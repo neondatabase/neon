@@ -11,7 +11,7 @@ import re
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import backoff
@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS results (
     duration     INT NOT NULL,
     flaky        BOOLEAN NOT NULL,
     arch         arch DEFAULT 'X64',
+    lfc          BOOLEAN DEFAULT false NOT NULL,
+    sanitizers   BOOLEAN DEFAULT false NOT NULL,
     build_type   TEXT NOT NULL,
     pg_version   INT NOT NULL,
     run_id       BIGINT NOT NULL,
@@ -38,7 +40,7 @@ CREATE TABLE IF NOT EXISTS results (
     reference    TEXT NOT NULL,
     revision     CHAR(40) NOT NULL,
     raw          JSONB COMPRESSION lz4 NOT NULL,
-    UNIQUE (parent_suite, suite, name, arch, build_type, pg_version, started_at, stopped_at, run_id)
+    UNIQUE (parent_suite, suite, name, arch, lfc, sanitizers, build_type, pg_version, started_at, stopped_at, run_id)
 );
 """
 
@@ -54,6 +56,8 @@ class Row:
     duration: int
     flaky: bool
     arch: str
+    lfc: bool
+    sanitizers: bool
     build_type: str
     pg_version: int
     run_id: int
@@ -132,6 +136,8 @@ def ingest_test_result(
             if p["name"].startswith("__")
         }
         arch = parameters.get("arch", "UNKNOWN").strip("'")
+        lfc = parameters.get("lfc", "without-lfc").strip("'") == "with-lfc"
+        sanitizers = parameters.get("sanitizers", "disabled").strip("'") == "enabled"
 
         build_type, pg_version, unparametrized_name = parse_test_name(test["name"])
         labels = {label["name"]: label["value"] for label in test["labels"]}
@@ -140,11 +146,13 @@ def ingest_test_result(
             suite=labels["suite"],
             name=unparametrized_name,
             status=test["status"],
-            started_at=datetime.fromtimestamp(test["time"]["start"] / 1000, tz=timezone.utc),
-            stopped_at=datetime.fromtimestamp(test["time"]["stop"] / 1000, tz=timezone.utc),
+            started_at=datetime.fromtimestamp(test["time"]["start"] / 1000, tz=UTC),
+            stopped_at=datetime.fromtimestamp(test["time"]["stop"] / 1000, tz=UTC),
             duration=test["time"]["duration"],
             flaky=test["flaky"] or test["retriesStatusChange"],
             arch=arch,
+            lfc=lfc,
+            sanitizers=sanitizers,
             build_type=build_type,
             pg_version=pg_version,
             run_id=run_id,

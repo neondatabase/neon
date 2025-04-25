@@ -1,7 +1,0 @@
-{
-    "public_extensions": [],
-    "library_index": {
-        "TODO": "We still need PG16 extensions"
-    },
-    "extension_data": {}
-}

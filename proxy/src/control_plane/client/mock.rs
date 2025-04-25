@@ -1,26 +1,28 @@
 //! Mock console backend which relies on a user-provided postgres instance.
 
+use std::io;
+use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 use std::sync::Arc;
 
 use futures::TryFutureExt;
 use thiserror::Error;
-use tokio_postgres::config::SslMode;
 use tokio_postgres::Client;
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{Instrument, error, info, info_span, warn};
 
-use crate::auth::backend::jwt::AuthRule;
-use crate::auth::backend::ComputeUserInfo;
 use crate::auth::IpPattern;
+use crate::auth::backend::ComputeUserInfo;
+use crate::auth::backend::jwt::AuthRule;
 use crate::cache::Cached;
-use crate::context::RequestMonitoring;
-use crate::control_plane::client::{CachedAllowedIps, CachedRoleSecret};
+use crate::context::RequestContext;
+use crate::control_plane::client::{
+    CachedAllowedIps, CachedAllowedVpcEndpointIds, CachedRoleSecret,
+};
 use crate::control_plane::errors::{
     ControlPlaneError, GetAuthInfoError, GetEndpointJwksError, WakeComputeError,
 };
 use crate::control_plane::messages::MetricsAuxInfo;
-use crate::control_plane::{AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo};
-use crate::error::io_error;
+use crate::control_plane::{AccessBlockerFlags, AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo};
 use crate::intern::RoleNameInt;
 use crate::types::{BranchId, EndpointId, ProjectId, RoleName};
 use crate::url::ApiUrl;
@@ -34,13 +36,13 @@ enum MockApiError {
 
 impl From<MockApiError> for ControlPlaneError {
     fn from(e: MockApiError) -> Self {
-        io_error(e).into()
+        io::Error::other(e).into()
     }
 }
 
 impl From<tokio_postgres::Error> for ControlPlaneError {
     fn from(e: tokio_postgres::Error) -> Self {
-        io_error(e).into()
+        io::Error::other(e).into()
     }
 }
 
@@ -103,7 +105,9 @@ impl MockControlPlane {
                     Some(s) => {
                         info!("got allowed_ips: {s}");
                         s.split(',')
-                            .map(|s| IpPattern::from_str(s).unwrap())
+                            .map(|s| {
+                                IpPattern::from_str(s).expect("mocked ip pattern should be correct")
+                            })
                             .collect()
                     }
                     None => vec![],
@@ -114,13 +118,16 @@ impl MockControlPlane {
 
             Ok((secret, allowed_ips))
         }
-        .map_err(crate::error::log_error::<GetAuthInfoError>)
+        .inspect_err(|e: &GetAuthInfoError| tracing::error!("{e}"))
         .instrument(info_span!("postgres", url = self.endpoint.as_str()))
         .await?;
         Ok(AuthInfo {
             secret,
             allowed_ips,
+            allowed_vpc_endpoint_ids: vec![],
             project_id: None,
+            account_id: None,
+            access_blocker_flags: AccessBlockerFlags::default(),
         })
     }
 
@@ -161,11 +168,23 @@ impl MockControlPlane {
     }
 
     async fn do_wake_compute(&self) -> Result<NodeInfo, WakeComputeError> {
-        let mut config = compute::ConnCfg::new();
-        config
-            .host(self.endpoint.host_str().unwrap_or("localhost"))
-            .port(self.endpoint.port().unwrap_or(5432))
-            .ssl_mode(SslMode::Disable);
+        let port = self.endpoint.port().unwrap_or(5432);
+        let mut config = match self.endpoint.host_str() {
+            None => {
+                let mut config = compute::ConnCfg::new("localhost".to_string(), port);
+                config.set_host_addr(IpAddr::V4(Ipv4Addr::LOCALHOST));
+                config
+            }
+            Some(host) => {
+                let mut config = compute::ConnCfg::new(host.to_string(), port);
+                if let Ok(addr) = IpAddr::from_str(host) {
+                    config.set_host_addr(addr);
+                }
+                config
+            }
+        };
+
+        config.ssl_mode(postgres_client::config::SslMode::Disable);
 
         let node = NodeInfo {
             config,
@@ -173,9 +192,9 @@ impl MockControlPlane {
                 endpoint_id: (&EndpointId::from("endpoint")).into(),
                 project_id: (&ProjectId::from("project")).into(),
                 branch_id: (&BranchId::from("branch")).into(),
+                compute_id: "compute".into(),
                 cold_start_info: crate::control_plane::messages::ColdStartInfo::Warm,
             },
-            allow_self_signed_compute: false,
         };
 
         Ok(node)
@@ -206,7 +225,7 @@ impl super::ControlPlaneApi for MockControlPlane {
     #[tracing::instrument(skip_all)]
     async fn get_role_secret(
         &self,
-        _ctx: &RequestMonitoring,
+        _ctx: &RequestContext,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, GetAuthInfoError> {
         Ok(CachedRoleSecret::new_uncached(
@@ -214,22 +233,41 @@ impl super::ControlPlaneApi for MockControlPlane {
         ))
     }
 
-    async fn get_allowed_ips_and_secret(
+    async fn get_allowed_ips(
         &self,
-        _ctx: &RequestMonitoring,
+        _ctx: &RequestContext,
         user_info: &ComputeUserInfo,
-    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
-        Ok((
-            Cached::new_uncached(Arc::new(
-                self.do_get_auth_info(user_info).await?.allowed_ips,
-            )),
-            None,
+    ) -> Result<CachedAllowedIps, GetAuthInfoError> {
+        Ok(Cached::new_uncached(Arc::new(
+            self.do_get_auth_info(user_info).await?.allowed_ips,
+        )))
+    }
+
+    async fn get_allowed_vpc_endpoint_ids(
+        &self,
+        _ctx: &RequestContext,
+        user_info: &ComputeUserInfo,
+    ) -> Result<CachedAllowedVpcEndpointIds, super::errors::GetAuthInfoError> {
+        Ok(Cached::new_uncached(Arc::new(
+            self.do_get_auth_info(user_info)
+                .await?
+                .allowed_vpc_endpoint_ids,
+        )))
+    }
+
+    async fn get_block_public_or_vpc_access(
+        &self,
+        _ctx: &RequestContext,
+        user_info: &ComputeUserInfo,
+    ) -> Result<super::CachedAccessBlockerFlags, super::errors::GetAuthInfoError> {
+        Ok(Cached::new_uncached(
+            self.do_get_auth_info(user_info).await?.access_blocker_flags,
         ))
     }
 
     async fn get_endpoint_jwks(
         &self,
-        _ctx: &RequestMonitoring,
+        _ctx: &RequestContext,
         endpoint: EndpointId,
     ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
         self.do_get_endpoint_jwks(endpoint).await
@@ -238,7 +276,7 @@ impl super::ControlPlaneApi for MockControlPlane {
     #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,
-        _ctx: &RequestMonitoring,
+        _ctx: &RequestContext,
         _user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
         self.do_wake_compute().map_ok(Cached::new_uncached).await

@@ -4,28 +4,30 @@ import concurrent.futures
 from typing import TYPE_CHECKING
 
 import pytest
-from pytest_httpserver import HTTPServer
-from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 from fixtures.common_types import TenantId
 from fixtures.log_helper import log
 
 if TYPE_CHECKING:
-    from typing import Any, Callable, Optional
+    from collections.abc import Callable
+    from typing import Any
+
+    from pytest_httpserver import HTTPServer
+    from werkzeug.wrappers.request import Request
 
 
 class ComputeReconfigure:
     def __init__(self, server: HTTPServer):
         self.server = server
-        self.control_plane_compute_hook_api = f"http://{server.host}:{server.port}/notify-attach"
+        self.control_plane_hooks_api = f"http://{server.host}:{server.port}/"
         self.workloads: dict[TenantId, Any] = {}
-        self.on_notify: Optional[Callable[[Any], None]] = None
+        self.on_notify: Callable[[Any], None] | None = None
 
     def register_workload(self, workload: Any):
         self.workloads[workload.tenant_id] = workload
 
-    def register_on_notify(self, fn: Optional[Callable[[Any], None]]):
+    def register_on_notify(self, fn: Callable[[Any], None] | None):
         """
         Add some extra work during a notification, like sleeping to slow things down, or
         logging what was notified.
@@ -68,7 +70,10 @@ def compute_reconfigure_listener(make_httpserver: HTTPServer):
             # This causes the endpoint to query storage controller for its location, which
             # is redundant since we already have it here, but this avoids extending the
             # neon_local CLI to take full lists of locations
-            reconfigure_threads.submit(lambda workload=workload: workload.reconfigure())  # type: ignore[no-any-return]
+            fut = reconfigure_threads.submit(lambda workload=workload: workload.reconfigure())  # type: ignore[misc]
+
+            # To satisfy semantics of notify-attach API, we must wait for the change to be applied before returning 200
+            fut.result()
 
         return Response(status=200)
 

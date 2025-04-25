@@ -1,5 +1,5 @@
 use metrics::{
-    register_histogram_vec, register_int_counter, register_int_counter_vec, Histogram, IntCounter,
+    Histogram, IntCounter, register_histogram_vec, register_int_counter, register_int_counter_vec,
 };
 use once_cell::sync::Lazy;
 
@@ -14,10 +14,11 @@ pub(crate) enum RequestKind {
     Copy = 4,
     TimeTravel = 5,
     Head = 6,
+    ListVersions = 7,
 }
 
-use scopeguard::ScopeGuard;
 use RequestKind::*;
+use scopeguard::ScopeGuard;
 
 impl RequestKind {
     const fn as_str(&self) -> &'static str {
@@ -29,6 +30,7 @@ impl RequestKind {
             Copy => "copy_object",
             TimeTravel => "time_travel_recover",
             Head => "head_object",
+            ListVersions => "list_versions",
         }
     }
     const fn as_index(&self) -> usize {
@@ -36,7 +38,10 @@ impl RequestKind {
     }
 }
 
-const REQUEST_KIND_COUNT: usize = 7;
+const REQUEST_KIND_LIST: &[RequestKind] =
+    &[Get, Put, Delete, List, Copy, TimeTravel, Head, ListVersions];
+
+const REQUEST_KIND_COUNT: usize = REQUEST_KIND_LIST.len();
 pub(crate) struct RequestTyped<C>([C; REQUEST_KIND_COUNT]);
 
 impl<C> RequestTyped<C> {
@@ -45,12 +50,11 @@ impl<C> RequestTyped<C> {
     }
 
     fn build_with(mut f: impl FnMut(RequestKind) -> C) -> Self {
-        use RequestKind::*;
-        let mut it = [Get, Put, Delete, List, Copy, TimeTravel, Head].into_iter();
+        let mut it = REQUEST_KIND_LIST.iter();
         let arr = std::array::from_fn::<C, REQUEST_KIND_COUNT, _>(|index| {
             let next = it.next().unwrap();
             assert_eq!(index, next.as_index());
-            f(next)
+            f(*next)
         });
 
         if let Some(next) = it.next() {
@@ -176,7 +180,9 @@ pub(crate) struct BucketMetrics {
 
 impl Default for BucketMetrics {
     fn default() -> Self {
-        let buckets = [0.01, 0.10, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0];
+        // first bucket 100 microseconds to count requests that do not need to wait at all
+        // and get a permit immediately
+        let buckets = [0.0001, 0.01, 0.10, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0];
 
         let req_seconds = register_histogram_vec!(
             "remote_storage_s3_request_seconds",

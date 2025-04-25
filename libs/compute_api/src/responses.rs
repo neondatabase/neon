@@ -1,19 +1,49 @@
 //! Structs representing the JSON formats used in the compute_ctl's HTTP API.
 
-use std::collections::HashSet;
 use std::fmt::Display;
 
 use chrono::{DateTime, Utc};
+use jsonwebtoken::jwk::JwkSet;
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::{
-    privilege::Privilege,
-    spec::{ComputeSpec, Database, ExtVersion, PgIdent, Role},
-};
+use crate::privilege::Privilege;
+use crate::spec::{ComputeSpec, Database, ExtVersion, PgIdent, Role};
 
 #[derive(Serialize, Debug, Deserialize)]
 pub struct GenericAPIError {
     pub error: String,
+}
+
+/// All configuration parameters necessary for a compute. When
+/// [`ComputeConfig::spec`] is provided, it means that the compute is attached
+/// to a tenant. [`ComputeConfig::compute_ctl_config`] will always be provided
+/// and contains parameters necessary for operating `compute_ctl` independently
+/// of whether a tenant is attached to the compute or not.
+///
+/// This also happens to be the body of `compute_ctl`'s /configure request.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ComputeConfig {
+    /// The compute spec
+    pub spec: Option<ComputeSpec>,
+
+    /// The compute_ctl configuration
+    #[allow(dead_code)]
+    pub compute_ctl_config: ComputeCtlConfig,
+}
+
+impl From<ControlPlaneConfigResponse> for ComputeConfig {
+    fn from(value: ControlPlaneConfigResponse) -> Self {
+        Self {
+            spec: value.spec,
+            compute_ctl_config: value.compute_ctl_config,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtensionInstallResponse {
+    pub extension: PgIdent,
+    pub version: ExtVersion,
 }
 
 /// Response of the /status API
@@ -24,16 +54,6 @@ pub struct ComputeStatusResponse {
     pub tenant: Option<String>,
     pub timeline: Option<String>,
     pub status: ComputeStatus,
-    #[serde(serialize_with = "rfc3339_serialize")]
-    pub last_active: Option<DateTime<Utc>>,
-    pub error: Option<String>,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ComputeState {
-    pub status: ComputeStatus,
-    /// Timestamp of the last Postgres activity
     #[serde(serialize_with = "rfc3339_serialize")]
     pub last_active: Option<DateTime<Utc>>,
     pub error: Option<String>,
@@ -79,7 +99,7 @@ impl Display for ComputeStatus {
     }
 }
 
-fn rfc3339_serialize<S>(x: &Option<DateTime<Utc>>, s: S) -> Result<S::Ok, S::Error>
+pub fn rfc3339_serialize<S>(x: &Option<DateTime<Utc>>, s: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
@@ -140,13 +160,37 @@ pub struct CatalogObjects {
     pub databases: Vec<Database>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ComputeCtlConfig {
+    /// Set of JSON web keys that the compute can use to authenticate
+    /// communication from the control plane.
+    pub jwks: JwkSet,
+    pub tls: Option<TlsConfig>,
+}
+
+impl Default for ComputeCtlConfig {
+    fn default() -> Self {
+        Self {
+            jwks: JwkSet {
+                keys: Vec::default(),
+            },
+            tls: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TlsConfig {
+    pub key_path: String,
+    pub cert_path: String,
+}
+
 /// Response of the `/computes/{compute_id}/spec` control-plane API.
-/// This is not actually a compute API response, so consider moving
-/// to a different place.
 #[derive(Deserialize, Debug)]
-pub struct ControlPlaneSpecResponse {
+pub struct ControlPlaneConfigResponse {
     pub spec: Option<ComputeSpec>,
     pub status: ControlPlaneComputeStatus,
+    pub compute_ctl_config: ComputeCtlConfig,
 }
 
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,8 +207,9 @@ pub enum ControlPlaneComputeStatus {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct InstalledExtension {
     pub extname: String,
-    pub versions: HashSet<String>,
+    pub version: String,
     pub n_databases: u32, // Number of databases using this extension
+    pub owned_by_superuser: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

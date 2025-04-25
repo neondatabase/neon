@@ -1,10 +1,17 @@
 //! Enum-dispatch to the `OpenOptions` type of the respective [`super::IoEngineKind`];
 
+use std::os::fd::OwnedFd;
+use std::path::Path;
+
 use super::io_engine::IoEngine;
-use std::{os::fd::OwnedFd, path::Path};
 
 #[derive(Debug, Clone)]
-pub enum OpenOptions {
+pub struct OpenOptions {
+    write: bool,
+    inner: Inner,
+}
+#[derive(Debug, Clone)]
+enum Inner {
     StdFs(std::fs::OpenOptions),
     #[cfg(target_os = "linux")]
     TokioEpollUring(tokio_epoll_uring::ops::open_at::OpenOptions),
@@ -12,13 +19,17 @@ pub enum OpenOptions {
 
 impl Default for OpenOptions {
     fn default() -> Self {
-        match super::io_engine::get() {
+        let inner = match super::io_engine::get() {
             IoEngine::NotSet => panic!("io engine not set"),
-            IoEngine::StdFs => Self::StdFs(std::fs::OpenOptions::new()),
+            IoEngine::StdFs => Inner::StdFs(std::fs::OpenOptions::new()),
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
-                Self::TokioEpollUring(tokio_epoll_uring::ops::open_at::OpenOptions::new())
+                Inner::TokioEpollUring(tokio_epoll_uring::ops::open_at::OpenOptions::new())
             }
+        };
+        Self {
+            write: false,
+            inner,
         }
     }
 }
@@ -28,13 +39,17 @@ impl OpenOptions {
         Self::default()
     }
 
+    pub(super) fn is_write(&self) -> bool {
+        self.write
+    }
+
     pub fn read(&mut self, read: bool) -> &mut OpenOptions {
-        match self {
-            OpenOptions::StdFs(x) => {
+        match &mut self.inner {
+            Inner::StdFs(x) => {
                 let _ = x.read(read);
             }
             #[cfg(target_os = "linux")]
-            OpenOptions::TokioEpollUring(x) => {
+            Inner::TokioEpollUring(x) => {
                 let _ = x.read(read);
             }
         }
@@ -42,12 +57,13 @@ impl OpenOptions {
     }
 
     pub fn write(&mut self, write: bool) -> &mut OpenOptions {
-        match self {
-            OpenOptions::StdFs(x) => {
+        self.write = write;
+        match &mut self.inner {
+            Inner::StdFs(x) => {
                 let _ = x.write(write);
             }
             #[cfg(target_os = "linux")]
-            OpenOptions::TokioEpollUring(x) => {
+            Inner::TokioEpollUring(x) => {
                 let _ = x.write(write);
             }
         }
@@ -55,12 +71,12 @@ impl OpenOptions {
     }
 
     pub fn create(&mut self, create: bool) -> &mut OpenOptions {
-        match self {
-            OpenOptions::StdFs(x) => {
+        match &mut self.inner {
+            Inner::StdFs(x) => {
                 let _ = x.create(create);
             }
             #[cfg(target_os = "linux")]
-            OpenOptions::TokioEpollUring(x) => {
+            Inner::TokioEpollUring(x) => {
                 let _ = x.create(create);
             }
         }
@@ -68,12 +84,12 @@ impl OpenOptions {
     }
 
     pub fn create_new(&mut self, create_new: bool) -> &mut OpenOptions {
-        match self {
-            OpenOptions::StdFs(x) => {
+        match &mut self.inner {
+            Inner::StdFs(x) => {
                 let _ = x.create_new(create_new);
             }
             #[cfg(target_os = "linux")]
-            OpenOptions::TokioEpollUring(x) => {
+            Inner::TokioEpollUring(x) => {
                 let _ = x.create_new(create_new);
             }
         }
@@ -81,12 +97,12 @@ impl OpenOptions {
     }
 
     pub fn truncate(&mut self, truncate: bool) -> &mut OpenOptions {
-        match self {
-            OpenOptions::StdFs(x) => {
+        match &mut self.inner {
+            Inner::StdFs(x) => {
                 let _ = x.truncate(truncate);
             }
             #[cfg(target_os = "linux")]
-            OpenOptions::TokioEpollUring(x) => {
+            Inner::TokioEpollUring(x) => {
                 let _ = x.truncate(truncate);
             }
         }
@@ -94,10 +110,10 @@ impl OpenOptions {
     }
 
     pub(in crate::virtual_file) async fn open(&self, path: &Path) -> std::io::Result<OwnedFd> {
-        match self {
-            OpenOptions::StdFs(x) => x.open(path).map(|file| file.into()),
+        match &self.inner {
+            Inner::StdFs(x) => x.open(path).map(|file| file.into()),
             #[cfg(target_os = "linux")]
-            OpenOptions::TokioEpollUring(x) => {
+            Inner::TokioEpollUring(x) => {
                 let system = super::io_engine::tokio_epoll_uring_ext::thread_local_system().await;
                 system.open(path, x).await.map_err(|e| match e {
                     tokio_epoll_uring::Error::Op(e) => e,
@@ -112,12 +128,12 @@ impl OpenOptions {
 
 impl std::os::unix::prelude::OpenOptionsExt for OpenOptions {
     fn mode(&mut self, mode: u32) -> &mut OpenOptions {
-        match self {
-            OpenOptions::StdFs(x) => {
+        match &mut self.inner {
+            Inner::StdFs(x) => {
                 let _ = x.mode(mode);
             }
             #[cfg(target_os = "linux")]
-            OpenOptions::TokioEpollUring(x) => {
+            Inner::TokioEpollUring(x) => {
                 let _ = x.mode(mode);
             }
         }
@@ -125,12 +141,12 @@ impl std::os::unix::prelude::OpenOptionsExt for OpenOptions {
     }
 
     fn custom_flags(&mut self, flags: i32) -> &mut OpenOptions {
-        match self {
-            OpenOptions::StdFs(x) => {
+        match &mut self.inner {
+            Inner::StdFs(x) => {
                 let _ = x.custom_flags(flags);
             }
             #[cfg(target_os = "linux")]
-            OpenOptions::TokioEpollUring(x) => {
+            Inner::TokioEpollUring(x) => {
                 let _ = x.custom_flags(flags);
             }
         }

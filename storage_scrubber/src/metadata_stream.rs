@@ -1,25 +1,36 @@
 use std::str::FromStr;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use async_stream::{stream, try_stream};
 use futures::StreamExt;
+use pageserver_api::shard::TenantShardId;
 use remote_storage::{GenericRemoteStorage, ListingMode, ListingObject, RemotePath};
 use tokio_stream::Stream;
+use utils::id::{TenantId, TimelineId};
 
 use crate::{
-    list_objects_with_retries, stream_objects_with_retries, RootTarget, S3Target,
-    TenantShardTimelineId,
+    RootTarget, S3Target, TenantShardTimelineId, list_objects_with_retries,
+    stream_objects_with_retries,
 };
-use pageserver_api::shard::TenantShardId;
-use utils::id::{TenantId, TimelineId};
 
 /// Given a remote storage and a target, output a stream of TenantIds discovered via listing prefixes
 pub fn stream_tenants<'a>(
     remote_client: &'a GenericRemoteStorage,
     target: &'a RootTarget,
 ) -> impl Stream<Item = anyhow::Result<TenantShardId>> + 'a {
+    stream_tenants_maybe_prefix(remote_client, target, None)
+}
+/// Given a remote storage and a target, output a stream of TenantIds discovered via listing prefixes
+pub fn stream_tenants_maybe_prefix<'a>(
+    remote_client: &'a GenericRemoteStorage,
+    target: &'a RootTarget,
+    tenant_id_prefix: Option<String>,
+) -> impl Stream<Item = anyhow::Result<TenantShardId>> + 'a {
     try_stream! {
-        let tenants_target = target.tenants_root();
+        let mut tenants_target = target.tenants_root();
+        if let Some(tenant_id_prefix) = tenant_id_prefix {
+            tenants_target.prefix_in_bucket += &tenant_id_prefix;
+        }
         let mut tenants_stream =
             std::pin::pin!(stream_objects_with_retries(remote_client, ListingMode::WithDelimiter, &tenants_target));
         while let Some(chunk) = tenants_stream.next().await {
@@ -60,7 +71,7 @@ pub async fn stream_tenant_shards<'a>(
 
             first_part
                 .parse::<TenantShardId>()
-                .with_context(|| format!("Incorrect entry id str: {first_part}"))
+                .with_context(|| format!("Incorrect tenant entry id str: {first_part}"))
         })
         .collect::<Vec<_>>();
 
@@ -114,9 +125,10 @@ pub async fn stream_tenant_timelines<'a>(
                 prefix.get_path().as_str().strip_prefix(prefix_str)
             })
             .map(|entry_id_str| {
-                entry_id_str
+                let first_part = entry_id_str.split('/').next().unwrap();
+                first_part
                     .parse::<TimelineId>()
-                    .with_context(|| format!("Incorrect entry id str: {entry_id_str}"))
+                    .with_context(|| format!("Incorrect timeline entry id str: {entry_id_str}"))
             });
 
         for i in new_entry_ids {

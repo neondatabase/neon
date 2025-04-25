@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fixtures.common_types import Lsn
@@ -39,9 +39,9 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder, with_lease: bool):
             # disable default GC and compaction
             "gc_period": "1000 m",
             "compaction_period": "0 s",
-            "gc_horizon": f"{1024 ** 2}",
-            "checkpoint_distance": f"{1024 ** 2}",
-            "compaction_target_size": f"{1024 ** 2}",
+            "gc_horizon": f"{1024**2}",
+            "checkpoint_distance": f"{1024**2}",
+            "compaction_target_size": f"{1024**2}",
         }
     )
 
@@ -169,7 +169,7 @@ def test_get_lsn_by_timestamp_cancelled(neon_env_builder: NeonEnvBuilder):
         )
 
         _, offset = wait_until(
-            20, 0.5, lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
+            lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
         )
 
         with pytest.raises(ReadTimeout):
@@ -178,8 +178,6 @@ def test_get_lsn_by_timestamp_cancelled(neon_env_builder: NeonEnvBuilder):
         client.configure_failpoints((failpoint, "off"))
 
         _, offset = wait_until(
-            20,
-            0.5,
             lambda: env.pageserver.assert_log_contains(
                 "Cancelled request finished with an error: Cancelled$", offset
             ),
@@ -207,7 +205,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
     for i in range(1000):
         cur.execute("INSERT INTO foo VALUES(%s)", (i,))
         # Get the timestamp at UTC
-        after_timestamp = query_scalar(cur, "SELECT clock_timestamp()").replace(tzinfo=timezone.utc)
+        after_timestamp = query_scalar(cur, "SELECT clock_timestamp()").replace(tzinfo=UTC)
         after_lsn = query_scalar(cur, "SELECT pg_current_wal_lsn()")
         tbl.append([i, after_timestamp, after_lsn])
         time.sleep(0.02)
@@ -273,12 +271,39 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
             )
             log.info("result: %s, after_ts: %s", result, after_timestamp)
 
-            # TODO use fromisoformat once we have Python 3.11+
-            # which has https://github.com/python/cpython/pull/92177
-            timestamp = datetime.strptime(result, "%Y-%m-%dT%H:%M:%S.%f000Z").replace(
-                tzinfo=timezone.utc
-            )
+            timestamp = datetime.fromisoformat(result).replace(tzinfo=UTC)
             assert timestamp < after_timestamp, "after_timestamp after timestamp"
             if i > 1:
                 before_timestamp = tbl[i - step_size][1]
                 assert timestamp >= before_timestamp, "before_timestamp before timestamp"
+
+
+def test_timestamp_of_lsn_empty_branch(neon_env_builder: NeonEnvBuilder):
+    """
+    Test that getting the timestamp of the head LSN of a newly created branch works.
+    This verifies that we don't get a 404 error when trying to get the timestamp
+    of the head LSN of a branch that was just created.
+    We now return a special status code 412 to indicate if there is no timestamp found for lsn.
+
+    Reproducer for https://github.com/neondatabase/neon/issues/11439
+    """
+    env = neon_env_builder.init_start()
+
+    # Create a new branch
+    new_timeline_id = env.create_branch("test_timestamp_of_lsn_empty_branch")
+
+    # Retrieve the commit LSN of the empty branch, which we have never run postgres on
+    detail = env.pageserver.http_client().timeline_detail(
+        tenant_id=env.initial_tenant, timeline_id=new_timeline_id
+    )
+    head_lsn = detail["last_record_lsn"]
+
+    # Verify that we get 412 status code
+    with env.pageserver.http_client() as client:
+        with pytest.raises(PageserverApiException) as err:
+            client.timeline_get_timestamp_of_lsn(
+                env.initial_tenant,
+                new_timeline_id,
+                head_lsn,
+            )
+        assert err.value.status_code == 412

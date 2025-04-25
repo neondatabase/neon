@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
 from fixtures.pg_version import PgVersion
 from fixtures.utils import wait_until
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv
 
 
 def test_neon_superuser(neon_simple_env: NeonEnv, pg_version: PgVersion):
@@ -77,7 +81,7 @@ def test_neon_superuser(neon_simple_env: NeonEnv, pg_version: PgVersion):
             assert len(res) == 4
             assert [r[0] for r in res] == [10, 20, 30, 40]
 
-        wait_until(10, 0.5, check_that_changes_propagated)
+        wait_until(check_that_changes_propagated)
 
         # Test that pg_monitor is working for neon_superuser role
         cur.execute("SELECT query from pg_stat_activity LIMIT 1")

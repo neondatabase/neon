@@ -2,36 +2,21 @@
 //! Gets messages from the network, passes them down to consensus module and
 //! sends replies back.
 
-use crate::handler::SafekeeperPostgresHandler;
-use crate::metrics::{
-    WAL_RECEIVERS, WAL_RECEIVER_QUEUE_DEPTH, WAL_RECEIVER_QUEUE_DEPTH_TOTAL,
-    WAL_RECEIVER_QUEUE_SIZE_TOTAL,
-};
-use crate::safekeeper::AcceptorProposerMessage;
-use crate::safekeeper::ProposerAcceptorMessage;
-use crate::safekeeper::ServerInfo;
-use crate::timeline::WalResidentTimeline;
-use crate::wal_service::ConnectionId;
-use crate::GlobalTimelines;
-use anyhow::{anyhow, Context};
-use bytes::BytesMut;
-use parking_lot::MappedMutexGuard;
-use parking_lot::Mutex;
-use parking_lot::MutexGuard;
-use postgres_backend::CopyStreamHandlerEnd;
-use postgres_backend::PostgresBackend;
-use postgres_backend::PostgresBackendReader;
-use postgres_backend::QueryError;
-use pq_proto::BeMessage;
-use serde::Deserialize;
-use serde::Serialize;
 use std::future;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::io::AsyncRead;
-use tokio::io::AsyncWrite;
+
+use anyhow::{Context, anyhow};
+use bytes::BytesMut;
+use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
+use postgres_backend::{CopyStreamHandlerEnd, PostgresBackend, PostgresBackendReader, QueryError};
+use pq_proto::BeMessage;
+use safekeeper_api::ServerInfo;
+use safekeeper_api::membership::Configuration;
+use safekeeper_api::models::{ConnectionId, WalReceiverState, WalReceiverStatus};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::error::SendTimeoutError;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, MissedTickBehavior};
@@ -39,6 +24,15 @@ use tracing::*;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
 use utils::pageserver_feedback::PageserverFeedback;
+
+use crate::GlobalTimelines;
+use crate::handler::SafekeeperPostgresHandler;
+use crate::metrics::{
+    WAL_RECEIVER_QUEUE_DEPTH, WAL_RECEIVER_QUEUE_DEPTH_TOTAL, WAL_RECEIVER_QUEUE_SIZE_TOTAL,
+    WAL_RECEIVERS,
+};
+use crate::safekeeper::{AcceptorProposerMessage, ProposerAcceptorMessage};
+use crate::timeline::WalResidentTimeline;
 
 const DEFAULT_FEEDBACK_CAPACITY: usize = 8;
 
@@ -100,10 +94,10 @@ impl WalReceivers {
 
     /// Get reference to locked slot contents. Slot must exist (registered
     /// earlier).
-    fn get_slot<'a>(
-        self: &'a Arc<WalReceivers>,
+    fn get_slot(
+        self: &Arc<WalReceivers>,
         id: WalReceiverId,
-    ) -> MappedMutexGuard<'a, WalReceiverState> {
+    ) -> MappedMutexGuard<'_, WalReceiverState> {
         MutexGuard::map(self.mutex.lock(), |locked| {
             locked.slots[id]
                 .as_mut()
@@ -171,21 +165,6 @@ impl WalReceiversShared {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WalReceiverState {
-    /// None means it is recovery initiated by us (this safekeeper).
-    pub conn_id: Option<ConnectionId>,
-    pub status: WalReceiverStatus,
-}
-
-/// Walreceiver status. Currently only whether it passed voting stage and
-/// started receiving the stream, but it is easy to add more if needed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum WalReceiverStatus {
-    Voting,
-    Streaming,
-}
-
 /// Scope guard to access slot in WalReceivers registry and unregister from
 /// it in Drop.
 pub struct WalReceiverGuard {
@@ -216,9 +195,14 @@ impl SafekeeperPostgresHandler {
     pub async fn handle_start_wal_push<IO: AsyncRead + AsyncWrite + Unpin>(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
+        proto_version: u32,
+        allow_timeline_creation: bool,
     ) -> Result<(), QueryError> {
         let mut tli: Option<WalResidentTimeline> = None;
-        if let Err(end) = self.handle_start_wal_push_guts(pgb, &mut tli).await {
+        if let Err(end) = self
+            .handle_start_wal_push_guts(pgb, &mut tli, proto_version, allow_timeline_creation)
+            .await
+        {
             // Log the result and probably send it to the client, closing the stream.
             let handle_end_fut = pgb.handle_copy_stream_end(end);
             // If we managed to create the timeline, augment logging with current LSNs etc.
@@ -238,7 +222,13 @@ impl SafekeeperPostgresHandler {
         &mut self,
         pgb: &mut PostgresBackend<IO>,
         tli: &mut Option<WalResidentTimeline>,
+        proto_version: u32,
+        allow_timeline_creation: bool,
     ) -> Result<(), CopyStreamHandlerEnd> {
+        // The `tli` parameter is only used for passing _out_ a timeline, one should
+        // not have been passed in.
+        assert!(tli.is_none());
+
         // Notify the libpq client that it's allowed to send `CopyData` messages
         pgb.write_message(&BeMessage::CopyBothResponse).await?;
 
@@ -256,16 +246,23 @@ impl SafekeeperPostgresHandler {
         // sends, so this avoids deadlocks.
         let mut pgb_reader = pgb.split().context("START_WAL_PUSH split")?;
         let peer_addr = *pgb.get_peer_addr();
+
         let mut network_reader = NetworkReader {
             ttid: self.ttid,
             conn_id: self.conn_id,
             pgb_reader: &mut pgb_reader,
             peer_addr,
+            proto_version,
             acceptor_handle: &mut acceptor_handle,
+            global_timelines: self.global_timelines.clone(),
         };
 
-        // Read first message and create timeline if needed.
-        let res = network_reader.read_first_message().await;
+        // Read first message and create timeline if needed and allowed. This
+        // won't be when timelines will be always created by storcon and
+        // allow_timeline_creation becomes false.
+        let res = network_reader
+            .read_first_message(allow_timeline_creation)
+            .await;
 
         let network_res = if let Ok((timeline, next_msg)) = res {
             let pageserver_feedback_rx: tokio::sync::broadcast::Receiver<PageserverFeedback> =
@@ -275,10 +272,14 @@ impl SafekeeperPostgresHandler {
                     .subscribe();
             *tli = Some(timeline.wal_residence_guard().await?);
 
+            let timeline_cancel = timeline.cancel.clone();
             tokio::select! {
                 // todo: add read|write .context to these errors
                 r = network_reader.run(msg_tx, msg_rx, reply_tx, timeline, next_msg) => r,
-                r = network_write(pgb, reply_rx, pageserver_feedback_rx) => r,
+                r = network_write(pgb, reply_rx, pageserver_feedback_rx, proto_version) => r,
+                _ = timeline_cancel.cancelled() => {
+                    return Err(CopyStreamHandlerEnd::Cancelled);
+                }
             }
         } else {
             res.map(|_| ())
@@ -303,7 +304,7 @@ impl SafekeeperPostgresHandler {
 
                 // Otherwise, WalAcceptor thread must have errored.
                 match wal_acceptor_res {
-                    Ok(Ok(_)) => Ok(()), // can't happen currently; would be if we add graceful termination
+                    Ok(Ok(_)) => Ok(()), // Clean shutdown
                     Ok(Err(e)) => Err(CopyStreamHandlerEnd::Other(e.context("WAL acceptor"))),
                     Err(_) => Err(CopyStreamHandlerEnd::Other(anyhow!(
                         "WalAcceptor task panicked",
@@ -319,43 +320,59 @@ struct NetworkReader<'a, IO> {
     conn_id: ConnectionId,
     pgb_reader: &'a mut PostgresBackendReader<IO>,
     peer_addr: SocketAddr,
+    proto_version: u32,
     // WalAcceptor is spawned when we learn server info from walproposer and
     // create timeline; handle is put here.
     acceptor_handle: &'a mut Option<JoinHandle<anyhow::Result<()>>>,
+    global_timelines: Arc<GlobalTimelines>,
 }
 
-impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
+impl<IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'_, IO> {
     async fn read_first_message(
         &mut self,
+        allow_timeline_creation: bool,
     ) -> Result<(WalResidentTimeline, ProposerAcceptorMessage), CopyStreamHandlerEnd> {
         // Receive information about server to create timeline, if not yet.
-        let next_msg = read_message(self.pgb_reader).await?;
+        let next_msg = read_message(self.pgb_reader, self.proto_version).await?;
         let tli = match next_msg {
             ProposerAcceptorMessage::Greeting(ref greeting) => {
                 info!(
-                    "start handshake with walproposer {} sysid {} timeline {}",
-                    self.peer_addr, greeting.system_id, greeting.tli,
+                    "start handshake with walproposer {} sysid {}",
+                    self.peer_addr, greeting.system_id,
                 );
                 let server_info = ServerInfo {
                     pg_version: greeting.pg_version,
                     system_id: greeting.system_id,
                     wal_seg_size: greeting.wal_seg_size,
                 };
-                let tli =
-                    GlobalTimelines::create(self.ttid, server_info, Lsn::INVALID, Lsn::INVALID)
+                let tli = if allow_timeline_creation {
+                    self.global_timelines
+                        .create(
+                            self.ttid,
+                            Configuration::empty(),
+                            server_info,
+                            Lsn::INVALID,
+                            Lsn::INVALID,
+                        )
                         .await
-                        .context("create timeline")?;
+                        .context("create timeline")?
+                } else {
+                    self.global_timelines
+                        .get(self.ttid)
+                        .context("get timeline")?
+                };
                 tli.wal_residence_guard().await?
             }
             _ => {
                 return Err(CopyStreamHandlerEnd::Other(anyhow::anyhow!(
                     "unexpected message {next_msg:?} instead of greeting"
-                )))
+                )));
             }
         };
         Ok((tli, next_msg))
     }
 
+    /// This function is cancellation-safe (only does network I/O and channel read/writes).
     async fn run(
         self,
         msg_tx: Sender<ProposerAcceptorMessage>,
@@ -372,7 +389,7 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
         ));
 
         // Forward all messages to WalAcceptor
-        read_network_loop(self.pgb_reader, msg_tx, next_msg).await
+        read_network_loop(self.pgb_reader, msg_tx, next_msg, self.proto_version).await
     }
 }
 
@@ -380,9 +397,10 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
 /// TODO: Return Ok(None) on graceful termination.
 async fn read_message<IO: AsyncRead + AsyncWrite + Unpin>(
     pgb_reader: &mut PostgresBackendReader<IO>,
+    proto_version: u32,
 ) -> Result<ProposerAcceptorMessage, CopyStreamHandlerEnd> {
     let copy_data = pgb_reader.read_copy_message().await?;
-    let msg = ProposerAcceptorMessage::parse(copy_data)?;
+    let msg = ProposerAcceptorMessage::parse(copy_data, proto_version)?;
     Ok(msg)
 }
 
@@ -390,6 +408,7 @@ async fn read_network_loop<IO: AsyncRead + AsyncWrite + Unpin>(
     pgb_reader: &mut PostgresBackendReader<IO>,
     msg_tx: Sender<ProposerAcceptorMessage>,
     mut next_msg: ProposerAcceptorMessage,
+    proto_version: u32,
 ) -> Result<(), CopyStreamHandlerEnd> {
     /// Threshold for logging slow WalAcceptor sends.
     const SLOW_THRESHOLD: Duration = Duration::from_secs(5);
@@ -397,6 +416,7 @@ async fn read_network_loop<IO: AsyncRead + AsyncWrite + Unpin>(
     loop {
         let started = Instant::now();
         let size = next_msg.size();
+
         match msg_tx.send_timeout(next_msg, SLOW_THRESHOLD).await {
             Ok(()) => {}
             // Slow send, log a message and keep trying. Log context has timeline ID.
@@ -421,17 +441,20 @@ async fn read_network_loop<IO: AsyncRead + AsyncWrite + Unpin>(
         WAL_RECEIVER_QUEUE_DEPTH_TOTAL.inc();
         WAL_RECEIVER_QUEUE_SIZE_TOTAL.add(size as i64);
 
-        next_msg = read_message(pgb_reader).await?;
+        next_msg = read_message(pgb_reader, proto_version).await?;
     }
 }
 
 /// Read replies from WalAcceptor and pass them back to socket. Returns Ok(())
 /// if reply_rx closed; it must mean WalAcceptor terminated, joining it should
 /// tell the error.
+///
+/// This function is cancellation-safe (only does network I/O and channel read/writes).
 async fn network_write<IO: AsyncRead + AsyncWrite + Unpin>(
     pgb_writer: &mut PostgresBackend<IO>,
     mut reply_rx: Receiver<AcceptorProposerMessage>,
     mut pageserver_feedback_rx: tokio::sync::broadcast::Receiver<PageserverFeedback>,
+    proto_version: u32,
 ) -> Result<(), CopyStreamHandlerEnd> {
     let mut buf = BytesMut::with_capacity(128);
 
@@ -461,7 +484,7 @@ async fn network_write<IO: AsyncRead + AsyncWrite + Unpin>(
                         Some(AcceptorProposerMessage::AppendResponse(append_response))
                     }
                     _ => None,
-                }
+                },
         };
 
         let Some(msg) = msg else {
@@ -469,7 +492,7 @@ async fn network_write<IO: AsyncRead + AsyncWrite + Unpin>(
         };
 
         buf.clear();
-        msg.serialize(&mut buf)?;
+        msg.serialize(&mut buf, proto_version)?;
         pgb_writer.write_message(&BeMessage::CopyData(&buf)).await?;
     }
 }
@@ -527,6 +550,10 @@ impl WalAcceptor {
 
     /// The main loop. Returns Ok(()) if either msg_rx or reply_tx got closed;
     /// it must mean that network thread terminated.
+    ///
+    /// This function is *not* cancellation safe, it does local disk I/O: it should always
+    /// be allowed to run to completion. It respects Timeline::cancel and shuts down cleanly
+    /// when that gets triggered.
     async fn run(&mut self) -> anyhow::Result<()> {
         let walreceiver_guard = self.tli.get_walreceivers().register(self.conn_id);
 
@@ -541,7 +568,7 @@ impl WalAcceptor {
         // Tracks whether we have unflushed appends.
         let mut dirty = false;
 
-        loop {
+        while !self.tli.is_cancelled() {
             let reply = tokio::select! {
                 // Process inbound message.
                 msg = self.msg_rx.recv() => {
@@ -599,6 +626,10 @@ impl WalAcceptor {
                     WAL_RECEIVER_QUEUE_DEPTH.observe(self.msg_rx.len() as f64);
                     None // no reply
                 }
+
+                _ = self.tli.cancel.cancelled() => {
+                    break;
+                }
             };
 
             // Send reply, if any.
@@ -610,7 +641,7 @@ impl WalAcceptor {
         }
 
         // Flush WAL on disconnect, see https://github.com/neondatabase/neon/issues/9259.
-        if dirty {
+        if dirty && !self.tli.cancel.is_cancelled() {
             self.tli
                 .process_msg(&ProposerAcceptorMessage::FlushWAL)
                 .await?;

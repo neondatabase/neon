@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio::sync::Notify;
-use tokio::time::error::Elapsed;
 use tokio::time::Instant;
+use tokio::time::error::Elapsed;
 
 use self::aimd::Aimd;
 
@@ -195,7 +195,11 @@ impl DynamicLimiter {
     ///
     /// Set the outcome to `None` to ignore the job.
     fn release_inner(&self, start: Instant, outcome: Option<Outcome>) {
-        tracing::info!("outcome is {:?}", outcome);
+        if outcome.is_none() {
+            tracing::warn!("outcome is {:?}", outcome);
+        } else {
+            tracing::debug!("outcome is {:?}", outcome);
+        }
         if self.config.initial_limit == 0 {
             return;
         }

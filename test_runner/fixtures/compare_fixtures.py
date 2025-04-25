@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, final
 
 import pytest
-from _pytest.fixtures import FixtureRequest
 from typing_extensions import override
 
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
@@ -24,10 +23,13 @@ from fixtures.neon_fixtures import (
     VanillaPostgres,
     wait_for_last_flush_lsn,
 )
-from fixtures.pg_stats import PgStatTable
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    from _pytest.fixtures import FixtureRequest
+
+    from fixtures.pg_stats import PgStatTable
 
 
 class PgCompare(ABC):
@@ -99,7 +101,7 @@ class PgCompare(ABC):
                 assert row is not None
                 assert len(row) == len(pg_stat.columns)
 
-                for col, val in zip(pg_stat.columns, row):
+                for col, val in zip(pg_stat.columns, row, strict=False):
                     results[f"{pg_stat.table}.{col}"] = int(val)
 
         return results

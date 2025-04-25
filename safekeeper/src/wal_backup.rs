@@ -1,37 +1,32 @@
-use anyhow::{Context, Result};
-
-use camino::{Utf8Path, Utf8PathBuf};
-use futures::stream::FuturesOrdered;
-use futures::StreamExt;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
-use utils::backoff;
-use utils::id::NodeId;
-
 use std::cmp::min;
 use std::collections::HashSet;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::time::Duration;
 
+use anyhow::{Context, Result};
+use camino::{Utf8Path, Utf8PathBuf};
+use futures::StreamExt;
+use futures::stream::FuturesOrdered;
 use postgres_ffi::v14::xlog_utils::XLogSegNoOffsetToRecPtr;
-use postgres_ffi::XLogFileName;
-use postgres_ffi::{XLogSegNo, PG_TLI};
+use postgres_ffi::{PG_TLI, XLogFileName, XLogSegNo};
 use remote_storage::{
     DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath, StorageMetadata,
 };
+use safekeeper_api::models::PeerInfo;
 use tokio::fs::File;
-
 use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::{watch, OnceCell};
-use tokio::time::sleep;
+use tokio::sync::{OnceCell, watch};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
-
-use utils::{id::TenantTimelineId, lsn::Lsn};
+use utils::id::{NodeId, TenantTimelineId};
+use utils::lsn::Lsn;
+use utils::{backoff, pausable_failpoint};
 
 use crate::metrics::{BACKED_UP_SEGMENTS, BACKUP_ERRORS, WAL_BACKUP_TASKS};
-use crate::timeline::{PeerInfo, WalResidentTimeline};
+use crate::timeline::WalResidentTimeline;
 use crate::timeline_manager::{Manager, StateSnapshot};
 use crate::{SafeKeeperConf, WAL_BACKUP_RUNTIME};
 
@@ -44,6 +39,14 @@ const BUFFER_SIZE: usize = 32 * 1024;
 pub struct WalBackupTaskHandle {
     shutdown_tx: Sender<()>,
     handle: JoinHandle<()>,
+}
+
+impl WalBackupTaskHandle {
+    pub(crate) async fn join(self) {
+        if let Err(e) = self.handle.await {
+            error!("WAL backup task panicked: {}", e);
+        }
+    }
 }
 
 /// Do we have anything to upload to S3, i.e. should safekeepers run backup activity?
@@ -74,11 +77,12 @@ pub(crate) async fn update_task(mgr: &mut Manager, need_backup: bool, state: &St
 
             let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
-            let async_task = backup_task_main(
-                mgr.wal_resident_timeline(),
-                mgr.conf.backup_parallel_jobs,
-                shutdown_rx,
-            );
+            let Ok(resident) = mgr.wal_resident_timeline() else {
+                info!("Timeline shut down");
+                return;
+            };
+
+            let async_task = backup_task_main(resident, mgr.conf.backup_parallel_jobs, shutdown_rx);
 
             let handle = if mgr.conf.current_thread_runtime {
                 tokio::spawn(async_task)
@@ -108,9 +112,7 @@ async fn shut_down_task(entry: &mut Option<WalBackupTaskHandle>) {
         // Tell the task to shutdown. Error means task exited earlier, that's ok.
         let _ = wb_handle.shutdown_tx.send(()).await;
         // Await the task itself. TODO: restart panicked tasks earlier.
-        if let Err(e) = wb_handle.handle.await {
-            warn!("WAL backup task panicked: {}", e);
-        }
+        wb_handle.join().await;
     }
 }
 
@@ -214,6 +216,7 @@ async fn backup_task_main(
     let _guard = WAL_BACKUP_TASKS.guard();
     info!("started");
 
+    let cancel = tli.tli.cancel.clone();
     let mut wb = WalBackupTask {
         wal_seg_size: tli.get_wal_seg_size().await,
         commit_lsn_watch_rx: tli.get_commit_lsn_watch_rx(),
@@ -230,25 +233,34 @@ async fn backup_task_main(
         _ = wb.run() => {}
         _ = shutdown_rx.recv() => {
             canceled = true;
+        },
+        _ = cancel.cancelled() => {
+            canceled = true;
         }
     }
     info!("task {}", if canceled { "canceled" } else { "terminated" });
 }
 
 impl WalBackupTask {
+    /// This function must be called from a select! that also respects self.timeline's
+    /// cancellation token.  This is done in [`backup_task_main`].
+    ///
+    /// The future returned by this function is safe to drop at any time because it
+    /// does not write to local disk.
     async fn run(&mut self) {
         let mut backup_lsn = Lsn(0);
 
         let mut retry_attempt = 0u32;
         // offload loop
-        loop {
+        while !self.timeline.cancel.is_cancelled() {
             if retry_attempt == 0 {
                 // wait for new WAL to arrive
                 if let Err(e) = self.commit_lsn_watch_rx.changed().await {
-                    // should never happen, as we hold Arc to timeline.
+                    // should never happen, as we hold Arc to timeline and transmitter's lifetime
+                    // is within Timeline's
                     error!("commit_lsn watch shut down: {:?}", e);
                     return;
-                }
+                };
             } else {
                 // or just sleep if we errored previously
                 let mut retry_delay = UPLOAD_FAILURE_RETRY_MAX_MS;
@@ -256,7 +268,7 @@ impl WalBackupTask {
                 {
                     retry_delay = min(retry_delay, backoff_delay);
                 }
-                sleep(Duration::from_millis(retry_delay)).await;
+                tokio::time::sleep(Duration::from_millis(retry_delay)).await;
             }
 
             let commit_lsn = *self.commit_lsn_watch_rx.borrow();
@@ -293,9 +305,12 @@ impl WalBackupTask {
                     retry_attempt = 0;
                 }
                 Err(e) => {
+                    // We might have managed to upload some segment even though
+                    // some later in the range failed, so log backup_lsn
+                    // separately.
                     error!(
-                        "failed while offloading range {}-{}: {:?}",
-                        backup_lsn, commit_lsn, e
+                        "failed while offloading range {}-{}, backup_lsn {}: {:?}",
+                        backup_lsn, commit_lsn, backup_lsn, e
                     );
 
                     retry_attempt = retry_attempt.saturating_add(1);
@@ -320,6 +335,13 @@ async fn backup_lsn_range(
     let remote_timeline_path = &timeline.remote_path;
     let start_lsn = *backup_lsn;
     let segments = get_segments(start_lsn, end_lsn, wal_seg_size);
+
+    info!(
+        "offloading segnos {:?} of range [{}-{})",
+        segments.iter().map(|&s| s.seg_no).collect::<Vec<_>>(),
+        start_lsn,
+        end_lsn,
+    );
 
     // Pool of concurrent upload tasks. We use `FuturesOrdered` to
     // preserve order of uploads, and update `backup_lsn` only after
@@ -357,10 +379,10 @@ async fn backup_lsn_range(
     }
 
     info!(
-        "offloaded segnos {:?} up to {}, previous backup_lsn {}",
+        "offloaded segnos {:?} of range [{}-{})",
         segments.iter().map(|&s| s.seg_no).collect::<Vec<_>>(),
-        end_lsn,
         start_lsn,
+        end_lsn,
     );
     Ok(())
 }
@@ -541,6 +563,12 @@ pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
     // Note: listing segments might take a long time if there are many of them.
     // We don't currently have http requests timeout cancellation, but if/once
     // we have listing should get streaming interface to make progress.
+
+    pausable_failpoint!("sk-delete-timeline-remote-pause");
+
+    fail::fail_point!("sk-delete-timeline-remote", |_| {
+        Err(anyhow::anyhow!("failpoint: sk-delete-timeline-remote"))
+    });
 
     let cancel = CancellationToken::new(); // not really used
     backoff::retry(

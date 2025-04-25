@@ -11,21 +11,20 @@ from typing import TYPE_CHECKING
 import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    NeonEnv,
-    NeonEnvBuilder,
-)
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import S3Storage, s3_storage
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
 
 if TYPE_CHECKING:
-    from typing import Optional
+    from fixtures.neon_fixtures import (
+        NeonEnv,
+        NeonEnvBuilder,
+    )
 
 
 @pytest.mark.parametrize("shard_count", [None, 4])
-def test_scrubber_tenant_snapshot(neon_env_builder: NeonEnvBuilder, shard_count: Optional[int]):
+def test_scrubber_tenant_snapshot(neon_env_builder: NeonEnvBuilder, shard_count: int | None):
     """
     Test the `tenant-snapshot` subcommand, which grabs data from remote storage
 
@@ -36,6 +35,12 @@ def test_scrubber_tenant_snapshot(neon_env_builder: NeonEnvBuilder, shard_count:
     neon_env_builder.num_pageservers = shard_count if shard_count is not None else 1
 
     env = neon_env_builder.init_start()
+    # We restart pageserver(s), which will cause storage storage controller
+    # requests to fail and warn.
+    env.storage_controller.allowed_errors.append(".*management API still failed.*")
+    env.storage_controller.allowed_errors.append(
+        ".*Reconcile error.*error sending request for url.*"
+    )
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
     branch = "main"
@@ -69,6 +74,10 @@ def test_scrubber_tenant_snapshot(neon_env_builder: NeonEnvBuilder, shard_count:
     else:
         tenant_shard_ids = [TenantShardId(tenant_id, 0, 0)]
 
+    # Let shards finish rescheduling to other pageservers: this makes the rest of the test more stable
+    # as it won't overlap with migrations
+    env.storage_controller.reconcile_until_idle(max_interval=0.1, timeout_secs=120)
+
     output_path = neon_env_builder.test_output_dir / "snapshot"
     os.makedirs(output_path)
 
@@ -77,6 +86,13 @@ def test_scrubber_tenant_snapshot(neon_env_builder: NeonEnvBuilder, shard_count:
     assert len(os.listdir(output_path)) > 0
 
     workload.stop()
+
+    # Disable scheduling, so the storage controller doesn't migrate shards around
+    # while we are stopping pageservers
+    env.storage_controller.tenant_policy_update(tenant_id, {"scheduling": "Stop"})
+    env.storage_controller.allowed_errors.extend(
+        [".*Scheduling is disabled by policy Stop.*", ".*Skipping reconcile for policy Stop.*"]
+    )
 
     # Stop pageservers
     for pageserver in env.pageservers:
@@ -118,8 +134,15 @@ def test_scrubber_tenant_snapshot(neon_env_builder: NeonEnvBuilder, shard_count:
     for pageserver in env.pageservers:
         pageserver.start()
 
+    # Turn scheduling back on.
+    # We don't care about optimizations, so enable only essential scheduling
+    env.storage_controller.tenant_policy_update(tenant_id, {"scheduling": "Essential"})
+
     # Check we can read everything
     workload.validate()
+
+    # Reconcile to avoid a race between test shutdown and background reconciliation (#11278)
+    env.storage_controller.reconcile_until_idle()
 
 
 def drop_local_state(env: NeonEnv, tenant_id: TenantId):
@@ -131,7 +154,7 @@ def drop_local_state(env: NeonEnv, tenant_id: TenantId):
 
 
 @pytest.mark.parametrize("shard_count", [None, 4])
-def test_scrubber_physical_gc(neon_env_builder: NeonEnvBuilder, shard_count: Optional[int]):
+def test_scrubber_physical_gc(neon_env_builder: NeonEnvBuilder, shard_count: int | None):
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.num_pageservers = 2
 
@@ -179,9 +202,7 @@ def test_scrubber_physical_gc(neon_env_builder: NeonEnvBuilder, shard_count: Opt
 
 
 @pytest.mark.parametrize("shard_count", [None, 2])
-def test_scrubber_physical_gc_ancestors(
-    neon_env_builder: NeonEnvBuilder, shard_count: Optional[int]
-):
+def test_scrubber_physical_gc_ancestors(neon_env_builder: NeonEnvBuilder, shard_count: int | None):
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.num_pageservers = 2
 
@@ -233,7 +254,9 @@ def test_scrubber_physical_gc_ancestors(
     new_shard_count = 4
     assert shard_count is None or new_shard_count > shard_count
     shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=new_shard_count)
-    env.storage_controller.reconcile_until_idle()  # Move shards to their final locations immediately
+    env.storage_controller.reconcile_until_idle(
+        timeout_secs=120
+    )  # Move shards to their final locations immediately
 
     # Create a timeline after split, to ensure scrubber can handle timelines that exist in child shards but not ancestors
     env.storage_controller.pageserver_api().timeline_create(
@@ -272,7 +295,17 @@ def test_scrubber_physical_gc_ancestors(
     for shard in shards:
         ps = env.get_tenant_pageserver(shard)
         assert ps is not None
-        ps.http_client().timeline_compact(shard, timeline_id, force_image_layer_creation=True)
+        ps.http_client().timeline_compact(
+            shard, timeline_id, force_image_layer_creation=True, wait_until_uploaded=True
+        )
+
+    # Add some WAL so that we don't gc at the latest remote consistent lsn
+    workload.churn_rows(10)
+
+    # Now gc the old stuff away
+    for shard in shards:
+        ps = env.get_tenant_pageserver(shard)
+        assert ps is not None
         ps.http_client().timeline_gc(shard, timeline_id, 0)
 
     # We will use a min_age_secs=1 threshold for deletion, let it pass
@@ -437,8 +470,6 @@ def test_scrubber_physical_gc_ancestors_split(neon_env_builder: NeonEnvBuilder):
 
         # Let the controller reach the failpoint
         wait_until(
-            10,
-            1,
             lambda: env.storage_controller.assert_log_contains(
                 'failpoint "shard-split-post-remote-sleep": sleeping'
             ),
@@ -499,7 +530,7 @@ def test_scrubber_physical_gc_ancestors_split(neon_env_builder: NeonEnvBuilder):
 
 @pytest.mark.parametrize("shard_count", [None, 4])
 def test_scrubber_scan_pageserver_metadata(
-    neon_env_builder: NeonEnvBuilder, shard_count: Optional[int]
+    neon_env_builder: NeonEnvBuilder, shard_count: int | None
 ):
     """
     Create some layers. Delete an object listed in index. Run scrubber and see if it detects the defect.
@@ -580,4 +611,10 @@ def test_scrubber_scan_pageserver_metadata(
     unhealthy = env.storage_controller.metadata_health_list_unhealthy()["unhealthy_tenant_shards"]
     assert len(unhealthy) == 1 and unhealthy[0] == str(tenant_shard_id)
 
-    neon_env_builder.disable_scrub_on_exit()
+    healthy, _ = env.storage_scrubber.scan_metadata()
+    assert not healthy
+    env.storage_scrubber.allowed_errors.append(".*not present in remote storage.*")
+    healthy, _ = env.storage_scrubber.scan_metadata()
+    assert healthy
+
+    neon_env_builder.disable_scrub_on_exit()  # We already ran scrubber, no need to do an extra run

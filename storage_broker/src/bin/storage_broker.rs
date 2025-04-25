@@ -10,37 +10,29 @@
 //!
 //! Only safekeeper message is supported, but it is not hard to add something
 //! else with generics.
-use clap::{command, Parser};
-use futures_core::Stream;
-use futures_util::StreamExt;
-use http_body_util::Full;
-use hyper::body::Incoming;
-use hyper::header::CONTENT_TYPE;
-use hyper::service::service_fn;
-use hyper::{Method, StatusCode};
-use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpListener;
-use tokio::sync::broadcast;
-use tokio::sync::broadcast::error::RecvError;
-use tokio::time;
-use tonic::body::{self, empty_body, BoxBody};
-use tonic::codegen::Service;
-use tonic::transport::server::Connected;
-use tonic::Code;
-use tonic::{Request, Response, Status};
-use tracing::*;
-use utils::signals::ShutdownSignals;
 
+use camino::Utf8PathBuf;
+use clap::{Parser, command};
+use futures::future::OptionFuture;
+use futures_core::Stream;
+use futures_util::StreamExt;
+use http_body_util::Full;
+use http_utils::tls_certs::ReloadingCertificateResolver;
+use hyper::body::Incoming;
+use hyper::header::CONTENT_TYPE;
+use hyper::service::service_fn;
+use hyper::{Method, StatusCode};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use metrics::{Encoder, TextEncoder};
+use parking_lot::RwLock;
 use storage_broker::metrics::{
-    BROADCASTED_MESSAGES_TOTAL, BROADCAST_DROPPED_MESSAGES_TOTAL, NUM_PUBS, NUM_SUBS_ALL,
+    BROADCAST_DROPPED_MESSAGES_TOTAL, BROADCASTED_MESSAGES_TOTAL, NUM_PUBS, NUM_SUBS_ALL,
     NUM_SUBS_TIMELINE, PROCESSED_MESSAGES_TOTAL, PUBLISHED_ONEOFF_MESSAGES_TOTAL,
 };
 use storage_broker::proto::broker_service_server::{BrokerService, BrokerServiceServer};
@@ -49,10 +41,19 @@ use storage_broker::proto::{
     FilterTenantTimelineId, MessageType, SafekeeperDiscoveryRequest, SafekeeperDiscoveryResponse,
     SafekeeperTimelineInfo, SubscribeByFilterRequest, SubscribeSafekeeperInfoRequest, TypedMessage,
 };
-use storage_broker::{parse_proto_ttid, DEFAULT_KEEPALIVE_INTERVAL, DEFAULT_LISTEN_ADDR};
+use storage_broker::{DEFAULT_KEEPALIVE_INTERVAL, parse_proto_ttid};
+use tokio::net::TcpListener;
+use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::RecvError;
+use tokio::time;
+use tonic::body::{self, BoxBody, empty_body};
+use tonic::codegen::Service;
+use tonic::{Code, Request, Response, Status};
+use tracing::*;
 use utils::id::TenantTimelineId;
 use utils::logging::{self, LogFormat};
 use utils::sentry_init::init_sentry;
+use utils::signals::ShutdownSignals;
 use utils::{project_build_tag, project_git_version};
 
 project_git_version!(GIT_VERSION);
@@ -61,12 +62,25 @@ project_build_tag!(BUILD_TAG);
 const DEFAULT_CHAN_SIZE: usize = 32;
 const DEFAULT_ALL_KEYS_CHAN_SIZE: usize = 16384;
 
+const DEFAULT_SSL_KEY_FILE: &str = "server.key";
+const DEFAULT_SSL_CERT_FILE: &str = "server.crt";
+const DEFAULT_SSL_CERT_RELOAD_PERIOD: &str = "60s";
+
 #[derive(Parser, Debug)]
 #[command(version = GIT_VERSION, about = "Broker for neon storage nodes communication", long_about = None)]
+#[clap(group(
+    clap::ArgGroup::new("listen-addresses")
+        .required(true)
+        .multiple(true)
+        .args(&["listen_addr", "listen_https_addr"]),
+))]
 struct Args {
-    /// Endpoint to listen on.
-    #[arg(short, long, default_value = DEFAULT_LISTEN_ADDR)]
-    listen_addr: SocketAddr,
+    /// Endpoint to listen HTTP on.
+    #[arg(short, long)]
+    listen_addr: Option<SocketAddr>,
+    /// Endpoint to listen HTTPS on.
+    #[arg(long)]
+    listen_https_addr: Option<SocketAddr>,
     /// Size of the queue to the per timeline subscriber.
     #[arg(long, default_value_t = DEFAULT_CHAN_SIZE)]
     timeline_chan_size: usize,
@@ -74,11 +88,20 @@ struct Args {
     #[arg(long, default_value_t = DEFAULT_ALL_KEYS_CHAN_SIZE)]
     all_keys_chan_size: usize,
     /// HTTP/2 keepalive interval.
-    #[arg(long, value_parser= humantime::parse_duration, default_value = DEFAULT_KEEPALIVE_INTERVAL)]
+    #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_KEEPALIVE_INTERVAL)]
     http2_keepalive_interval: Duration,
     /// Format for logging, either 'plain' or 'json'.
     #[arg(long, default_value = "plain")]
     log_format: String,
+    /// Path to a file with certificate's private key for https API.
+    #[arg(long, default_value = DEFAULT_SSL_KEY_FILE)]
+    ssl_key_file: Utf8PathBuf,
+    /// Path to a file with a X509 certificate for https API.
+    #[arg(long, default_value = DEFAULT_SSL_CERT_FILE)]
+    ssl_cert_file: Utf8PathBuf,
+    /// Period to reload certificate and private key from files.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_SSL_CERT_RELOAD_PERIOD)]
+    ssl_cert_reload_period: Duration,
 }
 
 /// Id of publisher for registering in maps
@@ -98,6 +121,7 @@ enum Message {
 
 impl Message {
     /// Convert proto message to internal message.
+    #[allow(clippy::result_large_err, reason = "TODO")]
     pub fn from(proto_msg: TypedMessage) -> Result<Self, Status> {
         match proto_msg.r#type() {
             MessageType::SafekeeperTimelineInfo => Ok(Message::SafekeeperTimelineInfo(
@@ -129,6 +153,7 @@ impl Message {
     }
 
     /// Get the tenant_timeline_id from the message.
+    #[allow(clippy::result_large_err, reason = "TODO")]
     pub fn tenant_timeline_id(&self) -> Result<Option<TenantTimelineId>, Status> {
         match self {
             Message::SafekeeperTimelineInfo(msg) => Ok(msg
@@ -187,6 +212,7 @@ enum SubscriptionKey {
 
 impl SubscriptionKey {
     /// Parse protobuf subkey (protobuf doesn't have fixed size bytes, we get vectors).
+    #[allow(clippy::result_large_err, reason = "TODO")]
     pub fn from_proto_subscription_key(key: ProtoSubscriptionKey) -> Result<Self, Status> {
         match key {
             ProtoSubscriptionKey::All(_) => Ok(SubscriptionKey::All),
@@ -197,6 +223,7 @@ impl SubscriptionKey {
     }
 
     /// Parse from FilterTenantTimelineId
+    #[allow(clippy::result_large_err, reason = "TODO")]
     pub fn from_proto_filter_tenant_timeline_id(
         opt: Option<&FilterTenantTimelineId>,
     ) -> Result<Self, Status> {
@@ -387,6 +414,7 @@ impl Registry {
     }
 
     /// Send msg to relevant subscribers.
+    #[allow(clippy::result_large_err, reason = "TODO")]
     pub fn send_msg(&self, msg: &Message) -> Result<(), Status> {
         PROCESSED_MESSAGES_TOTAL.inc();
 
@@ -438,6 +466,7 @@ struct Publisher {
 
 impl Publisher {
     /// Send msg to relevant subscribers.
+    #[allow(clippy::result_large_err, reason = "TODO")]
     pub fn send_msg(&mut self, msg: &Message) -> Result<(), Status> {
         self.registry.send_msg(msg)
     }
@@ -459,9 +488,10 @@ impl BrokerService for Broker {
         &self,
         request: Request<tonic::Streaming<SafekeeperTimelineInfo>>,
     ) -> Result<Response<()>, Status> {
-        let remote_addr = request
-            .remote_addr()
-            .expect("TCPConnectInfo inserted by handler");
+        let &RemoteAddr(remote_addr) = request
+            .extensions()
+            .get()
+            .expect("RemoteAddr inserted by handler");
         let mut publisher = self.registry.register_publisher(remote_addr);
 
         let mut stream = request.into_inner();
@@ -484,9 +514,10 @@ impl BrokerService for Broker {
         &self,
         request: Request<SubscribeSafekeeperInfoRequest>,
     ) -> Result<Response<Self::SubscribeSafekeeperInfoStream>, Status> {
-        let remote_addr = request
-            .remote_addr()
-            .expect("TCPConnectInfo inserted by handler");
+        let &RemoteAddr(remote_addr) = request
+            .extensions()
+            .get()
+            .expect("RemoteAddr inserted by handler");
         let proto_key = request
             .into_inner()
             .subscription_key
@@ -537,9 +568,10 @@ impl BrokerService for Broker {
         &self,
         request: Request<SubscribeByFilterRequest>,
     ) -> std::result::Result<Response<Self::SubscribeByFilterStream>, Status> {
-        let remote_addr = request
-            .remote_addr()
-            .expect("TCPConnectInfo inserted by handler");
+        let &RemoteAddr(remote_addr) = request
+            .extensions()
+            .get()
+            .expect("RemoteAddr inserted by handler");
         let proto_filter = request.into_inner();
         let ttid_filter = proto_filter.tenant_timeline_id.as_ref();
 
@@ -628,6 +660,9 @@ async fn http1_handler(
     Ok(resp)
 }
 
+#[derive(Clone, Copy)]
+struct RemoteAddr(SocketAddr);
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
@@ -664,12 +699,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let storage_broker_server = BrokerServiceServer::new(storage_broker_impl);
 
+    let http_listener = match &args.listen_addr {
+        Some(addr) => {
+            info!("listening HTTP on {}", addr);
+            Some(TcpListener::bind(addr).await?)
+        }
+        None => None,
+    };
+
+    let (https_listener, tls_acceptor) = match &args.listen_https_addr {
+        Some(addr) => {
+            let listener = TcpListener::bind(addr).await?;
+
+            let cert_resolver = ReloadingCertificateResolver::new(
+                "main",
+                &args.ssl_key_file,
+                &args.ssl_cert_file,
+                args.ssl_cert_reload_period,
+            )
+            .await?;
+
+            let mut tls_config = rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_cert_resolver(cert_resolver);
+
+            // Tonic is HTTP/2 only and it negotiates it with ALPN.
+            tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+            let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls_config));
+
+            info!("listening HTTPS on {}", addr);
+            (Some(listener), Some(acceptor))
+        }
+        None => (None, None),
+    };
+
     // grpc is served along with http1 for metrics on a single port, hence we
     // don't use tonic's Server.
-    let tcp_listener = TcpListener::bind(&args.listen_addr).await?;
-    info!("listening on {}", &args.listen_addr);
     loop {
-        let (stream, addr) = match tcp_listener.accept().await {
+        let (conn, is_https) = tokio::select! {
+            Some(conn) = OptionFuture::from(http_listener.as_ref().map(|l| l.accept())) => (conn, false),
+            Some(conn) = OptionFuture::from(https_listener.as_ref().map(|l| l.accept())) => (conn, true),
+        };
+
+        let (tcp_stream, addr) = match conn {
             Ok(v) => v,
             Err(e) => {
                 info!("couldn't accept connection: {e}");
@@ -687,13 +760,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .max_concurrent_streams(None);
 
         let storage_broker_server_cloned = storage_broker_server.clone();
-        let connect_info = stream.connect_info();
+        let remote_addr = RemoteAddr(addr);
         let service_fn_ = async move {
             service_fn(move |mut req| {
                 // That's what tonic's MakeSvc.call does to pass conninfo to
                 // the request handler (and where its request.remote_addr()
                 // expects it to find).
-                req.extensions_mut().insert(connect_info.clone());
+                req.extensions_mut().insert(remote_addr);
 
                 // Technically this second clone is not needed, but consume
                 // by async block is apparently unavoidable. BTW, error
@@ -724,13 +797,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         .await;
 
+        let tls_acceptor = tls_acceptor.clone();
+
         tokio::task::spawn(async move {
-            let res = builder
-                .serve_connection(TokioIo::new(stream), service_fn_)
-                .await;
+            let res = if is_https {
+                let tls_acceptor =
+                    tls_acceptor.expect("tls_acceptor is set together with https_listener");
+
+                let tls_stream = match tls_acceptor.accept(tcp_stream).await {
+                    Ok(tls_stream) => tls_stream,
+                    Err(e) => {
+                        info!("error accepting TLS connection from {addr}: {e}");
+                        return;
+                    }
+                };
+
+                builder
+                    .serve_connection(TokioIo::new(tls_stream), service_fn_)
+                    .await
+            } else {
+                builder
+                    .serve_connection(TokioIo::new(tcp_stream), service_fn_)
+                    .await
+            };
 
             if let Err(e) = res {
-                info!("error serving connection from {addr}: {e}");
+                info!(%is_https, "error serving connection from {addr}: {e}");
             }
         });
     }
@@ -738,10 +830,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
     use tokio::sync::broadcast::error::TryRecvError;
     use utils::id::{TenantId, TimelineId};
+
+    use super::*;
 
     fn msg(timeline_id: Vec<u8>) -> Message {
         Message::SafekeeperTimelineInfo(SafekeeperTimelineInfo {
@@ -759,6 +852,7 @@ mod tests {
             peer_horizon_lsn: 5,
             safekeeper_connstr: "neon-1-sk-1.local:7676".to_owned(),
             http_connstr: "neon-1-sk-1.local:7677".to_owned(),
+            https_connstr: Some("neon-1-sk-1.local:7678".to_owned()),
             local_start_lsn: 0,
             availability_zone: None,
             standby_horizon: 0,

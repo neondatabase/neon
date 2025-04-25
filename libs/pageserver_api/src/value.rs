@@ -7,9 +7,10 @@
 //! Note that the [`Value`] type is used for the permananent storage format, so any
 //! changes to it must be backwards compatible.
 
-use crate::record::NeonWalRecord;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+
+use crate::record::NeonWalRecord;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Value {
@@ -83,10 +84,10 @@ impl ValueBytes {
 
 #[cfg(test)]
 mod test {
-    use super::*;
-
     use bytes::Bytes;
     use utils::bin_ser::BeSer;
+
+    use super::*;
 
     macro_rules! roundtrip {
         ($orig:expr, $expected:expr) => {{

@@ -12,8 +12,8 @@ on:
   pull_request:
     paths:
       - '.github/workflows/pg-clients.yml'
-      - 'test_runner/pg_clients/**'
-      - 'test_runner/logical_repl/**'
+      - 'test_runner/pg_clients/**/*.py'
+      - 'test_runner/logical_repl/**/*.py'
       - 'poetry.lock'
   workflow_dispatch:
 
@@ -25,11 +25,13 @@ defaults:
   run:
     shell: bash -euxo pipefail {0}
 
+permissions:
+  id-token: write # aws-actions/configure-aws-credentials
+  statuses: write # require for posting a status update
+
 env:
-  DEFAULT_PG_VERSION: 16
+  DEFAULT_PG_VERSION: 17
   PLATFORM: neon-captest-new
-  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
   AWS_DEFAULT_REGION: eu-central-1
 
 jobs:
@@ -40,6 +42,8 @@ jobs:
       github-event-name: ${{ github.event_name }}
 
   build-build-tools-image:
+    permissions:
+      packages: write
     needs: [ check-permissions ]
     uses: ./.github/workflows/build-build-tools-image.yml
     secrets: inherit
@@ -51,8 +55,8 @@ jobs:
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init --user root
     services:
       clickhouse:
@@ -86,7 +90,12 @@ jobs:
         ports:
           - 8083:8083
     steps:
-      - uses: actions/checkout@v4
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Download Neon artifact
         uses: ./.github/actions/download
@@ -94,6 +103,7 @@ jobs:
           name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
           path: /tmp/neon/
           prefix: latest
+          aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
       - name: Create Neon Project
         id: create-neon-project
@@ -101,6 +111,8 @@ jobs:
         with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
           postgres_version: ${{ env.DEFAULT_PG_VERSION }}
+          project_settings: >-
+            {"enable_logical_replication": true}
 
       - name: Run tests
         uses: ./.github/actions/run-python-test-set
@@ -110,6 +122,7 @@ jobs:
           run_in_parallel: false
           extra_params: -m remote_cluster
           pg_version: ${{ env.DEFAULT_PG_VERSION }}
+          aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         env:
           BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
 
@@ -126,12 +139,13 @@ jobs:
         uses: ./.github/actions/allure-report-generate
         with:
           store-test-results-into-db: true
+          aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         env:
           REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
 
       - name: Post to a Slack channel
         if: github.event.schedule && failure()
-        uses: slackapi/slack-github-action@v1
+        uses: slackapi/slack-github-action@fcfb566f8b0aab22203f066d80ca1d7e4b5d05b3 # v1.27.1
         with:
           channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
           slack-message: |
@@ -146,12 +160,17 @@ jobs:
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init --user root
 
     steps:
-    - uses: actions/checkout@v4
+    - name: Harden the runner (Audit all outbound calls)
+      uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+      with:
+        egress-policy: audit
+
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
     - name: Download Neon artifact
       uses: ./.github/actions/download
@@ -159,6 +178,7 @@ jobs:
         name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
         path: /tmp/neon/
         prefix: latest
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Create Neon Project
       id: create-neon-project
@@ -175,6 +195,7 @@ jobs:
         run_in_parallel: false
         extra_params: -m remote_cluster
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
 
@@ -191,12 +212,13 @@ jobs:
       uses: ./.github/actions/allure-report-generate
       with:
         store-test-results-into-db: true
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
 
     - name: Post to a Slack channel
       if: github.event.schedule && failure()
-      uses: slackapi/slack-github-action@v1
+      uses: slackapi/slack-github-action@fcfb566f8b0aab22203f066d80ca1d7e4b5d05b3 # v1.27.1
       with:
         channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
         slack-message: |

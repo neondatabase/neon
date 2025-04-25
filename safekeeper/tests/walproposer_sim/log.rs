@@ -1,9 +1,11 @@
-use std::{fmt, sync::Arc};
+use std::fmt;
+use std::sync::Arc;
 
 use desim::time::Timing;
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
-use tracing_subscriber::fmt::{format::Writer, time::FormatTime};
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::time::FormatTime;
 
 /// SimClock can be plugged into tracing logger to print simulation time.
 #[derive(Clone)]

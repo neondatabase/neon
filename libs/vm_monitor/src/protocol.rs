@@ -35,7 +35,8 @@
 use core::fmt;
 use std::cmp;
 
-use serde::{de::Error, Deserialize, Serialize};
+use serde::de::Error;
+use serde::{Deserialize, Serialize};
 
 /// A Message we send to the agent.
 #[derive(Serialize, Deserialize, Debug, Clone)]

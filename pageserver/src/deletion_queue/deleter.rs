@@ -6,20 +6,15 @@
 //! number of full-sized DeleteObjects requests, rather than a larger number of
 //! smaller requests.
 
-use remote_storage::GenericRemoteStorage;
-use remote_storage::RemotePath;
-use remote_storage::TimeoutOrCancel;
-use remote_storage::MAX_KEYS_PER_DELETE;
 use std::time::Duration;
+
+use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
-use tracing::warn;
-use utils::backoff;
+use tracing::{info, warn};
+use utils::{backoff, pausable_failpoint};
 
+use super::{DeletionQueueError, FlushOp};
 use crate::metrics;
-
-use super::DeletionQueueError;
-use super::FlushOp;
 
 const AUTOFLUSH_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -90,6 +85,7 @@ impl Deleter {
     /// Block until everything in accumulator has been executed
     async fn flush(&mut self) -> Result<(), DeletionQueueError> {
         while !self.accumulator.is_empty() && !self.cancel.is_cancelled() {
+            pausable_failpoint!("deletion-queue-before-execute-pause");
             match self.remote_delete().await {
                 Ok(()) => {
                     // Note: we assume that the remote storage layer returns Ok(()) if some
@@ -129,7 +125,8 @@ impl Deleter {
     }
 
     pub(super) async fn background(&mut self) -> Result<(), DeletionQueueError> {
-        self.accumulator.reserve(MAX_KEYS_PER_DELETE);
+        let max_keys_per_delete = self.remote_storage.max_keys_per_delete();
+        self.accumulator.reserve(max_keys_per_delete);
 
         loop {
             if self.cancel.is_cancelled() {
@@ -154,14 +151,14 @@ impl Deleter {
 
             match msg {
                 DeleterMessage::Delete(mut list) => {
-                    while !list.is_empty() || self.accumulator.len() == MAX_KEYS_PER_DELETE {
-                        if self.accumulator.len() == MAX_KEYS_PER_DELETE {
+                    while !list.is_empty() || self.accumulator.len() == max_keys_per_delete {
+                        if self.accumulator.len() == max_keys_per_delete {
                             self.flush().await?;
                             // If we have received this number of keys, proceed with attempting to execute
                             assert_eq!(self.accumulator.len(), 0);
                         }
 
-                        let available_slots = MAX_KEYS_PER_DELETE - self.accumulator.len();
+                        let available_slots = max_keys_per_delete - self.accumulator.len();
                         let take_count = std::cmp::min(available_slots, list.len());
                         for path in list.drain(list.len() - take_count..) {
                             self.accumulator.push(path);

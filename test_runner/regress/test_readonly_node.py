@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Union
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
@@ -14,9 +14,11 @@ from fixtures.neon_fixtures import (
     last_flush_lsn_upload,
     tenant_get_shards,
 )
-from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_last_record_lsn
 from fixtures.utils import query_scalar, wait_until
+
+if TYPE_CHECKING:
+    from fixtures.pageserver.http import PageserverHttpClient
 
 
 #
@@ -122,7 +124,6 @@ def test_readonly_node(neon_simple_env: NeonEnv):
         )
 
 
-@pytest.mark.skip("See https://github.com/neondatabase/neon/issues/9754")
 def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
     """
     Test static endpoint is protected from GC by acquiring and renewing lsn leases.
@@ -175,7 +176,7 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
 
     def get_layers_protected_by_lease(
         ps_http: PageserverHttpClient,
-        tenant_id: Union[TenantId, TenantShardId],
+        tenant_id: TenantId | TenantShardId,
         timeline_id: TimelineId,
         lease_lsn: Lsn,
     ) -> set[str]:
@@ -209,16 +210,14 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
 
             # Note: cannot assert on `layers_removed` here because it could be layers
             # not guarded by the lease. Instead, use layer map dump.
-            assert layers_guarded_before_gc.issubset(
-                layers_guarded_after_gc
-            ), "Layers guarded by lease before GC should not be removed"
+            assert layers_guarded_before_gc.issubset(layers_guarded_after_gc), (
+                "Layers guarded by lease before GC should not be removed"
+            )
 
             log.info(f"{gc_result=}")
 
         # wait for lease renewal before running query.
         _, offset = wait_until(
-            20,
-            0.5,
             lambda: ep_static.assert_log_contains(
                 "lsn_lease_bg_task.*Request succeeded", offset=offset
             ),
@@ -232,7 +231,7 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
         return offset
 
     # Insert some records on main branch
-    with env.endpoints.create_start("main") as ep_main:
+    with env.endpoints.create_start("main", config_lines=["shared_buffers=1MB"]) as ep_main:
         with ep_main.cursor() as cur:
             cur.execute("CREATE TABLE t0(v0 int primary key, v1 text)")
         lsn = Lsn(0)
@@ -291,7 +290,7 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
                 offset=offset,
             )
 
-        # Do some update so we can increment latest_gc_cutoff
+        # Do some update so we can increment gc_cutoff
         generate_updates_on_main(env, ep_main, i, end=100)
 
     # Wait for the existing lease to expire.

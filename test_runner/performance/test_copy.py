@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from contextlib import closing
 from io import BufferedReader, RawIOBase
-from typing import Optional, final
+from typing import TYPE_CHECKING, final
 
-from fixtures.compare_fixtures import PgCompare
 from typing_extensions import override
+
+if TYPE_CHECKING:
+    from fixtures.compare_fixtures import PgCompare
 
 
 @final
@@ -13,7 +15,7 @@ class CopyTestData(RawIOBase):
     def __init__(self, rows: int):
         self.rows = rows
         self.rownum = 0
-        self.linebuf: Optional[bytes] = None
+        self.linebuf: bytes | None = None
         self.ptr = 0
 
     @override

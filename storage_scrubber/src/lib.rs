@@ -12,24 +12,18 @@ pub mod tenant_snapshot;
 
 use std::env;
 use std::fmt::Display;
-use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
-use aws_config::retry::{RetryConfigBuilder, RetryMode};
-use aws_sdk_s3::config::Region;
-use aws_sdk_s3::error::DisplayErrorContext;
-use aws_sdk_s3::Client;
-
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::ValueEnum;
 use futures::{Stream, StreamExt};
-use pageserver::tenant::remote_timeline_client::{remote_tenant_path, remote_timeline_path};
 use pageserver::tenant::TENANTS_SEGMENT_NAME;
+use pageserver::tenant::remote_timeline_client::{remote_tenant_path, remote_timeline_path};
 use pageserver_api::shard::TenantShardId;
 use remote_storage::{
     DownloadOpts, GenericRemoteStorage, Listing, ListingMode, RemotePath, RemoteStorageConfig,
-    RemoteStorageKind, S3Config,
+    RemoteStorageKind, VersionId,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -38,7 +32,8 @@ use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{EnvFilter, fmt};
 use utils::fs_ext;
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 
@@ -268,7 +263,7 @@ impl BucketConfig {
                 config.bucket_name, config.bucket_region
             ),
             RemoteStorageKind::AzureContainer(config) => format!(
-                "bucket {}, storage account {:?}, region {}",
+                "container {}, storage account {:?}, region {}",
                 config.container_name, config.storage_account, config.container_region
             ),
         }
@@ -295,8 +290,8 @@ pub struct ControllerClientConfig {
 }
 
 impl ControllerClientConfig {
-    pub fn build_client(self) -> control_api::Client {
-        control_api::Client::new(self.controller_api, Some(self.controller_jwt))
+    pub fn build_client(self, http_client: reqwest::Client) -> control_api::Client {
+        control_api::Client::new(http_client, self.controller_api, Some(self.controller_jwt))
     }
 }
 
@@ -351,21 +346,6 @@ pub fn init_logging(file_name: &str) -> Option<WorkerGuard> {
     }
 }
 
-async fn init_s3_client(bucket_region: Region) -> Client {
-    let mut retry_config_builder = RetryConfigBuilder::new();
-
-    retry_config_builder
-        .set_max_attempts(Some(3))
-        .set_mode(Some(RetryMode::Adaptive));
-
-    let config = aws_config::defaults(aws_config::BehaviorVersion::v2024_03_28())
-        .region(bucket_region)
-        .retry_config(retry_config_builder.build())
-        .load()
-        .await;
-    Client::new(&config)
-}
-
 fn default_prefix_in_bucket(node_kind: NodeKind) -> &'static str {
     match node_kind {
         NodeKind::Pageserver => "pageserver/v1/",
@@ -385,23 +365,6 @@ fn make_root_target(desc_str: String, prefix_in_bucket: String, node_kind: NodeK
     }
 }
 
-async fn init_remote_s3(
-    bucket_config: S3Config,
-    node_kind: NodeKind,
-) -> anyhow::Result<(Arc<Client>, RootTarget)> {
-    let bucket_region = Region::new(bucket_config.bucket_region);
-    let s3_client = Arc::new(init_s3_client(bucket_region).await);
-    let default_prefix = default_prefix_in_bucket(node_kind).to_string();
-
-    let s3_root = make_root_target(
-        bucket_config.bucket_name,
-        bucket_config.prefix_in_bucket.unwrap_or(default_prefix),
-        node_kind,
-    );
-
-    Ok((s3_client, s3_root))
-}
-
 async fn init_remote(
     mut storage_config: BucketConfig,
     node_kind: NodeKind,
@@ -411,10 +374,10 @@ async fn init_remote(
     let default_prefix = default_prefix_in_bucket(node_kind).to_string();
 
     match &mut storage_config.0.storage {
-        RemoteStorageKind::AwsS3(ref mut config) => {
+        RemoteStorageKind::AwsS3(config) => {
             config.prefix_in_bucket.get_or_insert(default_prefix);
         }
-        RemoteStorageKind::AzureContainer(ref mut config) => {
+        RemoteStorageKind::AzureContainer(config) => {
             config.prefix_in_container.get_or_insert(default_prefix);
         }
         RemoteStorageKind::LocalFs { .. } => (),
@@ -499,7 +462,7 @@ async fn list_objects_with_retries(
                     remote_client.bucket_name().unwrap_or_default(),
                     s3_target.prefix_in_bucket,
                     s3_target.delimiter,
-                    DisplayErrorContext(e),
+                    e,
                 );
                 let backoff_time = 1 << trial.min(5);
                 tokio::time::sleep(Duration::from_secs(backoff_time)).await;
@@ -509,10 +472,11 @@ async fn list_objects_with_retries(
     panic!("MAX_RETRIES is not allowed to be 0");
 }
 
+/// Returns content, last modified time
 async fn download_object_with_retries(
     remote_client: &GenericRemoteStorage,
     key: &RemotePath,
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<(Vec<u8>, SystemTime)> {
     let cancel = CancellationToken::new();
     for trial in 0..MAX_RETRIES {
         let mut buf = Vec::new();
@@ -535,7 +499,7 @@ async fn download_object_with_retries(
         {
             Ok(bytes_read) => {
                 tracing::debug!("Downloaded {bytes_read} bytes for object {key}");
-                return Ok(buf);
+                return Ok((buf, download.last_modified));
             }
             Err(e) => {
                 error!("Failed to stream object body for key {key}: {e}");
@@ -548,14 +512,18 @@ async fn download_object_with_retries(
     anyhow::bail!("Failed to download objects with key {key} {MAX_RETRIES} times")
 }
 
-async fn download_object_to_file_s3(
-    s3_client: &Client,
-    bucket_name: &str,
-    key: &str,
-    version_id: Option<&str>,
+async fn download_object_to_file(
+    remote_storage: &GenericRemoteStorage,
+    key: &RemotePath,
+    version_id: Option<VersionId>,
     local_path: &Utf8Path,
 ) -> anyhow::Result<()> {
+    let opts = DownloadOpts {
+        version_id: version_id.clone(),
+        ..Default::default()
+    };
     let tmp_path = Utf8PathBuf::from(format!("{local_path}.tmp"));
+    let cancel = CancellationToken::new();
     for _ in 0..MAX_RETRIES {
         tokio::fs::remove_file(&tmp_path)
             .await
@@ -565,28 +533,24 @@ async fn download_object_to_file_s3(
             .await
             .context("Opening output file")?;
 
-        let request = s3_client.get_object().bucket(bucket_name).key(key);
+        let res = remote_storage.download(key, &opts, &cancel).await;
 
-        let request = match version_id {
-            Some(version_id) => request.version_id(version_id),
-            None => request,
-        };
-
-        let response_stream = match request.send().await {
+        let download = match res {
             Ok(response) => response,
             Err(e) => {
                 error!(
-                    "Failed to download object for key {key} version {}: {e:#}",
-                    version_id.unwrap_or("")
+                    "Failed to download object for key {key} version {:?}: {e:#}",
+                    &version_id.as_ref().unwrap_or(&VersionId(String::new()))
                 );
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
         };
 
-        let mut read_stream = response_stream.body.into_async_read();
+        //response_stream.download_stream
 
-        tokio::io::copy(&mut read_stream, &mut file).await?;
+        let mut body = tokio_util::io::StreamReader::new(download.download_stream);
+        tokio::io::copy(&mut body, &mut file).await?;
 
         tokio::fs::rename(&tmp_path, local_path).await?;
         return Ok(());

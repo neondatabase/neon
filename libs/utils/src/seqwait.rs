@@ -5,6 +5,7 @@ use std::collections::BinaryHeap;
 use std::mem;
 use std::sync::Mutex;
 use std::time::Duration;
+
 use tokio::sync::watch::{self, channel};
 use tokio::time::timeout;
 
@@ -83,7 +84,9 @@ where
             }
             wake_these.push(self.heap.pop().unwrap().wake_channel);
         }
-        self.update_status();
+        if !wake_these.is_empty() {
+            self.update_status();
+        }
         wake_these
     }
 
@@ -246,11 +249,7 @@ where
         let internal = self.internal.lock().unwrap();
         let cnt = internal.current.cnt_value();
         drop(internal);
-        if cnt >= num {
-            Ok(())
-        } else {
-            Err(cnt)
-        }
+        if cnt >= num { Ok(()) } else { Err(cnt) }
     }
 
     /// Register and return a channel that will be notified when a number arrives,
@@ -323,8 +322,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Arc;
+
+    use super::*;
 
     impl MonotonicCounter<i32> for i32 {
         fn cnt_advance(&mut self, val: i32) {

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.log_helper import log
@@ -10,10 +9,16 @@ from fixtures.neon_fixtures import (
     NeonProxy,
     VanillaPostgres,
 )
-from fixtures.port_distributor import PortDistributor
-from pytest_httpserver import HTTPServer
-from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
+    from fixtures.httpserver import ListenAddress
+    from fixtures.port_distributor import PortDistributor
+    from pytest_httpserver import HTTPServer
+    from werkzeug.wrappers.request import Request
 
 
 def proxy_metrics_handler(request: Request) -> Response:
@@ -38,7 +43,7 @@ def proxy_metrics_handler(request: Request) -> Response:
 def proxy_with_metric_collector(
     port_distributor: PortDistributor,
     neon_binpath: Path,
-    httpserver_listen_address,
+    httpserver_listen_address: ListenAddress,
     test_output_dir: Path,
 ) -> Iterator[NeonProxy]:
     """Neon proxy that routes through link auth and has metric collection enabled."""

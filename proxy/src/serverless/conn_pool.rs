@@ -1,16 +1,17 @@
 use std::fmt;
 use std::pin::pin;
 use std::sync::{Arc, Weak};
-use std::task::{ready, Poll};
+use std::task::{Poll, ready};
 
-use futures::future::poll_fn;
 use futures::Future;
+use futures::future::poll_fn;
+use postgres_client::AsyncMessage;
+use postgres_client::tls::MakeTlsConnect;
 use smallvec::SmallVec;
+use tokio::net::TcpStream;
 use tokio::time::Instant;
-use tokio_postgres::tls::NoTlsStream;
-use tokio_postgres::{AsyncMessage, Socket};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{Instrument, error, info, info_span, warn};
 #[cfg(test)]
 use {
     super::conn_pool_lib::GlobalConnPoolOptions,
@@ -19,11 +20,15 @@ use {
 };
 
 use super::conn_pool_lib::{
-    Client, ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, GlobalConnPool,
+    Client, ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, EndpointConnPool,
+    GlobalConnPool,
 };
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::metrics::Metrics;
+use crate::tls::postgres_rustls::MakeRustlsConnect;
+
+type TlsStream = <MakeRustlsConnect as MakeTlsConnect<TcpStream>>::Stream;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ConnInfoWithAuth {
@@ -52,11 +57,11 @@ impl fmt::Display for ConnInfo {
 }
 
 pub(crate) fn poll_client<C: ClientInnerExt>(
-    global_pool: Arc<GlobalConnPool<C>>,
-    ctx: &RequestMonitoring,
+    global_pool: Arc<GlobalConnPool<C, EndpointConnPool<C>>>,
+    ctx: &RequestContext,
     conn_info: ConnInfo,
     client: C,
-    mut connection: tokio_postgres::Connection<Socket, NoTlsStream>,
+    mut connection: postgres_client::Connection<TcpStream, TlsStream>,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
 ) -> Client<C> {
@@ -167,6 +172,7 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
     Client::new(inner, conn_info, pool_clone)
 }
 
+#[derive(Clone)]
 pub(crate) struct ClientDataRemote {
     session: tokio::sync::watch::Sender<uuid::Uuid>,
     cancel: CancellationToken,
@@ -184,7 +190,6 @@ impl ClientDataRemote {
 
 #[cfg(test)]
 mod tests {
-    use std::mem;
     use std::sync::atomic::AtomicBool;
 
     use super::*;
@@ -218,6 +223,7 @@ mod tests {
                 endpoint_id: (&EndpointId::from("endpoint")).into(),
                 project_id: (&ProjectId::from("project")).into(),
                 branch_id: (&BranchId::from("branch")).into(),
+                compute_id: "compute".into(),
                 cold_start_info: crate::control_plane::messages::ColdStartInfo::Warm,
             },
             conn_id: uuid::Uuid::new_v4(),
@@ -243,7 +249,7 @@ mod tests {
             },
             cancel_set: CancelSet::new(0),
             client_conn_threshold: u64::MAX,
-            max_request_size_bytes: u64::MAX,
+            max_request_size_bytes: usize::MAX,
             max_response_size_bytes: usize::MAX,
         }));
         let pool = GlobalConnPool::new(config);
@@ -266,39 +272,33 @@ mod tests {
             assert_eq!(0, pool.get_global_connections_count());
         }
         {
-            let mut client = Client::new(create_inner(), conn_info.clone(), ep_pool.clone());
-            client.do_drop().unwrap()();
-            mem::forget(client); // drop the client
+            let client = Client::new(create_inner(), conn_info.clone(), ep_pool.clone());
+            drop(client);
             assert_eq!(1, pool.get_global_connections_count());
         }
         {
-            let mut closed_client = Client::new(
+            let closed_client = Client::new(
                 create_inner_with(MockClient::new(true)),
                 conn_info.clone(),
                 ep_pool.clone(),
             );
-            closed_client.do_drop().unwrap()();
-            mem::forget(closed_client); // drop the client
-                                        // The closed client shouldn't be added to the pool.
+            drop(closed_client);
             assert_eq!(1, pool.get_global_connections_count());
         }
         let is_closed: Arc<AtomicBool> = Arc::new(false.into());
         {
-            let mut client = Client::new(
+            let client = Client::new(
                 create_inner_with(MockClient(is_closed.clone())),
                 conn_info.clone(),
                 ep_pool.clone(),
             );
-            client.do_drop().unwrap()();
-            mem::forget(client); // drop the client
-
+            drop(client);
             // The client should be added to the pool.
             assert_eq!(2, pool.get_global_connections_count());
         }
         {
-            let mut client = Client::new(create_inner(), conn_info, ep_pool);
-            client.do_drop().unwrap()();
-            mem::forget(client); // drop the client
+            let client = Client::new(create_inner(), conn_info, ep_pool);
+            drop(client);
 
             // The client shouldn't be added to the pool. Because the ep-pool is full.
             assert_eq!(2, pool.get_global_connections_count());
@@ -316,15 +316,13 @@ mod tests {
             &pool.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key().unwrap()),
         );
         {
-            let mut client = Client::new(create_inner(), conn_info.clone(), ep_pool.clone());
-            client.do_drop().unwrap()();
-            mem::forget(client); // drop the client
+            let client = Client::new(create_inner(), conn_info.clone(), ep_pool.clone());
+            drop(client);
             assert_eq!(3, pool.get_global_connections_count());
         }
         {
-            let mut client = Client::new(create_inner(), conn_info.clone(), ep_pool.clone());
-            client.do_drop().unwrap()();
-            mem::forget(client); // drop the client
+            let client = Client::new(create_inner(), conn_info.clone(), ep_pool.clone());
+            drop(client);
 
             // The client shouldn't be added to the pool. Because the global pool is full.
             assert_eq!(3, pool.get_global_connections_count());

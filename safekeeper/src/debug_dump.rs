@@ -2,37 +2,25 @@
 
 use std::fs;
 use std::fs::DirEntry;
-use std::io::BufReader;
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::bail;
-use anyhow::Result;
-use camino::Utf8Path;
-use camino::Utf8PathBuf;
+use anyhow::{Result, bail};
+use camino::{Utf8Path, Utf8PathBuf};
 use chrono::{DateTime, Utc};
-use postgres_ffi::XLogSegNo;
-use postgres_ffi::MAX_SEND_SIZE;
-use serde::Deserialize;
-use serde::Serialize;
-
 use postgres_ffi::v14::xlog_utils::{IsPartialXLogFileName, IsXLogFileName};
+use postgres_ffi::{MAX_SEND_SIZE, XLogSegNo};
+use safekeeper_api::models::WalSenderState;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use utils::id::NodeId;
-use utils::id::TenantTimelineId;
-use utils::id::{TenantId, TimelineId};
+use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
 
 use crate::safekeeper::TermHistory;
-use crate::send_wal::WalSenderState;
-use crate::state::TimelineMemState;
-use crate::state::TimelinePersistentState;
-use crate::timeline::get_timeline_dir;
-use crate::timeline::WalResidentTimeline;
-use crate::timeline_manager;
-use crate::GlobalTimelines;
-use crate::SafeKeeperConf;
+use crate::state::{TimelineMemState, TimelinePersistentState};
+use crate::timeline::{WalResidentTimeline, get_timeline_dir};
+use crate::{GlobalTimelines, SafeKeeperConf, timeline_manager};
 
 /// Various filters that influence the resulting JSON output.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -207,23 +195,23 @@ pub struct FileInfo {
 }
 
 /// Build debug dump response, using the provided [`Args`] filters.
-pub async fn build(args: Args) -> Result<Response> {
+pub async fn build(args: Args, global_timelines: Arc<GlobalTimelines>) -> Result<Response> {
     let start_time = Utc::now();
-    let timelines_count = GlobalTimelines::timelines_count();
-    let config = GlobalTimelines::get_global_config();
+    let timelines_count = global_timelines.timelines_count();
+    let config = global_timelines.get_global_config();
 
     let ptrs_snapshot = if args.tenant_id.is_some() && args.timeline_id.is_some() {
         // If both tenant_id and timeline_id are specified, we can just get the
         // timeline directly, without taking a snapshot of the whole list.
         let ttid = TenantTimelineId::new(args.tenant_id.unwrap(), args.timeline_id.unwrap());
-        if let Ok(tli) = GlobalTimelines::get(ttid) {
+        if let Ok(tli) = global_timelines.get(ttid) {
             vec![tli]
         } else {
             vec![]
         }
     } else {
         // Otherwise, take a snapshot of the whole list.
-        GlobalTimelines::get_all()
+        global_timelines.get_all()
     };
 
     let mut timelines = Vec::new();
@@ -344,12 +332,12 @@ fn get_wal_last_modified(path: &Utf8Path) -> Result<Option<DateTime<Utc>>> {
 
 /// Converts SafeKeeperConf to Config, filtering out the fields that are not
 /// supposed to be exposed.
-fn build_config(config: SafeKeeperConf) -> Config {
+fn build_config(config: Arc<SafeKeeperConf>) -> Config {
     Config {
         id: config.my_id,
-        workdir: config.workdir.into(),
-        listen_pg_addr: config.listen_pg_addr,
-        listen_http_addr: config.listen_http_addr,
+        workdir: config.workdir.clone().into(),
+        listen_pg_addr: config.listen_pg_addr.clone(),
+        listen_http_addr: config.listen_http_addr.clone(),
         no_sync: config.no_sync,
         max_offloader_lag_bytes: config.max_offloader_lag_bytes,
         wal_backup_enabled: config.wal_backup_enabled,

@@ -80,7 +80,9 @@ pub(crate) fn get() -> IoEngine {
                     Ok(v) => match v.parse::<IoEngineKind>() {
                         Ok(engine_kind) => engine_kind,
                         Err(e) => {
-                            panic!("invalid VirtualFile io engine for env var {env_var_name}: {e:#}: {v:?}")
+                            panic!(
+                                "invalid VirtualFile io engine for env var {env_var_name}: {e:#}: {v:?}"
+                            )
                         }
                     },
                     Err(std::env::VarError::NotPresent) => {
@@ -107,15 +109,12 @@ pub(crate) fn get() -> IoEngine {
     }
 }
 
-use std::{
-    os::unix::prelude::FileExt,
-    sync::atomic::{AtomicU8, Ordering},
-};
+use std::os::unix::prelude::FileExt;
+use std::sync::atomic::{AtomicU8, Ordering};
 
-use super::{
-    owned_buffers_io::{io_buf_ext::FullSlice, slice::SliceMutExt},
-    FileGuard, Metadata,
-};
+use super::owned_buffers_io::io_buf_ext::FullSlice;
+use super::owned_buffers_io::slice::SliceMutExt;
+use super::{FileGuard, Metadata};
 
 #[cfg(target_os = "linux")]
 fn epoll_uring_error_to_std(e: tokio_epoll_uring::Error<std::io::Error>) -> std::io::Error {
@@ -210,6 +209,27 @@ impl IoEngine {
             }
         }
     }
+
+    pub(super) async fn set_len(
+        &self,
+        file_guard: FileGuard,
+        len: u64,
+    ) -> (FileGuard, std::io::Result<()>) {
+        match self {
+            IoEngine::NotSet => panic!("not initialized"),
+            IoEngine::StdFs => {
+                let res = file_guard.with_std_file(|std_file| std_file.set_len(len));
+                (file_guard, res)
+            }
+            #[cfg(target_os = "linux")]
+            IoEngine::TokioEpollUring => {
+                // TODO: ftruncate op for tokio-epoll-uring
+                let res = file_guard.with_std_file(|std_file| std_file.set_len(len));
+                (file_guard, res)
+            }
+        }
+    }
+
     pub(super) async fn write_at<B: IoBuf + Send>(
         &self,
         file_guard: FileGuard,

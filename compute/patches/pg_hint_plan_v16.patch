@@ -1,0 +1,24 @@
+diff --git a/expected/ut-A.out b/expected/ut-A.out
+index da723b8..5328114 100644
+--- a/expected/ut-A.out
++++ b/expected/ut-A.out
+@@ -3175,6 +3178,7 @@ SELECT s.query, s.calls
+   FROM public.pg_stat_statements s
+   JOIN pg_catalog.pg_database d
+     ON (s.dbid = d.oid)
++  WHERE s.query LIKE 'SELECT * FROM s1.t1%' OR s.query LIKE '%pg_stat_statements_reset%'
+  ORDER BY 1;
+                 query                 | calls 
+ --------------------------------------+-------
+diff --git a/sql/ut-A.sql b/sql/ut-A.sql
+index 7c7d58a..4fd1a07 100644
+--- a/sql/ut-A.sql
++++ b/sql/ut-A.sql
+@@ -963,6 +963,7 @@ SELECT s.query, s.calls
+   FROM public.pg_stat_statements s
+   JOIN pg_catalog.pg_database d
+     ON (s.dbid = d.oid)
++  WHERE s.query LIKE 'SELECT * FROM s1.t1%' OR s.query LIKE '%pg_stat_statements_reset%'
+  ORDER BY 1;
+ 
+ ----

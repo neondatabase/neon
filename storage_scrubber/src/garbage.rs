@@ -3,11 +3,9 @@
 //! Garbage means S3 objects which are either not referenced by any metadata,
 //! or are referenced by a control plane tenant/timeline in a deleted state.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
-};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use futures_util::TryStreamExt;
@@ -16,13 +14,14 @@ use remote_storage::{GenericRemoteStorage, ListingMode, ListingObject, RemotePat
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
-use utils::{backoff, id::TenantId};
+use utils::backoff;
+use utils::id::TenantId;
 
+use crate::cloud_admin_api::{CloudAdminApiClient, MaybeDeleted, ProjectData};
+use crate::metadata_stream::{stream_tenant_timelines, stream_tenants_maybe_prefix};
 use crate::{
-    cloud_admin_api::{CloudAdminApiClient, MaybeDeleted, ProjectData},
+    BucketConfig, ConsoleConfig, MAX_RETRIES, NodeKind, TenantShardTimelineId, TraversingDepth,
     init_remote, list_objects_with_retries,
-    metadata_stream::{stream_tenant_timelines, stream_tenants},
-    BucketConfig, ConsoleConfig, NodeKind, TenantShardTimelineId, TraversingDepth, MAX_RETRIES,
 };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -118,9 +117,17 @@ pub async fn find_garbage(
     console_config: ConsoleConfig,
     depth: TraversingDepth,
     node_kind: NodeKind,
+    tenant_id_prefix: Option<String>,
     output_path: String,
 ) -> anyhow::Result<()> {
-    let garbage = find_garbage_inner(bucket_config, console_config, depth, node_kind).await?;
+    let garbage = find_garbage_inner(
+        bucket_config,
+        console_config,
+        depth,
+        node_kind,
+        tenant_id_prefix,
+    )
+    .await?;
     let serialized = serde_json::to_vec_pretty(&garbage)?;
 
     tokio::fs::write(&output_path, &serialized).await?;
@@ -152,6 +159,7 @@ async fn find_garbage_inner(
     console_config: ConsoleConfig,
     depth: TraversingDepth,
     node_kind: NodeKind,
+    tenant_id_prefix: Option<String>,
 ) -> anyhow::Result<GarbageList> {
     // Construct clients for S3 and for Console API
     let (remote_client, target) = init_remote(bucket_config.clone(), node_kind).await?;
@@ -178,7 +186,7 @@ async fn find_garbage_inner(
 
     // Enumerate Tenants in S3, and check if each one exists in Console
     tracing::info!("Finding all tenants in {}...", bucket_config.desc_str());
-    let tenants = stream_tenants(&remote_client, &target);
+    let tenants = stream_tenants_maybe_prefix(&remote_client, &target, tenant_id_prefix);
     let tenants_checked = tenants.map_ok(|t| {
         let api_client = cloud_admin_api_client.clone();
         let console_cache = console_cache.clone();
@@ -250,14 +258,21 @@ async fn find_garbage_inner(
                 .await?;
                 if let Some(object) = tenant_objects.keys.first() {
                     if object.key.get_path().as_str().ends_with("heatmap-v1.json") {
-                        tracing::info!("Tenant {tenant_shard_id}: is missing in console and is only a heatmap (known historic deletion bug)");
+                        tracing::info!(
+                            "Tenant {tenant_shard_id}: is missing in console and is only a heatmap (known historic deletion bug)"
+                        );
                         garbage.append_buggy(GarbageEntity::Tenant(tenant_shard_id));
                         continue;
                     } else {
-                        tracing::info!("Tenant {tenant_shard_id} is missing in console and contains one object: {}", object.key);
+                        tracing::info!(
+                            "Tenant {tenant_shard_id} is missing in console and contains one object: {}",
+                            object.key
+                        );
                     }
                 } else {
-                    tracing::info!("Tenant {tenant_shard_id} is missing in console appears to have been deleted while we ran");
+                    tracing::info!(
+                        "Tenant {tenant_shard_id} is missing in console appears to have been deleted while we ran"
+                    );
                 }
             } else {
                 // A console-unknown tenant with timelines: check if these timelines only contain initdb.tar.zst, from the initial
@@ -286,9 +301,13 @@ async fn find_garbage_inner(
                 }
 
                 if any_non_initdb {
-                    tracing::info!("Tenant {tenant_shard_id}: is missing in console and contains timelines, one or more of which are more than just initdb");
+                    tracing::info!(
+                        "Tenant {tenant_shard_id}: is missing in console and contains timelines, one or more of which are more than just initdb"
+                    );
                 } else {
-                    tracing::info!("Tenant {tenant_shard_id}: is missing in console and contains only timelines that only contain initdb");
+                    tracing::info!(
+                        "Tenant {tenant_shard_id}: is missing in console and contains only timelines that only contain initdb"
+                    );
                     garbage.append_buggy(GarbageEntity::Tenant(tenant_shard_id));
                     continue;
                 }
@@ -450,12 +469,10 @@ pub async fn get_timeline_objects(
     Ok(list.keys)
 }
 
-const MAX_KEYS_PER_DELETE: usize = 1000;
-
 /// Drain a buffer of keys into DeleteObjects requests
 ///
 /// If `drain` is true, drains keys completely; otherwise stops when <
-/// MAX_KEYS_PER_DELETE keys are left.
+/// `max_keys_per_delete`` keys are left.
 /// `num_deleted` returns number of deleted keys.
 async fn do_delete(
     remote_client: &GenericRemoteStorage,
@@ -465,9 +482,10 @@ async fn do_delete(
     progress_tracker: &mut DeletionProgressTracker,
 ) -> anyhow::Result<()> {
     let cancel = CancellationToken::new();
-    while (!keys.is_empty() && drain) || (keys.len() >= MAX_KEYS_PER_DELETE) {
+    let max_keys_per_delete = remote_client.max_keys_per_delete();
+    while (!keys.is_empty() && drain) || (keys.len() >= max_keys_per_delete) {
         let request_keys =
-            keys.split_off(keys.len() - (std::cmp::min(MAX_KEYS_PER_DELETE, keys.len())));
+            keys.split_off(keys.len() - (std::cmp::min(max_keys_per_delete, keys.len())));
 
         let request_keys: Vec<RemotePath> = request_keys.into_iter().map(|o| o.key).collect();
 
@@ -538,7 +556,9 @@ pub async fn purge_garbage(
         .any(|g| matches!(g.entity, GarbageEntity::Timeline(_)))
         && garbage_list.active_timeline_count == 0
     {
-        anyhow::bail!("Refusing to purge a garbage list containing garbage timelines that reports 0 active timelines");
+        anyhow::bail!(
+            "Refusing to purge a garbage list containing garbage timelines that reports 0 active timelines"
+        );
     }
 
     let filtered_items = garbage_list
@@ -608,7 +628,7 @@ pub async fn purge_garbage(
         }
 
         objects_to_delete.append(&mut object_list);
-        if objects_to_delete.len() >= MAX_KEYS_PER_DELETE {
+        if objects_to_delete.len() >= remote_client.max_keys_per_delete() {
             do_delete(
                 &remote_client,
                 &mut objects_to_delete,

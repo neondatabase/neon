@@ -1,37 +1,44 @@
 //! This module implements the streaming side of replication protocol, starting
 //! with the "START_REPLICATION" message, and registry of walsenders.
 
-use crate::handler::SafekeeperPostgresHandler;
-use crate::metrics::RECEIVED_PS_FEEDBACKS;
-use crate::receive_wal::WalReceivers;
-use crate::safekeeper::{Term, TermLsn};
-use crate::timeline::WalResidentTimeline;
-use crate::wal_service::ConnectionId;
-use crate::wal_storage::WalReader;
-use crate::GlobalTimelines;
-use anyhow::{bail, Context as AnyhowContext};
-use bytes::Bytes;
-use parking_lot::Mutex;
-use postgres_backend::PostgresBackend;
-use postgres_backend::{CopyStreamHandlerEnd, PostgresBackendReader, QueryError};
-use postgres_ffi::get_current_timestamp;
-use postgres_ffi::{TimestampTz, MAX_SEND_SIZE};
-use pq_proto::{BeMessage, WalSndKeepAlive, XLogDataBody};
-use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncWrite};
-use utils::failpoint_support;
-use utils::id::TenantTimelineId;
-use utils::pageserver_feedback::PageserverFeedback;
-
 use std::cmp::{max, min};
 use std::net::SocketAddr;
-use std::str;
 use std::sync::Arc;
 use std::time::Duration;
+
+use anyhow::{Context as AnyhowContext, bail};
+use bytes::Bytes;
+use futures::FutureExt;
+use itertools::Itertools;
+use parking_lot::Mutex;
+use postgres_backend::{CopyStreamHandlerEnd, PostgresBackend, PostgresBackendReader, QueryError};
+use postgres_ffi::{MAX_SEND_SIZE, TimestampTz, get_current_timestamp};
+use pq_proto::{BeMessage, WalSndKeepAlive, XLogDataBody};
+use safekeeper_api::Term;
+use safekeeper_api::models::{
+    HotStandbyFeedback, INVALID_FULL_TRANSACTION_ID, ReplicationFeedback, StandbyFeedback,
+    StandbyReply,
+};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch::Receiver;
 use tokio::time::timeout;
 use tracing::*;
-use utils::{bin_ser::BeSer, lsn::Lsn};
+use utils::bin_ser::BeSer;
+use utils::failpoint_support;
+use utils::lsn::Lsn;
+use utils::pageserver_feedback::PageserverFeedback;
+use utils::postgres_client::PostgresClientProtocol;
+
+use crate::handler::SafekeeperPostgresHandler;
+use crate::metrics::{RECEIVED_PS_FEEDBACKS, WAL_READERS};
+use crate::receive_wal::WalReceivers;
+use crate::safekeeper::TermLsn;
+use crate::send_interpreted_wal::{
+    Batch, InterpretedWalReader, InterpretedWalReaderHandle, InterpretedWalSender,
+};
+use crate::timeline::WalResidentTimeline;
+use crate::wal_reader_stream::StreamingWalReader;
+use crate::wal_storage::WalReader;
 
 // See: https://www.postgresql.org/docs/13/protocol-replication.html
 const HOT_STANDBY_FEEDBACK_TAG_BYTE: u8 = b'h';
@@ -39,69 +46,16 @@ const STANDBY_STATUS_UPDATE_TAG_BYTE: u8 = b'r';
 // neon extension of replication protocol
 const NEON_STATUS_UPDATE_TAG_BYTE: u8 = b'z';
 
-type FullTransactionId = u64;
-
-/// Hot standby feedback received from replica
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct HotStandbyFeedback {
-    pub ts: TimestampTz,
-    pub xmin: FullTransactionId,
-    pub catalog_xmin: FullTransactionId,
-}
-
-const INVALID_FULL_TRANSACTION_ID: FullTransactionId = 0;
-
-impl HotStandbyFeedback {
-    pub fn empty() -> HotStandbyFeedback {
-        HotStandbyFeedback {
-            ts: 0,
-            xmin: 0,
-            catalog_xmin: 0,
-        }
-    }
-}
-
-/// Standby status update
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct StandbyReply {
-    pub write_lsn: Lsn, // The location of the last WAL byte + 1 received and written to disk in the standby.
-    pub flush_lsn: Lsn, // The location of the last WAL byte + 1 flushed to disk in the standby.
-    pub apply_lsn: Lsn, // The location of the last WAL byte + 1 applied in the standby.
-    pub reply_ts: TimestampTz, // The client's system clock at the time of transmission, as microseconds since midnight on 2000-01-01.
-    pub reply_requested: bool,
-}
-
-impl StandbyReply {
-    fn empty() -> Self {
-        StandbyReply {
-            write_lsn: Lsn::INVALID,
-            flush_lsn: Lsn::INVALID,
-            apply_lsn: Lsn::INVALID,
-            reply_ts: 0,
-            reply_requested: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct StandbyFeedback {
-    pub reply: StandbyReply,
-    pub hs_feedback: HotStandbyFeedback,
-}
-
-impl StandbyFeedback {
-    pub fn empty() -> Self {
-        StandbyFeedback {
-            reply: StandbyReply::empty(),
-            hs_feedback: HotStandbyFeedback::empty(),
-        }
-    }
-}
-
 /// WalSenders registry. Timeline holds it (wrapped in Arc).
 pub struct WalSenders {
     mutex: Mutex<WalSendersShared>,
     walreceivers: Arc<WalReceivers>,
+}
+
+pub struct WalSendersTimelineMetricValues {
+    pub ps_feedback_counter: u64,
+    pub last_ps_feedback: PageserverFeedback,
+    pub interpreted_wal_reader_tasks: usize,
 }
 
 impl WalSenders {
@@ -114,21 +68,8 @@ impl WalSenders {
 
     /// Register new walsender. Returned guard provides access to the slot and
     /// automatically deregisters in Drop.
-    fn register(
-        self: &Arc<WalSenders>,
-        ttid: TenantTimelineId,
-        addr: SocketAddr,
-        conn_id: ConnectionId,
-        appname: Option<String>,
-    ) -> WalSenderGuard {
+    fn register(self: &Arc<WalSenders>, walsender_state: WalSenderState) -> WalSenderGuard {
         let slots = &mut self.mutex.lock().slots;
-        let walsender_state = WalSenderState {
-            ttid,
-            addr,
-            conn_id,
-            appname,
-            feedback: ReplicationFeedback::Pageserver(PageserverFeedback::empty()),
-        };
         // find empty slot or create new one
         let pos = if let Some(pos) = slots.iter().position(|s| s.is_none()) {
             slots[pos] = Some(walsender_state);
@@ -144,9 +85,79 @@ impl WalSenders {
         }
     }
 
+    fn create_or_update_interpreted_reader<
+        FUp: FnOnce(&Arc<InterpretedWalReaderHandle>) -> anyhow::Result<()>,
+        FNew: FnOnce() -> InterpretedWalReaderHandle,
+    >(
+        self: &Arc<WalSenders>,
+        id: WalSenderId,
+        start_pos: Lsn,
+        max_delta_for_fanout: Option<u64>,
+        update: FUp,
+        create: FNew,
+    ) -> anyhow::Result<()> {
+        let state = &mut self.mutex.lock();
+
+        let mut selected_interpreted_reader = None;
+        for slot in state.slots.iter().flatten() {
+            if let WalSenderState::Interpreted(slot_state) = slot {
+                if let Some(ref interpreted_reader) = slot_state.interpreted_wal_reader {
+                    let select = match (interpreted_reader.current_position(), max_delta_for_fanout)
+                    {
+                        (Some(pos), Some(max_delta)) => {
+                            let delta = pos.0.abs_diff(start_pos.0);
+                            delta <= max_delta
+                        }
+                        // Reader is not active
+                        (None, _) => false,
+                        // Gating fanout by max delta is disabled.
+                        // Attach to any active reader.
+                        (_, None) => true,
+                    };
+
+                    if select {
+                        selected_interpreted_reader = Some(interpreted_reader.clone());
+                        break;
+                    }
+                }
+            }
+        }
+
+        let slot = state.get_slot_mut(id);
+        let slot_state = match slot {
+            WalSenderState::Interpreted(s) => s,
+            WalSenderState::Vanilla(_) => unreachable!(),
+        };
+
+        let selected_or_new = match selected_interpreted_reader {
+            Some(selected) => {
+                update(&selected)?;
+                selected
+            }
+            None => Arc::new(create()),
+        };
+
+        slot_state.interpreted_wal_reader = Some(selected_or_new);
+
+        Ok(())
+    }
+
     /// Get state of all walsenders.
-    pub fn get_all(self: &Arc<WalSenders>) -> Vec<WalSenderState> {
-        self.mutex.lock().slots.iter().flatten().cloned().collect()
+    pub fn get_all_public(self: &Arc<WalSenders>) -> Vec<safekeeper_api::models::WalSenderState> {
+        self.mutex
+            .lock()
+            .slots
+            .iter()
+            .flatten()
+            .map(|state| match state {
+                WalSenderState::Vanilla(s) => {
+                    safekeeper_api::models::WalSenderState::Vanilla(s.clone())
+                }
+                WalSenderState::Interpreted(s) => {
+                    safekeeper_api::models::WalSenderState::Interpreted(s.public_state.clone())
+                }
+            })
+            .collect()
     }
 
     /// Get LSN of the most lagging pageserver receiver. Return None if there are no
@@ -157,7 +168,7 @@ impl WalSenders {
             .slots
             .iter()
             .flatten()
-            .filter_map(|s| match s.feedback {
+            .filter_map(|s| match s.get_feedback() {
                 ReplicationFeedback::Pageserver(feedback) => Some(feedback.last_received_lsn),
                 ReplicationFeedback::Standby(_) => None,
             })
@@ -165,9 +176,25 @@ impl WalSenders {
     }
 
     /// Returns total counter of pageserver feedbacks received and last feedback.
-    pub fn get_ps_feedback_stats(self: &Arc<WalSenders>) -> (u64, PageserverFeedback) {
+    pub fn info_for_metrics(self: &Arc<WalSenders>) -> WalSendersTimelineMetricValues {
         let shared = self.mutex.lock();
-        (shared.ps_feedback_counter, shared.last_ps_feedback)
+
+        let interpreted_wal_reader_tasks = shared
+            .slots
+            .iter()
+            .filter_map(|ss| match ss {
+                Some(WalSenderState::Interpreted(int)) => int.interpreted_wal_reader.as_ref(),
+                Some(WalSenderState::Vanilla(_)) => None,
+                None => None,
+            })
+            .unique_by(|reader| Arc::as_ptr(reader))
+            .count();
+
+        WalSendersTimelineMetricValues {
+            ps_feedback_counter: shared.ps_feedback_counter,
+            last_ps_feedback: shared.last_ps_feedback,
+            interpreted_wal_reader_tasks,
+        }
     }
 
     /// Get aggregated hot standby feedback (we send it to compute).
@@ -178,7 +205,7 @@ impl WalSenders {
     /// Record new pageserver feedback, update aggregated values.
     fn record_ps_feedback(self: &Arc<WalSenders>, id: WalSenderId, feedback: &PageserverFeedback) {
         let mut shared = self.mutex.lock();
-        shared.get_slot_mut(id).feedback = ReplicationFeedback::Pageserver(*feedback);
+        *shared.get_slot_mut(id).get_mut_feedback() = ReplicationFeedback::Pageserver(*feedback);
         shared.last_ps_feedback = *feedback;
         shared.ps_feedback_counter += 1;
         drop(shared);
@@ -197,10 +224,10 @@ impl WalSenders {
             "Record standby reply: ts={} apply_lsn={}",
             reply.reply_ts, reply.apply_lsn
         );
-        match &mut slot.feedback {
+        match &mut slot.get_mut_feedback() {
             ReplicationFeedback::Standby(sf) => sf.reply = *reply,
             ReplicationFeedback::Pageserver(_) => {
-                slot.feedback = ReplicationFeedback::Standby(StandbyFeedback {
+                *slot.get_mut_feedback() = ReplicationFeedback::Standby(StandbyFeedback {
                     reply: *reply,
                     hs_feedback: HotStandbyFeedback::empty(),
                 })
@@ -212,10 +239,10 @@ impl WalSenders {
     fn record_hs_feedback(self: &Arc<WalSenders>, id: WalSenderId, feedback: &HotStandbyFeedback) {
         let mut shared = self.mutex.lock();
         let slot = shared.get_slot_mut(id);
-        match &mut slot.feedback {
+        match &mut slot.get_mut_feedback() {
             ReplicationFeedback::Standby(sf) => sf.hs_feedback = *feedback,
             ReplicationFeedback::Pageserver(_) => {
-                slot.feedback = ReplicationFeedback::Standby(StandbyFeedback {
+                *slot.get_mut_feedback() = ReplicationFeedback::Standby(StandbyFeedback {
                     reply: StandbyReply::empty(),
                     hs_feedback: *feedback,
                 })
@@ -226,10 +253,10 @@ impl WalSenders {
 
     /// Get remote_consistent_lsn reported by the pageserver. Returns None if
     /// client is not pageserver.
-    fn get_ws_remote_consistent_lsn(self: &Arc<WalSenders>, id: WalSenderId) -> Option<Lsn> {
+    pub fn get_ws_remote_consistent_lsn(self: &Arc<WalSenders>, id: WalSenderId) -> Option<Lsn> {
         let shared = self.mutex.lock();
         let slot = shared.get_slot(id);
-        match slot.feedback {
+        match slot.get_feedback() {
             ReplicationFeedback::Pageserver(feedback) => Some(feedback.remote_consistent_lsn),
             _ => None,
         }
@@ -251,6 +278,47 @@ struct WalSendersShared {
     // total counter of pageserver feedbacks received
     ps_feedback_counter: u64,
     slots: Vec<Option<WalSenderState>>,
+}
+
+/// Safekeeper internal definitions of wal sender state
+///
+/// As opposed to [`safekeeper_api::models::WalSenderState`] these struct may
+/// include state that we don not wish to expose to the public api.
+#[derive(Debug, Clone)]
+pub(crate) enum WalSenderState {
+    Vanilla(VanillaWalSenderInternalState),
+    Interpreted(InterpretedWalSenderInternalState),
+}
+
+type VanillaWalSenderInternalState = safekeeper_api::models::VanillaWalSenderState;
+
+#[derive(Debug, Clone)]
+pub(crate) struct InterpretedWalSenderInternalState {
+    public_state: safekeeper_api::models::InterpretedWalSenderState,
+    interpreted_wal_reader: Option<Arc<InterpretedWalReaderHandle>>,
+}
+
+impl WalSenderState {
+    fn get_addr(&self) -> &SocketAddr {
+        match self {
+            WalSenderState::Vanilla(state) => &state.addr,
+            WalSenderState::Interpreted(state) => &state.public_state.addr,
+        }
+    }
+
+    fn get_feedback(&self) -> &ReplicationFeedback {
+        match self {
+            WalSenderState::Vanilla(state) => &state.feedback,
+            WalSenderState::Interpreted(state) => &state.public_state.feedback,
+        }
+    }
+
+    fn get_mut_feedback(&mut self) -> &mut ReplicationFeedback {
+        match self {
+            WalSenderState::Vanilla(state) => &mut state.feedback,
+            WalSenderState::Interpreted(state) => &mut state.public_state.feedback,
+        }
+    }
 }
 
 impl WalSendersShared {
@@ -279,7 +347,7 @@ impl WalSendersShared {
         let mut agg = HotStandbyFeedback::empty();
         let mut reply_agg = StandbyReply::empty();
         for ws_state in self.slots.iter().flatten() {
-            if let ReplicationFeedback::Standby(standby_feedback) = ws_state.feedback {
+            if let ReplicationFeedback::Standby(standby_feedback) = ws_state.get_feedback() {
                 let hs_feedback = standby_feedback.hs_feedback;
                 // doing Option math like op1.iter().chain(op2.iter()).min()
                 // would be nicer, but we serialize/deserialize this struct
@@ -338,25 +406,6 @@ impl WalSendersShared {
     }
 }
 
-// Serialized is used only for pretty printing in json.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WalSenderState {
-    ttid: TenantTimelineId,
-    addr: SocketAddr,
-    conn_id: ConnectionId,
-    // postgres application_name
-    appname: Option<String>,
-    feedback: ReplicationFeedback,
-}
-
-// Receiver is either pageserver or regular standby, which have different
-// feedbacks.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-enum ReplicationFeedback {
-    Pageserver(PageserverFeedback),
-    Standby(StandbyFeedback),
-}
-
 // id of the occupied slot in WalSenders to access it (and save in the
 // WalSenderGuard). We could give Arc directly to the slot, but there is not
 // much sense in that as values aggregation which is performed on each feedback
@@ -370,6 +419,16 @@ pub struct WalSenderGuard {
     walsenders: Arc<WalSenders>,
 }
 
+impl WalSenderGuard {
+    pub fn id(&self) -> WalSenderId {
+        self.id
+    }
+
+    pub fn walsenders(&self) -> &Arc<WalSenders> {
+        &self.walsenders
+    }
+}
+
 impl Drop for WalSenderGuard {
     fn drop(&mut self) {
         self.walsenders.unregister(self.id);
@@ -380,13 +439,16 @@ impl SafekeeperPostgresHandler {
     /// Wrapper around handle_start_replication_guts handling result. Error is
     /// handled here while we're still in walsender ttid span; with API
     /// extension, this can probably be moved into postgres_backend.
-    pub async fn handle_start_replication<IO: AsyncRead + AsyncWrite + Unpin>(
+    pub async fn handle_start_replication<IO: AsyncRead + AsyncWrite + Unpin + Send>(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
         start_pos: Lsn,
         term: Option<Term>,
     ) -> Result<(), QueryError> {
-        let tli = GlobalTimelines::get(self.ttid).map_err(|e| QueryError::Other(e.into()))?;
+        let tli = self
+            .global_timelines
+            .get(self.ttid)
+            .map_err(|e| QueryError::Other(e.into()))?;
         let residence_guard = tli.wal_residence_guard().await?;
 
         if let Err(end) = self
@@ -402,7 +464,7 @@ impl SafekeeperPostgresHandler {
         Ok(())
     }
 
-    pub async fn handle_start_replication_guts<IO: AsyncRead + AsyncWrite + Unpin>(
+    pub async fn handle_start_replication_guts<IO: AsyncRead + AsyncWrite + Unpin + Send>(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
         start_pos: Lsn,
@@ -412,12 +474,30 @@ impl SafekeeperPostgresHandler {
         let appname = self.appname.clone();
 
         // Use a guard object to remove our entry from the timeline when we are done.
-        let ws_guard = Arc::new(tli.get_walsenders().register(
-            self.ttid,
-            *pgb.get_peer_addr(),
-            self.conn_id,
-            self.appname.clone(),
-        ));
+        let ws_guard = match self.protocol() {
+            PostgresClientProtocol::Vanilla => Arc::new(tli.get_walsenders().register(
+                WalSenderState::Vanilla(VanillaWalSenderInternalState {
+                    ttid: self.ttid,
+                    addr: *pgb.get_peer_addr(),
+                    conn_id: self.conn_id,
+                    appname: self.appname.clone(),
+                    feedback: ReplicationFeedback::Pageserver(PageserverFeedback::empty()),
+                }),
+            )),
+            PostgresClientProtocol::Interpreted { .. } => Arc::new(tli.get_walsenders().register(
+                WalSenderState::Interpreted(InterpretedWalSenderInternalState {
+                    public_state: safekeeper_api::models::InterpretedWalSenderState {
+                        ttid: self.ttid,
+                        shard: self.shard.unwrap(),
+                        addr: *pgb.get_peer_addr(),
+                        conn_id: self.conn_id,
+                        appname: self.appname.clone(),
+                        feedback: ReplicationFeedback::Pageserver(PageserverFeedback::empty()),
+                    },
+                    interpreted_wal_reader: None,
+                }),
+            )),
+        };
 
         // Walsender can operate in one of two modes which we select by
         // application_name: give only committed WAL (used by pageserver) or all
@@ -440,11 +520,12 @@ impl SafekeeperPostgresHandler {
         }
 
         info!(
-            "starting streaming from {:?}, available WAL ends at {}, recovery={}, appname={:?}",
+            "starting streaming from {:?}, available WAL ends at {}, recovery={}, appname={:?}, protocol={:?}",
             start_pos,
             end_pos,
             matches!(end_watch, EndWatch::Flush(_)),
-            appname
+            appname,
+            self.protocol(),
         );
 
         // switch to copy
@@ -456,19 +537,126 @@ impl SafekeeperPostgresHandler {
         // not synchronized with sends, so this avoids deadlocks.
         let reader = pgb.split().context("START_REPLICATION split")?;
 
-        let mut sender = WalSender {
-            pgb,
-            // should succeed since we're already holding another guard
-            tli: tli.wal_residence_guard().await?,
-            appname,
-            start_pos,
-            end_pos,
-            term,
-            end_watch,
-            ws_guard: ws_guard.clone(),
-            wal_reader,
-            send_buf: vec![0u8; MAX_SEND_SIZE],
+        let send_fut = match self.protocol() {
+            PostgresClientProtocol::Vanilla => {
+                let sender = WalSender {
+                    pgb,
+                    // should succeed since we're already holding another guard
+                    tli: tli.wal_residence_guard().await?,
+                    appname: appname.clone(),
+                    start_pos,
+                    end_pos,
+                    term,
+                    end_watch,
+                    ws_guard: ws_guard.clone(),
+                    wal_reader,
+                    send_buf: vec![0u8; MAX_SEND_SIZE],
+                };
+
+                FutureExt::boxed(sender.run())
+            }
+            PostgresClientProtocol::Interpreted {
+                format,
+                compression,
+            } => {
+                let pg_version = tli.tli.get_state().await.1.server.pg_version / 10000;
+                let end_watch_view = end_watch.view();
+                let wal_residence_guard = tli.wal_residence_guard().await?;
+                let (tx, rx) = tokio::sync::mpsc::channel::<Batch>(2);
+                let shard = self.shard.unwrap();
+
+                if self.conf.wal_reader_fanout && !shard.is_unsharded() {
+                    let ws_id = ws_guard.id();
+                    ws_guard.walsenders().create_or_update_interpreted_reader(
+                        ws_id,
+                        start_pos,
+                        self.conf.max_delta_for_fanout,
+                        {
+                            let tx = tx.clone();
+                            |reader| {
+                                tracing::info!(
+                                    "Fanning out interpreted wal reader at {}",
+                                    start_pos
+                                );
+                                reader
+                                    .fanout(shard, tx, start_pos)
+                                    .with_context(|| "Failed to fan out reader")
+                            }
+                        },
+                        || {
+                            tracing::info!("Spawning interpreted wal reader at {}", start_pos);
+
+                            let wal_stream = StreamingWalReader::new(
+                                wal_residence_guard,
+                                term,
+                                start_pos,
+                                end_pos,
+                                end_watch,
+                                MAX_SEND_SIZE,
+                            );
+
+                            InterpretedWalReader::spawn(
+                                wal_stream, start_pos, tx, shard, pg_version, &appname,
+                            )
+                        },
+                    )?;
+
+                    let sender = InterpretedWalSender {
+                        format,
+                        compression,
+                        appname,
+                        tli: tli.wal_residence_guard().await?,
+                        start_lsn: start_pos,
+                        pgb,
+                        end_watch_view,
+                        wal_sender_guard: ws_guard.clone(),
+                        rx,
+                    };
+
+                    FutureExt::boxed(sender.run())
+                } else {
+                    let wal_reader = StreamingWalReader::new(
+                        wal_residence_guard,
+                        term,
+                        start_pos,
+                        end_pos,
+                        end_watch,
+                        MAX_SEND_SIZE,
+                    );
+
+                    let reader = InterpretedWalReader::new(
+                        wal_reader, start_pos, tx, shard, pg_version, None,
+                    );
+
+                    let sender = InterpretedWalSender {
+                        format,
+                        compression,
+                        appname: appname.clone(),
+                        tli: tli.wal_residence_guard().await?,
+                        start_lsn: start_pos,
+                        pgb,
+                        end_watch_view,
+                        wal_sender_guard: ws_guard.clone(),
+                        rx,
+                    };
+
+                    FutureExt::boxed(async move {
+                        // Sender returns an Err on all code paths.
+                        // If the sender finishes first, we will drop the reader future.
+                        // If the reader finishes first, the sender will finish too since
+                        // the wal sender has dropped.
+                        let res = tokio::try_join!(sender.run(), reader.run(start_pos, &appname));
+                        match res.map(|_| ()) {
+                            Ok(_) => unreachable!("sender finishes with Err by convention"),
+                            err_res => err_res,
+                        }
+                    })
+                }
+            }
         };
+
+        let tli_cancel = tli.cancel.clone();
+
         let mut reply_reader = ReplyReader {
             reader,
             ws_guard: ws_guard.clone(),
@@ -477,8 +665,11 @@ impl SafekeeperPostgresHandler {
 
         let res = tokio::select! {
             // todo: add read|write .context to these errors
-            r = sender.run() => r,
+            r = send_fut => r,
             r = reply_reader.run() => r,
+            _ = tli_cancel.cancelled() => {
+                return Err(CopyStreamHandlerEnd::Cancelled);
+            }
         };
 
         let ws_state = ws_guard
@@ -489,7 +680,8 @@ impl SafekeeperPostgresHandler {
             .clone();
         info!(
             "finished streaming to {}, feedback={:?}",
-            ws_state.addr, ws_state.feedback,
+            ws_state.get_addr(),
+            ws_state.get_feedback(),
         );
 
         // Join pg backend back.
@@ -499,16 +691,22 @@ impl SafekeeperPostgresHandler {
     }
 }
 
+/// TODO(vlad): maybe lift this instead
 /// Walsender streams either up to commit_lsn (normally) or flush_lsn in the
 /// given term (recovery by walproposer or peer safekeeper).
-enum EndWatch {
+#[derive(Clone)]
+pub(crate) enum EndWatch {
     Commit(Receiver<Lsn>),
     Flush(Receiver<TermLsn>),
 }
 
 impl EndWatch {
+    pub(crate) fn view(&self) -> EndWatchView {
+        EndWatchView(self.clone())
+    }
+
     /// Get current end of WAL.
-    fn get(&self) -> Lsn {
+    pub(crate) fn get(&self) -> Lsn {
         match self {
             EndWatch::Commit(r) => *r.borrow(),
             EndWatch::Flush(r) => r.borrow().lsn,
@@ -516,15 +714,44 @@ impl EndWatch {
     }
 
     /// Wait for the update.
-    async fn changed(&mut self) -> anyhow::Result<()> {
+    pub(crate) async fn changed(&mut self) -> anyhow::Result<()> {
         match self {
             EndWatch::Commit(r) => r.changed().await?,
             EndWatch::Flush(r) => r.changed().await?,
         }
         Ok(())
     }
+
+    pub(crate) async fn wait_for_lsn(
+        &mut self,
+        lsn: Lsn,
+        client_term: Option<Term>,
+    ) -> anyhow::Result<Lsn> {
+        loop {
+            let end_pos = self.get();
+            if end_pos > lsn {
+                return Ok(end_pos);
+            }
+            if let EndWatch::Flush(rx) = &self {
+                let curr_term = rx.borrow().term;
+                if let Some(client_term) = client_term {
+                    if curr_term != client_term {
+                        bail!("term changed: requested {}, now {}", client_term, curr_term);
+                    }
+                }
+            }
+            self.changed().await?;
+        }
+    }
 }
 
+pub(crate) struct EndWatchView(EndWatch);
+
+impl EndWatchView {
+    pub(crate) fn get(&self) -> Lsn {
+        self.0.get()
+    }
+}
 /// A half driving sending WAL.
 struct WalSender<'a, IO> {
     pgb: &'a mut PostgresBackend<IO>,
@@ -557,10 +784,23 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
     /// Send WAL until
     /// - an error occurs
     /// - receiver is caughtup and there is no computes (if streaming up to commit_lsn)
+    /// - timeline's cancellation token fires
     ///
     /// Err(CopyStreamHandlerEnd) is always returned; Result is used only for ?
     /// convenience.
-    async fn run(&mut self) -> Result<(), CopyStreamHandlerEnd> {
+    async fn run(mut self) -> Result<(), CopyStreamHandlerEnd> {
+        let metric = WAL_READERS
+            .get_metric_with_label_values(&[
+                "future",
+                self.appname.as_deref().unwrap_or("safekeeper"),
+            ])
+            .unwrap();
+
+        metric.inc();
+        scopeguard::defer! {
+            metric.dec();
+        }
+
         loop {
             // Wait for the next portion if it is not there yet, or just
             // update our end of WAL available for sending value, we
@@ -601,15 +841,14 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
             };
             let send_buf = &send_buf[..send_size];
 
-            // and send it
-            self.pgb
-                .write_message(&BeMessage::XLogData(XLogDataBody {
-                    wal_start: self.start_pos.0,
-                    wal_end: self.end_pos.0,
-                    timestamp: get_current_timestamp(),
-                    data: send_buf,
-                }))
-                .await?;
+            // and send it, while respecting Timeline::cancel
+            let msg = BeMessage::XLogData(XLogDataBody {
+                wal_start: self.start_pos.0,
+                wal_end: self.end_pos.0,
+                timestamp: get_current_timestamp(),
+                data: send_buf,
+            });
+            self.pgb.write_message(&msg).await?;
 
             if let Some(appname) = &self.appname {
                 if appname == "replica" {
@@ -667,20 +906,20 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
                         // pageserver to identify WalReceiverError::SuccessfulCompletion,
                         // do not change this string without updating pageserver.
                         return Err(CopyStreamHandlerEnd::ServerInitiated(format!(
-                        "ending streaming to {:?} at {}, receiver is caughtup and there is no computes",
-                        self.appname, self.start_pos,
-                    )));
+                            "ending streaming to {:?} at {}, receiver is caughtup and there is no computes",
+                            self.appname, self.start_pos,
+                        )));
                     }
                 }
             }
 
-            self.pgb
-                .write_message(&BeMessage::KeepAlive(WalSndKeepAlive {
-                    wal_end: self.end_pos.0,
-                    timestamp: get_current_timestamp(),
-                    request_reply: true,
-                }))
-                .await?;
+            let msg = BeMessage::KeepAlive(WalSndKeepAlive {
+                wal_end: self.end_pos.0,
+                timestamp: get_current_timestamp(),
+                request_reply: true,
+            });
+
+            self.pgb.write_message(&msg).await?;
         }
     }
 
@@ -796,7 +1035,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
 
 #[cfg(test)]
 mod tests {
-    use utils::id::{TenantId, TimelineId};
+    use safekeeper_api::models::FullTransactionId;
+    use utils::id::{TenantId, TenantTimelineId, TimelineId};
 
     use super::*;
 
@@ -813,13 +1053,13 @@ mod tests {
 
     // add to wss specified feedback setting other fields to dummy values
     fn push_feedback(wss: &mut WalSendersShared, feedback: ReplicationFeedback) {
-        let walsender_state = WalSenderState {
+        let walsender_state = WalSenderState::Vanilla(VanillaWalSenderInternalState {
             ttid: mock_ttid(),
             addr: mock_addr(),
             conn_id: 1,
             appname: None,
             feedback,
-        };
+        });
         wss.slots.push(Some(walsender_state))
     }
 

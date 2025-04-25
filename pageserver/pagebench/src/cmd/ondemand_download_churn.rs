@@ -1,22 +1,18 @@
-use pageserver_api::{models::HistoricLayerInfo, shard::TenantShardId};
+use std::f64;
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
+use pageserver_api::models::HistoricLayerInfo;
+use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use rand::seq::SliceRandom;
+use tokio::sync::{OwnedSemaphorePermit, mpsc};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 use utils::id::{TenantTimelineId, TimelineId};
-
-use std::{f64, sync::Arc};
-use tokio::{
-    sync::{mpsc, OwnedSemaphorePermit},
-    task::JoinSet,
-};
-
-use std::{
-    num::NonZeroUsize,
-    sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, Instant},
-};
 
 /// Evict & on-demand download random layers.
 #[derive(clap::Parser)]
@@ -85,6 +81,7 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
     let args: &'static Args = Box::leak(Box::new(args));
 
     let mgmt_api_client = Arc::new(pageserver_client::mgmt_api::Client::new(
+        reqwest::Client::new(), // TODO: support ssl_ca_file for https APIs in pagebench.
         args.mgmt_api_endpoint.clone(),
         args.pageserver_jwt.as_deref(),
     ));

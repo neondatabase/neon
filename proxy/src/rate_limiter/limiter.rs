@@ -1,26 +1,27 @@
 use std::borrow::Cow;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::bail;
-use dashmap::DashMap;
+use clashmap::ClashMap;
 use itertools::Itertools;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use tokio::time::{Duration, Instant};
 use tracing::info;
 
+use crate::ext::LockExt;
 use crate::intern::EndpointIdInt;
 
-pub(crate) struct GlobalRateLimiter {
+pub struct GlobalRateLimiter {
     data: Vec<RateBucket>,
     info: Vec<RateBucketInfo>,
 }
 
 impl GlobalRateLimiter {
-    pub(crate) fn new(info: Vec<RateBucketInfo>) -> Self {
+    pub fn new(info: Vec<RateBucketInfo>) -> Self {
         Self {
             data: vec![
                 RateBucket {
@@ -34,7 +35,7 @@ impl GlobalRateLimiter {
     }
 
     /// Check that number of connections is below `max_rps` rps.
-    pub(crate) fn check(&mut self) -> bool {
+    pub fn check(&mut self) -> bool {
         let now = Instant::now();
 
         let should_allow_request = self
@@ -61,7 +62,7 @@ impl GlobalRateLimiter {
 pub type WakeComputeRateLimiter = BucketRateLimiter<EndpointIdInt, StdRng, RandomState>;
 
 pub struct BucketRateLimiter<Key, Rand = StdRng, Hasher = RandomState> {
-    map: DashMap<Key, Vec<RateBucket>, Hasher>,
+    map: ClashMap<Key, Vec<RateBucket>, Hasher>,
     info: Cow<'static, [RateBucketInfo]>,
     access_count: AtomicUsize,
     rand: Mutex<Rand>,
@@ -137,6 +138,25 @@ impl RateBucketInfo {
         Self::new(200, Duration::from_secs(600)),
     ];
 
+    // For all the sessions will be cancel key. So this limit is essentially global proxy limit.
+    pub const DEFAULT_REDIS_SET: [Self; 2] = [
+        Self::new(100_000, Duration::from_secs(1)),
+        Self::new(50_000, Duration::from_secs(10)),
+    ];
+
+    /// All of these are per endpoint-maskedip pair.
+    /// Context: 4096 rounds of pbkdf2 take about 1ms of cpu time to execute (1 milli-cpu-second or 1mcpus).
+    ///
+    /// First bucket: 1000mcpus total per endpoint-ip pair
+    /// * 4096000 requests per second with 1 hash rounds.
+    /// * 1000 requests per second with 4096 hash rounds.
+    /// * 6.8 requests per second with 600000 hash rounds.
+    pub const DEFAULT_AUTH_SET: [Self; 3] = [
+        Self::new(1000 * 4096, Duration::from_secs(1)),
+        Self::new(600 * 4096, Duration::from_secs(60)),
+        Self::new(300 * 4096, Duration::from_secs(600)),
+    ];
+
     pub fn rps(&self) -> f64 {
         (self.max_rpi as f64) / self.interval.as_secs_f64()
     }
@@ -182,7 +202,7 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
         info!(buckets = ?info, "endpoint rate limiter");
         Self {
             info,
-            map: DashMap::with_hasher_and_shard_amount(hasher, 64),
+            map: ClashMap::with_hasher_and_shard_amount(hasher, 64),
             access_count: AtomicUsize::new(1), // start from 1 to avoid GC on the first request
             rand: Mutex::new(rand),
         }
@@ -233,7 +253,7 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
         let n = self.map.shards().len();
         // this lock is ok as the periodic cycle of do_gc makes this very unlikely to collide
         // (impossible, infact, unless we have 2048 threads)
-        let shard = self.rand.lock().unwrap().gen_range(0..n);
+        let shard = self.rand.lock_propagate_poison().gen_range(0..n);
         self.map.shards()[shard].write().clear();
     }
 }

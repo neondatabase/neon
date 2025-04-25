@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.pageserver.utils import (
     assert_tenant_state,
     timeline_delete_wait_completed,
     wait_until_tenant_active,
 )
 from fixtures.utils import wait_until
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 def get_only_element(l):  # noqa: E741
@@ -77,4 +81,4 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
         assert tasks_started == tasks_ended
         assert tasks_panicked is None or int(tasks_panicked) == 0
 
-    wait_until(10, 0.2, assert_tasks_finish)
+    wait_until(assert_tasks_finish)

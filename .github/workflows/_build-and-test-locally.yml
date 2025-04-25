@@ -19,9 +19,14 @@ on:
         description: 'debug or release'
         required: true
         type: string
-      pg-versions:
-        description: 'a json array of postgres versions to run regression tests on'
+      test-cfg:
+        description: 'a json object of postgres versions and lfc states to run regression tests on'
         required: true
+        type: string
+      sanitizers:
+        description: 'enabled or disabled'
+        required: false
+        default: 'disabled'
         type: string
 
 defaults:
@@ -31,17 +36,21 @@ defaults:
 env:
   RUST_BACKTRACE: 1
   COPT: '-Werror'
-  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
+
+permissions:
+  contents: read
 
 jobs:
   build-neon:
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      contents: read
     container:
       image: ${{ inputs.build-tools-image }}
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       # Raise locked memory limit for tokio-epoll-uring.
       # On 5.10 LTS kernels < 5.10.162 (and generally mainline kernels < 5.12),
       # io_uring will account the memory of the CQ and SQ as locked.
@@ -53,7 +62,12 @@ jobs:
       BUILD_TAG: ${{ inputs.build-tag }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: true
 
@@ -86,6 +100,7 @@ jobs:
       - name: Set env variables
         env:
           ARCH: ${{ inputs.arch }}
+          SANITIZERS: ${{ inputs.sanitizers }}
         run: |
           CARGO_FEATURES="--features testing"
           if [[ $BUILD_TYPE == "debug" && $ARCH == 'x64' ]]; then
@@ -98,8 +113,14 @@ jobs:
             cov_prefix=""
             CARGO_FLAGS="--locked --release"
           fi
+          if [[ $SANITIZERS == 'enabled' ]]; then
+            make_vars="WITH_SANITIZERS=yes"
+          else
+            make_vars=""
+          fi
           {
             echo "cov_prefix=${cov_prefix}"
+            echo "make_vars=${make_vars}"
             echo "CARGO_FEATURES=${CARGO_FEATURES}"
             echo "CARGO_FLAGS=${CARGO_FLAGS}"
             echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo"
@@ -107,65 +128,87 @@ jobs:
 
       - name: Cache postgres v14 build
         id: cache_pg_14
-        uses: actions/cache@v4
+        uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
         with:
+          endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
+          bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
+          accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
+          secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
+          use-fallback: false
           path: pg_install/v14
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'build-tools.Dockerfile') }}
 
       - name: Cache postgres v15 build
         id: cache_pg_15
-        uses: actions/cache@v4
+        uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
         with:
+          endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
+          bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
+          accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
+          secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
+          use-fallback: false
           path: pg_install/v15
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'build-tools.Dockerfile') }}
 
       - name: Cache postgres v16 build
         id: cache_pg_16
-        uses: actions/cache@v4
+        uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
         with:
+          endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
+          bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
+          accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
+          secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
+          use-fallback: false
           path: pg_install/v16
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'build-tools.Dockerfile') }}
 
       - name: Cache postgres v17 build
         id: cache_pg_17
-        uses: actions/cache@v4
+        uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
         with:
+          endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
+          bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
+          accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
+          secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
+          use-fallback: false
           path: pg_install/v17
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v17_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'build-tools.Dockerfile') }}
 
       - name: Build postgres v14
         if: steps.cache_pg_14.outputs.cache-hit != 'true'
-        run: mold -run make postgres-v14 -j$(nproc)
+        run: mold -run make ${make_vars} postgres-v14 -j$(nproc)
 
       - name: Build postgres v15
         if: steps.cache_pg_15.outputs.cache-hit != 'true'
-        run: mold -run make postgres-v15 -j$(nproc)
+        run: mold -run make ${make_vars} postgres-v15 -j$(nproc)
 
       - name: Build postgres v16
         if: steps.cache_pg_16.outputs.cache-hit != 'true'
-        run: mold -run make postgres-v16 -j$(nproc)
+        run: mold -run make ${make_vars} postgres-v16 -j$(nproc)
 
       - name: Build postgres v17
         if: steps.cache_pg_17.outputs.cache-hit != 'true'
-        run: mold -run make postgres-v17 -j$(nproc)
+        run: mold -run make ${make_vars} postgres-v17 -j$(nproc)
 
       - name: Build neon extensions
-        run: mold -run make neon-pg-ext -j$(nproc)
+        run: mold -run make ${make_vars} neon-pg-ext -j$(nproc)
 
       - name: Build walproposer-lib
-        run: mold -run make walproposer-lib -j$(nproc)
+        run: mold -run make ${make_vars} walproposer-lib -j$(nproc)
 
       - name: Run cargo build
+        env:
+          WITH_TESTS: ${{ inputs.sanitizers != 'enabled' && '--tests' || '' }}
         run: |
-          PQ_LIB_DIR=$(pwd)/pg_install/v16/lib
-          export PQ_LIB_DIR
-          ${cov_prefix} mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
+          export ASAN_OPTIONS=detect_leaks=0
+          ${cov_prefix} mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins ${WITH_TESTS}
 
       # Do install *before* running rust tests because they might recompile the
       # binaries with different features/flags.
       - name: Install rust binaries
         env:
           ARCH: ${{ inputs.arch }}
+          SANITIZERS: ${{ inputs.sanitizers }}
         run: |
           # Install target binaries
           mkdir -p /tmp/neon/bin/
@@ -180,7 +223,7 @@ jobs:
           done
 
           # Install test executables and write list of all binaries (for code coverage)
-          if [[ $BUILD_TYPE == "debug" && $ARCH == 'x64' ]]; then
+          if [[ $BUILD_TYPE == "debug" && $ARCH == 'x64' && $SANITIZERS != 'enabled' ]]; then
             # Keep bloated coverage data files away from the rest of the artifact
             mkdir -p /tmp/coverage/
 
@@ -205,12 +248,18 @@ jobs:
             done
           fi
 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          aws-region: eu-central-1
+          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          role-duration-seconds: 18000 # 5 hours
+
       - name: Run rust tests
+        if: ${{ inputs.sanitizers != 'enabled' }}
         env:
           NEXTEST_RETRIES: 3
         run: |
-          PQ_LIB_DIR=$(pwd)/pg_install/v16/lib
-          export PQ_LIB_DIR
           LD_LIBRARY_PATH=$(pwd)/pg_install/v17/lib
           export LD_LIBRARY_PATH
 
@@ -221,8 +270,16 @@ jobs:
           ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES -E '!package(pageserver)'
 
           # run pageserver tests with different settings
-          for io_engine in std-fs tokio-epoll-uring ; do
-            NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES  -E 'package(pageserver)'
+          for get_vectored_concurrent_io in sequential sidecar-task; do
+            for io_engine in std-fs tokio-epoll-uring ; do
+                for io_mode in buffered direct direct-rw ; do
+                  NEON_PAGESERVER_UNIT_TEST_GET_VECTORED_CONCURRENT_IO=$get_vectored_concurrent_io \
+                  NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine \
+                  NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IO_MODE=$io_mode \
+                  ${cov_prefix} \
+                  cargo nextest run $CARGO_FLAGS $CARGO_FEATURES  -E 'package(pageserver)'
+              done
+            done
           done
 
           # Run separate tests for real S3
@@ -254,8 +311,30 @@ jobs:
       - name: Upload Neon artifact
         uses: ./.github/actions/upload
         with:
-          name: neon-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-artifact
+          name: neon-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}${{ inputs.sanitizers == 'enabled' && '-sanitized' || '' }}-artifact
           path: /tmp/neon
+          aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+
+      - name: Check diesel schema
+        if: inputs.build-type == 'release' && inputs.arch == 'x64'
+        env:
+          DATABASE_URL: postgresql://localhost:1235/storage_controller
+          POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+        run: |
+          export ASAN_OPTIONS=detect_leaks=0
+          /tmp/neon/bin/neon_local init
+          /tmp/neon/bin/neon_local storage_controller start
+
+          diesel print-schema > storage_controller/src/schema.rs
+
+          if [ -n "$(git diff storage_controller/src/schema.rs)" ]; then
+            echo >&2 "Uncommitted changes in diesel schema"
+
+            git diff .
+            exit 1
+          fi
+
+          /tmp/neon/bin/neon_local storage_controller stop
 
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
       - name: Merge and upload coverage data
@@ -265,27 +344,36 @@ jobs:
   regress-tests:
     # Don't run regression tests on debug arm64 builds
     if: inputs.build-type != 'debug' || inputs.arch != 'arm64'
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      contents: read
+      statuses: write
     needs: [ build-neon ]
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large-metal')) }}
     container:
       image: ${{ inputs.build-tools-image }}
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       # for changed limits, see comments on `options:` earlier in this file
       options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     strategy:
       fail-fast: false
-      matrix:
-        pg_version: ${{ fromJson(inputs.pg-versions) }}
+      matrix: ${{ fromJSON(format('{{"include":{0}}}', inputs.test-cfg)) }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: true
 
       - name: Pytest regression tests
+        continue-on-error: ${{ matrix.lfc_state == 'with-lfc' && inputs.build-type == 'debug' }}
         uses: ./.github/actions/run-python-test-set
-        timeout-minutes: 60
+        timeout-minutes: ${{ inputs.sanitizers != 'enabled' && 75 || 180 }}
         with:
           build_type: ${{ inputs.build-type }}
           test_selection: regress
@@ -293,13 +381,22 @@ jobs:
           run_with_real_s3: true
           real_s3_bucket: neon-github-ci-tests
           real_s3_region: eu-central-1
-          rerun_flaky: true
+          rerun_failed: true
           pg_version: ${{ matrix.pg_version }}
+          sanitizers: ${{ inputs.sanitizers }}
+          aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          # `--session-timeout` is equal to (timeout-minutes - 10 minutes) * 60 seconds.
+          # Attempt to stop tests gracefully to generate test reports
+          # until they are forcibly stopped by the stricter `timeout-minutes` limit.
+          extra_params: --session-timeout=${{ inputs.sanitizers != 'enabled' && 3000 || 10200 }}
         env:
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
           BUILD_TAG: ${{ inputs.build-tag }}
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
+          PAGESERVER_GET_VECTORED_CONCURRENT_IO: sidecar-task
+          PAGESERVER_VIRTUAL_FILE_IO_MODE: direct-rw
+          USE_LFC: ${{ matrix.lfc_state == 'with-lfc' && 'true' || 'false' }}
 
       # Temporary disable this step until we figure out why it's so flaky
       # Ref https://github.com/neondatabase/neon/issues/4540

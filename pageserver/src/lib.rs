@@ -15,7 +15,8 @@ pub mod l0_flush;
 
 extern crate hyper0 as hyper;
 
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 pub use pageserver_api::keyspace;
 use tokio_util::sync::CancellationToken;
 mod assert_u64_eq_usize;
@@ -35,10 +36,8 @@ pub mod walredo;
 
 use camino::Utf8Path;
 use deletion_queue::DeletionQueue;
-use tenant::{
-    mgr::{BackgroundPurges, TenantManager},
-    secondary,
-};
+use tenant::mgr::{BackgroundPurges, TenantManager};
+use tenant::secondary;
 use tracing::{info, info_span};
 
 /// Current storage format version
@@ -50,11 +49,14 @@ use tracing::{info, info_span};
 /// backwards-compatible changes to the metadata format.
 pub const STORAGE_FORMAT_VERSION: u16 = 3;
 
-pub const DEFAULT_PG_VERSION: u32 = 16;
+pub const DEFAULT_PG_VERSION: u32 = 17;
 
 // Magic constants used to identify different kinds of files
 pub const IMAGE_FILE_MAGIC: u16 = 0x5A60;
 pub const DELTA_FILE_MAGIC: u16 = 0x5A61;
+
+// Target used for performance traces.
+pub const PERF_TRACE_TARGET: &str = "P";
 
 static ZERO_PAGE: bytes::Bytes = bytes::Bytes::from_static(&[0u8; 8192]);
 
@@ -65,6 +67,7 @@ pub struct CancellableTask {
     pub cancel: CancellationToken,
 }
 pub struct HttpEndpointListener(pub CancellableTask);
+pub struct HttpsEndpointListener(pub CancellableTask);
 pub struct ConsumptionMetricsTasks(pub CancellableTask);
 pub struct DiskUsageEvictionTask(pub CancellableTask);
 impl CancellableTask {
@@ -78,6 +81,7 @@ impl CancellableTask {
 #[allow(clippy::too_many_arguments)]
 pub async fn shutdown_pageserver(
     http_listener: HttpEndpointListener,
+    https_listener: Option<HttpsEndpointListener>,
     page_service: page_service::Listener,
     consumption_metrics_worker: ConsumptionMetricsTasks,
     disk_usage_eviction_task: Option<DiskUsageEvictionTask>,
@@ -214,6 +218,15 @@ pub async fn shutdown_pageserver(
     )
     .await;
 
+    if let Some(https_listener) = https_listener {
+        timed(
+            https_listener.0.shutdown(),
+            "shutdown https",
+            Duration::from_secs(1),
+        )
+        .await;
+    }
+
     // Shut down the HTTP endpoint last, so that you can still check the server's
     // status while it's shutting down.
     // FIXME: We should probably stop accepting commands like attach/detach earlier.
@@ -263,38 +276,11 @@ pub(crate) const TENANT_HEATMAP_BASENAME: &str = "heatmap-v1.json";
 /// data directory at pageserver startup can be automatically removed.
 pub(crate) const TEMP_FILE_SUFFIX: &str = "___temp";
 
-/// A marker file to mark that a timeline directory was not fully initialized.
-/// If a timeline directory with this marker is encountered at pageserver startup,
-/// the timeline directory and the marker file are both removed.
-/// Full path: `tenants/<tenant_id>/timelines/<timeline_id>___uninit`.
-pub(crate) const TIMELINE_UNINIT_MARK_SUFFIX: &str = "___uninit";
-
-pub(crate) const TIMELINE_DELETE_MARK_SUFFIX: &str = "___delete";
-
 pub fn is_temporary(path: &Utf8Path) -> bool {
     match path.file_name() {
         Some(name) => name.ends_with(TEMP_FILE_SUFFIX),
         None => false,
     }
-}
-
-fn ends_with_suffix(path: &Utf8Path, suffix: &str) -> bool {
-    match path.file_name() {
-        Some(name) => name.ends_with(suffix),
-        None => false,
-    }
-}
-
-// FIXME: DO NOT ADD new query methods like this, which will have a next step of parsing timelineid
-// from the directory name. Instead create type "UninitMark(TimelineId)" and only parse it once
-// from the name.
-
-pub(crate) fn is_uninit_mark(path: &Utf8Path) -> bool {
-    ends_with_suffix(path, TIMELINE_UNINIT_MARK_SUFFIX)
-}
-
-pub(crate) fn is_delete_mark(path: &Utf8Path) -> bool {
-    ends_with_suffix(path, TIMELINE_DELETE_MARK_SUFFIX)
 }
 
 /// During pageserver startup, we need to order operations not to exhaust tokio worker threads by
@@ -356,10 +342,30 @@ async fn timed<Fut: std::future::Future>(
     }
 }
 
+/// Like [`timed`], but the warning timeout only starts after `cancel` has been cancelled.
+async fn timed_after_cancellation<Fut: std::future::Future>(
+    fut: Fut,
+    name: &str,
+    warn_at: std::time::Duration,
+    cancel: &CancellationToken,
+) -> <Fut as std::future::Future>::Output {
+    let mut fut = std::pin::pin!(fut);
+
+    tokio::select! {
+        _ = cancel.cancelled() => {
+            timed(fut, name, warn_at).await
+        }
+        ret = &mut fut => {
+            ret
+        }
+    }
+}
+
 #[cfg(test)]
 mod timed_tests {
-    use super::timed;
     use std::time::Duration;
+
+    use super::timed;
 
     #[tokio::test]
     async fn timed_completes_when_inner_future_completes() {

@@ -22,8 +22,8 @@
     clippy::string_add,
     clippy::string_to_string,
     clippy::todo,
-    // TODO: consider clippy::unimplemented
-    // TODO: consider clippy::unwrap_used
+    clippy::unimplemented,
+    clippy::unwrap_used,
 )]
 // List of permanently allowed lints.
 #![allow(
@@ -72,32 +72,37 @@
 // List of temporarily allowed lints to unblock beta/nightly.
 #![allow(unknown_lints)]
 
-pub mod auth;
-pub mod cache;
-pub mod cancellation;
-pub mod compute;
-pub mod compute_ctl;
-pub mod config;
-pub mod console_redirect_proxy;
-pub mod context;
-pub mod control_plane;
-pub mod error;
-pub mod http;
-pub mod intern;
-pub mod jemalloc;
-pub mod logging;
-pub mod metrics;
-pub mod parse;
-pub mod protocol2;
-pub mod proxy;
-pub mod rate_limiter;
-pub mod redis;
-pub mod sasl;
-pub mod scram;
-pub mod serverless;
-pub mod signals;
-pub mod stream;
-pub mod types;
-pub mod url;
-pub mod usage_metrics;
-pub mod waiters;
+pub mod binary;
+
+mod auth;
+mod cache;
+mod cancellation;
+mod compute;
+mod compute_ctl;
+mod config;
+mod console_redirect_proxy;
+mod context;
+mod control_plane;
+mod error;
+mod ext;
+mod http;
+mod intern;
+mod jemalloc;
+mod logging;
+mod metrics;
+mod parse;
+mod pglb;
+mod protocol2;
+mod proxy;
+mod rate_limiter;
+mod redis;
+mod sasl;
+mod scram;
+mod serverless;
+mod signals;
+mod stream;
+mod tls;
+mod types;
+mod url;
+mod usage_metrics;
+mod waiters;

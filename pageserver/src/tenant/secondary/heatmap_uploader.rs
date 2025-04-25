@@ -1,38 +1,33 @@
-use std::{
-    collections::HashMap,
-    pin::Pin,
-    sync::{Arc, Weak},
-    time::{Duration, Instant},
-};
-
-use crate::{
-    metrics::SECONDARY_MODE,
-    tenant::{
-        config::AttachmentMode,
-        mgr::GetTenantError,
-        mgr::TenantManager,
-        remote_timeline_client::remote_heatmap_path,
-        span::debug_assert_current_span_has_tenant_id,
-        tasks::{warn_when_period_overrun, BackgroundLoopKind},
-        Tenant,
-    },
-};
+use std::collections::HashMap;
+use std::pin::Pin;
+use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant};
 
 use futures::Future;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::{GenericRemoteStorage, TimeoutOrCancel};
-
-use super::{
-    heatmap::HeatMapTenant,
-    scheduler::{
-        self, period_jitter, period_warmup, JobGenerator, RunningJob, SchedulingResult,
-        TenantBackgroundJobs,
-    },
-    CommandRequest, UploadCommand,
-};
 use tokio_util::sync::CancellationToken;
-use tracing::{info_span, instrument, Instrument};
-use utils::{backoff, completion::Barrier, yielding_loop::yielding_loop};
+use tracing::{Instrument, info_span, instrument};
+use utils::backoff;
+use utils::completion::Barrier;
+use utils::crashsafe::path_with_suffix_extension;
+use utils::yielding_loop::yielding_loop;
+
+use super::heatmap::HeatMapTenant;
+use super::scheduler::{
+    self, JobGenerator, RunningJob, SchedulingResult, TenantBackgroundJobs, period_jitter,
+    period_warmup,
+};
+use super::{CommandRequest, SecondaryTenantError, UploadCommand};
+use crate::TEMP_FILE_SUFFIX;
+use crate::metrics::SECONDARY_MODE;
+use crate::tenant::TenantShard;
+use crate::tenant::config::AttachmentMode;
+use crate::tenant::mgr::{GetTenantError, TenantManager};
+use crate::tenant::remote_timeline_client::remote_heatmap_path;
+use crate::tenant::span::debug_assert_current_span_has_tenant_id;
+use crate::tenant::tasks::{BackgroundLoopKind, warn_when_period_overrun};
+use crate::virtual_file::VirtualFile;
 
 pub(super) async fn heatmap_uploader_task(
     tenant_manager: Arc<TenantManager>,
@@ -79,7 +74,7 @@ impl RunningJob for WriteInProgress {
 }
 
 struct UploadPending {
-    tenant: Arc<Tenant>,
+    tenant: Arc<TenantShard>,
     last_upload: Option<LastUploadState>,
     target_time: Option<Instant>,
     period: Option<Duration>,
@@ -111,7 +106,7 @@ impl scheduler::Completion for WriteComplete {
 struct UploaderTenantState {
     // This Weak only exists to enable culling idle instances of this type
     // when the Tenant has been deallocated.
-    tenant: Weak<Tenant>,
+    tenant: Weak<TenantShard>,
 
     /// Digest of the serialized heatmap that we last successfully uploaded
     last_upload_state: Option<LastUploadState>,
@@ -279,7 +274,10 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
         }.instrument(info_span!(parent: None, "heatmap_upload", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))))
     }
 
-    fn on_command(&mut self, command: UploadCommand) -> anyhow::Result<UploadPending> {
+    fn on_command(
+        &mut self,
+        command: UploadCommand,
+    ) -> Result<UploadPending, SecondaryTenantError> {
         let tenant_shard_id = command.get_tenant_shard_id();
 
         tracing::info!(
@@ -287,8 +285,7 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
             "Starting heatmap write on command");
         let tenant = self
             .tenant_manager
-            .get_attached_tenant_shard(*tenant_shard_id)
-            .map_err(|e| anyhow::anyhow!(e))?;
+            .get_attached_tenant_shard(*tenant_shard_id)?;
         if !tenant.is_active() {
             return Err(GetTenantError::NotActive(*tenant_shard_id).into());
         }
@@ -360,7 +357,7 @@ struct LastUploadState {
 /// of the object we would have uploaded.
 async fn upload_tenant_heatmap(
     remote_storage: GenericRemoteStorage,
-    tenant: &Arc<Tenant>,
+    tenant: &Arc<TenantShard>,
     last_upload: Option<LastUploadState>,
 ) -> Result<UploadHeatmapOutcome, UploadHeatmapError> {
     debug_assert_current_span_has_tenant_id();
@@ -457,6 +454,18 @@ async fn upload_tenant_heatmap(
         } else {
             return Err(e.into());
         }
+    }
+
+    // After a successful upload persist the fresh heatmap to disk.
+    // When restarting, the tenant will read the heatmap from disk
+    // and additively generate a new heatmap (see [`Timeline::generate_heatmap`]).
+    // If the heatmap is stale, the additive generation can lead to keeping previously
+    // evicted timelines on the secondarie's disk.
+    let tenant_shard_id = tenant.get_tenant_shard_id();
+    let heatmap_path = tenant.conf.tenant_heatmap_path(tenant_shard_id);
+    let temp_path = path_with_suffix_extension(&heatmap_path, TEMP_FILE_SUFFIX);
+    if let Err(err) = VirtualFile::crashsafe_overwrite(heatmap_path, temp_path, bytes).await {
+        tracing::warn!("Non fatal IO error writing to disk after heatmap upload: {err}");
     }
 
     tracing::info!("Successfully uploaded {size} byte heatmap to {path}");

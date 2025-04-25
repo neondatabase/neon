@@ -3,8 +3,6 @@
 #![deny(unsafe_code)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-extern crate hyper0 as hyper;
-
 pub mod checker;
 pub mod config;
 pub mod configurator;
@@ -18,10 +16,14 @@ pub mod extension_server;
 pub mod installed_extensions;
 pub mod local_proxy;
 pub mod lsn_lease;
+pub mod metrics;
 mod migration;
 pub mod monitor;
 pub mod params;
 pub mod pg_helpers;
+pub mod rsyslog;
 pub mod spec;
+mod spec_apply;
 pub mod swap;
 pub mod sync_sk;
+pub mod tls;

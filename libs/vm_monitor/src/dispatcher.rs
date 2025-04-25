@@ -6,17 +6,15 @@
 //! the cgroup (requesting upscale), and the signals that go to the cgroup
 //! (notifying it of upscale).
 
-use anyhow::{bail, Context};
-use axum::extract::ws::{Message, WebSocket};
-use futures::{
-    stream::{SplitSink, SplitStream},
-    SinkExt, StreamExt,
-};
+use anyhow::{Context, bail};
+use axum::extract::ws::{Message, Utf8Bytes, WebSocket};
+use futures::stream::{SplitSink, SplitStream};
+use futures::{SinkExt, StreamExt};
 use tracing::{debug, info};
 
 use crate::protocol::{
-    OutboundMsg, OutboundMsgKind, ProtocolRange, ProtocolResponse, ProtocolVersion,
-    PROTOCOL_MAX_VERSION, PROTOCOL_MIN_VERSION,
+    OutboundMsg, OutboundMsgKind, PROTOCOL_MAX_VERSION, PROTOCOL_MIN_VERSION, ProtocolRange,
+    ProtocolResponse, ProtocolVersion,
 };
 
 /// The central handler for all communications in the monitor.
@@ -82,21 +80,21 @@ impl Dispatcher {
 
         let highest_shared_version = match monitor_range.highest_shared_version(&agent_range) {
             Ok(version) => {
-                sink.send(Message::Text(
+                sink.send(Message::Text(Utf8Bytes::from(
                     serde_json::to_string(&ProtocolResponse::Version(version)).unwrap(),
-                ))
+                )))
                 .await
                 .context("failed to notify agent of negotiated protocol version")?;
                 version
             }
             Err(e) => {
-                sink.send(Message::Text(
+                sink.send(Message::Text(Utf8Bytes::from(
                     serde_json::to_string(&ProtocolResponse::Error(format!(
                         "Received protocol version range {} which does not overlap with {}",
                         agent_range, monitor_range
                     )))
                     .unwrap(),
-                ))
+                )))
                 .await
                 .context("failed to notify agent of no overlap between protocol version ranges")?;
                 Err(e).context("error determining suitable protocol version range")?
@@ -126,7 +124,7 @@ impl Dispatcher {
 
         let json = serde_json::to_string(&message).context("failed to serialize message")?;
         self.sink
-            .send(Message::Text(json))
+            .send(Message::Text(Utf8Bytes::from(json)))
             .await
             .context("stream error sending message")
     }

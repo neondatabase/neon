@@ -2,28 +2,28 @@ mod no_leak_child;
 /// The IPC protocol that pageserver and walredo process speak over their shared pipe.
 mod protocol;
 
-use self::no_leak_child::NoLeakChild;
-use crate::{
-    config::PageServerConf,
-    metrics::{WalRedoKillCause, WAL_REDO_PROCESS_COUNTERS, WAL_REDO_RECORD_COUNTER},
-    page_cache::PAGE_SZ,
-    span::debug_assert_current_span_has_tenant_id,
-};
+use std::collections::VecDeque;
+use std::process::{Command, Stdio};
+#[cfg(feature = "testing")]
+use std::sync::atomic::AtomicUsize;
+use std::time::Duration;
+
 use anyhow::Context;
 use bytes::Bytes;
 use pageserver_api::record::NeonWalRecord;
-use pageserver_api::{reltag::RelTag, shard::TenantShardId};
+use pageserver_api::reltag::RelTag;
+use pageserver_api::shard::TenantShardId;
 use postgres_ffi::BLCKSZ;
-#[cfg(feature = "testing")]
-use std::sync::atomic::AtomicUsize;
-use std::{
-    collections::VecDeque,
-    process::{Command, Stdio},
-    time::Duration,
-};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{debug, error, instrument, Instrument};
-use utils::{lsn::Lsn, poison::Poison};
+use tracing::{Instrument, debug, error, instrument};
+use utils::lsn::Lsn;
+use utils::poison::Poison;
+
+use self::no_leak_child::NoLeakChild;
+use crate::config::PageServerConf;
+use crate::metrics::{WAL_REDO_PROCESS_COUNTERS, WAL_REDO_RECORD_COUNTER, WalRedoKillCause};
+use crate::page_cache::PAGE_SZ;
+use crate::span::debug_assert_current_span_has_tenant_id;
 
 pub struct WalRedoProcess {
     #[allow(dead_code)]
@@ -79,6 +79,14 @@ impl WalRedoProcess {
             .env_clear()
             .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
             .env("DYLD_LIBRARY_PATH", &pg_lib_dir_path)
+            .env(
+                "ASAN_OPTIONS",
+                std::env::var("ASAN_OPTIONS").unwrap_or_default(),
+            )
+            .env(
+                "UBSAN_OPTIONS",
+                std::env::var("UBSAN_OPTIONS").unwrap_or_default(),
+            )
             // NB: The redo process is not trusted after we sent it the first
             // walredo work. Before that, it is trusted. Specifically, we trust
             // it to
@@ -128,7 +136,9 @@ impl WalRedoProcess {
                         Ok(0) => break Ok(()), // eof
                         Ok(num_bytes) => {
                             let output = String::from_utf8_lossy(&buf[..num_bytes]);
-                            error!(%output, "received output");
+                            if !output.contains("LOG:") {
+                               error!(%output, "received output");
+                            }
                         }
                         Err(e) => {
                             break Err(e);

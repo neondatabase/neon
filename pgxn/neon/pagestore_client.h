@@ -8,8 +8,8 @@
  *
  *-------------------------------------------------------------------------
  */
-#ifndef pageserver_h
-#define pageserver_h
+#ifndef PAGESTORE_CLIENT_h
+#define PAGESTORE_CLIENT_h
 
 #include "neon_pgversioncompat.h"
 
@@ -17,11 +17,8 @@
 #include "access/xlogdefs.h"
 #include RELFILEINFO_HDR
 #include "lib/stringinfo.h"
-#include "libpq/pqformat.h"
 #include "storage/block.h"
 #include "storage/buf_internals.h"
-#include "storage/smgr.h"
-#include "utils/memutils.h"
 
 #define MAX_SHARDS 128
 #define MAX_PAGESERVER_CONNSTRING_SIZE 256
@@ -34,6 +31,8 @@ typedef enum
 	T_NeonGetPageRequest,
 	T_NeonDbSizeRequest,
 	T_NeonGetSlruSegmentRequest,
+	/* future tags above this line */
+	T_NeonTestRequest = 99, /* only in cfg(feature = "testing") */
 
 	/* pagestore -> pagestore_client */
 	T_NeonExistsResponse = 100,
@@ -42,23 +41,22 @@ typedef enum
 	T_NeonErrorResponse,
 	T_NeonDbSizeResponse,
 	T_NeonGetSlruSegmentResponse,
+	/* future tags above this line */
+	T_NeonTestResponse = 199, /* only in cfg(feature = "testing") */
 } NeonMessageTag;
+
+typedef uint64 NeonRequestId;
 
 /* base struct for c-style inheritance */
 typedef struct
 {
 	NeonMessageTag tag;
+	NeonRequestId reqid;
+	XLogRecPtr	lsn;
+	XLogRecPtr	not_modified_since;
 } NeonMessage;
 
 #define messageTag(m) (((const NeonMessage *)(m))->tag)
-
-#define NEON_TAG "[NEON_SMGR] "
-#define neon_log(tag, fmt, ...) ereport(tag,                                  \
-										(errmsg(NEON_TAG fmt, ##__VA_ARGS__), \
-										 errhidestmt(true), errhidecontext(true), errposition(0), internalerrposition(0)))
-#define neon_shard_log(shard_no, tag, fmt, ...) ereport(tag,	\
-														(errmsg(NEON_TAG "[shard %d] " fmt, shard_no, ##__VA_ARGS__), \
-														 errhidestmt(true), errhidecontext(true), errposition(0), internalerrposition(0)))
 
 /* SLRUs downloadable from page server */
 typedef enum {
@@ -66,6 +64,7 @@ typedef enum {
 	SLRU_MULTIXACT_MEMBERS,
 	SLRU_MULTIXACT_OFFSETS
 } SlruKind;
+
 
 /*--
  * supertype of all the Neon*Request structs below.
@@ -87,37 +86,37 @@ typedef enum {
  *
  * These structs describe the V2 of these requests. (The old now-defunct V1
  * protocol contained just one LSN and a boolean 'latest' flag.)
+ *
+ * V3 version of protocol adds request ID to all requests. This request ID is also included in response
+ * as well as other fields from requests, which allows to verify that we receive response for our request.
+ * We copy fields from request to response to make checking more reliable: request ID is formed from process ID
+ * and local counter, so in principle there can be duplicated requests IDs if process PID is reused.
  */
-typedef struct
-{
-	NeonMessageTag tag;
-	XLogRecPtr	lsn;
-	XLogRecPtr	not_modified_since;
-} NeonRequest;
+typedef NeonMessage NeonRequest;
 
 typedef struct
 {
-	NeonRequest req;
+	NeonRequest hdr;
 	NRelFileInfo rinfo;
 	ForkNumber	forknum;
 } NeonExistsRequest;
 
 typedef struct
 {
-	NeonRequest req;
+	NeonRequest hdr;
 	NRelFileInfo rinfo;
 	ForkNumber	forknum;
 } NeonNblocksRequest;
 
 typedef struct
 {
-	NeonRequest req;
+	NeonRequest hdr;
 	Oid			dbNode;
 } NeonDbSizeRequest;
 
 typedef struct
 {
-	NeonRequest req;
+	NeonRequest hdr;
 	NRelFileInfo rinfo;
 	ForkNumber	forknum;
 	BlockNumber blkno;
@@ -125,32 +124,29 @@ typedef struct
 
 typedef struct
 {
-	NeonRequest req;
-	SlruKind kind;
-	int      segno;
+	NeonRequest hdr;
+	SlruKind	kind;
+	int			segno;
 } NeonGetSlruSegmentRequest;
 
 /* supertype of all the Neon*Response structs below */
-typedef struct
-{
-	NeonMessageTag tag;
-} NeonResponse;
+typedef NeonMessage NeonResponse;
 
 typedef struct
 {
-	NeonMessageTag tag;
+	NeonExistsRequest req;
 	bool		exists;
 } NeonExistsResponse;
 
 typedef struct
 {
-	NeonMessageTag tag;
+	NeonNblocksRequest req;
 	uint32		n_blocks;
 } NeonNblocksResponse;
 
 typedef struct
 {
-	NeonMessageTag tag;
+	NeonGetPageRequest req;
 	char		page[FLEXIBLE_ARRAY_MEMBER];
 } NeonGetPageResponse;
 
@@ -158,21 +154,21 @@ typedef struct
 
 typedef struct
 {
-	NeonMessageTag tag;
+	NeonDbSizeRequest req;
 	int64		db_size;
 } NeonDbSizeResponse;
 
 typedef struct
 {
-	NeonMessageTag tag;
+	NeonResponse req;
 	char		message[FLEXIBLE_ARRAY_MEMBER]; /* null-terminated error
 												 * message */
 } NeonErrorResponse;
 
 typedef struct
 {
-	NeonMessageTag tag;
-	int         n_blocks;
+	NeonGetSlruSegmentRequest req;
+	int			n_blocks;
 	char		data[BLCKSZ * SLRU_PAGES_PER_SEGMENT];
 } NeonGetSlruSegmentResponse;
 
@@ -189,9 +185,33 @@ typedef uint16 shardno_t;
 
 typedef struct
 {
+	/*
+	 * Send this request to the PageServer associated with this shard.
+	 */
 	bool		(*send) (shardno_t  shard_no, NeonRequest * request);
+	/*
+	 * Blocking read for the next response of this shard.
+	 *
+	 * When a CANCEL signal is handled, the connection state will be
+	 * unmodified.
+	 */
 	NeonResponse *(*receive) (shardno_t shard_no);
+	/*
+	 * Try get the next response from the TCP buffers, if any.
+	 * Returns NULL when the data is not yet available.
+	 *
+	 * This will raise errors only for malformed responses (we can't put them
+	 * back into connection). All other error conditions are soft errors and
+	 * return NULL as "no response available".
+	 */
+	NeonResponse *(*try_receive) (shardno_t shard_no);
+	/*
+	 * Make sure all requests are sent to PageServer.
+	 */
 	bool		(*flush) (shardno_t shard_no);
+	/*
+	 * Disconnect from this pageserver shard.
+	 */
 	void        (*disconnect) (shardno_t shard_no);
 } page_server_api;
 
@@ -212,6 +232,7 @@ extern shardno_t get_shard_number(BufferTag* tag);
 extern const f_smgr *smgr_neon(ProcNumber backend, NRelFileInfo rinfo);
 extern void smgr_init_neon(void);
 extern void readahead_buffer_resize(int newsize, void *extra);
+
 
 /*
  * LSN values associated with each request to the pageserver
@@ -245,14 +266,13 @@ typedef struct
 	XLogRecPtr effective_request_lsn;
 } neon_request_lsns;
 
-#if PG_MAJORVERSION_NUM < 16
-extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
-										 neon_request_lsns request_lsns, char *buffer);
-#else
 extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
 										 neon_request_lsns request_lsns, void *buffer);
-#endif
 extern int64 neon_dbsize(Oid dbNode);
+
+extern void neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum,
+								  BlockNumber blkno, neon_request_lsns *output,
+								  BlockNumber nblocks);
 
 /* utils for neon relsize cache */
 extern void relsize_hash_init(void);
@@ -261,35 +281,4 @@ extern void set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumb
 extern void update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size);
 extern void forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum);
 
-/* functions for local file cache */
-extern void lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum,
-					   BlockNumber blkno, const void *const *buffers,
-					   BlockNumber nblocks);
-/* returns number of blocks read, with one bit set in *read for each  */
-extern int lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum,
-							BlockNumber blkno, void **buffers,
-							BlockNumber nblocks, bits8 *mask);
-
-extern bool lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum,
-							   BlockNumber blkno);
-extern int lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum,
-							   BlockNumber blkno, int nblocks, bits8 *bitmap);
-extern void lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno);
-extern void lfc_init(void);
-
-static inline bool
-lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
-		 void *buffer)
-{
-	bits8		rv = 0;
-	return lfc_readv_select(rinfo, forkNum, blkno, &buffer, 1, &rv) == 1;
-}
-
-static inline void
-lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
-		  const void *buffer)
-{
-	return lfc_writev(rinfo, forkNum, blkno, &buffer, 1);
-}
-
-#endif
+#endif							/* PAGESTORE_CLIENT_H */

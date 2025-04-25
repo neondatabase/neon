@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING
 
 from fixtures.common_types import KEY_MAX, KEY_MIN, Key, Lsn
 
@@ -46,7 +46,7 @@ class DeltaLayerName:
         return ret
 
 
-LayerName = Union[ImageLayerName, DeltaLayerName]
+LayerName = ImageLayerName | DeltaLayerName
 
 
 class InvalidFileName(Exception):
@@ -105,7 +105,7 @@ def parse_layer_file_name(file_name: str) -> LayerName:
     except InvalidFileName:
         pass
 
-    raise InvalidFileName("neither image nor delta layer")
+    raise InvalidFileName(f"neither image nor delta layer: {file_name}")
 
 
 def is_future_layer(layer_file_name: LayerName, disk_consistent_lsn: Lsn):

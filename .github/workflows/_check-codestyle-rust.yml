@@ -1,0 +1,102 @@
+name: Check Codestyle Rust
+
+on:
+  workflow_call:
+    inputs:
+      build-tools-image:
+        description: "build-tools image"
+        required: true
+        type: string
+      archs:
+        description: "Json array of architectures to run on"
+        type: string
+
+
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
+
+# No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
+permissions: {}
+
+jobs:
+  check-codestyle-rust:
+    strategy:
+      matrix:
+        arch: ${{ fromJSON(inputs.archs) }}
+    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
+
+    permissions:
+      packages: read
+
+    container:
+      image: ${{ inputs.build-tools-image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --init
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          submodules: true
+
+      - name: Cache cargo deps
+        uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
+        with:
+          endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
+          bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
+          accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
+          secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
+          use-fallback: false
+          path: |
+            ~/.cargo/registry
+            !~/.cargo/registry/src
+            ~/.cargo/git
+            target
+          key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
+
+      # Some of our rust modules use FFI and need those to be checked
+      - name: Get postgres headers
+        run: make postgres-headers -j$(nproc)
+
+      # cargo hack runs the given cargo subcommand (clippy in this case) for all feature combinations.
+      # This will catch compiler & clippy warnings in all feature combinations.
+      # TODO: use cargo hack for build and test as well, but, that's quite expensive.
+      # NB: keep clippy args in sync with ./run_clippy.sh
+      #
+      # The only difference between "clippy --debug" and "clippy --release" is that in --release mode,
+      # #[cfg(debug_assertions)] blocks are not built. It's not worth building everything for second
+      # time just for that, so skip "clippy --release".
+      - run: |
+          CLIPPY_COMMON_ARGS="$( source .neon_clippy_args; echo "$CLIPPY_COMMON_ARGS")"
+          if [ "$CLIPPY_COMMON_ARGS" = "" ]; then
+            echo "No clippy args found in .neon_clippy_args"
+            exit 1
+          fi
+          echo "CLIPPY_COMMON_ARGS=${CLIPPY_COMMON_ARGS}" >> $GITHUB_ENV
+      - name: Run cargo clippy (debug)
+        run: cargo hack --features default --ignore-unknown-features --feature-powerset clippy $CLIPPY_COMMON_ARGS
+
+      - name: Check documentation generation
+        run: cargo doc --workspace --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: "-Dwarnings -Arustdoc::private_intra_doc_links"
+
+      # Use `${{ !cancelled() }}` to run quck tests after the longer clippy run
+      - name: Check formatting
+        if: ${{ !cancelled() }}
+        run: cargo fmt --all -- --check
+
+      # https://github.com/facebookincubator/cargo-guppy/tree/bec4e0eb29dcd1faac70b1b5360267fc02bf830e/tools/cargo-hakari#2-keep-the-workspace-hack-up-to-date-in-ci
+      - name: Check rust dependencies
+        if: ${{ !cancelled() }}
+        run: |
+          cargo hakari generate --diff  # workspace-hack Cargo.toml is up-to-date
+          cargo hakari manage-deps --dry-run  # all workspace crates depend on workspace-hack

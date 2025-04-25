@@ -17,10 +17,13 @@ mod pageserver_client;
 mod peer_client;
 pub mod persistence;
 mod reconciler;
+mod safekeeper;
+mod safekeeper_client;
 mod scheduler;
 mod schema;
 pub mod service;
 mod tenant_shard;
+mod timeline_import;
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Copy, Clone, Serialize)]
 struct Sequence(u64);

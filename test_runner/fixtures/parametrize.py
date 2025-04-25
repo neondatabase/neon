@@ -6,12 +6,13 @@ from typing import TYPE_CHECKING
 import allure
 import pytest
 import toml
-from _pytest.python import Metafunc
 
 from fixtures.pg_version import PgVersion
 
 if TYPE_CHECKING:
-    from typing import Any, Optional
+    from typing import Any
+
+    from _pytest.python import Metafunc
 
 
 """
@@ -20,31 +21,36 @@ Dynamically parametrize tests by different parameters
 
 
 @pytest.fixture(scope="function", autouse=True)
-def pg_version() -> Optional[PgVersion]:
+def pg_version() -> PgVersion | None:
     return None
 
 
 @pytest.fixture(scope="function", autouse=True)
-def build_type() -> Optional[str]:
+def build_type() -> str | None:
     return None
 
 
 @pytest.fixture(scope="session", autouse=True)
-def platform() -> Optional[str]:
+def platform() -> str | None:
     return None
 
 
 @pytest.fixture(scope="function", autouse=True)
-def pageserver_virtual_file_io_engine() -> Optional[str]:
+def pageserver_virtual_file_io_engine() -> str | None:
     return os.getenv("PAGESERVER_VIRTUAL_FILE_IO_ENGINE")
 
 
 @pytest.fixture(scope="function", autouse=True)
-def pageserver_virtual_file_io_mode() -> Optional[str]:
+def pageserver_virtual_file_io_mode() -> str | None:
     return os.getenv("PAGESERVER_VIRTUAL_FILE_IO_MODE")
 
 
-def get_pageserver_default_tenant_config_compaction_algorithm() -> Optional[dict[str, Any]]:
+@pytest.fixture(scope="function", autouse=True)
+def pageserver_get_vectored_concurrent_io() -> str | None:
+    return os.getenv("PAGESERVER_GET_VECTORED_CONCURRENT_IO")
+
+
+def get_pageserver_default_tenant_config_compaction_algorithm() -> dict[str, Any] | None:
     toml_table = os.getenv("PAGESERVER_DEFAULT_TENANT_CONFIG_COMPACTION_ALGORITHM")
     if toml_table is None:
         return None
@@ -54,7 +60,7 @@ def get_pageserver_default_tenant_config_compaction_algorithm() -> Optional[dict
 
 
 @pytest.fixture(scope="function", autouse=True)
-def pageserver_default_tenant_config_compaction_algorithm() -> Optional[dict[str, Any]]:
+def pageserver_default_tenant_config_compaction_algorithm() -> dict[str, Any] | None:
     return get_pageserver_default_tenant_config_compaction_algorithm()
 
 
@@ -66,6 +72,7 @@ def pytest_generate_tests(metafunc: Metafunc):
 
     metafunc.parametrize("build_type", build_types)
 
+    pg_versions: list[PgVersion]
     if (v := os.getenv("DEFAULT_PG_VERSION")) is None:
         pg_versions = [version for version in PgVersion if version != PgVersion.NOT_SET]
     else:
@@ -115,5 +122,11 @@ def pytest_runtest_makereport(*args, **kwargs):
     }.get(os.uname().machine, "UNKNOWN")
     arch = os.getenv("RUNNER_ARCH", uname_m)
     allure.dynamic.parameter("__arch", arch)
+    allure.dynamic.parameter(
+        "__lfc", "with-lfc" if os.getenv("USE_LFC") != "false" else "without-lfc"
+    )
+    allure.dynamic.parameter(
+        "__sanitizers", "enabled" if os.getenv("SANITIZERS") == "enabled" else "disabled"
+    )
 
     yield

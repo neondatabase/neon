@@ -1,7 +1,7 @@
 use std::time::{Duration, SystemTime};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use pq_proto::{read_cstr, PG_EPOCH};
+use pq_proto::{PG_EPOCH, read_cstr};
 use serde::{Deserialize, Serialize};
 use tracing::{trace, warn};
 

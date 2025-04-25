@@ -1,42 +1,46 @@
 //! Part of Safekeeper pretending to be Postgres, i.e. handling Postgres
 //! protocol commands.
 
-use anyhow::Context;
 use std::future::Future;
 use std::str::{self, FromStr};
 use std::sync::Arc;
+
+use anyhow::Context;
+use jsonwebtoken::TokenData;
+use pageserver_api::models::ShardParameters;
+use pageserver_api::shard::{ShardIdentity, ShardStripeSize};
+use postgres_backend::{PostgresBackend, QueryError};
+use postgres_ffi::PG_TLI;
+use pq_proto::{BeMessage, FeStartupPacket, INT4_OID, RowDescriptor, TEXT_OID};
+use regex::Regex;
+use safekeeper_api::Term;
+use safekeeper_api::models::ConnectionId;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{debug, info, info_span, Instrument};
+use tracing::{Instrument, debug, info, info_span};
+use utils::auth::{Claims, JwtAuth, Scope};
+use utils::id::{TenantId, TenantTimelineId, TimelineId};
+use utils::lsn::Lsn;
+use utils::postgres_client::PostgresClientProtocol;
+use utils::shard::{ShardCount, ShardNumber};
 
 use crate::auth::check_permission;
-use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
-
-use crate::metrics::{TrafficMetrics, PG_QUERIES_GAUGE};
-use crate::safekeeper::Term;
+use crate::metrics::{PG_QUERIES_GAUGE, TrafficMetrics};
 use crate::timeline::TimelineError;
-use crate::wal_service::ConnectionId;
 use crate::{GlobalTimelines, SafeKeeperConf};
-use postgres_backend::PostgresBackend;
-use postgres_backend::QueryError;
-use postgres_ffi::PG_TLI;
-use pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
-use regex::Regex;
-use utils::auth::{Claims, JwtAuth, Scope};
-use utils::{
-    id::{TenantId, TenantTimelineId, TimelineId},
-    lsn::Lsn,
-};
 
 /// Safekeeper handler of postgres commands
 pub struct SafekeeperPostgresHandler {
-    pub conf: SafeKeeperConf,
+    pub conf: Arc<SafeKeeperConf>,
     /// assigned application name
     pub appname: Option<String>,
     pub tenant_id: Option<TenantId>,
     pub timeline_id: Option<TimelineId>,
     pub ttid: TenantTimelineId,
+    pub shard: Option<ShardIdentity>,
+    pub protocol: Option<PostgresClientProtocol>,
     /// Unique connection id is logged in spans for observability.
     pub conn_id: ConnectionId,
+    pub global_timelines: Arc<GlobalTimelines>,
     /// Auth scope allowed on the connections and public key used to check auth tokens. None if auth is not configured.
     auth: Option<(Scope, Arc<JwtAuth>)>,
     claims: Option<Claims>,
@@ -45,16 +49,67 @@ pub struct SafekeeperPostgresHandler {
 
 /// Parsed Postgres command.
 enum SafekeeperPostgresCommand {
-    StartWalPush,
-    StartReplication { start_lsn: Lsn, term: Option<Term> },
+    StartWalPush {
+        proto_version: u32,
+        // Eventually timelines will be always created explicitly by storcon.
+        // This option allows legacy behaviour for compute to do that until we
+        // fully migrate.
+        allow_timeline_creation: bool,
+    },
+    StartReplication {
+        start_lsn: Lsn,
+        term: Option<Term>,
+    },
     IdentifySystem,
     TimelineStatus,
-    JSONCtrl { cmd: AppendLogicalMessage },
 }
 
 fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
     if cmd.starts_with("START_WAL_PUSH") {
-        Ok(SafekeeperPostgresCommand::StartWalPush)
+        // Allow additional options in postgres START_REPLICATION style like
+        //   START_WAL_PUSH (proto_version '3', allow_timeline_creation 'false').
+        // Parsing here is very naive and breaks in case of commas or
+        // whitespaces in values, but enough for our purposes.
+        let re = Regex::new(r"START_WAL_PUSH(\s+?\((.*)\))?").unwrap();
+        let caps = re
+            .captures(cmd)
+            .context(format!("failed to parse START_WAL_PUSH command {}", cmd))?;
+        // capture () content
+        let options = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+        // default values
+        let mut proto_version = 2;
+        let mut allow_timeline_creation = true;
+        for kvstr in options.split(",") {
+            if kvstr.is_empty() {
+                continue;
+            }
+            let mut kvit = kvstr.split_whitespace();
+            let key = kvit.next().context(format!(
+                "failed to parse key in kv {} in command {}",
+                kvstr, cmd
+            ))?;
+            let value = kvit.next().context(format!(
+                "failed to parse value in kv {} in command {}",
+                kvstr, cmd
+            ))?;
+            let value_trimmed = value.trim_matches('\'');
+            if key == "proto_version" {
+                proto_version = value_trimmed.parse::<u32>().context(format!(
+                    "failed to parse proto_version value {} in command {}",
+                    value, cmd
+                ))?;
+            }
+            if key == "allow_timeline_creation" {
+                allow_timeline_creation = value_trimmed.parse::<bool>().context(format!(
+                    "failed to parse allow_timeline_creation value {} in command {}",
+                    value, cmd
+                ))?;
+            }
+        }
+        Ok(SafekeeperPostgresCommand::StartWalPush {
+            proto_version,
+            allow_timeline_creation,
+        })
     } else if cmd.starts_with("START_REPLICATION") {
         let re = Regex::new(
             // We follow postgres START_REPLICATION LOGICAL options to pass term.
@@ -76,11 +131,6 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
         Ok(SafekeeperPostgresCommand::IdentifySystem)
     } else if cmd.starts_with("TIMELINE_STATUS") {
         Ok(SafekeeperPostgresCommand::TimelineStatus)
-    } else if cmd.starts_with("JSON_CTRL") {
-        let cmd = cmd.strip_prefix("JSON_CTRL").context("invalid prefix")?;
-        Ok(SafekeeperPostgresCommand::JSONCtrl {
-            cmd: serde_json::from_str(cmd)?,
-        })
     } else {
         anyhow::bail!("unsupported command {cmd}");
     }
@@ -88,11 +138,10 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
 
 fn cmd_to_string(cmd: &SafekeeperPostgresCommand) -> &str {
     match cmd {
-        SafekeeperPostgresCommand::StartWalPush => "START_WAL_PUSH",
+        SafekeeperPostgresCommand::StartWalPush { .. } => "START_WAL_PUSH",
         SafekeeperPostgresCommand::StartReplication { .. } => "START_REPLICATION",
         SafekeeperPostgresCommand::TimelineStatus => "TIMELINE_STATUS",
         SafekeeperPostgresCommand::IdentifySystem => "IDENTIFY_SYSTEM",
-        SafekeeperPostgresCommand::JSONCtrl { .. } => "JSON_CTRL",
     }
 }
 
@@ -107,11 +156,21 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
     ) -> Result<(), QueryError> {
         if let FeStartupPacket::StartupMessage { params, .. } = sm {
             if let Some(options) = params.options_raw() {
+                let mut shard_count: Option<u8> = None;
+                let mut shard_number: Option<u8> = None;
+                let mut shard_stripe_size: Option<u32> = None;
+
                 for opt in options {
                     // FIXME `ztenantid` and `ztimelineid` left for compatibility during deploy,
                     // remove these after the PR gets deployed:
                     // https://github.com/neondatabase/neon/pull/2433#discussion_r970005064
                     match opt.split_once('=') {
+                        Some(("protocol", value)) => {
+                            self.protocol =
+                                Some(serde_json::from_str(value).with_context(|| {
+                                    format!("Failed to parse {value} as protocol")
+                                })?);
+                        }
                         Some(("ztenantid", value)) | Some(("tenant_id", value)) => {
                             self.tenant_id = Some(value.parse().with_context(|| {
                                 format!("Failed to parse {value} as tenant id")
@@ -127,7 +186,52 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                                 metrics.set_client_az(client_az)
                             }
                         }
+                        Some(("shard_count", value)) => {
+                            shard_count = Some(value.parse::<u8>().with_context(|| {
+                                format!("Failed to parse {value} as shard count")
+                            })?);
+                        }
+                        Some(("shard_number", value)) => {
+                            shard_number = Some(value.parse::<u8>().with_context(|| {
+                                format!("Failed to parse {value} as shard number")
+                            })?);
+                        }
+                        Some(("shard_stripe_size", value)) => {
+                            shard_stripe_size = Some(value.parse::<u32>().with_context(|| {
+                                format!("Failed to parse {value} as shard stripe size")
+                            })?);
+                        }
                         _ => continue,
+                    }
+                }
+
+                match self.protocol() {
+                    PostgresClientProtocol::Vanilla => {
+                        if shard_count.is_some()
+                            || shard_number.is_some()
+                            || shard_stripe_size.is_some()
+                        {
+                            return Err(QueryError::Other(anyhow::anyhow!(
+                                "Shard params specified for vanilla protocol"
+                            )));
+                        }
+                    }
+                    PostgresClientProtocol::Interpreted { .. } => {
+                        match (shard_count, shard_number, shard_stripe_size) {
+                            (Some(count), Some(number), Some(stripe_size)) => {
+                                let params = ShardParameters {
+                                    count: ShardCount(count),
+                                    stripe_size: ShardStripeSize(stripe_size),
+                                };
+                                self.shard =
+                                    Some(ShardIdentity::from_params(ShardNumber(number), &params));
+                            }
+                            _ => {
+                                return Err(QueryError::Other(anyhow::anyhow!(
+                                    "Shard params were not specified"
+                                )));
+                            }
+                        }
                     }
                 }
             }
@@ -150,6 +254,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                     tracing::field::debug(self.appname.clone()),
                 );
 
+            if let Some(shard) = self.shard.as_ref() {
+                if let Some(slug) = shard.shard_slug().strip_prefix("-") {
+                    tracing::Span::current().record("shard", tracing::field::display(slug));
+                }
+            }
+
             Ok(())
         } else {
             Err(QueryError::Other(anyhow::anyhow!(
@@ -169,7 +279,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
             .auth
             .as_ref()
             .expect("auth_type is configured but .auth of handler is missing");
-        let data = auth
+        let data: TokenData<Claims> = auth
             .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)
             .map_err(|e| QueryError::Unauthorized(e.0))?;
 
@@ -225,8 +335,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
             self.ttid = TenantTimelineId::new(tenant_id, timeline_id);
 
             match cmd {
-                SafekeeperPostgresCommand::StartWalPush => {
-                    self.handle_start_wal_push(pgb)
+                SafekeeperPostgresCommand::StartWalPush {
+                    proto_version,
+                    allow_timeline_creation,
+                } => {
+                    self.handle_start_wal_push(pgb, proto_version, allow_timeline_creation)
                         .instrument(info_span!("WAL receiver"))
                         .await
                 }
@@ -237,9 +350,6 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                 }
                 SafekeeperPostgresCommand::IdentifySystem => self.handle_identify_system(pgb).await,
                 SafekeeperPostgresCommand::TimelineStatus => self.handle_timeline_status(pgb).await,
-                SafekeeperPostgresCommand::JSONCtrl { ref cmd } => {
-                    handle_json_ctrl(self, pgb, cmd).await
-                }
             }
         })
     }
@@ -247,10 +357,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
 
 impl SafekeeperPostgresHandler {
     pub fn new(
-        conf: SafeKeeperConf,
+        conf: Arc<SafeKeeperConf>,
         conn_id: u32,
         io_metrics: Option<TrafficMetrics>,
         auth: Option<(Scope, Arc<JwtAuth>)>,
+        global_timelines: Arc<GlobalTimelines>,
     ) -> Self {
         SafekeeperPostgresHandler {
             conf,
@@ -258,11 +369,18 @@ impl SafekeeperPostgresHandler {
             tenant_id: None,
             timeline_id: None,
             ttid: TenantTimelineId::empty(),
+            shard: None,
+            protocol: None,
             conn_id,
             claims: None,
             auth,
             io_metrics,
+            global_timelines,
         }
+    }
+
+    pub fn protocol(&self) -> PostgresClientProtocol {
+        self.protocol.unwrap_or(PostgresClientProtocol::Vanilla)
     }
 
     // when accessing management api supply None as an argument
@@ -287,7 +405,7 @@ impl SafekeeperPostgresHandler {
         pgb: &mut PostgresBackend<IO>,
     ) -> Result<(), QueryError> {
         // Get timeline, handling "not found" error
-        let tli = match GlobalTimelines::get(self.ttid) {
+        let tli = match self.global_timelines.get(self.ttid) {
             Ok(tli) => Ok(Some(tli)),
             Err(TimelineError::NotFound(_)) => Ok(None),
             Err(e) => Err(QueryError::Other(e.into())),
@@ -321,7 +439,10 @@ impl SafekeeperPostgresHandler {
         &mut self,
         pgb: &mut PostgresBackend<IO>,
     ) -> Result<(), QueryError> {
-        let tli = GlobalTimelines::get(self.ttid).map_err(|e| QueryError::Other(e.into()))?;
+        let tli = self
+            .global_timelines
+            .get(self.ttid)
+            .map_err(|e| QueryError::Other(e.into()))?;
 
         let lsn = if self.is_walproposer_recovery() {
             // walproposer should get all local WAL until flush_lsn
@@ -385,6 +506,42 @@ impl SafekeeperPostgresHandler {
                 // set by safekeeper peer recovery
                 appname.starts_with("safekeeper")
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SafekeeperPostgresCommand;
+
+    /// Test parsing of START_WAL_PUSH command
+    #[test]
+    fn test_start_wal_push_parse() {
+        let cmd = "START_WAL_PUSH";
+        let parsed = super::parse_cmd(cmd).expect("failed to parse");
+        match parsed {
+            SafekeeperPostgresCommand::StartWalPush {
+                proto_version,
+                allow_timeline_creation,
+            } => {
+                assert_eq!(proto_version, 2);
+                assert!(allow_timeline_creation);
+            }
+            _ => panic!("unexpected command"),
+        }
+
+        let cmd =
+            "START_WAL_PUSH (proto_version '3', allow_timeline_creation 'false', unknown 'hoho')";
+        let parsed = super::parse_cmd(cmd).expect("failed to parse");
+        match parsed {
+            SafekeeperPostgresCommand::StartWalPush {
+                proto_version,
+                allow_timeline_creation,
+            } => {
+                assert_eq!(proto_version, 3);
+                assert!(!allow_timeline_creation);
+            }
+            _ => panic!("unexpected command"),
         }
     }
 }

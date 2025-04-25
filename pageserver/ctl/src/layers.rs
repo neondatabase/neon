@@ -1,3 +1,4 @@
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -5,12 +6,10 @@ use camino::{Utf8Path, Utf8PathBuf};
 use clap::Subcommand;
 use pageserver::context::{DownloadBehavior, RequestContext};
 use pageserver::task_mgr::TaskKind;
-use pageserver::tenant::storage_layer::{delta_layer, image_layer};
-use pageserver::tenant::storage_layer::{DeltaLayer, ImageLayer};
+use pageserver::tenant::storage_layer::{DeltaLayer, ImageLayer, delta_layer, image_layer};
 use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use pageserver::virtual_file::api::IoMode;
 use pageserver::{page_cache, virtual_file};
-use std::fs::{self, File};
 use utils::id::{TenantId, TimelineId};
 
 use crate::layer_map_analyzer::parse_filename;
@@ -77,7 +76,8 @@ async fn read_image_file(path: impl AsRef<Path>, ctx: &RequestContext) -> Result
 }
 
 pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
-    let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
+    let ctx =
+        RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error).with_scope_debug_tools();
     match cmd {
         LayerCmd::List { path } => {
             for tenant in fs::read_dir(path.join(TENANTS_SEGMENT_NAME))? {
@@ -177,7 +177,8 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             );
             pageserver::page_cache::init(100);
 
-            let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
+            let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error)
+                .with_scope_debug_tools();
 
             macro_rules! rewrite_closure {
                 ($($summary_ty:tt)*) => {{

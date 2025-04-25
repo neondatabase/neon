@@ -1,0 +1,128 @@
+name: Push images to Container Registry
+on:
+  workflow_call:
+    inputs:
+      # Example: {"docker.io/neondatabase/neon:13196061314":["${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/neon:13196061314","neoneastus2.azurecr.io/neondatabase/neon:13196061314"]}
+      image-map:
+        description: JSON map of images, mapping from a source image to an array of target images that should be pushed.
+        required: true
+        type: string
+      aws-region:
+        description: AWS region to log in to. Required when pushing to ECR.
+        required: false
+        type: string
+      aws-account-id:
+        description: AWS account ID to log in to for pushing to ECR. Required when pushing to ECR.
+        required: false
+        type: string
+      aws-role-to-assume:
+        description: AWS role to assume to for pushing to ECR. Required when pushing to ECR.
+        required: false
+        type: string
+      azure-client-id:
+        description: Client ID of Azure managed identity or Entra app. Required when pushing to ACR.
+        required: false
+        type: string
+      azure-subscription-id:
+        description: Azure subscription ID. Required when pushing to ACR.
+        required: false
+        type: string
+      azure-tenant-id:
+        description: Azure tenant ID. Required when pushing to ACR.
+        required: false
+        type: string
+      acr-registry-name:
+        description: ACR registry name. Required when pushing to ACR.
+        required: false
+        type: string
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+jobs:
+  push-to-container-registry:
+    runs-on: ubuntu-22.04
+    permissions:
+      id-token: write  # Required for aws/azure login
+      packages: write  # required for pushing to GHCR
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          sparse-checkout: .github/scripts/push_with_image_map.py
+          sparse-checkout-cone-mode: false
+
+      - name: Print image-map
+        run: echo '${{ inputs.image-map }}' | jq
+
+      - name: Configure AWS credentials
+        if: contains(inputs.image-map, 'amazonaws.com/')
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          aws-region: "${{ inputs.aws-region }}"
+          role-to-assume: "arn:aws:iam::${{ inputs.aws-account-id }}:role/${{ inputs.aws-role-to-assume }}"
+          role-duration-seconds: 3600
+
+      - name: Login to ECR
+        if: contains(inputs.image-map, 'amazonaws.com/')
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2.0.1
+        with:
+          registries: "${{ inputs.aws-account-id }}"
+
+      - name: Configure Azure credentials
+        if: contains(inputs.image-map, 'azurecr.io/')
+        uses: azure/login@6c251865b4e6290e7b78be643ea2d005bc51f69a  # @v2.1.1
+        with:
+          client-id: ${{ inputs.azure-client-id }}
+          subscription-id: ${{ inputs.azure-subscription-id }}
+          tenant-id: ${{ inputs.azure-tenant-id }}
+
+      - name: Login to ACR
+        if: contains(inputs.image-map, 'azurecr.io/')
+        run: |
+          az acr login --name=${{ inputs.acr-registry-name }}
+
+      - name: Login to GHCR
+        if: contains(inputs.image-map, 'ghcr.io/')
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
+      - name: Copy docker images to target registries
+        id: push
+        run: python3 .github/scripts/push_with_image_map.py
+        env:
+          IMAGE_MAP: ${{ inputs.image-map }}
+
+      - name: Notify Slack if container image pushing fails
+        if: steps.push.outputs.push_failures || failure()
+        uses: slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d # v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ vars.SLACK_ON_CALL_DEVPROD_STREAM }}
+            text: >
+              *Container image pushing ${{
+                steps.push.outcome == 'failure' && 'failed completely' || 'succeeded with some retries'
+              }}* in
+              <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+
+              ${{ steps.push.outputs.push_failures && format(
+                '*Failed targets:*\n• {0}', join(fromJson(steps.push.outputs.push_failures), '\n• ')
+              ) || '' }}

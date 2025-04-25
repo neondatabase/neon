@@ -1,16 +1,18 @@
-//! `ComputeSpec` represents the contents of the spec.json file.
-//!
-//! The spec.json file is used to pass information to 'compute_ctl'. It contains
-//! all the information needed to start up the right version of PostgreSQL,
-//! and connect it to the storage nodes.
+//! The ComputeSpec contains all the information needed to start up
+//! the right version of PostgreSQL, and connect it to the storage nodes.
+//! It can be passed as part of the `config.json`, or the control plane can
+//! provide it by calling the compute_ctl's `/compute_ctl` endpoint, or
+//! compute_ctl can fetch it by calling the control plane's API.
 use std::collections::HashMap;
 
+use indexmap::IndexMap;
+use regex::Regex;
+use remote_storage::RemotePath;
 use serde::{Deserialize, Serialize};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
-use regex::Regex;
-use remote_storage::RemotePath;
+use crate::responses::TlsConfig;
 
 /// String type alias representing Postgres identifier and
 /// intended to be used for DB / role names.
@@ -18,6 +20,10 @@ pub type PgIdent = String;
 
 /// String type alias representing Postgres extension version
 pub type ExtVersion = String;
+
+fn default_reconfigure_concurrency() -> usize {
+    1
+}
 
 /// Cluster spec or configuration represented as an optional number of
 /// delta operations + final cluster state description.
@@ -63,11 +69,20 @@ pub struct ComputeSpec {
     #[serde(default)]
     pub disk_quota_bytes: Option<u64>,
 
+    /// Disables the vm-monitor behavior that resizes LFC on upscale/downscale, instead relying on
+    /// the initial size of LFC.
+    ///
+    /// This is intended for use when the LFC size is being overridden from the default but
+    /// autoscaling is still enabled, and we don't want the vm-monitor to interfere with the custom
+    /// LFC sizing.
+    #[serde(default)]
+    pub disable_lfc_resizing: Option<bool>,
+
     /// Expected cluster state at the end of transition process.
     pub cluster: Cluster,
     pub delta_operations: Option<Vec<DeltaOp>>,
 
-    /// An optinal hint that can be passed to speed up startup time if we know
+    /// An optional hint that can be passed to speed up startup time if we know
     /// that no pg catalog mutations (like role creation, database creation,
     /// extension creation) need to be done on the actual database to start.
     #[serde(default)] // Default false
@@ -86,11 +101,26 @@ pub struct ComputeSpec {
     // etc. GUCs in cluster.settings. TODO: Once the control plane has been
     // updated to fill these fields, we can make these non optional.
     pub tenant_id: Option<TenantId>,
-
     pub timeline_id: Option<TimelineId>,
-
     pub pageserver_connstring: Option<String>,
 
+    // More neon ids that we expose to the compute_ctl
+    // and to postgres as neon extension GUCs.
+    pub project_id: Option<String>,
+    pub branch_id: Option<String>,
+    pub endpoint_id: Option<String>,
+
+    /// Safekeeper membership config generation. It is put in
+    /// neon.safekeepers GUC and serves two purposes:
+    /// 1) Non zero value forces walproposer to use membership configurations.
+    /// 2) If walproposer wants to update list of safekeepers to connect to
+    ///    taking them from some safekeeper mconf, it should check what value
+    ///    is newer by comparing the generation.
+    ///
+    /// Note: it could be SafekeeperGeneration, but this needs linking
+    /// compute_ctl with postgres_ffi.
+    #[serde(default)]
+    pub safekeepers_generation: Option<u32>,
     #[serde(default)]
     pub safekeeper_connstrings: Vec<String>,
 
@@ -104,7 +134,7 @@ pub struct ComputeSpec {
     // information about available remote extensions
     pub remote_extensions: Option<RemoteExtSpec>,
 
-    pub pgbouncer_settings: Option<HashMap<String, String>>,
+    pub pgbouncer_settings: Option<IndexMap<String, String>>,
 
     // Stripe size for pageserver sharding, in pages
     #[serde(default)]
@@ -113,6 +143,35 @@ pub struct ComputeSpec {
     /// Local Proxy configuration used for JWT authentication
     #[serde(default)]
     pub local_proxy_config: Option<LocalProxySpec>,
+
+    /// Number of concurrent connections during the parallel RunInEachDatabase
+    /// phase of the apply config process.
+    ///
+    /// We need a higher concurrency during reconfiguration in case of many DBs,
+    /// but instance is already running and used by client. We can easily get out of
+    /// `max_connections` limit, and the current code won't handle that.
+    ///
+    /// Default is 1, but also allow control plane to override this value for specific
+    /// projects. It's also recommended to bump `superuser_reserved_connections` +=
+    /// `reconfigure_concurrency` for such projects to ensure that we always have
+    /// enough spare connections for reconfiguration process to succeed.
+    #[serde(default = "default_reconfigure_concurrency")]
+    pub reconfigure_concurrency: usize,
+
+    /// If set to true, the compute_ctl will drop all subscriptions before starting the
+    /// compute. This is needed when we start an endpoint on a branch, so that child
+    /// would not compete with parent branch subscriptions
+    /// over the same replication content from publisher.
+    #[serde(default)] // Default false
+    pub drop_subscriptions_before_start: bool,
+
+    /// Log level for compute audit logging
+    #[serde(default)]
+    pub audit_log_level: ComputeAudit,
+
+    /// Hostname and the port of the otel collector. Leave empty to disable Postgres logs forwarding.
+    /// Example: config-shy-breeze-123-collector-monitoring.neon-telemetry.svc.cluster.local:10514
+    pub logs_export_host: Option<String>,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
@@ -123,9 +182,6 @@ pub enum ComputeFeature {
     /// Enable the experimental activity monitor logic, which uses `pg_stat_database` to
     /// track short-lived connections as user activity.
     ActivityMonitorExperimental,
-
-    /// Pre-install and initialize anon extension for every database in the cluster
-    AnonExtension,
 
     /// This is a special feature flag that is used to represent unknown feature flags.
     /// Basically all unknown to enum flags are represented as this one. See unit test
@@ -172,25 +228,36 @@ impl RemoteExtSpec {
 
         // Check if extension is present in public or custom.
         // If not, then it is not allowed to be used by this compute.
-        if let Some(public_extensions) = &self.public_extensions {
-            if !public_extensions.contains(&real_ext_name.to_string()) {
-                if let Some(custom_extensions) = &self.custom_extensions {
-                    if !custom_extensions.contains(&real_ext_name.to_string()) {
-                        return Err(anyhow::anyhow!("extension {} is not found", real_ext_name));
-                    }
-                }
-            }
+        if !self
+            .public_extensions
+            .as_ref()
+            .is_some_and(|exts| exts.iter().any(|e| e == real_ext_name))
+            && !self
+                .custom_extensions
+                .as_ref()
+                .is_some_and(|exts| exts.iter().any(|e| e == real_ext_name))
+        {
+            return Err(anyhow::anyhow!("extension {} is not found", real_ext_name));
         }
 
         match self.extension_data.get(real_ext_name) {
             Some(_ext_data) => {
+                // We have decided to use the Go naming convention due to Kubernetes.
+
+                let arch = match std::env::consts::ARCH {
+                    "x86_64" => "amd64",
+                    "aarch64" => "arm64",
+                    arch => arch,
+                };
+
                 // Construct the path to the extension archive
                 // BUILD_TAG/PG_MAJOR_VERSION/extensions/EXTENSION_NAME.tar.zst
                 //
                 // Keep it in sync with path generation in
                 // https://github.com/neondatabase/build-custom-extensions/tree/main
-                let archive_path_str =
-                    format!("{build_tag}/{pg_major_version}/extensions/{real_ext_name}.tar.zst");
+                let archive_path_str = format!(
+                    "{build_tag}/{arch}/{pg_major_version}/extensions/{real_ext_name}.tar.zst"
+                );
                 Ok((
                     real_ext_name.to_string(),
                     RemotePath::from_string(&archive_path_str)?,
@@ -218,7 +285,41 @@ pub enum ComputeMode {
     Replica,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+impl ComputeMode {
+    /// Convert the compute mode to a string that can be used to identify the type of compute,
+    /// which means that if it's a static compute, the LSN will not be included.
+    pub fn to_type_str(&self) -> &'static str {
+        match self {
+            ComputeMode::Primary => "primary",
+            ComputeMode::Static(_) => "static",
+            ComputeMode::Replica => "replica",
+        }
+    }
+}
+
+/// Log level for audit logging
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub enum ComputeAudit {
+    #[default]
+    Disabled,
+    // Deprecated, use Base instead
+    Log,
+    // (pgaudit.log = 'ddl', pgaudit.log_parameter='off')
+    // logged to the standard postgresql log stream
+    Base,
+    // Deprecated, use Full or Extended instead
+    Hipaa,
+    // (pgaudit.log = 'all, -misc', pgaudit.log_parameter='off')
+    // logged to separate files collected by rsyslog
+    // into dedicated log storage with strict access
+    Extended,
+    // (pgaudit.log='all', pgaudit.log_parameter='on'),
+    // logged to separate files collected by rsyslog
+    // into dedicated log storage with strict access.
+    Full,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Cluster {
     pub cluster_id: Option<String>,
     pub name: Option<String>,
@@ -249,7 +350,7 @@ pub struct DeltaOp {
 
 /// Rust representation of Postgres role info with only those fields
 /// that matter for us.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Role {
     pub name: PgIdent,
     pub encrypted_password: Option<String>,
@@ -258,7 +359,7 @@ pub struct Role {
 
 /// Rust representation of Postgres database info with only those fields
 /// that matter for us.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Database {
     pub name: PgIdent,
     pub owner: PgIdent,
@@ -274,7 +375,7 @@ pub struct Database {
 /// Common type representing both SQL statement params with or without value,
 /// like `LOGIN` or `OWNER username` in the `CREATE/ALTER ROLE`, and config
 /// options like `wal_level = logical`.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct GenericOption {
     pub name: String,
     pub value: Option<String>,
@@ -292,6 +393,9 @@ pub struct LocalProxySpec {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jwks: Option<Vec<JwksSettings>>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -305,8 +409,105 @@ pub struct JwksSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs::File;
+
+    use super::*;
+
+    #[test]
+    fn allow_installing_remote_extensions() {
+        let rspec: RemoteExtSpec = serde_json::from_value(serde_json::json!({
+            "public_extensions": null,
+            "custom_extensions": null,
+            "library_index": {},
+            "extension_data": {},
+        }))
+        .unwrap();
+
+        rspec
+            .get_ext("ext", false, "latest", "v17")
+            .expect_err("Extension should not be found");
+
+        let rspec: RemoteExtSpec = serde_json::from_value(serde_json::json!({
+            "public_extensions": [],
+            "custom_extensions": null,
+            "library_index": {},
+            "extension_data": {},
+        }))
+        .unwrap();
+
+        rspec
+            .get_ext("ext", false, "latest", "v17")
+            .expect_err("Extension should not be found");
+
+        let rspec: RemoteExtSpec = serde_json::from_value(serde_json::json!({
+            "public_extensions": [],
+            "custom_extensions": [],
+            "library_index": {
+                "ext": "ext"
+            },
+            "extension_data": {
+                "ext": {
+                    "control_data": {
+                        "ext.control": ""
+                    },
+                    "archive_path": ""
+                }
+            },
+        }))
+        .unwrap();
+
+        rspec
+            .get_ext("ext", false, "latest", "v17")
+            .expect_err("Extension should not be found");
+
+        let rspec: RemoteExtSpec = serde_json::from_value(serde_json::json!({
+            "public_extensions": [],
+            "custom_extensions": ["ext"],
+            "library_index": {
+                "ext": "ext"
+            },
+            "extension_data": {
+                "ext": {
+                    "control_data": {
+                        "ext.control": ""
+                    },
+                    "archive_path": ""
+                }
+            },
+        }))
+        .unwrap();
+
+        rspec
+            .get_ext("ext", false, "latest", "v17")
+            .expect("Extension should be found");
+
+        let rspec: RemoteExtSpec = serde_json::from_value(serde_json::json!({
+            "public_extensions": ["ext"],
+            "custom_extensions": [],
+            "library_index": {
+                "extlib": "ext",
+            },
+            "extension_data": {
+                "ext": {
+                    "control_data": {
+                        "ext.control": ""
+                    },
+                    "archive_path": ""
+                }
+            },
+        }))
+        .unwrap();
+
+        rspec
+            .get_ext("ext", false, "latest", "v17")
+            .expect("Extension should be found");
+
+        // test library index for the case when library name
+        // doesn't match the extension name
+        rspec
+            .get_ext("extlib", true, "latest", "v17")
+            .expect("Library should be found");
+    }
 
     #[test]
     fn parse_spec_file() {
@@ -315,6 +516,9 @@ mod tests {
 
         // Features list defaults to empty vector.
         assert!(spec.features.is_empty());
+
+        // Reconfigure concurrency defaults to 1.
+        assert_eq!(spec.reconfigure_concurrency, 1);
     }
 
     #[test]

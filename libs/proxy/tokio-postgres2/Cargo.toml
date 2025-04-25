@@ -1,0 +1,18 @@
+[package]
+name = "tokio-postgres2"
+version = "0.1.0"
+edition = "2024"
+license = "MIT/Apache-2.0"
+
+[dependencies]
+bytes.workspace = true
+fallible-iterator.workspace = true
+futures-util = { workspace = true, features = ["sink"] }
+tracing.workspace = true
+parking_lot.workspace = true
+pin-project-lite.workspace = true
+postgres-protocol2 = { path = "../postgres-protocol2" }
+postgres-types2 = { path = "../postgres-types2" }
+tokio = { workspace = true, features = ["io-util", "time", "net"] }
+tokio-util = { workspace = true, features = ["codec"] }
+serde = { workspace = true, features = ["derive"] }

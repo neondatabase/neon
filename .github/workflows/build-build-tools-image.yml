@@ -2,13 +2,24 @@ name: Build build-tools image
 
 on:
   workflow_call:
+    inputs:
+      archs:
+        description: "Json array of architectures to build"
+        # Default values are set in `check-image` job, `set-variables` step
+        type: string
+        required: false
+      debians:
+        description: "Json array of Debian versions to build"
+        # Default values are set in `check-image` job, `set-variables` step
+        type: string
+        required: false
     outputs:
       image-tag:
         description: "build-tools tag"
         value: ${{ jobs.check-image.outputs.tag }}
       image:
         description: "build-tools image"
-        value: neondatabase/build-tools:${{ jobs.check-image.outputs.tag }}
+        value: ghcr.io/neondatabase/build-tools:${{ jobs.check-image.outputs.tag }}
 
 defaults:
   run:
@@ -32,34 +43,60 @@ jobs:
   check-image:
     runs-on: ubuntu-22.04
     outputs:
-      tag: ${{ steps.get-build-tools-tag.outputs.image-tag }}
-      found: ${{ steps.check-image.outputs.found }}
+      archs: ${{ steps.set-variables.outputs.archs }}
+      debians: ${{ steps.set-variables.outputs.debians }}
+      tag: ${{ steps.set-variables.outputs.image-tag }}
+      everything: ${{ steps.set-more-variables.outputs.everything }}
+      found: ${{ steps.set-more-variables.outputs.found }}
+
+    permissions:
+      packages: read
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
 
-      - name: Get build-tools image tag for the current commit
-        id: get-build-tools-tag
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set variables
+        id: set-variables
         env:
+          ARCHS: ${{ inputs.archs || '["x64","arm64"]' }}
+          DEBIANS: ${{ inputs.debians || '["bullseye","bookworm"]' }}
           IMAGE_TAG: |
             ${{ hashFiles('build-tools.Dockerfile',
                           '.github/workflows/build-build-tools-image.yml') }}
         run: |
-          echo "image-tag=${IMAGE_TAG}" | tee -a $GITHUB_OUTPUT
+          echo "archs=${ARCHS}"           | tee -a ${GITHUB_OUTPUT}
+          echo "debians=${DEBIANS}"       | tee -a ${GITHUB_OUTPUT}
+          echo "image-tag=${IMAGE_TAG}"   | tee -a ${GITHUB_OUTPUT}
 
-      - name: Check if such tag found in the registry
-        id: check-image
+      - name: Set more variables
+        id: set-more-variables
         env:
-          IMAGE_TAG: ${{ steps.get-build-tools-tag.outputs.image-tag }}
+          IMAGE_TAG: ${{ steps.set-variables.outputs.image-tag }}
+          EVERYTHING: |
+            ${{ contains(fromJSON(steps.set-variables.outputs.archs), 'x64') &&
+                contains(fromJSON(steps.set-variables.outputs.archs), 'arm64') &&
+                contains(fromJSON(steps.set-variables.outputs.debians), 'bullseye') &&
+                contains(fromJSON(steps.set-variables.outputs.debians), 'bookworm') }}
         run: |
-          if docker manifest inspect neondatabase/build-tools:${IMAGE_TAG}; then
+          if docker manifest inspect ghcr.io/neondatabase/build-tools:${IMAGE_TAG}; then
             found=true
           else
             found=false
           fi
 
-          echo "found=${found}" | tee -a $GITHUB_OUTPUT
-
+          echo "everything=${EVERYTHING}" | tee -a ${GITHUB_OUTPUT}
+          echo "found=${found}"           | tee -a ${GITHUB_OUTPUT}
 
   build-image:
     needs: [ check-image ]
@@ -67,31 +104,45 @@ jobs:
 
     strategy:
       matrix:
-        debian-version: [ bullseye, bookworm ]
-        arch: [ x64, arm64 ]
+        arch: ${{ fromJSON(needs.check-image.outputs.archs) }}
+        debian: ${{ fromJSON(needs.check-image.outputs.debians) }}
 
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    permissions:
+      packages: write
+
+    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
         with:
           cache-binary: false
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: cache.neon.build
           username: ${{ secrets.NEON_CI_DOCKERCACHE_USERNAME }}
           password: ${{ secrets.NEON_CI_DOCKERCACHE_PASSWORD }}
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
         with:
           file: build-tools.Dockerfile
           context: .
@@ -99,34 +150,54 @@ jobs:
           push: true
           pull: true
           build-args: |
-            DEBIAN_VERSION=${{ matrix.debian-version }}
-          cache-from: type=registry,ref=cache.neon.build/build-tools:cache-${{ matrix.debian-version }}-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/build-tools:cache-{0}-{1},mode=max', matrix.debian-version, matrix.arch) || '' }}
+            DEBIAN_VERSION=${{ matrix.debian }}
+          cache-from: type=registry,ref=cache.neon.build/build-tools:cache-${{ matrix.debian }}-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/build-tools:cache-{0}-{1},mode=max', matrix.debian, matrix.arch) || '' }}
           tags: |
-            neondatabase/build-tools:${{ needs.check-image.outputs.tag }}-${{ matrix.debian-version }}-${{ matrix.arch }}
+            ghcr.io/neondatabase/build-tools:${{ needs.check-image.outputs.tag }}-${{ matrix.debian }}-${{ matrix.arch }}
 
   merge-images:
     needs: [ check-image, build-image ]
     runs-on: ubuntu-22.04
 
+    permissions:
+      packages: write
+
     steps:
-      - uses: docker/login-action@v3
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Create multi-arch image
         env:
-          DEFAULT_DEBIAN_VERSION: bullseye
+          DEFAULT_DEBIAN_VERSION: bookworm
+          ARCHS: ${{ join(fromJSON(needs.check-image.outputs.archs), ' ') }}
+          DEBIANS: ${{ join(fromJSON(needs.check-image.outputs.debians), ' ') }}
+          EVERYTHING: ${{ needs.check-image.outputs.everything }}
           IMAGE_TAG: ${{ needs.check-image.outputs.tag }}
         run: |
-          for debian_version in bullseye bookworm; do
-            tags=("-t" "neondatabase/build-tools:${IMAGE_TAG}-${debian_version}")
-            if [ "${debian_version}" == "${DEFAULT_DEBIAN_VERSION}" ]; then
-              tags+=("-t" "neondatabase/build-tools:${IMAGE_TAG}")
+          for debian in ${DEBIANS}; do
+            tags=("-t" "ghcr.io/neondatabase/build-tools:${IMAGE_TAG}-${debian}")
+
+            if [ "${EVERYTHING}" == "true" ] && [ "${debian}" == "${DEFAULT_DEBIAN_VERSION}" ]; then
+              tags+=("-t" "ghcr.io/neondatabase/build-tools:${IMAGE_TAG}")
             fi
 
-            docker buildx imagetools create "${tags[@]}" \
-                                              neondatabase/build-tools:${IMAGE_TAG}-${debian_version}-x64 \
-                                              neondatabase/build-tools:${IMAGE_TAG}-${debian_version}-arm64
+            for arch in ${ARCHS}; do
+              tags+=("ghcr.io/neondatabase/build-tools:${IMAGE_TAG}-${debian}-${arch}")
+            done
+
+            docker buildx imagetools create "${tags[@]}"
           done

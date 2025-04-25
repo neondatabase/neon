@@ -1,9 +1,8 @@
 use std::sync::Arc;
 use std::thread;
 
-use tracing::{error, info, instrument};
-
 use compute_api::responses::ComputeStatus;
+use tracing::{error, info, instrument};
 
 use crate::compute::ComputeNode;
 
@@ -51,9 +50,12 @@ fn configurator_main_loop(compute: &Arc<ComputeNode>) {
 pub fn launch_configurator(compute: &Arc<ComputeNode>) -> thread::JoinHandle<()> {
     let compute = Arc::clone(compute);
 
+    let runtime = tokio::runtime::Handle::current();
+
     thread::Builder::new()
         .name("compute-configurator".into())
         .spawn(move || {
+            let _rt_guard = runtime.enter();
             configurator_main_loop(&compute);
             info!("configurator thread is exited");
         })

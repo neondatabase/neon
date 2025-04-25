@@ -3,17 +3,19 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+import pytest
 from fixtures.common_types import Lsn
-from fixtures.neon_fixtures import (
-    NeonEnvBuilder,
-)
 from fixtures.pageserver.utils import assert_tenant_state, wait_for_upload
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
-from fixtures.utils import wait_until
+from fixtures.utils import run_only_on_default_postgres, wait_until
 from fixtures.workload import Workload
 
 if TYPE_CHECKING:
     from typing import Any
+
+    from fixtures.neon_fixtures import (
+        NeonEnvBuilder,
+    )
 
 
 def test_tenant_config(neon_env_builder: NeonEnvBuilder):
@@ -67,9 +69,9 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
     # check the configuration of the default tenant
     # it should match global configuration
     default_tenant_config = http_client.tenant_config(tenant_id=env.initial_tenant)
-    assert (
-        not default_tenant_config.tenant_specific_overrides
-    ), "Should have no specific settings yet"
+    assert not default_tenant_config.tenant_specific_overrides, (
+        "Should have no specific settings yet"
+    )
     effective_config = default_tenant_config.effective_config
     assert effective_config["checkpoint_distance"] == 10000
     assert effective_config["compaction_target_size"] == 1048576
@@ -91,22 +93,22 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
     new_specific_config = new_tenant_config.tenant_specific_overrides
     assert new_specific_config["checkpoint_distance"] == 20000
     assert new_specific_config["gc_period"] == "30s"
-    assert len(new_specific_config) == len(
-        new_conf
-    ), f"No more specific properties were expected, but got: {new_specific_config}"
+    assert len(new_specific_config) == len(new_conf), (
+        f"No more specific properties were expected, but got: {new_specific_config}"
+    )
     new_effective_config = new_tenant_config.effective_config
-    assert (
-        new_effective_config["checkpoint_distance"] == 20000
-    ), "Specific 'checkpoint_distance' config should override the default value"
-    assert (
-        new_effective_config["gc_period"] == "30s"
-    ), "Specific 'gc_period' config should override the default value"
-    assert (
-        new_effective_config["evictions_low_residence_duration_metric_threshold"] == "42s"
-    ), "Should override default value"
-    assert new_effective_config["eviction_policy"] == {
-        "kind": "NoEviction"
-    }, "Specific 'eviction_policy' config should override the default value"
+    assert new_effective_config["checkpoint_distance"] == 20000, (
+        "Specific 'checkpoint_distance' config should override the default value"
+    )
+    assert new_effective_config["gc_period"] == "30s", (
+        "Specific 'gc_period' config should override the default value"
+    )
+    assert new_effective_config["evictions_low_residence_duration_metric_threshold"] == "42s", (
+        "Should override default value"
+    )
+    assert new_effective_config["eviction_policy"] == {"kind": "NoEviction"}, (
+        "Specific 'eviction_policy' config should override the default value"
+    )
     assert new_effective_config["compaction_target_size"] == 1048576
     assert new_effective_config["compaction_period"] == "20s"
     assert new_effective_config["compaction_threshold"] == 10
@@ -133,22 +135,22 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
     assert updated_specific_config["checkpoint_distance"] == 15000
     assert updated_specific_config["gc_period"] == "1m 20s"
     assert updated_specific_config["compaction_period"] == "1m 20s"
-    assert len(updated_specific_config) == len(
-        conf_update
-    ), f"No more specific properties were expected, but got: {updated_specific_config}"
+    assert len(updated_specific_config) == len(conf_update), (
+        f"No more specific properties were expected, but got: {updated_specific_config}"
+    )
     updated_effective_config = updated_tenant_config.effective_config
-    assert (
-        updated_effective_config["checkpoint_distance"] == 15000
-    ), "Specific 'checkpoint_distance' config should override the default value"
-    assert (
-        updated_effective_config["gc_period"] == "1m 20s"
-    ), "Specific 'gc_period' config should override the default value"
-    assert (
-        updated_effective_config["compaction_period"] == "1m 20s"
-    ), "Specific 'compaction_period' config should override the default value"
-    assert (
-        updated_effective_config["evictions_low_residence_duration_metric_threshold"] == "23h"
-    ), "Should override default value"
+    assert updated_effective_config["checkpoint_distance"] == 15000, (
+        "Specific 'checkpoint_distance' config should override the default value"
+    )
+    assert updated_effective_config["gc_period"] == "1m 20s", (
+        "Specific 'gc_period' config should override the default value"
+    )
+    assert updated_effective_config["compaction_period"] == "1m 20s", (
+        "Specific 'compaction_period' config should override the default value"
+    )
+    assert updated_effective_config["evictions_low_residence_duration_metric_threshold"] == "23h", (
+        "Should override default value"
+    )
     assert updated_effective_config["eviction_policy"] == {
         "kind": "LayerAccessThreshold",
         "period": "1m 20s",
@@ -166,9 +168,9 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
     env.pageserver.start()
 
     restarted_tenant_config = http_client.tenant_config(tenant_id=tenant)
-    assert (
-        restarted_tenant_config == updated_tenant_config
-    ), "Updated config should not change after the restart"
+    assert restarted_tenant_config == updated_tenant_config, (
+        "Updated config should not change after the restart"
+    )
 
     # update the config with very short config and make sure no trailing chars are left from previous config
     final_conf = {
@@ -179,13 +181,13 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
     final_tenant_config = http_client.tenant_config(tenant_id=tenant)
     final_specific_config = final_tenant_config.tenant_specific_overrides
     assert final_specific_config["pitr_interval"] == "1m"
-    assert len(final_specific_config) == len(
-        final_conf
-    ), f"No more specific properties were expected, but got: {final_specific_config}"
+    assert len(final_specific_config) == len(final_conf), (
+        f"No more specific properties were expected, but got: {final_specific_config}"
+    )
     final_effective_config = final_tenant_config.effective_config
-    assert (
-        final_effective_config["pitr_interval"] == "1m"
-    ), "Specific 'pitr_interval' config should override the default value"
+    assert final_effective_config["pitr_interval"] == "1m", (
+        "Specific 'pitr_interval' config should override the default value"
+    )
     assert final_effective_config["checkpoint_distance"] == 10000
     assert final_effective_config["compaction_target_size"] == 1048576
     assert final_effective_config["compaction_period"] == "20s"
@@ -206,9 +208,9 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
     env.pageserver.start()
 
     restarted_final_tenant_config = http_client.tenant_config(tenant_id=tenant)
-    assert (
-        restarted_final_tenant_config == final_tenant_config
-    ), "Updated config should not change after the restart"
+    assert restarted_final_tenant_config == final_tenant_config, (
+        "Updated config should not change after the restart"
+    )
 
 
 def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
@@ -234,11 +236,7 @@ def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
     assert not config_path.exists(), "detach did not remove config file"
 
     env.pageserver.tenant_attach(tenant_id)
-    wait_until(
-        number_of_iterations=5,
-        interval=1,
-        func=lambda: assert_tenant_state(http_client, tenant_id, "Active"),
-    )
+    wait_until(lambda: assert_tenant_state(http_client, tenant_id, "Active"))
 
     env.config_tenant(tenant_id, {"gc_horizon": "1000000"})
     contents_first = config_path.read_text()
@@ -302,9 +300,9 @@ def test_live_reconfig_get_evictions_low_residence_duration_metric_threshold(
         tenant_id, {"evictions_low_residence_duration_metric_threshold": default_value}
     )
     updated_metric = get_metric()
-    assert int(updated_metric.value) == int(
-        metric.value
-    ), "metric is unchanged when setting same value"
+    assert int(updated_metric.value) == int(metric.value), (
+        "metric is unchanged when setting same value"
+    )
 
     env.config_tenant(tenant_id, {"evictions_low_residence_duration_metric_threshold": "2day"})
     metric = get_metric()
@@ -334,3 +332,83 @@ def test_live_reconfig_get_evictions_low_residence_duration_metric_threshold(
     metric = get_metric()
     assert int(metric.labels["low_threshold_secs"]) == 24 * 60 * 60, "label resets to default"
     assert int(metric.value) == 0, "value resets to default"
+
+
+@run_only_on_default_postgres("Test does not start a compute")
+@pytest.mark.parametrize("ps_managed_by", ["storcon", "cplane"])
+def test_tenant_config_patch(neon_env_builder: NeonEnvBuilder, ps_managed_by: str):
+    """
+    Test tenant config patching (i.e. additive updates)
+
+    The flow is different for storage controller and cplane managed pageserver.
+    1. Storcon managed: /v1/tenant/config request lands on storcon, which generates
+    location_config calls containing the update to the pageserver
+    2. Cplane managed: /v1/tenant/config is called directly on the pageserver
+    """
+
+    def assert_tenant_conf_semantically_equal(lhs, rhs):
+        """
+        Storcon returns None for fields that are not set while the pageserver does not.
+        Compare two tenant's config overrides semantically, by dropping the None values.
+        """
+        lhs = {k: v for k, v in lhs.items() if v is not None}
+        rhs = {k: v for k, v in rhs.items() if v is not None}
+
+        assert lhs == rhs
+
+    env = neon_env_builder.init_start()
+
+    if ps_managed_by == "storcon":
+        api = env.storage_controller.pageserver_api()
+    elif ps_managed_by == "cplane":
+        # Disallow storcon from sending location_configs to the pageserver.
+        # These would overwrite the manually set tenant configs.
+        env.storage_controller.reconcile_until_idle()
+        env.storage_controller.tenant_policy_update(env.initial_tenant, {"scheduling": "Stop"})
+        env.storage_controller.allowed_errors.append(".*Scheduling is disabled by policy Stop.*")
+
+        api = env.pageserver.http_client()
+    else:
+        raise Exception(f"Unexpected value of ps_managed_by param: {ps_managed_by}")
+
+    crnt_tenant_conf = api.tenant_config(env.initial_tenant).tenant_specific_overrides
+
+    patch: dict[str, Any | None] = {
+        "gc_period": "3h",
+        "wal_receiver_protocol_override": {
+            "type": "interpreted",
+            "args": {"format": "bincode", "compression": {"zstd": {"level": 1}}},
+        },
+    }
+    api.patch_tenant_config(env.initial_tenant, patch)
+    tenant_conf_after_patch = api.tenant_config(env.initial_tenant).tenant_specific_overrides
+    if ps_managed_by == "storcon":
+        # Check that the config was propagated to the PS.
+        overrides_on_ps = (
+            env.pageserver.http_client().tenant_config(env.initial_tenant).tenant_specific_overrides
+        )
+        assert_tenant_conf_semantically_equal(overrides_on_ps, tenant_conf_after_patch)
+    assert_tenant_conf_semantically_equal(tenant_conf_after_patch, crnt_tenant_conf | patch)
+    crnt_tenant_conf = tenant_conf_after_patch
+
+    patch = {"gc_period": "5h", "wal_receiver_protocol_override": None}
+    api.patch_tenant_config(env.initial_tenant, patch)
+    tenant_conf_after_patch = api.tenant_config(env.initial_tenant).tenant_specific_overrides
+    if ps_managed_by == "storcon":
+        overrides_on_ps = (
+            env.pageserver.http_client().tenant_config(env.initial_tenant).tenant_specific_overrides
+        )
+        assert_tenant_conf_semantically_equal(overrides_on_ps, tenant_conf_after_patch)
+    assert_tenant_conf_semantically_equal(tenant_conf_after_patch, crnt_tenant_conf | patch)
+    crnt_tenant_conf = tenant_conf_after_patch
+
+    put = {"pitr_interval": "1m 1s"}
+    api.set_tenant_config(env.initial_tenant, put)
+    tenant_conf_after_put = api.tenant_config(env.initial_tenant).tenant_specific_overrides
+    if ps_managed_by == "storcon":
+        overrides_on_ps = (
+            env.pageserver.http_client().tenant_config(env.initial_tenant).tenant_specific_overrides
+        )
+        assert_tenant_conf_semantically_equal(overrides_on_ps, tenant_conf_after_put)
+    assert_tenant_conf_semantically_equal(tenant_conf_after_put, put)
+    crnt_tenant_conf = tenant_conf_after_put

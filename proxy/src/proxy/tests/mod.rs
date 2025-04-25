@@ -1,20 +1,20 @@
 //! A group of high-level tests for connection establishing logic and auth.
+#![allow(clippy::unimplemented)]
 
 mod mitm;
 
 use std::time::Duration;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use async_trait::async_trait;
 use http::StatusCode;
-use retry::{retry_after, ShouldRetryWakeCompute};
+use postgres_client::config::SslMode;
+use postgres_client::tls::{MakeTlsConnect, NoTls};
+use retry::{ShouldRetryWakeCompute, retry_after};
 use rstest::rstest;
 use rustls::crypto::ring;
 use rustls::pki_types;
 use tokio::io::DuplexStream;
-use tokio_postgres::config::SslMode;
-use tokio_postgres::tls::{MakeTlsConnect, NoTls};
-use tokio_postgres_rustls::MakeRustlsConnect;
 
 use super::connect_compute::ConnectMechanism;
 use super::retry::CouldRetry;
@@ -22,13 +22,16 @@ use super::*;
 use crate::auth::backend::{
     ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned,
 };
-use crate::config::{CertResolver, RetryConfig};
+use crate::config::{ComputeConfig, RetryConfig};
 use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
 use crate::control_plane::{
-    self, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, NodeInfo, NodeInfoCache,
+    self, CachedAllowedIps, CachedAllowedVpcEndpointIds, CachedNodeInfo, NodeInfo, NodeInfoCache,
 };
 use crate::error::ErrorKind;
+use crate::tls::client_config::compute_client_config_with_certs;
+use crate::tls::postgres_rustls::MakeRustlsConnect;
+use crate::tls::server_config::CertResolver;
 use crate::types::{BranchId, EndpointId, ProjectId};
 use crate::{sasl, scram};
 
@@ -66,7 +69,7 @@ fn generate_certs(
 }
 
 struct ClientConfig<'a> {
-    config: rustls::ClientConfig,
+    config: Arc<rustls::ClientConfig>,
     hostname: &'a str,
 }
 
@@ -93,32 +96,25 @@ fn generate_tls_config<'a>(
                 .with_safe_default_protocol_versions()
                 .context("ring should support the default protocol versions")?
                 .with_no_client_auth()
-                .with_single_cert(vec![cert.clone()], key.clone_key())?
-                .into();
+                .with_single_cert(vec![cert.clone()], key.clone_key())?;
 
         let mut cert_resolver = CertResolver::new();
         cert_resolver.add_cert(key, vec![cert], true)?;
 
         let common_names = cert_resolver.get_common_names();
 
+        let config = Arc::new(config);
+
         TlsConfig {
-            config,
+            http_config: config.clone(),
+            pg_config: config,
             common_names,
             cert_resolver: Arc::new(cert_resolver),
         }
     };
 
     let client_config = {
-        let config =
-            rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .context("ring should support the default protocol versions")?
-                .with_root_certificates({
-                    let mut store = rustls::RootCertStore::empty();
-                    store.add(ca)?;
-                    store
-                })
-                .with_no_client_auth();
+        let config = Arc::new(compute_client_config_with_certs([ca]));
 
         ClientConfig { config, hostname }
     };
@@ -162,7 +158,7 @@ impl TestAuth for Scram {
         stream: &mut PqStream<Stream<S>>,
     ) -> anyhow::Result<()> {
         let outcome = auth::AuthFlow::new(stream)
-            .begin(auth::Scram(&self.0, &RequestMonitoring::test()))
+            .begin(auth::Scram(&self.0, &RequestContext::test()))
             .await?
             .authenticate()
             .await?;
@@ -182,11 +178,10 @@ async fn dummy_proxy(
     auth: impl TestAuth + Send,
 ) -> anyhow::Result<()> {
     let (client, _) = read_proxy_protocol(client).await?;
-    let mut stream =
-        match handshake(&RequestMonitoring::test(), client, tls.as_ref(), false).await? {
-            HandshakeData::Startup(stream, _) => stream,
-            HandshakeData::Cancel(_) => bail!("cancellation not supported"),
-        };
+    let mut stream = match handshake(&RequestContext::test(), client, tls.as_ref(), false).await? {
+        HandshakeData::Startup(stream, _) => stream,
+        HandshakeData::Cancel(_) => bail!("cancellation not supported"),
+    };
 
     auth.authenticate(&mut stream).await?;
 
@@ -205,7 +200,7 @@ async fn handshake_tls_is_enforced_by_proxy() -> anyhow::Result<()> {
     let (_, server_config) = generate_tls_config("generic-project-name.localhost", "localhost")?;
     let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
 
-    let client_err = tokio_postgres::Config::new()
+    let client_err = postgres_client::Config::new("test".to_owned(), 5432)
         .user("john_doe")
         .dbname("earth")
         .ssl_mode(SslMode::Disable)
@@ -234,7 +229,7 @@ async fn handshake_tls() -> anyhow::Result<()> {
         generate_tls_config("generic-project-name.localhost", "localhost")?;
     let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
 
-    let (_client, _conn) = tokio_postgres::Config::new()
+    let _conn = postgres_client::Config::new("test".to_owned(), 5432)
         .user("john_doe")
         .dbname("earth")
         .ssl_mode(SslMode::Require)
@@ -250,10 +245,10 @@ async fn handshake_raw() -> anyhow::Result<()> {
 
     let proxy = tokio::spawn(dummy_proxy(client, None, NoAuth));
 
-    let (_client, _conn) = tokio_postgres::Config::new()
+    let _conn = postgres_client::Config::new("test".to_owned(), 5432)
         .user("john_doe")
         .dbname("earth")
-        .options("project=generic-project-name")
+        .set_param("options", "project=generic-project-name")
         .ssl_mode(SslMode::Prefer)
         .connect_raw(server, NoTls)
         .await?;
@@ -297,8 +292,8 @@ async fn scram_auth_good(#[case] password: &str) -> anyhow::Result<()> {
         Scram::new(password).await?,
     ));
 
-    let (_client, _conn) = tokio_postgres::Config::new()
-        .channel_binding(tokio_postgres::config::ChannelBinding::Require)
+    let _conn = postgres_client::Config::new("test".to_owned(), 5432)
+        .channel_binding(postgres_client::config::ChannelBinding::Require)
         .user("user")
         .dbname("db")
         .password(password)
@@ -321,8 +316,8 @@ async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
         Scram::new("password").await?,
     ));
 
-    let (_client, _conn) = tokio_postgres::Config::new()
-        .channel_binding(tokio_postgres::config::ChannelBinding::Disable)
+    let _conn = postgres_client::Config::new("test".to_owned(), 5432)
+        .channel_binding(postgres_client::config::ChannelBinding::Disable)
         .user("user")
         .dbname("db")
         .password("password")
@@ -341,15 +336,15 @@ async fn scram_auth_mock() -> anyhow::Result<()> {
         generate_tls_config("generic-project-name.localhost", "localhost")?;
     let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), Scram::mock()));
 
-    use rand::distributions::Alphanumeric;
     use rand::Rng;
+    use rand::distributions::Alphanumeric;
     let password: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(rand::random::<u8>() as usize)
         .map(char::from)
         .collect();
 
-    let _client_err = tokio_postgres::Config::new()
+    let _client_err = postgres_client::Config::new("test".to_owned(), 5432)
         .user("user")
         .dbname("db")
         .password(&password) // no password will match the mocked secret
@@ -466,9 +461,9 @@ impl ConnectMechanism for TestConnectMechanism {
 
     async fn connect_once(
         &self,
-        _ctx: &RequestMonitoring,
+        _ctx: &RequestContext,
         _node_info: &control_plane::CachedNodeInfo,
-        _timeout: std::time::Duration,
+        _config: &ComputeConfig,
     ) -> Result<Self::Connection, Self::ConnectError> {
         let mut counter = self.counter.lock().unwrap();
         let action = self.sequence[*counter];
@@ -533,9 +528,19 @@ impl TestControlPlaneClient for TestConnectMechanism {
         }
     }
 
-    fn get_allowed_ips_and_secret(
+    fn get_allowed_ips(&self) -> Result<CachedAllowedIps, control_plane::errors::GetAuthInfoError> {
+        unimplemented!("not used in tests")
+    }
+
+    fn get_allowed_vpc_endpoint_ids(
         &self,
-    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), control_plane::errors::GetAuthInfoError>
+    ) -> Result<CachedAllowedVpcEndpointIds, control_plane::errors::GetAuthInfoError> {
+        unimplemented!("not used in tests")
+    }
+
+    fn get_block_public_or_vpc_access(
+        &self,
+    ) -> Result<control_plane::CachedAccessBlockerFlags, control_plane::errors::GetAuthInfoError>
     {
         unimplemented!("not used in tests")
     }
@@ -547,14 +552,14 @@ impl TestControlPlaneClient for TestConnectMechanism {
 
 fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {
     let node = NodeInfo {
-        config: compute::ConnCfg::new(),
+        config: compute::ConnCfg::new("test".to_owned(), 5432),
         aux: MetricsAuxInfo {
             endpoint_id: (&EndpointId::from("endpoint")).into(),
             project_id: (&ProjectId::from("project")).into(),
             branch_id: (&BranchId::from("branch")).into(),
+            compute_id: "compute".into(),
             cold_start_info: crate::control_plane::messages::ColdStartInfo::Warm,
         },
-        allow_self_signed_compute: false,
     };
     let (_, node2) = cache.insert_unit("key".into(), Ok(node.clone()));
     node2.map(|()| node)
@@ -563,7 +568,7 @@ fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeIn
 fn helper_create_connect_info(
     mechanism: &TestConnectMechanism,
 ) -> auth::Backend<'static, ComputeCredentials> {
-    let user_info = auth::Backend::ControlPlane(
+    auth::Backend::ControlPlane(
         MaybeOwned::Owned(ControlPlaneClient::Test(Box::new(mechanism.clone()))),
         ComputeCredentials {
             info: ComputeUserInfo {
@@ -573,23 +578,32 @@ fn helper_create_connect_info(
             },
             keys: ComputeCredentialKeys::Password("password".into()),
         },
-    );
-    user_info
+    )
+}
+
+fn config() -> ComputeConfig {
+    let retry = RetryConfig {
+        base_delay: Duration::from_secs(1),
+        max_retries: 5,
+        backoff_factor: 2.0,
+    };
+
+    ComputeConfig {
+        retry,
+        tls: Arc::new(compute_client_config_with_certs(std::iter::empty())),
+        timeout: Duration::from_secs(2),
+    }
 }
 
 #[tokio::test]
 async fn connect_to_compute_success() {
     let _ = env_logger::try_init();
     use ConnectAction::*;
-    let ctx = RequestMonitoring::test();
+    let ctx = RequestContext::test();
     let mechanism = TestConnectMechanism::new(vec![Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
-    let config = RetryConfig {
-        base_delay: Duration::from_secs(1),
-        max_retries: 5,
-        backoff_factor: 2.0,
-    };
-    connect_to_compute(&ctx, &mechanism, &user_info, false, config, config)
+    let config = config();
+    connect_to_compute(&ctx, &mechanism, &user_info, config.retry, &config)
         .await
         .unwrap();
     mechanism.verify();
@@ -599,15 +613,11 @@ async fn connect_to_compute_success() {
 async fn connect_to_compute_retry() {
     let _ = env_logger::try_init();
     use ConnectAction::*;
-    let ctx = RequestMonitoring::test();
+    let ctx = RequestContext::test();
     let mechanism = TestConnectMechanism::new(vec![Wake, Retry, Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
-    let config = RetryConfig {
-        base_delay: Duration::from_secs(1),
-        max_retries: 5,
-        backoff_factor: 2.0,
-    };
-    connect_to_compute(&ctx, &mechanism, &user_info, false, config, config)
+    let config = config();
+    connect_to_compute(&ctx, &mechanism, &user_info, config.retry, &config)
         .await
         .unwrap();
     mechanism.verify();
@@ -618,15 +628,11 @@ async fn connect_to_compute_retry() {
 async fn connect_to_compute_non_retry_1() {
     let _ = env_logger::try_init();
     use ConnectAction::*;
-    let ctx = RequestMonitoring::test();
+    let ctx = RequestContext::test();
     let mechanism = TestConnectMechanism::new(vec![Wake, Retry, Wake, Fail]);
     let user_info = helper_create_connect_info(&mechanism);
-    let config = RetryConfig {
-        base_delay: Duration::from_secs(1),
-        max_retries: 5,
-        backoff_factor: 2.0,
-    };
-    connect_to_compute(&ctx, &mechanism, &user_info, false, config, config)
+    let config = config();
+    connect_to_compute(&ctx, &mechanism, &user_info, config.retry, &config)
         .await
         .unwrap_err();
     mechanism.verify();
@@ -637,15 +643,11 @@ async fn connect_to_compute_non_retry_1() {
 async fn connect_to_compute_non_retry_2() {
     let _ = env_logger::try_init();
     use ConnectAction::*;
-    let ctx = RequestMonitoring::test();
+    let ctx = RequestContext::test();
     let mechanism = TestConnectMechanism::new(vec![Wake, Fail, Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
-    let config = RetryConfig {
-        base_delay: Duration::from_secs(1),
-        max_retries: 5,
-        backoff_factor: 2.0,
-    };
-    connect_to_compute(&ctx, &mechanism, &user_info, false, config, config)
+    let config = config();
+    connect_to_compute(&ctx, &mechanism, &user_info, config.retry, &config)
         .await
         .unwrap();
     mechanism.verify();
@@ -657,7 +659,7 @@ async fn connect_to_compute_non_retry_3() {
     let _ = env_logger::try_init();
     tokio::time::pause();
     use ConnectAction::*;
-    let ctx = RequestMonitoring::test();
+    let ctx = RequestContext::test();
     let mechanism =
         TestConnectMechanism::new(vec![Wake, Retry, Wake, Retry, Retry, Retry, Retry, Retry]);
     let user_info = helper_create_connect_info(&mechanism);
@@ -666,18 +668,13 @@ async fn connect_to_compute_non_retry_3() {
         max_retries: 1,
         backoff_factor: 2.0,
     };
-    let connect_to_compute_retry_config = RetryConfig {
-        base_delay: Duration::from_secs(1),
-        max_retries: 5,
-        backoff_factor: 2.0,
-    };
+    let config = config();
     connect_to_compute(
         &ctx,
         &mechanism,
         &user_info,
-        false,
         wake_compute_retry_config,
-        connect_to_compute_retry_config,
+        &config,
     )
     .await
     .unwrap_err();
@@ -689,15 +686,11 @@ async fn connect_to_compute_non_retry_3() {
 async fn wake_retry() {
     let _ = env_logger::try_init();
     use ConnectAction::*;
-    let ctx = RequestMonitoring::test();
+    let ctx = RequestContext::test();
     let mechanism = TestConnectMechanism::new(vec![WakeRetry, Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
-    let config = RetryConfig {
-        base_delay: Duration::from_secs(1),
-        max_retries: 5,
-        backoff_factor: 2.0,
-    };
-    connect_to_compute(&ctx, &mechanism, &user_info, false, config, config)
+    let config = config();
+    connect_to_compute(&ctx, &mechanism, &user_info, config.retry, &config)
         .await
         .unwrap();
     mechanism.verify();
@@ -708,15 +701,11 @@ async fn wake_retry() {
 async fn wake_non_retry() {
     let _ = env_logger::try_init();
     use ConnectAction::*;
-    let ctx = RequestMonitoring::test();
+    let ctx = RequestContext::test();
     let mechanism = TestConnectMechanism::new(vec![WakeRetry, WakeFail]);
     let user_info = helper_create_connect_info(&mechanism);
-    let config = RetryConfig {
-        base_delay: Duration::from_secs(1),
-        max_retries: 5,
-        backoff_factor: 2.0,
-    };
-    connect_to_compute(&ctx, &mechanism, &user_info, false, config, config)
+    let config = config();
+    connect_to_compute(&ctx, &mechanism, &user_info, config.retry, &config)
         .await
         .unwrap_err();
     mechanism.verify();

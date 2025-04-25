@@ -5,22 +5,23 @@ from typing import TYPE_CHECKING
 
 import pytest
 import requests
-from pytest_httpserver import HTTPServer
 from werkzeug.datastructures import Headers
-from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 from fixtures.log_helper import log
 
 if TYPE_CHECKING:
-    from typing import Any, Optional
+    from typing import Any
+
+    from pytest_httpserver import HTTPServer
+    from werkzeug.wrappers.request import Request
 
 
 class StorageControllerProxy:
     def __init__(self, server: HTTPServer):
         self.server: HTTPServer = server
         self.listen: str = f"http://{server.host}:{server.port}"
-        self.routing_to: Optional[str] = None
+        self.routing_to: str | None = None
 
     def route_to(self, storage_controller_api: str):
         self.routing_to = storage_controller_api

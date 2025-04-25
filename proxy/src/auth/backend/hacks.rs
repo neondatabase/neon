@@ -4,7 +4,7 @@ use tracing::{debug, info};
 use super::{ComputeCredentials, ComputeUserInfo, ComputeUserInfoNoEndpoint};
 use crate::auth::{self, AuthFlow};
 use crate::config::AuthenticationConfig;
-use crate::context::RequestMonitoring;
+use crate::context::RequestContext;
 use crate::control_plane::AuthSecret;
 use crate::intern::EndpointIdInt;
 use crate::sasl;
@@ -15,7 +15,7 @@ use crate::stream::{self, Stream};
 /// These properties are benefical for serverless JS workers, so we
 /// use this mechanism for websocket connections.
 pub(crate) async fn authenticate_cleartext(
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     info: ComputeUserInfo,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     secret: AuthSecret,
@@ -57,7 +57,7 @@ pub(crate) async fn authenticate_cleartext(
 /// Similar to [`authenticate_cleartext`], but there's a specific password format,
 /// and passwords are not yet validated (we don't know how to validate them!)
 pub(crate) async fn password_hack_no_authentication(
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     info: ComputeUserInfoNoEndpoint,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
 ) -> auth::Result<(ComputeUserInfo, Vec<u8>)> {
@@ -73,7 +73,7 @@ pub(crate) async fn password_hack_no_authentication(
         .get_password()
         .await?;
 
-    info!(project = &*payload.endpoint, "received missing parameter");
+    debug!(project = &*payload.endpoint, "received missing parameter");
 
     // Report tentative success; compute node will check the password anyway.
     Ok((

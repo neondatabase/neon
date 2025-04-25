@@ -21,8 +21,10 @@ The Neon storage engine consists of two major components:
 
 See developer documentation in [SUMMARY.md](/docs/SUMMARY.md) for more information.
 
-## Running local installation
+## Running a local development environment
 
+Neon can be run on a workstation for small experiments and to test code changes, by
+following these instructions.
 
 #### Installing dependencies on Linux
 1. Install build dependencies and other applicable packages
@@ -132,7 +134,7 @@ make -j`sysctl -n hw.logicalcpu` -s
 To run the `psql` client, install the `postgresql-client` package or modify `PATH` and `LD_LIBRARY_PATH` to include `pg_install/bin` and `pg_install/lib`, respectively.
 
 To run the integration tests or Python scripts (not required to use the code), install
-Python (3.9 or higher), and install the python3 packages using `./scripts/pysync` (requires [poetry>=1.8](https://python-poetry.org/)) in the project directory.
+Python (3.11 or higher), and install the python3 packages using `./scripts/pysync` (requires [poetry>=1.8](https://python-poetry.org/)) in the project directory.
 
 
 #### Running neon database
@@ -238,7 +240,7 @@ postgres=# select * from t;
 > cargo neon stop
 ```
 
-More advanced usages can be found at [Control Plane and Neon Local](./control_plane/README.md).
+More advanced usages can be found at [Local Development Control Plane (`neon_local`))](./control_plane/README.md).
 
 #### Handling build failures
 
@@ -268,7 +270,7 @@ By default, this runs both debug and release modes, and all supported postgres v
 testing locally, it is convenient to run just one set of permutations, like this:
 
 ```sh
-DEFAULT_PG_VERSION=16 BUILD_TYPE=release ./scripts/pytest
+DEFAULT_PG_VERSION=17 BUILD_TYPE=release ./scripts/pytest
 ```
 
 ## Flamegraphs

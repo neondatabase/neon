@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import enum
 import random
 import time
+from enum import StrEnum
 from threading import Thread
 from typing import TYPE_CHECKING
 
@@ -11,11 +11,6 @@ import asyncpg
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    Endpoint,
-    NeonEnv,
-    NeonEnvBuilder,
-)
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
@@ -26,11 +21,14 @@ from fixtures.remote_storage import (
     RemoteStorageKind,
 )
 from fixtures.utils import query_scalar, wait_until
-from prometheus_client.samples import Sample
 
 if TYPE_CHECKING:
-    from typing import Optional
-
+    from fixtures.neon_fixtures import (
+        Endpoint,
+        NeonEnv,
+        NeonEnvBuilder,
+    )
+    from prometheus_client.samples import Sample
 
 # In tests that overlap endpoint activity with tenant attach/detach, there are
 # a variety of warnings that the page service may emit when it cannot acquire
@@ -57,7 +55,7 @@ def do_gc_target(
         log.info("gc http thread returning")
 
 
-class ReattachMode(str, enum.Enum):
+class ReattachMode(StrEnum):
     REATTACH_EXPLICIT = "explicit"
     REATTACH_RESET = "reset"
     REATTACH_RESET_DROP = "reset_drop"
@@ -217,7 +215,7 @@ def test_tenant_reattach_while_busy(
         nonlocal updates_started, updates_finished, updates_to_perform
 
         # Wait until we have performed some updates
-        wait_until(20, 0.5, lambda: updates_finished > 500)
+        wait_until(lambda: updates_finished > 500)
 
         log.info("Detaching tenant")
         pageserver_http.tenant_detach(tenant_id)
@@ -439,9 +437,9 @@ def test_detach_while_activating(
 
     tenants_after_detach = [tenant["id"] for tenant in pageserver_http.tenant_list()]
     assert tenant_id not in tenants_after_detach, "Detached tenant should be missing"
-    assert len(tenants_after_detach) + 1 == len(
-        tenants_before_detach
-    ), "Only ignored tenant should be missing"
+    assert len(tenants_after_detach) + 1 == len(tenants_before_detach), (
+        "Only ignored tenant should be missing"
+    )
 
     # Subsequently attaching it again should still work
     pageserver_http.configure_failpoints([("attach-before-activate-sleep", "off")])
@@ -483,9 +481,9 @@ def insert_test_data(
 
 def ensure_test_data(data_id: int, data: str, endpoint: Endpoint):
     with endpoint.cursor() as cur:
-        assert (
-            query_scalar(cur, f"SELECT secret FROM test WHERE id = {data_id};") == data
-        ), "Should have timeline data back"
+        assert query_scalar(cur, f"SELECT secret FROM test WHERE id = {data_id};") == data, (
+            "Should have timeline data back"
+        )
 
 
 def test_metrics_while_ignoring_broken_tenant_and_reloading(
@@ -498,7 +496,7 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
         r".* Changing Active tenant to Broken state, reason: broken from test"
     )
 
-    def only_int(samples: list[Sample]) -> Optional[int]:
+    def only_int(samples: list[Sample]) -> int | None:
         if len(samples) == 1:
             return int(samples[0].value)
         assert len(samples) == 0
@@ -517,7 +515,7 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
         )
         assert only_int(active) == 0 and only_int(broken) == 1 and only_int(broken_set) == 1
 
-    wait_until(10, 0.5, found_broken)
+    wait_until(found_broken)
 
     client.tenant_detach(env.initial_tenant)
 
@@ -529,7 +527,7 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
         )
         assert only_int(broken) == 0 and len(broken_set) == 0
 
-    wait_until(10, 0.5, found_cleaned_up)
+    wait_until(found_cleaned_up)
 
     env.pageserver.tenant_attach(env.initial_tenant)
 
@@ -541,4 +539,4 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
         )
         assert only_int(active) == 1 and len(broken_set) == 0
 
-    wait_until(10, 0.5, found_active)
+    wait_until(found_active)

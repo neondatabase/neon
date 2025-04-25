@@ -7,13 +7,16 @@ from __future__ import annotations
 import json
 import os
 import time
+from typing import TYPE_CHECKING
 
 import psycopg2
 import pytest
 import requests
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import RemotePostgres
 from fixtures.utils import wait_until
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import RemotePostgres
 
 
 class DebeziumAPI:
@@ -148,14 +151,12 @@ def test_debezium(debezium):
     )
     conn.commit()
     wait_until(
-        100,
-        0.5,
         lambda: get_kafka_msg(
             consumer,
             ts_ms,
             after={"first_name": "John", "last_name": "Dow", "email": "johndow@example.com"},
         ),
-        show_intermediate_error=True,
+        timeout=60,
     )
     ts_ms = time.time() * 1000
     log.info("Insert 2 ts_ms: %s", ts_ms)
@@ -165,28 +166,24 @@ def test_debezium(debezium):
     )
     conn.commit()
     wait_until(
-        100,
-        0.5,
         lambda: get_kafka_msg(
             consumer,
             ts_ms,
             after={"first_name": "Alex", "last_name": "Row", "email": "alexrow@example.com"},
         ),
-        show_intermediate_error=True,
+        timeout=60,
     )
     ts_ms = time.time() * 1000
     log.info("Update ts_ms: %s", ts_ms)
     cur.execute("update inventory.customers set first_name = 'Alexander' where id = 2")
     conn.commit()
     wait_until(
-        100,
-        0.5,
         lambda: get_kafka_msg(
             consumer,
             ts_ms,
             after={"first_name": "Alexander"},
         ),
-        show_intermediate_error=True,
+        timeout=60,
     )
     time.sleep(3)
     cur.execute("select 1")

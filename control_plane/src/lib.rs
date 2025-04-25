@@ -9,6 +9,7 @@
 mod background_process;
 pub mod broker;
 pub mod endpoint;
+pub mod endpoint_storage;
 pub mod local_env;
 pub mod pageserver;
 pub mod postgresql_conf;

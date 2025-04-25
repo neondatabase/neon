@@ -5,6 +5,7 @@ import enum
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from enum import StrEnum
 from queue import Empty, Queue
 from threading import Barrier
 
@@ -22,7 +23,8 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import HistoricLayerInfo, PageserverApiException
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_timeline_detail_404
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
-from fixtures.utils import assert_pageserver_backups_equal, wait_until
+from fixtures.utils import assert_pageserver_backups_equal, skip_in_debug_build, wait_until
+from fixtures.workload import Workload
 from requests import ReadTimeout
 
 
@@ -36,7 +38,7 @@ def layer_name(info: HistoricLayerInfo) -> str:
 
 
 @enum.unique
-class Branchpoint(str, enum.Enum):
+class Branchpoint(StrEnum):
     """
     Have branches at these Lsns possibly relative to L0 layer boundary.
     """
@@ -201,7 +203,7 @@ def test_ancestor_detach_branched_from(
     )
 
     client.timeline_delete(env.initial_tenant, env.initial_timeline)
-    wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline, 10, 1.0)
+    wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline)
 
     # because we do the fullbackup from ancestor at the branch_lsn, the zenith.signal is always different
     # as there is always "PREV_LSN: invalid" for "before"
@@ -317,8 +319,9 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
             # this does not contain Z in the end, so fromisoformat accepts it
             # it is to be in line with the deletion timestamp.. well, almost.
             when = original_ancestor[2][:26]
-            when_ts = datetime.datetime.fromisoformat(when)
-            assert when_ts < datetime.datetime.now()
+            when_ts = datetime.datetime.fromisoformat(when).replace(tzinfo=datetime.UTC)
+            now = datetime.datetime.utcnow().replace(tzinfo=datetime.UTC)
+            assert when_ts < now
             assert len(lineage.get("reparenting_history", [])) == 0
         elif expected_ancestor == timeline_id:
             assert len(lineage.get("original_ancestor", [])) == 0
@@ -334,10 +337,167 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
 
     # delete the timelines to confirm detach actually worked
     client.timeline_delete(env.initial_tenant, after)
-    wait_timeline_detail_404(client, env.initial_tenant, after, 10, 1.0)
+    wait_timeline_detail_404(client, env.initial_tenant, after)
 
     client.timeline_delete(env.initial_tenant, env.initial_timeline)
-    wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline, 10, 1.0)
+    wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline)
+
+
+@pytest.mark.parametrize("snapshots_archived", ["archived", "normal"])
+def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder, snapshots_archived: str):
+    """
+    Test the v2 behavior of ancestor detach.
+
+    old main -------|---------X--------->
+                    |         |         |
+                    |         |         +-> after
+                    |         +--X empty snapshot branch
+                    |            |
+                    |            +-> branch-to-detach
+                    |
+                    +-> earlier
+
+    Ends up as:
+
+    old main -------|---------X--------->
+                    |         |         |
+                    |         |         +-> after
+                    |         +--X empty snapshot branch
+                    |
+                    +-> earlier
+
+
+    new main -------|---------|----> branch-to-detach
+    """
+
+    env = neon_env_builder.init_start()
+
+    env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+
+    client = env.pageserver.http_client()
+
+    with env.endpoints.create_start("main", tenant_id=env.initial_tenant) as ep:
+        ep.safe_psql("CREATE TABLE foo (i BIGINT);")
+        ep.safe_psql("CREATE TABLE audit AS SELECT 1 as starts;")
+
+        branchpoint_pipe = wait_for_last_flush_lsn(
+            env, ep, env.initial_tenant, env.initial_timeline
+        )
+
+        ep.safe_psql("INSERT INTO foo SELECT i::bigint FROM generate_series(0, 8191) g(i);")
+
+        branchpoint_y = wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
+        client.timeline_checkpoint(env.initial_tenant, env.initial_timeline)
+
+        ep.safe_psql("INSERT INTO foo SELECT i::bigint FROM generate_series(0, 8191) g(i);")
+
+        branchpoint_x = wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
+        client.timeline_checkpoint(env.initial_tenant, env.initial_timeline)
+
+        ep.safe_psql("INSERT INTO foo SELECT i::bigint FROM generate_series(8192, 16383) g(i);")
+        wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
+
+    earlier = env.create_branch(
+        "earlier", ancestor_branch_name="main", ancestor_start_lsn=branchpoint_pipe
+    )
+
+    snapshot_branchpoint_old = env.create_branch(
+        "snapshot_branchpoint_old", ancestor_branch_name="main", ancestor_start_lsn=branchpoint_y
+    )
+
+    snapshot_branchpoint = env.create_branch(
+        "snapshot_branchpoint", ancestor_branch_name="main", ancestor_start_lsn=branchpoint_x
+    )
+
+    branch_to_detach = env.create_branch(
+        "branch_to_detach",
+        ancestor_branch_name="snapshot_branchpoint",
+        ancestor_start_lsn=branchpoint_x,
+    )
+
+    after = env.create_branch("after", ancestor_branch_name="main", ancestor_start_lsn=None)
+
+    if snapshots_archived == "archived":
+        # archive the previous snapshot branchpoint
+        client.timeline_archival_config(
+            env.initial_tenant, snapshot_branchpoint_old, TimelineArchivalState.ARCHIVED
+        )
+
+    all_reparented = client.detach_ancestor(
+        env.initial_tenant, branch_to_detach, detach_behavior="v2"
+    )
+    assert set(all_reparented) == set()
+
+    if snapshots_archived == "archived":
+        # restore the branchpoint so that we can query from the endpoint
+        client.timeline_archival_config(
+            env.initial_tenant, snapshot_branchpoint_old, TimelineArchivalState.UNARCHIVED
+        )
+
+    env.pageserver.quiesce_tenants()
+
+    # checking the ancestor after is much faster than waiting for the endpoint not start
+    expected_result = [
+        ("main", env.initial_timeline, None, 24576, 1),
+        ("after", after, env.initial_timeline, 24576, 1),
+        ("snapshot_branchpoint_old", snapshot_branchpoint_old, env.initial_timeline, 8192, 1),
+        ("snapshot_branchpoint", snapshot_branchpoint, env.initial_timeline, 16384, 1),
+        ("branch_to_detach", branch_to_detach, None, 16384, 1),
+        ("earlier", earlier, env.initial_timeline, 0, 1),
+    ]
+
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
+
+    for branch_name, queried_timeline, expected_ancestor, _, _ in expected_result:
+        details = client.timeline_detail(env.initial_tenant, queried_timeline)
+        ancestor_timeline_id = details["ancestor_timeline_id"]
+        if expected_ancestor is None:
+            assert ancestor_timeline_id is None
+        else:
+            assert TimelineId(ancestor_timeline_id) == expected_ancestor, (
+                f"when checking branch {branch_name}, mapping={expected_result}"
+            )
+
+        index_part = env.pageserver_remote_storage.index_content(
+            env.initial_tenant, queried_timeline
+        )
+        lineage = index_part["lineage"]
+        assert lineage is not None
+
+        assert lineage.get("reparenting_history_overflown", "false") == "false"
+
+        if queried_timeline == branch_to_detach:
+            original_ancestor = lineage["original_ancestor"]
+            assert original_ancestor is not None
+            assert original_ancestor[0] == str(env.initial_timeline)
+            assert original_ancestor[1] == str(branchpoint_x)
+
+            # this does not contain Z in the end, so fromisoformat accepts it
+            # it is to be in line with the deletion timestamp.. well, almost.
+            when = original_ancestor[2][:26]
+            when_ts = datetime.datetime.fromisoformat(when).replace(tzinfo=datetime.UTC)
+            now = datetime.datetime.utcnow().replace(tzinfo=datetime.UTC)
+            assert when_ts < now
+            assert len(lineage.get("reparenting_history", [])) == 0
+        elif expected_ancestor == branch_to_detach:
+            assert len(lineage.get("original_ancestor", [])) == 0
+            assert lineage["reparenting_history"] == [str(env.initial_timeline)]
+        else:
+            assert len(lineage.get("original_ancestor", [])) == 0
+            assert len(lineage.get("reparenting_history", [])) == 0
+
+    for name, _, _, rows, starts in expected_result:
+        with env.endpoints.create_start(name, tenant_id=env.initial_tenant) as ep:
+            assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
+            assert ep.safe_psql(f"SELECT count(*) FROM audit WHERE starts = {starts}")[0][0] == 1
+
+    # delete the new timeline to confirm it doesn't carry over the anything from the old timeline
+    client.timeline_delete(env.initial_tenant, branch_to_detach)
+    wait_timeline_detail_404(client, env.initial_tenant, branch_to_detach)
+
+    # delete the after timeline
+    client.timeline_delete(env.initial_tenant, after)
+    wait_timeline_detail_404(client, env.initial_tenant, after)
 
 
 def test_detached_receives_flushes_while_being_detached(neon_env_builder: NeonEnvBuilder):
@@ -414,7 +574,7 @@ def test_detached_receives_flushes_while_being_detached(neon_env_builder: NeonEn
 
     assert client.timeline_detail(env.initial_tenant, timeline_id)["ancestor_timeline_id"] is None
 
-    ep.clear_shared_buffers()
+    ep.clear_buffers()
     assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
     assert ep.safe_psql("SELECT SUM(LENGTH(aux)) FROM foo")[0][0] != 0
     ep.stop()
@@ -512,7 +672,7 @@ def test_compaction_induced_by_detaches_in_history(
 
         assert len(delta_layers(branch_timeline_id)) == 5
 
-        env.storage_controller.pageserver_api().patch_tenant_config_client_side(
+        env.storage_controller.pageserver_api().update_tenant_config(
             env.initial_tenant, {"compaction_threshold": 5}, None
         )
 
@@ -605,7 +765,7 @@ def test_timeline_ancestor_detach_idempotent_success(
 
     if shards_after > 1:
         # FIXME: should this be in the neon_env_builder.init_start?
-        env.storage_controller.reconcile_until_idle()
+        env.storage_controller.reconcile_until_idle(timeout_secs=120)
         client = env.storage_controller.pageserver_api()
     else:
         client = env.pageserver.http_client()
@@ -634,7 +794,7 @@ def test_timeline_ancestor_detach_idempotent_success(
         # Do a shard split
         # This is a reproducer for https://github.com/neondatabase/neon/issues/9667
         env.storage_controller.tenant_shard_split(env.initial_tenant, shards_after)
-        env.storage_controller.reconcile_until_idle()
+        env.storage_controller.reconcile_until_idle(timeout_secs=120)
 
     first_reparenting_response = client.detach_ancestor(env.initial_tenant, first_branch)
     assert set(first_reparenting_response) == {reparented1, reparented2}
@@ -675,11 +835,13 @@ def test_timeline_ancestor_detach_errors(neon_env_builder: NeonEnvBuilder, shard
 
     for ps in pageservers.values():
         ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+        # We make /detach_ancestor requests that are intended to fail.
+        # It's expected that storcon drops requests to other pageservers after
+        # it gets the first error (https://github.com/neondatabase/neon/issues/11177)
         ps.allowed_errors.extend(
             [
                 ".* WARN .* path=/v1/tenant/.*/timeline/.*/detach_ancestor request_id=.*: request was dropped before completing",
-                # rare error logging, which is hard to reproduce without instrumenting responding with random sleep
-                '.* ERROR .* path=/v1/tenant/.*/timeline/.*/detach_ancestor request_id=.*: Cancelled request finished with an error: Conflict\\("no ancestors"\\)',
+                ".* ERROR .* path=/v1/tenant/.*/timeline/.*/detach_ancestor request_id=.*: Cancelled request finished with an error.*",
             ]
         )
 
@@ -971,17 +1133,17 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
     with ThreadPoolExecutor(max_workers=2) as pool:
         try:
             fut = pool.submit(detach_ancestor)
-            offset = wait_until(10, 1.0, at_failpoint)
+            offset = wait_until(at_failpoint)
 
             delete = pool.submit(start_delete)
 
-            offset = wait_until(10, 1.0, lambda: at_waiting_on_gate_close(offset))
+            offset = wait_until(lambda: at_waiting_on_gate_close(offset))
 
             victim_http.configure_failpoints((pausepoint, "off"))
 
             delete.result()
 
-            assert wait_until(10, 1.0, is_deleted), f"unimplemented mode {mode}"
+            assert wait_until(is_deleted), f"unimplemented mode {mode}"
 
             # TODO: match the error
             with pytest.raises(PageserverApiException) as exc:
@@ -1113,11 +1275,11 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
     with ThreadPoolExecutor(max_workers=1) as pool:
         try:
             fut = pool.submit(detach_timeline)
-            wait_until(10, 1.0, paused_at_failpoint)
+            wait_until(paused_at_failpoint)
 
             # let stuck complete
             stuck_http.configure_failpoints((pausepoint, "off"))
-            wait_until(10, 1.0, first_completed)
+            wait_until(first_completed)
 
             if mode == "delete_reparentable_timeline":
                 assert first_branch is not None
@@ -1125,7 +1287,7 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
                     env.initial_tenant, first_branch
                 )
                 victim_http.configure_failpoints((pausepoint, "off"))
-                wait_until(10, 1.0, first_branch_gone)
+                wait_until(first_branch_gone)
             elif mode == "create_reparentable_timeline":
                 first_branch = create_reparentable_timeline()
                 victim_http.configure_failpoints((pausepoint, "off"))
@@ -1162,9 +1324,9 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
                 offset,
             )
             if mode == "delete_reparentable_timeline":
-                assert (
-                    retried is None
-                ), "detaching should had converged after both nodes saw the deletion"
+                assert retried is None, (
+                    "detaching should had converged after both nodes saw the deletion"
+                )
             elif mode == "create_reparentable_timeline":
                 assert retried is not None, "detaching should not have converged"
                 _, offset = retried
@@ -1215,8 +1377,10 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
         )
 
 
+@pytest.mark.parametrize("detach_behavior", ["default", "v1", "v2"])
 def test_retryable_500_hit_through_storcon_during_timeline_detach_ancestor(
     neon_env_builder: NeonEnvBuilder,
+    detach_behavior: str,
 ):
     shard_count = 2
     neon_env_builder.num_pageservers = shard_count
@@ -1255,7 +1419,11 @@ def test_retryable_500_hit_through_storcon_during_timeline_detach_ancestor(
     victim_http.configure_failpoints([(pausepoint, "pause"), (failpoint, "return")])
 
     def detach_timeline():
-        http.detach_ancestor(env.initial_tenant, detached_branch)
+        http.detach_ancestor(
+            env.initial_tenant,
+            detached_branch,
+            detach_behavior=detach_behavior if detach_behavior != "default" else None,
+        )
 
     def paused_at_failpoint():
         stuck.assert_log_contains(f"at failpoint {pausepoint}")
@@ -1269,11 +1437,11 @@ def test_retryable_500_hit_through_storcon_during_timeline_detach_ancestor(
     with ThreadPoolExecutor(max_workers=1) as pool:
         try:
             fut = pool.submit(detach_timeline)
-            wait_until(10, 1.0, paused_at_failpoint)
+            wait_until(paused_at_failpoint)
 
             # let stuck complete
             stuck_http.configure_failpoints((pausepoint, "off"))
-            wait_until(10, 1.0, first_completed)
+            wait_until(first_completed)
 
             victim_http.configure_failpoints((pausepoint, "off"))
 
@@ -1386,9 +1554,9 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     # first round -- do more checking to make sure the gc gets paused
     try_detach()
 
-    assert (
-        http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None
-    ), "first round should had detached 'detached'"
+    assert http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None, (
+        "first round should had detached 'detached'"
+    )
 
     reparented, not_reparented = reparenting_progress(timelines)
     assert reparented == 1
@@ -1424,9 +1592,9 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     for _ in range(2):
         try_detach()
 
-        assert (
-            http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None
-        ), "first round should had detached 'detached'"
+        assert http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None, (
+            "first round should had detached 'detached'"
+        )
 
         reparented, not_reparented = reparenting_progress(timelines)
         assert reparented == reparented_before + 1
@@ -1454,7 +1622,7 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     # other tests take the "detach? reparent complete", but this only hits
     # "complete".
     http.timeline_delete(env.initial_tenant, env.initial_timeline)
-    wait_timeline_detail_404(http, env.initial_tenant, env.initial_timeline, 20)
+    wait_timeline_detail_404(http, env.initial_tenant, env.initial_timeline)
 
     http.configure_failpoints(("timeline-detach-ancestor::complete_before_uploading", "off"))
 
@@ -1466,9 +1634,9 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     assert reparented == len(timelines)
 
     time.sleep(2)
-    assert (
-        env.pageserver.log_contains(".*: attach finished, activating", offset) is None
-    ), "there should be no restart with the final detach_ancestor as it only completed"
+    assert env.pageserver.log_contains(".*: attach finished, activating", offset) is None, (
+        "there should be no restart with the final detach_ancestor as it only completed"
+    )
 
     # gc is unblocked
     env.pageserver.assert_log_contains(".* gc_loop.*: 5 timelines need GC", offset)
@@ -1516,7 +1684,7 @@ def test_timeline_is_deleted_before_timeline_detach_ancestor_completes(
         with ThreadPoolExecutor(max_workers=1) as pool:
             detach = pool.submit(detach_and_get_stuck)
 
-            offset = wait_until(10, 1.0, request_processing_noted_in_log)
+            offset = wait_until(request_processing_noted_in_log)
 
             # make this named fn tor more clear failure test output logging
             def pausepoint_hit_with_gc_paused() -> LogCursor:
@@ -1527,11 +1695,11 @@ def test_timeline_is_deleted_before_timeline_detach_ancestor_completes(
                 )
                 return at
 
-            offset = wait_until(10, 1.0, pausepoint_hit_with_gc_paused)
+            offset = wait_until(pausepoint_hit_with_gc_paused)
 
             delete_detached()
 
-            wait_timeline_detail_404(http, env.initial_tenant, detached, 10, 1.0)
+            wait_timeline_detail_404(http, env.initial_tenant, detached)
 
             http.configure_failpoints((failpoint, "off"))
 
@@ -1547,6 +1715,138 @@ def test_timeline_is_deleted_before_timeline_detach_ancestor_completes(
     time.sleep(2)
 
     env.pageserver.assert_log_contains(".* gc_loop.*: 1 timelines need GC", offset)
+
+
+@skip_in_debug_build("only run with release build")
+def test_pageserver_compaction_detach_ancestor_smoke(neon_env_builder: NeonEnvBuilder):
+    SMOKE_CONF = {
+        # Run both gc and gc-compaction.
+        "gc_period": "5s",
+        "compaction_period": "5s",
+        # No PiTR interval and small GC horizon
+        "pitr_interval": "0s",
+        "gc_horizon": f"{1024**2}",
+        "lsn_lease_length": "0s",
+        # Small checkpoint distance to create many layers
+        "checkpoint_distance": 1024**2,
+        # Compact small layers
+        "compaction_target_size": 1024**2,
+        "image_creation_threshold": 2,
+    }
+
+    env = neon_env_builder.init_start(initial_tenant_conf=SMOKE_CONF)
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    row_count = 10000
+    churn_rounds = 50
+
+    ps_http = env.pageserver.http_client()
+
+    workload_parent = Workload(env, tenant_id, timeline_id)
+    workload_parent.init(env.pageserver.id)
+    log.info("Writing initial data ...")
+    workload_parent.write_rows(row_count, env.pageserver.id)
+    branch_id = env.create_branch("child")
+    workload_child = Workload(env, tenant_id, branch_id, branch_name="child")
+    workload_child.init(env.pageserver.id, allow_recreate=True)
+    log.info("Writing initial data on child...")
+    workload_child.write_rows(row_count, env.pageserver.id)
+
+    for i in range(1, churn_rounds + 1):
+        if i % 10 == 0:
+            log.info(f"Running churn round {i}/{churn_rounds} ...")
+
+        workload_parent.churn_rows(row_count, env.pageserver.id)
+        workload_child.churn_rows(row_count, env.pageserver.id)
+
+    ps_http.detach_ancestor(tenant_id, branch_id)
+
+    log.info("Validating at workload end ...")
+    workload_parent.validate(env.pageserver.id)
+    workload_child.validate(env.pageserver.id)
+
+
+def test_timeline_detach_with_aux_files_with_detach_v1(
+    neon_env_builder: NeonEnvBuilder,
+):
+    """
+    Validate that "branches do not inherit their parent" is invariant over detach_ancestor.
+
+    Branches hide parent branch aux files etc by stopping lookup of non-inherited keyspace at the parent-child boundary.
+    We had a bug where detach_ancestor running on a child branch would copy aux files key range from child to parent,
+    thereby making parent aux files reappear.
+    """
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "gc_period": "1s",
+            "lsn_lease_length": "0s",
+        }
+    )
+
+    env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+
+    http = env.pageserver.http_client()
+
+    endpoint = env.endpoints.create_start("main", tenant_id=env.initial_tenant)
+    lsn0 = wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
+    endpoint.safe_psql(
+        "SELECT pg_create_logical_replication_slot('test_slot_parent_1', 'pgoutput')"
+    )
+    lsn1 = wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
+    endpoint.safe_psql(
+        "SELECT pg_create_logical_replication_slot('test_slot_parent_2', 'pgoutput')"
+    )
+    lsn2 = wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
+    assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn0).keys()) == set(
+        []
+    )
+    assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn1).keys()) == set(
+        ["pg_replslot/test_slot_parent_1/state"]
+    )
+    assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn2).keys()) == set(
+        ["pg_replslot/test_slot_parent_1/state", "pg_replslot/test_slot_parent_2/state"]
+    )
+
+    # Restore at LSN1
+    branch_timeline_id = env.create_branch("restore", env.initial_tenant, "main", lsn1)
+    endpoint2 = env.endpoints.create_start("restore", tenant_id=env.initial_tenant)
+    assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn1).keys()) == set([])
+
+    # Add a new slot file to the restore branch (This won't happen in reality because cplane immediately detaches the branch on restore,
+    # but we want to ensure that aux files on the detached branch are NOT inherited during ancestor detach. We could change the behavior
+    # in the future.
+    # TL;DR we should NEVER automatically detach a branch as a background optimization for those tenants that already used the restore
+    # feature before branch detach was introduced because it will clean up the aux files and stop logical replication.
+    endpoint2.safe_psql(
+        "SELECT pg_create_logical_replication_slot('test_slot_restore', 'pgoutput')"
+    )
+    lsn3 = wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, branch_timeline_id)
+    assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn1).keys()) == set([])
+    assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn3).keys()) == set(
+        ["pg_replslot/test_slot_restore/state"]
+    )
+
+    print("lsn0=", lsn0)
+    print("lsn1=", lsn1)
+    print("lsn2=", lsn2)
+    print("lsn3=", lsn3)
+    # Detach the restore branch so that main doesn't have any child branches.
+    all_reparented = http.detach_ancestor(
+        env.initial_tenant, branch_timeline_id, detach_behavior="v1"
+    )
+    assert all_reparented == set([])
+
+    # We need to ensure all safekeeper data are ingested before checking aux files: the API does not wait for LSN.
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, branch_timeline_id)
+    assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn2).keys()) == set(
+        ["pg_replslot/test_slot_parent_1/state", "pg_replslot/test_slot_parent_2/state"]
+    ), "main branch unaffected"
+    assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn3).keys()) == set(
+        ["pg_replslot/test_slot_restore/state"]
+    )
+    assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn1).keys()) == set([])
 
 
 # TODO:

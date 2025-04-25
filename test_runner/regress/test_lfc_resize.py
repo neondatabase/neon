@@ -1,33 +1,39 @@
 from __future__ import annotations
 
-import os
 import random
 import re
 import subprocess
 import threading
 import time
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, PgBin
+from fixtures.utils import USE_LFC
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv, PgBin
 
 
 @pytest.mark.timeout(600)
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
     """
     Test resizing the Local File Cache
     """
     env = neon_simple_env
+    cache_dir = env.repo_dir / "file_cache"
+    cache_dir.mkdir(exist_ok=True)
+    env.create_branch("test_lfc_resize")
     endpoint = env.endpoints.create_start(
         "main",
         config_lines=[
-            "neon.file_cache_path='file.cache'",
-            "neon.max_file_cache_size=512MB",
-            "neon.file_cache_size_limit=512MB",
+            "neon.max_file_cache_size=1GB",
+            "neon.file_cache_size_limit=1GB",
         ],
     )
     n_resize = 10
-    scale = 100
+    scale = 20
 
     def run_pgbench(connstr: str):
         log.info(f"Start a pgbench workload on pg {connstr}")
@@ -43,16 +49,42 @@ def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
     conn = endpoint.connect()
     cur = conn.cursor()
 
+    cur.execute("create extension neon")
+
+    def get_lfc_size() -> tuple[int, int]:
+        lfc_file_path = endpoint.lfc_path()
+        lfc_file_size = lfc_file_path.stat().st_size
+        res = subprocess.run(
+            ["ls", "-sk", lfc_file_path], check=True, text=True, capture_output=True
+        )
+        lfc_file_blocks = re.findall("([0-9A-F]+)", res.stdout)[0]
+        log.info(f"Size of LFC file {lfc_file_size}, blocks {lfc_file_blocks}")
+
+        return (lfc_file_size, lfc_file_blocks)
+
     # For as long as pgbench is running, twiddle the LFC size once a second.
     # Note that we launch this immediately, already while the "pgbench -i"
     # initialization step is still running. That's quite a different workload
     # than the actual pgbench benchamark run, so this gives us coverage of both.
     while thread.is_alive():
-        size = random.randint(1, 512)
+        # Vary the LFC size randomly within a range above what we will later
+        # decrease it to.  This should ensure that the final size decrease
+        # is really doing something.
+        size = random.randint(192, 512)
         cur.execute(f"alter system set neon.file_cache_size_limit='{size}MB'")
         cur.execute("select pg_reload_conf()")
         time.sleep(1)
+
     thread.join()
+
+    # Fill LFC: seqscan should fetch the whole table in cache.
+    # It is needed for further correct evaluation of LFC file size
+    # (a sparse chunk of LFC takes less than 1 MB on disk).
+    cur.execute("select sum(abalance) from pgbench_accounts")
+
+    # Before shrinking the cache, check that it really is large now
+    (lfc_file_size, lfc_file_blocks) = get_lfc_size()
+    assert int(lfc_file_blocks) > 128 * 1024
 
     # At the end, set it at 100 MB, and perform a final check that the disk usage
     # of the file is in that ballbark.
@@ -63,13 +95,7 @@ def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
     cur.execute("select pg_reload_conf()")
     nretries = 10
     while True:
-        lfc_file_path = f"{endpoint.pg_data_dir_path()}/file.cache"
-        lfc_file_size = os.path.getsize(lfc_file_path)
-        res = subprocess.run(
-            ["ls", "-sk", lfc_file_path], check=True, text=True, capture_output=True
-        )
-        lfc_file_blocks = re.findall("([0-9A-F]+)", res.stdout)[0]
-        log.info(f"Size of LFC file {lfc_file_size}, blocks {lfc_file_blocks}")
+        (lfc_file_size, lfc_file_blocks) = get_lfc_size()
         assert lfc_file_size <= 512 * 1024 * 1024
 
         if int(lfc_file_blocks) <= 128 * 1024 or nretries == 0:
@@ -79,3 +105,23 @@ def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
         time.sleep(1)
 
     assert int(lfc_file_blocks) <= 128 * 1024
+
+    # Now test that number of rows returned by local_cache is the same as file_cache_used_pages.
+    # Perform several iterations to make cache cache content stabilized.
+    nretries = 10
+    while True:
+        cur.execute("select count(*) from local_cache")
+        local_cache_size = cur.fetchall()[0][0]
+
+        cur.execute(
+            "select lfc_value::bigint FROM neon_lfc_stats where lfc_key='file_cache_used_pages'"
+        )
+        used_pages = cur.fetchall()[0][0]
+
+        if local_cache_size == used_pages or nretries == 0:
+            break
+
+        nretries = nretries - 1
+        time.sleep(1)
+
+    assert local_cache_size == used_pages

@@ -2,41 +2,41 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::env;
 use std::fmt::Display;
-use std::io;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+use std::{env, io};
 
-use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use azure_core::request_options::{IfMatchCondition, MaxResults, Metadata, Range};
-use azure_core::{Continuable, RetryOptions};
-use azure_identity::DefaultAzureCredential;
+use azure_core::{Continuable, HttpClient, RetryOptions, TransportOptions};
 use azure_storage::StorageCredentials;
-use azure_storage_blobs::blob::CopyStatus;
-use azure_storage_blobs::prelude::ClientBuilder;
-use azure_storage_blobs::{blob::operations::GetBlobBuilder, prelude::ContainerClient};
+use azure_storage_blobs::blob::operations::GetBlobBuilder;
+use azure_storage_blobs::blob::{Blob, CopyStatus};
+use azure_storage_blobs::container::operations::ListBlobsBuilder;
+use azure_storage_blobs::prelude::{ClientBuilder, ContainerClient};
 use bytes::Bytes;
+use futures::FutureExt;
 use futures::future::Either;
 use futures::stream::Stream;
-use futures_util::StreamExt;
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use http_types::{StatusCode, Url};
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use utils::backoff;
+use utils::backoff::exponential_backoff_duration_seconds;
 
-use crate::metrics::{start_measuring_requests, AttemptOutcome, RequestKind};
+use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
+use crate::config::AzureConfig;
+use crate::error::Cancelled;
+use crate::metrics::{AttemptOutcome, RequestKind, start_measuring_requests};
 use crate::{
-    config::AzureConfig, error::Cancelled, ConcurrencyLimiter, Download, DownloadError,
-    DownloadOpts, Listing, ListingMode, ListingObject, RemotePath, RemoteStorage, StorageMetadata,
-    TimeTravelError, TimeoutOrCancel,
+    ConcurrencyLimiter, Download, DownloadError, DownloadKind, DownloadOpts, Listing, ListingMode,
+    ListingObject, RemotePath, RemoteStorage, StorageMetadata, TimeTravelError, TimeoutOrCancel,
 };
 
 pub struct AzureBlobStorage {
@@ -47,10 +47,17 @@ pub struct AzureBlobStorage {
     concurrency_limiter: ConcurrencyLimiter,
     // Per-request timeout. Accessible for tests.
     pub timeout: Duration,
+
+    // Alternative timeout used for metadata objects which are expected to be small
+    pub small_timeout: Duration,
 }
 
 impl AzureBlobStorage {
-    pub fn new(azure_config: &AzureConfig, timeout: Duration) -> Result<Self> {
+    pub fn new(
+        azure_config: &AzureConfig,
+        timeout: Duration,
+        small_timeout: Duration,
+    ) -> Result<Self> {
         debug!(
             "Creating azure remote storage for azure container {}",
             azure_config.container_name
@@ -66,12 +73,18 @@ impl AzureBlobStorage {
         let credentials = if let Ok(access_key) = env::var("AZURE_STORAGE_ACCESS_KEY") {
             StorageCredentials::access_key(account.clone(), access_key)
         } else {
-            let token_credential = DefaultAzureCredential::default();
-            StorageCredentials::token_credential(Arc::new(token_credential))
+            let token_credential = azure_identity::create_default_credential()
+                .context("trying to obtain Azure default credentials")?;
+            StorageCredentials::token_credential(token_credential)
         };
 
-        // we have an outer retry
-        let builder = ClientBuilder::new(account, credentials).retry(RetryOptions::none());
+        let builder = ClientBuilder::new(account, credentials)
+            // we have an outer retry
+            .retry(RetryOptions::none())
+            // Customize transport to configure conneciton pooling
+            .transport(TransportOptions::new(Self::reqwest_client(
+                azure_config.conn_pool_size,
+            )));
 
         let client = builder.container_client(azure_config.container_name.to_owned());
 
@@ -92,15 +105,21 @@ impl AzureBlobStorage {
             max_keys_per_list_response,
             concurrency_limiter: ConcurrencyLimiter::new(azure_config.concurrency_limit.get()),
             timeout,
+            small_timeout,
         })
+    }
+
+    fn reqwest_client(conn_pool_size: usize) -> Arc<dyn HttpClient> {
+        let client = reqwest::ClientBuilder::new()
+            .pool_max_idle_per_host(conn_pool_size)
+            .build()
+            .expect("failed to build `reqwest` client");
+        Arc::new(client)
     }
 
     pub fn relative_path_to_name(&self, path: &RemotePath) -> String {
         assert_eq!(std::path::MAIN_SEPARATOR, REMOTE_STORAGE_PREFIX_SEPARATOR);
-        let path_string = path
-            .get_path()
-            .as_str()
-            .trim_end_matches(REMOTE_STORAGE_PREFIX_SEPARATOR);
+        let path_string = path.get_path().as_str();
         match &self.prefix_in_container {
             Some(prefix) => {
                 if prefix.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
@@ -134,6 +153,7 @@ impl AzureBlobStorage {
     async fn download_for_builder(
         &self,
         builder: GetBlobBuilder,
+        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         let kind = RequestKind::Get;
@@ -157,7 +177,7 @@ impl AzureBlobStorage {
                 .map_err(to_download_error);
 
             // apply per request timeout
-            let response = tokio_stream::StreamExt::timeout(response, self.timeout);
+            let response = tokio_stream::StreamExt::timeout(response, timeout);
 
             // flatten
             let response = response.map(|res| match res {
@@ -221,12 +241,145 @@ impl AzureBlobStorage {
         let started_at = ScopeGuard::into_inner(started_at);
         let outcome = match &download {
             Ok(_) => AttemptOutcome::Ok,
+            // At this level in the stack 404 and 304 responses do not indicate an error.
+            // There's expected cases when a blob may not exist or hasn't been modified since
+            // the last get (e.g. probing for timeline indices and heatmap downloads).
+            // Callers should handle errors if they are unexpected.
+            Err(DownloadError::NotFound | DownloadError::Unmodified) => AttemptOutcome::Ok,
             Err(_) => AttemptOutcome::Err,
         };
         crate::metrics::BUCKET_METRICS
             .req_seconds
             .observe_elapsed(kind, outcome, started_at);
         download
+    }
+
+    fn list_streaming_for_fn<T: Default + ListingCollector>(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+        request_kind: RequestKind,
+        customize_builder: impl Fn(ListBlobsBuilder) -> ListBlobsBuilder,
+    ) -> impl Stream<Item = Result<T, DownloadError>> {
+        // get the passed prefix or if it is not set use prefix_in_bucket value
+        let list_prefix = prefix.map(|p| self.relative_path_to_name(p)).or_else(|| {
+            self.prefix_in_container.clone().map(|mut s| {
+                if !s.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
+                    s.push(REMOTE_STORAGE_PREFIX_SEPARATOR);
+                }
+                s
+            })
+        });
+
+        async_stream::stream! {
+            let _permit = self.permit(request_kind, cancel).await?;
+
+            let mut builder = self.client.list_blobs();
+
+            if let ListingMode::WithDelimiter = mode {
+                builder = builder.delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string());
+            }
+
+            if let Some(prefix) = list_prefix {
+                builder = builder.prefix(Cow::from(prefix.to_owned()));
+            }
+
+            if let Some(limit) = self.max_keys_per_list_response {
+                builder = builder.max_results(MaxResults::new(limit));
+            }
+
+            builder = customize_builder(builder);
+
+            let mut next_marker = None;
+
+            let mut timeout_try_cnt = 1;
+
+            'outer: loop {
+                let mut builder = builder.clone();
+                if let Some(marker) = next_marker.clone() {
+                    builder = builder.marker(marker);
+                }
+                // Azure Blob Rust SDK does not expose the list blob API directly. Users have to use
+                // their pageable iterator wrapper that returns all keys as a stream. We want to have
+                // full control of paging, and therefore we only take the first item from the stream.
+                let mut response_stream = builder.into_stream();
+                let response = response_stream.next();
+                // Timeout mechanism: Azure client will sometimes stuck on a request, but retrying that request
+                // would immediately succeed. Therefore, we use exponential backoff timeout to retry the request.
+                // (Usually, exponential backoff is used to determine the sleep time between two retries.) We
+                // start with 10.0 second timeout, and double the timeout for each failure, up to 5 failures.
+                // timeout = min(5 * (1.0+1.0)^n, self.timeout).
+                let this_timeout = (5.0 * exponential_backoff_duration_seconds(timeout_try_cnt, 1.0, self.timeout.as_secs_f64())).min(self.timeout.as_secs_f64());
+                let response = tokio::time::timeout(Duration::from_secs_f64(this_timeout), response);
+                let response = response.map(|res| {
+                    match res {
+                        Ok(Some(Ok(res))) => Ok(Some(res)),
+                        Ok(Some(Err(e)))  => Err(to_download_error(e)),
+                        Ok(None) => Ok(None),
+                        Err(_elasped) => Err(DownloadError::Timeout),
+                    }
+                });
+                let mut max_keys = max_keys.map(|mk| mk.get());
+                let next_item = tokio::select! {
+                    op = response => op,
+                    _ = cancel.cancelled() => Err(DownloadError::Cancelled),
+                };
+
+                if let Err(DownloadError::Timeout) = &next_item {
+                    timeout_try_cnt += 1;
+                    if timeout_try_cnt <= 5 {
+                        continue;
+                    }
+                }
+
+                let next_item = next_item?;
+
+                // Log a warning if we saw two timeouts in a row before a successful request
+                if timeout_try_cnt > 2 {
+                    tracing::warn!("Azure Blob Storage list timed out and succeeded after {} tries", timeout_try_cnt);
+                }
+                timeout_try_cnt = 1;
+
+                let Some(entry) = next_item else {
+                    // The list is complete, so yield it.
+                    break;
+                };
+
+                let mut res = T::default();
+                next_marker = entry.continuation();
+                let prefix_iter = entry
+                    .blobs
+                    .prefixes()
+                    .map(|prefix| self.name_to_relative_path(&prefix.name));
+                res.add_prefixes(self, prefix_iter);
+
+                let blob_iter = entry
+                    .blobs
+                    .blobs();
+
+                for key in blob_iter {
+                    res.add_blob(self, key);
+
+                    if let Some(mut mk) = max_keys {
+                        assert!(mk > 0);
+                        mk -= 1;
+                        if mk == 0 {
+                            yield Ok(res); // limit reached
+                            break 'outer;
+                        }
+                        max_keys = Some(mk);
+                    }
+                }
+                yield Ok(res);
+
+                // We are done here
+                if next_marker.is_none() {
+                    break;
+                }
+            }
+        }
     }
 
     async fn permit(
@@ -244,6 +397,46 @@ impl AzureBlobStorage {
 
     pub fn container_name(&self) -> &str {
         &self.container_name
+    }
+}
+
+trait ListingCollector {
+    fn add_prefixes(&mut self, abs: &AzureBlobStorage, prefix_it: impl Iterator<Item = RemotePath>);
+    fn add_blob(&mut self, abs: &AzureBlobStorage, blob: &Blob);
+}
+
+impl ListingCollector for Listing {
+    fn add_prefixes(
+        &mut self,
+        _abs: &AzureBlobStorage,
+        prefix_it: impl Iterator<Item = RemotePath>,
+    ) {
+        self.prefixes.extend(prefix_it);
+    }
+    fn add_blob(&mut self, abs: &AzureBlobStorage, blob: &Blob) {
+        self.keys.push(ListingObject {
+            key: abs.name_to_relative_path(&blob.name),
+            last_modified: blob.properties.last_modified.into(),
+            size: blob.properties.content_length,
+        });
+    }
+}
+
+impl ListingCollector for crate::VersionListing {
+    fn add_prefixes(
+        &mut self,
+        _abs: &AzureBlobStorage,
+        _prefix_it: impl Iterator<Item = RemotePath>,
+    ) {
+        // nothing
+    }
+    fn add_blob(&mut self, abs: &AzureBlobStorage, blob: &Blob) {
+        let id = crate::VersionId(blob.version_id.clone().expect("didn't find version ID"));
+        self.versions.push(crate::Version {
+            key: abs.name_to_relative_path(&blob.name),
+            last_modified: blob.properties.last_modified.into(),
+            kind: crate::VersionKind::Version(id),
+        });
     }
 }
 
@@ -276,112 +469,39 @@ impl RemoteStorage for AzureBlobStorage {
         max_keys: Option<NonZeroU32>,
         cancel: &CancellationToken,
     ) -> impl Stream<Item = Result<Listing, DownloadError>> {
-        // get the passed prefix or if it is not set use prefix_in_bucket value
-        let list_prefix = prefix
-            .map(|p| self.relative_path_to_name(p))
-            .or_else(|| self.prefix_in_container.clone())
-            .map(|mut p| {
-                // required to end with a separator
-                // otherwise request will return only the entry of a prefix
-                if matches!(mode, ListingMode::WithDelimiter)
-                    && !p.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR)
-                {
-                    p.push(REMOTE_STORAGE_PREFIX_SEPARATOR);
-                }
-                p
-            });
+        let customize_builder = |builder| builder;
+        let kind = RequestKind::ListVersions;
+        self.list_streaming_for_fn(prefix, mode, max_keys, cancel, kind, customize_builder)
+    }
 
-        async_stream::stream! {
-            let _permit = self.permit(RequestKind::List, cancel).await?;
+    async fn list_versions(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> std::result::Result<crate::VersionListing, DownloadError> {
+        let customize_builder = |mut builder: ListBlobsBuilder| {
+            builder = builder.include_versions(true);
+            builder
+        };
+        let kind = RequestKind::ListVersions;
 
-            let mut builder = self.client.list_blobs();
-
-            if let ListingMode::WithDelimiter = mode {
-                builder = builder.delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string());
-            }
-
-            if let Some(prefix) = list_prefix {
-                builder = builder.prefix(Cow::from(prefix.to_owned()));
-            }
-
-            if let Some(limit) = self.max_keys_per_list_response {
-                builder = builder.max_results(MaxResults::new(limit));
-            }
-
-            let mut next_marker = None;
-
-            'outer: loop {
-                let mut builder = builder.clone();
-                if let Some(marker) = next_marker.clone() {
-                    builder = builder.marker(marker);
-                }
-                let response = builder.into_stream();
-                let response = response.into_stream().map_err(to_download_error);
-                let response = tokio_stream::StreamExt::timeout(response, self.timeout);
-                let response = response.map(|res| match res {
-                    Ok(res) => res,
-                    Err(_elapsed) => Err(DownloadError::Timeout),
-                });
-
-                let mut response = std::pin::pin!(response);
-
-                let mut max_keys = max_keys.map(|mk| mk.get());
-                let next_item = tokio::select! {
-                    op = response.next() => Ok(op),
-                    _ = cancel.cancelled() => Err(DownloadError::Cancelled),
-                }?;
-                let Some(entry) = next_item else {
-                    // The list is complete, so yield it.
-                    break;
-                };
-
-                let mut res = Listing::default();
-                let entry = match entry {
-                    Ok(entry) => entry,
-                    Err(e) => {
-                        // The error is potentially retryable, so we must rewind the loop after yielding.
-                        yield Err(e);
-                        continue;
-                    }
-                };
-                next_marker = entry.continuation();
-                let prefix_iter = entry
-                    .blobs
-                    .prefixes()
-                    .map(|prefix| self.name_to_relative_path(&prefix.name));
-                res.prefixes.extend(prefix_iter);
-
-                let blob_iter = entry
-                    .blobs
-                    .blobs()
-                    .map(|k| ListingObject{
-                        key: self.name_to_relative_path(&k.name),
-                        last_modified: k.properties.last_modified.into(),
-                        size: k.properties.content_length,
-                    }
-                    );
-
-                for key in blob_iter {
-                    res.keys.push(key);
-
-                    if let Some(mut mk) = max_keys {
-                        assert!(mk > 0);
-                        mk -= 1;
-                        if mk == 0 {
-                            yield Ok(res); // limit reached
-                            break 'outer;
-                        }
-                        max_keys = Some(mk);
-                    }
-                }
-                yield Ok(res);
-
-                // We are done here
-                if next_marker.is_none() {
-                    break;
-                }
-            }
+        let mut stream = std::pin::pin!(self.list_streaming_for_fn(
+            prefix,
+            mode,
+            max_keys,
+            cancel,
+            kind,
+            customize_builder
+        ));
+        let mut combined: crate::VersionListing =
+            stream.next().await.expect("At least one item required")?;
+        while let Some(list) = stream.next().await {
+            let list = list?;
+            combined.versions.extend(list.versions.into_iter());
         }
+        Ok(combined)
     }
 
     async fn head_object(
@@ -397,7 +517,7 @@ impl RemoteStorage for AzureBlobStorage {
         let blob_client = self.client.blob_client(self.relative_path_to_name(key));
         let properties_future = blob_client.get_properties().into_future();
 
-        let properties_future = tokio::time::timeout(self.timeout, properties_future);
+        let properties_future = tokio::time::timeout(self.small_timeout, properties_future);
 
         let res = tokio::select! {
             res = properties_future => res,
@@ -493,7 +613,12 @@ impl RemoteStorage for AzureBlobStorage {
         let mut builder = blob_client.get();
 
         if let Some(ref etag) = opts.etag {
-            builder = builder.if_match(IfMatchCondition::NotMatch(etag.to_string()))
+            builder = builder.if_match(IfMatchCondition::NotMatch(etag.to_string()));
+        }
+
+        if let Some(ref version_id) = opts.version_id {
+            let version_id = azure_storage_blobs::prelude::VersionId::new(version_id.0.clone());
+            builder = builder.blob_versioning(version_id);
         }
 
         if let Some((start, end)) = opts.byte_range() {
@@ -503,7 +628,12 @@ impl RemoteStorage for AzureBlobStorage {
             });
         }
 
-        self.download_for_builder(builder, cancel).await
+        let timeout = match opts.kind {
+            DownloadKind::Small => self.small_timeout,
+            DownloadKind::Large => self.timeout,
+        };
+
+        self.download_for_builder(builder, timeout, cancel).await
     }
 
     async fn delete(&self, path: &RemotePath, cancel: &CancellationToken) -> anyhow::Result<()> {
@@ -511,9 +641,9 @@ impl RemoteStorage for AzureBlobStorage {
             .await
     }
 
-    async fn delete_objects<'a>(
+    async fn delete_objects(
         &self,
-        paths: &'a [RemotePath],
+        paths: &[RemotePath],
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let kind = RequestKind::Delete;
@@ -589,6 +719,10 @@ impl RemoteStorage for AzureBlobStorage {
             .req_seconds
             .observe_elapsed(kind, &res, started_at);
         res
+    }
+
+    fn max_keys_per_delete(&self) -> usize {
+        super::MAX_KEYS_PER_DELETE_AZURE
     }
 
     async fn copy(
@@ -753,8 +887,7 @@ where
             // that support needs to be hacked in.
             //
             // including {self:?} into the message would be useful, but unsure how to unproject.
-            _ => std::task::Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            _ => std::task::Poll::Ready(Err(std::io::Error::other(
                 "cloned or initial values cannot be read",
             ))),
         }
@@ -807,7 +940,7 @@ where
         };
         Err(azure_core::error::Error::new(
             azure_core::error::ErrorKind::Io,
-            std::io::Error::new(std::io::ErrorKind::Other, msg),
+            std::io::Error::other(msg),
         ))
     }
 

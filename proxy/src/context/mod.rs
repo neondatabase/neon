@@ -8,7 +8,7 @@ use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
 use tokio::sync::mpsc;
 use tracing::field::display;
-use tracing::{debug, info, info_span, Span};
+use tracing::{Span, debug, error, info_span};
 use try_lock::TryLock;
 use uuid::Uuid;
 
@@ -17,9 +17,10 @@ use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::error::ErrorKind;
 use crate::intern::{BranchIdInt, ProjectIdInt};
 use crate::metrics::{
-    ConnectOutcome, InvalidEndpointsGroup, LatencyTimer, Metrics, Protocol, Waiting,
+    ConnectOutcome, InvalidEndpointsGroup, LatencyAccumulated, LatencyTimer, Metrics, Protocol,
+    Waiting,
 };
-use crate::protocol2::ConnectionInfo;
+use crate::protocol2::{ConnectionInfo, ConnectionInfoExtra};
 use crate::types::{DbName, EndpointId, RoleName};
 
 pub mod parquet;
@@ -32,15 +33,15 @@ pub(crate) static LOG_CHAN_DISCONNECT: OnceCell<mpsc::WeakUnboundedSender<Reques
 ///
 /// This data should **not** be used for connection logic, only for observability and limiting purposes.
 /// All connection logic should instead use strongly typed state machines, not a bunch of Options.
-pub struct RequestMonitoring(
+pub struct RequestContext(
     /// To allow easier use of the ctx object, we have interior mutability.
     /// I would typically use a RefCell but that would break the `Send` requirements
     /// so we need something with thread-safety. `TryLock` is a cheap alternative
     /// that offers similar semantics to a `RefCell` but with synchronisation.
-    TryLock<RequestMonitoringInner>,
+    TryLock<RequestContextInner>,
 );
 
-struct RequestMonitoringInner {
+struct RequestContextInner {
     pub(crate) conn_info: ConnectionInfo,
     pub(crate) session_id: Uuid,
     pub(crate) protocol: Protocol,
@@ -55,11 +56,14 @@ struct RequestMonitoringInner {
     dbname: Option<DbName>,
     user: Option<RoleName>,
     application: Option<SmolStr>,
+    user_agent: Option<SmolStr>,
     error_kind: Option<ErrorKind>,
     pub(crate) auth_method: Option<AuthMethod>,
+    jwt_issuer: Option<String>,
     success: bool,
     pub(crate) cold_start_info: ColdStartInfo,
     pg_options: Option<StartupMessageParams>,
+    testodrome_query_id: Option<SmolStr>,
 
     // extra
     // This sender is here to keep the request monitoring channel open while requests are taking place.
@@ -79,12 +83,13 @@ pub(crate) enum AuthMethod {
     ScramSha256,
     ScramSha256Plus,
     Cleartext,
+    Jwt,
 }
 
-impl Clone for RequestMonitoring {
+impl Clone for RequestContext {
     fn clone(&self) -> Self {
         let inner = self.0.try_lock().expect("should not deadlock");
-        let new = RequestMonitoringInner {
+        let new = RequestContextInner {
             conn_info: inner.conn_info.clone(),
             session_id: inner.session_id,
             protocol: inner.protocol,
@@ -98,12 +103,15 @@ impl Clone for RequestMonitoring {
             dbname: inner.dbname.clone(),
             user: inner.user.clone(),
             application: inner.application.clone(),
+            user_agent: inner.user_agent.clone(),
             error_kind: inner.error_kind,
             auth_method: inner.auth_method.clone(),
+            jwt_issuer: inner.jwt_issuer.clone(),
             success: inner.success,
             rejected: inner.rejected,
             cold_start_info: inner.cold_start_info,
             pg_options: inner.pg_options.clone(),
+            testodrome_query_id: inner.testodrome_query_id.clone(),
 
             sender: None,
             disconnect_sender: None,
@@ -115,13 +123,14 @@ impl Clone for RequestMonitoring {
     }
 }
 
-impl RequestMonitoring {
+impl RequestContext {
     pub fn new(
         session_id: Uuid,
         conn_info: ConnectionInfo,
         protocol: Protocol,
         region: &'static str,
     ) -> Self {
+        // TODO: be careful with long lived spans
         let span = info_span!(
             "connect_request",
             %protocol,
@@ -131,7 +140,7 @@ impl RequestMonitoring {
             role = tracing::field::Empty,
         );
 
-        let inner = RequestMonitoringInner {
+        let inner = RequestContextInner {
             conn_info,
             session_id,
             protocol,
@@ -145,12 +154,15 @@ impl RequestMonitoring {
             dbname: None,
             user: None,
             application: None,
+            user_agent: None,
             error_kind: None,
             auth_method: None,
+            jwt_issuer: None,
             success: false,
             rejected: None,
             cold_start_info: ColdStartInfo::Unknown,
             pg_options: None,
+            testodrome_query_id: None,
 
             sender: LOG_CHAN.get().and_then(|tx| tx.upgrade()),
             disconnect_sender: LOG_CHAN_DISCONNECT.get().and_then(|tx| tx.upgrade()),
@@ -167,7 +179,7 @@ impl RequestMonitoring {
         let ip = IpAddr::from([127, 0, 0, 1]);
         let addr = SocketAddr::new(ip, 5432);
         let conn_info = ConnectionInfo { addr, extra: None };
-        RequestMonitoring::new(Uuid::now_v7(), conn_info, Protocol::Tcp, "test")
+        RequestContext::new(Uuid::now_v7(), conn_info, Protocol::Tcp, "test")
     }
 
     pub(crate) fn console_application_name(&self) -> String {
@@ -199,6 +211,19 @@ impl RequestMonitoring {
         }
         if let Some(dbname) = options.get("database") {
             this.set_dbname(dbname.into());
+        }
+
+        // Try to get testodrome_query_id directly from parameters
+        if let Some(options_str) = options.get("options") {
+            // If not found directly, try to extract it from the options string
+            for option in options_str.split_whitespace() {
+                if option.starts_with("neon_query_id:") {
+                    if let Some(value) = option.strip_prefix("neon_query_id:") {
+                        this.set_testodrome_id(value.into());
+                        break;
+                    }
+                }
+            }
         }
 
         this.pg_options = Some(options);
@@ -240,9 +265,28 @@ impl RequestMonitoring {
             .set_user(user);
     }
 
+    pub(crate) fn set_user_agent(&self, user_agent: Option<SmolStr>) {
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .set_user_agent(user_agent);
+    }
+
+    pub(crate) fn set_testodrome_id(&self, query_id: SmolStr) {
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .set_testodrome_id(query_id);
+    }
+
     pub(crate) fn set_auth_method(&self, auth_method: AuthMethod) {
         let mut this = self.0.try_lock().expect("should not deadlock");
         this.auth_method = Some(auth_method);
+    }
+
+    pub(crate) fn set_jwt_issuer(&self, jwt_issuer: String) {
+        let mut this = self.0.try_lock().expect("should not deadlock");
+        this.jwt_issuer = Some(jwt_issuer);
     }
 
     pub fn has_private_peer_addr(&self) -> bool {
@@ -271,11 +315,14 @@ impl RequestMonitoring {
         this.success = true;
     }
 
-    pub fn log_connect(&self) {
-        self.0
-            .try_lock()
-            .expect("should not deadlock")
-            .log_connect();
+    pub fn log_connect(self) -> DisconnectLogger {
+        let mut this = self.0.into_inner();
+        this.log_connect();
+
+        // close current span.
+        this.span = Span::none();
+
+        DisconnectLogger(this)
     }
 
     pub(crate) fn protocol(&self) -> Protocol {
@@ -299,6 +346,15 @@ impl RequestMonitoring {
             .ip()
     }
 
+    pub(crate) fn extra(&self) -> Option<ConnectionInfoExtra> {
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .conn_info
+            .extra
+            .clone()
+    }
+
     pub(crate) fn cold_start_info(&self) -> ColdStartInfo {
         self.0
             .try_lock()
@@ -314,6 +370,22 @@ impl RequestMonitoring {
         }
     }
 
+    pub(crate) fn get_proxy_latency(&self) -> LatencyAccumulated {
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .latency_timer
+            .accumulated()
+    }
+
+    pub(crate) fn get_testodrome_id(&self) -> Option<SmolStr> {
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .testodrome_query_id
+            .clone()
+    }
+
     pub(crate) fn success(&self) {
         self.0
             .try_lock()
@@ -324,7 +396,7 @@ impl RequestMonitoring {
 }
 
 pub(crate) struct LatencyTimerPause<'a> {
-    ctx: &'a RequestMonitoring,
+    ctx: &'a RequestContext,
     start: tokio::time::Instant,
     waiting_for: Waiting,
 }
@@ -340,7 +412,7 @@ impl Drop for LatencyTimerPause<'_> {
     }
 }
 
-impl RequestMonitoringInner {
+impl RequestContextInner {
     fn set_cold_start_info(&mut self, info: ColdStartInfo) {
         self.cold_start_info = info;
         self.latency_timer.cold_start_info(info);
@@ -362,6 +434,10 @@ impl RequestMonitoringInner {
         }
     }
 
+    fn set_user_agent(&mut self, user_agent: Option<SmolStr>) {
+        self.user_agent = user_agent;
+    }
+
     fn set_dbname(&mut self, dbname: DbName) {
         self.dbname = Some(dbname);
     }
@@ -369,6 +445,10 @@ impl RequestMonitoringInner {
     fn set_user(&mut self, user: RoleName) {
         self.span.record("role", display(&user));
         self.user = Some(user);
+    }
+
+    fn set_testodrome_id(&mut self, query_id: SmolStr) {
+        self.testodrome_query_id = Some(query_id);
     }
 
     fn has_private_peer_addr(&self) -> bool {
@@ -384,6 +464,10 @@ impl RequestMonitoringInner {
         } else {
             ConnectOutcome::Failed
         };
+
+        // TODO: get rid of entirely/refactor
+        // check for false positives
+        // AND false negatives
         if let Some(rejected) = self.rejected {
             let ep = self
                 .endpoint_id
@@ -391,7 +475,7 @@ impl RequestMonitoringInner {
                 .map(|x| x.as_str())
                 .unwrap_or_default();
             // This makes sense only if cache is disabled
-            info!(
+            debug!(
                 ?outcome,
                 ?rejected,
                 ?ep,
@@ -406,10 +490,13 @@ impl RequestMonitoringInner {
                     outcome,
                 });
         }
+
         if let Some(tx) = self.sender.take() {
-            tx.send(RequestData::from(&*self))
-                .inspect_err(|e| debug!("tx send failed: {e}"))
-                .ok();
+            // If type changes, this error handling needs to be updated.
+            let tx: mpsc::UnboundedSender<RequestData> = tx;
+            if let Err(e) = tx.send(RequestData::from(&*self)) {
+                error!("log_connect channel send failed: {e}");
+            }
         }
     }
 
@@ -418,19 +505,27 @@ impl RequestMonitoringInner {
         // Here we log the length of the session.
         self.disconnect_timestamp = Some(Utc::now());
         if let Some(tx) = self.disconnect_sender.take() {
-            tx.send(RequestData::from(&*self))
-                .inspect_err(|e| debug!("tx send failed: {e}"))
-                .ok();
+            // If type changes, this error handling needs to be updated.
+            let tx: mpsc::UnboundedSender<RequestData> = tx;
+            if let Err(e) = tx.send(RequestData::from(&*self)) {
+                error!("log_disconnect channel send failed: {e}");
+            }
         }
     }
 }
 
-impl Drop for RequestMonitoringInner {
+impl Drop for RequestContextInner {
     fn drop(&mut self) {
         if self.sender.is_some() {
             self.log_connect();
-        } else {
-            self.log_disconnect();
         }
+    }
+}
+
+pub struct DisconnectLogger(RequestContextInner);
+
+impl Drop for DisconnectLogger {
+    fn drop(&mut self) {
+        self.0.log_disconnect();
     }
 }

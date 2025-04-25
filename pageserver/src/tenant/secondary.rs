@@ -3,39 +3,31 @@ pub mod heatmap;
 mod heatmap_uploader;
 mod scheduler;
 
-use std::{sync::Arc, time::SystemTime};
+use std::sync::Arc;
+use std::time::SystemTime;
 
-use crate::{
-    context::RequestContext,
-    disk_usage_eviction_task::DiskUsageEvictionInfo,
-    metrics::SECONDARY_HEATMAP_TOTAL_SIZE,
-    task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
-};
-
-use self::{
-    downloader::{downloader_task, SecondaryDetail},
-    heatmap_uploader::heatmap_uploader_task,
-};
-
-use super::{
-    config::{SecondaryLocationConfig, TenantConfOpt},
-    mgr::TenantManager,
-    span::debug_assert_current_span_has_tenant_id,
-    storage_layer::LayerName,
-};
-
-use crate::metrics::SECONDARY_RESIDENT_PHYSICAL_SIZE;
 use metrics::UIntGauge;
-use pageserver_api::{
-    models,
-    shard::{ShardIdentity, TenantShardId},
-};
+use pageserver_api::models;
+use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use remote_storage::GenericRemoteStorage;
-
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
-use utils::{completion::Barrier, id::TimelineId, sync::gate::Gate};
+use utils::completion::Barrier;
+use utils::id::TimelineId;
+use utils::sync::gate::Gate;
+
+use self::downloader::{SecondaryDetail, downloader_task};
+use self::heatmap_uploader::heatmap_uploader_task;
+use super::GetTenantError;
+use super::config::SecondaryLocationConfig;
+use super::mgr::TenantManager;
+use super::span::debug_assert_current_span_has_tenant_id;
+use super::storage_layer::LayerName;
+use crate::context::RequestContext;
+use crate::disk_usage_eviction_task::DiskUsageEvictionInfo;
+use crate::metrics::{SECONDARY_HEATMAP_TOTAL_SIZE, SECONDARY_RESIDENT_PHYSICAL_SIZE};
+use crate::task_mgr::{self, BACKGROUND_RUNTIME, TaskKind};
 
 enum DownloadCommand {
     Download(TenantShardId),
@@ -66,7 +58,21 @@ struct CommandRequest<T> {
 }
 
 struct CommandResponse {
-    result: anyhow::Result<()>,
+    result: Result<(), SecondaryTenantError>,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum SecondaryTenantError {
+    #[error("{0}")]
+    GetTenant(GetTenantError),
+    #[error("shutting down")]
+    ShuttingDown,
+}
+
+impl From<GetTenantError> for SecondaryTenantError {
+    fn from(gte: GetTenantError) -> Self {
+        Self::GetTenant(gte)
+    }
 }
 
 // Whereas [`Tenant`] represents an attached tenant, this type represents the work
@@ -92,11 +98,11 @@ pub(crate) struct SecondaryTenant {
 
     pub(crate) gate: Gate,
 
-    // Secondary mode does not need the full shard identity or the TenantConfOpt.  However,
+    // Secondary mode does not need the full shard identity or the pageserver_api::models::TenantConfig.  However,
     // storing these enables us to report our full LocationConf, enabling convenient reconciliation
     // by the control plane (see [`Self::get_location_conf`])
     shard_identity: ShardIdentity,
-    tenant_conf: std::sync::Mutex<TenantConfOpt>,
+    tenant_conf: std::sync::Mutex<pageserver_api::models::TenantConfig>,
 
     // Internal state used by the Downloader.
     detail: std::sync::Mutex<SecondaryDetail>,
@@ -111,20 +117,11 @@ pub(crate) struct SecondaryTenant {
     pub(super) heatmap_total_size_metric: UIntGauge,
 }
 
-impl Drop for SecondaryTenant {
-    fn drop(&mut self) {
-        let tenant_id = self.tenant_shard_id.tenant_id.to_string();
-        let shard_id = format!("{}", self.tenant_shard_id.shard_slug());
-        let _ = SECONDARY_RESIDENT_PHYSICAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
-        let _ = SECONDARY_HEATMAP_TOTAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
-    }
-}
-
 impl SecondaryTenant {
     pub(crate) fn new(
         tenant_shard_id: TenantShardId,
         shard_identity: ShardIdentity,
-        tenant_conf: TenantConfOpt,
+        tenant_conf: pageserver_api::models::TenantConfig,
         config: &SecondaryLocationConfig,
     ) -> Arc<Self> {
         let tenant_id = tenant_shard_id.tenant_id.to_string();
@@ -167,13 +164,27 @@ impl SecondaryTenant {
 
         // Wait for any secondary downloader work to complete
         self.gate.close().await;
+
+        self.validate_metrics();
+
+        // Metrics are subtracted from and/or removed eagerly.
+        // Deletions are done in the background via [`BackgroundPurges::spawn`].
+        let tenant_id = self.tenant_shard_id.tenant_id.to_string();
+        let shard_id = format!("{}", self.tenant_shard_id.shard_slug());
+        let _ = SECONDARY_RESIDENT_PHYSICAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
+        let _ = SECONDARY_HEATMAP_TOTAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
+
+        self.detail
+            .lock()
+            .unwrap()
+            .drain_timelines(&self.tenant_shard_id, &self.resident_size_metric);
     }
 
     pub(crate) fn set_config(&self, config: &SecondaryLocationConfig) {
         self.detail.lock().unwrap().config = config.clone();
     }
 
-    pub(crate) fn set_tenant_conf(&self, config: &TenantConfOpt) {
+    pub(crate) fn set_tenant_conf(&self, config: &pageserver_api::models::TenantConfig) {
         *(self.tenant_conf.lock().unwrap()) = config.clone();
     }
 
@@ -193,7 +204,7 @@ impl SecondaryTenant {
             shard_number: self.tenant_shard_id.shard_number.0,
             shard_count: self.tenant_shard_id.shard_count.literal(),
             shard_stripe_size: self.shard_identity.stripe_size.0,
-            tenant_conf: tenant_conf.into(),
+            tenant_conf,
         }
     }
 
@@ -254,6 +265,20 @@ impl SecondaryTenant {
         .await
         .expect("secondary eviction should not have panicked");
     }
+
+    /// Exhaustive check that incrementally updated metrics match the actual state.
+    #[cfg(feature = "testing")]
+    fn validate_metrics(&self) {
+        let detail = self.detail.lock().unwrap();
+        let resident_size = detail.total_resident_size();
+
+        assert_eq!(resident_size, self.resident_size_metric.get());
+    }
+
+    #[cfg(not(feature = "testing"))]
+    fn validate_metrics(&self) {
+        // No-op in non-testing builds
+    }
 }
 
 /// The SecondaryController is a pseudo-rpc client for administrative control of secondary mode downloads,
@@ -273,7 +298,7 @@ impl SecondaryController {
         &self,
         queue: &tokio::sync::mpsc::Sender<CommandRequest<T>>,
         payload: T,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), SecondaryTenantError> {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
         queue
@@ -282,20 +307,26 @@ impl SecondaryController {
                 response_tx,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("Receiver shut down"))?;
+            .map_err(|_| SecondaryTenantError::ShuttingDown)?;
 
         let response = response_rx
             .await
-            .map_err(|_| anyhow::anyhow!("Request dropped"))?;
+            .map_err(|_| SecondaryTenantError::ShuttingDown)?;
 
         response.result
     }
 
-    pub async fn upload_tenant(&self, tenant_shard_id: TenantShardId) -> anyhow::Result<()> {
+    pub(crate) async fn upload_tenant(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<(), SecondaryTenantError> {
         self.dispatch(&self.upload_req_tx, UploadCommand::Upload(tenant_shard_id))
             .await
     }
-    pub async fn download_tenant(&self, tenant_shard_id: TenantShardId) -> anyhow::Result<()> {
+    pub(crate) async fn download_tenant(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<(), SecondaryTenantError> {
         self.dispatch(
             &self.download_req_tx,
             DownloadCommand::Download(tenant_shard_id),

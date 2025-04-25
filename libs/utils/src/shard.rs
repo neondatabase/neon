@@ -1,6 +1,7 @@
 //! See `pageserver_api::shard` for description on sharding.
 
-use std::{ops::RangeInclusive, str::FromStr};
+use std::ops::RangeInclusive;
+use std::str::FromStr;
 
 use hex::FromHex;
 use serde::{Deserialize, Serialize};
@@ -59,11 +60,7 @@ impl ShardCount {
     /// This method returns the actual number of shards, i.e. if our internal value is
     /// zero, we return 1 (unsharded tenants have 1 shard).
     pub fn count(&self) -> u8 {
-        if self.0 > 0 {
-            self.0
-        } else {
-            1
-        }
+        if self.0 > 0 { self.0 } else { 1 }
     }
 
     /// The literal internal value: this is **not** the number of shards in the
@@ -117,6 +114,10 @@ impl TenantShardId {
         )
     }
 
+    pub fn range(&self) -> RangeInclusive<Self> {
+        RangeInclusive::new(*self, *self)
+    }
+
     pub fn shard_slug(&self) -> impl std::fmt::Display + '_ {
         ShardSlug(self)
     }
@@ -161,6 +162,12 @@ impl TenantShardId {
         }
 
         child_shards
+    }
+}
+
+impl std::fmt::Display for ShardNumber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
     }
 }
 

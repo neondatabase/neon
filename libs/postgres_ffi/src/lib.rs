@@ -21,7 +21,9 @@ macro_rules! postgres_ffi {
             pub mod bindings {
                 // bindgen generates bindings for a lot of stuff we don't need
                 #![allow(dead_code)]
+                #![allow(unsafe_op_in_unsafe_fn)]
                 #![allow(clippy::undocumented_unsafe_blocks)]
+                #![allow(clippy::ptr_offset_with_cast)]
 
                 use serde::{Deserialize, Serialize};
                 include!(concat!(
@@ -43,8 +45,7 @@ macro_rules! postgres_ffi {
             pub const PG_MAJORVERSION: &str = stringify!($version);
 
             // Re-export some symbols from bindings
-            pub use bindings::DBState_DB_SHUTDOWNED;
-            pub use bindings::{CheckPoint, ControlFileData, XLogRecord};
+            pub use bindings::{CheckPoint, ControlFileData, DBState_DB_SHUTDOWNED, XLogRecord};
 
             pub const ZERO_CHECKPOINT: bytes::Bytes =
                 bytes::Bytes::from_static(&[0u8; xlog_utils::SIZEOF_CHECKPOINT]);
@@ -221,20 +222,16 @@ pub mod relfile_utils;
 pub mod walrecord;
 
 // Export some widely used datatypes that are unlikely to change across Postgres versions
-pub use v14::bindings::RepOriginId;
-pub use v14::bindings::{uint32, uint64, Oid};
-pub use v14::bindings::{BlockNumber, OffsetNumber};
-pub use v14::bindings::{MultiXactId, TransactionId};
-pub use v14::bindings::{TimeLineID, TimestampTz, XLogRecPtr, XLogSegNo};
-
+pub use v14::bindings::{
+    BlockNumber, CheckPoint, ControlFileData, MultiXactId, OffsetNumber, Oid, PageHeaderData,
+    RepOriginId, TimeLineID, TimestampTz, TransactionId, XLogRecPtr, XLogRecord, XLogSegNo, uint32,
+    uint64,
+};
 // Likewise for these, although the assumption that these don't change is a little more iffy.
 pub use v14::bindings::{MultiXactOffset, MultiXactStatus};
-pub use v14::bindings::{PageHeaderData, XLogRecord};
 pub use v14::xlog_utils::{
     XLOG_SIZE_OF_XLOG_LONG_PHD, XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD,
 };
-
-pub use v14::bindings::{CheckPoint, ControlFileData};
 
 // from pg_config.h. These can be changed with configure options --with-blocksize=BLOCKSIZE and
 // --with-segsize=SEGSIZE, but assume the defaults for now.
@@ -246,13 +243,11 @@ pub const WAL_SEGMENT_SIZE: usize = 16 * 1024 * 1024;
 pub const MAX_SEND_SIZE: usize = XLOG_BLCKSZ * 16;
 
 // Export some version independent functions that are used outside of this mod
-pub use v14::xlog_utils::encode_logical_message;
-pub use v14::xlog_utils::get_current_timestamp;
-pub use v14::xlog_utils::to_pg_timestamp;
-pub use v14::xlog_utils::try_from_pg_timestamp;
-pub use v14::xlog_utils::XLogFileName;
-
 pub use v14::bindings::DBState_DB_SHUTDOWNED;
+pub use v14::xlog_utils::{
+    XLogFileName, encode_logical_message, get_current_timestamp, to_pg_timestamp,
+    try_from_pg_timestamp,
+};
 
 pub fn bkpimage_is_compressed(bimg_info: u8, version: u32) -> bool {
     dispatch_pgversion!(version, pgv::bindings::bkpimg_is_compressed(bimg_info))
@@ -278,7 +273,7 @@ pub fn generate_pg_control(
     checkpoint_bytes: &[u8],
     lsn: Lsn,
     pg_version: u32,
-) -> anyhow::Result<(Bytes, u64)> {
+) -> anyhow::Result<(Bytes, u64, bool)> {
     dispatch_pgversion!(
         pg_version,
         pgv::xlog_utils::generate_pg_control(pg_control_bytes, checkpoint_bytes, lsn),
@@ -355,8 +350,9 @@ pub fn fsm_logical_to_physical(addr: BlockNumber) -> BlockNumber {
 }
 
 pub mod waldecoder {
-    use bytes::{Buf, Bytes, BytesMut};
     use std::num::NonZeroU32;
+
+    use bytes::{Buf, Bytes, BytesMut};
     use thiserror::Error;
     use utils::lsn::Lsn;
 
@@ -398,6 +394,14 @@ pub mod waldecoder {
         // The latest LSN position fed to the decoder.
         pub fn available(&self) -> Lsn {
             self.lsn + self.inputbuf.remaining() as u64
+        }
+
+        /// Returns the LSN up to which the WAL decoder has processed.
+        ///
+        /// If [`Self::poll_decode`] returned a record, then this will return
+        /// the end LSN of said record.
+        pub fn lsn(&self) -> Lsn {
+            self.lsn
         }
 
         pub fn feed_bytes(&mut self, buf: &[u8]) {

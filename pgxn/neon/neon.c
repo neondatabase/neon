@@ -1,10 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * neon.c
- *	  Utility functions to expose neon specific information to user
- *
- * IDENTIFICATION
- *	 contrib/neon/neon.c
+ *	  Main entry point into the neon exension
  *
  *-------------------------------------------------------------------------
  */
@@ -12,10 +9,15 @@
 #include "fmgr.h"
 
 #include "miscadmin.h"
+#include "pgstat.h"
 #include "access/subtrans.h"
 #include "access/twophase.h"
 #include "access/xlog.h"
+#if PG_MAJORVERSION_NUM >= 15
+#include "access/xlogrecovery.h"
+#endif
 #include "replication/logical.h"
+#include "replication/logicallauncher.h"
 #include "replication/slot.h"
 #include "replication/walsender.h"
 #include "storage/proc.h"
@@ -26,8 +28,11 @@
 #include "utils/guc.h"
 #include "utils/guc_tables.h"
 
+#include "communicator.h"
 #include "extension_server.h"
+#include "file_cache.h"
 #include "neon.h"
+#include "neon_lwlsncache.h"
 #include "control_plane_connector.h"
 #include "logical_replication_monitor.h"
 #include "unstable_extensions.h"
@@ -52,6 +57,7 @@ uint32		WAIT_EVENT_NEON_LFC_MAINTENANCE;
 uint32		WAIT_EVENT_NEON_LFC_READ;
 uint32		WAIT_EVENT_NEON_LFC_TRUNCATE;
 uint32		WAIT_EVENT_NEON_LFC_WRITE;
+uint32		WAIT_EVENT_NEON_LFC_CV_WAIT;
 uint32		WAIT_EVENT_NEON_PS_STARTING;
 uint32		WAIT_EVENT_NEON_PS_CONFIGURING;
 uint32		WAIT_EVENT_NEON_PS_SEND;
@@ -405,6 +411,16 @@ ReportSearchPath(void)
 	}
 }
 
+#if PG_VERSION_NUM < 150000
+/*
+ * PG14 uses separate backend for stats collector having no access to shared memory.
+ * As far as AUX mechanism requires access to shared memory, persisting pgstat.stat file
+ * is not supported in PG14. And so there is no definition of neon_pgstat_file_size_limit
+ * variable, so we have to declare it here.
+ */
+static int neon_pgstat_file_size_limit;
+#endif
+
 void
 _PG_init(void)
 {
@@ -420,10 +436,12 @@ _PG_init(void)
 #endif
 
 	pg_init_libpagestore();
+	lfc_init();
 	pg_init_walproposer();
-	WalSender_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
-	LogicalFuncs_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
-	SlotFuncs_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
+	init_lwlsncache();
+
+	pg_init_communicator();
+	Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 
 	InitUnstableExtensionsSupport();
 	InitLogicalReplicationMonitor();
@@ -433,6 +451,34 @@ _PG_init(void)
 
 	restore_running_xacts_callback = RestoreRunningXactsFromClog;
 
+	DefineCustomBoolVariable(
+							"neon.disable_logical_replication_subscribers",
+							"Disables incomming logical replication",
+							NULL,
+							&disable_logical_replication_subscribers,
+							false,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+	DefineCustomBoolVariable(
+							"neon.disable_wal_prevlink_checks",
+							"Disable validation of prev link in WAL records",
+							NULL,
+							&disable_wal_prev_lsn_checks,
+							false,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+							"neon.allow_replica_misconfig",
+							"Allow replica startup when some critical GUCs have smaller value than on primary node",
+							NULL,
+							&allowReplicaMisconfig,
+							true,
+							PGC_POSTMASTER,
+							0,
+							NULL, NULL, NULL);
 
 	DefineCustomEnumVariable(
 							"neon.running_xacts_overflow_policy",
@@ -443,6 +489,15 @@ _PG_init(void)
 							running_xacts_overflow_policies,
 							PGC_POSTMASTER,
 							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("neon.pgstat_file_size_limit",
+							"Maximal size of pgstat.stat file saved in Neon storage",
+							"Zero value disables persisting pgstat.stat file",
+							&neon_pgstat_file_size_limit,
+							0, 0, 1000000, /* disabled by default */
+							PGC_SIGHUP,
+							GUC_UNIT_KB,
 							NULL, NULL, NULL);
 
 	/*
@@ -517,6 +572,7 @@ neon_shmem_startup_hook(void)
 	WAIT_EVENT_NEON_LFC_READ = WaitEventExtensionNew("Neon/FileCache_Read");
 	WAIT_EVENT_NEON_LFC_TRUNCATE = WaitEventExtensionNew("Neon/FileCache_Truncate");
 	WAIT_EVENT_NEON_LFC_WRITE = WaitEventExtensionNew("Neon/FileCache_Write");
+	WAIT_EVENT_NEON_LFC_CV_WAIT = WaitEventExtensionNew("Neon/FileCache_CvWait");
 	WAIT_EVENT_NEON_PS_STARTING = WaitEventExtensionNew("Neon/PS_Starting");
 	WAIT_EVENT_NEON_PS_CONFIGURING = WaitEventExtensionNew("Neon/PS_Configuring");
 	WAIT_EVENT_NEON_PS_SEND = WaitEventExtensionNew("Neon/PS_SendIO");

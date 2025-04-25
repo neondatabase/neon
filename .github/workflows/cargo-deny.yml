@@ -1,0 +1,69 @@
+name: cargo deny checks
+
+on:
+  workflow_call:
+    inputs:
+      build-tools-image:
+        required: false
+        type: string
+  schedule:
+    - cron: '0 10 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-deny:
+    strategy:
+      matrix:
+        ref: >-
+          ${{
+            fromJSON(
+              github.event_name == 'schedule'
+                && '["main","release","release-proxy","release-compute"]'
+                || format('["{0}"]', github.sha)
+            )
+          }}
+
+    runs-on: [self-hosted, small]
+
+    permissions:
+      packages: read
+
+    container:
+      image: ${{ inputs.build-tools-image || 'ghcr.io/neondatabase/build-tools:pinned' }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --init
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ matrix.ref }}
+
+      - name: Check rust licenses/bans/advisories/sources
+        env:
+          CARGO_DENY_TARGET: >-
+            ${{ github.event_name == 'schedule' && 'advisories' || 'all' }}
+        run: cargo deny check --hide-inclusion-graph $CARGO_DENY_TARGET
+
+      - name: Post to a Slack channel
+        if: ${{ github.event_name == 'schedule' && failure() }}
+        uses: slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d # v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ vars.SLACK_ON_CALL_DEVPROD_STREAM }}
+            text: |
+              Periodic cargo-deny on ${{ matrix.ref }}: ${{ job.status }}
+              <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+              Fixing the problem should be fairly straight forward from the logs. If not, <#${{ vars.SLACK_RUST_CHANNEL_ID }}> is there to help.
+              Pinging <!subteam^S0838JPSH32|@oncall-devprod>.

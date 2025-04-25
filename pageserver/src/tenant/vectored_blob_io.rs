@@ -26,15 +26,15 @@ use utils::lsn::Lsn;
 use utils::vec_map::VecMap;
 
 use crate::context::RequestContext;
-use crate::tenant::blob_io::{BYTE_UNCOMPRESSED, BYTE_ZSTD, LEN_COMPRESSION_BIT_MASK};
-use crate::virtual_file::IoBufferMut;
-use crate::virtual_file::{self, VirtualFile};
+use crate::tenant::blob_io::{BYTE_UNCOMPRESSED, BYTE_ZSTD, Header};
+use crate::virtual_file::{self, IoBufferMut, VirtualFile};
 
 /// Metadata bundled with the start and end offset of a blob.
 #[derive(Copy, Clone, Debug)]
 pub struct BlobMeta {
     pub key: Key,
     pub lsn: Lsn,
+    pub will_init: bool,
 }
 
 /// A view into the vectored blobs read buffer.
@@ -111,18 +111,20 @@ impl From<Bytes> for BufView<'_> {
 pub struct VectoredBlob {
     /// Blob metadata.
     pub meta: BlobMeta,
-    /// Start offset.
-    start: usize,
+    /// Header start offset.
+    header_start: usize,
+    /// Data start offset.
+    data_start: usize,
     /// End offset.
     end: usize,
-    /// Compression used on the the blob.
+    /// Compression used on the data, extracted from the header.
     compression_bits: u8,
 }
 
 impl VectoredBlob {
     /// Reads a decompressed view of the blob.
     pub(crate) async fn read<'a>(&self, buf: &BufView<'a>) -> Result<BufView<'a>, std::io::Error> {
-        let view = buf.view(self.start..self.end);
+        let view = buf.view(self.data_start..self.end);
 
         match self.compression_bits {
             BYTE_UNCOMPRESSED => Ok(view),
@@ -138,11 +140,19 @@ impl VectoredBlob {
             bits => {
                 let error = std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("Failed to decompress blob for {}@{}, {}..{}: invalid compression byte {bits:x}", self.meta.key, self.meta.lsn, self.start, self.end),
+                    format!(
+                        "Failed to decompress blob for {}@{}, {}..{}: invalid compression byte {bits:x}",
+                        self.meta.key, self.meta.lsn, self.data_start, self.end
+                    ),
                 );
                 Err(error)
             }
         }
+    }
+
+    /// Returns the raw blob including header.
+    pub(crate) fn raw_with_header<'a>(&self, buf: &BufView<'a>) -> BufView<'a> {
+        buf.view(self.header_start..self.end)
     }
 }
 
@@ -151,7 +161,7 @@ impl std::fmt::Display for VectoredBlob {
         write!(
             f,
             "{}@{}, {}..{}",
-            self.meta.key, self.meta.lsn, self.start, self.end
+            self.meta.key, self.meta.lsn, self.data_start, self.end
         )
     }
 }
@@ -310,7 +320,15 @@ pub enum BlobFlag {
 /// * Iterate over the collected blobs and coalesce them into reads at the end
 pub struct VectoredReadPlanner {
     // Track all the blob offsets. Start offsets must be ordered.
-    blobs: BTreeMap<Key, Vec<(Lsn, u64, u64)>>,
+    // Values in the value tuples are:
+    // (
+    //   lsn of the blob,
+    //   start offset of the blob in the underlying file,
+    //   end offset of the blob in the underlying file,
+    //   whether the blob initializes the page image or not
+    //   see [`pageserver_api::record::NeonWalRecord::will_init`]
+    // )
+    blobs: BTreeMap<Key, Vec<(Lsn, u64, u64, bool)>>,
     // Arguments for previous blob passed into [`VectoredReadPlanner::handle`]
     prev: Option<(Key, Lsn, u64, BlobFlag)>,
 
@@ -371,12 +389,12 @@ impl VectoredReadPlanner {
         match flag {
             BlobFlag::None => {
                 let blobs_for_key = self.blobs.entry(key).or_default();
-                blobs_for_key.push((lsn, start_offset, end_offset));
+                blobs_for_key.push((lsn, start_offset, end_offset, false));
             }
             BlobFlag::ReplaceAll => {
                 let blobs_for_key = self.blobs.entry(key).or_default();
                 blobs_for_key.clear();
-                blobs_for_key.push((lsn, start_offset, end_offset));
+                blobs_for_key.push((lsn, start_offset, end_offset, true));
             }
             BlobFlag::Ignore => {}
         }
@@ -387,11 +405,17 @@ impl VectoredReadPlanner {
         let mut reads = Vec::new();
 
         for (key, blobs_for_key) in self.blobs {
-            for (lsn, start_offset, end_offset) in blobs_for_key {
+            for (lsn, start_offset, end_offset, will_init) in blobs_for_key {
                 let extended = match &mut current_read_builder {
-                    Some(read_builder) => {
-                        read_builder.extend(start_offset, end_offset, BlobMeta { key, lsn })
-                    }
+                    Some(read_builder) => read_builder.extend(
+                        start_offset,
+                        end_offset,
+                        BlobMeta {
+                            key,
+                            lsn,
+                            will_init,
+                        },
+                    ),
                     None => VectoredReadExtended::No,
                 };
 
@@ -399,7 +423,11 @@ impl VectoredReadPlanner {
                     let next_read_builder = ChunkedVectoredReadBuilder::new(
                         start_offset,
                         end_offset,
-                        BlobMeta { key, lsn },
+                        BlobMeta {
+                            key,
+                            lsn,
+                            will_init,
+                        },
                         self.max_read_size,
                     );
 
@@ -472,50 +500,30 @@ impl<'a> VectoredBlobReader<'a> {
 
         let blobs_at = read.blobs_at.as_slice();
 
-        let start_offset = read.start;
-
-        let mut metas = Vec::with_capacity(blobs_at.len());
+        let mut blobs = Vec::with_capacity(blobs_at.len());
         // Blobs in `read` only provide their starting offset. The end offset
         // of a blob is implicit: the start of the next blob if one exists
         // or the end of the read.
 
-        for (blob_start, meta) in blobs_at {
-            let blob_start_in_buf = blob_start - start_offset;
-            let first_len_byte = buf[blob_start_in_buf as usize];
+        for (blob_start, meta) in blobs_at.iter().copied() {
+            let header_start = (blob_start - read.start) as usize;
+            let header = Header::decode(&buf[header_start..]).map_err(|anyhow_err| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, anyhow_err)
+            })?;
+            let data_start = header_start + header.header_len;
+            let end = data_start + header.data_len;
+            let compression_bits = header.compression_bits;
 
-            // Each blob is prefixed by a header containing its size and compression information.
-            // Extract the size and skip that header to find the start of the data.
-            // The size can be 1 or 4 bytes. The most significant bit is 0 in the
-            // 1 byte case and 1 in the 4 byte case.
-            let (size_length, blob_size, compression_bits) = if first_len_byte < 0x80 {
-                (1, first_len_byte as u64, BYTE_UNCOMPRESSED)
-            } else {
-                let mut blob_size_buf = [0u8; 4];
-                let offset_in_buf = blob_start_in_buf as usize;
-
-                blob_size_buf.copy_from_slice(&buf[offset_in_buf..offset_in_buf + 4]);
-                blob_size_buf[0] &= !LEN_COMPRESSION_BIT_MASK;
-
-                let compression_bits = first_len_byte & LEN_COMPRESSION_BIT_MASK;
-                (
-                    4,
-                    u32::from_be_bytes(blob_size_buf) as u64,
-                    compression_bits,
-                )
-            };
-
-            let start = (blob_start_in_buf + size_length) as usize;
-            let end = start + blob_size as usize;
-
-            metas.push(VectoredBlob {
-                start,
+            blobs.push(VectoredBlob {
+                header_start,
+                data_start,
                 end,
-                meta: *meta,
+                meta,
                 compression_bits,
             });
         }
 
-        Ok(VectoredBlobsBuf { buf, blobs: metas })
+        Ok(VectoredBlobsBuf { buf, blobs })
     }
 }
 
@@ -527,7 +535,7 @@ impl<'a> VectoredBlobReader<'a> {
 pub struct StreamingVectoredReadPlanner {
     read_builder: Option<ChunkedVectoredReadBuilder>,
     // Arguments for previous blob passed into [`StreamingVectoredReadPlanner::handle`]
-    prev: Option<(Key, Lsn, u64)>,
+    prev: Option<(Key, Lsn, u64, bool)>,
     /// Max read size per batch. This is not a strict limit. If there are [0, 100) and [100, 200), while the `max_read_size` is 150,
     /// we will produce a single batch instead of split them.
     max_read_size: u64,
@@ -550,27 +558,47 @@ impl StreamingVectoredReadPlanner {
         }
     }
 
-    pub fn handle(&mut self, key: Key, lsn: Lsn, offset: u64) -> Option<VectoredRead> {
+    pub fn handle(
+        &mut self,
+        key: Key,
+        lsn: Lsn,
+        offset: u64,
+        will_init: bool,
+    ) -> Option<VectoredRead> {
         // Implementation note: internally lag behind by one blob such that
         // we have a start and end offset when initialising [`VectoredRead`]
-        let (prev_key, prev_lsn, prev_offset) = match self.prev {
+        let (prev_key, prev_lsn, prev_offset, prev_will_init) = match self.prev {
             None => {
-                self.prev = Some((key, lsn, offset));
+                self.prev = Some((key, lsn, offset, will_init));
                 return None;
             }
             Some(prev) => prev,
         };
 
-        let res = self.add_blob(prev_key, prev_lsn, prev_offset, offset, false);
+        let res = self.add_blob(
+            prev_key,
+            prev_lsn,
+            prev_offset,
+            offset,
+            false,
+            prev_will_init,
+        );
 
-        self.prev = Some((key, lsn, offset));
+        self.prev = Some((key, lsn, offset, will_init));
 
         res
     }
 
     pub fn handle_range_end(&mut self, offset: u64) -> Option<VectoredRead> {
-        let res = if let Some((prev_key, prev_lsn, prev_offset)) = self.prev {
-            self.add_blob(prev_key, prev_lsn, prev_offset, offset, true)
+        let res = if let Some((prev_key, prev_lsn, prev_offset, prev_will_init)) = self.prev {
+            self.add_blob(
+                prev_key,
+                prev_lsn,
+                prev_offset,
+                offset,
+                true,
+                prev_will_init,
+            )
         } else {
             None
         };
@@ -587,10 +615,19 @@ impl StreamingVectoredReadPlanner {
         start_offset: u64,
         end_offset: u64,
         is_last_blob_in_read: bool,
+        will_init: bool,
     ) -> Option<VectoredRead> {
         match &mut self.read_builder {
             Some(read_builder) => {
-                let extended = read_builder.extend(start_offset, end_offset, BlobMeta { key, lsn });
+                let extended = read_builder.extend(
+                    start_offset,
+                    end_offset,
+                    BlobMeta {
+                        key,
+                        lsn,
+                        will_init,
+                    },
+                );
                 assert_eq!(extended, VectoredReadExtended::Yes);
             }
             None => {
@@ -598,7 +635,11 @@ impl StreamingVectoredReadPlanner {
                     Some(ChunkedVectoredReadBuilder::new_streaming(
                         start_offset,
                         end_offset,
-                        BlobMeta { key, lsn },
+                        BlobMeta {
+                            key,
+                            lsn,
+                            will_init,
+                        },
                     ))
                 };
             }
@@ -623,14 +664,12 @@ impl StreamingVectoredReadPlanner {
 
 #[cfg(test)]
 mod tests {
-    use anyhow::Error;
-
-    use crate::context::DownloadBehavior;
-    use crate::page_cache::PAGE_SZ;
-    use crate::task_mgr::TaskKind;
 
     use super::super::blob_io::tests::{random_array, write_maybe_compressed};
     use super::*;
+    use crate::context::DownloadBehavior;
+    use crate::page_cache::PAGE_SZ;
+    use crate::task_mgr::TaskKind;
 
     fn validate_read(read: &VectoredRead, offset_range: &[(Key, Lsn, u64, BlobFlag)]) {
         const ALIGN: u64 = virtual_file::get_io_buffer_alignment() as u64;
@@ -812,7 +851,7 @@ mod tests {
         let mut planner = StreamingVectoredReadPlanner::new(max_read_size, 1000);
         let mut reads = Vec::new();
         for (key, lsn, offset, _) in blob_descriptions.clone() {
-            reads.extend(planner.handle(key, lsn, offset));
+            reads.extend(planner.handle(key, lsn, offset, false));
         }
         reads.extend(planner.handle_range_end(652 * 1024));
 
@@ -850,7 +889,7 @@ mod tests {
         let mut planner = StreamingVectoredReadPlanner::new(max_read_size, 2);
         let mut reads = Vec::new();
         for (key, lsn, offset, _) in blob_descriptions.clone() {
-            reads.extend(planner.handle(key, lsn, offset));
+            reads.extend(planner.handle(key, lsn, offset, false));
         }
         reads.extend(planner.handle_range_end(652 * 1024));
 
@@ -875,7 +914,7 @@ mod tests {
         {
             let mut planner = StreamingVectoredReadPlanner::new(max_read_size, 1);
             let mut reads = Vec::new();
-            reads.extend(planner.handle(key, lsn, 0));
+            reads.extend(planner.handle(key, lsn, 0, false));
             reads.extend(planner.handle_range_end(652 * 1024));
             assert_eq!(reads.len(), 1);
             validate_read(&reads[0], &[(key, lsn, 0, BlobFlag::None)]);
@@ -883,8 +922,8 @@ mod tests {
         {
             let mut planner = StreamingVectoredReadPlanner::new(max_read_size, 1);
             let mut reads = Vec::new();
-            reads.extend(planner.handle(key, lsn, 0));
-            reads.extend(planner.handle(key, lsn, 128 * 1024));
+            reads.extend(planner.handle(key, lsn, 0, false));
+            reads.extend(planner.handle(key, lsn, 128 * 1024, false));
             reads.extend(planner.handle_range_end(652 * 1024));
             assert_eq!(reads.len(), 2);
             validate_read(&reads[0], &[(key, lsn, 0, BlobFlag::None)]);
@@ -893,8 +932,8 @@ mod tests {
         {
             let mut planner = StreamingVectoredReadPlanner::new(max_read_size, 2);
             let mut reads = Vec::new();
-            reads.extend(planner.handle(key, lsn, 0));
-            reads.extend(planner.handle(key, lsn, 128 * 1024));
+            reads.extend(planner.handle(key, lsn, 0, false));
+            reads.extend(planner.handle(key, lsn, 128 * 1024, false));
             reads.extend(planner.handle_range_end(652 * 1024));
             assert_eq!(reads.len(), 1);
             validate_read(
@@ -907,12 +946,16 @@ mod tests {
         }
     }
 
-    async fn round_trip_test_compressed(blobs: &[Vec<u8>], compression: bool) -> Result<(), Error> {
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+    async fn round_trip_test_compressed(
+        blobs: &[Vec<u8>],
+        compression: bool,
+    ) -> anyhow::Result<()> {
+        let ctx =
+            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
         let (_temp_dir, pathbuf, offsets) =
-            write_maybe_compressed::<true>(blobs, compression, &ctx).await?;
+            write_maybe_compressed(blobs, compression, &ctx).await?;
 
-        let file = VirtualFile::open(&pathbuf, &ctx).await?;
+        let file = VirtualFile::open_v2(&pathbuf, &ctx).await?;
         let file_len = std::fs::metadata(&pathbuf)?.len();
 
         // Multiply by two (compressed data might need more space), and add a few bytes for the header
@@ -923,6 +966,7 @@ mod tests {
         let meta = BlobMeta {
             key: Key::MIN,
             lsn: Lsn(0),
+            will_init: false,
         };
 
         for (idx, (blob, offset)) in blobs.iter().zip(offsets.iter()).enumerate() {
@@ -942,13 +986,22 @@ mod tests {
                 &read_buf[..],
                 "mismatch for idx={idx} at offset={offset}"
             );
+
+            // Check that raw_with_header returns a valid header.
+            let raw = read_blob.raw_with_header(&view);
+            let header = Header::decode(&raw)?;
+            if !compression || header.header_len == 1 {
+                assert_eq!(header.compression_bits, BYTE_UNCOMPRESSED);
+            }
+            assert_eq!(raw.len(), header.total_len());
+
             buf = result.buf;
         }
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_really_big_array() -> Result<(), Error> {
+    async fn test_really_big_array() -> anyhow::Result<()> {
         let blobs = &[
             b"test".to_vec(),
             random_array(10 * PAGE_SZ),
@@ -963,7 +1016,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_arrays_inc() -> Result<(), Error> {
+    async fn test_arrays_inc() -> anyhow::Result<()> {
         let blobs = (0..PAGE_SZ / 8)
             .map(|v| random_array(v * 16))
             .collect::<Vec<_>>();

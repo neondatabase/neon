@@ -26,14 +26,14 @@
 //! file size, the file will still be considered to be part of L0 at the next
 //! iteration.
 
-use anyhow::bail;
 use std::collections::BTreeSet;
 use std::ops::Range;
+
+use anyhow::bail;
+use tracing::{info, trace};
 use utils::lsn::Lsn;
 
 use crate::interface::*;
-
-use tracing::{info, trace};
 
 pub struct Level<L> {
     pub lsn_range: Range<Lsn>,
@@ -60,7 +60,11 @@ where
         if l.lsn_range().start < end_lsn && l.lsn_range().end > end_lsn {
             // shouldn't happen. Indicates that the caller passed a bogus
             // end_lsn.
-            bail!("identify_level() called with end_lsn that does not partition the LSN space: end_lsn {} intersects with layer {}", end_lsn, l.short_id());
+            bail!(
+                "identify_level() called with end_lsn that does not partition the LSN space: end_lsn {} intersects with layer {}",
+                end_lsn,
+                l.short_id()
+            );
         }
         // include image layers sitting exacty at `end_lsn`.
         let is_image = !l.is_delta();
@@ -224,9 +228,8 @@ impl<L> Level<L> {
             }
 
             // recalculate depth if this was the last event at this point
-            let more_events_at_this_key = events_iter
-                .peek()
-                .map_or(false, |next_e| next_e.key == e.key);
+            let more_events_at_this_key =
+                events_iter.peek().is_some_and(|next_e| next_e.key == e.key);
             if !more_events_at_this_key {
                 let mut active_depth = 0;
                 for (_end_lsn, is_image, _idx) in active_set.iter().rev() {
@@ -247,9 +250,10 @@ impl<L> Level<L> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
     use crate::simulator::{Key, MockDeltaLayer, MockImageLayer, MockLayer};
-    use std::sync::{Arc, Mutex};
 
     fn delta(key_range: Range<Key>, lsn_range: Range<Lsn>) -> MockLayer {
         MockLayer::Delta(Arc::new(MockDeltaLayer {

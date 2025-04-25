@@ -5,15 +5,16 @@ use pq_proto::{
 };
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::auth::endpoint_sni;
-use crate::config::{TlsConfig, PG_ALPN_PROTOCOL};
-use crate::context::RequestMonitoring;
+use crate::config::TlsConfig;
+use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::Metrics;
 use crate::proxy::ERR_INSECURE_CONNECTION;
 use crate::stream::{PqStream, Stream, StreamUpgradeError};
+use crate::tls::PG_ALPN_PROTOCOL;
 
 #[derive(Error, Debug)]
 pub(crate) enum HandshakeError {
@@ -66,7 +67,7 @@ pub(crate) enum HandshakeData<S> {
 /// we also take an extra care of propagating only the select handshake errors to client.
 #[tracing::instrument(skip_all)]
 pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
-    ctx: &RequestMonitoring,
+    ctx: &RequestContext,
     stream: S,
     mut tls: Option<&TlsConfig>,
     record_handshake_error: bool,
@@ -113,7 +114,7 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 
                         let mut read_buf = read_buf.reader();
                         let mut res = Ok(());
-                        let accept = tokio_rustls::TlsAcceptor::from(tls.to_server_config())
+                        let accept = tokio_rustls::TlsAcceptor::from(tls.pg_config.clone())
                             .accept_with(raw, |session| {
                                 // push the early data to the tls session
                                 while !read_buf.get_ref().is_empty() {
@@ -195,10 +196,16 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 // OR we didn't provide it at all (for dev purposes).
                 if tls.is_some() {
                     return stream
-                        .throw_error_str(ERR_INSECURE_CONNECTION, crate::error::ErrorKind::User)
+                        .throw_error_str(
+                            ERR_INSECURE_CONNECTION,
+                            crate::error::ErrorKind::User,
+                            None,
+                        )
                         .await?;
                 }
 
+                // This log highlights the start of the connection.
+                // This contains useful information for debugging, not logged elsewhere, like role name and endpoint id.
                 info!(
                     ?version,
                     ?params,
@@ -211,7 +218,7 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
             FeStartupPacket::StartupMessage { params, version }
                 if version.major() == 3 && version > PG_PROTOCOL_LATEST =>
             {
-                warn!(?version, "unsupported minor version");
+                debug!(?version, "unsupported minor version");
 
                 // no protocol extensions are supported.
                 // <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/backend/tcop/backend_startup.c#L744-L753>
@@ -233,14 +240,16 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 
                 info!(
                     ?version,
+                    ?params,
                     session_type = "normal",
                     "successful handshake; unsupported minor version requested"
                 );
                 break Ok(HandshakeData::Startup(stream, params));
             }
-            FeStartupPacket::StartupMessage { version, .. } => {
+            FeStartupPacket::StartupMessage { version, params } => {
                 warn!(
                     ?version,
+                    ?params,
                     session_type = "normal",
                     "unsuccessful handshake; unsupported version"
                 );
