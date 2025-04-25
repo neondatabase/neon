@@ -142,7 +142,7 @@ typedef struct PrewarmWorkerState
 {
 	uint32		prewarmed_pages;
 	uint32		skipped_pages;
-	BackgroundWorkerHandle *handle;
+	TimestampTz completed;
 } PrewarmWorkerState;
 
 typedef struct FileCacheControl
@@ -690,6 +690,8 @@ lfc_prewarm(FileCacheState* fcs, uint32 n_workers)
 	size_t prewarm_batch = Min(lfc_prewarm_batch, readahead_buffer_size);
 	size_t fcs_size;
 	dsm_segment *seg;
+	BackgroundWorkerHandle* bgw_handle[MAX_PREWARM_WORKERS];
+
 
 	if (!lfc_ensure_opened())
 		return;
@@ -778,11 +780,11 @@ lfc_prewarm(FileCacheState* fcs, uint32 n_workers)
 		/* must set notify PID to wait for shutdown */
 		worker.bgw_notify_pid = MyProcPid;
 
-		if (!RegisterDynamicBackgroundWorker(&worker, &lfc_ctl->prewarm_workers[i].handle))
+		if (!RegisterDynamicBackgroundWorker(&worker, &bgw_handle[i]))
 		{
 			ereport(LOG,
 					(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
-					 errmsg("registering dynamic bgworker prewarm failed"),
+					 errmsg("LFC: registering dynamic bgworker prewarm failed"),
 					 errhint("Consider increasing the configuration parameter \"%s\".", "max_worker_processes")));
 			n_workers = i;
 			lfc_ctl->prewarm_canceled = true;
@@ -792,8 +794,18 @@ lfc_prewarm(FileCacheState* fcs, uint32 n_workers)
 
 	for (uint32 i = 0; i < n_workers; i++)
 	{
-		WaitForBackgroundWorkerShutdown(lfc_ctl->prewarm_workers[i].handle);
-		lfc_ctl->prewarm_workers[i].handle = NULL;
+		BgwHandleStatus status = WaitForBackgroundWorkerShutdown(bgw_handle[i]);
+		if (status != BGWH_STOPPED && status != BGWH_POSTMASTER_DIED)
+		{
+			elog(LOG, "LFC: Unexpected status of prewarm worker termination: %d", status);
+		}
+		if (!lfc_ctl->prewarm_workers[i].completed)
+		{
+			/* Background worker doesn't set completion time: it means that it was abnormally terminated */
+			elog(LOG, "LFC: prewarm worker %d failed", i+1);
+			/* Set completion time to prevent get_prewarm_info from considering this worker as active */
+			lfc_ctl->prewarm_workers[i].completed = GetCurrentTimestamp();
+		}
 	}
 	dsm_detach(seg);
 
@@ -801,8 +813,6 @@ lfc_prewarm(FileCacheState* fcs, uint32 n_workers)
 	lfc_ctl->prewarm_active = false;
 	LWLockRelease(lfc_lock);
 }
-
-PGDLLEXPORT void lfc_prewarm_main(Datum main_arg);
 
 void
 lfc_prewarm_main(Datum main_arg)
@@ -905,6 +915,7 @@ lfc_prewarm_main(Datum main_arg)
 	}
 	Assert(n_sent == n_received);
 	elog(LOG, "LFC: worker %d complete prewarming: loaded %ld pages", worker_id, (long)n_received);
+	lfc_ctl->prewarm_workers[worker_id].completed = GetCurrentTimestamp();
 }
 
 
@@ -2155,7 +2166,7 @@ get_prewarm_info(PG_FUNCTION_ARGS)
 		PrewarmWorkerState* ws = &lfc_ctl->prewarm_workers[i];
 		prewarmed_pages += ws->prewarmed_pages;
 		skipped_pages += ws->skipped_pages;
-		active_workers += ws->handle != NULL;
+		active_workers += ws->completed != 0;
 	}
 	LWLockRelease(lfc_lock);
 
