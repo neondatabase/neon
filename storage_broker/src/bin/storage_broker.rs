@@ -822,7 +822,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             if let Err(e) = res {
-                info!(%is_https, "error serving HTTP connection from {addr}: {e}");
+                info!(%is_https, "error serving connection from {addr}: {e}");
             }
         });
     }

@@ -1787,6 +1787,7 @@ async fn handle_storage_broker(subcmd: &StorageBrokerCmd, env: &local_env::Local
         }
 
         StorageBrokerCmd::Stop(_args) => {
+            // FIXME: stop_mode unused
             let storage_broker = StorageBroker::from_env(env);
             if let Err(e) = storage_broker.stop() {
                 eprintln!("broker stop failed: {e}");
