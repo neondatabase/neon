@@ -3867,6 +3867,8 @@ pub mod tokio_epoll_uring {
     use metrics::{Histogram, LocalHistogram, UIntGauge, register_histogram, register_int_counter};
     use once_cell::sync::Lazy;
 
+    use crate::virtual_file::io_engine::TokioEpollUringExtThreadLocalStateId;
+
     /// Shared storage for tokio-epoll-uring thread local metrics.
     pub(crate) static THREAD_LOCAL_METRICS_STORAGE: Lazy<ThreadLocalMetricsStorage> =
         Lazy::new(|| {
@@ -3886,7 +3888,7 @@ pub mod tokio_epoll_uring {
 
     pub struct ThreadLocalMetricsStorage {
         /// List of thread local metrics observers.
-        observers: Mutex<HashMap<u64, Arc<ThreadLocalMetrics>>>,
+        observers: Mutex<HashMap<TokioEpollUringExtThreadLocalStateId, Arc<ThreadLocalMetrics>>>,
         /// A histogram shared between all thread local systems
         /// for collecting slots submission queue depth.
         slots_submission_queue_depth: Histogram,
@@ -3908,7 +3910,10 @@ pub mod tokio_epoll_uring {
 
     impl ThreadLocalMetricsStorage {
         /// Registers a new thread local system. Returns a thread local metrics observer.
-        pub fn register_system(&self, id: u64) -> Arc<ThreadLocalMetrics> {
+        pub fn register_system(
+            &self,
+            id: TokioEpollUringExtThreadLocalStateId,
+        ) -> Arc<ThreadLocalMetrics> {
             let per_system_metrics = Arc::new(ThreadLocalMetrics::new(
                 self.slots_submission_queue_depth.local(),
             ));
@@ -3919,7 +3924,7 @@ pub mod tokio_epoll_uring {
 
         /// Removes metrics observer for a thread local system.
         /// This should be called before dropping a thread local system.
-        pub fn remove_system(&self, id: u64) {
+        pub fn remove_system(&self, id: TokioEpollUringExtThreadLocalStateId) {
             let mut g = self.observers.lock().unwrap();
             g.remove(&id);
         }
