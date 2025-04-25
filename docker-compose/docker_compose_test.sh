@@ -9,7 +9,7 @@
 # to verify custom image builds (e.g pre-published ones).
 #
 # A test script for postgres extensions
-# Currently supports only v16
+# Currently supports only v16+
 #
 set -eux -o pipefail
 
