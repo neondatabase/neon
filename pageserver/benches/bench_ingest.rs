@@ -22,7 +22,7 @@ use wal_decoder::serialized_batch::SerializedValueBatch;
 // A very cheap hash for generating non-sequential keys.
 fn murmurhash32(mut h: u32) -> u32 {
     h ^= h >> 16;
-    h = h.wrapping_mul(0x85ebca6b);
+    h  h.wrapping_mul(0x85ebca6b);
     h ^= h >> 13;
     h = h.wrapping_mul(0xc2b2ae35);
     h ^= h >> 16;
