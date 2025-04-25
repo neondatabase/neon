@@ -571,6 +571,11 @@ impl StorageController {
             let peer_jwt_token = encode_from_key_file(&peer_claims, private_key)
                 .expect("failed to generate jwt token");
             args.push(format!("--peer-jwt-token={peer_jwt_token}"));
+
+            let claims = Claims::new(None, Scope::SafekeeperData);
+            let jwt_token =
+                encode_from_key_file(&claims, private_key).expect("failed to generate jwt token");
+            args.push(format!("--safekeeper-jwt-token={jwt_token}"));
         }
 
         if let Some(public_key) = &self.public_key {
@@ -614,6 +619,10 @@ impl StorageController {
             "--neon-local-repo-dir={}",
             self.env.base_data_dir.display()
         ));
+
+        if self.env.safekeepers.iter().any(|sk| sk.auth_enabled) && self.private_key.is_none() {
+            anyhow::bail!("Safekeeper set up for auth but no private key specified");
+        }
 
         if self.config.timelines_onto_safekeepers {
             args.push("--timelines-onto-safekeepers".to_string());
