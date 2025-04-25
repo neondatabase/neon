@@ -18,12 +18,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use compute_api::spec::ComputeMode;
 use control_plane::endpoint::ComputeControlPlane;
+use control_plane::endpoint_storage::{ENDPOINT_STORAGE_DEFAULT_PORT, EndpointStorage};
 use control_plane::local_env::{
-    InitForceMode, LocalEnv, NeonBroker, NeonLocalInitConf, NeonLocalInitPageserverConf,
-    ObjectStorageConf, SafekeeperConf,
+    EndpointStorageConf, InitForceMode, LocalEnv, NeonBroker, NeonLocalInitConf,
+    NeonLocalInitPageserverConf, SafekeeperConf,
 };
-use control_plane::object_storage::OBJECT_STORAGE_DEFAULT_PORT;
-use control_plane::object_storage::ObjectStorage;
 use control_plane::pageserver::PageServerNode;
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::storage_controller::{
@@ -93,7 +92,7 @@ enum NeonLocalCmd {
     #[command(subcommand)]
     Safekeeper(SafekeeperCmd),
     #[command(subcommand)]
-    ObjectStorage(ObjectStorageCmd),
+    EndpointStorage(EndpointStorageCmd),
     #[command(subcommand)]
     Endpoint(EndpointCmd),
     #[command(subcommand)]
@@ -460,14 +459,14 @@ enum SafekeeperCmd {
 
 #[derive(clap::Subcommand)]
 #[clap(about = "Manage object storage")]
-enum ObjectStorageCmd {
-    Start(ObjectStorageStartCmd),
-    Stop(ObjectStorageStopCmd),
+enum EndpointStorageCmd {
+    Start(EndpointStorageStartCmd),
+    Stop(EndpointStorageStopCmd),
 }
 
 #[derive(clap::Args)]
 #[clap(about = "Start object storage")]
-struct ObjectStorageStartCmd {
+struct EndpointStorageStartCmd {
     #[clap(short = 't', long, help = "timeout until we fail the command")]
     #[arg(default_value = "10s")]
     start_timeout: humantime::Duration,
@@ -475,7 +474,7 @@ struct ObjectStorageStartCmd {
 
 #[derive(clap::Args)]
 #[clap(about = "Stop object storage")]
-struct ObjectStorageStopCmd {
+struct EndpointStorageStopCmd {
     #[arg(value_enum, default_value = "fast")]
     #[clap(
         short = 'm',
@@ -797,7 +796,9 @@ fn main() -> Result<()> {
             }
             NeonLocalCmd::StorageBroker(subcmd) => rt.block_on(handle_storage_broker(&subcmd, env)),
             NeonLocalCmd::Safekeeper(subcmd) => rt.block_on(handle_safekeeper(&subcmd, env)),
-            NeonLocalCmd::ObjectStorage(subcmd) => rt.block_on(handle_object_storage(&subcmd, env)),
+            NeonLocalCmd::EndpointStorage(subcmd) => {
+                rt.block_on(handle_endpoint_storage(&subcmd, env))
+            }
             NeonLocalCmd::Endpoint(subcmd) => rt.block_on(handle_endpoint(&subcmd, env)),
             NeonLocalCmd::Mappings(subcmd) => handle_mappings(&subcmd, env),
         };
@@ -1015,8 +1016,8 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
                     }
                 })
                 .collect(),
-            object_storage: ObjectStorageConf {
-                port: OBJECT_STORAGE_DEFAULT_PORT,
+            endpoint_storage: EndpointStorageConf {
+                port: ENDPOINT_STORAGE_DEFAULT_PORT,
             },
             pg_distrib_dir: None,
             neon_distrib_dir: None,
@@ -1736,12 +1737,15 @@ async fn handle_safekeeper(subcmd: &SafekeeperCmd, env: &local_env::LocalEnv) ->
     Ok(())
 }
 
-async fn handle_object_storage(subcmd: &ObjectStorageCmd, env: &local_env::LocalEnv) -> Result<()> {
-    use ObjectStorageCmd::*;
-    let storage = ObjectStorage::from_env(env);
+async fn handle_endpoint_storage(
+    subcmd: &EndpointStorageCmd,
+    env: &local_env::LocalEnv,
+) -> Result<()> {
+    use EndpointStorageCmd::*;
+    let storage = EndpointStorage::from_env(env);
 
     // In tests like test_forward_compatibility or test_graceful_cluster_restart
-    // old neon binaries (without object_storage) are present
+    // old neon binaries (without endpoint_storage) are present
     if !storage.bin.exists() {
         eprintln!(
             "{} binary not found. Ignore if this is a compatibility test",
@@ -1751,13 +1755,13 @@ async fn handle_object_storage(subcmd: &ObjectStorageCmd, env: &local_env::Local
     }
 
     match subcmd {
-        Start(ObjectStorageStartCmd { start_timeout }) => {
+        Start(EndpointStorageStartCmd { start_timeout }) => {
             if let Err(e) = storage.start(start_timeout).await {
-                eprintln!("object_storage start failed: {e}");
+                eprintln!("endpoint_storage start failed: {e}");
                 exit(1);
             }
         }
-        Stop(ObjectStorageStopCmd { stop_mode }) => {
+        Stop(EndpointStorageStopCmd { stop_mode }) => {
             let immediate = match stop_mode {
                 StopMode::Fast => false,
                 StopMode::Immediate => true,
@@ -1867,10 +1871,10 @@ async fn handle_start_all_impl(
         }
 
         js.spawn(async move {
-            ObjectStorage::from_env(env)
+            EndpointStorage::from_env(env)
                 .start(&retry_timeout)
                 .await
-                .map_err(|e| e.context("start object_storage"))
+                .map_err(|e| e.context("start endpoint_storage"))
         });
     })();
 
@@ -1969,9 +1973,9 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
         }
     }
 
-    let storage = ObjectStorage::from_env(env);
+    let storage = EndpointStorage::from_env(env);
     if let Err(e) = storage.stop(immediate) {
-        eprintln!("object_storage stop failed: {:#}", e);
+        eprintln!("endpoint_storage stop failed: {:#}", e);
     }
 
     for ps_conf in &env.pageservers {

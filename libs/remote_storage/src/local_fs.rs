@@ -445,6 +445,16 @@ impl RemoteStorage for LocalFs {
         }
     }
 
+    async fn list_versions(
+        &self,
+        _prefix: Option<&RemotePath>,
+        _mode: ListingMode,
+        _max_keys: Option<NonZeroU32>,
+        _cancel: &CancellationToken,
+    ) -> Result<crate::VersionListing, DownloadError> {
+        unimplemented!()
+    }
+
     async fn head_object(
         &self,
         key: &RemotePath,

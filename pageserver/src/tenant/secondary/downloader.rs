@@ -646,7 +646,7 @@ enum UpdateError {
     NoData,
     #[error("Insufficient local storage space")]
     NoSpace,
-    #[error("Failed to download")]
+    #[error("Failed to download: {0}")]
     DownloadError(DownloadError),
     #[error(transparent)]
     Deserialize(#[from] serde_json::Error),
@@ -1521,12 +1521,11 @@ async fn load_heatmap(
     path: &Utf8PathBuf,
     ctx: &RequestContext,
 ) -> Result<Option<HeatMapTenant>, anyhow::Error> {
-    let mut file = match VirtualFile::open(path, ctx).await {
-        Ok(file) => file,
+    let st = match VirtualFile::read_to_string(path, ctx).await {
+        Ok(st) => st,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => Err(e)?,
     };
-    let st = file.read_to_string(ctx).await?;
     let htm = serde_json::from_str(&st)?;
     Ok(Some(htm))
 }
