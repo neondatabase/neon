@@ -198,7 +198,7 @@ pub fn write_postgres_conf(
                 // Typically, this should be unreacheable,
                 // because we always set at least some shared_preload_libraries in the spec
                 // but let's handle it explicitly anyway.
-                writeln!(file, "shared_preload_libraries='neon,pgaudit'")?;
+                writeln!(file, "shared_preload_libraries='neon,anon,pgaudit'")?;
             }
             writeln!(file, "# Managed by compute_ctl base audit settings: end")?;
         }
@@ -247,7 +247,7 @@ pub fn write_postgres_conf(
                 // but let's handle it explicitly anyway.
                 writeln!(
                     file,
-                    "shared_preload_libraries='neon,pgaudit,pgauditlogtofile'"
+                    "shared_preload_libraries='neon,anon,pgaudit,pgauditlogtofile'"
                 )?;
             }
             writeln!(
