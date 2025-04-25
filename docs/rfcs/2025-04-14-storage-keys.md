@@ -9,7 +9,6 @@ to provide at least tenant granularity, but will use timeline granularity when i
 so.
 
 Out of scope:
-- We describe lifecycle of keys here but not the encryption of user data with these keys.
 - We describe an abstract KMS interface, but not particular platform implementations (such as how
   to authenticate with KMS).
 
@@ -19,11 +18,11 @@ _wrapped/unwrapped_: a wrapped encryption key is a key encrypted by another key.
 encrypting a timeline's pageserver data might be wrapped by some "root" key for the tenant's user account, stored in a KMS system.
 
 _key hierarchy_: the relationships between keys which wrap each other. For example, a layer file key might
-be wrapped by a pageserver timeline key, which is wrapped by a tenant's root key.
+be wrapped by a pageserver tenant key, which is wrapped by a tenant's root key.
 
 ## Design Choices
 
-Storage: S3 will be the store of record for wrapped keys
+Storage: S3 will be the store of record for wrapped keys.
 
 Separate keys: Safekeeper and Pageserver will use independent keys.
 
@@ -34,6 +33,9 @@ Per-object keys: rather than encrypting data objects (layer files and segment fi
 the tenant keys directly, they will be encrypted with separate keys.  This avoids cryptographic
 safety issues from re-using the same key for large quantities of potentially repetitive plaintext.
 
+S3 objects are self-contained: each encrypted file will have a metadata block in the file itself
+storing the KMS-wrapped key to decrypt itself.
+
 Key storage is optional at a per-tenant granularity: eventually this would be on by default, but:
 - initially only some environments will have a KMS set up.
 - Encryption has some overhead and it may be that some tenants don't want or need it.
@@ -42,11 +44,10 @@ Key storage is optional at a per-tenant granularity: eventually this would be on
 
 ### Summary of format changes
 
+- Pageserver layer files and safekeeper segment objects are split into blocks and each
+  block is encrypted by the layer key.
 - Pageserver layer files and safekeeper segment objects get new metadata fields to
-  store wrapped key and version of the wrapping key
-- Pageserver timeline index gets a new `keys` field to store wrapped timeline keys
-- Safekeeper gets a new per-timeline manifest object in S3 to store wrapped timeline keys
-- Pageserver timeline index gets per-layer metadata for wrapped key and wrapping version
+  store wrapped layer key and the KMS-wrapped timeline key.
 
 ### Summary of API changes
 
@@ -68,80 +69,68 @@ The KMS deals with abstract "account IDs", which are not equal to tenant IDs and
 1:1 with tenants.  The account ID will be provided as part of tenant configuration, along
 with a field to identify an encryption mode.
 
-### Pageserver key storage
 
-The wrapped pageserver timeline key will be stored in the timeline index object.  Because of
-key rotation, multiple keys will be stored in an array, with each key having a counter version. 
+### Pageserver Layer File Format
+
+Encryption blocks are the minimum of unit of read. To read the part of the data within the encryption block
+we must decrypt the whole block. All encryption blocks share the same layer key within the layer (is this safe?).
+
+Image layers: each image is one encryption block.
+
+Delta layers: for the first stage of the project, each delta is encrypted separately; in the future, we can batch
+several small deltas into a single encryption block.
+
+Indicies: each B+ tree node is an encryption block.
+
+Layer format:
 
 ```
-"keys": [
-    {
-        # The key version: a new key with the next version is generated when rekeying
-        "version": 1,
-        # The wrapped key: this is unwrapped by a KMS API call when the key is to be used
-        "wrapped": "<base64 string>",
-        # The time the key was generated: this may be used to implement rekeying/key rotation
-        # policies.
-        "ctime": "<ISO 8601 timestamp>",
-    },
-    ...
-]
+| Data Block | Data Block | Data Block | ... | Index Block | Index Block | Index Block | Metadata |
+Data block = encrypt(data, layer_key)
+Index block = encrypt(index, layer_key); index points a key to a offset of the data block inside the layer file.
+Metadata = wrap(layer_key, timeline_key), wrap_kms(tenant_key), and other metadata we want to store in the future
 ```
 
-Wrapped pageserver layer file keys will be stored in the `index_part` file, as part
-of the layer metadata.
+Note that we generate a random layer_key for each of the layer. We store the layer key wrapped by the current
+tenant key (described in later sections) and the KMS-wrapped tenant key in the layer.
+
+If data compression is enabled, the data is compressed first before being encrypted (is this safe?)
+
+This file format is used across both object storage and local storage. We do not decrypt when downloading
+the layer file to the disk. Decryption is done when reading the layer.
+
+### Safekeeper Segment Format
+
+TBD
+
+### Pageserver Timeline Index
+
+We will add a `created_at` for each of the layer file so that during re-keying (described in later sections)
+we can determine which layer files to rewrite. We also record the offset of the metadata block so that it is
+possible to obtain more information about the layer file without downloading the full layer file (i.e., the
+exact timeline key being used to encrypt the layer file).
 
 ```
 # LayerFileMetadata
 {
-    "key": {
-        "version":
-    }
-
+  "created_at": "<time>",
+  "metadata_block_offset": u64,
 }
 ```
 
-To enable re-key procedure to drop deleted versions with old keys, and to avoid mistakes in index_part leading to irretreivable data loss, wrapped keys & version will also be stored
-in the object store metadata of uploaded objects.
+TODO: create an index for safekeeper so that it's faster to determine what files to re-key? Or we can scan all
+files.
 
-### Safekeeper key storage
+### Pageserver Key Cache
 
-All safekeeper storage is per-timeline.  The only concept of a tenant in the safekeeper
-is as a namespace for timelines.
-
-As the safekeeper doesn't currently have a flexible metadata object in remote storage,
-we will add one.  This will initially contain:
-- A configuration object that contains the accountId
-- An array of keys idential to those used in the pageserver's index.
-
-Because multiple safekeeper processes share the same remote storage path, we must be
-sure to handle write races safely.  To avoid giving safekeepers a pageserver-like generation
-concept (not to be confused with safekeeper's configuration generation), we may use
-the conditional write primitive that is available on S3 and ABS, to implement a safe
-read-then-write for operations such as key rotation, such that a given key version is
-only ever implemented once.
+We have a hashmap from KMS-wrapped tenant key to plain key for each of the tenant so that we do not need to repeatly
+unwrap the same key.
 
 ### Key rotation
 
-The process of key rotation is:
-1. Load the version of the existing key
-2. Generate a new key
-3. Store the new key with the previous version incremented by 1
-4. **Only once durably stored** use the new key for subsequent generation of object keys
-
-This is the same for safekeepers and pageservers.
-
-A storage controller API will be exposed for key rotation.
-
-For the pageserver, it is very important that key rotation
-operations respect generation safety rules, the same as timeline CRUD operations: i.e.
-the operation is only durable once the new index_part is uploaded _and_ the generation of the tenant location updated is still the latest generation when the operation is complete.
-
-For the safekeeper, the controller can call into one safekeeper to write the new
-key to remote storage, and then when calling into the others they should just load
-the key from remote storage.  Any safekeeper that is unavailable at the time of a key
-rotation will need to be marked "dirty" by the controller and contacted as soon as it
-comes back online (key rotation should not be failed if a single safekeeper is down).
+Each tenant stores a tenant key in memory to encrypt all layer files generated across all timelines within
+its active period. When the key rotation API gets called, we rotate the timeline key in memory by calling the
+KMS API to generate a new key-pair, and all new layer files' layer keys will be encrypted using this key.
 
 ### Re-keying
 
