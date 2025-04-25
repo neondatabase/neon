@@ -212,6 +212,21 @@ impl PageserverClient {
         )
     }
 
+    pub(crate) async fn timeline_detail(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Result<TimelineInfo> {
+        measured_request!(
+            "timeline_detail",
+            crate::metrics::Method::Get,
+            &self.node_id_label,
+            self.inner
+                .timeline_detail(tenant_shard_id, timeline_id)
+                .await
+        )
+    }
+
     pub(crate) async fn tenant_shard_split(
         &self,
         tenant_shard_id: TenantShardId,

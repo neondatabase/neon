@@ -16,4 +16,5 @@ pytest_plugins = (
     "fixtures.slow",
     "fixtures.reruns",
     "fixtures.fast_import",
+    "fixtures.pg_config",
 )
