@@ -1,6 +1,10 @@
 # Feature Rollout on Storage Controller
 
-describes the rollout interface from the user's perspective; no implementation idea yet, might be infeasible, and needs to figure out.
+This RFC describes the rollout interface from a user's perspective. I do not have a concreate implementation idea
+yet, but the operations described below should be intuitively feasible to implement -- most of them map to a single
+SQL inside the storcon database and then some reconcile operations.
+
+What will it look like if we want to rollout gc-compaction gradually?
 
 Create a feature called gc-compaction.
 
@@ -58,16 +62,25 @@ Week 3: rollout gradually to 50% larger tenants before Jun 1. The storage contro
 $ storcon-cli feature scheduled-rollout --job gc-compaction --config-set enable --filter "remote_size < 100GB" --coverage-percentage 50 --cron "0 0 * * *" --before 2025-06-01 00:00:00
 ```
 
-Week 4: we discover a bug and need to immediately stop the feature across the fleet.
+Week 4: we discover a bug over a specific tenant and want to disable gc-compaction on it,
+
+```
+$ storcon-cli feature rollout --job gc-compaction --config-set default --filter "tenant-id=<id>" --coverage-percentage all
+rollout succeeded, operation_id=11
+```
+
+Then we realize that this bug might affect all tenants and decide to disable it for all tenants:
 
 ```
 $ storcon-cli feature rollout --job gc-compaction --config-set default --coverage-percentage all
+rollout succeeded, operation_id=10
 ```
 
 We get a fix and can re-enable it on those tenants which had the feature enabled previously.
 
 ```
-$ storcon-cli feature rollout --job gc-compaction --config-set enable --filter "in (history_id <= 10)" --coverage-percentage all
+$ storcon-cli feature rollout --job gc-compaction --revert 11
+$ storcon-cli feature rollout --job gc-compaction --revert 10
 ```
 
 Week 5: enable by default
