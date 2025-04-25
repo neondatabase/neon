@@ -4,6 +4,8 @@ This RFC describes the rollout interface from a user's perspective. I do not hav
 yet, but the operations described below should be intuitively feasible to implement -- most of them map to a single
 SQL inside the storcon database and then some reconcile operations.
 
+The rollout RFC makes it possible for the storcon to gradually modify tenant configs based on filters and percentages.
+
 What will it look like if we want to rollout gc-compaction gradually?
 
 Create a feature called gc-compaction.
