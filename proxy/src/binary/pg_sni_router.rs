@@ -139,7 +139,7 @@ pub async fn run() -> anyhow::Result<()> {
         .parse()?;
     let proxy_address_compute_tls: SocketAddr = args
         .get_one::<String>("listen-tls")
-        .expect("string argument defined")
+        .expect("listen-tls argument defined")
         .parse()?;
 
     info!("Starting sni router on {proxy_address}");
@@ -335,7 +335,7 @@ async fn handle_client(
 
     let mut client = tokio::net::TcpStream::connect(&destination).await?;
 
-    if let Some(compute_tls_config) = compute_tls_config {
+    let client = if let Some(compute_tls_config) = compute_tls_config {
         info!("upgrading TLS");
 
         // send SslRequest
@@ -353,34 +353,34 @@ async fn handle_client(
         // upgrade to TLS.
         let domain = DnsName::try_from(destination)?;
         let domain = rustls::pki_types::ServerName::DnsName(domain);
-        let mut client = TlsConnector::from(compute_tls_config)
+        let client = TlsConnector::from(compute_tls_config)
             .connect(domain, client)
             .await?;
-
-        // doesn't yet matter as pg-sni-router doesn't report analytics logs
-        ctx.set_success();
-        ctx.log_connect();
-
-        // Starting from here we only proxy the client's traffic.
-        info!("performing the proxy pass...");
-
-        match copy_bidirectional_client_compute(&mut tls_stream, &mut client).await {
-            Ok(_) => Ok(()),
-            Err(ErrorSource::Client(err)) => Err(err).context("client"),
-            Err(ErrorSource::Compute(err)) => Err(err).context("compute"),
-        }
+        Connection::Tls(client)
     } else {
-        // doesn't yet matter as pg-sni-router doesn't report analytics logs
-        ctx.set_success();
-        ctx.log_connect();
+        Connection::Raw(client)
+    };
 
-        // Starting from here we only proxy the client's traffic.
-        info!("performing the proxy pass...");
+    // doesn't yet matter as pg-sni-router doesn't report analytics logs
+    ctx.set_success();
+    ctx.log_connect();
 
-        match copy_bidirectional_client_compute(&mut tls_stream, &mut client).await {
-            Ok(_) => Ok(()),
-            Err(ErrorSource::Client(err)) => Err(err).context("client"),
-            Err(ErrorSource::Compute(err)) => Err(err).context("compute"),
-        }
+    // Starting from here we only proxy the client's traffic.
+    info!("performing the proxy pass...");
+
+    let res = match client {
+        Connection::Raw(mut c) => copy_bidirectional_client_compute(&mut tls_stream, &mut c).await,
+        Connection::Tls(mut c) => copy_bidirectional_client_compute(&mut tls_stream, &mut c).await,
+    };
+
+    match res {
+        Ok(_) => Ok(()),
+        Err(ErrorSource::Client(err)) => Err(err).context("client"),
+        Err(ErrorSource::Compute(err)) => Err(err).context("compute"),
     }
+}
+
+enum Connection {
+    Raw(tokio::net::TcpStream),
+    Tls(tokio_rustls::client::TlsStream<tokio::net::TcpStream>),
 }
