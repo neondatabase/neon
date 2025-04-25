@@ -2,20 +2,21 @@
 //! and push them to a HTTP endpoint.
 use std::borrow::Cow;
 use std::convert::Infallible;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use async_compression::tokio::write::GzipEncoder;
 use bytes::Bytes;
 use chrono::{DateTime, Datelike, Timelike, Utc};
-use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
-use dashmap::mapref::entry::Entry;
-use dashmap::DashMap;
+use clashmap::ClashMap;
+use clashmap::mapref::entry::Entry;
+use consumption_metrics::{CHUNK_SIZE, Event, EventChunk, EventType, idempotency_key};
 use once_cell::sync::Lazy;
 use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, trace, warn};
@@ -43,23 +44,61 @@ const HTTP_REPORTING_RETRY_DURATION: Duration = Duration::from_secs(60);
 pub(crate) struct Ids {
     pub(crate) endpoint_id: EndpointIdInt,
     pub(crate) branch_id: BranchIdInt,
+    #[serde(with = "none_as_empty_string")]
+    pub(crate) private_link_id: Option<SmolStr>,
+}
+
+#[derive(Eq, Hash, PartialEq, Serialize, Deserialize, Debug, Clone)]
+struct Extra {
+    #[serde(flatten)]
+    ids: Ids,
+    direction: TrafficDirection,
+}
+
+mod none_as_empty_string {
+    use serde::Deserialize;
+    use smol_str::SmolStr;
+
+    #[allow(clippy::ref_option)]
+    pub fn serialize<S: serde::Serializer>(t: &Option<SmolStr>, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(t.as_deref().unwrap_or(""))
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<SmolStr>, D::Error> {
+        let s = SmolStr::deserialize(d)?;
+        if s.is_empty() { Ok(None) } else { Ok(Some(s)) }
+    }
+}
+
+#[derive(Eq, Hash, PartialEq, Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum TrafficDirection {
+    Ingress,
+    Egress,
 }
 
 pub(crate) trait MetricCounterRecorder {
     /// Record that some bytes were sent from the proxy to the client
     fn record_egress(&self, bytes: u64);
+
+    /// Record that some bytes were sent from the client to the proxy
+    fn record_ingress(&self, bytes: u64);
+
     /// Record that some connections were opened
     fn record_connection(&self, count: usize);
 }
 
 trait MetricCounterReporter {
-    fn get_metrics(&mut self) -> (u64, usize);
-    fn move_metrics(&self) -> (u64, usize);
+    fn get_metrics(&mut self) -> MetricsData;
+    fn move_metrics(&self) -> MetricsData;
 }
 
 #[derive(Debug)]
 pub(crate) struct MetricCounter {
     transmitted: AtomicU64,
+    received: AtomicU64,
     opened_connections: AtomicUsize,
 }
 
@@ -69,6 +108,11 @@ impl MetricCounterRecorder for MetricCounter {
         self.transmitted.fetch_add(bytes, Ordering::Relaxed);
     }
 
+    /// Record that some bytes were sent from the proxy to the client
+    fn record_ingress(&self, bytes: u64) {
+        self.received.fetch_add(bytes, Ordering::Relaxed);
+    }
+
     /// Record that some connections were opened
     fn record_connection(&self, count: usize) {
         self.opened_connections.fetch_add(count, Ordering::Relaxed);
@@ -76,29 +120,43 @@ impl MetricCounterRecorder for MetricCounter {
 }
 
 impl MetricCounterReporter for MetricCounter {
-    fn get_metrics(&mut self) -> (u64, usize) {
-        (
-            *self.transmitted.get_mut(),
-            *self.opened_connections.get_mut(),
-        )
+    fn get_metrics(&mut self) -> MetricsData {
+        MetricsData {
+            received: *self.received.get_mut(),
+            transmitted: *self.transmitted.get_mut(),
+            connections: *self.opened_connections.get_mut(),
+        }
     }
-    fn move_metrics(&self) -> (u64, usize) {
-        (
-            self.transmitted.swap(0, Ordering::Relaxed),
-            self.opened_connections.swap(0, Ordering::Relaxed),
-        )
+
+    fn move_metrics(&self) -> MetricsData {
+        MetricsData {
+            received: self.received.swap(0, Ordering::Relaxed),
+            transmitted: self.transmitted.swap(0, Ordering::Relaxed),
+            connections: self.opened_connections.swap(0, Ordering::Relaxed),
+        }
     }
+}
+
+struct MetricsData {
+    transmitted: u64,
+    received: u64,
+    connections: usize,
+}
+
+struct BytesSent {
+    transmitted: u64,
+    received: u64,
 }
 
 trait Clearable {
     /// extract the value that should be reported
-    fn should_report(self: &Arc<Self>) -> Option<u64>;
+    fn should_report(self: &Arc<Self>) -> Option<BytesSent>;
     /// Determine whether the counter should be cleared from the global map.
     fn should_clear(self: &mut Arc<Self>) -> bool;
 }
 
 impl<C: MetricCounterReporter> Clearable for C {
-    fn should_report(self: &Arc<Self>) -> Option<u64> {
+    fn should_report(self: &Arc<Self>) -> Option<BytesSent> {
         // heuristic to see if the branch is still open
         // if a clone happens while we are observing, the heuristic will be incorrect.
         //
@@ -111,14 +169,21 @@ impl<C: MetricCounterReporter> Clearable for C {
         // (to avoid sending the same metrics twice)
         // see the relevant discussion on why to do so even if the status is not success:
         // https://github.com/neondatabase/neon/pull/4563#discussion_r1246710956
-        let (value, opened) = self.move_metrics();
+        let MetricsData {
+            transmitted,
+            received,
+            connections,
+        } = self.move_metrics();
 
         // Our only requirement is that we report in every interval if there was an open connection
         // if there were no opened connections since, then we don't need to report
-        if value == 0 && !is_open && opened == 0 {
+        if transmitted == 0 && received == 0 && !is_open && connections == 0 {
             None
         } else {
-            Some(value)
+            Some(BytesSent {
+                transmitted,
+                received,
+            })
         }
     }
     fn should_clear(self: &mut Arc<Self>) -> bool {
@@ -126,9 +191,13 @@ impl<C: MetricCounterReporter> Clearable for C {
         let Some(counter) = Arc::get_mut(self) else {
             return false;
         };
-        let (opened, value) = counter.get_metrics();
+        let MetricsData {
+            transmitted,
+            received,
+            connections,
+        } = counter.get_metrics();
         // clear if there's no data to report
-        value == 0 && opened == 0
+        transmitted == 0 && received == 0 && connections == 0
     }
 }
 
@@ -137,7 +206,7 @@ type FastHasher = std::hash::BuildHasherDefault<rustc_hash::FxHasher>;
 
 #[derive(Default)]
 pub(crate) struct Metrics {
-    endpoints: DashMap<Ids, Arc<MetricCounter>, FastHasher>,
+    endpoints: ClashMap<Ids, Arc<MetricCounter>, FastHasher>,
 }
 
 impl Metrics {
@@ -150,6 +219,7 @@ impl Metrics {
                 .entry(ids)
                 .or_insert_with(|| {
                     Arc::new(MetricCounter {
+                        received: AtomicU64::new(0),
                         transmitted: AtomicU64::new(0),
                         opened_connections: AtomicUsize::new(0),
                     })
@@ -213,11 +283,11 @@ pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infall
 }
 
 fn collect_and_clear_metrics<C: Clearable>(
-    endpoints: &DashMap<Ids, Arc<C>, FastHasher>,
-) -> Vec<(Ids, u64)> {
+    endpoints: &ClashMap<Ids, Arc<C>, FastHasher>,
+) -> Vec<(Ids, BytesSent)> {
     let mut metrics_to_clear = Vec::new();
 
-    let metrics_to_send: Vec<(Ids, u64)> = endpoints
+    let metrics_to_send: Vec<(Ids, BytesSent)> = endpoints
         .iter()
         .filter_map(|counter| {
             let key = counter.key().clone();
@@ -243,26 +313,46 @@ fn collect_and_clear_metrics<C: Clearable>(
 }
 
 fn create_event_chunks<'a>(
-    metrics_to_send: &'a [(Ids, u64)],
+    metrics_to_send: &'a [(Ids, BytesSent)],
     hostname: &'a str,
     prev: DateTime<Utc>,
     now: DateTime<Utc>,
     chunk_size: usize,
-) -> impl Iterator<Item = EventChunk<'a, Event<Ids, &'static str>>> + 'a {
+) -> impl Iterator<Item = EventChunk<'a, Event<Extra, &'static str>>> + 'a {
     metrics_to_send
         .chunks(chunk_size)
         .map(move |chunk| EventChunk {
             events: chunk
                 .iter()
-                .map(|(ids, value)| Event {
-                    kind: EventType::Incremental {
-                        start_time: prev,
-                        stop_time: now,
-                    },
-                    metric: PROXY_IO_BYTES_PER_CLIENT,
-                    idempotency_key: idempotency_key(hostname),
-                    value: *value,
-                    extra: ids.clone(),
+                .flat_map(|(ids, bytes)| {
+                    [
+                        Event {
+                            kind: EventType::Incremental {
+                                start_time: prev,
+                                stop_time: now,
+                            },
+                            metric: PROXY_IO_BYTES_PER_CLIENT,
+                            idempotency_key: idempotency_key(hostname),
+                            value: bytes.transmitted,
+                            extra: Extra {
+                                ids: ids.clone(),
+                                direction: TrafficDirection::Egress,
+                            },
+                        },
+                        Event {
+                            kind: EventType::Incremental {
+                                start_time: prev,
+                                stop_time: now,
+                            },
+                            metric: PROXY_IO_BYTES_PER_CLIENT,
+                            idempotency_key: idempotency_key(hostname),
+                            value: bytes.received,
+                            extra: Extra {
+                                ids: ids.clone(),
+                                direction: TrafficDirection::Ingress,
+                            },
+                        },
+                    ]
                 })
                 .collect(),
         })
@@ -271,7 +361,7 @@ fn create_event_chunks<'a>(
 #[expect(clippy::too_many_arguments)]
 #[instrument(skip_all)]
 async fn collect_metrics_iteration(
-    endpoints: &DashMap<Ids, Arc<MetricCounter>, FastHasher>,
+    endpoints: &ClashMap<Ids, Arc<MetricCounter>, FastHasher>,
     client: &http::ClientWithMiddleware,
     metric_collection_endpoint: &reqwest::Url,
     storage: Option<&GenericRemoteStorage>,
@@ -322,7 +412,7 @@ fn create_remote_path_prefix(now: DateTime<Utc>) -> String {
 async fn upload_main_events_chunked(
     client: &http::ClientWithMiddleware,
     metric_collection_endpoint: &reqwest::Url,
-    chunk: &EventChunk<'_, Event<Ids, &str>>,
+    chunk: &EventChunk<'_, Event<Extra, &str>>,
     subchunk_size: usize,
 ) {
     // Split into smaller chunks to avoid exceeding the max request size
@@ -356,7 +446,7 @@ async fn upload_main_events_chunked(
 
 async fn upload_backup_events(
     storage: Option<&GenericRemoteStorage>,
-    chunk: &EventChunk<'_, Event<Ids, &'static str>>,
+    chunk: &EventChunk<'_, Event<Extra, &'static str>>,
     path_prefix: &str,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
@@ -396,13 +486,13 @@ async fn upload_backup_events(
         TimeoutOrCancel::caused_by_cancel,
         FAILED_UPLOAD_WARN_THRESHOLD,
         FAILED_UPLOAD_MAX_RETRIES,
-        "request_data_upload",
+        "usage_metrics_upload",
         cancel,
     )
     .await
     .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
     .and_then(|x| x)
-    .context("request_data_upload")?;
+    .with_context(|| format!("usage_metrics_upload: path={remote_path}"))?;
     Ok(())
 }
 
@@ -432,7 +522,7 @@ mod tests {
 
     #[tokio::test]
     async fn metrics() {
-        type Report = EventChunk<'static, Event<Ids, String>>;
+        type Report = EventChunk<'static, Event<Extra, String>>;
         let reports: Arc<Mutex<Vec<Report>>> = Arc::default();
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -504,6 +594,7 @@ mod tests {
         let counter = metrics.register(Ids {
             endpoint_id: (&EndpointId::from("e1")).into(),
             branch_id: (&BranchId::from("b1")).into(),
+            private_link_id: None,
         });
 
         // the counter should be observed despite 0 egress
@@ -520,12 +611,18 @@ mod tests {
         .await;
         let r = std::mem::take(&mut *reports.lock().unwrap());
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].events.len(), 1);
+        assert_eq!(r[0].events.len(), 2);
         assert_eq!(r[0].events[0].value, 0);
+        assert_eq!(r[0].events[0].extra.direction, TrafficDirection::Egress);
+        assert_eq!(r[0].events[1].value, 0);
+        assert_eq!(r[0].events[1].extra.direction, TrafficDirection::Ingress);
         pushed_chunks.extend(r);
 
         // record egress
         counter.record_egress(1);
+
+        // record ingress
+        counter.record_ingress(2);
 
         // egress should be observered
         collect_metrics_iteration(
@@ -541,8 +638,11 @@ mod tests {
         .await;
         let r = std::mem::take(&mut *reports.lock().unwrap());
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].events.len(), 1);
+        assert_eq!(r[0].events.len(), 2);
         assert_eq!(r[0].events[0].value, 1);
+        assert_eq!(r[0].events[0].extra.direction, TrafficDirection::Egress);
+        assert_eq!(r[0].events[1].value, 2);
+        assert_eq!(r[0].events[1].extra.direction, TrafficDirection::Ingress);
         pushed_chunks.extend(r);
 
         // release counter

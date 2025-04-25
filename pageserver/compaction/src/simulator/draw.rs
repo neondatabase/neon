@@ -1,13 +1,13 @@
-use super::Key;
-use anyhow::Result;
 use std::cmp::Ordering;
-use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
-    fmt::Write,
-    ops::Range,
-};
-use svg_fmt::{rgb, BeginSvg, EndSvg, Fill, Stroke, Style};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::fmt::Write;
+use std::ops::Range;
+
+use anyhow::Result;
+use svg_fmt::{BeginSvg, EndSvg, Fill, Stroke, Style, rgb};
 use utils::lsn::Lsn;
+
+use super::Key;
 
 // Map values to their compressed coordinate - the index the value
 // would have in a sorted and deduplicated list of all values.
@@ -160,9 +160,12 @@ pub fn draw_history<W: std::io::Write>(history: &[LayerTraceEvent], mut output: 
 
         // Fill in and thicken rectangle if it's an
         // image layer so that we can see it.
-        let mut style = Style::default();
-        style.fill = Fill::Color(rgb(0x80, 0x80, 0x80));
-        style.stroke = Stroke::Color(rgb(0, 0, 0), 0.5);
+        let mut style = Style {
+            fill: Fill::Color(rgb(0x80, 0x80, 0x80)),
+            stroke: Stroke::Color(rgb(0, 0, 0), 0.5),
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+        };
 
         let y_start = lsn_max - lsn_start;
         let y_end = lsn_max - lsn_end;
@@ -213,10 +216,6 @@ pub fn draw_history<W: std::io::Write>(history: &[LayerTraceEvent], mut output: 
         }
         files_seen.insert(f);
     }
-
-    let mut record_style = Style::default();
-    record_style.fill = Fill::Color(rgb(0x80, 0x80, 0x80));
-    record_style.stroke = Stroke::None;
 
     writeln!(svg, "{}", EndSvg)?;
 

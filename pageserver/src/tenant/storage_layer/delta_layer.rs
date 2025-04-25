@@ -27,6 +27,38 @@
 //! "values" part.  The actual page images and WAL records are stored in the
 //! "values" part.
 //!
+use std::collections::{HashMap, VecDeque};
+use std::fs::File;
+use std::ops::Range;
+use std::os::unix::fs::FileExt;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+
+use anyhow::{Context, Result, bail, ensure};
+use camino::{Utf8Path, Utf8PathBuf};
+use futures::StreamExt;
+use itertools::Itertools;
+use pageserver_api::config::MaxVectoredReadBytes;
+use pageserver_api::key::{DBDIR_KEY, KEY_SIZE, Key};
+use pageserver_api::keyspace::KeySpace;
+use pageserver_api::models::ImageCompressionAlgorithm;
+use pageserver_api::shard::TenantShardId;
+use pageserver_api::value::Value;
+use serde::{Deserialize, Serialize};
+use tokio::sync::OnceCell;
+use tokio_epoll_uring::IoBuf;
+use tokio_util::sync::CancellationToken;
+use tracing::*;
+use utils::bin_ser::BeSer;
+use utils::bin_ser::SerializeError;
+use utils::id::{TenantId, TimelineId};
+use utils::lsn::Lsn;
+
+use super::{
+    AsLayerDesc, LayerName, OnDiskValue, OnDiskValueIo, PersistentLayerDesc, ResidentLayer,
+    ValuesReconstructState,
+};
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::page_cache::{self, FileId, PAGE_SZ};
@@ -41,43 +73,11 @@ use crate::tenant::vectored_blob_io::{
     BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadPlanner,
 };
-use crate::tenant::PageReconstructError;
+use crate::virtual_file::TempVirtualFile;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
-use crate::virtual_file::IoBufferMut;
-use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
-use crate::TEMP_FILE_SUFFIX;
-use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
-use anyhow::{anyhow, bail, ensure, Context, Result};
-use camino::{Utf8Path, Utf8PathBuf};
-use futures::StreamExt;
-use itertools::Itertools;
-use pageserver_api::config::MaxVectoredReadBytes;
-use pageserver_api::key::DBDIR_KEY;
-use pageserver_api::key::{Key, KEY_SIZE};
-use pageserver_api::keyspace::KeySpace;
-use pageserver_api::models::ImageCompressionAlgorithm;
-use pageserver_api::shard::TenantShardId;
-use pageserver_api::value::Value;
-use rand::{distributions::Alphanumeric, Rng};
-use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
-use std::fs::File;
-use std::io::SeekFrom;
-use std::ops::Range;
-use std::os::unix::fs::FileExt;
-use std::str::FromStr;
-use std::sync::Arc;
-use tokio::sync::OnceCell;
-use tokio_epoll_uring::IoBuf;
-use tracing::*;
-
-use utils::{
-    bin_ser::BeSer,
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
-
-use super::{AsLayerDesc, LayerName, PersistentLayerDesc, ValuesReconstructState};
+use crate::virtual_file::owned_buffers_io::write::{Buffer, BufferedWriterShutdownMode};
+use crate::virtual_file::{self, IoBuffer, IoBufferMut, MaybeFatalIo, VirtualFile};
+use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 
 ///
 /// Header stored in the beginning of the file
@@ -114,6 +114,15 @@ impl From<&DeltaLayer> for Summary {
 }
 
 impl Summary {
+    /// Serializes the summary header into an aligned buffer of lenth `PAGE_SZ`.
+    pub fn ser_into_page(&self) -> Result<IoBuffer, SerializeError> {
+        let mut buf = IoBufferMut::with_capacity(PAGE_SZ);
+        Self::ser_into(self, &mut buf)?;
+        // Pad zeroes to the buffer so the length is a multiple of the alignment.
+        buf.extend_with(0, buf.capacity() - buf.len());
+        Ok(buf.freeze())
+    }
+
     pub(super) fn expected(
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -226,7 +235,7 @@ pub struct DeltaLayerInner {
     index_start_blk: u32,
     index_root_blk: u32,
 
-    file: VirtualFile,
+    file: Arc<VirtualFile>,
     file_id: FileId,
 
     layer_key_range: Range<Key>,
@@ -289,19 +298,20 @@ impl DeltaLayer {
         key_start: Key,
         lsn_range: &Range<Lsn>,
     ) -> Utf8PathBuf {
-        let rand_string: String = rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(8)
-            .map(char::from)
-            .collect();
+        // TempVirtualFile requires us to never reuse a filename while an old
+        // instance of TempVirtualFile created with that filename is not done dropping yet.
+        // So, we use a monotonic counter to disambiguate the filenames.
+        static NEXT_TEMP_DISAMBIGUATOR: AtomicU64 = AtomicU64::new(1);
+        let filename_disambiguator =
+            NEXT_TEMP_DISAMBIGUATOR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         conf.timeline_path(tenant_shard_id, timeline_id)
             .join(format!(
-                "{}-XXX__{:016X}-{:016X}.{}.{}",
+                "{}-XXX__{:016X}-{:016X}.{:x}.{}",
                 key_start,
                 u64::from(lsn_range.start),
                 u64::from(lsn_range.end),
-                rand_string,
+                filename_disambiguator,
                 TEMP_FILE_SUFFIX,
             ))
     }
@@ -392,7 +402,7 @@ struct DeltaLayerWriterInner {
 
     tree: DiskBtreeBuilder<BlockBuf, DELTA_KEY_SIZE>,
 
-    blob_writer: BlobWriter<true>,
+    blob_writer: BlobWriter<TempVirtualFile>,
 
     // Number of key-lsns in the layer.
     num_keys: usize,
@@ -402,27 +412,43 @@ impl DeltaLayerWriterInner {
     ///
     /// Start building a new delta layer.
     ///
+    #[allow(clippy::too_many_arguments)]
     async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
         key_start: Key,
         lsn_range: Range<Lsn>,
+        gate: &utils::sync::gate::Gate,
+        cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename. We don't know
         // the end key yet, so we cannot form the final filename yet. We will
         // rename it when we're done.
-        //
-        // Note: This overwrites any existing file. There shouldn't be any.
-        // FIXME: throw an error instead?
         let path =
             DeltaLayer::temp_path_for(conf, &tenant_shard_id, &timeline_id, key_start, &lsn_range);
+        let file = TempVirtualFile::new(
+            VirtualFile::open_with_options_v2(
+                &path,
+                virtual_file::OpenOptions::new()
+                    .create_new(true)
+                    .write(true),
+                ctx,
+            )
+            .await?,
+            gate.enter()?,
+        );
 
-        let mut file = VirtualFile::create(&path, ctx).await?;
-        // make room for the header block
-        file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
-        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64);
+        // Start at PAGE_SZ, make room for the header block
+        let blob_writer = BlobWriter::new(
+            file,
+            PAGE_SZ as u64,
+            gate,
+            cancel,
+            ctx,
+            info_span!(parent: None, "delta_layer_writer_flush_task", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%timeline_id, path = %path),
+        )?;
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();
@@ -514,33 +540,26 @@ impl DeltaLayerWriterInner {
         key_end: Key,
         ctx: &RequestContext,
     ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
-        let temp_path = self.path.clone();
-        let result = self.finish0(key_end, ctx).await;
-        if let Err(ref e) = result {
-            tracing::info!(%temp_path, "cleaning up temporary file after error during writing: {e}");
-            if let Err(e) = std::fs::remove_file(&temp_path) {
-                tracing::warn!(error=%e, %temp_path, "error cleaning up temporary layer file after error during writing");
-            }
-        }
-        result
-    }
-
-    async fn finish0(
-        self,
-        key_end: Key,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         let index_start_blk = self.blob_writer.size().div_ceil(PAGE_SZ as u64) as u32;
 
-        let mut file = self.blob_writer.into_inner(ctx).await?;
+        let file = self
+            .blob_writer
+            .shutdown(
+                BufferedWriterShutdownMode::ZeroPadToNextMultiple(PAGE_SZ),
+                ctx,
+            )
+            .await?;
 
         // Write out the index
         let (index_root_blk, block_buf) = self.tree.finish()?;
-        file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
-            .await?;
+        let mut offset = index_start_blk as u64 * PAGE_SZ as u64;
+
+        // TODO(yuchen): https://github.com/neondatabase/neon/issues/10092
+        // Should we just replace BlockBuf::blocks with one big buffer
         for buf in block_buf.blocks {
-            let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
+            let (_buf, res) = file.write_all_at(buf.slice_len(), offset, ctx).await;
             res?;
+            offset += PAGE_SZ as u64;
         }
         assert!(self.lsn_range.start < self.lsn_range.end);
         // Fill in the summary on blk 0
@@ -555,11 +574,9 @@ impl DeltaLayerWriterInner {
             index_root_blk,
         };
 
-        let mut buf = Vec::with_capacity(PAGE_SZ);
-        // TODO: could use smallvec here but it's a pain with Slice<T>
-        Summary::ser_into(&summary, &mut buf)?;
-        file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
+        // Writes summary at the first block (offset 0).
+        let buf = summary.ser_into_page()?;
+        let (_buf, res) = file.write_all_at(buf.slice_len(), 0, ctx).await;
         res?;
 
         let metadata = file
@@ -596,6 +613,10 @@ impl DeltaLayerWriterInner {
 
         trace!("created delta layer {}", self.path);
 
+        // The gate guard stored in `destination_file` is dropped. Callers (e.g.. flush loop or compaction)
+        // keep the gate open also, so that it's safe for them to rename the file to its final destination.
+        file.disarm_into_inner();
+
         Ok((desc, self.path))
     }
 }
@@ -630,12 +651,15 @@ impl DeltaLayerWriter {
     ///
     /// Start building a new delta layer.
     ///
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
         key_start: Key,
         lsn_range: Range<Lsn>,
+        gate: &utils::sync::gate::Gate,
+        cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         Ok(Self {
@@ -646,6 +670,8 @@ impl DeltaLayerWriter {
                     tenant_shard_id,
                     key_start,
                     lsn_range,
+                    gate,
+                    cancel,
                     ctx,
                 )
                 .await?,
@@ -719,17 +745,6 @@ impl DeltaLayerWriter {
     }
 }
 
-impl Drop for DeltaLayerWriter {
-    fn drop(&mut self) {
-        if let Some(inner) = self.inner.take() {
-            // We want to remove the virtual file here, so it's fine to not
-            // having completely flushed unwritten data.
-            let vfile = inner.blob_writer.into_inner_no_flush();
-            vfile.remove();
-        }
-    }
-}
-
 #[derive(thiserror::Error, Debug)]
 pub enum RewriteSummaryError {
     #[error("magic mismatch")]
@@ -753,7 +768,7 @@ impl DeltaLayer {
     where
         F: Fn(Summary) -> Summary,
     {
-        let mut file = VirtualFile::open_with_options(
+        let file = VirtualFile::open_with_options_v2(
             path,
             virtual_file::OpenOptions::new().read(true).write(true),
             ctx,
@@ -770,11 +785,8 @@ impl DeltaLayer {
 
         let new_summary = rewrite(actual_summary);
 
-        let mut buf = Vec::with_capacity(PAGE_SZ);
-        // TODO: could use smallvec here, but it's a pain with Slice<T>
-        Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
-        file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
+        let buf = new_summary.ser_into_page().context("serialize")?;
+        let (_buf, res) = file.write_all_at(buf.slice_len(), 0, ctx).await;
         res?;
         Ok(())
     }
@@ -795,9 +807,11 @@ impl DeltaLayerInner {
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
-        let file = VirtualFile::open_v2(path, ctx)
-            .await
-            .context("open layer file")?;
+        let file = Arc::new(
+            VirtualFile::open_v2(path, ctx)
+                .await
+                .context("open layer file")?,
+        );
 
         let file_id = page_cache::next_file_id();
 
@@ -842,12 +856,11 @@ impl DeltaLayerInner {
     // Look up the keys in the provided keyspace and update
     // the reconstruct state with whatever is found.
     //
-    // If the key is cached, go no further than the cached Lsn.
-    //
     // Currently, the index is visited for each range, but this
     // can be further optimised to visit the index only once.
     pub(super) async fn get_values_reconstruct_data(
         &self,
+        this: ResidentLayer,
         keyspace: KeySpace,
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValuesReconstructState,
@@ -875,16 +888,13 @@ impl DeltaLayerInner {
             data_end_offset,
             index_reader,
             planner,
-            reconstruct_state,
             ctx,
         )
         .await
         .map_err(GetVectoredError::Other)?;
 
-        self.do_reads_and_update_state(reads, reconstruct_state, ctx)
+        self.do_reads_and_update_state(this, reads, reconstruct_state, ctx)
             .await;
-
-        reconstruct_state.on_lsn_advanced(&keyspace, lsn_range.start);
 
         Ok(())
     }
@@ -895,15 +905,14 @@ impl DeltaLayerInner {
         data_end_offset: u64,
         index_reader: DiskBtreeReader<Reader, DELTA_KEY_SIZE>,
         mut planner: VectoredReadPlanner,
-        reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<VectoredRead>>
     where
         Reader: BlockReader + Clone,
     {
-        let ctx = RequestContextBuilder::extend(ctx)
+        let ctx = RequestContextBuilder::from(ctx)
             .page_content_kind(PageContentKind::DeltaLayerBtreeNode)
-            .build();
+            .attached_child();
 
         for range in keyspace.ranges.iter() {
             let mut range_end_handled = false;
@@ -922,10 +931,9 @@ impl DeltaLayerInner {
                 assert!(key >= range.start);
 
                 let outside_lsn_range = !lsn_range.contains(&lsn);
-                let below_cached_lsn = reconstruct_state.get_cached_lsn(&key) >= Some(lsn);
 
                 let flag = {
-                    if outside_lsn_range || below_cached_lsn {
+                    if outside_lsn_range {
                         BlobFlag::Ignore
                     } else if blob_ref.will_init() {
                         BlobFlag::ReplaceAll
@@ -969,7 +977,10 @@ impl DeltaLayerInner {
                 .as_slice()
                 .iter()
                 .filter_map(|(_, blob_meta)| {
-                    if blob_meta.key.is_rel_dir_key() || blob_meta.key == DBDIR_KEY {
+                    if blob_meta.key.is_rel_dir_key()
+                        || blob_meta.key == DBDIR_KEY
+                        || blob_meta.key.is_aux_file_key()
+                    {
                         // The size of values for these keys is unbounded and can
                         // grow very large in pathological cases.
                         None
@@ -994,98 +1005,78 @@ impl DeltaLayerInner {
 
     async fn do_reads_and_update_state(
         &self,
+        this: ResidentLayer,
         reads: Vec<VectoredRead>,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) {
-        let vectored_blob_reader = VectoredBlobReader::new(&self.file);
-        let mut ignore_key_with_err = None;
-
         let max_vectored_read_bytes = self
             .max_vectored_read_bytes
             .expect("Layer is loaded with max vectored bytes config")
             .0
             .into();
         let buf_size = Self::get_min_read_buffer_size(&reads, max_vectored_read_bytes);
-        let mut buf = Some(IoBufferMut::with_capacity(buf_size));
 
         // Note that reads are processed in reverse order (from highest key+lsn).
         // This is the order that `ReconstructState` requires such that it can
         // track when a key is done.
         for read in reads.into_iter().rev() {
-            let res = vectored_blob_reader
-                .read_blobs(&read, buf.take().expect("Should have a buffer"), ctx)
-                .await;
-
-            let blobs_buf = match res {
-                Ok(blobs_buf) => blobs_buf,
-                Err(err) => {
-                    let kind = err.kind();
-                    for (_, blob_meta) in read.blobs_at.as_slice() {
-                        reconstruct_state.on_key_error(
-                            blob_meta.key,
-                            PageReconstructError::Other(anyhow!(
-                                "Failed to read blobs from virtual file {}: {}",
-                                self.file.path(),
-                                kind
-                            )),
-                        );
-                    }
-
-                    // We have "lost" the buffer since the lower level IO api
-                    // doesn't return the buffer on error. Allocate a new one.
-                    buf = Some(IoBufferMut::with_capacity(buf_size));
-
-                    continue;
-                }
-            };
-            let view = BufView::new_slice(&blobs_buf.buf);
-            for meta in blobs_buf.blobs.iter().rev() {
-                if Some(meta.meta.key) == ignore_key_with_err {
-                    continue;
-                }
-                let blob_read = meta.read(&view).await;
-                let blob_read = match blob_read {
-                    Ok(buf) => buf,
-                    Err(e) => {
-                        reconstruct_state.on_key_error(
-                            meta.meta.key,
-                            PageReconstructError::Other(anyhow!(e).context(format!(
-                                "Failed to decompress blob from virtual file {}",
-                                self.file.path(),
-                            ))),
-                        );
-
-                        ignore_key_with_err = Some(meta.meta.key);
-                        continue;
-                    }
-                };
-
-                let value = Value::des(&blob_read);
-
-                let value = match value {
-                    Ok(v) => v,
-                    Err(e) => {
-                        reconstruct_state.on_key_error(
-                            meta.meta.key,
-                            PageReconstructError::Other(anyhow!(e).context(format!(
-                                "Failed to deserialize blob from virtual file {}",
-                                self.file.path(),
-                            ))),
-                        );
-
-                        ignore_key_with_err = Some(meta.meta.key);
-                        continue;
-                    }
-                };
-
-                // Invariant: once a key reaches [`ValueReconstructSituation::Complete`]
-                // state, no further updates shall be made to it. The call below will
-                // panic if the invariant is violated.
-                reconstruct_state.update_key(&meta.meta.key, meta.meta.lsn, value);
+            let mut ios: HashMap<(Key, Lsn), OnDiskValueIo> = Default::default();
+            for (_, blob_meta) in read.blobs_at.as_slice().iter().rev() {
+                let io = reconstruct_state.update_key(
+                    &blob_meta.key,
+                    blob_meta.lsn,
+                    blob_meta.will_init,
+                );
+                ios.insert((blob_meta.key, blob_meta.lsn), io);
             }
 
-            buf = Some(blobs_buf.buf);
+            let read_extend_residency = this.clone();
+            let read_from = self.file.clone();
+            let read_ctx = ctx.attached_child();
+            reconstruct_state
+                .spawn_io(async move {
+                    let vectored_blob_reader = VectoredBlobReader::new(&read_from);
+                    let buf = IoBufferMut::with_capacity(buf_size);
+
+                    let res = vectored_blob_reader.read_blobs(&read, buf, &read_ctx).await;
+                    match res {
+                        Ok(blobs_buf) => {
+                            let view = BufView::new_slice(&blobs_buf.buf);
+                            for meta in blobs_buf.blobs.iter().rev() {
+                                let io = ios.remove(&(meta.meta.key, meta.meta.lsn)).unwrap();
+
+                                let blob_read = meta.read(&view).await;
+                                let blob_read = match blob_read {
+                                    Ok(buf) => buf,
+                                    Err(e) => {
+                                        io.complete(Err(e));
+                                        continue;
+                                    }
+                                };
+
+                                io.complete(Ok(OnDiskValue::WalRecordOrImage(
+                                    blob_read.into_bytes(),
+                                )));
+                            }
+
+                            assert!(ios.is_empty());
+                        }
+                        Err(err) => {
+                            for (_, sender) in ios {
+                                sender.complete(Err(std::io::Error::new(
+                                    err.kind(),
+                                    "vec read failed",
+                                )));
+                            }
+                        }
+                    }
+
+                    // keep layer resident until this IO is done; this spawned IO future generally outlives the
+                    // call to `self` / the `Arc<DownloadedLayer>` / the `ResidentLayer` that guarantees residency
+                    drop(read_extend_residency);
+                })
+                .await;
         }
     }
 
@@ -1128,9 +1119,9 @@ impl DeltaLayerInner {
                     all_keys.push(entry);
                     true
                 },
-                &RequestContextBuilder::extend(ctx)
+                &RequestContextBuilder::from(ctx)
                     .page_content_kind(PageContentKind::DeltaLayerBtreeNode)
-                    .build(),
+                    .attached_child(),
             )
             .await?;
         if let Some(last) = all_keys.last_mut() {
@@ -1150,10 +1141,11 @@ impl DeltaLayerInner {
         until: Lsn,
         ctx: &RequestContext,
     ) -> anyhow::Result<usize> {
+        use futures::stream::TryStreamExt;
+
         use crate::tenant::vectored_blob_io::{
             BlobMeta, ChunkedVectoredReadBuilder, VectoredReadExtended,
         };
-        use futures::stream::TryStreamExt;
 
         #[derive(Debug)]
         enum Item {
@@ -1224,7 +1216,14 @@ impl DeltaLayerInner {
             let actionable = if let Some((key, lsn, start_offset)) = prev.take() {
                 let end_offset = offset;
 
-                Some((BlobMeta { key, lsn }, start_offset..end_offset))
+                Some((
+                    BlobMeta {
+                        key,
+                        lsn,
+                        will_init: false,
+                    },
+                    start_offset..end_offset,
+                ))
             } else {
                 None
             };
@@ -1349,7 +1348,7 @@ impl DeltaLayerInner {
             block_reader,
         );
 
-        tree_reader.dump().await?;
+        tree_reader.dump(ctx).await?;
 
         let keys = self.index_entries(ctx).await?;
 
@@ -1443,6 +1442,19 @@ impl DeltaLayerInner {
     }
 
     pub fn iter<'a>(&'a self, ctx: &'a RequestContext) -> DeltaLayerIterator<'a> {
+        self.iter_with_options(
+            ctx,
+            1024 * 8192, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
+            1024,        // The default value. Unit tests might use a different value
+        )
+    }
+
+    pub fn iter_with_options<'a>(
+        &'a self,
+        ctx: &'a RequestContext,
+        max_read_size: u64,
+        max_batch_size: usize,
+    ) -> DeltaLayerIterator<'a> {
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
@@ -1452,10 +1464,7 @@ impl DeltaLayerInner {
             index_iter: tree_reader.iter(&[0; DELTA_KEY_SIZE], ctx),
             key_values_batch: std::collections::VecDeque::new(),
             is_end: false,
-            planner: StreamingVectoredReadPlanner::new(
-                1024 * 8192, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
-                1024,        // The default value. Unit tests might use a different value
-            ),
+            planner: StreamingVectoredReadPlanner::new(max_read_size, max_batch_size),
         }
     }
 
@@ -1486,7 +1495,7 @@ pub struct ValueRef<'a> {
     layer: &'a DeltaLayerInner,
 }
 
-impl<'a> ValueRef<'a> {
+impl ValueRef<'_> {
     /// Loads the value from disk
     pub async fn load(&self, ctx: &RequestContext) -> Result<Value> {
         let buf = self.load_raw(ctx).await?;
@@ -1543,7 +1552,7 @@ pub struct DeltaLayerIterator<'a> {
     is_end: bool,
 }
 
-impl<'a> DeltaLayerIterator<'a> {
+impl DeltaLayerIterator<'_> {
     pub(crate) fn layer_dbg_info(&self) -> String {
         self.delta_layer.layer_dbg_info()
     }
@@ -1560,7 +1569,9 @@ impl<'a> DeltaLayerIterator<'a> {
                 let lsn = DeltaKey::extract_lsn_from_buf(&raw_key);
                 let blob_ref = BlobRef(value);
                 let offset = blob_ref.pos();
-                if let Some(batch_plan) = self.planner.handle(key, lsn, offset) {
+                if let Some(batch_plan) =
+                    self.planner.handle(key, lsn, offset, blob_ref.will_init())
+                {
                     break batch_plan;
                 }
             } else {
@@ -1610,23 +1621,21 @@ impl<'a> DeltaLayerIterator<'a> {
 pub(crate) mod test {
     use std::collections::BTreeMap;
 
+    use bytes::Bytes;
     use itertools::MinMaxResult;
+    use pageserver_api::value::Value;
     use rand::prelude::{SeedableRng, SliceRandom, StdRng};
-    use rand::RngCore;
+    use rand::{Rng, RngCore};
 
     use super::*;
-    use crate::tenant::harness::TIMELINE_ID;
+    use crate::DEFAULT_PG_VERSION;
+    use crate::context::DownloadBehavior;
+    use crate::task_mgr::TaskKind;
+    use crate::tenant::disk_btree::tests::TestDisk;
+    use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
     use crate::tenant::storage_layer::{Layer, ResidentLayer};
     use crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner;
-    use crate::tenant::{Tenant, Timeline};
-    use crate::{
-        context::DownloadBehavior,
-        task_mgr::TaskKind,
-        tenant::{disk_btree::tests::TestDisk, harness::TenantHarness},
-        DEFAULT_PG_VERSION,
-    };
-    use bytes::Bytes;
-    use pageserver_api::value::Value;
+    use crate::tenant::{TenantShard, Timeline};
 
     /// Construct an index for a fictional delta layer and and then
     /// traverse in order to plan vectored reads for a query. Finally,
@@ -1673,7 +1682,6 @@ pub(crate) mod test {
             .expect("In memory disk finish should never fail");
         let reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(0, root_offset, disk);
         let planner = VectoredReadPlanner::new(100);
-        let mut reconstruct_state = ValuesReconstructState::new();
         let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
 
         let keyspace = KeySpace {
@@ -1691,7 +1699,6 @@ pub(crate) mod test {
             disk_offset,
             reader,
             planner,
-            &mut reconstruct_state,
             &ctx,
         )
         .await
@@ -1902,6 +1909,8 @@ pub(crate) mod test {
             harness.tenant_shard_id,
             entries_meta.key_range.start,
             entries_meta.lsn_range.clone(),
+            &timeline.gate,
+            timeline.cancel.clone(),
             &ctx,
         )
         .await?;
@@ -1935,7 +1944,6 @@ pub(crate) mod test {
             );
 
             let planner = VectoredReadPlanner::new(constants::MAX_VECTORED_READ_BYTES);
-            let mut reconstruct_state = ValuesReconstructState::new();
             let keyspace = pick_random_keyspace(rng, &entries_meta.key_range);
             let data_end_offset = inner.index_start_blk as u64 * PAGE_SZ as u64;
 
@@ -1945,7 +1953,6 @@ pub(crate) mod test {
                 data_end_offset,
                 index_reader,
                 planner,
-                &mut reconstruct_state,
                 &ctx,
             )
             .await?;
@@ -1991,6 +1998,7 @@ pub(crate) mod test {
             .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, ctx)
             .await
             .unwrap();
+        let ctx = &ctx.with_scope_timeline(&timeline);
 
         let initdb_layer = timeline
             .layers
@@ -2097,12 +2105,14 @@ pub(crate) mod test {
                 tenant.tenant_shard_id,
                 Key::MIN,
                 Lsn(0x11)..truncate_at,
+                &branch.gate,
+                branch.cancel.clone(),
                 ctx,
             )
             .await
             .unwrap();
 
-            let new_layer = new_layer.download_and_keep_resident().await.unwrap();
+            let new_layer = new_layer.download_and_keep_resident(ctx).await.unwrap();
 
             new_layer
                 .copy_delta_prefix(&mut writer, truncate_at, ctx)
@@ -2214,7 +2224,7 @@ pub(crate) mod test {
     }
 
     pub(crate) async fn produce_delta_layer(
-        tenant: &Tenant,
+        tenant: &TenantShard,
         tline: &Arc<Timeline>,
         mut deltas: Vec<(Key, Lsn, Value)>,
         ctx: &RequestContext,
@@ -2231,6 +2241,8 @@ pub(crate) mod test {
             tenant.tenant_shard_id,
             *key_start,
             (*lsn_min)..lsn_end,
+            &tline.gate,
+            tline.cancel.clone(),
             ctx,
         )
         .await?;

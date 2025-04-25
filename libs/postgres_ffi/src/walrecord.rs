@@ -3,20 +3,18 @@
 //!
 //! TODO: Generate separate types for each supported PG version
 
-use crate::pg_constants;
-use crate::XLogRecord;
-use crate::{
-    BlockNumber, MultiXactId, MultiXactOffset, MultiXactStatus, Oid, RepOriginId, TimestampTz,
-    TransactionId,
-};
-use crate::{BLCKSZ, XLOG_SIZE_OF_XLOG_RECORD};
 use bytes::{Buf, Bytes};
 use serde::{Deserialize, Serialize};
 use utils::bin_ser::DeserializeError;
 use utils::lsn::Lsn;
 
+use crate::{
+    BLCKSZ, BlockNumber, MultiXactId, MultiXactOffset, MultiXactStatus, Oid, RepOriginId,
+    TimestampTz, TransactionId, XLOG_SIZE_OF_XLOG_RECORD, XLogRecord, pg_constants,
+};
+
 #[repr(C)]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct XlMultiXactCreate {
     pub mid: MultiXactId,
     /* new MultiXact's ID */
@@ -46,7 +44,7 @@ impl XlMultiXactCreate {
 }
 
 #[repr(C)]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct XlMultiXactTruncate {
     pub oldest_multi_db: Oid,
     /* to-be-truncated range of multixact offsets */
@@ -72,7 +70,7 @@ impl XlMultiXactTruncate {
 }
 
 #[repr(C)]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct XlRelmapUpdate {
     pub dbid: Oid,   /* database ID, or 0 for shared map */
     pub tsid: Oid,   /* database's tablespace, or pg_global */
@@ -90,7 +88,7 @@ impl XlRelmapUpdate {
 }
 
 #[repr(C)]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct XlReploriginDrop {
     pub node_id: RepOriginId,
 }
@@ -104,7 +102,7 @@ impl XlReploriginDrop {
 }
 
 #[repr(C)]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct XlReploriginSet {
     pub remote_lsn: Lsn,
     pub node_id: RepOriginId,
@@ -508,8 +506,9 @@ pub fn decode_wal_record(
 }
 
 pub mod v14 {
-    use crate::{OffsetNumber, TransactionId};
     use bytes::{Buf, Bytes};
+
+    use crate::{OffsetNumber, TransactionId};
 
     #[repr(C)]
     #[derive(Debug)]
@@ -678,9 +677,10 @@ pub mod v15 {
 }
 
 pub mod v16 {
+    use bytes::{Buf, Bytes};
+
     pub use super::v14::{XlHeapInsert, XlHeapLockUpdated, XlHeapMultiInsert, XlParameterChange};
     use crate::{OffsetNumber, TransactionId};
-    use bytes::{Buf, Bytes};
 
     pub struct XlHeapDelete {
         pub xmax: TransactionId,
@@ -746,8 +746,9 @@ pub mod v16 {
 
     /* Since PG16, we have the Neon RMGR (RM_NEON_ID) to manage Neon-flavored WAL. */
     pub mod rm_neon {
-        use crate::{OffsetNumber, TransactionId};
         use bytes::{Buf, Bytes};
+
+        use crate::{OffsetNumber, TransactionId};
 
         #[repr(C)]
         #[derive(Debug)]
@@ -858,14 +859,14 @@ pub mod v16 {
 }
 
 pub mod v17 {
-    pub use super::v14::XlHeapLockUpdated;
-    pub use crate::{TimeLineID, TimestampTz};
     use bytes::{Buf, Bytes};
 
-    pub use super::v16::rm_neon;
+    pub use super::v14::XlHeapLockUpdated;
     pub use super::v16::{
         XlHeapDelete, XlHeapInsert, XlHeapLock, XlHeapMultiInsert, XlHeapUpdate, XlParameterChange,
+        rm_neon,
     };
+    pub use crate::{TimeLineID, TimestampTz};
 
     #[repr(C)]
     #[derive(Debug)]
@@ -911,7 +912,7 @@ impl XlSmgrCreate {
 }
 
 #[repr(C)]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct XlSmgrTruncate {
     pub blkno: BlockNumber,
     pub rnode: RelFileNode,
@@ -984,7 +985,7 @@ impl XlDropDatabase {
 /// xl_xact_parsed_abort structs in PostgreSQL, but we use the same
 /// struct for commits and aborts.
 ///
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct XlXactParsedRecord {
     pub xid: TransactionId,
     pub info: u8,

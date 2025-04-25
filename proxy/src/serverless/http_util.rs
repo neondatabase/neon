@@ -6,8 +6,8 @@ use bytes::Bytes;
 use http::{Response, StatusCode};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
+use http_utils::error::ApiError;
 use serde::Serialize;
-use utils::http::error::ApiError;
 
 /// Like [`ApiError::into_response`]
 pub(crate) fn api_error_into_response(this: ApiError) -> Response<BoxBody<Bytes, hyper::Error>> {
@@ -59,14 +59,14 @@ pub(crate) fn api_error_into_response(this: ApiError) -> Response<BoxBody<Bytes,
     }
 }
 
-/// Same as [`utils::http::error::HttpErrorBody`]
+/// Same as [`http_utils::error::HttpErrorBody`]
 #[derive(Serialize)]
 struct HttpErrorBody {
     pub(crate) msg: String,
 }
 
 impl HttpErrorBody {
-    /// Same as [`utils::http::error::HttpErrorBody::response_from_msg_and_status`]
+    /// Same as [`http_utils::error::HttpErrorBody::response_from_msg_and_status`]
     fn response_from_msg_and_status(
         msg: String,
         status: StatusCode,
@@ -74,22 +74,25 @@ impl HttpErrorBody {
         HttpErrorBody { msg }.to_response(status)
     }
 
-    /// Same as [`utils::http::error::HttpErrorBody::to_response`]
+    /// Same as [`http_utils::error::HttpErrorBody::to_response`]
     fn to_response(&self, status: StatusCode) -> Response<BoxBody<Bytes, hyper::Error>> {
         Response::builder()
             .status(status)
             .header(http::header::CONTENT_TYPE, "application/json")
             // we do not have nested maps with non string keys so serialization shouldn't fail
             .body(
-                Full::new(Bytes::from(serde_json::to_string(self).unwrap()))
-                    .map_err(|x| match x {})
-                    .boxed(),
+                Full::new(Bytes::from(
+                    serde_json::to_string(self)
+                        .expect("serialising HttpErrorBody should never fail"),
+                ))
+                .map_err(|x| match x {})
+                .boxed(),
             )
-            .unwrap()
+            .expect("content-type header should be valid")
     }
 }
 
-/// Same as [`utils::http::json::json_response`]
+/// Same as [`http_utils::json::json_response`]
 pub(crate) fn json_response<T: Serialize>(
     status: StatusCode,
     data: T,

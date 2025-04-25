@@ -7,16 +7,19 @@ import threading
 import time
 import timeit
 from contextlib import closing
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.common_types import Lsn
-from fixtures.compare_fixtures import NeonCompare
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonPageserver
 from fixtures.pageserver.utils import wait_for_last_record_lsn
 from fixtures.utils import wait_until
-from prometheus_client.samples import Sample
+
+if TYPE_CHECKING:
+    from fixtures.compare_fixtures import NeonCompare
+    from fixtures.neon_fixtures import NeonPageserver
+    from prometheus_client.samples import Sample
 
 
 def _record_branch_creation_durations(neon_compare: NeonCompare, durs: list[float]):
@@ -45,9 +48,9 @@ def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int)
     tenant, _ = env.create_tenant(
         conf={
             "gc_period": "5 s",
-            "gc_horizon": f"{4 * 1024 ** 2}",
-            "checkpoint_distance": f"{2 * 1024 ** 2}",
-            "compaction_target_size": f"{1024 ** 2}",
+            "gc_horizon": f"{4 * 1024**2}",
+            "checkpoint_distance": f"{2 * 1024**2}",
+            "compaction_target_size": f"{1024**2}",
             "compaction_threshold": "2",
             # set PITR interval to be small, so we can do GC
             "pitr_interval": "5 s",
@@ -82,10 +85,10 @@ def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int)
         env.create_branch(f"b{i + 1}", ancestor_branch_name=f"b{p}", tenant_id=tenant)
         dur = timeit.default_timer() - timer
 
-        log.info(f"Creating branch b{i+1} took {dur}s")
+        log.info(f"Creating branch b{i + 1} took {dur}s")
         branch_creation_durations.append(dur)
 
-        threads.append(threading.Thread(target=run_pgbench, args=(f"b{i+1}",), daemon=True))
+        threads.append(threading.Thread(target=run_pgbench, args=(f"b{i + 1}",), daemon=True))
         threads[-1].start()
 
     for thread in threads:
@@ -94,6 +97,7 @@ def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int)
     _record_branch_creation_durations(neon_compare, branch_creation_durations)
 
 
+@pytest.mark.timeout(1000)
 @pytest.mark.parametrize("n_branches", [500, 1024])
 @pytest.mark.parametrize("shape", ["one_ancestor", "random"])
 def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape: str):
@@ -202,7 +206,7 @@ def wait_and_record_startup_metrics(
         assert len(matching) == len(expected_labels)
         return matching
 
-    samples = wait_until(metrics_are_filled)
+    samples = wait_until(metrics_are_filled, timeout=60)
 
     for sample in samples:
         phase = sample.labels["phase"]

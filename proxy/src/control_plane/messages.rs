@@ -2,9 +2,10 @@ use std::fmt::{self, Display};
 
 use measured::FixedCardinalityLabel;
 use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
 
 use crate::auth::IpPattern;
-use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt, RoleNameInt};
+use crate::intern::{AccountIdInt, BranchIdInt, EndpointIdInt, ProjectIdInt, RoleNameInt};
 use crate::proxy::retry::CouldRetry;
 
 /// Generic error response with human-readable description.
@@ -222,29 +223,16 @@ pub(crate) struct UserFacingMessage {
 }
 
 /// Response which holds client's auth secret, e.g. [`crate::scram::ServerSecret`].
-/// Returned by the `/proxy_get_role_secret` API method.
-#[derive(Deserialize)]
-pub(crate) struct GetRoleSecret {
-    pub(crate) role_secret: Box<str>,
-    pub(crate) allowed_ips: Option<Vec<IpPattern>>,
-    pub(crate) project_id: Option<ProjectIdInt>,
-}
-
-/// Response which holds client's auth secret, e.g. [`crate::scram::ServerSecret`].
 /// Returned by the `/get_endpoint_access_control` API method.
 #[derive(Deserialize)]
 pub(crate) struct GetEndpointAccessControl {
     pub(crate) role_secret: Box<str>,
     pub(crate) allowed_ips: Option<Vec<IpPattern>>,
+    pub(crate) allowed_vpc_endpoint_ids: Option<Vec<String>>,
     pub(crate) project_id: Option<ProjectIdInt>,
-    pub(crate) allowed_vpc_endpoint_ids: Option<Vec<EndpointIdInt>>,
-}
-
-// Manually implement debug to omit sensitive info.
-impl fmt::Debug for GetRoleSecret {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("GetRoleSecret").finish_non_exhaustive()
-    }
+    pub(crate) account_id: Option<AccountIdInt>,
+    pub(crate) block_public_connections: Option<bool>,
+    pub(crate) block_vpc_connections: Option<bool>,
 }
 
 /// Response which holds compute node's `host:port` pair.
@@ -252,6 +240,7 @@ impl fmt::Debug for GetRoleSecret {
 #[derive(Debug, Deserialize)]
 pub(crate) struct WakeCompute {
     pub(crate) address: Box<str>,
+    pub(crate) server_name: Option<String>,
     pub(crate) aux: MetricsAuxInfo,
 }
 
@@ -298,6 +287,10 @@ pub(crate) struct DatabaseInfo {
     pub(crate) aux: MetricsAuxInfo,
     #[serde(default)]
     pub(crate) allowed_ips: Option<Vec<IpPattern>>,
+    #[serde(default)]
+    pub(crate) allowed_vpc_endpoint_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) public_access_allowed: Option<bool>,
 }
 
 // Manually implement debug to omit sensitive info.
@@ -309,6 +302,7 @@ impl fmt::Debug for DatabaseInfo {
             .field("dbname", &self.dbname)
             .field("user", &self.user)
             .field("allowed_ips", &self.allowed_ips)
+            .field("allowed_vpc_endpoint_ids", &self.allowed_vpc_endpoint_ids)
             .finish_non_exhaustive()
     }
 }
@@ -320,6 +314,9 @@ pub(crate) struct MetricsAuxInfo {
     pub(crate) endpoint_id: EndpointIdInt,
     pub(crate) project_id: ProjectIdInt,
     pub(crate) branch_id: BranchIdInt,
+    // note: we don't use interned strings for compute IDs.
+    // they churn too quickly and we have no way to clean up interned strings.
+    pub(crate) compute_id: SmolStr,
     #[serde(default)]
     pub(crate) cold_start_info: ColdStartInfo,
 }
@@ -369,7 +366,8 @@ pub struct EndpointJwksResponse {
 pub struct JwksSettings {
     pub id: String,
     pub jwks_url: url::Url,
-    pub provider_name: String,
+    #[serde(rename = "provider_name")]
+    pub _provider_name: String,
     pub jwt_audience: Option<String>,
     pub role_names: Vec<RoleNameInt>,
 }
@@ -385,6 +383,7 @@ mod tests {
             "endpoint_id": "endpoint",
             "project_id": "project",
             "branch_id": "branch",
+            "compute_id": "compute",
             "cold_start_info": "unknown",
         })
     }
@@ -473,22 +472,34 @@ mod tests {
 
     #[test]
     fn parse_get_role_secret() -> anyhow::Result<()> {
-        // Empty `allowed_ips` field.
+        // Empty `allowed_ips` and `allowed_vpc_endpoint_ids` field.
         let json = json!({
             "role_secret": "secret",
         });
-        serde_json::from_str::<GetRoleSecret>(&json.to_string())?;
+        serde_json::from_str::<GetEndpointAccessControl>(&json.to_string())?;
         let json = json!({
             "role_secret": "secret",
             "allowed_ips": ["8.8.8.8"],
         });
-        serde_json::from_str::<GetRoleSecret>(&json.to_string())?;
+        serde_json::from_str::<GetEndpointAccessControl>(&json.to_string())?;
+        let json = json!({
+            "role_secret": "secret",
+            "allowed_vpc_endpoint_ids": ["vpce-0abcd1234567890ef"],
+        });
+        serde_json::from_str::<GetEndpointAccessControl>(&json.to_string())?;
         let json = json!({
             "role_secret": "secret",
             "allowed_ips": ["8.8.8.8"],
+            "allowed_vpc_endpoint_ids": ["vpce-0abcd1234567890ef"],
+        });
+        serde_json::from_str::<GetEndpointAccessControl>(&json.to_string())?;
+        let json = json!({
+            "role_secret": "secret",
+            "allowed_ips": ["8.8.8.8"],
+            "allowed_vpc_endpoint_ids": ["vpce-0abcd1234567890ef"],
             "project_id": "project",
         });
-        serde_json::from_str::<GetRoleSecret>(&json.to_string())?;
+        serde_json::from_str::<GetEndpointAccessControl>(&json.to_string())?;
 
         Ok(())
     }

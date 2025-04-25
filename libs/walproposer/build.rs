@@ -1,9 +1,11 @@
 //! Links with walproposer, pgcommon, pgport and runs bindgen on walproposer.h
 //! to generate Rust bindings for it.
 
-use std::{env, path::PathBuf, process::Command};
+use std::env;
+use std::path::PathBuf;
+use std::process::Command;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 
 const WALPROPOSER_PG_VERSION: &str = "v17";
 
@@ -30,9 +32,9 @@ fn main() -> anyhow::Result<()> {
     let pgxn_neon = std::fs::canonicalize(pgxn_neon)?;
     let pgxn_neon = pgxn_neon.to_str().ok_or(anyhow!("Bad non-UTF path"))?;
 
+    println!("cargo:rustc-link-lib=static=walproposer");
     println!("cargo:rustc-link-lib=static=pgport");
     println!("cargo:rustc-link-lib=static=pgcommon");
-    println!("cargo:rustc-link-lib=static=walproposer");
     println!("cargo:rustc-link-search={walproposer_lib_search_str}");
 
     // Rebuild crate when libwalproposer.a changes

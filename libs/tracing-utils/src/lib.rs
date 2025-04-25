@@ -21,7 +21,7 @@
 //!         .with_writer(std::io::stderr);
 //!
 //!     // Initialize OpenTelemetry. Exports tracing spans as OpenTelemetry traces
-//!     let otlp_layer = tracing_utils::init_tracing("my_application").await;
+//!     let otlp_layer = tracing_utils::init_tracing("my_application", tracing_utils::ExportConfig::default()).await;
 //!
 //!     // Put it all together
 //!     tracing_subscriber::registry()
@@ -31,17 +31,20 @@
 //!         .init();
 //! }
 //! ```
-#![deny(unsafe_code)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 pub mod http;
+pub mod perf_span;
 
-use opentelemetry::trace::TracerProvider;
 use opentelemetry::KeyValue;
-use opentelemetry_sdk::Resource;
-use tracing::Subscriber;
-use tracing_subscriber::registry::LookupSpan;
+use opentelemetry::trace::TracerProvider;
+use opentelemetry_otlp::WithExportConfig;
+pub use opentelemetry_otlp::{ExportConfig, Protocol};
+use tracing::level_filters::LevelFilter;
+use tracing::{Dispatch, Subscriber};
 use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::registry::LookupSpan;
 
 /// Set up OpenTelemetry exporter, using configuration from environment variables.
 ///
@@ -70,19 +73,28 @@ use tracing_subscriber::Layer;
 ///
 /// This doesn't block, but is marked as 'async' to hint that this must be called in
 /// asynchronous execution context.
-pub async fn init_tracing<S>(service_name: &str) -> Option<impl Layer<S>>
+pub async fn init_tracing<S>(
+    service_name: &str,
+    export_config: ExportConfig,
+) -> Option<impl Layer<S>>
 where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
     if std::env::var("OTEL_SDK_DISABLED") == Ok("true".to_string()) {
         return None;
     };
-    Some(init_tracing_internal(service_name.to_string()))
+    Some(init_tracing_internal(
+        service_name.to_string(),
+        export_config,
+    ))
 }
 
 /// Like `init_tracing`, but creates a separate tokio Runtime for the tracing
 /// tasks.
-pub fn init_tracing_without_runtime<S>(service_name: &str) -> Option<impl Layer<S>>
+pub fn init_tracing_without_runtime<S>(
+    service_name: &str,
+    export_config: ExportConfig,
+) -> Option<impl Layer<S>>
 where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
@@ -113,15 +125,24 @@ where
     ));
     let _guard = runtime.enter();
 
-    Some(init_tracing_internal(service_name.to_string()))
+    Some(init_tracing_internal(
+        service_name.to_string(),
+        export_config,
+    ))
 }
 
-fn init_tracing_internal<S>(service_name: String) -> impl Layer<S>
+fn init_tracing_internal<S>(service_name: String, export_config: ExportConfig) -> impl Layer<S>
 where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
-    // Sets up exporter from the OTEL_EXPORTER_* environment variables.
-    let exporter = opentelemetry_otlp::new_exporter().http();
+    // Sets up exporter from the provided [`ExportConfig`] parameter.
+    // If the endpoint is not specified, it is loaded from the
+    // OTEL_EXPORTER_OTLP_ENDPOINT environment variable.
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .with_export_config(export_config)
+        .build()
+        .expect("could not initialize opentelemetry exporter");
 
     // TODO: opentelemetry::global::set_error_handler() with custom handler that
     //       bypasses default tracing layers, but logs regular looking log
@@ -132,17 +153,13 @@ where
         opentelemetry_sdk::propagation::TraceContextPropagator::new(),
     );
 
-    let tracer = opentelemetry_otlp::new_pipeline()
-        .tracing()
-        .with_exporter(exporter)
-        .with_trace_config(opentelemetry_sdk::trace::Config::default().with_resource(
-            Resource::new(vec![KeyValue::new(
-                opentelemetry_semantic_conventions::resource::SERVICE_NAME,
-                service_name,
-            )]),
-        ))
-        .install_batch(opentelemetry_sdk::runtime::Tokio)
-        .expect("could not initialize opentelemetry exporter")
+    let tracer = opentelemetry_sdk::trace::TracerProvider::builder()
+        .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+        .with_resource(opentelemetry_sdk::Resource::new(vec![KeyValue::new(
+            opentelemetry_semantic_conventions::resource::SERVICE_NAME,
+            service_name,
+        )]))
+        .build()
         .tracer("global");
 
     tracing_opentelemetry::layer().with_tracer(tracer)
@@ -152,4 +169,52 @@ where
 // pending traces before we exit.
 pub fn shutdown_tracing() {
     opentelemetry::global::shutdown_tracer_provider();
+}
+
+pub enum OtelEnablement {
+    Disabled,
+    Enabled {
+        service_name: String,
+        export_config: ExportConfig,
+        runtime: &'static tokio::runtime::Runtime,
+    },
+}
+
+pub struct OtelGuard {
+    pub dispatch: Dispatch,
+}
+
+impl Drop for OtelGuard {
+    fn drop(&mut self) {
+        shutdown_tracing();
+    }
+}
+
+/// Initializes OTEL infrastructure for performance tracing according to the provided configuration
+///
+/// Performance tracing is handled by a different [`tracing::Subscriber`]. This functions returns
+/// an [`OtelGuard`] containing a [`tracing::Dispatch`] associated with a newly created subscriber.
+/// Applications should use this dispatch for their performance traces.
+///
+/// The lifetime of the guard should match taht of the application. On drop, it tears down the
+/// OTEL infra.
+pub fn init_performance_tracing(otel_enablement: OtelEnablement) -> Option<OtelGuard> {
+    let otel_subscriber = match otel_enablement {
+        OtelEnablement::Disabled => None,
+        OtelEnablement::Enabled {
+            service_name,
+            export_config,
+            runtime,
+        } => {
+            let otel_layer = runtime
+                .block_on(init_tracing(&service_name, export_config))
+                .with_filter(LevelFilter::INFO);
+            let otel_subscriber = tracing_subscriber::registry().with(otel_layer);
+            let otel_dispatch = Dispatch::new(otel_subscriber);
+
+            Some(otel_dispatch)
+        }
+    };
+
+    otel_subscriber.map(|dispatch| OtelGuard { dispatch })
 }

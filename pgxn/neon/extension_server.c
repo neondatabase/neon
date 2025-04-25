@@ -3,9 +3,6 @@
  * extension_server.c
  *	  Request compute_ctl to download extension files.
  *
- * IDENTIFICATION
- *	 contrib/neon/extension_server.c
- *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -14,10 +11,12 @@
 
 #include "utils/guc.h"
 
-#include "extension_server.h" 
+#include "extension_server.h"
 #include "neon_utils.h"
 
 static int	extension_server_port = 0;
+static int	extension_server_request_timeout = 60;
+static int	extension_server_connect_timeout = 60;
 
 static download_extension_file_hook_type prev_download_extension_file_hook = NULL;
 
@@ -34,19 +33,18 @@ static download_extension_file_hook_type prev_download_extension_file_hook = NUL
 static bool
 neon_download_extension_file_http(const char *filename, bool is_library)
 {
-	static CURL	   *handle = NULL;
-
 	CURLcode	res;
-	char	   *compute_ctl_url;
 	bool		ret = false;
+	CURL	   *handle = NULL;
+	char	   *compute_ctl_url;
 
-	if (handle == NULL)
-	{
-		handle = alloc_curl_handle();
+	handle = alloc_curl_handle();
 
-		curl_easy_setopt(handle, CURLOPT_CUSTOMREQUEST, "POST");
-		curl_easy_setopt(handle, CURLOPT_TIMEOUT, 3L /* seconds */ );
-	}
+	curl_easy_setopt(handle, CURLOPT_CUSTOMREQUEST, "POST");
+	if (extension_server_request_timeout > 0)
+		curl_easy_setopt(handle, CURLOPT_TIMEOUT, (long)extension_server_request_timeout /* seconds */ );
+	if (extension_server_connect_timeout > 0)
+		curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, (long)extension_server_connect_timeout /* seconds */ );
 
 	compute_ctl_url = psprintf("http://localhost:%d/extension_server/%s%s",
 							   extension_server_port, filename, is_library ? "?is_library=true" : "");
@@ -57,6 +55,8 @@ neon_download_extension_file_http(const char *filename, bool is_library)
 
 	/* Perform the request, res will get the return code */
 	res = curl_easy_perform(handle);
+	curl_easy_cleanup(handle);
+
 	/* Check for errors */
 	if (res == CURLE_OK)
 	{
@@ -86,6 +86,24 @@ pg_init_extension_server()
 							0, 0, INT_MAX,
 							PGC_POSTMASTER,
 							0,	/* no flags required */
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("neon.extension_server_request_timeout",
+							"timeout for fetching extensions in seconds",
+							NULL,
+							&extension_server_request_timeout,
+							60, 0, INT_MAX,
+							PGC_SUSET,
+							GUC_UNIT_S,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("neon.extension_server_connect_timeout",
+							"timeout for connecting to the extension server in seconds",
+							NULL,
+							&extension_server_connect_timeout,
+							60, 0, INT_MAX,
+							PGC_SUSET,
+							GUC_UNIT_S,
 							NULL, NULL, NULL);
 
 	/* set download_extension_file_hook */

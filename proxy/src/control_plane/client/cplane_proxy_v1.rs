@@ -1,18 +1,20 @@
 //! Production console backend.
 
+use std::net::IpAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ::http::header::AUTHORIZATION;
 use ::http::HeaderName;
+use ::http::header::AUTHORIZATION;
 use futures::TryFutureExt;
 use postgres_client::config::SslMode;
 use tokio::time::Instant;
-use tracing::{debug, info, info_span, warn, Instrument};
+use tracing::{Instrument, debug, info, info_span, warn};
 
 use super::super::messages::{ControlPlaneErrorMessage, GetEndpointAccessControl, WakeCompute};
-use crate::auth::backend::jwt::AuthRule;
 use crate::auth::backend::ComputeUserInfo;
+use crate::auth::backend::jwt::AuthRule;
 use crate::cache::Cached;
 use crate::context::RequestContext;
 use crate::control_plane::caches::ApiCaches;
@@ -22,14 +24,15 @@ use crate::control_plane::errors::{
 use crate::control_plane::locks::ApiLocks;
 use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, Reason};
 use crate::control_plane::{
-    AuthInfo, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, NodeInfo,
+    AccessBlockerFlags, AuthInfo, AuthSecret, CachedAccessBlockerFlags, CachedAllowedIps,
+    CachedAllowedVpcEndpointIds, CachedNodeInfo, CachedRoleSecret, NodeInfo,
 };
 use crate::metrics::{CacheOutcome, Metrics};
 use crate::rate_limiter::WakeComputeRateLimiter;
 use crate::types::{EndpointCacheKey, EndpointId};
 use crate::{compute, http, scram};
 
-const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
+pub(crate) const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 
 #[derive(Clone)]
 pub struct NeonControlPlaneClient {
@@ -78,15 +81,30 @@ impl NeonControlPlaneClient {
             info!("endpoint is not valid, skipping the request");
             return Ok(AuthInfo::default());
         }
-        let request_id = ctx.session_id().to_string();
-        let application_name = ctx.console_application_name();
+        self.do_get_auth_req(user_info, &ctx.session_id(), Some(ctx))
+            .await
+    }
+
+    async fn do_get_auth_req(
+        &self,
+        user_info: &ComputeUserInfo,
+        session_id: &uuid::Uuid,
+        ctx: Option<&RequestContext>,
+    ) -> Result<AuthInfo, GetAuthInfoError> {
+        let request_id: String = session_id.to_string();
+        let application_name = if let Some(ctx) = ctx {
+            ctx.console_application_name()
+        } else {
+            "auth_cancellation".to_string()
+        };
+
         async {
             let request = self
                 .endpoint
                 .get_path("get_endpoint_access_control")
                 .header(X_REQUEST_ID, &request_id)
                 .header(AUTHORIZATION, format!("Bearer {}", &self.jwt))
-                .query(&[("session_id", ctx.session_id())])
+                .query(&[("session_id", session_id)])
                 .query(&[
                     ("application_name", application_name.as_str()),
                     ("endpointish", user_info.endpoint.as_str()),
@@ -96,9 +114,16 @@ impl NeonControlPlaneClient {
 
             debug!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
-            let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Cplane);
-            let response = self.endpoint.execute(request).await?;
-            drop(pause);
+            let response = match ctx {
+                Some(ctx) => {
+                    let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Cplane);
+                    let rsp = self.endpoint.execute(request).await;
+                    drop(pause);
+                    rsp?
+                }
+                None => self.endpoint.execute(request).await?,
+            };
+
             info!(duration = ?start.elapsed(), "received http response");
             let body = match parse_body::<GetEndpointAccessControl>(response).await {
                 Ok(body) => body,
@@ -115,9 +140,6 @@ impl NeonControlPlaneClient {
                 }
             };
 
-            // Ivan: don't know where it will be used, so I leave it here
-            let _endpoint_vpc_ids = body.allowed_vpc_endpoint_ids.unwrap_or_default();
-
             let secret = if body.role_secret.is_empty() {
                 None
             } else {
@@ -131,10 +153,23 @@ impl NeonControlPlaneClient {
                 .proxy
                 .allowed_ips_number
                 .observe(allowed_ips.len() as f64);
+            let allowed_vpc_endpoint_ids = body.allowed_vpc_endpoint_ids.unwrap_or_default();
+            Metrics::get()
+                .proxy
+                .allowed_vpc_endpoint_ids
+                .observe(allowed_vpc_endpoint_ids.len() as f64);
+            let block_public_connections = body.block_public_connections.unwrap_or_default();
+            let block_vpc_connections = body.block_vpc_connections.unwrap_or_default();
             Ok(AuthInfo {
                 secret,
                 allowed_ips,
+                allowed_vpc_endpoint_ids,
                 project_id: body.project_id,
+                account_id: body.account_id,
+                access_blocker_flags: AccessBlockerFlags {
+                    public_access_blocked: block_public_connections,
+                    vpc_access_blocked: block_vpc_connections,
+                },
             })
         }
         .inspect_err(|e| tracing::debug!(error = ?e))
@@ -241,16 +276,31 @@ impl NeonControlPlaneClient {
                 Some(x) => x,
             };
 
+            let host_addr = IpAddr::from_str(host).ok();
+
+            let ssl_mode = match &body.server_name {
+                Some(_) => SslMode::Require,
+                None => SslMode::Disable,
+            };
+            let host_name = match body.server_name {
+                Some(host) => host,
+                None => host.to_owned(),
+            };
+
             // Don't set anything but host and port! This config will be cached.
             // We'll set username and such later using the startup message.
             // TODO: add more type safety (in progress).
-            let mut config = compute::ConnCfg::new(host.to_owned(), port);
-            config.ssl_mode(SslMode::Disable); // TLS is not configured on compute nodes.
+            let mut config = compute::ConnCfg::new(host_name, port);
+
+            if let Some(addr) = host_addr {
+                config.set_host_addr(addr);
+            }
+
+            config.ssl_mode(ssl_mode);
 
             let node = NodeInfo {
                 config,
                 aux: body.aux,
-                allow_self_signed_compute: false,
             };
 
             Ok(node)
@@ -278,6 +328,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
             return Ok(role_secret);
         }
         let auth_info = self.do_get_auth_info(ctx, user_info).await?;
+        let account_id = auth_info.account_id;
         if let Some(project_id) = auth_info.project_id {
             let normalized_ep_int = normalized_ep.into();
             self.caches.project_info.insert_role_secret(
@@ -291,24 +342,35 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
                 normalized_ep_int,
                 Arc::new(auth_info.allowed_ips),
             );
+            self.caches.project_info.insert_allowed_vpc_endpoint_ids(
+                account_id,
+                project_id,
+                normalized_ep_int,
+                Arc::new(auth_info.allowed_vpc_endpoint_ids),
+            );
+            self.caches.project_info.insert_block_public_or_vpc_access(
+                project_id,
+                normalized_ep_int,
+                auth_info.access_blocker_flags,
+            );
             ctx.set_project_id(project_id);
         }
         // When we just got a secret, we don't need to invalidate it.
         Ok(Cached::new_uncached(auth_info.secret))
     }
 
-    async fn get_allowed_ips_and_secret(
+    async fn get_allowed_ips(
         &self,
         ctx: &RequestContext,
         user_info: &ComputeUserInfo,
-    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
+    ) -> Result<CachedAllowedIps, GetAuthInfoError> {
         let normalized_ep = &user_info.endpoint.normalize();
         if let Some(allowed_ips) = self.caches.project_info.get_allowed_ips(normalized_ep) {
             Metrics::get()
                 .proxy
-                .allowed_ips_cache_misses
+                .allowed_ips_cache_misses // TODO SR: Should we rename this variable to something like allowed_ip_cache_stats?
                 .inc(CacheOutcome::Hit);
-            return Ok((allowed_ips, None));
+            return Ok(allowed_ips);
         }
         Metrics::get()
             .proxy
@@ -316,7 +378,10 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
             .inc(CacheOutcome::Miss);
         let auth_info = self.do_get_auth_info(ctx, user_info).await?;
         let allowed_ips = Arc::new(auth_info.allowed_ips);
+        let allowed_vpc_endpoint_ids = Arc::new(auth_info.allowed_vpc_endpoint_ids);
+        let access_blocker_flags = auth_info.access_blocker_flags;
         let user = &user_info.user;
+        let account_id = auth_info.account_id;
         if let Some(project_id) = auth_info.project_id {
             let normalized_ep_int = normalized_ep.into();
             self.caches.project_info.insert_role_secret(
@@ -330,12 +395,136 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
                 normalized_ep_int,
                 allowed_ips.clone(),
             );
+            self.caches.project_info.insert_allowed_vpc_endpoint_ids(
+                account_id,
+                project_id,
+                normalized_ep_int,
+                allowed_vpc_endpoint_ids.clone(),
+            );
+            self.caches.project_info.insert_block_public_or_vpc_access(
+                project_id,
+                normalized_ep_int,
+                access_blocker_flags,
+            );
             ctx.set_project_id(project_id);
         }
-        Ok((
-            Cached::new_uncached(allowed_ips),
-            Some(Cached::new_uncached(auth_info.secret)),
-        ))
+        Ok(Cached::new_uncached(allowed_ips))
+    }
+
+    async fn get_allowed_vpc_endpoint_ids(
+        &self,
+        ctx: &RequestContext,
+        user_info: &ComputeUserInfo,
+    ) -> Result<CachedAllowedVpcEndpointIds, GetAuthInfoError> {
+        let normalized_ep = &user_info.endpoint.normalize();
+        if let Some(allowed_vpc_endpoint_ids) = self
+            .caches
+            .project_info
+            .get_allowed_vpc_endpoint_ids(normalized_ep)
+        {
+            Metrics::get()
+                .proxy
+                .vpc_endpoint_id_cache_stats
+                .inc(CacheOutcome::Hit);
+            return Ok(allowed_vpc_endpoint_ids);
+        }
+
+        Metrics::get()
+            .proxy
+            .vpc_endpoint_id_cache_stats
+            .inc(CacheOutcome::Miss);
+
+        let auth_info = self.do_get_auth_info(ctx, user_info).await?;
+        let allowed_ips = Arc::new(auth_info.allowed_ips);
+        let allowed_vpc_endpoint_ids = Arc::new(auth_info.allowed_vpc_endpoint_ids);
+        let access_blocker_flags = auth_info.access_blocker_flags;
+        let user = &user_info.user;
+        let account_id = auth_info.account_id;
+        if let Some(project_id) = auth_info.project_id {
+            let normalized_ep_int = normalized_ep.into();
+            self.caches.project_info.insert_role_secret(
+                project_id,
+                normalized_ep_int,
+                user.into(),
+                auth_info.secret.clone(),
+            );
+            self.caches.project_info.insert_allowed_ips(
+                project_id,
+                normalized_ep_int,
+                allowed_ips.clone(),
+            );
+            self.caches.project_info.insert_allowed_vpc_endpoint_ids(
+                account_id,
+                project_id,
+                normalized_ep_int,
+                allowed_vpc_endpoint_ids.clone(),
+            );
+            self.caches.project_info.insert_block_public_or_vpc_access(
+                project_id,
+                normalized_ep_int,
+                access_blocker_flags,
+            );
+            ctx.set_project_id(project_id);
+        }
+        Ok(Cached::new_uncached(allowed_vpc_endpoint_ids))
+    }
+
+    async fn get_block_public_or_vpc_access(
+        &self,
+        ctx: &RequestContext,
+        user_info: &ComputeUserInfo,
+    ) -> Result<CachedAccessBlockerFlags, GetAuthInfoError> {
+        let normalized_ep = &user_info.endpoint.normalize();
+        if let Some(access_blocker_flags) = self
+            .caches
+            .project_info
+            .get_block_public_or_vpc_access(normalized_ep)
+        {
+            Metrics::get()
+                .proxy
+                .access_blocker_flags_cache_stats
+                .inc(CacheOutcome::Hit);
+            return Ok(access_blocker_flags);
+        }
+
+        Metrics::get()
+            .proxy
+            .access_blocker_flags_cache_stats
+            .inc(CacheOutcome::Miss);
+
+        let auth_info = self.do_get_auth_info(ctx, user_info).await?;
+        let allowed_ips = Arc::new(auth_info.allowed_ips);
+        let allowed_vpc_endpoint_ids = Arc::new(auth_info.allowed_vpc_endpoint_ids);
+        let access_blocker_flags = auth_info.access_blocker_flags;
+        let user = &user_info.user;
+        let account_id = auth_info.account_id;
+        if let Some(project_id) = auth_info.project_id {
+            let normalized_ep_int = normalized_ep.into();
+            self.caches.project_info.insert_role_secret(
+                project_id,
+                normalized_ep_int,
+                user.into(),
+                auth_info.secret.clone(),
+            );
+            self.caches.project_info.insert_allowed_ips(
+                project_id,
+                normalized_ep_int,
+                allowed_ips.clone(),
+            );
+            self.caches.project_info.insert_allowed_vpc_endpoint_ids(
+                account_id,
+                project_id,
+                normalized_ep_int,
+                allowed_vpc_endpoint_ids.clone(),
+            );
+            self.caches.project_info.insert_block_public_or_vpc_access(
+                project_id,
+                normalized_ep_int,
+                access_blocker_flags.clone(),
+            );
+            ctx.set_project_id(project_id);
+        }
+        Ok(Cached::new_uncached(access_blocker_flags))
     }
 
     #[tracing::instrument(skip_all)]

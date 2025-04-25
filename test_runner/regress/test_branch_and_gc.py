@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
 from fixtures.pageserver.http import TimelineCreate406
 from fixtures.utils import query_scalar, skip_in_debug_build
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv
 
 
 # Test the GC implementation when running with branching.
@@ -58,12 +61,14 @@ def test_branch_and_gc(neon_simple_env: NeonEnv):
             # disable background GC
             "gc_period": "0s",
             # small checkpoint distance to create more delta layer files
-            "checkpoint_distance": f"{1024 ** 2}",
+            "checkpoint_distance": f"{1024**2}",
             # set the target size to be large to allow the image layer to cover the whole key space
-            "compaction_target_size": f"{1024 ** 3}",
+            "compaction_target_size": f"{1024**3}",
             # tweak the default settings to allow quickly create image layers and L1 layers
             "compaction_period": "1 s",
             "compaction_threshold": "2",
+            "l0_flush_delay_threshold": "20",
+            "l0_flush_stall_threshold": "40",
             "image_creation_threshold": "1",
             # Disable PITR, this test will set an explicit space-based GC limit
             "pitr_interval": "0 s",
@@ -132,9 +137,9 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
             # disable background GC
             "gc_period": "0s",
             # small checkpoint distance to create more delta layer files
-            "checkpoint_distance": f"{1024 ** 2}",
+            "checkpoint_distance": f"{1024**2}",
             # set the target size to be large to allow the image layer to cover the whole key space
-            "compaction_target_size": f"{1024 ** 3}",
+            "compaction_target_size": f"{1024**3}",
             # tweak the default settings to allow quickly create image layers and L1 layers
             "compaction_period": "1 s",
             "compaction_threshold": "2",

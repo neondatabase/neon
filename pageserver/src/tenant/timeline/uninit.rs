@@ -1,34 +1,43 @@
-use std::{collections::hash_map::Entry, fs, sync::Arc};
+use std::collections::hash_map::Entry;
+use std::fs;
+use std::future::Future;
+use std::sync::Arc;
 
 use anyhow::Context;
 use camino::Utf8PathBuf;
 use tracing::{error, info, info_span};
-use utils::{fs_ext, id::TimelineId, lsn::Lsn, sync::gate::GateGuard};
-
-use crate::{
-    context::RequestContext,
-    import_datadir,
-    tenant::{CreateTimelineIdempotency, Tenant, TimelineOrOffloaded},
-};
+use utils::fs_ext;
+use utils::id::TimelineId;
+use utils::lsn::Lsn;
+use utils::sync::gate::GateGuard;
 
 use super::Timeline;
+use crate::context::RequestContext;
+use crate::import_datadir;
+use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::tenant::{
+    CreateTimelineError, CreateTimelineIdempotency, TenantShard, TimelineOrOffloaded,
+};
 
 /// A timeline with some of its files on disk, being initialized.
 /// This struct ensures the atomicity of the timeline init: it's either properly created and inserted into pageserver's memory, or
 /// its local files are removed.  If we crash while this class exists, then the timeline's local
-/// state is cleaned up during [`Tenant::clean_up_timelines`], because the timeline's content isn't in remote storage.
+/// state is cleaned up during [`TenantShard::clean_up_timelines`], because the timeline's content isn't in remote storage.
 ///
 /// The caller is responsible for proper timeline data filling before the final init.
 #[must_use]
 pub struct UninitializedTimeline<'t> {
-    pub(crate) owning_tenant: &'t Tenant,
+    pub(crate) owning_tenant: &'t TenantShard,
     timeline_id: TimelineId,
     raw_timeline: Option<(Arc<Timeline>, TimelineCreateGuard)>,
+    /// Whether we spawned the inner Timeline's tasks such that we must later shut it down
+    /// if aborting the timeline creation
+    needs_shutdown: bool,
 }
 
 impl<'t> UninitializedTimeline<'t> {
     pub(crate) fn new(
-        owning_tenant: &'t Tenant,
+        owning_tenant: &'t TenantShard,
         timeline_id: TimelineId,
         raw_timeline: Option<(Arc<Timeline>, TimelineCreateGuard)>,
     ) -> Self {
@@ -36,6 +45,50 @@ impl<'t> UninitializedTimeline<'t> {
             owning_tenant,
             timeline_id,
             raw_timeline,
+            needs_shutdown: false,
+        }
+    }
+
+    /// When writing data to this timeline during creation, use this wrapper: it will take care of
+    /// setup of Timeline tasks required for I/O (flush loop) and making sure they are torn down
+    /// later.
+    pub(crate) async fn write<F, Fut>(&mut self, f: F) -> anyhow::Result<()>
+    where
+        F: FnOnce(Arc<Timeline>) -> Fut,
+        Fut: Future<Output = Result<(), CreateTimelineError>>,
+    {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
+        // Remember that we did I/O (spawned the flush loop), so that we can check we shut it down on drop
+        self.needs_shutdown = true;
+
+        let timeline = self.raw_timeline()?;
+
+        // Spawn flush loop so that the Timeline is ready to accept writes
+        timeline.maybe_spawn_flush_loop();
+
+        // Invoke the provided function, which will write some data into the new timeline
+        if let Err(e) = f(timeline.clone()).await {
+            self.abort().await;
+            return Err(e.into());
+        }
+
+        // Flush the underlying timeline's ephemeral layers to disk
+        if let Err(e) = timeline
+            .freeze_and_flush()
+            .await
+            .context("Failed to flush after timeline creation writes")
+        {
+            self.abort().await;
+            return Err(e);
+        }
+
+        Ok(())
+    }
+
+    pub(crate) async fn abort(&self) {
+        if let Some((raw_timeline, _)) = self.raw_timeline.as_ref() {
+            raw_timeline.shutdown(super::ShutdownMode::Hard).await;
         }
     }
 
@@ -44,11 +97,13 @@ impl<'t> UninitializedTimeline<'t> {
     /// This function launches the flush loop if not already done.
     ///
     /// The caller is responsible for activating the timeline (function `.activate()`).
-    pub(crate) fn finish_creation(mut self) -> anyhow::Result<Arc<Timeline>> {
+    pub(crate) async fn finish_creation(mut self) -> anyhow::Result<Arc<Timeline>> {
         let timeline_id = self.timeline_id;
         let tenant_shard_id = self.owning_tenant.tenant_shard_id;
 
         if self.raw_timeline.is_none() {
+            self.abort().await;
+
             return Err(anyhow::anyhow!(
                 "No timeline for initialization found for {tenant_shard_id}/{timeline_id}"
             ));
@@ -62,16 +117,25 @@ impl<'t> UninitializedTimeline<'t> {
             .0
             .get_disk_consistent_lsn();
 
-        anyhow::ensure!(
-            new_disk_consistent_lsn.is_valid(),
-            "new timeline {tenant_shard_id}/{timeline_id} has invalid disk_consistent_lsn"
-        );
+        if !new_disk_consistent_lsn.is_valid() {
+            self.abort().await;
+
+            return Err(anyhow::anyhow!(
+                "new timeline {tenant_shard_id}/{timeline_id} has invalid disk_consistent_lsn"
+            ));
+        }
 
         let mut timelines = self.owning_tenant.timelines.lock().unwrap();
         match timelines.entry(timeline_id) {
-            Entry::Occupied(_) => anyhow::bail!(
-                "Found freshly initialized timeline {tenant_shard_id}/{timeline_id} in the tenant map"
-            ),
+            Entry::Occupied(_) => {
+                // Unexpected, bug in the caller.  Tenant is responsible for preventing concurrent creation of the same timeline.
+                //
+                // We do not call Self::abort here.  Because we don't cleanly shut down our Timeline, [`Self::drop`] should
+                // skip trying to delete the timeline directory too.
+                anyhow::bail!(
+                    "Found freshly initialized timeline {tenant_shard_id}/{timeline_id} in the tenant map"
+                )
+            }
             Entry::Vacant(v) => {
                 // after taking here should be no fallible operations, because the drop guard will not
                 // cleanup after and would block for example the tenant deletion
@@ -93,36 +157,31 @@ impl<'t> UninitializedTimeline<'t> {
 
     /// Prepares timeline data by loading it from the basebackup archive.
     pub(crate) async fn import_basebackup_from_tar(
-        self,
-        tenant: Arc<Tenant>,
+        mut self,
+        tenant: Arc<TenantShard>,
         copyin_read: &mut (impl tokio::io::AsyncRead + Send + Sync + Unpin),
         base_lsn: Lsn,
         broker_client: storage_broker::BrokerClientChannel,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
-        let raw_timeline = self.raw_timeline()?;
+        self.write(|raw_timeline| async move {
+            import_datadir::import_basebackup_from_tar(&raw_timeline, copyin_read, base_lsn, ctx)
+                .await
+                .context("Failed to import basebackup")
+                .map_err(CreateTimelineError::Other)?;
 
-        import_datadir::import_basebackup_from_tar(raw_timeline, copyin_read, base_lsn, ctx)
-            .await
-            .context("Failed to import basebackup")?;
+            fail::fail_point!("before-checkpoint-new-timeline", |_| {
+                Err(CreateTimelineError::Other(anyhow::anyhow!(
+                    "failpoint before-checkpoint-new-timeline"
+                )))
+            });
 
-        // Flush the new layer files to disk, before we make the timeline as available to
-        // the outside world.
-        //
-        // Flush loop needs to be spawned in order to be able to flush.
-        raw_timeline.maybe_spawn_flush_loop();
-
-        fail::fail_point!("before-checkpoint-new-timeline", |_| {
-            anyhow::bail!("failpoint before-checkpoint-new-timeline");
-        });
-
-        raw_timeline
-            .freeze_and_flush()
-            .await
-            .context("Failed to flush after basebackup import")?;
+            Ok(())
+        })
+        .await?;
 
         // All the data has been imported. Insert the Timeline into the tenant's timelines map
-        let tl = self.finish_creation()?;
+        let tl = self.finish_creation().await?;
         tl.activate(tenant, broker_client, None, ctx);
         Ok(tl)
     }
@@ -143,12 +202,19 @@ impl<'t> UninitializedTimeline<'t> {
 
 impl Drop for UninitializedTimeline<'_> {
     fn drop(&mut self) {
-        if let Some((_, create_guard)) = self.raw_timeline.take() {
+        if let Some((timeline, create_guard)) = self.raw_timeline.take() {
             let _entered = info_span!("drop_uninitialized_timeline", tenant_id = %self.owning_tenant.tenant_shard_id.tenant_id, shard_id = %self.owning_tenant.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id).entered();
-            // This is unusual, but can happen harmlessly if the pageserver is stopped while
-            // creating a timeline.
-            info!("Timeline got dropped without initializing, cleaning its files");
-            cleanup_timeline_directory(create_guard);
+            if self.needs_shutdown && !timeline.gate.close_complete() {
+                // This should not happen: caller should call [`Self::abort`] on failures
+                tracing::warn!(
+                    "Timeline not shut down after initialization failure, cannot clean up files"
+                );
+            } else {
+                // This is unusual, but can happen harmlessly if the pageserver is stopped while
+                // creating a timeline.
+                info!("Timeline got dropped without initializing, cleaning its files");
+                cleanup_timeline_directory(create_guard);
+            }
         }
     }
 }
@@ -163,17 +229,17 @@ pub(crate) fn cleanup_timeline_directory(create_guard: TimelineCreateGuard) {
             error!("Failed to clean up uninitialized timeline directory {timeline_path:?}: {e:?}")
         }
     }
-    // Having cleaned up, we can release this TimelineId in `[Tenant::timelines_creating]` to allow other
+    // Having cleaned up, we can release this TimelineId in `[TenantShard::timelines_creating]` to allow other
     // timeline creation attempts under this TimelineId to proceed
     drop(create_guard);
 }
 
 /// A guard for timeline creations in process: as long as this object exists, the timeline ID
-/// is kept in `[Tenant::timelines_creating]` to exclude concurrent attempts to create the same timeline.
+/// is kept in `[TenantShard::timelines_creating]` to exclude concurrent attempts to create the same timeline.
 #[must_use]
 pub(crate) struct TimelineCreateGuard {
     pub(crate) _tenant_gate_guard: GateGuard,
-    pub(crate) owning_tenant: Arc<Tenant>,
+    pub(crate) owning_tenant: Arc<TenantShard>,
     pub(crate) timeline_id: TimelineId,
     pub(crate) timeline_path: Utf8PathBuf,
     pub(crate) idempotency: CreateTimelineIdempotency,
@@ -199,7 +265,7 @@ pub(crate) enum TimelineExclusionError {
 
 impl TimelineCreateGuard {
     pub(crate) fn new(
-        owning_tenant: &Arc<Tenant>,
+        owning_tenant: &Arc<TenantShard>,
         timeline_id: TimelineId,
         timeline_path: Utf8PathBuf,
         idempotency: CreateTimelineIdempotency,

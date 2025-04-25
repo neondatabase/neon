@@ -6,9 +6,12 @@ import subprocess
 import threading
 import time
 from contextlib import closing
+from typing import TYPE_CHECKING
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv
 
 
 def lsof_path() -> str:

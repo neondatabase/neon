@@ -5,14 +5,15 @@
 
 pub mod framed;
 
+use std::borrow::Cow;
+use std::{fmt, io, str};
+
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use itertools::Itertools;
-use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, fmt, io, str};
-
 // re-export for use in utils pageserver_feedback.rs
 pub use postgres_protocol::PG_EPOCH;
+use serde::{Deserialize, Serialize};
 
 pub type Oid = u32;
 pub type SystemId = u64;
@@ -44,7 +45,7 @@ pub struct ProtocolVersion(u32);
 
 impl ProtocolVersion {
     pub const fn new(major: u16, minor: u16) -> Self {
-        Self((major as u32) << 16 | minor as u32)
+        Self(((major as u32) << 16) | minor as u32)
     }
     pub const fn minor(self) -> u16 {
         self.0 as u16
@@ -182,6 +183,13 @@ pub struct CancelKeyData {
     pub cancel_key: i32,
 }
 
+pub fn id_to_cancel_key(id: u64) -> CancelKeyData {
+    CancelKeyData {
+        backend_pid: (id >> 32) as i32,
+        cancel_key: (id & 0xffffffff) as i32,
+    }
+}
+
 impl fmt::Display for CancelKeyData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let hi = (self.backend_pid as u64) << 32;
@@ -199,8 +207,8 @@ use rand::distributions::{Distribution, Standard};
 impl Distribution<CancelKeyData> for Standard {
     fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> CancelKeyData {
         CancelKeyData {
-            backend_pid: rng.gen(),
-            cancel_key: rng.gen(),
+            backend_pid: rng.r#gen(),
+            cancel_key: rng.r#gen(),
         }
     }
 }
@@ -249,7 +257,7 @@ pub enum ProtocolError {
 impl ProtocolError {
     /// Proxy stream.rs uses only io::Error; provide it.
     pub fn into_io_error(self) -> io::Error {
-        io::Error::new(io::ErrorKind::Other, self.to_string())
+        io::Error::other(self.to_string())
     }
 }
 
@@ -1028,7 +1036,7 @@ impl BeMessage<'_> {
                 buf.put_u8(b'd');
                 write_body(buf, |buf| {
                     buf.put_u8(b'0'); // matches INTERPRETED_WAL_RECORD_TAG in postgres-protocol
-                                      // dependency
+                    // dependency
                     buf.put_u64(rec.streaming_lsn);
                     buf.put_u64(rec.commit_lsn);
                     buf.put_slice(rec.data);

@@ -1,6 +1,8 @@
+pub use signal_hook::consts::TERM_SIGNALS;
+pub use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
-
-pub use signal_hook::consts::{signal::*, TERM_SIGNALS};
+use tokio::signal::unix::{SignalKind, signal};
+use tracing::info;
 
 pub enum Signal {
     Quit,
@@ -34,5 +36,32 @@ impl ShutdownSignals {
         }
 
         Ok(())
+    }
+}
+
+/// Runs in a loop since we want to be responsive to multiple signals
+/// even after triggering shutdown (e.g. a SIGQUIT after a slow SIGTERM shutdown)
+/// <https://github.com/neondatabase/neon/issues/9740>
+pub async fn signal_handler(token: tokio_util::sync::CancellationToken) {
+    let mut sigint = signal(SignalKind::interrupt()).unwrap();
+    let mut sigterm = signal(SignalKind::terminate()).unwrap();
+    let mut sigquit = signal(SignalKind::quit()).unwrap();
+
+    loop {
+        let signal = tokio::select! {
+            _ = sigquit.recv() => {
+                info!("Got signal SIGQUIT. Terminating in immediate shutdown mode.");
+                std::process::exit(111);
+            }
+            _ = sigint.recv() => "SIGINT",
+            _ = sigterm.recv() => "SIGTERM",
+        };
+
+        if !token.is_cancelled() {
+            info!("Got signal {signal}. Terminating gracefully in fast shutdown mode.");
+            token.cancel();
+        } else {
+            info!("Got signal {signal}. Already shutting down.");
+        }
     }
 }

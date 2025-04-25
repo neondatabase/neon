@@ -4,12 +4,14 @@
 MODULE_big = neon
 OBJS = \
 	$(WIN32RES) \
+	communicator.o \
 	extension_server.o \
 	file_cache.o \
 	hll.o \
 	libpagestore.o \
 	logical_replication_monitor.o \
 	neon.o \
+	neon_lwlsncache.o \
 	neon_pgversioncompat.o \
 	neon_perf_counters.o \
 	neon_utils.o \

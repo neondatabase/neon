@@ -7,7 +7,7 @@
 use std::fmt::Debug;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use axum::extract::ws::{Message, WebSocket};
 use futures::StreamExt;
 use tokio::sync::{broadcast, watch};
@@ -18,7 +18,7 @@ use crate::cgroup::{self, CgroupWatcher};
 use crate::dispatcher::Dispatcher;
 use crate::filecache::{FileCacheConfig, FileCacheState};
 use crate::protocol::{InboundMsg, InboundMsgKind, OutboundMsg, OutboundMsgKind, Resources};
-use crate::{bytes_to_mebibytes, get_total_system_memory, spawn_with_cancel, Args, MiB};
+use crate::{Args, MiB, bytes_to_mebibytes, get_total_system_memory, spawn_with_cancel};
 
 /// Central struct that interacts with agent, dispatcher, and cgroup to handle
 /// signals from the agent.
@@ -233,7 +233,9 @@ impl Runner {
             //
             // TODO: make the duration here configurable.
             if last_time.elapsed() > Duration::from_secs(5) {
-                bail!("haven't gotten cgroup memory stats recently enough to determine downscaling information");
+                bail!(
+                    "haven't gotten cgroup memory stats recently enough to determine downscaling information"
+                );
             } else if last_history.samples_count <= 1 {
                 let status = "haven't received enough cgroup memory stats yet";
                 info!(status, "discontinuing downscale");
@@ -370,12 +372,16 @@ impl Runner {
                 }),
             InboundMsgKind::InvalidMessage { error } => {
                 warn!(
-                    %error, id, "received notification of an invalid message we sent"
+                    error = format_args!("{error:#}"),
+                    id, "received notification of an invalid message we sent"
                 );
                 Ok(None)
             }
             InboundMsgKind::InternalError { error } => {
-                warn!(error, id, "agent experienced an internal error");
+                warn!(
+                    error = format_args!("{error:#}"),
+                    id, "agent experienced an internal error"
+                );
                 Ok(None)
             }
             InboundMsgKind::HealthCheck {} => {
@@ -476,7 +482,7 @@ impl Runner {
                                         // gives the outermost cause, and the debug impl
                                         // pretty-prints the error, whereas {:#} contains all the
                                         // causes, but is compact (no newlines).
-                                        warn!(error = format!("{e:#}"), "error handling message");
+                                        warn!(error = format_args!("{e:#}"), "error handling message");
                                         OutboundMsg::new(
                                             OutboundMsgKind::InternalError {
                                                 error: e.to_string(),
@@ -492,7 +498,7 @@ impl Runner {
                                     .context("failed to send message")?;
                             }
                             Err(e) => warn!(
-                                error = format!("{e}"),
+                                error = format_args!("{e:#}"),
                                 msg = ?msg,
                                 "received error message"
                             ),

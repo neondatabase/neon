@@ -46,7 +46,7 @@ def test_local_only_layers_after_crash(neon_env_builder: NeonEnvBuilder, pg_bin:
     for sk in env.safekeepers:
         sk.stop()
 
-    env.storage_controller.pageserver_api().patch_tenant_config_client_side(
+    env.storage_controller.pageserver_api().update_tenant_config(
         tenant_id, {"compaction_threshold": 3}
     )
     # hit the exit failpoint
@@ -92,9 +92,9 @@ def test_local_only_layers_after_crash(neon_env_builder: NeonEnvBuilder, pg_bin:
     env.pageserver.start()
     wait_until_tenant_active(pageserver_http, tenant_id)
 
-    assert not env.pageserver.layer_exists(
-        tenant_id, timeline_id, l1_found
-    ), "partial compaction result should had been removed during startup"
+    assert not env.pageserver.layer_exists(tenant_id, timeline_id, l1_found), (
+        "partial compaction result should had been removed during startup"
+    )
 
     # wait for us to catch up again
     wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, lsn)

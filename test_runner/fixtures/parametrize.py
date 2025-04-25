@@ -6,12 +6,13 @@ from typing import TYPE_CHECKING
 import allure
 import pytest
 import toml
-from _pytest.python import Metafunc
 
 from fixtures.pg_version import PgVersion
 
 if TYPE_CHECKING:
     from typing import Any
+
+    from _pytest.python import Metafunc
 
 
 """
@@ -42,6 +43,11 @@ def pageserver_virtual_file_io_engine() -> str | None:
 @pytest.fixture(scope="function", autouse=True)
 def pageserver_virtual_file_io_mode() -> str | None:
     return os.getenv("PAGESERVER_VIRTUAL_FILE_IO_MODE")
+
+
+@pytest.fixture(scope="function", autouse=True)
+def pageserver_get_vectored_concurrent_io() -> str | None:
+    return os.getenv("PAGESERVER_GET_VECTORED_CONCURRENT_IO")
 
 
 def get_pageserver_default_tenant_config_compaction_algorithm() -> dict[str, Any] | None:
@@ -116,6 +122,11 @@ def pytest_runtest_makereport(*args, **kwargs):
     }.get(os.uname().machine, "UNKNOWN")
     arch = os.getenv("RUNNER_ARCH", uname_m)
     allure.dynamic.parameter("__arch", arch)
-    allure.dynamic.parameter("__lfc", os.getenv("USE_LFC") != "false")
+    allure.dynamic.parameter(
+        "__lfc", "with-lfc" if os.getenv("USE_LFC") != "false" else "without-lfc"
+    )
+    allure.dynamic.parameter(
+        "__sanitizers", "enabled" if os.getenv("SANITIZERS") == "enabled" else "disabled"
+    )
 
     yield

@@ -1,14 +1,16 @@
+use std::collections::HashMap;
 use std::time::SystemTime;
 
-use crate::tenant::{remote_timeline_client::index::LayerFileMetadata, storage_layer::LayerName};
-
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr, TimestampSeconds};
+use serde_with::{DisplayFromStr, TimestampSeconds, serde_as};
+use utils::generation::Generation;
+use utils::id::TimelineId;
 
-use utils::{generation::Generation, id::TimelineId};
+use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
+use crate::tenant::storage_layer::LayerName;
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct HeatMapTenant {
+pub(crate) struct HeatMapTenant {
     /// Generation of the attached location that uploaded the heatmap: this is not required
     /// for correctness, but acts as a hint to secondary locations in order to detect thrashing
     /// in the unlikely event that two attached locations are both uploading conflicting heatmaps.
@@ -25,25 +27,36 @@ pub(super) struct HeatMapTenant {
     pub(super) upload_period_ms: Option<u128>,
 }
 
+impl HeatMapTenant {
+    pub(crate) fn into_timelines_index(self) -> HashMap<TimelineId, HeatMapTimeline> {
+        self.timelines
+            .into_iter()
+            .map(|htl| (htl.timeline_id, htl))
+            .collect()
+    }
+}
+
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct HeatMapTimeline {
     #[serde_as(as = "DisplayFromStr")]
     pub(crate) timeline_id: TimelineId,
 
-    pub(crate) layers: Vec<HeatMapLayer>,
+    layers: Vec<HeatMapLayer>,
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct HeatMapLayer {
     pub(crate) name: LayerName,
     pub(crate) metadata: LayerFileMetadata,
 
     #[serde_as(as = "TimestampSeconds<i64>")]
-    pub(super) access_time: SystemTime,
-    // TODO: an actual 'heat' score that would let secondary locations prioritize downloading
-    // the hottest layers, rather than trying to simply mirror whatever layers are on-disk on the primary.
+    pub(crate) access_time: SystemTime,
+
+    #[serde(default)]
+    pub(crate) cold: bool, // TODO: an actual 'heat' score that would let secondary locations prioritize downloading
+                           // the hottest layers, rather than trying to simply mirror whatever layers are on-disk on the primary.
 }
 
 impl HeatMapLayer {
@@ -51,11 +64,13 @@ impl HeatMapLayer {
         name: LayerName,
         metadata: LayerFileMetadata,
         access_time: SystemTime,
+        cold: bool,
     ) -> Self {
         Self {
             name,
             metadata,
             access_time,
+            cold,
         }
     }
 }
@@ -66,6 +81,18 @@ impl HeatMapTimeline {
             timeline_id,
             layers,
         }
+    }
+
+    pub(crate) fn into_hot_layers(self) -> impl Iterator<Item = HeatMapLayer> {
+        self.layers.into_iter().filter(|l| !l.cold)
+    }
+
+    pub(crate) fn hot_layers(&self) -> impl Iterator<Item = &HeatMapLayer> {
+        self.layers.iter().filter(|l| !l.cold)
+    }
+
+    pub(crate) fn all_layers(&self) -> impl Iterator<Item = &HeatMapLayer> {
+        self.layers.iter()
     }
 }
 
@@ -81,7 +108,7 @@ impl HeatMapTenant {
             layers: 0,
         };
         for timeline in &self.timelines {
-            for layer in &timeline.layers {
+            for layer in timeline.hot_layers() {
                 stats.layers += 1;
                 stats.bytes += layer.metadata.file_size;
             }

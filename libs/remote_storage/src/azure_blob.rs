@@ -2,31 +2,27 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::env;
 use std::fmt::Display;
-use std::io;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+use std::{env, io};
 
-use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use azure_core::request_options::{IfMatchCondition, MaxResults, Metadata, Range};
-use azure_core::{Continuable, RetryOptions};
-use azure_identity::DefaultAzureCredential;
+use azure_core::{Continuable, HttpClient, RetryOptions, TransportOptions};
 use azure_storage::StorageCredentials;
-use azure_storage_blobs::blob::CopyStatus;
-use azure_storage_blobs::prelude::ClientBuilder;
-use azure_storage_blobs::{blob::operations::GetBlobBuilder, prelude::ContainerClient};
+use azure_storage_blobs::blob::operations::GetBlobBuilder;
+use azure_storage_blobs::blob::{Blob, CopyStatus};
+use azure_storage_blobs::container::operations::ListBlobsBuilder;
+use azure_storage_blobs::prelude::{ClientBuilder, ContainerClient};
 use bytes::Bytes;
+use futures::FutureExt;
 use futures::future::Either;
 use futures::stream::Stream;
-use futures::FutureExt;
-use futures_util::StreamExt;
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use http_types::{StatusCode, Url};
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
@@ -34,12 +30,13 @@ use tracing::debug;
 use utils::backoff;
 use utils::backoff::exponential_backoff_duration_seconds;
 
-use crate::metrics::{start_measuring_requests, AttemptOutcome, RequestKind};
-use crate::DownloadKind;
+use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
+use crate::config::AzureConfig;
+use crate::error::Cancelled;
+use crate::metrics::{AttemptOutcome, RequestKind, start_measuring_requests};
 use crate::{
-    config::AzureConfig, error::Cancelled, ConcurrencyLimiter, Download, DownloadError,
-    DownloadOpts, Listing, ListingMode, ListingObject, RemotePath, RemoteStorage, StorageMetadata,
-    TimeTravelError, TimeoutOrCancel,
+    ConcurrencyLimiter, Download, DownloadError, DownloadKind, DownloadOpts, Listing, ListingMode,
+    ListingObject, RemotePath, RemoteStorage, StorageMetadata, TimeTravelError, TimeoutOrCancel,
 };
 
 pub struct AzureBlobStorage {
@@ -76,12 +73,18 @@ impl AzureBlobStorage {
         let credentials = if let Ok(access_key) = env::var("AZURE_STORAGE_ACCESS_KEY") {
             StorageCredentials::access_key(account.clone(), access_key)
         } else {
-            let token_credential = DefaultAzureCredential::default();
-            StorageCredentials::token_credential(Arc::new(token_credential))
+            let token_credential = azure_identity::create_default_credential()
+                .context("trying to obtain Azure default credentials")?;
+            StorageCredentials::token_credential(token_credential)
         };
 
-        // we have an outer retry
-        let builder = ClientBuilder::new(account, credentials).retry(RetryOptions::none());
+        let builder = ClientBuilder::new(account, credentials)
+            // we have an outer retry
+            .retry(RetryOptions::none())
+            // Customize transport to configure conneciton pooling
+            .transport(TransportOptions::new(Self::reqwest_client(
+                azure_config.conn_pool_size,
+            )));
 
         let client = builder.container_client(azure_config.container_name.to_owned());
 
@@ -104,6 +107,14 @@ impl AzureBlobStorage {
             timeout,
             small_timeout,
         })
+    }
+
+    fn reqwest_client(conn_pool_size: usize) -> Arc<dyn HttpClient> {
+        let client = reqwest::ClientBuilder::new()
+            .pool_max_idle_per_host(conn_pool_size)
+            .build()
+            .expect("failed to build `reqwest` client");
+        Arc::new(client)
     }
 
     pub fn relative_path_to_name(&self, path: &RemotePath) -> String {
@@ -243,53 +254,15 @@ impl AzureBlobStorage {
         download
     }
 
-    async fn permit(
-        &self,
-        kind: RequestKind,
-        cancel: &CancellationToken,
-    ) -> Result<tokio::sync::SemaphorePermit<'_>, Cancelled> {
-        let acquire = self.concurrency_limiter.acquire(kind);
-
-        tokio::select! {
-            permit = acquire => Ok(permit.expect("never closed")),
-            _ = cancel.cancelled() => Err(Cancelled),
-        }
-    }
-
-    pub fn container_name(&self) -> &str {
-        &self.container_name
-    }
-}
-
-fn to_azure_metadata(metadata: StorageMetadata) -> Metadata {
-    let mut res = Metadata::new();
-    for (k, v) in metadata.0.into_iter() {
-        res.insert(k, v);
-    }
-    res
-}
-
-fn to_download_error(error: azure_core::Error) -> DownloadError {
-    if let Some(http_err) = error.as_http_error() {
-        match http_err.status() {
-            StatusCode::NotFound => DownloadError::NotFound,
-            StatusCode::NotModified => DownloadError::Unmodified,
-            StatusCode::BadRequest => DownloadError::BadInput(anyhow::Error::new(error)),
-            _ => DownloadError::Other(anyhow::Error::new(error)),
-        }
-    } else {
-        DownloadError::Other(error.into())
-    }
-}
-
-impl RemoteStorage for AzureBlobStorage {
-    fn list_streaming(
+    fn list_streaming_for_fn<T: Default + ListingCollector>(
         &self,
         prefix: Option<&RemotePath>,
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
         cancel: &CancellationToken,
-    ) -> impl Stream<Item = Result<Listing, DownloadError>> {
+        request_kind: RequestKind,
+        customize_builder: impl Fn(ListBlobsBuilder) -> ListBlobsBuilder,
+    ) -> impl Stream<Item = Result<T, DownloadError>> {
         // get the passed prefix or if it is not set use prefix_in_bucket value
         let list_prefix = prefix.map(|p| self.relative_path_to_name(p)).or_else(|| {
             self.prefix_in_container.clone().map(|mut s| {
@@ -301,7 +274,7 @@ impl RemoteStorage for AzureBlobStorage {
         });
 
         async_stream::stream! {
-            let _permit = self.permit(RequestKind::List, cancel).await?;
+            let _permit = self.permit(request_kind, cancel).await?;
 
             let mut builder = self.client.list_blobs();
 
@@ -316,6 +289,8 @@ impl RemoteStorage for AzureBlobStorage {
             if let Some(limit) = self.max_keys_per_list_response {
                 builder = builder.max_results(MaxResults::new(limit));
             }
+
+            builder = customize_builder(builder);
 
             let mut next_marker = None;
 
@@ -361,7 +336,8 @@ impl RemoteStorage for AzureBlobStorage {
 
                 let next_item = next_item?;
 
-                if timeout_try_cnt >= 2 {
+                // Log a warning if we saw two timeouts in a row before a successful request
+                if timeout_try_cnt > 2 {
                     tracing::warn!("Azure Blob Storage list timed out and succeeded after {} tries", timeout_try_cnt);
                 }
                 timeout_try_cnt = 1;
@@ -371,26 +347,20 @@ impl RemoteStorage for AzureBlobStorage {
                     break;
                 };
 
-                let mut res = Listing::default();
+                let mut res = T::default();
                 next_marker = entry.continuation();
                 let prefix_iter = entry
                     .blobs
                     .prefixes()
                     .map(|prefix| self.name_to_relative_path(&prefix.name));
-                res.prefixes.extend(prefix_iter);
+                res.add_prefixes(self, prefix_iter);
 
                 let blob_iter = entry
                     .blobs
-                    .blobs()
-                    .map(|k| ListingObject{
-                        key: self.name_to_relative_path(&k.name),
-                        last_modified: k.properties.last_modified.into(),
-                        size: k.properties.content_length,
-                    }
-                );
+                    .blobs();
 
                 for key in blob_iter {
-                    res.keys.push(key);
+                    res.add_blob(self, key);
 
                     if let Some(mut mk) = max_keys {
                         assert!(mk > 0);
@@ -410,6 +380,128 @@ impl RemoteStorage for AzureBlobStorage {
                 }
             }
         }
+    }
+
+    async fn permit(
+        &self,
+        kind: RequestKind,
+        cancel: &CancellationToken,
+    ) -> Result<tokio::sync::SemaphorePermit<'_>, Cancelled> {
+        let acquire = self.concurrency_limiter.acquire(kind);
+
+        tokio::select! {
+            permit = acquire => Ok(permit.expect("never closed")),
+            _ = cancel.cancelled() => Err(Cancelled),
+        }
+    }
+
+    pub fn container_name(&self) -> &str {
+        &self.container_name
+    }
+}
+
+trait ListingCollector {
+    fn add_prefixes(&mut self, abs: &AzureBlobStorage, prefix_it: impl Iterator<Item = RemotePath>);
+    fn add_blob(&mut self, abs: &AzureBlobStorage, blob: &Blob);
+}
+
+impl ListingCollector for Listing {
+    fn add_prefixes(
+        &mut self,
+        _abs: &AzureBlobStorage,
+        prefix_it: impl Iterator<Item = RemotePath>,
+    ) {
+        self.prefixes.extend(prefix_it);
+    }
+    fn add_blob(&mut self, abs: &AzureBlobStorage, blob: &Blob) {
+        self.keys.push(ListingObject {
+            key: abs.name_to_relative_path(&blob.name),
+            last_modified: blob.properties.last_modified.into(),
+            size: blob.properties.content_length,
+        });
+    }
+}
+
+impl ListingCollector for crate::VersionListing {
+    fn add_prefixes(
+        &mut self,
+        _abs: &AzureBlobStorage,
+        _prefix_it: impl Iterator<Item = RemotePath>,
+    ) {
+        // nothing
+    }
+    fn add_blob(&mut self, abs: &AzureBlobStorage, blob: &Blob) {
+        let id = crate::VersionId(blob.version_id.clone().expect("didn't find version ID"));
+        self.versions.push(crate::Version {
+            key: abs.name_to_relative_path(&blob.name),
+            last_modified: blob.properties.last_modified.into(),
+            kind: crate::VersionKind::Version(id),
+        });
+    }
+}
+
+fn to_azure_metadata(metadata: StorageMetadata) -> Metadata {
+    let mut res = Metadata::new();
+    for (k, v) in metadata.0.into_iter() {
+        res.insert(k, v);
+    }
+    res
+}
+
+fn to_download_error(error: azure_core::Error) -> DownloadError {
+    if let Some(http_err) = error.as_http_error() {
+        match http_err.status() {
+            StatusCode::NotFound => DownloadError::NotFound,
+            StatusCode::NotModified => DownloadError::Unmodified,
+            StatusCode::BadRequest => DownloadError::BadInput(anyhow::Error::new(error)),
+            _ => DownloadError::Other(anyhow::Error::new(error)),
+        }
+    } else {
+        DownloadError::Other(error.into())
+    }
+}
+
+impl RemoteStorage for AzureBlobStorage {
+    fn list_streaming(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> impl Stream<Item = Result<Listing, DownloadError>> {
+        let customize_builder = |builder| builder;
+        let kind = RequestKind::ListVersions;
+        self.list_streaming_for_fn(prefix, mode, max_keys, cancel, kind, customize_builder)
+    }
+
+    async fn list_versions(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> std::result::Result<crate::VersionListing, DownloadError> {
+        let customize_builder = |mut builder: ListBlobsBuilder| {
+            builder = builder.include_versions(true);
+            builder
+        };
+        let kind = RequestKind::ListVersions;
+
+        let mut stream = std::pin::pin!(self.list_streaming_for_fn(
+            prefix,
+            mode,
+            max_keys,
+            cancel,
+            kind,
+            customize_builder
+        ));
+        let mut combined: crate::VersionListing =
+            stream.next().await.expect("At least one item required")?;
+        while let Some(list) = stream.next().await {
+            let list = list?;
+            combined.versions.extend(list.versions.into_iter());
+        }
+        Ok(combined)
     }
 
     async fn head_object(
@@ -521,7 +613,12 @@ impl RemoteStorage for AzureBlobStorage {
         let mut builder = blob_client.get();
 
         if let Some(ref etag) = opts.etag {
-            builder = builder.if_match(IfMatchCondition::NotMatch(etag.to_string()))
+            builder = builder.if_match(IfMatchCondition::NotMatch(etag.to_string()));
+        }
+
+        if let Some(ref version_id) = opts.version_id {
+            let version_id = azure_storage_blobs::prelude::VersionId::new(version_id.0.clone());
+            builder = builder.blob_versioning(version_id);
         }
 
         if let Some((start, end)) = opts.byte_range() {
@@ -544,9 +641,9 @@ impl RemoteStorage for AzureBlobStorage {
             .await
     }
 
-    async fn delete_objects<'a>(
+    async fn delete_objects(
         &self,
-        paths: &'a [RemotePath],
+        paths: &[RemotePath],
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let kind = RequestKind::Delete;
@@ -622,6 +719,10 @@ impl RemoteStorage for AzureBlobStorage {
             .req_seconds
             .observe_elapsed(kind, &res, started_at);
         res
+    }
+
+    fn max_keys_per_delete(&self) -> usize {
+        super::MAX_KEYS_PER_DELETE_AZURE
     }
 
     async fn copy(
@@ -786,8 +887,7 @@ where
             // that support needs to be hacked in.
             //
             // including {self:?} into the message would be useful, but unsure how to unproject.
-            _ => std::task::Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            _ => std::task::Poll::Ready(Err(std::io::Error::other(
                 "cloned or initial values cannot be read",
             ))),
         }
@@ -840,7 +940,7 @@ where
         };
         Err(azure_core::error::Error::new(
             azure_core::error::ErrorKind::Io,
-            std::io::Error::new(std::io::ErrorKind::Other, msg),
+            std::io::Error::other(msg),
         ))
     }
 

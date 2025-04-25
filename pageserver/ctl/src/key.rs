@@ -1,11 +1,10 @@
+use std::str::FromStr;
+
 use anyhow::Context;
 use clap::Parser;
-use pageserver_api::{
-    key::Key,
-    reltag::{BlockNumber, RelTag, SlruKind},
-    shard::{ShardCount, ShardStripeSize},
-};
-use std::str::FromStr;
+use pageserver_api::key::Key;
+use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
+use pageserver_api::shard::{ShardCount, ShardStripeSize};
 
 #[derive(Parser)]
 pub(super) struct DescribeKeyCommand {
@@ -345,6 +344,7 @@ impl AuxFileV2 {
                 AuxFileV2::Recognized("pg_logical/replorigin_checkpoint", hash)
             }
             (2, 1) => AuxFileV2::Recognized("pg_replslot/", hash),
+            (3, 1) => AuxFileV2::Recognized("pg_stat/pgstat.stat", hash),
             (1, 0xff) => AuxFileV2::OtherWithPrefix("pg_logical/", hash),
             (0xff, 0xff) => AuxFileV2::Other(hash),
             _ => return None,
@@ -393,7 +393,10 @@ mod tests {
     fn single_positional_spanalike_is_key_material() {
         // why is this needed? if you are checking many, then copypaste starts to appeal
         let strings = [
-            (line!(), "2024-05-15T15:33:49.873906Z ERROR page_service_conn_main{peer_addr=A:B}:process_query{tenant_id=C timeline_id=D}:handle_pagerequests:handle_get_page_at_lsn_request{rel=1663/208101/2620_fsm blkno=2 req_lsn=0/238D98C8}: error reading relation or page version: Read error: could not find data for key 000000067F00032CE5000000000000000001 (shard ShardNumber(0)) at LSN 0/1D0A16C1, request LSN 0/238D98C8, ancestor 0/0"),
+            (
+                line!(),
+                "2024-05-15T15:33:49.873906Z ERROR page_service_conn_main{peer_addr=A:B}:process_query{tenant_id=C timeline_id=D}:handle_pagerequests:handle_get_page_at_lsn_request{rel=1663/208101/2620_fsm blkno=2 req_lsn=0/238D98C8}: error reading relation or page version: Read error: could not find data for key 000000067F00032CE5000000000000000001 (shard ShardNumber(0)) at LSN 0/1D0A16C1, request LSN 0/238D98C8, ancestor 0/0",
+            ),
             (line!(), "rel=1663/208101/2620_fsm blkno=2"),
             (line!(), "rel=1663/208101/2620.1 blkno=2"),
         ];
@@ -419,7 +422,15 @@ mod tests {
     #[test]
     fn multiple_spanlike_args() {
         let strings = [
-            (line!(), &["process_query{tenant_id=C", "timeline_id=D}:handle_pagerequests:handle_get_page_at_lsn_request{rel=1663/208101/2620_fsm", "blkno=2", "req_lsn=0/238D98C8}"][..]),
+            (
+                line!(),
+                &[
+                    "process_query{tenant_id=C",
+                    "timeline_id=D}:handle_pagerequests:handle_get_page_at_lsn_request{rel=1663/208101/2620_fsm",
+                    "blkno=2",
+                    "req_lsn=0/238D98C8}",
+                ][..],
+            ),
             (line!(), &["rel=1663/208101/2620_fsm", "blkno=2"][..]),
             (line!(), &["1663/208101/2620_fsm", "2"][..]),
         ];

@@ -4,6 +4,7 @@ import enum
 import os
 import shutil
 from enum import StrEnum
+from logging import debug
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -13,15 +14,20 @@ import pytest
 import requests
 import yaml
 from fixtures.log_helper import log
+from fixtures.metrics import parse_metrics
 from fixtures.paths import BASE_DIR, COMPUTE_CONFIG_DIR
+from fixtures.utils import wait_until
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from types import TracebackType
     from typing import Self, TypedDict
 
+    from fixtures.endpoint.http import EndpointHttpClient
     from fixtures.neon_fixtures import NeonEnv
     from fixtures.pg_version import PgVersion
     from fixtures.port_distributor import PortDistributor
+    from prometheus_client.samples import Sample
 
     class Metric(TypedDict):
         metric_name: str
@@ -215,7 +221,7 @@ if SQL_EXPORTER is None:
             #
             # The "host" network mode allows sql_exporter to talk to the
             # endpoint which is running on the host.
-            super().__init__("docker.io/burningalchemist/sql_exporter:0.16.0", network_mode="host")
+            super().__init__("docker.io/burningalchemist/sql_exporter:0.17.0", network_mode="host")
 
             self.__logs_dir = logs_dir
             self.__port = port
@@ -248,7 +254,7 @@ if SQL_EXPORTER is None:
             log.info("Waiting for sql_exporter to be ready")
             wait_for_logs(
                 self,
-                rf'level=info msg="Listening on" address=\[::\]:{self.__port}',
+                rf'msg="Listening on" address=\[::\]:{self.__port}',
                 timeout=5,
             )
 
@@ -340,10 +346,7 @@ else:
                         time.sleep(0.5)
                         continue
 
-                    if (
-                        f'level=info msg="Listening on" address=[::]:{self._sql_exporter_port}'
-                        in line
-                    ):
+                    if f'msg="Listening on" address=[::]:{self._sql_exporter_port}' in line:
                         break
 
         @override
@@ -465,3 +468,100 @@ def test_perf_counters(neon_simple_env: NeonEnv):
     cur.execute("CREATE EXTENSION neon VERSION '1.5'")
     cur.execute("SELECT * FROM neon_perf_counters")
     cur.execute("SELECT * FROM neon_backend_perf_counters")
+
+
+def collect_metric(
+    client: EndpointHttpClient,
+    name: str,
+    filter: dict[str, str],
+    predicate: Callable[[list[Sample]], bool],
+) -> Callable[[], list[Sample]]:
+    """
+    Call this function as the first argument to wait_until().
+    """
+
+    def __collect_metric() -> list[Sample]:
+        resp = client.metrics()
+        debug("Metrics: %s", resp)
+        m = parse_metrics(resp)
+        samples = m.query_all(name, filter)
+        debug("Samples: %s", samples)
+        assert predicate(samples), "predicate failed"
+        return samples
+
+    return __collect_metric
+
+
+def test_compute_installed_extensions_metric(neon_simple_env: NeonEnv):
+    """
+    Test that the compute_installed_extensions properly reports accurate
+    results. Important to note that currently this metric is only gathered on
+    compute start. We install the neon extension into a database other than
+    postgres because compute_ctl will run `ALTER EXTENSION neon UPDATE` during
+    Postgres startup in the postgres database, creating a race condition.
+    """
+    DB_NAME = "test"
+
+    env = neon_simple_env
+
+    endpoint = env.endpoints.create_start("main")
+    endpoint.safe_psql(f"CREATE DATABASE {DB_NAME}")
+
+    # The metric is only gathered on compute start, so restart to check that
+    # plpgsql is now in 3 databases, instead of its regular 2, template1 and
+    # postgres.
+    endpoint.stop()
+    endpoint.start()
+
+    client = endpoint.http_client()
+
+    def __has_plpgsql(samples: list[Sample]) -> bool:
+        """
+        Check that plpgsql is installed in the template1, postgres, and test
+        databases
+        """
+        return len(samples) == 1 and samples[0].value == 3
+
+    wait_until(
+        collect_metric(
+            client,
+            "compute_installed_extensions",
+            {"extension_name": "plpgsql", "version": "1.0", "owned_by_superuser": "1"},
+            __has_plpgsql,
+        ),
+        name="compute_installed_extensions",
+    )
+
+    # Install the neon extension, so we can check for it on the restart.
+    endpoint.safe_psql("CREATE EXTENSION neon VERSION '1.0'", dbname=DB_NAME)
+
+    # The metric is only gathered on compute start, so restart to check if the
+    # neon extension will now be there.
+    endpoint.stop()
+    endpoint.start()
+
+    client = endpoint.http_client()
+
+    def __has_neon(samples: list[Sample]) -> bool:
+        return len(samples) == 1 and samples[0].value == 1
+
+    wait_until(
+        collect_metric(
+            client,
+            "compute_installed_extensions",
+            {"extension_name": "neon", "version": "1.0", "owned_by_superuser": "1"},
+            __has_neon,
+        ),
+        name="compute_installed_extensions",
+    )
+
+    # Double check that we also still have plpgsql
+    wait_until(
+        collect_metric(
+            client,
+            "compute_installed_extensions",
+            {"extension_name": "plpgsql", "version": "1.0", "owned_by_superuser": "1"},
+            __has_plpgsql,
+        ),
+        name="compute_installed_extensions",
+    )

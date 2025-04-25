@@ -5,6 +5,13 @@ on:
     types:
       - ready_for_review
   workflow_call:
+    inputs:
+      github-event-name:
+        type: string
+        required: true
+      github-event-json:
+        type: string
+        required: true
 
 defaults:
   run:
@@ -15,11 +22,23 @@ env:
   E2E_CONCURRENCY_GROUP: ${{ github.repository }}-e2e-tests-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
 
 jobs:
+  check-permissions:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
+    uses: ./.github/workflows/check-permissions.yml
+    with:
+      github-event-name: ${{ inputs.github-event-name || github.event_name }}
+
   cancel-previous-e2e-tests:
+    needs: [ check-permissions ]
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-22.04
 
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+        with:
+          egress-policy: audit
+
       - name: Cancel previous e2e-tests runs for this PR
         env:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
@@ -28,47 +47,37 @@ jobs:
             run cancel-previous-in-concurrency-group.yml \
               --field concurrency_group="${{ env.E2E_CONCURRENCY_GROUP }}"
 
-  tag:
-    runs-on: ubuntu-22.04
-    outputs:
-      build-tag: ${{ steps.build-tag.outputs.tag }}
-
-    steps:
-      # Need `fetch-depth: 0` to count the number of commits in the branch
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Get build tag
-        env:
-          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
-          CURRENT_BRANCH: ${{ github.head_ref || github.ref_name }}
-          CURRENT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            echo "tag=$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
-          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            echo "tag=release-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
-          elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
-            echo "tag=release-proxy-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
-          elif [[ "$GITHUB_REF_NAME" == "release-compute" ]]; then
-            echo "tag=release-compute-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
-          else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
-            BUILD_AND_TEST_RUN_ID=$(gh run list -b $CURRENT_BRANCH -c $CURRENT_SHA -w 'Build and Test' -L 1 --json databaseId --jq '.[].databaseId')
-            echo "tag=$BUILD_AND_TEST_RUN_ID" | tee -a $GITHUB_OUTPUT
-          fi
-        id: build-tag
+  meta:
+    uses: ./.github/workflows/_meta.yml
+    with:
+      github-event-name: ${{ inputs.github-event-name || github.event_name }}
+      github-event-json: ${{ inputs.github-event-json || toJSON(github.event) }}
 
   trigger-e2e-tests:
-    needs: [ tag ]
+    needs: [ meta ]
     runs-on: ubuntu-22.04
     env:
       EVENT_ACTION: ${{ github.event.action }}
       GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
-      TAG: ${{ needs.tag.outputs.build-tag }}
+      TAG: >-
+        ${{
+          contains(fromJSON('["compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind)
+          && needs.meta.outputs.previous-storage-release
+          || needs.meta.outputs.build-tag
+        }}
+      COMPUTE_TAG: >-
+        ${{
+          contains(fromJSON('["storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind)
+          && needs.meta.outputs.previous-compute-release
+          || needs.meta.outputs.build-tag
+        }}
     steps:
-      - name: Wait for `promote-images` job to finish
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+        with:
+          egress-policy: audit
+
+      - name: Wait for `push-{neon,compute}-image-dev` job to finish
         # It's important to have a timeout here, the script in the step can run infinitely
         timeout-minutes: 60
         run: |
@@ -79,20 +88,20 @@ jobs:
           # For PRs we use the run id as the tag
           BUILD_AND_TEST_RUN_ID=${TAG}
           while true; do
-            conclusion=$(gh run --repo ${GITHUB_REPOSITORY} view ${BUILD_AND_TEST_RUN_ID} --json jobs --jq '.jobs[] | select(.name == "promote-images") | .conclusion')
-            case "$conclusion" in
-              success)
-                break
-                ;;
-              failure | cancelled | skipped)
-                echo "The 'promote-images' job didn't succeed: '${conclusion}'. Exiting..."
-                exit 1
-                ;;
-              *)
-                echo "The 'promote-images' hasn't succeed yet. Waiting..."
-                sleep 60
-                ;;
-            esac
+            gh run --repo ${GITHUB_REPOSITORY} view ${BUILD_AND_TEST_RUN_ID} --json jobs --jq '[.jobs[] | select((.name | startswith("push-neon-image-dev")) or (.name | startswith("push-compute-image-dev"))) | {"name": .name, "conclusion": .conclusion, "url": .url}]' > jobs.json
+            if [ $(jq '[.[] | select(.conclusion == "success")] | length' jobs.json) -eq 2 ]; then
+              break
+            fi
+            jq -c '.[]' jobs.json | while read -r job; do
+              case $(echo $job | jq .conclusion) in
+                failure | cancelled | skipped)
+                  echo "The '$(echo $job | jq .name)' job didn't succeed: '$(echo $job | jq .conclusion)'. See log in '$(echo $job | jq .url)' Exiting..."
+                  exit 1
+                  ;;
+              esac
+            done
+            echo "The 'push-{neon,compute}-image-dev' jobs haven't succeeded yet. Waiting..."
+            sleep 60
           done
 
       - name: Set e2e-platforms
@@ -149,6 +158,6 @@ jobs:
               --raw-field "commit_hash=$COMMIT_SHA" \
               --raw-field "remote_repo=${GITHUB_REPOSITORY}" \
               --raw-field "storage_image_tag=${TAG}" \
-              --raw-field "compute_image_tag=${TAG}" \
+              --raw-field "compute_image_tag=${COMPUTE_TAG}" \
               --raw-field "concurrency_group=${E2E_CONCURRENCY_GROUP}" \
               --raw-field "e2e-platforms=${E2E_PLATFORMS}"

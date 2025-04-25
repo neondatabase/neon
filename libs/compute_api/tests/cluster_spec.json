@@ -208,7 +208,6 @@
     ],
     "remote_extensions": {
         "library_index": {
-          "anon": "anon",
           "postgis-3": "postgis",
           "libpgrouting-3.4": "postgis",
           "postgis_raster-3": "postgis",
@@ -217,12 +216,6 @@
           "address_standardizer-3": "postgis"
         },
         "extension_data": {
-          "anon": {
-            "archive_path": "5834329303/v15/extensions/anon.tar.zst",
-            "control_data": {
-              "anon.control": "# PostgreSQL Anonymizer (anon) extension\ncomment = ''Data anonymization tools''\ndefault_version = ''1.1.0''\ndirectory=''extension/anon''\nrelocatable = false\nrequires = ''pgcrypto''\nsuperuser = false\nmodule_pathname = ''$libdir/anon''\ntrusted = true\n"
-            }
-          },
           "postgis": {
             "archive_path": "5834329303/v15/extensions/postgis.tar.zst",
             "control_data": {
@@ -238,7 +231,6 @@
           }
         },
         "custom_extensions": [
-          "anon"
         ],
         "public_extensions": [
           "postgis"

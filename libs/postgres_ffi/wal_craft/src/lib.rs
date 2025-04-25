@@ -1,16 +1,17 @@
-use anyhow::{bail, ensure};
-use camino_tempfile::{tempdir, Utf8TempDir};
-use log::*;
-use postgres::types::PgLsn;
-use postgres::Client;
-use postgres_ffi::{WAL_SEGMENT_SIZE, XLOG_BLCKSZ};
-use postgres_ffi::{
-    XLOG_SIZE_OF_XLOG_LONG_PHD, XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD,
-};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
+
+use anyhow::{bail, ensure};
+use camino_tempfile::{Utf8TempDir, tempdir};
+use log::*;
+use postgres::Client;
+use postgres::types::PgLsn;
+use postgres_ffi::{
+    WAL_SEGMENT_SIZE, XLOG_BLCKSZ, XLOG_SIZE_OF_XLOG_LONG_PHD, XLOG_SIZE_OF_XLOG_RECORD,
+    XLOG_SIZE_OF_XLOG_SHORT_PHD,
+};
 
 macro_rules! xlog_utils_test {
     ($version:ident) => {
@@ -76,7 +77,15 @@ impl Conf {
         let mut cmd = Command::new(path);
         cmd.env_clear()
             .env("LD_LIBRARY_PATH", self.pg_lib_dir()?)
-            .env("DYLD_LIBRARY_PATH", self.pg_lib_dir()?);
+            .env("DYLD_LIBRARY_PATH", self.pg_lib_dir()?)
+            .env(
+                "ASAN_OPTIONS",
+                std::env::var("ASAN_OPTIONS").unwrap_or_default(),
+            )
+            .env(
+                "UBSAN_OPTIONS",
+                std::env::var("UBSAN_OPTIONS").unwrap_or_default(),
+            );
         Ok(cmd)
     }
 

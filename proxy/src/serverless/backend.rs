@@ -1,35 +1,41 @@
 use std::io;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use ed25519_dalek::SigningKey;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use p256::ecdsa::SigningKey;
-use p256::elliptic_curve::JwkEcKey;
+use jose_jwk::jose_b64;
+use postgres_client::config::SslMode;
 use rand::rngs::OsRng;
-use tokio::net::{lookup_host, TcpStream};
+use rustls::pki_types::{DnsName, ServerName};
+use tokio::net::{TcpStream, lookup_host};
+use tokio_rustls::TlsConnector;
 use tracing::field::display;
 use tracing::{debug, info};
 
+use super::AsyncRW;
 use super::conn_pool::poll_client;
 use super::conn_pool_lib::{Client, ConnInfo, EndpointConnPool, GlobalConnPool};
-use super::http_conn_pool::{self, poll_http2_client, HttpConnPool, Send};
-use super::local_conn_pool::{self, LocalConnPool, EXT_NAME, EXT_SCHEMA, EXT_VERSION};
+use super::http_conn_pool::{self, HttpConnPool, Send, poll_http2_client};
+use super::local_conn_pool::{self, EXT_NAME, EXT_SCHEMA, EXT_VERSION, LocalConnPool};
 use crate::auth::backend::local::StaticAuthRules;
 use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
-use crate::auth::{self, check_peer_addr_is_in_list, AuthError};
+use crate::auth::{self, AuthError, check_peer_addr_is_in_list};
 use crate::compute;
 use crate::compute_ctl::{
     ComputeCtlError, ExtensionInstallRequest, Privilege, SetRoleGrantsRequest,
 };
-use crate::config::ProxyConfig;
+use crate::config::{ComputeConfig, ProxyConfig};
 use crate::context::RequestContext;
+use crate::control_plane::CachedNodeInfo;
 use crate::control_plane::client::ApiLockError;
 use crate::control_plane::errors::{GetAuthInfoError, WakeComputeError};
 use crate::control_plane::locks::ApiLocks;
-use crate::control_plane::CachedNodeInfo;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::intern::EndpointIdInt;
+use crate::protocol2::ConnectionInfoExtra;
 use crate::proxy::connect_compute::ConnectMechanism;
 use crate::proxy::retry::{CouldRetry, ShouldRetryWakeCompute};
 use crate::rate_limiter::EndpointRateLimiter;
@@ -57,23 +63,49 @@ impl PoolingBackend {
 
         let user_info = user_info.clone();
         let backend = self.auth_backend.as_ref().map(|()| user_info.clone());
-        let (allowed_ips, maybe_secret) = backend.get_allowed_ips_and_secret(ctx).await?;
+        let allowed_ips = backend.get_allowed_ips(ctx).await?;
+
         if self.config.authentication_config.ip_allowlist_check_enabled
             && !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips)
         {
             return Err(AuthError::ip_address_not_allowed(ctx.peer_addr()));
         }
+
+        let access_blocker_flags = backend.get_block_public_or_vpc_access(ctx).await?;
+        if self.config.authentication_config.is_vpc_acccess_proxy {
+            if access_blocker_flags.vpc_access_blocked {
+                return Err(AuthError::NetworkNotAllowed);
+            }
+
+            let extra = ctx.extra();
+            let incoming_endpoint_id = match extra {
+                None => String::new(),
+                Some(ConnectionInfoExtra::Aws { vpce_id }) => vpce_id.to_string(),
+                Some(ConnectionInfoExtra::Azure { link_id }) => link_id.to_string(),
+            };
+
+            if incoming_endpoint_id.is_empty() {
+                return Err(AuthError::MissingVPCEndpointId);
+            }
+
+            let allowed_vpc_endpoint_ids = backend.get_allowed_vpc_endpoint_ids(ctx).await?;
+            // TODO: For now an empty VPC endpoint ID list means all are allowed. We should replace that.
+            if !allowed_vpc_endpoint_ids.is_empty()
+                && !allowed_vpc_endpoint_ids.contains(&incoming_endpoint_id)
+            {
+                return Err(AuthError::vpc_endpoint_id_not_allowed(incoming_endpoint_id));
+            }
+        } else if access_blocker_flags.public_access_blocked {
+            return Err(AuthError::NetworkNotAllowed);
+        }
+
         if !self
             .endpoint_rate_limiter
             .check(user_info.endpoint.clone().into(), 1)
         {
             return Err(AuthError::too_many_connections());
         }
-        let cached_secret = match maybe_secret {
-            Some(secret) => secret,
-            None => backend.get_role_secret(ctx).await?,
-        };
-
+        let cached_secret = backend.get_role_secret(ctx).await?;
         let secret = match cached_secret.value.clone() {
             Some(secret) => self.config.authentication_config.check_rate_limit(
                 ctx,
@@ -163,7 +195,11 @@ impl PoolingBackend {
     // Wake up the destination if needed. Code here is a bit involved because
     // we reuse the code from the usual proxy and we need to prepare few structures
     // that this code expects.
-    #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
+    #[tracing::instrument(skip_all, fields(
+        pid = tracing::field::Empty,
+        compute_id = tracing::field::Empty,
+        conn_id = tracing::field::Empty,
+    ))]
     pub(crate) async fn connect_to_compute(
         &self,
         ctx: &RequestContext,
@@ -195,15 +231,17 @@ impl PoolingBackend {
                 locks: &self.config.connect_compute_locks,
             },
             &backend,
-            false, // do not allow self signed compute for http flow
             self.config.wake_compute_retry_config,
-            self.config.connect_to_compute_retry_config,
+            &self.config.connect_to_compute,
         )
         .await
     }
 
     // Wake up the destination if needed
-    #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
+    #[tracing::instrument(skip_all, fields(
+        compute_id = tracing::field::Empty,
+        conn_id = tracing::field::Empty,
+    ))]
     pub(crate) async fn connect_to_local_proxy(
         &self,
         ctx: &RequestContext,
@@ -237,9 +275,8 @@ impl PoolingBackend {
                 locks: &self.config.connect_compute_locks,
             },
             &backend,
-            false, // do not allow self signed compute for http flow
             self.config.wake_compute_retry_config,
-            self.config.connect_to_compute_retry_config,
+            &self.config.connect_to_compute,
         )
         .await
     }
@@ -251,7 +288,10 @@ impl PoolingBackend {
     /// # Panics
     ///
     /// Panics if called with a non-local_proxy backend.
-    #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
+    #[tracing::instrument(skip_all, fields(
+        pid = tracing::field::Empty,
+        conn_id = tracing::field::Empty,
+    ))]
     pub(crate) async fn connect_to_local_postgres(
         &self,
         ctx: &RequestContext,
@@ -270,7 +310,11 @@ impl PoolingBackend {
 
         if !self.local_pool.initialized(&conn_info) {
             // only install and grant usage one at a time.
-            let _permit = local_backend.initialize.acquire().await.unwrap();
+            let _permit = local_backend
+                .initialize
+                .acquire()
+                .await
+                .expect("semaphore should never be closed");
 
             // check again for race
             if !self.local_pool.initialized(&conn_info) {
@@ -340,7 +384,7 @@ impl PoolingBackend {
             debug!("setting up backend session state");
 
             // initiates the auth session
-            if let Err(e) = client.execute("select auth.init()", &[]).await {
+            if let Err(e) = client.batch_execute("select auth.init();").await {
                 discard.discard();
                 return Err(e.into());
             }
@@ -352,9 +396,15 @@ impl PoolingBackend {
     }
 }
 
-fn create_random_jwk() -> (SigningKey, JwkEcKey) {
-    let key = SigningKey::random(&mut OsRng);
-    let jwk = p256::PublicKey::from(key.verifying_key()).to_jwk();
+fn create_random_jwk() -> (SigningKey, jose_jwk::Key) {
+    let key = SigningKey::generate(&mut OsRng);
+
+    let jwk = jose_jwk::Key::Okp(jose_jwk::Okp {
+        crv: jose_jwk::OkpCurves::Ed25519,
+        x: jose_b64::serde::Bytes::from(key.verifying_key().to_bytes().to_vec()),
+        d: None,
+    });
+
     (key, jwk)
 }
 
@@ -362,9 +412,9 @@ fn create_random_jwk() -> (SigningKey, JwkEcKey) {
 pub(crate) enum HttpConnError {
     #[error("pooled connection closed at inconsistent state")]
     ConnectionClosedAbruptly(#[from] tokio::sync::watch::error::SendError<uuid::Uuid>),
-    #[error("could not connection to postgres in compute")]
+    #[error("could not connect to postgres in compute")]
     PostgresConnectionError(#[from] postgres_client::Error),
-    #[error("could not connection to local-proxy in compute")]
+    #[error("could not connect to local-proxy in compute")]
     LocalProxyConnectionError(#[from] LocalProxyConnError),
     #[error("could not parse JWT payload")]
     JwtPayloadError(serde_json::Error),
@@ -500,7 +550,7 @@ impl ConnectMechanism for TokioMechanism {
         &self,
         ctx: &RequestContext,
         node_info: &CachedNodeInfo,
-        timeout: Duration,
+        compute_config: &ComputeConfig,
     ) -> Result<Self::Connection, Self::ConnectError> {
         let host = node_info.config.get_host();
         let permit = self.locks.get_permit(&host).await?;
@@ -509,14 +559,25 @@ impl ConnectMechanism for TokioMechanism {
         let config = config
             .user(&self.conn_info.user_info.user)
             .dbname(&self.conn_info.dbname)
-            .connect_timeout(timeout);
+            .connect_timeout(compute_config.timeout);
 
+        let mk_tls =
+            crate::tls::postgres_rustls::MakeRustlsConnect::new(compute_config.tls.clone());
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let res = config.connect(postgres_client::NoTls).await;
+        let res = config.connect(mk_tls).await;
         drop(pause);
         let (client, connection) = permit.release_result(res)?;
 
         tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
+        tracing::Span::current().record(
+            "compute_id",
+            tracing::field::display(&node_info.aux.compute_id),
+        );
+
+        if let Some(query_id) = ctx.get_testodrome_id() {
+            info!("latency={}, query_id={}", ctx.get_proxy_latency(), query_id);
+        }
+
         Ok(poll_client(
             self.pool.clone(),
             ctx,
@@ -550,17 +611,33 @@ impl ConnectMechanism for HyperMechanism {
         &self,
         ctx: &RequestContext,
         node_info: &CachedNodeInfo,
-        timeout: Duration,
+        config: &ComputeConfig,
     ) -> Result<Self::Connection, Self::ConnectError> {
+        let host_addr = node_info.config.get_host_addr();
         let host = node_info.config.get_host();
         let permit = self.locks.get_permit(&host).await?;
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
 
+        let tls = if node_info.config.get_ssl_mode() == SslMode::Disable {
+            None
+        } else {
+            Some(&config.tls)
+        };
+
         let port = node_info.config.get_port();
-        let res = connect_http2(&host, port, timeout).await;
+        let res = connect_http2(host_addr, &host, port, config.timeout, tls).await;
         drop(pause);
         let (client, connection) = permit.release_result(res)?;
+
+        tracing::Span::current().record(
+            "compute_id",
+            tracing::field::display(&node_info.aux.compute_id),
+        );
+
+        if let Some(query_id) = ctx.get_testodrome_id() {
+            info!("latency={}, query_id={}", ctx.get_proxy_latency(), query_id);
+        }
 
         Ok(poll_http2_client(
             self.pool.clone(),
@@ -577,18 +654,22 @@ impl ConnectMechanism for HyperMechanism {
 }
 
 async fn connect_http2(
+    host_addr: Option<IpAddr>,
     host: &str,
     port: u16,
     timeout: Duration,
+    tls: Option<&Arc<rustls::ClientConfig>>,
 ) -> Result<(http_conn_pool::Send, http_conn_pool::Connect), LocalProxyConnError> {
-    // assumption: host is an ip address so this should not actually perform any requests.
-    // todo: add that assumption as a guarantee in the control-plane API.
-    let mut addrs = lookup_host((host, port))
-        .await
-        .map_err(LocalProxyConnError::Io)?;
-
+    let addrs = match host_addr {
+        Some(addr) => vec![SocketAddr::new(addr, port)],
+        None => lookup_host((host, port))
+            .await
+            .map_err(LocalProxyConnError::Io)?
+            .collect(),
+    };
     let mut last_err = None;
 
+    let mut addrs = addrs.into_iter();
     let stream = loop {
         let Some(addr) = addrs.next() else {
             return Err(last_err.unwrap_or_else(|| {
@@ -613,7 +694,21 @@ async fn connect_http2(
                     e,
                 )));
             }
-        };
+        }
+    };
+
+    let stream = if let Some(tls) = tls {
+        let host = DnsName::try_from(host)
+            .map_err(io::Error::other)
+            .map_err(LocalProxyConnError::Io)?
+            .to_owned();
+        let stream = TlsConnector::from(tls.clone())
+            .connect(ServerName::DnsName(host), stream)
+            .await
+            .map_err(LocalProxyConnError::Io)?;
+        Box::pin(stream) as AsyncRW
+    } else {
+        Box::pin(stream) as AsyncRW
     };
 
     let (client, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())

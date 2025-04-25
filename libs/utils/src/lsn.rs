@@ -1,10 +1,12 @@
 #![warn(missing_docs)]
 
-use serde::{de::Visitor, Deserialize, Serialize};
 use std::fmt;
 use std::ops::{Add, AddAssign};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use serde::de::Visitor;
+use serde::{Deserialize, Serialize};
 
 use crate::seqwait::MonotonicCounter;
 
@@ -260,7 +262,7 @@ impl FromStr for Lsn {
         {
             let left_num = u32::from_str_radix(left, 16).map_err(|_| LsnParseError)?;
             let right_num = u32::from_str_radix(right, 16).map_err(|_| LsnParseError)?;
-            Ok(Lsn((left_num as u64) << 32 | right_num as u64))
+            Ok(Lsn(((left_num as u64) << 32) | right_num as u64))
         } else {
             Err(LsnParseError)
         }
@@ -407,11 +409,10 @@ impl rand::distributions::uniform::UniformSampler for LsnSampler {
 
 #[cfg(test)]
 mod tests {
-    use crate::bin_ser::BeSer;
+    use serde_assert::{Deserializer, Serializer, Token, Tokens};
 
     use super::*;
-
-    use serde_assert::{Deserializer, Serializer, Token, Tokens};
+    use crate::bin_ser::BeSer;
 
     #[test]
     fn test_lsn_strings() {

@@ -23,17 +23,11 @@
 mod connection_manager;
 mod walreceiver_connection;
 
-use crate::context::{DownloadBehavior, RequestContext};
-use crate::task_mgr::{TaskKind, WALRECEIVER_RUNTIME};
-use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
-use crate::tenant::timeline::walreceiver::connection_manager::{
-    connection_manager_loop_step, ConnectionManagerState,
-};
-
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
+
 use storage_broker::BrokerClientChannel;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -41,8 +35,13 @@ use tracing::*;
 use utils::postgres_client::PostgresClientProtocol;
 
 use self::connection_manager::ConnectionManagerStatus;
-
 use super::Timeline;
+use crate::context::{DownloadBehavior, RequestContext};
+use crate::task_mgr::{TaskKind, WALRECEIVER_RUNTIME};
+use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::tenant::timeline::walreceiver::connection_manager::{
+    ConnectionManagerState, connection_manager_loop_step,
+};
 
 #[derive(Clone)]
 pub struct WalReceiverConf {
@@ -56,6 +55,7 @@ pub struct WalReceiverConf {
     pub auth_token: Option<Arc<String>>,
     pub availability_zone: Option<String>,
     pub ingest_batch_size: u64,
+    pub validate_wal_contiguity: bool,
 }
 
 pub struct WalReceiver {

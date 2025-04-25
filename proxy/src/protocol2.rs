@@ -9,9 +9,10 @@ use std::task::{Context, Poll};
 
 use bytes::{Buf, Bytes, BytesMut};
 use pin_project_lite::pin_project;
+use smol_str::SmolStr;
 use strum_macros::FromRepr;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
-use zerocopy::{FromBytes, FromZeroes};
+use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned, network_endian};
 
 pin_project! {
     /// A chained [`AsyncRead`] with [`AsyncWrite`] passthrough
@@ -99,7 +100,7 @@ impl fmt::Display for ConnectionInfo {
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub enum ConnectionInfoExtra {
-    Aws { vpce_id: Bytes },
+    Aws { vpce_id: SmolStr },
     Azure { link_id: u32 },
 }
 
@@ -119,7 +120,7 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
         // if no more bytes available then exit
         if bytes_read == 0 {
             return Ok((ChainRW { inner: read, buf }, ConnectHeader::Missing));
-        };
+        }
 
         // check if we have enough bytes to continue
         if let Some(header) = buf.try_get::<ProxyProtocolV2Header>() {
@@ -162,14 +163,13 @@ fn process_proxy_payload(
         // other values are unassigned and must not be emitted by senders. Receivers
         // must drop connections presenting unexpected values here.
         #[rustfmt::skip] // https://github.com/rust-lang/rustfmt/issues/6384
-        _ => return Err(io::Error::new(
-            io::ErrorKind::Other,
+        _ => return Err(io::Error::other(
             format!(
                 "invalid proxy protocol command 0x{:02X}. expected local (0x20) or proxy (0x21)",
                 header.version_and_command
             ),
         )),
-    };
+    }
 
     let size_err =
         "invalid proxy protocol length. payload not large enough to fit requested IP addresses";
@@ -177,23 +177,22 @@ fn process_proxy_payload(
         TCP_OVER_IPV4 | UDP_OVER_IPV4 => {
             let addr = payload
                 .try_get::<ProxyProtocolV2HeaderV4>()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::Other, size_err))?;
+                .ok_or_else(|| io::Error::other(size_err))?;
 
             SocketAddr::from((addr.src_addr.get(), addr.src_port.get()))
         }
         TCP_OVER_IPV6 | UDP_OVER_IPV6 => {
             let addr = payload
                 .try_get::<ProxyProtocolV2HeaderV6>()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::Other, size_err))?;
+                .ok_or_else(|| io::Error::other(size_err))?;
 
             SocketAddr::from((addr.src_addr.get(), addr.src_port.get()))
         }
         // unspecified or unix stream. ignore the addresses
         _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 "invalid proxy protocol address family/transport protocol.",
-            ))
+            ));
         }
     };
 
@@ -207,9 +206,14 @@ fn process_proxy_payload(
                 }
                 let subtype = tlv.value.get_u8();
                 match Pp2AwsType::from_repr(subtype) {
-                    Some(Pp2AwsType::VpceId) => {
-                        extra = Some(ConnectionInfoExtra::Aws { vpce_id: tlv.value });
-                    }
+                    Some(Pp2AwsType::VpceId) => match std::str::from_utf8(&tlv.value) {
+                        Ok(s) => {
+                            extra = Some(ConnectionInfoExtra::Aws { vpce_id: s.into() });
+                        }
+                        Err(e) => {
+                            tracing::warn!("invalid aws vpce id: {e}");
+                        }
+                    },
                     None => {
                         tracing::warn!("unknown aws tlv: subtype={subtype}");
                     }
@@ -335,49 +339,49 @@ trait BufExt: Sized {
 }
 impl BufExt for BytesMut {
     fn try_get<T: FromBytes>(&mut self) -> Option<T> {
-        let res = T::read_from_prefix(self)?;
+        let (res, _) = T::read_from_prefix(self).ok()?;
         self.advance(size_of::<T>());
         Some(res)
     }
 }
 
-#[derive(FromBytes, FromZeroes, Copy, Clone)]
-#[repr(C)]
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned, Copy, Clone)]
+#[repr(C, packed)]
 struct ProxyProtocolV2Header {
     signature: [u8; 12],
     version_and_command: u8,
     protocol_and_family: u8,
-    len: zerocopy::byteorder::network_endian::U16,
+    len: network_endian::U16,
 }
 
-#[derive(FromBytes, FromZeroes, Copy, Clone)]
-#[repr(C)]
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned, Copy, Clone)]
+#[repr(C, packed)]
 struct ProxyProtocolV2HeaderV4 {
     src_addr: NetworkEndianIpv4,
     dst_addr: NetworkEndianIpv4,
-    src_port: zerocopy::byteorder::network_endian::U16,
-    dst_port: zerocopy::byteorder::network_endian::U16,
+    src_port: network_endian::U16,
+    dst_port: network_endian::U16,
 }
 
-#[derive(FromBytes, FromZeroes, Copy, Clone)]
-#[repr(C)]
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned, Copy, Clone)]
+#[repr(C, packed)]
 struct ProxyProtocolV2HeaderV6 {
     src_addr: NetworkEndianIpv6,
     dst_addr: NetworkEndianIpv6,
-    src_port: zerocopy::byteorder::network_endian::U16,
-    dst_port: zerocopy::byteorder::network_endian::U16,
+    src_port: network_endian::U16,
+    dst_port: network_endian::U16,
 }
 
-#[derive(FromBytes, FromZeroes, Copy, Clone)]
-#[repr(C)]
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned, Copy, Clone)]
+#[repr(C, packed)]
 struct TlvHeader {
     kind: u8,
-    len: zerocopy::byteorder::network_endian::U16,
+    len: network_endian::U16,
 }
 
-#[derive(FromBytes, FromZeroes, Copy, Clone)]
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned, Copy, Clone)]
 #[repr(transparent)]
-struct NetworkEndianIpv4(zerocopy::byteorder::network_endian::U32);
+struct NetworkEndianIpv4(network_endian::U32);
 impl NetworkEndianIpv4 {
     #[inline]
     fn get(self) -> Ipv4Addr {
@@ -385,9 +389,9 @@ impl NetworkEndianIpv4 {
     }
 }
 
-#[derive(FromBytes, FromZeroes, Copy, Clone)]
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned, Copy, Clone)]
 #[repr(transparent)]
-struct NetworkEndianIpv6(zerocopy::byteorder::network_endian::U128);
+struct NetworkEndianIpv6(network_endian::U128);
 impl NetworkEndianIpv6 {
     #[inline]
     fn get(self) -> Ipv6Addr {
@@ -400,7 +404,7 @@ mod tests {
     use tokio::io::AsyncReadExt;
 
     use crate::protocol2::{
-        read_proxy_protocol, ConnectHeader, LOCAL_V2, PROXY_V2, TCP_OVER_IPV4, UDP_OVER_IPV6,
+        ConnectHeader, LOCAL_V2, PROXY_V2, TCP_OVER_IPV4, UDP_OVER_IPV6, read_proxy_protocol,
     };
 
     #[tokio::test]

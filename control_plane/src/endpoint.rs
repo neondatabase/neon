@@ -29,7 +29,7 @@
 //!     compute.log               - log output of `compute_ctl` and `postgres`
 //!     endpoint.json             - serialized `EndpointConf` struct
 //!     postgresql.conf           - postgresql settings
-//!     spec.json                 - passed to `compute_ctl`
+//!     config.json                 - passed to `compute_ctl`
 //!     pgdata/
 //!         postgresql.conf       - copy of postgresql.conf created by `compute_ctl`
 //!         zenith.signal
@@ -37,33 +37,42 @@
 //! ```
 //!
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
-use std::net::TcpStream;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context, Result};
-use compute_api::spec::Database;
-use compute_api::spec::PgIdent;
-use compute_api::spec::RemoteExtSpec;
-use compute_api::spec::Role;
-use nix::sys::signal::kill;
-use nix::sys::signal::Signal;
+use anyhow::{Context, Result, anyhow, bail};
+use compute_api::requests::{ComputeClaims, ConfigurationRequest};
+use compute_api::responses::{
+    ComputeConfig, ComputeCtlConfig, ComputeStatus, ComputeStatusResponse, TlsConfig,
+};
+use compute_api::spec::{
+    Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PgIdent,
+    RemoteExtSpec, Role,
+};
+use jsonwebtoken::jwk::{
+    AlgorithmParameters, CommonParameters, EllipticCurve, Jwk, JwkSet, KeyAlgorithm, KeyOperations,
+    OctetKeyPairParameters, OctetKeyPairType, PublicKeyUse,
+};
+use nix::sys::signal::{Signal, kill};
 use pageserver_api::shard::ShardStripeSize;
+use pem::Pem;
 use reqwest::header::CONTENT_TYPE;
+use safekeeper_api::membership::SafekeeperGeneration;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use spki::der::Decode;
+use spki::{SubjectPublicKeyInfo, SubjectPublicKeyInfoRef};
+use tracing::debug;
 use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
 
 use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;
 use crate::storage_controller::StorageController;
-
-use compute_api::responses::{ComputeState, ComputeStatus};
-use compute_api::spec::{Cluster, ComputeFeature, ComputeMode, ComputeSpec};
 
 // contents of a endpoint.json file
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
@@ -73,10 +82,15 @@ pub struct EndpointConf {
     timeline_id: TimelineId,
     mode: ComputeMode,
     pg_port: u16,
-    http_port: u16,
+    external_http_port: u16,
+    internal_http_port: u16,
     pg_version: u32,
     skip_pg_catalog_updates: bool,
+    reconfigure_concurrency: usize,
+    drop_subscriptions_before_start: bool,
     features: Vec<ComputeFeature>,
+    cluster: Option<Cluster>,
+    compute_ctl_config: ComputeCtlConfig,
 }
 
 //
@@ -127,9 +141,40 @@ impl ComputeControlPlane {
         1 + self
             .endpoints
             .values()
-            .map(|ep| std::cmp::max(ep.pg_address.port(), ep.http_address.port()))
+            .map(|ep| std::cmp::max(ep.pg_address.port(), ep.external_http_address.port()))
             .max()
             .unwrap_or(self.base_port)
+    }
+
+    /// Create a JSON Web Key Set. This ideally matches the way we create a JWKS
+    /// from the production control plane.
+    fn create_jwks_from_pem(pem: &Pem) -> Result<JwkSet> {
+        let spki: SubjectPublicKeyInfoRef = SubjectPublicKeyInfo::from_der(pem.contents())?;
+        let public_key = spki.subject_public_key.raw_bytes();
+
+        let mut hasher = Sha256::new();
+        hasher.update(public_key);
+        let key_hash = hasher.finalize();
+
+        Ok(JwkSet {
+            keys: vec![Jwk {
+                common: CommonParameters {
+                    public_key_use: Some(PublicKeyUse::Signature),
+                    key_operations: Some(vec![KeyOperations::Verify]),
+                    key_algorithm: Some(KeyAlgorithm::EdDSA),
+                    key_id: Some(base64::encode_config(key_hash, base64::URL_SAFE_NO_PAD)),
+                    x509_url: None::<String>,
+                    x509_chain: None::<Vec<String>>,
+                    x509_sha1_fingerprint: None::<String>,
+                    x509_sha256_fingerprint: None::<String>,
+                },
+                algorithm: AlgorithmParameters::OctetKeyPair(OctetKeyPairParameters {
+                    key_type: OctetKeyPairType::OctetKeyPair,
+                    curve: EllipticCurve::Ed25519,
+                    x: base64::encode_config(public_key, base64::URL_SAFE_NO_PAD),
+                }),
+            }],
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -139,17 +184,31 @@ impl ComputeControlPlane {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         pg_port: Option<u16>,
-        http_port: Option<u16>,
+        external_http_port: Option<u16>,
+        internal_http_port: Option<u16>,
         pg_version: u32,
         mode: ComputeMode,
         skip_pg_catalog_updates: bool,
+        drop_subscriptions_before_start: bool,
     ) -> Result<Arc<Endpoint>> {
         let pg_port = pg_port.unwrap_or_else(|| self.get_port());
-        let http_port = http_port.unwrap_or_else(|| self.get_port() + 1);
+        let external_http_port = external_http_port.unwrap_or_else(|| self.get_port() + 1);
+        let internal_http_port = internal_http_port.unwrap_or_else(|| external_http_port + 1);
+        let compute_ctl_config = ComputeCtlConfig {
+            jwks: Self::create_jwks_from_pem(&self.env.read_public_key()?)?,
+            tls: None::<TlsConfig>,
+        };
         let ep = Arc::new(Endpoint {
             endpoint_id: endpoint_id.to_owned(),
-            pg_address: SocketAddr::new("127.0.0.1".parse().unwrap(), pg_port),
-            http_address: SocketAddr::new("127.0.0.1".parse().unwrap(), http_port),
+            pg_address: SocketAddr::new(IpAddr::from(Ipv4Addr::LOCALHOST), pg_port),
+            external_http_address: SocketAddr::new(
+                IpAddr::from(Ipv4Addr::UNSPECIFIED),
+                external_http_port,
+            ),
+            internal_http_address: SocketAddr::new(
+                IpAddr::from(Ipv4Addr::LOCALHOST),
+                internal_http_port,
+            ),
             env: self.env.clone(),
             timeline_id,
             mode,
@@ -162,7 +221,11 @@ impl ComputeControlPlane {
             // with this we basically test a case of waking up an idle compute, where
             // we also skip catalog updates in the cloud.
             skip_pg_catalog_updates,
+            drop_subscriptions_before_start,
+            reconfigure_concurrency: 1,
             features: vec![],
+            cluster: None,
+            compute_ctl_config: compute_ctl_config.clone(),
         });
 
         ep.create_endpoint_dir()?;
@@ -173,11 +236,16 @@ impl ComputeControlPlane {
                 tenant_id,
                 timeline_id,
                 mode,
-                http_port,
+                external_http_port,
+                internal_http_port,
                 pg_port,
                 pg_version,
                 skip_pg_catalog_updates,
+                drop_subscriptions_before_start,
+                reconfigure_concurrency: 1,
                 features: vec![],
+                cluster: None,
+                compute_ctl_config,
             })?,
         )?;
         std::fs::write(
@@ -209,7 +277,9 @@ impl ComputeControlPlane {
             });
 
             if let Some((key, _)) = duplicates.next() {
-                bail!("attempting to create a duplicate primary endpoint on tenant {tenant_id}, timeline {timeline_id}: endpoint {key:?} exists already. please don't do this, it is not supported.");
+                bail!(
+                    "attempting to create a duplicate primary endpoint on tenant {tenant_id}, timeline {timeline_id}: endpoint {key:?} exists already. please don't do this, it is not supported."
+                );
             }
         }
         Ok(())
@@ -218,7 +288,6 @@ impl ComputeControlPlane {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-#[derive(Debug)]
 pub struct Endpoint {
     /// used as the directory name
     endpoint_id: String,
@@ -226,9 +295,10 @@ pub struct Endpoint {
     pub timeline_id: TimelineId,
     pub mode: ComputeMode,
 
-    // port and address of the Postgres server and `compute_ctl`'s HTTP API
+    // port and address of the Postgres server and `compute_ctl`'s HTTP APIs
     pub pg_address: SocketAddr,
-    pub http_address: SocketAddr,
+    pub external_http_address: SocketAddr,
+    pub internal_http_address: SocketAddr,
 
     // postgres major version in the format: 14, 15, etc.
     pg_version: u32,
@@ -240,8 +310,15 @@ pub struct Endpoint {
     // Optimizations
     skip_pg_catalog_updates: bool,
 
+    drop_subscriptions_before_start: bool,
+    reconfigure_concurrency: usize,
     // Feature flags
     features: Vec<ComputeFeature>,
+    // Cluster settings
+    cluster: Option<Cluster>,
+
+    /// The compute_ctl config for the endpoint's compute.
+    compute_ctl_config: ComputeCtlConfig,
 }
 
 #[derive(PartialEq, Eq)]
@@ -281,9 +358,18 @@ impl Endpoint {
         let conf: EndpointConf =
             serde_json::from_slice(&std::fs::read(entry.path().join("endpoint.json"))?)?;
 
+        debug!("serialized endpoint conf: {:?}", conf);
+
         Ok(Endpoint {
-            pg_address: SocketAddr::new("127.0.0.1".parse().unwrap(), conf.pg_port),
-            http_address: SocketAddr::new("127.0.0.1".parse().unwrap(), conf.http_port),
+            pg_address: SocketAddr::new(IpAddr::from(Ipv4Addr::LOCALHOST), conf.pg_port),
+            external_http_address: SocketAddr::new(
+                IpAddr::from(Ipv4Addr::UNSPECIFIED),
+                conf.external_http_port,
+            ),
+            internal_http_address: SocketAddr::new(
+                IpAddr::from(Ipv4Addr::LOCALHOST),
+                conf.internal_http_port,
+            ),
             endpoint_id,
             env: env.clone(),
             timeline_id: conf.timeline_id,
@@ -291,7 +377,11 @@ impl Endpoint {
             tenant_id: conf.tenant_id,
             pg_version: conf.pg_version,
             skip_pg_catalog_updates: conf.skip_pg_catalog_updates,
+            reconfigure_concurrency: conf.reconfigure_concurrency,
+            drop_subscriptions_before_start: conf.drop_subscriptions_before_start,
             features: conf.features,
+            cluster: conf.cluster,
+            compute_ctl_config: conf.compute_ctl_config,
         })
     }
 
@@ -316,6 +406,10 @@ impl Endpoint {
         // and can cause errors like 'no unpinned buffers available', see
         // <https://github.com/neondatabase/neon/issues/9956>
         conf.append("shared_buffers", "1MB");
+        // Postgres defaults to effective_io_concurrency=1, which does not exercise the pageserver's
+        // batching logic.  Set this to 2 so that we exercise the code a bit without letting
+        // individual tests do a lot of concurrent work on underpowered test machines
+        conf.append("effective_io_concurrency", "2");
         conf.append("fsync", "off");
         conf.append("max_connections", "100");
         conf.append("wal_level", "logical");
@@ -535,14 +629,24 @@ impl Endpoint {
         Ok(safekeeper_connstrings)
     }
 
+    /// Generate a JWT with the correct claims.
+    pub fn generate_jwt(&self) -> Result<String> {
+        self.env.generate_auth_token(&ComputeClaims {
+            compute_id: self.endpoint_id.clone(),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         &self,
         auth_token: &Option<String>,
+        safekeepers_generation: Option<SafekeeperGeneration>,
         safekeepers: Vec<NodeId>,
         pageservers: Vec<(Host, u16)>,
         remote_ext_config: Option<&String>,
         shard_stripe_size: usize,
         create_test_user: bool,
+        start_timeout: Duration,
     ) -> Result<()> {
         if self.status() == EndpointStatus::Running {
             anyhow::bail!("The endpoint is already running");
@@ -573,56 +677,97 @@ impl Endpoint {
             remote_extensions = None;
         };
 
-        // Create spec file
-        let spec = ComputeSpec {
-            skip_pg_catalog_updates: self.skip_pg_catalog_updates,
-            format_version: 1.0,
-            operation_uuid: None,
-            features: self.features.clone(),
-            swap_size_bytes: None,
-            disk_quota_bytes: None,
-            cluster: Cluster {
-                cluster_id: None, // project ID: not used
-                name: None,       // project name: not used
-                state: None,
-                roles: if create_test_user {
-                    vec![Role {
+        // Create config file
+        let config = {
+            let mut spec = ComputeSpec {
+                skip_pg_catalog_updates: self.skip_pg_catalog_updates,
+                format_version: 1.0,
+                operation_uuid: None,
+                features: self.features.clone(),
+                swap_size_bytes: None,
+                disk_quota_bytes: None,
+                disable_lfc_resizing: None,
+                cluster: Cluster {
+                    cluster_id: None, // project ID: not used
+                    name: None,       // project name: not used
+                    state: None,
+                    roles: if create_test_user {
+                        vec![Role {
+                            name: PgIdent::from_str("test").unwrap(),
+                            encrypted_password: None,
+                            options: None,
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    databases: if create_test_user {
+                        vec![Database {
+                            name: PgIdent::from_str("neondb").unwrap(),
+                            owner: PgIdent::from_str("test").unwrap(),
+                            options: None,
+                            restrict_conn: false,
+                            invalid: false,
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    settings: None,
+                    postgresql_conf: Some(postgresql_conf.clone()),
+                },
+                delta_operations: None,
+                tenant_id: Some(self.tenant_id),
+                timeline_id: Some(self.timeline_id),
+                project_id: None,
+                branch_id: None,
+                endpoint_id: Some(self.endpoint_id.clone()),
+                mode: self.mode,
+                pageserver_connstring: Some(pageserver_connstring),
+                safekeepers_generation: safekeepers_generation.map(|g| g.into_inner()),
+                safekeeper_connstrings,
+                storage_auth_token: auth_token.clone(),
+                remote_extensions,
+                pgbouncer_settings: None,
+                shard_stripe_size: Some(shard_stripe_size),
+                local_proxy_config: None,
+                reconfigure_concurrency: self.reconfigure_concurrency,
+                drop_subscriptions_before_start: self.drop_subscriptions_before_start,
+                audit_log_level: ComputeAudit::Disabled,
+                logs_export_host: None::<String>,
+            };
+
+            // this strange code is needed to support respec() in tests
+            if self.cluster.is_some() {
+                debug!("Cluster is already set in the endpoint spec, using it");
+                spec.cluster = self.cluster.clone().unwrap();
+
+                debug!("spec.cluster {:?}", spec.cluster);
+
+                // fill missing fields again
+                if create_test_user {
+                    spec.cluster.roles.push(Role {
                         name: PgIdent::from_str("test").unwrap(),
                         encrypted_password: None,
                         options: None,
-                    }]
-                } else {
-                    Vec::new()
-                },
-                databases: if create_test_user {
-                    vec![Database {
+                    });
+                    spec.cluster.databases.push(Database {
                         name: PgIdent::from_str("neondb").unwrap(),
                         owner: PgIdent::from_str("test").unwrap(),
                         options: None,
                         restrict_conn: false,
                         invalid: false,
-                    }]
-                } else {
-                    Vec::new()
-                },
-                settings: None,
-                postgresql_conf: Some(postgresql_conf),
-            },
-            delta_operations: None,
-            tenant_id: Some(self.tenant_id),
-            timeline_id: Some(self.timeline_id),
-            mode: self.mode,
-            pageserver_connstring: Some(pageserver_connstring),
-            safekeeper_connstrings,
-            storage_auth_token: auth_token.clone(),
-            remote_extensions,
-            pgbouncer_settings: None,
-            shard_stripe_size: Some(shard_stripe_size),
-            local_proxy_config: None,
-            reconfigure_concurrency: 1,
+                    });
+                }
+                spec.cluster.postgresql_conf = Some(postgresql_conf);
+            }
+
+            ComputeConfig {
+                spec: Some(spec),
+                compute_ctl_config: self.compute_ctl_config.clone(),
+            }
         };
-        let spec_path = self.endpoint_path().join("spec.json");
-        std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
+
+        let config_path = self.endpoint_path().join("config.json");
+        std::fs::write(config_path, serde_json::to_string_pretty(&config)?)?;
 
         // Open log file. We'll redirect the stdout and stderr of `compute_ctl` to it.
         let logfile = std::fs::OpenOptions::new()
@@ -638,24 +783,32 @@ impl Endpoint {
             println!("Also at '{}'", conn_str);
         }
         let mut cmd = Command::new(self.env.neon_distrib_dir.join("compute_ctl"));
-        cmd.args(["--http-port", &self.http_address.port().to_string()])
-            .args(["--pgdata", self.pgdata().to_str().unwrap()])
-            .args(["--connstr", &conn_str])
-            .args([
-                "--spec-path",
-                self.endpoint_path().join("spec.json").to_str().unwrap(),
-            ])
-            .args([
-                "--pgbin",
-                self.env
-                    .pg_bin_dir(self.pg_version)?
-                    .join("postgres")
-                    .to_str()
-                    .unwrap(),
-            ])
-            .stdin(std::process::Stdio::null())
-            .stderr(logfile.try_clone()?)
-            .stdout(logfile);
+        cmd.args([
+            "--external-http-port",
+            &self.external_http_address.port().to_string(),
+        ])
+        .args([
+            "--internal-http-port",
+            &self.internal_http_address.port().to_string(),
+        ])
+        .args(["--pgdata", self.pgdata().to_str().unwrap()])
+        .args(["--connstr", &conn_str])
+        .arg("--config")
+        .arg(self.endpoint_path().join("config.json").as_os_str())
+        .args([
+            "--pgbin",
+            self.env
+                .pg_bin_dir(self.pg_version)?
+                .join("postgres")
+                .to_str()
+                .unwrap(),
+        ])
+        // TODO: It would be nice if we generated compute IDs with the same
+        // algorithm as the real control plane.
+        .args(["--compute-id", &self.endpoint_id])
+        .stdin(std::process::Stdio::null())
+        .stderr(logfile.try_clone()?)
+        .stdout(logfile);
 
         if let Some(remote_ext_config) = remote_ext_config {
             cmd.args(["--remote-ext-config", remote_ext_config]);
@@ -682,17 +835,18 @@ impl Endpoint {
         std::fs::write(pidfile_path, pid.to_string())?;
 
         // Wait for it to start
-        let mut attempt = 0;
         const ATTEMPT_INTERVAL: Duration = Duration::from_millis(100);
-        const MAX_ATTEMPTS: u32 = 10 * 90; // Wait up to 1.5 min
+        let start_at = Instant::now();
         loop {
-            attempt += 1;
             match self.get_status().await {
                 Ok(state) => {
                     match state.status {
                         ComputeStatus::Init => {
-                            if attempt == MAX_ATTEMPTS {
-                                bail!("compute startup timed out; still in Init state");
+                            if Instant::now().duration_since(start_at) > start_timeout {
+                                bail!(
+                                    "compute startup timed out {:?}; still in Init state",
+                                    start_timeout
+                                );
                             }
                             // keep retrying
                         }
@@ -719,8 +873,11 @@ impl Endpoint {
                     }
                 }
                 Err(e) => {
-                    if attempt == MAX_ATTEMPTS {
-                        return Err(e).context("timed out waiting to connect to compute_ctl HTTP");
+                    if Instant::now().duration_since(start_at) > start_timeout {
+                        return Err(e).context(format!(
+                            "timed out {:?} waiting to connect to compute_ctl HTTP",
+                            start_timeout,
+                        ));
                     }
                 }
             }
@@ -734,7 +891,7 @@ impl Endpoint {
     }
 
     // Call the /status HTTP API
-    pub async fn get_status(&self) -> Result<ComputeState> {
+    pub async fn get_status(&self) -> Result<ComputeStatusResponse> {
         let client = reqwest::Client::new();
 
         let response = client
@@ -742,10 +899,11 @@ impl Endpoint {
                 reqwest::Method::GET,
                 format!(
                     "http://{}:{}/status",
-                    self.http_address.ip(),
-                    self.http_address.port()
+                    self.external_http_address.ip(),
+                    self.external_http_address.port()
                 ),
             )
+            .bearer_auth(self.generate_jwt()?)
             .send()
             .await?;
 
@@ -770,10 +928,12 @@ impl Endpoint {
         stripe_size: Option<ShardStripeSize>,
         safekeepers: Option<Vec<NodeId>>,
     ) -> Result<()> {
-        let mut spec: ComputeSpec = {
-            let spec_path = self.endpoint_path().join("spec.json");
-            let file = std::fs::File::open(spec_path)?;
-            serde_json::from_reader(file)?
+        let (mut spec, compute_ctl_config) = {
+            let config_path = self.endpoint_path().join("config.json");
+            let file = std::fs::File::open(config_path)?;
+            let config: ComputeConfig = serde_json::from_reader(file)?;
+
+            (config.spec.unwrap(), config.compute_ctl_config)
         };
 
         let postgresql_conf = self.read_postgresql_conf()?;
@@ -810,20 +970,24 @@ impl Endpoint {
         }
 
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(120))
             .build()
             .unwrap();
         let response = client
             .post(format!(
                 "http://{}:{}/configure",
-                self.http_address.ip(),
-                self.http_address.port()
+                self.external_http_address.ip(),
+                self.external_http_address.port()
             ))
             .header(CONTENT_TYPE.as_str(), "application/json")
-            .body(format!(
-                "{{\"spec\":{}}}",
-                serde_json::to_string_pretty(&spec)?
-            ))
+            .bearer_auth(self.generate_jwt()?)
+            .body(
+                serde_json::to_string(&ConfigurationRequest {
+                    spec,
+                    compute_ctl_config,
+                })
+                .unwrap(),
+            )
             .send()
             .await?;
 

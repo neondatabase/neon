@@ -1,66 +1,66 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
-use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
-use futures::StreamExt;
-use itertools::Itertools;
-use pageserver_api::key::Key;
-use pageserver_api::models::LocationConfigMode;
-use pageserver_api::shard::{
-    ShardCount, ShardIdentity, ShardIndex, ShardNumber, ShardStripeSize, TenantShardId,
-};
-use pageserver_api::upcall_api::ReAttachResponseTenant;
-use rand::{distributions::Alphanumeric, Rng};
-use remote_storage::TimeoutOrCancel;
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
-use sysinfo::SystemExt;
-use tokio::fs;
 
 use anyhow::Context;
+use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
+use futures::StreamExt;
+use itertools::Itertools;
 use once_cell::sync::Lazy;
+use pageserver_api::key::Key;
+use pageserver_api::models::{DetachBehavior, LocationConfigMode};
+use pageserver_api::shard::{
+    ShardCount, ShardIdentity, ShardIndex, ShardNumber, ShardStripeSize, TenantShardId,
+};
+use pageserver_api::upcall_api::ReAttachResponseTenant;
+use rand::Rng;
+use rand::distributions::Alphanumeric;
+use remote_storage::TimeoutOrCancel;
+use sysinfo::SystemExt;
+use tokio::fs;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-
+use utils::crashsafe::path_with_suffix_extension;
+use utils::fs_ext::PathExt;
+use utils::generation::Generation;
+use utils::id::{TenantId, TimelineId};
 use utils::{backoff, completion, crashsafe};
 
+use super::remote_timeline_client::remote_tenant_path;
+use super::secondary::SecondaryTenant;
+use super::timeline::detach_ancestor::{self, PreparedTimelineDetach};
+use super::{GlobalShutDown, TenantSharedResources};
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::controller_upcall_client::{
-    ControlPlaneGenerationsApi, ControllerUpcallClient, RetryForeverError,
+    RetryForeverError, StorageControllerUpcallApi, StorageControllerUpcallClient,
 };
 use crate::deletion_queue::DeletionQueueClient;
 use crate::http::routes::ACTIVE_TENANT_TIMEOUT;
 use crate::metrics::{TENANT, TENANT_MANAGER as METRICS};
-use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
+use crate::task_mgr::{BACKGROUND_RUNTIME, TaskKind};
 use crate::tenant::config::{
     AttachedLocationConfig, AttachmentMode, LocationConf, LocationMode, SecondaryLocationConfig,
 };
 use crate::tenant::span::debug_assert_current_span_has_tenant_id;
 use crate::tenant::storage_layer::inmemory_layer;
 use crate::tenant::timeline::ShutdownMode;
-use crate::tenant::{AttachedTenantConf, GcError, LoadConfigError, SpawnMode, Tenant, TenantState};
+use crate::tenant::{
+    AttachedTenantConf, GcError, LoadConfigError, SpawnMode, TenantShard, TenantState,
+};
 use crate::virtual_file::MaybeFatalIo;
 use crate::{InitializationOrder, TEMP_FILE_SUFFIX};
 
-use utils::crashsafe::path_with_suffix_extension;
-use utils::fs_ext::PathExt;
-use utils::generation::Generation;
-use utils::id::{TenantId, TimelineId};
-
-use super::remote_timeline_client::remote_tenant_path;
-use super::secondary::SecondaryTenant;
-use super::timeline::detach_ancestor::{self, PreparedTimelineDetach};
-use super::{GlobalShutDown, TenantSharedResources};
-
 /// For a tenant that appears in TenantsMap, it may either be
 /// - `Attached`: has a full Tenant object, is elegible to service
-///    reads and ingest WAL.
+///   reads and ingest WAL.
 /// - `Secondary`: is only keeping a local cache warm.
 ///
 /// Secondary is a totally distinct state rather than being a mode of a `Tenant`, because
@@ -69,7 +69,7 @@ use super::{GlobalShutDown, TenantSharedResources};
 /// having a properly acquired generation (Secondary doesn't need a generation)
 #[derive(Clone)]
 pub(crate) enum TenantSlot {
-    Attached(Arc<Tenant>),
+    Attached(Arc<TenantShard>),
     Secondary(Arc<SecondaryTenant>),
     /// In this state, other administrative operations acting on the TenantId should
     /// block, or return a retry indicator equivalent to HTTP 503.
@@ -88,7 +88,7 @@ impl std::fmt::Debug for TenantSlot {
 
 impl TenantSlot {
     /// Return the `Tenant` in this slot if attached, else None
-    fn get_attached(&self) -> Option<&Arc<Tenant>> {
+    fn get_attached(&self) -> Option<&Arc<TenantShard>> {
         match self {
             Self::Attached(t) => Some(t),
             Self::Secondary(_) => None,
@@ -140,7 +140,7 @@ impl TenantStartupMode {
     /// If this returns None, the re-attach struct is in an invalid state and
     /// should be ignored in the response.
     fn from_reattach_tenant(rart: ReAttachResponseTenant) -> Option<Self> {
-        match (rart.mode, rart.gen) {
+        match (rart.mode, rart.r#gen) {
             (LocationConfigMode::Detached, _) => None,
             (LocationConfigMode::Secondary, _) => Some(Self::Secondary),
             (LocationConfigMode::AttachedMulti, Some(g)) => {
@@ -166,7 +166,7 @@ impl TenantStartupMode {
 /// Result type for looking up a TenantId to a specific shard
 pub(crate) enum ShardResolveResult {
     NotFound,
-    Found(Arc<Tenant>),
+    Found(Arc<TenantShard>),
     // Wait for this barrrier, then query again
     InProgress(utils::completion::Barrier),
 }
@@ -175,7 +175,7 @@ impl TenantsMap {
     /// Convenience function for typical usage, where we want to get a `Tenant` object, for
     /// working with attached tenants.  If the TenantId is in the map but in Secondary state,
     /// None is returned.
-    pub(crate) fn get(&self, tenant_shard_id: &TenantShardId) -> Option<&Arc<Tenant>> {
+    pub(crate) fn get(&self, tenant_shard_id: &TenantShardId) -> Option<&Arc<TenantShard>> {
         match self {
             TenantsMap::Initializing => None,
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
@@ -346,7 +346,7 @@ async fn init_load_generations(
             "Emergency mode!  Tenants will be attached unsafely using their last known generation"
         );
         emergency_generations(tenant_confs)
-    } else if let Some(client) = ControllerUpcallClient::new(conf, cancel) {
+    } else if let Some(client) = StorageControllerUpcallClient::new(conf, cancel)? {
         info!("Calling {} API to re-attach tenants", client.base_url());
         // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
         match client.re_attach(conf).await {
@@ -376,7 +376,7 @@ async fn init_load_generations(
                 TenantStartupMode::Attached((_mode, generation)) => Some(generation),
                 TenantStartupMode::Secondary => None,
             }
-            .map(|gen| (*id, *gen))
+            .map(|gen_| (*id, *gen_))
         })
         .collect();
     resources.deletion_queue_client.recover(attached_tenants)?;
@@ -412,7 +412,7 @@ fn load_tenant_config(
         return None;
     }
 
-    Some(Tenant::load_tenant_config(conf, &tenant_shard_id))
+    Some(TenantShard::load_tenant_config(conf, &tenant_shard_id))
 }
 
 /// Initial stage of load: walk the local tenants directory, clean up any temp files,
@@ -502,7 +502,9 @@ pub async fn init_tenant_mgr(
             .total_memory();
     let max_ephemeral_layer_bytes =
         conf.ephemeral_bytes_per_memory_kb as u64 * (system_memory / 1024);
-    tracing::info!("Initialized ephemeral layer size limit to {max_ephemeral_layer_bytes}, for {system_memory} bytes of memory");
+    tracing::info!(
+        "Initialized ephemeral layer size limit to {max_ephemeral_layer_bytes}, for {system_memory} bytes of memory"
+    );
     inmemory_layer::GLOBAL_RESOURCES.max_dirty_bytes.store(
         max_ephemeral_layer_bytes,
         std::sync::atomic::Ordering::Relaxed,
@@ -606,7 +608,8 @@ pub async fn init_tenant_mgr(
         // Presence of a generation number implies attachment: attach the tenant
         // if it wasn't already, and apply the generation number.
         config_write_futs.push(async move {
-            let r = Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf).await;
+            let r =
+                TenantShard::persist_tenant_config(conf, &tenant_shard_id, &location_conf).await;
             (tenant_shard_id, location_conf, r)
         });
     }
@@ -694,18 +697,19 @@ fn tenant_spawn(
     init_order: Option<InitializationOrder>,
     mode: SpawnMode,
     ctx: &RequestContext,
-) -> Result<Arc<Tenant>, GlobalShutDown> {
+) -> Result<Arc<TenantShard>, GlobalShutDown> {
     // All these conditions should have been satisfied by our caller: the tenant dir exists, is a well formed
     // path, and contains a configuration file.  Assertions that do synchronous I/O are limited to debug mode
     // to avoid impacting prod runtime performance.
     assert!(!crate::is_temporary(tenant_path));
     debug_assert!(tenant_path.is_dir());
-    debug_assert!(conf
-        .tenant_location_config_path(&tenant_shard_id)
-        .try_exists()
-        .unwrap());
+    debug_assert!(
+        conf.tenant_location_config_path(&tenant_shard_id)
+            .try_exists()
+            .unwrap()
+    );
 
-    Tenant::spawn(
+    TenantShard::spawn(
         conf,
         tenant_shard_id,
         resources,
@@ -791,7 +795,9 @@ async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
                 (total_in_progress, total_attached)
             }
             TenantsMap::ShuttingDown(_) => {
-                error!("already shutting down, this function isn't supposed to be called more than once");
+                error!(
+                    "already shutting down, this function isn't supposed to be called more than once"
+                );
                 return;
             }
         }
@@ -880,12 +886,12 @@ impl TenantManager {
     /// Gets the attached tenant from the in-memory data, erroring if it's absent, in secondary mode, or currently
     /// undergoing a state change (i.e. slot is InProgress).
     ///
-    /// The return Tenant is not guaranteed to be active: check its status after obtaing it, or
-    /// use [`Tenant::wait_to_become_active`] before using it if you will do I/O on it.
+    /// The return TenantShard is not guaranteed to be active: check its status after obtaing it, or
+    /// use [`TenantShard::wait_to_become_active`] before using it if you will do I/O on it.
     pub(crate) fn get_attached_tenant_shard(
         &self,
         tenant_shard_id: TenantShardId,
-    ) -> Result<Arc<Tenant>, GetTenantError> {
+    ) -> Result<Arc<TenantShard>, GetTenantError> {
         let locked = self.tenants.read().unwrap();
 
         let peek_slot = tenant_map_peek_slot(&locked, &tenant_shard_id, TenantSlotPeekMode::Read)?;
@@ -934,12 +940,12 @@ impl TenantManager {
         flush: Option<Duration>,
         mut spawn_mode: SpawnMode,
         ctx: &RequestContext,
-    ) -> Result<Option<Arc<Tenant>>, UpsertLocationError> {
+    ) -> Result<Option<Arc<TenantShard>>, UpsertLocationError> {
         debug_assert_current_span_has_tenant_id();
         info!("configuring tenant location to state {new_location_config:?}");
 
         enum FastPathModified {
-            Attached(Arc<Tenant>),
+            Attached(Arc<TenantShard>),
             Secondary(Arc<SecondaryTenant>),
         }
 
@@ -996,9 +1002,13 @@ impl TenantManager {
         // phase of writing config and/or waiting for flush, before returning.
         match fast_path_taken {
             Some(FastPathModified::Attached(tenant)) => {
-                Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
-                    .await
-                    .fatal_err("write tenant shard config");
+                TenantShard::persist_tenant_config(
+                    self.conf,
+                    &tenant_shard_id,
+                    &new_location_config,
+                )
+                .await
+                .fatal_err("write tenant shard config");
 
                 // Transition to AttachedStale means we may well hold a valid generation
                 // still, and have been requested to go stale as part of a migration.  If
@@ -1016,9 +1026,9 @@ impl TenantManager {
                             Ok(Ok(_)) => return Ok(Some(tenant)),
                             Err(_) => {
                                 tracing::warn!(
-                                timeout_ms = flush_timeout.as_millis(),
-                                "Timed out waiting for flush to remote storage, proceeding anyway."
-                            )
+                                    timeout_ms = flush_timeout.as_millis(),
+                                    "Timed out waiting for flush to remote storage, proceeding anyway."
+                                )
                             }
                         }
                     }
@@ -1027,9 +1037,13 @@ impl TenantManager {
                 return Ok(Some(tenant));
             }
             Some(FastPathModified::Secondary(_secondary_tenant)) => {
-                Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
-                    .await
-                    .fatal_err("write tenant shard config");
+                TenantShard::persist_tenant_config(
+                    self.conf,
+                    &tenant_shard_id,
+                    &new_location_config,
+                )
+                .await
+                .fatal_err("write tenant shard config");
 
                 return Ok(None);
             }
@@ -1119,7 +1133,7 @@ impl TenantManager {
         // Before activating either secondary or attached mode, persist the
         // configuration, so that on restart we will re-attach (or re-start
         // secondary) on the tenant.
-        Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
+        TenantShard::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
             .await
             .fatal_err("write tenant shard config");
 
@@ -1194,7 +1208,9 @@ impl TenantManager {
                     }
                     TenantSlot::Attached(tenant) => {
                         let (_guard, progress) = utils::completion::channel();
-                        info!("Shutting down just-spawned tenant, because tenant manager is shut down");
+                        info!(
+                            "Shutting down just-spawned tenant, because tenant manager is shut down"
+                        );
                         match tenant.shutdown(progress, ShutdownMode::Hard).await {
                             Ok(()) => {
                                 info!("Finished shutting down just-spawned tenant");
@@ -1257,7 +1273,7 @@ impl TenantManager {
 
         let tenant_path = self.conf.tenant_path(&tenant_shard_id);
         let timelines_path = self.conf.timelines_path(&tenant_shard_id);
-        let config = Tenant::load_tenant_config(self.conf, &tenant_shard_id)?;
+        let config = TenantShard::load_tenant_config(self.conf, &tenant_shard_id)?;
 
         if drop_cache {
             tracing::info!("Dropping local file cache");
@@ -1292,7 +1308,7 @@ impl TenantManager {
         Ok(())
     }
 
-    pub(crate) fn get_attached_active_tenant_shards(&self) -> Vec<Arc<Tenant>> {
+    pub(crate) fn get_attached_active_tenant_shards(&self) -> Vec<Arc<TenantShard>> {
         let locked = self.tenants.read().unwrap();
         match &*locked {
             TenantsMap::Initializing => Vec::new(),
@@ -1441,7 +1457,7 @@ impl TenantManager {
     #[instrument(skip_all, fields(tenant_id=%tenant.get_tenant_shard_id().tenant_id, shard_id=%tenant.get_tenant_shard_id().shard_slug(), new_shard_count=%new_shard_count.literal()))]
     pub(crate) async fn shard_split(
         &self,
-        tenant: Arc<Tenant>,
+        tenant: Arc<TenantShard>,
         new_shard_count: ShardCount,
         new_stripe_size: Option<ShardStripeSize>,
         ctx: &RequestContext,
@@ -1471,7 +1487,7 @@ impl TenantManager {
 
     pub(crate) async fn do_shard_split(
         &self,
-        tenant: Arc<Tenant>,
+        tenant: Arc<TenantShard>,
         new_shard_count: ShardCount,
         new_stripe_size: Option<ShardStripeSize>,
         ctx: &RequestContext,
@@ -1643,6 +1659,7 @@ impl TenantManager {
                         .wait_lsn(
                             *target_lsn,
                             crate::tenant::timeline::WaitLsnWaiter::Tenant,
+                            crate::tenant::timeline::WaitLsnTimeout::Default,
                             ctx,
                         )
                         .await
@@ -1697,7 +1714,7 @@ impl TenantManager {
     /// For each resident layer in the parent shard, we will hard link it into all of the child shards.
     async fn shard_split_hardlink(
         &self,
-        parent_shard: &Tenant,
+        parent_shard: &TenantShard,
         child_shards: Vec<TenantShardId>,
     ) -> anyhow::Result<()> {
         debug_assert_current_span_has_tenant_id();
@@ -1783,7 +1800,7 @@ impl TenantManager {
                             _ => {
                                 return Err(anyhow::anyhow!(e).context(format!(
                                     "Hard linking {relative_layer} into {child_prefix}"
-                                )))
+                                )));
                             }
                         }
                     }
@@ -1908,6 +1925,7 @@ impl TenantManager {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         prepared: PreparedTimelineDetach,
+        behavior: DetachBehavior,
         mut attempt: detach_ancestor::Attempt,
         ctx: &RequestContext,
     ) -> Result<HashSet<TimelineId>, detach_ancestor::Error> {
@@ -1951,7 +1969,14 @@ impl TenantManager {
             .map_err(Error::NotFound)?;
 
         let resp = timeline
-            .detach_from_ancestor_and_reparent(&tenant, prepared, ctx)
+            .detach_from_ancestor_and_reparent(
+                &tenant,
+                prepared,
+                attempt.ancestor_timeline_id,
+                attempt.ancestor_lsn,
+                behavior,
+                ctx,
+            )
             .await?;
 
         let mut slot_guard = slot_guard;
@@ -1974,7 +1999,7 @@ impl TenantManager {
             }
 
             let tenant_path = self.conf.tenant_path(&tenant_shard_id);
-            let config = Tenant::load_tenant_config(self.conf, &tenant_shard_id)
+            let config = TenantShard::load_tenant_config(self.conf, &tenant_shard_id)
                 .map_err(|e| Error::DetachReparent(e.into()))?;
 
             let shard_identity = config.shard;
@@ -2024,8 +2049,8 @@ impl TenantManager {
                 .wait_to_become_active(std::time::Duration::from_secs(9999))
                 .await
                 .map_err(|e| {
-                    use pageserver_api::models::TenantState;
                     use GetActiveTenantError::{Cancelled, WillNotBecomeActive};
+                    use pageserver_api::models::TenantState;
                     match e {
                         Cancelled | WillNotBecomeActive(TenantState::Stopping { .. }) => {
                             Error::ShuttingDown
@@ -2088,7 +2113,7 @@ impl TenantManager {
 
                     match selector {
                         ShardSelector::Zero if slot.0.shard_number == ShardNumber(0) => {
-                            return ShardResolveResult::Found(tenant.clone())
+                            return ShardResolveResult::Found(tenant.clone());
                         }
                         ShardSelector::Page(key) => {
                             // First slot we see for this tenant, calculate the expected shard number
@@ -2485,7 +2510,7 @@ impl SlotGuard {
                 TenantsMap::Initializing => {
                     return Err(TenantSlotUpsertError::MapState(
                         TenantMapError::StillInitializing,
-                    ))
+                    ));
                 }
                 TenantsMap::ShuttingDown(_) => {
                     return Err(TenantSlotUpsertError::ShuttingDown((
@@ -2814,20 +2839,21 @@ where
     }
 }
 
-use {
-    crate::tenant::gc_result::GcResult, pageserver_api::models::TimelineGcRequest,
-    utils::http::error::ApiError,
-};
+use http_utils::error::ApiError;
+use pageserver_api::models::TimelineGcRequest;
+
+use crate::tenant::gc_result::GcResult;
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
+
     use tracing::Instrument;
 
+    use super::super::harness::TenantHarness;
+    use super::TenantsMap;
     use crate::tenant::mgr::TenantSlot;
-
-    use super::{super::harness::TenantHarness, TenantsMap};
 
     #[tokio::test(start_paused = true)]
     async fn shutdown_awaits_in_progress_tenant() {

@@ -1,11 +1,7 @@
-use std::{
-    panic::AssertUnwindSafe,
-    sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
-        mpsc, Arc, OnceLock,
-    },
-    thread::JoinHandle,
-};
+use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock, mpsc};
+use std::thread::JoinHandle;
 
 use tracing::{debug, error, trace};
 

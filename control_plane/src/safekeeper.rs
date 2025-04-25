@@ -14,16 +14,15 @@ use std::{io, result};
 
 use anyhow::Context;
 use camino::Utf8PathBuf;
+use http_utils::error::HttpErrorBody;
 use postgres_connection::PgConnectionConfig;
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
 use utils::auth::{Claims, Scope};
-use utils::{http::error::HttpErrorBody, id::NodeId};
+use utils::id::NodeId;
 
-use crate::{
-    background_process,
-    local_env::{LocalEnv, SafekeeperConf},
-};
+use crate::background_process;
+use crate::local_env::{LocalEnv, SafekeeperConf};
 
 #[derive(Error, Debug)]
 pub enum SafekeeperHttpError {
@@ -88,7 +87,7 @@ impl SafekeeperNode {
             conf: conf.clone(),
             pg_connection_config: Self::safekeeper_connection_config(&listen_addr, conf.pg_port),
             env: env.clone(),
-            http_client: reqwest::Client::new(),
+            http_client: env.create_http_client(),
             http_base_url: format!("http://{}:{}/v1", listen_addr, conf.http_port),
             listen_addr,
         }
@@ -110,6 +109,18 @@ impl SafekeeperNode {
     pub fn pid_file(&self) -> Utf8PathBuf {
         Utf8PathBuf::from_path_buf(self.datadir_path().join("safekeeper.pid"))
             .expect("non-Unicode path")
+    }
+
+    /// Initializes a safekeeper node by creating all necessary files,
+    /// e.g. SSL certificates.
+    pub fn initialize(&self) -> anyhow::Result<()> {
+        if self.env.generate_local_ssl_certs {
+            self.env.generate_ssl_cert(
+                &self.datadir_path().join("server.crt"),
+                &self.datadir_path().join("server.key"),
+            )?;
+        }
+        Ok(())
     }
 
     pub async fn start(
@@ -195,6 +206,16 @@ impl SafekeeperNode {
                 "--http-auth-public-key-path".to_owned(),
                 key_path_string.clone(),
             ]);
+        }
+
+        if let Some(https_port) = self.conf.https_port {
+            args.extend([
+                "--listen-https".to_owned(),
+                format!("{}:{}", self.listen_addr, https_port),
+            ]);
+        }
+        if let Some(ssl_ca_file) = self.env.ssl_ca_cert_path() {
+            args.push(format!("--ssl-ca-file={}", ssl_ca_file.to_str().unwrap()));
         }
 
         args.extend_from_slice(extra_opts);

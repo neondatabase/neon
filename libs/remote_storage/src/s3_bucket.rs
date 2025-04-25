@@ -4,56 +4,49 @@
 //! allowing multiple api users to independently work with the same S3 bucket, if
 //! their bucket prefixes are both specified and different.
 
-use std::{
-    borrow::Cow,
-    collections::HashMap,
-    num::NonZeroU32,
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-    time::{Duration, SystemTime},
-};
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::num::NonZeroU32;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::{Duration, SystemTime};
 
-use anyhow::{anyhow, Context as _};
-use aws_config::{
-    default_provider::credentials::DefaultCredentialsChain,
-    retry::{RetryConfigBuilder, RetryMode},
-    BehaviorVersion,
-};
-use aws_sdk_s3::{
-    config::{AsyncSleep, IdentityCache, Region, SharedAsyncSleep},
-    error::SdkError,
-    operation::{get_object::GetObjectError, head_object::HeadObjectError},
-    types::{Delete, DeleteMarkerEntry, ObjectIdentifier, ObjectVersion, StorageClass},
-    Client,
-};
+use anyhow::{Context as _, anyhow};
+use aws_config::BehaviorVersion;
+use aws_config::default_provider::credentials::DefaultCredentialsChain;
+use aws_config::retry::{RetryConfigBuilder, RetryMode};
+use aws_sdk_s3::Client;
+use aws_sdk_s3::config::{AsyncSleep, IdentityCache, Region, SharedAsyncSleep};
+use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::operation::get_object::GetObjectError;
+use aws_sdk_s3::operation::head_object::HeadObjectError;
+use aws_sdk_s3::types::{Delete, ObjectIdentifier, StorageClass};
 use aws_smithy_async::rt::sleep::TokioSleep;
-use http_body_util::StreamBody;
-use http_types::StatusCode;
-
-use aws_smithy_types::{body::SdkBody, DateTime};
-use aws_smithy_types::{byte_stream::ByteStream, date_time::ConversionError};
+use aws_smithy_types::body::SdkBody;
+use aws_smithy_types::byte_stream::ByteStream;
+use aws_smithy_types::date_time::ConversionError;
 use bytes::Bytes;
 use futures::stream::Stream;
 use futures_util::StreamExt;
+use http_body_util::StreamBody;
+use http_types::StatusCode;
 use hyper::body::Frame;
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
 use utils::backoff;
 
 use super::StorageMetadata;
-use crate::{
-    config::S3Config,
-    error::Cancelled,
-    metrics::{start_counting_cancelled_wait, start_measuring_requests},
-    support::PermitCarrying,
-    ConcurrencyLimiter, Download, DownloadError, DownloadOpts, Listing, ListingMode, ListingObject,
-    RemotePath, RemoteStorage, TimeTravelError, TimeoutOrCancel, MAX_KEYS_PER_DELETE,
-    REMOTE_STORAGE_PREFIX_SEPARATOR,
-};
-
-use crate::metrics::AttemptOutcome;
+use crate::config::S3Config;
+use crate::error::Cancelled;
 pub(super) use crate::metrics::RequestKind;
+use crate::metrics::{AttemptOutcome, start_counting_cancelled_wait, start_measuring_requests};
+use crate::support::PermitCarrying;
+use crate::{
+    ConcurrencyLimiter, Download, DownloadError, DownloadOpts, Listing, ListingMode, ListingObject,
+    MAX_KEYS_PER_DELETE_S3, REMOTE_STORAGE_PREFIX_SEPARATOR, RemotePath, RemoteStorage,
+    TimeTravelError, TimeoutOrCancel, Version, VersionId, VersionKind, VersionListing,
+};
 
 /// AWS S3 storage.
 pub struct S3Bucket {
@@ -72,6 +65,7 @@ struct GetObjectRequest {
     key: String,
     etag: Option<String>,
     range: Option<String>,
+    version_id: Option<String>,
 }
 impl S3Bucket {
     /// Creates the S3 storage, errors if incorrect AWS S3 configuration provided.
@@ -257,6 +251,7 @@ impl S3Bucket {
             .get_object()
             .bucket(request.bucket)
             .key(request.key)
+            .set_version_id(request.version_id)
             .set_range(request.range);
 
         if let Some(etag) = request.etag {
@@ -355,7 +350,7 @@ impl S3Bucket {
         let kind = RequestKind::Delete;
         let mut cancel = std::pin::pin!(cancel.cancelled());
 
-        for chunk in delete_objects.chunks(MAX_KEYS_PER_DELETE) {
+        for chunk in delete_objects.chunks(MAX_KEYS_PER_DELETE_S3) {
             let started_at = start_measuring_requests(kind);
 
             let req = self
@@ -409,6 +404,124 @@ impl S3Bucket {
             }
         }
         Ok(())
+    }
+
+    async fn list_versions_with_permit(
+        &self,
+        _permit: &tokio::sync::SemaphorePermit<'_>,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> Result<crate::VersionListing, DownloadError> {
+        // get the passed prefix or if it is not set use prefix_in_bucket value
+        let prefix = prefix
+            .map(|p| self.relative_path_to_s3_object(p))
+            .or_else(|| self.prefix_in_bucket.clone());
+
+        let warn_threshold = 3;
+        let max_retries = 10;
+        let is_permanent = |e: &_| matches!(e, DownloadError::Cancelled);
+
+        let mut key_marker = None;
+        let mut version_id_marker = None;
+        let mut versions_and_deletes = Vec::new();
+
+        loop {
+            let response = backoff::retry(
+                || async {
+                    let mut request = self
+                        .client
+                        .list_object_versions()
+                        .bucket(self.bucket_name.clone())
+                        .set_prefix(prefix.clone())
+                        .set_key_marker(key_marker.clone())
+                        .set_version_id_marker(version_id_marker.clone());
+
+                    if let ListingMode::WithDelimiter = mode {
+                        request = request.delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string());
+                    }
+
+                    let op = request.send();
+
+                    tokio::select! {
+                        res = op => res.map_err(|e| DownloadError::Other(e.into())),
+                        _ = cancel.cancelled() => Err(DownloadError::Cancelled),
+                    }
+                },
+                is_permanent,
+                warn_threshold,
+                max_retries,
+                "listing object versions",
+                cancel,
+            )
+            .await
+            .ok_or_else(|| DownloadError::Cancelled)
+            .and_then(|x| x)?;
+
+            tracing::trace!(
+                "  Got List response version_id_marker={:?}, key_marker={:?}",
+                response.version_id_marker,
+                response.key_marker
+            );
+            let versions = response
+                .versions
+                .unwrap_or_default()
+                .into_iter()
+                .map(|version| {
+                    let key = version.key.expect("response does not contain a key");
+                    let key = self.s3_object_to_relative_path(&key);
+                    let version_id = VersionId(version.version_id.expect("needing version id"));
+                    let last_modified =
+                        SystemTime::try_from(version.last_modified.expect("no last_modified"))?;
+                    Ok(Version {
+                        key,
+                        last_modified,
+                        kind: crate::VersionKind::Version(version_id),
+                    })
+                });
+            let deletes = response
+                .delete_markers
+                .unwrap_or_default()
+                .into_iter()
+                .map(|version| {
+                    let key = version.key.expect("response does not contain a key");
+                    let key = self.s3_object_to_relative_path(&key);
+                    let last_modified =
+                        SystemTime::try_from(version.last_modified.expect("no last_modified"))?;
+                    Ok(Version {
+                        key,
+                        last_modified,
+                        kind: crate::VersionKind::DeletionMarker,
+                    })
+                });
+            itertools::process_results(versions.chain(deletes), |n_vds| {
+                versions_and_deletes.extend(n_vds)
+            })
+            .map_err(DownloadError::Other)?;
+            fn none_if_empty(v: Option<String>) -> Option<String> {
+                v.filter(|v| !v.is_empty())
+            }
+            version_id_marker = none_if_empty(response.next_version_id_marker);
+            key_marker = none_if_empty(response.next_key_marker);
+            if version_id_marker.is_none() {
+                // The final response is not supposed to be truncated
+                if response.is_truncated.unwrap_or_default() {
+                    return Err(DownloadError::Other(anyhow::anyhow!(
+                        "Received truncated ListObjectVersions response for prefix={prefix:?}"
+                    )));
+                }
+                break;
+            }
+            if let Some(max_keys) = max_keys {
+                if versions_and_deletes.len() >= max_keys.get().try_into().unwrap() {
+                    return Err(DownloadError::Other(anyhow::anyhow!("too many versions")));
+                }
+            }
+        }
+        Ok(VersionListing {
+            versions: versions_and_deletes,
+        })
     }
 
     pub fn bucket_name(&self) -> &str {
@@ -627,6 +740,19 @@ impl RemoteStorage for S3Bucket {
         }
     }
 
+    async fn list_versions(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> Result<crate::VersionListing, DownloadError> {
+        let kind = RequestKind::ListVersions;
+        let permit = self.permit(kind, cancel).await?;
+        self.list_versions_with_permit(&permit, prefix, mode, max_keys, cancel)
+            .await
+    }
+
     async fn head_object(
         &self,
         key: &RemotePath,
@@ -807,15 +933,16 @@ impl RemoteStorage for S3Bucket {
                 key: self.relative_path_to_s3_object(from),
                 etag: opts.etag.as_ref().map(|e| e.to_string()),
                 range: opts.byte_range_header(),
+                version_id: opts.version_id.as_ref().map(|v| v.0.to_owned()),
             },
             cancel,
         )
         .await
     }
 
-    async fn delete_objects<'a>(
+    async fn delete_objects(
         &self,
-        paths: &'a [RemotePath],
+        paths: &[RemotePath],
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let kind = RequestKind::Delete;
@@ -830,6 +957,10 @@ impl RemoteStorage for S3Bucket {
         }
 
         self.delete_oids(&permit, &delete_objects, cancel).await
+    }
+
+    fn max_keys_per_delete(&self) -> usize {
+        MAX_KEYS_PER_DELETE_S3
     }
 
     async fn delete(&self, path: &RemotePath, cancel: &CancellationToken) -> anyhow::Result<()> {
@@ -847,94 +978,25 @@ impl RemoteStorage for S3Bucket {
         let kind = RequestKind::TimeTravel;
         let permit = self.permit(kind, cancel).await?;
 
-        let timestamp = DateTime::from(timestamp);
-        let done_if_after = DateTime::from(done_if_after);
-
         tracing::trace!("Target time: {timestamp:?}, done_if_after {done_if_after:?}");
 
-        // get the passed prefix or if it is not set use prefix_in_bucket value
-        let prefix = prefix
-            .map(|p| self.relative_path_to_s3_object(p))
-            .or_else(|| self.prefix_in_bucket.clone());
+        // Limit the number of versions deletions, mostly so that we don't
+        // keep requesting forever if the list is too long, as we'd put the
+        // list in RAM.
+        // Building a list of 100k entries that reaches the limit roughly takes
+        // 40 seconds, and roughly corresponds to tenants of 2 TiB physical size.
+        const COMPLEXITY_LIMIT: Option<NonZeroU32> = NonZeroU32::new(100_000);
 
-        let warn_threshold = 3;
-        let max_retries = 10;
-        let is_permanent = |e: &_| matches!(e, TimeTravelError::Cancelled);
-
-        let mut key_marker = None;
-        let mut version_id_marker = None;
-        let mut versions_and_deletes = Vec::new();
-
-        loop {
-            let response = backoff::retry(
-                || async {
-                    let op = self
-                        .client
-                        .list_object_versions()
-                        .bucket(self.bucket_name.clone())
-                        .set_prefix(prefix.clone())
-                        .set_key_marker(key_marker.clone())
-                        .set_version_id_marker(version_id_marker.clone())
-                        .send();
-
-                    tokio::select! {
-                        res = op => res.map_err(|e| TimeTravelError::Other(e.into())),
-                        _ = cancel.cancelled() => Err(TimeTravelError::Cancelled),
-                    }
-                },
-                is_permanent,
-                warn_threshold,
-                max_retries,
-                "listing object versions for time_travel_recover",
-                cancel,
-            )
+        let mode = ListingMode::NoDelimiter;
+        let version_listing = self
+            .list_versions_with_permit(&permit, prefix, mode, COMPLEXITY_LIMIT, cancel)
             .await
-            .ok_or_else(|| TimeTravelError::Cancelled)
-            .and_then(|x| x)?;
-
-            tracing::trace!(
-                "  Got List response version_id_marker={:?}, key_marker={:?}",
-                response.version_id_marker,
-                response.key_marker
-            );
-            let versions = response
-                .versions
-                .unwrap_or_default()
-                .into_iter()
-                .map(VerOrDelete::from_version);
-            let deletes = response
-                .delete_markers
-                .unwrap_or_default()
-                .into_iter()
-                .map(VerOrDelete::from_delete_marker);
-            itertools::process_results(versions.chain(deletes), |n_vds| {
-                versions_and_deletes.extend(n_vds)
-            })
-            .map_err(TimeTravelError::Other)?;
-            fn none_if_empty(v: Option<String>) -> Option<String> {
-                v.filter(|v| !v.is_empty())
-            }
-            version_id_marker = none_if_empty(response.next_version_id_marker);
-            key_marker = none_if_empty(response.next_key_marker);
-            if version_id_marker.is_none() {
-                // The final response is not supposed to be truncated
-                if response.is_truncated.unwrap_or_default() {
-                    return Err(TimeTravelError::Other(anyhow::anyhow!(
-                        "Received truncated ListObjectVersions response for prefix={prefix:?}"
-                    )));
-                }
-                break;
-            }
-            // Limit the number of versions deletions, mostly so that we don't
-            // keep requesting forever if the list is too long, as we'd put the
-            // list in RAM.
-            // Building a list of 100k entries that reaches the limit roughly takes
-            // 40 seconds, and roughly corresponds to tenants of 2 TiB physical size.
-            const COMPLEXITY_LIMIT: usize = 100_000;
-            if versions_and_deletes.len() >= COMPLEXITY_LIMIT {
-                return Err(TimeTravelError::TooManyVersions);
-            }
-        }
+            .map_err(|err| match err {
+                DownloadError::Other(e) => TimeTravelError::Other(e),
+                DownloadError::Cancelled => TimeTravelError::Cancelled,
+                other => TimeTravelError::Other(other.into()),
+            })?;
+        let versions_and_deletes = version_listing.versions;
 
         tracing::info!(
             "Built list for time travel with {} versions and deletions",
@@ -950,22 +1012,26 @@ impl RemoteStorage for S3Bucket {
         let mut vds_for_key = HashMap::<_, Vec<_>>::new();
 
         for vd in &versions_and_deletes {
-            let VerOrDelete {
-                version_id, key, ..
-            } = &vd;
-            if version_id == "null" {
-                return Err(TimeTravelError::Other(anyhow!("Received ListVersions response for key={key} with version_id='null', \
-                    indicating either disabled versioning, or legacy objects with null version id values")));
+            let Version { key, .. } = &vd;
+            let version_id = vd.version_id().map(|v| v.0.as_str());
+            if version_id == Some("null") {
+                return Err(TimeTravelError::Other(anyhow!(
+                    "Received ListVersions response for key={key} with version_id='null', \
+                    indicating either disabled versioning, or legacy objects with null version id values"
+                )));
             }
-            tracing::trace!(
-                "Parsing version key={key} version_id={version_id} kind={:?}",
-                vd.kind
-            );
+            tracing::trace!("Parsing version key={key} kind={:?}", vd.kind);
 
             vds_for_key.entry(key).or_default().push(vd);
         }
+
+        let warn_threshold = 3;
+        let max_retries = 10;
+        let is_permanent = |e: &_| matches!(e, TimeTravelError::Cancelled);
+
         for (key, versions) in vds_for_key {
             let last_vd = versions.last().unwrap();
+            let key = self.relative_path_to_s3_object(key);
             if last_vd.last_modified > done_if_after {
                 tracing::trace!("Key {key} has version later than done_if_after, skipping");
                 continue;
@@ -990,11 +1056,11 @@ impl RemoteStorage for S3Bucket {
                 do_delete = true;
             } else {
                 match &versions[version_to_restore_to - 1] {
-                    VerOrDelete {
-                        kind: VerOrDeleteKind::Version,
-                        version_id,
+                    Version {
+                        kind: VersionKind::Version(version_id),
                         ..
                     } => {
+                        let version_id = &version_id.0;
                         tracing::trace!("Copying old version {version_id} for {key}...");
                         // Restore the state to the last version by copying
                         let source_id =
@@ -1006,7 +1072,7 @@ impl RemoteStorage for S3Bucket {
                                     .client
                                     .copy_object()
                                     .bucket(self.bucket_name.clone())
-                                    .key(key)
+                                    .key(&key)
                                     .set_storage_class(self.upload_storage_class.clone())
                                     .copy_source(&source_id)
                                     .send();
@@ -1027,8 +1093,8 @@ impl RemoteStorage for S3Bucket {
                         .and_then(|x| x)?;
                         tracing::info!(%version_id, %key, "Copied old version in S3");
                     }
-                    VerOrDelete {
-                        kind: VerOrDeleteKind::DeleteMarker,
+                    Version {
+                        kind: VersionKind::DeletionMarker,
                         ..
                     } => {
                         do_delete = true;
@@ -1036,7 +1102,7 @@ impl RemoteStorage for S3Bucket {
                 }
             };
             if do_delete {
-                if matches!(last_vd.kind, VerOrDeleteKind::DeleteMarker) {
+                if matches!(last_vd.kind, VersionKind::DeletionMarker) {
                     // Key has since been deleted (but there was some history), no need to do anything
                     tracing::trace!("Key {key} already deleted, skipping.");
                 } else {
@@ -1064,66 +1130,11 @@ impl RemoteStorage for S3Bucket {
     }
 }
 
-// Save RAM and only store the needed data instead of the entire ObjectVersion/DeleteMarkerEntry
-struct VerOrDelete {
-    kind: VerOrDeleteKind,
-    last_modified: DateTime,
-    version_id: String,
-    key: String,
-}
-
-#[derive(Debug)]
-enum VerOrDeleteKind {
-    Version,
-    DeleteMarker,
-}
-
-impl VerOrDelete {
-    fn with_kind(
-        kind: VerOrDeleteKind,
-        last_modified: Option<DateTime>,
-        version_id: Option<String>,
-        key: Option<String>,
-    ) -> anyhow::Result<Self> {
-        let lvk = (last_modified, version_id, key);
-        let (Some(last_modified), Some(version_id), Some(key)) = lvk else {
-            anyhow::bail!(
-                "One (or more) of last_modified, key, and id is None. \
-            Is versioning enabled in the bucket? last_modified={:?}, version_id={:?}, key={:?}",
-                lvk.0,
-                lvk.1,
-                lvk.2,
-            );
-        };
-        Ok(Self {
-            kind,
-            last_modified,
-            version_id,
-            key,
-        })
-    }
-    fn from_version(v: ObjectVersion) -> anyhow::Result<Self> {
-        Self::with_kind(
-            VerOrDeleteKind::Version,
-            v.last_modified,
-            v.version_id,
-            v.key,
-        )
-    }
-    fn from_delete_marker(v: DeleteMarkerEntry) -> anyhow::Result<Self> {
-        Self::with_kind(
-            VerOrDeleteKind::DeleteMarker,
-            v.last_modified,
-            v.version_id,
-            v.key,
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use camino::Utf8Path;
     use std::num::NonZeroUsize;
+
+    use camino::Utf8Path;
 
     use crate::{RemotePath, S3Bucket, S3Config};
 

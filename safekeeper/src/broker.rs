@@ -1,55 +1,56 @@
 //! Communication with the broker, providing safekeeper peers and pageserver coordination.
 
-use anyhow::anyhow;
-use anyhow::bail;
-use anyhow::Context;
-
-use anyhow::Error;
-use anyhow::Result;
-
-use storage_broker::parse_proto_ttid;
-
-use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey as ProtoSubscriptionKey;
-use storage_broker::proto::FilterTenantTimelineId;
-use storage_broker::proto::MessageType;
-use storage_broker::proto::SafekeeperDiscoveryResponse;
-use storage_broker::proto::SubscribeByFilterRequest;
-use storage_broker::proto::SubscribeSafekeeperInfoRequest;
-use storage_broker::proto::TypeSubscription;
-use storage_broker::proto::TypedMessage;
-use storage_broker::Request;
-
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::Instant;
-use std::time::UNIX_EPOCH;
+use std::sync::atomic::AtomicU64;
+use std::time::{Duration, Instant, UNIX_EPOCH};
+
+use anyhow::{Context, Error, Result, anyhow, bail};
+use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey as ProtoSubscriptionKey;
+use storage_broker::proto::{
+    FilterTenantTimelineId, MessageType, SafekeeperDiscoveryResponse, SubscribeByFilterRequest,
+    SubscribeSafekeeperInfoRequest, TypeSubscription, TypedMessage,
+};
+use storage_broker::{Request, parse_proto_ttid};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::*;
 
-use crate::metrics::BROKER_ITERATION_TIMELINES;
-use crate::metrics::BROKER_PULLED_UPDATES;
-use crate::metrics::BROKER_PUSHED_UPDATES;
-use crate::metrics::BROKER_PUSH_ALL_UPDATES_SECONDS;
-use crate::GlobalTimelines;
-use crate::SafeKeeperConf;
+use crate::metrics::{
+    BROKER_ITERATION_TIMELINES, BROKER_PULLED_UPDATES, BROKER_PUSH_ALL_UPDATES_SECONDS,
+    BROKER_PUSHED_UPDATES,
+};
+use crate::{GlobalTimelines, SafeKeeperConf};
 
 const RETRY_INTERVAL_MSEC: u64 = 1000;
 const PUSH_INTERVAL_MSEC: u64 = 1000;
 
+fn make_tls_config(conf: &SafeKeeperConf) -> storage_broker::ClientTlsConfig {
+    storage_broker::ClientTlsConfig::new().ca_certificates(
+        conf.ssl_ca_certs
+            .iter()
+            .map(pem::encode)
+            .map(storage_broker::Certificate::from_pem),
+    )
+}
+
 /// Push once in a while data about all active timelines to the broker.
-async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
+async fn push_loop(
+    conf: Arc<SafeKeeperConf>,
+    global_timelines: Arc<GlobalTimelines>,
+) -> anyhow::Result<()> {
     if conf.disable_periodic_broker_push {
         info!("broker push_loop is disabled, doing nothing...");
         futures::future::pending::<()>().await; // sleep forever
         return Ok(());
     }
 
-    let active_timelines_set = GlobalTimelines::get_global_broker_active_set();
+    let active_timelines_set = global_timelines.get_global_broker_active_set();
 
-    let mut client =
-        storage_broker::connect(conf.broker_endpoint.clone(), conf.broker_keepalive_interval)?;
+    let mut client = storage_broker::connect(
+        conf.broker_endpoint.clone(),
+        conf.broker_keepalive_interval,
+        make_tls_config(&conf),
+    )?;
     let push_interval = Duration::from_millis(PUSH_INTERVAL_MSEC);
 
     let outbound = async_stream::stream! {
@@ -87,8 +88,16 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
 
 /// Subscribe and fetch all the interesting data from the broker.
 #[instrument(name = "broker_pull", skip_all)]
-async fn pull_loop(conf: SafeKeeperConf, stats: Arc<BrokerStats>) -> Result<()> {
-    let mut client = storage_broker::connect(conf.broker_endpoint, conf.broker_keepalive_interval)?;
+async fn pull_loop(
+    conf: Arc<SafeKeeperConf>,
+    global_timelines: Arc<GlobalTimelines>,
+    stats: Arc<BrokerStats>,
+) -> Result<()> {
+    let mut client = storage_broker::connect(
+        conf.broker_endpoint.clone(),
+        conf.broker_keepalive_interval,
+        make_tls_config(&conf),
+    )?;
 
     // TODO: subscribe only to local timelines instead of all
     let request = SubscribeSafekeeperInfoRequest {
@@ -113,7 +122,7 @@ async fn pull_loop(conf: SafeKeeperConf, stats: Arc<BrokerStats>) -> Result<()> 
             .as_ref()
             .ok_or_else(|| anyhow!("missing tenant_timeline_id"))?;
         let ttid = parse_proto_ttid(proto_ttid)?;
-        if let Ok(tli) = GlobalTimelines::get(ttid) {
+        if let Ok(tli) = global_timelines.get(ttid) {
             // Note that we also receive *our own* info. That's
             // important, as it is used as an indication of live
             // connection to the broker.
@@ -135,9 +144,16 @@ async fn pull_loop(conf: SafeKeeperConf, stats: Arc<BrokerStats>) -> Result<()> 
 
 /// Process incoming discover requests. This is done in a separate task to avoid
 /// interfering with the normal pull/push loops.
-async fn discover_loop(conf: SafeKeeperConf, stats: Arc<BrokerStats>) -> Result<()> {
-    let mut client =
-        storage_broker::connect(conf.broker_endpoint.clone(), conf.broker_keepalive_interval)?;
+async fn discover_loop(
+    conf: Arc<SafeKeeperConf>,
+    global_timelines: Arc<GlobalTimelines>,
+    stats: Arc<BrokerStats>,
+) -> Result<()> {
+    let mut client = storage_broker::connect(
+        conf.broker_endpoint.clone(),
+        conf.broker_keepalive_interval,
+        make_tls_config(&conf),
+    )?;
 
     let request = SubscribeByFilterRequest {
         types: vec![TypeSubscription {
@@ -171,7 +187,7 @@ async fn discover_loop(conf: SafeKeeperConf, stats: Arc<BrokerStats>) -> Result<
                     .as_ref()
                     .ok_or_else(|| anyhow!("missing tenant_timeline_id"))?;
                 let ttid = parse_proto_ttid(proto_ttid)?;
-                if let Ok(tli) = GlobalTimelines::get(ttid) {
+                if let Ok(tli) = global_timelines.get(ttid) {
                     // we received a discovery request for a timeline we know about
                     discover_counter.inc();
 
@@ -210,7 +226,10 @@ async fn discover_loop(conf: SafeKeeperConf, stats: Arc<BrokerStats>) -> Result<
     bail!("end of stream");
 }
 
-pub async fn task_main(conf: SafeKeeperConf) -> anyhow::Result<()> {
+pub async fn task_main(
+    conf: Arc<SafeKeeperConf>,
+    global_timelines: Arc<GlobalTimelines>,
+) -> anyhow::Result<()> {
     info!("started, broker endpoint {:?}", conf.broker_endpoint);
 
     let mut ticker = tokio::time::interval(Duration::from_millis(RETRY_INTERVAL_MSEC));
@@ -261,13 +280,13 @@ pub async fn task_main(conf: SafeKeeperConf) -> anyhow::Result<()> {
                 },
                 _ = ticker.tick() => {
                     if push_handle.is_none() {
-                        push_handle = Some(tokio::spawn(push_loop(conf.clone())));
+                        push_handle = Some(tokio::spawn(push_loop(conf.clone(), global_timelines.clone())));
                     }
                     if pull_handle.is_none() {
-                        pull_handle = Some(tokio::spawn(pull_loop(conf.clone(), stats.clone())));
+                        pull_handle = Some(tokio::spawn(pull_loop(conf.clone(), global_timelines.clone(), stats.clone())));
                     }
                     if discover_handle.is_none() {
-                        discover_handle = Some(tokio::spawn(discover_loop(conf.clone(), stats.clone())));
+                        discover_handle = Some(tokio::spawn(discover_loop(conf.clone(), global_timelines.clone(), stats.clone())));
                     }
                 },
                 _ = &mut stats_task => {}

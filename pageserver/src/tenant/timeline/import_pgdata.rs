@@ -1,20 +1,21 @@
 use std::sync::Arc;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
+use pageserver_api::models::ShardImportStatus;
 use remote_storage::RemotePath;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, info_span, Instrument};
+use tracing::info;
 use utils::lsn::Lsn;
 
-use crate::{context::RequestContext, tenant::metadata::TimelineMetadata};
-
 use super::Timeline;
+use crate::context::RequestContext;
+use crate::controller_upcall_client::{StorageControllerUpcallApi, StorageControllerUpcallClient};
+use crate::tenant::metadata::TimelineMetadata;
 
 mod flow;
 mod importbucket_client;
 mod importbucket_format;
 pub(crate) mod index_part_format;
-pub(crate) mod upcall_api;
 
 pub async fn doit(
     timeline: &Arc<Timeline>,
@@ -33,23 +34,6 @@ pub async fn doit(
     };
 
     let storage = importbucket_client::new(timeline.conf, &location, cancel.clone()).await?;
-
-    info!("get spec early so we know we'll be able to upcall when done");
-    let Some(spec) = storage.get_spec().await? else {
-        bail!("spec not found")
-    };
-
-    let upcall_client =
-        upcall_api::Client::new(timeline.conf, cancel.clone()).context("create upcall client")?;
-
-    //
-    // send an early progress update to clean up k8s job early and generate potentially useful logs
-    //
-    info!("send early progress update");
-    upcall_client
-        .send_progress_until_success(&spec)
-        .instrument(info_span!("early_progress_update"))
-        .await?;
 
     let status_prefix = RemotePath::from_string("status").unwrap();
 
@@ -113,7 +97,7 @@ pub async fn doit(
             match res {
                 Ok(_) => break,
                 Err(err) => {
-                    info!(?err, "indefintely waiting for pgdata to finish");
+                    info!(?err, "indefinitely waiting for pgdata to finish");
                     if tokio::time::timeout(std::time::Duration::from_secs(10), cancel.cancelled())
                         .await
                         .is_ok()
@@ -176,7 +160,21 @@ pub async fn doit(
 
         //
         // Communicate that shard is done.
+        // Ensure at-least-once delivery of the upcall to storage controller
+        // before we mark the task as done and never come here again.
         //
+        let storcon_client = StorageControllerUpcallClient::new(timeline.conf, &cancel)?
+            .expect("storcon configured");
+        storcon_client
+            .put_timeline_import_status(
+                timeline.tenant_shard_id,
+                timeline.timeline_id,
+                // TODO(vlad): What about import errors?
+                ShardImportStatus::Done,
+            )
+            .await
+            .map_err(|_err| anyhow::anyhow!("Shut down while putting timeline import status"))?;
+
         storage
             .put_json(
                 &shard_status_key,
@@ -185,16 +183,6 @@ pub async fn doit(
             .await
             .context("put shard status")?;
     }
-
-    //
-    // Ensure at-least-once deliver of the upcall to cplane
-    // before we mark the task as done and never come here again.
-    //
-    info!("send final progress update");
-    upcall_client
-        .send_progress_until_success(&spec)
-        .instrument(info_span!("final_progress_update"))
-        .await?;
 
     //
     // Mark as done in index_part.

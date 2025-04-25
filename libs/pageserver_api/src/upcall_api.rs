@@ -1,14 +1,14 @@
-//! Types in this file are for pageserver's upward-facing API calls to the control plane,
+//! Types in this file are for pageserver's upward-facing API calls to the storage controller,
 //! required for acquiring and validating tenant generation numbers.
 //!
 //! See docs/rfcs/025-generation-numbers.md
 
 use serde::{Deserialize, Serialize};
-use utils::id::NodeId;
+use utils::id::{NodeId, TimelineId};
 
-use crate::{
-    controller_api::NodeRegisterRequest, models::LocationConfigMode, shard::TenantShardId,
-};
+use crate::controller_api::NodeRegisterRequest;
+use crate::models::{LocationConfigMode, ShardImportStatus};
+use crate::shard::TenantShardId;
 
 /// Upcall message sent by the pageserver to the configured `control_plane_api` on
 /// startup.
@@ -30,7 +30,7 @@ fn default_mode() -> LocationConfigMode {
 pub struct ReAttachResponseTenant {
     pub id: TenantShardId,
     /// Mandatory if LocationConfigMode is None or set to an Attached* mode
-    pub gen: Option<u32>,
+    pub r#gen: Option<u32>,
 
     /// Default value only for backward compat: this field should be set
     #[serde(default = "default_mode")]
@@ -44,7 +44,7 @@ pub struct ReAttachResponse {
 #[derive(Serialize, Deserialize)]
 pub struct ValidateRequestTenant {
     pub id: TenantShardId,
-    pub gen: u32,
+    pub r#gen: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -61,4 +61,11 @@ pub struct ValidateResponse {
 pub struct ValidateResponseTenant {
     pub id: TenantShardId,
     pub valid: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PutTimelineImportStatusRequest {
+    pub tenant_shard_id: TenantShardId,
+    pub timeline_id: TimelineId,
+    pub status: ShardImportStatus,
 }

@@ -56,20 +56,23 @@
 //! medium/128              time:   [10.412 ms 10.574 ms 10.718 ms]
 //! ```
 
+use std::future::Future;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use anyhow::Context;
 use bytes::{Buf, Bytes};
 use criterion::{BenchmarkId, Criterion};
 use once_cell::sync::Lazy;
-use pageserver::{config::PageServerConf, walredo::PostgresRedoManager};
+use pageserver::config::PageServerConf;
+use pageserver::walredo::{PostgresRedoManager, RedoAttemptType};
+use pageserver_api::key::Key;
 use pageserver_api::record::NeonWalRecord;
-use pageserver_api::{key::Key, shard::TenantShardId};
-use std::{
-    future::Future,
-    sync::Arc,
-    time::{Duration, Instant},
-};
-use tokio::{sync::Barrier, task::JoinSet};
-use utils::{id::TenantId, lsn::Lsn};
+use pageserver_api::shard::TenantShardId;
+use tokio::sync::Barrier;
+use tokio::task::JoinSet;
+use utils::id::TenantId;
+use utils::lsn::Lsn;
 
 fn bench(c: &mut Criterion) {
     macro_rules! bench_group {
@@ -220,7 +223,14 @@ impl Request {
 
         // TODO: avoid these clones
         manager
-            .request_redo(*key, *lsn, base_img.clone(), records.clone(), *pg_version)
+            .request_redo(
+                *key,
+                *lsn,
+                base_img.clone(),
+                records.clone(),
+                *pg_version,
+                RedoAttemptType::ReadPage,
+            )
             .await
             .context("request_redo")
     }

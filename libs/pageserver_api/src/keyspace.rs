@@ -1,11 +1,10 @@
-use postgres_ffi::BLCKSZ;
 use std::ops::Range;
 
-use crate::{
-    key::Key,
-    shard::{ShardCount, ShardIdentity},
-};
 use itertools::Itertools;
+use postgres_ffi::BLCKSZ;
+
+use crate::key::Key;
+use crate::shard::{ShardCount, ShardIdentity};
 
 ///
 /// Represents a set of Keys, in a compact form.
@@ -609,15 +608,12 @@ pub fn singleton_range(key: Key) -> Range<Key> {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write;
+
     use rand::{RngCore, SeedableRng};
 
-    use crate::{
-        models::ShardParameters,
-        shard::{ShardCount, ShardNumber},
-    };
-
     use super::*;
-    use std::fmt::Write;
+    use crate::shard::{DEFAULT_STRIPE_SIZE, ShardCount, ShardNumber, ShardStripeSize};
 
     // Helper function to create a key range.
     //
@@ -967,12 +963,8 @@ mod tests {
     }
     #[test]
     fn sharded_range_relation_gap() {
-        let shard_identity = ShardIdentity::new(
-            ShardNumber(0),
-            ShardCount::new(4),
-            ShardParameters::DEFAULT_STRIPE_SIZE,
-        )
-        .unwrap();
+        let shard_identity =
+            ShardIdentity::new(ShardNumber(0), ShardCount::new(4), DEFAULT_STRIPE_SIZE).unwrap();
 
         let range = ShardedRange::new(
             Range {
@@ -988,12 +980,8 @@ mod tests {
 
     #[test]
     fn shard_identity_keyspaces_single_key() {
-        let shard_identity = ShardIdentity::new(
-            ShardNumber(1),
-            ShardCount::new(4),
-            ShardParameters::DEFAULT_STRIPE_SIZE,
-        )
-        .unwrap();
+        let shard_identity =
+            ShardIdentity::new(ShardNumber(1), ShardCount::new(4), DEFAULT_STRIPE_SIZE).unwrap();
 
         let range = ShardedRange::new(
             Range {
@@ -1037,12 +1025,8 @@ mod tests {
 
     #[test]
     fn shard_identity_keyspaces_forkno_gap() {
-        let shard_identity = ShardIdentity::new(
-            ShardNumber(1),
-            ShardCount::new(4),
-            ShardParameters::DEFAULT_STRIPE_SIZE,
-        )
-        .unwrap();
+        let shard_identity =
+            ShardIdentity::new(ShardNumber(1), ShardCount::new(4), DEFAULT_STRIPE_SIZE).unwrap();
 
         let range = ShardedRange::new(
             Range {
@@ -1064,7 +1048,7 @@ mod tests {
             let shard_identity = ShardIdentity::new(
                 ShardNumber(shard_number),
                 ShardCount::new(4),
-                ShardParameters::DEFAULT_STRIPE_SIZE,
+                DEFAULT_STRIPE_SIZE,
             )
             .unwrap();
 
@@ -1147,37 +1131,44 @@ mod tests {
     /// for a single tenant.
     #[test]
     fn sharded_range_fragment_simple() {
+        const SHARD_COUNT: u8 = 4;
+        const STRIPE_SIZE: u32 = DEFAULT_STRIPE_SIZE.0;
+
         let shard_identity = ShardIdentity::new(
             ShardNumber(0),
-            ShardCount::new(4),
-            ShardParameters::DEFAULT_STRIPE_SIZE,
+            ShardCount::new(SHARD_COUNT),
+            ShardStripeSize(STRIPE_SIZE),
         )
         .unwrap();
 
         // A range which we happen to know covers exactly one stripe which belongs to this shard
         let input_start = Key::from_hex("000000067f00000001000000ae0000000000").unwrap();
-        let input_end = Key::from_hex("000000067f00000001000000ae0000008000").unwrap();
+        let mut input_end = input_start;
+        input_end.field6 += STRIPE_SIZE; // field6 is block number
 
         // Ask for stripe_size blocks, we get the whole stripe
         assert_eq!(
-            do_fragment(input_start, input_end, &shard_identity, 32768),
-            (32768, vec![(32768, input_start..input_end)])
+            do_fragment(input_start, input_end, &shard_identity, STRIPE_SIZE),
+            (STRIPE_SIZE, vec![(STRIPE_SIZE, input_start..input_end)])
         );
 
         // Ask for more, we still get the whole stripe
         assert_eq!(
-            do_fragment(input_start, input_end, &shard_identity, 10000000),
-            (32768, vec![(32768, input_start..input_end)])
+            do_fragment(input_start, input_end, &shard_identity, 10 * STRIPE_SIZE),
+            (STRIPE_SIZE, vec![(STRIPE_SIZE, input_start..input_end)])
         );
 
         // Ask for target_nblocks of half the stripe size, we get two halves
         assert_eq!(
-            do_fragment(input_start, input_end, &shard_identity, 16384),
+            do_fragment(input_start, input_end, &shard_identity, STRIPE_SIZE / 2),
             (
-                32768,
+                STRIPE_SIZE,
                 vec![
-                    (16384, input_start..input_start.add(16384)),
-                    (16384, input_start.add(16384)..input_end)
+                    (
+                        STRIPE_SIZE / 2,
+                        input_start..input_start.add(STRIPE_SIZE / 2)
+                    ),
+                    (STRIPE_SIZE / 2, input_start.add(STRIPE_SIZE / 2)..input_end)
                 ]
             )
         );
@@ -1185,40 +1176,53 @@ mod tests {
 
     #[test]
     fn sharded_range_fragment_multi_stripe() {
+        const SHARD_COUNT: u8 = 4;
+        const STRIPE_SIZE: u32 = DEFAULT_STRIPE_SIZE.0;
+        const RANGE_SIZE: u32 = SHARD_COUNT as u32 * STRIPE_SIZE;
+
         let shard_identity = ShardIdentity::new(
             ShardNumber(0),
-            ShardCount::new(4),
-            ShardParameters::DEFAULT_STRIPE_SIZE,
+            ShardCount::new(SHARD_COUNT),
+            ShardStripeSize(STRIPE_SIZE),
         )
         .unwrap();
 
         // A range which covers multiple stripes, exactly one of which belongs to the current shard.
         let input_start = Key::from_hex("000000067f00000001000000ae0000000000").unwrap();
-        let input_end = Key::from_hex("000000067f00000001000000ae0000020000").unwrap();
+        let mut input_end = input_start;
+        input_end.field6 += RANGE_SIZE; // field6 is block number
+
         // Ask for all the blocks, get a fragment that covers the whole range but reports
         // its size to be just the blocks belonging to our shard.
         assert_eq!(
-            do_fragment(input_start, input_end, &shard_identity, 131072),
-            (32768, vec![(32768, input_start..input_end)])
+            do_fragment(input_start, input_end, &shard_identity, RANGE_SIZE),
+            (STRIPE_SIZE, vec![(STRIPE_SIZE, input_start..input_end)])
         );
 
-        // Ask for a sub-stripe quantity
+        // Ask for a sub-stripe quantity that results in 3 fragments.
+        let limit = STRIPE_SIZE / 3 + 1;
         assert_eq!(
-            do_fragment(input_start, input_end, &shard_identity, 16000),
+            do_fragment(input_start, input_end, &shard_identity, limit),
             (
-                32768,
+                STRIPE_SIZE,
                 vec![
-                    (16000, input_start..input_start.add(16000)),
-                    (16000, input_start.add(16000)..input_start.add(32000)),
-                    (768, input_start.add(32000)..input_end),
+                    (limit, input_start..input_start.add(limit)),
+                    (limit, input_start.add(limit)..input_start.add(2 * limit)),
+                    (
+                        STRIPE_SIZE - 2 * limit,
+                        input_start.add(2 * limit)..input_end
+                    ),
                 ]
             )
         );
 
         // Try on a range that starts slightly after our owned stripe
         assert_eq!(
-            do_fragment(input_start.add(1), input_end, &shard_identity, 131072),
-            (32767, vec![(32767, input_start.add(1)..input_end)])
+            do_fragment(input_start.add(1), input_end, &shard_identity, RANGE_SIZE),
+            (
+                STRIPE_SIZE - 1,
+                vec![(STRIPE_SIZE - 1, input_start.add(1)..input_end)]
+            )
         );
     }
 
@@ -1226,32 +1230,40 @@ mod tests {
     /// a previous relation.
     #[test]
     fn sharded_range_fragment_starting_from_logical_size() {
+        const SHARD_COUNT: u8 = 4;
+        const STRIPE_SIZE: u32 = DEFAULT_STRIPE_SIZE.0;
+        const RANGE_SIZE: u32 = SHARD_COUNT as u32 * STRIPE_SIZE;
+
         let input_start = Key::from_hex("000000067f00000001000000ae00ffffffff").unwrap();
-        let input_end = Key::from_hex("000000067f00000001000000ae0100008000").unwrap();
+        let mut input_end = Key::from_hex("000000067f00000001000000ae0100000000").unwrap();
+        input_end.field6 += RANGE_SIZE; // field6 is block number
 
         // Shard 0 owns the first stripe in the relation, and the preceding logical size is shard local too
         let shard_identity = ShardIdentity::new(
             ShardNumber(0),
-            ShardCount::new(4),
-            ShardParameters::DEFAULT_STRIPE_SIZE,
+            ShardCount::new(SHARD_COUNT),
+            ShardStripeSize(STRIPE_SIZE),
         )
         .unwrap();
         assert_eq!(
-            do_fragment(input_start, input_end, &shard_identity, 0x10000),
-            (0x8001, vec![(0x8001, input_start..input_end)])
+            do_fragment(input_start, input_end, &shard_identity, 2 * STRIPE_SIZE),
+            (
+                STRIPE_SIZE + 1,
+                vec![(STRIPE_SIZE + 1, input_start..input_end)]
+            )
         );
 
         // Shard 1 does not own the first stripe in the relation, but it does own the logical size (all shards
         // store all logical sizes)
         let shard_identity = ShardIdentity::new(
             ShardNumber(1),
-            ShardCount::new(4),
-            ShardParameters::DEFAULT_STRIPE_SIZE,
+            ShardCount::new(SHARD_COUNT),
+            ShardStripeSize(STRIPE_SIZE),
         )
         .unwrap();
         assert_eq!(
-            do_fragment(input_start, input_end, &shard_identity, 0x10000),
-            (0x1, vec![(0x1, input_start..input_end)])
+            do_fragment(input_start, input_end, &shard_identity, 2 * STRIPE_SIZE),
+            (1, vec![(1, input_start..input_end)])
         );
     }
 
@@ -1287,12 +1299,8 @@ mod tests {
         );
 
         // Same, but using a sharded identity
-        let shard_identity = ShardIdentity::new(
-            ShardNumber(0),
-            ShardCount::new(4),
-            ShardParameters::DEFAULT_STRIPE_SIZE,
-        )
-        .unwrap();
+        let shard_identity =
+            ShardIdentity::new(ShardNumber(0), ShardCount::new(4), DEFAULT_STRIPE_SIZE).unwrap();
         assert_eq!(
             do_fragment(input_start, input_end, &shard_identity, 0x8000),
             (u32::MAX, vec![(u32::MAX, input_start..input_end),])
@@ -1334,7 +1342,7 @@ mod tests {
                 ShardIdentity::new(
                     ShardNumber((prng.next_u32() % shard_count) as u8),
                     ShardCount::new(shard_count as u8),
-                    ShardParameters::DEFAULT_STRIPE_SIZE,
+                    DEFAULT_STRIPE_SIZE,
                 )
                 .unwrap()
             };

@@ -5,7 +5,10 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from collections.abc import Iterable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 
 def scan_pageserver_log_for_errors(
@@ -94,13 +97,20 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*Flushed oversized open layer with size.*",
     # During teardown, we stop the storage controller before the pageservers, so pageservers
     # can experience connection errors doing background deletion queue work.
-    ".*WARN deletion backend: calling control plane generation validation API failed.*error sending request.*",
+    ".*WARN deletion backend:.* storage controller upcall failed, will retry.*error sending request.*",
+    # Can happen when the pageserver starts faster than the storage controller
+    ".*WARN init_tenant_mgr:.* storage controller upcall failed, will retry.*error sending request.*",
     # Can happen when the test shuts down the storage controller while it is calling the utilization API
     ".*WARN.*path=/v1/utilization .*request was dropped before completing",
     # Can happen during shutdown
     ".*scheduling deletion on drop failed: queue is in state Stopped.*",
-    # Too many frozen layers error is normal during intensive benchmarks
-    ".*too many frozen layers.*",
+    ".*scheduling deletion on drop failed: queue is shutting down.*",
+    # L0 flush backpressure delays are expected under heavy ingest load. We want to exercise
+    # this backpressure in tests.
+    ".*delaying layer flush by \\S+ for compaction backpressure.*",
+    ".*stalling layer flushes for compaction backpressure.*",
+    ".*layer roll waiting for flush due to compaction backpressure.*",
+    ".*BatchSpanProcessor.*",
 )
 
 
@@ -109,7 +119,9 @@ DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS = [
     # failing to connect to them.
     ".*Call to node.*management API.*failed.*receive body.*",
     ".*Call to node.*management API.*failed.*ReceiveBody.*",
+    ".*Call to node.*management API.*failed.*Timeout.*",
     ".*Failed to update node .+ after heartbeat round.*error sending request for url.*",
+    ".*background_reconcile: failed to fetch top tenants:.*client error \\(Connect\\).*",
     # Many tests will start up with a node offline
     ".*startup_reconcile: Could not scan node.*",
     # Tests run in dev mode
@@ -119,6 +131,8 @@ DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS = [
     # controller's attempts to notify the endpoint).
     ".*reconciler.*neon_local notification hook failed.*",
     ".*reconciler.*neon_local error.*",
+    # Tenant rate limits may fire in tests that submit lots of API requests.
+    ".*tenant \\S+ is rate limited.*",
 ]
 
 

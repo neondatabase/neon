@@ -4,8 +4,6 @@ import concurrent.futures
 from typing import TYPE_CHECKING
 
 import pytest
-from pytest_httpserver import HTTPServer
-from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 from fixtures.common_types import TenantId
@@ -15,11 +13,14 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Any
 
+    from pytest_httpserver import HTTPServer
+    from werkzeug.wrappers.request import Request
+
 
 class ComputeReconfigure:
     def __init__(self, server: HTTPServer):
         self.server = server
-        self.control_plane_compute_hook_api = f"http://{server.host}:{server.port}/notify-attach"
+        self.control_plane_hooks_api = f"http://{server.host}:{server.port}/"
         self.workloads: dict[TenantId, Any] = {}
         self.on_notify: Callable[[Any], None] | None = None
 
@@ -69,7 +70,10 @@ def compute_reconfigure_listener(make_httpserver: HTTPServer):
             # This causes the endpoint to query storage controller for its location, which
             # is redundant since we already have it here, but this avoids extending the
             # neon_local CLI to take full lists of locations
-            reconfigure_threads.submit(lambda workload=workload: workload.reconfigure())  # type: ignore[misc]
+            fut = reconfigure_threads.submit(lambda workload=workload: workload.reconfigure())  # type: ignore[misc]
+
+            # To satisfy semantics of notify-attach API, we must wait for the change to be applied before returning 200
+            fut.result()
 
         return Response(status=200)
 

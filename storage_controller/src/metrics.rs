@@ -7,17 +7,18 @@
 //!
 //! The rest of the code defines label group types and deals with converting outer types to labels.
 //!
+use std::sync::Mutex;
+
 use bytes::Bytes;
-use measured::{label::LabelValue, metric::histogram, FixedCardinalityLabel, MetricGroup};
+use measured::label::LabelValue;
+use measured::metric::histogram;
+use measured::{FixedCardinalityLabel, MetricGroup};
 use metrics::NeonMetrics;
 use once_cell::sync::Lazy;
-use std::sync::Mutex;
 use strum::IntoEnumIterator;
 
-use crate::{
-    persistence::{DatabaseError, DatabaseOperation},
-    service::LeadershipStatus,
-};
+use crate::persistence::{DatabaseError, DatabaseOperation};
+use crate::service::LeadershipStatus;
 
 pub(crate) static METRICS_REGISTRY: Lazy<StorageControllerMetrics> =
     Lazy::new(StorageControllerMetrics::default);
@@ -43,6 +44,15 @@ pub(crate) struct StorageControllerMetricGroup {
     /// Size of the in-memory map of pageserver_nodes
     pub(crate) storage_controller_pageserver_nodes: measured::Gauge,
 
+    /// Count of how many pageserver nodes from in-memory map have https configured
+    pub(crate) storage_controller_https_pageserver_nodes: measured::Gauge,
+
+    /// Size of the in-memory map of safekeeper_nodes
+    pub(crate) storage_controller_safekeeper_nodes: measured::Gauge,
+
+    /// Count of how many safekeeper nodes from in-memory map have https configured
+    pub(crate) storage_controller_https_safekeeper_nodes: measured::Gauge,
+
     /// Reconciler tasks completed, broken down by success/failure/cancelled
     pub(crate) storage_controller_reconcile_complete:
         measured::CounterVec<ReconcileCompleteLabelGroupSet>,
@@ -52,6 +62,16 @@ pub(crate) struct StorageControllerMetricGroup {
 
     /// How many shards are not scheduled into their preferred AZ
     pub(crate) storage_controller_schedule_az_violation: measured::Gauge,
+
+    /// How many shard locations (secondary or attached) on each node
+    pub(crate) storage_controller_node_shards: measured::GaugeVec<NodeLabelGroupSet>,
+
+    /// How many _attached_ shard locations on each node
+    pub(crate) storage_controller_node_attached_shards: measured::GaugeVec<NodeLabelGroupSet>,
+
+    /// How many _home_ shard locations on each node (i.e. the node's AZ matches the shard's
+    /// preferred AZ)
+    pub(crate) storage_controller_node_home_shards: measured::GaugeVec<NodeLabelGroupSet>,
 
     /// How many shards would like to reconcile but were blocked by concurrency limits
     pub(crate) storage_controller_pending_reconciles: measured::Gauge,
@@ -65,9 +85,18 @@ pub(crate) struct StorageControllerMetricGroup {
     pub(crate) storage_controller_http_request_latency:
         measured::HistogramVec<HttpRequestLatencyLabelGroupSet, 5>,
 
+    /// HTTP rate limiting latency across all tenants and endpoints
+    #[metric(metadata = histogram::Thresholds::exponential_buckets(0.1, 10.0))]
+    pub(crate) storage_controller_http_request_rate_limited: measured::Histogram<10>,
+
     /// Count of HTTP requests to the pageserver that resulted in an error,
     /// broken down by the pageserver node id, request name and method
     pub(crate) storage_controller_pageserver_request_error:
+        measured::CounterVec<PageserverRequestLabelGroupSet>,
+
+    /// Count of HTTP requests to the safekeeper that resulted in an error,
+    /// broken down by the safekeeper node id, request name and method
+    pub(crate) storage_controller_safekeeper_request_error:
         measured::CounterVec<PageserverRequestLabelGroupSet>,
 
     /// Latency of HTTP requests to the pageserver, broken down by pageserver
@@ -75,6 +104,13 @@ pub(crate) struct StorageControllerMetricGroup {
     /// requests.
     #[metric(metadata = histogram::Thresholds::exponential_buckets(0.1, 2.0))]
     pub(crate) storage_controller_pageserver_request_latency:
+        measured::HistogramVec<PageserverRequestLabelGroupSet, 5>,
+
+    /// Latency of HTTP requests to the safekeeper, broken down by safekeeper
+    /// node id, request name and method. This include both successful and unsuccessful
+    /// requests.
+    #[metric(metadata = histogram::Thresholds::exponential_buckets(0.1, 2.0))]
+    pub(crate) storage_controller_safekeeper_request_latency:
         measured::HistogramVec<PageserverRequestLabelGroupSet, 5>,
 
     /// Count of pass-through HTTP requests to the pageserver that resulted in an error,
@@ -130,6 +166,15 @@ impl Default for StorageControllerMetrics {
             encoder: Mutex::new(measured::text::BufferedTextEncoder::new()),
         }
     }
+}
+
+#[derive(measured::LabelGroup, Clone)]
+#[label(set = NodeLabelGroupSet)]
+pub(crate) struct NodeLabelGroup<'a> {
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    pub(crate) az: &'a str,
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    pub(crate) node_id: &'a str,
 }
 
 #[derive(measured::LabelGroup)]

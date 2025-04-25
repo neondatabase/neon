@@ -15,7 +15,7 @@ mod secret;
 mod signature;
 pub mod threadpool;
 
-pub(crate) use exchange::{exchange, Exchange};
+pub(crate) use exchange::{Exchange, exchange};
 use hmac::{Hmac, Mac};
 pub(crate) use key::ScramKey;
 pub(crate) use secret::ServerSecret;
@@ -76,11 +76,8 @@ mod tests {
         const NONCE: [u8; 18] = [
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
         ];
-        let mut exchange = Exchange::new(
-            &secret,
-            || NONCE,
-            crate::config::TlsServerEndPoint::Undefined,
-        );
+        let mut exchange =
+            Exchange::new(&secret, || NONCE, crate::tls::TlsServerEndPoint::Undefined);
 
         let client_first = "n,,n=user,r=rOprNGfwEbeRWgbNEkqO";
         let client_final = "c=biws,r=rOprNGfwEbeRWgbNEkqOAQIDBAUGBwgJCgsMDQ4PEBES,p=rw1r5Kph5ThxmaUBC2GAQ6MfXbPnNkFiTIvdb/Rear0=";

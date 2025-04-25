@@ -1,0 +1,28 @@
+[package]
+name = "endpoint_storage"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+[dependencies]
+anyhow.workspace = true
+axum-extra.workspace = true
+axum.workspace = true
+camino.workspace = true
+futures.workspace = true
+jsonwebtoken.workspace = true
+prometheus.workspace = true
+remote_storage.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio-util.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+utils = { path = "../libs/utils", default-features = false }
+workspace_hack.workspace = true
+[dev-dependencies]
+camino-tempfile.workspace = true
+http-body-util.workspace = true
+itertools.workspace = true
+rand.workspace = true
+test-log.workspace = true
+tower.workspace = true

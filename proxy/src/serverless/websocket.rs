@@ -1,6 +1,6 @@
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{ready, Context, Poll};
+use std::task::{Context, Poll, ready};
 
 use anyhow::Context as _;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -12,12 +12,12 @@ use pin_project_lite::pin_project;
 use tokio::io::{self, AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 use tracing::warn;
 
-use crate::cancellation::CancellationHandlerMain;
+use crate::cancellation::CancellationHandler;
 use crate::config::ProxyConfig;
 use crate::context::RequestContext;
-use crate::error::{io_error, ReportableError};
+use crate::error::ReportableError;
 use crate::metrics::Metrics;
-use crate::proxy::{handle_client, ClientMode, ErrorSource};
+use crate::proxy::{ClientMode, ErrorSource, handle_client};
 use crate::rate_limiter::EndpointRateLimiter;
 
 pin_project! {
@@ -50,23 +50,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WebSocketRw<S> {
         let this = self.project();
         let mut stream = this.stream;
 
-        ready!(stream.as_mut().poll_ready(cx).map_err(io_error))?;
+        ready!(stream.as_mut().poll_ready(cx).map_err(io::Error::other))?;
 
         this.send.put(buf);
         match stream.as_mut().start_send(Frame::binary(this.send.split())) {
             Ok(()) => Poll::Ready(Ok(buf.len())),
-            Err(e) => Poll::Ready(Err(io_error(e))),
+            Err(e) => Poll::Ready(Err(io::Error::other(e))),
         }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let stream = self.project().stream;
-        stream.poll_flush(cx).map_err(io_error)
+        stream.poll_flush(cx).map_err(io::Error::other)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let stream = self.project().stream;
-        stream.poll_close(cx).map_err(io_error)
+        stream.poll_close(cx).map_err(io::Error::other)
     }
 }
 
@@ -97,7 +97,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
             }
 
             let res = ready!(this.stream.as_mut().poll_next(cx));
-            match res.transpose().map_err(io_error)? {
+            match res.transpose().map_err(io::Error::other)? {
                 Some(message) => match message.opcode {
                     OpCode::Ping => {}
                     OpCode::Pong => {}
@@ -105,7 +105,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
                         // We expect to see only binary messages.
                         let error = "unexpected text message in the websocket";
                         warn!(length = message.payload.len(), error);
-                        return Poll::Ready(Err(io_error(error)));
+                        return Poll::Ready(Err(io::Error::other(error)));
                     }
                     OpCode::Binary | OpCode::Continuation => {
                         debug_assert!(this.recv.is_empty());
@@ -129,7 +129,7 @@ pub(crate) async fn serve_websocket(
     auth_backend: &'static crate::auth::Backend<'static, ()>,
     ctx: RequestContext,
     websocket: OnUpgrade,
-    cancellation_handler: Arc<CancellationHandlerMain>,
+    cancellation_handler: Arc<CancellationHandler>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     hostname: Option<String>,
     cancellations: tokio_util::task::task_tracker::TaskTracker,
@@ -157,7 +157,6 @@ pub(crate) async fn serve_websocket(
 
     match res {
         Err(e) => {
-            // todo: log and push to ctx the error kind
             ctx.set_error_kind(e.get_error_kind());
             Err(e.into())
         }
@@ -168,7 +167,7 @@ pub(crate) async fn serve_websocket(
         Ok(Some(p)) => {
             ctx.set_success();
             ctx.log_connect();
-            match p.proxy_pass().await {
+            match p.proxy_pass(&config.connect_to_compute).await {
                 Ok(()) => Ok(()),
                 Err(ErrorSource::Client(err)) => Err(err).context("client"),
                 Err(ErrorSource::Compute(err)) => Err(err).context("compute"),
@@ -183,11 +182,11 @@ mod tests {
 
     use framed_websockets::WebSocketServer;
     use futures::{SinkExt, StreamExt};
-    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
     use tokio::task::JoinSet;
-    use tokio_tungstenite::tungstenite::protocol::Role;
-    use tokio_tungstenite::tungstenite::Message;
     use tokio_tungstenite::WebSocketStream;
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::protocol::Role;
 
     use super::WebSocketRw;
 
