@@ -613,19 +613,6 @@ lfc_init(void)
 							NULL,
 							NULL);
 
-	DefineCustomIntVariable("neon.chunk_size",
-							"LFC chunk size in blocks (should be power of two)",
-							NULL,
-							&lfc_blocks_per_chunk,
-							MAX_BLOCKS_PER_CHUNK,
-							1,
-							MAX_BLOCKS_PER_CHUNK,
-							PGC_POSTMASTER,
-							GUC_UNIT_BLOCKS,
-							lfc_check_chunk_size,
-							lfc_change_chunk_size,
-							NULL);
-
 	if (lfc_max_size == 0)
 		return;
 
