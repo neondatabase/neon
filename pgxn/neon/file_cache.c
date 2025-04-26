@@ -2125,3 +2125,82 @@ approximate_working_set_size(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_NULL();
 }
+
+PG_FUNCTION_INFO_V1(get_local_cache_state);
+
+Datum
+get_local_cache_state(PG_FUNCTION_ARGS)
+{
+	size_t max_entries = PG_ARGISNULL(0) ? lfc_prewarm_limit : PG_GETARG_INT32(0);
+	FileCacheState* fcs = lfc_get_state(max_entries);
+	if (fcs != NULL)
+		PG_RETURN_BYTEA_P((bytea*)fcs);
+	else
+		PG_RETURN_NULL();
+}
+
+PG_FUNCTION_INFO_V1(prewarm_local_cache);
+
+Datum
+prewarm_local_cache(PG_FUNCTION_ARGS)
+{
+	bytea* state = PG_GETARG_BYTEA_PP(0);
+	uint32 n_workers =  PG_GETARG_INT32(1);
+	FileCacheState* fcs = (FileCacheState*)state;
+
+	lfc_prewarm(fcs, n_workers);
+
+	PG_RETURN_NULL();
+}
+
+PG_FUNCTION_INFO_V1(get_prewarm_info);
+
+Datum
+get_prewarm_info(PG_FUNCTION_ARGS)
+{
+	Datum		values[4];
+	bool		nulls[4];
+	TupleDesc	tupdesc;
+	uint32 prewarmed_pages = 0;
+	uint32 skipped_pages = 0;
+	uint32 active_workers = 0;
+	uint32 total_pages;
+	size_t n_workers;
+
+	if (lfc_size_limit == 0)
+		PG_RETURN_NULL();
+
+	LWLockAcquire(lfc_lock, LW_SHARED);
+	if (!lfc_ctl || lfc_ctl->n_prewarm_workers == 0)
+	{
+		LWLockRelease(lfc_lock);
+		PG_RETURN_NULL();
+	}
+	n_workers = lfc_ctl->n_prewarm_workers;
+	total_pages = lfc_ctl->total_prewarm_pages;
+	for (size_t i = 0; i < n_workers; i++)
+	{
+		PrewarmWorkerState* ws = &lfc_ctl->prewarm_workers[i];
+		prewarmed_pages += ws->prewarmed_pages;
+		skipped_pages += ws->skipped_pages;
+		active_workers += ws->completed != 0;
+	}
+	LWLockRelease(lfc_lock);
+
+	tupdesc = CreateTemplateTupleDesc(4);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "total_pages", INT4OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "prewarmed_pages", INT4OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "skipped_pages", INT4OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 4, "active_workers", INT4OID, -1, 0);
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	MemSet(nulls, 0, sizeof(nulls));
+
+	values[0] = Int32GetDatum(total_pages);
+	values[1] = Int32GetDatum(prewarmed_pages);
+	values[2] = Int32GetDatum(skipped_pages);
+	values[3] = Int32GetDatum(active_workers);
+
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
