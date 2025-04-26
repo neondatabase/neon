@@ -793,8 +793,10 @@ lfc_prewarm(FileCacheState* fcs, uint32 n_workers)
 
 	for (uint32 i = 0; i < n_workers; i++)
 	{
-		while (true)
+		bool interrupted;
+		do
 		{
+			interrupted = false;
 			PG_TRY();
 			{
 				BgwHandleStatus status = WaitForBackgroundWorkerShutdown(bgw_handle[i]);
@@ -802,15 +804,16 @@ lfc_prewarm(FileCacheState* fcs, uint32 n_workers)
 				{
 					elog(LOG, "LFC: Unexpected status of prewarm worker termination: %d", status);
 				}
-				break;
 			}
 			PG_CATCH();
 			{
 				elog(LOG, "LFC: cancel prewarm");
 				lfc_ctl->prewarm_canceled = true;
+				interrupted = true;
 			}
 			PG_END_TRY();
-		}
+		} while (interrupted);
+
 		if (!lfc_ctl->prewarm_workers[i].completed)
 		{
 			/* Background worker doesn't set completion time: it means that it was abnormally terminated */
