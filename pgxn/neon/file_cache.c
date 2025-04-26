@@ -212,6 +212,7 @@ static shmem_request_hook_type prev_shmem_request_hook;
 #endif
 
 bool lfc_store_prefetch_result;
+bool lfc_prewarm_update_ws_estimation;
 
 #define LFC_ENABLED() (lfc_ctl->limit != 0)
 
@@ -538,6 +539,17 @@ lfc_init(void)
 							NULL,
 							NULL);
 
+	DefineCustomBoolVariable("neon.prewarm_update_ws_estimation",
+							"Consider prewarmed pages for working set estimation",
+							NULL,
+							&lfc_prewarm_update_ws_estimation,
+							true,
+							PGC_SUSET,
+							0,
+							NULL,
+							NULL,
+							NULL);
+
 	DefineCustomIntVariable("neon.max_file_cache_size",
 							"Maximal size of Neon local file cache",
 							NULL,
@@ -794,10 +806,23 @@ lfc_prewarm(FileCacheState* fcs, uint32 n_workers)
 
 	for (uint32 i = 0; i < n_workers; i++)
 	{
-		BgwHandleStatus status = WaitForBackgroundWorkerShutdown(bgw_handle[i]);
-		if (status != BGWH_STOPPED && status != BGWH_POSTMASTER_DIED)
+		while (true)
 		{
-			elog(LOG, "LFC: Unexpected status of prewarm worker termination: %d", status);
+			PG_TRY();
+			{
+				BgwHandleStatus status = WaitForBackgroundWorkerShutdown(bgw_handle[i]);
+				if (status != BGWH_STOPPED && status != BGWH_POSTMASTER_DIED)
+				{
+					elog(LOG, "LFC: Unexpected status of prewarm worker termination: %d", status);
+				}
+				break;
+			}
+			PG_CATCH();
+			{
+				elog(LOG, "LFC: cancel prewarm");
+				lfc_ctl->prewarm_canceled = true;
+			}
+			PG_END_TRY();
 		}
 		if (!lfc_ctl->prewarm_workers[i].completed)
 		{
@@ -1472,9 +1497,11 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 
 	entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_ENTER, &found);
 
-	tag.blockNum = blkno;
-	addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
-
+	if (lfc_prewarm_update_ws_estimation)
+	{
+		tag.blockNum = blkno;
+		addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
+	}
 	if (found)
 	{
 		state = GET_STATE(entry, chunk_offs);
