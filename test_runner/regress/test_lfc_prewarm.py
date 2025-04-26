@@ -11,7 +11,7 @@ from fixtures.utils import USE_LFC
 def check_pinned_entries(cur):
     # some LFC buffer can be temporary locked by autovacuum or background writer
     for _ in range(10):
-        cur.execute("select lfc_value from neon_lfc_stats where lfc_key='file_cache_pinned'")
+        cur.execute("select lfc_value from neon_lfc_stats where lfc_key='file_cache_chunks_pinned'")
         n_pinned = cur.fetchall()[0][0]
         if n_pinned == 0:
             break
