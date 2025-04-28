@@ -1989,9 +1989,6 @@ neon_start_unlogged_build(SMgrRelation reln)
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	if (smgrnblocks(reln, MAIN_FORKNUM) != 0)
-		neon_log(ERROR, "cannot perform unlogged index build, index is not empty ");
-
 	unlogged_build_rel = reln;
 	unlogged_build_phase = UNLOGGED_BUILD_PHASE_1;
 
