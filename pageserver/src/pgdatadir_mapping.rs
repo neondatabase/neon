@@ -1093,7 +1093,8 @@ impl Timeline {
                 continue;
             }
             let origin_id = k.field6 as RepOriginId;
-            let origin_lsn = Lsn::des(&v).context("decode replorigin value")?;
+            let origin_lsn = Lsn::des(&v)
+                .with_context(|| format!("decode replorigin value for {}: {v:?}", origin_id))?;
             if origin_lsn != Lsn::INVALID {
                 result.insert(origin_id, origin_lsn);
             }
