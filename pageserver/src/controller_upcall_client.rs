@@ -58,14 +58,8 @@ pub trait StorageControllerUpcallApi {
 impl StorageControllerUpcallClient {
     /// A None return value indicates that the input `conf` object does not have control
     /// plane API enabled.
-    pub fn new(
-        conf: &'static PageServerConf,
-        cancel: &CancellationToken,
-    ) -> Result<Option<Self>, reqwest::Error> {
-        let mut url = match conf.control_plane_api.as_ref() {
-            Some(u) => u.clone(),
-            None => return Ok(None),
-        };
+    pub fn new(conf: &'static PageServerConf, cancel: &CancellationToken) -> Self {
+        let mut url = conf.control_plane_api.clone();
 
         if let Ok(mut segs) = url.path_segments_mut() {
             // This ensures that `url` ends with a slash if it doesn't already.
@@ -85,15 +79,17 @@ impl StorageControllerUpcallClient {
         }
 
         for cert in &conf.ssl_ca_certs {
-            client = client.add_root_certificate(Certificate::from_der(cert.contents())?);
+            client = client.add_root_certificate(
+                Certificate::from_der(cert.contents()).expect("Invalid certificate in config"),
+            );
         }
 
-        Ok(Some(Self {
-            http_client: client.build()?,
+        Self {
+            http_client: client.build().expect("Failed to construct HTTP client"),
             base_url: url,
             node_id: conf.id,
             cancel: cancel.clone(),
-        }))
+        }
     }
 
     #[tracing::instrument(skip_all)]

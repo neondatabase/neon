@@ -4254,9 +4254,7 @@ impl TenantShard {
         deletion_queue_client: DeletionQueueClient,
         l0_flush_global_state: L0FlushGlobalState,
     ) -> TenantShard {
-        debug_assert!(
-            !attached_conf.location.generation.is_none() || conf.control_plane_api.is_none()
-        );
+        assert!(!attached_conf.location.generation.is_none());
 
         let (state, mut rx) = watch::channel(state);
 
