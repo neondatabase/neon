@@ -844,8 +844,6 @@ impl Key {
     }
 
     pub const fn sparse_non_inherited_keyspace() -> Range<Key> {
-        // The two keys are adjacent; if we will have non-adjancent keys in the future, we should return a keyspace
-        const_assert!(AUX_KEY_PREFIX + 1 == REPL_ORIGIN_KEY_PREFIX);
         Key {
             field1: AUX_KEY_PREFIX,
             field2: 0,
@@ -854,7 +852,7 @@ impl Key {
             field5: 0,
             field6: 0,
         }..Key {
-            field1: REPL_ORIGIN_KEY_PREFIX + 1,
+            field1: AUX_KEY_PREFIX + 1,
             field2: 0,
             field3: 0,
             field4: 0,
