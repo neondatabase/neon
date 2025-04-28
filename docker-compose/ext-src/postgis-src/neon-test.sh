@@ -1,8 +1,10 @@
 #!/bin/bash
 set -ex
 cd "$(dirname "$0")"
-sed -i '/computed_columns/d' regress/core/tests.mk
-cp regress/runtest.mk regress/runtest.mk.bak
+if [[ ${PG_REGRESS} = v17 ]]; then
+  sed -i '/computed_columns/d' regress/core/tests.mk
+fi
+cp regress/runtest.mk /tmp/runtest.mk.bak
 sed -i '27,36d' regress/runtest.mk
-trap 'echo Cleaning up; mv regress/runtest.mk.bak regress/runtest.mk' EXIT INT TERM
+trap 'echo Cleaning up; mv /tmp/runtest.mk regress/runtest.mk' EXIT INT TERM
 make installcheck-base
