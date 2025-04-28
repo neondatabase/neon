@@ -5949,7 +5949,9 @@ mod tests {
     use itertools::Itertools;
     #[cfg(feature = "testing")]
     use models::CompactLsnRange;
-    use pageserver_api::key::{AUX_KEY_PREFIX, Key, NON_INHERITED_RANGE, RELATION_SIZE_PREFIX};
+    use pageserver_api::key::{
+        AUX_KEY_PREFIX, Key, NON_INHERITED_RANGE, RELATION_SIZE_PREFIX, repl_origin_key,
+    };
     use pageserver_api::keyspace::KeySpace;
     #[cfg(feature = "testing")]
     use pageserver_api::keyspace::KeySpaceRandomAccum;
@@ -8205,10 +8207,7 @@ mod tests {
         {
             lsn += 8;
             let mut modification = tline.begin_modification(lsn);
-            modification.put_for_unit_test(
-                Key::from_hex("630000000000000000000000000000000001").unwrap(),
-                Value::Image(Bytes::new()),
-            );
+            modification.put_for_unit_test(repl_origin_key(2), Value::Image(Bytes::new()));
             modification.set_replorigin(1, repl_lsn).await.unwrap();
             modification.commit(&ctx).await.unwrap();
         }
