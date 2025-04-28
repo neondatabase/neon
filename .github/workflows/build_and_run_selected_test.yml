@@ -93,7 +93,7 @@ jobs:
         uses: ./.github/actions/allure-report-generate
         with:
           store-test-results-into-db: true
-          aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         env:
           REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_DEV }}
 
