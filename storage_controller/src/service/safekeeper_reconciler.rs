@@ -210,6 +210,7 @@ impl ReconcilerHandle {
 
 pub(crate) struct SafekeeperReconciler {
     inner: SafekeeperReconcilerInner,
+    concurrency_limiter: Arc<Semaphore>,
     rx: UnboundedReceiver<(ScheduleRequest, CancellationToken)>,
     cancel: CancellationToken,
 }
@@ -217,7 +218,6 @@ pub(crate) struct SafekeeperReconciler {
 /// Thin wrapper over `Service` to not clutter its inherent functions
 #[derive(Clone)]
 struct SafekeeperReconcilerInner {
-    concurrency_limiter: Arc<Semaphore>,
     service: Arc<Service>,
 }
 
@@ -226,13 +226,10 @@ impl SafekeeperReconciler {
         // We hold the ServiceInner lock so we don't want to make sending to the reconciler channel to be blocking.
         let (tx, rx) = mpsc::unbounded_channel();
         let concurrency = service.config.safekeeper_reconciler_concurrency;
-        let inner = SafekeeperReconcilerInner {
-            service,
-            concurrency_limiter: Arc::new(Semaphore::new(concurrency)),
-        };
         let mut reconciler = SafekeeperReconciler {
-            inner,
+            inner: SafekeeperReconcilerInner { service },
             rx,
+            concurrency_limiter: Arc::new(Semaphore::new(concurrency)),
             cancel: cancel.clone(),
         };
         let handle = ReconcilerHandle {
@@ -250,6 +247,9 @@ impl SafekeeperReconciler {
                 _ = self.cancel.cancelled() => break,
             };
             let Some((req, req_cancel)) = req else { break };
+
+            let permit_res = self.concurrency_limiter.clone().acquire_owned().await;
+            let Ok(_permit) = permit_res else { return };
 
             let inner = self.inner.clone();
             if req_cancel.is_cancelled() {
@@ -278,9 +278,6 @@ impl SafekeeperReconciler {
 
 impl SafekeeperReconcilerInner {
     async fn reconcile_one(&self, req: ScheduleRequest, req_cancel: CancellationToken) {
-        let permit_res = self.concurrency_limiter.acquire().await;
-        let Ok(_permit) = permit_res else { return };
-
         let req_host = req.safekeeper.skp.host.clone();
         match req.kind {
             SafekeeperTimelineOpKind::Pull => {
