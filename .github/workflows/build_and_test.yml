@@ -324,7 +324,7 @@ jobs:
           TEST_RESULT_CONNSTR: "${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}"
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
           PAGESERVER_GET_VECTORED_CONCURRENT_IO: sidecar-task
-          PAGESERVER_VIRTUAL_FILE_IO_MODE: direct
+          PAGESERVER_VIRTUAL_FILE_IO_MODE: direct-rw
           SYNC_BETWEEN_TESTS: true
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
