@@ -248,7 +248,10 @@ impl SafekeeperReconciler {
             };
             let Some((req, req_cancel)) = req else { break };
 
-            let permit_res = self.concurrency_limiter.clone().acquire_owned().await;
+            let permit_res = tokio::select! {
+                req = self.concurrency_limiter.clone().acquire_owned() => req,
+                _ = self.cancel.cancelled() => break,
+            };
             let Ok(_permit) = permit_res else { return };
 
             let inner = self.inner.clone();
