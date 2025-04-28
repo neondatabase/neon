@@ -396,9 +396,10 @@ SetLastWrittenLSNForBlockRangeInternal(XLogRecPtr lsn,
 XLogRecPtr
 neon_set_lwlsn_block_range(XLogRecPtr lsn, NRelFileInfo rlocator, ForkNumber forknum, BlockNumber from, BlockNumber n_blocks)
 {
-	if (lsn < FirstNormalUnloggedLSN || n_blocks == 0 || LwLsnCache->lastWrittenLsnCacheSize == 0)
+	if (lsn == InvalidXLogRecPtr || n_blocks == 0 || LwLsnCache->lastWrittenLsnCacheSize == 0)
 		return lsn;
 
+	Assert(lsn >= FirstNormalUnloggedLSN);
 	LWLockAcquire(LastWrittenLsnLock, LW_EXCLUSIVE);
 	lsn = SetLastWrittenLSNForBlockRangeInternal(lsn, rlocator, forknum, from, n_blocks);
 	LWLockRelease(LastWrittenLsnLock);
@@ -435,7 +436,6 @@ neon_set_lwlsn_block_v(const XLogRecPtr *lsns, NRelFileInfo relfilenode,
 		NInfoGetRelNumber(relfilenode) == InvalidOid)
 		return InvalidXLogRecPtr;
 
-	
 	BufTagInit(key,  relNumber, forknum, blockno, spcOid, dbOid);
 
 	LWLockAcquire(LastWrittenLsnLock, LW_EXCLUSIVE);
@@ -444,6 +444,7 @@ neon_set_lwlsn_block_v(const XLogRecPtr *lsns, NRelFileInfo relfilenode,
 	{
 		XLogRecPtr	lsn = lsns[i];
 
+		Assert(lsn >= FirstNormalUnloggedLSN);
 		key.blockNum = blockno + i;
 		entry = hash_search(lastWrittenLsnCache, &key, HASH_ENTER, &found);
 		if (found)
