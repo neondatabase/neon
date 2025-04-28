@@ -65,7 +65,6 @@ typedef enum {
 	SLRU_MULTIXACT_OFFSETS
 } SlruKind;
 
-
 /*--
  * supertype of all the Neon*Request structs below.
  *
@@ -129,6 +128,7 @@ typedef struct
 	int			segno;
 } NeonGetSlruSegmentRequest;
 
+
 /* supertype of all the Neon*Response structs below */
 typedef NeonMessage NeonResponse;
 
@@ -187,6 +187,7 @@ typedef struct
 {
 	/*
 	 * Send this request to the PageServer associated with this shard.
+	 * This function assigns request_id to the request which can be extracted by caller from request struct.
 	 */
 	bool		(*send) (shardno_t  shard_no, NeonRequest * request);
 	/*
