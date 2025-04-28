@@ -1775,7 +1775,7 @@ COPY docker-compose/ext-src/ /ext-src/
 
 COPY --from=pg-build /postgres /postgres
 COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=postgis-build /ext-src/postgis-src /ext-src/
+COPY --from=postgis-build /ext-src/postgis-src /ext-src/postgis-src
 COPY --from=postgis-build /sfcgal/* /usr
 COPY --from=plv8-src /ext-src/ /ext-src/
 #COPY --from=h3-pg-src /ext-src/ /ext-src/
