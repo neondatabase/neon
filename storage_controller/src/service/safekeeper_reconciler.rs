@@ -3,7 +3,10 @@ use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
 use clashmap::{ClashMap, Entry};
 use safekeeper_api::models::PullTimelineRequest;
 use safekeeper_client::mgmt_api;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::{
+    Semaphore,
+    mpsc::{self, UnboundedReceiver, UnboundedSender},
+};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use utils::{
@@ -206,17 +209,29 @@ impl ReconcilerHandle {
 }
 
 pub(crate) struct SafekeeperReconciler {
-    service: Arc<Service>,
+    inner: SafekeeperReconcilerInner,
     rx: UnboundedReceiver<(ScheduleRequest, CancellationToken)>,
     cancel: CancellationToken,
+}
+
+/// Thin wrapper over `Service` to not clutter its inherent functions
+#[derive(Clone)]
+struct SafekeeperReconcilerInner {
+    concurrency_limiter: Arc<Semaphore>,
+    service: Arc<Service>,
 }
 
 impl SafekeeperReconciler {
     fn spawn(cancel: CancellationToken, service: Arc<Service>) -> ReconcilerHandle {
         // We hold the ServiceInner lock so we don't want to make sending to the reconciler channel to be blocking.
         let (tx, rx) = mpsc::unbounded_channel();
-        let mut reconciler = SafekeeperReconciler {
+        const PARALLELISM_LEVEL: usize = 50;
+        let inner = SafekeeperReconcilerInner {
             service,
+            concurrency_limiter: Arc::new(Semaphore::new(PARALLELISM_LEVEL)),
+        };
+        let mut reconciler = SafekeeperReconciler {
+            inner,
             rx,
             cancel: cancel.clone(),
         };
@@ -230,32 +245,42 @@ impl SafekeeperReconciler {
     }
     async fn run(&mut self) {
         loop {
-            // TODO add parallelism with semaphore here
             let req = tokio::select! {
                 req = self.rx.recv() => req,
                 _ = self.cancel.cancelled() => break,
             };
             let Some((req, req_cancel)) = req else { break };
+
+            let inner = self.inner.clone();
             if req_cancel.is_cancelled() {
                 continue;
             }
 
-            let kind = req.kind;
-            let tenant_id = req.tenant_id;
-            let timeline_id = req.timeline_id;
-            let node_id = req.safekeeper.skp.id;
-            self.reconcile_one(req, req_cancel)
-                .instrument(tracing::info_span!(
-                    "reconcile_one",
-                    ?kind,
-                    %tenant_id,
-                    ?timeline_id,
-                    %node_id,
-                ))
-                .await;
+            tokio::task::spawn(async move {
+                let kind = req.kind;
+                let tenant_id = req.tenant_id;
+                let timeline_id = req.timeline_id;
+                let node_id = req.safekeeper.skp.id;
+                inner
+                    .reconcile_one(req, req_cancel)
+                    .instrument(tracing::info_span!(
+                        "reconcile_one",
+                        ?kind,
+                        %tenant_id,
+                        ?timeline_id,
+                        %node_id,
+                    ))
+                    .await;
+            });
         }
     }
+}
+
+impl SafekeeperReconcilerInner {
     async fn reconcile_one(&self, req: ScheduleRequest, req_cancel: CancellationToken) {
+        let permit_res = self.concurrency_limiter.acquire().await;
+        let Ok(_permit) = permit_res else { return };
+
         let req_host = req.safekeeper.skp.host.clone();
         match req.kind {
             SafekeeperTimelineOpKind::Pull => {
