@@ -225,10 +225,10 @@ impl SafekeeperReconciler {
     fn spawn(cancel: CancellationToken, service: Arc<Service>) -> ReconcilerHandle {
         // We hold the ServiceInner lock so we don't want to make sending to the reconciler channel to be blocking.
         let (tx, rx) = mpsc::unbounded_channel();
-        const PARALLELISM_LEVEL: usize = 50;
+        let concurrency = service.config.safekeeper_reconciler_concurrency;
         let inner = SafekeeperReconcilerInner {
             service,
-            concurrency_limiter: Arc::new(Semaphore::new(PARALLELISM_LEVEL)),
+            concurrency_limiter: Arc::new(Semaphore::new(concurrency)),
         };
         let mut reconciler = SafekeeperReconciler {
             inner,

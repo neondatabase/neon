@@ -132,6 +132,10 @@ struct Cli {
     #[arg(long)]
     priority_reconciler_concurrency: Option<usize>,
 
+    /// Maximum number of safekeeper reconciliations that may run in parallel (per safekeeper)
+    #[arg(long)]
+    safekeeper_reconciler_concurrency: Option<usize>,
+
     /// Tenant API rate limit, as requests per second per tenant.
     #[arg(long, default_value = "10")]
     tenant_rate_limit: NonZeroU32,
@@ -403,6 +407,9 @@ async fn async_main() -> anyhow::Result<()> {
         priority_reconciler_concurrency: args
             .priority_reconciler_concurrency
             .unwrap_or(PRIORITY_RECONCILER_CONCURRENCY_DEFAULT),
+        safekeeper_reconciler_concurrency: args
+            .safekeeper_reconciler_concurrency
+            .unwrap_or(SAFEKEEPER_RECONCILER_CONCURRENCY_DEFAULT),
         tenant_rate_limit: args.tenant_rate_limit,
         split_threshold: args.split_threshold,
         max_split_shards: args.max_split_shards,
