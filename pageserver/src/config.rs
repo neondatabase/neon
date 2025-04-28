@@ -645,7 +645,7 @@ mod tests {
     #[test]
     fn test_minimal_config_toml_is_valid() {
         // The minimal valid config for running a pageserver:
-        // - control_plane_api is mandatory, as pageservers cannotrun in isolation
+        // - control_plane_api is mandatory, as pageservers cannot run in isolation
         // - we use Default impl of everything else in this situation
         let input = r#"
             control_plane_api = "http://localhost:6666"
