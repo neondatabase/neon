@@ -2544,6 +2544,13 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_timeout)
     }
 
+    pub(crate) fn get_pitr_interval(&self) -> Duration {
+        let tenant_conf = &self.tenant_conf.load().tenant_conf;
+        tenant_conf
+            .pitr_interval
+            .unwrap_or(self.conf.default_tenant_conf.pitr_interval)
+    }
+
     fn get_compaction_period(&self) -> Duration {
         let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
         tenant_conf
