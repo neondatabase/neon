@@ -1084,6 +1084,10 @@ impl Timeline {
         let mut result = HashMap::new();
         for (k, v) in kv {
             let v = v?;
+            if v.is_empty() {
+                // This is a tombstone -- we can skip it.
+                continue;
+            }
             let origin_id = k.field6 as RepOriginId;
             let origin_lsn = Lsn::des(&v).unwrap();
             if origin_lsn != Lsn::INVALID {
