@@ -864,9 +864,9 @@ lfc_prewarm_main(Datum main_arg)
 	lfc_do_prewarm = true; /* Flag for lfc_prefetch preventing replacement of existed entries if LFC cache is full */
 
 	elog(LOG, "LFC: worker %d start prewarming", worker_id);
-	while (true)
+	while (!lfc_ctl->prewarm_canceled)
 	{
-		if (snd_idx < max_prefetch_pages && !lfc_ctl->prewarm_canceled)
+		if (snd_idx < max_prefetch_pages)
 		{
 			if ((snd_idx >> fcs_chunk_size_log) % n_workers != worker_id)
 			{
@@ -893,9 +893,9 @@ lfc_prewarm_main(Datum main_arg)
 				snd_idx += 1;
 			}
 		}
-		if (n_sent >= n_received + prewarm_batch || snd_idx == max_prefetch_pages || lfc_ctl->prewarm_canceled)
+		if (n_sent >= n_received + prewarm_batch || snd_idx == max_prefetch_pages)
 		{
-			if (n_received == n_sent && (snd_idx == max_prefetch_pages || lfc_ctl->prewarm_canceled))
+			if (n_received == n_sent && snd_idx == max_prefetch_pages)
 			{
 				break;
 			}
@@ -925,7 +925,10 @@ lfc_prewarm_main(Datum main_arg)
 			n_received += 1;
 		}
 	}
-	Assert(n_sent == n_received);
+	/* No need to perform prefetch cleanup here because prewarm worker will be terminated and
+	 * connection to PS dropped just after return from this function.
+	 */
+	Assert(n_sent == n_received || lfc_ctl->prewarm_canceled);
 	elog(LOG, "LFC: worker %d complete prewarming: loaded %ld pages", worker_id, (long)n_received);
 	lfc_ctl->prewarm_workers[worker_id].completed = GetCurrentTimestamp();
 }
