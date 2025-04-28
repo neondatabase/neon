@@ -11,6 +11,7 @@
 
 #[cfg(target_os = "linux")]
 pub(super) mod tokio_epoll_uring_ext;
+use nix::fcntl::{FallocateFlags, fallocate};
 
 use tokio_epoll_uring::IoBuf;
 use tracing::Instrument;
@@ -109,6 +110,7 @@ pub(crate) fn get() -> IoEngine {
     }
 }
 
+use std::os::fd::AsRawFd;
 use std::os::unix::prelude::FileExt;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -226,6 +228,35 @@ impl IoEngine {
                 // TODO: ftruncate op for tokio-epoll-uring
                 let res = file_guard.with_std_file(|std_file| std_file.set_len(len));
                 (file_guard, res)
+            }
+        }
+    }
+
+    pub(super) async fn fallocate_keep_size(
+        &self,
+        file_guard: FileGuard,
+        offset: i64,
+        len: i64,
+    ) -> (FileGuard, std::io::Result<()>) {
+        // TODO io_uring implementation
+        match self {
+            IoEngine::NotSet => panic!("not initialized"),
+            IoEngine::StdFs => {
+                unimplemented!()
+            }
+            #[cfg(target_os = "linux")]
+            IoEngine::TokioEpollUring => {
+                // TODO: fallocate op for tokio-epoll-uring
+                file_guard.with_std_file(|std_file| {
+                    fallocate(
+                        std_file.as_raw_fd(),
+                        FallocateFlags::FALLOC_FL_KEEP_SIZE,
+                        offset,
+                        len,
+                    )
+                    .expect("TODO")
+                });
+                (file_guard, Ok(()))
             }
         }
     }

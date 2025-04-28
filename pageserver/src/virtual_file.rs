@@ -161,6 +161,15 @@ impl VirtualFile {
         self.inner.set_len(len, ctx).await
     }
 
+    pub async fn fallocate_keep_size(
+        &self,
+        offset: i64,
+        size: i64,
+        ctx: &RequestContext,
+    ) -> Result<(), Error> {
+        self.inner.fallocate_keep_size(offset, size, ctx).await
+    }
+
     pub async fn metadata(&self) -> Result<Metadata, Error> {
         self.inner.metadata().await
     }
@@ -635,6 +644,20 @@ impl VirtualFileInner {
         with_file!(self, StorageIoOperation::SetLen, |file_guard| {
             let (_file_guard, res) = io_engine::get().set_len(file_guard, len).await;
             res.maybe_fatal_err("set_len")
+        })
+    }
+
+    pub async fn fallocate_keep_size(
+        &self,
+        offset: i64,
+        size: i64,
+        _ctx: &RequestContext,
+    ) -> Result<(), Error> {
+        with_file!(self, StorageIoOperation::Fallocate, |file_guard| {
+            let (_file_guard, res) = io_engine::get()
+                .fallocate_keep_size(file_guard, offset, size)
+                .await;
+            res.maybe_fatal_err("fallocate") // TODO haven't thought about this
         })
     }
 

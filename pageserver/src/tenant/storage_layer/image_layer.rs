@@ -806,6 +806,10 @@ impl ImageLayerWriterInner {
             gate.enter()?,
         );
 
+        file.fallocate_keep_size(0, 1 * 1024 * 1024 * 1024, ctx)
+            .await
+            .unwrap();
+
         // Start at `PAGE_SZ` to make room for the header block.
         let blob_writer = BlobWriter::new(
             file,
