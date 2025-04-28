@@ -1086,6 +1086,10 @@ impl Timeline {
             let v = v?;
             if v.is_empty() {
                 // This is a tombstone -- we can skip it.
+                // Originally, the replorigin code uses `Lsn::INVALID` to represent a tombstone. However, as it part of
+                // the sparse keyspace and the sparse keyspace uses an empty image to universally represent a tombstone,
+                // we also need to consider that. Such tombstones might be written on the detach ancestor code path to
+                // avoid the value going into the child branch. (See [`crate::tenant::timeline::detach_ancestor::generate_tombstone_image_layer`] for more details.)
                 continue;
             }
             let origin_id = k.field6 as RepOriginId;
@@ -2580,6 +2584,11 @@ impl DatadirModification<'_> {
             Err(PageReconstructError::MissingKey(_)) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    #[cfg(test)]
+    pub fn put_for_unit_test(&mut self, key: Key, val: Value) {
+        self.put(key, val);
     }
 
     fn put(&mut self, key: Key, val: Value) {

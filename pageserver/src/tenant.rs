@@ -8186,6 +8186,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_repl_origin_tombstones() {
+        let harness = TenantHarness::create("test_repl_origin_tombstones")
+            .await
+            .unwrap();
+
+        let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
+
+        let mut lsn = Lsn(0x08);
+
+        let tline: Arc<Timeline> = tenant
+            .create_test_timeline(TIMELINE_ID, lsn, DEFAULT_PG_VERSION, &ctx)
+            .await
+            .unwrap();
+
+        let repl_lsn = Lsn(0x10);
+        {
+            lsn += 8;
+            let mut modification = tline.begin_modification(lsn);
+            modification.put_for_unit_test(
+                Key::from_hex("630000000000000000000000000000000001").unwrap(),
+                Value::Image(Bytes::new()),
+            );
+            modification.set_replorigin(1, repl_lsn).await.unwrap();
+            modification.commit(&ctx).await.unwrap();
+        }
+
+        // we can read everything from the storage
+        let repl_origins = tline
+            .get_replorigins(lsn, &ctx, io_concurrency.clone())
+            .await
+            .unwrap();
+        assert_eq!(repl_origins.len(), 1);
+        assert_eq!(repl_origins[&1], lsn);
+    }
+
+    #[tokio::test]
     async fn test_metadata_image_creation() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_metadata_image_creation").await?;
         let (tenant, ctx) = harness.load().await;
