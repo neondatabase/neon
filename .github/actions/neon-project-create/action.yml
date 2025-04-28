@@ -153,6 +153,27 @@ runs:
                 "https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/projects/${project_id}/default_endpoint_settings" \
                 -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${ADMIN_API_KEY}" \
                 --data "${NEW_DEFAULT_ENDPOINT_SETTINGS}"
+          set -x
+          res=$(curl -X GET  \
+                "https://${API_HOST}/api/v2/projects/${project_id}/endpoints" \
+                -w "%{http_code}" \
+                -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${API_KEY}" )
+          code=${res: -3}
+          if [[ ${code} -eq 200 ]]; then
+            endpoint_id=$(echo ${res::-3} | jq -rc '.endpoints[] | select(.current_state == "active").id')
+            if [[ -n "${endpoint_id}" ]] && [[ "${endpoint_id}" != null ]]; then
+              res=$(curl -X POST  \
+                      "https://${API_HOST}/api/v2/projects/${project_id}/endpoints/${endpoint_id}/restart" \
+                      -w "%{http_code}" \
+                      -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${API_KEY}" )
+              code=${res: -3}
+              if [[ $code -ge 400 ]]; then
+                echo ${res::-3}
+                exit 2
+              fi
+              sleep 3
+            fi
+          fi
         fi
         
 
