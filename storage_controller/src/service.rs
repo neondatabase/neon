@@ -97,7 +97,9 @@ use crate::tenant_shard::{
     ReconcileNeeded, ReconcileResult, ReconcileWaitError, ReconcilerStatus, ReconcilerWaiter,
     ScheduleOptimization, ScheduleOptimizationAction, TenantShard,
 };
-use crate::timeline_import::{ShardImportStatuses, TimelineImport, UpcallClient};
+use crate::timeline_import::{
+    ShardImportStatuses, TimelineImport, TimelineImportState, UpcallClient,
+};
 
 const WAITER_FILL_DRAIN_POLL_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -878,15 +880,33 @@ impl Service {
             });
         }
 
-        // Fetch the list of completed imports and attempt to finalize them in the background.
-        // This handles the case where the previous storage controller instance shut down
-        // whilst finalizing imports.
-        let complete_imports = self.persistence.list_complete_timeline_imports().await;
-        match complete_imports {
-            Ok(ok) => {
+        // Reconcile the timeline imports:
+        // 1. Mark each tenant shard of tenants with an importing timeline as importing.
+        // 2. Finalize the completed imports in the background. This handles the case where
+        //    the previous storage controller instance shut down whilst finalizing imports.
+        let imports = self.persistence.list_timeline_imports().await;
+        match imports {
+            Ok(mut imports) => {
+                {
+                    let mut locked = self.inner.write().unwrap();
+                    for import in &imports {
+                        locked
+                            .tenants
+                            .range_mut(TenantShardId::tenant_range(import.tenant_id))
+                            .for_each(|(_id, shard)| {
+                                shard.importing = TimelineImportState::Importing
+                            });
+                    }
+                }
+
+                imports.retain(|import| import.is_complete());
                 tokio::task::spawn({
                     let finalize_imports_self = self.clone();
-                    async move { finalize_imports_self.finalize_timeline_imports(ok).await }
+                    async move {
+                        finalize_imports_self
+                            .finalize_timeline_imports(imports)
+                            .await
+                    }
                 });
             }
             Err(err) => {
@@ -3772,6 +3792,22 @@ impl Service {
         failpoint_support::sleep_millis_async!("tenant-create-timeline-shared-lock");
         let is_import = create_req.is_import();
 
+        if is_import {
+            // Ensure that there is no split on-going.
+            // [`Self::tenant_shard_split`] holds the exclusive tenant lock
+            // for the duration of the split, but here we handle the case
+            // where we restarted and the split is being aborted.
+            let locked = self.inner.read().unwrap();
+            let splitting = locked
+                .tenants
+                .range(TenantShardId::tenant_range(tenant_id))
+                .any(|(_id, shard)| shard.splitting != SplitState::Idle);
+
+            if splitting {
+                return Err(ApiError::Conflict("Tenant is splitting shard".to_string()));
+            }
+        }
+
         let timeline_info = self
             .tenant_timeline_create_pageservers(tenant_id, create_req)
             .await?;
@@ -3808,6 +3844,14 @@ impl Service {
                 .await
                 .context("timeline import insert")
                 .map_err(ApiError::InternalServerError)?;
+
+            // Set the importing flag on the tenant shards
+            self.inner
+                .write()
+                .unwrap()
+                .tenants
+                .range_mut(TenantShardId::tenant_range(tenant_id))
+                .for_each(|(_id, shard)| shard.importing = TimelineImportState::Importing);
 
             match inserted {
                 true => {
@@ -3930,6 +3974,13 @@ impl Service {
         {
             tracing::warn!("Failed to delete timeline import entry from database: {err}");
         }
+
+        self.inner
+            .write()
+            .unwrap()
+            .tenants
+            .range_mut(TenantShardId::tenant_range(import.tenant_id))
+            .for_each(|(_id, shard)| shard.importing = TimelineImportState::Idle);
 
         // TODO(vlad): Timeline creations in import mode do not return a correct initdb lsn,
         // so we can't create the timeline on the safekeepers. Fix by moving creation here.
@@ -4914,6 +4965,7 @@ impl Service {
                 is_reconciling: shard.reconciler.is_some(),
                 is_pending_compute_notification: shard.pending_compute_notification,
                 is_splitting: matches!(shard.splitting, SplitState::Splitting),
+                is_importing: shard.importing == TimelineImportState::Importing,
                 scheduling_policy: shard.get_scheduling_policy(),
                 preferred_az_id: shard.preferred_az().map(ToString::to_string),
             })
@@ -5403,6 +5455,27 @@ impl Service {
             .reconcilers_gate
             .enter()
             .map_err(|_| ApiError::ShuttingDown)?;
+
+        // Timeline imports on the pageserver side can't handle shard-splits.
+        // If the tenant is importing a timeline, dont't shard split it.
+        match self
+            .persistence
+            .is_tenant_importing_timeline(tenant_id)
+            .await
+        {
+            Ok(importing) => {
+                if importing {
+                    return Err(ApiError::Conflict(
+                        "Cannot shard split during timeline import".to_string(),
+                    ));
+                }
+            }
+            Err(err) => {
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                    "Failed to check for running imports: {err}"
+                )));
+            }
+        }
 
         let new_shard_count = ShardCount::new(split_req.new_shard_count);
         let new_stripe_size = split_req.new_stripe_size;
@@ -8076,12 +8149,25 @@ impl Service {
             candidates.extend(size_candidates);
         }
 
-        // Filter out tenants in a prohibiting scheduling mode.
+        // Filter out tenants in a prohibiting scheduling modes
+        // and tenants with an ongoing import.
+        //
+        // Note that the import check here is oportunistic. An import might start
+        // after the check before we actually update [`TenantShard::splitting`].
+        // [`Self::tenant_shard_split`] checks the database whilst holding the exclusive
+        // tenant lock. Imports might take a long time, so the check here allows us
+        // to split something else instead of trying the same shard over and over.
         {
             let state = self.inner.read().unwrap();
             candidates.retain(|i| {
-                let policy = state.tenants.get(&i.id).map(|s| s.get_scheduling_policy());
-                policy == Some(ShardSchedulingPolicy::Active)
+                let shard = state.tenants.get(&i.id);
+                match shard {
+                    Some(t) => {
+                        t.get_scheduling_policy() == ShardSchedulingPolicy::Active
+                            && t.importing == TimelineImportState::Idle
+                    }
+                    None => false,
+                }
             });
         }
 

@@ -3816,6 +3816,24 @@ impl TenantShard {
                 MaybeDeletedIndexPart::IndexPart(p) => p,
             };
 
+            // A shard split may not take place while a timeline import is on-going
+            // for the tenant. Timeline imports run as part of each tenant shard
+            // and rely on the sharding scheme to split the work among pageservers.
+            // If we were to split in the middle of this process, we would have to
+            // either ensure that it's driven to completion on the old shard set
+            // or transfer it to the new shard set. It's technically possible, but complex.
+            match index_part.import_pgdata {
+                Some(ref import) if !import.is_done() => {
+                    anyhow::bail!(
+                        "Cannot split due to import with idempotency key: {:?}",
+                        import.idempotency_key()
+                    );
+                }
+                Some(_) | None => {
+                    // fallthrough
+                }
+            }
+
             for child_shard in child_shards {
                 tracing::info!(%timeline_id, "Uploading index_part for child {}", child_shard.to_index());
                 upload_index_part(
