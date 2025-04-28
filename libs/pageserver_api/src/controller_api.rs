@@ -169,6 +169,8 @@ pub struct TenantDescribeResponseShard {
     pub is_pending_compute_notification: bool,
     /// A shard split is currently underway
     pub is_splitting: bool,
+    /// A timeline is being imported into this tenant
+    pub is_importing: bool,
 
     pub scheduling_policy: ShardSchedulingPolicy,
 

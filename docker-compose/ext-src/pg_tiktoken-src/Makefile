@@ -5,4 +5,6 @@ REGRESS = pg_tiktoken
 installcheck: regression-test
 
 regression-test:
-	$(PG_REGRESS) --inputdir=. --outputdir=. --dbname=contrib_regression $(REGRESS)
+	dropdb --if-exists contrib_regression
+	createdb contrib_regression
+	$(PG_REGRESS) --inputdir=. --outputdir=. --use-existing --dbname=contrib_regression $(REGRESS)
