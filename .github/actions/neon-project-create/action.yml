@@ -49,6 +49,10 @@ inputs:
     description: 'A JSON object with project settings'
     required: false
     default: '{}'
+  default_endpoint_settings:
+    description: 'A JSON object with the default endpoint settings'
+    required: false
+    default: '{}'
 
 outputs:
   dsn:
@@ -66,9 +70,9 @@ runs:
       # A shell without `set -x` to not to expose password/dsn in logs
       shell: bash -euo pipefail {0}
       run: |
-        project=$(curl \
+        res=$(curl \
           "https://${API_HOST}/api/v2/projects" \
-          --fail \
+          -w "%{http_code}" \
           --header "Accept: application/json" \
           --header "Content-Type: application/json" \
           --header "Authorization: Bearer ${API_KEY}" \
@@ -83,6 +87,15 @@ runs:
               \"settings\": ${PROJECT_SETTINGS}
             }
           }")
+        
+        code=${res: -3}
+        if [[ ${code} -ge 400 ]]; then
+          echo Request failed with error code ${code}
+          echo ${res::-3}
+          exit 1
+        else
+          project=${res::-3}
+        fi
 
         # Mask password
         echo "::add-mask::$(echo $project | jq --raw-output '.roles[] | select(.name != "web_access") | .password')"
@@ -126,6 +139,22 @@ runs:
             -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${ADMIN_API_KEY}" \
             -d "{\"scheduling\": \"Essential\"}"
         fi
+        # XXX
+        # This is a workaround for the default endpoint settings, which currently do not allow some settings in the public API.
+        # https://github.com/neondatabase/cloud/issues/27108
+        if [[ -n ${DEFAULT_ENDPOINT_SETTINGS} && ${DEFAULT_ENDPOINT_SETTINGS} != "{}" ]] ; then
+          PROJECT_DATA=$(curl -X GET \
+              "https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/projects/${project_id}" \
+              -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${ADMIN_API_KEY}" \
+              -d "{\"scheduling\": \"Essential\"}"
+          )
+          NEW_DEFAULT_ENDPOINT_SETTINGS=$(echo ${PROJECT_DATA} | jq -rc ".project.default_endpoint_settings + ${DEFAULT_ENDPOINT_SETTINGS}")
+          curl -X POST --fail \
+                "https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/projects/${project_id}/default_endpoint_settings" \
+                -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${ADMIN_API_KEY}" \
+                --data "${NEW_DEFAULT_ENDPOINT_SETTINGS}"
+        fi
+        
 
       env:
         API_HOST: ${{ inputs.api_host }}
@@ -142,3 +171,4 @@ runs:
         PSQL: ${{ inputs.psql_path }}
         LD_LIBRARY_PATH: ${{ inputs.libpq_lib_path }}
         PROJECT_SETTINGS: ${{ inputs.project_settings }}
+        DEFAULT_ENDPOINT_SETTINGS: ${{ inputs.default_endpoint_settings }}
