@@ -8219,6 +8219,20 @@ mod tests {
             .unwrap();
         assert_eq!(repl_origins.len(), 1);
         assert_eq!(repl_origins[&1], lsn);
+
+        {
+            lsn += 8;
+            let mut modification = tline.begin_modification(lsn);
+            modification.put_for_unit_test(
+                repl_origin_key(3),
+                Value::Image(Bytes::copy_from_slice(b"cannot_decode_this")),
+            );
+            modification.commit(&ctx).await.unwrap();
+        }
+        let result = tline
+            .get_replorigins(lsn, &ctx, io_concurrency.clone())
+            .await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
