@@ -1280,7 +1280,7 @@ class NeonEnv:
                 )
 
             tenant_config = ps_cfg.setdefault("tenant_config", {})
-            tenant_config["rel_size_v2_enabled"] = True  # Enable relsize_v2 by default in tests
+            # tenant_config["rel_size_v2_enabled"] = True  # Enable relsize_v2 by default in tests
 
             if self.pageserver_remote_storage is not None:
                 ps_cfg["remote_storage"] = remote_storage_to_toml_dict(
