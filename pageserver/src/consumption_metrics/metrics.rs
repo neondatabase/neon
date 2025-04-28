@@ -10,6 +10,7 @@ use utils::lsn::Lsn;
 use super::{Cache, NewRawMetric};
 use crate::context::RequestContext;
 use crate::tenant::mgr::TenantManager;
+use crate::tenant::timeline::GcCutoffs;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 
 /// Name of the metric, used by `MetricsKey` factory methods and `deserialize_cached_events`
@@ -24,7 +25,9 @@ pub(super) enum Name {
     /// Timeline last_record_lsn, incremental
     #[serde(rename = "written_data_bytes_delta")]
     WrittenSizeDelta,
-    /// Timeline logical size
+    /// Timeline last_record_lsn - gc_cutoffs.time (i.e. pitr_interval)
+    #[serde(rename = "pitr_history_size")]
+    PitrHistorySize,
     #[serde(rename = "timeline_logical_size")]
     LogicalSize,
     /// Tenant remote size
@@ -158,6 +161,22 @@ impl MetricsKey {
             metric: Name::WrittenSizeDelta,
         }
         .incremental_values()
+    }
+
+    /// [`Timeline::get_last_record_lsn`] - [`GcCutoffs::time`] (i.e. `pitr_interval`).
+    ///
+    /// [`Timeline::get_last_record_lsn`]: crate::tenant::Timeline::get_last_record_lsn
+    /// [`GcCutoffs::time`]: crate::tenant::timeline::GcCutoffs::time
+    const fn pitr_history_size(
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> AbsoluteValueFactory {
+        MetricsKey {
+            tenant_id,
+            timeline_id: Some(timeline_id),
+            metric: Name::PitrHistorySize,
+        }
+        .absolute_values()
     }
 
     /// Exact [`Timeline::get_current_logical_size`].
@@ -371,6 +390,7 @@ struct TimelineSnapshot {
     loaded_at: (Lsn, SystemTime),
     last_record_lsn: Lsn,
     current_exact_logical_size: Option<u64>,
+    gc_cutoffs: GcCutoffs,
 }
 
 impl TimelineSnapshot {
@@ -390,6 +410,7 @@ impl TimelineSnapshot {
         } else {
             let loaded_at = t.loaded_at;
             let last_record_lsn = t.get_last_record_lsn();
+            let gc_cutoffs = t.gc_info.read().unwrap().cutoffs; // NB: assume periodically updated
 
             let current_exact_logical_size = {
                 let span = tracing::info_span!("collect_metrics_iteration", tenant_id = %t.tenant_shard_id.tenant_id, timeline_id = %t.timeline_id);
@@ -410,6 +431,7 @@ impl TimelineSnapshot {
                 loaded_at,
                 last_record_lsn,
                 current_exact_logical_size,
+                gc_cutoffs,
             }))
         }
     }
@@ -476,6 +498,15 @@ impl TimelineSnapshot {
                 value: prev.1,
             });
         }
+
+        // Compute the PITR history size.
+        //
+        // TODO: verify that the GC cutoffs don't severely regress, e.g. to 0 such that we bill the
+        // entire history. Also verify that it's okay for this to regress on restart, unlike e.g.
+        // written_size above.
+        let pitr_history_size_key = MetricsKey::pitr_history_size(tenant_id, timeline_id);
+        let pitr_history_size = self.last_record_lsn.saturating_sub(self.gc_cutoffs.time);
+        metrics.push(pitr_history_size_key.at(now, pitr_history_size.into()));
 
         {
             let factory = MetricsKey::timeline_logical_size(tenant_id, timeline_id);

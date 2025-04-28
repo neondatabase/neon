@@ -576,7 +576,7 @@ mod tests {
         super::super::metrics::metric_examples_old(tenant_id, timeline_id, now, before)
     }
 
-    fn metric_samples() -> [NewRawMetric; 6] {
+    fn metric_samples() -> [NewRawMetric; 7] {
         let tenant_id = TenantId::from_array([0; 16]);
         let timeline_id = TimelineId::from_array([0xff; 16]);
 
