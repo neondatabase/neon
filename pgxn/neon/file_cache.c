@@ -99,7 +99,6 @@
 
 #define SIZE_MB_TO_CHUNKS(size) ((uint32)((size) * MB / BLCKSZ >> lfc_chunk_size_log))
 
-#define BLOCK_TO_CHUNK_NUN(blkno) ((blkno) >> lfc_chunk_size_log)
 #define BLOCK_TO_CHUNK_OFF(blkno) ((blkno) & (lfc_blocks_per_chunk-1))
 
 /*
@@ -538,7 +537,7 @@ lfc_init(void)
 							   NULL,
 							   NULL);
 
-	DefineCustomIntVariable("neon.chunk_size",
+	DefineCustomIntVariable("neon.file_cache_chunk_size",
 							"LFC chunk size in blocks (should be power of two)",
 							NULL,
 							&lfc_blocks_per_chunk,
