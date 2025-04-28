@@ -863,6 +863,87 @@ def test_pageserver_compaction_circuit_breaker(neon_env_builder: NeonEnvBuilder)
     assert not env.pageserver.log_contains(".*Circuit breaker failure ended.*")
 
 
+def test_ps_corruption_detection_feedback(neon_env_builder: NeonEnvBuilder):
+    """
+    Test that when the pageserver detects corruption during image layer creation,
+    it sends corruption feedback to the safekeeper which gets recorded in its
+    safekeeper_ps_corruption_detected metric.
+    """
+    # Configure tenant with aggressive compaction settings to easily trigger compaction
+    TENANT_CONF = {
+        # Small checkpoint distance to create many layers
+        "checkpoint_distance": 1024 * 128,
+        # Compact small layers
+        "compaction_target_size": 1024 * 128,
+        # Create image layers eagerly
+        "image_creation_threshold": 1,
+        "image_layer_creation_check_threshold": 0,
+        # Force frequent compaction
+        "compaction_period": "1s",
+    }
+
+    env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
+    # We are simulating compaction failures so we should allow these error messages.
+    env.pageserver.allowed_errors.append(".*Compaction failed.*")
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    pageserver_http = env.pageserver.http_client()
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init()
+
+    # Enable the failpoint that will cause image layer creation to fail due to a (simulated) detected
+    # corruption.
+    pageserver_http.configure_failpoints(("create-image-layer-fail-simulated-corruption", "return"))
+
+    # Write some data to trigger compaction and image layer creation
+    log.info("Writing data to trigger compaction...")
+    workload.write_rows(1024 * 64, upload=False)
+    workload.write_rows(1024 * 64, upload=False)
+
+    # Returns True if the corruption signal from PS is propagated to the SK according to the "safekeeper_ps_corruption_detected" metric.
+    # Raises an exception otherwise.
+    def check_corruption_signal_propagated_to_sk():
+        # Get metrics from all safekeepers
+        for sk in env.safekeepers:
+            sk_metrics = sk.http_client().get_metrics()
+            # Look for our corruption detected metric with the right tenant and timeline
+            corruption_metrics = sk_metrics.query_all("safekeeper_ps_corruption_detected")
+
+            for metric in corruption_metrics:
+                # Check if there's a metric for our tenant and timeline that has value 1
+                if (
+                    metric.labels.get("tenant_id") == str(tenant_id)
+                    and metric.labels.get("timeline_id") == str(timeline_id)
+                    and metric.value == 1
+                ):
+                    log.info(f"Corruption detected by safekeeper {sk.id}: {metric}")
+                    return True
+        raise Exception("Corruption detection feedback not found in any safekeeper metrics")
+
+    # Returns True if the corruption signal from PS is propagated to the PG according to the "ps_corruption_detected" metric
+    # in "neon_perf_counters".
+    # Raises an exception otherwise.
+    def check_corruption_signal_propagated_to_pg():
+        endpoint = workload.endpoint()
+        results = endpoint.safe_psql("CREATE EXTENSION IF NOT EXISTS neon")
+        results = endpoint.safe_psql(
+            "SELECT value FROM neon_perf_counters WHERE metric = 'ps_corruption_detected'"
+        )
+        log.info("Query corruption detection metric, results: %s", results)
+        if results[0][0] == 1:
+            log.info("Corruption detection signal is raised on Postgres")
+            return True
+        raise Exception("Corruption detection signal is not raise on Postgres")
+
+    # Confirm that the corruption signal propagates to both the safekeeper and Postgres
+    wait_until(check_corruption_signal_propagated_to_sk, timeout=10, interval=0.1)
+    wait_until(check_corruption_signal_propagated_to_pg, timeout=10, interval=0.1)
+
+    # Cleanup the failpoint
+    pageserver_http.configure_failpoints(("create-image-layer-fail-simulated-corruption", "off"))
+
+
 @pytest.mark.parametrize("enabled", [True, False])
 def test_image_layer_compression(neon_env_builder: NeonEnvBuilder, enabled: bool):
     tenant_conf = {

@@ -374,6 +374,8 @@ typedef struct PageserverFeedback
 	XLogRecPtr	remote_consistent_lsn;
 	TimestampTz replytime;
 	uint32		shard_number;
+	/* true if the pageserver has detected data corruption in the timeline */
+	bool		corruption_detected;
 } PageserverFeedback;
 
 /* BEGIN_HADRON */
