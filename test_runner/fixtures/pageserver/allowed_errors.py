@@ -111,6 +111,8 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*stalling layer flushes for compaction backpressure.*",
     ".*layer roll waiting for flush due to compaction backpressure.*",
     ".*BatchSpanProcessor.*",
+    # Tests run in dev mode
+    ".*Starting in dev mode.*",
 )
 
 

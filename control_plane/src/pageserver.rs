@@ -139,6 +139,8 @@ impl PageServerNode {
             overrides.push(format!("ssl_ca_file='{}'", ssl_ca_file.to_str().unwrap()));
         }
 
+        overrides.push("dev_mode=true".to_owned());
+
         // Apply the user-provided overrides
         overrides.push({
             let mut doc =

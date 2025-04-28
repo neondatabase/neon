@@ -353,6 +353,21 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    if !args.dev {
+        let http_auth_enabled = args.http_auth_public_key_path.is_some();
+        let pg_auth_enabled = args.pg_auth_public_key_path.is_some();
+        let pg_tenant_only_auth_enabled = args.pg_tenant_only_auth_public_key_path.is_some();
+        if !http_auth_enabled || !pg_auth_enabled || !pg_tenant_only_auth_enabled {
+            bail!(
+                "Safekeeper refuses to start with HTTP, PostgreSQL, or tenant-only PostgreSQL API authentication disabled.\n\
+                  Run with --dev to allow running without authentication.\n\
+                  This is insecure and should only be used in development environments."
+            );
+        }
+    } else {
+        warn!("Starting in dev mode: this may be an insecure configuration.");
+    }
+
     // Load JWT auth token to connect to other safekeepers for pull_timeline.
     // First check if the env var is present, then check the arg with the path.
     // We want to deprecate and remove the env var method in the future.

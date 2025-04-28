@@ -65,6 +65,7 @@ services:
                     --id=$$SAFEKEEPER_ID
                     --broker-endpoint=$$BROKER_ENDPOINT
                     -D /data
+                    --dev
                     --remote-storage=\"{endpoint='http://minio:9000',
                                         bucket_name='neon',
                                         bucket_region='eu-north-1',
@@ -95,6 +96,7 @@ services:
                     --id=$$SAFEKEEPER_ID
                     --broker-endpoint=$$BROKER_ENDPOINT
                     -D /data
+                    --dev
                     --remote-storage=\"{endpoint='http://minio:9000',
                                         bucket_name='neon',
                                         bucket_region='eu-north-1',
@@ -125,6 +127,7 @@ services:
                     --id=$$SAFEKEEPER_ID
                     --broker-endpoint=$$BROKER_ENDPOINT
                     -D /data
+                    --dev
                     --remote-storage=\"{endpoint='http://minio:9000',
                                         bucket_name='neon',
                                         bucket_region='eu-north-1',

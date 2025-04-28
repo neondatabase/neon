@@ -9,7 +9,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use camino::Utf8Path;
 use clap::{Arg, ArgAction, Command};
 use http_utils::tls_certs::ReloadingCertificateResolver;
@@ -98,6 +98,20 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("Failed to set application's current dir to '{workdir}'"))?;
 
     let (conf, ignored) = initialize_config(&identity_file_path, &cfg_file_path, &workdir)?;
+
+    if !conf.dev_mode {
+        if matches!(conf.http_auth_type, AuthType::Trust)
+            || matches!(conf.pg_auth_type, AuthType::Trust)
+        {
+            bail!(
+                "Pageserver refuses to start with HTTP or PostgreSQL API authentication disabled.\n\
+                  Set dev_mode = true in pageserver.toml to allow running without authentication.\n\
+                  This is insecure and should only be used in development environments."
+            );
+        }
+    } else {
+        warn!("Starting in dev mode: this may be an insecure configuration.");
+    }
 
     // Initialize logging.
     //
