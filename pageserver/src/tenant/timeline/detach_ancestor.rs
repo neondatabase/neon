@@ -178,7 +178,7 @@ impl Attempt {
     }
 }
 
-async fn generate_tombstone_image_layer(
+pub(crate) async fn generate_tombstone_image_layer(
     detached: &Arc<Timeline>,
     ancestor: &Arc<Timeline>,
     ancestor_lsn: Lsn,

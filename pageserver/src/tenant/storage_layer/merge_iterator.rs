@@ -19,10 +19,27 @@ pub(crate) enum LayerRef<'a> {
 }
 
 impl<'a> LayerRef<'a> {
+    #[allow(dead_code)]
     fn iter(self, ctx: &'a RequestContext) -> LayerIterRef<'a> {
         match self {
             Self::Image(x) => LayerIterRef::Image(x.iter(ctx)),
             Self::Delta(x) => LayerIterRef::Delta(x.iter(ctx)),
+        }
+    }
+
+    fn iter_with_options(
+        self,
+        ctx: &'a RequestContext,
+        max_read_size: u64,
+        max_batch_size: usize,
+    ) -> LayerIterRef<'a> {
+        match self {
+            Self::Image(x) => {
+                LayerIterRef::Image(x.iter_with_options(ctx, max_read_size, max_batch_size))
+            }
+            Self::Delta(x) => {
+                LayerIterRef::Delta(x.iter_with_options(ctx, max_read_size, max_batch_size))
+            }
         }
     }
 
@@ -66,6 +83,8 @@ pub(crate) enum IteratorWrapper<'a> {
         first_key_lower_bound: (Key, Lsn),
         layer: LayerRef<'a>,
         source_desc: Arc<PersistentLayerKey>,
+        max_read_size: u64,
+        max_batch_size: usize,
     },
     Loaded {
         iter: PeekableLayerIterRef<'a>,
@@ -146,6 +165,8 @@ impl<'a> IteratorWrapper<'a> {
     pub fn create_from_image_layer(
         image_layer: &'a ImageLayerInner,
         ctx: &'a RequestContext,
+        max_read_size: u64,
+        max_batch_size: usize,
     ) -> Self {
         Self::NotLoaded {
             layer: LayerRef::Image(image_layer),
@@ -157,12 +178,16 @@ impl<'a> IteratorWrapper<'a> {
                 is_delta: false,
             }
             .into(),
+            max_read_size,
+            max_batch_size,
         }
     }
 
     pub fn create_from_delta_layer(
         delta_layer: &'a DeltaLayerInner,
         ctx: &'a RequestContext,
+        max_read_size: u64,
+        max_batch_size: usize,
     ) -> Self {
         Self::NotLoaded {
             layer: LayerRef::Delta(delta_layer),
@@ -174,6 +199,8 @@ impl<'a> IteratorWrapper<'a> {
                 is_delta: true,
             }
             .into(),
+            max_read_size,
+            max_batch_size,
         }
     }
 
@@ -204,11 +231,13 @@ impl<'a> IteratorWrapper<'a> {
             first_key_lower_bound,
             layer,
             source_desc,
+            max_read_size,
+            max_batch_size,
         } = self
         else {
             unreachable!()
         };
-        let iter = layer.iter(ctx);
+        let iter = layer.iter_with_options(ctx, *max_read_size, *max_batch_size);
         let iter = PeekableLayerIterRef::create(iter).await?;
         if let Some((k1, l1, _)) = iter.peek() {
             let (k2, l2) = first_key_lower_bound;
@@ -293,21 +322,41 @@ impl MergeIteratorItem for ((Key, Lsn, Value), Arc<PersistentLayerKey>) {
 }
 
 impl<'a> MergeIterator<'a> {
+    pub fn create_with_options(
+        deltas: &[&'a DeltaLayerInner],
+        images: &[&'a ImageLayerInner],
+        ctx: &'a RequestContext,
+        max_read_size: u64,
+        max_batch_size: usize,
+    ) -> Self {
+        let mut heap = Vec::with_capacity(images.len() + deltas.len());
+        for image in images {
+            heap.push(IteratorWrapper::create_from_image_layer(
+                image,
+                ctx,
+                max_read_size,
+                max_batch_size,
+            ));
+        }
+        for delta in deltas {
+            heap.push(IteratorWrapper::create_from_delta_layer(
+                delta,
+                ctx,
+                max_read_size,
+                max_batch_size,
+            ));
+        }
+        Self {
+            heap: BinaryHeap::from(heap),
+        }
+    }
+
     pub fn create(
         deltas: &[&'a DeltaLayerInner],
         images: &[&'a ImageLayerInner],
         ctx: &'a RequestContext,
     ) -> Self {
-        let mut heap = Vec::with_capacity(images.len() + deltas.len());
-        for image in images {
-            heap.push(IteratorWrapper::create_from_image_layer(image, ctx));
-        }
-        for delta in deltas {
-            heap.push(IteratorWrapper::create_from_delta_layer(delta, ctx));
-        }
-        Self {
-            heap: BinaryHeap::from(heap),
-        }
+        Self::create_with_options(deltas, images, ctx, 1024 * 8192, 1024)
     }
 
     pub(crate) async fn next_inner<R: MergeIteratorItem>(&mut self) -> anyhow::Result<Option<R>> {

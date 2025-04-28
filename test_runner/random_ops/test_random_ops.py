@@ -323,6 +323,7 @@ class NeonProject:
             if self.restart_pgbench_on_console_errors and (
                 "ERROR:  Couldn't connect to compute node" in err
                 or "ERROR:  Console request failed" in err
+                or "ERROR:  Control plane request failed" in err
             ):
                 log.info("Restarting benchmark for %s", target)
                 self.benchmarks.pop(target)

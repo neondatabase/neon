@@ -1,7 +1,6 @@
 //
 // Main entry point for the safekeeper executable
 //
-use std::env::{VarError, var};
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::str::FromStr;
@@ -354,29 +353,13 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Load JWT auth token to connect to other safekeepers for pull_timeline.
-    // First check if the env var is present, then check the arg with the path.
-    // We want to deprecate and remove the env var method in the future.
-    let sk_auth_token = match var("SAFEKEEPER_AUTH_TOKEN") {
-        Ok(v) => {
-            info!("loaded JWT token for authentication with safekeepers");
-            Some(SecretString::from(v))
-        }
-        Err(VarError::NotPresent) => {
-            if let Some(auth_token_path) = args.auth_token_path.as_ref() {
-                info!(
-                    "loading JWT token for authentication with safekeepers from {auth_token_path}"
-                );
-                let auth_token = tokio::fs::read_to_string(auth_token_path).await?;
-                Some(SecretString::from(auth_token.trim().to_owned()))
-            } else {
-                info!("no JWT token for authentication with safekeepers detected");
-                None
-            }
-        }
-        Err(_) => {
-            warn!("JWT token for authentication with safekeepers is not unicode");
-            None
-        }
+    let sk_auth_token = if let Some(auth_token_path) = args.auth_token_path.as_ref() {
+        info!("loading JWT token for authentication with safekeepers from {auth_token_path}");
+        let auth_token = tokio::fs::read_to_string(auth_token_path).await?;
+        Some(SecretString::from(auth_token.trim().to_owned()))
+    } else {
+        info!("no JWT token for authentication with safekeepers detected");
+        None
     };
 
     let ssl_ca_certs = match args.ssl_ca_file.as_ref() {
