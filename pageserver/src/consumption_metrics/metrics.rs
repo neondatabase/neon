@@ -178,10 +178,10 @@ impl MetricsKey {
         .absolute_values()
     }
 
-    /// [`Timeline::get_current_lsn`] - [`Timeline::get_ancestor_lsn`], clamped to
+    /// [`Timeline::get_last_record_lsn`] - [`Timeline::get_ancestor_lsn`], clamped to
     /// [`Timeline::get_current_logical_size`].
     ///
-    /// [`Timeline::get_current_lsn`]: crate::tenant::Timeline::get_current_lsn
+    /// [`Timeline::get_last_record_lsn`]: crate::tenant::Timeline::get_last_record_lsn
     /// [`Timeline::get_ancestor_lsn`]: crate::tenant::Timeline::get_ancestor_lsn
     /// [`Timeline::get_current_logical_size`]: crate::tenant::Timeline::get_current_logical_size
     const fn timeline_changed_bytes_from_parent(
