@@ -193,6 +193,6 @@ services:
       - "/bin/bash"
       - "-c"
     command:
-      - sleep 180000
+      - sleep 3600
     depends_on:
       - compute
