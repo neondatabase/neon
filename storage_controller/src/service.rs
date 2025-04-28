@@ -194,7 +194,7 @@ pub(crate) enum LeadershipStatus {
 
 pub const RECONCILER_CONCURRENCY_DEFAULT: usize = 128;
 pub const PRIORITY_RECONCILER_CONCURRENCY_DEFAULT: usize = 256;
-pub const SAFEKEEPER_RECONCILER_CONCURRENCY_DEFAULT: usize = 128;
+pub const SAFEKEEPER_RECONCILER_CONCURRENCY_DEFAULT: usize = 32;
 
 // Depth of the channel used to enqueue shards for reconciliation when they can't do it immediately.
 // This channel is finite-size to avoid using excessive memory if we get into a state where reconciles are finishing more slowly
