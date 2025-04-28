@@ -34,11 +34,10 @@ permissions:
 jobs:
   build-pgxn:
     if: |
-      (inputs.pg_versions != '[]' || inputs.rebuild_everything) && (
-        contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
-        contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
-        github.ref_name == 'main'
-      )
+      inputs.pg_versions != '[]' || inputs.rebuild_everything ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
+      github.ref_name == 'main'
     timeout-minutes: 30
     runs-on: macos-15
     strategy:
@@ -63,13 +62,8 @@ jobs:
 
       - name: Cache postgres ${{ matrix.postgres-version }} build
         id: cache_pg
-        uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
-          endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
-          bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
-          accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
-          secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
-          use-fallback: false
           path: pg_install/${{ matrix.postgres-version }}
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ matrix.postgres-version }}-${{ steps.pg_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
@@ -105,13 +99,21 @@ jobs:
         run: |
           make postgres-headers-${{ matrix.postgres-version }} -j$(sysctl -n hw.ncpu)
 
+      - name: Upload "pg_install/${{ matrix.postgres-version }}" artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pg_install--${{ matrix.postgres-version }}
+          path: pg_install/${{ matrix.postgres-version }}
+          # The artifact is supposed to be used by the next job in the same workflow,
+          # so there’s no need to store it for too long.
+          retention-days: 1
+
   build-walproposer-lib:
     if: |
-      (inputs.pg_versions != '[]' || inputs.rebuild_everything) && (
-        contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
-        contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
-        github.ref_name == 'main'
-      )
+      inputs.pg_versions != '[]' || inputs.rebuild_everything ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
+      github.ref_name == 'main'
     timeout-minutes: 30
     runs-on: macos-15
     needs: [build-pgxn]
@@ -132,27 +134,16 @@ jobs:
         id: pg_rev
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v17) | tee -a "${GITHUB_OUTPUT}"
 
-      - name: Cache postgres v17 build
-        id: cache_pg
-        uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
+      - name: Download "pg_install/v17" artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
-          bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
-          accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
-          secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
-          use-fallback: false
+          name: pg_install--v17
           path: pg_install/v17
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-v17-${{ steps.pg_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Cache walproposer-lib
         id: cache_walproposer_lib
-        uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
-          endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
-          bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
-          accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
-          secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
-          use-fallback: false
           path: pg_install/build/walproposer-lib
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-walproposer_lib-v17-${{ steps.pg_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
@@ -178,13 +169,21 @@ jobs:
         run:
           make walproposer-lib -j$(sysctl -n hw.ncpu)
 
+      - name: Upload "pg_install/build/walproposer-lib" artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pg_install--build--walproposer-lib
+          path: pg_install/build/walproposer-lib
+          # The artifact is supposed to be used by the next job in the same workflow,
+          # so there’s no need to store it for too long.
+          retention-days: 1
+
   cargo-build:
     if: |
-      (inputs.pg_versions != '[]' || inputs.rebuild_rust_code || inputs.rebuild_everything) && (
-        contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
-        contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
-        github.ref_name == 'main'
-      )
+      inputs.pg_versions != '[]' || inputs.rebuild_rust_code || inputs.rebuild_everything ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos') ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
+      github.ref_name == 'main'
     timeout-minutes: 30
     runs-on: macos-15
     needs: [build-pgxn, build-walproposer-lib]
@@ -203,90 +202,51 @@ jobs:
         with:
           submodules: true
 
-      - name: Set pg v14 for caching
-        id: pg_rev_v14
-        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v14) | tee -a "${GITHUB_OUTPUT}"
-      - name: Set pg v15 for caching
-        id: pg_rev_v15
-        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v15) | tee -a "${GITHUB_OUTPUT}"
-      - name: Set pg v16 for caching
-        id: pg_rev_v16
-        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v16) | tee -a "${GITHUB_OUTPUT}"
-      - name: Set pg v17 for caching
-        id: pg_rev_v17
-        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v17) | tee -a "${GITHUB_OUTPUT}"
-
-      - name: Cache postgres v14 build
-        id: cache_pg
-        uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
+      - name: Download "pg_install/v14" artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
-          bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
-          accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
-          secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
-          use-fallback: false
+          name: pg_install--v14
           path: pg_install/v14
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-v14-${{ steps.pg_rev_v14.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
-      - name: Cache postgres v15 build
-        id: cache_pg_v15
-        uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
-        with:
-          endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
-          bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
-          accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
-          secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
-          use-fallback: false
-          path: pg_install/v15
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-v15-${{ steps.pg_rev_v15.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
-      - name: Cache postgres v16 build
-        id: cache_pg_v16
-        uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
-        with:
-          endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
-          bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
-          accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
-          secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
-          use-fallback: false
-          path: pg_install/v16
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-v16-${{ steps.pg_rev_v16.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
-      - name: Cache postgres v17 build
-        id: cache_pg_v17
-        uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
-        with:
-          endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
-          bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
-          accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
-          secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
-          use-fallback: false
-          path: pg_install/v17
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-v17-${{ steps.pg_rev_v17.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
-      - name: Cache cargo deps (only for v17)
-        uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
+      - name: Download "pg_install/v15" artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
-          bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
-          accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
-          secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
-          use-fallback: false
+          name: pg_install--v15
+          path: pg_install/v15
+
+      - name: Download "pg_install/v16" artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: pg_install--v16
+          path: pg_install/v16
+
+      - name: Download "pg_install/v17" artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: pg_install--v17
+          path: pg_install/v17
+
+      - name: Download "pg_install/build/walproposer-lib" artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: pg_install--build--walproposer-lib
+          path: pg_install/build/walproposer-lib
+
+      # `actions/download-artifact` doesn't preserve permissions:
+      # https://github.com/actions/download-artifact?tab=readme-ov-file#permission-loss
+      - name: Make pg_install/v*/bin/* executable
+        run: |
+          chmod +x pg_install/v*/bin/*
+
+      - name: Cache cargo deps
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
           path: |
             ~/.cargo/registry
             !~/.cargo/registry/src
             ~/.cargo/git
             target
           key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
-
-      - name: Cache walproposer-lib
-        id: cache_walproposer_lib
-        uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
-        with:
-          endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
-          bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
-          accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
-          secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
-          use-fallback: false
-          path: pg_install/build/walproposer-lib
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-walproposer_lib-v17-${{ steps.pg_rev_v17.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Install build dependencies
         run: |
@@ -297,8 +257,8 @@ jobs:
           echo 'LDFLAGS=-L/usr/local/opt/openssl@3/lib' >> $GITHUB_ENV
           echo 'CPPFLAGS=-I/usr/local/opt/openssl@3/include' >> $GITHUB_ENV
 
-      - name: Run cargo build (only for v17)
+      - name: Run cargo build
         run: cargo build --all --release -j$(sysctl -n hw.ncpu)
 
-      - name: Check that no warnings are produced (only for v17)
+      - name: Check that no warnings are produced
         run: ./run_clippy.sh
