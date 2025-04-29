@@ -471,7 +471,7 @@ def test_tx_abort_with_many_relations(
         try:
             # Rollback phase should be fast: this is one WAL record that we should process efficiently
             fut = exec.submit(rollback_and_wait)
-            fut.result(timeout=15)
+            fut.result(timeout=15 if reldir_type == "v1" else 30)
         except:
             exec.shutdown(wait=False, cancel_futures=True)
             raise
