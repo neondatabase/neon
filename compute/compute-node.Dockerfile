@@ -1623,7 +1623,6 @@ COPY --from=pgrag-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=timescaledb-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_cron-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_partman-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg-anon-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 #########################################################################################
 #
@@ -1666,6 +1665,7 @@ COPY --from=pg_uuidv7-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_roaringbitmap-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_semver-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=wal2json-build /usr/local/pgsql /usr/local/pgsql
+COPY --from=pg-anon-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_ivm-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_partman-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_mooncake-build /usr/local/pgsql/ /usr/local/pgsql/

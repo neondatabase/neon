@@ -1285,7 +1285,7 @@ impl ComputeNode {
         let mut file = std::fs::File::create(conf_path)?;
         writeln!(file, "shared_buffers=65536")?;
         writeln!(file, "port=51055")?; // Nobody should be connecting
-        writeln!(file, "shared_preload_libraries = 'neon,anon'")?;
+        writeln!(file, "shared_preload_libraries = 'neon'")?;
 
         // Start postgres
         info!("starting postgres");
