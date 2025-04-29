@@ -150,7 +150,7 @@ pub struct PageServerConf {
     /// not terrible.
     pub background_task_maximum_delay: Duration,
 
-    pub control_plane_api: Option<Url>,
+    pub control_plane_api: Url,
 
     /// JWT token for use with the control plane API.
     pub control_plane_api_token: Option<SecretString>,
@@ -225,6 +225,11 @@ pub struct PageServerConf {
     /// Does not force TLS: the client negotiates TLS usage during the handshake.
     /// Uses key and certificate from ssl_key_file/ssl_cert_file.
     pub enable_tls_page_service_api: bool,
+
+    /// Run in development mode, which disables certain safety checks
+    /// such as authentication requirements for HTTP and PostgreSQL APIs.
+    /// This is insecure and should only be used in development environments.
+    pub dev_mode: bool,
 }
 
 /// Token for authentication to safekeepers
@@ -398,6 +403,7 @@ impl PageServerConf {
             generate_unarchival_heatmap,
             tracing,
             enable_tls_page_service_api,
+            dev_mode,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -432,7 +438,8 @@ impl PageServerConf {
             test_remote_failures,
             ondemand_download_behavior_treat_error_as_warn,
             background_task_maximum_delay,
-            control_plane_api,
+            control_plane_api: control_plane_api
+                .ok_or_else(|| anyhow::anyhow!("`control_plane_api` must be set"))?,
             control_plane_emergency_mode,
             heatmap_upload_concurrency,
             secondary_download_concurrency,
@@ -449,6 +456,7 @@ impl PageServerConf {
             get_vectored_concurrent_io,
             tracing,
             enable_tls_page_service_api,
+            dev_mode,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
@@ -566,6 +574,7 @@ impl PageServerConf {
             background_task_maximum_delay: Duration::ZERO,
             load_previous_heatmap: Some(true),
             generate_unarchival_heatmap: Some(true),
+            control_plane_api: Some(Url::parse("http://localhost:6666").unwrap()),
             ..Default::default()
         };
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &repo_dir).unwrap()
@@ -634,9 +643,12 @@ mod tests {
     use super::PageServerConf;
 
     #[test]
-    fn test_empty_config_toml_is_valid() {
-        // we use Default impl of everything in this situation
+    fn test_minimal_config_toml_is_valid() {
+        // The minimal valid config for running a pageserver:
+        // - control_plane_api is mandatory, as pageservers cannot run in isolation
+        // - we use Default impl of everything else in this situation
         let input = r#"
+            control_plane_api = "http://localhost:6666"
         "#;
         let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input)
             .expect("empty config is valid");

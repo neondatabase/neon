@@ -88,9 +88,6 @@ typedef PGAlignedBlock PGIOAlignedBlock;
 
 page_server_api *page_server;
 
-static uint32 local_request_counter;
-#define GENERATE_REQUEST_ID() (((NeonRequestId)MyProcPid << 32) | ++local_request_counter)
-
 /*
  * Various settings related to prompt (fast) handling of PageStream responses
  * at any CHECK_FOR_INTERRUPTS point.
@@ -788,6 +785,27 @@ prefetch_read(PrefetchRequest *slot)
 	}
 }
 
+
+/*
+ * Wait completion of previosly registered prefetch request.
+ * Prefetch result should be placed in LFC by prefetch_wait_for.
+ */
+bool
+communicator_prefetch_receive(BufferTag tag)
+{
+	PrfHashEntry *entry;
+	PrefetchRequest hashkey;
+
+	hashkey.buftag = tag;
+	entry = prfh_lookup(MyPState->prf_hash, &hashkey);
+	if (entry != NULL && prefetch_wait_for(entry->slot->my_ring_index))
+	{
+		prefetch_set_unused(entry->slot->my_ring_index);
+		return true;
+	}
+	return false;
+}
+
 /*
  * Disconnect hook - drop prefetches when the connection drops
  *
@@ -906,7 +924,6 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 
 	NeonGetPageRequest request = {
 		.hdr.tag = T_NeonGetPageRequest,
-		.hdr.reqid = GENERATE_REQUEST_ID(),
 		/* lsn and not_modified_since are filled in below */
 		.rinfo = BufTagGetNRelFileInfo(slot->buftag),
 		.forknum = slot->buftag.forkNum,
@@ -914,8 +931,6 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 	};
 
 	Assert(mySlotNo == MyPState->ring_unused);
-
-	slot->reqid = request.hdr.reqid;
 
 	if (force_request_lsns)
 		slot->request_lsns = *force_request_lsns;
@@ -934,6 +949,7 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 		Assert(mySlotNo == MyPState->ring_unused);
 		/* loop */
 	}
+	slot->reqid = request.hdr.reqid;
 
 	/* update prefetch state */
 	MyPState->n_requests_inflight += 1;
@@ -1937,7 +1953,6 @@ communicator_exists(NRelFileInfo rinfo, ForkNumber forkNum, neon_request_lsns *r
 	{
 		NeonExistsRequest request = {
 			.hdr.tag = T_NeonExistsRequest,
-			.hdr.reqid = GENERATE_REQUEST_ID(),
 			.hdr.lsn = request_lsns->request_lsn,
 			.hdr.not_modified_since = request_lsns->not_modified_since,
 			.rinfo = rinfo,
@@ -2212,7 +2227,6 @@ communicator_nblocks(NRelFileInfo rinfo, ForkNumber forknum, neon_request_lsns *
 	{
 		NeonNblocksRequest request = {
 			.hdr.tag = T_NeonNblocksRequest,
-			.hdr.reqid = GENERATE_REQUEST_ID(),
 			.hdr.lsn = request_lsns->request_lsn,
 			.hdr.not_modified_since = request_lsns->not_modified_since,
 			.rinfo = rinfo,
@@ -2285,7 +2299,6 @@ communicator_dbsize(Oid dbNode, neon_request_lsns *request_lsns)
 	{
 		NeonDbSizeRequest request = {
 			.hdr.tag = T_NeonDbSizeRequest,
-			.hdr.reqid = GENERATE_REQUEST_ID(),
 			.hdr.lsn = request_lsns->request_lsn,
 			.hdr.not_modified_since = request_lsns->not_modified_since,
 			.dbNode = dbNode,
@@ -2353,7 +2366,6 @@ communicator_read_slru_segment(SlruKind kind, int64 segno, neon_request_lsns *re
 
 	request = (NeonGetSlruSegmentRequest) {
 		.hdr.tag = T_NeonGetSlruSegmentRequest,
-		.hdr.reqid = GENERATE_REQUEST_ID(),
 		.hdr.lsn = request_lsns->request_lsn,
 		.hdr.not_modified_since = request_lsns->not_modified_since,
 		.kind = kind,

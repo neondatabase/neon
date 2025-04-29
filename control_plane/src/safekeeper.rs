@@ -87,7 +87,7 @@ impl SafekeeperNode {
             conf: conf.clone(),
             pg_connection_config: Self::safekeeper_connection_config(&listen_addr, conf.pg_port),
             env: env.clone(),
-            http_client: reqwest::Client::new(),
+            http_client: env.create_http_client(),
             http_base_url: format!("http://{}:{}/v1", listen_addr, conf.http_port),
             listen_addr,
         }
@@ -112,7 +112,7 @@ impl SafekeeperNode {
     }
 
     /// Initializes a safekeeper node by creating all necessary files,
-    /// e.g. SSL certificates.
+    /// e.g. SSL certificates and JWT token file.
     pub fn initialize(&self) -> anyhow::Result<()> {
         if self.env.generate_local_ssl_certs {
             self.env.generate_ssl_cert(
@@ -120,6 +120,17 @@ impl SafekeeperNode {
                 &self.datadir_path().join("server.key"),
             )?;
         }
+
+        // Generate a token file for authentication with other safekeepers
+        if self.conf.auth_enabled {
+            let token = self
+                .env
+                .generate_auth_token(&Claims::new(None, Scope::SafekeeperData))?;
+
+            let token_path = self.datadir_path().join("peer_jwt_token");
+            std::fs::write(token_path, token)?;
+        }
+
         Ok(())
     }
 
@@ -218,14 +229,26 @@ impl SafekeeperNode {
             args.push(format!("--ssl-ca-file={}", ssl_ca_file.to_str().unwrap()));
         }
 
+        if self.conf.auth_enabled {
+            let token_path = self.datadir_path().join("peer_jwt_token");
+            let token_path_str = token_path
+                .to_str()
+                .with_context(|| {
+                    format!("Token path {token_path:?} cannot be represented as a unicode string")
+                })?
+                .to_owned();
+            args.extend(["--auth-token-path".to_owned(), token_path_str]);
+        }
+
         args.extend_from_slice(extra_opts);
 
+        let env_variables = Vec::new();
         background_process::start_process(
             &format!("safekeeper-{id}"),
             &datadir,
             &self.env.safekeeper_bin(),
             &args,
-            self.safekeeper_env_variables()?,
+            env_variables,
             background_process::InitialPidFile::Expect(self.pid_file()),
             retry_timeout,
             || async {
@@ -237,18 +260,6 @@ impl SafekeeperNode {
             },
         )
         .await
-    }
-
-    fn safekeeper_env_variables(&self) -> anyhow::Result<Vec<(String, String)>> {
-        // Generate a token to connect from safekeeper to peers
-        if self.conf.auth_enabled {
-            let token = self
-                .env
-                .generate_auth_token(&Claims::new(None, Scope::SafekeeperData))?;
-            Ok(vec![("SAFEKEEPER_AUTH_TOKEN".to_owned(), token)])
-        } else {
-            Ok(Vec::new())
-        }
     }
 
     ///

@@ -140,6 +140,20 @@ impl RemoteStorage for UnreliableWrapper {
         self.inner.list(prefix, mode, max_keys, cancel).await
     }
 
+    async fn list_versions(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> Result<crate::VersionListing, DownloadError> {
+        self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))
+            .map_err(DownloadError::Other)?;
+        self.inner
+            .list_versions(prefix, mode, max_keys, cancel)
+            .await
+    }
+
     async fn head_object(
         &self,
         key: &RemotePath,

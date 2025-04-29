@@ -53,7 +53,7 @@ jobs:
           submodules: true
 
       - name: Check for Postgres changes
-        uses: dorny/paths-filter@1441771bbfdd59dcd748680ee64ebd8faab1a242  #v3
+        uses: step-security/paths-filter@v3
         id: files_changed
         with:
           token: ${{ github.token }}
@@ -69,10 +69,6 @@ jobs:
 
   check-macos-build:
     needs: [ check-permissions, files-changed ]
-    if: |
-      contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
-      contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
-      github.ref_name == 'main'
     uses: ./.github/workflows/build-macos.yml
     with:
       pg_versions: ${{ needs.files-changed.outputs.postgres_changes }}
