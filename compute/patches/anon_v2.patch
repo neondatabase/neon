@@ -12,7 +12,7 @@ index 0cdc769..f6cc950 100644
 +GRANT ALL ON SCHEMA anon to neon_superuser;
 +GRANT ALL ON ALL TABLES IN SCHEMA anon TO neon_superuser;
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..059c403 100644
+index 7da6553..e8a5b60 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
 @@ -74,6 +74,49 @@ $$
@@ -146,7 +146,7 @@ index 7da6553..059c403 100644
 +
 +  IF current_libs IS NULL OR current_libs = '' THEN
 +    EXECUTE format('ALTER DATABASE %I SET session_preload_libraries TO ''anon''', dbname);
-+  ELSE
++  ELSIF position('anon' in current_libs) = 0 THEN
 +    EXECUTE format('ALTER DATABASE %I SET session_preload_libraries TO %L', 
 +                   dbname, 
 +                   current_libs || ',' || 'anon');
