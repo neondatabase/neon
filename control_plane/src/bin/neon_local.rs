@@ -1416,7 +1416,14 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             let pageserver_id = args.endpoint_pageserver_id;
             let remote_ext_config = &args.remote_ext_config;
 
-            let safekeepers_generation = args.safekeepers_generation.map(SafekeeperGeneration::new);
+            let default_generation = env
+                .storage_controller
+                .timelines_onto_safekeepers
+                .then_some(1);
+            let safekeepers_generation = args
+                .safekeepers_generation
+                .or(default_generation)
+                .map(SafekeeperGeneration::new);
             // If --safekeepers argument is given, use only the listed
             // safekeeper nodes; otherwise all from the env.
             let safekeepers = if let Some(safekeepers) = parse_safekeepers(&args.safekeepers)? {
