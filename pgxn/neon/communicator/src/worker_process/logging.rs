@@ -116,7 +116,7 @@ struct EventBuilder<'a> {
     maker: &'a Maker,
 }
 
-impl<'a> std::io::Write for EventBuilder<'a> {
+impl std::io::Write for EventBuilder<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.event.message.write(buf)
     }
@@ -126,7 +126,7 @@ impl<'a> std::io::Write for EventBuilder<'a> {
     }
 }
 
-impl<'a> Drop for EventBuilder<'a> {
+impl Drop for EventBuilder<'_> {
     fn drop(&mut self) {
         let maker = self.maker;
         let event = std::mem::take(&mut self.event);

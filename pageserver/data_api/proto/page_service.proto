@@ -17,7 +17,11 @@ service PageService {
   // Returns size of a relation, as # of blocks
   rpc RelSize (RelSizeRequest) returns (RelSizeResponse);
 
+  // Fetches a page.
   rpc GetPage (GetPageRequest) returns (GetPageResponse);
+
+  // Streaming GetPage protocol.
+  rpc GetPages (stream GetPageRequest) returns (stream GetPageResponse);
 
   // Returns total size of a database, as # of bytes
   rpc DbSize (DbSizeRequest) returns (DbSizeResponse);

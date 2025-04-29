@@ -9,7 +9,6 @@ use anyhow::Context;
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api::ForceAwaitLogicalSize;
 use pageserver_client::page_service::BasebackupRequest;
-use pageserver_client_grpc;
 use pageserver_data_api::model::{GetBaseBackupRequest, RequestCommon};
 
 use rand::prelude::*;

@@ -7,9 +7,8 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 
 use bytes::Bytes;
-use http;
+use futures::Stream;
 use thiserror::Error;
-use tonic;
 use tonic::metadata::AsciiMetadataValue;
 use tonic::transport::Channel;
 
@@ -106,6 +105,21 @@ impl PageserverClient {
         let response = client.get_page(tonic::Request::new(request)).await?;
 
         Ok(response.into_inner().page_image)
+    }
+
+    pub async fn get_pages(
+        &self,
+        requests: impl Stream<Item = proto::GetPageRequest> + Send + 'static,
+    ) -> std::result::Result<
+        tonic::Response<tonic::codec::Streaming<proto::GetPageResponse>>,
+        PageserverClientError,
+    > {
+        // FIXME: calculate the shard number correctly
+        let shard_no = 0;
+
+        let mut client = self.get_client(shard_no).await?;
+
+        Ok(client.get_pages(tonic::Request::new(requests)).await?)
     }
 
     /// Process a request to get the size of a database.

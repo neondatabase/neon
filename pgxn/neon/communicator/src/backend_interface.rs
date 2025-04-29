@@ -120,7 +120,7 @@ pub extern "C" fn bcomm_start_get_page_v_request<'t>(
     // Tell the communicator about it
     bs.submit_request(request_idx);
 
-    return request_idx;
+    request_idx
 }
 
 /// Check if a request has completed. Returns:

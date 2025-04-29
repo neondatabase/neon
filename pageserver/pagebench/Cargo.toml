@@ -15,11 +15,12 @@ hdrhistogram.workspace = true
 humantime.workspace = true
 humantime-serde.workspace = true
 rand.workspace = true
-reqwest.workspace=true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
 tokio-util.workspace = true
 
 pageserver_client.workspace = true
