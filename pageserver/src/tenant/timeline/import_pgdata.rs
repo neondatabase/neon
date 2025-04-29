@@ -163,8 +163,7 @@ pub async fn doit(
         // Ensure at-least-once delivery of the upcall to storage controller
         // before we mark the task as done and never come here again.
         //
-        let storcon_client = StorageControllerUpcallClient::new(timeline.conf, &cancel)?
-            .expect("storcon configured");
+        let storcon_client = StorageControllerUpcallClient::new(timeline.conf, &cancel);
         storcon_client
             .put_timeline_import_status(
                 timeline.tenant_shard_id,
