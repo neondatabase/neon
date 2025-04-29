@@ -401,7 +401,10 @@ pub async fn handle_request(
         request.timeline_id,
     ));
     if existing_tli.is_ok() {
-        bail!("Timeline {} already exists", request.timeline_id);
+        info!("Timeline {} already exists", request.timeline_id);
+        return Ok(PullTimelineResponse {
+            safekeeper_host: None,
+        });
     }
 
     let mut http_client = reqwest::Client::builder();
@@ -536,6 +539,6 @@ async fn pull_timeline(
         .await?;
 
     Ok(PullTimelineResponse {
-        safekeeper_host: host,
+        safekeeper_host: Some(host),
     })
 }
