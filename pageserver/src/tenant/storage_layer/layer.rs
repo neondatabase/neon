@@ -1259,7 +1259,7 @@ impl LayerInner {
                 let task_kind: &'static str = ctx.task_kind().into();
                 ONDEMAND_DOWNLOAD_BYTES
                     .with_label_values(&[task_kind])
-                    .inc_by(self.desc.file_size as u64);
+                    .inc_by(self.desc.file_size);
                 ONDEMAND_DOWNLOAD_COUNT
                     .with_label_values(&[task_kind])
                     .inc();
