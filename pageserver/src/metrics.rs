@@ -497,6 +497,24 @@ pub(crate) static WAIT_LSN_IN_PROGRESS_GLOBAL_MICROS: Lazy<IntCounter> = Lazy::n
     .expect("failed to define a metric")
 });
 
+pub(crate) static ONDEMAND_DOWNLOAD_BYTES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_ondemand_download_bytes_total",
+        "Total bytes of layers on-demand downloaded",
+        &["task_kind"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static ONDEMAND_DOWNLOAD_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_ondemand_download_count",
+        "Total count of layers on-demand downloaded",
+        &["task_kind"]
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) mod wait_ondemand_download_time {
     use super::*;
     const WAIT_ONDEMAND_DOWNLOAD_TIME_BUCKETS: &[f64] = &[
