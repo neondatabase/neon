@@ -1,6 +1,7 @@
 import random
 import threading
 import time
+
 import pytest
 from fixtures.endpoint.http import EndpointHttpClient
 from fixtures.log_helper import log
@@ -35,20 +36,38 @@ def prom_parse(client: EndpointHttpClient) -> dict[str, float]:
 def prewarm_lfc_blocking(client: EndpointHttpClient):
     client.prewarm_lfc()
     for _ in range(20):
-        match client.prewarm_lfc_status()["status"]:
+        prewarm_status = client.prewarm_lfc_status()
+        match prewarm_status["status"]:
             case "prewarming":
                 time.sleep(1)
             case "completed":
                 break
             case status:
-                raise AssertionError(f"Invalid status {status}")
+                error = prewarm_status["error"]
+                raise AssertionError(f"Invalid status {status}, error: {error}")
     else:
         raise AssertionError("failed to prewarm within 20 seconds")
-    pass
+
+
+def prewarm_lfc_offload_blocking(client: EndpointHttpClient):
+    client.prewarm_lfc_offload()
+    for _ in range(20):
+        offload_status = client.prewarm_lfc_offload_status()
+        match offload_status["status"]:
+            case "offloading":
+                time.sleep(1)
+            case "completed":
+                break
+            case status:
+                error = offload_status["error"]
+                raise AssertionError(f"Invalid status {status}, error: {error}")
+    else:
+        raise AssertionError("failed to offload prewarm data within 20 seconds")
 
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
-def test_lfc_prewarm(neon_simple_env: NeonEnv):
+@pytest.mark.parametrize("with_compute_ctl", [False, True])
+def test_lfc_prewarm(neon_simple_env: NeonEnv, with_compute_ctl: bool):
     env = neon_simple_env
     n_records = 1000000
 
@@ -74,7 +93,7 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv):
         assert status["status"] == "not_prewarmed"
         assert status["error"] == ""
 
-        http_client.prewarm_lfc_offload()
+        prewarm_lfc_offload_blocking(http_client)
 
         assert http_client.prewarm_lfc_status()["status"] == "not_prewarmed"
         assert prom_parse(http_client) == {offload_label: 1, prewarm_label: 0}
@@ -117,14 +136,20 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv):
 
     check_pinned_entries(cur)
     if with_compute_ctl:
-        desired = {"status": "completed", "total": total, "prewarmed": prewarmed,
-                   "skipped": skipped, "error": ""}
+        desired = {
+            "status": "completed",
+            "total": total,
+            "prewarmed": prewarmed,
+            "skipped": skipped,
+            "error": "",
+        }
         assert http_client.prewarm_lfc_status() == desired
         assert prom_parse(http_client) == {offload_label: 0, prewarm_label: 1}
 
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
-def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv):
+@pytest.mark.parametrize("with_compute_ctl", [False, True])
+def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, with_compute_ctl: bool):
     env = neon_simple_env
     n_records = 10000
     n_threads = 4
@@ -145,20 +170,16 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv):
         "create table accounts(id integer primary key, balance bigint default 0, payload text default repeat('?', 1000)) with (fillfactor=10)"
     )
     cur.execute(f"insert into accounts(id) values (generate_series(1,{n_records}))")
-<<<<<<< HEAD
-    cur.execute("select get_local_cache_state()")
-    lfc_state = cur.fetchall()[0][0]
-=======
 
     http_client = endpoint.http_client()
     if with_compute_ctl:
-        http_client.prewarm_lfc_offload()
+        prewarm_lfc_offload_blocking(http_client)
     else:
         cur.execute("select get_local_cache_state()")
         lfc_state = cur.fetchall()[0][0]
->>>>>>> 28568dc49 (test)
 
     running = True
+    n_prewarms = 0
 
     def workload():
         conn = endpoint.connect()
@@ -175,15 +196,11 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv):
     def prewarm():
         conn = endpoint.connect()
         cur = conn.cursor()
-        n_prewarms = 0
         while running:
             cur.execute("alter system set neon.file_cache_size_limit='1MB'")
             cur.execute("select pg_reload_conf()")
             cur.execute("alter system set neon.file_cache_size_limit='1GB'")
             cur.execute("select pg_reload_conf()")
-<<<<<<< HEAD
-            cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
-=======
 
             if with_compute_ctl:
                 prewarm_lfc_blocking(http_client)
@@ -191,7 +208,6 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv):
                 cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
 
             nonlocal n_prewarms
->>>>>>> 28568dc49 (test)
             n_prewarms += 1
         log.info(f"Number of prewarms: {n_prewarms}")
 
@@ -215,9 +231,6 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv):
     total_balance = cur.fetchall()[0][0]
     assert total_balance == 0
 
-<<<<<<< HEAD
     check_pinned_entries(cur)
-=======
     if with_compute_ctl:
         assert prom_parse(http_client) == {offload_label: 1, prewarm_label: n_prewarms}
->>>>>>> 28568dc49 (test)
