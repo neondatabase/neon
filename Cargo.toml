@@ -8,6 +8,7 @@ members = [
     "pageserver/compaction",
     "pageserver/ctl",
     "pageserver/client",
+    "pageserver/client_grpc",
     "pageserver/pagebench",
     "proxy",
     "safekeeper",
@@ -29,6 +30,7 @@ members = [
     "libs/pq_proto",
     "libs/tenant_size_model",
     "libs/metrics",
+    "libs/neonart",
     "libs/postgres_connection",
     "libs/remote_storage",
     "libs/tracing-utils",
@@ -41,6 +43,7 @@ members = [
     "libs/proxy/postgres-types2",
     "libs/proxy/tokio-postgres2",
     "endpoint_storage",
+    "pgxn/neon/communicator",
 ]
 
 [workspace.package]
@@ -142,6 +145,7 @@ parquet = { version = "53", default-features = false, features = ["zstd"] }
 parquet_derive = "53"
 pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
 pem = "3.0.3"
+peekable = "0.3.0"
 pin-project-lite = "0.2"
 pprof = { version = "0.14", features = ["criterion", "flamegraph", "frame-pointer", "prost-codec"] }
 procfs = "0.16"
@@ -187,7 +191,6 @@ thiserror = "1.0"
 tikv-jemallocator = { version = "0.6", features = ["profiling", "stats", "unprefixed_malloc_on_supported_platforms"] }
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 tokio = { version = "1.43.1", features = ["macros"] }
-tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "main" }
 tokio-io-timeout = "1.2.0"
 tokio-postgres-rustls = "0.12.0"
 tokio-rustls = { version = "0.26.0", default-features = false, features = ["tls12", "ring"]}
@@ -196,7 +199,7 @@ tokio-tar = "0.3"
 tokio-util = { version = "0.7.10", features = ["io", "rt"] }
 toml = "0.8"
 toml_edit = "0.22"
-tonic = {version = "0.12.3", default-features = false, features = ["channel", "tls", "tls-roots"]}
+tonic = {version = "0.12.3", default-features = false, features = ["channel", "server", "tls", "tls-roots", "gzip"]}
 tower = { version = "0.5.2", default-features = false }
 tower-http = { version = "0.6.2", features = ["auth", "request-id", "trace"] }
 
@@ -228,6 +231,9 @@ x509-cert = { version = "0.2.5" }
 env_logger = "0.11"
 log = "0.4"
 
+tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "main" }
+uring-common = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "main" }
+
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
 postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch = "neon" }
 postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", branch = "neon" }
@@ -245,9 +251,12 @@ compute_api = { version = "0.1", path = "./libs/compute_api/" }
 consumption_metrics = { version = "0.1", path = "./libs/consumption_metrics/" }
 http-utils = { version = "0.1", path = "./libs/http-utils/" }
 metrics = { version = "0.1", path = "./libs/metrics/" }
+neonart = { version = "0.1", path = "./libs/neonart/" }
 pageserver = { path = "./pageserver" }
 pageserver_api = { version = "0.1", path = "./libs/pageserver_api/" }
 pageserver_client = { path = "./pageserver/client" }
+pageserver_client_grpc = { path = "./pageserver/client_grpc" }
+pageserver_data_api = { path = "./pageserver/data_api" }
 pageserver_compaction = { version = "0.1", path = "./pageserver/compaction/" }
 postgres_backend = { version = "0.1", path = "./libs/postgres_backend/" }
 postgres_connection = { version = "0.1", path = "./libs/postgres_connection/" }
@@ -271,6 +280,7 @@ wal_decoder = { version = "0.1", path = "./libs/wal_decoder" }
 workspace_hack = { version = "0.1", path = "./workspace_hack/" }
 
 ## Build dependencies
+cbindgen = "0.28.0"
 criterion = "0.5.1"
 rcgen = "0.13"
 rstest = "0.18"

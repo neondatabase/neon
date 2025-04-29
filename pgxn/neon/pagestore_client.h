@@ -228,6 +228,7 @@ extern char *neon_tenant;
 extern int32 max_cluster_size;
 extern int  neon_protocol_version;
 
+extern void get_shard_map(char ***connstrs_p, shardno_t *num_shards_p);
 extern shardno_t get_shard_number(BufferTag* tag);
 
 extern const f_smgr *smgr_neon(ProcNumber backend, NRelFileInfo rinfo);

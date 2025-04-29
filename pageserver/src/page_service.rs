@@ -13,7 +13,6 @@ use crate::PERF_TRACE_TARGET;
 use anyhow::{Context, bail};
 use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
-use futures::FutureExt;
 use itertools::Itertools;
 use jsonwebtoken::TokenData;
 use once_cell::sync::OnceCell;
@@ -40,7 +39,6 @@ use pq_proto::framed::ConnectionError;
 use pq_proto::{BeMessage, FeMessage, FeStartupPacket, RowDescriptor};
 use strum_macros::IntoStaticStr;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::auth::{Claims, Scope, SwappableJwtAuth};
@@ -49,15 +47,13 @@ use utils::id::{TenantId, TimelineId};
 use utils::logging::log_slow;
 use utils::lsn::Lsn;
 use utils::simple_rcu::RcuReadGuard;
-use utils::sync::gate::{Gate, GateGuard};
+use utils::sync::gate::GateGuard;
 use utils::sync::spsc_fold;
 
 use crate::auth::check_permission;
 use crate::basebackup::BasebackupError;
 use crate::config::PageServerConf;
-use crate::context::{
-    DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
-};
+use crate::context::{PerfInstrumentFutureExt, RequestContext, RequestContextBuilder};
 use crate::metrics::{
     self, COMPUTE_COMMANDS_COUNTERS, ComputeCommandKind, GetPageBatchBreakReason, LIVE_CONNECTIONS,
     SmgrOpTimer, TimelineMetrics,
@@ -67,7 +63,6 @@ use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id,
     debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id,
 };
-use crate::task_mgr::{self, COMPUTE_REQUEST_RUNTIME, TaskKind};
 use crate::tenant::mgr::{
     GetActiveTenantError, GetTenantError, ShardResolveResult, ShardSelector, TenantManager,
 };
@@ -85,171 +80,6 @@ const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
 /// Threshold at which to log slow GetPage requests.
 const LOG_SLOW_GETPAGE_THRESHOLD: Duration = Duration::from_secs(30);
 
-///////////////////////////////////////////////////////////////////////////////
-
-pub struct Listener {
-    cancel: CancellationToken,
-    /// Cancel the listener task through `listen_cancel` to shut down the listener
-    /// and get a handle on the existing connections.
-    task: JoinHandle<Connections>,
-}
-
-pub struct Connections {
-    cancel: CancellationToken,
-    tasks: tokio::task::JoinSet<ConnectionHandlerResult>,
-    gate: Gate,
-}
-
-pub fn spawn(
-    conf: &'static PageServerConf,
-    tenant_manager: Arc<TenantManager>,
-    pg_auth: Option<Arc<SwappableJwtAuth>>,
-    perf_trace_dispatch: Option<Dispatch>,
-    tcp_listener: tokio::net::TcpListener,
-    tls_config: Option<Arc<rustls::ServerConfig>>,
-) -> Listener {
-    let cancel = CancellationToken::new();
-    let libpq_ctx = RequestContext::todo_child(
-        TaskKind::LibpqEndpointListener,
-        // listener task shouldn't need to download anything. (We will
-        // create a separate sub-contexts for each connection, with their
-        // own download behavior. This context is used only to listen and
-        // accept connections.)
-        DownloadBehavior::Error,
-    );
-    let task = COMPUTE_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
-        "libpq listener",
-        libpq_listener_main(
-            conf,
-            tenant_manager,
-            pg_auth,
-            perf_trace_dispatch,
-            tcp_listener,
-            conf.pg_auth_type,
-            tls_config,
-            conf.page_service_pipelining.clone(),
-            libpq_ctx,
-            cancel.clone(),
-        )
-        .map(anyhow::Ok),
-    ));
-
-    Listener { cancel, task }
-}
-
-impl Listener {
-    pub async fn stop_accepting(self) -> Connections {
-        self.cancel.cancel();
-        self.task
-            .await
-            .expect("unreachable: we wrap the listener task in task_mgr::exit_on_panic_or_error")
-    }
-}
-impl Connections {
-    pub(crate) async fn shutdown(self) {
-        let Self {
-            cancel,
-            mut tasks,
-            gate,
-        } = self;
-        cancel.cancel();
-        while let Some(res) = tasks.join_next().await {
-            Self::handle_connection_completion(res);
-        }
-        gate.close().await;
-    }
-
-    fn handle_connection_completion(res: Result<anyhow::Result<()>, tokio::task::JoinError>) {
-        match res {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => error!("error in page_service connection task: {:?}", e),
-            Err(e) => error!("page_service connection task panicked: {:?}", e),
-        }
-    }
-}
-
-///
-/// Main loop of the page service.
-///
-/// Listens for connections, and launches a new handler task for each.
-///
-/// Returns Ok(()) upon cancellation via `cancel`, returning the set of
-/// open connections.
-///
-#[allow(clippy::too_many_arguments)]
-pub async fn libpq_listener_main(
-    conf: &'static PageServerConf,
-    tenant_manager: Arc<TenantManager>,
-    auth: Option<Arc<SwappableJwtAuth>>,
-    perf_trace_dispatch: Option<Dispatch>,
-    listener: tokio::net::TcpListener,
-    auth_type: AuthType,
-    tls_config: Option<Arc<rustls::ServerConfig>>,
-    pipelining_config: PageServicePipeliningConfig,
-    listener_ctx: RequestContext,
-    listener_cancel: CancellationToken,
-) -> Connections {
-    let connections_cancel = CancellationToken::new();
-    let connections_gate = Gate::default();
-    let mut connection_handler_tasks = tokio::task::JoinSet::default();
-
-    loop {
-        let gate_guard = match connections_gate.enter() {
-            Ok(guard) => guard,
-            Err(_) => break,
-        };
-
-        let accepted = tokio::select! {
-            biased;
-            _ = listener_cancel.cancelled() => break,
-            next = connection_handler_tasks.join_next(), if !connection_handler_tasks.is_empty() => {
-                let res = next.expect("we dont poll while empty");
-                Connections::handle_connection_completion(res);
-                continue;
-            }
-            accepted = listener.accept() => accepted,
-        };
-
-        match accepted {
-            Ok((socket, peer_addr)) => {
-                // Connection established. Spawn a new task to handle it.
-                debug!("accepted connection from {}", peer_addr);
-                let local_auth = auth.clone();
-                let connection_ctx = RequestContextBuilder::from(&listener_ctx)
-                    .task_kind(TaskKind::PageRequestHandler)
-                    .download_behavior(DownloadBehavior::Download)
-                    .perf_span_dispatch(perf_trace_dispatch.clone())
-                    .detached_child();
-
-                connection_handler_tasks.spawn(page_service_conn_main(
-                    conf,
-                    tenant_manager.clone(),
-                    local_auth,
-                    socket,
-                    auth_type,
-                    tls_config.clone(),
-                    pipelining_config.clone(),
-                    connection_ctx,
-                    connections_cancel.child_token(),
-                    gate_guard,
-                ));
-            }
-            Err(err) => {
-                // accept() failed. Log the error, and loop back to retry on next connection.
-                error!("accept() failed: {:?}", err);
-            }
-        }
-    }
-
-    debug!("page_service listener loop terminated");
-
-    Connections {
-        cancel: connections_cancel,
-        tasks: connection_handler_tasks,
-        gate: connections_gate,
-    }
-}
-
 type ConnectionHandlerResult = anyhow::Result<()>;
 
 /// Perf root spans start at the per-request level, after shard routing.
@@ -261,9 +91,10 @@ struct ConnectionPerfSpanFields {
     compute_mode: Option<String>,
 }
 
+/// note: the caller has already set TCP_NODELAY on the socket
 #[instrument(skip_all, fields(peer_addr, application_name, compute_mode))]
 #[allow(clippy::too_many_arguments)]
-async fn page_service_conn_main(
+pub async fn libpq_page_service_conn_main(
     conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<SwappableJwtAuth>>,
@@ -278,10 +109,6 @@ async fn page_service_conn_main(
     let _guard = LIVE_CONNECTIONS
         .with_label_values(&["page_service"])
         .guard();
-
-    socket
-        .set_nodelay(true)
-        .context("could not set TCP_NODELAY")?;
 
     let socket_fd = socket.as_raw_fd();
 
@@ -393,7 +220,7 @@ struct PageServerHandler {
     gate_guard: GateGuard,
 }
 
-struct TimelineHandles {
+pub struct TimelineHandles {
     wrapper: TenantManagerWrapper,
     /// Note on size: the typical size of this map is 1.  The largest size we expect
     /// to see is the number of shards divided by the number of pageservers (typically < 2),

@@ -1,0 +1,35 @@
+[package]
+name = "communicator"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+bytes.workspace = true
+http.workspace = true
+libc.workspace = true
+nix.workspace = true
+atomic_enum = "0.3.0"
+prost.workspace = true
+tonic = { version = "0.12.0", default-features = false, features=["codegen", "prost", "transport"] }
+tokio = { version = "1.43.1", features = ["macros", "net", "io-util", "rt", "rt-multi-thread"] }
+tokio-pipe = { version = "0.2.12" }
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zerocopy = "0.8.0"
+zerocopy-derive = "0.8.0"
+
+tokio-epoll-uring.workspace = true
+uring-common.workspace = true
+
+pageserver_client_grpc.workspace = true
+pageserver_data_api.workspace = true
+
+neonart.workspace = true
+utils.workspace = true
+
+[build-dependencies]
+cbindgen.workspace = true

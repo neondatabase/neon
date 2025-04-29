@@ -9,6 +9,9 @@ use anyhow::Context;
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api::ForceAwaitLogicalSize;
 use pageserver_client::page_service::BasebackupRequest;
+use pageserver_client_grpc;
+use pageserver_data_api::model::{GetBaseBackupRequest, RequestCommon};
+
 use rand::prelude::*;
 use tokio::sync::Barrier;
 use tokio::task::JoinSet;
@@ -22,6 +25,8 @@ use crate::util::{request_stats, tokio_thread_local_stats};
 /// basebackup@LatestLSN
 #[derive(clap::Parser)]
 pub(crate) struct Args {
+    #[clap(long, default_value = "false")]
+    grpc: bool,
     #[clap(long, default_value = "http://localhost:9898")]
     mgmt_api_endpoint: String,
     #[clap(long, default_value = "postgres://postgres@localhost:64000")]
@@ -52,7 +57,7 @@ impl LiveStats {
 
 struct Target {
     timeline: TenantTimelineId,
-    lsn_range: Option<Range<Lsn>>,
+    lsn_range: Range<Lsn>,
 }
 
 #[derive(serde::Serialize)]
@@ -105,7 +110,7 @@ async fn main_impl(
                 anyhow::Ok(Target {
                     timeline,
                     // TODO: support lsn_range != latest LSN
-                    lsn_range: Some(info.last_record_lsn..(info.last_record_lsn + 1)),
+                    lsn_range: info.last_record_lsn..(info.last_record_lsn + 1),
                 })
             }
         });
@@ -149,14 +154,27 @@ async fn main_impl(
     for tl in &timelines {
         let (sender, receiver) = tokio::sync::mpsc::channel(1); // TODO: not sure what the implications of this are
         work_senders.insert(tl, sender);
-        tasks.push(tokio::spawn(client(
-            args,
-            *tl,
-            Arc::clone(&start_work_barrier),
-            receiver,
-            Arc::clone(&all_work_done_barrier),
-            Arc::clone(&live_stats),
-        )));
+
+        let client_task = if args.grpc {
+            tokio::spawn(client_grpc(
+                args,
+                *tl,
+                Arc::clone(&start_work_barrier),
+                receiver,
+                Arc::clone(&all_work_done_barrier),
+                Arc::clone(&live_stats),
+            ))
+        } else {
+            tokio::spawn(client(
+                args,
+                *tl,
+                Arc::clone(&start_work_barrier),
+                receiver,
+                Arc::clone(&all_work_done_barrier),
+                Arc::clone(&live_stats),
+            ))
+        };
+        tasks.push(client_task);
     }
 
     let work_sender = async move {
@@ -165,7 +183,7 @@ async fn main_impl(
             let (timeline, work) = {
                 let mut rng = rand::thread_rng();
                 let target = all_targets.choose(&mut rng).unwrap();
-                let lsn = target.lsn_range.clone().map(|r| rng.gen_range(r));
+                let lsn = rng.gen_range(target.lsn_range.clone());
                 (
                     target.timeline,
                     Work {
@@ -215,7 +233,7 @@ async fn main_impl(
 
 #[derive(Copy, Clone)]
 struct Work {
-    lsn: Option<Lsn>,
+    lsn: Lsn,
     gzip: bool,
 }
 
@@ -240,7 +258,7 @@ async fn client(
             .basebackup(&BasebackupRequest {
                 tenant_id: timeline.tenant_id,
                 timeline_id: timeline.timeline_id,
-                lsn,
+                lsn: Some(lsn),
                 gzip,
             })
             .await
@@ -261,6 +279,74 @@ async fn client(
             })
             .await;
         info!("basebackup size is {} bytes", size.load(Ordering::Relaxed));
+        let elapsed = start.elapsed();
+        live_stats.inc();
+        STATS.with(|stats| {
+            stats.borrow().lock().unwrap().observe(elapsed).unwrap();
+        });
+    }
+
+    all_work_done_barrier.wait().await;
+}
+
+#[instrument(skip_all)]
+async fn client_grpc(
+    args: &'static Args,
+    timeline: TenantTimelineId,
+    start_work_barrier: Arc<Barrier>,
+    mut work: tokio::sync::mpsc::Receiver<Work>,
+    all_work_done_barrier: Arc<Barrier>,
+    live_stats: Arc<LiveStats>,
+) {
+    let shard_map = HashMap::from([(0, args.page_service_connstring.clone())]);
+    let client = pageserver_client_grpc::PageserverClient::new(
+        &timeline.tenant_id.to_string(),
+        &timeline.timeline_id.to_string(),
+        &None,
+        shard_map,
+    );
+
+    start_work_barrier.wait().await;
+
+    while let Some(Work { lsn, gzip }) = work.recv().await {
+        let start = Instant::now();
+
+        //tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        info!("starting get_base_backup");
+        let mut basebackup_stream = client
+            .get_base_backup(
+                &GetBaseBackupRequest {
+                    common: RequestCommon {
+                        request_lsn: lsn,
+                        not_modified_since_lsn: lsn,
+                    },
+                    replica: false,
+                },
+                gzip,
+            )
+            .await
+            .with_context(|| format!("start basebackup for {timeline}"))
+            .unwrap()
+            .into_inner();
+
+        info!("starting receive");
+        use futures::StreamExt;
+        let mut size = 0;
+        let mut nchunks = 0;
+        while let Some(chunk) = basebackup_stream.next().await {
+            let chunk = chunk
+                .with_context(|| format!("error during basebackup"))
+                .unwrap();
+            size += chunk.chunk.len();
+            nchunks += 1;
+        }
+
+        info!(
+            "basebackup size is {} bytes, avg chunk size {} bytes",
+            size,
+            size as f32 / nchunks as f32
+        );
         let elapsed = start.elapsed();
         live_stats.inc();
         STATS.with(|stats| {

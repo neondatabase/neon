@@ -1,0 +1,377 @@
+mod lock_and_version;
+mod node_ptr;
+mod node_ref;
+
+use std::vec::Vec;
+
+use crate::algorithm::lock_and_version::ResultOrRestart;
+use crate::algorithm::node_ptr::{MAX_PREFIX_LEN, NodePtr};
+use crate::algorithm::node_ref::ChildOrValue;
+use crate::algorithm::node_ref::{NodeRef, ReadLockedNodeRef, WriteLockedNodeRef};
+
+use crate::epoch::EpochPin;
+use crate::{Allocator, Key, Value};
+
+pub(crate) type RootPtr<V> = node_ptr::NodePtr<V>;
+
+pub fn new_root<V: Value>(allocator: &Allocator) -> RootPtr<V> {
+    node_ptr::new_root(allocator)
+}
+
+pub(crate) fn search<'e, K: Key, V: Value>(
+    key: &K,
+    root: RootPtr<V>,
+    epoch_pin: &'e EpochPin,
+) -> Option<V> {
+    loop {
+        let root_ref = NodeRef::from_root_ptr(root);
+        if let Ok(result) = lookup_recurse(key.as_bytes(), root_ref, None, epoch_pin) {
+            break result;
+        }
+        // retry
+    }
+}
+
+pub(crate) fn update_fn<'e, K: Key, V: Value, F>(
+    key: &K,
+    value_fn: F,
+    root: RootPtr<V>,
+    allocator: &Allocator,
+    epoch_pin: &'e EpochPin,
+) where
+    F: FnOnce(Option<&V>) -> Option<V>,
+{
+    let value_fn_cell = std::cell::Cell::new(Some(value_fn));
+    loop {
+        let root_ref = NodeRef::from_root_ptr(root);
+        let this_value_fn = |arg: Option<&V>| value_fn_cell.take().unwrap()(arg);
+        let key_bytes = key.as_bytes();
+        if let Ok(()) = update_recurse(
+            key_bytes,
+            this_value_fn,
+            root_ref,
+            None,
+            allocator,
+            epoch_pin,
+            0,
+            key_bytes,
+        ) {
+            break;
+        }
+        // retry
+    }
+}
+
+pub(crate) fn dump_tree<'e, V: Value + std::fmt::Debug>(root: RootPtr<V>, epoch_pin: &'e EpochPin) {
+    let root_ref = NodeRef::from_root_ptr(root);
+
+    let _ = dump_recurse(&[], root_ref, &epoch_pin, 0);
+}
+
+// Error means you must retry.
+//
+// This corresponds to the 'lookupOpt' function in the paper
+fn lookup_recurse<'e, V: Value>(
+    key: &[u8],
+    node: NodeRef<'e, V>,
+    parent: Option<ReadLockedNodeRef<V>>,
+    epoch_pin: &'e EpochPin,
+) -> ResultOrRestart<Option<V>> {
+    let rnode = node.read_lock_or_restart()?;
+    if let Some(parent) = parent {
+        parent.read_unlock_or_restart()?;
+    }
+
+    // check if prefix matches, may increment level
+    let prefix_len = if let Some(prefix_len) = rnode.prefix_matches(key) {
+        prefix_len
+    } else {
+        rnode.read_unlock_or_restart()?;
+        return Ok(None);
+    };
+    let key = &key[prefix_len..];
+
+    // find child (or leaf value)
+    let next_node = rnode.find_child_or_value_or_restart(key[0])?;
+
+    match next_node {
+        None => Ok(None), // key not found
+        Some(ChildOrValue::Value(vptr)) => {
+            // safety: It's OK to follow the pointer because we checked the version.
+            let v = unsafe { (*vptr).clone() };
+            Ok(Some(v))
+        }
+        Some(ChildOrValue::Child(v)) => lookup_recurse(&key[1..], v, Some(rnode), epoch_pin),
+    }
+}
+
+// This corresponds to the 'insertOpt' function in the paper
+pub(crate) fn update_recurse<'e, V: Value, F>(
+    key: &[u8],
+    value_fn: F,
+    node: NodeRef<'e, V>,
+    rparent: Option<(ReadLockedNodeRef<V>, u8)>,
+    allocator: &Allocator,
+    epoch_pin: &'e EpochPin,
+    level: usize,
+    orig_key: &[u8],
+) -> ResultOrRestart<()>
+where
+    F: FnOnce(Option<&V>) -> Option<V>,
+{
+    let rnode = node.read_lock_or_restart()?;
+
+    let prefix_match_len = rnode.prefix_matches(key);
+    if prefix_match_len.is_none() {
+        let (rparent, parent_key) = rparent.expect("direct children of the root have no prefix");
+        let mut wparent = rparent.upgrade_to_write_lock_or_restart()?;
+        let mut wnode = rnode.upgrade_to_write_lock_or_restart()?;
+
+        if let Some(new_value) = value_fn(None) {
+            insert_split_prefix(
+                key,
+                new_value,
+                &mut wnode,
+                &mut wparent,
+                parent_key,
+                allocator,
+            );
+        }
+        wnode.write_unlock();
+        wparent.write_unlock();
+        return Ok(());
+    }
+    let prefix_match_len = prefix_match_len.unwrap();
+    let key = &key[prefix_match_len as usize..];
+    let level = level + prefix_match_len as usize;
+
+    let next_node = rnode.find_child_or_value_or_restart(key[0])?;
+
+    if next_node.is_none() {
+        if rnode.is_full() {
+            let (rparent, parent_key) = rparent.expect("root node cannot become full");
+            let mut wparent = rparent.upgrade_to_write_lock_or_restart()?;
+            let wnode = rnode.upgrade_to_write_lock_or_restart()?;
+
+            if let Some(new_value) = value_fn(None) {
+                insert_and_grow(key, new_value, &wnode, &mut wparent, parent_key, allocator);
+                wnode.write_unlock_obsolete();
+                wparent.write_unlock();
+            } else {
+                wnode.write_unlock();
+                wparent.write_unlock();
+            }
+        } else {
+            let mut wnode = rnode.upgrade_to_write_lock_or_restart()?;
+            if let Some((rparent, _)) = rparent {
+                rparent.read_unlock_or_restart()?;
+            }
+            if let Some(new_value) = value_fn(None) {
+                insert_to_node(&mut wnode, key, new_value, allocator);
+            }
+            wnode.write_unlock();
+        }
+        return Ok(());
+    } else {
+        let next_node = next_node.unwrap(); // checked above it's not None
+        if let Some((rparent, _)) = rparent {
+            rparent.read_unlock_or_restart()?;
+        }
+
+        match next_node {
+            ChildOrValue::Value(existing_value_ptr) => {
+                assert!(key.len() == 1);
+                let wnode = rnode.upgrade_to_write_lock_or_restart()?;
+
+                // safety: Now that we have acquired the write lock, we have exclusive access to the
+                // value
+                let vmut = unsafe { existing_value_ptr.cast_mut().as_mut() }.unwrap();
+                if let Some(new_value) = value_fn(Some(vmut)) {
+                    *vmut = new_value;
+                } else {
+                    // TODO: Treat this as deletion?
+                }
+                wnode.write_unlock();
+
+                Ok(())
+            }
+            ChildOrValue::Child(next_child) => {
+                // recurse to next level
+                update_recurse(
+                    &key[1..],
+                    value_fn,
+                    next_child,
+                    Some((rnode, key[0])),
+                    allocator,
+                    epoch_pin,
+                    level + 1,
+                    orig_key,
+                )
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+enum PathElement {
+    Prefix(Vec<u8>),
+    KeyByte(u8),
+}
+
+impl std::fmt::Debug for PathElement {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        match self {
+            PathElement::Prefix(prefix) => write!(fmt, "{:?}", prefix),
+            PathElement::KeyByte(key_byte) => write!(fmt, "{}", key_byte),
+        }
+    }
+}
+
+fn dump_recurse<'e, V: Value + std::fmt::Debug>(
+    path: &[PathElement],
+    node: NodeRef<'e, V>,
+    epoch_pin: &'e EpochPin,
+    level: usize,
+) -> ResultOrRestart<()> {
+    let indent = str::repeat(" ", level);
+
+    let rnode = node.read_lock_or_restart()?;
+    let mut path = Vec::from(path);
+    let prefix = rnode.get_prefix();
+    if prefix.len() != 0 {
+        path.push(PathElement::Prefix(Vec::from(prefix)));
+    }
+
+    for key_byte in 0..u8::MAX {
+        match rnode.find_child_or_value_or_restart(key_byte)? {
+            None => continue,
+            Some(ChildOrValue::Child(child_ref)) => {
+                let rchild = child_ref.read_lock_or_restart()?;
+                eprintln!(
+                    "{} {:?}, {}: prefix {:?}",
+                    indent,
+                    &path,
+                    key_byte,
+                    rchild.get_prefix()
+                );
+
+                let mut child_path = path.clone();
+                child_path.push(PathElement::KeyByte(key_byte));
+
+                dump_recurse(&child_path, child_ref, epoch_pin, level + 1)?;
+            }
+            Some(ChildOrValue::Value(val)) => {
+                eprintln!("{} {:?}, {}: {:?}", indent, path, key_byte, unsafe {
+                    val.as_ref().unwrap()
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+///```text
+///        [fooba]r -> value
+///
+/// [foo]b -> [a]r  -> value
+///      e -> [ls]e -> value
+///```
+fn insert_split_prefix<'a, V: Value>(
+    key: &[u8],
+    value: V,
+    node: &mut WriteLockedNodeRef<V>,
+    parent: &mut WriteLockedNodeRef<V>,
+    parent_key: u8,
+    allocator: &Allocator,
+) {
+    let old_node = node;
+    let old_prefix = old_node.get_prefix();
+    let common_prefix_len = common_prefix(key, old_prefix);
+
+    // Allocate a node for the new value.
+    let new_value_node = allocate_node_for_value(&key[common_prefix_len + 1..], value, allocator);
+
+    // Allocate a new internal node with the common prefix
+    let mut prefix_node = node_ref::new_internal(&key[..common_prefix_len], allocator);
+
+    // Add the old node and the new nodes to the new internal node
+    prefix_node.insert_child(old_prefix[common_prefix_len], old_node.as_ptr());
+    prefix_node.insert_child(key[common_prefix_len], new_value_node);
+
+    // Modify the prefix of the old child in place
+    old_node.truncate_prefix(old_prefix.len() - common_prefix_len - 1);
+
+    // replace the pointer in the parent
+    parent.replace_child(parent_key, prefix_node.into_ptr());
+}
+
+fn insert_to_node<V: Value>(
+    wnode: &mut WriteLockedNodeRef<V>,
+    key: &[u8],
+    value: V,
+    allocator: &Allocator,
+) {
+    if wnode.is_leaf() {
+        wnode.insert_value(key[0], value);
+    } else {
+        let value_child = allocate_node_for_value(&key[1..], value, allocator);
+        wnode.insert_child(key[0], value_child);
+    }
+}
+
+// On entry: 'parent' and 'node' are locked
+fn insert_and_grow<V: Value>(
+    key: &[u8],
+    value: V,
+    wnode: &WriteLockedNodeRef<V>,
+    parent: &mut WriteLockedNodeRef<V>,
+    parent_key_byte: u8,
+    allocator: &Allocator,
+) {
+    let mut bigger_node = wnode.grow(allocator);
+
+    if wnode.is_leaf() {
+        bigger_node.insert_value(key[0], value);
+    } else {
+        let value_child = allocate_node_for_value(&key[1..], value, allocator);
+        bigger_node.insert_child(key[0], value_child);
+    }
+
+    // Replace the pointer in the parent
+    parent.replace_child(parent_key_byte, bigger_node.into_ptr());
+}
+
+// Allocate a new leaf node to hold 'value'. If key is long, we may need to allocate
+// new internal nodes to hold it too
+fn allocate_node_for_value<V: Value>(key: &[u8], value: V, allocator: &Allocator) -> NodePtr<V> {
+    let mut prefix_off = key.len().saturating_sub(MAX_PREFIX_LEN + 1);
+
+    let mut leaf_node = node_ref::new_leaf(&key[prefix_off..key.len() - 1], allocator);
+    leaf_node.insert_value(*key.last().unwrap(), value);
+
+    let mut node = leaf_node;
+    while prefix_off > 0 {
+        // Need another internal node
+        let remain_prefix = &key[0..prefix_off];
+
+        prefix_off = remain_prefix.len().saturating_sub(MAX_PREFIX_LEN + 1);
+        let mut internal_node = node_ref::new_internal(
+            &remain_prefix[prefix_off..remain_prefix.len() - 1],
+            allocator,
+        );
+        internal_node.insert_child(*remain_prefix.last().unwrap(), node.into_ptr());
+        node = internal_node;
+    }
+
+    node.into_ptr()
+}
+
+fn common_prefix(a: &[u8], b: &[u8]) -> usize {
+    for i in 0..MAX_PREFIX_LEN {
+        if a[i] != b[i] {
+            return i;
+        }
+    }
+    panic!("prefixes are equal");
+}

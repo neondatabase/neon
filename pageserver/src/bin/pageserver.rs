@@ -16,6 +16,7 @@ use http_utils::tls_certs::ReloadingCertificateResolver;
 use metrics::launch_timestamp::{LaunchTimestamp, set_launch_timestamp_metric};
 use metrics::set_build_info_metric;
 use nix::sys::socket::{setsockopt, sockopt};
+use pageserver::compute_service;
 use pageserver::config::{PageServerConf, PageserverIdentity, ignored_fields};
 use pageserver::controller_upcall_client::StorageControllerUpcallClient;
 use pageserver::deletion_queue::DeletionQueue;
@@ -27,7 +28,7 @@ use pageserver::task_mgr::{
 use pageserver::tenant::{TenantSharedResources, mgr, secondary};
 use pageserver::{
     CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener, HttpsEndpointListener, http,
-    page_cache, page_service, task_mgr, virtual_file,
+    page_cache, task_mgr, virtual_file,
 };
 use postgres_backend::AuthType;
 use remote_storage::GenericRemoteStorage;
@@ -745,7 +746,7 @@ fn start_pageserver(
     // Spawn a task to listen for libpq connections. It will spawn further tasks
     // for each connection. We created the listener earlier already.
     let perf_trace_dispatch = otel_guard.as_ref().map(|g| g.dispatch.clone());
-    let page_service = page_service::spawn(
+    let compute_service = compute_service::spawn(
         conf,
         tenant_manager.clone(),
         pg_auth,
@@ -782,7 +783,7 @@ fn start_pageserver(
         pageserver::shutdown_pageserver(
             http_endpoint_listener,
             https_endpoint_listener,
-            page_service,
+            compute_service,
             consumption_metrics_tasks,
             disk_usage_eviction_task,
             &tenant_manager,

@@ -15,6 +15,8 @@
 
 /* GUCs */
 extern bool lfc_store_prefetch_result;
+extern int	lfc_size_limit;
+extern char *lfc_path;
 
 /* functions for local file cache */
 extern void lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum,

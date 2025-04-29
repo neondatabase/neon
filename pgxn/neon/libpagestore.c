@@ -279,6 +279,55 @@ AssignPageserverConnstring(const char *newval, void *extra)
 	}
 }
 
+/* Return a copy of the whole shard map from shared memory */
+void
+get_shard_map(char ***connstrs_p, shardno_t *num_shards_p)
+{
+	uint64		begin_update_counter;
+	uint64		end_update_counter;
+	ShardMap   *shard_map = &pagestore_shared->shard_map;
+	shardno_t	num_shards;
+	char	   *buf;
+	char	  **connstrs;
+
+	buf = palloc(MAX_SHARDS*MAX_PAGESERVER_CONNSTRING_SIZE);
+	connstrs = palloc(sizeof(char *) * MAX_SHARDS);
+
+	/*
+	 * Postmaster can update the shared memory values concurrently, in which
+	 * case we would copy a garbled mix of the old and new values. We will
+	 * detect it because the counter's won't match, and retry. But it's
+	 * important that we don't do anything within the retry-loop that would
+	 * depend on the string having valid contents.
+	 */
+	do
+	{
+		char		*p;
+
+		begin_update_counter = pg_atomic_read_u64(&pagestore_shared->begin_update_counter);
+		end_update_counter = pg_atomic_read_u64(&pagestore_shared->end_update_counter);
+
+		num_shards = shard_map->num_shards;
+
+		p = buf;
+		for (int i = 0; i < Min(num_shards, MAX_SHARDS); i++)
+		{
+			strlcpy(p, shard_map->connstring[i], MAX_PAGESERVER_CONNSTRING_SIZE);
+			connstrs[i] = p;
+			elog(LOG, "XX: connstrs[%d]: %p", i, p);
+			p += MAX_PAGESERVER_CONNSTRING_SIZE;
+		}
+
+		pg_memory_barrier();
+	}
+	while (begin_update_counter != end_update_counter
+		   || begin_update_counter != pg_atomic_read_u64(&pagestore_shared->begin_update_counter)
+		   || end_update_counter != pg_atomic_read_u64(&pagestore_shared->end_update_counter));
+
+	*connstrs_p = connstrs;
+	*num_shards_p = num_shards;
+}
+
 /*
  * Get the current number of shards, and/or the connection string for a
  * particular shard from the shard map in shared memory.
