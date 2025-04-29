@@ -1,4 +1,4 @@
-// Page service presented by pageservers, for computes
+// Page service presented by pageservers, for computes.
 //
 // Each request must come with the following metadata:
 // - neon-tenant-id
@@ -12,21 +12,32 @@ syntax = "proto3";
 package page_service;
 
 service PageService {
-  rpc RelExists(RelExistsRequest) returns (RelExistsResponse);
-
-  // Returns size of a relation, as # of blocks
-  rpc RelSize (RelSizeRequest) returns (RelSizeResponse);
-
-  // Fetches a page.
-  rpc GetPage (GetPageRequest) returns (GetPageResponse);
-
-  // Streaming GetPage protocol.
-  rpc GetPages (stream GetPageRequest) returns (stream GetPageResponse);
-
-  // Returns total size of a database, as # of bytes
+  // Returns the total size of a database, as # of bytes.
   rpc DbSize (DbSizeRequest) returns (DbSizeResponse);
 
+  // Returns whether a relation exists.
+  rpc RelExists(RelExistsRequest) returns (RelExistsResponse);
+
+  // Returns the size of a relation, as # of blocks.
+  rpc RelSize (RelSizeRequest) returns (RelSizeResponse);
+
+  // Fetches a base backup.
   rpc GetBaseBackup (GetBaseBackupRequest) returns (stream GetBaseBackupResponseChunk);
+
+  // Fetches a page.
+  // TODO: remove this, use GetPages.
+  rpc GetPage (GetPageRequest) returns (GetPageResponse);
+
+  // Fetches pages.
+  //
+  // This is implemented as a bidirectional streaming RPC for performance. Unary
+  // requests incur costs for e.g. HTTP/2 stream setup, header parsing,
+  // authentication, and so on -- with streaming, we only pay these costs during
+  // the initial stream setup. This doubles performance in benchmarks.
+  rpc GetPages (stream GetPageRequest) returns (stream GetPageResponse);
+
+  // Fetches an SLRU segment.
+  rpc GetSlruSegment (GetSlruSegmentRequest) returns (GetSlruSegmentResponse);
 }
 
 message RequestCommon {
@@ -85,4 +96,14 @@ message GetBaseBackupRequest {
 
 message GetBaseBackupResponseChunk {
   bytes chunk = 1;
+}
+
+message GetSlruSegmentRequest {
+  RequestCommon common = 1;
+  uint32 kind = 2;
+  uint32 segno = 3;
+}
+
+message GetSlruSegmentResponse {
+  bytes segment = 1;
 }

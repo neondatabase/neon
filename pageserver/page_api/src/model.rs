@@ -76,6 +76,13 @@ pub struct GetBaseBackupRequest {
     pub replica: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct GetSlruSegmentRequest {
+    pub common: RequestCommon,
+    pub kind: u8, // TODO: SlruKind
+    pub segno: u32,
+}
+
 //--- Conversions to/from the generated proto types
 
 use thiserror::Error;
@@ -237,6 +244,21 @@ impl TryFrom<&proto::GetBaseBackupRequest> for GetBaseBackupRequest {
         Ok(GetBaseBackupRequest {
             common: (&value.common.ok_or(ProtocolError::Missing("common"))?).into(),
             replica: value.replica,
+        })
+    }
+}
+
+impl TryFrom<&proto::GetSlruSegmentRequest> for GetSlruSegmentRequest {
+    type Error = ProtocolError;
+
+    fn try_from(value: &proto::GetSlruSegmentRequest) -> Result<Self, Self::Error> {
+        Ok(GetSlruSegmentRequest {
+            common: (&value.common.ok_or(ProtocolError::Missing("common"))?).into(),
+            kind: value
+                .kind
+                .try_into()
+                .or(Err(ProtocolError::InvalidValue("kind")))?,
+            segno: value.segno,
         })
     }
 }

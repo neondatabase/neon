@@ -33,6 +33,7 @@ use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::WaitLsnTimeout;
 use async_stream::try_stream;
 use futures::Stream;
+use pageserver_api::reltag::SlruKind;
 use tokio::io::{AsyncWriteExt, ReadHalf, SimplexStream};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{Decoder, FramedRead};
@@ -492,6 +493,42 @@ impl PageService for PageServiceService {
         let response = new_basebackup_response_stream(simplex_read, basebackup_task);
 
         Ok(tonic::Response::new(response))
+    }
+
+    async fn get_slru_segment(
+        &self,
+        request: tonic::Request<proto::GetSlruSegmentRequest>,
+    ) -> Result<tonic::Response<proto::GetSlruSegmentResponse>, tonic::Status> {
+        let ttid = self.extract_ttid(request.metadata())?;
+        let req: model::GetSlruSegmentRequest = request.get_ref().try_into()?;
+
+        let span = tracing::info_span!("get_slru_segment", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, kind = %req.kind, segno = %req.segno, req_lsn = %req.common.request_lsn);
+
+        async {
+            let timeline = self.get_timeline(ttid, ShardSelector::Zero).await?;
+            let ctx = self.ctx.with_scope_timeline(&timeline);
+            let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
+            let lsn = Self::wait_or_get_last_lsn(
+                &timeline,
+                req.common.request_lsn,
+                req.common.not_modified_since_lsn,
+                &latest_gc_cutoff_lsn,
+                &ctx,
+            )
+            .await?;
+
+            let kind = SlruKind::from_repr(req.kind)
+                .ok_or(tonic::Status::from_error("invalid SLRU kind".into()))?;
+            let segment = timeline
+                .get_slru_segment(kind, req.segno, lsn, &ctx)
+                .await?;
+
+            Ok(tonic::Response::new(proto::GetSlruSegmentResponse {
+                segment,
+            }))
+        }
+        .instrument(span)
+        .await
     }
 }
 
