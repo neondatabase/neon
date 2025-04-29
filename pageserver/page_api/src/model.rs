@@ -1,4 +1,4 @@
-//! Structs representing the API
+//! Structs representing the canonical page service API.
 //!
 //! These mirror the pageserver APIs and the structs automatically generated
 //! from the protobuf specification. The differences are:
@@ -8,6 +8,9 @@
 //!   (See https://github.com/tokio-rs/prost/issues/800 for a gripe on this)
 //!
 //! - Use more precise datatypes, e.g. Lsn and uints shorter than 32 bits.
+//!
+//! TODO: these types should be used in the Pageserver for actual processing,
+//! instead of being cast into internal mirror types.
 
 use utils::lsn::Lsn;
 

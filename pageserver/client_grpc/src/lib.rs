@@ -17,9 +17,9 @@ use pageserver_page_api::proto;
 
 type Shardno = u16;
 
-use pageserver_page_api::client::PageServiceClient;
+use pageserver_page_api::proto::PageServiceClient;
 
-type MyPageServiceClient = pageserver_page_api::client::PageServiceClient<
+type MyPageServiceClient = pageserver_page_api::proto::PageServiceClient<
     tonic::service::interceptor::InterceptedService<tonic::transport::Channel, AuthInterceptor>,
 >;
 
