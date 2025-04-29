@@ -568,7 +568,7 @@ mod tests {
         assert_eq!(upgraded_samples, new_samples);
     }
 
-    fn metric_samples_old() -> [RawMetric; 6] {
+    fn metric_samples_old() -> [RawMetric; 7] {
         let tenant_id = TenantId::from_array([0; 16]);
         let timeline_id = TimelineId::from_array([0xff; 16]);
 

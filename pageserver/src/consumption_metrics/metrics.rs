@@ -24,9 +24,12 @@ pub(super) enum Name {
     /// Timeline last_record_lsn, incremental
     #[serde(rename = "written_data_bytes_delta")]
     WrittenSizeDelta,
-    /// Timeline last_record_lsn - gc_cutoffs.time (i.e. pitr_interval)
-    #[serde(rename = "pitr_history_size")]
-    PitrHistorySize,
+    /// Timeline's PITR cutoff LSN (now - pitr_interval). If PITR is disabled
+    /// (pitr_interval = 0), this will equal WrittenSize.
+    ///
+    /// Updated periodically during GC. Does not regress.
+    #[serde(rename = "pitr_cutoff")]
+    PitrCutoff,
     /// Timeline logical size
     #[serde(rename = "timeline_logical_size")]
     LogicalSize,
@@ -163,18 +166,14 @@ impl MetricsKey {
         .incremental_values()
     }
 
-    /// [`Timeline::get_last_record_lsn`] - [`GcCutoffs::time`] (i.e. `pitr_interval`).
+    /// [`GcCutoffs::time`] (i.e. `now` - `pitr_interval`)
     ///
-    /// [`Timeline::get_last_record_lsn`]: crate::tenant::Timeline::get_last_record_lsn
     /// [`GcCutoffs::time`]: crate::tenant::timeline::GcCutoffs::time
-    const fn pitr_history_size(
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-    ) -> AbsoluteValueFactory {
+    const fn pitr_cutoff(tenant_id: TenantId, timeline_id: TimelineId) -> AbsoluteValueFactory {
         MetricsKey {
             tenant_id,
             timeline_id: Some(timeline_id),
-            metric: Name::PitrHistorySize,
+            metric: Name::PitrCutoff,
         }
         .absolute_values()
     }
@@ -501,17 +500,24 @@ impl TimelineSnapshot {
             });
         }
 
-        // Compute the PITR history size.
+        // Compute the PITR cutoff. We have to make sure this doesn't regress:
+        // on restart, GC may not run for a while, and the PITR cutoff will be
+        // reported as 0 (which would bill the user for the entire history from
+        // 0 to last_record_lsn). We therefore clamp this to the cached value
+        // (which persists across restarts).
         //
-        // TODO: verify that the GC cutoffs don't severely regress, e.g. to 0 such that we bill the
-        // entire history. Also verify that it's okay for this to regress on restart, unlike e.g.
-        // written_size above.
-        let pitr_history_size_key = MetricsKey::pitr_history_size(tenant_id, timeline_id);
-        let pitr_history_size = self
+        // If pitr_interval is disabled (pitr_cutoff is None), the cutoff is the
+        // last record LSN, by definition. We don't use the written_size
+        // clamping from above, because our own caching should result in
+        // equivalent clamping.
+        let pitr_cutoff_key = MetricsKey::pitr_cutoff(tenant_id, timeline_id);
+        let mut pitr_cutoff = self
             .pitr_cutoff
-            .map(|pitr| self.last_record_lsn.saturating_sub(pitr))
-            .unwrap_or_default();
-        metrics.push(pitr_history_size_key.at(now, pitr_history_size.into()));
+            .unwrap_or(self.last_record_lsn /* PITR disabled */);
+        if let Some(prev) = cache.get(pitr_cutoff_key.key()) {
+            pitr_cutoff = pitr_cutoff.max(Lsn(prev.value)); // don't regress
+        }
+        metrics.push(pitr_cutoff_key.at(now, pitr_cutoff.into()));
 
         {
             let factory = MetricsKey::timeline_logical_size(tenant_id, timeline_id);
