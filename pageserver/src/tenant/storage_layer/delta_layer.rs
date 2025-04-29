@@ -440,7 +440,7 @@ impl DeltaLayerWriterInner {
             gate.enter()?,
         );
 
-        file.fallocate_keep_size(0, 1 * 1024 * 1024 * 1024, ctx)
+        file.fallocate(0, 1 * 1024 * 1024 * 1024, ctx)
             .await
             .unwrap();
 

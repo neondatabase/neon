@@ -232,7 +232,7 @@ impl IoEngine {
         }
     }
 
-    pub(super) async fn fallocate_keep_size(
+    pub(super) async fn fallocate(
         &self,
         file_guard: FileGuard,
         offset: i64,
@@ -250,11 +250,17 @@ impl IoEngine {
                 file_guard.with_std_file(|std_file| {
                     fallocate(
                         std_file.as_raw_fd(),
-                        FallocateFlags::FALLOC_FL_KEEP_SIZE,
+                        // NB: if you ever think of using FALLOC_FL_KEEP_SIZE, keep
+                        // in mind that I have found it to be punting to io_uring worker threads
+                        // on Debian Bookworm Linux 6.1.0-32-amd64 and 6.12.25 mainline.
+                        // => https://gist.github.com/problame/ed876bea40b915ba53267b8265e99352
+                        FallocateFlags::empty(),
                         offset,
                         len,
                     )
-                    .expect("TODO")
+                    .expect("TODO");
+                    std_file.sync_all().unwrap();
+                    ()
                 });
                 (file_guard, Ok(()))
             }

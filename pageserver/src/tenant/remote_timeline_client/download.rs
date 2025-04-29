@@ -109,7 +109,7 @@ pub async fn download_layer_file<'a>(
 64 * 1024 /* TODO this is the max roundtup size by the buffered writer set_len_then_truncate */
 
             )) {
-                temp_file.fallocate_keep_size(
+                temp_file.fallocate(
                     0,
                     file_size,
                     ctx,
