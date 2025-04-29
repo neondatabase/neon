@@ -16,8 +16,9 @@ from fixtures.utils import USE_LFC
 @pytest.mark.timeout(10000)
 @pytest.mark.parametrize("n_readers", [1, 2, 4, 8])
 @pytest.mark.parametrize("n_writers", [0, 1, 2, 4, 8])
+@pytest.mark.parametrize("chunk_size", [1, 8, 16])
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
-def test_lfc_prefetch(neon_simple_env: NeonEnv, n_readers: int, n_writers: int):
+def test_lfc_prefetch(neon_simple_env: NeonEnv, n_readers: int, n_writers: int, chunk_size: int):
     """
     Test resizing the Local File Cache
     """
@@ -33,6 +34,7 @@ def test_lfc_prefetch(neon_simple_env: NeonEnv, n_readers: int, n_writers: int):
             "enable_seqscan=off",
             "autovacuum=off",
             "statement_timeout=0",
+            f"neon.file_cache_chunk_size={chunk_size}",
             "neon.store_prefetch_result_in_lfc=on",
         ],
     )
