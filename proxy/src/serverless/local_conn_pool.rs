@@ -199,7 +199,7 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
             match rx.has_changed() {
                 Ok(true) => {
                     session_id = *rx.borrow_and_update();
-                    info!(%session_id, "changed session");
+                    debug!(%session_id, "changed session");
                     idle_timeout.as_mut().reset(Instant::now() + idle);
                 }
                 Err(_) => {
