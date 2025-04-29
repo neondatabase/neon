@@ -515,7 +515,7 @@ mod tests {
             ),
             (
                 line!(),
-                r#"{"type":"absolute","time":"2023-09-15T00:00:00.123456789Z","metric":"pitr_history_size","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":0,"tenant_id":"00000000000000000000000000000000","timeline_id":"ffffffffffffffffffffffffffffffff"}"#,
+                r#"{"type":"absolute","time":"2023-09-15T00:00:00.123456789Z","metric":"pitr_cutoff","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":0,"tenant_id":"00000000000000000000000000000000","timeline_id":"ffffffffffffffffffffffffffffffff"}"#,
             ),
             (
                 line!(),
