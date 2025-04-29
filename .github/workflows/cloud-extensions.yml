@@ -68,7 +68,7 @@ jobs:
         id: create-neon-project
         uses: ./.github/actions/neon-project-create
         with:
-          region_id: ${{ inputs.region_id }}
+          region_id: ${{ inputs.region_id || 'aws-us-east-2' }}
           postgres_version: ${{ matrix.pg-version }}
           project_settings: ${{ steps.project-settings.outputs.settings }}
           # We need these settings to get the expected output results.
