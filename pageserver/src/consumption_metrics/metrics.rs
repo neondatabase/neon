@@ -27,6 +27,7 @@ pub(super) enum Name {
     /// Timeline last_record_lsn - gc_cutoffs.time (i.e. pitr_interval)
     #[serde(rename = "pitr_history_size")]
     PitrHistorySize,
+    /// Timeline logical size
     #[serde(rename = "timeline_logical_size")]
     LogicalSize,
     /// Tenant remote size
