@@ -132,11 +132,10 @@ impl Drop for LoggingGuard {
     }
 }
 
-// TODO: make JSON the default
 #[derive(Copy, Clone, PartialEq, Eq, Default, Debug)]
 enum LogFormat {
+    Text,
     #[default]
-    Text = 1,
     Json,
 }
 

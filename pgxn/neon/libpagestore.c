@@ -736,8 +736,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	default:
 		neon_shard_log(shard_no, ERROR, "libpagestore: invalid connection state %d", shard->state);
 	}
-	/* This shouldn't be hit */
-	Assert(false);
+
+	pg_unreachable();
 }
 
 static void
