@@ -13,7 +13,8 @@ if TYPE_CHECKING:
 from fixtures.utils import USE_LFC
 
 
-@pytest.mark.timeout(10000)
+@pytest.mark.timeout(100000)
+@pytest.mark.remote_cluster
 @pytest.mark.parametrize("n_readers", [1, 2, 4, 8])
 @pytest.mark.parametrize("n_writers", [0, 1, 2, 4, 8])
 @pytest.mark.parametrize("chunk_size", [1, 8, 16])
