@@ -428,8 +428,18 @@ pub async fn handle_request(
 
     let mut statuses = Vec::new();
     for (i, response) in responses.into_iter().enumerate() {
-        let status = response.context(format!("fetching status from {}", http_hosts[i]))?;
-        statuses.push((status, i));
+        match response {
+            Ok(status) => {
+                statuses.push((status, i));
+            }
+            Err(e) => {
+                info!("error fetching status from {}: {e}", http_hosts[i]);
+            }
+        }
+    }
+
+    if statuses.is_empty() {
+        bail!("no successful status response from any safekeeper");
     }
 
     // Find the most advanced safekeeper
