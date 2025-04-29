@@ -5471,8 +5471,8 @@ def wait_for_last_flush_lsn(
         # the remaining part of the record might not be flushed for a long time.
         # This would prevent the pageserver from reaching last_flush_lsn promptly.
         # To ensure the rest of the record reaches the pageserver quickly,
-        # we forcibly flush the WAL by using pg_switch_wal().
-        endpoint.safe_psql("SELECT pg_switch_wal()")
+        # we forcibly flush the WAL by using CHECKPOINT.
+        endpoint.safe_psql("CHECKPOINT")
 
     results = []
     for tenant_shard_id, pageserver in shards:
