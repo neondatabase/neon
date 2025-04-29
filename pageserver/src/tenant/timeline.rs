@@ -537,7 +537,7 @@ impl GcInfo {
 /// The `GcInfo` component describing which Lsns need to be retained.  Functionally, this
 /// is a single number (the oldest LSN which we must retain), but it internally distinguishes
 /// between time-based and space-based retention for observability and consumption metrics purposes.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct GcCutoffs {
     /// Calculated from the [`pageserver_api::models::TenantConfig::gc_horizon`], this LSN indicates how much
     /// history we must keep to retain a specified number of bytes of WAL.
@@ -2541,6 +2541,13 @@ impl Timeline {
             .tenant_conf
             .checkpoint_timeout
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_timeout)
+    }
+
+    pub(crate) fn get_pitr_interval(&self) -> Duration {
+        let tenant_conf = &self.tenant_conf.load().tenant_conf;
+        tenant_conf
+            .pitr_interval
+            .unwrap_or(self.conf.default_tenant_conf.pitr_interval)
     }
 
     fn get_compaction_period(&self) -> Duration {

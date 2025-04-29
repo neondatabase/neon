@@ -20,10 +20,7 @@ fn startup_collected_timeline_metrics_before_advancing() {
         loaded_at: (disk_consistent_lsn, SystemTime::now()),
         last_record_lsn: disk_consistent_lsn,
         current_exact_logical_size: Some(logical_size),
-        gc_cutoffs: GcCutoffs {
-            space: Lsn::INVALID,
-            time: pitr_cutoff,
-        },
+        pitr_cutoff: Some(pitr_cutoff),
     };
 
     let now = DateTime::<Utc>::from(SystemTime::now());
@@ -70,10 +67,7 @@ fn startup_collected_timeline_metrics_second_round() {
         loaded_at: (disk_consistent_lsn, init),
         last_record_lsn: disk_consistent_lsn,
         current_exact_logical_size: Some(logical_size),
-        gc_cutoffs: GcCutoffs {
-            space: Lsn::INVALID,
-            time: pitr_cutoff,
-        },
+        pitr_cutoff: Some(pitr_cutoff),
     };
 
     snap.to_metrics(tenant_id, timeline_id, now, &mut metrics, &cache);
@@ -122,10 +116,7 @@ fn startup_collected_timeline_metrics_nth_round_at_same_lsn() {
         loaded_at: (disk_consistent_lsn, init),
         last_record_lsn: disk_consistent_lsn,
         current_exact_logical_size: Some(logical_size),
-        gc_cutoffs: GcCutoffs {
-            space: Lsn::INVALID,
-            time: pitr_cutoff,
-        },
+        pitr_cutoff: Some(pitr_cutoff),
     };
 
     snap.to_metrics(tenant_id, timeline_id, now, &mut metrics, &cache);
@@ -165,7 +156,7 @@ fn post_restart_written_sizes_with_rolled_back_last_record_lsn() {
         loaded_at: (Lsn(50), at_restart),
         last_record_lsn: Lsn(50),
         current_exact_logical_size: None,
-        gc_cutoffs: GcCutoffs::default(),
+        pitr_cutoff: Some(Lsn(0)),
     };
 
     let mut cache = HashMap::from([
@@ -229,7 +220,7 @@ fn post_restart_current_exact_logical_size_uses_cached() {
         loaded_at: (Lsn(50), at_restart),
         last_record_lsn: Lsn(50),
         current_exact_logical_size: None,
-        gc_cutoffs: GcCutoffs::default(),
+        pitr_cutoff: None,
     };
 
     let cache = HashMap::from([MetricsKey::timeline_logical_size(tenant_id, timeline_id)
