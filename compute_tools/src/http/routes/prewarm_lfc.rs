@@ -104,7 +104,7 @@ async fn prewarm_lfc_offload_impl(parts: Parts, state: State) -> UnitResult {
 
     let request = Client::new().put(uri).bearer_auth(token).body(compressed);
     match request.send().await {
-        Ok(res) if res.status() == StatusCode::OK => return Ok(()),
+        Ok(res) if res.status() == StatusCode::OK => Ok(()),
         Ok(res) => {
             anyhow::bail!("Error writing to endpoint storage: {}", res.status())
         }
