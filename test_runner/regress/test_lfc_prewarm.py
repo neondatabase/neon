@@ -9,8 +9,8 @@ from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import USE_LFC
 from prometheus_client.parser import text_string_to_metric_families as prom_parse_impl
 
-prewarm_label = "compute_ctl_lfc_prewarm_requests_total"
-offload_label = "compute_ctl_lfc_prewarm_offload_requests_total"
+PREWARM_LABEL = "compute_ctl_lfc_prewarm_requests_total"
+OFFLOAD_LABEL = "compute_ctl_lfc_prewarm_offload_requests_total"
 
 
 def check_pinned_entries(cur):
@@ -29,7 +29,7 @@ def prom_parse(client: EndpointHttpClient) -> dict[str, float]:
         sample.name: sample.value
         for family in prom_parse_impl(client.metrics())
         for sample in family.samples
-        if sample.name in (prewarm_label, offload_label)
+        if sample.name in (PREWARM_LABEL, OFFLOAD_LABEL)
     }
 
 
@@ -44,7 +44,7 @@ def prewarm_lfc_blocking(client: EndpointHttpClient):
                 break
             case status:
                 error = prewarm_status["error"]
-                raise AssertionError(f"Invalid status {status}, error: {error}")
+                raise AssertionError(f"invalid status {status}, error: {error}")
     else:
         raise AssertionError("failed to prewarm within 20 seconds")
 
@@ -60,13 +60,13 @@ def prewarm_lfc_offload_blocking(client: EndpointHttpClient):
                 break
             case status:
                 error = offload_status["error"]
-                raise AssertionError(f"Invalid status {status}, error: {error}")
+                raise AssertionError(f"invalid status {status}, error: {error}")
     else:
         raise AssertionError("failed to offload prewarm data within 20 seconds")
 
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
-@pytest.mark.parametrize("with_compute_ctl", [False, True])
+@pytest.mark.parametrize("with_compute_ctl", [False, True], ids=["", "compute-ctl"])
 def test_lfc_prewarm(neon_simple_env: NeonEnv, with_compute_ctl: bool):
     env = neon_simple_env
     n_records = 1000000
@@ -96,7 +96,7 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, with_compute_ctl: bool):
         prewarm_lfc_offload_blocking(http_client)
 
         assert http_client.prewarm_lfc_status()["status"] == "not_prewarmed"
-        assert prom_parse(http_client) == {offload_label: 1, prewarm_label: 0}
+        assert prom_parse(http_client) == {OFFLOAD_LABEL: 1, PREWARM_LABEL: 0}
     else:
         cur.execute("select get_local_cache_state()")
         lfc_state = cur.fetchall()[0][0]
@@ -106,7 +106,8 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, with_compute_ctl: bool):
 
     conn = endpoint.connect()
     cur = conn.cursor()
-    time.sleep(1)  # wait until compute_ctl complete downgrade of extension to default version
+    # wait until compute_ctl complete downgrade of extension to default version
+    time.sleep(1)
     cur.execute("alter extension neon update to '1.6'")
 
     if with_compute_ctl:
@@ -144,11 +145,11 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, with_compute_ctl: bool):
             "error": "",
         }
         assert http_client.prewarm_lfc_status() == desired
-        assert prom_parse(http_client) == {offload_label: 0, prewarm_label: 1}
+        assert prom_parse(http_client) == {OFFLOAD_LABEL: 0, PREWARM_LABEL: 1}
 
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
-@pytest.mark.parametrize("with_compute_ctl", [False, True])
+@pytest.mark.parametrize("with_compute_ctl", [False, True], ids=["", "compute-ctl"])
 def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, with_compute_ctl: bool):
     env = neon_simple_env
     n_records = 10000
@@ -233,4 +234,4 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, with_compute_ctl: 
 
     check_pinned_entries(cur)
     if with_compute_ctl:
-        assert prom_parse(http_client) == {offload_label: 1, prewarm_label: n_prewarms}
+        assert prom_parse(http_client) == {OFFLOAD_LABEL: 1, PREWARM_LABEL: n_prewarms}
