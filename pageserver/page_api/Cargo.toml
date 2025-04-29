@@ -1,5 +1,5 @@
 [package]
-name = "pageserver_data_api"
+name = "pageserver_page_api"
 version = "0.1.0"
 edition = "2024"
 

@@ -8,7 +8,7 @@ use crate::integrated_cache::{CacheResult, IntegratedCacheWriteAccess};
 use crate::neon_request::{CGetPageVRequest, CPrefetchVRequest};
 use crate::neon_request::{NeonIORequest, NeonIOResult};
 use pageserver_client_grpc::PageserverClient;
-use pageserver_data_api::model;
+use pageserver_page_api::model;
 
 use tokio::io::AsyncReadExt;
 use tokio_epoll_uring::IoBuf;

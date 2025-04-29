@@ -12,14 +12,14 @@ use thiserror::Error;
 use tonic::metadata::AsciiMetadataValue;
 use tonic::transport::Channel;
 
-use pageserver_data_api::model::*;
-use pageserver_data_api::proto;
+use pageserver_page_api::model::*;
+use pageserver_page_api::proto;
 
 type Shardno = u16;
 
-use pageserver_data_api::client::PageServiceClient;
+use pageserver_page_api::client::PageServiceClient;
 
-type MyPageServiceClient = pageserver_data_api::client::PageServiceClient<
+type MyPageServiceClient = pageserver_page_api::client::PageServiceClient<
     tonic::service::interceptor::InterceptedService<tonic::transport::Channel, AuthInterceptor>,
 >;
 

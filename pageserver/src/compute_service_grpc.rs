@@ -40,9 +40,9 @@ use tokio_util::sync::CancellationToken;
 
 use futures::stream::StreamExt;
 
-use pageserver_data_api::model;
-use pageserver_data_api::proto::page_service_server::PageService;
-use pageserver_data_api::proto::page_service_server::PageServiceServer;
+use pageserver_page_api::model;
+use pageserver_page_api::proto::page_service_server::PageService;
+use pageserver_page_api::proto::page_service_server::PageServiceServer;
 
 use anyhow::Context;
 use bytes::BytesMut;
@@ -71,7 +71,7 @@ use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 
 use postgres_backend::AuthType;
 
-pub use pageserver_data_api::proto;
+pub use pageserver_page_api::proto;
 
 pub(super) fn launch_compute_service_grpc_server(
     tcp_connections_rx: tokio::sync::mpsc::Receiver<tokio::io::Result<tokio::net::TcpStream>>,

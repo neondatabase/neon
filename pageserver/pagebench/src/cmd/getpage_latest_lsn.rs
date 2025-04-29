@@ -302,38 +302,11 @@ async fn main_impl(
 
         Box::pin(async move {
             if args.grpc_stream {
-                client_grpc_stream(
-                    args,
-                    worker_id,
-                    ss,
-                    cancel,
-                    rps_period,
-                    ranges,
-                    weights,
-                )
-                .await
+                client_grpc_stream(args, worker_id, ss, cancel, rps_period, ranges, weights).await
             } else if args.grpc {
-                client_grpc(
-                    args,
-                    worker_id,
-                    ss,
-                    cancel,
-                    rps_period,
-                    ranges,
-                    weights,
-                )
-                .await
+                client_grpc(args, worker_id, ss, cancel, rps_period, ranges, weights).await
             } else {
-                client_libpq(
-                    args,
-                    worker_id,
-                    ss,
-                    cancel,
-                    rps_period,
-                    ranges,
-                    weights,
-                )
-                .await
+                client_libpq(args, worker_id, ss, cancel, rps_period, ranges, weights).await
             }
         })
     };
@@ -522,8 +495,8 @@ async fn client_grpc(
                 let (rel_tag, block_no) = key
                     .to_rel_block()
                     .expect("we filter non-rel-block keys out above");
-                pageserver_data_api::model::GetPageRequest {
-                    common: pageserver_data_api::model::RequestCommon {
+                pageserver_page_api::model::GetPageRequest {
+                    common: pageserver_page_api::model::RequestCommon {
                         request_lsn: if rng.gen_bool(args.req_latest_probability) {
                             Lsn::MAX
                         } else {
@@ -531,7 +504,7 @@ async fn client_grpc(
                         },
                         not_modified_since_lsn: r.timeline_lsn,
                     },
-                    rel: pageserver_data_api::model::RelTag {
+                    rel: pageserver_page_api::model::RelTag {
                         spc_oid: rel_tag.spcnode,
                         db_oid: rel_tag.dbnode,
                         rel_number: rel_tag.relnode,
@@ -605,7 +578,9 @@ async fn client_grpc_stream(
                 usize::try_from(client_start.elapsed().as_micros() / period.as_micros()).unwrap();
 
             if periods_passed_until_now > ticks_processed {
-                shared_state.live_stats.missed((periods_passed_until_now - ticks_processed) as u64);
+                shared_state
+                    .live_stats
+                    .missed((periods_passed_until_now - ticks_processed) as u64);
             }
             ticks_processed = periods_passed_until_now;
         }
@@ -622,8 +597,8 @@ async fn client_grpc_stream(
                 let (rel_tag, block_no) = key
                     .to_rel_block()
                     .expect("we filter non-rel-block keys out above");
-                pageserver_data_api::model::GetPageRequest {
-                    common: pageserver_data_api::model::RequestCommon {
+                pageserver_page_api::model::GetPageRequest {
+                    common: pageserver_page_api::model::RequestCommon {
                         request_lsn: if rng.gen_bool(args.req_latest_probability) {
                             Lsn::MAX
                         } else {
@@ -631,7 +606,7 @@ async fn client_grpc_stream(
                         },
                         not_modified_since_lsn: r.timeline_lsn,
                     },
-                    rel: pageserver_data_api::model::RelTag {
+                    rel: pageserver_page_api::model::RelTag {
                         spc_oid: rel_tag.spcnode,
                         db_oid: rel_tag.dbnode,
                         rel_number: rel_tag.relnode,

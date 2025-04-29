@@ -14,7 +14,7 @@
 use utils::lsn::Lsn;
 
 use crate::file_cache::{CacheBlock, FileCache};
-use pageserver_data_api::model::RelTag;
+use pageserver_page_api::model::RelTag;
 
 use neonart;
 use neonart::TreeInitStruct;

@@ -26,7 +26,7 @@ tokio-epoll-uring.workspace = true
 uring-common.workspace = true
 
 pageserver_client_grpc.workspace = true
-pageserver_data_api.workspace = true
+pageserver_page_api.workspace = true
 
 neonart.workspace = true
 utils.workspace = true

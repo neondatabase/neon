@@ -11,4 +11,4 @@ thiserror.workspace = true
 tonic.workspace = true
 tracing.workspace = true
 
-pageserver_data_api.workspace = true
+pageserver_page_api.workspace = true

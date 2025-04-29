@@ -1353,7 +1353,7 @@ dependencies = [
  "neonart",
  "nix 0.27.1",
  "pageserver_client_grpc",
- "pageserver_data_api",
+ "pageserver_page_api",
  "prost 0.13.3",
  "thiserror 1.0.69",
  "tokio",
@@ -4334,7 +4334,7 @@ dependencies = [
  "pageserver_api",
  "pageserver_client",
  "pageserver_client_grpc",
- "pageserver_data_api",
+ "pageserver_page_api",
  "rand 0.8.5",
  "reqwest",
  "serde",
@@ -4412,7 +4412,7 @@ dependencies = [
  "pageserver_api",
  "pageserver_client",
  "pageserver_compaction",
- "pageserver_data_api",
+ "pageserver_page_api",
  "peekable",
  "pem",
  "pin-project-lite",
@@ -4529,7 +4529,7 @@ dependencies = [
  "bytes",
  "futures",
  "http 1.1.0",
- "pageserver_data_api",
+ "pageserver_page_api",
  "thiserror 1.0.69",
  "tonic",
  "tracing",
@@ -4559,7 +4559,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pageserver_data_api"
+name = "pageserver_page_api"
 version = "0.1.0"
 dependencies = [
  "prost 0.13.3",

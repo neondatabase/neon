@@ -4,7 +4,7 @@ type COid = u32;
 // This conveniently matches PG_IOV_MAX
 pub const MAX_GETPAGEV_PAGES: usize = 32;
 
-use pageserver_data_api::model;
+use pageserver_page_api::model;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -12,7 +12,7 @@ pub enum NeonIORequest {
     Empty,
 
     // Read requests. These are C-friendly variants of the corresponding structs in
-    // pageserver_data_api::model.
+    // pageserver_page_api::model.
     RelExists(CRelExistsRequest),
     RelSize(CRelSizeRequest),
     GetPageV(CGetPageVRequest),
