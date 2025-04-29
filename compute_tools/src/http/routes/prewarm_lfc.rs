@@ -3,6 +3,7 @@ use anyhow::Context;
 use async_compression::tokio::bufread::{ZstdDecoder, ZstdEncoder};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, http::StatusCode};
+use compute_api::responses::PrewarmOffloadState;
 use reqwest::Client;
 use serde::Serialize;
 use std::sync::Arc;
@@ -10,6 +11,7 @@ use tokio::{io::AsyncReadExt, spawn};
 use tracing::{error, info};
 
 type State = axum::extract::State<Arc<ComputeNode>>;
+type UnitResult = anyhow::Result<()>;
 const KEY: &str = "lfc_state";
 
 pub struct Parts {
@@ -56,28 +58,47 @@ impl axum::extract::FromRequestParts<Arc<ComputeNode>> for Parts {
     }
 }
 
-pub(in crate::http) async fn prewarm_lfc_offload(parts: Parts, state: State) {
+pub(in crate::http) async fn prewarm_lfc_offload(parts: Parts, state: State) -> Response {
     crate::metrics::LFC_PREWARM_OFFLOAD_REQUESTS.inc();
-    spawn(async move { prewarm_lfc_offload_impl(parts, state).await });
+    use compute_api::responses::PrewarmOffloadStatus::*;
+    {
+        let status = &mut state.state.lock().unwrap().prewarm_offload_state.status;
+        if *status == Offloading {
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
+        *status = Offloading;
+    }
+    spawn(async move {
+        let Err(err) = prewarm_lfc_offload_impl(parts, state.clone()).await else {
+            state.state.lock().unwrap().prewarm_offload_state.status = Completed;
+            return;
+        };
+        error!(%err);
+        let state = &mut state.state.lock().unwrap().prewarm_offload_state;
+        state.status = Failed;
+        state.error = err.to_string();
+    });
+
+    StatusCode::OK.into_response()
 }
 
-async fn prewarm_lfc_offload_impl(parts: Parts, state: State) -> Result<(), ()> {
+async fn prewarm_lfc_offload_impl(parts: Parts, state: State) -> UnitResult {
     let Parts { uri, token } = parts;
     info!(%uri, "requesting LFC state from postgres");
 
     let mut compressed = Vec::new();
     ComputeNode::get_maintenance_client(&state.tokio_conn_conf)
         .await
-        .map_err(|err| error!(%err, "connecting to postgres"))?
+        .context("connecting to postgres")?
         .query_one("select get_local_cache_state()", &[])
         .await
-        .map_err(|err| error!(%err, "querying LFC state"))?
+        .context("querying LFC state")?
         .try_get::<usize, &[u8]>(0)
-        .map_err(|err| error!(%err, "deserializing LFC state"))
+        .context("deserializing LFC state")
         .map(ZstdEncoder::new)?
         .read_to_end(&mut compressed)
         .await
-        .map_err(|err| error!(%err, "compressing LFC state"))?;
+        .context("compressing LFC state")?;
     let compressed_len = compressed.len();
     info!(%uri, "downloaded LFC state, compressed size {compressed_len}, writing to endpoint storage");
 
@@ -85,12 +106,10 @@ async fn prewarm_lfc_offload_impl(parts: Parts, state: State) -> Result<(), ()> 
     match request.send().await {
         Ok(res) if res.status() == StatusCode::OK => return Ok(()),
         Ok(res) => {
-            let err = res.status().to_string();
-            error!(%err, "writing to endpoint storage");
+            anyhow::bail!("Error writing to endpoint storage: {}", res.status())
         }
-        Err(err) => error!(%err, "writing to endpoint storage"),
+        Err(err) => Err(err).context("writing to endpoint storage"),
     }
-    Err(())
 }
 
 pub async fn prewarm_lfc(parts: Parts, state: State) -> Response {
@@ -116,7 +135,7 @@ pub async fn prewarm_lfc(parts: Parts, state: State) -> Response {
     StatusCode::OK.into_response()
 }
 
-async fn prewarm_lfc_impl(parts: Parts, conn: &tokio_postgres::Config) -> anyhow::Result<()> {
+async fn prewarm_lfc_impl(parts: Parts, conn: &tokio_postgres::Config) -> UnitResult {
     let Parts { uri, token } = parts;
     info!(%uri, "requesting LFC state from endpoint storage");
 
@@ -152,8 +171,9 @@ async fn prewarm_lfc_impl(parts: Parts, conn: &tokio_postgres::Config) -> anyhow
 pub(in crate::http) struct PrewarmStatus {
     status: compute_api::responses::PrewarmStatus,
     error: String,
-    segments: i32,
-    done: i32,
+    total: i32,
+    prewarmed: i32,
+    skipped: i32,
 }
 
 // If prewarm failed, we want to get overall number of segments as well as done ones.
@@ -181,8 +201,14 @@ pub(in crate::http) async fn prewarm_lfc_status(state: State) -> Json<PrewarmSta
             return Json(status);
         }
     };
-    status.done = row.try_get(0).unwrap_or_default();
-    status.segments = row.try_get(1).unwrap_or_default();
+    status.total = row.try_get(0).unwrap_or_default();
+    status.prewarmed = row.try_get(1).unwrap_or_default();
+    status.skipped = row.try_get(2).unwrap_or_default();
 
     Json(status)
+}
+
+pub(in crate::http) async fn prewarm_lfc_offload_status(state: State) -> Json<PrewarmOffloadState> {
+    info!("requesting LFC prewarm offload status");
+    Json(state.state.lock().unwrap().prewarm_offload_state.clone())
 }

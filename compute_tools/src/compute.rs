@@ -12,7 +12,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
 use compute_api::responses::{
-    ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus, PrewarmState,
+    ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus, PrewarmOffloadState,
+    PrewarmState,
 };
 use compute_api::spec::{
     ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent,
@@ -153,6 +154,7 @@ pub struct ComputeState {
     pub startup_span: Option<tracing::span::Span>,
 
     pub prewarm_state: PrewarmState,
+    pub prewarm_offload_state: PrewarmOffloadState,
 
     pub metrics: ComputeMetrics,
 }
@@ -168,6 +170,7 @@ impl ComputeState {
             startup_span: None,
             metrics: ComputeMetrics::default(),
             prewarm_state: PrewarmState::default(),
+            prewarm_offload_state: PrewarmOffloadState::default(),
         }
     }
 

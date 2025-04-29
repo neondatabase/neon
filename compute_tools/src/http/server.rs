@@ -89,6 +89,10 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                     .route("/prewarm_lfc", post(prewarm_lfc))
                     .route("/prewarm_lfc_status", get(prewarm_lfc_status))
                     .route("/prewarm_lfc_offload", post(prewarm_lfc_offload))
+                    .route(
+                        "/prewarm_lfc_offload_status",
+                        get(prewarm_lfc_offload_status),
+                    )
                     .route("/check_writability", post(check_writability::is_writable))
                     .route("/configure", post(configure::configure))
                     .route("/database_schema", get(database_schema::get_schema_dump))

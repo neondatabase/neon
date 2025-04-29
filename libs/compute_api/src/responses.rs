@@ -56,9 +56,25 @@ pub enum PrewarmStatus {
     Failed,
 }
 
+#[derive(Serialize, Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrewarmOffloadStatus {
+    #[default]
+    NotOffloaded,
+    Offloading,
+    Completed,
+    Failed,
+}
+
 #[derive(Serialize, Default, Debug, Deserialize, Clone)]
 pub struct PrewarmState {
     pub status: PrewarmStatus,
+    pub error: String,
+}
+
+#[derive(Serialize, Default, Debug, Deserialize, Clone)]
+pub struct PrewarmOffloadState {
+    pub status: PrewarmOffloadStatus,
     pub error: String,
 }
 
