@@ -12,7 +12,7 @@ index 0cdc769..f6cc950 100644
 +GRANT ALL ON SCHEMA anon to neon_superuser;
 +GRANT ALL ON ALL TABLES IN SCHEMA anon TO neon_superuser;
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..86d6536 100644
+index 7da6553..059c403 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
 @@ -74,6 +74,49 @@ $$
@@ -106,19 +106,20 @@ index 7da6553..86d6536 100644
  $$
    LANGUAGE SQL
    VOLATILE
-@@ -264,3 +284,57 @@ $$
+@@ -264,3 +284,53 @@ $$
  ;
  
  SECURITY LABEL FOR anon ON FUNCTION anon.unload IS 'UNTRUSTED';
 +
 +
-+CREATE OR REPLACE FUNCTION anon.enable_transparent_masking_superuser(
-+  dbname TEXT
++CREATE OR REPLACE FUNCTION anon.toggle_transparent_masking_superuser(
++  dbname TEXT,
++  toggle BOOLEAN DEFAULT TRUE
 +)
 +RETURNS VOID AS
 +$$
 +BEGIN
-+  EXECUTE format('ALTER DATABASE %I SET anon.transparent_dynamic_masking TO true', dbname);
++  EXECUTE format('ALTER DATABASE %I SET anon.transparent_dynamic_masking TO %s', dbname, toggle::TEXT);
 +END;
 +$$
 +  LANGUAGE plpgsql
@@ -127,25 +128,7 @@ index 7da6553..86d6536 100644
 +  SET search_path=''
 +;
 +
-+SECURITY LABEL FOR anon ON FUNCTION anon.enable_transparent_masking_superuser IS 'UNTRUSTED';
-+
-+
-+CREATE OR REPLACE FUNCTION anon.disable_transparent_masking_superuser(
-+  dbname TEXT
-+)
-+RETURNS VOID AS
-+$$
-+BEGIN
-+  EXECUTE format('ALTER DATABASE %I SET anon.transparent_dynamic_masking TO false', dbname);
-+END;
-+$$
-+  LANGUAGE plpgsql
-+  VOLATILE
-+  SECURITY DEFINER
-+  SET search_path=''
-+;
-+
-+SECURITY LABEL FOR anon ON FUNCTION anon.disable_transparent_masking_superuser IS 'UNTRUSTED';
++SECURITY LABEL FOR anon ON FUNCTION anon.toggle_transparent_masking_superuser IS 'UNTRUSTED';
 +
 +
 +CREATE OR REPLACE FUNCTION anon.add_to_session_preload_libraries(
@@ -153,8 +136,21 @@ index 7da6553..86d6536 100644
 +)
 +RETURNS VOID AS
 +$$
++DECLARE
++  current_libs TEXT;
 +BEGIN
-+  EXECUTE format('ALTER DATABASE %I SET session_preload_libraries TO ''anon''', dbname);
++
++  SELECT setting INTO current_libs
++  FROM pg_catalog.pg_settings
++  WHERE name = 'session_preload_libraries';
++
++  IF current_libs IS NULL OR current_libs = '' THEN
++    EXECUTE format('ALTER DATABASE %I SET session_preload_libraries TO ''anon''', dbname);
++  ELSE
++    EXECUTE format('ALTER DATABASE %I SET session_preload_libraries TO %L', 
++                   dbname, 
++                   current_libs || ',' || 'anon');
++  END IF;
 +END;
 +$$
 +  LANGUAGE plpgsql
