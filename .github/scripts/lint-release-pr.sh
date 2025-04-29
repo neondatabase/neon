@@ -41,7 +41,7 @@ echo "Merge base of ${MAIN_BRANCH} and ${RELEASE_BRANCH}: ${MERGE_BASE}"
 LAST_COMMIT=$(git rev-parse HEAD)
 
 MERGE_COMMIT_MESSAGE=$(git log -1 --format=%s "${LAST_COMMIT}")
-EXPECTED_MESSAGE_REGEX="^$COMPONENT release [0-9]{4}-[0-9]{2}-[0-9]{2}$"
+EXPECTED_MESSAGE_REGEX="^$COMPONENT release [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} UTC$"
 
 if ! [[ "${MERGE_COMMIT_MESSAGE}" =~ ${EXPECTED_MESSAGE_REGEX} ]]; then
   report_error "Merge commit message does not match expected pattern: '<component> release YYYY-MM-DD'
