@@ -108,7 +108,7 @@ impl PageserverClient {
 
     pub async fn get_pages(
         &self,
-        requests: impl Stream<Item = proto::GetPageRequest> + Send + 'static,
+        requests: impl Stream<Item = proto::GetPageRequestBatch> + Send + 'static,
     ) -> std::result::Result<
         tonic::Response<tonic::codec::Streaming<proto::GetPageResponse>>,
         PageserverClientError,

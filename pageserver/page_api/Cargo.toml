@@ -11,6 +11,7 @@ edition = "2024"
 utils.workspace = true
 
 prost.workspace = true
+smallvec.workspace = true
 thiserror.workspace = true
 tonic.workspace = true
 

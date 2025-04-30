@@ -44,7 +44,7 @@ service PageService {
   // NB: a status response (e.g. for errors) will terminate the stream. The
   // stream may be shared by e.g. multiple Postgres backends, so we should avoid
   // this. Most errors are instead propagated in the GetPageResponse.
-  rpc GetPages (stream GetPageRequest) returns (stream GetPageResponse);
+  rpc GetPages (stream GetPageRequestBatch) returns (stream GetPageResponse);
 
   // Fetches an SLRU segment.
   rpc GetSlruSegment (GetSlruSegmentRequest) returns (GetSlruSegmentResponse);
@@ -87,6 +87,17 @@ message GetPageRequest {
   RequestCommon common = 2;
   RelTag rel = 3;
   uint32 block_number = 4;
+}
+
+// A batch of GetPage requests. These will be executed as a single batch by the
+// Pageserver, amortizing layer access costs and parallelizing them. This may
+// increase the latency of any individual request, but improves the overall
+// latency and throughput of the batch as a whole.
+//
+// Responses will be emitted individually, as soon as they are ready. They may
+// be emitted in a different order than the requests.
+message GetPageRequestBatch {
+  repeated GetPageRequest requests = 1;
 }
 
 // TODO: should this include page metadata, like reltag, LSN, and block number?

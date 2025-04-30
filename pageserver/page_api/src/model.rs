@@ -12,6 +12,7 @@
 //! TODO: these types should be used in the Pageserver for actual processing,
 //! instead of being cast into internal mirror types.
 
+use smallvec::{SmallVec, smallvec};
 use utils::lsn::Lsn;
 
 use crate::proto;
@@ -54,6 +55,8 @@ pub struct GetPageRequest {
     pub rel: RelTag,
     pub block_number: u32,
 }
+
+pub type GetPageRequestBatch = SmallVec<[GetPageRequest; 8]>;
 
 #[derive(Clone, Debug)]
 pub struct GetPageResponse {
@@ -101,6 +104,28 @@ impl From<ProtocolError> for tonic::Status {
         match e {
             ProtocolError::InvalidValue(_field) => tonic::Status::invalid_argument(e.to_string()),
             ProtocolError::Missing(_field) => tonic::Status::invalid_argument(e.to_string()),
+        }
+    }
+}
+
+impl From<GetPageRequestBatch> for proto::GetPageRequestBatch {
+    fn from(value: GetPageRequestBatch) -> proto::GetPageRequestBatch {
+        proto::GetPageRequestBatch {
+            requests: (&value).iter().map(|r| r.into()).collect(),
+        }
+    }
+}
+
+impl From<GetPageRequest> for GetPageRequestBatch {
+    fn from(value: GetPageRequest) -> GetPageRequestBatch {
+        smallvec![value]
+    }
+}
+
+impl From<GetPageRequest> for proto::GetPageRequestBatch {
+    fn from(value: GetPageRequest) -> proto::GetPageRequestBatch {
+        proto::GetPageRequestBatch {
+            requests: vec![(&value).into()],
         }
     }
 }

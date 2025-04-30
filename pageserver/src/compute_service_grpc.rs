@@ -272,7 +272,7 @@ impl PageService for PageServiceService {
 
     async fn get_pages(
         &self,
-        request: tonic::Request<tonic::Streaming<proto::GetPageRequest>>,
+        request: tonic::Request<tonic::Streaming<proto::GetPageRequestBatch>>,
     ) -> Result<tonic::Response<Self::GetPagesStream>, tonic::Status> {
         let ttid = self.extract_ttid(request.metadata())?;
         let shard = self.extract_shard(request.metadata())?;
@@ -283,35 +283,39 @@ impl PageService for PageServiceService {
         let mut request_stream = request.into_inner();
 
         let response_stream = try_stream! {
-            while let Some(request) = request_stream.message().await? {
-                let guard = timeline
+            while let Some(batch) = request_stream.message().await? {
+
+                // TODO: implement batching
+                for request in batch.requests {
+                    let guard = timeline
                     .gate
                     .enter()
                     .or(Err(tonic::Status::unavailable("timeline is shutting down")))?;
 
-                let request: model::GetPageRequest = (&request).try_into()?;
-                let rel = convert_reltag(&request.rel);
-                let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
-                let lsn = Self::wait_or_get_last_lsn(
-                    &timeline,
-                    request.common.request_lsn,
-                    request.common.not_modified_since_lsn,
-                    &latest_gc_cutoff_lsn,
-                    &ctx,
-                )
-                .await?;
-
-                let page_image = timeline
-                    .get_rel_page_at_lsn(
-                        rel,
-                        request.block_number,
-                        Version::Lsn(lsn),
+                    let request: model::GetPageRequest = (&request).try_into()?;
+                    let rel = convert_reltag(&request.rel);
+                    let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
+                    let lsn = Self::wait_or_get_last_lsn(
+                        &timeline,
+                        request.common.request_lsn,
+                        request.common.not_modified_since_lsn,
+                        &latest_gc_cutoff_lsn,
                         &ctx,
-                        IoConcurrency::spawn_from_conf(conf, guard),
                     )
                     .await?;
 
-                yield proto::GetPageResponse { id: request.id, page_image };
+                    let page_image = timeline
+                        .get_rel_page_at_lsn(
+                            rel,
+                            request.block_number,
+                            Version::Lsn(lsn),
+                            &ctx,
+                            IoConcurrency::spawn_from_conf(conf, guard),
+                        )
+                        .await?;
+
+                    yield proto::GetPageResponse { id: request.id, page_image };
+                }
             }
         };
 

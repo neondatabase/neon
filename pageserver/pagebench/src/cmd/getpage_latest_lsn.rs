@@ -594,6 +594,7 @@ async fn client_grpc_stream(
         }
 
         // Send requests until the queue depth is reached
+        // TODO: use batching
         while inflight.len() < args.queue_depth.get() {
             let start = Instant::now();
             let req = {
@@ -624,7 +625,7 @@ async fn client_grpc_stream(
                     block_number: block_no,
                 }
             };
-            request_tx.send((&req).into()).await.unwrap();
+            request_tx.send(req.into()).await.unwrap();
             inflight.push_back(start);
         }
 

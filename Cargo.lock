@@ -4564,6 +4564,7 @@ name = "pageserver_page_api"
 version = "0.1.0"
 dependencies = [
  "prost 0.13.3",
+ "smallvec",
  "thiserror 1.0.69",
  "tonic",
  "tonic-build",
