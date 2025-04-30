@@ -13,14 +13,15 @@ if TYPE_CHECKING:
 from fixtures.utils import USE_LFC
 
 
+@pytest.mark.remote_cluster
 @pytest.mark.timeout(100000)
-@pytest.mark.parametrize("n_readers", [8, 1, 2, 4])
+@pytest.mark.parametrize("n_readers", [1, 2, 4, 8])
 @pytest.mark.parametrize("n_writers", [0, 1, 2, 4, 8])
 @pytest.mark.parametrize("chunk_size", [1, 8, 16])
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 def test_lfc_prefetch(neon_simple_env: NeonEnv, n_readers: int, n_writers: int, chunk_size: int):
     """
-    Test resizing the Local File Cache
+    Test prefetch under different kinds of workload
     """
     env = neon_simple_env
     endpoint = env.endpoints.create_start(
@@ -100,7 +101,7 @@ def test_lfc_prefetch(neon_simple_env: NeonEnv, n_readers: int, n_writers: int, 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 def test_lfc_async_prefetch_performance(neon_simple_env: NeonEnv, zenbenchmark):
     """
-    Test resizing the Local File Cache
+    Demonstrate performance advantages of storing prefetch results in LFC
     """
     env = neon_simple_env
     endpoint = env.endpoints.create_start(
