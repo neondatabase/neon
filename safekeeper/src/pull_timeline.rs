@@ -30,7 +30,7 @@ use utils::pausable_failpoint;
 
 use crate::control_file::CONTROL_FILE_NAME;
 use crate::state::{EvictionState, TimelinePersistentState};
-use crate::timeline::{Timeline, WalResidentTimeline};
+use crate::timeline::{Timeline, TimelineError, WalResidentTimeline};
 use crate::timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline};
 use crate::wal_storage::open_wal_file;
 use crate::{GlobalTimelines, debug_dump, wal_backup};
@@ -465,7 +465,7 @@ pub async fn handle_request(
     assert!(status.tenant_id == request.tenant_id);
     assert!(status.timeline_id == request.timeline_id);
 
-    pull_timeline(
+    match pull_timeline(
         status,
         safekeeper_host,
         sk_auth_token,
@@ -473,6 +473,19 @@ pub async fn handle_request(
         global_timelines,
     )
     .await
+    {
+        Ok(resp) => Ok(resp),
+        Err(e) => {
+            if let Some(TimelineError::AlreadyExists(_) | TimelineError::CreationInProgress(_)) =
+                e.downcast_ref::<TimelineError>()
+            {
+                return Ok(PullTimelineResponse {
+                    safekeeper_host: None,
+                });
+            }
+            Err(e)
+        }
+    }
 }
 
 async fn pull_timeline(
