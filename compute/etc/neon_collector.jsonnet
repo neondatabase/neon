@@ -23,6 +23,8 @@
     import 'sql_exporter/getpage_prefetch_requests_total.libsonnet',
     import 'sql_exporter/getpage_prefetches_buffered.libsonnet',
     import 'sql_exporter/getpage_sync_requests_total.libsonnet',
+    import 'sql_exporter/compute_getpage_stuck_requests_total.libsonnet',
+    import 'sql_exporter/compute_getpage_max_inflight_stuck_time_ms.libsonnet',
     import 'sql_exporter/getpage_wait_seconds_bucket.libsonnet',
     import 'sql_exporter/getpage_wait_seconds_count.libsonnet',
     import 'sql_exporter/getpage_wait_seconds_sum.libsonnet',
