@@ -97,7 +97,7 @@ impl VirtualFile {
 
     pub async fn open_with_options_v2<P: AsRef<Utf8Path>>(
         path: P,
-        mut open_options: OpenOptions,
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))] mut open_options: OpenOptions,
         ctx: &RequestContext,
     ) -> Result<Self, std::io::Error> {
         let mode = get_io_mode();
