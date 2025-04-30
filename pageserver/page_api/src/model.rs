@@ -12,6 +12,7 @@
 //! TODO: these types should be used in the Pageserver for actual processing,
 //! instead of being cast into internal mirror types.
 
+use bytes::Bytes;
 use smallvec::{SmallVec, smallvec};
 use utils::lsn::Lsn;
 
@@ -60,7 +61,18 @@ pub type GetPageRequestBatch = SmallVec<[GetPageRequest; 8]>;
 
 #[derive(Clone, Debug)]
 pub struct GetPageResponse {
-    pub page_image: std::vec::Vec<u8>,
+    pub id: u64,
+    pub status: GetPageStatus,
+    pub reason: Option<String>,
+    pub page_image: Bytes,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum GetPageStatus {
+    Ok,
+    NotFound,
+    Invalid,
+    SlowDown,
 }
 
 #[derive(Clone, Debug)]
@@ -230,6 +242,29 @@ impl TryFrom<&proto::GetPageRequest> for GetPageRequest {
             common: (&value.common.ok_or(ProtocolError::Missing("common"))?).into(),
             rel: (&value.rel.ok_or(ProtocolError::Missing("rel"))?).try_into()?,
             block_number: value.block_number,
+        })
+    }
+}
+
+impl TryFrom<proto::GetPageResponse> for GetPageResponse {
+    type Error = ProtocolError;
+
+    fn try_from(value: proto::GetPageResponse) -> Result<GetPageResponse, ProtocolError> {
+        let status = match proto::GetPageStatus::from_i32(value.status) {
+            Some(proto::GetPageStatus::Unknown) => {
+                return Err(ProtocolError::InvalidValue("status"));
+            }
+            Some(proto::GetPageStatus::Ok) => GetPageStatus::Ok,
+            Some(proto::GetPageStatus::NotFound) => GetPageStatus::NotFound,
+            Some(proto::GetPageStatus::Invalid) => GetPageStatus::Invalid,
+            Some(proto::GetPageStatus::SlowDown) => GetPageStatus::SlowDown,
+            None => return Err(ProtocolError::InvalidValue("status")),
+        };
+        Ok(GetPageResponse {
+            id: value.id,
+            status,
+            reason: value.reason,
+            page_image: value.page_image,
         })
     }
 }

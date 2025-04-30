@@ -8,7 +8,6 @@
 // - neon-priority: used e.g. for metrics ("normal" or "low"), prefetches would be "low"
 //
 // TODO:
-// - Backpressure? Rate limiting?
 // - Health checks?
 // - Tracing? OpenTelemetry?
 // - Compression?
@@ -20,12 +19,6 @@ package page_service;
 service PageService {
   // Returns the total size of a database, as # of bytes.
   rpc DbSize (DbSizeRequest) returns (DbSizeResponse);
-
-  // Returns whether a relation exists.
-  rpc RelExists(RelExistsRequest) returns (RelExistsResponse);
-
-  // Returns the size of a relation, as # of blocks.
-  rpc RelSize (RelSizeRequest) returns (RelSizeResponse);
 
   // Fetches a base backup.
   rpc GetBaseBackup (GetBaseBackupRequest) returns (stream GetBaseBackupResponseChunk);
@@ -48,6 +41,13 @@ service PageService {
 
   // Fetches an SLRU segment.
   rpc GetSlruSegment (GetSlruSegmentRequest) returns (GetSlruSegmentResponse);
+
+  // Returns whether a relation exists.
+  rpc RelExists(RelExistsRequest) returns (RelExistsResponse);
+
+  // Returns the size of a relation, as # of blocks.
+  rpc RelSize (RelSizeRequest) returns (RelSizeResponse);
+
 }
 
 message RequestCommon {
@@ -80,6 +80,7 @@ message RelSizeResponse {
   uint32 num_blocks = 1;
 }
 
+// A single GetPage request.
 message GetPageRequest {
   // A request ID. Will be included in the response. Should be unique for
   // in-flight requests on the stream.
@@ -100,12 +101,36 @@ message GetPageRequestBatch {
   repeated GetPageRequest requests = 1;
 }
 
+// A GetPage response. May be emitted out of order.
+//
 // TODO: should this include page metadata, like reltag, LSN, and block number?
 message GetPageResponse {
   // The original request's ID.
   uint64 id = 1;
-  // The 8KB page image.
-  bytes page_image = 2;
+  // The response status code.
+  GetPageStatus status = 2;
+  // A string describing the status, if any.
+  optional string reason = 3;
+  // The 8KB page image. Empty if status != OK.
+  bytes page_image = 4;
+}
+
+// A GetPageResponse status code. Since we use a bidirectional stream, we don't
+// want to send errors as gRPC statuses, since this would terminate the stream.
+enum GetPageStatus {
+  // Unknown status. For backwards compatibility: used when the server sends a
+  // status code that the client doesn't know about.
+  UNKNOWN = 0;
+  // The request was successful.
+  OK = 1;
+  // The page did not exist. The tenant/timeline/shard has already been
+  // validated during stream setup.
+  NOT_FOUND = 2;
+  // The request was invalid.
+  INVALID = 3;
+  // The client is rate limited. Slow down and retry later.
+  // TODO: should we use this?
+  SLOW_DOWN = 4;
 }
 
 message DbSizeRequest {

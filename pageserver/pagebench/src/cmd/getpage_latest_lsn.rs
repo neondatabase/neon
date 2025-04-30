@@ -14,6 +14,7 @@ use pageserver_api::key::Key;
 use pageserver_api::keyspace::KeySpaceAccum;
 use pageserver_api::models::{PagestreamGetPageRequest, PagestreamRequest};
 use pageserver_api::shard::TenantShardId;
+use pageserver_page_api::model::{GetPageResponse, GetPageStatus};
 use rand::prelude::*;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -631,7 +632,8 @@ async fn client_grpc_stream(
 
         // Receive responses for the inflight requests
         if let Some(response) = response_stream.next().await {
-            response.unwrap(); // Ensure the response is successful
+            let response: GetPageResponse = response.unwrap().try_into().unwrap();
+            assert_eq!(response.status, GetPageStatus::Ok);
             let start = inflight.pop_front().unwrap();
             let end = Instant::now();
             shared_state.live_stats.request_done();

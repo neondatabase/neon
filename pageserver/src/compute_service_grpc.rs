@@ -263,6 +263,8 @@ impl PageService for PageServiceService {
 
             Ok(tonic::Response::new(proto::GetPageResponse {
                 id: req.id,
+                status: proto::GetPageStatus::Ok as i32,
+                reason: None,
                 page_image,
             }))
         }
@@ -270,6 +272,7 @@ impl PageService for PageServiceService {
         .await
     }
 
+    // TODO: take and emit model types
     async fn get_pages(
         &self,
         request: tonic::Request<tonic::Streaming<proto::GetPageRequestBatch>>,
@@ -314,7 +317,12 @@ impl PageService for PageServiceService {
                         )
                         .await?;
 
-                    yield proto::GetPageResponse { id: request.id, page_image };
+                    yield proto::GetPageResponse {
+                        id: request.id,
+                        status: proto::GetPageStatus::Ok as i32,
+                        reason: None,
+                        page_image,
+                    };
                 }
             }
         };

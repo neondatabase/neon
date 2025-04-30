@@ -28,6 +28,8 @@ pub enum PageserverClientError {
     ConnectError(#[from] tonic::transport::Error),
     #[error("could not perform request: {0}`")]
     RequestError(#[from] tonic::Status),
+    #[error("protocol error: {0}")]
+    ProtocolError(#[from] ProtocolError),
 
     #[error("could not perform request: {0}`")]
     InvalidUri(#[from] http::uri::InvalidUri),
@@ -102,10 +104,22 @@ impl PageserverClient {
 
         let request = proto::GetPageRequest::from(request);
         let response = client.get_page(tonic::Request::new(request)).await?;
+        let response: GetPageResponse = response.into_inner().try_into()?;
+        if response.status != GetPageStatus::Ok {
+            return Err(PageserverClientError::RequestError(tonic::Status::new(
+                tonic::Code::Internal,
+                format!(
+                    "{:?} {}",
+                    response.status,
+                    response.reason.unwrap_or_default()
+                ),
+            )));
+        }
 
-        Ok(response.into_inner().page_image)
+        Ok(response.page_image)
     }
 
+    // TODO: this should use model::GetPageRequest and GetPageResponse
     pub async fn get_pages(
         &self,
         requests: impl Stream<Item = proto::GetPageRequestBatch> + Send + 'static,

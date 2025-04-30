@@ -10,6 +10,7 @@ edition = "2024"
 # TODO: move Lsn to separate crate? This draws in a lot more dependencies
 utils.workspace = true
 
+bytes.workspace = true
 prost.workspace = true
 smallvec.workspace = true
 thiserror.workspace = true
