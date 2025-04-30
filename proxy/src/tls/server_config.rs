@@ -86,7 +86,7 @@ pub struct CertResolver {
 }
 
 impl CertResolver {
-    pub fn parse_new(key_path: &str, cert_path: &str) -> anyhow::Result<Self> {
+    fn parse_new(key_path: &str, cert_path: &str) -> anyhow::Result<Self> {
         let (priv_key, cert_chain) = parse_key_cert(key_path, cert_path)?;
         Self::new(priv_key, cert_chain)
     }
@@ -108,7 +108,7 @@ impl CertResolver {
         self.add_cert(priv_key, cert_chain)
     }
 
-    pub fn add_cert(
+    fn add_cert(
         &mut self,
         priv_key: PrivateKeyDer<'static>,
         cert_chain: Vec<CertificateDer<'static>>,
@@ -151,7 +151,7 @@ fn parse_key_cert(
     Ok((priv_key, cert_chain))
 }
 
-pub fn process_key_cert(
+fn process_key_cert(
     priv_key: PrivateKeyDer<'static>,
     cert_chain: Vec<CertificateDer<'static>>,
 ) -> anyhow::Result<(String, Arc<CertifiedKey>, TlsServerEndPoint)> {
