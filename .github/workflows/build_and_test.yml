@@ -824,7 +824,7 @@ jobs:
           - pg: v17
             debian: bookworm
     env:
-      VM_BUILDER_VERSION: v0.42.2
+      VM_BUILDER_VERSION: v0.46.0
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
