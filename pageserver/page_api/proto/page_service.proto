@@ -5,8 +5,13 @@
 // - neon-tenant-id: tenant ID ("7c4a1f9e3bd6470c8f3e21a65bd2e980")
 // - neon-shard-id: shard ID, as <number><count> in hex ("0b10" = shard 11 of 16)
 // - neon-timeline-id: timeline ID ("f08c4e9a2d5f76b1e3a7c2d8910f4b3e")
+// - neon-priority: used e.g. for metrics ("normal" or "low"), prefetches would be "low"
 //
-// TODO: what else? Priority? OpenTelemetry tracing?
+// TODO:
+// - Backpressure? Rate limiting?
+// - Health checks?
+// - Tracing? OpenTelemetry?
+// - Compression?
 //
 
 syntax = "proto3";
@@ -26,7 +31,7 @@ service PageService {
   rpc GetBaseBackup (GetBaseBackupRequest) returns (stream GetBaseBackupResponseChunk);
 
   // Fetches a page.
-  // TODO: remove this, use GetPages.
+  // TODO: remove this and use GetPages. Kept for benchmarks.
   rpc GetPage (GetPageRequest) returns (GetPageResponse);
 
   // Fetches pages.
@@ -34,7 +39,11 @@ service PageService {
   // This is implemented as a bidirectional streaming RPC for performance. Unary
   // requests incur costs for e.g. HTTP/2 stream setup, header parsing,
   // authentication, and so on -- with streaming, we only pay these costs during
-  // the initial stream setup. This doubles performance in benchmarks.
+  // the initial stream setup. This ~doubles throughput in benchmarks.
+  //
+  // NB: a status response (e.g. for errors) will terminate the stream. The
+  // stream may be shared by e.g. multiple Postgres backends, so we should avoid
+  // this. Most errors are instead propagated in the GetPageResponse.
   rpc GetPages (stream GetPageRequest) returns (stream GetPageResponse);
 
   // Fetches an SLRU segment.
