@@ -113,7 +113,7 @@ impl VirtualFile {
         if set_o_direct {
             #[cfg(target_os = "linux")]
             {
-                open_options.custom_flags(nix::libc::O_DIRECT);
+                open_options = open_options.custom_flags(nix::libc::O_DIRECT);
             }
             #[cfg(not(target_os = "linux"))]
             unreachable!(

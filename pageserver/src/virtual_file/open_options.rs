@@ -126,7 +126,7 @@ impl OpenOptions {
         }
     }
 
-    pub fn mode(&mut self, mode: u32) -> &mut Self {
+    pub fn mode(mut self, mode: u32) -> Self {
         match &mut self.inner {
             Inner::StdFs(x) => {
                 let _ = x.mode(mode);
@@ -139,7 +139,7 @@ impl OpenOptions {
         self
     }
 
-    pub fn custom_flags(&mut self, flags: i32) -> &mut Self {
+    pub fn custom_flags(mut self, flags: i32) -> Self {
         match &mut self.inner {
             Inner::StdFs(x) => {
                 let _ = x.custom_flags(flags);
