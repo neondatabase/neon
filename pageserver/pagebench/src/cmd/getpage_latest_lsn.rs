@@ -500,6 +500,7 @@ async fn client_grpc(
                     .to_rel_block()
                     .expect("we filter non-rel-block keys out above");
                 pageserver_page_api::model::GetPageRequest {
+                    id: 0, // TODO
                     common: pageserver_page_api::model::RequestCommon {
                         request_lsn: if rng.gen_bool(args.req_latest_probability) {
                             Lsn::MAX
@@ -605,6 +606,7 @@ async fn client_grpc_stream(
                     .to_rel_block()
                     .expect("we filter non-rel-block keys out above");
                 pageserver_page_api::model::GetPageRequest {
+                    id: 0, // TODO
                     common: pageserver_page_api::model::RequestCommon {
                         request_lsn: if rng.gen_bool(args.req_latest_probability) {
                             Lsn::MAX

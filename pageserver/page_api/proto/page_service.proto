@@ -81,13 +81,20 @@ message RelSizeResponse {
 }
 
 message GetPageRequest {
-  RequestCommon common = 1;
-  RelTag rel = 2;
-  uint32 block_number = 3;
+  // A request ID. Will be included in the response. Should be unique for
+  // in-flight requests on the stream.
+  uint64 id = 1;
+  RequestCommon common = 2;
+  RelTag rel = 3;
+  uint32 block_number = 4;
 }
 
+// TODO: should this include page metadata, like reltag, LSN, and block number?
 message GetPageResponse {
-  bytes page_image = 1;
+  // The original request's ID.
+  uint64 id = 1;
+  // The 8KB page image.
+  bytes page_image = 2;
 }
 
 message DbSizeRequest {

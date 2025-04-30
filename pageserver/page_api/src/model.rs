@@ -49,6 +49,7 @@ pub struct RelSizeResponse {
 
 #[derive(Clone, Debug)]
 pub struct GetPageRequest {
+    pub id: u64,
     pub common: RequestCommon,
     pub rel: RelTag,
     pub block_number: u32,
@@ -188,6 +189,7 @@ impl TryFrom<&proto::RelSizeRequest> for RelSizeRequest {
 impl From<&GetPageRequest> for proto::GetPageRequest {
     fn from(value: &GetPageRequest) -> proto::GetPageRequest {
         proto::GetPageRequest {
+            id: value.id,
             common: Some((&value.common).into()),
             rel: Some((&value.rel).into()),
             block_number: value.block_number,
@@ -199,6 +201,7 @@ impl TryFrom<&proto::GetPageRequest> for GetPageRequest {
 
     fn try_from(value: &proto::GetPageRequest) -> Result<GetPageRequest, ProtocolError> {
         Ok(GetPageRequest {
+            id: value.id,
             common: (&value.common.ok_or(ProtocolError::Missing("common"))?).into(),
             rel: (&value.rel.ok_or(ProtocolError::Missing("rel"))?).try_into()?,
             block_number: value.block_number,

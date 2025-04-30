@@ -261,7 +261,10 @@ impl PageService for PageServiceService {
                 )
                 .await?;
 
-            Ok(tonic::Response::new(proto::GetPageResponse { page_image }))
+            Ok(tonic::Response::new(proto::GetPageResponse {
+                id: req.id,
+                page_image,
+            }))
         }
         .instrument(span)
         .await
@@ -308,7 +311,7 @@ impl PageService for PageServiceService {
                     )
                     .await?;
 
-                yield proto::GetPageResponse { page_image };
+                yield proto::GetPageResponse { id: request.id, page_image };
             }
         };
 
