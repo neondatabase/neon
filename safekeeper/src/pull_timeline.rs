@@ -438,8 +438,15 @@ pub async fn handle_request(
         }
     }
 
-    if statuses.is_empty() {
-        bail!("no successful status response from any safekeeper");
+    // Allow missing responses from up to one safekeeper (say due to downtime)
+    // e.g. if we created a timeline on PS A and B, with C being offline. Then B goes
+    // offline and C comes online. Then we want a pull on C with A and B as hosts to work.
+    let min_required_successful = (http_hosts.len() - 1).max(1);
+    if statuses.len() < min_required_successful {
+        bail!(
+            "only got {} successful status responses. required: {min_required_successful}",
+            statuses.len()
+        )
     }
 
     // Find the most advanced safekeeper
