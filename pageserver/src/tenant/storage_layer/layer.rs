@@ -4,6 +4,7 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime};
 
 use crate::PERF_TRACE_TARGET;
+use crate::metrics::{ONDEMAND_DOWNLOAD_BYTES, ONDEMAND_DOWNLOAD_COUNT};
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::keyspace::KeySpace;
@@ -1254,6 +1255,14 @@ impl LayerInner {
                 }
 
                 self.access_stats.record_residence_event();
+
+                let task_kind: &'static str = ctx.task_kind().into();
+                ONDEMAND_DOWNLOAD_BYTES
+                    .with_label_values(&[task_kind])
+                    .inc_by(self.desc.file_size);
+                ONDEMAND_DOWNLOAD_COUNT
+                    .with_label_values(&[task_kind])
+                    .inc();
 
                 Ok(self.initialize_after_layer_is_on_disk(permit))
             }
