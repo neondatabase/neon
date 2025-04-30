@@ -43,7 +43,7 @@ impl OpenOptions {
         self.write
     }
 
-    pub fn read(&mut self, read: bool) -> &mut OpenOptions {
+    pub fn read(mut self, read: bool) -> Self {
         match &mut self.inner {
             Inner::StdFs(x) => {
                 let _ = x.read(read);
@@ -56,7 +56,7 @@ impl OpenOptions {
         self
     }
 
-    pub fn write(&mut self, write: bool) -> &mut OpenOptions {
+    pub fn write(mut self, write: bool) -> Self {
         self.write = write;
         match &mut self.inner {
             Inner::StdFs(x) => {
@@ -70,7 +70,7 @@ impl OpenOptions {
         self
     }
 
-    pub fn create(&mut self, create: bool) -> &mut OpenOptions {
+    pub fn create(mut self, create: bool) -> Self {
         match &mut self.inner {
             Inner::StdFs(x) => {
                 let _ = x.create(create);
@@ -83,7 +83,7 @@ impl OpenOptions {
         self
     }
 
-    pub fn create_new(&mut self, create_new: bool) -> &mut OpenOptions {
+    pub fn create_new(mut self, create_new: bool) -> Self {
         match &mut self.inner {
             Inner::StdFs(x) => {
                 let _ = x.create_new(create_new);
@@ -96,7 +96,7 @@ impl OpenOptions {
         self
     }
 
-    pub fn truncate(&mut self, truncate: bool) -> &mut OpenOptions {
+    pub fn truncate(mut self, truncate: bool) -> Self {
         match &mut self.inner {
             Inner::StdFs(x) => {
                 let _ = x.truncate(truncate);
@@ -127,7 +127,7 @@ impl OpenOptions {
 }
 
 impl std::os::unix::prelude::OpenOptionsExt for OpenOptions {
-    fn mode(&mut self, mode: u32) -> &mut OpenOptions {
+    fn mode(&mut self, mode: u32) -> &mut Self {
         match &mut self.inner {
             Inner::StdFs(x) => {
                 let _ = x.mode(mode);
@@ -140,7 +140,7 @@ impl std::os::unix::prelude::OpenOptionsExt for OpenOptions {
         self
     }
 
-    fn custom_flags(&mut self, flags: i32) -> &mut OpenOptions {
+    fn custom_flags(&mut self, flags: i32) -> &mut Self {
         match &mut self.inner {
             Inner::StdFs(x) => {
                 let _ = x.custom_flags(flags);
