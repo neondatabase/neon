@@ -33,7 +33,6 @@ def test_lfc_prefetch(neon_simple_env: NeonEnv, n_readers: int, n_writers: int, 
             "shared_buffers=128MB",
             "enable_bitmapscan=off",
             "enable_seqscan=off",
-            "autovacuum=off",
             f"neon.file_cache_chunk_size={chunk_size}",
             "neon.store_prefetch_result_in_lfc=on",
         ],
@@ -127,7 +126,7 @@ def test_lfc_async_prefetch_performance(neon_simple_env: NeonEnv, zenbenchmark):
     cur.execute(f"insert into account values (generate_series(1,{n_records}))")
     cur.execute("vacuum account")
 
-    with zenbenchmark.record_duration("do_not_store_store_prefetch_results"):
+    with zenbenchmark.record_duration("do_not_store_prefetch_results"):
         cur.execute("set neon.store_prefetch_result_in_lfc=off")
         for _ in range(n_iterations):
             cur.execute(
