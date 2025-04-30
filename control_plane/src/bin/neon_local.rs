@@ -1499,8 +1499,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             };
 
             let endpoint_storage_auth_token = env.generate_auth_token(&claims)?;
-            let addr = env.endpoint_storage.listen_addr;
-            let endpoint_storage_addr = format!("http://{}:{}", addr.ip(), addr.port());
+            let endpoint_storage_addr = env.endpoint_storage.listen_addr.to_string();
 
             println!("Starting existing endpoint {endpoint_id}...");
             endpoint

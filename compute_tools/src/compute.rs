@@ -334,6 +334,7 @@ struct StartVmMonitorResult {
 #[derive(serde::Serialize, Default)]
 pub struct PrewarmStatus {
     status: compute_api::responses::PrewarmStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     total: i32,
     prewarmed: i32,
@@ -360,7 +361,7 @@ impl TryFrom<&ParsedSpec> for EndpointStoragePair {
         let tenant_id = pspec.tenant_id;
         let timeline_id = pspec.timeline_id;
 
-        let url = format!("{base_uri}/{tenant_id}/{timeline_id}/{endpoint_id}/{KEY}");
+        let url = format!("http://{base_uri}/{tenant_id}/{timeline_id}/{endpoint_id}/{KEY}");
         let Some(ref token) = pspec.endpoint_storage_token else {
             return Err("pspec.endpoint_storage_token missing");
         };
