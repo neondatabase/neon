@@ -306,10 +306,11 @@ impl SafekeeperReconcilerInner {
                     req,
                     async |client| client.pull_timeline(&pull_req).await,
                     |resp| {
-                        tracing::info!(
-                            "pulled timeline from {} onto {req_host}",
-                            resp.safekeeper_host,
-                        );
+                        if let Some(host) = resp.safekeeper_host {
+                            tracing::info!("pulled timeline from {host} onto {req_host}");
+                        } else {
+                            tracing::info!("timeline already present on safekeeper on {req_host}");
+                        }
                     },
                     req_cancel,
                 )

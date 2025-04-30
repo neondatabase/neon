@@ -497,6 +497,24 @@ pub(crate) static WAIT_LSN_IN_PROGRESS_GLOBAL_MICROS: Lazy<IntCounter> = Lazy::n
     .expect("failed to define a metric")
 });
 
+pub(crate) static ONDEMAND_DOWNLOAD_BYTES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_ondemand_download_bytes_total",
+        "Total bytes of layers on-demand downloaded",
+        &["task_kind"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static ONDEMAND_DOWNLOAD_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_ondemand_download_count",
+        "Total count of layers on-demand downloaded",
+        &["task_kind"]
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) mod wait_ondemand_download_time {
     use super::*;
     const WAIT_ONDEMAND_DOWNLOAD_TIME_BUCKETS: &[f64] = &[
@@ -2180,6 +2198,10 @@ impl BasebackupQueryTimeOngoingRecording<'_> {
         // If you want to change categorize of a specific error, also change it in `log_query_error`.
         let metric = match res {
             Ok(_) => &self.parent.ok,
+            Err(QueryError::Shutdown) => {
+                // Do not observe ok/err for shutdown
+                return;
+            }
             Err(QueryError::Disconnected(ConnectionError::Io(io_error)))
                 if is_expected_io_error(io_error) =>
             {

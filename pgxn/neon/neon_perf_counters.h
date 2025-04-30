@@ -57,6 +57,18 @@ typedef struct
 	uint64		getpage_prefetch_requests_total;
 	uint64		getpage_sync_requests_total;
 
+	/* 
+	 * Total number of Getpage requests left without an answer for more than
+	 * pageserver_response_log_timeout but less than pageserver_response_disconnect_timeout
+	 */
+	uint64 compute_getpage_stuck_requests_total;
+
+	/* 
+	 * Longest waiting time for active stuck requests. If a stuck request gets a
+	 * response or disconnects, this metric is updated
+	 */
+	uint64 compute_getpage_max_inflight_stuck_time_ms;
+
 	/*
 	 * Total number of readahead misses; consisting of either prefetches that
 	 * don't satisfy the LSN bounds, or cases where no readahead was issued
