@@ -24,9 +24,6 @@ pub(crate) enum HandshakeError {
     #[error("protocol violation")]
     ProtocolViolation,
 
-    #[error("missing certificate")]
-    MissingCertificate,
-
     #[error("{0}")]
     StreamUpgradeError(#[from] StreamUpgradeError),
 
@@ -42,10 +39,6 @@ impl ReportableError for HandshakeError {
         match self {
             HandshakeError::EarlyData => crate::error::ErrorKind::User,
             HandshakeError::ProtocolViolation => crate::error::ErrorKind::User,
-            // This error should not happen, but will if we have no default certificate and
-            // the client sends no SNI extension.
-            // If they provide SNI then we can be sure there is a certificate that matches.
-            HandshakeError::MissingCertificate => crate::error::ErrorKind::Service,
             HandshakeError::StreamUpgradeError(upgrade) => match upgrade {
                 StreamUpgradeError::AlreadyTls => crate::error::ErrorKind::Service,
                 StreamUpgradeError::Io(_) => crate::error::ErrorKind::ClientDisconnect,
@@ -161,10 +154,8 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                             }
                         }
 
-                        let (_, tls_server_end_point) = tls
-                            .cert_resolver
-                            .resolve(conn_info.server_name())
-                            .ok_or(HandshakeError::MissingCertificate)?;
+                        let (_, tls_server_end_point) =
+                            tls.cert_resolver.resolve(conn_info.server_name());
 
                         stream = PqStream {
                             framed: Framed {

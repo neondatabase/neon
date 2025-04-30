@@ -26,10 +26,8 @@ pub fn configure_tls(
     certs_dir: Option<&String>,
     allow_tls_keylogfile: bool,
 ) -> anyhow::Result<TlsConfig> {
-    let mut cert_resolver = CertResolver::new();
-
     // add default certificate
-    cert_resolver.add_cert_path(key_path, cert_path, true)?;
+    let mut cert_resolver = CertResolver::parse_new(key_path, cert_path)?;
 
     // add extra certificates
     if let Some(certs_dir) = certs_dir {
@@ -41,11 +39,8 @@ pub fn configure_tls(
                 let key_path = path.join("tls.key");
                 let cert_path = path.join("tls.crt");
                 if key_path.exists() && cert_path.exists() {
-                    cert_resolver.add_cert_path(
-                        &key_path.to_string_lossy(),
-                        &cert_path.to_string_lossy(),
-                        false,
-                    )?;
+                    cert_resolver
+                        .add_cert_path(&key_path.to_string_lossy(), &cert_path.to_string_lossy())?;
                 }
             }
         }
@@ -84,42 +79,42 @@ pub fn configure_tls(
     })
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct CertResolver {
     certs: HashMap<String, (Arc<rustls::sign::CertifiedKey>, TlsServerEndPoint)>,
-    default: Option<(Arc<rustls::sign::CertifiedKey>, TlsServerEndPoint)>,
+    default: (Arc<rustls::sign::CertifiedKey>, TlsServerEndPoint),
 }
 
 impl CertResolver {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn parse_new(key_path: &str, cert_path: &str) -> anyhow::Result<Self> {
+        let (priv_key, cert_chain) = parse_key_cert(key_path, cert_path)?;
+        Self::new(priv_key, cert_chain)
     }
 
-    fn add_cert_path(
-        &mut self,
-        key_path: &str,
-        cert_path: &str,
-        is_default: bool,
-    ) -> anyhow::Result<()> {
-        let (priv_key, cert_chain) = parse_key_cert(key_path, cert_path)?;
+    pub fn new(
+        priv_key: PrivateKeyDer<'static>,
+        cert_chain: Vec<CertificateDer<'static>>,
+    ) -> anyhow::Result<Self> {
+        let (common_name, cert, tls_server_end_point) = process_key_cert(priv_key, cert_chain)?;
 
-        self.add_cert(priv_key, cert_chain, is_default)
+        let mut certs = HashMap::new();
+        let default = (cert.clone(), tls_server_end_point);
+        certs.insert(common_name, (cert, tls_server_end_point));
+        Ok(Self { certs, default })
+    }
+
+    fn add_cert_path(&mut self, key_path: &str, cert_path: &str) -> anyhow::Result<()> {
+        let (priv_key, cert_chain) = parse_key_cert(key_path, cert_path)?;
+        self.add_cert(priv_key, cert_chain)
     }
 
     pub fn add_cert(
         &mut self,
         priv_key: PrivateKeyDer<'static>,
         cert_chain: Vec<CertificateDer<'static>>,
-        is_default: bool,
     ) -> anyhow::Result<()> {
         let (common_name, cert, tls_server_end_point) = process_key_cert(priv_key, cert_chain)?;
-
-        if is_default {
-            self.default = Some((cert.clone(), tls_server_end_point));
-        }
-
         self.certs.insert(common_name, (cert, tls_server_end_point));
-
         Ok(())
     }
 
@@ -203,7 +198,7 @@ impl rustls::server::ResolvesServerCert for CertResolver {
         &self,
         client_hello: rustls::server::ClientHello<'_>,
     ) -> Option<Arc<rustls::sign::CertifiedKey>> {
-        self.resolve(client_hello.server_name()).map(|x| x.0)
+        Some(self.resolve(client_hello.server_name()).0)
     }
 }
 
@@ -211,7 +206,7 @@ impl CertResolver {
     pub fn resolve(
         &self,
         server_name: Option<&str>,
-    ) -> Option<(Arc<rustls::sign::CertifiedKey>, TlsServerEndPoint)> {
+    ) -> (Arc<rustls::sign::CertifiedKey>, TlsServerEndPoint) {
         // loop here and cut off more and more subdomains until we find
         // a match to get a proper wildcard support. OTOH, we now do not
         // use nested domains, so keep this simple for now.
@@ -221,7 +216,7 @@ impl CertResolver {
         if let Some(mut sni_name) = server_name {
             loop {
                 if let Some(cert) = self.certs.get(sni_name) {
-                    return Some(cert.clone());
+                    return cert.clone();
                 }
                 if let Some((_, rest)) = sni_name.split_once('.') {
                     sni_name = rest;

@@ -98,8 +98,7 @@ fn generate_tls_config<'a>(
                 .with_no_client_auth()
                 .with_single_cert(vec![cert.clone()], key.clone_key())?;
 
-        let mut cert_resolver = CertResolver::new();
-        cert_resolver.add_cert(key, vec![cert], true)?;
+        let cert_resolver = CertResolver::new(key, vec![cert])?;
 
         let common_names = cert_resolver.get_common_names();
 
