@@ -42,8 +42,8 @@ pub(in crate::http) async fn prewarm(state: State, pair: EndpointStoragePair) ->
 
 pub(in crate::http) async fn offload(state: State, pair: EndpointStoragePair) -> StatusCode {
     if state.prewarm_offload(pair).await {
-        return StatusCode::OK;
+        StatusCode::OK
     } else {
-        return StatusCode::TOO_MANY_REQUESTS;
+        StatusCode::TOO_MANY_REQUESTS
     }
 }
