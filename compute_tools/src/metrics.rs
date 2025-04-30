@@ -98,7 +98,7 @@ pub(crate) static PG_TOTAL_DOWNTIME_MS: Lazy<GenericCounter<AtomicU64>> = Lazy::
 });
 
 /// Needed as neon.file_cache_prewarm_batch == 0 doesn't mean we never tried to prewarm.
-/// On the other hand, smth. like LFC_PREWARMED_PAGES is excessive as we can query this
+/// On the other hand, LFC_PREWARMED_PAGES is excessive as we can query this
 /// directly from extension
 pub(crate) static LFC_PREWARM_REQUESTS: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(

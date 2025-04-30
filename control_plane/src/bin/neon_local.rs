@@ -1488,18 +1488,10 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 None
             };
 
-            #[derive(serde::Serialize)]
-            struct EndpointStorageAuthClaims {
-                tenant_id: TenantId,
-                timeline_id: TimelineId,
-                endpoint_id: String,
-                exp: u64,
-            }
-            let exp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_secs()
-                + 86400;
-            let claims = EndpointStorageAuthClaims {
+            let exp = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?
+                + Duration::from_secs(86400))
+            .as_secs();
+            let claims = endpoint_storage::claims::EndpointClaims {
                 tenant_id: endpoint.tenant_id,
                 timeline_id: endpoint.timeline_id,
                 endpoint_id: endpoint_id.to_string(),

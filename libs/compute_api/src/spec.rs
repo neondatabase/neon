@@ -173,8 +173,11 @@ pub struct ComputeSpec {
     /// Example: config-shy-breeze-123-collector-monitoring.neon-telemetry.svc.cluster.local:10514
     pub logs_export_host: Option<String>,
 
+    // Address of endpoint storage service
     pub endpoint_storage_addr: Option<String>,
-    pub endpoint_storage_token: Option<String>,
+
+    // JWT for authorizing requests to endpoint storage service
+    pub endpoint_storage_auth_token: Option<String>,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.

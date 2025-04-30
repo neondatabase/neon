@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -9,6 +10,7 @@ use std::time::{Duration, Instant};
 use std::{env, fs};
 
 use anyhow::{Context, Result};
+use async_compression::tokio::bufread::{ZstdDecoder, ZstdEncoder};
 use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
 use compute_api::responses::{
@@ -21,6 +23,7 @@ use compute_api::spec::{
 use futures::StreamExt;
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
+use http::StatusCode;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use once_cell::sync::Lazy;
@@ -28,6 +31,8 @@ use postgres;
 use postgres::NoTls;
 use postgres::error::SqlState;
 use remote_storage::{DownloadError, RemotePath};
+use reqwest::Client;
+use tokio::io::AsyncReadExt;
 use tokio::spawn;
 use tracing::{Instrument, debug, error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
@@ -206,7 +211,7 @@ pub struct ParsedSpec {
     pub pageserver_connstr: String,
     pub safekeeper_connstrings: Vec<String>,
     pub storage_auth_token: Option<String>,
-    pub endpoint_storage_addr: Option<String>,
+    pub endpoint_storage_addr: Option<SocketAddr>,
     pub endpoint_storage_token: Option<String>,
 }
 
@@ -261,12 +266,15 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
                 .or(Err("invalid timeline id"))?
         };
 
-        let endpoint_storage_addr = spec
+        let endpoint_storage_addr: Option<SocketAddr> = spec
             .endpoint_storage_addr
             .clone()
-            .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_addr"));
+            .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_addr"))
+            .unwrap_or_default()
+            .parse()
+            .ok();
         let endpoint_storage_token = spec
-            .endpoint_storage_token
+            .endpoint_storage_auth_token
             .clone()
             .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_token"));
 
@@ -321,6 +329,44 @@ struct StartVmMonitorResult {
     token: tokio_util::sync::CancellationToken,
     #[cfg(target_os = "linux")]
     vm_monitor: Option<tokio::task::JoinHandle<Result<()>>>,
+}
+
+#[derive(serde::Serialize, Default)]
+pub struct PrewarmStatus {
+    status: compute_api::responses::PrewarmStatus,
+    error: Option<String>,
+    total: i32,
+    prewarmed: i32,
+    skipped: i32,
+}
+
+/// A pair of uri and a token to query endpoint storage for LFC prewarm-related tasks
+pub struct EndpointStoragePair {
+    pub url: String,
+    pub token: String,
+}
+
+const KEY: &str = "lfc_state";
+
+impl TryFrom<&ParsedSpec> for EndpointStoragePair {
+    type Error = &'static str;
+    fn try_from(pspec: &ParsedSpec) -> Result<Self, Self::Error> {
+        let Some(ref endpoint_id) = pspec.spec.endpoint_id else {
+            return Err("pspec.endpoint_id missing");
+        };
+        let Some(ref base_uri) = pspec.endpoint_storage_addr else {
+            return Err("pspec.endpoint_storage_addr missing");
+        };
+        let tenant_id = pspec.tenant_id;
+        let timeline_id = pspec.timeline_id;
+
+        let url = format!("{base_uri}/{tenant_id}/{timeline_id}/{endpoint_id}/{KEY}");
+        let Some(ref token) = pspec.endpoint_storage_token else {
+            return Err("pspec.endpoint_storage_token missing");
+        };
+        let token = token.clone();
+        Ok(EndpointStoragePair { url, token })
+    }
 }
 
 impl ComputeNode {
@@ -758,24 +804,31 @@ impl ComputeNode {
         info!(?metrics, postmaster_pid = %postmaster_pid, "compute start finished");
 
         let features = &pspec.spec.features;
-        if features.contains(&ComputeFeature::PrewarmLfcOnStartup) {
-            let cloned = self.clone();
-            rt.spawn(async move { cloned.prewarm_lfc().await });
+        if !features.contains(&ComputeFeature::PrewarmLfcOnStartup) {
+            return Ok(());
         }
 
-        Ok(())
-    }
-
-    async fn prewarm_lfc(self: &Arc<Self>) {
-        let parts = match self.try_into() {
-            Ok(parts) => parts,
-            Err(err) => {
-                error!(%err, "prewarming LFC on endpoint startup failed");
-                return;
+        let clone = self.clone();
+        rt.spawn(async move {
+            let pair;
+            {
+                let Some(ref pspec) = clone.state.lock().unwrap().pspec else {
+                    error!("prewarming LFC failed: pspec is missing");
+                    return;
+                };
+                pair = pspec.try_into();
             }
-        };
-        // Error logged inside. Compute prewarming doesn't impact its ability to start
-        let _ = crate::http::prewarm_lfc(parts, axum::extract::State(self.clone())).await;
+            let pair = match pair {
+                Ok(v) => v,
+                Err(err) => {
+                    error!(%err, "prewarming LFC failed");
+                    return;
+                }
+            };
+            clone.prewarm(pair).await;
+        });
+
+        Ok(())
     }
 
     #[instrument(skip_all)]
@@ -2160,6 +2213,158 @@ LIMIT 100",
             .unwrap();
         if !unchanged {
             info!("Pageserver config changed");
+        }
+    }
+
+    // If prewarm failed, we want to get overall number of segments as well as done ones.
+    // However, this function should be reliable even if querying postgres failed.
+    pub async fn prewarm_status(&self) -> PrewarmStatus {
+        info!("requesting LFC prewarm status from postgres");
+        let mut status = PrewarmStatus::default();
+        {
+            let state = &self.state.lock().unwrap().prewarm_state;
+            status.status = state.status;
+            status.error = state.error.clone();
+        }
+
+        let res = match ComputeNode::get_maintenance_client(&self.tokio_conn_conf).await {
+            Ok(res) => res,
+            Err(err) => {
+                error!(%err, "connecting to postgres");
+                return status;
+            }
+        };
+        let row = match res.query_one("select * from get_prewarm_info()", &[]).await {
+            Ok(row) => row,
+            Err(err) => {
+                error!(%err, "querying LFC prewarm status");
+                return status;
+            }
+        };
+        status.total = row.try_get(0).unwrap_or_default();
+        status.prewarmed = row.try_get(1).unwrap_or_default();
+        status.skipped = row.try_get(2).unwrap_or_default();
+
+        status
+    }
+
+    pub async fn prewarm_offload_status(&self) -> PrewarmOffloadState {
+        self.state.lock().unwrap().prewarm_offload_state.clone()
+    }
+
+    pub async fn prewarm(self: &Arc<Self>, pair: EndpointStoragePair) -> bool {
+        crate::metrics::LFC_PREWARM_REQUESTS.inc();
+        use compute_api::responses::PrewarmStatus::*;
+        {
+            let status = &mut self.state.lock().unwrap().prewarm_state.status;
+            if *status == Prewarming {
+                return false;
+            }
+            *status = Prewarming;
+        }
+
+        let cloned = self.clone();
+        spawn(async move {
+            let Err(err) = cloned.prewarm_impl(pair).await else {
+                cloned.state.lock().unwrap().prewarm_state.status = Completed;
+                return;
+            };
+            error!(%err);
+            let state = &mut cloned.state.lock().unwrap().prewarm_state;
+            state.status = Failed;
+            state.error = Some(err.to_string());
+        });
+        true
+    }
+
+    async fn prewarm_impl(
+        &self,
+        EndpointStoragePair { url, token }: EndpointStoragePair,
+    ) -> Result<()> {
+        info!(%url, "requesting LFC state from endpoint storage");
+
+        let request = Client::new().get(url.clone()).bearer_auth(token);
+        let res = request.send().await.context("querying endpoint storage")?;
+        let status = res.status();
+        if status != StatusCode::OK {
+            anyhow::bail!("{status} querying endpoint storage")
+        }
+
+        let mut uncompressed = Vec::new();
+        let lfc_state = res
+            .bytes()
+            .await
+            .context("getting request body from endpoint storage")?;
+        ZstdDecoder::new(lfc_state.iter().as_slice())
+            .read_to_end(&mut uncompressed)
+            .await
+            .context("decoding LFC state")?;
+        let uncompressed_len = uncompressed.len();
+        info!(%url, "downloaded LFC state, uncompressed size {uncompressed_len}, loading into postgres");
+
+        ComputeNode::get_maintenance_client(&self.tokio_conn_conf)
+            .await
+            .context("connecting to postgres")?
+            .query_one("select prewarm_local_cache($1)", &[&uncompressed])
+            .await
+            .context("loading LFC state into postgres")
+            .map(|_| ())
+    }
+
+    pub async fn prewarm_offload(self: &Arc<Self>, pair: EndpointStoragePair) -> bool {
+        crate::metrics::LFC_PREWARM_OFFLOAD_REQUESTS.inc();
+        use compute_api::responses::PrewarmOffloadStatus::*;
+        {
+            let status = &mut self.state.lock().unwrap().prewarm_offload_state.status;
+            if *status == Offloading {
+                return false;
+            }
+            *status = Offloading;
+        }
+
+        let cloned = self.clone();
+        spawn(async move {
+            let Err(err) = cloned.prewarm_offload_impl(pair).await else {
+                cloned.state.lock().unwrap().prewarm_offload_state.status = Completed;
+                return;
+            };
+            error!(%err);
+            let state = &mut cloned.state.lock().unwrap().prewarm_offload_state;
+            state.status = Failed;
+            state.error = Some(err.to_string());
+        });
+        true
+    }
+
+    async fn prewarm_offload_impl(
+        &self,
+        EndpointStoragePair { url, token }: EndpointStoragePair,
+    ) -> Result<()> {
+        info!(%url, "requesting LFC state from postgres");
+
+        let mut compressed = Vec::new();
+        ComputeNode::get_maintenance_client(&self.tokio_conn_conf)
+            .await
+            .context("connecting to postgres")?
+            .query_one("select get_local_cache_state()", &[])
+            .await
+            .context("querying LFC state")?
+            .try_get::<usize, &[u8]>(0)
+            .context("deserializing LFC state")
+            .map(ZstdEncoder::new)?
+            .read_to_end(&mut compressed)
+            .await
+            .context("compressing LFC state")?;
+        let compressed_len = compressed.len();
+        info!(%url, "downloaded LFC state, compressed size {compressed_len}, writing to endpoint storage");
+
+        let request = Client::new().put(url).bearer_auth(token).body(compressed);
+        match request.send().await {
+            Ok(res) if res.status() == StatusCode::OK => Ok(()),
+            Ok(res) => {
+                anyhow::bail!("Error writing to endpoint storage: {}", res.status())
+            }
+            Err(err) => Err(err).context("writing to endpoint storage"),
         }
     }
 }

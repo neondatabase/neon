@@ -84,14 +84,14 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                 let unauthenticated_router =
                     Router::<Arc<ComputeNode>>::new().route("/metrics", get(metrics::get_metrics));
 
-                use prewarm_lfc::*;
                 let authenticated_router = Router::<Arc<ComputeNode>>::new()
-                    .route("/prewarm_lfc", post(prewarm_lfc))
-                    .route("/prewarm_lfc_status", get(prewarm_lfc_status))
-                    .route("/prewarm_lfc_offload", post(prewarm_lfc_offload))
                     .route(
-                        "/prewarm_lfc_offload_status",
-                        get(prewarm_lfc_offload_status),
+                        "/lfc/prewarm",
+                        get(prewarm_lfc::status).post(prewarm_lfc::prewarm),
+                    )
+                    .route(
+                        "/lfc/offload",
+                        get(prewarm_lfc::offload_status).post(prewarm_lfc::offload),
                     )
                     .route("/check_writability", post(check_writability::is_writable))
                     .route("/configure", post(configure::configure))

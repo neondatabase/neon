@@ -4,7 +4,7 @@
 //! script which will use local paths.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -20,7 +20,9 @@ use utils::auth::encode_from_key_file;
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 
 use crate::broker::StorageBroker;
-use crate::endpoint_storage::{ENDPOINT_STORAGE_REMOTE_STORAGE_DIR, EndpointStorage};
+use crate::endpoint_storage::{
+    ENDPOINT_STORAGE_DEFAULT_ADDR, ENDPOINT_STORAGE_REMOTE_STORAGE_DIR, EndpointStorage,
+};
 use crate::pageserver::{PAGESERVER_REMOTE_STORAGE_DIR, PageServerNode};
 use crate::safekeeper::SafekeeperNode;
 
@@ -244,7 +246,7 @@ impl Default for NeonStorageControllerConf {
 impl Default for EndpointStorageConf {
     fn default() -> Self {
         Self {
-            listen_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0),
+            listen_addr: ENDPOINT_STORAGE_DEFAULT_ADDR,
         }
     }
 }

@@ -69,13 +69,13 @@ pub enum PrewarmOffloadStatus {
 #[derive(Serialize, Default, Debug, Deserialize, Clone)]
 pub struct PrewarmState {
     pub status: PrewarmStatus,
-    pub error: String,
+    pub error: Option<String>,
 }
 
 #[derive(Serialize, Default, Debug, Deserialize, Clone)]
 pub struct PrewarmOffloadState {
     pub status: PrewarmOffloadStatus,
-    pub error: String,
+    pub error: Option<String>,
 }
 
 /// Response of the /status API
