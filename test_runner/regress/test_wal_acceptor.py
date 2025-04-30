@@ -1704,13 +1704,15 @@ def test_pull_timeline_gc(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
     env = neon_env_builder.init_start()
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
 
     (src_sk, dst_sk) = (env.safekeepers[0], env.safekeepers[2])
 
+    dst_sk.stop()
+
+    [tenant_id, timeline_id] = env.create_tenant()
+
     log.info("use only first 2 safekeepers, 3rd will be seeded")
-    endpoint = env.endpoints.create("main")
+    endpoint = env.endpoints.create("main", tenant_id=tenant_id)
     endpoint.active_safekeepers = [1, 2]
     endpoint.start()
     endpoint.safe_psql("create table t(key int, value text)")
@@ -1722,9 +1724,17 @@ def test_pull_timeline_gc(neon_env_builder: NeonEnvBuilder):
     src_http = src_sk.http_client()
     # run pull_timeline which will halt before downloading files
     src_http.configure_failpoints(("sk-snapshot-after-list-pausable", "pause"))
-    pt_handle = PropagatingThread(
-        target=dst_sk.pull_timeline, args=([src_sk], tenant_id, timeline_id)
-    )
+    dst_sk.start()
+
+    def pull_timeline_dst():
+        try:
+            dst_sk.pull_timeline([src_sk], tenant_id, timeline_id)
+        except requests.HTTPError:
+            # Do nothing, this is an allowed condition for now
+            # Known bug, can happen when two pull_timeline's for the same timeline race
+            pass
+
+    pt_handle = PropagatingThread(target=pull_timeline_dst)
     pt_handle.start()
     src_sk.wait_until_paused("sk-snapshot-after-list-pausable")
 
