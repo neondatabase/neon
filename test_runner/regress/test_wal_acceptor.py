@@ -1725,16 +1725,9 @@ def test_pull_timeline_gc(neon_env_builder: NeonEnvBuilder):
     # run pull_timeline which will halt before downloading files
     src_http.configure_failpoints(("sk-snapshot-after-list-pausable", "pause"))
     dst_sk.start()
-
-    def pull_timeline_dst():
-        try:
-            dst_sk.pull_timeline([src_sk], tenant_id, timeline_id)
-        except requests.HTTPError:
-            # Do nothing, this is an allowed condition for now
-            # Known bug, can happen when two pull_timeline's for the same timeline race
-            pass
-
-    pt_handle = PropagatingThread(target=pull_timeline_dst)
+    pt_handle = PropagatingThread(
+        target=dst_sk.pull_timeline, args=([src_sk], tenant_id, timeline_id)
+    )
     pt_handle.start()
     src_sk.wait_until_paused("sk-snapshot-after-list-pausable")
 
