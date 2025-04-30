@@ -436,33 +436,19 @@ impl GCSBucket {
         Ok(())
     }
 
-    async fn list_objects_v2(&self, list_uri: String) -> anyhow::Result<reqwest::RequestBuilder> {
-        let res = Client::new()
-            .get(list_uri)
-            .bearer_auth(self.token_provider.token(GCS_SCOPES).await?.as_str());
-        Ok(res)
-    }
-
-    // need a 'bucket', a 'key', and a bytes 'range'.
-    async fn get_object(
+    async fn head(
         &self,
-        request: GetObjectRequest,
+        key: String,
         cancel: &CancellationToken,
-    ) -> anyhow::Result<Download, DownloadError> {
-        let kind = RequestKind::Get;
+    ) -> Result<ListingObject, DownloadError> {
+        let kind = RequestKind::Head;
 
-        let permit = self.owned_permit(kind, cancel).await?;
+        let _permit = self.permit(kind, cancel).await?;
 
         let started_at = start_measuring_requests(kind);
 
-        let encoded_path: String =
-            url::form_urlencoded::byte_serialize(request.key.as_bytes()).collect();
+        let encoded_path: String = url::form_urlencoded::byte_serialize(key.as_bytes()).collect();
 
-        /// We do this in two parts:
-        /// 1. Serialize the metadata of the first request to get Etag, last modified, etc
-        /// 2. We do not .await the second request pass on the pinned stream to the 'get_object'
-        ///    caller
-        // 1. Serialize Metadata in initial request
         let metadata_uri_mod = "alt=json";
         let download_uri = format!(
             "https://storage.googleapis.com/storage/v1/b/{}/o/{}?{}",
@@ -502,6 +488,90 @@ impl GCSBucket {
 
         let resp: GCSObject = serde_json::from_str(&body)
             .map_err(|e: serde_json::Error| DownloadError::Other(e.into()))?;
+
+        let head_future = tokio::time::timeout(self.timeout, head_future);
+
+        let res = tokio::select! {
+            res = head_future => res,
+            _ = cancel.cancelled() => return Err(TimeoutOrCancel::Cancel.into()),
+        };
+
+        let res = res.map_err(|_e| DownloadError::Timeout)?;
+
+        // do not incl. timeouts as errors in metrics but cancellations
+        let started_at = ScopeGuard::into_inner(started_at);
+        crate::metrics::BUCKET_METRICS
+            .req_seconds
+            .observe_elapsed(kind, &res, started_at);
+
+        let data = match res {
+            Ok(object_output) => object_output,
+            Err(SdkError::ServiceError(e)) if matches!(e.err(), HeadObjectError::NotFound(_)) => {
+                // Count this in the AttemptOutcome::Ok bucket, because 404 is not
+                // an error: we expect to sometimes fetch an object and find it missing,
+                // e.g. when probing for timeline indices.
+                crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
+                    kind,
+                    AttemptOutcome::Ok,
+                    started_at,
+                );
+                return Err(DownloadError::NotFound);
+            }
+            Err(e) => {
+                crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
+                    kind,
+                    AttemptOutcome::Err,
+                    started_at,
+                );
+
+                return Err(DownloadError::Other(
+                    anyhow::Error::new(e).context("s3 head object"),
+                ));
+            }
+        };
+
+        let (Some(last_modified), Some(size)) = (data.last_modified, data.content_length) else {
+            return Err(DownloadError::Other(anyhow::anyhow!(
+                "head_object doesn't contain last_modified or content_length"
+            )))?;
+        };
+        Ok(ListingObject {
+            key: self.gcs_object_to_relative_path(&key),
+            last_modified: SystemTime::try_from(last_modified).map_err(|e| {
+                DownloadError::Other(anyhow::anyhow!("can't convert time '{last_modified}': {e}"))
+            })?,
+            size: size as u64,
+        })
+    }
+
+    async fn list_objects_v2(&self, list_uri: String) -> anyhow::Result<reqwest::RequestBuilder> {
+        let res = Client::new()
+            .get(list_uri)
+            .bearer_auth(self.token_provider.token(GCS_SCOPES).await?.as_str());
+        Ok(res)
+    }
+
+    // need a 'bucket', a 'key', and a bytes 'range'.
+    async fn get_object(
+        &self,
+        request: GetObjectRequest,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<Download, DownloadError> {
+        let kind = RequestKind::Get;
+
+        let permit = self.owned_permit(kind, cancel).await?;
+
+        let started_at = start_measuring_requests(kind);
+
+        let encoded_path: String =
+            url::form_urlencoded::byte_serialize(request.key.as_bytes()).collect();
+
+        /// We do this in two parts:
+        /// 1. Serialize the metadata of the first request to get Etag, last modified, etc
+        /// 2. We do not .await the second request pass on the pinned stream to the 'get_object'
+        ///    caller
+        // 1. Serialize Metadata in initial request
+        let resp = self.head_object(request.key, cancel).await?;
 
         // 2. Byte Stream request
         let mut headers = header::HeaderMap::new();
@@ -748,16 +818,6 @@ impl RemoteStorage for GCSBucket {
                 }
             }
         }
-    }
-
-    async fn head_object(
-        &self,
-        key: &RemotePath,
-        cancel: &CancellationToken,
-    ) -> Result<ListingObject, DownloadError> {
-        let kind = RequestKind::Head;
-
-        todo!();
     }
 
     async fn upload(
