@@ -146,7 +146,7 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                         // try parse endpoint
                         let ep = conn_info
                             .server_name()
-                            .and_then(|sni| endpoint_sni(sni, &tls.common_names).ok().flatten());
+                            .and_then(|sni| endpoint_sni(sni, &tls.common_names));
                         if let Some(ep) = ep {
                             ctx.set_endpoint_id(ep);
                         }

@@ -205,7 +205,12 @@ impl CertResolver {
                 if let Some((_, rest)) = sni_name.split_once('.') {
                     sni_name = rest;
                 } else {
-                    return None;
+                    // The customer has some custom DNS mapping - just return
+                    // a default certificate.
+                    //
+                    // This will error if the customer uses anything stronger
+                    // than sslmode=require. That's a choice they can make.
+                    return self.default.clone()
                 }
             }
         } else {
