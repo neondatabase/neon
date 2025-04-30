@@ -99,7 +99,7 @@ impl VirtualFile {
 
     pub async fn open_with_options_v2<P: AsRef<Utf8Path>>(
         path: P,
-        open_options: OpenOptions,
+        mut open_options: OpenOptions,
         ctx: &RequestContext,
     ) -> Result<Self, std::io::Error> {
         let mode = get_io_mode();
@@ -112,20 +112,16 @@ impl VirtualFile {
             #[cfg(target_os = "linux")]
             (IoMode::DirectRw, _) => true,
         };
-        let open_options = if set_o_direct {
+        if set_o_direct {
             #[cfg(target_os = "linux")]
             {
-                let mut options = open_options;
-                options.custom_flags(nix::libc::O_DIRECT);
-                options
+                open_options.custom_flags(nix::libc::O_DIRECT);
             }
             #[cfg(not(target_os = "linux"))]
             unreachable!(
                 "O_DIRECT is not supported on this platform, IoMode's that result in set_o_direct=true shouldn't even be defined"
             );
-        } else {
-            open_options
-        };
+        }
         let inner = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
         Ok(VirtualFile { inner, _mode: mode })
     }
