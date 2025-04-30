@@ -61,7 +61,7 @@ impl PageserverClient {
             _auth_token: auth_token.clone(),
             shard_map,
             channels: RwLock::new(HashMap::new()),
-            auth_interceptor: AuthInterceptor::new(tenant_id, timeline_id, auth_token.as_ref()),
+            auth_interceptor: AuthInterceptor::new(tenant_id, timeline_id, auth_token.as_deref()),
         }
     }
 
@@ -206,15 +206,17 @@ struct AuthInterceptor {
     tenant_id: AsciiMetadataValue,
     timeline_id: AsciiMetadataValue,
 
-    auth_token: Option<AsciiMetadataValue>,
+    auth_header: Option<AsciiMetadataValue>, // including "Bearer " prefix
 }
 
 impl AuthInterceptor {
-    fn new(tenant_id: &str, timeline_id: &str, auth_token: Option<&String>) -> Self {
+    fn new(tenant_id: &str, timeline_id: &str, auth_token: Option<&str>) -> Self {
         Self {
             tenant_id: tenant_id.parse().expect("could not parse tenant id"),
             timeline_id: timeline_id.parse().expect("could not parse timeline id"),
-            auth_token: auth_token.map(|x| x.parse().expect("could not parse auth token")),
+            auth_header: auth_token
+                .map(|t| format!("Bearer {t}"))
+                .map(|t| t.parse().expect("could not parse auth token")),
         }
     }
 }
@@ -225,9 +227,9 @@ impl tonic::service::Interceptor for AuthInterceptor {
             .insert("neon-tenant-id", self.tenant_id.clone());
         req.metadata_mut()
             .insert("neon-timeline-id", self.timeline_id.clone());
-        if let Some(auth_token) = &self.auth_token {
+        if let Some(auth_header) = &self.auth_header {
             req.metadata_mut()
-                .insert("neon-auth-token", auth_token.clone());
+                .insert("authorization", auth_header.clone());
         }
 
         Ok(req)

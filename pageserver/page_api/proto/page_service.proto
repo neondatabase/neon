@@ -1,9 +1,9 @@
 // Page service presented by pageservers, for computes.
 //
-// Each request must come with the following metadata:
-// - neon-tenant-id
-// - neon-timeline-id
-// - neon-auth-token (if auth is enabled)
+// Request metadata:
+// - authorization: JWT token ("Bearer <token>"), if auth is enabled
+// - neon-tenant-id: tenant ID ("7c4a1f9e3bd6470c8f3e21a65bd2e980")
+// - neon-timeline-id: timeline ID ("f08c4e9a2d5f76b1e3a7c2d8910f4b3e")
 //
 // TODO: what else? Priority? OpenTelemetry tracing?
 //

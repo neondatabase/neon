@@ -722,13 +722,22 @@ impl tonic::service::Interceptor for PageServiceAuthenticator {
             return Ok(req);
         };
 
-        let jwt = req
+        let authorization = req
             .metadata()
-            .get("neon-auth-token")
-            .ok_or(tonic::Status::unauthenticated("no neon-auth-token"))?;
-        let jwt = jwt.to_str().map_err(|_| {
-            tonic::Status::invalid_argument("invalid UTF-8 characters in neon-auth-token metadata")
-        })?;
+            .get("authorization")
+            .ok_or(tonic::Status::unauthenticated("no authorization header"))?
+            .to_str()
+            .map_err(|_| {
+                tonic::Status::invalid_argument(
+                    "invalid UTF-8 characters in authorization metadata",
+                )
+            })?;
+        if &authorization[0..7] != "Bearer " {
+            return Err(tonic::Status::unauthenticated(
+                "authorization header must start with 'Bearer '",
+            ));
+        }
+        let jwt = &authorization[7..].trim();
 
         let jwtdata: TokenData<utils::auth::Claims> = auth
             .decode(jwt)
