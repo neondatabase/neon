@@ -1,6 +1,7 @@
 //! Enum-dispatch to the `OpenOptions` type of the respective [`super::IoEngineKind`];
 
 use std::os::fd::OwnedFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use super::io_engine::IoEngine;
@@ -124,10 +125,8 @@ impl OpenOptions {
             }
         }
     }
-}
 
-impl std::os::unix::prelude::OpenOptionsExt for OpenOptions {
-    fn mode(&mut self, mode: u32) -> &mut Self {
+    pub fn mode(&mut self, mode: u32) -> &mut Self {
         match &mut self.inner {
             Inner::StdFs(x) => {
                 let _ = x.mode(mode);
@@ -140,7 +139,7 @@ impl std::os::unix::prelude::OpenOptionsExt for OpenOptions {
         self
     }
 
-    fn custom_flags(&mut self, flags: i32) -> &mut Self {
+    pub fn custom_flags(&mut self, flags: i32) -> &mut Self {
         match &mut self.inner {
             Inner::StdFs(x) => {
                 let _ = x.custom_flags(flags);
