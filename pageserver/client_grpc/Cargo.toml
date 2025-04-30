@@ -12,3 +12,4 @@ tonic.workspace = true
 tracing.workspace = true
 
 pageserver_page_api.workspace = true
+utils.workspace = true

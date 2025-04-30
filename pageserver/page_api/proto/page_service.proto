@@ -3,6 +3,7 @@
 // Request metadata:
 // - authorization: JWT token ("Bearer <token>"), if auth is enabled
 // - neon-tenant-id: tenant ID ("7c4a1f9e3bd6470c8f3e21a65bd2e980")
+// - neon-shard-id: shard ID, as <number><count> in hex ("0b10" = shard 11 of 16)
 // - neon-timeline-id: timeline ID ("f08c4e9a2d5f76b1e3a7c2d8910f4b3e")
 //
 // TODO: what else? Priority? OpenTelemetry tracing?

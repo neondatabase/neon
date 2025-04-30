@@ -4533,6 +4533,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tonic",
  "tracing",
+ "utils",
 ]
 
 [[package]]

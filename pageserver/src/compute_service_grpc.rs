@@ -65,8 +65,6 @@ use tonic;
 use tonic::codec::CompressionEncoding;
 use tonic::service::interceptor::InterceptedService;
 
-use pageserver_api::key::rel_block_to_key;
-
 use crate::pgdatadir_mapping::Version;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 
@@ -156,13 +154,14 @@ impl PageService for PageServiceService {
         request: tonic::Request<proto::RelExistsRequest>,
     ) -> std::result::Result<tonic::Response<proto::RelExistsResponse>, tonic::Status> {
         let ttid = self.extract_ttid(request.metadata())?;
+        let shard = self.extract_shard(request.metadata())?;
         let req: model::RelExistsRequest = request.get_ref().try_into()?;
 
         let rel = convert_reltag(&req.rel);
         let span = tracing::info_span!("rel_exists", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, rel = %rel, req_lsn = %req.common.request_lsn);
 
         async {
-            let timeline = self.get_timeline(ttid, ShardSelector::Zero).await?;
+            let timeline = self.get_timeline(ttid, shard).await?;
             let ctx = self.ctx.with_scope_timeline(&timeline);
             let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
             let lsn = Self::wait_or_get_last_lsn(
@@ -190,13 +189,14 @@ impl PageService for PageServiceService {
         request: tonic::Request<proto::RelSizeRequest>,
     ) -> std::result::Result<tonic::Response<proto::RelSizeResponse>, tonic::Status> {
         let ttid = self.extract_ttid(request.metadata())?;
+        let shard = self.extract_shard(request.metadata())?;
         let req: model::RelSizeRequest = request.get_ref().try_into()?;
         let rel = convert_reltag(&req.rel);
 
         let span = tracing::info_span!("rel_size", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, rel = %rel, req_lsn = %req.common.request_lsn);
 
         async {
-            let timeline = self.get_timeline(ttid, ShardSelector::Zero).await?;
+            let timeline = self.get_timeline(ttid, shard).await?;
             let ctx = self.ctx.with_scope_timeline(&timeline);
             let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
             let lsn = Self::wait_or_get_last_lsn(
@@ -221,14 +221,11 @@ impl PageService for PageServiceService {
         request: tonic::Request<proto::GetPageRequest>,
     ) -> std::result::Result<tonic::Response<proto::GetPageResponse>, tonic::Status> {
         let ttid = self.extract_ttid(request.metadata())?;
+        let shard = self.extract_shard(request.metadata())?;
         let req: model::GetPageRequest = request.get_ref().try_into()?;
 
-        // Calculate shard number.
-        //
-        // FIXME: this should probably be part of the data_api crate.
         let rel = convert_reltag(&req.rel);
-        let key = rel_block_to_key(rel, req.block_number);
-        let timeline = self.get_timeline(ttid, ShardSelector::Page(key)).await?;
+        let timeline = self.get_timeline(ttid, shard).await?;
 
         let ctx = self.ctx.with_scope_timeline(&timeline);
         let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
@@ -274,11 +271,9 @@ impl PageService for PageServiceService {
         &self,
         request: tonic::Request<tonic::Streaming<proto::GetPageRequest>>,
     ) -> Result<tonic::Response<Self::GetPagesStream>, tonic::Status> {
-        // TODO: pass the shard index in the request metadata.
         let ttid = self.extract_ttid(request.metadata())?;
-        let timeline = self
-            .get_timeline(ttid, ShardSelector::Known(ShardIndex::unsharded()))
-            .await?;
+        let shard = self.extract_shard(request.metadata())?;
+        let timeline = self.get_timeline(ttid, shard).await?;
         let ctx = self.ctx.with_scope_timeline(&timeline);
         let conf = self.conf;
 
@@ -327,12 +322,13 @@ impl PageService for PageServiceService {
         request: tonic::Request<proto::DbSizeRequest>,
     ) -> Result<tonic::Response<proto::DbSizeResponse>, tonic::Status> {
         let ttid = self.extract_ttid(request.metadata())?;
+        let shard = self.extract_shard(request.metadata())?;
         let req: model::DbSizeRequest = request.get_ref().try_into()?;
 
         let span = tracing::info_span!("get_page", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, db_oid = %req.db_oid, req_lsn = %req.common.request_lsn);
 
         async {
-            let timeline = self.get_timeline(ttid, ShardSelector::Zero).await?;
+            let timeline = self.get_timeline(ttid, shard).await?;
             let ctx = self.ctx.with_scope_timeline(&timeline);
             let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
             let lsn = Self::wait_or_get_last_lsn(
@@ -361,9 +357,10 @@ impl PageService for PageServiceService {
         request: tonic::Request<proto::GetBaseBackupRequest>,
     ) -> Result<tonic::Response<Self::GetBaseBackupStream>, tonic::Status> {
         let ttid = self.extract_ttid(request.metadata())?;
+        let shard = self.extract_shard(request.metadata())?;
         let req: model::GetBaseBackupRequest = request.get_ref().try_into()?;
 
-        let timeline = self.get_timeline(ttid, ShardSelector::Zero).await?;
+        let timeline = self.get_timeline(ttid, shard).await?;
 
         let ctx = self.ctx.with_scope_timeline(&timeline);
         let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
@@ -500,12 +497,13 @@ impl PageService for PageServiceService {
         request: tonic::Request<proto::GetSlruSegmentRequest>,
     ) -> Result<tonic::Response<proto::GetSlruSegmentResponse>, tonic::Status> {
         let ttid = self.extract_ttid(request.metadata())?;
+        let shard = self.extract_shard(request.metadata())?;
         let req: model::GetSlruSegmentRequest = request.get_ref().try_into()?;
 
         let span = tracing::info_span!("get_slru_segment", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, kind = %req.kind, segno = %req.segno, req_lsn = %req.common.request_lsn);
 
         async {
-            let timeline = self.get_timeline(ttid, ShardSelector::Zero).await?;
+            let timeline = self.get_timeline(ttid, shard).await?;
             let ctx = self.ctx.with_scope_timeline(&timeline);
             let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
             let lsn = Self::wait_or_get_last_lsn(
@@ -540,7 +538,7 @@ impl PageServiceService {
     async fn get_timeline(
         &self,
         ttid: TenantTimelineId,
-        shard_selector: ShardSelector,
+        shard: ShardIndex,
     ) -> Result<Arc<Timeline>, tonic::Status> {
         let timeout = ACTIVE_TENANT_TIMEOUT;
         let wait_start = Instant::now();
@@ -549,7 +547,7 @@ impl PageServiceService {
         let tenant_shard = loop {
             let resolved = self
                 .tenant_mgr
-                .resolve_attached_shard(&ttid.tenant_id, shard_selector);
+                .resolve_attached_shard(&ttid.tenant_id, ShardSelector::Known(shard));
 
             match resolved {
                 ShardResolveResult::Found(tenant_shard) => break tenant_shard,
@@ -621,6 +619,26 @@ impl PageServiceService {
             .map_err(|_| tonic::Status::invalid_argument("invalid neon-timelineid metadata"))?;
 
         Ok(TenantTimelineId::new(tenant_id, timeline_id))
+    }
+
+    /// Extract ShardSelector from the request metadata.
+    fn extract_shard(
+        &self,
+        metadata: &tonic::metadata::MetadataMap,
+    ) -> Result<ShardIndex, tonic::Status> {
+        let shard_id = metadata
+            .get("neon-shard-id")
+            .ok_or(tonic::Status::invalid_argument(
+                "neon-shard-id metadata missing",
+            ))?
+            .to_str()
+            .map_err(|_| {
+                tonic::Status::invalid_argument(
+                    "invalid UTF-8 characters in shard-selector metadata",
+                )
+            })?;
+        ShardIndex::from_str(shard_id)
+            .map_err(|err| tonic::Status::invalid_argument(format!("invalid neon-shard-id: {err}")))
     }
 
     // XXX: copied from PageServerHandler

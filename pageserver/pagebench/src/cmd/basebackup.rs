@@ -17,6 +17,7 @@ use tokio::task::JoinSet;
 use tracing::{info, instrument};
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
+use utils::shard::ShardIndex;
 
 use crate::util::tokio_thread_local_stats::AllThreadLocalStats;
 use crate::util::{request_stats, tokio_thread_local_stats};
@@ -297,7 +298,10 @@ async fn client_grpc(
     all_work_done_barrier: Arc<Barrier>,
     live_stats: Arc<LiveStats>,
 ) {
-    let shard_map = HashMap::from([(0, args.page_service_connstring.clone())]);
+    let shard_map = HashMap::from([(
+        ShardIndex::unsharded(),
+        args.page_service_connstring.clone(),
+    )]);
     let client = pageserver_client_grpc::PageserverClient::new(
         &timeline.tenant_id.to_string(),
         &timeline.timeline_id.to_string(),

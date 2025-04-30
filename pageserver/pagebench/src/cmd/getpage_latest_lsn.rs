@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
+use utils::shard::ShardIndex;
 
 use crate::util::tokio_thread_local_stats::AllThreadLocalStats;
 use crate::util::{request_stats, tokio_thread_local_stats};
@@ -457,7 +458,10 @@ async fn client_grpc(
     ranges: Vec<KeyRange>,
     weights: rand::distributions::weighted::WeightedIndex<i128>,
 ) {
-    let shard_map = HashMap::from([(0, args.page_service_connstring.clone())]);
+    let shard_map = HashMap::from([(
+        ShardIndex::unsharded(),
+        args.page_service_connstring.clone(),
+    )]);
     let client = pageserver_client_grpc::PageserverClient::new(
         &worker_id.timeline.tenant_id.to_string(),
         &worker_id.timeline.timeline_id.to_string(),
@@ -554,7 +558,10 @@ async fn client_grpc_stream(
     ranges: Vec<KeyRange>,
     weights: rand::distributions::weighted::WeightedIndex<i128>,
 ) {
-    let shard_map = HashMap::from([(0, args.page_service_connstring.clone())]);
+    let shard_map = HashMap::from([(
+        ShardIndex::unsharded(),
+        args.page_service_connstring.clone(),
+    )]);
     let client = pageserver_client_grpc::PageserverClient::new(
         &worker_id.timeline.tenant_id.to_string(),
         &worker_id.timeline.timeline_id.to_string(),

@@ -15,9 +15,8 @@ use tonic::transport::Channel;
 use pageserver_page_api::model::*;
 use pageserver_page_api::proto;
 
-type Shardno = u16;
-
 use pageserver_page_api::proto::PageServiceClient;
+use utils::shard::ShardIndex;
 
 type MyPageServiceClient = pageserver_page_api::proto::PageServiceClient<
     tonic::service::interceptor::InterceptedService<tonic::transport::Channel, AuthInterceptor>,
@@ -40,9 +39,9 @@ pub struct PageserverClient {
 
     _auth_token: Option<String>,
 
-    shard_map: HashMap<Shardno, String>,
+    shard_map: HashMap<ShardIndex, String>,
 
-    channels: RwLock<HashMap<Shardno, Channel>>,
+    channels: RwLock<HashMap<ShardIndex, Channel>>,
 
     auth_interceptor: AuthInterceptor,
 }
@@ -53,7 +52,7 @@ impl PageserverClient {
         tenant_id: &str,
         timeline_id: &str,
         auth_token: &Option<String>,
-        shard_map: HashMap<Shardno, String>,
+        shard_map: HashMap<ShardIndex, String>,
     ) -> Self {
         Self {
             _tenant_id: tenant_id.to_string(),
@@ -70,9 +69,9 @@ impl PageserverClient {
         request: &RelExistsRequest,
     ) -> Result<bool, PageserverClientError> {
         // Current sharding model assumes that all metadata is present only at shard 0.
-        let shard_no = 0;
+        let shard = ShardIndex::unsharded();
 
-        let mut client = self.get_client(shard_no).await?;
+        let mut client = self.get_client(shard).await?;
 
         let request = proto::RelExistsRequest::from(request);
         let response = client.rel_exists(tonic::Request::new(request)).await?;
@@ -85,9 +84,9 @@ impl PageserverClient {
         request: &RelSizeRequest,
     ) -> Result<u32, PageserverClientError> {
         // Current sharding model assumes that all metadata is present only at shard 0.
-        let shard_no = 0;
+        let shard = ShardIndex::unsharded();
 
-        let mut client = self.get_client(shard_no).await?;
+        let mut client = self.get_client(shard).await?;
 
         let request = proto::RelSizeRequest::from(request);
         let response = client.rel_size(tonic::Request::new(request)).await?;
@@ -97,9 +96,9 @@ impl PageserverClient {
 
     pub async fn get_page(&self, request: &GetPageRequest) -> Result<Bytes, PageserverClientError> {
         // FIXME: calculate the shard number correctly
-        let shard_no = 0;
+        let shard = ShardIndex::unsharded();
 
-        let mut client = self.get_client(shard_no).await?;
+        let mut client = self.get_client(shard).await?;
 
         let request = proto::GetPageRequest::from(request);
         let response = client.get_page(tonic::Request::new(request)).await?;
@@ -115,9 +114,9 @@ impl PageserverClient {
         PageserverClientError,
     > {
         // FIXME: calculate the shard number correctly
-        let shard_no = 0;
+        let shard = ShardIndex::unsharded();
 
-        let mut client = self.get_client(shard_no).await?;
+        let mut client = self.get_client(shard).await?;
 
         Ok(client.get_pages(tonic::Request::new(requests)).await?)
     }
@@ -128,9 +127,9 @@ impl PageserverClient {
         request: &DbSizeRequest,
     ) -> Result<u64, PageserverClientError> {
         // Current sharding model assumes that all metadata is present only at shard 0.
-        let shard_no = 0;
+        let shard = ShardIndex::unsharded();
 
-        let mut client = self.get_client(shard_no).await?;
+        let mut client = self.get_client(shard).await?;
 
         let request = proto::DbSizeRequest::from(request);
         let response = client.db_size(tonic::Request::new(request)).await?;
@@ -148,9 +147,9 @@ impl PageserverClient {
         PageserverClientError,
     > {
         // Current sharding model assumes that all metadata is present only at shard 0.
-        let shard_no = 0;
+        let shard = ShardIndex::unsharded();
 
-        let mut client = self.get_client(shard_no).await?;
+        let mut client = self.get_client(shard).await?;
         if gzip {
             client = client.accept_compressed(tonic::codec::CompressionEncoding::Gzip);
         }
@@ -167,12 +166,12 @@ impl PageserverClient {
     /// reuse it. If not, create a new client and put it to the cache.
     async fn get_client(
         &self,
-        shard_no: u16,
+        shard: ShardIndex,
     ) -> Result<MyPageServiceClient, PageserverClientError> {
         let reused_channel: Option<Channel> = {
             let channels = self.channels.read().unwrap();
 
-            channels.get(&shard_no).cloned()
+            channels.get(&shard).cloned()
         };
 
         let channel = if let Some(reused_channel) = reused_channel {
@@ -180,8 +179,8 @@ impl PageserverClient {
         } else {
             let endpoint: tonic::transport::Endpoint = self
                 .shard_map
-                .get(&shard_no)
-                .expect("no url for shard {shard_no}")
+                .get(&shard)
+                .expect("no url for shard {shard}")
                 .parse()?;
             let channel = endpoint.connect().await?;
 
@@ -190,12 +189,13 @@ impl PageserverClient {
             // client in the cache.
             {
                 let mut channels = self.channels.write().unwrap();
-                channels.insert(shard_no, channel.clone());
+                channels.insert(shard, channel.clone());
             }
             channel
         };
 
-        let client = PageServiceClient::with_interceptor(channel, self.auth_interceptor.clone());
+        let client =
+            PageServiceClient::with_interceptor(channel, self.auth_interceptor.for_shard(shard));
         Ok(client)
     }
 }
@@ -204,6 +204,7 @@ impl PageserverClient {
 #[derive(Clone)]
 struct AuthInterceptor {
     tenant_id: AsciiMetadataValue,
+    shard_id: Option<AsciiMetadataValue>,
     timeline_id: AsciiMetadataValue,
 
     auth_header: Option<AsciiMetadataValue>, // including "Bearer " prefix
@@ -213,11 +214,23 @@ impl AuthInterceptor {
     fn new(tenant_id: &str, timeline_id: &str, auth_token: Option<&str>) -> Self {
         Self {
             tenant_id: tenant_id.parse().expect("could not parse tenant id"),
+            shard_id: None,
             timeline_id: timeline_id.parse().expect("could not parse timeline id"),
             auth_header: auth_token
                 .map(|t| format!("Bearer {t}"))
                 .map(|t| t.parse().expect("could not parse auth token")),
         }
+    }
+
+    fn for_shard(&self, shard_id: ShardIndex) -> Self {
+        let mut with_shard = self.clone();
+        with_shard.shard_id = Some(
+            shard_id
+                .to_string()
+                .parse()
+                .expect("could not parse shard id"),
+        );
+        with_shard
     }
 }
 
