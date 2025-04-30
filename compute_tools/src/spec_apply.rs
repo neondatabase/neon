@@ -366,47 +366,24 @@ impl ComputeNode {
         // and can thus use all `max_connections` connection slots. However, that's generally not
         // very efficient, so we generally still limit it to a smaller number.
         if compute_state.status == ComputeStatus::Init {
-            // If the settings contain 'max_connections', use that as template
-            if let Some(config) = spec.cluster.settings.find("max_connections") {
-                config.parse::<usize>().ok()
-            } else {
-                // Otherwise, try to find the setting in the postgresql_conf string
-                spec.cluster
-                    .postgresql_conf
-                    .iter()
-                    .flat_map(|conf| conf.split("\n"))
-                    .filter_map(|line| {
-                        if !line.contains("max_connections") {
-                            return None;
-                        }
+            // If the settings contain 'max_connections', use that as a
+            // template. Otherwise, if we didn't find max_connections, default
+            // to 10 concurrent connections.
+            spec.cluster
+                .settings
+                .find("max_connections")
+                .map_or(10, |guc| {
+                    let max_connections = guc.parse::<usize>().unwrap();
 
-                        let (key, value) = line.split_once("=")?;
-                        let key = key
-                            .trim_start_matches(char::is_whitespace)
-                            .trim_end_matches(char::is_whitespace);
-
-                        let value = value
-                            .trim_start_matches(char::is_whitespace)
-                            .trim_end_matches(char::is_whitespace);
-
-                        if key != "max_connections" {
-                            return None;
-                        }
-
-                        value.parse::<usize>().ok()
-                    })
-                    .next()
-            }
-            // If max_connections is present, use at most 1/3rd of that.
-            // When max_connections is lower than 30, try to use at least 10 connections, but
-            // never more than max_connections.
-            .map(|limit| match limit {
-                0..10 => limit,
-                10..30 => 10,
-                30.. => limit / 3,
-            })
-            // If we didn't find max_connections, default to 10 concurrent connections.
-            .unwrap_or(10)
+                    // If max_connections is present, use at most 1/3rd of that.
+                    // When max_connections is lower than 30, try to use at least 10 connections, but
+                    // never more than max_connections.
+                    match max_connections {
+                        0..10 => max_connections,
+                        10..30 => 10,
+                        30.. => max_connections / 3,
+                    }
+                })
         } else {
             // state == Running
             // Because the cluster is already in the Running state, we should assume users are

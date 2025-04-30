@@ -50,8 +50,8 @@ use compute_api::responses::{
     ComputeConfig, ComputeCtlConfig, ComputeStatus, ComputeStatusResponse, TlsConfig,
 };
 use compute_api::spec::{
-    Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PgIdent,
-    RemoteExtSpec, Role,
+    Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, GenericOption,
+    PgIdent, RemoteExtSpec, Role,
 };
 use jsonwebtoken::jwk::{
     AlgorithmParameters, CommonParameters, EllipticCurve, Jwk, JwkSet, KeyAlgorithm, KeyOperations,
@@ -711,7 +711,18 @@ impl Endpoint {
                     } else {
                         Vec::new()
                     },
-                    settings: None,
+                    settings: Some(vec![
+                        GenericOption {
+                            name: "neon.pageserver_connstring".to_string(),
+                            value: Some(pageserver_connstring),
+                            vartype: "string".to_string(),
+                        },
+                        GenericOption {
+                            name: "neon.safekeepers".to_string(),
+                            value: Some(safekeeper_connstrings.join(",")),
+                            vartype: "string".to_string(),
+                        },
+                    ]),
                     postgresql_conf: Some(postgresql_conf.clone()),
                 },
                 delta_operations: None,
@@ -721,9 +732,7 @@ impl Endpoint {
                 branch_id: None,
                 endpoint_id: Some(self.endpoint_id.clone()),
                 mode: self.mode,
-                pageserver_connstring: Some(pageserver_connstring),
                 safekeepers_generation: safekeepers_generation.map(|g| g.into_inner()),
-                safekeeper_connstrings,
                 storage_auth_token: auth_token.clone(),
                 remote_extensions,
                 pgbouncer_settings: None,
@@ -928,6 +937,8 @@ impl Endpoint {
         stripe_size: Option<ShardStripeSize>,
         safekeepers: Option<Vec<NodeId>>,
     ) -> Result<()> {
+        let mut pg_settings: Vec<GenericOption> = vec![];
+
         let (mut spec, compute_ctl_config) = {
             let config_path = self.endpoint_path().join("config.json");
             let file = std::fs::File::open(config_path)?;
@@ -958,7 +969,12 @@ impl Endpoint {
 
         let pageserver_connstr = Self::build_pageserver_connstr(&pageservers);
         assert!(!pageserver_connstr.is_empty());
-        spec.pageserver_connstring = Some(pageserver_connstr);
+        pg_settings.push(GenericOption {
+            name: "neon.pageserver_connstring".to_string(),
+            value: Some(pageserver_connstr),
+            vartype: "string".to_string(),
+        });
+
         if stripe_size.is_some() {
             spec.shard_stripe_size = stripe_size.map(|s| s.0 as usize);
         }
@@ -966,8 +982,21 @@ impl Endpoint {
         // If safekeepers are not specified, don't change them.
         if let Some(safekeepers) = safekeepers {
             let safekeeper_connstrings = self.build_safekeepers_connstrs(safekeepers)?;
-            spec.safekeeper_connstrings = safekeeper_connstrings;
+            pg_settings.push(GenericOption {
+                name: "neon.safekeepers".to_string(),
+                value: Some(safekeeper_connstrings.join(",")),
+                vartype: "string".to_string(),
+            });
         }
+
+        spec.cluster.settings = match spec.cluster.settings {
+            // Append the new settings to the configured settings
+            Some(mut settings) => {
+                settings.append(&mut pg_settings);
+                Some(settings)
+            }
+            None => Some(pg_settings),
+        };
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))

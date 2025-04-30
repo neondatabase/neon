@@ -210,24 +210,20 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
         // may be empty. In that case, we need to dig them from the GUCs in the
         // cluster.settings field.
         let pageserver_connstr = spec
-            .pageserver_connstring
-            .clone()
-            .or_else(|| spec.cluster.settings.find("neon.pageserver_connstring"))
-            .ok_or("pageserver connstr should be provided")?;
-        let safekeeper_connstrings = if spec.safekeeper_connstrings.is_empty() {
-            if matches!(spec.mode, ComputeMode::Primary) {
-                spec.cluster
-                    .settings
-                    .find("neon.safekeepers")
-                    .ok_or("safekeeper connstrings should be provided")?
-                    .split(',')
-                    .map(|str| str.to_string())
-                    .collect()
-            } else {
-                vec![]
-            }
+            .cluster
+            .settings
+            .find("neon.pageserver_connstring")
+            .expect("pageserver connstr should be provided");
+        let safekeeper_connstrings = if matches!(spec.mode, ComputeMode::Primary) {
+            spec.cluster
+                .settings
+                .find("neon.safekeepers")
+                .ok_or("safekeeper connstrings should be provided")?
+                .split(',')
+                .map(|str| str.to_string())
+                .collect()
         } else {
-            spec.safekeeper_connstrings.clone()
+            vec![]
         };
         let storage_auth_token = spec.storage_auth_token.clone();
         let tenant_id: TenantId = if let Some(tenant_id) = spec.tenant_id {
