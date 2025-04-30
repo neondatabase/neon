@@ -12,7 +12,7 @@ index 0cdc769..f6cc950 100644
 +GRANT ALL ON SCHEMA anon to neon_superuser;
 +GRANT ALL ON ALL TABLES IN SCHEMA anon TO neon_superuser;
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..09ea70c 100644
+index 7da6553..f7d8e44 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
 @@ -74,6 +74,50 @@ $$
@@ -100,7 +100,7 @@ index 7da6553..09ea70c 100644
  END;
  $$
    LANGUAGE PLPGSQL
-@@ -159,14 +185,12 @@ SECURITY LABEL FOR anon ON FUNCTION anon.load(TEXT) IS 'UNTRUSTED';
+@@ -159,16 +185,16 @@ SECURITY LABEL FOR anon ON FUNCTION anon.load(TEXT) IS 'UNTRUSTED';
  CREATE OR REPLACE FUNCTION anon.init()
  RETURNS BOOLEAN
  AS $$
@@ -112,12 +112,17 @@ index 7da6553..09ea70c 100644
 -    )
 -  SELECT anon.init(conf.sharedir || '/extension/anon/')
 -  FROM conf;
++BEGIN
 +  IF anon.is_initialized() THEN
 +    RAISE NOTICE 'The anon extension is already initialized.';
 +    RETURN TRUE;
 +  END IF;
 +
 +  RETURN anon.load_fake_data();
++END;
  $$
-   LANGUAGE SQL
+-  LANGUAGE SQL
++  LANGUAGE plpgsql
    VOLATILE
+   PARALLEL UNSAFE -- because init is unsafe
+   SECURITY INVOKER
