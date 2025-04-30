@@ -1357,7 +1357,7 @@ RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/latest/postgr
     sed -i 's/pgrx = "0.14.1"/pgrx = { version = "=0.14.1", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     patch -p1 < /ext-src/anon_v2.patch
 
-FROM rust-extensions-build-pgrx14 AS pg-anon-pg-build
+FROM rust-extensions-build-pgrx14-pg-anon AS pg-anon-pg-build
 ARG PG_VERSION
 COPY --from=pg_anon-src /ext-src/ /ext-src/
 WORKDIR /ext-src
