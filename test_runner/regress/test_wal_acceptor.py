@@ -1291,6 +1291,12 @@ def test_lagging_sk(neon_env_builder: NeonEnvBuilder):
 # it works without compute at all.
 def test_peer_recovery(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
+
+    # timelines should be created the old way
+    neon_env_builder.storage_controller_config = {
+        "timelines_onto_safekeepers": False,
+    }
+
     env = neon_env_builder.init_start()
 
     tenant_id = env.initial_tenant
