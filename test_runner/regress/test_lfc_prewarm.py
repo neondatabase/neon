@@ -91,7 +91,7 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, with_compute_ctl: bool):
     if with_compute_ctl:
         status = http_client.prewarm_lfc_status()
         assert status["status"] == "not_prewarmed"
-        assert status["error"] == ""
+        assert "error" not in status
 
         prewarm_lfc_offload_blocking(http_client)
 
@@ -142,7 +142,6 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, with_compute_ctl: bool):
             "total": total,
             "prewarmed": prewarmed,
             "skipped": skipped,
-            "error": "",
         }
         assert http_client.prewarm_lfc_status() == desired
         assert prom_parse(http_client) == {OFFLOAD_LABEL: 0, PREWARM_LABEL: 1}
