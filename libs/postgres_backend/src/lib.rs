@@ -841,6 +841,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
 
         let expected_end = match &end {
             ServerInitiated(_) | CopyDone | CopyFail | Terminate | EOF | Cancelled => true,
+            // The timeline doesn't exist and we have been requested to not auto-create it.
+            // Compute requests for timelines that haven't been created yet
+            // might reach us before the storcon request to create those timelines.
+            TimelineNoCreate => true,
             CopyStreamHandlerEnd::Disconnected(ConnectionError::Io(io_error))
                 if is_expected_io_error(io_error) =>
             {
@@ -1059,6 +1063,8 @@ pub enum CopyStreamHandlerEnd {
     Terminate,
     #[error("EOF on COPY stream")]
     EOF,
+    #[error("timeline not found, and allow_timeline_creation is false")]
+    TimelineNoCreate,
     /// The connection was lost
     #[error("connection error: {0}")]
     Disconnected(#[from] ConnectionError),

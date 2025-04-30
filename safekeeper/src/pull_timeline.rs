@@ -401,7 +401,10 @@ pub async fn handle_request(
         request.timeline_id,
     ));
     if existing_tli.is_ok() {
-        bail!("Timeline {} already exists", request.timeline_id);
+        info!("Timeline {} already exists", request.timeline_id);
+        return Ok(PullTimelineResponse {
+            safekeeper_host: None,
+        });
     }
 
     let mut http_client = reqwest::Client::builder();
@@ -425,8 +428,25 @@ pub async fn handle_request(
 
     let mut statuses = Vec::new();
     for (i, response) in responses.into_iter().enumerate() {
-        let status = response.context(format!("fetching status from {}", http_hosts[i]))?;
-        statuses.push((status, i));
+        match response {
+            Ok(status) => {
+                statuses.push((status, i));
+            }
+            Err(e) => {
+                info!("error fetching status from {}: {e}", http_hosts[i]);
+            }
+        }
+    }
+
+    // Allow missing responses from up to one safekeeper (say due to downtime)
+    // e.g. if we created a timeline on PS A and B, with C being offline. Then B goes
+    // offline and C comes online. Then we want a pull on C with A and B as hosts to work.
+    let min_required_successful = (http_hosts.len() - 1).max(1);
+    if statuses.len() < min_required_successful {
+        bail!(
+            "only got {} successful status responses. required: {min_required_successful}",
+            statuses.len()
+        )
     }
 
     // Find the most advanced safekeeper
@@ -536,6 +556,6 @@ async fn pull_timeline(
         .await?;
 
     Ok(PullTimelineResponse {
-        safekeeper_host: host,
+        safekeeper_host: Some(host),
     })
 }
