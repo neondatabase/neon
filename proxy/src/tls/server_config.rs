@@ -5,6 +5,7 @@ use anyhow::{Context, bail};
 use itertools::Itertools;
 use rustls::crypto::ring::{self, sign};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::sign::CertifiedKey;
 use x509_cert::der::{Reader, SliceReader};
 
 use super::{PG_ALPN_PROTOCOL, TlsServerEndPoint};
@@ -100,24 +101,7 @@ impl CertResolver {
         cert_path: &str,
         is_default: bool,
     ) -> anyhow::Result<()> {
-        let priv_key = {
-            let key_bytes = std::fs::read(key_path)
-                .with_context(|| format!("Failed to read TLS keys at '{key_path}'"))?;
-            rustls_pemfile::private_key(&mut &key_bytes[..])
-                .with_context(|| format!("Failed to parse TLS keys at '{key_path}'"))?
-                .with_context(|| format!("Failed to parse TLS keys at '{key_path}'"))?
-        };
-
-        let cert_chain_bytes = std::fs::read(cert_path)
-            .context(format!("Failed to read TLS cert file at '{cert_path}.'"))?;
-
-        let cert_chain = {
-            rustls_pemfile::certs(&mut &cert_chain_bytes[..])
-                .try_collect()
-                .with_context(|| {
-                    format!("Failed to read TLS certificate chain from bytes from file at '{cert_path}'.")
-                })?
-        };
+        let (priv_key, cert_chain) = parse_key_cert(key_path, cert_path)?;
 
         self.add_cert(priv_key, cert_chain, is_default)
     }
@@ -128,40 +112,7 @@ impl CertResolver {
         cert_chain: Vec<CertificateDer<'static>>,
         is_default: bool,
     ) -> anyhow::Result<()> {
-        let key = sign::any_supported_type(&priv_key).context("invalid private key")?;
-
-        let first_cert = &cert_chain[0];
-        let tls_server_end_point = TlsServerEndPoint::new(first_cert)?;
-
-        let certificate = SliceReader::new(first_cert)
-            .context("Failed to parse cerficiate")?
-            .decode::<x509_cert::Certificate>()
-            .context("Failed to parse cerficiate")?;
-
-        let common_name = certificate.tbs_certificate.subject.to_string();
-
-        // We need to get the canonical name for this certificate so we can match them against any domain names
-        // seen within the proxy codebase.
-        //
-        // In scram-proxy we use wildcard certificates only, with the database endpoint as the wildcard subdomain, taken from SNI.
-        // We need to remove the wildcard prefix for the purposes of certificate selection.
-        //
-        // auth-broker does not use SNI and instead uses the Neon-Connection-String header.
-        // Auth broker has the subdomain `apiauth` we need to remove for the purposes of validating the Neon-Connection-String.
-        //
-        // Console Redirect proxy does not use any wildcard domains and does not need any certificate selection or conn string
-        // validation, so let's we can continue with any common-name
-        let common_name = if let Some(s) = common_name.strip_prefix("CN=*.") {
-            s.to_string()
-        } else if let Some(s) = common_name.strip_prefix("CN=apiauth.") {
-            s.to_string()
-        } else if let Some(s) = common_name.strip_prefix("CN=") {
-            s.to_string()
-        } else {
-            bail!("Failed to parse common name from certificate")
-        };
-
-        let cert = Arc::new(rustls::sign::CertifiedKey::new(cert_chain, key));
+        let (common_name, cert, tls_server_end_point) = process_key_cert(priv_key, cert_chain)?;
 
         if is_default {
             self.default = Some((cert.clone(), tls_server_end_point));
@@ -175,6 +126,76 @@ impl CertResolver {
     pub fn get_common_names(&self) -> HashSet<String> {
         self.certs.keys().cloned().collect()
     }
+}
+
+fn parse_key_cert(
+    key_path: &str,
+    cert_path: &str,
+) -> anyhow::Result<(PrivateKeyDer<'static>, Vec<CertificateDer<'static>>)> {
+    let priv_key = {
+        let key_bytes = std::fs::read(key_path)
+            .with_context(|| format!("Failed to read TLS keys at '{key_path}'"))?;
+        rustls_pemfile::private_key(&mut &key_bytes[..])
+            .with_context(|| format!("Failed to parse TLS keys at '{key_path}'"))?
+            .with_context(|| format!("Failed to parse TLS keys at '{key_path}'"))?
+    };
+
+    let cert_chain_bytes = std::fs::read(cert_path)
+        .context(format!("Failed to read TLS cert file at '{cert_path}.'"))?;
+
+    let cert_chain = {
+        rustls_pemfile::certs(&mut &cert_chain_bytes[..])
+            .try_collect()
+            .with_context(|| {
+                format!(
+                    "Failed to read TLS certificate chain from bytes from file at '{cert_path}'."
+                )
+            })?
+    };
+
+    Ok((priv_key, cert_chain))
+}
+
+pub fn process_key_cert(
+    priv_key: PrivateKeyDer<'static>,
+    cert_chain: Vec<CertificateDer<'static>>,
+) -> anyhow::Result<(String, Arc<CertifiedKey>, TlsServerEndPoint)> {
+    let key = sign::any_supported_type(&priv_key).context("invalid private key")?;
+
+    let first_cert = &cert_chain[0];
+    let tls_server_end_point = TlsServerEndPoint::new(first_cert)?;
+
+    let certificate = SliceReader::new(first_cert)
+        .context("Failed to parse cerficiate")?
+        .decode::<x509_cert::Certificate>()
+        .context("Failed to parse cerficiate")?;
+
+    let common_name = certificate.tbs_certificate.subject.to_string();
+
+    // We need to get the canonical name for this certificate so we can match them against any domain names
+    // seen within the proxy codebase.
+    //
+    // In scram-proxy we use wildcard certificates only, with the database endpoint as the wildcard subdomain, taken from SNI.
+    // We need to remove the wildcard prefix for the purposes of certificate selection.
+    //
+    // auth-broker does not use SNI and instead uses the Neon-Connection-String header.
+    // Auth broker has the subdomain `apiauth` we need to remove for the purposes of validating the Neon-Connection-String.
+    //
+    // Console Redirect proxy does not use any wildcard domains and does not need any certificate selection or conn string
+    // validation, so let's we can continue with any common-name
+    let common_name = if let Some(s) = common_name.strip_prefix("CN=*.") {
+        s.to_string()
+    } else if let Some(s) = common_name.strip_prefix("CN=apiauth.") {
+        s.to_string()
+    } else if let Some(s) = common_name.strip_prefix("CN=") {
+        s.to_string()
+    } else {
+        bail!("Failed to parse common name from certificate")
+    };
+
+    let cert = Arc::new(rustls::sign::CertifiedKey::new(cert_chain, key));
+
+    Ok((common_name, cert, tls_server_end_point))
 }
 
 impl rustls::server::ResolvesServerCert for CertResolver {
@@ -210,7 +231,7 @@ impl CertResolver {
                     //
                     // This will error if the customer uses anything stronger
                     // than sslmode=require. That's a choice they can make.
-                    return self.default.clone()
+                    return self.default.clone();
                 }
             }
         } else {

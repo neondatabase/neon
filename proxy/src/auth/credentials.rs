@@ -419,7 +419,10 @@ mod tests {
 
     #[test]
     fn parse_unknown_sni_with_options() {
-        let options = StartupMessageParams::new([("user", "john_doe"), ("options", "endpoint=foo-bar-baz-1234")]);
+        let options = StartupMessageParams::new([
+            ("user", "john_doe"),
+            ("options", "endpoint=foo-bar-baz-1234"),
+        ]);
 
         let sni = Some("project.localhost");
         let common_names = Some(["example.com".into()].into());
