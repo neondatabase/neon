@@ -444,6 +444,9 @@ neon_set_lwlsn_block_v(const XLogRecPtr *lsns, NRelFileInfo relfilenode,
 	{
 		XLogRecPtr	lsn = lsns[i];
 
+		if (lsn == InvalidXLogRecPtr)
+			continue;
+
 		Assert(lsn >= FirstNormalUnloggedLSN);
 		key.blockNum = blockno + i;
 		entry = hash_search(lastWrittenLsnCache, &key, HASH_ENTER, &found);
