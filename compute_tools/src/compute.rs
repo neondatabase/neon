@@ -92,7 +92,7 @@ pub struct ComputeNodeParams {
     pub internal_http_port: u16,
 
     /// the address of extension storage proxy gateway
-    pub ext_remote_storage: Option<String>,
+    pub remote_ext_base_url: Option<String>,
 }
 
 /// Compute node info shared across several `compute_ctl` threads.
@@ -1838,9 +1838,9 @@ LIMIT 100",
         real_ext_name: String,
         ext_path: RemotePath,
     ) -> Result<u64, DownloadError> {
-        let ext_remote_storage =
+        let remote_ext_base_url =
             self.params
-                .ext_remote_storage
+                .remote_ext_base_url
                 .as_ref()
                 .ok_or(DownloadError::BadInput(anyhow::anyhow!(
                     "Remote extensions storage is not configured",
@@ -1902,7 +1902,7 @@ LIMIT 100",
         let download_size = extension_server::download_extension(
             &real_ext_name,
             &ext_path,
-            ext_remote_storage,
+            remote_ext_base_url,
             &self.params.pgbin,
         )
         .await
@@ -2011,7 +2011,7 @@ LIMIT 100",
         &self,
         spec: &ComputeSpec,
     ) -> Result<RemoteExtensionMetrics> {
-        if self.params.ext_remote_storage.is_none() {
+        if self.params.remote_ext_base_url.is_none() {
             return Ok(RemoteExtensionMetrics {
                 num_ext_downloaded: 0,
                 largest_ext_size: 0,

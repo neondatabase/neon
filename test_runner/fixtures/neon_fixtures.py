@@ -4224,7 +4224,7 @@ class Endpoint(PgProtocol, LogUtils):
 
     def start(
         self,
-        remote_ext_config: str | None = None,
+        remote_ext_base_url: str | None = None,
         pageserver_id: int | None = None,
         safekeeper_generation: int | None = None,
         safekeepers: list[int] | None = None,
@@ -4250,7 +4250,7 @@ class Endpoint(PgProtocol, LogUtils):
             self.endpoint_id,
             safekeepers_generation=safekeeper_generation,
             safekeepers=self.active_safekeepers,
-            remote_ext_config=remote_ext_config,
+            remote_ext_base_url=remote_ext_base_url,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
             create_test_user=create_test_user,
@@ -4457,7 +4457,7 @@ class Endpoint(PgProtocol, LogUtils):
         hot_standby: bool = False,
         lsn: Lsn | None = None,
         config_lines: list[str] | None = None,
-        remote_ext_config: str | None = None,
+        remote_ext_base_url: str | None = None,
         pageserver_id: int | None = None,
         allow_multiple: bool = False,
         basebackup_request_tries: int | None = None,
@@ -4476,7 +4476,7 @@ class Endpoint(PgProtocol, LogUtils):
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
         ).start(
-            remote_ext_config=remote_ext_config,
+            remote_ext_base_url=remote_ext_base_url,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
             basebackup_request_tries=basebackup_request_tries,
@@ -4560,7 +4560,7 @@ class EndpointFactory:
         lsn: Lsn | None = None,
         hot_standby: bool = False,
         config_lines: list[str] | None = None,
-        remote_ext_config: str | None = None,
+        remote_ext_base_url: str | None = None,
         pageserver_id: int | None = None,
         basebackup_request_tries: int | None = None,
     ) -> Endpoint:
@@ -4580,7 +4580,7 @@ class EndpointFactory:
             hot_standby=hot_standby,
             config_lines=config_lines,
             lsn=lsn,
-            remote_ext_config=remote_ext_config,
+            remote_ext_base_url=remote_ext_base_url,
             pageserver_id=pageserver_id,
             basebackup_request_tries=basebackup_request_tries,
         )
