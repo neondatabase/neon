@@ -24,6 +24,7 @@ from fixtures.utils import (
     skip_in_debug_build,
     wait_until,
 )
+from fixtures.workload import Workload
 from mypy_boto3_kms import KMSClient
 from mypy_boto3_kms.type_defs import EncryptResponseTypeDef
 from mypy_boto3_s3 import S3Client
@@ -286,34 +287,28 @@ def test_pgdata_import_smoke(
     #
     # validate that we can write
     #
-    rw_endpoint = env.endpoints.create_start(
-        branch_name=import_branch_name,
-        endpoint_id="rw",
-        tenant_id=tenant_id,
-        config_lines=ep_config,
-    )
-    rw_endpoint.safe_psql("create table othertable(values text)")
-    rw_lsn = Lsn(rw_endpoint.safe_psql_scalar("select pg_current_wal_flush_lsn()"))
+    workload = Workload(env, tenant_id, timeline_id, branch_name=import_branch_name)
+    workload.init()
+    workload.write_rows(64)
+    workload.validate()
 
-    # TODO: consider using `class Workload` here
-    # to do compaction and whatnot?
+    rw_lsn = Lsn(workload.endpoint().safe_psql_scalar("select pg_current_wal_flush_lsn()"))
 
     #
     # validate that we can branch (important use case)
     #
 
     # ... at the tip
-    _ = env.create_branch(
+    child_timeline_id = env.create_branch(
         new_branch_name="br-tip",
         ancestor_branch_name=import_branch_name,
         tenant_id=tenant_id,
         ancestor_start_lsn=rw_lsn,
     )
-    br_tip_endpoint = env.endpoints.create_start(
-        branch_name="br-tip", endpoint_id="br-tip-ro", tenant_id=tenant_id, config_lines=ep_config
-    )
-    validate_vanilla_equivalence(br_tip_endpoint)
-    br_tip_endpoint.safe_psql("select * from othertable")
+    child_workload = workload.branch(timeline_id=child_timeline_id, branch_name="br-tip")
+    child_workload.validate()
+
+    validate_vanilla_equivalence(child_workload.endpoint())
 
     # ... at the initdb lsn
     _ = env.create_branch(
@@ -330,7 +325,7 @@ def test_pgdata_import_smoke(
     )
     validate_vanilla_equivalence(br_initdb_endpoint)
     with pytest.raises(psycopg2.errors.UndefinedTable):
-        br_initdb_endpoint.safe_psql("select * from othertable")
+        br_initdb_endpoint.safe_psql(f"select * from {workload.table}")
 
 
 @run_only_on_default_postgres(reason="PG version is irrelevant here")
