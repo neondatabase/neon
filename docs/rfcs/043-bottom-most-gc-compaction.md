@@ -180,7 +180,7 @@ There are still some limitations of gc-compaction itself that needs to be resolv
 
 - gc-compaction is currently only automatically triggered on root branches. We have not tested gc-compaction on child branches in staging.
 - gc-compaction will skip aux key regions because of the possible conflict with the assumption of aux file tombstones.
-- gc-compaction does consider keyspaces at retain_lsns and only look at keys in the layers. This also causes us giving up some sub-compaction jobs because a key might have part of its history available due to traditional GC removing part of the history.
+- gc-compaction does not consider keyspaces at retain_lsns and only look at keys in the layers. This also causes us giving up some sub-compaction jobs because a key might have part of its history available due to traditional GC removing part of the history.
 - We limit gc-compaction to run over shards <= 150GB to avoid gc-compaction taking too much time blocking other compaction jobs. The sub-compaction split algorithm needs to be improved to be able to split vertically and horizontally. Also, we need to move the download layer process out of the compaction loop so that we don't block other compaction jobs for too long.
 - The compaction trigger always schedules gc-compaction from the lowest LSN to the gc-horizon. Currently we do not schedule compaction jobs that only selects layers in the middle. Allowing this could potentially reduce the number of layers read/write throughout the process.
 - gc-compaction will give up if there are too many layers to rewrite or if there are not enough disk space for the compaction.
