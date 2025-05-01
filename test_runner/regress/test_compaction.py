@@ -229,7 +229,7 @@ def test_pageserver_gc_compaction_preempt(
 
 
 @skip_in_debug_build("only run with release build")
-@pytest.mark.timeout(600)  # This test is slow with sanitizers enabled, especially on ARM
+@pytest.mark.timeout(900)  # This test is slow with sanitizers enabled, especially on ARM
 @pytest.mark.parametrize(
     "with_branches",
     ["with_branches", "no_branches"],
