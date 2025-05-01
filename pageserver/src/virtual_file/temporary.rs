@@ -33,6 +33,10 @@ impl OwnedAsyncWriter for TempVirtualFile {
     ) -> impl std::future::Future<Output = (FullSlice<Buf>, std::io::Result<()>)> + Send {
         VirtualFile::write_all_at(self, buf, offset, ctx)
     }
+
+    async fn set_len(&self, len: u64, ctx: &RequestContext) -> std::io::Result<()> {
+        VirtualFile::set_len(self, len, ctx).await
+    }
 }
 
 impl Drop for TempVirtualFile {

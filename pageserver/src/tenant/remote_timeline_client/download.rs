@@ -91,9 +91,7 @@ pub async fn download_layer_file<'a>(
             );
 
             let temp_file = TempVirtualFile::new(
-                // Not _v2 yet which is sensitive to virtual_file_io_mode.
-                // That'll happen in PR https://github.com/neondatabase/neon/pull/11558
-                VirtualFile::open_with_options(
+                VirtualFile::open_with_options_v2(
                     &temp_file_path,
                     virtual_file::OpenOptions::new()
                         .create_new(true)
@@ -197,6 +195,7 @@ async fn download_object(
     let dst_path = destination_file.path().to_owned();
     let mut buffered = owned_buffers_io::write::BufferedWriter::<IoBufferMut, _>::new(
         destination_file,
+        0,
         || IoBufferMut::with_capacity(super::BUFFER_SIZE),
         gate.enter().map_err(|_| DownloadError::Cancelled)?,
         cancel.child_token(),
@@ -219,10 +218,15 @@ async fn download_object(
                     FlushTaskError::Cancelled => DownloadError::Cancelled,
                 })?;
         }
-        let inner = buffered.shutdown(ctx).await.map_err(|e| match e {
-            FlushTaskError::Cancelled => DownloadError::Cancelled,
-        })?;
-        Ok(inner)
+        buffered
+            .shutdown(
+                owned_buffers_io::write::BufferedWriterShutdownMode::PadThenTruncate,
+                ctx,
+            )
+            .await
+            .map_err(|e| match e {
+                FlushTaskError::Cancelled => DownloadError::Cancelled,
+            })
     }
     .await?;
 

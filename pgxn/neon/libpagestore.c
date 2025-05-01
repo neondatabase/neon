@@ -48,7 +48,6 @@
 #define MIN_RECONNECT_INTERVAL_USEC 1000
 #define MAX_RECONNECT_INTERVAL_USEC 1000000
 
-
 enum NeonComputeMode {
 	CP_MODE_PRIMARY = 0,
 	CP_MODE_REPLICA,
@@ -166,6 +165,9 @@ typedef struct
 	 */
 	WaitEventSet   *wes_read;
 } PageServer;
+
+static uint32 local_request_counter;
+#define GENERATE_REQUEST_ID() (((NeonRequestId)MyProcPid << 32) | ++local_request_counter)
 
 static PageServer page_servers[MAX_SHARDS];
 
@@ -734,8 +736,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	default:
 		neon_shard_log(shard_no, ERROR, "libpagestore: invalid connection state %d", shard->state);
 	}
-	/* This shouldn't be hit */
-	Assert(false);
+
+	pg_unreachable();
 }
 
 static void
@@ -875,6 +877,7 @@ retry:
 			int			port;
 			int			sndbuf;
 			int			recvbuf;
+			uint64*		max_wait;
 
 			get_local_port(PQsocket(pageserver_conn), &port);
 			get_socket_stats(PQsocket(pageserver_conn), &sndbuf, &recvbuf);
@@ -885,7 +888,10 @@ retry:
 						   shard->nrequests_sent, shard->nresponses_received, port, sndbuf, recvbuf,
 				           pageserver_conn->inStart, pageserver_conn->inEnd);
 			shard->receive_last_log_time = now;
+			MyNeonCounters->compute_getpage_stuck_requests_total += !shard->receive_logged;
 			shard->receive_logged = true;
+			max_wait = &MyNeonCounters->compute_getpage_max_inflight_stuck_time_ms;
+			*max_wait = Max(*max_wait, INSTR_TIME_GET_MILLISEC(since_start));
 		}
 
 		/*
@@ -908,6 +914,7 @@ retry:
 			get_local_port(PQsocket(pageserver_conn), &port);
 			neon_shard_log(shard_no, LOG, "no response from pageserver for %0.3f s, disconnecting (socket port=%d)",
 					   INSTR_TIME_GET_DOUBLE(since_start), port);
+			MyNeonCounters->compute_getpage_max_inflight_stuck_time_ms = 0;
 			pageserver_disconnect(shard_no);
 			return -1;
 		}
@@ -931,6 +938,7 @@ retry:
 	INSTR_TIME_SET_ZERO(shard->receive_start_time);
 	INSTR_TIME_SET_ZERO(shard->receive_last_log_time);
 	shard->receive_logged = false;
+	MyNeonCounters->compute_getpage_max_inflight_stuck_time_ms = 0;
 
 	return ret;
 }
@@ -994,6 +1002,7 @@ pageserver_send(shardno_t shard_no, NeonRequest *request)
 		pageserver_conn = NULL;
 	}
 
+	request->reqid = GENERATE_REQUEST_ID();
 	req_buff = nm_pack_request(request);
 
 	/*

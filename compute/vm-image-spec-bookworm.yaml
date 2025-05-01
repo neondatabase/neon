@@ -22,7 +22,7 @@ commands:
   - name: local_proxy
     user: postgres
     sysvInitAction: respawn
-    shell: 'RUST_LOG="info,proxy::serverless::sql_over_http=warn" /usr/local/bin/local_proxy --config-path /etc/local_proxy/config.json --pid-path /etc/local_proxy/pid --http 0.0.0.0:10432'
+    shell: 'RUST_LOG="error" /usr/local/bin/local_proxy --config-path /etc/local_proxy/config.json --pid-path /etc/local_proxy/pid --http 0.0.0.0:10432'
   - name: postgres-exporter
     user: nobody
     sysvInitAction: respawn

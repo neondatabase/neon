@@ -8,7 +8,7 @@ inputs:
   unique-key:
     description: 'string to distinguish different results in the same run'
     required: true
-  aws-oicd-role-arn:
+  aws-oidc-role-arn:
     description: 'OIDC role arn to interract with S3'
     required: true
 
@@ -39,7 +39,7 @@ runs:
       if: ${{ !cancelled() }}
       with:
         aws-region: eu-central-1
-        role-to-assume: ${{ inputs.aws-oicd-role-arn }}
+        role-to-assume: ${{ inputs.aws-oidc-role-arn }}
         role-duration-seconds: 3600 # 1 hour should be more than enough to upload report
 
     - name: Upload test results

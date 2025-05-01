@@ -14,6 +14,12 @@ use utils::{
 
 use crate::{persistence::TimelineImportPersistence, service::Config};
 
+#[derive(Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) enum TimelineImportState {
+    Importing,
+    Idle,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub(crate) struct ShardImportStatuses(pub(crate) HashMap<ShardIndex, ShardImportStatus>);
 
@@ -103,7 +109,7 @@ impl TimelineImport {
                 let crnt = occ.get_mut();
                 if *crnt == status {
                     Ok(TimelineImportUpdateFollowUp::None)
-                } else if crnt.is_terminal() && !status.is_terminal() {
+                } else if crnt.is_terminal() && *crnt != status {
                     Err(TimelineImportUpdateError::UnexpectedUpdate)
                 } else {
                     *crnt = status;

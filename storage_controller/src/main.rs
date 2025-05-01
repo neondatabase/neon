@@ -19,7 +19,8 @@ use storage_controller::service::chaos_injector::ChaosInjector;
 use storage_controller::service::{
     Config, HEARTBEAT_INTERVAL_DEFAULT, LONG_RECONCILE_THRESHOLD_DEFAULT,
     MAX_OFFLINE_INTERVAL_DEFAULT, MAX_WARMING_UP_INTERVAL_DEFAULT,
-    PRIORITY_RECONCILER_CONCURRENCY_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT, Service,
+    PRIORITY_RECONCILER_CONCURRENCY_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT,
+    SAFEKEEPER_RECONCILER_CONCURRENCY_DEFAULT, Service,
 };
 use tokio::signal::unix::SignalKind;
 use tokio_util::sync::CancellationToken;
@@ -132,6 +133,10 @@ struct Cli {
     #[arg(long)]
     priority_reconciler_concurrency: Option<usize>,
 
+    /// Maximum number of safekeeper reconciliations that may run in parallel (per safekeeper)
+    #[arg(long)]
+    safekeeper_reconciler_concurrency: Option<usize>,
+
     /// Tenant API rate limit, as requests per second per tenant.
     #[arg(long, default_value = "10")]
     tenant_rate_limit: NonZeroU32,
@@ -196,7 +201,7 @@ struct Cli {
     ssl_cert_reload_period: humantime::Duration,
     /// Trusted root CA certificates to use in https APIs.
     #[arg(long)]
-    ssl_ca_file: Option<PathBuf>,
+    ssl_ca_file: Option<Utf8PathBuf>,
 
     /// Neon local specific flag. When set, ignore [`Cli::control_plane_url`] and deliver
     /// the compute notification directly (instead of via control plane).
@@ -403,6 +408,9 @@ async fn async_main() -> anyhow::Result<()> {
         priority_reconciler_concurrency: args
             .priority_reconciler_concurrency
             .unwrap_or(PRIORITY_RECONCILER_CONCURRENCY_DEFAULT),
+        safekeeper_reconciler_concurrency: args
+            .safekeeper_reconciler_concurrency
+            .unwrap_or(SAFEKEEPER_RECONCILER_CONCURRENCY_DEFAULT),
         tenant_rate_limit: args.tenant_rate_limit,
         split_threshold: args.split_threshold,
         max_split_shards: args.max_split_shards,

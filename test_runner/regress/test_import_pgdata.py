@@ -18,7 +18,12 @@ from fixtures.pageserver.http import (
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import MockS3Server, RemoteStorageKind
-from fixtures.utils import shared_buffers_for_max_cu, skip_in_debug_build, wait_until
+from fixtures.utils import (
+    run_only_on_default_postgres,
+    shared_buffers_for_max_cu,
+    skip_in_debug_build,
+    wait_until,
+)
 from mypy_boto3_kms import KMSClient
 from mypy_boto3_kms.type_defs import EncryptResponseTypeDef
 from mypy_boto3_s3 import S3Client
@@ -41,6 +46,24 @@ smoke_params = [
     # many shards, small stripe size to speed up test
     *[(8, 1024, s) for s in RelBlockSize],
 ]
+
+
+def mock_import_bucket(vanilla_pg: VanillaPostgres, path: Path):
+    """
+    Mock the import S3 bucket into a local directory for a provided vanilla PG instance.
+    """
+    assert not vanilla_pg.is_running()
+
+    path.mkdir()
+    # what cplane writes before scheduling fast_import
+    specpath = path / "spec.json"
+    specpath.write_text(json.dumps({"branch_id": "somebranch", "project_id": "someproject"}))
+    # what fast_import writes
+    vanilla_pg.pgdatadir.rename(path / "pgdata")
+    statusdir = path / "status"
+    statusdir.mkdir()
+    (statusdir / "pgdata").write_text(json.dumps({"done": True}))
+    (statusdir / "fast_import").write_text(json.dumps({"command": "pgdata", "done": True}))
 
 
 @skip_in_debug_build("MULTIPLE_RELATION_SEGMENTS has non trivial amount of data")
@@ -155,17 +178,8 @@ def test_pgdata_import_smoke(
     # TODO: actually exercise fast_import here
     # TODO: test s3 remote storage
     #
-    importbucket = neon_env_builder.repo_dir / "importbucket"
-    importbucket.mkdir()
-    # what cplane writes before scheduling fast_import
-    specpath = importbucket / "spec.json"
-    specpath.write_text(json.dumps({"branch_id": "somebranch", "project_id": "someproject"}))
-    # what fast_import writes
-    vanilla_pg.pgdatadir.rename(importbucket / "pgdata")
-    statusdir = importbucket / "status"
-    statusdir.mkdir()
-    (statusdir / "pgdata").write_text(json.dumps({"done": True}))
-    (statusdir / "fast_import").write_text(json.dumps({"command": "pgdata", "done": True}))
+    importbucket_path = neon_env_builder.repo_dir / "importbucket"
+    mock_import_bucket(vanilla_pg, importbucket_path)
 
     #
     # Do the import
@@ -192,7 +206,7 @@ def test_pgdata_import_smoke(
             "new_timeline_id": str(timeline_id),
             "import_pgdata": {
                 "idempotency_key": str(idempotency),
-                "location": {"LocalFs": {"path": str(importbucket.absolute())}},
+                "location": {"LocalFs": {"path": str(importbucket_path.absolute())}},
             },
         },
     )
@@ -317,6 +331,87 @@ def test_pgdata_import_smoke(
     validate_vanilla_equivalence(br_initdb_endpoint)
     with pytest.raises(psycopg2.errors.UndefinedTable):
         br_initdb_endpoint.safe_psql("select * from othertable")
+
+
+@run_only_on_default_postgres(reason="PG version is irrelevant here")
+def test_import_completion_on_restart(
+    neon_env_builder: NeonEnvBuilder, vanilla_pg: VanillaPostgres, make_httpserver: HTTPServer
+):
+    """
+    Validate that the storage controller delivers the import completion notification
+    eventually even if it was restarted when the import initially completed.
+    """
+    # Set up mock control plane HTTP server to listen for import completions
+    import_completion_signaled = Event()
+
+    def handler(request: Request) -> Response:
+        log.info(f"control plane /import_complete request: {request.json}")
+        import_completion_signaled.set()
+        return Response(json.dumps({}), status=200)
+
+    cplane_mgmt_api_server = make_httpserver
+    cplane_mgmt_api_server.expect_request(
+        "/storage/api/v1/import_complete", method="PUT"
+    ).respond_with_handler(handler)
+
+    # Plug the cplane mock in
+    neon_env_builder.control_plane_hooks_api = (
+        f"http://{cplane_mgmt_api_server.host}:{cplane_mgmt_api_server.port}/storage/api/v1/"
+    )
+
+    # The import will specifiy a local filesystem path mocking remote storage
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+
+    vanilla_pg.start()
+    vanilla_pg.stop()
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    importbucket_path = neon_env_builder.repo_dir / "test_import_completion_bucket"
+    mock_import_bucket(vanilla_pg, importbucket_path)
+
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+    idempotency = ImportPgdataIdemptencyKey.random()
+
+    # Pause before sending the notification
+    failpoint_name = "timeline-import-pre-cplane-notification"
+    env.storage_controller.configure_failpoints((failpoint_name, "pause"))
+
+    env.storage_controller.tenant_create(tenant_id)
+    env.storage_controller.timeline_create(
+        tenant_id,
+        {
+            "new_timeline_id": str(timeline_id),
+            "import_pgdata": {
+                "idempotency_key": str(idempotency),
+                "location": {"LocalFs": {"path": str(importbucket_path.absolute())}},
+            },
+        },
+    )
+
+    def hit_failpoint():
+        log.info("Checking log for pattern...")
+        try:
+            assert env.storage_controller.log_contains(f".*at failpoint {failpoint_name}.*")
+        except Exception:
+            log.exception("Failed to find pattern in log")
+            raise
+
+    wait_until(hit_failpoint)
+    assert not import_completion_signaled.is_set()
+
+    # Restart the storage controller before signalling control plane.
+    # This clears the failpoint and we expect that the import start-up reconciliation
+    # kicks in and notifies cplane.
+    env.storage_controller.stop()
+    env.storage_controller.start()
+
+    def cplane_notified():
+        assert import_completion_signaled.is_set()
+
+    wait_until(cplane_notified)
 
 
 def test_fast_import_with_pageserver_ingest(

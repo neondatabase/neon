@@ -129,7 +129,7 @@ index 7da6553..7961984 100644
    SECURITY INVOKER
 @@ -264,3 +263,22 @@ $$
  ;
- 
+
  SECURITY LABEL FOR anon ON FUNCTION anon.unload IS 'UNTRUSTED';
 +
 +

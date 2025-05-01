@@ -133,6 +133,8 @@ pub(crate) enum DatabaseOperation {
     InsertTimelineImport,
     UpdateTimelineImport,
     DeleteTimelineImport,
+    ListTimelineImports,
+    IsTenantImportingTimeline,
 }
 
 #[must_use]
@@ -1640,6 +1642,30 @@ impl Persistence {
         .await
     }
 
+    pub(crate) async fn list_timeline_imports(&self) -> DatabaseResult<Vec<TimelineImport>> {
+        use crate::schema::timeline_imports::dsl;
+        let persistent = self
+            .with_measured_conn(DatabaseOperation::ListTimelineImports, move |conn| {
+                Box::pin(async move {
+                    let from_db: Vec<TimelineImportPersistence> =
+                        dsl::timeline_imports.load(conn).await?;
+                    Ok(from_db)
+                })
+            })
+            .await?;
+
+        let imports: Result<Vec<TimelineImport>, _> = persistent
+            .into_iter()
+            .map(TimelineImport::from_persistent)
+            .collect();
+        match imports {
+            Ok(ok) => Ok(ok.into_iter().collect()),
+            Err(err) => Err(DatabaseError::Logical(format!(
+                "failed to deserialize import: {err}"
+            ))),
+        }
+    }
+
     pub(crate) async fn delete_timeline_import(
         &self,
         tenant_id: TenantId,
@@ -1739,6 +1765,25 @@ impl Persistence {
                         TimelineImportUpdateFollowUp::None => Ok(Ok(None)),
                     }
                 }
+            })
+        })
+        .await
+    }
+
+    pub(crate) async fn is_tenant_importing_timeline(
+        &self,
+        tenant_id: TenantId,
+    ) -> DatabaseResult<bool> {
+        use crate::schema::timeline_imports::dsl;
+        self.with_measured_conn(DatabaseOperation::IsTenantImportingTimeline, move |conn| {
+            Box::pin(async move {
+                let imports: i64 = dsl::timeline_imports
+                    .filter(dsl::tenant_id.eq(tenant_id.to_string()))
+                    .count()
+                    .get_result(conn)
+                    .await?;
+
+                Ok(imports > 0)
             })
         })
         .await

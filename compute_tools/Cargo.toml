@@ -44,7 +44,6 @@ serde.workspace = true
 serde_with.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
-spki = { version = "0.7.3", features = ["std"] }
 tar.workspace = true
 tower.workspace = true
 tower-http.workspace = true

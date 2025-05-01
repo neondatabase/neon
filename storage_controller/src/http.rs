@@ -72,6 +72,7 @@ impl HttpState {
             neon_metrics: NeonMetrics::new(build_info),
             allowlist_routes: &[
                 "/status",
+                "/live",
                 "/ready",
                 "/metrics",
                 "/profile/cpu",
@@ -1260,16 +1261,8 @@ async fn handle_step_down(req: Request<Body>) -> Result<Response<Body>, ApiError
         ForwardOutcome::NotForwarded(req) => req,
     };
 
-    // Spawn a background task: once we start stepping down, we must finish: if the client drops
-    // their request we should avoid stopping in some part-stepped-down state.
-    let handle = tokio::spawn(async move {
-        let state = get_state(&req);
-        state.service.step_down().await
-    });
-
-    let result = handle
-        .await
-        .map_err(|e| ApiError::InternalServerError(e.into()))?;
+    let state = get_state(&req);
+    let result = state.service.step_down().await;
 
     json_response(StatusCode::OK, result)
 }
@@ -1401,6 +1394,8 @@ async fn handle_reconcile_all(req: Request<Body>) -> Result<Response<Body>, ApiE
 }
 
 /// Status endpoint is just used for checking that our HTTP listener is up
+///
+/// This serves as our k8s startup probe.
 async fn handle_status(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -1410,6 +1405,30 @@ async fn handle_status(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     };
 
     json_response(StatusCode::OK, ())
+}
+
+/// Liveness endpoint indicates that this storage controller is in a state
+/// where it can fulfill it's responsibilties. Namely, startup has finished
+/// and it is the current leader.
+///
+/// This serves as our k8s liveness probe.
+async fn handle_live(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let state = get_state(&req);
+    let live = state.service.startup_complete.is_ready()
+        && state.service.get_leadership_status() == LeadershipStatus::Leader;
+
+    if live {
+        json_response(StatusCode::OK, ())
+    } else {
+        json_response(StatusCode::SERVICE_UNAVAILABLE, ())
+    }
 }
 
 /// Readiness endpoint indicates when we're done doing startup I/O (e.g. reconciling
@@ -1745,6 +1764,7 @@ async fn maybe_forward(req: Request<Body>) -> ForwardOutcome {
     const NOT_FOR_FORWARD: &[&str] = &[
         "/control/v1/step_down",
         "/status",
+        "/live",
         "/ready",
         "/metrics",
         "/profile/cpu",
@@ -1968,6 +1988,9 @@ pub fn make_router(
         // Non-prefixed generic endpoints (status, metrics, profiling)
         .get("/status", |r| {
             named_request_span(r, handle_status, RequestName("status"))
+        })
+        .get("/live", |r| {
+            named_request_span(r, handle_live, RequestName("live"))
         })
         .get("/ready", |r| {
             named_request_span(r, handle_ready, RequestName("ready"))
