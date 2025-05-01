@@ -180,6 +180,7 @@ smallvec = "1.11"
 smol_str = { version = "0.2.0", features = ["serde"] }
 socket2 = "0.5"
 spki = "0.7.3"
+spin = "0.9.8"
 strum = "0.26"
 strum_macros = "0.26"
 "subtle"  = "2.5.0"

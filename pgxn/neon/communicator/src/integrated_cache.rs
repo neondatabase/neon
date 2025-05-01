@@ -11,6 +11,8 @@
 //! Note: This deals with "relations", which is really just one "relation fork" in Postgres
 //! terms. RelFileLocator + ForkNumber is the key.
 
+use std::mem::MaybeUninit;
+
 use utils::lsn::Lsn;
 
 use crate::file_cache::{CacheBlock, FileCache};
@@ -21,20 +23,28 @@ use neonart::TreeInitStruct;
 
 const CACHE_AREA_SIZE: usize = 10 * 1024 * 1024;
 
+type IntegratedCacheTreeInitStruct<'t> =
+    TreeInitStruct<'t, TreeKey, TreeEntry, neonart::ArtMultiSlabAllocator<'t, TreeEntry>>;
+
 /// This struct is stored in the shared memory segment.
 struct IntegratedCacheShmemData {
-    allocator: neonart::Allocator,
+    allocator: &'static neonart::ArtMultiSlabAllocator<'static, TreeEntry>,
 }
 
 /// This struct is initialized at postmaster startup, and passed to all the processes via fork().
 pub struct IntegratedCacheInitStruct<'t> {
     shmem_data: &'t IntegratedCacheShmemData,
-    handle: TreeInitStruct<'t, TreeKey, TreeEntry>,
+    handle: IntegratedCacheTreeInitStruct<'t>,
 }
 
 /// Represents write-access to the integrated cache. This is used by the communicator process.
 pub struct IntegratedCacheWriteAccess<'t> {
-    cache_tree: neonart::TreeWriteAccess<'t, TreeKey, TreeEntry>,
+    cache_tree: neonart::TreeWriteAccess<
+        't,
+        TreeKey,
+        TreeEntry,
+        neonart::ArtMultiSlabAllocator<'t, TreeEntry>,
+    >,
 
     global_lw_lsn: Lsn,
 
@@ -72,8 +82,9 @@ impl<'t> IntegratedCacheInitStruct<'t> {
         let area_ptr = ptr;
         let area_size = shmem_area.len() - len_used;
 
-        let cache_area: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(area_ptr, area_size) };
-        let allocator = neonart::Allocator::new(cache_area);
+        let cache_area: &mut [MaybeUninit<u8>] =
+            unsafe { std::slice::from_raw_parts_mut(area_ptr.cast(), area_size) };
+        let allocator = neonart::ArtMultiSlabAllocator::new(cache_area);
 
         // Initialize the shared memory area
         let shmem_data = unsafe {
@@ -81,7 +92,7 @@ impl<'t> IntegratedCacheInitStruct<'t> {
             &*shmem_data_ptr
         };
 
-        let tree_handle = TreeInitStruct::new(&shmem_data.allocator);
+        let tree_handle = IntegratedCacheTreeInitStruct::new(&shmem_data.allocator);
 
         IntegratedCacheInitStruct {
             shmem_data,

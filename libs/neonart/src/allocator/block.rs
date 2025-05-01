@@ -5,12 +5,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use spin;
 
-const BLOCK_SIZE: usize = 16*1024;
+use crate::allocator::r#static::StaticAllocator;
+
+const BLOCK_SIZE: usize = 16 * 1024;
 
 const INVALID_BLOCK: u64 = u64::MAX;
 
-pub(crate) struct BlockAllocator {
-    blocks_ptr: *mut MaybeUninit<u8>,
+pub(crate) struct BlockAllocator<'t> {
+    blocks_ptr: &'t [MaybeUninit<u8>],
     num_blocks: u64,
     num_initialized: AtomicU64,
 
@@ -28,23 +30,19 @@ struct FreeListBlockInner {
     free_blocks: [u64; 100], // FIXME: fill the rest of the block
 }
 
+impl<'t> BlockAllocator<'t> {
+    pub(crate) fn new(area: &'t mut [MaybeUninit<u8>]) -> Self {
+        let mut alloc = StaticAllocator::new(area);
 
-impl BlockAllocator {
-    pub(crate) fn new(ptr: *mut MaybeUninit<u8>, size: usize) -> Self {
-        let mut p = ptr;
         // Use all the space for the blocks
-        let padding = p.align_offset(BLOCK_SIZE);
-        p = unsafe { p.byte_add(padding) };
-        let blocks_ptr = p;
+        alloc.align(BLOCK_SIZE);
 
-        let used = unsafe { p.byte_offset_from(ptr) as usize };
-        assert!(used <= size);
-        let blocks_size = size - used;
+        let remain = alloc.remaining();
 
-        let num_blocks = (blocks_size / BLOCK_SIZE) as u64;
+        let num_blocks = (remain.len() / BLOCK_SIZE) as u64;
 
         BlockAllocator {
-            blocks_ptr,
+            blocks_ptr: remain,
             num_blocks,
             num_initialized: AtomicU64::new(0),
             freelist_head: spin::Mutex::new(INVALID_BLOCK),
@@ -60,7 +58,13 @@ impl BlockAllocator {
 
     fn get_block_ptr(&self, blkno: u64) -> *mut u8 {
         assert!(blkno < self.num_blocks);
-        unsafe { self.blocks_ptr.byte_offset(blkno as isize * BLOCK_SIZE as isize) }.cast()
+        unsafe {
+            self.blocks_ptr
+                .as_ptr()
+                .byte_offset(blkno as isize * BLOCK_SIZE as isize)
+        }
+        .cast_mut()
+        .cast()
     }
 
     pub(crate) fn alloc_block(&self) -> *mut u8 {
@@ -95,14 +99,19 @@ impl BlockAllocator {
         // If there are some blocks left that we've never used, pick next such block
         let mut next_uninitialized = self.num_initialized.load(Ordering::Relaxed);
         while next_uninitialized < self.num_blocks {
-            match self.num_initialized.compare_exchange(next_uninitialized, next_uninitialized + 1, Ordering::Relaxed, Ordering::Relaxed) {
+            match self.num_initialized.compare_exchange(
+                next_uninitialized,
+                next_uninitialized + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
                 Ok(_) => {
                     return next_uninitialized;
-                },
+                }
                 Err(old) => {
                     next_uninitialized = old;
                     continue;
-                },
+                }
             }
         }
 

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+spin.workspace = true
 tracing.workspace = true
 
 rand.workspace = true # for tests

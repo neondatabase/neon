@@ -3,8 +3,8 @@ use std::ptr::NonNull;
 
 use super::lock_and_version::AtomicLockAndVersion;
 
-use crate::Allocator;
 use crate::Value;
+use crate::allocator::ArtAllocator;
 
 pub(crate) const MAX_PREFIX_LEN: usize = 8;
 
@@ -75,7 +75,7 @@ pub(crate) enum ChildOrValuePtr<V> {
 }
 
 #[repr(C)]
-struct NodeInternal4<V> {
+pub struct NodeInternal4<V> {
     tag: NodeTag,
     lock_and_version: AtomicLockAndVersion,
 
@@ -88,7 +88,7 @@ struct NodeInternal4<V> {
 }
 
 #[repr(C)]
-struct NodeInternal16<V> {
+pub struct NodeInternal16<V> {
     tag: NodeTag,
     lock_and_version: AtomicLockAndVersion,
 
@@ -103,7 +103,7 @@ struct NodeInternal16<V> {
 const INVALID_CHILD_INDEX: u8 = u8::MAX;
 
 #[repr(C)]
-struct NodeInternal48<V> {
+pub struct NodeInternal48<V> {
     tag: NodeTag,
     lock_and_version: AtomicLockAndVersion,
 
@@ -116,7 +116,7 @@ struct NodeInternal48<V> {
 }
 
 #[repr(C)]
-pub(crate) struct NodeInternal256<V> {
+pub struct NodeInternal256<V> {
     tag: NodeTag,
     lock_and_version: AtomicLockAndVersion,
 
@@ -128,7 +128,7 @@ pub(crate) struct NodeInternal256<V> {
 }
 
 #[repr(C)]
-struct NodeLeaf4<V> {
+pub struct NodeLeaf4<V> {
     tag: NodeTag,
     lock_and_version: AtomicLockAndVersion,
 
@@ -141,7 +141,7 @@ struct NodeLeaf4<V> {
 }
 
 #[repr(C)]
-struct NodeLeaf16<V> {
+pub struct NodeLeaf16<V> {
     tag: NodeTag,
     lock_and_version: AtomicLockAndVersion,
 
@@ -154,7 +154,7 @@ struct NodeLeaf16<V> {
 }
 
 #[repr(C)]
-struct NodeLeaf48<V> {
+pub struct NodeLeaf48<V> {
     tag: NodeTag,
     lock_and_version: AtomicLockAndVersion,
 
@@ -167,7 +167,7 @@ struct NodeLeaf48<V> {
 }
 
 #[repr(C)]
-struct NodeLeaf256<V> {
+pub struct NodeLeaf256<V> {
     tag: NodeTag,
     lock_and_version: AtomicLockAndVersion,
 
@@ -352,7 +352,7 @@ impl<V: Value> NodePtr<V> {
         }
     }
 
-    pub(crate) fn grow(&self, allocator: &Allocator) -> NodePtr<V> {
+    pub(crate) fn grow(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
         match self.variant() {
             NodeVariant::Internal4(n) => n.grow(allocator),
             NodeVariant::Internal16(n) => n.grow(allocator),
@@ -403,17 +403,43 @@ impl<V: Value> NodePtr<V> {
             NodeVariantMut::Leaf256(n) => n.insert_value(key_byte, value),
         }
     }
-}
 
-pub fn new_root<V: Value>(allocator: &Allocator) -> NodePtr<V> {
-    NodePtr {
-        ptr: allocator.alloc(NodeInternal256::<V>::new()).as_ptr().cast(),
-        phantom_value: PhantomData,
+    // FIXME
+    /*
+        pub(crate) fn deallocate(self, allocator: &impl ArtAllocator<V>) {
+            match self.variant() {
+                NodeVariant::Internal4(_) => allocator.dealloc_node_internal4(self.ptr.cast()),
+                NodeVariant::Internal16(_) => allocator.dealloc_node_internal16(self.ptr.cast()),
+                NodeVariant::Internal48(_) => allocator.dealloc_node_internal48(self.ptr.cast()),
+                NodeVariant::Internal256(_) => allocator.dealloc_node_internal256(self.ptr.cast()),
+                NodeVariant::Leaf4(_) => allocator.dealloc_node_leaf4(self.ptr.cast()),
+                NodeVariant::Leaf16(_) => allocator.dealloc_node_leaf16(self.ptr.cast()),
+                NodeVariant::Leaf48(_) => allocator.dealloc_node_leaf48(self.ptr.cast()),
+                NodeVariant::Leaf256(_) => allocator.dealloc_node_leaf256(self.ptr.cast()),
+            }
     }
+        */
 }
 
-pub fn new_internal<V: Value>(prefix: &[u8], allocator: &Allocator) -> NodePtr<V> {
-    let mut node = allocator.alloc(NodeInternal4 {
+pub fn new_root<V: Value>(allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+    let ptr: *mut NodeInternal256<V> = allocator.alloc_node_internal256().cast();
+    if ptr.is_null() {
+        panic!("out of memory");
+    }
+
+    unsafe {
+        *ptr = NodeInternal256::<V>::new();
+    }
+
+    ptr.into()
+}
+
+pub fn new_internal<V: Value>(prefix: &[u8], allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+    let ptr: *mut NodeInternal4<V> = allocator.alloc_node_internal4().cast();
+    if ptr.is_null() {
+        panic!("out of memory");
+    }
+    let mut init = NodeInternal4 {
         tag: NodeTag::Internal4,
         lock_and_version: AtomicLockAndVersion::new(),
 
@@ -423,14 +449,19 @@ pub fn new_internal<V: Value>(prefix: &[u8], allocator: &Allocator) -> NodePtr<V
 
         child_keys: [0; 4],
         child_ptrs: [const { NodePtr::null() }; 4],
-    });
-    node.prefix[0..prefix.len()].copy_from_slice(prefix);
+    };
+    init.prefix[0..prefix.len()].copy_from_slice(prefix);
+    unsafe { ptr.write(init) };
 
-    node.as_ptr().into()
+    ptr.into()
 }
 
-pub fn new_leaf<V: Value>(prefix: &[u8], allocator: &Allocator) -> NodePtr<V> {
-    let mut node = allocator.alloc(NodeLeaf4 {
+pub fn new_leaf<V: Value>(prefix: &[u8], allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+    let ptr: *mut NodeLeaf4<V> = allocator.alloc_node_leaf4().cast();
+    if ptr.is_null() {
+        panic!("out of memory");
+    }
+    let mut init = NodeLeaf4 {
         tag: NodeTag::Leaf4,
         lock_and_version: AtomicLockAndVersion::new(),
 
@@ -440,10 +471,11 @@ pub fn new_leaf<V: Value>(prefix: &[u8], allocator: &Allocator) -> NodePtr<V> {
 
         child_keys: [0; 4],
         child_values: [const { None }; 4],
-    });
-    node.prefix[0..prefix.len()].copy_from_slice(prefix);
+    };
+    init.prefix[0..prefix.len()].copy_from_slice(prefix);
+    unsafe { ptr.write(init) };
 
-    node.as_ptr().into()
+    ptr.into()
 }
 
 impl<V: Value> NodeInternal4<V> {
@@ -493,8 +525,12 @@ impl<V: Value> NodeInternal4<V> {
         self.num_children += 1;
     }
 
-    fn grow(&self, allocator: &Allocator) -> NodePtr<V> {
-        let mut node16 = allocator.alloc(NodeInternal16 {
+    fn grow(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+        let ptr: *mut NodeInternal16<V> = allocator.alloc_node_internal16().cast();
+        if ptr.is_null() {
+            panic!("out of memory");
+        }
+        let mut init = NodeInternal16 {
             tag: NodeTag::Internal16,
             lock_and_version: AtomicLockAndVersion::new(),
 
@@ -504,13 +540,13 @@ impl<V: Value> NodeInternal4<V> {
 
             child_keys: [0; 16],
             child_ptrs: [const { NodePtr::null() }; 16],
-        });
+        };
         for i in 0..self.num_children as usize {
-            node16.child_keys[i] = self.child_keys[i];
-            node16.child_ptrs[i] = self.child_ptrs[i];
+            init.child_keys[i] = self.child_keys[i];
+            init.child_ptrs[i] = self.child_ptrs[i];
         }
-
-        node16.as_ptr().into()
+        unsafe { ptr.write(init) };
+        ptr.into()
     }
 }
 
@@ -561,8 +597,12 @@ impl<V: Value> NodeInternal16<V> {
         self.num_children += 1;
     }
 
-    fn grow(&self, allocator: &Allocator) -> NodePtr<V> {
-        let mut node48 = allocator.alloc(NodeInternal48 {
+    fn grow(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+        let ptr: *mut NodeInternal48<V> = allocator.alloc_node_internal48().cast();
+        if ptr.is_null() {
+            panic!("out of memory");
+        }
+        let mut init = NodeInternal48 {
             tag: NodeTag::Internal48,
             lock_and_version: AtomicLockAndVersion::new(),
 
@@ -572,14 +612,14 @@ impl<V: Value> NodeInternal16<V> {
 
             child_indexes: [INVALID_CHILD_INDEX; 256],
             child_ptrs: [const { NodePtr::null() }; 48],
-        });
+        };
         for i in 0..self.num_children as usize {
             let idx = self.child_keys[i] as usize;
-            node48.child_indexes[idx] = i as u8;
-            node48.child_ptrs[i] = self.child_ptrs[i];
+            init.child_indexes[idx] = i as u8;
+            init.child_ptrs[i] = self.child_ptrs[i];
         }
-
-        node48.as_ptr().into()
+        unsafe { ptr.write(init) };
+        ptr.into()
     }
 }
 
@@ -629,8 +669,12 @@ impl<V: Value> NodeInternal48<V> {
         self.num_children += 1;
     }
 
-    fn grow(&self, allocator: &Allocator) -> NodePtr<V> {
-        let mut node256 = allocator.alloc(NodeInternal256 {
+    fn grow(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+        let ptr: *mut NodeInternal256<V> = allocator.alloc_node_internal256().cast();
+        if ptr.is_null() {
+            panic!("out of memory");
+        }
+        let mut init = NodeInternal256 {
             tag: NodeTag::Internal256,
             lock_and_version: AtomicLockAndVersion::new(),
 
@@ -639,14 +683,15 @@ impl<V: Value> NodeInternal48<V> {
             num_children: self.num_children as u16,
 
             child_ptrs: [const { NodePtr::null() }; 256],
-        });
+        };
         for i in 0..256 {
             let idx = self.child_indexes[i];
             if idx != INVALID_CHILD_INDEX {
-                node256.child_ptrs[i] = self.child_ptrs[idx as usize];
+                init.child_ptrs[i] = self.child_ptrs[idx as usize];
             }
         }
-        node256.as_ptr().into()
+        unsafe { ptr.write(init) };
+        ptr.into()
     }
 }
 
@@ -732,8 +777,12 @@ impl<V: Value> NodeLeaf4<V> {
         self.num_values += 1;
     }
 
-    fn grow(&self, allocator: &Allocator) -> NodePtr<V> {
-        let mut node16 = allocator.alloc(NodeLeaf16 {
+    fn grow(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+        let ptr: *mut NodeLeaf16<V> = allocator.alloc_node_leaf16();
+        if ptr.is_null() {
+            panic!("out of memory");
+        }
+        let mut init = NodeLeaf16 {
             tag: NodeTag::Leaf16,
             lock_and_version: AtomicLockAndVersion::new(),
 
@@ -743,12 +792,13 @@ impl<V: Value> NodeLeaf4<V> {
 
             child_keys: [0; 16],
             child_values: [const { None }; 16],
-        });
+        };
         for i in 0..self.num_values as usize {
-            node16.child_keys[i] = self.child_keys[i];
-            node16.child_values[i] = self.child_values[i].clone();
+            init.child_keys[i] = self.child_keys[i];
+            init.child_values[i] = self.child_values[i].clone();
         }
-        node16.as_ptr().into()
+        unsafe { ptr.write(init) };
+        ptr.into()
     }
 }
 
@@ -788,8 +838,12 @@ impl<V: Value> NodeLeaf16<V> {
         self.child_values[idx] = Some(value);
         self.num_values += 1;
     }
-    fn grow(&self, allocator: &Allocator) -> NodePtr<V> {
-        let mut node48 = allocator.alloc(NodeLeaf48 {
+    fn grow(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+        let ptr: *mut NodeLeaf48<V> = allocator.alloc_node_leaf48().cast();
+        if ptr.is_null() {
+            panic!("out of memory");
+        }
+        let mut init = NodeLeaf48 {
             tag: NodeTag::Leaf48,
             lock_and_version: AtomicLockAndVersion::new(),
 
@@ -799,13 +853,14 @@ impl<V: Value> NodeLeaf16<V> {
 
             child_indexes: [INVALID_CHILD_INDEX; 256],
             child_values: [const { None }; 48],
-        });
+        };
         for i in 0..self.num_values {
             let idx = self.child_keys[i as usize];
-            node48.child_indexes[idx as usize] = i;
-            node48.child_values[i as usize] = self.child_values[i as usize].clone();
+            init.child_indexes[idx as usize] = i;
+            init.child_values[i as usize] = self.child_values[i as usize].clone();
         }
-        node48.as_ptr().into()
+        unsafe { ptr.write(init) };
+        ptr.into()
     }
 }
 
@@ -845,8 +900,12 @@ impl<V: Value> NodeLeaf48<V> {
         self.child_values[idx as usize] = Some(value);
         self.num_values += 1;
     }
-    fn grow(&self, allocator: &Allocator) -> NodePtr<V> {
-        let mut node256 = allocator.alloc(NodeLeaf256 {
+    fn grow(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+        let ptr: *mut NodeLeaf256<V> = allocator.alloc_node_leaf256();
+        if ptr.is_null() {
+            panic!("out of memory");
+        }
+        let mut init = NodeLeaf256 {
             tag: NodeTag::Leaf256,
             lock_and_version: AtomicLockAndVersion::new(),
 
@@ -855,14 +914,15 @@ impl<V: Value> NodeLeaf48<V> {
             num_values: self.num_values as u16,
 
             child_values: [const { None }; 256],
-        });
+        };
         for i in 0..256 {
             let idx = self.child_indexes[i];
             if idx != INVALID_CHILD_INDEX {
-                node256.child_values[i] = self.child_values[idx as usize].clone();
+                init.child_values[i] = self.child_values[idx as usize].clone();
             }
         }
-        node256.as_ptr().into()
+        unsafe { ptr.write(init) };
+        ptr.into()
     }
 }
 

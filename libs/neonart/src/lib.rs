@@ -122,15 +122,14 @@
 //! - Removing values has not been implemented
 
 mod algorithm;
-mod allocator;
+pub mod allocator;
 mod epoch;
 
 use algorithm::RootPtr;
 
-use allocator::AllocatedBox;
-
 use std::fmt::Debug;
 use std::marker::PhantomData;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::epoch::EpochPin;
@@ -138,7 +137,8 @@ use crate::epoch::EpochPin;
 #[cfg(test)]
 mod tests;
 
-pub use allocator::Allocator;
+use allocator::ArtAllocator;
+pub use allocator::ArtMultiSlabAllocator;
 
 /// Fixed-length key type.
 ///
@@ -154,31 +154,36 @@ pub trait Key: Clone + Debug {
 /// the old sticks around until all readers that might see the old value are gone.
 pub trait Value: Clone {}
 
-struct Tree<K: Key, V: Value> {
+pub struct Tree<V: Value> {
     root: RootPtr<V>,
 
     writer_attached: AtomicBool,
+}
+
+unsafe impl<V: Value + Sync> Sync for Tree<V> {}
+unsafe impl<V: Value + Send> Send for Tree<V> {}
+
+/// Struct created at postmaster startup
+pub struct TreeInitStruct<'t, K: Key, V: Value, A: ArtAllocator<V>> {
+    tree: &'t Tree<V>,
+
+    allocator: &'t A,
 
     phantom_key: PhantomData<K>,
 }
 
-/// Struct created at postmaster startup
-pub struct TreeInitStruct<'t, K: Key, V: Value> {
-    tree: AllocatedBox<'t, Tree<K, V>>,
-
-    allocator: &'t Allocator,
-}
-
 /// The worker process has a reference to this. The write operations are only safe
 /// from the worker process
-pub struct TreeWriteAccess<'t, K: Key, V: Value>
+pub struct TreeWriteAccess<'t, K: Key, V: Value, A: ArtAllocator<V>>
 where
     K: Key,
     V: Value,
 {
-    tree: AllocatedBox<'t, Tree<K, V>>,
+    tree: &'t Tree<V>,
 
-    allocator: &'t Allocator,
+    allocator: &'t A,
+
+    phantom_key: PhantomData<K>,
 }
 
 /// The backends have a reference to this. It cannot be used to modify the tree
@@ -187,21 +192,29 @@ where
     K: Key,
     V: Value,
 {
-    tree: AllocatedBox<'t, Tree<K, V>>,
+    tree: &'t Tree<V>,
+
+    phantom_key: PhantomData<K>,
 }
 
-impl<'a, 't: 'a, K: Key, V: Value> TreeInitStruct<'t, K, V> {
-    pub fn new(allocator: &'t Allocator) -> TreeInitStruct<'t, K, V> {
-        let tree = allocator.alloc(Tree {
+impl<'a, 't: 'a, K: Key, V: Value, A: ArtAllocator<V>> TreeInitStruct<'t, K, V, A> {
+    pub fn new(allocator: &'t A) -> TreeInitStruct<'t, K, V, A> {
+        let tree_ptr = allocator.alloc_tree();
+        let tree_ptr = NonNull::new(tree_ptr).expect("out of memory");
+        let init = Tree {
             root: algorithm::new_root(allocator),
             writer_attached: AtomicBool::new(false),
-            phantom_key: PhantomData,
-        });
+        };
+        unsafe { tree_ptr.write(init) };
 
-        TreeInitStruct { tree, allocator }
+        TreeInitStruct {
+            tree: unsafe { tree_ptr.as_ref() },
+            allocator,
+            phantom_key: PhantomData,
+        }
     }
 
-    pub fn attach_writer(self) -> TreeWriteAccess<'t, K, V> {
+    pub fn attach_writer(self) -> TreeWriteAccess<'t, K, V, A> {
         let previously_attached = self.tree.writer_attached.swap(true, Ordering::Relaxed);
         if previously_attached {
             panic!("writer already attached");
@@ -209,21 +222,26 @@ impl<'a, 't: 'a, K: Key, V: Value> TreeInitStruct<'t, K, V> {
         TreeWriteAccess {
             tree: self.tree,
             allocator: self.allocator,
+            phantom_key: PhantomData,
         }
     }
 
     pub fn attach_reader(self) -> TreeReadAccess<'t, K, V> {
-        TreeReadAccess { tree: self.tree }
+        TreeReadAccess {
+            tree: self.tree,
+            phantom_key: PhantomData,
+        }
     }
 }
 
-impl<'t, K: Key + Clone, V: Value> TreeWriteAccess<'t, K, V> {
-    pub fn start_write(&'t self) -> TreeWriteGuard<'t, K, V> {
+impl<'t, K: Key + Clone, V: Value, A: ArtAllocator<V>> TreeWriteAccess<'t, K, V, A> {
+    pub fn start_write(&'t self) -> TreeWriteGuard<'t, K, V, A> {
         // TODO: grab epoch guard
         TreeWriteGuard {
             allocator: self.allocator,
             tree: &self.tree,
             epoch_pin: epoch::pin_epoch(),
+            phantom_key: PhantomData,
         }
     }
 
@@ -231,6 +249,7 @@ impl<'t, K: Key + Clone, V: Value> TreeWriteAccess<'t, K, V> {
         TreeReadGuard {
             tree: &self.tree,
             epoch_pin: epoch::pin_epoch(),
+            phantom_key: PhantomData,
         }
     }
 }
@@ -240,6 +259,7 @@ impl<'t, K: Key + Clone, V: Value> TreeReadAccess<'t, K, V> {
         TreeReadGuard {
             tree: &self.tree,
             epoch_pin: epoch::pin_epoch(),
+            phantom_key: PhantomData,
         }
     }
 }
@@ -249,9 +269,10 @@ where
     K: Key,
     V: Value,
 {
-    tree: &'t AllocatedBox<'t, Tree<K, V>>,
+    tree: &'t Tree<V>,
 
     epoch_pin: EpochPin,
+    phantom_key: PhantomData<K>,
 }
 
 impl<'t, K: Key, V: Value> TreeReadGuard<'t, K, V> {
@@ -260,18 +281,19 @@ impl<'t, K: Key, V: Value> TreeReadGuard<'t, K, V> {
     }
 }
 
-pub struct TreeWriteGuard<'t, K, V>
+pub struct TreeWriteGuard<'t, K, V, A>
 where
     K: Key,
     V: Value,
 {
-    tree: &'t AllocatedBox<'t, Tree<K, V>>,
-    allocator: &'t Allocator,
+    tree: &'t Tree<V>,
+    allocator: &'t A,
 
     epoch_pin: EpochPin,
+    phantom_key: PhantomData<K>,
 }
 
-impl<'t, K: Key, V: Value> TreeWriteGuard<'t, K, V> {
+impl<'t, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteGuard<'t, K, V, A> {
     pub fn insert(&mut self, key: &K, value: V) {
         self.update_with_fn(key, |_| Some(value))
     }
@@ -294,7 +316,7 @@ impl<'t, K: Key, V: Value> TreeWriteGuard<'t, K, V> {
     }
 }
 
-impl<'t, K: Key, V: Value + Debug> TreeWriteGuard<'t, K, V> {
+impl<'t, K: Key, V: Value + Debug> TreeReadGuard<'t, K, V> {
     pub fn dump(&mut self) {
         algorithm::dump_tree(self.tree.root, &self.epoch_pin)
     }

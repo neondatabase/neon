@@ -1,5 +1,5 @@
 mod lock_and_version;
-mod node_ptr;
+pub(crate) mod node_ptr;
 mod node_ref;
 
 use std::vec::Vec;
@@ -9,12 +9,13 @@ use crate::algorithm::node_ptr::{MAX_PREFIX_LEN, NodePtr};
 use crate::algorithm::node_ref::ChildOrValue;
 use crate::algorithm::node_ref::{NodeRef, ReadLockedNodeRef, WriteLockedNodeRef};
 
+use crate::allocator::ArtAllocator;
 use crate::epoch::EpochPin;
-use crate::{Allocator, Key, Value};
+use crate::{Key, Value};
 
 pub(crate) type RootPtr<V> = node_ptr::NodePtr<V>;
 
-pub fn new_root<V: Value>(allocator: &Allocator) -> RootPtr<V> {
+pub fn new_root<V: Value>(allocator: &impl ArtAllocator<V>) -> RootPtr<V> {
     node_ptr::new_root(allocator)
 }
 
@@ -36,7 +37,7 @@ pub(crate) fn update_fn<'e, K: Key, V: Value, F>(
     key: &K,
     value_fn: F,
     root: RootPtr<V>,
-    allocator: &Allocator,
+    allocator: &impl ArtAllocator<V>,
     epoch_pin: &'e EpochPin,
 ) where
     F: FnOnce(Option<&V>) -> Option<V>,
@@ -111,7 +112,7 @@ pub(crate) fn update_recurse<'e, V: Value, F>(
     value_fn: F,
     node: NodeRef<'e, V>,
     rparent: Option<(ReadLockedNodeRef<V>, u8)>,
-    allocator: &Allocator,
+    allocator: &impl ArtAllocator<V>,
     epoch_pin: &'e EpochPin,
     level: usize,
     orig_key: &[u8],
@@ -283,7 +284,7 @@ fn insert_split_prefix<'a, V: Value>(
     node: &mut WriteLockedNodeRef<V>,
     parent: &mut WriteLockedNodeRef<V>,
     parent_key: u8,
-    allocator: &Allocator,
+    allocator: &impl ArtAllocator<V>,
 ) {
     let old_node = node;
     let old_prefix = old_node.get_prefix();
@@ -310,7 +311,7 @@ fn insert_to_node<V: Value>(
     wnode: &mut WriteLockedNodeRef<V>,
     key: &[u8],
     value: V,
-    allocator: &Allocator,
+    allocator: &impl ArtAllocator<V>,
 ) {
     if wnode.is_leaf() {
         wnode.insert_value(key[0], value);
@@ -327,7 +328,7 @@ fn insert_and_grow<V: Value>(
     wnode: &WriteLockedNodeRef<V>,
     parent: &mut WriteLockedNodeRef<V>,
     parent_key_byte: u8,
-    allocator: &Allocator,
+    allocator: &impl ArtAllocator<V>,
 ) {
     let mut bigger_node = wnode.grow(allocator);
 
@@ -344,7 +345,11 @@ fn insert_and_grow<V: Value>(
 
 // Allocate a new leaf node to hold 'value'. If key is long, we may need to allocate
 // new internal nodes to hold it too
-fn allocate_node_for_value<V: Value>(key: &[u8], value: V, allocator: &Allocator) -> NodePtr<V> {
+fn allocate_node_for_value<V: Value>(
+    key: &[u8],
+    value: V,
+    allocator: &impl ArtAllocator<V>,
+) -> NodePtr<V> {
     let mut prefix_off = key.len().saturating_sub(MAX_PREFIX_LEN + 1);
 
     let mut leaf_node = node_ref::new_leaf(&key[prefix_off..key.len() - 1], allocator);

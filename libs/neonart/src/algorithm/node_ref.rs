@@ -6,8 +6,9 @@ use super::node_ptr;
 use super::node_ptr::ChildOrValuePtr;
 use super::node_ptr::NodePtr;
 use crate::EpochPin;
+use crate::Value;
 use crate::algorithm::lock_and_version::AtomicLockAndVersion;
-use crate::{Allocator, Value};
+use crate::allocator::ArtAllocator;
 
 pub struct NodeRef<'e, V> {
     ptr: NodePtr<V>,
@@ -148,7 +149,7 @@ impl<'e, V: Value> WriteLockedNodeRef<'e, V> {
         self.ptr.insert_value(key_byte, value)
     }
 
-    pub(crate) fn grow(&self, allocator: &Allocator) -> NewNodeRef<V> {
+    pub(crate) fn grow(&self, allocator: &impl ArtAllocator<V>) -> NewNodeRef<V> {
         let new_node = self.ptr.grow(allocator);
         NewNodeRef { ptr: new_node }
     }
@@ -189,13 +190,16 @@ impl<V: Value> NewNodeRef<V> {
     }
 }
 
-pub(crate) fn new_internal<V: Value>(prefix: &[u8], allocator: &Allocator) -> NewNodeRef<V> {
+pub(crate) fn new_internal<V: Value>(
+    prefix: &[u8],
+    allocator: &impl ArtAllocator<V>,
+) -> NewNodeRef<V> {
     NewNodeRef {
         ptr: node_ptr::new_internal(prefix, allocator),
     }
 }
 
-pub(crate) fn new_leaf<V: Value>(prefix: &[u8], allocator: &Allocator) -> NewNodeRef<V> {
+pub(crate) fn new_leaf<V: Value>(prefix: &[u8], allocator: &impl ArtAllocator<V>) -> NewNodeRef<V> {
     NewNodeRef {
         ptr: node_ptr::new_leaf(prefix, allocator),
     }
