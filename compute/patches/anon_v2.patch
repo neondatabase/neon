@@ -19,20 +19,30 @@ index 7da6553..7961984 100644
  
  SECURITY LABEL FOR anon ON FUNCTION anon.load_csv IS 'UNTRUSTED';
  
-+CREATE OR REPLACE FUNCTION anon.load_csv_superuser(
-+  datapath TEXT
-+)
-+RETURNS BOOLEAN
-+AS $$
-+DECLARE
-+  success BOOLEAN;
+--- load fake data from a given path
+-CREATE OR REPLACE FUNCTION anon.init(
+-  datapath TEXT
+-)
++CREATE OR REPLACE FUNCTION anon.load_fake_data()
+ RETURNS BOOLEAN
+ AS $$
+ DECLARE
+-  datapath_check TEXT;
+   success BOOLEAN;
 +  sharedir TEXT;
-+BEGIN
++  datapath TEXT;
+ BEGIN
+ 
+-  IF anon.is_initialized() THEN
+-    RAISE NOTICE 'The anon extension is already initialized.';
+-    RETURN TRUE;
+-  END IF;
++  datapath := '/extension/anon/';
 +  -- find the local extension directory
 +  SELECT setting INTO sharedir
 +  FROM pg_catalog.pg_config
 +  WHERE name = 'SHAREDIR';
-
+ 
    SELECT bool_or(results) INTO success
    FROM unnest(array[
 -    anon.load_csv('anon.identifiers_category',datapath||'/identifiers_category.csv'),
@@ -119,7 +129,7 @@ index 7da6553..7961984 100644
    SECURITY INVOKER
 @@ -264,3 +263,22 @@ $$
  ;
-
+ 
  SECURITY LABEL FOR anon ON FUNCTION anon.unload IS 'UNTRUSTED';
 +
 +
