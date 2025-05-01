@@ -3886,10 +3886,10 @@ impl Service {
 
             None
         } else if safekeepers {
-            // Note that we do not support creating the timeline on the safekeepers
-            // for imported timelines. The `start_lsn` of the timeline is not known
-            // until the import finshes.
-            // https://github.com/neondatabase/neon/issues/11569
+            // Note that for imported timelines, we do not create the timeline on the safekeepers
+            // straight away. Instead, we do it once the import finalized such that we know what
+            // start LSN to provide for the safekeepers. This is done in
+            // [`Self::finalize_timeline_import`].
             let res = self
                 .tenant_timeline_create_safekeepers(tenant_id, &timeline_info)
                 .instrument(tracing::info_span!("timeline_create_safekeepers", %tenant_id, timeline_id=%timeline_info.timeline_id))
@@ -3966,11 +3966,20 @@ impl Service {
                 let active = self.timeline_active_on_all_shards(&import).await?;
 
                 match active {
-                    true => {
+                    Some(timeline_info) => {
                         tracing::info!("Timeline became active on all shards");
+
+                        // Now that we know the start LSN of this timeline, create it on the
+                        // safekeepers.
+                        self.tenant_timeline_create_safekeepers_until_success(
+                            import.tenant_id,
+                            timeline_info,
+                        )
+                        .await?;
+
                         break;
                     }
-                    false => {
+                    None => {
                         tracing::info!("Timeline not active on all shards yet");
 
                         tokio::select! {
@@ -4004,9 +4013,6 @@ impl Service {
             .range_mut(TenantShardId::tenant_range(import.tenant_id))
             .for_each(|(_id, shard)| shard.importing = TimelineImportState::Idle);
 
-        // TODO(vlad): Timeline creations in import mode do not return a correct initdb lsn,
-        // so we can't create the timeline on the safekeepers. Fix by moving creation here.
-        // https://github.com/neondatabase/neon/issues/11569
         tracing::info!(%import_failed, "Timeline import complete");
 
         Ok(())
@@ -4021,10 +4027,16 @@ impl Service {
         .await;
     }
 
+    /// If the timeline is active on all shards, returns the [`TimelineInfo`]
+    /// collected from shard 0.
+    ///
+    /// An error is returned if the shard layout has changed during the import.
+    /// This is guarded against within the storage controller and the pageserver,
+    /// and, therefore, unexpected.
     async fn timeline_active_on_all_shards(
         self: &Arc<Self>,
         import: &TimelineImport,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<Option<TimelineInfo>> {
         let targets = {
             let locked = self.inner.read().unwrap();
             let mut targets = Vec::new();
@@ -4048,12 +4060,16 @@ impl Service {
                         .expect("Pageservers may not be deleted while referenced");
                     targets.push((*tenant_shard_id, node.clone()));
                 } else {
-                    return Ok(false);
+                    return Ok(None);
                 }
             }
 
             targets
         };
+
+        if targets.is_empty() {
+            anyhow::bail!("No shards found to finalize import for");
+        }
 
         let results = self
             .tenant_for_shards_api(
@@ -4070,10 +4086,17 @@ impl Service {
             )
             .await;
 
-        Ok(results.into_iter().all(|res| match res {
+        let all_active = results.iter().all(|res| match res {
             Ok(info) => info.state == TimelineState::Active,
             Err(_) => false,
-        }))
+        });
+
+        if all_active {
+            // Both unwraps are validated above
+            Ok(Some(results.into_iter().next().unwrap().unwrap()))
+        } else {
+            Ok(None)
+        }
     }
 
     pub(crate) async fn tenant_timeline_archival_config(
