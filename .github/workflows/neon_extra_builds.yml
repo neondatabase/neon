@@ -39,7 +39,7 @@ jobs:
       v17: ${{ steps.files_changed.outputs.v17 }}
       postgres_changes: ${{ steps.postgres_changes.outputs.changes }}
       rebuild_rust_code: ${{ steps.files_changed.outputs.rust_code }}
-      rebuild_everything: ${{ steps.files_changed.outputs.rebuild_neon_extra || steps.files_changed.outputs.rebuild_macos }}
+      rebuild_everything: ${{ false }}
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
