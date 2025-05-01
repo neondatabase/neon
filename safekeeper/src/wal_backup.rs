@@ -166,7 +166,7 @@ fn hadron_determine_offloader(mgr: &Manager, state: &StateSnapshot) -> (Option<N
 
     let backup_lag = state.commit_lsn.checked_sub(state.backup_lsn);
     if backup_lag.is_none() {
-        info!("Backup lag is None. Skipping re-election.");
+        debug!("Backup lag is None. Skipping re-election.");
         return (offloader, election_dbg_str);
     }
 

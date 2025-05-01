@@ -22,6 +22,7 @@ use tracing::{Instrument, debug, info, info_span, warn};
 use utils::auth::{AuthError, Claims, SwappableJwtAuth};
 
 use crate::error::{ApiError, api_error_handler, route_error_handler};
+use crate::metrics_collector::{METRICS_COLLECTOR, METRICS_STALE_MILLIS};
 use crate::request::{get_query_param, parse_query_param};
 
 static SERVE_METRICS_COUNT: Lazy<IntCounter> = Lazy::new(|| {
@@ -250,9 +251,11 @@ impl std::io::Write for ChannelWriter {
     }
 }
 
-pub async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
+pub async fn prometheus_metrics_handler(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     SERVE_METRICS_COUNT.inc();
 
+    // HADRON
+    let use_latest = parse_query_param(&req, "use_latest")?.unwrap_or(false);
     let started_at = std::time::Instant::now();
 
     let (tx, rx) = mpsc::channel(1);
@@ -277,12 +280,17 @@ pub async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<
 
         let _span = span.entered();
 
-        let metrics = metrics::gather();
+        // HADRON
+        if use_latest {
+            METRICS_COLLECTOR.run_once();
+        }
+
+        let collected = METRICS_COLLECTOR.last_collected();
 
         let gathered_at = std::time::Instant::now();
 
         let res = encoder
-            .encode(&metrics, &mut writer)
+            .encode(&collected.metrics, &mut writer)
             .and_then(|_| writer.flush().map_err(|e| e.into()));
 
         // this instant is not when we finally got the full response sent, sending is done by hyper
@@ -295,6 +303,10 @@ pub async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<
         let encoded_in = encoded_at - gathered_at - writer.wait_time();
         let total = encoded_at - started_at;
 
+        // HADRON
+        let staleness_ms = (encoded_at - collected.collected_at).as_millis();
+        METRICS_STALE_MILLIS.set(staleness_ms as i64);
+
         match res {
             Ok(()) => {
                 tracing::info!(
@@ -303,6 +315,7 @@ pub async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<
                     spawning_ms = spawned_in.as_millis(),
                     collection_ms = collected_in.as_millis(),
                     encoding_ms = encoded_in.as_millis(),
+                    stalenss_ms = staleness_ms,
                     "responded /metrics"
                 );
             }

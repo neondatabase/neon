@@ -41,6 +41,7 @@ use tracing_utils::OtelGuard;
 use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::crashsafe::syncfs;
 use utils::logging::TracingErrorLayerEnablement;
+use utils::metrics_collector::{METRICS_COLLECTION_INTERVAL, METRICS_COLLECTOR};
 use utils::sentry_init::init_sentry;
 use utils::{failpoint_support, logging, project_build_tag, project_git_version, tcp_listener};
 
@@ -763,6 +764,37 @@ fn start_pageserver(
         (http_task, https_task)
     };
 
+    /* BEGIN_HADRON */
+    let metrics_collection_task = {
+        let cancel = shutdown_pageserver.child_token();
+        let task = crate::BACKGROUND_RUNTIME.spawn({
+            let cancel = cancel.clone();
+            let background_jobs_barrier = background_jobs_barrier.clone();
+            async move {
+                // first wait until background jobs are cleared to launch.
+                tokio::select! {
+                    _ = cancel.cancelled() => { return; },
+                    _ = background_jobs_barrier.wait() => {}
+                };
+                let mut interval = tokio::time::interval(METRICS_COLLECTION_INTERVAL);
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
+                            tracing::info!("cancelled metrics collection task, exiting...");
+                             break;
+                        },
+                        _ = interval.tick() => {}
+                    }
+                    tokio::task::spawn_blocking(|| {
+                        METRICS_COLLECTOR.run_once();
+                    });
+                }
+            }
+        });
+        MetricsCollectionTask(CancellableTask { task, cancel })
+    };
+    /* END_HADRON */
+
     let consumption_metrics_tasks = {
         let cancel = shutdown_pageserver.child_token();
         let task = crate::BACKGROUND_RUNTIME.spawn({
@@ -844,6 +876,7 @@ fn start_pageserver(
             https_endpoint_listener,
             page_service,
             page_service_grpc,
+            metrics_collection_task,
             consumption_metrics_tasks,
             disk_usage_eviction_task,
             &tenant_manager,

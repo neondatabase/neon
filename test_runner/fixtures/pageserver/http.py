@@ -1002,7 +1002,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
     def get_metrics_str(self) -> str:
         """You probably want to use get_metrics() instead."""
-        res = self.get(f"http://localhost:{self.port}/metrics")
+        res = self.get(f"http://localhost:{self.port}/metrics?use_latest=true")
         self.verbose_error(res)
         return res.text
 

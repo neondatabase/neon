@@ -37,6 +37,7 @@ use tracing::*;
 use utils::auth::{JwtAuth, Scope, SwappableJwtAuth};
 use utils::id::NodeId;
 use utils::logging::{self, LogFormat, SecretString};
+use utils::metrics_collector::{METRICS_COLLECTION_INTERVAL, METRICS_COLLECTOR};
 use utils::sentry_init::init_sentry;
 use utils::{pid_file, project_build_tag, project_git_version, tcp_listener};
 
@@ -639,6 +640,24 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
         )
         .map(|res| ("broker main".to_owned(), res));
     tasks_handles.push(Box::pin(broker_task_handle));
+
+    /* BEGIN_HADRON */
+    let metrics_handle = current_thread_rt
+        .as_ref()
+        .unwrap_or_else(|| BACKGROUND_RUNTIME.handle())
+        .spawn(async move {
+            let mut interval: tokio::time::Interval =
+                tokio::time::interval(METRICS_COLLECTION_INTERVAL);
+            loop {
+                interval.tick().await;
+                tokio::task::spawn_blocking(|| {
+                    METRICS_COLLECTOR.run_once();
+                });
+            }
+        })
+        .map(|res| ("broker main".to_owned(), res));
+    tasks_handles.push(Box::pin(metrics_handle));
+    /* END_HADRON */
 
     set_build_info_metric(GIT_VERSION, BUILD_TAG);
 
