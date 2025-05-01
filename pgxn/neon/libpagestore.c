@@ -339,7 +339,7 @@ load_shard_map(shardno_t shard_no, char *connstr_p, shardno_t *num_shards_p)
 		}
 		pagestore_local_counter = end_update_counter;
 
-		/* Reserver fiel descriptorts for sockets */
+        /* Reserve file descriptors for sockets */
 		while (max_sockets < num_shards)
 		{
 			max_sockets += 1;
