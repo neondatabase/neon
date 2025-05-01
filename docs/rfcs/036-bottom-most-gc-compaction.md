@@ -6,13 +6,13 @@ The goal of this doc is to propose a way to reliably collect garbages below the 
 
 ## Motivation
 
-The current GC algorithm will wait until the covering image layers being created before collecting the garbages of a key region. Relying on image layer generation to generate covering images is not reliable. There are prior arts to generate feedbacks from the GC algorithm to the image generation process to accelerate garbage collection, but it slows down the system and creates write amplification.
+The current GC algorithm will wait until the covering via image layers before collecting the garbages of a key region. Relying on image layer generation to generate covering images is not reliable. There are prior arts to generate feedbacks from the GC algorithm to the image generation process to accelerate garbage collection, but it slows down the system and creates write amplification.
 
 # Basic Idea
 
 ![](images/036-bottom-most-gc-compaction/01-basic-idea.svg)
 
-The idea of bottom-most compaction is simple: we rewrite all layers that is below or intersect with the GC horizon to produce a flat level of image layers at the GC horizon and deltas above the GC horizon. In this process,
+The idea of bottom-most compaction is simple: we rewrite all layers that are below or intersect with the GC horizon to produce a flat level of image layers at the GC horizon and deltas above the GC horizon. In this process,
 
 - All images and deltas ≤ GC horizon LSN will be dropped. This process collects garbages.
 - We produce images for all keys involved in the compaction process at the GC horizon.
@@ -62,7 +62,7 @@ LSN 0x60 -> append F
 
 ![](images/036-bottom-most-gc-compaction/05-btmgc-parent.svg)
 
-What happens is that we balance the space taken by each retain_lsn and the cost of replaying deltas during the bottom-most compaction process. This is controlled by a threshold. If `sum(deltas) < $threshold`, the deltas will be retained. Otherwise, an image will be generated and the deltas will be dropped.
+What happens is that we balance the space taken by each retain_lsn and the cost of replaying deltas during the bottom-most compaction process. This is controlled by a threshold. If `count(deltas) < $threshold`, the deltas will be retained. Otherwise, an image will be generated and the deltas will be dropped.
 
 In the example above, the `$threshold` is 2.
 
@@ -81,7 +81,7 @@ GC horizon: 0x50
 LSN 0x60 -> append S
 ```
 
-Note that bottom-most compaction happens on a per-timeline basis. When it processes this key, it only reads the history from LSN 0x30 without a base image. Therefore, on child branches, the bottom-most compaction process will make image creation decisions based on the same `sum(deltas) < $threshold` criteria, and if it decides to create an image, the base image will be retrieved from the ancestor branch.
+Note that bottom-most compaction happens on a per-timeline basis. When it processes this key, it only reads the history from LSN 0x30 without a base image. Therefore, on child branches, the bottom-most compaction process will make image creation decisions based on the same `count(deltas) < $threshold` criteria, and if it decides to create an image, the base image will be retrieved from the ancestor branch.
 
 ```
 branch_lsn: 0x20
@@ -93,7 +93,7 @@ LSN 0x60 -> append S
 
 ![](images/036-bottom-most-gc-compaction/06-btmgc-child.svg)
 
-Note that for child branches, we do not create image layers for the images when bottom-most compaction runs. Instead, we drop the 0x30/0x40/0x50 delta records and directly place the image ABPQR@0x50 into the delta layer, which serves a partial image layer. For child branches, if we create image layers, we will need to put all keys in the range into the image layer. This causes space bloat and slow compactions. In this proposal, the compaction process will only compact and process keys modified inside the child branch.
+Note that for child branches, we do not create image layers for the images when bottom-most compaction runs. Instead, we drop the 0x30/0x40/0x50 delta records and directly place the image ABPQR@0x50 into the delta layer, which serves as a sparse image layer. For child branches, if we create image layers, we will need to put all keys in the range into the image layer. This causes space bloat and slow compactions. In this proposal, the compaction process will only compact and process keys modified inside the child branch.
 
 ## Optimization: Layer Selection for Compaction
 
@@ -105,7 +105,7 @@ Consider the case that the system finishes bottom-most compaction at GC horizon 
 
 # Result
 
-Bottom-most compaction ensures all garbages under the GC horizon gets collected right away (compared with “eventually” in the current algorithm). Meanwhile, it generates images at each of the retain_lsn to ensure branch reads are fast. As we make per-key decision on whether to generate an image or not, the theoretical lower bound of the storage space we need to retain a branch is lower than before.
+Bottom-most compaction ensures all garbage under the GC horizon gets collected right away (compared with “eventually” in the current algorithm). Meanwhile, it generates images at each of the retain_lsn to ensure branch reads are fast. As we make per-key decisions on whether to generate an image or not, the theoretical lower bound of the storage space we need to retain for a branch is lower than before.
 
 Before: min(sum(logs for each key), sum(image for each key)), for each partition — we always generate image layers on a key range
 
@@ -125,9 +125,9 @@ The image creation is integrated into the k-merge, i.e., reconstruct data natura
 
 # Compaction Trigger
 
-The bottom-most compaction should be automatically triggered. The goal of the trigger is that it should ensure a constant factor for write amplification. Say that the user write 1GB of WAL into the system, we should write 1GB x C data to S3. The legacy compaction algorithm does not has such a constant factor C. The data we write to S3 is quadratic to the logical size of the database (see [A Theoretical View of Neon Storage](https://www.notion.so/A-Theoretical-View-of-Neon-Storage-8d7ad7555b0c41b2a3597fa780911194?pvs=21)).
+The bottom-most compaction should be automatically triggered. The goal of the trigger is that it should ensure a constant factor for write amplification. Say that the user write 1GB of WAL into the system, we should write 1GB x C data to S3. The legacy compaction algorithm does not have such a constant factor C. The data we write to S3 is quadratic to the logical size of the database (see [A Theoretical View of Neon Storage](https://www.notion.so/A-Theoretical-View-of-Neon-Storage-8d7ad7555b0c41b2a3597fa780911194?pvs=21)).
 
-We propose the following compaction trigger that generates a constant write amplification factor. Write amplification = total writes to S3 / total user writes. We only analyze the write amplification caused by the bottom-most GC-compaction process, ignoring the legacy create image layers amplification.
+We propose the following compaction trigger that generates a constant write amplification factor. Write amplification >= total writes to S3 / total user writes. We only analyze the write amplification caused by the bottom-most GC-compaction process, ignoring the legacy create image layers amplification.
 
 Given that we have ***X*** bytes of the delta layers above the GC horizon, ***A*** bytes of the delta layers intersecting with the GC horizon, ***B*** bytes of the delta layers below the GC horizon, and ***C*** bytes of the image layers below the GC horizon.
 
