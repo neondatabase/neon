@@ -1098,6 +1098,23 @@ RUN cargo install --locked --version 0.14.1 cargo-pgrx && \
 USER root
 #########################################################################################
 #
+# Layer "rust extensions pgrx14"
+#
+# Version 14 is now required by a few 
+# This layer should be used as a base for new pgrx extensions,
+# and eventually get merged with `rust-extensions-build`
+#
+#########################################################################################
+FROM pg-build-nonroot-with-cargo AS rust-extensions-build-pgrx14
+ARG PG_VERSION
+
+RUN cargo install --locked --version 0.14.1 cargo-pgrx && \
+    /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
+
+USER root
+
+#########################################################################################
+#
 # Layers "pg-onnx-build" and "pgrag-build"
 # Compile "pgrag" extensions
 #
@@ -1329,6 +1346,39 @@ FROM rust-extensions-build-pgrx12 AS pg_session_jwt-build
 COPY --from=pg_session_jwt-src /ext-src/ /ext-src/
 WORKDIR /ext-src/pg_session_jwt-src
 RUN cargo pgrx install --release
+
+#########################################################################################
+#
+# Layer "pg-anon-pg-build"
+# compile anon extension
+#
+#########################################################################################
+FROM pg-build AS pg_anon-src
+ARG PG_VERSION
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+WORKDIR /ext-src
+COPY compute/patches/anon_v2.patch .
+
+# This is an experimental extension, never got to real production.
+# !Do not remove! It can be present in shared_preload_libraries and compute will fail to start if library is not found.
+ENV PATH="/usr/local/pgsql/bin/:$PATH"
+RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/latest/postgresql_anonymizer-latest.tar.gz -O pg_anon.tar.gz && \
+    mkdir pg_anon-src && cd pg_anon-src && tar xzf ../pg_anon.tar.gz --strip-components=1 -C . && \
+    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt && \
+    sed -i 's/pgrx = "0.14.1"/pgrx = { version = "=0.14.1", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    patch -p1 < /ext-src/anon_v2.patch
+
+FROM rust-extensions-build-pgrx14 AS pg-anon-pg-build
+ARG PG_VERSION
+COPY --from=pg_anon-src /ext-src/ /ext-src/
+WORKDIR /ext-src
+RUN cd pg_anon-src && \
+    make -j $(getconf _NPROCESSORS_ONLN) extension PG_CONFIG=/usr/local/pgsql/bin/pg_config PGVER=pg$(echo "$PG_VERSION" | sed 's/^v//') && \
+    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config PGVER=pg$(echo "$PG_VERSION" | sed 's/^v//') && \
+    chmod -R a+r ../pg_anon-src && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/anon.control;
+
+########################################################################################
 
 #########################################################################################
 #
@@ -1626,6 +1676,7 @@ COPY --from=pg_uuidv7-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_roaringbitmap-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_semver-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=wal2json-build /usr/local/pgsql /usr/local/pgsql
+COPY --from=pg-anon-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_ivm-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_partman-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_mooncake-build /usr/local/pgsql/ /usr/local/pgsql/
