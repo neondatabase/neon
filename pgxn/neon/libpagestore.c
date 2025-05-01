@@ -26,6 +26,7 @@
 #include "portability/instr_time.h"
 #include "postmaster/interrupt.h"
 #include "storage/buf_internals.h"
+#include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
 #include "storage/pg_shmem.h"
@@ -79,6 +80,7 @@ int         neon_protocol_version = 3;
 static int	neon_compute_mode = 0;
 static int	max_reconnect_attempts = 60;
 static int	stripe_size;
+static int	max_sockets;
 
 static int pageserver_response_log_timeout = 10000;
 /* 2.5 minutes. A bit higher than highest default TCP retransmission timeout */
@@ -336,6 +338,13 @@ load_shard_map(shardno_t shard_no, char *connstr_p, shardno_t *num_shards_p)
 				pageserver_disconnect(i);
 		}
 		pagestore_local_counter = end_update_counter;
+
+		/* Reserver fiel descriptorts for sockets */
+		while (max_sockets < num_shards)
+		{
+			max_sockets += 1;
+			ReserveExternalFD();
+		}
 	}
 
 	if (num_shards_p)
