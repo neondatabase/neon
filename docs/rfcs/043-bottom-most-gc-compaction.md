@@ -95,14 +95,6 @@ LSN 0x60 -> append S
 
 Note that for child branches, we do not create image layers for the images when bottom-most compaction runs. Instead, we drop the 0x30/0x40/0x50 delta records and directly place the image ABPQR@0x50 into the delta layer, which serves as a sparse image layer. For child branches, if we create image layers, we will need to put all keys in the range into the image layer. This causes space bloat and slow compactions. In this proposal, the compaction process will only compact and process keys modified inside the child branch.
 
-## Optimization: Layer Selection for Compaction
-
-In the basic bottom-most compaction, we select all layers that intersect with or are below the GC horizon. With retain_lsn and child branches taken into consideration, we do not need to run bottom-most compaction for all layers. Instead, only a subset of the layers need to be picked for compaction.
-
-![](images/036-bottom-most-gc-compaction/08-optimization.svg)
-
-Consider the case that the system finishes bottom-most compaction at GC horizon 0x60. Now GC horizon grows to 0x70 and the branch at 0x50 is deleted. We only need to pick the layers between 0x40 and 0x70 for compaction (the red layers). As other lower layers will not change after the compaction process, it does not need to be picked.
-
 # Result
 
 Bottom-most compaction ensures all garbage under the GC horizon gets collected right away (compared with “eventually” in the current algorithm). Meanwhile, it generates images at each of the retain_lsn to ensure branch reads are fast. As we make per-key decisions on whether to generate an image or not, the theoretical lower bound of the storage space we need to retain for a branch is lower than before.
@@ -111,21 +103,9 @@ Before: min(sum(logs for each key), sum(image for each key)), for each partition
 
 After: sum(min(logs for each key, image for each key))
 
-# Dealing with Large Input
-
-Bottom-most compaction does a full compaction below the GC horizon, and the process is currently designed as non-resumable. The process should take a fixed amount of memory and be able to run for a few minutes.
-
-We made two design choices for the compaction algorithm:
-
-- Use k-merge to collect data required for the compaction. The memory consumption is `<buffered key-values per file> x <num of layers involved in compaction>`.
-    - Key history of 1 million → OOM?
-- Parallel compaction to make full use of the CPU resources.
-
-The image creation is integrated into the k-merge, i.e., reconstruct data naturally becomes available as part of k-merge instead of calling into get_values_reconstruct_data. This is significantly more CPU efficient than the image layer creation of legacy compaction.
-
 # Compaction Trigger
 
-The bottom-most compaction should be automatically triggered. The goal of the trigger is that it should ensure a constant factor for write amplification. Say that the user write 1GB of WAL into the system, we should write 1GB x C data to S3. The legacy compaction algorithm does not have such a constant factor C. The data we write to S3 is quadratic to the logical size of the database (see [A Theoretical View of Neon Storage](https://www.notion.so/A-Theoretical-View-of-Neon-Storage-8d7ad7555b0c41b2a3597fa780911194?pvs=21)).
+The bottom-most compaction can be automatically triggered. The goal of the trigger is that it should ensure a constant factor for write amplification. Say that the user write 1GB of WAL into the system, we should write 1GB x C data to S3. The legacy compaction algorithm does not have such a constant factor C. The data we write to S3 is quadratic to the logical size of the database (see [A Theoretical View of Neon Storage](https://www.notion.so/A-Theoretical-View-of-Neon-Storage-8d7ad7555b0c41b2a3597fa780911194?pvs=21)).
 
 We propose the following compaction trigger that generates a constant write amplification factor. Write amplification >= total writes to S3 / total user writes. We only analyze the write amplification caused by the bottom-most GC-compaction process, ignoring the legacy create image layers amplification.
 
@@ -163,19 +143,49 @@ The next step is to optimize the write amplification above the GC horizon (i.e.,
 
 20GB layers → +20GB layers → delete 20GB, need 40GB temporary space
 
-# Test Plan
+# Sub-Compactions
 
-- Unit test. In this project, we developed the infrastructure to test the pageserver logic without the dependency on Postgres by introducing a fake WAL type.
-- Integration test. We will generate workloads based on test_gc_feedback and ensure it works efficiently + correctly.
-- Production test. In the first stage, we will run the compaction process on some tenants without actually generating any layers and collect some statistics to ensure the new compaction algorithm can handle and process user data. Then, we will actually update the layer map with the compaction result. And finally, we will enable the automatic trigger of bottom-most compaction for all tenants.
+The gc-compaction algorithm may take a long time and we need to split the job into multiple sub-compaction jobs.
 
-# Questions
+![](images/036-bottom-most-gc-compaction/13-job-split.svg)
 
-Q: Why not use the original patch that sends feedback of GC to the compaction job?
+As in the figure, the auto-trigger schedules a compaction job covering the full keyspace below a specific LSN. In such case that we cannot finish compacting it in one run in a reasonable amount of time, the algorithm will vertically split it into multiple jobs (in this case, 5).
 
-A: GC runs every hour, compaction does not touch anything that finishes L0→L1 compaction, and the image needs to be generated exactly at the GC horizon in order to garbage-collect the things below the horizon. Therefore, it’s best if we have a dedicated bottom-most garbage-collect-compaction process that does the exact job. Furthermore, as we might move to tiered compaction in the future and merge delta layers, it is likely that we will have delta layers with large LSN range that intersect with the GC horizon. It is unrealistic to wait until the GC horizon to go above these layers and do the garbage collection, as the layers will be merged with the upper layers and grow larger.
+Each gc-compaction job will create one level of delta layers and one flat level of image layers for each LSN. Those layers will be automatically split based on size, which means that if the sub-compaction job produces 1GB of deltas, it will produce 4 * 256MB delta layers. For those layers that is not fully contained within the sub-compaction job rectangles, it will be rewritten to only contain the keys outside of the key range.
+
+# Implementation
+
+The main implementation of gc-compaction is in `compaction.rs`.
+
+* `compact_with_gc`: The main loop of gc-compaction. It takes a rectangle range of the layer map and compact that specific range. It selects layers intersecting with the rectangle, downloads the layers, creates the k-merge iterator to read those layers in the key-lsn order, and decide which keys to keep or insert a reconstructed page. The process is the basic unit of a gc-compaction and is not interruptable. If the process gets preempted by L0 compaction, it has to be restarted from scratch. For layers overlaps with the rectangle but not fully inside, the main loop will also rewrite them so that the new layer (or two layers if both left and right ends are outside of the rectangle) has the same LSN range as the original one but only contain the keys outside of the compaction range.
+* `gc_compaction_split_jobs`: Splits a big gc-compaction job into sub-compactions based on heuristics in the layer map. The function looks at the layer map and splits the compaction job based on the size of the layers so that each compaction job only pulls ~4GB of layer files.
+* `generate_key_retention` and `KeyHistoryRetention`: Implements the algorithm described in the "basic idea" and "branch" chapter of this RFC. It takes a vector of history of a key (key-lsn-value) and decides which LSNs of the key to retain. If there are too many deltas between two retain_lsns, it will reconstruct the page and insert an image into the compaction result. Also, we implement `KeyHistoryRetention::verify` to ensure the generated result is not corrupted -- all retain_lsns and all LSNs above the gc-horizon should be accessible.
+* `GcCompactionQueue`: the automatic trigger implementation for gc-compaction. `GcCompactionQueue::iteration` is called at the end of the tenant compaction loop. It will then call `trigger_auto_compaction` to decide whether to trigger a gc-compaction job for this tenant. If yes, the compaction-job will be added to the compaction queue, and the queue will be slowly drained once there are no other compaction jobs running. gc-compaction has the lowest priority. If a sub-compaction job is not successful or gets preempted by L0 compaction (see limitations for reasons why a compaction job would fail), it will _not_ be retried.
+* Changes to `index_part.json`: we added a `last_completed_lsn` field to the index part for the auto-trigger to decide when to trigger a compaction.
+* Changes to the read path: when gc-compaction updates the layer map, all reads need to wait. See `gc_compaction_layer_update_lock` and comments in the code path for more information.
+
+Gc-compaction can also be scheduled over the HTTP API. Example:
+
+```
+curl 'localhost:9898/v1/tenant/:tenant_id/timeline/:timeline_id/compact?enhanced_gc_bottom_most_compaction=true&dry_run=true' -X PUT -H "Content-Type: application/json" -d '{"scheduled": true, "compact_key_range": { "start": "000000067F0000A0000002A1CF0100000000", "end": "000000067F0000A0000002A1D70100000000" } }'
+```
+
+The `dry_run` mode can be specified in the query string so that the compaction will go through all layers to estimate how much space can be saved without writing the compaction result into the layer map.
+
+The auto-trigger is controlled by tenant-level flag `gc_compaction_enabled`. If this is set to false, no gc-compaction will be automatically scheduled on this tenant (but manual trigger still works).
 
 # Next Steps
+
+There are still some limitations of gc-compaction itself that needs to be resolved and tested,
+
+- gc-compaction is currently only automatically triggered on root branches. We have not tested gc-compaction on child branches in staging.
+- gc-compaction will skip aux key regions because of the possible conflict with the assumption of aux file tombstones.
+- gc-compaction does consider keyspaces at retain_lsns and only look at keys in the layers. This also causes us giving up some sub-compaction jobs because a key might have part of its history available due to traditional GC removing part of the history.
+- We limit gc-compaction to run over shards <= 150GB to avoid gc-compaction taking too much time blocking other compaction jobs. The sub-compaction split algorithm needs to be improved to be able to split vertically and horizontally. Also, we need to move the download layer process out of the compaction loop so that we don't block other compaction jobs for too long.
+- The compaction trigger always schedules gc-compaction from the lowest LSN to the gc-horizon. Currently we do not schedule compaction jobs that only selects layers in the middle. Allowing this could potentially reduce the number of layers read/write throughout the process.
+- gc-compaction will give up if there are too many layers to rewrite or if there are not enough disk space for the compaction.
+
+In the future,
 
 - Top-most compaction: ensure we always have an image coverage for the latest data (or near the latest data), so that reads will be fast at the latest LSN.
 - Tiered compaction on deltas: ensure read from any LSN is fast.
