@@ -6204,6 +6204,7 @@ dependencies = [
  "itertools 0.10.5",
  "jsonwebtoken",
  "metrics",
+ "nix 0.30.1",
  "once_cell",
  "pageserver_api",
  "parking_lot 0.12.1",

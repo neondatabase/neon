@@ -2788,7 +2788,8 @@ def test_timeline_disk_usage_limit(neon_env_builder: NeonEnvBuilder):
 
     # Wait for the error message to appear in the compute log
     def error_logged():
-        return endpoint.log_contains("WAL storage utilization exceeds configured limit") is not None
+        if endpoint.log_contains("WAL storage utilization exceeds configured limit") is None:
+            raise Exception("Expected error message not found in compute log yet")
 
     wait_until(error_logged)
     log.info("Found expected error message in compute log, resuming.")
@@ -2821,4 +2822,86 @@ def test_timeline_disk_usage_limit(neon_env_builder: NeonEnvBuilder):
         with conn.cursor() as cur:
             cur.execute("select count(*) from t")
             # 2000 rows from first insert + 1000 from last insert
+            assert cur.fetchone() == (3000,)
+
+
+def test_global_disk_usage_limit(neon_env_builder: NeonEnvBuilder):
+    """
+    Similar to `test_timeline_disk_usage_limit`, but test that the global disk usage circuit breaker
+    also works as expected. The test scenario:
+    1. Create a timeline and endpoint.
+    2. Start safekeeper with a very small global disk usage limit (1KB).
+    3. Write data to the timeline so that disk usage exceeds the limit.
+    4. Verify that the writes hang and the expected error message appears in the compute log.
+    5. Restart the safekeeper to clear the disk usage limit.
+    6. Verify that the hanging writes unblock and we can continue to write as normal.
+    """
+    neon_env_builder.num_safekeepers = 1
+    remote_storage_kind = s3_storage()
+    neon_env_builder.enable_safekeeper_remote_storage(remote_storage_kind)
+
+    env = neon_env_builder.init_start()
+
+    env.create_branch("test_global_disk_usage_limit")
+    endpoint = env.endpoints.create_start("test_global_disk_usage_limit")
+
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("create table t2(key int, value text)")
+
+    for sk in env.safekeepers:
+        sk.stop().start(extra_opts=["--global-disk-check-interval=1s"])
+
+    # Set the failpoint to have the disk usage check return u64::MAX, which definitely exceeds the practical
+    # limits in the test environment.
+    for sk in env.safekeepers:
+        sk.http_client().configure_failpoints(
+            [("sk-global-disk-usage", "return(18446744073709551615)")]
+        )
+
+    # Wait until the global disk usage limit watcher trips the circuit breaker.
+    def error_logged_in_sk():
+        for sk in env.safekeepers:
+            if sk.log_contains("Global disk usage exceeded limit") is None:
+                raise Exception("Expected error message not found in safekeeper log yet")
+
+    wait_until(error_logged_in_sk)
+
+    def run_hanging_insert_global():
+        with closing(endpoint.connect()) as bg_conn:
+            with bg_conn.cursor() as bg_cur:
+                # This should generate more than 1KiB of WAL
+                bg_cur.execute("insert into t2 select generate_series(1,2000), 'payload'")
+
+    bg_thread_global = threading.Thread(target=run_hanging_insert_global)
+    bg_thread_global.start()
+
+    def error_logged_in_compute():
+        if endpoint.log_contains("Global disk usage exceeded limit") is None:
+            raise Exception("Expected error message not found in compute log yet")
+
+    wait_until(error_logged_in_compute)
+    log.info("Found the expected error message in compute log, resuming.")
+
+    time.sleep(2)
+    assert bg_thread_global.is_alive(), "Global hanging insert unblocked prematurely!"
+
+    # Make the disk usage check always return 0 through the failpoint to simulate the disk pressure easing.
+    # The SKs should resume accepting WAL writes without restarting.
+    for sk in env.safekeepers:
+        sk.http_client().configure_failpoints([("sk-global-disk-usage", "return(0)")])
+
+    bg_thread_global.join(timeout=120)
+    assert not bg_thread_global.is_alive(), "Hanging global insert did not complete after restart"
+    log.info("Global hanging insert unblocked.")
+
+    # Verify that we can continue to write as normal and we don't have obvious data corruption
+    # following the recovery.
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("insert into t2 select generate_series(2001,3000), 'payload'")
+
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("select count(*) from t2")
             assert cur.fetchone() == (3000,)
