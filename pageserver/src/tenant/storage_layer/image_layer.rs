@@ -684,14 +684,6 @@ impl ImageLayerInner {
         }
     }
 
-    pub(crate) fn iter<'a>(&'a self, ctx: &'a RequestContext) -> ImageLayerIterator<'a> {
-        self.iter_with_options(
-            ctx,
-            1024 * 8192, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
-            1024,        // The default value. Unit tests might use a different value
-        )
-    }
-
     pub(crate) fn iter_with_options<'a>(
         &'a self,
         ctx: &'a RequestContext,
@@ -1240,7 +1232,6 @@ mod test {
     use crate::context::RequestContext;
     use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
     use crate::tenant::storage_layer::{Layer, ResidentLayer};
-    use crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner;
     use crate::tenant::{TenantShard, Timeline};
 
     #[tokio::test]
@@ -1507,8 +1498,7 @@ mod test {
             for batch_size in [1, 2, 4, 8, 3, 7, 13] {
                 println!("running with batch_size={batch_size} max_read_size={max_read_size}");
                 // Test if the batch size is correctly determined
-                let mut iter = img_layer.iter(&ctx);
-                iter.planner = StreamingVectoredReadPlanner::new(max_read_size, batch_size);
+                let mut iter = img_layer.iter_with_options(&ctx, max_read_size, batch_size);
                 let mut num_items = 0;
                 for _ in 0..3 {
                     iter.next_batch().await.unwrap();
@@ -1525,8 +1515,7 @@ mod test {
                     iter.key_values_batch.clear();
                 }
                 // Test if the result is correct
-                let mut iter = img_layer.iter(&ctx);
-                iter.planner = StreamingVectoredReadPlanner::new(max_read_size, batch_size);
+                let mut iter = img_layer.iter_with_options(&ctx, max_read_size, batch_size);
                 assert_img_iter_equal(&mut iter, &test_imgs, Lsn(0x10)).await;
             }
         }
