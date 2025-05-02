@@ -1996,21 +1996,15 @@ LIMIT 100",
 
         // TODO: support other types of grants apart from schemas?
 
-        // quote the schema and role name as identifiers to sanitize them.
-        let schema_name = schema_name.pg_quote();
-        let role_name = role_name.pg_quote();
-
         // check the role grants first - to gracefully handle read-replicas.
-        let select = format!(
-            "SELECT privilege_type
+        let select = "SELECT privilege_type
             FROM pg_namespace
                 JOIN LATERAL (SELECT * FROM aclexplode(nspacl) AS x) acl ON true
                 JOIN pg_user users ON acl.grantee = users.usesysid
-            WHERE users.usename = {role_name}
-                AND nspname = {schema_name}"
-        );
+            WHERE users.usename = $1
+                AND nspname = $2";
         let rows = db_client
-            .query(&select, &[])
+            .query(select, &[role_name, schema_name])
             .await
             .with_context(|| format!("Failed to execute query: {select}"))?;
 
@@ -2035,6 +2029,10 @@ LIMIT 100",
             .map(|p| p.as_str())
             .collect::<Vec<&'static str>>()
             .join(", ");
+
+        // quote the schema and role name as identifiers to sanitize them.
+        let schema_name = schema_name.pg_quote();
+        let role_name = role_name.pg_quote();
 
         let query = format!("GRANT {grants} ON SCHEMA {schema_name} TO {role_name}",);
         db_client
