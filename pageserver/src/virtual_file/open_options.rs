@@ -120,25 +120,11 @@ impl OpenOptions {
             #[cfg(target_os = "linux")]
             Inner::TokioEpollUring(x) => {
                 let system = super::io_engine::tokio_epoll_uring_ext::thread_local_system().await;
-                async fn wrapper<'a>(
-                    args: (
-                        crate::virtual_file::io_engine::tokio_epoll_uring_ext::Handle,
-                        &'a Path,
-                        &'a tokio_epoll_uring::ops::open_at::OpenOptions,
-                    ),
-                ) -> (
-                    (
-                        crate::virtual_file::io_engine::tokio_epoll_uring_ext::Handle,
-                        &'a Path,
-                        &'a tokio_epoll_uring::ops::open_at::OpenOptions,
-                    ),
-                    Result<OwnedFd, tokio_epoll_uring::Error<std::io::Error>>,
-                ) {
-                    let (system, path, x) = args;
+                let (_, res) = super::io_engine::retry_ecanceled_once((), async move |()| {
                     let res = system.open(path, x).await;
                     ((), res)
-                }
-                let (_, res) = retry_ecanceled_once((system, path, x), wrapper).await;
+                })
+                .await;
                 res.map_err(super::io_engine::epoll_uring_error_to_std)
             }
         }

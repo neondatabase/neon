@@ -309,12 +309,12 @@ impl IoEngine {
 ///
 /// This function retries the operation once if it fails with ECANCELED.
 /// ONLY USE FOR IDEMPOTENT [`VirtualFile`] operations.
-async fn retry_ecanceled_once<Fut, T, V>(
+pub(super) async fn retry_ecanceled_once<Fut, T, V>(
     resources: T,
     f: Fut,
 ) -> (T, Result<V, tokio_epoll_uring::Error<std::io::Error>>)
 where
-    Fut: 'static + Send + AsyncFn(T) -> (T, Result<V, tokio_epoll_uring::Error<std::io::Error>>),
+    Fut: Send + AsyncFn(T) -> (T, Result<V, tokio_epoll_uring::Error<std::io::Error>>),
     T: Send,
     V: Send,
 {
