@@ -21,31 +21,30 @@ People primarily involved in this project were:
 
 For posterity, here is the rough timeline of the develpoment work that got us to where we are today.
 
-- Jan 2024: [intergate tokio-epoll-uring](https://github.com/neondatabase/neon/pull/5824) along with owned buffers API
-- March 2024: tokio-epoll-uring enabled in all regions (in buffered IO mode, i.e., what `virtual_file_io_mode=buffered` is today)
+- Jan 2024: [integrate `tokio-epoll-uring`](https://github.com/neondatabase/neon/pull/5824) along with owned buffers API
+- March 2024: `tokio-epoll-uring` enabled in all regions in buffered IO mode
 - Feb 2024 to June 2024: PS PageCache Bypass For Data Blocks
   - Feb 2024: [Vectored Get Implementation](https://github.com/neondatabase/neon/pull/6576) bypasses delta & image layer blocks for page requests
   - Apr to June 2024: [Epic: bypass PageCache for use data blocks](https://github.com/neondatabase/neon/issues/7386) addresses remaining users
 - Aug to Nov 2024: direct IO: first code; preliminaries; read path coding; BufferedWriter; benchmarks show perf regressions too high, no-go.
 - Nov to Jan 2024: address perf regressions by developing page_service pipelining (aka batching) and concurrent IO ([Epic](https://github.com/neondatabase/neon/issues/9376))
-- Feb to March 2024: rollout direct+concurrent IO to prod
-- Mar 2025: Direct IO ships for the read path + BufferedWriter in InMemoryLayer
+- Feb to March 2024: rollout batching, then concurrent+direct IO => read path and InMemoryLayer is now direct IO
 - Apr 2025: develop & roll out direct IO for the write path
 
 ## Background: Terminology & Glossary
 
-**kernel page cache**: the kernel's page cache is a write-back cache for filesystem contents.
+**kernel page cache**: the Linux kernel's page cache is a write-back cache for filesystem contents.
 The cached unit is memory-page-sized & aligned chunks of the files that are being cached (typically 4k).
 The cache lives in kernel memory and is not directly accessible through userspace.
 
-**Buffered IO**: the application's read/write system calls go through the kernel page cache.
+**Buffered IO**: an application's read/write system calls go through the kernel page cache.
 For example, a 10 byte sized read or write to offset 5000 in a file will load the file contents
 at offset `[4096,8192)` into a free page in the kernel page cache. If necessary, it will evict
-other pages to make room (cf eviction). Then, the kernel performs a memory-to-memory copy of 10 bytes
+a page to make room (cf eviction). Then, the kernel performs a memory-to-memory copy of 10 bytes
 from/to the offset `4` (`5000 = 4096 + 4`) within the cached page. If it's a write, the kernel keeps
 track of the fact that the page is now "dirty" in some ancillary structure.
 
-**Writeback**: a buffered read/write syscall returns after the memory-to-memory copy. The moficiations
+**Writeback**: a buffered read/write syscall returns after the memory-to-memory copy. The modifications
 made by e.g. write system calls are not even *issued* to disk, let alone durable. Instead, the kernel
 asynchronously writes back dirtied pages based on a variety of conditions. For us, the most relevant
 ones are a) explicit request by userspace (`fsync`) and b) memory pressure.
