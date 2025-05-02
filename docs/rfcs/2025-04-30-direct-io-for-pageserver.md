@@ -71,9 +71,10 @@ It takes more effort by the application to program with direct instead of buffer
 The return is precise control over and a clear distinction between consumption/modification of memory vs disk.
 
 **Pageserver PageCache**: Pageserver has an additional `PageCache` (referred to as PS PageCache from here on, as opposed to "kernel page cache").
-Its caching unit is 8KiB which is the Postgres page size.
-Its default size is tiny (64MiB), very much like Postgres's `shared_buffers`.
-A miss in PageCache is filled from the filesystem using buffered IO, issued through the `VirtualFile` layer in Pageserver.
+Its caching unit is 8KiB blocks of the layer files written by Pageserver.
+A miss in PageCache is filled by reading from the filesystem, through the `VirtualFile` abstraction layer.
+The default size is tiny (64MiB), very much like Postgres's `shared_buffers`.
+We ran production at 128MiB for a long time but gradually moved it up to 2GiB over the past ~year.
 
 **VirtualFile** is Pageserver's abstraction for file IO, very similar to the facility in Postgres that bears the same name.
 Its historical purpose appears to be working around open file descriptor limitations, which is practically irrelevant on Linux.
@@ -91,11 +92,11 @@ The introduction of `tokio-epoll-uring` required converting the code base to use
 The `PageCache` pages are usable as owned IO buffers.
 
 We then started bypassing PageCache for user data blocks.
-Data blocks are the 8k blocks of data in layer files that hold the `Value`s.
-The disk btree embedded in delta & image layers is still `PageCache`'d.
+Data blocks are the 8k blocks of data in layer files that hold the multiple `Value`s, as opposed to the disk btree index blocks that tell us which values exist in a file at what offsets.
+The disk btree embedded in delta & image layers remains `PageCache`'d.
 Epics for that work were:
 - Vectored `Timeline::get` (cf RFC 30) skipped delta and image layer data block `PageCache`ing outright.
-- Epic https://github.com/neondatabase/neon/issues/7386 took care of the remaining users for data pages:
+- Epic https://github.com/neondatabase/neon/issues/7386 took care of the remaining users for data blocks:
   - Materialized page cache (cached materialized pages; shown to be ~0% hit rate in practice)
   - InMemoryLayer
   - Compaction
@@ -104,7 +105,8 @@ The outcome of the above:
 1. All data blocks are always read through the `VirtualFile` APIs, hitting the kernel buffered read path (=> kernel page cache).
 2. Indirect blocks (=disk btree blocks) would be cached in the PS `PageCache`.
 
-In production we size the PS `PageCache` such that the eviction rate / replacement rates are low (less than 200/second on a 1-minute average, on the busiest machines).
+In production we size the PS `PageCache` to be 2GiB.
+Thus drives hit rate up to ~99.95% and the eviction rate / replacement rates down to less than 200/second on a 1-minute average, on the busiest machines.
 High baseline replacement rates are treated as a signal of resource exhaustion (page cache insufficient to host working set of the PS).
 The response to this is to migrate tenants away, or increase PS `PageCache` size.
 It is currently manual but could be automated, e.g., in Storage Controller.
@@ -116,20 +118,21 @@ instead of individual blocks.
 ## High-Level Design
 
 So, before work on this project started, all data block reads and the entire write path of Pageserver were using kernel-buffered IO, i.e., the kernel page cache.
-We want to get the kernel page cache out of the picture by using direct IO for all interaction with the filesystem to achieve the following system properties:
+We now want to get the kernel page cache out of the picture by using direct IO for all interaction with the filesystem.
+This achieves the following system properties:
 
 **Predictable VirtualFile latencies**
 * With buffered IO, reads are sometimes fast, sometimes slow, depending on kernel page cache hit/miss.
 * With buffered IO, appends when writing out new layer files during ingest or compaction are sometimes fast, sometimes slow because of write-back backpressure.
 * With buffered IO, the "malloc backscatter" phenomenon pointed out in the Glossary section is not something we actively observe.
   But we do have occasional spikes in Dirty memory amount and Memory PSI graphs, so it may already be affecting to some degree.
-* By switching to direct IO, above operations will have the (predictable) device latency always.
+* By switching to direct IO, above operations will have the (predictable) device latency -- always.
   Reads and appends always go to disk.
   And malloc will not have to write back dirty data.
 
 **Explicitness & Tangibility of resource usage**
 * In a multi-tenant system, it is generally desirable and valuable to be *explicit* about the main resources we use for each tenant.
-* By using direct IO, we become explicit about the resources *disk IOPs*  and *memory* in a way that was previously being conflated through the kernel page cache.
+* By using direct IO, we become explicit about the resources *disk IOPs*  and *memory capacity* in a way that was previously being conflated through the kernel page cache, outside our immediate control.
 * We will be able to build per-tenant observability of resource usage ("what tenant is causing the actual IOs that are sent to the disk?").
 * We will be able to build accounting & QoS by implementing an IO scheduler that is tenant aware. The kernel is not tenant-aware and can't do that.
 
@@ -144,15 +147,14 @@ The **trade-off** is that we no longer get the theoretical benefits of the kerne
   - asterisk: only if memory pressure is low enough that the kernel can afford to delay writeback
 
 We are **happy to make this trade-off**:
-- Cf. the advantages listed above.
-- We empirically have enough DRAM on Pageservers to serve metadata (=index blocks) from PS PageCache.
+- Because of the advantages listed above.
+- Because we empirically have enough DRAM on Pageservers to serve metadata (=index blocks) from PS PageCache.
   (At just 2GiB PS PageCache size, we average a 99.95% hit rate).
   So, the latency of going to disk is only for data block reads, not the index traversal.
-- **The kernel page cache ineffective** at high tenant density anyways (#tenants/pageserver instance).
+- Because **the kernel page cache is ineffective** at high tenant density anyways (#tenants/pageserver instance).
   And dense packing of tenants will always going desirable to drive COGS down, so, we should design the system for it.
   (See the appendix for a more detailed explanation why this is).
-- **So, we accept making such reads *predictably* higher latency, rather than *maybe* fast depending on
-   kernel cache state, memory pressure, and the tenant density a particular pageserver happens to have at a particular point in time**
+- So, we accept that some reads that used to be fast by circumstance will have higher but **predictable** latency than before.
 
 ### Desired End State
 
@@ -171,10 +173,11 @@ Hit rate target is 99.95%.
 There are no regressions to ingest latency.
 
 The total "wait-for-disk time" contribution to random getpage request latency is `O(1 read IOP latency)`.
-We accomplish that by having ~100% PS PageCache hit rate so that layer index traversal need not wait for IO.
-And by issuing all data blocks reads in parallel (concurrent IO).
+We accomplish that by having a near 100% PS PageCache hit rate so that layer index traversal effectively never needs not wait for IO.
+Thereby, it can issue all the data blocks as it traverses the index, and only wait at the end of it (concurrent IO).
 
 The amortized "wait-for-disk time" contribution of this direct IO proposal to a series of sequential getpage requests is `1/32 * read IOP latency` for each getpage request.
+We accomplish this by server-side batching of up to 32 reads into a single `Timeline::get_vectored` call.
 
 ## Design & Implementation
 
@@ -185,11 +188,13 @@ A lot of prerequisite work had to happen to enable use of direct IO.
 To meet the "wait-for-disk time" requirements from the DoD, we implement for the read path:
 - page_service level server-side batching (config field `page_service_pipelining`)
 - concurrent IO (config field `get_vectored_concurrent_io`)
+These really deserve separate retroactive RFCs, but in lieu of that, [here is the epic](https://github.com/neondatabase/neon/issues/9376).
 
 For the write path, and especially WAL ingest, we need to hide write latency.
 We accomplish this by implementing a (`BufferedWriter`) type that does double-buffering: flushes of the filled
 buffer happen in a sidecar tokio task while new writes fill a new buffer.
 We refactor InMemoryLayer as well as BlobWriter (=> delta and image layer writers) to use this new `BufferedWriter`.
+The most comprehensive write-up of this work is in [the PR description](https://github.com/neondatabase/neon/pull/11558).
 
 ### Ensuring Adherence to Alignment Requirements
 
@@ -198,20 +203,20 @@ Direct IO puts requirements on
 - io size (=memory buffer size)
 - file offset alignment
 
-The requirements are specific to a combination of filesystem/block-device/architecture(page size!).
+The requirements are specific to a combination of filesystem/block-device/architecture(hardware page size!).
 
 In Neon production environments we currently use ext4 with Linux 6.1.X on AWS and Azure storage-optimized instances (locally attached NVMe).
 Instead of dynamic discovery using `statx`, we statically hard-code 512 bytes as the buffer/offset alignment and size-multiple.
 This decision was made on the basis that
-- a) it is compatible with the environments we support
+- a) it is compatible with all the environments we need to run in
 - b) our primarily workload is small random reads of multiple that typically are smaller than 512 bytes
 - c) tail latency of 512 bytes vs 4k was shown to be much better for 512 (p99.9: 3x lower, p99.99 5x lower).
 - d) by hard-coding at compile-time, we can use the Rust type system to enforce only aligned IO buffers are used.
-     This eliminates runtime errors.
+     This eliminates a source of runtime errors typically associated with direct IO.
 
-Link to the discussion & decision: https://neondb.slack.com/archives/C07BZ38E6SD/p1725036790965549?thread_ts=1725026845.455259&cid=C07BZ38E6SD
+This was [discssued here](https://neondb.slack.com/archives/C07BZ38E6SD/p1725036790965549?thread_ts=1725026845.455259&cid=C07BZ38E6SD).
 
-The `IoBufAligned` / `IoBufAlignedMut` marker traits indicate that a given buffer meets memory alignment requirements.
+The new `IoBufAligned` / `IoBufAlignedMut` marker traits indicate that a given buffer meets memory alignment requirements.
 All `VirtualFile` APIs and several software layers built on top of them only accept buffers that implement those traits.
 Implementors of the marker traits are:
 - `IoBuffer` / `IoBufferMut`: used for most reads and writes
@@ -229,20 +234,32 @@ The `IoBufAligned` / `IoBufAlignedMut` types do not protect us from the followin
 - non-adherence to io size requirements
 
 The following higher-level constructs ensure we meet the requirements:
-- read path: the `ChunkedVectoredReadBuilder` and `mod vectored_dio_read` ensure reads happen at aligned offsets and in appropriate size multiples
+- read path: the `ChunkedVectoredReadBuilder` and `mod vectored_dio_read` ensure reads happen at aligned offsets and in appropriate size multiples.
 - write path: `BufferedWriter` only writes in multiples of the capacity, at offsets that are `start_offset+N*capacity`; see its doc comment.
+
+Note that these types are used always, regardless of whether direct IO is enabled or not.
+There are some cases where this adds unnecessary overhead to buffered IO (e.g. all memcpy's inflated to multiples of 512).
+But we could not identify meaniful impact in practice when we shipped these changes while we were still using buffered IO.
 
 ### Configuration / Feature Flagging
 
-Whether direct IO is used for reads/write is determined by
+In the previous section we described how all users of VirtualFile were changed to always adhere to direct IO alignment and size-multiple requirements.
+To actually enable direct IO, all we need to do is set the `O_DIRECT` flag in `open` syscalls / io_uring operations.
+
+Whether we do set `O_DIRECT` is determined by
 - the choice of VirtualFile API used to create/open the VirtualFile instance
 - the `virtual_file_io_mode` configuration flag
-- the OpenOptions `read` and/or `write` flags
+- the OpenOptions `read` and/or `write` flags.
 
-The VirtualFile APIs suffixed with `_v2` are the only ones that _may_ open with `O_DIRECT`.
+The VirtualFile APIs suffixed with `_v2` are the only ones that _may_ open with `O_DIRECT` depending on the other two factors in above list.
 Other APIs never use `O_DIRECT`.
 (The name is bad and should really be `_maybe_direct_io`.)
-The following table shows when `O_DIRECT` is set:
+
+The reason for having new APIs is because all code used VirtualFile but implementation and rollout happened in consecutive phases (read path, InMemoryLayer, write path).
+At the VirtualFile level, context on whether an instance of VirtualFile is on read path, InMemoryLayer, or write path is not available.
+
+The `_v2` APIs then check make the decision to set `O_DIRECT` based on the `virtual_file_io_mode` flag and the OpenOptions `read`/`write` flags.
+The result is the following runtime behavior:
 
 |what|OpenOptions|`v_f_io_mode`<br/>=`buffered`|`v_f_io_mode`<br/>=`direct`|`v_f_io_mode`<br/>=`direct-rw`|
 |-|-|-|-|-|
@@ -259,6 +276,9 @@ We used it in `InMemoryLayer` and `download_layer_file` but it was only sensitiv
 The introduction of `=direct-rw`, and the switch of the remaining write path to `BufferedWriter`, happened later,
 in https://github.com/neondatabase/neon/pull/11558.
 
+Note that this way of feature flagging inside VirtualFile makes it less and less a general purpose POSIX file access abstraction.
+For example, with `=direct-rw` enabled, it is no longer possible to open a `VirtualFile` without `O_DIRECT`. It'll always be set.
+
 ## Correctness Validation
 
 The correctness risks with this project were:
@@ -266,7 +286,7 @@ The correctness risks with this project were:
   These types expose an API that is largely identical to that of the `bytes` crate and/or Vec.
 - Runtime errors (=> downtime / unavailability) because of non-adherence to alignment/size-multiple requirements, resulting in EINVAL on the read path.
 
-We sadly do not have infrastructure to run pageserver under miri.
+We sadly do not have infrastructure to run pageserver under `cargo miri`.
 So for memory safety issues, we relied on careful peer review.
 
 For adherence checking to alignment/size-multiple requirements, the original plan was to implement a validation mode at the VirtualFile level.
@@ -313,8 +333,14 @@ Both:
 - Along with the validation mode, a performance simulation mode that pads VirtualFile op latencies to typical NVMe latencies, even if the underlying storage is faster.
   This would avoid misleadingly good performance on developer systems and in benchmarks on systems that are less busy than production hosts.
   However, padding latencies at microsecond scale is non-trivial.
-- Remove the `virtual_file_io_mode` option altogether: always do direct IO, and fake it on systems that don't have it.
+- Remove the `virtual_file_io_mode` feature gating altogether: always do direct IO, and fake it on systems that don't have it.
   This idea is (also) tracked in https://github.com/neondatabase/neon/issues/11676
+
+Misc:
+- We should finish trimming VirtualFile's scope to be truly limited to core data path read & write.
+  Abstractions for reading & writing pageserver config, location config, heatmaps, etc, should use
+  APIs in a different package (`VirtualFile::crashsafe_overwrite` and `VirtualFile::read_to_string`
+  are good entrypoints for cleanup.) https://github.com/neondatabase/neon/issues/11809
 
 # Appendix
 
