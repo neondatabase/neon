@@ -19,7 +19,7 @@ People primarily involved in this project were:
 
 ## Timeline
 
-For posterity, here is the rough timeline of the develpoment work that got us to where we are today.
+For posterity, here is the rough timeline of the development work that got us to where we are today.
 
 - Jan 2024: [integrate `tokio-epoll-uring`](https://github.com/neondatabase/neon/pull/5824) along with owned buffers API
 - March 2024: `tokio-epoll-uring` enabled in all regions in buffered IO mode
@@ -70,14 +70,14 @@ the application.
 It takes more effort by the application to program with direct instead of buffered IO.
 The return is precise control over and a clear distinction between consumption/modification of memory vs disk.
 
-**Pageserver PageCache**: Pageserver has an additioanl `PageCache` (referred to as PS PageCache from here on, as opposed to "kernel page cache").
+**Pageserver PageCache**: Pageserver has an additional `PageCache` (referred to as PS PageCache from here on, as opposed to "kernel page cache").
 Its caching unit is 8KiB which is the Postgres page size.
 Its default size is tiny (64MiB), very much like Postgres's `shared_buffers`.
 A miss in PageCache is filled from the filesystem using buffered IO, issued through the `VirtualFile` layer in Pageserver.
 
-**VirtualFile** is Pageserver's abstraction for file IO, very similar to the faciltiy in Postgres that bears the same name.
+**VirtualFile** is Pageserver's abstraction for file IO, very similar to the facility in Postgres that bears the same name.
 Its historical purpose appears to be working around open file descriptor limitations, which is practically irrelevant on Linux.
-However, the faciltiy in Pageserver is useful as an intermediary layer for metrics and abstracts over the different kinds of
+However, the facility in Pageserver is useful as an intermediary layer for metrics and abstracts over the different kinds of
 IO engines that Pageserver supports (`std-fs` vs `tokio-epoll-uring`).
 
 ## Background: History Of Caching In Pageserver
@@ -96,7 +96,7 @@ The disk btree embedded in delta & image layers is still `PageCache`'d.
 Epics for that work were:
 - Vectored `Timeline::get` (cf RFC 30) skipped delta and image layer data block `PageCache`ing outright.
 - Epic https://github.com/neondatabase/neon/issues/7386 took care of the remaining users for data pages:
-  - Materialized page cache (cached materialized pages; shown to be ~0% hit rate in practie)
+  - Materialized page cache (cached materialized pages; shown to be ~0% hit rate in practice)
   - InMemoryLayer
   - Compaction
 
@@ -109,7 +109,7 @@ High baseline replacement rates are treated as a signal of resource exhaustion (
 The response to this is to migrate tenants away, or increase PS `PageCache` size.
 It is currently manual but could be automated, e.g., in Storage Controller.
 
-In the future, we may elminate the `PageCache` even for indirect blocks.
+In the future, we may eliminate the `PageCache` even for indirect blocks.
 For example with an LRU cache that has as unit the entire disk btree content
 instead of individual blocks.
 
@@ -135,7 +135,7 @@ We want to get the kernel page cache out of the picture by using direct IO for a
 
 **CPU Efficiency**
 * The involvement of the kernel page cache means one additional memory-to-memory copy on read and write path.
-* Direct IO will elminate that memory-to-memory copy, if we can make the userspace buffers used for the IO calls satisfy direct IO alignment requirements.
+* Direct IO will eliminate that memory-to-memory copy, if we can make the userspace buffers used for the IO calls satisfy direct IO alignment requirements.
 
 The **trade-off** is that we no longer get the theoretical benefits of the kernel page cache. These are:
 - read latency improvements for repeat reads of the same data ("locality of reference")
@@ -200,7 +200,7 @@ Direct IO puts requirements on
 
 The requirements are specific to a combination of filesystem/block-device/architecture(page size!).
 
-In Neon production enviornments we currently use ext4 with Linux 6.1.X on AWS and Azure storage-optimized instances (locally attached NVMe).
+In Neon production environments we currently use ext4 with Linux 6.1.X on AWS and Azure storage-optimized instances (locally attached NVMe).
 Instead of dynamic discovery using `statx`, we statically hard-code 512 bytes as the buffer/offset alignment and size-multiple.
 This decision was made on the basis that
 - a) it is compatible with the environments we support
@@ -217,7 +217,7 @@ Implementors of the marker traits are:
 - `IoBuffer` / `IoBufferMut`: used for most reads and writes
 - `PageWriteGuardBuf`: for filling PS PageCache pages (index blocks!)
 
-The alignment requirement is infectous, i.e., it permeates buttom up throughout the code base.
+The alignment requirement is infectious, i.e., it permeates bottom up throughout the code base.
 We stop the infection at roughly the same layers in the code base where we stopped permeating the
 use of owned-buffers-style API for tokio-epoll-uring. The way the stopping works is by introducing
 a memory-to-memory copy from/to some unaligned memory location on the stack/current/heap.
@@ -230,7 +230,7 @@ The `IoBufAligned` / `IoBufAlignedMut` types do not protect us from the followin
 
 The following higher-level constructs ensure we meet the requirements:
 - read path: the `ChunkedVectoredReadBuilder` and `mod vectored_dio_read` ensure reads happen at aligned offsets and in appropriate size multiples
-- write path: `BufferedWriter` only writes in muliples of the capacity, at offsets that are `start_offset+N*capacity`; see its doc comment.
+- write path: `BufferedWriter` only writes in multiples of the capacity, at offsets that are `start_offset+N*capacity`; see its doc comment.
 
 ### Configuration / Feature Flagging
 
@@ -271,7 +271,7 @@ So for memory safety issues, we relied on careful peer review.
 
 For adherence checking to alignment/size-multiple requirements, the original plan was to implement a validation mode at the VirtualFile level.
 That mode would have its own (maximally restrictive) model of alignment requirements and runtime-check that all calls made to VirtualFile adhere to it.
-It would also work as a point of injecting transient errors, short reads, adn the like.
+It would also work as a point of injecting transient errors, short reads, and the like.
 However, such a mode was never implemented.
 The validation happened in staging and pre-prod instead.
 We eventually enabled  `=direct`/`=direct-rw` for Rust unit tests and the regression test suite.
@@ -284,8 +284,7 @@ The read path went through a lot of iterations of benchmarking in staging and pr
 The benchmarks in those environments demonstrated performance regressions early in the implementation.
 It was actually this performance testing that made us implement batching and concurrent IO to avoid unacceptable regressions.
 
-The write path was much quicker to validate because `bench_ingest` covered all of the (less numerious) access patterns.
-
+The write path was much quicker to validate because `bench_ingest` covered all of the (less numerous) access patterns.
 
 ## Future Work
 
@@ -309,12 +308,12 @@ Write Path:
 Both:
 - A runtime validation mode to check adherence to alignment and size-multiple requirements at the VirtualFile level.
   This would allow catching such bugs on systems that don't have O_DIRECT (macOS).
-  It would also prevent alignment bugs from slipping into production because test systems may have more lax requirements thatn production.
+  It would also prevent alignment bugs from slipping into production because test systems may have more lax requirements than production.
   (This is not the case today, but it could change in the future).
 - Along with the validation mode, a performance simulation mode that pads VirtualFile op latencies to typical NVMe latencies, even if the underlying storage is faster.
   This would avoid misleadingly good performance on developer systems and in benchmarks on systems that are less busy than production hosts.
   However, padding latencies at microsecond scale is non-trivial.
-- Remove the `virtual_file_io_mode` option alltogether: always do direct IO, and fake it on systems that don't have it.
+- Remove the `virtual_file_io_mode` option altogether: always do direct IO, and fake it on systems that don't have it.
   This idea is (also) tracked in https://github.com/neondatabase/neon/issues/11676
 
 # Appendix
