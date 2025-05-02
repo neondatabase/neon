@@ -14,7 +14,7 @@ use pageserver_api::key::Key;
 use pageserver_api::keyspace::KeySpaceAccum;
 use pageserver_api::models::{PagestreamGetPageRequest, PagestreamRequest};
 use pageserver_api::shard::TenantShardId;
-use pageserver_page_api::model::{GetPageResponse, GetPageStatus};
+use pageserver_page_api::model::{GetPageClass, GetPageResponse, GetPageStatus};
 use rand::prelude::*;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -517,6 +517,7 @@ async fn client_grpc(
                         fork_number: rel_tag.forknum,
                     },
                     block_number: block_no,
+                    class: GetPageClass::Normal,
                 }
             };
             let client_clone = client.clone();
@@ -624,6 +625,7 @@ async fn client_grpc_stream(
                         fork_number: rel_tag.forknum,
                     },
                     block_number: block_no,
+                    class: GetPageClass::Normal,
                 }
             };
             request_tx.send(req.into()).await.unwrap();

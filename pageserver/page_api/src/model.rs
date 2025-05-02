@@ -55,6 +55,13 @@ pub struct GetPageRequest {
     pub common: RequestCommon,
     pub rel: RelTag,
     pub block_number: u32,
+    pub class: GetPageClass,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum GetPageClass {
+    Normal,
+    Prefetch,
 }
 
 pub type GetPageRequestBatch = SmallVec<[GetPageRequest; 8]>;
@@ -123,7 +130,7 @@ impl From<ProtocolError> for tonic::Status {
 impl From<GetPageRequestBatch> for proto::GetPageRequestBatch {
     fn from(value: GetPageRequestBatch) -> proto::GetPageRequestBatch {
         proto::GetPageRequestBatch {
-            requests: (&value).iter().map(|r| r.into()).collect(),
+            requests: value.iter().map(|r| r.into()).collect(),
         }
     }
 }
@@ -227,6 +234,10 @@ impl From<&GetPageRequest> for proto::GetPageRequest {
     fn from(value: &GetPageRequest) -> proto::GetPageRequest {
         proto::GetPageRequest {
             id: value.id,
+            class: match value.class {
+                GetPageClass::Normal => proto::GetPageClass::Normal as i32,
+                GetPageClass::Prefetch => proto::GetPageClass::Prefetch as i32,
+            },
             common: Some((&value.common).into()),
             rel: Some((&value.rel).into()),
             block_number: value.block_number,
@@ -242,7 +253,31 @@ impl TryFrom<&proto::GetPageRequest> for GetPageRequest {
             common: (&value.common.ok_or(ProtocolError::Missing("common"))?).into(),
             rel: (&value.rel.ok_or(ProtocolError::Missing("rel"))?).try_into()?,
             block_number: value.block_number,
+            class: proto::GetPageClass::try_from(value.class)
+                .unwrap_or(proto::GetPageClass::Unknown)
+                .try_into()?,
         })
+    }
+}
+
+impl TryFrom<proto::GetPageClass> for GetPageClass {
+    type Error = ProtocolError;
+
+    fn try_from(value: proto::GetPageClass) -> Result<GetPageClass, ProtocolError> {
+        match value {
+            proto::GetPageClass::Unknown => Err(ProtocolError::InvalidValue("class")),
+            proto::GetPageClass::Normal => Ok(GetPageClass::Normal),
+            proto::GetPageClass::Prefetch => Ok(GetPageClass::Prefetch),
+        }
+    }
+}
+
+impl From<GetPageClass> for proto::GetPageClass {
+    fn from(value: GetPageClass) -> proto::GetPageClass {
+        match value {
+            GetPageClass::Normal => proto::GetPageClass::Normal,
+            GetPageClass::Prefetch => proto::GetPageClass::Prefetch,
+        }
     }
 }
 
@@ -250,22 +285,43 @@ impl TryFrom<proto::GetPageResponse> for GetPageResponse {
     type Error = ProtocolError;
 
     fn try_from(value: proto::GetPageResponse) -> Result<GetPageResponse, ProtocolError> {
-        let status = match proto::GetPageStatus::from_i32(value.status) {
-            Some(proto::GetPageStatus::Unknown) => {
-                return Err(ProtocolError::InvalidValue("status"));
-            }
-            Some(proto::GetPageStatus::Ok) => GetPageStatus::Ok,
-            Some(proto::GetPageStatus::NotFound) => GetPageStatus::NotFound,
-            Some(proto::GetPageStatus::Invalid) => GetPageStatus::Invalid,
-            Some(proto::GetPageStatus::SlowDown) => GetPageStatus::SlowDown,
-            None => return Err(ProtocolError::InvalidValue("status")),
-        };
         Ok(GetPageResponse {
             id: value.id,
-            status,
+            status: proto::GetPageStatus::try_from(value.status)
+                .unwrap_or(proto::GetPageStatus::Unknown)
+                .try_into()?,
             reason: value.reason,
             page_image: value.page_image,
         })
+    }
+}
+
+impl TryFrom<proto::GetPageStatus> for GetPageStatus {
+    type Error = ProtocolError;
+
+    fn try_from(value: proto::GetPageStatus) -> Result<GetPageStatus, ProtocolError> {
+        match value {
+            // Error on unknknown status -- we don't want to make any assumptions here.
+            //
+            // NB: this means that new statuses can only be used after all computes
+            // have been updated to understand them. Do something else instead?
+            proto::GetPageStatus::Unknown => Err(ProtocolError::InvalidValue("status")),
+            proto::GetPageStatus::Ok => Ok(GetPageStatus::Ok),
+            proto::GetPageStatus::NotFound => Ok(GetPageStatus::NotFound),
+            proto::GetPageStatus::Invalid => Ok(GetPageStatus::Invalid),
+            proto::GetPageStatus::SlowDown => Ok(GetPageStatus::SlowDown),
+        }
+    }
+}
+
+impl From<GetPageStatus> for proto::GetPageStatus {
+    fn from(value: GetPageStatus) -> proto::GetPageStatus {
+        match value {
+            GetPageStatus::Ok => proto::GetPageStatus::Ok,
+            GetPageStatus::NotFound => proto::GetPageStatus::NotFound,
+            GetPageStatus::Invalid => proto::GetPageStatus::Invalid,
+            GetPageStatus::SlowDown => proto::GetPageStatus::SlowDown,
+        }
     }
 }
 
