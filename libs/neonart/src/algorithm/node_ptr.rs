@@ -404,21 +404,18 @@ impl<V: Value> NodePtr<V> {
         }
     }
 
-    // FIXME
-    /*
-        pub(crate) fn deallocate(self, allocator: &impl ArtAllocator<V>) {
-            match self.variant() {
-                NodeVariant::Internal4(_) => allocator.dealloc_node_internal4(self.ptr.cast()),
-                NodeVariant::Internal16(_) => allocator.dealloc_node_internal16(self.ptr.cast()),
-                NodeVariant::Internal48(_) => allocator.dealloc_node_internal48(self.ptr.cast()),
-                NodeVariant::Internal256(_) => allocator.dealloc_node_internal256(self.ptr.cast()),
-                NodeVariant::Leaf4(_) => allocator.dealloc_node_leaf4(self.ptr.cast()),
-                NodeVariant::Leaf16(_) => allocator.dealloc_node_leaf16(self.ptr.cast()),
-                NodeVariant::Leaf48(_) => allocator.dealloc_node_leaf48(self.ptr.cast()),
-                NodeVariant::Leaf256(_) => allocator.dealloc_node_leaf256(self.ptr.cast()),
-            }
+    pub(crate) fn deallocate(self, allocator: &impl ArtAllocator<V>) {
+        match self.variant() {
+            NodeVariant::Internal4(_) => allocator.dealloc_node_internal4(self.ptr.cast()),
+            NodeVariant::Internal16(_) => allocator.dealloc_node_internal16(self.ptr.cast()),
+            NodeVariant::Internal48(_) => allocator.dealloc_node_internal48(self.ptr.cast()),
+            NodeVariant::Internal256(_) => allocator.dealloc_node_internal256(self.ptr.cast()),
+            NodeVariant::Leaf4(_) => allocator.dealloc_node_leaf4(self.ptr.cast()),
+            NodeVariant::Leaf16(_) => allocator.dealloc_node_leaf16(self.ptr.cast()),
+            NodeVariant::Leaf48(_) => allocator.dealloc_node_leaf48(self.ptr.cast()),
+            NodeVariant::Leaf256(_) => allocator.dealloc_node_leaf256(self.ptr.cast()),
+        }
     }
-        */
 }
 
 pub fn new_root<V: Value>(allocator: &impl ArtAllocator<V>) -> NodePtr<V> {

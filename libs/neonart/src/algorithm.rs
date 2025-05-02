@@ -4,16 +4,43 @@ mod node_ref;
 
 use std::vec::Vec;
 
-use crate::algorithm::lock_and_version::ResultOrRestart;
-use crate::algorithm::node_ptr::{MAX_PREFIX_LEN, NodePtr};
+use crate::algorithm::lock_and_version::ConcurrentUpdateError;
+use crate::algorithm::node_ptr::MAX_PREFIX_LEN;
 use crate::algorithm::node_ref::ChildOrValue;
-use crate::algorithm::node_ref::{NodeRef, ReadLockedNodeRef, WriteLockedNodeRef};
+use crate::algorithm::node_ref::{NewNodeRef, NodeRef, ReadLockedNodeRef, WriteLockedNodeRef};
+use crate::allocator::OutOfMemoryError;
 
+use crate::GarbageQueueFullError;
+use crate::TreeWriteGuard;
 use crate::allocator::ArtAllocator;
 use crate::epoch::EpochPin;
 use crate::{Key, Value};
 
 pub(crate) type RootPtr<V> = node_ptr::NodePtr<V>;
+
+pub enum ArtError {
+    ConcurrentUpdate, // need to retry
+    OutOfMemory,
+    GarbageQueueFull,
+}
+
+impl From<ConcurrentUpdateError> for ArtError {
+    fn from(_: ConcurrentUpdateError) -> ArtError {
+        ArtError::ConcurrentUpdate
+    }
+}
+
+impl From<OutOfMemoryError> for ArtError {
+    fn from(_: OutOfMemoryError) -> ArtError {
+        ArtError::OutOfMemory
+    }
+}
+
+impl From<GarbageQueueFullError> for ArtError {
+    fn from(_: GarbageQueueFullError) -> ArtError {
+        ArtError::GarbageQueueFull
+    }
+}
 
 pub fn new_root<V: Value>(allocator: &impl ArtAllocator<V>) -> RootPtr<V> {
     node_ptr::new_root(allocator)
@@ -33,12 +60,11 @@ pub(crate) fn search<'e, K: Key, V: Value>(
     }
 }
 
-pub(crate) fn update_fn<'e, K: Key, V: Value, F>(
+pub(crate) fn update_fn<'e, K: Key, V: Value, A: ArtAllocator<V>, F>(
     key: &K,
     value_fn: F,
     root: RootPtr<V>,
-    allocator: &impl ArtAllocator<V>,
-    epoch_pin: &'e EpochPin,
+    guard: &'e TreeWriteGuard<K, V, A>,
 ) where
     F: FnOnce(Option<&V>) -> Option<V>,
 {
@@ -52,8 +78,7 @@ pub(crate) fn update_fn<'e, K: Key, V: Value, F>(
             this_value_fn,
             root_ref,
             None,
-            allocator,
-            epoch_pin,
+            guard,
             0,
             key_bytes,
         ) {
@@ -77,7 +102,7 @@ fn lookup_recurse<'e, V: Value>(
     node: NodeRef<'e, V>,
     parent: Option<ReadLockedNodeRef<V>>,
     epoch_pin: &'e EpochPin,
-) -> ResultOrRestart<Option<V>> {
+) -> Result<Option<V>, ConcurrentUpdateError> {
     let rnode = node.read_lock_or_restart()?;
     if let Some(parent) = parent {
         parent.read_unlock_or_restart()?;
@@ -107,16 +132,15 @@ fn lookup_recurse<'e, V: Value>(
 }
 
 // This corresponds to the 'insertOpt' function in the paper
-pub(crate) fn update_recurse<'e, V: Value, F>(
+pub(crate) fn update_recurse<'e, K: Key, V: Value, A: ArtAllocator<V>, F>(
     key: &[u8],
     value_fn: F,
     node: NodeRef<'e, V>,
     rparent: Option<(ReadLockedNodeRef<V>, u8)>,
-    allocator: &impl ArtAllocator<V>,
-    epoch_pin: &'e EpochPin,
+    guard: &'e TreeWriteGuard<K, V, A>,
     level: usize,
     orig_key: &[u8],
-) -> ResultOrRestart<()>
+) -> Result<(), ArtError>
 where
     F: FnOnce(Option<&V>) -> Option<V>,
 {
@@ -129,14 +153,7 @@ where
         let mut wnode = rnode.upgrade_to_write_lock_or_restart()?;
 
         if let Some(new_value) = value_fn(None) {
-            insert_split_prefix(
-                key,
-                new_value,
-                &mut wnode,
-                &mut wparent,
-                parent_key,
-                allocator,
-            );
+            insert_split_prefix(key, new_value, &mut wnode, &mut wparent, parent_key, guard)?;
         }
         wnode.write_unlock();
         wparent.write_unlock();
@@ -155,7 +172,7 @@ where
             let wnode = rnode.upgrade_to_write_lock_or_restart()?;
 
             if let Some(new_value) = value_fn(None) {
-                insert_and_grow(key, new_value, &wnode, &mut wparent, parent_key, allocator);
+                insert_and_grow(key, new_value, &wnode, &mut wparent, parent_key, guard)?;
                 wnode.write_unlock_obsolete();
                 wparent.write_unlock();
             } else {
@@ -168,7 +185,7 @@ where
                 rparent.read_unlock_or_restart()?;
             }
             if let Some(new_value) = value_fn(None) {
-                insert_to_node(&mut wnode, key, new_value, allocator);
+                insert_to_node(&mut wnode, key, new_value, guard)?;
             }
             wnode.write_unlock();
         }
@@ -203,8 +220,7 @@ where
                     value_fn,
                     next_child,
                     Some((rnode, key[0])),
-                    allocator,
-                    epoch_pin,
+                    guard,
                     level + 1,
                     orig_key,
                 )
@@ -233,7 +249,7 @@ fn dump_recurse<'e, V: Value + std::fmt::Debug>(
     node: NodeRef<'e, V>,
     epoch_pin: &'e EpochPin,
     level: usize,
-) -> ResultOrRestart<()> {
+) -> Result<(), ConcurrentUpdateError> {
     let indent = str::repeat(" ", level);
 
     let rnode = node.read_lock_or_restart()?;
@@ -278,81 +294,92 @@ fn dump_recurse<'e, V: Value + std::fmt::Debug>(
 /// [foo]b -> [a]r  -> value
 ///      e -> [ls]e -> value
 ///```
-fn insert_split_prefix<'a, V: Value>(
+fn insert_split_prefix<'e, K: Key, V: Value, A: ArtAllocator<V>>(
     key: &[u8],
     value: V,
     node: &mut WriteLockedNodeRef<V>,
     parent: &mut WriteLockedNodeRef<V>,
     parent_key: u8,
-    allocator: &impl ArtAllocator<V>,
-) {
+    guard: &'e TreeWriteGuard<K, V, A>,
+) -> Result<(), OutOfMemoryError> {
     let old_node = node;
     let old_prefix = old_node.get_prefix();
     let common_prefix_len = common_prefix(key, old_prefix);
 
     // Allocate a node for the new value.
-    let new_value_node = allocate_node_for_value(&key[common_prefix_len + 1..], value, allocator);
+    let new_value_node =
+        allocate_node_for_value(&key[common_prefix_len + 1..], value, guard.allocator)?;
 
     // Allocate a new internal node with the common prefix
-    let mut prefix_node = node_ref::new_internal(&key[..common_prefix_len], allocator);
+    // FIXME: deallocate 'new_value_node' on OOM
+    let mut prefix_node = node_ref::new_internal(&key[..common_prefix_len], guard.allocator)?;
 
     // Add the old node and the new nodes to the new internal node
-    prefix_node.insert_child(old_prefix[common_prefix_len], old_node.as_ptr());
-    prefix_node.insert_child(key[common_prefix_len], new_value_node);
+    prefix_node.insert_old_child(old_prefix[common_prefix_len], old_node);
+    prefix_node.insert_new_child(key[common_prefix_len], new_value_node);
 
     // Modify the prefix of the old child in place
     old_node.truncate_prefix(old_prefix.len() - common_prefix_len - 1);
 
     // replace the pointer in the parent
     parent.replace_child(parent_key, prefix_node.into_ptr());
+
+    Ok(())
 }
 
-fn insert_to_node<V: Value>(
+fn insert_to_node<'e, K: Key, V: Value, A: ArtAllocator<V>>(
     wnode: &mut WriteLockedNodeRef<V>,
     key: &[u8],
     value: V,
-    allocator: &impl ArtAllocator<V>,
-) {
+    guard: &'e TreeWriteGuard<K, V, A>,
+) -> Result<(), OutOfMemoryError> {
     if wnode.is_leaf() {
         wnode.insert_value(key[0], value);
     } else {
-        let value_child = allocate_node_for_value(&key[1..], value, allocator);
-        wnode.insert_child(key[0], value_child);
+        let value_child = allocate_node_for_value(&key[1..], value, guard.allocator)?;
+        wnode.insert_child(key[0], value_child.into_ptr());
     }
+    Ok(())
 }
 
 // On entry: 'parent' and 'node' are locked
-fn insert_and_grow<V: Value>(
+fn insert_and_grow<'e, K: Key, V: Value, A: ArtAllocator<V>>(
     key: &[u8],
     value: V,
     wnode: &WriteLockedNodeRef<V>,
     parent: &mut WriteLockedNodeRef<V>,
     parent_key_byte: u8,
-    allocator: &impl ArtAllocator<V>,
-) {
-    let mut bigger_node = wnode.grow(allocator);
+    guard: &'e TreeWriteGuard<K, V, A>,
+) -> Result<(), ArtError> {
+    let mut bigger_node = wnode.grow(guard.allocator)?;
 
     if wnode.is_leaf() {
         bigger_node.insert_value(key[0], value);
     } else {
-        let value_child = allocate_node_for_value(&key[1..], value, allocator);
-        bigger_node.insert_child(key[0], value_child);
+        // FIXME: deallocate 'bigger_node' on OOM
+        let value_child = allocate_node_for_value(&key[1..], value, guard.allocator)?;
+        bigger_node.insert_new_child(key[0], value_child);
     }
 
     // Replace the pointer in the parent
     parent.replace_child(parent_key_byte, bigger_node.into_ptr());
+
+    // FIXME: if this errors out, deallocate stuff we already allocated
+    guard.remember_obsolete_node(wnode.as_ptr())?;
+
+    Ok(())
 }
 
 // Allocate a new leaf node to hold 'value'. If key is long, we may need to allocate
 // new internal nodes to hold it too
-fn allocate_node_for_value<V: Value>(
+fn allocate_node_for_value<'a, V: Value, A: ArtAllocator<V>>(
     key: &[u8],
     value: V,
-    allocator: &impl ArtAllocator<V>,
-) -> NodePtr<V> {
+    allocator: &'a A,
+) -> Result<NewNodeRef<'a, V, A>, OutOfMemoryError> {
     let mut prefix_off = key.len().saturating_sub(MAX_PREFIX_LEN + 1);
 
-    let mut leaf_node = node_ref::new_leaf(&key[prefix_off..key.len() - 1], allocator);
+    let mut leaf_node = node_ref::new_leaf(&key[prefix_off..key.len() - 1], allocator)?;
     leaf_node.insert_value(*key.last().unwrap(), value);
 
     let mut node = leaf_node;
@@ -364,12 +391,12 @@ fn allocate_node_for_value<V: Value>(
         let mut internal_node = node_ref::new_internal(
             &remain_prefix[prefix_off..remain_prefix.len() - 1],
             allocator,
-        );
-        internal_node.insert_child(*remain_prefix.last().unwrap(), node.into_ptr());
+        )?;
+        internal_node.insert_new_child(*remain_prefix.last().unwrap(), node);
         node = internal_node;
     }
 
-    node.into_ptr()
+    Ok(node)
 }
 
 fn common_prefix(a: &[u8], b: &[u8]) -> usize {

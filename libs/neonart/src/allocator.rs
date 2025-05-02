@@ -15,6 +15,8 @@ pub use crate::algorithm::node_ptr::{
     NodeLeaf48, NodeLeaf256,
 };
 
+pub struct OutOfMemoryError();
+
 pub trait ArtAllocator<V: crate::Value> {
     fn alloc_tree(&self) -> *mut Tree<V>;
 

@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub(crate) struct ConcurrentUpdateError();
+
 pub(crate) struct AtomicLockAndVersion {
     inner: AtomicU64,
 }
@@ -12,33 +14,30 @@ impl AtomicLockAndVersion {
     }
 }
 
-pub(crate) type ResultOrRestart<T> = Result<T, ()>;
-
-const fn restart<T>() -> ResultOrRestart<T> {
-    Err(())
-}
-
 impl AtomicLockAndVersion {
-    pub(crate) fn read_lock_or_restart(&self) -> ResultOrRestart<u64> {
+    pub(crate) fn read_lock_or_restart(&self) -> Result<u64, ConcurrentUpdateError> {
         let version = self.await_node_unlocked();
         if is_obsolete(version) {
-            return restart();
+            return Err(ConcurrentUpdateError());
         }
         Ok(version)
     }
 
-    pub(crate) fn check_or_restart(&self, version: u64) -> ResultOrRestart<()> {
+    pub(crate) fn check_or_restart(&self, version: u64) -> Result<(), ConcurrentUpdateError> {
         self.read_unlock_or_restart(version)
     }
 
-    pub(crate) fn read_unlock_or_restart(&self, version: u64) -> ResultOrRestart<()> {
+    pub(crate) fn read_unlock_or_restart(&self, version: u64) -> Result<(), ConcurrentUpdateError> {
         if self.inner.load(Ordering::Acquire) != version {
-            return restart();
+            return Err(ConcurrentUpdateError());
         }
         Ok(())
     }
 
-    pub(crate) fn upgrade_to_write_lock_or_restart(&self, version: u64) -> ResultOrRestart<()> {
+    pub(crate) fn upgrade_to_write_lock_or_restart(
+        &self,
+        version: u64,
+    ) -> Result<(), ConcurrentUpdateError> {
         if self
             .inner
             .compare_exchange(
@@ -49,7 +48,7 @@ impl AtomicLockAndVersion {
             )
             .is_err()
         {
-            return restart();
+            return Err(ConcurrentUpdateError());
         }
         Ok(())
     }

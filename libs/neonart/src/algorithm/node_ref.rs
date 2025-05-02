@@ -1,14 +1,15 @@
 use std::fmt::Debug;
 use std::marker::PhantomData;
 
-use super::lock_and_version::ResultOrRestart;
 use super::node_ptr;
 use super::node_ptr::ChildOrValuePtr;
 use super::node_ptr::NodePtr;
 use crate::EpochPin;
 use crate::Value;
 use crate::algorithm::lock_and_version::AtomicLockAndVersion;
+use crate::algorithm::lock_and_version::ConcurrentUpdateError;
 use crate::allocator::ArtAllocator;
+use crate::allocator::OutOfMemoryError;
 
 pub struct NodeRef<'e, V> {
     ptr: NodePtr<V>,
@@ -30,7 +31,9 @@ impl<'e, V: Value> NodeRef<'e, V> {
         }
     }
 
-    pub(crate) fn read_lock_or_restart(&self) -> ResultOrRestart<ReadLockedNodeRef<'e, V>> {
+    pub(crate) fn read_lock_or_restart(
+        &self,
+    ) -> Result<ReadLockedNodeRef<'e, V>, ConcurrentUpdateError> {
         let version = self.lockword().read_lock_or_restart()?;
         Ok(ReadLockedNodeRef {
             ptr: self.ptr,
@@ -78,7 +81,7 @@ impl<'e, V: Value> ReadLockedNodeRef<'e, V> {
     pub(crate) fn find_child_or_value_or_restart(
         &self,
         key_byte: u8,
-    ) -> ResultOrRestart<Option<ChildOrValue<'e, V>>> {
+    ) -> Result<Option<ChildOrValue<'e, V>>, ConcurrentUpdateError> {
         let child_or_value = self.ptr.find_child_or_value(key_byte);
         self.ptr.lockword().check_or_restart(self.version)?;
 
@@ -94,7 +97,7 @@ impl<'e, V: Value> ReadLockedNodeRef<'e, V> {
 
     pub(crate) fn upgrade_to_write_lock_or_restart(
         self,
-    ) -> ResultOrRestart<WriteLockedNodeRef<'e, V>> {
+    ) -> Result<WriteLockedNodeRef<'e, V>, ConcurrentUpdateError> {
         self.ptr
             .lockword()
             .upgrade_to_write_lock_or_restart(self.version)?;
@@ -105,7 +108,7 @@ impl<'e, V: Value> ReadLockedNodeRef<'e, V> {
         })
     }
 
-    pub(crate) fn read_unlock_or_restart(self) -> ResultOrRestart<()> {
+    pub(crate) fn read_unlock_or_restart(self) -> Result<(), ConcurrentUpdateError> {
         self.ptr.lockword().check_or_restart(self.version)?;
         Ok(())
     }
@@ -149,9 +152,20 @@ impl<'e, V: Value> WriteLockedNodeRef<'e, V> {
         self.ptr.insert_value(key_byte, value)
     }
 
-    pub(crate) fn grow(&self, allocator: &impl ArtAllocator<V>) -> NewNodeRef<V> {
+    pub(crate) fn grow<'a, A>(
+        &self,
+        allocator: &'a A,
+    ) -> Result<NewNodeRef<'a, V, A>, OutOfMemoryError>
+    where
+        A: ArtAllocator<V>,
+    {
+        // FIXME: check OOM
         let new_node = self.ptr.grow(allocator);
-        NewNodeRef { ptr: new_node }
+        Ok(NewNodeRef {
+            ptr: new_node,
+            allocator,
+            extra_nodes: Vec::new(),
+        })
     }
 
     pub(crate) fn as_ptr(&self) -> NodePtr<V> {
@@ -171,36 +185,85 @@ impl<'e, V> Drop for WriteLockedNodeRef<'e, V> {
     }
 }
 
-pub(crate) struct NewNodeRef<V> {
+pub(crate) struct NewNodeRef<'a, V, A>
+where
+    V: Value,
+    A: ArtAllocator<V>,
+{
     ptr: NodePtr<V>,
+    allocator: &'a A,
+
+    extra_nodes: Vec<NodePtr<V>>,
 }
 
-impl<V: Value> NewNodeRef<V> {
-    pub(crate) fn insert_child(&mut self, key_byte: u8, child: NodePtr<V>) {
-        self.ptr.insert_child(key_byte, child)
+impl<'a, V, A> NewNodeRef<'a, V, A>
+where
+    V: Value,
+    A: ArtAllocator<V>,
+{
+    pub(crate) fn insert_old_child(&mut self, key_byte: u8, child: &WriteLockedNodeRef<V>) {
+        self.ptr.insert_child(key_byte, child.as_ptr())
     }
 
     pub(crate) fn insert_value(&mut self, key_byte: u8, value: V) {
         self.ptr.insert_value(key_byte, value)
     }
 
-    pub(crate) fn into_ptr(self) -> NodePtr<V> {
+    pub(crate) fn into_ptr(mut self) -> NodePtr<V> {
         let ptr = self.ptr;
+        self.ptr = NodePtr::null();
         ptr
     }
+
+    pub(crate) fn insert_new_child(&mut self, key_byte: u8, child: NewNodeRef<'a, V, A>) {
+        let child_ptr = child.into_ptr();
+        self.ptr.insert_child(key_byte, child_ptr);
+        self.extra_nodes.push(child_ptr);
+    }
 }
 
-pub(crate) fn new_internal<V: Value>(
+impl<'a, V, A> Drop for NewNodeRef<'a, V, A>
+where
+    V: Value,
+    A: ArtAllocator<V>,
+{
+    /// This drop implementation deallocates the newly allocated node, if into_ptr() was not called.
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            self.ptr.deallocate(self.allocator);
+            for p in self.extra_nodes.iter() {
+                p.deallocate(self.allocator);
+            }
+        }
+    }
+}
+
+pub(crate) fn new_internal<'a, V, A>(
     prefix: &[u8],
-    allocator: &impl ArtAllocator<V>,
-) -> NewNodeRef<V> {
-    NewNodeRef {
+    allocator: &'a A,
+) -> Result<NewNodeRef<'a, V, A>, OutOfMemoryError>
+where
+    V: Value,
+    A: ArtAllocator<V>,
+{
+    Ok(NewNodeRef {
         ptr: node_ptr::new_internal(prefix, allocator),
-    }
+        allocator,
+        extra_nodes: Vec::new(),
+    })
 }
 
-pub(crate) fn new_leaf<V: Value>(prefix: &[u8], allocator: &impl ArtAllocator<V>) -> NewNodeRef<V> {
-    NewNodeRef {
+pub(crate) fn new_leaf<'a, V, A>(
+    prefix: &[u8],
+    allocator: &'a A,
+) -> Result<NewNodeRef<'a, V, A>, OutOfMemoryError>
+where
+    V: Value,
+    A: ArtAllocator<V>,
+{
+    Ok(NewNodeRef {
         ptr: node_ptr::new_leaf(prefix, allocator),
-    }
+        allocator,
+        extra_nodes: Vec::new(),
+    })
 }

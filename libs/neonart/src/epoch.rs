@@ -59,7 +59,7 @@ impl EpochShared {
         (slot, epoch)
     }
 
-    fn advance(&self) -> u64 {
+    pub(crate) fn advance(&self) -> u64 {
         // Advance the global epoch
         let old_epoch = self.global_epoch.fetch_add(2, Ordering::Relaxed);
         let new_epoch = old_epoch + 2;
@@ -68,7 +68,7 @@ impl EpochShared {
         new_epoch
     }
 
-    fn broadcast(&self) {
+    pub(crate) fn broadcast(&self) {
         let Some(_guard) = self.broadcast_lock.try_lock() else {
             return;
         };
@@ -90,7 +90,7 @@ impl EpochShared {
         // FIXME: memory fence here, since we used Relaxed?
     }
 
-    fn get_oldest(&self) -> u64 {
+    pub(crate) fn get_oldest(&self) -> u64 {
         // Read all slots.
         let now = self.global_epoch.load(Ordering::Relaxed);
         let mut oldest = now;
@@ -111,7 +111,7 @@ impl EpochShared {
 
 pub(crate) struct EpochPin<'e> {
     slot: usize,
-    epoch: u64,
+    pub(crate) epoch: u64,
 
     handle: &'e LocalHandle<'e>,
 }
