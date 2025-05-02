@@ -1,7 +1,8 @@
 [package]
 name = "pageserver_page_api"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
 prost.workspace = true
