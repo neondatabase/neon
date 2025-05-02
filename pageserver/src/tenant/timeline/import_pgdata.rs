@@ -149,13 +149,7 @@ pub async fn doit(
         }
         .await?;
 
-        flow::run(
-            timeline.clone(),
-            control_file,
-            storage.clone(),
-            ctx,
-        )
-        .await?;
+        flow::run(timeline.clone(), control_file, storage.clone(), ctx).await?;
 
         //
         // Communicate that shard is done.

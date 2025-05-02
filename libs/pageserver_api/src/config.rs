@@ -182,6 +182,7 @@ pub struct ConfigToml {
     pub tracing: Option<Tracing>,
     pub enable_tls_page_service_api: bool,
     pub dev_mode: bool,
+    pub timeline_import_config: TimelineImportConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -298,6 +299,12 @@ impl From<OtelExporterProtocol> for tracing_utils::Protocol {
             OtelExporterProtocol::HttpBinary => tracing_utils::Protocol::HttpBinary,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TimelineImportConfig {
+    pub import_job_concurrency: NonZeroUsize,
+    pub import_job_soft_size_limit: NonZeroUsize,
 }
 
 pub mod statvfs {
@@ -659,6 +666,10 @@ impl Default for ConfigToml {
             tracing: None,
             enable_tls_page_service_api: false,
             dev_mode: false,
+            timeline_import_config: TimelineImportConfig {
+                import_job_concurrency: NonZeroUsize::new(128).unwrap(),
+                import_job_soft_size_limit: NonZeroUsize::new(1024 * 1024 * 1024).unwrap(),
+            },
         }
     }
 }

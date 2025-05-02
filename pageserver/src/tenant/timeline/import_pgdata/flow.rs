@@ -34,7 +34,9 @@ use std::sync::Arc;
 
 use anyhow::{bail, ensure};
 use bytes::Bytes;
+use futures::stream::FuturesOrdered;
 use itertools::Itertools;
+use pageserver_api::config::TimelineImportConfig;
 use pageserver_api::key::{
     CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, Key, TWOPHASEDIR_KEY, rel_block_to_key,
     rel_dir_to_key, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
@@ -46,8 +48,9 @@ use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::relfile_utils::parse_relfilename;
 use postgres_ffi::{BLCKSZ, pg_constants};
 use remote_storage::RemotePath;
-use tokio::task::JoinSet;
-use tracing::{Instrument, debug, info_span, instrument};
+use tokio::sync::Semaphore;
+use tokio_stream::StreamExt;
+use tracing::{debug, instrument};
 use utils::bin_ser::BeSer;
 use utils::lsn::Lsn;
 
@@ -74,8 +77,9 @@ pub async fn run(
         tasks: Vec::default(),
     };
 
-    let plan = planner.plan().await?;
-    plan.execute(timeline, ctx).await
+    let import_config = &timeline.conf.timeline_import_config;
+    let plan = planner.plan(import_config).await?;
+    plan.execute(timeline, import_config, ctx).await
 }
 
 struct Planner {
@@ -93,7 +97,7 @@ impl Planner {
     /// Creates an import plan
     ///
     /// This function is and must remain pure: given the same input, it will generate the same import plan.
-    async fn plan(mut self) -> anyhow::Result<Plan> {
+    async fn plan(mut self, import_config: &TimelineImportConfig) -> anyhow::Result<Plan> {
         let pgdata_lsn = Lsn(self.control_file.control_file_data().checkPoint).align();
 
         let datadir = PgDataDir::new(&self.storage).await?;
@@ -169,7 +173,9 @@ impl Planner {
         let mut current_chunk_size: usize = 0;
         let mut jobs = Vec::new();
         for task in std::mem::take(&mut self.tasks).into_iter() {
-            if current_chunk_size + task.total_size() > 1024 * 1024 * 1024 {
+            if current_chunk_size + task.total_size()
+                > import_config.import_job_soft_size_limit.into()
+            {
                 let key_range = last_end_key..task.key_range().start;
                 jobs.push(ChunkProcessingJob::new(
                     key_range.clone(),
@@ -314,29 +320,49 @@ impl Planner {
 }
 
 impl Plan {
-    async fn execute(self, timeline: Arc<Timeline>, ctx: &RequestContext) -> anyhow::Result<()> {
-        // Start all jobs simultaneosly
-        let mut work = JoinSet::new();
-        // TODO: semaphore?
-        for job in self.jobs {
-            let ctx: RequestContext =
-                ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Error);
-            let job_timeline = timeline.clone();
-            work.spawn(
-                async move { job.run(job_timeline, &ctx).await }
-                    .instrument(info_span!("parallel_job")),
-            );
-        }
+    async fn execute(
+        self,
+        timeline: Arc<Timeline>,
+        import_config: &TimelineImportConfig,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        let mut work = FuturesOrdered::new();
+        let semaphore = Arc::new(Semaphore::new(import_config.import_job_concurrency.into()));
+
+        let jobs_in_plan = self.jobs.len();
+
+        let mut jobs = self.jobs.into_iter().enumerate().peekable();
         let mut results = Vec::new();
-        while let Some(result) = work.join_next().await {
-            match result {
-                Ok(res) => {
-                    results.push(res);
-                }
-                Err(_joinset_err) => {
-                    results.push(Err(anyhow::anyhow!(
-                        "parallel job panicked or cancelled, check pageserver logs"
-                    )));
+
+        // Run import jobs concurrently up to the limit specified by the pageserver configuration.
+        // Note that we process completed futures in the oreder of insertion. This will be the
+        // building block for resuming imports across pageserver restarts or tenant migrations.
+        while results.len() < jobs_in_plan {
+            tokio::select! {
+                permit = semaphore.clone().acquire_owned(), if jobs.peek().is_some() => {
+                    let permit = permit.expect("never closed");
+                    let (job_idx, job) = jobs.next().expect("we peeked");
+                    let job_timeline = timeline.clone();
+                    let ctx = ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Error);
+
+                    work.push_back(tokio::task::spawn(async move {
+                        let _permit = permit;
+                        let res = job.run(job_timeline, &ctx).await;
+                        (job_idx, res)
+                    }));
+                },
+                maybe_complete_job_idx = work.next() => {
+                    match maybe_complete_job_idx {
+                        Some(Ok((_job_idx, res))) => {
+                            results.push(res);
+                        },
+                        Some(Err(_)) => {
+                            results.push(Err(anyhow::anyhow!(
+                                "parallel job panicked or cancelled, check pageserver logs"
+                            )));
+                        }
+                        None => {}
+                    }
                 }
             }
         }
@@ -773,10 +799,6 @@ impl ChunkProcessingJob {
             .track_new_image_layers(&[resident_layer.clone()], &timeline.metrics);
         crate::tenant::timeline::drop_wlock(guard);
 
-        // Schedule the layer for upload but don't add barriers such as
-        // wait for completion or index upload, so we don't inhibit upload parallelism.
-        // TODO: limit upload parallelism somehow (e.g. by limiting concurrency of jobs?)
-        // TODO: or regulate parallelism by upload queue depth? Prob should happen at a higher level.
         timeline
             .remote_client
             .schedule_layer_file_upload(resident_layer)?;
