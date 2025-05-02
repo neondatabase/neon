@@ -399,7 +399,7 @@ neon_set_lwlsn_block_range(XLogRecPtr lsn, NRelFileInfo rlocator, ForkNumber for
 	if (lsn == InvalidXLogRecPtr || n_blocks == 0 || LwLsnCache->lastWrittenLsnCacheSize == 0)
 		return lsn;
 
-	Assert(lsn >= FirstNormalUnloggedLSN);
+	Assert(lsn >= WalSegMinSize);
 	LWLockAcquire(LastWrittenLsnLock, LW_EXCLUSIVE);
 	lsn = SetLastWrittenLSNForBlockRangeInternal(lsn, rlocator, forknum, from, n_blocks);
 	LWLockRelease(LastWrittenLsnLock);
@@ -447,7 +447,7 @@ neon_set_lwlsn_block_v(const XLogRecPtr *lsns, NRelFileInfo relfilenode,
 		if (lsn == InvalidXLogRecPtr)
 			continue;
 
-		Assert(lsn >= FirstNormalUnloggedLSN);
+		Assert(lsn >= WalSegMinSize);
 		key.blockNum = blockno + i;
 		entry = hash_search(lastWrittenLsnCache, &key, HASH_ENTER, &found);
 		if (found)
