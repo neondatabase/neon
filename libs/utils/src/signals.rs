@@ -46,6 +46,7 @@ pub async fn signal_handler(token: tokio_util::sync::CancellationToken) {
     let mut sigint = signal(SignalKind::interrupt()).unwrap();
     let mut sigterm = signal(SignalKind::terminate()).unwrap();
     let mut sigquit = signal(SignalKind::quit()).unwrap();
+    let mut sigusr1 = signal(SignalKind::user_defined1()).unwrap();
 
     loop {
         let signal = tokio::select! {
@@ -55,13 +56,17 @@ pub async fn signal_handler(token: tokio_util::sync::CancellationToken) {
             }
             _ = sigint.recv() => "SIGINT",
             _ = sigterm.recv() => "SIGTERM",
+            _ = sigusr1.recv() => {
+                info!("Got signal SIGUSR1");
+                continue;
+            }
         };
 
         if !token.is_cancelled() {
-            info!("Got signal {signal}. Terminating gracefully in fast shutdown mode.");
+            info!(thread_id=?std::thread::current().id(), "Got signal {signal}. Terminating gracefully in fast shutdown mode.");
             token.cancel();
         } else {
-            info!("Got signal {signal}. Already shutting down.");
+            info!(thread_id=?std::thread::current().id(), "Got signal {signal}. Already shutting down.");
         }
     }
 }

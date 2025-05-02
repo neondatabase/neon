@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+
 if TYPE_CHECKING:
     from fixtures.neon_fixtures import NeonEnvBuilder
 
@@ -10,6 +12,7 @@ if TYPE_CHECKING:
 # while initial compute node is down and pageserver is lagging behind safekeepers.
 # Ensure that basebackup after restart of all components is correct
 # and new compute node contains all data.
+@pytest.mark.repeat(1000)
 def test_pageserver_catchup_while_compute_down(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()

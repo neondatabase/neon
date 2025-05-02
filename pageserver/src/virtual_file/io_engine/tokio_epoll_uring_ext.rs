@@ -76,12 +76,13 @@ pub async fn thread_local_system() -> Handle {
                     )
                     .await;
                     let per_system_metrics = metrics::THREAD_LOCAL_METRICS_STORAGE.register_system(inner.thread_local_state_id);
-                    let res = System::launch_with_metrics(per_system_metrics)
+                    info!(thread_id=?std::thread::current().id(), thread_name=?std::thread::current().name(), "launching system");
+                    let res = System::launch_with_metrics(per_system_metrics, usize::try_from(inner.thread_local_state_id).unwrap())
                     // this might move us to another executor thread => loop outside the get_or_try_init, not inside it
                     .await;
                     match res {
                         Ok(system) => {
-                            info!("successfully launched system");
+                            info!(thread_id=?std::thread::current().id(), thread_name=?std::thread::current().name(), "successfully launched system");
                             metrics::THREAD_LOCAL_LAUNCH_SUCCESSES.inc();
                             Ok(system)
                         }
