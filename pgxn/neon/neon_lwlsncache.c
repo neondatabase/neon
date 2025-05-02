@@ -4,6 +4,7 @@
 
 #include "miscadmin.h"
 #include "access/xlog.h"
+#include "access/xlog_internal.h"
 #include "storage/ipc.h"
 #include "storage/shmem.h"
 #include "storage/buf_internals.h"
