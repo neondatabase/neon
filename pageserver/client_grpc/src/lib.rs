@@ -145,7 +145,6 @@ impl PageserverClient {
         PageserverClientError,
     > {
 
-        // Print a debug message
         // FIXME: calculate the shard number correctly
         let shard = ShardIndex::unsharded();
 

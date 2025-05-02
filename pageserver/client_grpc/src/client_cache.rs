@@ -237,7 +237,6 @@ impl ConnectionPool {
                 let remove = entry.active_consumers;
                 if new_failure {
                     inner.last_connect_failure = Some(Instant::now());
-                    info!("Connection {} has failed", id);
                 }
                 if remove == 0 {
                     info!("Removing connection {} due to too many errors", id);
