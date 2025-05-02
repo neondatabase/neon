@@ -4420,6 +4420,7 @@ dependencies = [
  "prost 0.13.3",
  "tonic",
  "tonic-build",
+ "workspace_hack",
 ]
 
 [[package]]

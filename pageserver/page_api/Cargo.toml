@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 prost.workspace = true
 tonic.workspace = true
+workspace_hack.workspace = true
 
 [build-dependencies]
 tonic-build.workspace = true
