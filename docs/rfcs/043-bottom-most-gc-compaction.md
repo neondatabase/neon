@@ -184,6 +184,7 @@ There are still some limitations of gc-compaction itself that needs to be resolv
 - We limit gc-compaction to run over shards <= 150GB to avoid gc-compaction taking too much time blocking other compaction jobs. The sub-compaction split algorithm needs to be improved to be able to split vertically and horizontally. Also, we need to move the download layer process out of the compaction loop so that we don't block other compaction jobs for too long.
 - The compaction trigger always schedules gc-compaction from the lowest LSN to the gc-horizon. Currently we do not schedule compaction jobs that only selects layers in the middle. Allowing this could potentially reduce the number of layers read/write throughout the process.
 - gc-compaction will give up if there are too many layers to rewrite or if there are not enough disk space for the compaction.
+- gc-compaction sometimes fails with "no key produced during compaction", which means that all existing keys within the compaction range can be collected; but we don't have a way to write this information back to the layer map -- we cannot generate an empty image layer.
 
 In the future,
 
