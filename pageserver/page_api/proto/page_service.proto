@@ -1,0 +1,202 @@
+// Page service, presented by pageservers for computes.
+//
+// This is the compute read path. It primarily serves page versions at given
+// LSNs, but also base backups, SLRU segments, and relation metadata.
+//
+// EXPERIMENTAL: this is still under development and subject to change.
+//
+// Request metadata headers:
+// - authorization: JWT token ("Bearer <token>"), if auth is enabled
+// - neon-tenant-id: tenant ID ("7c4a1f9e3bd6470c8f3e21a65bd2e980")
+// - neon-shard-id: shard ID, as <number><count> in hex ("0b10" = shard 11 of 16, 0-based)
+// - neon-timeline-id: timeline ID ("f08c4e9a2d5f76b1e3a7c2d8910f4b3e")
+//
+// TODO: write implementation guidance on
+// - Health checks
+// - Tracing, OpenTelemetry
+// - Compression
+
+syntax = "proto3";
+package page_service;
+
+service PageService {
+  // Returns the total size of a database, as # of bytes.
+  rpc DbSize (DbSizeRequest) returns (DbSizeResponse);
+
+  // Fetches a base backup.
+  rpc GetBaseBackup (GetBaseBackupRequest) returns (stream GetBaseBackupResponseChunk);
+
+  // Fetches pages.
+  //
+  // This is implemented as a bidirectional streaming RPC for performance. Unary
+  // requests incur costs for e.g. HTTP/2 stream setup, header parsing,
+  // authentication, and so on -- with streaming, we only pay these costs during
+  // the initial stream setup. This ~doubles throughput in benchmarks. Other
+  // RPCs use regular unary requests, since they are not as frequent and
+  // performance-critical, and this simplifies implementation.
+  //
+  // NB: a status response (e.g. errors) will terminate the stream. The stream
+  // may be shared by e.g. multiple Postgres backends, so we should avoid this.
+  // Most errors are therefore sent as GetPageResponse.status instead.
+  rpc GetPages (stream GetPageRequestBatch) returns (stream GetPageResponse);
+
+  // Fetches an SLRU segment.
+  rpc GetSlruSegment (GetSlruSegmentRequest) returns (GetSlruSegmentResponse);
+
+  // Returns whether a relation exists.
+  rpc RelExists(RelExistsRequest) returns (RelExistsResponse);
+
+  // Returns the size of a relation, as # of blocks.
+  rpc RelSize (RelSizeRequest) returns (RelSizeResponse);
+}
+
+// Common request fields.
+message RequestCommon {
+  // The LSN to read at. Required.
+  uint64 request_lsn = 1;
+  // If given, the caller guarantees that the page has not been modified since
+  // this LSN. Must be smaller than request_lsn. This allows the Pageserver to
+  // serve an old page without waiting for the request LSN to arrive.
+  uint64 not_modified_since_lsn = 2;
+}
+
+// A relation identifier.
+message RelTag {
+    uint32 spc_oid = 1;
+    uint32 db_oid = 2;
+    uint32 rel_number = 3;
+    uint32 fork_number = 4;
+}
+
+// Requests the size of a database, as # of bytes. This is only accurate on
+// shard 0; other shards will return their view of the database according to
+// which pages they have.
+message DbSizeRequest {
+  RequestCommon common = 1;
+  uint32 db_oid = 2;
+}
+
+message DbSizeResponse {
+  uint64 num_bytes = 1;
+}
+
+// Requests a base backup at a given LSN.
+message GetBaseBackupRequest {
+  // The LSN to fetch a base backup at.
+  RequestCommon common = 1;
+  // If true, logical replication slots will not be created.
+  bool replica = 2;
+}
+
+// Base backup response chunk, returned as an ordered stream.
+message GetBaseBackupResponseChunk {
+  // A basebackup data chunk. The size is undefined, but bounded by the 4 MB
+  // gRPC message size limit.
+  bytes chunk = 1;
+}
+
+// Requests a single page.
+message GetPageRequest {
+  // A request ID. Will be included in the response. Should be unique for
+  // in-flight requests on the stream.
+  uint64 id = 1;
+  // The LSN to read at.
+  RequestCommon common = 2;
+  // The relation to read from.
+  RelTag rel = 3;
+  // The page number to read. Must belong to the remote shard.
+  uint32 block_number = 4;
+  // The request class.
+  GetPageClass class = 5;
+}
+
+// A GetPageRequest class. Primarily intended for observability, but may also be
+// used for prioritization in the future.
+enum GetPageClass {
+  // Unknown class. For forwards compatibility: used when the client sends a
+  // class that the server doesn't know about.
+  GET_PAGE_CLASS_UNKNOWN = 0;
+  // A normal request. This is the default.
+  GET_PAGE_CLASS_NORMAL = 1;
+  // A prefetch request.
+  GET_PAGE_CLASS_PREFETCH = 2;
+}
+
+// A batch of GetPage requests. These will be executed as a single batch by the
+// Pageserver, amortizing layer access costs and parallelizing them. This may
+// increase the latency of any individual request, but improves the overall
+// latency and throughput of the batch as a whole.
+//
+// Responses will be emitted individually, as soon as they are ready. They may
+// be emitted in a different order than the requests.
+message GetPageRequestBatch {
+  repeated GetPageRequest requests = 1;
+}
+
+// A GetPage response. May be emitted out of order.
+message GetPageResponse {
+  // The original request's ID.
+  uint64 id = 1;
+  // The response status code.
+  GetPageStatus status = 2;
+  // A string describing the status, if any.
+  optional string reason = 3;
+  // The 8KB page image. Empty if status != OK.
+  bytes page_image = 4;
+}
+
+// A GetPageResponse status code. Since we use a bidirectional stream, we don't
+// want to send errors as gRPC statuses, since this would terminate the stream.
+enum GetPageStatus {
+  // Unknown status. For forwards compatibility: used when the server sends a
+  // status code that the client doesn't know about.
+  GET_PAGE_STATUS_UNKNOWN = 0;
+  // The request was successful.
+  GET_PAGE_STATUS_OK = 1;
+  // The page did not exist. The tenant/timeline/shard has already been
+  // validated during stream setup.
+  GET_PAGE_STATUS_NOT_FOUND = 2;
+  // The request was invalid.
+  GET_PAGE_STATUS_INVALID = 3;
+  // The client is rate limited. Slow down and retry later.
+  // TODO: should we use this?
+  GET_PAGE_STATUS_SLOW_DOWN = 4;
+}
+
+// Requests an SLRU segment.
+message GetSlruSegmentRequest {
+  RequestCommon common = 1;
+  uint32 kind = 2;
+  uint32 segno = 3;
+}
+
+// Returns an SLRU segment.
+//
+// These are up 32 pages (256 KB), so we can send them as a single response.
+message GetSlruSegmentResponse {
+  bytes segment = 1;
+}
+
+// Checks whether a relation exists, at the given LSN. This is only accurate on
+// shard 0; other shards will return their view of the relation according to
+// which pages they have.
+message RelExistsRequest {
+  RequestCommon common = 1;
+  RelTag rel = 2;
+}
+
+message RelExistsResponse {
+  bool exists = 1;
+}
+
+// Fetches the size of a relation at a given LSN, as # of blocks. This is only
+// accurate on shard 0; other shards will return their view of the relation
+// according to which pages they have.
+message RelSizeRequest {
+  RequestCommon common = 1;
+  RelTag rel = 2;
+}
+
+message RelSizeResponse {
+  uint32 num_blocks = 1;
+}

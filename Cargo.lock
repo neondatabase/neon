@@ -4414,6 +4414,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pageserver_page_api"
+version = "0.1.0"
+dependencies = [
+ "prost 0.13.3",
+ "tonic",
+ "tonic-build",
+]
+
+[[package]]
 name = "papaya"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
