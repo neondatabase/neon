@@ -26,14 +26,9 @@ const CACHE_AREA_SIZE: usize = 10 * 1024 * 1024;
 type IntegratedCacheTreeInitStruct<'t> =
     TreeInitStruct<'t, TreeKey, TreeEntry, neonart::ArtMultiSlabAllocator<'t, TreeEntry>>;
 
-/// This struct is stored in the shared memory segment.
-struct IntegratedCacheShmemData {
-    allocator: &'static neonart::ArtMultiSlabAllocator<'static, TreeEntry>,
-}
-
 /// This struct is initialized at postmaster startup, and passed to all the processes via fork().
 pub struct IntegratedCacheInitStruct<'t> {
-    shmem_data: &'t IntegratedCacheShmemData,
+    allocator: &'t neonart::ArtMultiSlabAllocator<'t, TreeEntry>,
     handle: IntegratedCacheTreeInitStruct<'t>,
 }
 
@@ -65,38 +60,15 @@ impl<'t> IntegratedCacheInitStruct<'t> {
 
     /// Initialize the shared memory segment. This runs once in postmaster. Returns a struct which
     /// will be inherited by all processes through fork.
-    pub fn shmem_init(_max_procs: u32, shmem_area: &'t mut [u8]) -> IntegratedCacheInitStruct<'t> {
-        assert!(shmem_area.len() > std::mem::size_of::<IntegratedCacheShmemData>());
+    pub fn shmem_init(_max_procs: u32, shmem_area: &'t mut [MaybeUninit<u8>]) -> IntegratedCacheInitStruct<'t> {
+        let allocator = neonart::ArtMultiSlabAllocator::new(shmem_area);
 
-        let mut ptr = shmem_area.as_mut_ptr();
-        let shmem_data_ptr;
-        let len_used;
-        unsafe {
-            ptr = ptr.byte_add(ptr.align_offset(align_of::<IntegratedCacheShmemData>()));
-            shmem_data_ptr = ptr.cast::<IntegratedCacheShmemData>();
-            ptr = ptr.byte_add(std::mem::size_of::<IntegratedCacheShmemData>());
-            len_used = ptr.byte_offset_from(shmem_area.as_mut_ptr()) as usize;
-        };
-        assert!(len_used < shmem_area.len());
-
-        let area_ptr = ptr;
-        let area_size = shmem_area.len() - len_used;
-
-        let cache_area: &mut [MaybeUninit<u8>] =
-            unsafe { std::slice::from_raw_parts_mut(area_ptr.cast(), area_size) };
-        let allocator = neonart::ArtMultiSlabAllocator::new(cache_area);
+        let handle = IntegratedCacheTreeInitStruct::new(allocator);
 
         // Initialize the shared memory area
-        let shmem_data = unsafe {
-            *shmem_data_ptr = IntegratedCacheShmemData { allocator };
-            &*shmem_data_ptr
-        };
-
-        let tree_handle = IntegratedCacheTreeInitStruct::new(&shmem_data.allocator);
-
         IntegratedCacheInitStruct {
-            shmem_data,
-            handle: tree_handle,
+            allocator,
+            handle,
         }
     }
 
@@ -106,7 +78,7 @@ impl<'t> IntegratedCacheInitStruct<'t> {
         file_cache: Option<FileCache>,
     ) -> IntegratedCacheWriteAccess<'t> {
         let IntegratedCacheInitStruct {
-            shmem_data: _shmem,
+            allocator: _allocator,
             handle,
         } = self;
         let tree_writer = handle.attach_writer();
@@ -120,7 +92,7 @@ impl<'t> IntegratedCacheInitStruct<'t> {
 
     pub fn backend_init(self) -> IntegratedCacheReadAccess<'t> {
         let IntegratedCacheInitStruct {
-            shmem_data: _shmem,
+            allocator: _allocator,
             handle,
         } = self;
 

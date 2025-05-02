@@ -1,13 +1,16 @@
 mod block;
 mod multislab;
 mod slab;
-mod r#static;
+pub mod r#static;
 
 use std::alloc::Layout;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 
 use crate::allocator::multislab::MultiSlabAllocator;
+use crate::allocator::r#static::alloc_from_slice;
+
+use spin;
 
 use crate::Tree;
 pub use crate::algorithm::node_ptr::{
@@ -39,8 +42,11 @@ pub trait ArtAllocator<V: crate::Value> {
     fn dealloc_node_leaf256(&self, ptr: *mut NodeLeaf256<V>);
 }
 
-#[repr(transparent)]
-pub struct ArtMultiSlabAllocator<'t, V> {
+pub struct ArtMultiSlabAllocator<'t, V>
+    where V: crate::Value
+{
+    tree_area: spin::Mutex<Option<&'t mut MaybeUninit<Tree<V>>>>,
+
     inner: MultiSlabAllocator<'t, 8>,
 
     phantom_val: PhantomData<V>,
@@ -59,19 +65,26 @@ impl<'t, V: crate::Value> ArtMultiSlabAllocator<'t, V> {
     ];
 
     pub fn new(area: &'t mut [MaybeUninit<u8>]) -> &'t mut ArtMultiSlabAllocator<'t, V> {
-        let allocator = MultiSlabAllocator::new(area, &Self::LAYOUTS);
+        let (allocator_area, remain) = alloc_from_slice::<ArtMultiSlabAllocator<V>>(area);
+        let (tree_area, remain) = alloc_from_slice::<Tree<V>>(remain);
 
-        let ptr: *mut MultiSlabAllocator<8> = allocator;
+        let allocator = allocator_area.write(ArtMultiSlabAllocator {
+            tree_area: spin::Mutex::new(Some(tree_area)),
+            inner: MultiSlabAllocator::new(remain, &Self::LAYOUTS),
+            phantom_val: PhantomData,
+        });
 
-        let ptr: *mut ArtMultiSlabAllocator<V> = ptr.cast();
-
-        unsafe { ptr.as_mut().unwrap() }
+        allocator
     }
 }
 
 impl<'t, V: crate::Value> ArtAllocator<V> for ArtMultiSlabAllocator<'t, V> {
     fn alloc_tree(&self) -> *mut Tree<V> {
-        self.inner.alloc_fit(Layout::new::<Tree<V>>()).cast()
+        let mut t = self.tree_area.lock();
+        if let Some(tree_area) = t.take() {
+            return tree_area.as_mut_ptr().cast();
+        }
+        panic!("cannot allocate more than one tree");
     }
 
     fn alloc_node_internal4(&self) -> *mut NodeInternal4<V> {

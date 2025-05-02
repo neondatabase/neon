@@ -5,9 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use spin;
 
-use crate::allocator::r#static::StaticAllocator;
-
-const BLOCK_SIZE: usize = 16 * 1024;
+pub(crate) const BLOCK_SIZE: usize = 16 * 1024;
 
 const INVALID_BLOCK: u64 = u64::MAX;
 
@@ -32,12 +30,9 @@ struct FreeListBlockInner {
 
 impl<'t> BlockAllocator<'t> {
     pub(crate) fn new(area: &'t mut [MaybeUninit<u8>]) -> Self {
-        let mut alloc = StaticAllocator::new(area);
-
         // Use all the space for the blocks
-        alloc.align(BLOCK_SIZE);
-
-        let remain = alloc.remaining();
+        let padding = area.as_ptr().align_offset(BLOCK_SIZE);
+        let remain = &mut area[padding..];
 
         let num_blocks = (remain.len() / BLOCK_SIZE) as u64;
 
@@ -67,8 +62,10 @@ impl<'t> BlockAllocator<'t> {
         .cast()
     }
 
-    pub(crate) fn alloc_block(&self) -> *mut u8 {
-        self.get_block_ptr(self.alloc_block_internal())
+    pub(crate) fn alloc_block(&self) -> &mut [MaybeUninit<u8>] {
+        // FIXME: handle OOM
+        let ptr: *mut MaybeUninit<u8> = self.get_block_ptr(self.alloc_block_internal()).cast();
+        unsafe { std::slice::from_raw_parts_mut( ptr, BLOCK_SIZE) }
     }
 
     fn alloc_block_internal(&self) -> u64 {

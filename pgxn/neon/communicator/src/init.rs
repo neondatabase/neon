@@ -20,6 +20,9 @@
 
 use std::ffi::c_int;
 use std::mem;
+use std::mem::MaybeUninit;
+
+use neonart::allocator::r#static::alloc_array_from_slice;
 
 use crate::backend_comms::NeonIOHandle;
 use crate::integrated_cache::IntegratedCacheInitStruct;
@@ -79,41 +82,33 @@ pub extern "C" fn rcommunicator_shmem_init(
     submission_pipe_read_fd: c_int,
     submission_pipe_write_fd: c_int,
     max_procs: u32,
-    shmem_area_ptr: *mut u8,
+    shmem_area_ptr: *mut MaybeUninit<u8>,
     shmem_area_len: u64,
 ) -> &'static mut CommunicatorInitStruct {
-    let mut ptr = shmem_area_ptr;
-
-    // Carve out the request slots from the shmem area and initialize them
-    let num_neon_request_slots_per_backend = NUM_NEON_REQUEST_SLOTS_PER_BACKEND;
-    let num_neon_request_slots = max_procs * num_neon_request_slots_per_backend;
-
-    let len_used;
-    let neon_request_slots: &mut [NeonIOHandle] = unsafe {
-        ptr = ptr.add(ptr.align_offset(std::mem::align_of::<NeonIOHandle>()));
-        let neon_request_slots_ptr: *mut NeonIOHandle = ptr.cast();
-        for _i in 0..num_neon_request_slots {
-            let slot: *mut NeonIOHandle = ptr.cast();
-            *slot = NeonIOHandle::default();
-            ptr = ptr.byte_add(mem::size_of::<NeonIOHandle>());
-        }
-        len_used = ptr.byte_offset_from(shmem_area_ptr) as usize;
-        assert!(len_used <= shmem_area_len as usize);
-
-        std::slice::from_raw_parts_mut(neon_request_slots_ptr, num_neon_request_slots as usize)
+    let shmem_area: &'static mut [MaybeUninit<u8>] = unsafe {
+        std::slice::from_raw_parts_mut(shmem_area_ptr, shmem_area_len as usize)
     };
 
-    let remaining_area =
-        unsafe { std::slice::from_raw_parts_mut(ptr, shmem_area_len as usize - len_used) };
+    // Carve out the request slots from the shmem area and initialize them
+    let num_neon_request_slots_per_backend = NUM_NEON_REQUEST_SLOTS_PER_BACKEND as usize;
+    let num_neon_request_slots = max_procs as usize * num_neon_request_slots_per_backend;
+
+    let (neon_request_slots, remaining_area) =
+        alloc_array_from_slice::<NeonIOHandle>(shmem_area, num_neon_request_slots);
+
+    for i in 0..num_neon_request_slots {
+        neon_request_slots[i].write(NeonIOHandle::default());
+    }
+
+    // 'neon_request_slots' is initialized now. (MaybeUninit::slice_assume_init_mut() is nightly-only
+    // as of this writing.)
+    let neon_request_slots = unsafe {
+        std::mem::transmute::<&mut [MaybeUninit<NeonIOHandle>], &mut[NeonIOHandle]>(neon_request_slots)
+    };
 
     // Give the rest of the area to the integrated cache
     let integrated_cache_init_struct =
         IntegratedCacheInitStruct::shmem_init(max_procs, remaining_area);
-
-    eprintln!(
-        "PIPE READ {} WRITE {}",
-        submission_pipe_read_fd, submission_pipe_write_fd
-    );
 
     let cis: &'static mut CommunicatorInitStruct = Box::leak(Box::new(CommunicatorInitStruct {
         max_procs,

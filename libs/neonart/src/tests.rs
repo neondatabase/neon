@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::Allocator;
+use crate::ArtMultiSlabAllocator;
 use crate::TreeInitStruct;
 
 use crate::{Key, Value};
@@ -31,11 +31,11 @@ impl Value for usize {}
 
 fn test_inserts<K: Into<TestKey> + Copy>(keys: &[K]) {
     const MEM_SIZE: usize = 10000000;
-    let area = Box::leak(Box::new_uninit_slice(MEM_SIZE));
+    let mut area = Box::new_uninit_slice(MEM_SIZE);
 
-    let allocator = Box::leak(Box::new(Allocator::new_uninit(area)));
+    let allocator = ArtMultiSlabAllocator::new(&mut area);
 
-    let init_struct = TreeInitStruct::<TestKey, usize>::new(allocator);
+    let init_struct = TreeInitStruct::<TestKey, usize, _>::new(allocator);
     let tree_writer = init_struct.attach_writer();
 
     for (idx, k) in keys.iter().enumerate() {
