@@ -154,7 +154,9 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 		wp->safekeeper[wp->n_safekeepers].state = SS_OFFLINE;
 		wp->safekeeper[wp->n_safekeepers].active_state = SS_ACTIVE_SEND;
 		wp->safekeeper[wp->n_safekeepers].wp = wp;
-
+		/* BEGIN_HADRON */
+		wp->safekeeper[wp->n_safekeepers].index = wp->n_safekeepers;
+		/* END_HADRON */
 		{
 			Safekeeper *sk = &wp->safekeeper[wp->n_safekeepers];
 			int			written = 0;
@@ -183,6 +185,10 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 	if (wp->safekeepers_generation > INVALID_GENERATION && wp->config->proto_version < 3)
 		wp_log(FATAL, "enabling generations requires protocol version 3");
 	wp_log(LOG, "using safekeeper protocol version %d", wp->config->proto_version);
+	
+	/* BEGIN_HADRON */
+	wp->api.reset_safekeeper_statuses_for_metrics(wp, wp->n_safekeepers);
+	/* END_HADRON */
 
 	/* Fill the greeting package */
 	wp->greetRequest.pam.tag = 'g';
@@ -354,6 +360,10 @@ ShutdownConnection(Safekeeper *sk)
 {
 	sk->state = SS_OFFLINE;
 	sk->streamingAt = InvalidXLogRecPtr;
+
+	/* BEGIN_HADRON */
+	sk->wp->api.update_safekeeper_status_for_metrics(sk->wp, sk->index, 0);
+	/* END_HADRON */
 
 	MembershipConfigurationFree(&sk->greetResponse.mconf);
 	if (sk->voteResponse.termHistory.entries)
@@ -1529,6 +1539,10 @@ StartStreaming(Safekeeper *sk)
 	sk->state = SS_ACTIVE;
 	sk->active_state = SS_ACTIVE_SEND;
 	sk->streamingAt = sk->startStreamingAt;
+
+	/* BEGIN_HADRON */
+	sk->wp->api.update_safekeeper_status_for_metrics(sk->wp, sk->index, 1);
+	/* END_HADRON */
 
 	/*
 	 * Donors can only be in SS_ACTIVE state, so we potentially update the

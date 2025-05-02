@@ -20,6 +20,7 @@
 #include "neon.h"
 #include "neon_perf_counters.h"
 #include "walproposer.h"
+#include "walproposer.h"
 
 /* BEGIN_HADRON */
 databricks_metrics *databricks_metrics_shared;
@@ -391,6 +392,12 @@ neon_get_perf_counters(PG_FUNCTION_ARGS)
 	neon_per_backend_counters totals = {0};
 	metric_t   *metrics;
 
+	/* BEGIN_HADRON */
+	WalproposerShmemState *wp_shmem;
+	uint32 num_safekeepers;
+	uint32 num_active_safekeepers;
+	/* END_HADRON */
+
 	/* We put all the tuples into a tuplestore in one go. */
 	InitMaterializedSRF(fcinfo, 0);
 
@@ -437,11 +444,32 @@ neon_get_perf_counters(PG_FUNCTION_ARGS)
 		// Not ideal but piggyback our databricks counters into the neon perf counters view
 		// so that we don't need to introduce neon--1.x+1.sql to add a new view.
 		{
+		// Keeping this code in its own block to work around the C90 "don't mix declarations and code" rule when we define
+		// the `databricks_metrics` array in the next block. Yes, we are seriously dealing with C90 rules in 2025.
+
+		// Read safekeeper status from wal proposer shared memory first.
+		// Note that we are taking a mutex when reading from walproposer shared memory so that the total safekeeper count is
+		// consistent with the active wal acceptors count. Assuming that we don't query this view too often the mutex should
+		// not be a huge deal.
+		wp_shmem = GetWalpropShmemState();
+		SpinLockAcquire(&wp_shmem->mutex);
+		num_safekeepers = wp_shmem->num_safekeepers;
+		num_active_safekeepers = 0;
+		for (int i = 0; i < num_safekeepers; i++) {
+			if (wp_shmem->safekeeper_status[i] == 1) {
+				num_active_safekeepers++;
+			}
+		}
+		SpinLockRelease(&wp_shmem->mutex);
+	}
+	{
 			metric_t databricks_metrics[] = {
 				{"sql_index_corruption_count", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->index_corruption_count)},
 				{"sql_data_corruption_count", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->data_corruption_count)},
 				{"sql_internal_error_count", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->internal_error_count)},
 				{"ps_corruption_detected", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->ps_corruption_detected)},
+				{"num_active_safekeepers", false, 0.0, (double) num_active_safekeepers},
+				{"num_configured_safekeepers", false, 0.0, (double) num_safekeepers},
 				{NULL, false, 0, 0},
 			};
 			for (int i = 0; databricks_metrics[i].name != NULL; i++)

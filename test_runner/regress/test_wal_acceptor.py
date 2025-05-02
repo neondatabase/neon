@@ -2757,17 +2757,31 @@ def test_timeline_disk_usage_limit(neon_env_builder: NeonEnvBuilder):
     remote_storage_kind = s3_storage()
     neon_env_builder.enable_safekeeper_remote_storage(remote_storage_kind)
 
-    # Set a very small disk usage limit (1KB)
-    neon_env_builder.safekeeper_extra_opts = ["--max-timeline-disk-usage-bytes=1024"]
-
     env = neon_env_builder.init_start()
 
     # Create a timeline and endpoint
     env.create_branch("test_timeline_disk_usage_limit")
     endpoint = env.endpoints.create_start("test_timeline_disk_usage_limit")
 
+    # Install the neon extension in the test database. We need it to query perf counter metrics.
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS neon")
+            # Sanity-check safekeeper connection status in neon_perf_counters in the happy case.
+            cur.execute(
+                "SELECT value FROM neon_perf_counters WHERE metric = 'num_active_safekeepers'"
+            )
+            assert cur.fetchone() == (1,), "Expected 1 active safekeeper"
+            cur.execute(
+                "SELECT value FROM neon_perf_counters WHERE metric = 'num_configured_safekeepers'"
+            )
+            assert cur.fetchone() == (1,), "Expected 1 configured safekeeper"
+
     # Get the safekeeper
     sk = env.safekeepers[0]
+
+    # Restart the safekeeper with a very small disk usage limit (1KB)
+    sk.stop().start(["--max-timeline-disk-usage-bytes=1024"])
 
     # Inject a failpoint to stop WAL backup
     with sk.http_client() as http_cli:
@@ -2793,6 +2807,18 @@ def test_timeline_disk_usage_limit(neon_env_builder: NeonEnvBuilder):
 
     wait_until(error_logged)
     log.info("Found expected error message in compute log, resuming.")
+
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            # Confirm that neon_perf_counters also indicates that there are no active safekeepers
+            cur.execute(
+                "SELECT value FROM neon_perf_counters WHERE metric = 'num_active_safekeepers'"
+            )
+            assert cur.fetchone() == (0,), "Expected 0 active safekeepers"
+            cur.execute(
+                "SELECT value FROM neon_perf_counters WHERE metric = 'num_configured_safekeepers'"
+            )
+            assert cur.fetchone() == (1,), "Expected 1 configured safekeeper"
 
     # Sanity check that the hanging insert is indeed still hanging. Otherwise means the circuit breaker we
     # implemented didn't work as expected.
