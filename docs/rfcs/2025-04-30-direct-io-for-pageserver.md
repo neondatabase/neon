@@ -151,8 +151,8 @@ We are **happy to make this trade-off**:
 - Because we empirically have enough DRAM on Pageservers to serve metadata (=index blocks) from PS PageCache.
   (At just 2GiB PS PageCache size, we average a 99.95% hit rate).
   So, the latency of going to disk is only for data block reads, not the index traversal.
-- Because **the kernel page cache is ineffective** at high tenant density anyways (#tenants/pageserver instance).
-  And dense packing of tenants will always going desirable to drive COGS down, so, we should design the system for it.
+- Because **the kernel page cache is ineffective** at high tenant density anyway (#tenants/pageserver instance).
+  And because dense packing of tenants will always be desirable to drive COGS down, we should design the system for it.
   (See the appendix for a more detailed explanation why this is).
 - So, we accept that some reads that used to be fast by circumstance will have higher but **predictable** latency than before.
 
@@ -207,12 +207,11 @@ The requirements are specific to a combination of filesystem/block-device/archit
 
 In Neon production environments we currently use ext4 with Linux 6.1.X on AWS and Azure storage-optimized instances (locally attached NVMe).
 Instead of dynamic discovery using `statx`, we statically hard-code 512 bytes as the buffer/offset alignment and size-multiple.
-This decision was made on the basis that
+We made this decision because:
 - a) it is compatible with all the environments we need to run in
-- b) our primarily workload is small random reads of multiple that typically are smaller than 512 bytes
-- c) tail latency of 512 bytes vs 4k was shown to be much better for 512 (p99.9: 3x lower, p99.99 5x lower).
-- d) by hard-coding at compile-time, we can use the Rust type system to enforce only aligned IO buffers are used.
-     This eliminates a source of runtime errors typically associated with direct IO.
+- b) our primary workload is small random reads, typically smaller than 512 bytes
+- c) 512-byte tail latency on the production instance types is much better than 4k (p99.9: 3x lower, p99.99 5x lower).
+- d) hard-coding at compile-time allows us to use the Rust type system to enforce the use of only aligned IO buffers, eliminating a source of runtime errors typically associated with direct IO.
 
 This was [discussed here](https://neondb.slack.com/archives/C07BZ38E6SD/p1725036790965549?thread_ts=1725026845.455259&cid=C07BZ38E6SD).
 
@@ -222,7 +221,7 @@ Implementors of the marker traits are:
 - `IoBuffer` / `IoBufferMut`: used for most reads and writes
 - `PageWriteGuardBuf`: for filling PS PageCache pages (index blocks!)
 
-The alignment requirement is infectious, i.e., it permeates bottom up throughout the code base.
+The alignment requirement is infectious; it permeates bottom-up throughout the code base.
 We stop the infection at roughly the same layers in the code base where we stopped permeating the
 use of owned-buffers-style API for tokio-epoll-uring. The way the stopping works is by introducing
 a memory-to-memory copy from/to some unaligned memory location on the stack/current/heap.
@@ -246,8 +245,8 @@ But we could not identify meaningful impact in practice when we shipped these ch
 In the previous section we described how all users of VirtualFile were changed to always adhere to direct IO alignment and size-multiple requirements.
 To actually enable direct IO, all we need to do is set the `O_DIRECT` flag in `open` syscalls / io_uring operations.
 
-Whether we do set `O_DIRECT` is determined by
-- the choice of VirtualFile API used to create/open the VirtualFile instance
+We set `O_DIRECT` based on:
+- the VirtualFile API used to create/open the VirtualFile instance
 - the `virtual_file_io_mode` configuration flag
 - the OpenOptions `read` and/or `write` flags.
 
@@ -289,7 +288,7 @@ The correctness risks with this project were:
 We sadly do not have infrastructure to run pageserver under `cargo miri`.
 So for memory safety issues, we relied on careful peer review.
 
-For adherence checking to alignment/size-multiple requirements, the original plan was to implement a validation mode at the VirtualFile level.
+Originally, we planned to implement a validation mode at the VirtualFile level to check adherence to alignment/size-multiple requirements.
 That mode would have its own (maximally restrictive) model of alignment requirements and runtime-check that all calls made to VirtualFile adhere to it.
 It would also work as a point of injecting transient errors, short reads, and the like.
 However, such a mode was never implemented.
