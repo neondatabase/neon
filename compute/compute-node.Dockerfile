@@ -1088,6 +1088,10 @@ USER root
 #
 # Layer "rust extensions pgrx14"
 #
+# Version 14 is now required by a few extensions.
+# This layer should be used as a base for new pgrx extensions,
+# and eventually get merged with `rust-extensions-build`
+
 #########################################################################################
 FROM pg-build-nonroot-with-cargo AS rust-extensions-build-pgrx14
 ARG PG_VERSION
