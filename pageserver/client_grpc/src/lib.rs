@@ -19,8 +19,6 @@ use pageserver_page_api::proto;
 use pageserver_page_api::proto::PageServiceClient;
 use utils::shard::ShardIndex;
 
-use tracing::info;
-
 
 mod client_cache;
 

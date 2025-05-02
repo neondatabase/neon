@@ -2,7 +2,6 @@ use std::{collections::HashMap, sync::Arc, time::{Duration, Instant}};
 use tokio::{sync::{Mutex, Notify, mpsc, watch}, time::sleep};
 use tonic::transport::{Channel, Endpoint};
 
-use tracing::info;
 use uuid;
 
 /// A pooled gRPC client with capacity tracking and error handling.
@@ -239,7 +238,6 @@ impl ConnectionPool {
                     inner.last_connect_failure = Some(Instant::now());
                 }
                 if remove == 0 {
-                    info!("Removing connection {} due to too many errors", id);
                     inner.entries.remove(&id);
                 }
             } else {
