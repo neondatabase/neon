@@ -8447,6 +8447,7 @@ dependencies = [
  "futures-channel",
  "futures-executor",
  "futures-io",
+ "futures-task",
  "futures-util",
  "generic-array",
  "getrandom 0.2.11",
