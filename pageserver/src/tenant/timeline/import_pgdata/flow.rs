@@ -63,37 +63,38 @@ use crate::tenant::storage_layer::{ImageLayerWriter, Layer};
 
 pub async fn run(
     timeline: Arc<Timeline>,
-    pgdata_lsn: Lsn,
     control_file: ControlFile,
     storage: RemoteStorageWrapper,
     ctx: &RequestContext,
 ) -> anyhow::Result<()> {
-    Flow {
-        timeline,
-        pgdata_lsn,
+    let planner = Planner {
         control_file,
-        tasks: Vec::new(),
-        storage,
-    }
-    .run(ctx)
-    .await
+        storage: storage.clone(),
+        shard: timeline.shard_identity,
+        tasks: Vec::default(),
+    };
+
+    let plan = planner.plan().await?;
+    plan.execute(timeline, ctx).await
 }
 
-struct Flow {
-    timeline: Arc<Timeline>,
-    pgdata_lsn: Lsn,
+struct Planner {
     control_file: ControlFile,
-    tasks: Vec<AnyImportTask>,
     storage: RemoteStorageWrapper,
+    shard: ShardIdentity,
+    tasks: Vec<AnyImportTask>,
 }
 
-impl Flow {
-    /// Perform the ingestion into [`Self::timeline`].
-    /// Assumes the timeline is empty (= no layers).
-    pub async fn run(mut self, ctx: &RequestContext) -> anyhow::Result<()> {
-        let pgdata_lsn = Lsn(self.control_file.control_file_data().checkPoint).align();
+struct Plan {
+    jobs: Vec<ChunkProcessingJob>,
+}
 
-        self.pgdata_lsn = pgdata_lsn;
+impl Planner {
+    /// Creates an import plan
+    ///
+    /// This function is and must remain pure: given the same input, it will generate the same import plan.
+    async fn plan(mut self) -> anyhow::Result<Plan> {
+        let pgdata_lsn = Lsn(self.control_file.control_file_data().checkPoint).align();
 
         let datadir = PgDataDir::new(&self.storage).await?;
 
@@ -115,7 +116,7 @@ impl Flow {
         }
 
         // Import SLRUs
-        if self.timeline.tenant_shard_id.is_shard_zero() {
+        if self.shard.is_shard_zero() {
             // pg_xact (01:00 keyspace)
             self.import_slru(SlruKind::Clog, &self.storage.pgdata().join("pg_xact"))
                 .await?;
@@ -166,14 +167,14 @@ impl Flow {
         let mut last_end_key = Key::MIN;
         let mut current_chunk = Vec::new();
         let mut current_chunk_size: usize = 0;
-        let mut parallel_jobs = Vec::new();
+        let mut jobs = Vec::new();
         for task in std::mem::take(&mut self.tasks).into_iter() {
             if current_chunk_size + task.total_size() > 1024 * 1024 * 1024 {
                 let key_range = last_end_key..task.key_range().start;
-                parallel_jobs.push(ChunkProcessingJob::new(
+                jobs.push(ChunkProcessingJob::new(
                     key_range.clone(),
                     std::mem::take(&mut current_chunk),
-                    &self,
+                    pgdata_lsn,
                 ));
                 last_end_key = key_range.end;
                 current_chunk_size = 0;
@@ -181,45 +182,13 @@ impl Flow {
             current_chunk_size += task.total_size();
             current_chunk.push(task);
         }
-        parallel_jobs.push(ChunkProcessingJob::new(
+        jobs.push(ChunkProcessingJob::new(
             last_end_key..Key::MAX,
             current_chunk,
-            &self,
+            pgdata_lsn,
         ));
 
-        // Start all jobs simultaneosly
-        let mut work = JoinSet::new();
-        // TODO: semaphore?
-        for job in parallel_jobs {
-            let ctx: RequestContext =
-                ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Error);
-            work.spawn(async move { job.run(&ctx).await }.instrument(info_span!("parallel_job")));
-        }
-        let mut results = Vec::new();
-        while let Some(result) = work.join_next().await {
-            match result {
-                Ok(res) => {
-                    results.push(res);
-                }
-                Err(_joinset_err) => {
-                    results.push(Err(anyhow::anyhow!(
-                        "parallel job panicked or cancelled, check pageserver logs"
-                    )));
-                }
-            }
-        }
-
-        if results.iter().all(|r| r.is_ok()) {
-            Ok(())
-        } else {
-            let mut msg = String::new();
-            for result in results {
-                if let Err(err) = result {
-                    msg.push_str(&format!("{err:?}\n\n"));
-                }
-            }
-            bail!("Some parallel jobs failed:\n\n{msg}");
-        }
+        Ok(Plan { jobs })
     }
 
     #[instrument(level = tracing::Level::DEBUG, skip_all, fields(dboid=%db.dboid, tablespace=%db.spcnode, path=%db.path))]
@@ -266,7 +235,7 @@ impl Flow {
             let end_key = rel_block_to_key(file.rel_tag, start_blk + (len / 8192) as u32);
             self.tasks
                 .push(AnyImportTask::RelBlocks(ImportRelBlocksTask::new(
-                    *self.timeline.get_shard_identity(),
+                    self.shard,
                     start_key..end_key,
                     &file.path,
                     self.storage.clone(),
@@ -289,7 +258,7 @@ impl Flow {
     }
 
     async fn import_slru(&mut self, kind: SlruKind, path: &RemotePath) -> anyhow::Result<()> {
-        assert!(self.timeline.tenant_shard_id.is_shard_zero());
+        assert!(self.shard.is_shard_zero());
 
         let segments = self.storage.listfilesindir(path).await?;
         let segments: Vec<(String, u32, usize)> = segments
@@ -341,6 +310,48 @@ impl Flow {
                 )));
         }
         Ok(())
+    }
+}
+
+impl Plan {
+    async fn execute(self, timeline: Arc<Timeline>, ctx: &RequestContext) -> anyhow::Result<()> {
+        // Start all jobs simultaneosly
+        let mut work = JoinSet::new();
+        // TODO: semaphore?
+        for job in self.jobs {
+            let ctx: RequestContext =
+                ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Error);
+            let job_timeline = timeline.clone();
+            work.spawn(
+                async move { job.run(job_timeline, &ctx).await }
+                    .instrument(info_span!("parallel_job")),
+            );
+        }
+        let mut results = Vec::new();
+        while let Some(result) = work.join_next().await {
+            match result {
+                Ok(res) => {
+                    results.push(res);
+                }
+                Err(_joinset_err) => {
+                    results.push(Err(anyhow::anyhow!(
+                        "parallel job panicked or cancelled, check pageserver logs"
+                    )));
+                }
+            }
+        }
+
+        if results.iter().all(|r| r.is_ok()) {
+            Ok(())
+        } else {
+            let mut msg = String::new();
+            for result in results {
+                if let Err(err) = result {
+                    msg.push_str(&format!("{err:?}\n\n"));
+                }
+            }
+            bail!("Some parallel jobs failed:\n\n{msg}");
+        }
     }
 }
 
@@ -713,7 +724,6 @@ impl From<ImportSlruBlocksTask> for AnyImportTask {
 }
 
 struct ChunkProcessingJob {
-    timeline: Arc<Timeline>,
     range: Range<Key>,
     tasks: Vec<AnyImportTask>,
 
@@ -721,25 +731,24 @@ struct ChunkProcessingJob {
 }
 
 impl ChunkProcessingJob {
-    fn new(range: Range<Key>, tasks: Vec<AnyImportTask>, env: &Flow) -> Self {
-        assert!(env.pgdata_lsn.is_valid());
+    fn new(range: Range<Key>, tasks: Vec<AnyImportTask>, pgdata_lsn: Lsn) -> Self {
+        assert!(pgdata_lsn.is_valid());
         Self {
-            timeline: env.timeline.clone(),
             range,
             tasks,
-            pgdata_lsn: env.pgdata_lsn,
+            pgdata_lsn,
         }
     }
 
-    async fn run(self, ctx: &RequestContext) -> anyhow::Result<()> {
+    async fn run(self, timeline: Arc<Timeline>, ctx: &RequestContext) -> anyhow::Result<()> {
         let mut writer = ImageLayerWriter::new(
-            self.timeline.conf,
-            self.timeline.timeline_id,
-            self.timeline.tenant_shard_id,
+            timeline.conf,
+            timeline.timeline_id,
+            timeline.tenant_shard_id,
             &self.range,
             self.pgdata_lsn,
-            &self.timeline.gate,
-            self.timeline.cancel.clone(),
+            &timeline.gate,
+            timeline.cancel.clone(),
             ctx,
         )
         .await?;
@@ -751,24 +760,24 @@ impl ChunkProcessingJob {
 
         let resident_layer = if nimages > 0 {
             let (desc, path) = writer.finish(ctx).await?;
-            Layer::finish_creating(self.timeline.conf, &self.timeline, desc, &path)?
+            Layer::finish_creating(timeline.conf, &timeline, desc, &path)?
         } else {
             // dropping the writer cleans up
             return Ok(());
         };
 
         // this is sharing the same code as create_image_layers
-        let mut guard = self.timeline.layers.write().await;
+        let mut guard = timeline.layers.write().await;
         guard
             .open_mut()?
-            .track_new_image_layers(&[resident_layer.clone()], &self.timeline.metrics);
+            .track_new_image_layers(&[resident_layer.clone()], &timeline.metrics);
         crate::tenant::timeline::drop_wlock(guard);
 
         // Schedule the layer for upload but don't add barriers such as
         // wait for completion or index upload, so we don't inhibit upload parallelism.
         // TODO: limit upload parallelism somehow (e.g. by limiting concurrency of jobs?)
         // TODO: or regulate parallelism by upload queue depth? Prob should happen at a higher level.
-        self.timeline
+        timeline
             .remote_client
             .schedule_layer_file_upload(resident_layer)?;
 

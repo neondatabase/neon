@@ -151,7 +151,6 @@ pub async fn doit(
 
         flow::run(
             timeline.clone(),
-            base_lsn,
             control_file,
             storage.clone(),
             ctx,
