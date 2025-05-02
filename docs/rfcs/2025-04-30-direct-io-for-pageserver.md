@@ -165,7 +165,7 @@ All IOs of the Pageserver data path use direct IO, thereby bypassing the kernel 
 In particular, the "data path" includes
 - the wal ingest path
 - compaction
-- anything on the `Timline::get` / `Timline::get_vectored` path.
+- anything on the `Timeline::get` / `Timeline::get_vectored` path.
 
 The production Pageserver config is tuned such that virtually all non-data blocks are cached in the PS PageCache.
 Hit rate target is 99.95%.
@@ -214,7 +214,7 @@ This decision was made on the basis that
 - d) by hard-coding at compile-time, we can use the Rust type system to enforce only aligned IO buffers are used.
      This eliminates a source of runtime errors typically associated with direct IO.
 
-This was [discssued here](https://neondb.slack.com/archives/C07BZ38E6SD/p1725036790965549?thread_ts=1725026845.455259&cid=C07BZ38E6SD).
+This was [discussed here](https://neondb.slack.com/archives/C07BZ38E6SD/p1725036790965549?thread_ts=1725026845.455259&cid=C07BZ38E6SD).
 
 The new `IoBufAligned` / `IoBufAlignedMut` marker traits indicate that a given buffer meets memory alignment requirements.
 All `VirtualFile` APIs and several software layers built on top of them only accept buffers that implement those traits.
@@ -239,7 +239,7 @@ The following higher-level constructs ensure we meet the requirements:
 
 Note that these types are used always, regardless of whether direct IO is enabled or not.
 There are some cases where this adds unnecessary overhead to buffered IO (e.g. all memcpy's inflated to multiples of 512).
-But we could not identify meaniful impact in practice when we shipped these changes while we were still using buffered IO.
+But we could not identify meaningful impact in practice when we shipped these changes while we were still using buffered IO.
 
 ### Configuration / Feature Flagging
 
@@ -365,4 +365,4 @@ This amortizes the read latency for our delta layer block across the vectored ge
 
 There are Pageserver-internal workloads that do sequential access (compaction, image layer generation), but these
 1. are not latency-critical and can do batched access outside of the `page_service` protocol constraints (image layer generation)
-2. don't actually need to reconstruct images and therefore can use totally different access methods (=> compaction can use k-merge iterators with their own internal buffering / prefetching).
+2. don't actually need to reconstruct images and therefore can use totally different access methods (=> compaction can use k-way merge iterators with their own internal buffering / prefetching).
