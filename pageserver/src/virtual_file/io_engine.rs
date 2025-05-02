@@ -13,7 +13,7 @@
 pub(super) mod tokio_epoll_uring_ext;
 
 use tokio_epoll_uring::IoBuf;
-use tracing::Instrument;
+use tracing::{Instrument, info};
 
 pub(crate) use super::api::IoEngineKind;
 #[derive(Clone, Copy)]
@@ -111,6 +111,7 @@ pub(crate) fn get() -> IoEngine {
 
 use std::os::unix::prelude::FileExt;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::time::Duration;
 
 use super::owned_buffers_io::io_buf_ext::FullSlice;
 use super::owned_buffers_io::slice::SliceMutExt;
@@ -149,7 +150,11 @@ impl IoEngine {
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
                 let system = tokio_epoll_uring_ext::thread_local_system().await;
-                let (resources, res) = system.read(file_guard, offset, slice).await;
+                let (resources, res) =
+                    retry_ecanceled_once((file_guard, slice), async move |(file_guard, slice)| {
+                        system.read(file_guard, offset, slice).await
+                    })
+                    .await;
                 (resources, res.map_err(epoll_uring_error_to_std))
             }
         }
@@ -164,7 +169,10 @@ impl IoEngine {
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
                 let system = tokio_epoll_uring_ext::thread_local_system().await;
-                let (resources, res) = system.fsync(file_guard).await;
+                let (resources, res) = retry_ecanceled_once(file_guard, async move |file_guard| {
+                    system.fsync(file_guard).await
+                })
+                .await;
                 (resources, res.map_err(epoll_uring_error_to_std))
             }
         }
@@ -182,7 +190,10 @@ impl IoEngine {
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
                 let system = tokio_epoll_uring_ext::thread_local_system().await;
-                let (resources, res) = system.fdatasync(file_guard).await;
+                let (resources, res) = retry_ecanceled_once(file_guard, async move |file_guard| {
+                    system.fdatasync(file_guard).await
+                })
+                .await;
                 (resources, res.map_err(epoll_uring_error_to_std))
             }
         }
@@ -201,7 +212,10 @@ impl IoEngine {
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
                 let system = tokio_epoll_uring_ext::thread_local_system().await;
-                let (resources, res) = system.statx(file_guard).await;
+                let (resources, res) = retry_ecanceled_once(file_guard, async move |file_guard| {
+                    system.statx(file_guard).await
+                })
+                .await;
                 (
                     resources,
                     res.map_err(epoll_uring_error_to_std).map(Metadata::from),
@@ -224,6 +238,7 @@ impl IoEngine {
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
                 // TODO: ftruncate op for tokio-epoll-uring
+                // Don't forget to use retry_ecanceled_once
                 let res = file_guard.with_std_file(|std_file| std_file.set_len(len));
                 (file_guard, res)
             }
@@ -245,8 +260,11 @@ impl IoEngine {
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
                 let system = tokio_epoll_uring_ext::thread_local_system().await;
-                let ((file_guard, slice), res) =
-                    system.write(file_guard, offset, buf.into_raw_slice()).await;
+                let ((file_guard, slice), res) = retry_ecanceled_once(
+                    (file_guard, buf.into_raw_slice()),
+                    async move |(file_guard, buf)| system.write(file_guard, offset, buf).await,
+                )
+                .await;
                 (
                     (file_guard, FullSlice::must_new(slice)),
                     res.map_err(epoll_uring_error_to_std),
@@ -280,6 +298,48 @@ impl IoEngine {
             IoEngine::TokioEpollUring => work.await,
         }
     }
+}
+
+/// We observe in tests that stop pageserver with SIGTERM immediately after it was ingesting data,
+/// occasionally buffered writers fail (and get retried by BufferedWriter) with ECANCELED.
+/// The problem is believed to be a race condition in how io_uring handles punted async work (io-wq) and signals.
+/// Investigation ticket: https://github.com/neondatabase/neon/issues/11446
+///
+/// This function retries the operation once if it fails with ECANCELED.
+/// ONLY USE FOR IDEMPOTENT [`VirtualFile`] operations.
+async fn retry_ecanceled_once<Fut, T, V>(
+    resources: T,
+    f: Fut,
+) -> (T, Result<V, tokio_epoll_uring::Error<std::io::Error>>)
+where
+    Fut: 'static + Send + AsyncFn(T) -> (T, Result<V, tokio_epoll_uring::Error<std::io::Error>>),
+    T: Send,
+    V: Send,
+{
+    let (resources, res) = f(resources).await;
+    let Err(e) = res else {
+        return (resources, res);
+    };
+    let tokio_epoll_uring::Error::Op(err) = e else {
+        return (resources, Err(e));
+    };
+    if err.raw_os_error() != Some(nix::libc::ECANCELED) {
+        return (resources, Err(tokio_epoll_uring::Error::Op(err)));
+    }
+    {
+        static RATE_LIMIT: std::sync::Mutex<utils::rate_limit::RateLimit> =
+            std::sync::Mutex::new(utils::rate_limit::RateLimit::new(Duration::from_secs(1)));
+        let mut guard = RATE_LIMIT.lock().unwrap();
+        guard.call2(|rate_limit_stats| {
+            info!(
+                %rate_limit_stats, "ECANCELED observed, assuming it is due to  signal being received by the submitting thread, retrying after a delay; this message is rate-limited"
+            );
+        });
+        drop(guard);
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await; // something big enough to beat even heavily overcommitted CI runners
+    let (resources, res) = f(resources).await;
+    return (resources, res);
 }
 
 pub enum FeatureTestResult {
