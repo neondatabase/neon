@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+crossbeam-utils.workspace = true
 spin.workspace = true
 tracing.workspace = true
 

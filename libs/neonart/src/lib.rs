@@ -158,6 +158,8 @@ pub struct Tree<V: Value> {
     root: RootPtr<V>,
 
     writer_attached: AtomicBool,
+
+    epoch: epoch::EpochShared,
 }
 
 unsafe impl<V: Value + Sync> Sync for Tree<V> {}
@@ -183,6 +185,8 @@ where
 
     allocator: &'t A,
 
+    epoch_handle: epoch::LocalHandle<'t>,
+
     phantom_key: PhantomData<K>,
 }
 
@@ -194,6 +198,8 @@ where
 {
     tree: &'t Tree<V>,
 
+    epoch_handle: epoch::LocalHandle<'t>,
+
     phantom_key: PhantomData<K>,
 }
 
@@ -204,6 +210,7 @@ impl<'a, 't: 'a, K: Key, V: Value, A: ArtAllocator<V>> TreeInitStruct<'t, K, V, 
         let init = Tree {
             root: algorithm::new_root(allocator),
             writer_attached: AtomicBool::new(false),
+            epoch: epoch::EpochShared::new(),
         };
         unsafe { tree_ptr.write(init) };
 
@@ -223,6 +230,7 @@ impl<'a, 't: 'a, K: Key, V: Value, A: ArtAllocator<V>> TreeInitStruct<'t, K, V, 
             tree: self.tree,
             allocator: self.allocator,
             phantom_key: PhantomData,
+            epoch_handle: self.tree.epoch.register(),
         }
     }
 
@@ -230,6 +238,7 @@ impl<'a, 't: 'a, K: Key, V: Value, A: ArtAllocator<V>> TreeInitStruct<'t, K, V, 
         TreeReadAccess {
             tree: self.tree,
             phantom_key: PhantomData,
+            epoch_handle: self.tree.epoch.register(),
         }
     }
 }
@@ -240,7 +249,7 @@ impl<'t, K: Key + Clone, V: Value, A: ArtAllocator<V>> TreeWriteAccess<'t, K, V,
         TreeWriteGuard {
             allocator: self.allocator,
             tree: &self.tree,
-            epoch_pin: epoch::pin_epoch(),
+            epoch_pin: self.epoch_handle.pin(),
             phantom_key: PhantomData,
         }
     }
@@ -248,7 +257,7 @@ impl<'t, K: Key + Clone, V: Value, A: ArtAllocator<V>> TreeWriteAccess<'t, K, V,
     pub fn start_read(&'t self) -> TreeReadGuard<'t, K, V> {
         TreeReadGuard {
             tree: &self.tree,
-            epoch_pin: epoch::pin_epoch(),
+            epoch_pin: self.epoch_handle.pin(),
             phantom_key: PhantomData,
         }
     }
@@ -258,38 +267,38 @@ impl<'t, K: Key + Clone, V: Value> TreeReadAccess<'t, K, V> {
     pub fn start_read(&'t self) -> TreeReadGuard<'t, K, V> {
         TreeReadGuard {
             tree: &self.tree,
-            epoch_pin: epoch::pin_epoch(),
+            epoch_pin: self.epoch_handle.pin(),
             phantom_key: PhantomData,
         }
     }
 }
 
-pub struct TreeReadGuard<'t, K, V>
+pub struct TreeReadGuard<'e, K, V>
 where
     K: Key,
     V: Value,
 {
-    tree: &'t Tree<V>,
+    tree: &'e Tree<V>,
 
-    epoch_pin: EpochPin,
+    epoch_pin: EpochPin<'e>,
     phantom_key: PhantomData<K>,
 }
 
-impl<'t, K: Key, V: Value> TreeReadGuard<'t, K, V> {
+impl<'e, K: Key, V: Value> TreeReadGuard<'e, K, V> {
     pub fn get(&self, key: &K) -> Option<V> {
         algorithm::search(key, self.tree.root, &self.epoch_pin)
     }
 }
 
-pub struct TreeWriteGuard<'t, K, V, A>
+pub struct TreeWriteGuard<'e, K, V, A>
 where
     K: Key,
     V: Value,
 {
-    tree: &'t Tree<V>,
-    allocator: &'t A,
+    tree: &'e Tree<V>,
+    allocator: &'e A,
 
-    epoch_pin: EpochPin,
+    epoch_pin: EpochPin<'e>,
     phantom_key: PhantomData<K>,
 }
 

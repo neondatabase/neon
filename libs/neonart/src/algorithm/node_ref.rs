@@ -13,7 +13,7 @@ use crate::allocator::ArtAllocator;
 pub struct NodeRef<'e, V> {
     ptr: NodePtr<V>,
 
-    phantom: PhantomData<&'e EpochPin>,
+    phantom: PhantomData<&'e EpochPin<'e>>,
 }
 
 impl<'e, V> Debug for NodeRef<'e, V> {
@@ -50,7 +50,7 @@ pub struct ReadLockedNodeRef<'e, V> {
     ptr: NodePtr<V>,
     version: u64,
 
-    phantom: PhantomData<&'e EpochPin>,
+    phantom: PhantomData<&'e EpochPin<'e>>,
 }
 
 pub(crate) enum ChildOrValue<'e, V> {
@@ -115,7 +115,7 @@ impl<'e, V: Value> ReadLockedNodeRef<'e, V> {
 /// the version after each read.
 pub struct WriteLockedNodeRef<'e, V> {
     ptr: NodePtr<V>,
-    phantom: PhantomData<&'e EpochPin>,
+    phantom: PhantomData<&'e EpochPin<'e>>,
 }
 
 impl<'e, V: Value> WriteLockedNodeRef<'e, V> {
