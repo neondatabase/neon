@@ -10,6 +10,8 @@ http.workspace = true
 thiserror.workspace = true
 tonic.workspace = true
 tracing.workspace = true
+tokio = { version = "1.43.1", features = ["macros", "net", "io-util", "rt", "rt-multi-thread"] }
+uuid = { version = "1", features = ["v4"] }
 
 pageserver_page_api.workspace = true
 utils.workspace = true
