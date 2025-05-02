@@ -109,18 +109,37 @@ impl OpenOptions {
         self
     }
 
+    /// Don't use, `O_APPEND` is not supported.
+    pub fn append(&mut self, _append: bool) {
+        super::io_engine::panic_operation_must_be_idempotent();
+    }
+
     pub(in crate::virtual_file) async fn open(&self, path: &Path) -> std::io::Result<OwnedFd> {
         match &self.inner {
             Inner::StdFs(x) => x.open(path).map(|file| file.into()),
             #[cfg(target_os = "linux")]
             Inner::TokioEpollUring(x) => {
                 let system = super::io_engine::tokio_epoll_uring_ext::thread_local_system().await;
-                system.open(path, x).await.map_err(|e| match e {
-                    tokio_epoll_uring::Error::Op(e) => e,
-                    tokio_epoll_uring::Error::System(system) => {
-                        std::io::Error::new(std::io::ErrorKind::Other, system)
-                    }
-                })
+                async fn wrapper<'a>(
+                    args: (
+                        crate::virtual_file::io_engine::tokio_epoll_uring_ext::Handle,
+                        &'a Path,
+                        &'a tokio_epoll_uring::ops::open_at::OpenOptions,
+                    ),
+                ) -> (
+                    (
+                        crate::virtual_file::io_engine::tokio_epoll_uring_ext::Handle,
+                        &'a Path,
+                        &'a tokio_epoll_uring::ops::open_at::OpenOptions,
+                    ),
+                    Result<OwnedFd, tokio_epoll_uring::Error<std::io::Error>>,
+                ) {
+                    let (system, path, x) = args;
+                    let res = system.open(path, x).await;
+                    ((), res)
+                }
+                let (_, res) = retry_ecanceled_once((system, path, x), wrapper).await;
+                res.map_err(super::io_engine::epoll_uring_error_to_std)
             }
         }
     }
@@ -141,6 +160,9 @@ impl std::os::unix::prelude::OpenOptionsExt for OpenOptions {
     }
 
     fn custom_flags(&mut self, flags: i32) -> &mut OpenOptions {
+        if flags & nix::libc::O_APPEND != 0 {
+            super::io_engine::panic_operation_must_be_idempotent();
+        }
         match &mut self.inner {
             Inner::StdFs(x) => {
                 let _ = x.custom_flags(flags);

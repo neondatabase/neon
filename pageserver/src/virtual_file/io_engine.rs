@@ -118,7 +118,9 @@ use super::owned_buffers_io::slice::SliceMutExt;
 use super::{FileGuard, Metadata};
 
 #[cfg(target_os = "linux")]
-fn epoll_uring_error_to_std(e: tokio_epoll_uring::Error<std::io::Error>) -> std::io::Error {
+pub(super) fn epoll_uring_error_to_std(
+    e: tokio_epoll_uring::Error<std::io::Error>,
+) -> std::io::Error {
     match e {
         tokio_epoll_uring::Error::Op(e) => e,
         tokio_epoll_uring::Error::System(system) => {
@@ -340,6 +342,12 @@ where
     tokio::time::sleep(Duration::from_millis(100)).await; // something big enough to beat even heavily overcommitted CI runners
     let (resources, res) = f(resources).await;
     return (resources, res);
+}
+
+pub(super) fn panic_operation_must_be_idempotent() {
+    panic!(
+        "unsupported; io_engine may retry operations internally and thus needs them to be idempotent (retry_ecanceled_once)"
+    )
 }
 
 pub enum FeatureTestResult {
