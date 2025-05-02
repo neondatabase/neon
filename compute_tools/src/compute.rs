@@ -18,7 +18,7 @@ use postgres;
 use postgres::NoTls;
 use postgres::error::SqlState;
 use remote_storage::{DownloadError, RemotePath};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
@@ -1995,19 +1995,48 @@ LIMIT 100",
         tokio::spawn(conn);
 
         // TODO: support other types of grants apart from schemas?
-        let query = format!(
-            "GRANT {} ON SCHEMA {} TO {}",
-            privileges
-                .iter()
-                // should not be quoted as it's part of the command.
-                // is already sanitized so it's ok
-                .map(|p| p.as_str())
-                .collect::<Vec<&'static str>>()
-                .join(", "),
-            // quote the schema and role name as identifiers to sanitize them.
-            schema_name.pg_quote(),
-            role_name.pg_quote(),
+
+        // quote the schema and role name as identifiers to sanitize them.
+        let schema_name = schema_name.pg_quote();
+        let role_name = role_name.pg_quote();
+
+        // check the role grants first - to gracefully handle read-replicas.
+        let select = format!(
+            "SELECT privilege_type
+            FROM pg_namespace
+                JOIN LATERAL (SELECT * FROM aclexplode(nspacl) AS x) acl ON true
+                JOIN pg_user users ON acl.grantee = users.usesysid
+            WHERE users.usename = {role_name}
+                AND nspname = {schema_name}"
         );
+        let rows = db_client
+            .query(&select, &[])
+            .await
+            .with_context(|| format!("Failed to execute query: {select}"))?;
+
+        let mut already_granted = HashSet::new();
+        for row in rows {
+            let grant: String = row.get(0);
+            already_granted.insert(grant);
+        }
+
+        // check if all privileges are granted.
+        if privileges
+            .iter()
+            .all(|g| already_granted.contains(g.as_str()))
+        {
+            return Ok(());
+        }
+
+        let grants = privileges
+            .iter()
+            // should not be quoted as it's part of the command.
+            // is already sanitized so it's ok
+            .map(|p| p.as_str())
+            .collect::<Vec<&'static str>>()
+            .join(", ");
+
+        let query = format!("GRANT {grants} ON SCHEMA {schema_name} TO {role_name}",);
         db_client
             .simple_query(&query)
             .await
