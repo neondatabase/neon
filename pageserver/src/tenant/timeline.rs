@@ -351,6 +351,14 @@ pub struct Timeline {
     last_image_layer_creation_check_at: AtomicLsn,
     last_image_layer_creation_check_instant: std::sync::Mutex<Option<Instant>>,
 
+    // HADRON
+    /// If a key range has writes with LSN > force_image_creation_lsn, then we should force image layer creation
+    /// on this key range.
+    force_image_creation_lsn: AtomicLsn,
+    /// The last time instant when force_image_creation_lsn is computed.
+    // TODO: this is never updated
+    force_image_creation_lsn_computed_at: tokio::sync::Mutex<Option<Instant>>,
+
     /// Current logical size of the "datadir", at the last LSN.
     current_logical_size: LogicalSize,
 
@@ -2851,6 +2859,18 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
     }
 
+    // HADRON
+    fn get_image_creation_timeout(&self) -> Option<Duration> {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .image_layer_force_creation_period
+            .or(self
+                .conf
+                .default_tenant_conf
+                .image_layer_force_creation_period)
+    }
+
     fn get_compaction_algorithm_settings(&self) -> CompactionAlgorithmSettings {
         let tenant_conf = &self.tenant_conf.load();
         tenant_conf
@@ -3120,7 +3140,9 @@ impl Timeline {
                 repartition_threshold: 0,
                 last_image_layer_creation_check_at: AtomicLsn::new(0),
                 last_image_layer_creation_check_instant: Mutex::new(None),
-
+                // HADRON
+                force_image_creation_lsn: AtomicLsn::new(0),
+                force_image_creation_lsn_computed_at: tokio::sync::Mutex::new(None),
                 last_received_wal: Mutex::new(None),
                 rel_size_latest_cache: RwLock::new(HashMap::new()),
                 rel_size_snapshot_cache: Mutex::new(LruCache::new(relsize_snapshot_cache_capacity)),
@@ -5041,6 +5063,7 @@ impl Timeline {
                 .create_image_layers(
                     &partitions,
                     self.initdb_lsn,
+                    None,
                     ImageLayerCreationMode::Initial,
                     ctx,
                     LastImageLayerCreationStatus::Initial,
@@ -5312,14 +5335,19 @@ impl Timeline {
     }
 
     // Is it time to create a new image layer for the given partition? True if we want to generate.
-    async fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> bool {
+    async fn time_for_new_image_layer(
+        &self,
+        partition: &KeySpace,
+        lsn: Lsn,
+        force_image_creation_lsn: Option<Lsn>,
+    ) -> bool {
         let threshold = self.get_image_creation_threshold();
 
         let guard = self.layers.read(LayerManagerLockHolder::Compaction).await;
         let Ok(layers) = guard.layer_map() else {
             return false;
         };
-
+        let mut min_image_lsn: Lsn = Lsn::MAX;
         let mut max_deltas = 0;
         for part_range in &partition.ranges {
             let image_coverage = layers.image_coverage(part_range, lsn);
@@ -5354,7 +5382,20 @@ impl Timeline {
                         return true;
                     }
                 }
+                min_image_lsn = min(min_image_lsn, img_lsn);
             }
+        }
+
+        // HADRON
+        if min_image_lsn < force_image_creation_lsn.unwrap_or(Lsn(0)) && max_deltas > 0 {
+            info!(
+                "forcing image creation for partitioned range {}-{}. Min image LSN: {}, force image creation LSN: {}",
+                partition.ranges[0].start,
+                partition.ranges[0].end,
+                min_image_lsn,
+                force_image_creation_lsn.unwrap()
+            );
+            return true;
         }
 
         debug!(
@@ -5582,7 +5623,9 @@ impl Timeline {
     ///        suffer from the lack of image layers
     ///     2. For small tenants (that can mostly fit in RAM), we use a much longer interval
     fn should_check_if_image_layers_required(self: &Arc<Timeline>, lsn: Lsn) -> bool {
-        const LARGE_TENANT_THRESHOLD: u64 = 2 * 1024 * 1024 * 1024;
+        // HADRON: we consider every tenant to be large to periodically create new image layers
+        // TODO: Make this configurable
+        const LARGE_TENANT_THRESHOLD: u64 = 1;
 
         let last_checks_at = self.last_image_layer_creation_check_at.load();
         let distance = lsn
@@ -5629,10 +5672,12 @@ impl Timeline {
     /// true = we have generate all image layers, false = we preempt the process for L0 compaction.
     ///
     /// `partition_mode` is only for logging purpose and is not used anywhere in this function.
+    #[allow(clippy::too_many_arguments)]
     async fn create_image_layers(
         self: &Arc<Timeline>,
         partitioning: &KeyPartitioning,
         lsn: Lsn,
+        force_image_creation_lsn: Option<Lsn>,
         mode: ImageLayerCreationMode,
         ctx: &RequestContext,
         last_status: LastImageLayerCreationStatus,
@@ -5736,7 +5781,11 @@ impl Timeline {
             } else if let ImageLayerCreationMode::Try = mode {
                 // check_for_image_layers = false -> skip
                 // check_for_image_layers = true -> check time_for_new_image_layer -> skip/generate
-                if !check_for_image_layers || !self.time_for_new_image_layer(partition, lsn).await {
+                if !check_for_image_layers
+                    || !self
+                        .time_for_new_image_layer(partition, lsn, force_image_creation_lsn)
+                        .await
+                {
                     start = img_range.end;
                     continue;
                 }

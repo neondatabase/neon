@@ -4,10 +4,11 @@
 //!
 //! The old legacy algorithm is implemented directly in `timeline.rs`.
 
+use std::cmp::min;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use super::layer_manager::LayerManagerLockHolder;
 use super::{
@@ -33,6 +34,7 @@ use pageserver_api::models::{CompactInfoResponse, CompactKeyRange};
 use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
 use pageserver_compaction::helpers::{fully_contains, overlaps_with};
 use pageserver_compaction::interface::*;
+use postgres_ffi::to_pg_timestamp;
 use serde::Serialize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
@@ -45,6 +47,7 @@ use wal_decoder::models::value::Value;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
+use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::statvfs::Statvfs;
 use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::gc_block::GcBlock;
@@ -1267,6 +1270,12 @@ impl Timeline {
 
         // Define partitioning schema if needed
 
+        // HADRON
+        let force_image_creation_lsn = self
+            .get_or_compute_force_image_creation_lsn(cancel, ctx)
+            .await
+            .map_err(CompactionError::Other)?;
+
         // 1. L0 Compact
         let l0_outcome = {
             let timer = self.metrics.compact_time_histo.start_timer();
@@ -1274,6 +1283,7 @@ impl Timeline {
                 .compact_level0(
                     target_file_size,
                     options.flags.contains(CompactFlags::ForceL0Compaction),
+                    force_image_creation_lsn,
                     ctx,
                 )
                 .await?;
@@ -1376,6 +1386,7 @@ impl Timeline {
                     .create_image_layers(
                         &partitioning,
                         lsn,
+                        force_image_creation_lsn,
                         mode,
                         &image_ctx,
                         self.last_image_layer_creation_status
@@ -1471,6 +1482,62 @@ impl Timeline {
 
         Ok(CompactionOutcome::Done)
     }
+
+    /* BEGIN_HADRON */
+    // Get the force image creation LSN. Compute it if the last computed LSN is too old.
+    async fn get_or_compute_force_image_creation_lsn(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Option<Lsn>> {
+        const FORCE_IMAGE_CREATION_LSN_COMPUTE_INTERVAL: Duration = Duration::from_secs(10 * 60); // 10 minutes
+        let image_layer_force_creation_period = self.get_image_creation_timeout();
+        if image_layer_force_creation_period.is_none() {
+            return Ok(None);
+        }
+
+        let image_layer_force_creation_period = image_layer_force_creation_period.unwrap();
+        let force_image_creation_lsn_computed_at =
+            self.force_image_creation_lsn_computed_at.lock().await;
+        if force_image_creation_lsn_computed_at.is_none()
+            || force_image_creation_lsn_computed_at.unwrap().elapsed()
+                > FORCE_IMAGE_CREATION_LSN_COMPUTE_INTERVAL
+        {
+            let now: SystemTime = SystemTime::now();
+            let timestamp = now
+                .checked_sub(image_layer_force_creation_period)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "image creation timeout is too large: {image_layer_force_creation_period:?}"
+                    )
+                })?;
+            let timestamp = to_pg_timestamp(timestamp);
+            let force_image_creation_lsn = match self
+                .find_lsn_for_timestamp(timestamp, cancel, ctx)
+                .await?
+            {
+                LsnForTimestamp::Present(lsn) | LsnForTimestamp::Future(lsn) => lsn,
+                _ => {
+                    let gc_lsn = *self.get_applied_gc_cutoff_lsn();
+                    tracing::info!(
+                        "no LSN found for timestamp {timestamp:?}, using latest GC cutoff LSN {}",
+                        gc_lsn
+                    );
+                    gc_lsn
+                }
+            };
+            self.force_image_creation_lsn
+                .store(force_image_creation_lsn);
+            tracing::info!(
+                "computed force image creation LSN: {}",
+                force_image_creation_lsn
+            );
+            Ok(Some(force_image_creation_lsn))
+        } else {
+            Ok(Some(self.force_image_creation_lsn.load()))
+        }
+    }
+    /* END_HADRON */
 
     /// Check for layers that are elegible to be rewritten:
     /// - Shard splitting: After a shard split, ancestor layers beyond pitr_interval, so that
@@ -1801,6 +1868,7 @@ impl Timeline {
         self: &Arc<Self>,
         target_file_size: u64,
         force_compaction_ignore_threshold: bool,
+        force_compaction_lsn: Option<Lsn>,
         ctx: &RequestContext,
     ) -> Result<CompactionOutcome, CompactionError> {
         let CompactLevel0Phase1Result {
@@ -1821,6 +1889,7 @@ impl Timeline {
                 stats,
                 target_file_size,
                 force_compaction_ignore_threshold,
+                force_compaction_lsn,
                 &ctx,
             )
             .instrument(phase1_span)
@@ -1843,6 +1912,7 @@ impl Timeline {
         mut stats: CompactLevel0Phase1StatsBuilder,
         target_file_size: u64,
         force_compaction_ignore_threshold: bool,
+        force_compaction_lsn: Option<Lsn>,
         ctx: &RequestContext,
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
         let begin = tokio::time::Instant::now();
@@ -1872,11 +1942,28 @@ impl Timeline {
                     return Ok(CompactLevel0Phase1Result::default());
                 }
             } else {
-                debug!(
-                    level0_deltas = level0_deltas.len(),
-                    threshold, "too few deltas to compact"
-                );
-                return Ok(CompactLevel0Phase1Result::default());
+                // HADRON
+                let min_lsn = level0_deltas
+                    .iter()
+                    .map(|a| a.get_lsn_range().start)
+                    .reduce(min);
+                if force_compaction_lsn.is_some()
+                    && min_lsn.is_some()
+                    && min_lsn.unwrap() < force_compaction_lsn.unwrap()
+                {
+                    info!(
+                        "forcing L0 compaction of {} L0 deltas. Min lsn: {}, force compaction lsn: {}",
+                        level0_deltas.len(),
+                        min_lsn.unwrap(),
+                        force_compaction_lsn.unwrap()
+                    );
+                } else {
+                    debug!(
+                        level0_deltas = level0_deltas.len(),
+                        threshold, "too few deltas to compact"
+                    );
+                    return Ok(CompactLevel0Phase1Result::default());
+                }
             }
         }
 

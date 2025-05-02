@@ -560,6 +560,10 @@ pub struct TenantConfigToml {
     pub gc_period: Duration,
     // Delta layer churn threshold to create L1 image layers.
     pub image_creation_threshold: usize,
+    // HADRON
+    // When the timeout is reached, PageServer will (1) force compact any remaining L0 deltas and
+    // (2) create image layers if there are any L1 deltas.
+    pub image_layer_force_creation_period: Option<Duration>,
     // Determines how much history is retained, to allow
     // branching and read replicas at an older point in time.
     // The unit is time.
@@ -914,6 +918,7 @@ impl Default for TenantConfigToml {
             gc_period: humantime::parse_duration(DEFAULT_GC_PERIOD)
                 .expect("cannot parse default gc period"),
             image_creation_threshold: DEFAULT_IMAGE_CREATION_THRESHOLD,
+            image_layer_force_creation_period: None,
             pitr_interval: humantime::parse_duration(DEFAULT_PITR_INTERVAL)
                 .expect("cannot parse default PITR interval"),
             walreceiver_connect_timeout: humantime::parse_duration(
