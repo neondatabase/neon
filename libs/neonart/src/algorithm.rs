@@ -73,7 +73,8 @@ pub(crate) fn update_fn<'e, K: Key, V: Value, A: ArtAllocator<V>, F>(
         let root_ref = NodeRef::from_root_ptr(root);
         let this_value_fn = |arg: Option<&V>| value_fn_cell.take().unwrap()(arg);
         let key_bytes = key.as_bytes();
-        if let Ok(()) = update_recurse(
+
+        match update_recurse(
             key_bytes,
             this_value_fn,
             root_ref,
@@ -82,9 +83,20 @@ pub(crate) fn update_fn<'e, K: Key, V: Value, A: ArtAllocator<V>, F>(
             0,
             key_bytes,
         ) {
-            break;
+            Ok(()) => break,
+            Err(ArtError::ConcurrentUpdate) => continue, // retry
+            Err(ArtError::OutOfMemory) => {
+                panic!("todo: OOM: try to GC, propagate to caller");
+            },
+            Err(ArtError::GarbageQueueFull) => {
+                if guard.collect_garbage() {
+                    continue;
+                }
+                // FIXME: This can happen if someone is holding back the epoch. We should
+                // wait for the epoch to advance
+                panic!("todo: GC queue is full and couldn't free up space");
+            },
         }
-        // retry
     }
 }
 

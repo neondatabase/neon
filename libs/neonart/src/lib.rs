@@ -311,18 +311,6 @@ impl<'t, K: Key + Clone, V: Value, A: ArtAllocator<V>> TreeWriteAccess<'t, K, V,
             phantom_key: PhantomData,
         }
     }
-
-    pub fn collect_garbage(&'t self) {
-        self.tree.epoch.advance();
-        self.tree.epoch.broadcast();
-
-        let cutoff_epoch = self.tree.epoch.get_oldest();
-
-        let mut garbage_queue = self.tree.garbage.lock();
-        while let Some(ptr) = garbage_queue.next_obsolete(cutoff_epoch) {
-            ptr.deallocate(self.allocator);
-        }
-    }
 }
 
 impl<'t, K: Key + Clone, V: Value> TreeReadAccess<'t, K, V> {
@@ -386,10 +374,37 @@ impl<'t, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteGuard<'t, K, V, A> {
             .lock()
             .remember_obsolete_node(ptr, self.epoch_pin.epoch)
     }
+
+    // returns true if something was free'd up
+    fn collect_garbage(&'t self) -> bool {
+        let mut result = false;
+        self.tree.epoch.advance();
+        self.tree.epoch.broadcast();
+
+        let cutoff_epoch = self.tree.epoch.get_oldest();
+
+        let mut garbage_queue = self.tree.garbage.lock();
+        while let Some(ptr) = garbage_queue.next_obsolete(cutoff_epoch) {
+            ptr.deallocate(self.allocator);
+            result = true;
+        }
+        result
+    }
 }
 
+// Debugging functions
 impl<'t, K: Key, V: Value + Debug> TreeReadGuard<'t, K, V> {
     pub fn dump(&mut self) {
         algorithm::dump_tree(self.tree.root, &self.epoch_pin)
     }
+}
+impl<'t, K: Key, V: Value + Debug> TreeWriteGuard<'t, K, V, ArtMultiSlabAllocator<'t, V>> {
+    pub fn get_statistics(&self) -> ArtTreeStatistics {
+        self.allocator.get_statistics()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ArtTreeStatistics {
+    pub blocks: allocator::block::BlockAllocatorStats,
 }

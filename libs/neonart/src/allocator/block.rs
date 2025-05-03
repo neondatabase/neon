@@ -149,4 +149,35 @@ impl<'t> BlockAllocator<'t> {
         unsafe { (*block_ptr) = init };
         *freelist_head = blockno;
     }
+
+    // for debugging
+    pub(crate) fn get_statistics(&self) -> BlockAllocatorStats {
+        let mut num_free_blocks = 0;
+
+        let mut _prev_lock= None;
+        let head_lock = self.freelist_head.lock();
+        let mut next_blk = *head_lock;
+        let mut _head_lock = Some(head_lock);
+        while next_blk != INVALID_BLOCK {
+            let freelist_block = self.read_freelist_block(next_blk);
+            let lock = freelist_block.inner.lock();
+            num_free_blocks += lock.num_free_blocks;
+            next_blk = lock.next;
+            _prev_lock = Some(lock); // hold the lock until we've read the next block
+            _head_lock = None;
+        }
+
+        BlockAllocatorStats {
+            num_blocks: self.num_blocks,
+            num_initialized: self.num_initialized.load(Ordering::Relaxed),
+            num_free_blocks,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BlockAllocatorStats {
+    pub num_blocks: u64,
+    pub num_initialized: u64,
+    pub num_free_blocks: u64,
 }

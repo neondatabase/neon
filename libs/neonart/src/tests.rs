@@ -51,6 +51,8 @@ fn test_inserts<K: Into<TestKey> + Copy>(keys: &[K]) {
         let value = r.get(&(*k).into());
         assert_eq!(value, Some(idx));
     }
+
+    eprintln!("stats: {:?}", tree_writer.start_write().get_statistics());
 }
 
 #[test]

@@ -1,4 +1,4 @@
-mod block;
+pub mod block;
 mod multislab;
 mod slab;
 pub mod r#static;
@@ -12,6 +12,7 @@ use crate::allocator::r#static::alloc_from_slice;
 
 use spin;
 
+use crate::ArtTreeStatistics;
 use crate::Tree;
 pub use crate::algorithm::node_ptr::{
     NodeInternal4, NodeInternal16, NodeInternal48, NodeInternal256, NodeLeaf4, NodeLeaf16,
@@ -136,5 +137,14 @@ impl<'t, V: crate::Value> ArtAllocator<V> for ArtMultiSlabAllocator<'t, V> {
     }
     fn dealloc_node_leaf256(&self, ptr: *mut NodeLeaf256<V>) {
         self.inner.dealloc_slab(7, ptr.cast())
+    }
+}
+
+
+impl<'t, V: crate::Value> ArtMultiSlabAllocator<'t, V> {
+    pub fn get_statistics(&self) -> ArtTreeStatistics {
+        ArtTreeStatistics {
+            blocks: self.inner.block_allocator.get_statistics(),
+        }
     }
 }
