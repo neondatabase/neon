@@ -11,7 +11,8 @@ use camino::Utf8Path;
 use jsonwebtoken::{
     Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation, decode, encode,
 };
-use serde::{Deserialize, Serialize};
+use pem::Pem;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::id::TenantId;
 
@@ -73,7 +74,10 @@ impl SwappableJwtAuth {
     pub fn swap(&self, jwt_auth: JwtAuth) {
         self.0.swap(Arc::new(jwt_auth));
     }
-    pub fn decode(&self, token: &str) -> std::result::Result<TokenData<Claims>, AuthError> {
+    pub fn decode<D: DeserializeOwned>(
+        &self,
+        token: &str,
+    ) -> std::result::Result<TokenData<D>, AuthError> {
         self.0.load().decode(token)
     }
 }
@@ -148,7 +152,10 @@ impl JwtAuth {
     /// The function tries the stored decoding keys in succession,
     /// and returns the first yielding a successful result.
     /// If there is no working decoding key, it returns the last error.
-    pub fn decode(&self, token: &str) -> std::result::Result<TokenData<Claims>, AuthError> {
+    pub fn decode<D: DeserializeOwned>(
+        &self,
+        token: &str,
+    ) -> std::result::Result<TokenData<D>, AuthError> {
         let mut res = None;
         for decoding_key in &self.decoding_keys {
             res = Some(decode(token, decoding_key, &self.validation));
@@ -173,8 +180,8 @@ impl std::fmt::Debug for JwtAuth {
 }
 
 // this function is used only for testing purposes in CLI e g generate tokens during init
-pub fn encode_from_key_file(claims: &Claims, key_data: &[u8]) -> Result<String> {
-    let key = EncodingKey::from_ed_pem(key_data)?;
+pub fn encode_from_key_file<S: Serialize>(claims: &S, pem: &Pem) -> Result<String> {
+    let key = EncodingKey::from_ed_der(pem.contents());
     Ok(encode(&Header::new(STORAGE_TOKEN_ALGORITHM), claims, &key)?)
 }
 
@@ -188,13 +195,13 @@ mod tests {
     //
     // openssl genpkey -algorithm ed25519 -out ed25519-priv.pem
     // openssl pkey -in ed25519-priv.pem -pubout -out ed25519-pub.pem
-    const TEST_PUB_KEY_ED25519: &[u8] = br#"
+    const TEST_PUB_KEY_ED25519: &str = r#"
 -----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEARYwaNBayR+eGI0iXB4s3QxE3Nl2g1iWbr6KtLWeVD/w=
 -----END PUBLIC KEY-----
 "#;
 
-    const TEST_PRIV_KEY_ED25519: &[u8] = br#"
+    const TEST_PRIV_KEY_ED25519: &str = r#"
 -----BEGIN PRIVATE KEY-----
 MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
 -----END PRIVATE KEY-----
@@ -222,9 +229,9 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
 
         // Check it can be validated with the public key
         let auth = JwtAuth::new(vec![
-            DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519).unwrap(),
+            DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519.as_bytes()).unwrap(),
         ]);
-        let claims_from_token = auth.decode(encoded_eddsa).unwrap().claims;
+        let claims_from_token: Claims = auth.decode(encoded_eddsa).unwrap().claims;
         assert_eq!(claims_from_token, expected_claims);
     }
 
@@ -235,13 +242,14 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
             scope: Scope::Tenant,
         };
 
-        let encoded = encode_from_key_file(&claims, TEST_PRIV_KEY_ED25519).unwrap();
+        let pem = pem::parse(TEST_PRIV_KEY_ED25519).unwrap();
+        let encoded = encode_from_key_file(&claims, &pem).unwrap();
 
         // decode it back
         let auth = JwtAuth::new(vec![
-            DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519).unwrap(),
+            DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519.as_bytes()).unwrap(),
         ]);
-        let decoded = auth.decode(&encoded).unwrap();
+        let decoded: TokenData<Claims> = auth.decode(&encoded).unwrap();
 
         assert_eq!(decoded.claims, claims);
     }

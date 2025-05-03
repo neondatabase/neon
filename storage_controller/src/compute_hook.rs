@@ -4,6 +4,7 @@ use std::error::Error as _;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use control_plane::endpoint::{ComputeControlPlane, EndpointStatus};
 use control_plane::local_env::LocalEnv;
 use futures::StreamExt;
@@ -364,25 +365,28 @@ pub(crate) struct ShardUpdate<'a> {
 }
 
 impl ComputeHook {
-    pub(super) fn new(config: Config) -> Self {
+    pub(super) fn new(config: Config) -> anyhow::Result<Self> {
         let authorization_header = config
             .control_plane_jwt_token
             .clone()
             .map(|jwt| format!("Bearer {}", jwt));
 
-        let client = reqwest::ClientBuilder::new()
-            .timeout(NOTIFY_REQUEST_TIMEOUT)
+        let mut client = reqwest::ClientBuilder::new().timeout(NOTIFY_REQUEST_TIMEOUT);
+        for cert in &config.ssl_ca_certs {
+            client = client.add_root_certificate(cert.clone());
+        }
+        let client = client
             .build()
-            .expect("Failed to construct HTTP client");
+            .context("Failed to build http client for compute hook")?;
 
-        Self {
+        Ok(Self {
             state: Default::default(),
             config,
             authorization_header,
             neon_local_lock: Default::default(),
             api_concurrency: tokio::sync::Semaphore::new(API_CONCURRENCY),
             client,
-        }
+        })
     }
 
     /// For test environments: use neon_local's LocalEnv to update compute
@@ -625,15 +629,13 @@ impl ComputeHook {
         };
 
         let result = if !self.config.use_local_compute_notifications {
-            let compute_hook_url = if let Some(control_plane_url) = &self.config.control_plane_url {
-                Some(if control_plane_url.ends_with('/') {
-                    format!("{control_plane_url}notify-attach")
-                } else {
-                    format!("{control_plane_url}/notify-attach")
-                })
-            } else {
-                self.config.compute_hook_url.clone()
-            };
+            let compute_hook_url =
+                self.config
+                    .control_plane_url
+                    .as_ref()
+                    .map(|control_plane_url| {
+                        format!("{}/notify-attach", control_plane_url.trim_end_matches('/'))
+                    });
 
             // We validate this at startup
             let notify_url = compute_hook_url.as_ref().unwrap();
@@ -796,7 +798,7 @@ impl ComputeHook {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use pageserver_api::shard::{ShardCount, ShardNumber};
+    use pageserver_api::shard::{DEFAULT_STRIPE_SIZE, ShardCount, ShardNumber};
     use utils::id::TenantId;
 
     use super::*;
@@ -804,6 +806,7 @@ pub(crate) mod tests {
     #[test]
     fn tenant_updates() -> anyhow::Result<()> {
         let tenant_id = TenantId::generate();
+        let stripe_size = DEFAULT_STRIPE_SIZE;
         let mut tenant_state = ComputeHookTenant::new(
             TenantShardId {
                 tenant_id,
@@ -844,7 +847,7 @@ pub(crate) mod tests {
                 shard_count: ShardCount::new(2),
                 shard_number: ShardNumber(1),
             },
-            stripe_size: ShardStripeSize(32768),
+            stripe_size,
             preferred_az: None,
             node_id: NodeId(1),
         });
@@ -860,7 +863,7 @@ pub(crate) mod tests {
                 shard_count: ShardCount::new(2),
                 shard_number: ShardNumber(0),
             },
-            stripe_size: ShardStripeSize(32768),
+            stripe_size,
             preferred_az: None,
             node_id: NodeId(1),
         });
@@ -870,7 +873,7 @@ pub(crate) mod tests {
             anyhow::bail!("Wrong send result");
         };
         assert_eq!(request.shards.len(), 2);
-        assert_eq!(request.stripe_size, Some(ShardStripeSize(32768)));
+        assert_eq!(request.stripe_size, Some(stripe_size));
 
         // Simulate successful send
         *guard = Some(ComputeRemoteState {

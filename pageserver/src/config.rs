@@ -4,6 +4,8 @@
 //! file, or on the command line.
 //! See also `settings.md` for better description on every parameter.
 
+pub mod ignored_fields;
+
 use std::env;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -15,9 +17,10 @@ use once_cell::sync::OnceCell;
 use pageserver_api::config::{DiskUsageEvictionTaskConfig, MaxVectoredReadBytes};
 use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
+use pem::Pem;
 use postgres_backend::AuthType;
 use remote_storage::{RemotePath, RemoteStorageConfig};
-use reqwest::{Certificate, Url};
+use reqwest::Url;
 use storage_broker::Uri;
 use utils::id::{NodeId, TimelineId};
 use utils::logging::{LogFormat, SecretString};
@@ -65,8 +68,8 @@ pub struct PageServerConf {
     /// Period to reload certificate and private key from files.
     /// Default: 60s.
     pub ssl_cert_reload_period: Duration,
-    /// Trusted root CA certificates to use in https APIs.
-    pub ssl_ca_certs: Vec<Certificate>,
+    /// Trusted root CA certificates to use in https APIs in PEM format.
+    pub ssl_ca_certs: Vec<Pem>,
 
     /// Current availability zone. Used for traffic metrics.
     pub availability_zone: Option<String>,
@@ -116,13 +119,13 @@ pub struct PageServerConf {
     /// A lower value implicitly deprioritizes loading such tenants, vs. other work in the system.
     pub concurrent_tenant_warmup: ConfigurableSemaphore,
 
-    /// Number of concurrent [`Tenant::gather_size_inputs`](crate::tenant::Tenant::gather_size_inputs) allowed.
+    /// Number of concurrent [`TenantShard::gather_size_inputs`](crate::tenant::TenantShard::gather_size_inputs) allowed.
     pub concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore,
-    /// Limit of concurrent [`Tenant::gather_size_inputs`] issued by module `eviction_task`.
+    /// Limit of concurrent [`TenantShard::gather_size_inputs`] issued by module `eviction_task`.
     /// The number of permits is the same as `concurrent_tenant_size_logical_size_queries`.
     /// See the comment in `eviction_task` for details.
     ///
-    /// [`Tenant::gather_size_inputs`]: crate::tenant::Tenant::gather_size_inputs
+    /// [`TenantShard::gather_size_inputs`]: crate::tenant::TenantShard::gather_size_inputs
     pub eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore,
 
     // How often to collect metrics and send them to the metrics endpoint.
@@ -147,7 +150,7 @@ pub struct PageServerConf {
     /// not terrible.
     pub background_task_maximum_delay: Duration,
 
-    pub control_plane_api: Option<Url>,
+    pub control_plane_api: Url,
 
     /// JWT token for use with the control plane API.
     pub control_plane_api_token: Option<SecretString>,
@@ -215,6 +218,18 @@ pub struct PageServerConf {
 
     /// When set, include visible layers in the next uploaded heatmaps of an unarchived timeline.
     pub generate_unarchival_heatmap: bool,
+
+    pub tracing: Option<pageserver_api::config::Tracing>,
+
+    /// Enable TLS in page service API.
+    /// Does not force TLS: the client negotiates TLS usage during the handshake.
+    /// Uses key and certificate from ssl_key_file/ssl_cert_file.
+    pub enable_tls_page_service_api: bool,
+
+    /// Run in development mode, which disables certain safety checks
+    /// such as authentication requirements for HTTP and PostgreSQL APIs.
+    /// This is insecure and should only be used in development environments.
+    pub dev_mode: bool,
 }
 
 /// Token for authentication to safekeepers
@@ -386,6 +401,9 @@ impl PageServerConf {
             validate_wal_contiguity,
             load_previous_heatmap,
             generate_unarchival_heatmap,
+            tracing,
+            enable_tls_page_service_api,
+            dev_mode,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -420,7 +438,8 @@ impl PageServerConf {
             test_remote_failures,
             ondemand_download_behavior_treat_error_as_warn,
             background_task_maximum_delay,
-            control_plane_api,
+            control_plane_api: control_plane_api
+                .ok_or_else(|| anyhow::anyhow!("`control_plane_api` must be set"))?,
             control_plane_emergency_mode,
             heatmap_upload_concurrency,
             secondary_download_concurrency,
@@ -435,6 +454,9 @@ impl PageServerConf {
             wal_receiver_protocol,
             page_service_pipelining,
             get_vectored_concurrent_io,
+            tracing,
+            enable_tls_page_service_api,
+            dev_mode,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
@@ -484,7 +506,10 @@ impl PageServerConf {
             ssl_ca_certs: match ssl_ca_file {
                 Some(ssl_ca_file) => {
                     let buf = std::fs::read(ssl_ca_file)?;
-                    Certificate::from_pem_bundle(&buf)?
+                    pem::parse_many(&buf)?
+                        .into_iter()
+                        .filter(|pem| pem.tag() == "CERTIFICATE")
+                        .collect()
                 }
                 None => Vec::new(),
             },
@@ -502,6 +527,17 @@ impl PageServerConf {
                 auth_validation_public_key_path.exists(),
                 format!(
                     "Can't find auth_validation_public_key at '{auth_validation_public_key_path}'",
+                )
+            );
+        }
+
+        if let Some(tracing_config) = conf.tracing.as_ref() {
+            let ratio = &tracing_config.sampling_ratio;
+            ensure!(
+                ratio.denominator != 0 && ratio.denominator >= ratio.numerator,
+                format!(
+                    "Invalid sampling ratio: {}/{}",
+                    ratio.numerator, ratio.denominator
                 )
             );
         }
@@ -538,6 +574,7 @@ impl PageServerConf {
             background_task_maximum_delay: Duration::ZERO,
             load_previous_heatmap: Some(true),
             generate_unarchival_heatmap: Some(true),
+            control_plane_api: Some(Url::parse("http://localhost:6666").unwrap()),
             ..Default::default()
         };
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &repo_dir).unwrap()
@@ -545,7 +582,6 @@ impl PageServerConf {
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct PageserverIdentity {
     pub id: NodeId,
 }
@@ -565,10 +601,10 @@ impl ConfigurableSemaphore {
     /// Initializse using a non-zero amount of permits.
     ///
     /// Require a non-zero initial permits, because using permits == 0 is a crude way to disable a
-    /// feature such as [`Tenant::gather_size_inputs`]. Otherwise any semaphore using future will
+    /// feature such as [`TenantShard::gather_size_inputs`]. Otherwise any semaphore using future will
     /// behave like [`futures::future::pending`], just waiting until new permits are added.
     ///
-    /// [`Tenant::gather_size_inputs`]: crate::tenant::Tenant::gather_size_inputs
+    /// [`TenantShard::gather_size_inputs`]: crate::tenant::TenantShard::gather_size_inputs
     pub fn new(initial_permits: NonZeroUsize) -> Self {
         ConfigurableSemaphore {
             initial_permits,
@@ -607,92 +643,17 @@ mod tests {
     use super::PageServerConf;
 
     #[test]
-    fn test_empty_config_toml_is_valid() {
-        // we use Default impl of everything in this situation
+    fn test_minimal_config_toml_is_valid() {
+        // The minimal valid config for running a pageserver:
+        // - control_plane_api is mandatory, as pageservers cannot run in isolation
+        // - we use Default impl of everything else in this situation
         let input = r#"
+            control_plane_api = "http://localhost:6666"
         "#;
         let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input)
             .expect("empty config is valid");
         let workdir = Utf8PathBuf::from("/nonexistent");
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
             .expect("parse_and_validate");
-    }
-
-    /// If there's a typo in the pageserver config, we'd rather catch that typo
-    /// and fail pageserver startup than silently ignoring the typo, leaving whoever
-    /// made it in the believe that their config change is effective.
-    ///
-    /// The default in serde is to allow unknown fields, so, we rely
-    /// on developer+review discipline to add `deny_unknown_fields` when adding
-    /// new structs to the config, and these tests here as a regression test.
-    ///
-    /// The alternative to all of this would be to allow unknown fields in the config.
-    /// To catch them, we could have a config check tool or mgmt API endpoint that
-    /// compares the effective config with the TOML on disk and makes sure that
-    /// the on-disk TOML is a strict subset of the effective config.
-    mod unknown_fields_handling {
-        macro_rules! test {
-            ($short_name:ident, $input:expr) => {
-                #[test]
-                fn $short_name() {
-                    let input = $input;
-                    let err = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
-                        .expect_err("some_invalid_field is an invalid field");
-                    dbg!(&err);
-                    assert!(err.to_string().contains("some_invalid_field"));
-                }
-            };
-        }
-        use indoc::indoc;
-
-        test!(
-            toplevel,
-            indoc! {r#"
-                some_invalid_field = 23
-            "#}
-        );
-
-        test!(
-            toplevel_nested,
-            indoc! {r#"
-                [some_invalid_field]
-                foo = 23
-            "#}
-        );
-
-        test!(
-            disk_usage_based_eviction,
-            indoc! {r#"
-                [disk_usage_based_eviction]
-                some_invalid_field = 23
-            "#}
-        );
-
-        test!(
-            tenant_config,
-            indoc! {r#"
-                [tenant_config]
-                some_invalid_field = 23
-            "#}
-        );
-
-        test!(
-            l0_flush,
-            indoc! {r#"
-                [l0_flush]
-                mode = "direct"
-                some_invalid_field = 23
-            "#}
-        );
-
-        // TODO: fix this => https://github.com/neondatabase/neon/issues/8915
-        // test!(
-        //     remote_storage_config,
-        //     indoc! {r#"
-        //         [remote_storage_config]
-        //         local_path = "/nonexistent"
-        //         some_invalid_field = 23
-        //     "#}
-        // );
     }
 }

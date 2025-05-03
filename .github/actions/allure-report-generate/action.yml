@@ -7,7 +7,7 @@ inputs:
     type: boolean
     required: false
     default: false
-  aws-oicd-role-arn:
+  aws-oidc-role-arn:
     description: 'OIDC role arn to interract with S3'
     required: true
 
@@ -70,6 +70,7 @@ runs:
 
     - name: Install Allure
       shell: bash -euxo pipefail {0}
+      working-directory: /tmp
       run: |
         if ! which allure; then
           ALLURE_ZIP=allure-${ALLURE_VERSION}.zip
@@ -87,7 +88,7 @@ runs:
       if: ${{ !cancelled() }}
       with:
         aws-region: eu-central-1
-        role-to-assume: ${{ inputs.aws-oicd-role-arn }}
+        role-to-assume: ${{ inputs.aws-oidc-role-arn }}
         role-duration-seconds: 3600 # 1 hour should be more than enough to upload report
 
     # Potentially we could have several running build for the same key (for example, for the main branch), so we use improvised lock for this

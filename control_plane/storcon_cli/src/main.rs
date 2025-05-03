@@ -385,8 +385,6 @@ where
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let storcon_client = Client::new(cli.api.clone(), cli.jwt.clone());
-
     let ssl_ca_certs = match &cli.ssl_ca_file {
         Some(ssl_ca_file) => {
             let buf = tokio::fs::read(ssl_ca_file).await?;
@@ -401,9 +399,11 @@ async fn main() -> anyhow::Result<()> {
     }
     let http_client = http_client.build()?;
 
+    let storcon_client = Client::new(http_client.clone(), cli.api.clone(), cli.jwt.clone());
+
     let mut trimmed = cli.api.to_string();
     trimmed.pop();
-    let vps_client = mgmt_api::Client::new(http_client, trimmed, cli.jwt.as_deref());
+    let vps_client = mgmt_api::Client::new(http_client.clone(), trimmed, cli.jwt.as_deref());
 
     match cli.command {
         Command::NodeRegister {
@@ -941,7 +941,7 @@ async fn main() -> anyhow::Result<()> {
             let mut node_to_fill_descs = Vec::new();
 
             for desc in node_descs {
-                let to_drain = nodes.iter().any(|id| *id == desc.id);
+                let to_drain = nodes.contains(&desc.id);
                 if to_drain {
                     node_to_drain_descs.push(desc);
                 } else {
@@ -1056,7 +1056,7 @@ async fn main() -> anyhow::Result<()> {
             const DEFAULT_MIGRATE_CONCURRENCY: usize = 8;
             let mut stream = futures::stream::iter(moves)
                 .map(|mv| {
-                    let client = Client::new(cli.api.clone(), cli.jwt.clone());
+                    let client = Client::new(http_client.clone(), cli.api.clone(), cli.jwt.clone());
                     async move {
                         client
                             .dispatch::<TenantShardMigrateRequest, TenantShardMigrateResponse>(

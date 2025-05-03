@@ -4,7 +4,7 @@
 //! script which will use local paths.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -12,16 +12,19 @@ use std::{env, fs};
 
 use anyhow::{Context, bail};
 use clap::ValueEnum;
+use pem::Pem;
 use postgres_backend::AuthType;
-use reqwest::Url;
+use reqwest::{Certificate, Url};
 use serde::{Deserialize, Serialize};
-use utils::auth::{Claims, encode_from_key_file};
+use utils::auth::encode_from_key_file;
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 
+use crate::broker::StorageBroker;
+use crate::endpoint_storage::{ENDPOINT_STORAGE_REMOTE_STORAGE_DIR, EndpointStorage};
 use crate::pageserver::{PAGESERVER_REMOTE_STORAGE_DIR, PageServerNode};
 use crate::safekeeper::SafekeeperNode;
 
-pub const DEFAULT_PG_VERSION: u32 = 16;
+pub const DEFAULT_PG_VERSION: u32 = 17;
 
 //
 // This data structures represents neon_local CLI config
@@ -55,6 +58,8 @@ pub struct LocalEnv {
 
     // used to issue tokens during e.g pg start
     pub private_key_path: PathBuf,
+    /// Path to environment's public key
+    pub public_key_path: PathBuf,
 
     pub broker: NeonBroker,
 
@@ -67,6 +72,8 @@ pub struct LocalEnv {
     pub pageservers: Vec<PageServerConf>,
 
     pub safekeepers: Vec<SafekeeperConf>,
+
+    pub endpoint_storage: EndpointStorageConf,
 
     // Control plane upcall API for pageserver: if None, we will not run storage_controller  If set, this will
     // be propagated into each pageserver's configuration.
@@ -95,6 +102,7 @@ pub struct OnDiskConfig {
     pub neon_distrib_dir: PathBuf,
     pub default_tenant_id: Option<TenantId>,
     pub private_key_path: PathBuf,
+    pub public_key_path: PathBuf,
     pub broker: NeonBroker,
     pub storage_controller: NeonStorageControllerConf,
     #[serde(
@@ -103,6 +111,7 @@ pub struct OnDiskConfig {
     )]
     pub pageservers: Vec<PageServerConf>,
     pub safekeepers: Vec<SafekeeperConf>,
+    pub endpoint_storage: EndpointStorageConf,
     pub control_plane_api: Option<Url>,
     pub control_plane_hooks_api: Option<Url>,
     pub control_plane_compute_hook_api: Option<Url>,
@@ -136,17 +145,29 @@ pub struct NeonLocalInitConf {
     pub storage_controller: Option<NeonStorageControllerConf>,
     pub pageservers: Vec<NeonLocalInitPageserverConf>,
     pub safekeepers: Vec<SafekeeperConf>,
+    pub endpoint_storage: EndpointStorageConf,
     pub control_plane_api: Option<Url>,
     pub control_plane_hooks_api: Option<Url>,
     pub generate_local_ssl_certs: bool,
 }
 
+#[derive(Serialize, Default, Deserialize, PartialEq, Eq, Clone, Debug)]
+#[serde(default)]
+pub struct EndpointStorageConf {
+    pub port: u16,
+}
+
 /// Broker config for cluster internal communication.
-#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug, Default)]
 #[serde(default)]
 pub struct NeonBroker {
-    /// Broker listen address for storage nodes coordination, e.g. '127.0.0.1:50051'.
-    pub listen_addr: SocketAddr,
+    /// Broker listen HTTP address for storage nodes coordination, e.g. '127.0.0.1:50051'.
+    /// At least one of listen_addr or listen_https_addr must be set.
+    pub listen_addr: Option<SocketAddr>,
+    /// Broker listen HTTPS address for storage nodes coordination, e.g. '127.0.0.1:50051'.
+    /// At least one of listen_addr or listen_https_addr must be set.
+    /// listen_https_addr is preferred over listen_addr in neon_local.
+    pub listen_https_addr: Option<SocketAddr>,
 }
 
 /// A part of storage controller's config the neon_local knows about.
@@ -220,18 +241,19 @@ impl Default for NeonStorageControllerConf {
     }
 }
 
-// Dummy Default impl to satisfy Deserialize derive.
-impl Default for NeonBroker {
-    fn default() -> Self {
-        NeonBroker {
-            listen_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0),
-        }
-    }
-}
-
 impl NeonBroker {
     pub fn client_url(&self) -> Url {
-        Url::parse(&format!("http://{}", self.listen_addr)).expect("failed to construct url")
+        let url = if let Some(addr) = self.listen_https_addr {
+            format!("https://{}", addr)
+        } else {
+            format!(
+                "http://{}",
+                self.listen_addr
+                    .expect("at least one address should be set")
+            )
+        };
+
+        Url::parse(&url).expect("failed to construct url")
     }
 }
 
@@ -398,6 +420,10 @@ impl LocalEnv {
         self.pg_dir(pg_version, "lib")
     }
 
+    pub fn endpoint_storage_bin(&self) -> PathBuf {
+        self.neon_distrib_dir.join("endpoint_storage")
+    }
+
     pub fn pageserver_bin(&self) -> PathBuf {
         self.neon_distrib_dir.join("pageserver")
     }
@@ -422,6 +448,10 @@ impl LocalEnv {
         self.base_data_dir.join("endpoints")
     }
 
+    pub fn storage_broker_data_dir(&self) -> PathBuf {
+        self.base_data_dir.join("storage_broker")
+    }
+
     pub fn pageserver_data_dir(&self, pageserver_id: NodeId) -> PathBuf {
         self.base_data_dir
             .join(format!("pageserver_{pageserver_id}"))
@@ -429,6 +459,10 @@ impl LocalEnv {
 
     pub fn safekeeper_data_dir(&self, data_dir_name: &str) -> PathBuf {
         self.base_data_dir.join("safekeepers").join(data_dir_name)
+    }
+
+    pub fn endpoint_storage_data_dir(&self) -> PathBuf {
+        self.base_data_dir.join("endpoint_storage")
     }
 
     pub fn get_pageserver_conf(&self, id: NodeId) -> anyhow::Result<&PageServerConf> {
@@ -478,6 +512,23 @@ impl LocalEnv {
             self.ssl_ca_cert_path().unwrap().as_path(),
             self.ssl_ca_key_path().unwrap().as_path(),
         )
+    }
+
+    /// Creates HTTP client with local SSL CA certificates.
+    pub fn create_http_client(&self) -> reqwest::Client {
+        let ssl_ca_certs = self.ssl_ca_cert_path().map(|ssl_ca_file| {
+            let buf = std::fs::read(ssl_ca_file).expect("SSL CA file should exist");
+            Certificate::from_pem_bundle(&buf).expect("SSL CA file should be valid")
+        });
+
+        let mut http_client = reqwest::Client::builder();
+        for ssl_ca_cert in ssl_ca_certs.unwrap_or_default() {
+            http_client = http_client.add_root_certificate(ssl_ca_cert);
+        }
+
+        http_client
+            .build()
+            .expect("HTTP client should construct with no error")
     }
 
     /// Inspect the base data directory and extract the instance id and instance directory path
@@ -582,6 +633,7 @@ impl LocalEnv {
                 neon_distrib_dir,
                 default_tenant_id,
                 private_key_path,
+                public_key_path,
                 broker,
                 storage_controller,
                 pageservers,
@@ -591,6 +643,7 @@ impl LocalEnv {
                 control_plane_compute_hook_api: _,
                 branch_name_mappings,
                 generate_local_ssl_certs,
+                endpoint_storage,
             } = on_disk_config;
             LocalEnv {
                 base_data_dir: repopath.to_owned(),
@@ -598,6 +651,7 @@ impl LocalEnv {
                 neon_distrib_dir,
                 default_tenant_id,
                 private_key_path,
+                public_key_path,
                 broker,
                 storage_controller,
                 pageservers,
@@ -606,6 +660,7 @@ impl LocalEnv {
                 control_plane_hooks_api,
                 branch_name_mappings,
                 generate_local_ssl_certs,
+                endpoint_storage,
             }
         };
 
@@ -705,6 +760,7 @@ impl LocalEnv {
                 neon_distrib_dir: self.neon_distrib_dir.clone(),
                 default_tenant_id: self.default_tenant_id,
                 private_key_path: self.private_key_path.clone(),
+                public_key_path: self.public_key_path.clone(),
                 broker: self.broker.clone(),
                 storage_controller: self.storage_controller.clone(),
                 pageservers: vec![], // it's skip_serializing anyway
@@ -714,6 +770,7 @@ impl LocalEnv {
                 control_plane_compute_hook_api: None,
                 branch_name_mappings: self.branch_name_mappings.clone(),
                 generate_local_ssl_certs: self.generate_local_ssl_certs,
+                endpoint_storage: self.endpoint_storage.clone(),
             },
         )
     }
@@ -730,18 +787,41 @@ impl LocalEnv {
     }
 
     // this function is used only for testing purposes in CLI e g generate tokens during init
-    pub fn generate_auth_token(&self, claims: &Claims) -> anyhow::Result<String> {
-        let private_key_path = self.get_private_key_path();
-        let key_data = fs::read(private_key_path)?;
-        encode_from_key_file(claims, &key_data)
+    pub fn generate_auth_token<S: Serialize>(&self, claims: &S) -> anyhow::Result<String> {
+        let key = self.read_private_key()?;
+        encode_from_key_file(claims, &key)
     }
 
+    /// Get the path to the private key.
     pub fn get_private_key_path(&self) -> PathBuf {
         if self.private_key_path.is_absolute() {
             self.private_key_path.to_path_buf()
         } else {
             self.base_data_dir.join(&self.private_key_path)
         }
+    }
+
+    /// Get the path to the public key.
+    pub fn get_public_key_path(&self) -> PathBuf {
+        if self.public_key_path.is_absolute() {
+            self.public_key_path.to_path_buf()
+        } else {
+            self.base_data_dir.join(&self.public_key_path)
+        }
+    }
+
+    /// Read the contents of the private key file.
+    pub fn read_private_key(&self) -> anyhow::Result<Pem> {
+        let private_key_path = self.get_private_key_path();
+        let pem = pem::parse(fs::read(private_key_path)?)?;
+        Ok(pem)
+    }
+
+    /// Read the contents of the public key file.
+    pub fn read_public_key(&self) -> anyhow::Result<Pem> {
+        let public_key_path = self.get_public_key_path();
+        let pem = pem::parse(fs::read(public_key_path)?)?;
+        Ok(pem)
     }
 
     /// Materialize the [`NeonLocalInitConf`] to disk. Called during [`neon_local init`].
@@ -797,6 +877,7 @@ impl LocalEnv {
             control_plane_api,
             generate_local_ssl_certs,
             control_plane_hooks_api,
+            endpoint_storage,
         } = conf;
 
         // Find postgres binaries.
@@ -828,6 +909,7 @@ impl LocalEnv {
         )
         .context("generate auth keys")?;
         let private_key_path = PathBuf::from("auth_private_key.pem");
+        let public_key_path = PathBuf::from("auth_public_key.pem");
 
         // create the runtime type because the remaining initialization code below needs
         // a LocalEnv instance op operation
@@ -838,6 +920,7 @@ impl LocalEnv {
             neon_distrib_dir,
             default_tenant_id: Some(default_tenant_id),
             private_key_path,
+            public_key_path,
             broker,
             storage_controller: storage_controller.unwrap_or_default(),
             pageservers: pageservers.iter().map(Into::into).collect(),
@@ -846,6 +929,7 @@ impl LocalEnv {
             control_plane_hooks_api,
             branch_name_mappings: Default::default(),
             generate_local_ssl_certs,
+            endpoint_storage,
         };
 
         if generate_local_ssl_certs {
@@ -854,6 +938,12 @@ impl LocalEnv {
 
         // create endpoints dir
         fs::create_dir_all(env.endpoints_path())?;
+
+        // create storage broker dir
+        fs::create_dir_all(env.storage_broker_data_dir())?;
+        StorageBroker::from_env(&env)
+            .initialize()
+            .context("storage broker init failed")?;
 
         // create safekeeper dirs
         for safekeeper in &env.safekeepers {
@@ -873,8 +963,13 @@ impl LocalEnv {
                 .context("pageserver init failed")?;
         }
 
+        EndpointStorage::from_env(&env)
+            .init()
+            .context("object storage init failed")?;
+
         // setup remote remote location for default LocalFs remote storage
         std::fs::create_dir_all(env.base_data_dir.join(PAGESERVER_REMOTE_STORAGE_DIR))?;
+        std::fs::create_dir_all(env.base_data_dir.join(ENDPOINT_STORAGE_REMOTE_STORAGE_DIR))?;
 
         env.persist_config()
     }
@@ -920,6 +1015,7 @@ fn generate_auth_keys(private_key_path: &Path, public_key_path: &Path) -> anyhow
             String::from_utf8_lossy(&keygen_output.stderr)
         );
     }
+
     // Extract the public key from the private key file
     //
     // openssl pkey -in auth_private_key.pem -pubout -out auth_public_key.pem
@@ -936,6 +1032,7 @@ fn generate_auth_keys(private_key_path: &Path, public_key_path: &Path) -> anyhow
             String::from_utf8_lossy(&keygen_output.stderr)
         );
     }
+
     Ok(())
 }
 
@@ -944,7 +1041,7 @@ fn generate_ssl_ca_cert(cert_path: &Path, key_path: &Path) -> anyhow::Result<()>
     // -out rootCA.crt -keyout rootCA.key
     let keygen_output = Command::new("openssl")
         .args([
-            "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "36500",
+            "req", "-x509", "-newkey", "ed25519", "-nodes", "-days", "36500",
         ])
         .args(["-subj", "/CN=Neon Local CA"])
         .args(["-out", cert_path.to_str().unwrap()])
@@ -974,7 +1071,7 @@ fn generate_ssl_cert(
     // -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
     let keygen_output = Command::new("openssl")
         .args(["req", "-new", "-nodes"])
-        .args(["-newkey", "rsa:2048"])
+        .args(["-newkey", "ed25519"])
         .args(["-subj", "/CN=localhost"])
         .args(["-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"])
         .args(["-keyout", key_path.to_str().unwrap()])

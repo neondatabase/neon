@@ -10,14 +10,13 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
+    PageserverTracingConfig,
     PgBin,
     wait_for_last_flush_lsn,
 )
 from fixtures.utils import get_scale_for_db, humantime_to_ms, skip_on_ci
 
-from performance.pageserver.util import (
-    setup_pageserver_with_tenants,
-)
+from performance.pageserver.util import setup_pageserver_with_tenants
 
 if TYPE_CHECKING:
     from typing import Any
@@ -113,6 +112,15 @@ def setup_and_run_pagebench_benchmark(
     neon_env_builder.pageserver_config_override = (
         f"page_cache_size={page_cache_size}; max_file_descriptors={max_file_descriptors}"
     )
+
+    tracing_config = PageserverTracingConfig(
+        sampling_ratio=(0, 1000),
+        endpoint="http://localhost:4318/v1/traces",
+        protocol="http-binary",
+        timeout="10s",
+    )
+    neon_env_builder.pageserver_tracing_config = tracing_config
+    ratio = tracing_config.sampling_ratio[0] / tracing_config.sampling_ratio[1]
     params.update(
         {
             "pageserver_config_override.page_cache_size": (
@@ -120,20 +128,18 @@ def setup_and_run_pagebench_benchmark(
                 {"unit": "byte"},
             ),
             "pageserver_config_override.max_file_descriptors": (max_file_descriptors, {"unit": ""}),
+            "pageserver_config_override.sampling_ratio": (ratio, {"unit": ""}),
         }
     )
 
     for param, (value, kwargs) in params.items():
         record(param, metric_value=value, report=MetricReport.TEST_PARAM, **kwargs)
 
-    def setup_wrapper(env: NeonEnv):
-        return setup_tenant_template(env, pg_bin, pgbench_scale)
-
     env = setup_pageserver_with_tenants(
         neon_env_builder,
         f"max_throughput_latest_lsn-{n_tenants}-{pgbench_scale}",
         n_tenants,
-        setup_wrapper,
+        lambda env: setup_tenant_template(env, pg_bin, pgbench_scale),
         # https://github.com/neondatabase/neon/issues/8070
         timeout_in_seconds=60,
     )
@@ -160,14 +166,8 @@ def setup_tenant_template(env: NeonEnv, pg_bin: PgBin, scale: int):
         "gc_period": "0s",  # disable periodic gc
         "checkpoint_timeout": "10 years",
         "compaction_period": "0s",  # disable periodic compaction
-        "compaction_threshold": 10,
-        "compaction_target_size": 134217728,
-        "checkpoint_distance": 268435456,
-        "image_creation_threshold": 3,
     }
-    template_tenant, template_timeline = env.create_tenant(set_default=True)
-    env.pageserver.tenant_detach(template_tenant)
-    env.pageserver.tenant_attach(template_tenant, config)
+    template_tenant, template_timeline = env.create_tenant(set_default=True, conf=config)
     ps_http = env.pageserver.http_client()
     with env.endpoints.create_start("main", tenant_id=template_tenant) as ep:
         pg_bin.run_capture(["pgbench", "-i", f"-s{scale}", "-I", "dtGvp", ep.connstr()])

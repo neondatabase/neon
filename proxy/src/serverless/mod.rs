@@ -434,17 +434,6 @@ async fn request_handler(
                 .map(Into::into),
         );
 
-        let testodrome_id = request
-            .headers()
-            .get("X-Neon-Query-ID")
-            .and_then(|value| value.to_str().ok())
-            .map(|s| s.to_string());
-
-        if let Some(query_id) = testodrome_id {
-            info!(parent: &ctx.span(), "testodrome query ID: {query_id}");
-            ctx.set_testodrome_id(query_id);
-        }
-
         let span = ctx.span();
         info!(parent: &span, "performing websocket upgrade");
 
@@ -491,7 +480,7 @@ async fn request_handler(
 
         if let Some(query_id) = testodrome_id {
             info!(parent: &ctx.span(), "testodrome query ID: {query_id}");
-            ctx.set_testodrome_id(query_id);
+            ctx.set_testodrome_id(query_id.into());
         }
 
         sql_over_http::handle(config, ctx, request, backend, http_cancellation_token)

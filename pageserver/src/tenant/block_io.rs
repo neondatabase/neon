@@ -4,14 +4,12 @@
 
 use std::ops::Deref;
 
-use bytes::Bytes;
-
 use super::storage_layer::delta_layer::{Adapter, DeltaLayerInner};
 use crate::context::RequestContext;
 use crate::page_cache::{self, FileId, PAGE_SZ, PageReadGuard, PageWriteGuard, ReadBufResult};
 #[cfg(test)]
 use crate::virtual_file::IoBufferMut;
-use crate::virtual_file::VirtualFile;
+use crate::virtual_file::{IoBuffer, VirtualFile};
 
 /// This is implemented by anything that can read 8 kB (PAGE_SZ)
 /// blocks, using the page cache
@@ -216,12 +214,8 @@ impl<'a> FileBlockReader<'a> {
         match cache
             .read_immutable_buf(self.file_id, blknum, ctx)
             .await
-            .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to read immutable buf: {e:#}"),
-                )
-            })? {
+            .map_err(|e| std::io::Error::other(format!("Failed to read immutable buf: {e:#}")))?
+        {
             ReadBufResult::Found(guard) => Ok(guard.into()),
             ReadBufResult::NotFound(write_guard) => {
                 // Read the page from disk into the buffer
@@ -251,17 +245,17 @@ pub trait BlockWriter {
     /// 'buf' must be of size PAGE_SZ. Returns the block number the page was
     /// written to.
     ///
-    fn write_blk(&mut self, buf: Bytes) -> Result<u32, std::io::Error>;
+    fn write_blk(&mut self, buf: IoBuffer) -> Result<u32, std::io::Error>;
 }
 
 ///
 /// A simple in-memory buffer of blocks.
 ///
 pub struct BlockBuf {
-    pub blocks: Vec<Bytes>,
+    pub blocks: Vec<IoBuffer>,
 }
 impl BlockWriter for BlockBuf {
-    fn write_blk(&mut self, buf: Bytes) -> Result<u32, std::io::Error> {
+    fn write_blk(&mut self, buf: IoBuffer) -> Result<u32, std::io::Error> {
         assert!(buf.len() == PAGE_SZ);
         let blknum = self.blocks.len();
         self.blocks.push(buf);

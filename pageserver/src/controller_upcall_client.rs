@@ -3,17 +3,19 @@ use std::collections::HashMap;
 use futures::Future;
 use pageserver_api::config::NodeMetadata;
 use pageserver_api::controller_api::{AvailabilityZone, NodeRegisterRequest};
+use pageserver_api::models::ShardImportStatus;
 use pageserver_api::shard::TenantShardId;
 use pageserver_api::upcall_api::{
-    ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest,
-    ValidateRequestTenant, ValidateResponse,
+    PutTimelineImportStatusRequest, ReAttachRequest, ReAttachResponse, ReAttachResponseTenant,
+    ValidateRequest, ValidateRequestTenant, ValidateResponse,
 };
+use reqwest::Certificate;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use utils::generation::Generation;
-use utils::id::NodeId;
+use utils::id::{NodeId, TimelineId};
 use utils::{backoff, failpoint_support};
 
 use crate::config::PageServerConf;
@@ -45,19 +47,19 @@ pub trait StorageControllerUpcallApi {
         &self,
         tenants: Vec<(TenantShardId, Generation)>,
     ) -> impl Future<Output = Result<HashMap<TenantShardId, bool>, RetryForeverError>> + Send;
+    fn put_timeline_import_status(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        status: ShardImportStatus,
+    ) -> impl Future<Output = Result<(), RetryForeverError>> + Send;
 }
 
 impl StorageControllerUpcallClient {
     /// A None return value indicates that the input `conf` object does not have control
     /// plane API enabled.
-    pub fn new(
-        conf: &'static PageServerConf,
-        cancel: &CancellationToken,
-    ) -> Result<Option<Self>, reqwest::Error> {
-        let mut url = match conf.control_plane_api.as_ref() {
-            Some(u) => u.clone(),
-            None => return Ok(None),
-        };
+    pub fn new(conf: &'static PageServerConf, cancel: &CancellationToken) -> Self {
+        let mut url = conf.control_plane_api.clone();
 
         if let Ok(mut segs) = url.path_segments_mut() {
             // This ensures that `url` ends with a slash if it doesn't already.
@@ -76,16 +78,18 @@ impl StorageControllerUpcallClient {
             client = client.default_headers(headers);
         }
 
-        for ssl_ca_cert in &conf.ssl_ca_certs {
-            client = client.add_root_certificate(ssl_ca_cert.clone());
+        for cert in &conf.ssl_ca_certs {
+            client = client.add_root_certificate(
+                Certificate::from_der(cert.contents()).expect("Invalid certificate in config"),
+            );
         }
 
-        Ok(Some(Self {
-            http_client: client.build()?,
+        Self {
+            http_client: client.build().expect("Failed to construct HTTP client"),
             base_url: url,
             node_id: conf.id,
             cancel: cancel.clone(),
-        }))
+        }
     }
 
     #[tracing::instrument(skip_all)]
@@ -271,5 +275,31 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
         }
 
         Ok(result.into_iter().collect())
+    }
+
+    /// Send a shard import status to the storage controller
+    ///
+    /// The implementation must have at-least-once delivery semantics.
+    /// To this end, we retry the request until it succeeds. If the pageserver
+    /// restarts or crashes, the shard import will start again from the beggining.
+    #[tracing::instrument(skip_all)] // so that warning logs from retry_http_forever have context
+    async fn put_timeline_import_status(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        status: ShardImportStatus,
+    ) -> Result<(), RetryForeverError> {
+        let url = self
+            .base_url
+            .join("timeline_import_status")
+            .expect("Failed to build path");
+
+        let request = PutTimelineImportStatusRequest {
+            tenant_shard_id,
+            timeline_id,
+            status,
+        };
+
+        self.retry_http_forever(&url, request).await
     }
 }

@@ -23,9 +23,10 @@ use utils::lsn::Lsn;
 use utils::postgres_client::PostgresClientProtocol;
 use utils::{completion, serde_system_time};
 
+use crate::config::Ratio;
 use crate::key::{CompactKey, Key};
 use crate::reltag::RelTag;
-use crate::shard::{ShardCount, ShardStripeSize, TenantShardId};
+use crate::shard::{DEFAULT_STRIPE_SIZE, ShardCount, ShardStripeSize, TenantShardId};
 
 /// The state of a tenant in this pageserver.
 ///
@@ -79,10 +80,22 @@ pub enum TenantState {
     ///
     /// Transitions out of this state are possible through `set_broken()`.
     Stopping {
+        /// The barrier can be used to wait for shutdown to complete. The first caller to set
+        /// Some(Barrier) is responsible for driving shutdown to completion. Subsequent callers
+        /// will wait for the first caller's existing barrier.
+        ///
+        /// None is set when an attach is cancelled, to signal to shutdown that the attach has in
+        /// fact cancelled:
+        ///
+        /// 1. `shutdown` sees `TenantState::Attaching`, and cancels the tenant.
+        /// 2. `attach` sets `TenantState::Stopping(None)` and exits.
+        /// 3. `set_stopping` waits for `TenantState::Stopping(None)` and sets
+        ///    `TenantState::Stopping(Some)` to claim the barrier as the shutdown owner.
+        //
         // Because of https://github.com/serde-rs/serde/issues/2105 this has to be a named field,
         // otherwise it will not be skipped during deserialization
         #[serde(skip)]
-        progress: completion::Barrier,
+        progress: Option<completion::Barrier>,
     },
     /// The tenant is recognized by the pageserver, but can no longer be used for
     /// any operations.
@@ -307,6 +320,35 @@ pub struct TimelineCreateRequest {
     pub mode: TimelineCreateRequestMode,
 }
 
+impl TimelineCreateRequest {
+    pub fn mode_tag(&self) -> &'static str {
+        match &self.mode {
+            TimelineCreateRequestMode::Branch { .. } => "branch",
+            TimelineCreateRequestMode::ImportPgdata { .. } => "import",
+            TimelineCreateRequestMode::Bootstrap { .. } => "bootstrap",
+        }
+    }
+
+    pub fn is_import(&self) -> bool {
+        matches!(self.mode, TimelineCreateRequestMode::ImportPgdata { .. })
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ShardImportStatus {
+    InProgress,
+    Done,
+    Error(String),
+}
+impl ShardImportStatus {
+    pub fn is_terminal(&self) -> bool {
+        match self {
+            ShardImportStatus::InProgress => false,
+            ShardImportStatus::Done | ShardImportStatus::Error(_) => true,
+        }
+    }
+}
+
 /// Storage controller specific extensions to [`TimelineInfo`].
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TimelineCreateResponseStorcon {
@@ -425,8 +467,6 @@ pub struct ShardParameters {
 }
 
 impl ShardParameters {
-    pub const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
-
     pub fn is_unsharded(&self) -> bool {
         self.count.is_unsharded()
     }
@@ -436,7 +476,7 @@ impl Default for ShardParameters {
     fn default() -> Self {
         Self {
             count: ShardCount::new(0),
-            stripe_size: Self::DEFAULT_STRIPE_SIZE,
+            stripe_size: DEFAULT_STRIPE_SIZE,
         }
     }
 }
@@ -515,6 +555,8 @@ pub struct TenantConfigPatch {
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub compaction_algorithm: FieldPatch<CompactionAlgorithmSettings>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub compaction_shard_ancestor: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub compaction_l0_first: FieldPatch<bool>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub compaction_l0_semaphore: FieldPatch<bool>,
@@ -565,9 +607,13 @@ pub struct TenantConfigPatch {
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_compaction_enabled: FieldPatch<bool>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub gc_compaction_verification: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_compaction_initial_threshold_kb: FieldPatch<u64>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_compaction_ratio_percent: FieldPatch<u64>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub sampling_ratio: FieldPatch<Option<Ratio>>,
 }
 
 /// Like [`crate::config::TenantConfigToml`], but preserves the information
@@ -599,6 +645,9 @@ pub struct TenantConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction_algorithm: Option<CompactionAlgorithmSettings>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compaction_shard_ancestor: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction_l0_first: Option<bool>,
@@ -684,10 +733,16 @@ pub struct TenantConfig {
     pub gc_compaction_enabled: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub gc_compaction_verification: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gc_compaction_initial_threshold_kb: Option<u64>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gc_compaction_ratio_percent: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sampling_ratio: Option<Option<Ratio>>,
 }
 
 impl TenantConfig {
@@ -703,6 +758,7 @@ impl TenantConfig {
             mut compaction_threshold,
             mut compaction_upper_limit,
             mut compaction_algorithm,
+            mut compaction_shard_ancestor,
             mut compaction_l0_first,
             mut compaction_l0_semaphore,
             mut l0_flush_delay_threshold,
@@ -728,8 +784,10 @@ impl TenantConfig {
             mut wal_receiver_protocol_override,
             mut rel_size_v2_enabled,
             mut gc_compaction_enabled,
+            mut gc_compaction_verification,
             mut gc_compaction_initial_threshold_kb,
             mut gc_compaction_ratio_percent,
+            mut sampling_ratio,
         } = self;
 
         patch.checkpoint_distance.apply(&mut checkpoint_distance);
@@ -749,6 +807,9 @@ impl TenantConfig {
             .compaction_upper_limit
             .apply(&mut compaction_upper_limit);
         patch.compaction_algorithm.apply(&mut compaction_algorithm);
+        patch
+            .compaction_shard_ancestor
+            .apply(&mut compaction_shard_ancestor);
         patch.compaction_l0_first.apply(&mut compaction_l0_first);
         patch
             .compaction_l0_semaphore
@@ -819,11 +880,15 @@ impl TenantConfig {
             .gc_compaction_enabled
             .apply(&mut gc_compaction_enabled);
         patch
+            .gc_compaction_verification
+            .apply(&mut gc_compaction_verification);
+        patch
             .gc_compaction_initial_threshold_kb
             .apply(&mut gc_compaction_initial_threshold_kb);
         patch
             .gc_compaction_ratio_percent
             .apply(&mut gc_compaction_ratio_percent);
+        patch.sampling_ratio.apply(&mut sampling_ratio);
 
         Ok(Self {
             checkpoint_distance,
@@ -833,6 +898,7 @@ impl TenantConfig {
             compaction_threshold,
             compaction_upper_limit,
             compaction_algorithm,
+            compaction_shard_ancestor,
             compaction_l0_first,
             compaction_l0_semaphore,
             l0_flush_delay_threshold,
@@ -858,8 +924,10 @@ impl TenantConfig {
             wal_receiver_protocol_override,
             rel_size_v2_enabled,
             gc_compaction_enabled,
+            gc_compaction_verification,
             gc_compaction_initial_threshold_kb,
             gc_compaction_ratio_percent,
+            sampling_ratio,
         })
     }
 
@@ -891,6 +959,9 @@ impl TenantConfig {
                 .as_ref()
                 .unwrap_or(&global_conf.compaction_algorithm)
                 .clone(),
+            compaction_shard_ancestor: self
+                .compaction_shard_ancestor
+                .unwrap_or(global_conf.compaction_shard_ancestor),
             compaction_l0_first: self
                 .compaction_l0_first
                 .unwrap_or(global_conf.compaction_l0_first),
@@ -955,12 +1026,16 @@ impl TenantConfig {
             gc_compaction_enabled: self
                 .gc_compaction_enabled
                 .unwrap_or(global_conf.gc_compaction_enabled),
+            gc_compaction_verification: self
+                .gc_compaction_verification
+                .unwrap_or(global_conf.gc_compaction_verification),
             gc_compaction_initial_threshold_kb: self
                 .gc_compaction_initial_threshold_kb
                 .unwrap_or(global_conf.gc_compaction_initial_threshold_kb),
             gc_compaction_ratio_percent: self
                 .gc_compaction_ratio_percent
                 .unwrap_or(global_conf.gc_compaction_ratio_percent),
+            sampling_ratio: self.sampling_ratio.unwrap_or(global_conf.sampling_ratio),
         }
     }
 }
@@ -1094,7 +1169,7 @@ pub struct CompactionAlgorithmSettings {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
-#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(tag = "mode", rename_all = "kebab-case")]
 pub enum L0FlushConfig {
     #[serde(rename_all = "snake_case")]
     Direct { max_concurrency: NonZeroUsize },
@@ -1418,11 +1493,6 @@ pub struct TimelineInfo {
     pub last_record_lsn: Lsn,
     pub prev_record_lsn: Option<Lsn>,
 
-    /// Legacy field, retained for one version to enable old storage controller to
-    /// decode (it was a mandatory field).
-    #[serde(default, rename = "latest_gc_cutoff_lsn")]
-    pub _unused: Lsn,
-
     /// The LSN up to which GC has advanced: older data may still exist but it is not available for clients.
     /// This LSN is not suitable for deciding where to create branches etc: use [`TimelineInfo::min_readable_lsn`] instead,
     /// as it is easier to reason about.
@@ -1663,6 +1733,7 @@ pub struct SecondaryProgress {
 pub struct TenantScanRemoteStorageShard {
     pub tenant_shard_id: TenantShardId,
     pub generation: Option<u32>,
+    pub stripe_size: Option<ShardStripeSize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -1732,6 +1803,8 @@ pub struct TopTenantShardsResponse {
 }
 
 pub mod virtual_file {
+    use std::sync::LazyLock;
+
     #[derive(
         Copy,
         Clone,
@@ -1769,14 +1842,38 @@ pub mod virtual_file {
     pub enum IoMode {
         /// Uses buffered IO.
         Buffered,
-        /// Uses direct IO, error out if the operation fails.
+        /// Uses direct IO for reads only.
         #[cfg(target_os = "linux")]
         Direct,
+        /// Use direct IO for reads and writes.
+        #[cfg(target_os = "linux")]
+        DirectRw,
     }
 
     impl IoMode {
-        pub const fn preferred() -> Self {
-            Self::Buffered
+        pub fn preferred() -> Self {
+            // The default behavior when running Rust unit tests without any further
+            // flags is to use the newest behavior (DirectRw).
+            // The CI uses the following environment variable to unit tests for all
+            // different modes.
+            // NB: the Python regression & perf tests have their own defaults management
+            // that writes pageserver.toml; they do not use this variable.
+            if cfg!(test) {
+                static CACHED: LazyLock<IoMode> = LazyLock::new(|| {
+                    utils::env::var_serde_json_string(
+                        "NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IO_MODE",
+                    )
+                    .unwrap_or(
+                        #[cfg(target_os = "linux")]
+                        IoMode::DirectRw,
+                        #[cfg(not(target_os = "linux"))]
+                        IoMode::Buffered,
+                    )
+                });
+                *CACHED
+            } else {
+                IoMode::Buffered
+            }
         }
     }
 
@@ -1788,6 +1885,8 @@ pub mod virtual_file {
                 v if v == (IoMode::Buffered as u8) => IoMode::Buffered,
                 #[cfg(target_os = "linux")]
                 v if v == (IoMode::Direct as u8) => IoMode::Direct,
+                #[cfg(target_os = "linux")]
+                v if v == (IoMode::DirectRw as u8) => IoMode::DirectRw,
                 x => return Err(x),
             })
         }
@@ -2716,8 +2815,13 @@ mod tests {
             (line!(), TenantState::Active, "Active"),
             (
                 line!(),
+                TenantState::Stopping { progress: None },
+                "Stopping",
+            ),
+            (
+                line!(),
                 TenantState::Stopping {
-                    progress: utils::completion::Barrier::default(),
+                    progress: Some(completion::Barrier::default()),
                 },
                 "Stopping",
             ),

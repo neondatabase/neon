@@ -45,23 +45,13 @@ allow = [
     "ISC",
     "MIT",
     "MPL-2.0",
-    "OpenSSL",
     "Unicode-3.0",
-    "Zlib",
 ]
 confidence-threshold = 0.8
 exceptions = [
     # Zlib license has some restrictions if we decide to change sth
     { allow = ["Zlib"], name = "const_format_proc_macros", version = "*" },
     { allow = ["Zlib"], name = "const_format", version = "*" },
-]
-
-[[licenses.clarify]]
-name = "ring"
-version = "*"
-expression = "MIT AND ISC AND OpenSSL"
-license-files = [
-    { path = "LICENSE", hash = 0xbd0eed23 }
 ]
 
 [licenses.private]
@@ -116,7 +106,11 @@ name = "openssl"
 unknown-registry = "warn"
 unknown-git = "warn"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+allow-git = [
+    # Crate pinned to commit in origin repo due to opentelemetry version.
+    # TODO: Remove this once crate is fetched from crates.io again.
+    "https://github.com/mattiapenati/tower-otel",
+]
 
 [sources.allow-org]
 github = [

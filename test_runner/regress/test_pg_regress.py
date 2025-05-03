@@ -239,6 +239,8 @@ def test_isolation(
             "neon.regress_test_mode = true",
             # Stack size should be increased for tests to pass with asan.
             "max_stack_depth = 4MB",
+            # Neon extensiosn starts 2 BGW so decreasing number of parallel workers which can affect deadlock-parallel test if it hits max_worker_processes.
+            "max_worker_processes = 16",
         ],
     )
     endpoint.safe_psql(f"CREATE DATABASE {DBNAME}")
@@ -469,7 +471,7 @@ def test_tx_abort_with_many_relations(
         try:
             # Rollback phase should be fast: this is one WAL record that we should process efficiently
             fut = exec.submit(rollback_and_wait)
-            fut.result(timeout=15)
+            fut.result(timeout=15 if reldir_type == "v1" else 30)
         except:
             exec.shutdown(wait=False, cancel_futures=True)
             raise

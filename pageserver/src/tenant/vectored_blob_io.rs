@@ -26,7 +26,7 @@ use utils::lsn::Lsn;
 use utils::vec_map::VecMap;
 
 use crate::context::RequestContext;
-use crate::tenant::blob_io::{BYTE_UNCOMPRESSED, BYTE_ZSTD, LEN_COMPRESSION_BIT_MASK};
+use crate::tenant::blob_io::{BYTE_UNCOMPRESSED, BYTE_ZSTD, Header};
 use crate::virtual_file::{self, IoBufferMut, VirtualFile};
 
 /// Metadata bundled with the start and end offset of a blob.
@@ -111,18 +111,20 @@ impl From<Bytes> for BufView<'_> {
 pub struct VectoredBlob {
     /// Blob metadata.
     pub meta: BlobMeta,
-    /// Start offset.
-    start: usize,
+    /// Header start offset.
+    header_start: usize,
+    /// Data start offset.
+    data_start: usize,
     /// End offset.
     end: usize,
-    /// Compression used on the the blob.
+    /// Compression used on the data, extracted from the header.
     compression_bits: u8,
 }
 
 impl VectoredBlob {
     /// Reads a decompressed view of the blob.
     pub(crate) async fn read<'a>(&self, buf: &BufView<'a>) -> Result<BufView<'a>, std::io::Error> {
-        let view = buf.view(self.start..self.end);
+        let view = buf.view(self.data_start..self.end);
 
         match self.compression_bits {
             BYTE_UNCOMPRESSED => Ok(view),
@@ -140,12 +142,17 @@ impl VectoredBlob {
                     std::io::ErrorKind::InvalidData,
                     format!(
                         "Failed to decompress blob for {}@{}, {}..{}: invalid compression byte {bits:x}",
-                        self.meta.key, self.meta.lsn, self.start, self.end
+                        self.meta.key, self.meta.lsn, self.data_start, self.end
                     ),
                 );
                 Err(error)
             }
         }
+    }
+
+    /// Returns the raw blob including header.
+    pub(crate) fn raw_with_header<'a>(&self, buf: &BufView<'a>) -> BufView<'a> {
+        buf.view(self.header_start..self.end)
     }
 }
 
@@ -154,7 +161,7 @@ impl std::fmt::Display for VectoredBlob {
         write!(
             f,
             "{}@{}, {}..{}",
-            self.meta.key, self.meta.lsn, self.start, self.end
+            self.meta.key, self.meta.lsn, self.data_start, self.end
         )
     }
 }
@@ -493,50 +500,30 @@ impl<'a> VectoredBlobReader<'a> {
 
         let blobs_at = read.blobs_at.as_slice();
 
-        let start_offset = read.start;
-
-        let mut metas = Vec::with_capacity(blobs_at.len());
+        let mut blobs = Vec::with_capacity(blobs_at.len());
         // Blobs in `read` only provide their starting offset. The end offset
         // of a blob is implicit: the start of the next blob if one exists
         // or the end of the read.
 
-        for (blob_start, meta) in blobs_at {
-            let blob_start_in_buf = blob_start - start_offset;
-            let first_len_byte = buf[blob_start_in_buf as usize];
+        for (blob_start, meta) in blobs_at.iter().copied() {
+            let header_start = (blob_start - read.start) as usize;
+            let header = Header::decode(&buf[header_start..]).map_err(|anyhow_err| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, anyhow_err)
+            })?;
+            let data_start = header_start + header.header_len;
+            let end = data_start + header.data_len;
+            let compression_bits = header.compression_bits;
 
-            // Each blob is prefixed by a header containing its size and compression information.
-            // Extract the size and skip that header to find the start of the data.
-            // The size can be 1 or 4 bytes. The most significant bit is 0 in the
-            // 1 byte case and 1 in the 4 byte case.
-            let (size_length, blob_size, compression_bits) = if first_len_byte < 0x80 {
-                (1, first_len_byte as u64, BYTE_UNCOMPRESSED)
-            } else {
-                let mut blob_size_buf = [0u8; 4];
-                let offset_in_buf = blob_start_in_buf as usize;
-
-                blob_size_buf.copy_from_slice(&buf[offset_in_buf..offset_in_buf + 4]);
-                blob_size_buf[0] &= !LEN_COMPRESSION_BIT_MASK;
-
-                let compression_bits = first_len_byte & LEN_COMPRESSION_BIT_MASK;
-                (
-                    4,
-                    u32::from_be_bytes(blob_size_buf) as u64,
-                    compression_bits,
-                )
-            };
-
-            let start = (blob_start_in_buf + size_length) as usize;
-            let end = start + blob_size as usize;
-
-            metas.push(VectoredBlob {
-                start,
+            blobs.push(VectoredBlob {
+                header_start,
+                data_start,
                 end,
-                meta: *meta,
+                meta,
                 compression_bits,
             });
         }
 
-        Ok(VectoredBlobsBuf { buf, blobs: metas })
+        Ok(VectoredBlobsBuf { buf, blobs })
     }
 }
 
@@ -677,7 +664,6 @@ impl StreamingVectoredReadPlanner {
 
 #[cfg(test)]
 mod tests {
-    use anyhow::Error;
 
     use super::super::blob_io::tests::{random_array, write_maybe_compressed};
     use super::*;
@@ -960,13 +946,16 @@ mod tests {
         }
     }
 
-    async fn round_trip_test_compressed(blobs: &[Vec<u8>], compression: bool) -> Result<(), Error> {
+    async fn round_trip_test_compressed(
+        blobs: &[Vec<u8>],
+        compression: bool,
+    ) -> anyhow::Result<()> {
         let ctx =
             RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
         let (_temp_dir, pathbuf, offsets) =
-            write_maybe_compressed::<true>(blobs, compression, &ctx).await?;
+            write_maybe_compressed(blobs, compression, &ctx).await?;
 
-        let file = VirtualFile::open(&pathbuf, &ctx).await?;
+        let file = VirtualFile::open_v2(&pathbuf, &ctx).await?;
         let file_len = std::fs::metadata(&pathbuf)?.len();
 
         // Multiply by two (compressed data might need more space), and add a few bytes for the header
@@ -997,13 +986,22 @@ mod tests {
                 &read_buf[..],
                 "mismatch for idx={idx} at offset={offset}"
             );
+
+            // Check that raw_with_header returns a valid header.
+            let raw = read_blob.raw_with_header(&view);
+            let header = Header::decode(&raw)?;
+            if !compression || header.header_len == 1 {
+                assert_eq!(header.compression_bits, BYTE_UNCOMPRESSED);
+            }
+            assert_eq!(raw.len(), header.total_len());
+
             buf = result.buf;
         }
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_really_big_array() -> Result<(), Error> {
+    async fn test_really_big_array() -> anyhow::Result<()> {
         let blobs = &[
             b"test".to_vec(),
             random_array(10 * PAGE_SZ),
@@ -1018,7 +1016,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_arrays_inc() -> Result<(), Error> {
+    async fn test_arrays_inc() -> anyhow::Result<()> {
         let blobs = (0..PAGE_SZ / 8)
             .map(|v| random_array(v * 16))
             .collect::<Vec<_>>();

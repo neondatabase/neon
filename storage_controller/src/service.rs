@@ -11,7 +11,7 @@ use std::num::NonZeroU32;
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
@@ -40,14 +40,14 @@ use pageserver_api::models::{
     TenantLocationConfigResponse, TenantShardLocation, TenantShardSplitRequest,
     TenantShardSplitResponse, TenantSorting, TenantTimeTravelRequest,
     TimelineArchivalConfigRequest, TimelineCreateRequest, TimelineCreateResponseStorcon,
-    TimelineInfo, TopTenantShardItem, TopTenantShardsRequest,
+    TimelineInfo, TimelineState, TopTenantShardItem, TopTenantShardsRequest,
 };
 use pageserver_api::shard::{
-    ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
+    DEFAULT_STRIPE_SIZE, ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
 };
 use pageserver_api::upcall_api::{
-    ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest, ValidateResponse,
-    ValidateResponseTenant,
+    PutTimelineImportStatusRequest, ReAttachRequest, ReAttachResponse, ReAttachResponseTenant,
+    ValidateRequest, ValidateResponse, ValidateResponseTenant,
 };
 use pageserver_client::{BlockUnblock, mgmt_api};
 use reqwest::{Certificate, StatusCode};
@@ -61,7 +61,7 @@ use utils::completion::Barrier;
 use utils::generation::Generation;
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
-use utils::sync::gate::Gate;
+use utils::sync::gate::{Gate, GateGuard};
 use utils::{failpoint_support, pausable_failpoint};
 
 use crate::background_node_operations::{
@@ -96,6 +96,9 @@ use crate::tenant_shard::{
     IntentState, MigrateAttachment, ObservedState, ObservedStateDelta, ObservedStateLocation,
     ReconcileNeeded, ReconcileResult, ReconcileWaitError, ReconcilerStatus, ReconcilerWaiter,
     ScheduleOptimization, ScheduleOptimizationAction, TenantShard,
+};
+use crate::timeline_import::{
+    ShardImportStatuses, TimelineImport, TimelineImportState, UpcallClient,
 };
 
 const WAITER_FILL_DRAIN_POLL_TIMEOUT: Duration = Duration::from_millis(500);
@@ -191,6 +194,7 @@ pub(crate) enum LeadershipStatus {
 
 pub const RECONCILER_CONCURRENCY_DEFAULT: usize = 128;
 pub const PRIORITY_RECONCILER_CONCURRENCY_DEFAULT: usize = 256;
+pub const SAFEKEEPER_RECONCILER_CONCURRENCY_DEFAULT: usize = 32;
 
 // Depth of the channel used to enqueue shards for reconciliation when they can't do it immediately.
 // This channel is finite-size to avoid using excessive memory if we get into a state where reconciles are finishing more slowly
@@ -357,18 +361,10 @@ pub struct Config {
     // This JWT token will be used to authenticate with other storage controller instances
     pub peer_jwt_token: Option<String>,
 
-    /// Where the compute hook should send notifications of pageserver attachment locations
-    /// (this URL points to the control plane in prod). If this is None, the compute hook will
-    /// assume it is running in a test environment and try to update neon_local.
-    pub compute_hook_url: Option<String>,
-
     /// Prefix for storage API endpoints of the control plane. We use this prefix to compute
     /// URLs that we use to send pageserver and safekeeper attachment locations.
     /// If this is None, the compute hook will assume it is running in a test environment
     /// and try to invoke neon_local instead.
-    ///
-    /// For now, there is also `compute_hook_url` which allows configuration of the pageserver
-    /// specific endpoint, but it is in the process of being phased out.
     pub control_plane_url: Option<String>,
 
     /// Grace period within which a pageserver does not respond to heartbeats, but is still
@@ -386,6 +382,9 @@ pub struct Config {
 
     /// How many high-priority Reconcilers may be spawned concurrently
     pub priority_reconciler_concurrency: usize,
+
+    /// How many safekeeper reconciles may happen concurrently (per safekeeper)
+    pub safekeeper_reconciler_concurrency: usize,
 
     /// How many API requests per second to allow per tenant, across all
     /// tenant-scoped API endpoints. Further API requests queue until ready.
@@ -531,6 +530,9 @@ pub struct Service {
 
     /// HTTP client with proper CA certs.
     http_client: reqwest::Client,
+
+    /// Handle for the step down background task if one was ever requested
+    step_down_barrier: OnceLock<tokio::sync::watch::Receiver<Option<GlobalObservedState>>>,
 }
 
 impl From<ReconcileWaitError> for ApiError {
@@ -594,6 +596,8 @@ struct TenantShardSplitAbort {
     new_stripe_size: Option<ShardStripeSize>,
     /// Until this abort op is complete, no other operations may be done on the tenant
     _tenant_lock: TracingExclusiveGuard<TenantOperations>,
+    /// The reconciler gate for the duration of the split operation, and any included abort.
+    _gate: GateGuard,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -830,9 +834,13 @@ impl Service {
             let mut locked = self.inner.write().unwrap();
             locked.become_leader();
 
+            for (sk_id, _sk) in locked.safekeepers.clone().iter() {
+                locked.safekeeper_reconcilers.start_reconciler(*sk_id, self);
+            }
+
             locked
                 .safekeeper_reconcilers
-                .schedule_request_vec(self, sk_schedule_requests);
+                .schedule_request_vec(sk_schedule_requests);
         }
 
         // TODO: if any tenant's intent now differs from its loaded generation_pageserver, we should clear that
@@ -874,6 +882,40 @@ impl Service {
                 let cleanup_self = self.clone();
                 async move { cleanup_self.cleanup_locations(cleanup).await }
             });
+        }
+
+        // Reconcile the timeline imports:
+        // 1. Mark each tenant shard of tenants with an importing timeline as importing.
+        // 2. Finalize the completed imports in the background. This handles the case where
+        //    the previous storage controller instance shut down whilst finalizing imports.
+        let imports = self.persistence.list_timeline_imports().await;
+        match imports {
+            Ok(mut imports) => {
+                {
+                    let mut locked = self.inner.write().unwrap();
+                    for import in &imports {
+                        locked
+                            .tenants
+                            .range_mut(TenantShardId::tenant_range(import.tenant_id))
+                            .for_each(|(_id, shard)| {
+                                shard.importing = TimelineImportState::Importing
+                            });
+                    }
+                }
+
+                imports.retain(|import| import.is_complete());
+                tokio::task::spawn({
+                    let finalize_imports_self = self.clone();
+                    async move {
+                        finalize_imports_self
+                            .finalize_timeline_imports(imports)
+                            .await
+                    }
+                });
+            }
+            Err(err) => {
+                tracing::error!("Could not retrieve completed imports from database: {err}");
+            }
         }
 
         tracing::info!(
@@ -1460,7 +1502,7 @@ impl Service {
             // Retry until shutdown: we must keep this request object alive until it is properly
             // processed, as it holds a lock guard that prevents other operations trying to do things
             // to the tenant while it is in a weird part-split state.
-            while !self.cancel.is_cancelled() {
+            while !self.reconcilers_cancel.is_cancelled() {
                 match self.abort_tenant_shard_split(&op).await {
                     Ok(_) => break,
                     Err(e) => {
@@ -1473,9 +1515,12 @@ impl Service {
                         // when we retry, so that the abort op will succeed.  If the abort op is failing
                         // for some other reason, we will keep retrying forever, or until a human notices
                         // and does something about it (either fixing a pageserver or restarting the controller).
-                        tokio::time::timeout(Duration::from_secs(5), self.cancel.cancelled())
-                            .await
-                            .ok();
+                        tokio::time::timeout(
+                            Duration::from_secs(5),
+                            self.reconcilers_cancel.cancelled(),
+                        )
+                        .await
+                        .ok();
                     }
                 }
             }
@@ -1509,6 +1554,10 @@ impl Service {
             .metrics_group
             .storage_controller_pageserver_nodes
             .set(nodes.len() as i64);
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_https_pageserver_nodes
+            .set(nodes.values().filter(|n| n.has_https_port()).count() as i64);
 
         tracing::info!("Loading safekeepers from database...");
         let safekeepers = persistence
@@ -1526,6 +1575,14 @@ impl Service {
         let safekeepers: HashMap<NodeId, Safekeeper> =
             safekeepers.into_iter().map(|n| (n.get_id(), n)).collect();
         tracing::info!("Loaded {} safekeepers from database.", safekeepers.len());
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_safekeeper_nodes
+            .set(safekeepers.len() as i64);
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_https_safekeeper_nodes
+            .set(safekeepers.values().filter(|s| s.has_https_port()).count() as i64);
 
         tracing::info!("Loading shards from database...");
         let mut tenant_shard_persistence = persistence.load_active_tenant_shards().await?;
@@ -1711,7 +1768,7 @@ impl Service {
             ))),
             config: config.clone(),
             persistence,
-            compute_hook: Arc::new(ComputeHook::new(config.clone())),
+            compute_hook: Arc::new(ComputeHook::new(config.clone())?),
             result_tx,
             heartbeater_ps,
             heartbeater_sk,
@@ -1731,6 +1788,7 @@ impl Service {
             tenant_op_locks: Default::default(),
             node_op_locks: Default::default(),
             http_client,
+            step_down_barrier: Default::default(),
         });
 
         let result_task_this = this.clone();
@@ -1835,6 +1893,7 @@ impl Service {
         };
 
         if insert {
+            let config = attach_req.config.clone().unwrap_or_default();
             let tsp = TenantShardPersistence {
                 tenant_id: attach_req.tenant_shard_id.tenant_id.to_string(),
                 shard_number: attach_req.tenant_shard_id.shard_number.0 as i32,
@@ -1843,7 +1902,7 @@ impl Service {
                 generation: attach_req.generation_override.or(Some(0)),
                 generation_pageserver: None,
                 placement_policy: serde_json::to_string(&PlacementPolicy::Attached(0)).unwrap(),
-                config: serde_json::to_string(&TenantConfig::default()).unwrap(),
+                config: serde_json::to_string(&config).unwrap(),
                 splitting: SplitState::default(),
                 scheduling_policy: serde_json::to_string(&ShardSchedulingPolicy::default())
                     .unwrap(),
@@ -1866,16 +1925,16 @@ impl Service {
                 Ok(()) => {
                     tracing::info!("Inserted shard {} in database", attach_req.tenant_shard_id);
 
-                    let mut locked = self.inner.write().unwrap();
-                    locked.tenants.insert(
+                    let mut shard = TenantShard::new(
                         attach_req.tenant_shard_id,
-                        TenantShard::new(
-                            attach_req.tenant_shard_id,
-                            ShardIdentity::unsharded(),
-                            PlacementPolicy::Attached(0),
-                            None,
-                        ),
+                        ShardIdentity::unsharded(),
+                        PlacementPolicy::Attached(0),
+                        None,
                     );
+                    shard.config = config;
+
+                    let mut locked = self.inner.write().unwrap();
+                    locked.tenants.insert(attach_req.tenant_shard_id, shard);
                     tracing::info!("Inserted shard {} in memory", attach_req.tenant_shard_id);
                 }
             }
@@ -1960,11 +2019,12 @@ impl Service {
             .set_attached(scheduler, attach_req.node_id);
 
         tracing::info!(
-            "attach_hook: tenant {} set generation {:?}, pageserver {}",
+            "attach_hook: tenant {} set generation {:?}, pageserver {}, config {:?}",
             attach_req.tenant_shard_id,
             tenant_shard.generation,
             // TODO: this is an odd number of 0xf's
-            attach_req.node_id.unwrap_or(utils::id::NodeId(0xfffffff))
+            attach_req.node_id.unwrap_or(utils::id::NodeId(0xfffffff)),
+            attach_req.config,
         );
 
         // Trick the reconciler into not doing anything for this tenant: this helps
@@ -2742,7 +2802,7 @@ impl Service {
                         count: tenant_shard_id.shard_count,
                         // We only import un-sharded or single-sharded tenants, so stripe
                         // size can be made up arbitrarily here.
-                        stripe_size: ShardParameters::DEFAULT_STRIPE_SIZE,
+                        stripe_size: DEFAULT_STRIPE_SIZE,
                     },
                     placement_policy: Some(placement_policy),
                     config: req.config.tenant_conf,
@@ -3603,7 +3663,7 @@ impl Service {
                 locations: ShardMutationLocations,
                 http_client: reqwest::Client,
                 jwt: Option<String>,
-                create_req: TimelineCreateRequest,
+                mut create_req: TimelineCreateRequest,
             ) -> Result<TimelineInfo, ApiError> {
                 let latest = locations.latest.node;
 
@@ -3621,6 +3681,15 @@ impl Service {
                     .timeline_create(tenant_shard_id, &create_req)
                     .await
                     .map_err(|e| passthrough_api_error(&latest, e))?;
+
+                // If we are going to create the timeline on some stale locations for shard 0, then ask them to re-use
+                // the initdb generated by the latest location, rather than generating their own.  This avoids racing uploads
+                // of initdb to S3 which might not be binary-identical if different pageservers have different postgres binaries.
+                if tenant_shard_id.is_shard_zero() {
+                    if let models::TimelineCreateRequestMode::Bootstrap { existing_initdb_timeline_id, .. } = &mut create_req.mode {
+                        *existing_initdb_timeline_id = Some(create_req.new_timeline_id);
+                    }
+                }
 
                 // We propagate timeline creations to all attached locations such that a compute
                 // for the new timeline is able to start regardless of the current state of the
@@ -3664,6 +3733,10 @@ impl Service {
             // Because the caller might not provide an explicit LSN, we must do the creation first on a single shard, and then
             // use whatever LSN that shard picked when creating on subsequent shards.  We arbitrarily use shard zero as the shard
             // that will get the first creation request, and propagate the LSN to all the >0 shards.
+            //
+            // This also enables non-zero shards to use the initdb that shard 0 generated and uploaded to S3, rather than
+            // independently generating their own initdb.  This guarantees that shards cannot end up with different initial
+            // states if e.g. they have different postgres binary versions.
             let timeline_info = create_one(
                 shard_zero_tid,
                 shard_zero_locations,
@@ -3673,11 +3746,16 @@ impl Service {
             )
             .await?;
 
-            // Propagate the LSN that shard zero picked, if caller didn't provide one
+            // Update the create request for shards >= 0
             match &mut create_req.mode {
                 models::TimelineCreateRequestMode::Branch { ancestor_start_lsn, .. } if ancestor_start_lsn.is_none() => {
+                    // Propagate the LSN that shard zero picked, if caller didn't provide one
                     *ancestor_start_lsn = timeline_info.ancestor_lsn;
                 },
+                models::TimelineCreateRequestMode::Bootstrap { existing_initdb_timeline_id, .. } => {
+                    // For shards >= 0, do not run initdb: use the one that shard 0 uploaded to S3
+                    *existing_initdb_timeline_id = Some(create_req.new_timeline_id)
+                }
                 _ => {}
             }
 
@@ -3717,11 +3795,14 @@ impl Service {
         create_req: TimelineCreateRequest,
     ) -> Result<TimelineCreateResponseStorcon, ApiError> {
         let safekeepers = self.config.timelines_onto_safekeepers;
+        let timeline_id = create_req.new_timeline_id;
+
         tracing::info!(
+            mode=%create_req.mode_tag(),
             %safekeepers,
             "Creating timeline {}/{}",
             tenant_id,
-            create_req.new_timeline_id,
+            timeline_id,
         );
 
         let _tenant_lock = trace_shared_lock(
@@ -3731,15 +3812,86 @@ impl Service {
         )
         .await;
         failpoint_support::sleep_millis_async!("tenant-create-timeline-shared-lock");
-        let create_mode = create_req.mode.clone();
+        let is_import = create_req.is_import();
+
+        if is_import {
+            // Ensure that there is no split on-going.
+            // [`Self::tenant_shard_split`] holds the exclusive tenant lock
+            // for the duration of the split, but here we handle the case
+            // where we restarted and the split is being aborted.
+            let locked = self.inner.read().unwrap();
+            let splitting = locked
+                .tenants
+                .range(TenantShardId::tenant_range(tenant_id))
+                .any(|(_id, shard)| shard.splitting != SplitState::Idle);
+
+            if splitting {
+                return Err(ApiError::Conflict("Tenant is splitting shard".to_string()));
+            }
+        }
 
         let timeline_info = self
             .tenant_timeline_create_pageservers(tenant_id, create_req)
             .await?;
 
-        let safekeepers = if safekeepers {
+        let selected_safekeepers = if is_import {
+            let shards = {
+                let locked = self.inner.read().unwrap();
+                locked
+                    .tenants
+                    .range(TenantShardId::tenant_range(tenant_id))
+                    .map(|(ts_id, _)| ts_id.to_index())
+                    .collect::<Vec<_>>()
+            };
+
+            if !shards
+                .iter()
+                .map(|shard_index| shard_index.shard_count)
+                .all_equal()
+            {
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                    "Inconsistent shard count"
+                )));
+            }
+
+            let import = TimelineImport {
+                tenant_id,
+                timeline_id,
+                shard_statuses: ShardImportStatuses::new(shards),
+            };
+
+            let inserted = self
+                .persistence
+                .insert_timeline_import(import.to_persistent())
+                .await
+                .context("timeline import insert")
+                .map_err(ApiError::InternalServerError)?;
+
+            // Set the importing flag on the tenant shards
+            self.inner
+                .write()
+                .unwrap()
+                .tenants
+                .range_mut(TenantShardId::tenant_range(tenant_id))
+                .for_each(|(_id, shard)| shard.importing = TimelineImportState::Importing);
+
+            match inserted {
+                true => {
+                    tracing::info!(%tenant_id, %timeline_id, "Inserted timeline import");
+                }
+                false => {
+                    tracing::info!(%tenant_id, %timeline_id, "Timeline import entry already present");
+                }
+            }
+
+            None
+        } else if safekeepers {
+            // Note that we do not support creating the timeline on the safekeepers
+            // for imported timelines. The `start_lsn` of the timeline is not known
+            // until the import finshes.
+            // https://github.com/neondatabase/neon/issues/11569
             let res = self
-                .tenant_timeline_create_safekeepers(tenant_id, &timeline_info, create_mode)
+                .tenant_timeline_create_safekeepers(tenant_id, &timeline_info)
                 .instrument(tracing::info_span!("timeline_create_safekeepers", %tenant_id, timeline_id=%timeline_info.timeline_id))
                 .await?;
             Some(res)
@@ -3749,8 +3901,179 @@ impl Service {
 
         Ok(TimelineCreateResponseStorcon {
             timeline_info,
-            safekeepers,
+            safekeepers: selected_safekeepers,
         })
+    }
+
+    pub(crate) async fn handle_timeline_shard_import_progress_upcall(
+        self: &Arc<Self>,
+        req: PutTimelineImportStatusRequest,
+    ) -> Result<(), ApiError> {
+        let res = self
+            .persistence
+            .update_timeline_import(req.tenant_shard_id, req.timeline_id, req.status)
+            .await;
+        let timeline_import = match res {
+            Ok(Ok(Some(timeline_import))) => timeline_import,
+            Ok(Ok(None)) => {
+                // Idempotency: we've already seen and handled this update.
+                return Ok(());
+            }
+            Ok(Err(logical_err)) => {
+                return Err(logical_err.into());
+            }
+            Err(db_err) => {
+                return Err(db_err.into());
+            }
+        };
+
+        tracing::info!(
+            tenant_id=%req.tenant_shard_id.tenant_id,
+            timeline_id=%req.timeline_id,
+            shard_id=%req.tenant_shard_id.shard_slug(),
+            "Updated timeline import status to: {timeline_import:?}");
+
+        if timeline_import.is_complete() {
+            tokio::task::spawn({
+                let this = self.clone();
+                async move { this.finalize_timeline_import(timeline_import).await }
+            });
+        }
+
+        Ok(())
+    }
+
+    #[instrument(skip_all, fields(
+        tenant_id=%import.tenant_id,
+        shard_id=%import.timeline_id,
+    ))]
+    async fn finalize_timeline_import(
+        self: &Arc<Self>,
+        import: TimelineImport,
+    ) -> anyhow::Result<()> {
+        tracing::info!("Finalizing timeline import");
+
+        pausable_failpoint!("timeline-import-pre-cplane-notification");
+
+        let import_failed = import.completion_error().is_some();
+
+        if !import_failed {
+            loop {
+                if self.cancel.is_cancelled() {
+                    anyhow::bail!("Shut down requested while finalizing import");
+                }
+
+                let active = self.timeline_active_on_all_shards(&import).await?;
+
+                match active {
+                    true => {
+                        tracing::info!("Timeline became active on all shards");
+                        break;
+                    }
+                    false => {
+                        tracing::info!("Timeline not active on all shards yet");
+
+                        tokio::select! {
+                            _ = self.cancel.cancelled() => {
+                                anyhow::bail!("Shut down requested while finalizing import");
+                            },
+                            _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                        };
+                    }
+                }
+            }
+        }
+
+        tracing::info!(%import_failed, "Notifying cplane of import completion");
+
+        let client = UpcallClient::new(self.get_config(), self.cancel.child_token());
+        client.notify_import_complete(&import).await?;
+
+        if let Err(err) = self
+            .persistence
+            .delete_timeline_import(import.tenant_id, import.timeline_id)
+            .await
+        {
+            tracing::warn!("Failed to delete timeline import entry from database: {err}");
+        }
+
+        self.inner
+            .write()
+            .unwrap()
+            .tenants
+            .range_mut(TenantShardId::tenant_range(import.tenant_id))
+            .for_each(|(_id, shard)| shard.importing = TimelineImportState::Idle);
+
+        // TODO(vlad): Timeline creations in import mode do not return a correct initdb lsn,
+        // so we can't create the timeline on the safekeepers. Fix by moving creation here.
+        // https://github.com/neondatabase/neon/issues/11569
+        tracing::info!(%import_failed, "Timeline import complete");
+
+        Ok(())
+    }
+
+    async fn finalize_timeline_imports(self: &Arc<Self>, imports: Vec<TimelineImport>) {
+        futures::future::join_all(
+            imports
+                .into_iter()
+                .map(|import| self.finalize_timeline_import(import)),
+        )
+        .await;
+    }
+
+    async fn timeline_active_on_all_shards(
+        self: &Arc<Self>,
+        import: &TimelineImport,
+    ) -> anyhow::Result<bool> {
+        let targets = {
+            let locked = self.inner.read().unwrap();
+            let mut targets = Vec::new();
+
+            for (tenant_shard_id, shard) in locked
+                .tenants
+                .range(TenantShardId::tenant_range(import.tenant_id))
+            {
+                if !import
+                    .shard_statuses
+                    .0
+                    .contains_key(&tenant_shard_id.to_index())
+                {
+                    anyhow::bail!("Shard layout change detected on completion");
+                }
+
+                if let Some(node_id) = shard.intent.get_attached() {
+                    let node = locked
+                        .nodes
+                        .get(node_id)
+                        .expect("Pageservers may not be deleted while referenced");
+                    targets.push((*tenant_shard_id, node.clone()));
+                } else {
+                    return Ok(false);
+                }
+            }
+
+            targets
+        };
+
+        let results = self
+            .tenant_for_shards_api(
+                targets,
+                |tenant_shard_id, client| async move {
+                    client
+                        .timeline_detail(tenant_shard_id, import.timeline_id)
+                        .await
+                },
+                1,
+                1,
+                SHORT_RECONCILE_TIMEOUT,
+                &self.cancel,
+            )
+            .await;
+
+        Ok(results.into_iter().all(|res| match res {
+            Ok(info) => info.state == TimelineState::Active,
+            Err(_) => false,
+        }))
     }
 
     pub(crate) async fn tenant_timeline_archival_config(
@@ -4664,6 +4987,7 @@ impl Service {
                 is_reconciling: shard.reconciler.is_some(),
                 is_pending_compute_notification: shard.pending_compute_notification,
                 is_splitting: matches!(shard.splitting, SplitState::Splitting),
+                is_importing: shard.importing == TimelineImportState::Importing,
                 scheduling_policy: shard.get_scheduling_policy(),
                 preferred_az_id: shard.preferred_az().map(ToString::to_string),
             })
@@ -4898,7 +5222,7 @@ impl Service {
                     1,
                     10,
                     Duration::from_secs(5),
-                    &self.cancel,
+                    &self.reconcilers_cancel,
                 )
                 .await
             {
@@ -5149,6 +5473,32 @@ impl Service {
         )
         .await;
 
+        let _gate = self
+            .reconcilers_gate
+            .enter()
+            .map_err(|_| ApiError::ShuttingDown)?;
+
+        // Timeline imports on the pageserver side can't handle shard-splits.
+        // If the tenant is importing a timeline, dont't shard split it.
+        match self
+            .persistence
+            .is_tenant_importing_timeline(tenant_id)
+            .await
+        {
+            Ok(importing) => {
+                if importing {
+                    return Err(ApiError::Conflict(
+                        "Cannot shard split during timeline import".to_string(),
+                    ));
+                }
+            }
+            Err(err) => {
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                    "Failed to check for running imports: {err}"
+                )));
+            }
+        }
+
         let new_shard_count = ShardCount::new(split_req.new_shard_count);
         let new_stripe_size = split_req.new_stripe_size;
 
@@ -5176,6 +5526,7 @@ impl Service {
                         new_shard_count,
                         new_stripe_size,
                         _tenant_lock,
+                        _gate,
                     })
                     // Ignore error sending: that just means we're shutting down: aborts are ephemeral so it's fine to drop it.
                     .ok();
@@ -5515,7 +5866,10 @@ impl Service {
                 "failpoint".to_string()
             )));
 
-            failpoint_support::sleep_millis_async!("shard-split-post-remote-sleep", &self.cancel);
+            failpoint_support::sleep_millis_async!(
+                "shard-split-post-remote-sleep",
+                &self.reconcilers_cancel
+            );
 
             tracing::info!(
                 "Split {} into {}",
@@ -5573,7 +5927,7 @@ impl Service {
                         stripe_size,
                         preferred_az: preferred_az_id.as_ref().map(Cow::Borrowed),
                     },
-                    &self.cancel,
+                    &self.reconcilers_cancel,
                 )
                 .await
             {
@@ -6014,9 +6368,21 @@ impl Service {
             .max()
             .expect("We already validated >0 shards");
 
-        // FIXME: we have no way to recover the shard stripe size from contents of remote storage: this will
-        // only work if they were using the default stripe size.
-        let stripe_size = ShardParameters::DEFAULT_STRIPE_SIZE;
+        // Find the tenant's stripe size. This wasn't always persisted in the tenant manifest, so
+        // fall back to the original default stripe size of 32768 (256 MB) if it's not specified.
+        const ORIGINAL_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(32768);
+        let stripe_size = scan_result
+            .shards
+            .iter()
+            .find(|s| s.tenant_shard_id.shard_count == shard_count && s.generation == generation)
+            .expect("we validated >0 shards above")
+            .stripe_size
+            .unwrap_or_else(|| {
+                if shard_count.count() > 1 {
+                    warn!("unknown stripe size, assuming {ORIGINAL_STRIPE_SIZE}");
+                }
+                ORIGINAL_STRIPE_SIZE
+            });
 
         let (response, waiters) = self
             .do_tenant_create(TenantCreateRequest {
@@ -6242,6 +6608,10 @@ impl Service {
             .metrics_group
             .storage_controller_pageserver_nodes
             .set(locked.nodes.len() as i64);
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_https_pageserver_nodes
+            .set(locked.nodes.values().filter(|n| n.has_https_port()).count() as i64);
 
         locked.scheduler.node_remove(node_id);
 
@@ -6333,6 +6703,10 @@ impl Service {
                     .metrics_group
                     .storage_controller_pageserver_nodes
                     .set(nodes.len() as i64);
+                metrics::METRICS_REGISTRY
+                    .metrics_group
+                    .storage_controller_https_pageserver_nodes
+                    .set(nodes.values().filter(|n| n.has_https_port()).count() as i64);
             }
         }
 
@@ -6557,6 +6931,10 @@ impl Service {
             .metrics_group
             .storage_controller_pageserver_nodes
             .set(locked.nodes.len() as i64);
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_https_pageserver_nodes
+            .set(locked.nodes.values().filter(|n| n.has_https_port()).count() as i64);
 
         match registration_status {
             RegistrationStatus::New => {
@@ -7270,7 +7648,7 @@ impl Service {
             }
 
             // Eventual consistency: if an earlier reconcile job failed, and the shard is still
-            // dirty, spawn another rone
+            // dirty, spawn another one
             if self
                 .maybe_reconcile_shard(shard, &pageservers, ReconcilerPriority::Normal)
                 .is_some()
@@ -7793,12 +8171,25 @@ impl Service {
             candidates.extend(size_candidates);
         }
 
-        // Filter out tenants in a prohibiting scheduling mode.
+        // Filter out tenants in a prohibiting scheduling modes
+        // and tenants with an ongoing import.
+        //
+        // Note that the import check here is oportunistic. An import might start
+        // after the check before we actually update [`TenantShard::splitting`].
+        // [`Self::tenant_shard_split`] checks the database whilst holding the exclusive
+        // tenant lock. Imports might take a long time, so the check here allows us
+        // to split something else instead of trying the same shard over and over.
         {
             let state = self.inner.read().unwrap();
             candidates.retain(|i| {
-                let policy = state.tenants.get(&i.id).map(|s| s.get_scheduling_policy());
-                policy == Some(ShardSchedulingPolicy::Active)
+                let shard = state.tenants.get(&i.id);
+                match shard {
+                    Some(t) => {
+                        t.get_scheduling_policy() == ShardSchedulingPolicy::Active
+                            && t.importing == TimelineImportState::Idle
+                    }
+                    None => false,
+                }
             });
         }
 
@@ -7829,7 +8220,7 @@ impl Service {
         // old, persisted stripe size.
         let new_stripe_size = match candidate.id.shard_count.count() {
             0 => panic!("invalid shard count 0"),
-            1 => Some(ShardParameters::DEFAULT_STRIPE_SIZE),
+            1 => Some(DEFAULT_STRIPE_SIZE),
             2.. => None,
         };
 
@@ -8629,14 +9020,61 @@ impl Service {
         self.inner.read().unwrap().get_leadership_status()
     }
 
-    pub(crate) async fn step_down(&self) -> GlobalObservedState {
+    /// Handler for step down requests
+    ///
+    /// Step down runs in separate task since once it's called it should
+    /// be driven to completion. Subsequent requests will wait on the same
+    /// step down task.
+    pub(crate) async fn step_down(self: &Arc<Self>) -> GlobalObservedState {
+        let handle = self.step_down_barrier.get_or_init(|| {
+            let step_down_self = self.clone();
+            let (tx, rx) = tokio::sync::watch::channel::<Option<GlobalObservedState>>(None);
+            tokio::spawn(async move {
+                let state = step_down_self.step_down_task().await;
+                tx.send(Some(state))
+                    .expect("Task Arc<Service> keeps receiver alive");
+            });
+
+            rx
+        });
+
+        handle
+            .clone()
+            .wait_for(|observed_state| observed_state.is_some())
+            .await
+            .expect("Task Arc<Service> keeps sender alive")
+            .deref()
+            .clone()
+            .expect("Checked above")
+    }
+
+    async fn step_down_task(&self) -> GlobalObservedState {
         tracing::info!("Received step down request from peer");
         failpoint_support::sleep_millis_async!("sleep-on-step-down-handling");
 
         self.inner.write().unwrap().step_down();
-        // TODO: would it make sense to have a time-out for this?
-        self.stop_reconciliations(StopReconciliationsReason::SteppingDown)
-            .await;
+
+        let stop_reconciliations =
+            self.stop_reconciliations(StopReconciliationsReason::SteppingDown);
+        let mut stop_reconciliations = std::pin::pin!(stop_reconciliations);
+
+        let started_at = Instant::now();
+
+        // Wait for reconciliations to stop and warn if that's taking a long time
+        loop {
+            tokio::select! {
+                _ = &mut stop_reconciliations => {
+                    tracing::info!("Reconciliations stopped, proceeding with step down");
+                    break;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                    tracing::warn!(
+                        elapsed_sec=%started_at.elapsed().as_secs(),
+                        "Stopping reconciliations during step down is taking too long"
+                    );
+                }
+            }
+        }
 
         let mut global_observed = GlobalObservedState::default();
         let locked = self.inner.read().unwrap();

@@ -32,7 +32,7 @@ use crate::metrics::{
     WAL_RECEIVERS,
 };
 use crate::safekeeper::{AcceptorProposerMessage, ProposerAcceptorMessage};
-use crate::timeline::WalResidentTimeline;
+use crate::timeline::{TimelineError, WalResidentTimeline};
 
 const DEFAULT_FEEDBACK_CAPACITY: usize = 8;
 
@@ -94,10 +94,10 @@ impl WalReceivers {
 
     /// Get reference to locked slot contents. Slot must exist (registered
     /// earlier).
-    fn get_slot<'a>(
-        self: &'a Arc<WalReceivers>,
+    fn get_slot(
+        self: &Arc<WalReceivers>,
         id: WalReceiverId,
-    ) -> MappedMutexGuard<'a, WalReceiverState> {
+    ) -> MappedMutexGuard<'_, WalReceiverState> {
         MutexGuard::map(self.mutex.lock(), |locked| {
             locked.slots[id]
                 .as_mut()
@@ -357,9 +357,14 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'_, IO> {
                         .await
                         .context("create timeline")?
                 } else {
-                    self.global_timelines
-                        .get(self.ttid)
-                        .context("get timeline")?
+                    let timeline_res = self.global_timelines.get(self.ttid);
+                    match timeline_res {
+                        Ok(tl) => tl,
+                        Err(TimelineError::NotFound(_)) => {
+                            return Err(CopyStreamHandlerEnd::TimelineNoCreate);
+                        }
+                        other => other.context("get_timeline")?,
+                    }
                 };
                 tli.wal_residence_guard().await?
             }

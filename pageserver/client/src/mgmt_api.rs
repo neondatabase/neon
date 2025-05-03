@@ -86,17 +86,17 @@ impl Client {
         resp.json().await.map_err(Error::ReceiveBody)
     }
 
-    /// Get an arbitrary path and returning a streaming Response.  This function is suitable
-    /// for pass-through/proxy use cases where we don't care what the response content looks
-    /// like.
+    /// Send an HTTP request to an arbitrary path with a desired HTTP method and returning a streaming
+    /// Response.  This function is suitable for pass-through/proxy use cases where we don't care
+    /// what the response content looks like.
     ///
     /// Use/add one of the properly typed methods below if you know aren't proxying, and
     /// know what kind of response you expect.
-    pub async fn get_raw(&self, path: String) -> Result<reqwest::Response> {
+    pub async fn op_raw(&self, method: Method, path: String) -> Result<reqwest::Response> {
         debug_assert!(path.starts_with('/'));
         let uri = format!("{}{}", self.mgmt_api_endpoint, path);
 
-        let mut req = self.client.request(Method::GET, uri);
+        let mut req = self.client.request(method, uri);
         if let Some(value) = &self.authorization_header {
             req = req.header(reqwest::header::AUTHORIZATION, value);
         }
@@ -417,6 +417,23 @@ impl Client {
             Err(e) => Err(e),
             Ok(response) => Ok(response.status()),
         }
+    }
+
+    pub async fn timeline_detail(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Result<TimelineInfo> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}",
+            self.mgmt_api_endpoint
+        );
+
+        self.request(Method::GET, &uri, ())
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
     }
 
     pub async fn timeline_archival_config(

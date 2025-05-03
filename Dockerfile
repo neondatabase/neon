@@ -89,6 +89,7 @@ RUN set -e \
       --bin storage_broker  \
       --bin storage_controller  \
       --bin proxy  \
+      --bin endpoint_storage \
       --bin neon_local \
       --bin storage_scrubber \
       --locked --release
@@ -121,6 +122,7 @@ COPY --from=build --chown=neon:neon /home/nonroot/target/release/safekeeper     
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_broker      /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_controller  /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy               /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/endpoint_storage    /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/neon_local          /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_scrubber    /usr/local/bin
 

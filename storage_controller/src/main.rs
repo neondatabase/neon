@@ -19,7 +19,8 @@ use storage_controller::service::chaos_injector::ChaosInjector;
 use storage_controller::service::{
     Config, HEARTBEAT_INTERVAL_DEFAULT, LONG_RECONCILE_THRESHOLD_DEFAULT,
     MAX_OFFLINE_INTERVAL_DEFAULT, MAX_WARMING_UP_INTERVAL_DEFAULT,
-    PRIORITY_RECONCILER_CONCURRENCY_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT, Service,
+    PRIORITY_RECONCILER_CONCURRENCY_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT,
+    SAFEKEEPER_RECONCILER_CONCURRENCY_DEFAULT, Service,
 };
 use tokio::signal::unix::SignalKind;
 use tokio_util::sync::CancellationToken;
@@ -86,10 +87,6 @@ struct Cli {
     #[arg(long)]
     peer_jwt_token: Option<String>,
 
-    /// URL to control plane compute notification endpoint
-    #[arg(long)]
-    compute_hook_url: Option<String>,
-
     /// URL to control plane storage API prefix
     #[arg(long)]
     control_plane_url: Option<String>,
@@ -115,19 +112,17 @@ struct Cli {
     #[arg(long)]
     split_threshold: Option<u64>,
 
-    /// Maximum number of shards during autosplits. 0 disables autosplits.
-    // TODO: defaults to 8 for backwards compatibility, should default to 255.
-    #[arg(long, default_value = "8")]
+    /// Maximum number of shards during autosplits. 0 disables autosplits. Defaults
+    /// to 16 as a safety to avoid too many shards by accident.
+    #[arg(long, default_value = "16")]
     max_split_shards: u8,
 
     /// Size threshold for initial shard splits of unsharded tenants. 0 disables initial splits.
-    // TODO: defaults to 64 GB for backwards compatibility. Should default to None.
-    #[arg(long, default_value = "68719476736")]
-    initial_split_threshold: u64,
+    #[arg(long)]
+    initial_split_threshold: Option<u64>,
 
-    /// Number of target shards for initial splits. 0 or 1 disables initial splits.
-    // TODO: defaults to 8 for backwards compatibility. Should default to 2.
-    #[arg(long, default_value = "8")]
+    /// Number of target shards for initial splits. 0 or 1 disables initial splits. Defaults to 2.
+    #[arg(long, default_value = "2")]
     initial_split_shards: u8,
 
     /// Maximum number of normal-priority reconcilers that may run in parallel
@@ -137,6 +132,10 @@ struct Cli {
     /// Maximum number of high-priority reconcilers that may run in parallel
     #[arg(long)]
     priority_reconciler_concurrency: Option<usize>,
+
+    /// Maximum number of safekeeper reconciliations that may run in parallel (per safekeeper)
+    #[arg(long)]
+    safekeeper_reconciler_concurrency: Option<usize>,
 
     /// Tenant API rate limit, as requests per second per tenant.
     #[arg(long, default_value = "10")]
@@ -202,7 +201,7 @@ struct Cli {
     ssl_cert_reload_period: humantime::Duration,
     /// Trusted root CA certificates to use in https APIs.
     #[arg(long)]
-    ssl_ca_file: Option<PathBuf>,
+    ssl_ca_file: Option<Utf8PathBuf>,
 
     /// Neon local specific flag. When set, ignore [`Cli::control_plane_url`] and deliver
     /// the compute notification directly (instead of via control plane).
@@ -285,10 +284,8 @@ impl Secrets {
     fn load_secret(cli: &Option<String>, env_name: &str) -> Option<String> {
         if let Some(v) = cli {
             Some(v.clone())
-        } else if let Ok(v) = std::env::var(env_name) {
-            Some(v)
         } else {
-            None
+            std::env::var(env_name).ok()
         }
     }
 }
@@ -364,13 +361,11 @@ async fn async_main() -> anyhow::Result<()> {
                 "Insecure config!  One or more secrets is not set.  This is only permitted in `--dev` mode"
             );
         }
-        StrictMode::Strict
-            if args.compute_hook_url.is_none() && args.control_plane_url.is_none() =>
-        {
+        StrictMode::Strict if args.control_plane_url.is_none() => {
             // Production systems should always have a control plane URL set, to prevent falling
             // back to trying to use neon_local.
             anyhow::bail!(
-                "neither `--compute-hook-url` nor `--control-plane-url` are set: this is only permitted in `--dev` mode"
+                "`--control-plane-url` is not set: this is only permitted in `--dev` mode"
             );
         }
         StrictMode::Strict if args.use_local_compute_notifications => {
@@ -398,7 +393,6 @@ async fn async_main() -> anyhow::Result<()> {
         safekeeper_jwt_token: secrets.safekeeper_jwt_token,
         control_plane_jwt_token: secrets.control_plane_jwt_token,
         peer_jwt_token: secrets.peer_jwt_token,
-        compute_hook_url: args.compute_hook_url,
         control_plane_url: args.control_plane_url,
         max_offline_interval: args
             .max_offline_interval
@@ -414,10 +408,13 @@ async fn async_main() -> anyhow::Result<()> {
         priority_reconciler_concurrency: args
             .priority_reconciler_concurrency
             .unwrap_or(PRIORITY_RECONCILER_CONCURRENCY_DEFAULT),
+        safekeeper_reconciler_concurrency: args
+            .safekeeper_reconciler_concurrency
+            .unwrap_or(SAFEKEEPER_RECONCILER_CONCURRENCY_DEFAULT),
         tenant_rate_limit: args.tenant_rate_limit,
         split_threshold: args.split_threshold,
         max_split_shards: args.max_split_shards,
-        initial_split_threshold: Some(args.initial_split_threshold),
+        initial_split_threshold: args.initial_split_threshold,
         initial_split_shards: args.initial_split_shards,
         neon_local_repo_dir: args.neon_local_repo_dir,
         max_secondary_lag_bytes: args.max_secondary_lag_bytes,
@@ -476,6 +473,7 @@ async fn async_main() -> anyhow::Result<()> {
             let https_listener = tcp_listener::bind(https_addr)?;
 
             let resolver = ReloadingCertificateResolver::new(
+                "main",
                 &args.ssl_key_file,
                 &args.ssl_cert_file,
                 *args.ssl_cert_reload_period,

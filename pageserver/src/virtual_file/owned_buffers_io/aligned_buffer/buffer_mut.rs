@@ -25,8 +25,8 @@ impl<const A: usize> AlignedBufferMut<ConstAlign<A>> {
     /// * `align` must be a power of two,
     ///
     /// * `capacity`, when rounded up to the nearest multiple of `align`,
-    ///    must not overflow isize (i.e., the rounded value must be
-    ///    less than or equal to `isize::MAX`).
+    ///   must not overflow isize (i.e., the rounded value must be
+    ///   less than or equal to `isize::MAX`).
     pub fn with_capacity(capacity: usize) -> Self {
         AlignedBufferMut {
             raw: RawAlignedBuffer::with_capacity(capacity),
@@ -279,6 +279,17 @@ unsafe impl<A: Alignment> tokio_epoll_uring::IoBufMut for AlignedBufferMut<A> {
                 self.set_len(init_len);
             }
         }
+    }
+}
+
+impl<A: Alignment> std::io::Write for AlignedBufferMut<A> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 

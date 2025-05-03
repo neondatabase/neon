@@ -14,11 +14,12 @@ use http_utils::json::{json_request, json_response};
 use http_utils::request::{ensure_no_body, parse_query_param, parse_request_param};
 use http_utils::{RequestExt, RouterBuilder};
 use hyper::{Body, Request, Response, StatusCode};
+use pem::Pem;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use safekeeper_api::models::{
-    AcceptorStateStatus, PullTimelineRequest, SafekeeperStatus, SkTimelineInfo, TermSwitchApiEntry,
-    TimelineCopyRequest, TimelineCreateRequest, TimelineDeleteResult, TimelineStatus,
-    TimelineTermBumpRequest,
+    AcceptorStateStatus, PullTimelineRequest, SafekeeperStatus, SkTimelineInfo, TenantDeleteResult,
+    TermSwitchApiEntry, TimelineCopyRequest, TimelineCreateRequest, TimelineDeleteResult,
+    TimelineStatus, TimelineTermBumpRequest,
 };
 use safekeeper_api::{ServerInfo, membership, models};
 use storage_broker::proto::{SafekeeperTimelineInfo, TenantTimelineId as ProtoTenantTimelineId};
@@ -83,13 +84,11 @@ async fn tenant_delete_handler(mut request: Request<Body>) -> Result<Response<Bo
         .delete_all_for_tenant(&tenant_id, action)
         .await
         .map_err(ApiError::InternalServerError)?;
-    json_response(
-        StatusCode::OK,
-        delete_info
-            .iter()
-            .map(|(ttid, resp)| (format!("{}", ttid.timeline_id), *resp))
-            .collect::<HashMap<String, TimelineDeleteResult>>(),
-    )
+    let response_body: TenantDeleteResult = delete_info
+        .iter()
+        .map(|(ttid, resp)| (format!("{}", ttid.timeline_id), *resp))
+        .collect::<HashMap<String, TimelineDeleteResult>>();
+    json_response(StatusCode::OK, response_body)
 }
 
 async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -232,14 +231,20 @@ async fn timeline_pull_handler(mut request: Request<Body>) -> Result<Response<Bo
     let conf = get_conf(&request);
     let global_timelines = get_global_timelines(&request);
 
-    let resp = pull_timeline::handle_request(
-        data,
-        conf.sk_auth_token.clone(),
-        conf.ssl_ca_certs.clone(),
-        global_timelines,
-    )
-    .await
-    .map_err(ApiError::InternalServerError)?;
+    let ca_certs = conf
+        .ssl_ca_certs
+        .iter()
+        .map(Pem::contents)
+        .map(reqwest::Certificate::from_der)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            ApiError::InternalServerError(anyhow::anyhow!("failed to parse CA certs: {e}"))
+        })?;
+
+    let resp =
+        pull_timeline::handle_request(data, conf.sk_auth_token.clone(), ca_certs, global_timelines)
+            .await
+            .map_err(ApiError::InternalServerError)?;
     json_response(StatusCode::OK, resp)
 }
 
@@ -538,6 +543,7 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
         peer_horizon_lsn: sk_info.peer_horizon_lsn.0,
         safekeeper_connstr: sk_info.safekeeper_connstr.unwrap_or_else(|| "".to_owned()),
         http_connstr: sk_info.http_connstr.unwrap_or_else(|| "".to_owned()),
+        https_connstr: sk_info.https_connstr,
         backup_lsn: sk_info.backup_lsn.0,
         local_start_lsn: sk_info.local_start_lsn.0,
         availability_zone: None,

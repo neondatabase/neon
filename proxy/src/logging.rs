@@ -132,11 +132,10 @@ impl Drop for LoggingGuard {
     }
 }
 
-// TODO: make JSON the default
 #[derive(Copy, Clone, PartialEq, Eq, Default, Debug)]
 enum LogFormat {
+    Text,
     #[default]
-    Text = 1,
     Json,
 }
 
@@ -1032,7 +1031,6 @@ impl<const F: usize> serde::ser::Serialize for ExtractedSpanFields<'_, F> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::marker::PhantomData;
     use std::sync::{Arc, Mutex, MutexGuard};

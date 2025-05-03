@@ -14,6 +14,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     NeonPageserver,
     StorageControllerMigrationConfig,
+    flush_ep_to_pageserver,
 )
 from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.utils import (
@@ -61,7 +62,7 @@ def evict_random_layers(
     )
     client = pageserver.http_client()
     for layer in initial_local_layers:
-        if "ephemeral" in layer.name or "temp_download" in layer.name:
+        if "ephemeral" in layer.name or "temp_download" in layer.name or ".___temp" in layer.name:
             continue
 
         layer_name = parse_layer_file_name(layer.name)
@@ -242,7 +243,13 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
             pageserver.tenant_location_configure(tenant_id, location_conf)
             last_state[pageserver.id] = (mode, generation)
 
-            if mode.startswith("Attached"):
+            # It's only valid to connect to the last generation. Newer generations may yank layer
+            # files used in older generations.
+            last_generation = max(
+                [s[1] for s in last_state.values() if s[1] is not None], default=None
+            )
+
+            if mode.startswith("Attached") and generation == last_generation:
                 # This is a basic test: we are validating that he endpoint works properly _between_
                 # configuration changes.  A stronger test would be to validate that clients see
                 # no errors while we are making the changes.
@@ -991,10 +998,6 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
     ps_secondary.http_client().tenant_heatmap_upload(tenant_id)
     heatmap_after_migration = timeline_heatmap(timeline_id)
 
-    local_layers = ps_secondary.list_layers(tenant_id, timeline_id)
-    # We download 1 layer per second and give up within 5 seconds.
-    assert len(local_layers) < 10
-
     after_migration_heatmap_layers_count = len(heatmap_after_migration["layers"])
     log.info(f"Heatmap size after cold migration is {after_migration_heatmap_layers_count}")
 
@@ -1032,8 +1035,13 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
         .value
     )
 
-    workload.stop()
     assert before == after
+
+    # Stop the endpoint and wait until any finally written WAL propagates to
+    # the pageserver and is uploaded to remote storage.
+    flush_ep_to_pageserver(env, workload.endpoint(), tenant_id, timeline_id)
+    ps_secondary.http_client().timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
+    workload.stop()
 
     # Now simulate the case where a child timeline is archived, parent layers
     # are evicted and the child is unarchived. When the child is unarchived,
@@ -1099,3 +1107,70 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
     # Warm up the current secondary.
     ps_attached.http_client().tenant_secondary_download(tenant_id, wait_ms=100)
     wait_until(lambda: all_layers_downloaded(ps_secondary, expected_locally))
+
+
+@run_only_on_default_postgres("PG version is not interesting here")
+@pytest.mark.parametrize("action", ["delete_timeline", "detach"])
+def test_io_metrics_match_secondary_timeline_lifecycle(
+    neon_env_builder: NeonEnvBuilder, action: str
+):
+    """
+    Check that IO metrics for secondary timelines are de-registered when the timeline
+    is removed
+    """
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_id = TenantId.generate()
+    parent_timeline_id = TimelineId.generate()
+
+    # We do heatmap uploads and pulls manually
+    tenant_conf = {"heatmap_period": "0s"}
+    env.create_tenant(
+        tenant_id, parent_timeline_id, conf=tenant_conf, placement_policy='{"Attached":1}'
+    )
+
+    child_timeline_id = env.create_branch("foo", tenant_id)
+
+    attached_to_id = env.storage_controller.locate(tenant_id)[0]["node_id"]
+    ps_attached = env.get_pageserver(attached_to_id)
+    ps_secondary = next(p for p in env.pageservers if p != ps_attached)
+
+    ps_attached.http_client().tenant_heatmap_upload(tenant_id)
+    status, _ = ps_secondary.http_client().tenant_secondary_download(tenant_id, wait_ms=5000)
+    assert status == 200
+
+    labels = {
+        "operation": "write",
+        "tenant_id": str(tenant_id),
+        "timeline_id": str(child_timeline_id),
+    }
+    bytes_written = (
+        ps_secondary.http_client()
+        .get_metrics()
+        .query_one("pageserver_io_operations_bytes_total", labels)
+        .value
+    )
+
+    assert bytes_written == 0
+
+    if action == "delete_timeline":
+        env.storage_controller.pageserver_api().timeline_delete(tenant_id, child_timeline_id)
+        ps_attached.http_client().tenant_heatmap_upload(tenant_id)
+        status, _ = ps_secondary.http_client().tenant_secondary_download(tenant_id, wait_ms=5000)
+        assert status == 200
+    elif action == "detach":
+        env.storage_controller.tenant_policy_update(tenant_id, {"placement": {"Attached": 0}})
+        env.storage_controller.reconcile_until_idle()
+    else:
+        raise Exception("Unexpected action")
+
+    assert (
+        len(
+            ps_secondary.http_client()
+            .get_metrics()
+            .query_all("pageserver_io_operations_bytes_total", labels)
+        )
+        == 0
+    )

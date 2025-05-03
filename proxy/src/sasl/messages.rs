@@ -51,7 +51,6 @@ impl<'a> ServerMessage<&'a str> {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

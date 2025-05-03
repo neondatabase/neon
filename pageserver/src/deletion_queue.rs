@@ -585,7 +585,7 @@ impl DeletionQueue {
     /// we don't spawn those inside new() so that the caller can use their runtime/spans of choice.
     pub fn new<C>(
         remote_storage: GenericRemoteStorage,
-        controller_upcall_client: Option<C>,
+        controller_upcall_client: C,
         conf: &'static PageServerConf,
     ) -> (Self, DeletionQueueWorkers<C>)
     where
@@ -701,7 +701,7 @@ mod test {
         async fn restart(&mut self) {
             let (deletion_queue, workers) = DeletionQueue::new(
                 self.storage.clone(),
-                Some(self.mock_control_plane.clone()),
+                self.mock_control_plane.clone(),
                 self.harness.conf,
             );
 
@@ -787,6 +787,15 @@ mod test {
 
             Ok(result)
         }
+
+        async fn put_timeline_import_status(
+            &self,
+            _tenant_shard_id: TenantShardId,
+            _timeline_id: TimelineId,
+            _status: pageserver_api::models::ShardImportStatus,
+        ) -> Result<(), RetryForeverError> {
+            unimplemented!()
+        }
     }
 
     async fn setup(test_name: &str) -> anyhow::Result<TestSetup> {
@@ -812,11 +821,8 @@ mod test {
 
         let mock_control_plane = MockStorageController::new();
 
-        let (deletion_queue, worker) = DeletionQueue::new(
-            storage.clone(),
-            Some(mock_control_plane.clone()),
-            harness.conf,
-        );
+        let (deletion_queue, worker) =
+            DeletionQueue::new(storage.clone(), mock_control_plane.clone(), harness.conf);
 
         let worker_join = worker.spawn_with(&tokio::runtime::Handle::current());
 

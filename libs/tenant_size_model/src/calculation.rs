@@ -77,7 +77,9 @@ impl StorageModel {
         }
 
         SizeResult {
-            total_size,
+            // If total_size is 0, it means that the tenant has all timelines offloaded; we need to report 1
+            // here so that the data point shows up in the s3 files.
+            total_size: total_size.max(1),
             segments: segment_results,
         }
     }

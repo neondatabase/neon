@@ -5,7 +5,6 @@
 #![deny(unsafe_code)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 use std::future::Future;
-use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, RawFd};
 use std::pin::Pin;
@@ -227,7 +226,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> MaybeWriteOnly<IO> {
         match self {
             MaybeWriteOnly::Full(framed) => framed.read_startup_message().await,
             MaybeWriteOnly::WriteOnly(_) => {
-                Err(io::Error::new(ErrorKind::Other, "reading from write only half").into())
+                Err(io::Error::other("reading from write only half").into())
             }
             MaybeWriteOnly::Broken => panic!("IO on invalid MaybeWriteOnly"),
         }
@@ -237,7 +236,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> MaybeWriteOnly<IO> {
         match self {
             MaybeWriteOnly::Full(framed) => framed.read_message().await,
             MaybeWriteOnly::WriteOnly(_) => {
-                Err(io::Error::new(ErrorKind::Other, "reading from write only half").into())
+                Err(io::Error::other("reading from write only half").into())
             }
             MaybeWriteOnly::Broken => panic!("IO on invalid MaybeWriteOnly"),
         }
@@ -842,6 +841,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
 
         let expected_end = match &end {
             ServerInitiated(_) | CopyDone | CopyFail | Terminate | EOF | Cancelled => true,
+            // The timeline doesn't exist and we have been requested to not auto-create it.
+            // Compute requests for timelines that haven't been created yet
+            // might reach us before the storcon request to create those timelines.
+            TimelineNoCreate => true,
             CopyStreamHandlerEnd::Disconnected(ConnectionError::Io(io_error))
                 if is_expected_io_error(io_error) =>
             {
@@ -975,7 +978,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for CopyDataWriter<'_, IO> {
             .write_message_noflush(&BeMessage::CopyData(buf))
             // write_message only writes to the buffer, so it can fail iff the
             // message is invaid, but CopyData can't be invalid.
-            .map_err(|_| io::Error::new(ErrorKind::Other, "failed to serialize CopyData"))?;
+            .map_err(|_| io::Error::other("failed to serialize CopyData"))?;
 
         Poll::Ready(Ok(buf.len()))
     }
@@ -1060,6 +1063,8 @@ pub enum CopyStreamHandlerEnd {
     Terminate,
     #[error("EOF on COPY stream")]
     EOF,
+    #[error("timeline not found, and allow_timeline_creation is false")]
+    TimelineNoCreate,
     /// The connection was lost
     #[error("connection error: {0}")]
     Disconnected(#[from] ConnectionError),

@@ -7,7 +7,6 @@ import traceback
 from typing import TYPE_CHECKING
 
 import psycopg2
-import psycopg2.extras
 import pytest
 from fixtures.benchmark_fixture import MetricReport
 from fixtures.common_types import Lsn
@@ -26,7 +25,11 @@ if TYPE_CHECKING:
 
 
 # Granularity of ~0.5 sec
-def measure_replication_lag(master, replica, timeout_sec=600):
+def measure_replication_lag(
+    master: psycopg2.extensions.cursor,
+    replica: psycopg2.extensions.cursor,
+    timeout_sec: int = 600,
+):
     start = time.time()
     master.execute("SELECT pg_current_wal_flush_lsn()")
     master_lsn = Lsn(master.fetchall()[0][0])
@@ -40,7 +43,7 @@ def measure_replication_lag(master, replica, timeout_sec=600):
     raise TimeoutError(f"Replication sync took more than {timeout_sec} sec")
 
 
-def check_pgbench_still_running(pgbench):
+def check_pgbench_still_running(pgbench: subprocess.Popen[str]):
     rc = pgbench.poll()
     if rc is not None:
         raise RuntimeError(f"Pgbench terminated early with return code {rc}")
@@ -61,6 +64,8 @@ def test_ro_replica_lag(
 
     project = neon_api.create_project(pg_version)
     project_id = project["project"]["id"]
+    log.info("Project ID: %s", project_id)
+    log.info("Primary endpoint ID: %s", project["endpoints"][0]["id"])
     neon_api.wait_for_operation_to_finish(project_id)
     error_occurred = False
     try:
@@ -76,6 +81,7 @@ def test_ro_replica_lag(
             endpoint_type="read_only",
             settings={"pg_settings": {"hot_standby_feedback": "on"}},
         )
+        log.info("Replica endpoint ID: %s", replica["endpoint"]["id"])
         replica_env = master_env.copy()
         replica_env["PGHOST"] = replica["endpoint"]["host"]
         neon_api.wait_for_operation_to_finish(project_id)
@@ -191,6 +197,8 @@ def test_replication_start_stop(
 
     project = neon_api.create_project(pg_version)
     project_id = project["project"]["id"]
+    log.info("Project ID: %s", project_id)
+    log.info("Primary endpoint ID: %s", project["endpoints"][0]["id"])
     neon_api.wait_for_operation_to_finish(project_id)
     try:
         branch_id = project["branch"]["id"]
@@ -200,15 +208,15 @@ def test_replication_start_stop(
         )
 
         replicas = []
-        for _ in range(num_replicas):
-            replicas.append(
-                neon_api.create_endpoint(
-                    project_id,
-                    branch_id,
-                    endpoint_type="read_only",
-                    settings={"pg_settings": {"hot_standby_feedback": "on"}},
-                )
+        for i in range(num_replicas):
+            replica = neon_api.create_endpoint(
+                project_id,
+                branch_id,
+                endpoint_type="read_only",
+                settings={"pg_settings": {"hot_standby_feedback": "on"}},
             )
+            log.info("Replica %d endpoint ID: %s", i + 1, replica["endpoint"]["id"])
+            replicas.append(replica)
             neon_api.wait_for_operation_to_finish(project_id)
 
         replica_connstr = [

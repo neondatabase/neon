@@ -421,9 +421,9 @@ impl InMemoryLayer {
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
-        let ctx = RequestContextBuilder::extend(ctx)
+        let ctx = RequestContextBuilder::from(ctx)
             .page_content_kind(PageContentKind::InMemoryLayer)
-            .build();
+            .attached_child();
 
         let inner = self.inner.read().await;
 
@@ -719,6 +719,8 @@ impl InMemoryLayer {
         ctx: &RequestContext,
         key_range: Option<Range<Key>>,
         l0_flush_global_state: &l0_flush::Inner,
+        gate: &utils::sync::gate::Gate,
+        cancel: CancellationToken,
     ) -> Result<Option<(PersistentLayerDesc, Utf8PathBuf)>> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this
         // layer is not writeable anymore, no one should be trying to acquire the
@@ -759,6 +761,8 @@ impl InMemoryLayer {
             self.tenant_shard_id,
             Key::MIN,
             self.start_lsn..end_lsn,
+            gate,
+            cancel,
             ctx,
         )
         .await?;

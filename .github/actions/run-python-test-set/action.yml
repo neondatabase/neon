@@ -53,7 +53,7 @@ inputs:
     description: 'benchmark durations JSON'
     required: false
     default: '{}'
-  aws-oicd-role-arn:
+  aws-oidc-role-arn:
     description: 'OIDC role arn to interract with S3'
     required: true
 
@@ -66,7 +66,7 @@ runs:
       with:
         name: neon-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build_type }}${{ inputs.sanitizers == 'enabled' && '-sanitized' || '' }}-artifact
         path: /tmp/neon
-        aws-oicd-role-arn: ${{ inputs.aws-oicd-role-arn }}
+        aws-oidc-role-arn: ${{ inputs.aws-oidc-role-arn }}
 
     - name: Download Neon binaries for the previous release
       if: inputs.build_type != 'remote'
@@ -75,7 +75,7 @@ runs:
         name: neon-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build_type }}-artifact
         path: /tmp/neon-previous
         prefix: latest
-        aws-oicd-role-arn: ${{ inputs.aws-oicd-role-arn }}
+        aws-oidc-role-arn: ${{ inputs.aws-oidc-role-arn }}
 
     - name: Download compatibility snapshot
       if: inputs.build_type != 'remote'
@@ -87,7 +87,7 @@ runs:
         # The lack of compatibility snapshot (for example, for the new Postgres version)
         # shouldn't fail the whole job. Only relevant test should fail.
         skip-if-does-not-exist: true
-        aws-oicd-role-arn: ${{ inputs.aws-oicd-role-arn }}
+        aws-oidc-role-arn: ${{ inputs.aws-oidc-role-arn }}
 
     - name: Checkout
       if: inputs.needs_postgres_source == 'true'
@@ -113,8 +113,6 @@ runs:
         TEST_OUTPUT: /tmp/test_output
         BUILD_TYPE: ${{ inputs.build_type }}
         COMPATIBILITY_SNAPSHOT_DIR: /tmp/compatibility_snapshot_pg${{ inputs.pg_version }}
-        ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE: contains(github.event.pull_request.labels.*.name, 'backward compatibility breakage')
-        ALLOW_FORWARD_COMPATIBILITY_BREAKAGE: contains(github.event.pull_request.labels.*.name, 'forward compatibility breakage')
         RERUN_FAILED: ${{ inputs.rerun_failed }}
         PG_VERSION: ${{ inputs.pg_version }}
         SANITIZERS: ${{ inputs.sanitizers }}
@@ -135,6 +133,7 @@ runs:
         fi
 
         PERF_REPORT_DIR="$(realpath test_runner/perf-report-local)"
+        echo "PERF_REPORT_DIR=${PERF_REPORT_DIR}" >> ${GITHUB_ENV}
         rm -rf $PERF_REPORT_DIR
 
         TEST_SELECTION="test_runner/${{ inputs.test_selection }}"
@@ -211,11 +210,12 @@ runs:
           --verbose \
           -rA $TEST_SELECTION $EXTRA_PARAMS
 
-        if [[ "${{ inputs.save_perf_report }}" == "true" ]]; then
-          export REPORT_FROM="$PERF_REPORT_DIR"
-          export REPORT_TO="$PLATFORM"
-          scripts/generate_and_push_perf_report.sh
-        fi
+    - name: Upload performance report
+      if: ${{ !cancelled() && inputs.save_perf_report == 'true' }}
+      shell: bash -euxo pipefail {0}
+      run: |
+        export REPORT_FROM="${PERF_REPORT_DIR}"
+        scripts/generate_and_push_perf_report.sh
 
     - name: Upload compatibility snapshot
       # Note, that we use `github.base_ref` which is a target branch for a PR
@@ -228,13 +228,13 @@ runs:
         # The lack of compatibility snapshot shouldn't fail the job
         # (for example if we didn't run the test for non build-and-test workflow)
         skip-if-does-not-exist: true
-        aws-oicd-role-arn: ${{ inputs.aws-oicd-role-arn }}
+        aws-oidc-role-arn: ${{ inputs.aws-oidc-role-arn }}
 
     - uses: aws-actions/configure-aws-credentials@v4
       if: ${{ !cancelled() }}
       with:
         aws-region: eu-central-1
-        role-to-assume: ${{ inputs.aws-oicd-role-arn }}
+        role-to-assume: ${{ inputs.aws-oidc-role-arn }}
         role-duration-seconds: 3600 # 1 hour should be more than enough to upload report
 
     - name: Upload test results
@@ -243,4 +243,4 @@ runs:
       with:
         report-dir: /tmp/test_output/allure/results
         unique-key: ${{ inputs.build_type }}-${{ inputs.pg_version }}-${{ runner.arch }}
-        aws-oicd-role-arn: ${{ inputs.aws-oicd-role-arn }}
+        aws-oidc-role-arn: ${{ inputs.aws-oidc-role-arn }}

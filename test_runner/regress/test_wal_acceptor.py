@@ -45,7 +45,7 @@ from fixtures.remote_storage import (
     s3_storage,
 )
 from fixtures.safekeeper.http import (
-    Configuration,
+    MembershipConfiguration,
     SafekeeperHttpClient,
     SafekeeperId,
     TimelineCreateRequest,
@@ -589,7 +589,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
     for sk in env.safekeepers:
         sk.start()
         cli = sk.http_client()
-        mconf = Configuration(generation=0, members=[], new_members=None)
+        mconf = MembershipConfiguration(generation=0, members=[], new_members=None)
         # set start_lsn to the beginning of the first segment to allow reading
         # WAL from there (could you intidb LSN as well).
         r = TimelineCreateRequest(
@@ -1948,7 +1948,7 @@ def test_membership_api(neon_env_builder: NeonEnvBuilder):
     sk_id_2 = SafekeeperId(11, "localhost", 5434)  # just a mock
 
     # Request to switch before timeline creation should fail.
-    init_conf = Configuration(generation=1, members=[sk_id_1], new_members=None)
+    init_conf = MembershipConfiguration(generation=1, members=[sk_id_1], new_members=None)
     with pytest.raises(requests.exceptions.HTTPError):
         http_cli.membership_switch(tenant_id, timeline_id, init_conf)
 
@@ -1960,7 +1960,7 @@ def test_membership_api(neon_env_builder: NeonEnvBuilder):
     http_cli.timeline_create(create_r)
 
     # Switch into some conf.
-    joint_conf = Configuration(generation=4, members=[sk_id_1], new_members=[sk_id_2])
+    joint_conf = MembershipConfiguration(generation=4, members=[sk_id_1], new_members=[sk_id_2])
     resp = http_cli.membership_switch(tenant_id, timeline_id, joint_conf)
     log.info(f"joint switch resp: {resp}")
     assert resp.previous_conf.generation == 1
@@ -1973,24 +1973,26 @@ def test_membership_api(neon_env_builder: NeonEnvBuilder):
     assert after_restart.generation == 4
 
     # Switch into non joint conf of which sk is not a member, must fail.
-    non_joint_not_member = Configuration(generation=5, members=[sk_id_2], new_members=None)
+    non_joint_not_member = MembershipConfiguration(
+        generation=5, members=[sk_id_2], new_members=None
+    )
     with pytest.raises(requests.exceptions.HTTPError):
         resp = http_cli.membership_switch(tenant_id, timeline_id, non_joint_not_member)
 
     # Switch into good non joint conf.
-    non_joint = Configuration(generation=6, members=[sk_id_1], new_members=None)
+    non_joint = MembershipConfiguration(generation=6, members=[sk_id_1], new_members=None)
     resp = http_cli.membership_switch(tenant_id, timeline_id, non_joint)
     log.info(f"non joint switch resp: {resp}")
     assert resp.previous_conf.generation == 4
     assert resp.current_conf.generation == 6
 
     # Switch request to lower conf should be rejected.
-    lower_conf = Configuration(generation=3, members=[sk_id_1], new_members=None)
+    lower_conf = MembershipConfiguration(generation=3, members=[sk_id_1], new_members=None)
     with pytest.raises(requests.exceptions.HTTPError):
         http_cli.membership_switch(tenant_id, timeline_id, lower_conf)
 
     # Now, exclude sk from the membership, timeline should be deleted.
-    excluded_conf = Configuration(generation=7, members=[sk_id_2], new_members=None)
+    excluded_conf = MembershipConfiguration(generation=7, members=[sk_id_2], new_members=None)
     http_cli.timeline_exclude(tenant_id, timeline_id, excluded_conf)
     with pytest.raises(requests.exceptions.HTTPError):
         http_cli.timeline_status(tenant_id, timeline_id)
@@ -2010,11 +2012,6 @@ def test_explicit_timeline_creation(neon_env_builder: NeonEnvBuilder):
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
-    ps = env.pageservers[0]
-    ps_http_cli = ps.http_client()
-
-    http_clis = [sk.http_client() for sk in env.safekeepers]
-
     config_lines = [
         "neon.safekeeper_proto_version = 3",
     ]
@@ -2023,22 +2020,11 @@ def test_explicit_timeline_creation(neon_env_builder: NeonEnvBuilder):
     # expected to fail because timeline is not created on safekeepers
     with pytest.raises(Exception, match=r".*timed out.*"):
         ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3], timeout="2s")
-    # figure out initial LSN.
-    ps_timeline_detail = ps_http_cli.timeline_detail(tenant_id, timeline_id)
-    init_lsn = ps_timeline_detail["last_record_lsn"]
-    log.info(f"initial LSN: {init_lsn}")
-    # sk timeline creation request expects minor version
-    pg_version = ps_timeline_detail["pg_version"] * 10000
     # create inital mconf
-    sk_ids = [SafekeeperId(sk.id, "localhost", sk.port.pg_tenant_only) for sk in env.safekeepers]
-    mconf = Configuration(generation=1, members=sk_ids, new_members=None)
-    create_r = TimelineCreateRequest(
-        tenant_id, timeline_id, mconf, pg_version, Lsn(init_lsn), commit_lsn=None
+    mconf = MembershipConfiguration(
+        generation=1, members=Safekeeper.sks_to_safekeeper_ids(env.safekeepers), new_members=None
     )
-    log.info(f"sending timeline create: {create_r.to_json()}")
-
-    for sk_http_cli in http_clis:
-        sk_http_cli.timeline_create(create_r)
+    Safekeeper.create_timeline(tenant_id, timeline_id, env.pageservers[0], mconf, env.safekeepers)
     # Once timeline created endpoint should start.
     ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
     ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")

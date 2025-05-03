@@ -369,7 +369,7 @@ FROM build-deps AS plv8-src
 ARG PG_VERSION
 WORKDIR /ext-src
 
-COPY compute/patches/plv8-3.1.10.patch .
+COPY compute/patches/plv8* .
 
 # plv8 3.2.3 supports v17
 # last release v3.2.3 - Sep 7, 2024
@@ -393,7 +393,7 @@ RUN case "${PG_VERSION:?}" in \
     git clone --recurse-submodules --depth 1 --branch ${PLV8_TAG} https://github.com/plv8/plv8.git plv8-src && \
     tar -czf plv8.tar.gz --exclude .git plv8-src && \
     cd plv8-src && \
-    if [[ "${PG_VERSION:?}" < "v17" ]]; then patch -p1 < /ext-src/plv8-3.1.10.patch; fi
+    if [[ "${PG_VERSION:?}" < "v17" ]]; then patch -p1 < /ext-src/plv8_v3.1.10.patch; else patch -p1 < /ext-src/plv8_v3.2.3.patch; fi
 
 # Step 1: Build the vendored V8 engine. It doesn't depend on PostgreSQL, so use
 # 'build-deps' as the base. This enables caching and avoids unnecessary rebuilds.
@@ -1063,67 +1063,6 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) && \
 
 #########################################################################################
 #
-# Layer "pg_embedding-build"
-# compile pg_embedding extension
-#
-#########################################################################################
-FROM build-deps AS pg_embedding-src
-ARG PG_VERSION
-
-# This is our extension, support stopped in favor of pgvector
-# TODO: deprecate it
-WORKDIR /ext-src
-RUN case "${PG_VERSION:?}" in \
-      "v14" | "v15") \
-        export PG_EMBEDDING_VERSION=0.3.5 \
-        export PG_EMBEDDING_CHECKSUM=0e95b27b8b6196e2cf0a0c9ec143fe2219b82e54c5bb4ee064e76398cbe69ae9 \
-        ;; \
-      *) \
-        echo "pg_embedding not supported on this PostgreSQL version. Use pgvector instead." && exit 0;; \
-    esac && \
-    wget https://github.com/neondatabase/pg_embedding/archive/refs/tags/${PG_EMBEDDING_VERSION}.tar.gz -O pg_embedding.tar.gz && \
-    echo "${PG_EMBEDDING_CHECKSUM} pg_embedding.tar.gz" | sha256sum --check && \
-    mkdir pg_embedding-src && cd pg_embedding-src && tar xzf ../pg_embedding.tar.gz --strip-components=1 -C .
-
-FROM pg-build AS pg_embedding-build
-COPY --from=pg_embedding-src /ext-src/ /ext-src/
-WORKDIR /ext-src/
-RUN  if [ -d pg_embedding-src ]; then \
-        cd pg_embedding-src && \
-        make -j $(getconf _NPROCESSORS_ONLN) && \
-        make -j $(getconf _NPROCESSORS_ONLN) install; \
-    fi
-
-#########################################################################################
-#
-# Layer "pg_anon-build"
-# compile anon extension
-#
-#########################################################################################
-FROM build-deps AS pg_anon-src
-ARG PG_VERSION
-
-# This is an experimental extension, never got to real production.
-# !Do not remove! It can be present in shared_preload_libraries and compute will fail to start if library is not found.
-WORKDIR /ext-src
-RUN case "${PG_VERSION:?}" in "v17") \
-    echo "postgresql_anonymizer does not yet support PG17" && exit 0;; \
-    esac && \
-    wget  https://github.com/neondatabase/postgresql_anonymizer/archive/refs/tags/neon_1.1.1.tar.gz -O pg_anon.tar.gz && \
-    echo "321ea8d5c1648880aafde850a2c576e4a9e7b9933a34ce272efc839328999fa9  pg_anon.tar.gz" | sha256sum --check && \
-    mkdir pg_anon-src && cd pg_anon-src && tar xzf ../pg_anon.tar.gz --strip-components=1 -C .
-
-FROM pg-build AS pg_anon-build
-COPY --from=pg_anon-src /ext-src/ /ext-src/
-WORKDIR /ext-src
-RUN if [ -d pg_anon-src ]; then \
-        cd pg_anon-src && \
-        make -j $(getconf _NPROCESSORS_ONLN) install && \
-        echo 'trusted = true' >> /usr/local/pgsql/share/extension/anon.control; \
-    fi
-
-#########################################################################################
-#
 # Layer "pg build with nonroot user and cargo installed"
 # This layer is base and common for layers with `pgrx`
 #
@@ -1184,6 +1123,34 @@ RUN cargo install --locked --version 0.12.9 cargo-pgrx && \
     /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
 
 USER root
+#########################################################################################
+#
+# Layer "rust extensions pgrx14"
+#
+#########################################################################################
+FROM pg-build-nonroot-with-cargo AS rust-extensions-build-pgrx14
+ARG PG_VERSION
+
+RUN cargo install --locked --version 0.14.1 cargo-pgrx && \
+    /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
+
+USER root
+#########################################################################################
+#
+# Layer "rust extensions pgrx14"
+#
+# Version 14 is now required by a few 
+# This layer should be used as a base for new pgrx extensions,
+# and eventually get merged with `rust-extensions-build`
+#
+#########################################################################################
+FROM pg-build-nonroot-with-cargo AS rust-extensions-build-pgrx14
+ARG PG_VERSION
+
+RUN cargo install --locked --version 0.14.1 cargo-pgrx && \
+    /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
+
+USER root
 
 #########################################################################################
 #
@@ -1200,11 +1167,11 @@ RUN wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.18.1.tar.
     mkdir onnxruntime-src && cd onnxruntime-src && tar xzf ../onnxruntime.tar.gz --strip-components=1 -C . && \
     echo "#nothing to test here" > neon-test.sh
 
-RUN wget https://github.com/neondatabase-labs/pgrag/archive/refs/tags/v0.0.0.tar.gz -O pgrag.tar.gz &&  \
-    echo "2cbe394c1e74fc8bcad9b52d5fbbfb783aef834ca3ce44626cfd770573700bb4 pgrag.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/neondatabase-labs/pgrag/archive/refs/tags/v0.1.1.tar.gz -O pgrag.tar.gz &&  \
+    echo "087b2ecd11ba307dc968042ef2e9e43dc04d9ba60e8306e882c407bbe1350a50 pgrag.tar.gz" | sha256sum --check && \
     mkdir pgrag-src && cd pgrag-src && tar xzf ../pgrag.tar.gz --strip-components=1 -C .
 
-FROM rust-extensions-build-pgrx12 AS pgrag-build
+FROM rust-extensions-build-pgrx14 AS pgrag-build
 COPY --from=pgrag-src /ext-src/ /ext-src/
 
 # Install build-time dependencies
@@ -1224,19 +1191,19 @@ RUN . venv/bin/activate && \
 
 WORKDIR /ext-src/pgrag-src
 RUN cd exts/rag && \
-    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.9", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx = "0.14.1"/pgrx = { version = "0.14.1", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/rag.control
 
 RUN cd exts/rag_bge_small_en_v15 && \
-    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.9", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx = "0.14.1"/pgrx = { version = "0.14.1", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     ORT_LIB_LOCATION=/ext-src/onnxruntime-src/build/Linux \
         REMOTE_ONNX_URL=http://pg-ext-s3-gateway/pgrag-data/bge_small_en_v15.onnx \
         cargo pgrx install --release --features remote_onnx && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/rag_bge_small_en_v15.control
 
 RUN cd exts/rag_jina_reranker_v1_tiny_en && \
-    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.9", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx = "0.14.1"/pgrx = { version = "0.14.1", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     ORT_LIB_LOCATION=/ext-src/onnxruntime-src/build/Linux \
         REMOTE_ONNX_URL=http://pg-ext-s3-gateway/pgrag-data/jina_reranker_v1_tiny_en.onnx \
         cargo pgrx install --release --features remote_onnx && \
@@ -1405,8 +1372,8 @@ ARG PG_VERSION
 # Do not update without approve from proxy team
 # Make sure the version is reflected in proxy/src/serverless/local_conn_pool.rs
 WORKDIR /ext-src
-RUN wget https://github.com/neondatabase/pg_session_jwt/archive/refs/tags/v0.2.0.tar.gz -O pg_session_jwt.tar.gz && \
-    echo "5ace028e591f2e000ca10afa5b1ca62203ebff014c2907c0ec3b29c36f28a1bb pg_session_jwt.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/neondatabase/pg_session_jwt/archive/refs/tags/v0.3.0.tar.gz -O pg_session_jwt.tar.gz && \
+    echo "19be2dc0b3834d643706ed430af998bb4c2cdf24b3c45e7b102bb3a550e8660c pg_session_jwt.tar.gz" | sha256sum --check && \
     mkdir pg_session_jwt-src && cd pg_session_jwt-src && tar xzf ../pg_session_jwt.tar.gz --strip-components=1 -C . && \
     sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.9", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     sed -i 's/version = "0.12.6"/version = "0.12.9"/g' pgrx-tests/Cargo.toml && \
@@ -1418,6 +1385,39 @@ FROM rust-extensions-build-pgrx12 AS pg_session_jwt-build
 COPY --from=pg_session_jwt-src /ext-src/ /ext-src/
 WORKDIR /ext-src/pg_session_jwt-src
 RUN cargo pgrx install --release
+
+#########################################################################################
+#
+# Layer "pg-anon-pg-build"
+# compile anon extension
+#
+#########################################################################################
+FROM pg-build AS pg_anon-src
+ARG PG_VERSION
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+WORKDIR /ext-src
+COPY compute/patches/anon_v2.patch .
+
+# This is an experimental extension, never got to real production.
+# !Do not remove! It can be present in shared_preload_libraries and compute will fail to start if library is not found.
+ENV PATH="/usr/local/pgsql/bin/:$PATH"
+RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/latest/postgresql_anonymizer-latest.tar.gz -O pg_anon.tar.gz && \
+    mkdir pg_anon-src && cd pg_anon-src && tar xzf ../pg_anon.tar.gz --strip-components=1 -C . && \
+    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt && \
+    sed -i 's/pgrx = "0.14.1"/pgrx = { version = "=0.14.1", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    patch -p1 < /ext-src/anon_v2.patch
+
+FROM rust-extensions-build-pgrx14 AS pg-anon-pg-build
+ARG PG_VERSION
+COPY --from=pg_anon-src /ext-src/ /ext-src/
+WORKDIR /ext-src
+RUN cd pg_anon-src && \
+    make -j $(getconf _NPROCESSORS_ONLN) extension PG_CONFIG=/usr/local/pgsql/bin/pg_config PGVER=pg$(echo "$PG_VERSION" | sed 's/^v//') && \
+    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config PGVER=pg$(echo "$PG_VERSION" | sed 's/^v//') && \
+    chmod -R a+r ../pg_anon-src && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/anon.control;
+
+########################################################################################
 
 #########################################################################################
 #
@@ -1714,9 +1714,8 @@ COPY --from=rdkit-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_uuidv7-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_roaringbitmap-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_semver-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg_embedding-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=wal2json-build /usr/local/pgsql /usr/local/pgsql
-COPY --from=pg_anon-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-anon-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_ivm-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_partman-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_mooncake-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -1780,7 +1779,7 @@ RUN set -e \
     && apt clean && rm -rf /var/lib/apt/lists/*
 
 # Use `dist_man_MANS=` to skip manpage generation (which requires python3/pandoc)
-ENV PGBOUNCER_TAG=pgbouncer_1_22_1
+ENV PGBOUNCER_TAG=pgbouncer_1_24_1
 RUN set -e \
     && git clone --recurse-submodules --depth 1 --branch ${PGBOUNCER_TAG} https://github.com/pgbouncer/pgbouncer.git pgbouncer \
     && cd pgbouncer \
@@ -1893,7 +1892,6 @@ COPY --from=pg_cron-src /ext-src/ /ext-src/
 COPY --from=pg_uuidv7-src /ext-src/ /ext-src/
 COPY --from=pg_roaringbitmap-src /ext-src/ /ext-src/
 COPY --from=pg_semver-src /ext-src/ /ext-src/
-#COPY --from=pg_embedding-src /ext-src/ /ext-src/
 #COPY --from=wal2json-src /ext-src/ /ext-src/
 COPY --from=pg_ivm-src /ext-src/ /ext-src/
 COPY --from=pg_partman-src /ext-src/ /ext-src/
@@ -1904,8 +1902,8 @@ COPY compute/patches/pg_repack.patch /ext-src
 RUN cd /ext-src/pg_repack-src && patch -p1 </ext-src/pg_repack.patch && rm -f /ext-src/pg_repack.patch
 
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
-RUN apt-get update && apt-get install -y libtap-parser-sourcehandler-pgtap-perl\
-   && apt clean && rm -rf /ext-src/*.tar.gz /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y libtap-parser-sourcehandler-pgtap-perl jq \
+   && apt clean && rm -rf /ext-src/*.tar.gz /ext-src/*.patch /var/lib/apt/lists/*
 ENV PATH=/usr/local/pgsql/bin:$PATH
 ENV PGHOST=compute
 ENV PGPORT=55433

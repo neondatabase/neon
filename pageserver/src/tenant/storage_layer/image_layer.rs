@@ -27,11 +27,11 @@
 //! actual page images are stored in the "values" part.
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
-use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
@@ -43,13 +43,13 @@ use pageserver_api::key::{DBDIR_KEY, KEY_SIZE, Key};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use pageserver_api::value::Value;
-use rand::Rng;
-use rand::distributions::Alphanumeric;
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::bin_ser::BeSer;
+use utils::bin_ser::SerializeError;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
@@ -71,8 +71,10 @@ use crate::tenant::vectored_blob_io::{
     BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadPlanner,
 };
+use crate::virtual_file::TempVirtualFile;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
-use crate::virtual_file::{self, IoBufferMut, MaybeFatalIo, VirtualFile};
+use crate::virtual_file::owned_buffers_io::write::{Buffer, BufferedWriterShutdownMode};
+use crate::virtual_file::{self, IoBuffer, IoBufferMut, MaybeFatalIo, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 
 ///
@@ -111,6 +113,15 @@ impl From<&ImageLayer> for Summary {
 }
 
 impl Summary {
+    /// Serializes the summary header into an aligned buffer of lenth `PAGE_SZ`.
+    pub fn ser_into_page(&self) -> Result<IoBuffer, SerializeError> {
+        let mut buf = IoBufferMut::with_capacity(PAGE_SZ);
+        Self::ser_into(self, &mut buf)?;
+        // Pad zeroes to the buffer so the length is a multiple of the alignment.
+        buf.extend_with(0, buf.capacity() - buf.len());
+        Ok(buf.freeze())
+    }
+
     pub(super) fn expected(
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -251,14 +262,18 @@ impl ImageLayer {
         tenant_shard_id: TenantShardId,
         fname: &ImageLayerName,
     ) -> Utf8PathBuf {
-        let rand_string: String = rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(8)
-            .map(char::from)
-            .collect();
+        // TempVirtualFile requires us to never reuse a filename while an old
+        // instance of TempVirtualFile created with that filename is not done dropping yet.
+        // So, we use a monotonic counter to disambiguate the filenames.
+        static NEXT_TEMP_DISAMBIGUATOR: AtomicU64 = AtomicU64::new(1);
+        let filename_disambiguator =
+            NEXT_TEMP_DISAMBIGUATOR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         conf.timeline_path(&tenant_shard_id, &timeline_id)
-            .join(format!("{fname}.{rand_string}.{TEMP_FILE_SUFFIX}"))
+            .join(format!(
+                "{fname}.{:x}.{TEMP_FILE_SUFFIX}",
+                filename_disambiguator
+            ))
     }
 
     ///
@@ -348,7 +363,7 @@ impl ImageLayer {
     where
         F: Fn(Summary) -> Summary,
     {
-        let mut file = VirtualFile::open_with_options(
+        let file = VirtualFile::open_with_options_v2(
             path,
             virtual_file::OpenOptions::new().read(true).write(true),
             ctx,
@@ -365,11 +380,8 @@ impl ImageLayer {
 
         let new_summary = rewrite(actual_summary);
 
-        let mut buf = Vec::with_capacity(PAGE_SZ);
-        // TODO: could use smallvec here but it's a pain with Slice<T>
-        Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
-        file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
+        let buf = new_summary.ser_into_page().context("serialize")?;
+        let (_buf, res) = file.write_all_at(buf.slice_len(), 0, ctx).await;
         res?;
         Ok(())
     }
@@ -481,9 +493,9 @@ impl ImageLayerInner {
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
 
-        let ctx = RequestContextBuilder::extend(ctx)
+        let ctx = RequestContextBuilder::from(ctx)
             .page_content_kind(PageContentKind::ImageLayerBtreeNode)
-            .build();
+            .attached_child();
 
         for range in keyspace.ranges.iter() {
             let mut range_end_handled = false;
@@ -558,11 +570,12 @@ impl ImageLayerInner {
             let view = BufView::new_slice(&blobs_buf.buf);
 
             for meta in blobs_buf.blobs.iter() {
-                let img_buf = meta.read(&view).await?;
-
+                // Just read the raw header+data and pass it through to the target layer, without
+                // decoding and recompressing it.
+                let raw = meta.raw_with_header(&view);
                 key_count += 1;
                 writer
-                    .put_image(meta.meta.key, img_buf.into_bytes(), ctx)
+                    .put_image_raw(meta.meta.key, raw.into_bytes(), ctx)
                     .await
                     .context(format!("Storing key {}", meta.meta.key))?;
             }
@@ -672,6 +685,19 @@ impl ImageLayerInner {
     }
 
     pub(crate) fn iter<'a>(&'a self, ctx: &'a RequestContext) -> ImageLayerIterator<'a> {
+        self.iter_with_options(
+            ctx,
+            1024 * 8192, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
+            1024,        // The default value. Unit tests might use a different value
+        )
+    }
+
+    pub(crate) fn iter_with_options<'a>(
+        &'a self,
+        ctx: &'a RequestContext,
+        max_read_size: u64,
+        max_batch_size: usize,
+    ) -> ImageLayerIterator<'a> {
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
@@ -681,10 +707,7 @@ impl ImageLayerInner {
             index_iter: tree_reader.iter(&[0; KEY_SIZE], ctx),
             key_values_batch: VecDeque::new(),
             is_end: false,
-            planner: StreamingVectoredReadPlanner::new(
-                1024 * 8192, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
-                1024,        // The default value. Unit tests might use a different value
-            ),
+            planner: StreamingVectoredReadPlanner::new(max_read_size, max_batch_size),
         }
     }
 
@@ -737,7 +760,7 @@ struct ImageLayerWriterInner {
     // Number of keys in the layer.
     num_keys: usize,
 
-    blob_writer: BlobWriter<false>,
+    blob_writer: BlobWriter<TempVirtualFile>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
 
     #[cfg(feature = "testing")]
@@ -748,12 +771,15 @@ impl ImageLayerWriterInner {
     ///
     /// Start building a new image layer.
     ///
+    #[allow(clippy::too_many_arguments)]
     async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
         key_range: &Range<Key>,
         lsn: Lsn,
+        gate: &utils::sync::gate::Gate,
+        cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename.
@@ -768,19 +794,27 @@ impl ImageLayerWriterInner {
             },
         );
         trace!("creating image layer {}", path);
-        let mut file = {
-            VirtualFile::open_with_options(
+        let file = TempVirtualFile::new(
+            VirtualFile::open_with_options_v2(
                 &path,
                 virtual_file::OpenOptions::new()
-                    .write(true)
-                    .create_new(true),
+                    .create_new(true)
+                    .write(true),
                 ctx,
             )
-            .await?
-        };
-        // make room for the header block
-        file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
-        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64);
+            .await?,
+            gate.enter()?,
+        );
+
+        // Start at `PAGE_SZ` to make room for the header block.
+        let blob_writer = BlobWriter::new(
+            file,
+            PAGE_SZ as u64,
+            gate,
+            cancel,
+            ctx,
+            info_span!(parent: None, "image_layer_writer_flush_task", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%timeline_id, path = %path),
+        )?;
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();
@@ -850,28 +884,44 @@ impl ImageLayerWriterInner {
     }
 
     ///
-    /// Finish writing the image layer.
+    /// Write the next image to the file, as a raw blob header and data.
     ///
-    async fn finish(
-        self,
+    /// The page versions must be appended in blknum order.
+    ///
+    async fn put_image_raw(
+        &mut self,
+        key: Key,
+        raw_with_header: Bytes,
         ctx: &RequestContext,
-        end_key: Option<Key>,
-    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
-        let temp_path = self.path.clone();
-        let result = self.finish0(ctx, end_key).await;
-        if let Err(ref e) = result {
-            tracing::info!(%temp_path, "cleaning up temporary file after error during writing: {e}");
-            if let Err(e) = std::fs::remove_file(&temp_path) {
-                tracing::warn!(error=%e, %temp_path, "error cleaning up temporary layer file after error during writing");
-            }
+    ) -> anyhow::Result<()> {
+        ensure!(self.key_range.contains(&key));
+
+        // NB: we don't update the (un)compressed metrics, since we can't determine them without
+        // decompressing the image. This seems okay.
+        self.num_keys += 1;
+
+        let (_, res) = self
+            .blob_writer
+            .write_blob_raw(raw_with_header.slice_len(), ctx)
+            .await;
+        let offset = res?;
+
+        let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
+        key.write_to_byte_slice(&mut keybuf);
+        self.tree.append(&keybuf, offset)?;
+
+        #[cfg(feature = "testing")]
+        {
+            self.last_written_key = key;
         }
-        result
+
+        Ok(())
     }
 
     ///
     /// Finish writing the image layer.
     ///
-    async fn finish0(
+    async fn finish(
         self,
         ctx: &RequestContext,
         end_key: Option<Key>,
@@ -884,17 +934,32 @@ impl ImageLayerWriterInner {
         crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES_CONSIDERED
             .inc_by(self.uncompressed_bytes_eligible);
         crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES_CHOSEN.inc_by(self.uncompressed_bytes_chosen);
-        crate::metrics::COMPRESSION_IMAGE_OUTPUT_BYTES.inc_by(compressed_size);
 
-        let mut file = self.blob_writer.into_inner();
+        // NB: filter() may pass through raw pages from a different layer, without looking at
+        // whether these are compressed or not. We don't track metrics for these, so avoid
+        // increasing `COMPRESSION_IMAGE_OUTPUT_BYTES` in this case too.
+        if self.uncompressed_bytes > 0 {
+            crate::metrics::COMPRESSION_IMAGE_OUTPUT_BYTES.inc_by(compressed_size);
+        };
+
+        let file = self
+            .blob_writer
+            .shutdown(
+                BufferedWriterShutdownMode::ZeroPadToNextMultiple(PAGE_SZ),
+                ctx,
+            )
+            .await?;
 
         // Write out the index
-        file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
-            .await?;
+        let mut offset = index_start_blk as u64 * PAGE_SZ as u64;
         let (index_root_blk, block_buf) = self.tree.finish()?;
+
+        // TODO(yuchen): https://github.com/neondatabase/neon/issues/10092
+        // Should we just replace BlockBuf::blocks with one big buffer?
         for buf in block_buf.blocks {
-            let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
+            let (_buf, res) = file.write_all_at(buf.slice_len(), offset, ctx).await;
             res?;
+            offset += PAGE_SZ as u64;
         }
 
         let final_key_range = if let Some(end_key) = end_key {
@@ -915,11 +980,9 @@ impl ImageLayerWriterInner {
             index_root_blk,
         };
 
-        let mut buf = Vec::with_capacity(PAGE_SZ);
-        // TODO: could use smallvec here but it's a pain with Slice<T>
-        Summary::ser_into(&summary, &mut buf)?;
-        file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
+        // Writes summary at the first block (offset 0).
+        let buf = summary.ser_into_page()?;
+        let (_buf, res) = file.write_all_at(buf.slice_len(), 0, ctx).await;
         res?;
 
         let metadata = file
@@ -953,6 +1016,10 @@ impl ImageLayerWriterInner {
             .maybe_fatal_err("image_layer sync_all")?;
 
         trace!("created image layer {}", self.path);
+
+        // The gate guard stored in `destination_file` is dropped. Callers (e.g.. flush loop or compaction)
+        // keep the gate open also, so that it's safe for them to rename the file to its final destination.
+        file.disarm_into_inner();
 
         Ok((desc, self.path))
     }
@@ -988,18 +1055,30 @@ impl ImageLayerWriter {
     ///
     /// Start building a new image layer.
     ///
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
         key_range: &Range<Key>,
         lsn: Lsn,
+        gate: &utils::sync::gate::Gate,
+        cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<ImageLayerWriter> {
         Ok(Self {
             inner: Some(
-                ImageLayerWriterInner::new(conf, timeline_id, tenant_shard_id, key_range, lsn, ctx)
-                    .await?,
+                ImageLayerWriterInner::new(
+                    conf,
+                    timeline_id,
+                    tenant_shard_id,
+                    key_range,
+                    lsn,
+                    gate,
+                    cancel,
+                    ctx,
+                )
+                .await?,
             ),
         })
     }
@@ -1016,6 +1095,25 @@ impl ImageLayerWriter {
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         self.inner.as_mut().unwrap().put_image(key, img, ctx).await
+    }
+
+    ///
+    /// Write the next value to the file, as a raw header and data. This allows passing through a
+    /// raw, potentially compressed image from a different layer file without recompressing it.
+    ///
+    /// The page versions must be appended in blknum order.
+    ///
+    pub async fn put_image_raw(
+        &mut self,
+        key: Key,
+        raw_with_header: Bytes,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .as_mut()
+            .unwrap()
+            .put_image_raw(key, raw_with_header, ctx)
+            .await
     }
 
     /// Estimated size of the image layer.
@@ -1045,14 +1143,6 @@ impl ImageLayerWriter {
         ctx: &RequestContext,
     ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         self.inner.take().unwrap().finish(ctx, Some(end_key)).await
-    }
-}
-
-impl Drop for ImageLayerWriter {
-    fn drop(&mut self) {
-        if let Some(inner) = self.inner.take() {
-            inner.blob_writer.into_inner().remove();
-        }
     }
 }
 
@@ -1151,7 +1241,7 @@ mod test {
     use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
     use crate::tenant::storage_layer::{Layer, ResidentLayer};
     use crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner;
-    use crate::tenant::{Tenant, Timeline};
+    use crate::tenant::{TenantShard, Timeline};
 
     #[tokio::test]
     async fn image_layer_rewrite() {
@@ -1192,7 +1282,7 @@ mod test {
 
         // This key range contains several 0x8000 page stripes, only one of which belongs to shard zero
         let input_start = Key::from_hex("000000067f00000001000000ae0000000000").unwrap();
-        let input_end = Key::from_hex("000000067f00000001000000ae0000020000").unwrap();
+        let input_end = Key::from_hex("000000067f00000001000000ae0000002000").unwrap();
         let range = input_start..input_end;
 
         // Build an image layer to filter
@@ -1203,6 +1293,8 @@ mod test {
                 harness.tenant_shard_id,
                 &range,
                 lsn,
+                &timeline.gate,
+                timeline.cancel.clone(),
                 &ctx,
             )
             .await
@@ -1235,7 +1327,7 @@ mod test {
             let shard_identity = ShardIdentity::new(
                 ShardNumber(shard_number),
                 shard_count,
-                ShardStripeSize(0x8000),
+                ShardStripeSize(0x800),
             )
             .unwrap();
             let harness = TenantHarness::create_custom(
@@ -1268,6 +1360,8 @@ mod test {
                 harness.tenant_shard_id,
                 &range,
                 lsn,
+                &timeline.gate,
+                timeline.cancel.clone(),
                 &ctx,
             )
             .await
@@ -1287,12 +1381,12 @@ mod test {
 
             // This exact size and those below will need updating as/when the layer encoding changes, but
             // should be deterministic for a given version of the format, as we used no randomness generating the input.
-            assert_eq!(original_size, 1597440);
+            assert_eq!(original_size, 122880);
 
             match shard_number {
                 0 => {
                     // We should have written out just one stripe for our shard identity
-                    assert_eq!(wrote_keys, 0x8000);
+                    assert_eq!(wrote_keys, 0x800);
                     let replacement = replacement.unwrap();
 
                     // We should have dropped some of the data
@@ -1300,7 +1394,7 @@ mod test {
                     assert!(replacement.metadata().file_size > 0);
 
                     // Assert that we dropped ~3/4 of the data.
-                    assert_eq!(replacement.metadata().file_size, 417792);
+                    assert_eq!(replacement.metadata().file_size, 49152);
                 }
                 1 => {
                     // Shard 1 has no keys in our input range
@@ -1309,19 +1403,19 @@ mod test {
                 }
                 2 => {
                     // Shard 2 has one stripes in the input range
-                    assert_eq!(wrote_keys, 0x8000);
+                    assert_eq!(wrote_keys, 0x800);
                     let replacement = replacement.unwrap();
                     assert!(replacement.metadata().file_size < original_size);
                     assert!(replacement.metadata().file_size > 0);
-                    assert_eq!(replacement.metadata().file_size, 417792);
+                    assert_eq!(replacement.metadata().file_size, 49152);
                 }
                 3 => {
                     // Shard 3 has two stripes in the input range
-                    assert_eq!(wrote_keys, 0x10000);
+                    assert_eq!(wrote_keys, 0x1000);
                     let replacement = replacement.unwrap();
                     assert!(replacement.metadata().file_size < original_size);
                     assert!(replacement.metadata().file_size > 0);
-                    assert_eq!(replacement.metadata().file_size, 811008);
+                    assert_eq!(replacement.metadata().file_size, 73728);
                 }
                 _ => unreachable!(),
             }
@@ -1329,7 +1423,7 @@ mod test {
     }
 
     async fn produce_image_layer(
-        tenant: &Tenant,
+        tenant: &TenantShard,
         tline: &Arc<Timeline>,
         mut images: Vec<(Key, Bytes)>,
         lsn: Lsn,
@@ -1346,6 +1440,8 @@ mod test {
             tenant.tenant_shard_id,
             &key_range,
             lsn,
+            &tline.gate,
+            tline.cancel.clone(),
             ctx,
         )
         .await?;

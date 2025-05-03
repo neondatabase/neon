@@ -19,6 +19,7 @@
 !pageserver/
 !pgxn/
 !proxy/
+!endpoint_storage/
 !storage_scrubber/
 !safekeeper/
 !storage_broker/

@@ -8,8 +8,8 @@
  *
  *-------------------------------------------------------------------------
  */
-#ifndef pageserver_h
-#define pageserver_h
+#ifndef PAGESTORE_CLIENT_h
+#define PAGESTORE_CLIENT_h
 
 #include "neon_pgversioncompat.h"
 
@@ -17,11 +17,8 @@
 #include "access/xlogdefs.h"
 #include RELFILEINFO_HDR
 #include "lib/stringinfo.h"
-#include "libpq/pqformat.h"
 #include "storage/block.h"
 #include "storage/buf_internals.h"
-#include "storage/smgr.h"
-#include "utils/memutils.h"
 
 #define MAX_SHARDS 128
 #define MAX_PAGESERVER_CONNSTRING_SIZE 256
@@ -61,21 +58,12 @@ typedef struct
 
 #define messageTag(m) (((const NeonMessage *)(m))->tag)
 
-#define NEON_TAG "[NEON_SMGR] "
-#define neon_log(tag, fmt, ...) ereport(tag,                                  \
-										(errmsg(NEON_TAG fmt, ##__VA_ARGS__), \
-										 errhidestmt(true), errhidecontext(true), errposition(0), internalerrposition(0)))
-#define neon_shard_log(shard_no, tag, fmt, ...) ereport(tag,	\
-														(errmsg(NEON_TAG "[shard %d] " fmt, shard_no, ##__VA_ARGS__), \
-														 errhidestmt(true), errhidecontext(true), errposition(0), internalerrposition(0)))
-
 /* SLRUs downloadable from page server */
 typedef enum {
 	SLRU_CLOG,
 	SLRU_MULTIXACT_MEMBERS,
 	SLRU_MULTIXACT_OFFSETS
 } SlruKind;
-
 
 /*--
  * supertype of all the Neon*Request structs below.
@@ -140,6 +128,7 @@ typedef struct
 	int			segno;
 } NeonGetSlruSegmentRequest;
 
+
 /* supertype of all the Neon*Response structs below */
 typedef NeonMessage NeonResponse;
 
@@ -198,6 +187,7 @@ typedef struct
 {
 	/*
 	 * Send this request to the PageServer associated with this shard.
+	 * This function assigns request_id to the request which can be extracted by caller from request struct.
 	 */
 	bool		(*send) (shardno_t  shard_no, NeonRequest * request);
 	/*
@@ -237,13 +227,13 @@ extern char *neon_timeline;
 extern char *neon_tenant;
 extern int32 max_cluster_size;
 extern int  neon_protocol_version;
-extern bool lfc_store_prefetch_result;
 
 extern shardno_t get_shard_number(BufferTag* tag);
 
 extern const f_smgr *smgr_neon(ProcNumber backend, NRelFileInfo rinfo);
 extern void smgr_init_neon(void);
 extern void readahead_buffer_resize(int newsize, void *extra);
+
 
 /*
  * LSN values associated with each request to the pageserver
@@ -277,14 +267,13 @@ typedef struct
 	XLogRecPtr effective_request_lsn;
 } neon_request_lsns;
 
-#if PG_MAJORVERSION_NUM < 16
-extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
-										 neon_request_lsns request_lsns, char *buffer);
-#else
 extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
 										 neon_request_lsns request_lsns, void *buffer);
-#endif
 extern int64 neon_dbsize(Oid dbNode);
+
+extern void neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum,
+								  BlockNumber blkno, neon_request_lsns *output,
+								  BlockNumber nblocks);
 
 /* utils for neon relsize cache */
 extern void relsize_hash_init(void);
@@ -293,37 +282,4 @@ extern void set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumb
 extern void update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size);
 extern void forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum);
 
-/* functions for local file cache */
-extern void lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum,
-					   BlockNumber blkno, const void *const *buffers,
-					   BlockNumber nblocks);
-/* returns number of blocks read, with one bit set in *read for each  */
-extern int lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum,
-							BlockNumber blkno, void **buffers,
-							BlockNumber nblocks, bits8 *mask);
-
-extern bool lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum,
-							   BlockNumber blkno);
-extern int lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum,
-							   BlockNumber blkno, int nblocks, bits8 *bitmap);
-extern void lfc_init(void);
-extern bool lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
-						 const void* buffer, XLogRecPtr lsn);
-
-
-static inline bool
-lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
-		 void *buffer)
-{
-	bits8		rv = 0;
-	return lfc_readv_select(rinfo, forkNum, blkno, &buffer, 1, &rv) == 1;
-}
-
-static inline void
-lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
-		  const void *buffer)
-{
-	return lfc_writev(rinfo, forkNum, blkno, &buffer, 1);
-}
-
-#endif
+#endif							/* PAGESTORE_CLIENT_H */

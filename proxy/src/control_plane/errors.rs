@@ -8,7 +8,7 @@ use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::proxy::retry::CouldRetry;
 
 /// A go-to error message which doesn't leak any detail.
-pub(crate) const REQUEST_FAILED: &str = "Console request failed";
+pub(crate) const REQUEST_FAILED: &str = "Control plane request failed";
 
 /// Common console API error.
 #[derive(Debug, Error)]

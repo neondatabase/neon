@@ -1,0 +1,12 @@
+name: Create storage release PR
+
+on:
+  schedule:
+    - cron: '0 6 * * FRI'
+
+jobs:
+  create-release-pr:
+    uses: ./.github/workflows/release.yml
+    with:
+      component: storage
+    secrets: inherit

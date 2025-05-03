@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 /// API (`/control/v1` prefix).  Implemented by the server
 /// in [`storage_controller::http`]
 use serde::{Deserialize, Serialize};
-use utils::id::{NodeId, TenantId};
+use utils::id::{NodeId, TenantId, TimelineId};
+use utils::lsn::Lsn;
 
 use crate::models::{PageserverUtilization, ShardParameters, TenantConfig};
 use crate::shard::{ShardStripeSize, TenantShardId};
@@ -168,6 +169,8 @@ pub struct TenantDescribeResponseShard {
     pub is_pending_compute_notification: bool,
     /// A shard split is currently underway
     pub is_splitting: bool,
+    /// A timeline is being imported into this tenant
+    pub is_importing: bool,
 
     pub scheduling_policy: ShardSchedulingPolicy,
 
@@ -497,6 +500,15 @@ pub struct SafekeeperDescribeResponse {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SafekeeperSchedulingPolicyRequest {
     pub scheduling_policy: SkSchedulingPolicy,
+}
+
+/// Import request for safekeeper timelines.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TimelineImportRequest {
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
+    pub start_lsn: Lsn,
+    pub sk_set: Vec<NodeId>,
 }
 
 #[cfg(test)]

@@ -6,10 +6,6 @@
  * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- *
- * IDENTIFICATION
- *	 contrib/neon/libpqpagestore.c
- *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -30,10 +26,12 @@
 #include "portability/instr_time.h"
 #include "postmaster/interrupt.h"
 #include "storage/buf_internals.h"
+#include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
 #include "storage/pg_shmem.h"
 #include "utils/guc.h"
+#include "utils/memutils.h"
 
 #include "neon.h"
 #include "neon_perf_counters.h"
@@ -51,7 +49,6 @@
 #define MIN_RECONNECT_INTERVAL_USEC 1000
 #define MAX_RECONNECT_INTERVAL_USEC 1000000
 
-
 enum NeonComputeMode {
 	CP_MODE_PRIMARY = 0,
 	CP_MODE_REPLICA,
@@ -68,6 +65,9 @@ static const struct config_enum_entry neon_compute_modes[] = {
 /* GUCs */
 char	   *neon_timeline;
 char	   *neon_tenant;
+char	   *neon_project_id;
+char	   *neon_branch_id;
+char	   *neon_endpoint_id;
 int32		max_cluster_size;
 char	   *page_server_connstring;
 char	   *neon_auth_token;
@@ -75,11 +75,12 @@ char	   *neon_auth_token;
 int			readahead_buffer_size = 128;
 int			flush_every_n_requests = 8;
 
-int         neon_protocol_version = 2;
+int         neon_protocol_version = 3;
 
 static int	neon_compute_mode = 0;
 static int	max_reconnect_attempts = 60;
 static int	stripe_size;
+static int	max_sockets;
 
 static int pageserver_response_log_timeout = 10000;
 /* 2.5 minutes. A bit higher than highest default TCP retransmission timeout */
@@ -166,6 +167,9 @@ typedef struct
 	 */
 	WaitEventSet   *wes_read;
 } PageServer;
+
+static uint32 local_request_counter;
+#define GENERATE_REQUEST_ID() (((NeonRequestId)MyProcPid << 32) | ++local_request_counter)
 
 static PageServer page_servers[MAX_SHARDS];
 
@@ -334,6 +338,13 @@ load_shard_map(shardno_t shard_no, char *connstr_p, shardno_t *num_shards_p)
 				pageserver_disconnect(i);
 		}
 		pagestore_local_counter = end_update_counter;
+
+        /* Reserve file descriptors for sockets */
+		while (max_sockets < num_shards)
+		{
+			max_sockets += 1;
+			ReserveExternalFD();
+		}
 	}
 
 	if (num_shards_p)
@@ -734,8 +745,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	default:
 		neon_shard_log(shard_no, ERROR, "libpagestore: invalid connection state %d", shard->state);
 	}
-	/* This shouldn't be hit */
-	Assert(false);
+
+	pg_unreachable();
 }
 
 static void
@@ -875,6 +886,7 @@ retry:
 			int			port;
 			int			sndbuf;
 			int			recvbuf;
+			uint64*		max_wait;
 
 			get_local_port(PQsocket(pageserver_conn), &port);
 			get_socket_stats(PQsocket(pageserver_conn), &sndbuf, &recvbuf);
@@ -885,7 +897,10 @@ retry:
 						   shard->nrequests_sent, shard->nresponses_received, port, sndbuf, recvbuf,
 				           pageserver_conn->inStart, pageserver_conn->inEnd);
 			shard->receive_last_log_time = now;
+			MyNeonCounters->compute_getpage_stuck_requests_total += !shard->receive_logged;
 			shard->receive_logged = true;
+			max_wait = &MyNeonCounters->compute_getpage_max_inflight_stuck_time_ms;
+			*max_wait = Max(*max_wait, INSTR_TIME_GET_MILLISEC(since_start));
 		}
 
 		/*
@@ -908,6 +923,7 @@ retry:
 			get_local_port(PQsocket(pageserver_conn), &port);
 			neon_shard_log(shard_no, LOG, "no response from pageserver for %0.3f s, disconnecting (socket port=%d)",
 					   INSTR_TIME_GET_DOUBLE(since_start), port);
+			MyNeonCounters->compute_getpage_max_inflight_stuck_time_ms = 0;
 			pageserver_disconnect(shard_no);
 			return -1;
 		}
@@ -931,6 +947,7 @@ retry:
 	INSTR_TIME_SET_ZERO(shard->receive_start_time);
 	INSTR_TIME_SET_ZERO(shard->receive_last_log_time);
 	shard->receive_logged = false;
+	MyNeonCounters->compute_getpage_max_inflight_stuck_time_ms = 0;
 
 	return ret;
 }
@@ -994,6 +1011,7 @@ pageserver_send(shardno_t shard_no, NeonRequest *request)
 		pageserver_conn = NULL;
 	}
 
+	request->reqid = GENERATE_REQUEST_ID();
 	req_buff = nm_pack_request(request);
 
 	/*
@@ -1355,6 +1373,31 @@ pg_init_libpagestore(void)
 							   0,	/* no flags required */
 							   check_neon_id, NULL, NULL);
 
+	DefineCustomStringVariable("neon.project_id",
+							   "Neon project_id the server is running on",
+							   NULL,
+							   &neon_project_id,
+							   "",
+							   PGC_POSTMASTER,
+							   0,	/* no flags required */
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable("neon.branch_id",
+							   "Neon branch_id the server is running on",
+							   NULL,
+							   &neon_branch_id,
+							   "",
+							   PGC_POSTMASTER,
+							   0,	/* no flags required */
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable("neon.endpoint_id",
+							   "Neon endpoint_id the server is running on",
+							   NULL,
+							   &neon_endpoint_id,
+							   "",
+							   PGC_POSTMASTER,
+							   0,	/* no flags required */
+							   NULL, NULL, NULL);
+
 	DefineCustomIntVariable("neon.stripe_size",
 							"sharding stripe size",
 							NULL,
@@ -1407,7 +1450,7 @@ pg_init_libpagestore(void)
 							"PageStream connection when we have pages which "
 							"were read ahead but not yet received.",
 							&readahead_getpage_pull_timeout_ms,
-							0, 0, 5 * 60 * 1000,
+							50, 0, 5 * 60 * 1000,
 							PGC_USERSET,
 							GUC_UNIT_MS,
 							NULL, NULL, NULL);
@@ -1415,7 +1458,7 @@ pg_init_libpagestore(void)
 							"Version of compute<->page server protocol",
 							NULL,
 							&neon_protocol_version,
-							2,	/* use protocol version 2 */
+							3,	/* use protocol version 3 */
 							2,	/* min */
 							3,	/* max */
 							PGC_SU_BACKEND,
@@ -1478,6 +1521,4 @@ pg_init_libpagestore(void)
 	}
 
 	memset(page_servers, 0, sizeof(page_servers));
-
-	lfc_init();
 }

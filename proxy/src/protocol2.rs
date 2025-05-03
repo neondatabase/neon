@@ -12,7 +12,7 @@ use pin_project_lite::pin_project;
 use smol_str::SmolStr;
 use strum_macros::FromRepr;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
-use zerocopy::{FromBytes, FromZeroes};
+use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned, network_endian};
 
 pin_project! {
     /// A chained [`AsyncRead`] with [`AsyncWrite`] passthrough
@@ -339,49 +339,49 @@ trait BufExt: Sized {
 }
 impl BufExt for BytesMut {
     fn try_get<T: FromBytes>(&mut self) -> Option<T> {
-        let res = T::read_from_prefix(self)?;
+        let (res, _) = T::read_from_prefix(self).ok()?;
         self.advance(size_of::<T>());
         Some(res)
     }
 }
 
-#[derive(FromBytes, FromZeroes, Copy, Clone)]
-#[repr(C)]
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned, Copy, Clone)]
+#[repr(C, packed)]
 struct ProxyProtocolV2Header {
     signature: [u8; 12],
     version_and_command: u8,
     protocol_and_family: u8,
-    len: zerocopy::byteorder::network_endian::U16,
+    len: network_endian::U16,
 }
 
-#[derive(FromBytes, FromZeroes, Copy, Clone)]
-#[repr(C)]
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned, Copy, Clone)]
+#[repr(C, packed)]
 struct ProxyProtocolV2HeaderV4 {
     src_addr: NetworkEndianIpv4,
     dst_addr: NetworkEndianIpv4,
-    src_port: zerocopy::byteorder::network_endian::U16,
-    dst_port: zerocopy::byteorder::network_endian::U16,
+    src_port: network_endian::U16,
+    dst_port: network_endian::U16,
 }
 
-#[derive(FromBytes, FromZeroes, Copy, Clone)]
-#[repr(C)]
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned, Copy, Clone)]
+#[repr(C, packed)]
 struct ProxyProtocolV2HeaderV6 {
     src_addr: NetworkEndianIpv6,
     dst_addr: NetworkEndianIpv6,
-    src_port: zerocopy::byteorder::network_endian::U16,
-    dst_port: zerocopy::byteorder::network_endian::U16,
+    src_port: network_endian::U16,
+    dst_port: network_endian::U16,
 }
 
-#[derive(FromBytes, FromZeroes, Copy, Clone)]
-#[repr(C)]
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned, Copy, Clone)]
+#[repr(C, packed)]
 struct TlvHeader {
     kind: u8,
-    len: zerocopy::byteorder::network_endian::U16,
+    len: network_endian::U16,
 }
 
-#[derive(FromBytes, FromZeroes, Copy, Clone)]
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned, Copy, Clone)]
 #[repr(transparent)]
-struct NetworkEndianIpv4(zerocopy::byteorder::network_endian::U32);
+struct NetworkEndianIpv4(network_endian::U32);
 impl NetworkEndianIpv4 {
     #[inline]
     fn get(self) -> Ipv4Addr {
@@ -389,9 +389,9 @@ impl NetworkEndianIpv4 {
     }
 }
 
-#[derive(FromBytes, FromZeroes, Copy, Clone)]
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned, Copy, Clone)]
 #[repr(transparent)]
-struct NetworkEndianIpv6(zerocopy::byteorder::network_endian::U128);
+struct NetworkEndianIpv6(network_endian::U128);
 impl NetworkEndianIpv6 {
     #[inline]
     fn get(self) -> Ipv6Addr {
@@ -400,7 +400,6 @@ impl NetworkEndianIpv6 {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used)]
 mod tests {
     use tokio::io::AsyncReadExt;
 

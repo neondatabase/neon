@@ -8,6 +8,7 @@ use std::time::SystemTime;
 use anyhow::{Context, bail};
 use futures::StreamExt;
 use postgres_protocol::message::backend::ReplicationMessage;
+use reqwest::Certificate;
 use safekeeper_api::Term;
 use safekeeper_api::membership::INVALID_GENERATION;
 use safekeeper_api::models::{PeerInfo, TimelineStatus};
@@ -176,6 +177,7 @@ pub struct Donor {
     pub flush_lsn: Lsn,
     pub pg_connstr: String,
     pub http_connstr: String,
+    pub https_connstr: Option<String>,
 }
 
 impl From<&PeerInfo> for Donor {
@@ -186,6 +188,7 @@ impl From<&PeerInfo> for Donor {
             flush_lsn: p.flush_lsn,
             pg_connstr: p.pg_connstr.clone(),
             http_connstr: p.http_connstr.clone(),
+            https_connstr: p.https_connstr.clone(),
         }
     }
 }
@@ -236,11 +239,33 @@ async fn recover(
     conf: &SafeKeeperConf,
 ) -> anyhow::Result<String> {
     // Learn donor term switch history to figure out starting point.
-    let client = reqwest::Client::new();
+
+    let mut client = reqwest::Client::builder();
+    for cert in &conf.ssl_ca_certs {
+        client = client.add_root_certificate(Certificate::from_der(cert.contents())?);
+    }
+    let client = client
+        .build()
+        .context("Failed to build http client for recover")?;
+
+    let url = if conf.use_https_safekeeper_api {
+        if let Some(https_connstr) = donor.https_connstr.as_ref() {
+            format!("https://{https_connstr}")
+        } else {
+            anyhow::bail!(
+                "cannot recover from donor {}: \
+                https is enabled, but https_connstr is not specified",
+                donor.sk_id
+            );
+        }
+    } else {
+        format!("http://{}", donor.http_connstr)
+    };
+
     let timeline_info: TimelineStatus = client
         .get(format!(
-            "http://{}/v1/tenant/{}/timeline/{}",
-            donor.http_connstr, tli.ttid.tenant_id, tli.ttid.timeline_id
+            "{}/v1/tenant/{}/timeline/{}",
+            url, tli.ttid.tenant_id, tli.ttid.timeline_id
         ))
         .send()
         .await?

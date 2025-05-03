@@ -4,6 +4,7 @@
 
 #include "miscadmin.h"
 #include "access/xlog.h"
+#include "access/xlog_internal.h"
 #include "storage/ipc.h"
 #include "storage/shmem.h"
 #include "storage/buf_internals.h"
@@ -399,6 +400,7 @@ neon_set_lwlsn_block_range(XLogRecPtr lsn, NRelFileInfo rlocator, ForkNumber for
 	if (lsn == InvalidXLogRecPtr || n_blocks == 0 || LwLsnCache->lastWrittenLsnCacheSize == 0)
 		return lsn;
 
+	Assert(lsn >= WalSegMinSize);
 	LWLockAcquire(LastWrittenLsnLock, LW_EXCLUSIVE);
 	lsn = SetLastWrittenLSNForBlockRangeInternal(lsn, rlocator, forknum, from, n_blocks);
 	LWLockRelease(LastWrittenLsnLock);
@@ -435,7 +437,6 @@ neon_set_lwlsn_block_v(const XLogRecPtr *lsns, NRelFileInfo relfilenode,
 		NInfoGetRelNumber(relfilenode) == InvalidOid)
 		return InvalidXLogRecPtr;
 
-	
 	BufTagInit(key,  relNumber, forknum, blockno, spcOid, dbOid);
 
 	LWLockAcquire(LastWrittenLsnLock, LW_EXCLUSIVE);
@@ -444,6 +445,10 @@ neon_set_lwlsn_block_v(const XLogRecPtr *lsns, NRelFileInfo relfilenode,
 	{
 		XLogRecPtr	lsn = lsns[i];
 
+		if (lsn == InvalidXLogRecPtr)
+			continue;
+
+		Assert(lsn >= WalSegMinSize);
 		key.blockNum = blockno + i;
 		entry = hash_search(lastWrittenLsnCache, &key, HASH_ENTER, &found);
 		if (found)
@@ -506,3 +511,4 @@ neon_set_lwlsn_db(XLogRecPtr lsn)
 	NRelFileInfo dummyNode = {InvalidOid, InvalidOid, InvalidOid};
 	return neon_set_lwlsn_block(lsn, dummyNode, MAIN_FORKNUM, 0);
 }
+

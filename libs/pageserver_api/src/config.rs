@@ -51,9 +51,54 @@ pub struct NodeMetadata {
 /// If there cannot be a static default value because we need to make runtime
 /// checks to determine the default, make it an `Option` (which defaults to None).
 /// The runtime check should be done in the consuming crate, i.e., `pageserver`.
+///
+/// Unknown fields are silently ignored during deserialization.
+/// The alternative, which we used in the past, was to set `deny_unknown_fields`,
+/// which fails deserialization, and hence pageserver startup, if there is an unknown field.
+/// The reason we don't do that anymore is that it complicates
+/// usage of config fields for feature flagging, which we commonly do for
+/// region-by-region rollouts.
+/// The complications mainly arise because the `pageserver.toml` contents on a
+/// prod server have a separate lifecycle from the pageserver binary.
+/// For instance, `pageserver.toml` contents today are defined in the internal
+/// infra repo, and thus introducing a new config field to pageserver and
+/// rolling it out to prod servers are separate commits in separate repos
+/// that can't be made or rolled back atomically.
+/// Rollbacks in particular pose a risk with deny_unknown_fields because
+/// the old pageserver binary may reject a new config field, resulting in
+/// an outage unless the person doing the pageserver rollback remembers
+/// to also revert the commit that added the config field in to the
+/// `pageserver.toml` templates in the internal infra repo.
+/// (A pre-deploy config check would eliminate this risk during rollbacks,
+///  cf [here](https://github.com/neondatabase/cloud/issues/24349).)
+/// In addition to this compatibility problem during emergency rollbacks,
+/// deny_unknown_fields adds further complications when decomissioning a feature
+/// flag: with deny_unknown_fields, we can't remove a flag from the [`ConfigToml`]
+/// until all prod servers' `pageserver.toml` files have been updated to a version
+/// that doesn't specify the flag. Otherwise new software would fail to start up.
+/// This adds the requirement for an intermediate step where the new config field
+/// is accepted but ignored, prolonging the decomissioning process by an entire
+/// release cycle.
+/// By contrast  with unknown fields silently ignored, decomissioning a feature
+/// flag is a one-step process: we can skip the intermediate step and straight
+/// remove the field from the [`ConfigToml`]. We leave the field in the
+/// `pageserver.toml` files on prod servers until we reach certainty that we
+/// will not roll back to old software whose behavior was dependent on config.
+/// Then we can remove the field from the templates in the internal infra repo.
+/// This process is [documented internally](
+/// https://docs.neon.build/storage/pageserver_configuration.html).
+///
+/// Note that above relaxed compatbility for the config format does NOT APPLY
+/// TO THE STORAGE FORMAT. As general guidance, when introducing storage format
+/// changes, ensure that the potential rollback target version will be compatible
+/// with the new format. This must hold regardless of what flags are set in in the `pageserver.toml`:
+/// any format version that exists in an environment must be compatible with the software that runs there.
+/// Use a pageserver.toml flag only to gate whether software _writes_ the new format.
+/// For more compatibility considerations, refer to [internal docs](
+/// https://docs.neon.build/storage/compat.html?highlight=compat#format-versions--compatibility)
 #[serde_as]
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct ConfigToml {
     // types mapped 1:1 into the runtime PageServerConfig type
     pub listen_pg_addr: String,
@@ -134,10 +179,12 @@ pub struct ConfigToml {
     pub load_previous_heatmap: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generate_unarchival_heatmap: Option<bool>,
+    pub tracing: Option<Tracing>,
+    pub enable_tls_page_service_api: bool,
+    pub dev_mode: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DiskUsageEvictionTaskConfig {
     pub max_usage_pct: utils::serde_percent::Percent,
     pub min_avail_bytes: u64,
@@ -152,17 +199,19 @@ pub struct DiskUsageEvictionTaskConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case")]
-#[serde(deny_unknown_fields)]
 pub enum PageServicePipeliningConfig {
     Serial,
     Pipelined(PageServicePipeliningConfigPipelined),
 }
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PageServicePipeliningConfigPipelined {
     /// Causes runtime errors if larger than max get_vectored batch size.
     pub max_batch_size: NonZeroUsize,
     pub execution: PageServiceProtocolPipelinedExecutionStrategy,
+    // The default below is such that new versions of the software can start
+    // with the old configuration.
+    #[serde(default)]
+    pub batching: PageServiceProtocolPipelinedBatchingStrategy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -172,9 +221,21 @@ pub enum PageServiceProtocolPipelinedExecutionStrategy {
     Tasks,
 }
 
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PageServiceProtocolPipelinedBatchingStrategy {
+    /// All get page requests in a batch will be at the same LSN
+    #[default]
+    UniformLsn,
+    /// Get page requests in a batch may be at different LSN
+    ///
+    /// One key cannot be present more than once at different LSNs in
+    /// the same batch.
+    ScatteredLsn,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case")]
-#[serde(deny_unknown_fields)]
 pub enum GetVectoredConcurrentIo {
     /// The read path is fully sequential: layers are visited
     /// one after the other and IOs are issued and waited upon
@@ -189,6 +250,54 @@ pub enum GetVectoredConcurrentIo {
     /// If the PS PageCache miss rate is low, this improves
     /// throughput dramatically.
     SidecarTask,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Ratio {
+    pub numerator: usize,
+    pub denominator: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OtelExporterConfig {
+    pub endpoint: String,
+    pub protocol: OtelExporterProtocol,
+    #[serde(with = "humantime_serde")]
+    pub timeout: Duration,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OtelExporterProtocol {
+    Grpc,
+    HttpBinary,
+    HttpJson,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Tracing {
+    pub sampling_ratio: Ratio,
+    pub export_config: OtelExporterConfig,
+}
+
+impl From<&OtelExporterConfig> for tracing_utils::ExportConfig {
+    fn from(val: &OtelExporterConfig) -> Self {
+        tracing_utils::ExportConfig {
+            endpoint: Some(val.endpoint.clone()),
+            protocol: val.protocol.into(),
+            timeout: val.timeout,
+        }
+    }
+}
+
+impl From<OtelExporterProtocol> for tracing_utils::Protocol {
+    fn from(val: OtelExporterProtocol) -> Self {
+        match val {
+            OtelExporterProtocol::Grpc => tracing_utils::Protocol::Grpc,
+            OtelExporterProtocol::HttpJson => tracing_utils::Protocol::HttpJson,
+            OtelExporterProtocol::HttpBinary => tracing_utils::Protocol::HttpBinary,
+        }
+    }
 }
 
 pub mod statvfs {
@@ -245,7 +354,7 @@ pub struct MaxVectoredReadBytes(pub NonZeroUsize);
 
 /// Tenant-level configuration values, used for various purposes.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[serde(default)]
 pub struct TenantConfigToml {
     // Flush out an inmemory layer, if it's holding WAL older than this
     // This puts a backstop on how much WAL needs to be re-digested if the
@@ -271,6 +380,8 @@ pub struct TenantConfigToml {
     /// size exceeds `compaction_upper_limit * checkpoint_distance`.
     pub compaction_upper_limit: usize,
     pub compaction_algorithm: crate::models::CompactionAlgorithmSettings,
+    /// If true, enable shard ancestor compaction (enabled by default).
+    pub compaction_shard_ancestor: bool,
     /// If true, compact down L0 across all tenant timelines before doing regular compaction. L0
     /// compaction must be responsive to avoid read amp during heavy ingestion. Defaults to true.
     pub compaction_l0_first: bool,
@@ -361,12 +472,17 @@ pub struct TenantConfigToml {
     // gc-compaction related configs
     /// Enable automatic gc-compaction trigger on this tenant.
     pub gc_compaction_enabled: bool,
+    /// Enable verification of gc-compaction results.
+    pub gc_compaction_verification: bool,
     /// The initial threshold for gc-compaction in KB. Once the total size of layers below the gc-horizon is above this threshold,
     /// gc-compaction will be triggered.
     pub gc_compaction_initial_threshold_kb: u64,
     /// The ratio that triggers the auto gc-compaction. If (the total size of layers between L2 LSN and gc-horizon) / (size below the L2 LSN)
     /// is above this ratio, gc-compaction will be triggered.
     pub gc_compaction_ratio_percent: u64,
+    /// Tenant level performance sampling ratio override. Controls the ratio of get page requests
+    /// that will get perf sampling for the tenant.
+    pub sampling_ratio: Option<Ratio>,
 }
 
 pub mod defaults {
@@ -519,9 +635,12 @@ impl Default for ConfigToml {
             page_service_pipelining: if !cfg!(test) {
                 PageServicePipeliningConfig::Serial
             } else {
+                // Do not turn this into the default until scattered reads have been
+                // validated and rolled-out fully.
                 PageServicePipeliningConfig::Pipelined(PageServicePipeliningConfigPipelined {
                     max_batch_size: NonZeroUsize::new(32).unwrap(),
                     execution: PageServiceProtocolPipelinedExecutionStrategy::ConcurrentFutures,
+                    batching: PageServiceProtocolPipelinedBatchingStrategy::ScatteredLsn,
                 })
             },
             get_vectored_concurrent_io: if !cfg!(test) {
@@ -537,6 +656,9 @@ impl Default for ConfigToml {
             validate_wal_contiguity: None,
             load_previous_heatmap: None,
             generate_unarchival_heatmap: None,
+            tracing: None,
+            enable_tls_page_service_api: false,
+            dev_mode: false,
         }
     }
 }
@@ -559,12 +681,13 @@ pub mod tenant_conf_defaults {
 
     pub const DEFAULT_COMPACTION_PERIOD: &str = "20 s";
     pub const DEFAULT_COMPACTION_THRESHOLD: usize = 10;
+    pub const DEFAULT_COMPACTION_SHARD_ANCESTOR: bool = true;
 
     // This value needs to be tuned to avoid OOM. We have 3/4*CPUs threads for L0 compaction, that's
-    // 3/4*16=9 on most of our pageservers. Compacting 20 layers requires about 1 GB memory (could
-    // be reduced later by optimizing L0 hole calculation to avoid loading all keys into memory). So
-    // with this config, we can get a maximum peak compaction usage of 9 GB.
-    pub const DEFAULT_COMPACTION_UPPER_LIMIT: usize = 20;
+    // 3/4*8=6 on most of our pageservers. Compacting 10 layers requires a maximum of
+    // DEFAULT_CHECKPOINT_DISTANCE*10 memory, that's 2560MB. So with this config, we can get a maximum peak
+    // compaction usage of 15360MB.
+    pub const DEFAULT_COMPACTION_UPPER_LIMIT: usize = 10;
     // Enable L0 compaction pass and semaphore by default. L0 compaction must be responsive to avoid
     // read amp.
     pub const DEFAULT_COMPACTION_L0_FIRST: bool = true;
@@ -581,8 +704,11 @@ pub mod tenant_conf_defaults {
     // Relevant: https://github.com/neondatabase/neon/issues/3394
     pub const DEFAULT_GC_PERIOD: &str = "1 hr";
     pub const DEFAULT_IMAGE_CREATION_THRESHOLD: usize = 3;
-    // If there are more than threshold * compaction_threshold (that is 3 * 10 in the default config) L0 layers, image
-    // layer creation will end immediately. Set to 0 to disable.
+    // Currently, any value other than 0 will trigger image layer creation preemption immediately with L0 backpressure
+    // without looking at the exact number of L0 layers.
+    // It was expected to have the following behavior:
+    // > If there are more than threshold * compaction_threshold (that is 3 * 10 in the default config) L0 layers, image
+    // > layer creation will end immediately. Set to 0 to disable.
     pub const DEFAULT_IMAGE_CREATION_PREEMPT_THRESHOLD: usize = 3;
     pub const DEFAULT_PITR_INTERVAL: &str = "7 days";
     pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "10 seconds";
@@ -596,6 +722,7 @@ pub mod tenant_conf_defaults {
     // image layers should be created.
     pub const DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD: u8 = 2;
     pub const DEFAULT_GC_COMPACTION_ENABLED: bool = false;
+    pub const DEFAULT_GC_COMPACTION_VERIFICATION: bool = true;
     pub const DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB: u64 = 5 * 1024 * 1024; // 5GB
     pub const DEFAULT_GC_COMPACTION_RATIO_PERCENT: u64 = 100;
 }
@@ -615,6 +742,7 @@ impl Default for TenantConfigToml {
             compaction_algorithm: crate::models::CompactionAlgorithmSettings {
                 kind: DEFAULT_COMPACTION_ALGORITHM,
             },
+            compaction_shard_ancestor: DEFAULT_COMPACTION_SHARD_ANCESTOR,
             compaction_l0_first: DEFAULT_COMPACTION_L0_FIRST,
             compaction_l0_semaphore: DEFAULT_COMPACTION_L0_SEMAPHORE,
             l0_flush_delay_threshold: None,
@@ -650,8 +778,10 @@ impl Default for TenantConfigToml {
             wal_receiver_protocol_override: None,
             rel_size_v2_enabled: false,
             gc_compaction_enabled: DEFAULT_GC_COMPACTION_ENABLED,
+            gc_compaction_verification: DEFAULT_GC_COMPACTION_VERIFICATION,
             gc_compaction_initial_threshold_kb: DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB,
             gc_compaction_ratio_percent: DEFAULT_GC_COMPACTION_RATIO_PERCENT,
+            sampling_ratio: None,
         }
     }
 }

@@ -43,6 +43,19 @@ impl Leadership {
         &self,
     ) -> Result<(Option<ControllerPersistence>, Option<GlobalObservedState>)> {
         let leader = self.current_leader().await?;
+
+        if leader.as_ref().map(|l| &l.address)
+            == self
+                .config
+                .address_for_peers
+                .as_ref()
+                .map(Uri::to_string)
+                .as_ref()
+        {
+            // We already are the current leader. This is a restart.
+            return Ok((leader, None));
+        }
+
         let leader_step_down_state = if let Some(ref leader) = leader {
             if self.config.start_as_candidate {
                 self.request_step_down(leader).await
@@ -110,7 +123,20 @@ impl Leadership {
     ) -> Option<GlobalObservedState> {
         tracing::info!("Sending step down request to {leader:?}");
 
+        let mut http_client = reqwest::Client::builder();
+        for cert in &self.config.ssl_ca_certs {
+            http_client = http_client.add_root_certificate(cert.clone());
+        }
+        let http_client = match http_client.build() {
+            Ok(http_client) => http_client,
+            Err(err) => {
+                tracing::error!("Failed to build client for leader step-down request: {err}");
+                return None;
+            }
+        };
+
         let client = PeerClient::new(
+            http_client,
             Uri::try_from(leader.address.as_str()).expect("Failed to build leader URI"),
             self.config.peer_jwt_token.clone(),
         );

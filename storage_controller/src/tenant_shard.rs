@@ -33,6 +33,7 @@ use crate::scheduler::{
     RefCountUpdate, ScheduleContext, ScheduleError, Scheduler, SecondaryShardTag, ShardTag,
 };
 use crate::service::ReconcileResultRequest;
+use crate::timeline_import::TimelineImportState;
 use crate::{Sequence, service};
 
 /// Serialization helper
@@ -99,6 +100,10 @@ pub(crate) struct TenantShard {
     /// SplitState set, this acts as a guard against other operations such as background
     /// reconciliation, and timeline creation.
     pub(crate) splitting: SplitState,
+
+    /// Flag indicating whether the tenant has an in-progress timeline import.
+    /// Used to disallow shard splits while an import is in progress.
+    pub(crate) importing: TimelineImportState,
 
     /// If a tenant was enqueued for later reconcile due to hitting concurrency limit, this flag
     /// is set. This flag is cleared when the tenant is popped off the delay queue.
@@ -583,6 +588,7 @@ impl TenantShard {
             config: TenantConfig::default(),
             reconciler: None,
             splitting: SplitState::Idle,
+            importing: TimelineImportState::Idle,
             sequence: Sequence(1),
             delayed_reconcile: false,
             waiter: Arc::new(SeqWait::new(Sequence(0))),
@@ -622,7 +628,7 @@ impl TenantShard {
             .collect::<Vec<_>>();
 
         attached_locs.sort_by_key(|i| i.1);
-        if let Some((node_id, _gen)) = attached_locs.into_iter().last() {
+        if let Some((node_id, _gen)) = attached_locs.into_iter().next_back() {
             self.intent.set_attached(scheduler, Some(*node_id));
         }
 
@@ -1844,6 +1850,8 @@ impl TenantShard {
             config: serde_json::from_str(&tsp.config).unwrap(),
             reconciler: None,
             splitting: tsp.splitting,
+            // Filled in during [`Service::startup_reconcile`]
+            importing: TimelineImportState::Idle,
             waiter: Arc::new(SeqWait::new(Sequence::initial())),
             error_waiter: Arc::new(SeqWait::new(Sequence::initial())),
             last_error: Arc::default(),
@@ -2000,7 +2008,7 @@ pub(crate) mod tests {
     use std::rc::Rc;
 
     use pageserver_api::controller_api::NodeAvailability;
-    use pageserver_api::shard::{ShardCount, ShardNumber};
+    use pageserver_api::shard::{DEFAULT_STRIPE_SIZE, ShardCount, ShardNumber};
     use rand::SeedableRng;
     use rand::rngs::StdRng;
     use utils::id::TenantId;
@@ -2012,6 +2020,7 @@ pub(crate) mod tests {
         let tenant_id = TenantId::generate();
         let shard_number = ShardNumber(0);
         let shard_count = ShardCount::new(1);
+        let stripe_size = DEFAULT_STRIPE_SIZE;
 
         let tenant_shard_id = TenantShardId {
             tenant_id,
@@ -2020,12 +2029,7 @@ pub(crate) mod tests {
         };
         TenantShard::new(
             tenant_shard_id,
-            ShardIdentity::new(
-                shard_number,
-                shard_count,
-                pageserver_api::shard::ShardStripeSize(32768),
-            )
-            .unwrap(),
+            ShardIdentity::new(shard_number, shard_count, stripe_size).unwrap(),
             policy,
             None,
         )
@@ -2045,6 +2049,7 @@ pub(crate) mod tests {
         shard_count: ShardCount,
         preferred_az: Option<AvailabilityZone>,
     ) -> Vec<TenantShard> {
+        let stripe_size = DEFAULT_STRIPE_SIZE;
         (0..shard_count.count())
             .map(|i| {
                 let shard_number = ShardNumber(i);
@@ -2056,12 +2061,7 @@ pub(crate) mod tests {
                 };
                 TenantShard::new(
                     tenant_shard_id,
-                    ShardIdentity::new(
-                        shard_number,
-                        shard_count,
-                        pageserver_api::shard::ShardStripeSize(32768),
-                    )
-                    .unwrap(),
+                    ShardIdentity::new(shard_number, shard_count, stripe_size).unwrap(),
                     policy.clone(),
                     preferred_az.clone(),
                 )

@@ -50,13 +50,13 @@ fn restart_rsyslog() -> Result<()> {
 
 pub fn configure_audit_rsyslog(
     log_directory: String,
-    tag: &str,
+    tag: Option<String>,
     remote_endpoint: &str,
 ) -> Result<()> {
     let config_content: String = format!(
         include_str!("config_template/compute_audit_rsyslog_template.conf"),
         log_directory = log_directory,
-        tag = tag,
+        tag = tag.unwrap_or("".to_string()),
         remote_endpoint = remote_endpoint
     );
 
@@ -119,16 +119,9 @@ impl<'a> PostgresLogsRsyslogConfig<'a> {
         };
         Ok(config_content)
     }
-
-    /// Returns the default host for otel collector that receives Postgres logs
-    pub fn default_host(project_id: &str) -> String {
-        format!(
-            "config-{}-collector.neon-telemetry.svc.cluster.local:10514",
-            project_id
-        )
-    }
 }
 
+/// Writes rsyslogd configuration for Postgres logs export and restarts rsyslog.
 pub fn configure_postgres_logs_export(conf: PostgresLogsRsyslogConfig) -> Result<()> {
     let new_config = conf.build()?;
     let current_config = PostgresLogsRsyslogConfig::current_config()?;
@@ -260,17 +253,6 @@ mod tests {
             let conf = PostgresLogsRsyslogConfig::new(Some("invalid"));
             let res = conf.build();
             assert!(res.is_err());
-        }
-
-        {
-            // Verify config with default host
-            let host = PostgresLogsRsyslogConfig::default_host("shy-breeze-123");
-            let conf = PostgresLogsRsyslogConfig::new(Some(&host));
-            let res = conf.build();
-            assert!(res.is_ok());
-            let conf_str = res.unwrap();
-            assert!(conf_str.contains(r#"shy-breeze-123"#));
-            assert!(conf_str.contains(r#"port="10514""#));
         }
     }
 }

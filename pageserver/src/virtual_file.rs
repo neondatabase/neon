@@ -12,10 +12,11 @@
 //! src/backend/storage/file/fd.c
 //!
 use std::fs::File;
-use std::io::{Error, ErrorKind, Seek, SeekFrom};
+use std::io::{Error, ErrorKind};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -25,29 +26,31 @@ use owned_buffers_io::aligned_buffer::{AlignedBufferMut, AlignedSlice, ConstAlig
 use owned_buffers_io::io_buf_aligned::{IoBufAligned, IoBufAlignedMut};
 use owned_buffers_io::io_buf_ext::FullSlice;
 use pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
-pub use pageserver_api::models::virtual_file as api;
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::time::Instant;
 use tokio_epoll_uring::{BoundedBuf, IoBuf, IoBufMut, Slice};
 
+use self::owned_buffers_io::write::OwnedAsyncWriter;
 use crate::assert_u64_eq_usize::UsizeIsU64;
 use crate::context::RequestContext;
 use crate::metrics::{STORAGE_IO_TIME_METRIC, StorageIoOperation};
 use crate::page_cache::{PAGE_SZ, PageWriteGuard};
-pub(crate) mod io_engine;
+
+pub(crate) use api::IoMode;
+pub(crate) use io_engine::IoEngineKind;
 pub use io_engine::{
     FeatureTestResult as IoEngineFeatureTestResult, feature_test as io_engine_feature_test,
     io_engine_for_bench,
 };
-mod metadata;
-mod open_options;
-pub(crate) use api::IoMode;
-pub(crate) use io_engine::IoEngineKind;
 pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
+pub use pageserver_api::models::virtual_file as api;
+pub use temporary::TempVirtualFile;
 
-use self::owned_buffers_io::write::OwnedAsyncWriter;
-
+pub(crate) mod io_engine;
+mod metadata;
+mod open_options;
+mod temporary;
 pub(crate) mod owned_buffers_io {
     //! Abstractions for IO with owned buffers.
     //!
@@ -94,69 +97,38 @@ impl VirtualFile {
         Self::open_with_options_v2(path.as_ref(), OpenOptions::new().read(true), ctx).await
     }
 
-    pub async fn create<P: AsRef<Utf8Path>>(
-        path: P,
-        ctx: &RequestContext,
-    ) -> Result<Self, std::io::Error> {
-        let inner = VirtualFileInner::create(path, ctx).await?;
-        Ok(VirtualFile {
-            inner,
-            _mode: IoMode::Buffered,
-        })
-    }
-
-    pub async fn create_v2<P: AsRef<Utf8Path>>(
-        path: P,
-        ctx: &RequestContext,
-    ) -> Result<Self, std::io::Error> {
-        VirtualFile::open_with_options_v2(
-            path.as_ref(),
-            OpenOptions::new().write(true).create(true).truncate(true),
-            ctx,
-        )
-        .await
-    }
-
-    pub async fn open_with_options<P: AsRef<Utf8Path>>(
-        path: P,
-        open_options: &OpenOptions,
-        ctx: &RequestContext,
-    ) -> Result<Self, std::io::Error> {
-        let inner = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
-        Ok(VirtualFile {
-            inner,
-            _mode: IoMode::Buffered,
-        })
-    }
-
     pub async fn open_with_options_v2<P: AsRef<Utf8Path>>(
         path: P,
         open_options: &OpenOptions,
         ctx: &RequestContext,
     ) -> Result<Self, std::io::Error> {
-        let file = match get_io_mode() {
-            IoMode::Buffered => {
-                let inner = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
-                VirtualFile {
-                    inner,
-                    _mode: IoMode::Buffered,
-                }
-            }
+        let mode = get_io_mode();
+        let set_o_direct = match (mode, open_options.is_write()) {
+            (IoMode::Buffered, _) => false,
             #[cfg(target_os = "linux")]
-            IoMode::Direct => {
-                let inner = VirtualFileInner::open_with_options(
-                    path,
-                    open_options.clone().custom_flags(nix::libc::O_DIRECT),
-                    ctx,
-                )
-                .await?;
-                VirtualFile {
-                    inner,
-                    _mode: IoMode::Direct,
-                }
-            }
+            (IoMode::Direct, false) => true,
+            #[cfg(target_os = "linux")]
+            (IoMode::Direct, true) => false,
+            #[cfg(target_os = "linux")]
+            (IoMode::DirectRw, _) => true,
         };
-        Ok(file)
+        let open_options = open_options.clone();
+        let open_options = if set_o_direct {
+            #[cfg(target_os = "linux")]
+            {
+                let mut open_options = open_options;
+                open_options.custom_flags(nix::libc::O_DIRECT);
+                open_options
+            }
+            #[cfg(not(target_os = "linux"))]
+            unreachable!(
+                "O_DIRECT is not supported on this platform, IoMode's that result in set_o_direct=true shouldn't even be defined"
+            );
+        } else {
+            open_options
+        };
+        let inner = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
+        Ok(VirtualFile { inner, _mode: mode })
     }
 
     pub fn path(&self) -> &Utf8Path {
@@ -185,16 +157,12 @@ impl VirtualFile {
         self.inner.sync_data().await
     }
 
+    pub async fn set_len(&self, len: u64, ctx: &RequestContext) -> Result<(), Error> {
+        self.inner.set_len(len, ctx).await
+    }
+
     pub async fn metadata(&self) -> Result<Metadata, Error> {
         self.inner.metadata().await
-    }
-
-    pub fn remove(self) {
-        self.inner.remove();
-    }
-
-    pub async fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
-        self.inner.seek(pos).await
     }
 
     pub async fn read_exact_at<Buf>(
@@ -227,25 +195,31 @@ impl VirtualFile {
         self.inner.write_all_at(buf, offset, ctx).await
     }
 
-    pub async fn write_all<Buf: IoBuf + Send>(
-        &mut self,
-        buf: FullSlice<Buf>,
+    pub(crate) async fn read_to_string<P: AsRef<Utf8Path>>(
+        path: P,
         ctx: &RequestContext,
-    ) -> (FullSlice<Buf>, Result<usize, Error>) {
-        self.inner.write_all(buf, ctx).await
-    }
-
-    async fn read_to_end(&mut self, buf: &mut Vec<u8>, ctx: &RequestContext) -> Result<(), Error> {
-        self.inner.read_to_end(buf, ctx).await
-    }
-
-    pub(crate) async fn read_to_string(
-        &mut self,
-        ctx: &RequestContext,
-    ) -> Result<String, anyhow::Error> {
+    ) -> std::io::Result<String> {
+        let file = VirtualFile::open(path, ctx).await?; // TODO: open_v2
         let mut buf = Vec::new();
-        self.read_to_end(&mut buf, ctx).await?;
-        Ok(String::from_utf8(buf)?)
+        let mut tmp = vec![0; 128];
+        let mut pos: u64 = 0;
+        loop {
+            let slice = tmp.slice(..128);
+            let (slice, res) = file.inner.read_at(slice, pos, ctx).await;
+            match res {
+                Ok(0) => break,
+                Ok(n) => {
+                    pos += n as u64;
+                    buf.extend_from_slice(&slice[..n]);
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+            tmp = slice.into_inner();
+        }
+        String::from_utf8(buf).map_err(|_| {
+            std::io::Error::new(ErrorKind::InvalidData, "file contents are not valid UTF-8")
+        })
     }
 }
 
@@ -291,9 +265,6 @@ pub struct VirtualFileInner {
     /// might contain our File, or it may be empty, or it may contain a File that
     /// belongs to a different VirtualFile.
     handle: RwLock<SlotHandle>,
-
-    /// Current file position
-    pos: u64,
 
     /// File path and options to use to open it.
     ///
@@ -559,21 +530,7 @@ impl VirtualFileInner {
         path: P,
         ctx: &RequestContext,
     ) -> Result<VirtualFileInner, std::io::Error> {
-        Self::open_with_options(path.as_ref(), OpenOptions::new().read(true), ctx).await
-    }
-
-    /// Create a new file for writing. If the file exists, it will be truncated.
-    /// Like File::create.
-    pub async fn create<P: AsRef<Utf8Path>>(
-        path: P,
-        ctx: &RequestContext,
-    ) -> Result<VirtualFileInner, std::io::Error> {
-        Self::open_with_options(
-            path.as_ref(),
-            OpenOptions::new().write(true).create(true).truncate(true),
-            ctx,
-        )
-        .await
+        Self::open_with_options(path.as_ref(), OpenOptions::new().read(true).clone(), ctx).await
     }
 
     /// Open a file with given options.
@@ -583,7 +540,7 @@ impl VirtualFileInner {
     /// on the first time. Make sure that's sane!
     pub async fn open_with_options<P: AsRef<Utf8Path>>(
         path: P,
-        open_options: &OpenOptions,
+        open_options: OpenOptions,
         _ctx: &RequestContext,
     ) -> Result<VirtualFileInner, std::io::Error> {
         let path = path.as_ref();
@@ -608,7 +565,6 @@ impl VirtualFileInner {
 
         let vfile = VirtualFileInner {
             handle: RwLock::new(handle),
-            pos: 0,
             path: path.to_owned(),
             open_options: reopen_options,
         };
@@ -672,6 +628,13 @@ impl VirtualFileInner {
         with_file!(self, StorageIoOperation::Metadata, |file_guard| {
             let (_file_guard, res) = io_engine::get().metadata(file_guard).await;
             res
+        })
+    }
+
+    pub async fn set_len(&self, len: u64, _ctx: &RequestContext) -> Result<(), Error> {
+        with_file!(self, StorageIoOperation::SetLen, |file_guard| {
+            let (_file_guard, res) = io_engine::get().set_len(file_guard, len).await;
+            res.maybe_fatal_err("set_len")
         })
     }
 
@@ -740,38 +703,6 @@ impl VirtualFileInner {
         Ok(FileGuard {
             slot_guard: slot_guard.downgrade(),
         })
-    }
-
-    pub fn remove(self) {
-        let path = self.path.clone();
-        drop(self);
-        std::fs::remove_file(path).expect("failed to remove the virtual file");
-    }
-
-    pub async fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
-        match pos {
-            SeekFrom::Start(offset) => {
-                self.pos = offset;
-            }
-            SeekFrom::End(offset) => {
-                self.pos = with_file!(self, StorageIoOperation::Seek, |mut file_guard| file_guard
-                    .with_std_file_mut(|std_file| std_file.seek(SeekFrom::End(offset))))?
-            }
-            SeekFrom::Current(offset) => {
-                let pos = self.pos as i128 + offset as i128;
-                if pos < 0 {
-                    return Err(Error::new(
-                        ErrorKind::InvalidInput,
-                        "offset would be negative",
-                    ));
-                }
-                if pos > u64::MAX as i128 {
-                    return Err(Error::new(ErrorKind::InvalidInput, "offset overflow"));
-                }
-                self.pos = pos as u64;
-            }
-        }
-        Ok(self.pos)
     }
 
     /// Read the file contents in range `offset..(offset + slice.bytes_total())` into `slice[0..slice.bytes_total()]`.
@@ -857,59 +788,7 @@ impl VirtualFileInner {
         (restore(buf), Ok(()))
     }
 
-    /// Writes `buf` to the file at the current offset.
-    ///
-    /// Panics if there is an uninitialized range in `buf`, as that is most likely a bug in the caller.
-    pub async fn write_all<Buf: IoBuf + Send>(
-        &mut self,
-        buf: FullSlice<Buf>,
-        ctx: &RequestContext,
-    ) -> (FullSlice<Buf>, Result<usize, Error>) {
-        let buf = buf.into_raw_slice();
-        let bounds = buf.bounds();
-        let restore =
-            |buf: Slice<_>| FullSlice::must_new(Slice::from_buf_bounds(buf.into_inner(), bounds));
-        let nbytes = buf.len();
-        let mut buf = buf;
-        while !buf.is_empty() {
-            let (tmp, res) = self.write(FullSlice::must_new(buf), ctx).await;
-            buf = tmp.into_raw_slice();
-            match res {
-                Ok(0) => {
-                    return (
-                        restore(buf),
-                        Err(Error::new(
-                            std::io::ErrorKind::WriteZero,
-                            "failed to write whole buffer",
-                        )),
-                    );
-                }
-                Ok(n) => {
-                    buf = buf.slice(n..);
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return (restore(buf), Err(e)),
-            }
-        }
-        (restore(buf), Ok(nbytes))
-    }
-
-    async fn write<B: IoBuf + Send>(
-        &mut self,
-        buf: FullSlice<B>,
-        ctx: &RequestContext,
-    ) -> (FullSlice<B>, Result<usize, std::io::Error>) {
-        let pos = self.pos;
-        let (buf, res) = self.write_at(buf, pos, ctx).await;
-        let n = match res {
-            Ok(n) => n,
-            Err(e) => return (buf, Err(e)),
-        };
-        self.pos += n as u64;
-        (buf, Ok(n))
-    }
-
-    pub(crate) async fn read_at<Buf>(
+    pub(super) async fn read_at<Buf>(
         &self,
         buf: tokio_epoll_uring::Slice<Buf>,
         offset: u64,
@@ -937,19 +816,7 @@ impl VirtualFileInner {
         })
     }
 
-    /// The function aborts the process if the error is fatal.
     async fn write_at<B: IoBuf + Send>(
-        &self,
-        buf: FullSlice<B>,
-        offset: u64,
-        ctx: &RequestContext,
-    ) -> (FullSlice<B>, Result<usize, Error>) {
-        let (slice, result) = self.write_at_inner(buf, offset, ctx).await;
-        let result = result.maybe_fatal_err("write_at");
-        (slice, result)
-    }
-
-    async fn write_at_inner<B: IoBuf + Send>(
         &self,
         buf: FullSlice<B>,
         offset: u64,
@@ -962,29 +829,12 @@ impl VirtualFileInner {
         observe_duration!(StorageIoOperation::Write, {
             let ((_file_guard, buf), result) =
                 io_engine::get().write_at(file_guard, offset, buf).await;
+            let result = result.maybe_fatal_err("write_at");
             if let Ok(size) = result {
                 ctx.io_size_metrics().write.add(size.into_u64());
             }
             (buf, result)
         })
-    }
-
-    async fn read_to_end(&mut self, buf: &mut Vec<u8>, ctx: &RequestContext) -> Result<(), Error> {
-        let mut tmp = vec![0; 128];
-        loop {
-            let slice = tmp.slice(..128);
-            let (slice, res) = self.read_at(slice, self.pos, ctx).await;
-            match res {
-                Ok(0) => return Ok(()),
-                Ok(n) => {
-                    self.pos += n as u64;
-                    buf.extend_from_slice(&slice[..n]);
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
-            }
-            tmp = slice.into_inner();
-        }
     }
 }
 
@@ -1200,19 +1050,6 @@ impl FileGuard {
         let _ = file.into_raw_fd();
         res
     }
-    /// Soft deprecation: we'll move VirtualFile to async APIs and remove this function eventually.
-    fn with_std_file_mut<F, R>(&mut self, with: F) -> R
-    where
-        F: FnOnce(&mut File) -> R,
-    {
-        // SAFETY:
-        // - lifetime of the fd: `file` doesn't outlive the OwnedFd stored in `self`.
-        // - &mut usage below: `self` is `&mut`, hence this call is the only task/thread that has control over the underlying fd
-        let mut file = unsafe { File::from_raw_fd(self.as_ref().as_raw_fd()) };
-        let res = with(&mut file);
-        let _ = file.into_raw_fd();
-        res
-    }
 }
 
 impl tokio_epoll_uring::IoFd for FileGuard {
@@ -1302,6 +1139,9 @@ impl OwnedAsyncWriter for VirtualFile {
     ) -> (FullSlice<Buf>, std::io::Result<()>) {
         VirtualFile::write_all_at(self, buf, offset, ctx).await
     }
+    async fn set_len(&self, len: u64, ctx: &RequestContext) -> std::io::Result<()> {
+        VirtualFile::set_len(self, len, ctx).await
+    }
 }
 
 impl OpenFiles {
@@ -1366,9 +1206,9 @@ pub(crate) type IoBuffer = AlignedBuffer<ConstAlign<{ get_io_buffer_alignment() 
 pub(crate) type IoPageSlice<'a> =
     AlignedSlice<'a, PAGE_SZ, ConstAlign<{ get_io_buffer_alignment() }>>;
 
-static IO_MODE: AtomicU8 = AtomicU8::new(IoMode::preferred() as u8);
+static IO_MODE: LazyLock<AtomicU8> = LazyLock::new(|| AtomicU8::new(IoMode::preferred() as u8));
 
-pub(crate) fn set_io_mode(mode: IoMode) {
+pub fn set_io_mode(mode: IoMode) {
     IO_MODE.store(mode as u8, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -1380,7 +1220,6 @@ static SYNC_MODE: AtomicU8 = AtomicU8::new(SyncMode::Sync as u8);
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
     use std::os::unix::fs::FileExt;
     use std::sync::Arc;
 
@@ -1433,43 +1272,6 @@ mod tests {
                 MaybeVirtualFile::File(file) => file.write_all_at(&buf[..], offset),
             }
         }
-        async fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
-            match self {
-                MaybeVirtualFile::VirtualFile(file) => file.seek(pos).await,
-                MaybeVirtualFile::File(file) => file.seek(pos),
-            }
-        }
-        async fn write_all<Buf: IoBuf + Send>(
-            &mut self,
-            buf: FullSlice<Buf>,
-            ctx: &RequestContext,
-        ) -> Result<(), Error> {
-            match self {
-                MaybeVirtualFile::VirtualFile(file) => {
-                    let (_buf, res) = file.write_all(buf, ctx).await;
-                    res.map(|_| ())
-                }
-                MaybeVirtualFile::File(file) => file.write_all(&buf[..]),
-            }
-        }
-
-        // Helper function to slurp contents of a file, starting at the current position,
-        // into a string
-        async fn read_string(&mut self, ctx: &RequestContext) -> Result<String, Error> {
-            use std::io::Read;
-            let mut buf = String::new();
-            match self {
-                MaybeVirtualFile::VirtualFile(file) => {
-                    let mut buf = Vec::new();
-                    file.read_to_end(&mut buf, ctx).await?;
-                    return Ok(String::from_utf8(buf).unwrap());
-                }
-                MaybeVirtualFile::File(file) => {
-                    file.read_to_string(&mut buf)?;
-                }
-            }
-            Ok(buf)
-        }
 
         // Helper function to slurp a portion of a file into a string
         async fn read_string_at(
@@ -1505,7 +1307,7 @@ mod tests {
                 opts: OpenOptions,
                 ctx: &RequestContext,
             ) -> Result<MaybeVirtualFile, anyhow::Error> {
-                let vf = VirtualFile::open_with_options(&path, &opts, ctx).await?;
+                let vf = VirtualFile::open_with_options_v2(&path, &opts, ctx).await?;
                 Ok(MaybeVirtualFile::VirtualFile(vf))
             }
         }
@@ -1565,48 +1367,23 @@ mod tests {
         .await?;
 
         file_a
-            .write_all(b"foobar".to_vec().slice_len(), &ctx)
+            .write_all_at(IoBuffer::from(b"foobar").slice_len(), 0, &ctx)
             .await?;
 
         // cannot read from a file opened in write-only mode
-        let _ = file_a.read_string(&ctx).await.unwrap_err();
+        let _ = file_a.read_string_at(0, 1, &ctx).await.unwrap_err();
 
         // Close the file and re-open for reading
         let mut file_a = A::open(path_a, OpenOptions::new().read(true).to_owned(), &ctx).await?;
 
         // cannot write to a file opened in read-only mode
         let _ = file_a
-            .write_all(b"bar".to_vec().slice_len(), &ctx)
+            .write_all_at(IoBuffer::from(b"bar").slice_len(), 0, &ctx)
             .await
             .unwrap_err();
 
         // Try simple read
-        assert_eq!("foobar", file_a.read_string(&ctx).await?);
-
-        // It's positioned at the EOF now.
-        assert_eq!("", file_a.read_string(&ctx).await?);
-
-        // Test seeks.
-        assert_eq!(file_a.seek(SeekFrom::Start(1)).await?, 1);
-        assert_eq!("oobar", file_a.read_string(&ctx).await?);
-
-        assert_eq!(file_a.seek(SeekFrom::End(-2)).await?, 4);
-        assert_eq!("ar", file_a.read_string(&ctx).await?);
-
-        assert_eq!(file_a.seek(SeekFrom::Start(1)).await?, 1);
-        assert_eq!(file_a.seek(SeekFrom::Current(2)).await?, 3);
-        assert_eq!("bar", file_a.read_string(&ctx).await?);
-
-        assert_eq!(file_a.seek(SeekFrom::Current(-5)).await?, 1);
-        assert_eq!("oobar", file_a.read_string(&ctx).await?);
-
-        // Test erroneous seeks to before byte 0
-        file_a.seek(SeekFrom::End(-7)).await.unwrap_err();
-        assert_eq!(file_a.seek(SeekFrom::Start(1)).await?, 1);
-        file_a.seek(SeekFrom::Current(-2)).await.unwrap_err();
-
-        // the erroneous seek should have left the position unchanged
-        assert_eq!("oobar", file_a.read_string(&ctx).await?);
+        assert_eq!("foobar", file_a.read_string_at(0, 6, &ctx).await?);
 
         // Create another test file, and try FileExt functions on it.
         let path_b = testdir.join("file_b");
@@ -1632,9 +1409,6 @@ mod tests {
 
         // Open a lot of files, enough to cause some evictions. (Or to be precise,
         // open the same file many times. The effect is the same.)
-        //
-        // leave file_a positioned at offset 1 before we start
-        assert_eq!(file_a.seek(SeekFrom::Start(1)).await?, 1);
 
         let mut vfiles = Vec::new();
         for _ in 0..100 {
@@ -1644,7 +1418,7 @@ mod tests {
                 &ctx,
             )
             .await?;
-            assert_eq!("FOOBAR", vfile.read_string(&ctx).await?);
+            assert_eq!("FOOBAR", vfile.read_string_at(0, 6, &ctx).await?);
             vfiles.push(vfile);
         }
 
@@ -1652,8 +1426,8 @@ mod tests {
         assert!(vfiles.len() > TEST_MAX_FILE_DESCRIPTORS * 2);
 
         // The underlying file descriptor for 'file_a' should be closed now. Try to read
-        // from it again. We left the file positioned at offset 1 above.
-        assert_eq!("oobar", file_a.read_string(&ctx).await?);
+        // from it again.
+        assert_eq!("foobar", file_a.read_string_at(0, 6, &ctx).await?);
 
         // Check that all the other FDs still work too. Use them in random order for
         // good measure.
@@ -1692,7 +1466,7 @@ mod tests {
         for _ in 0..VIRTUAL_FILES {
             let f = VirtualFileInner::open_with_options(
                 &test_file_path,
-                OpenOptions::new().read(true),
+                OpenOptions::new().read(true).clone(),
                 &ctx,
             )
             .await?;
@@ -1747,7 +1521,7 @@ mod tests {
             .await
             .unwrap();
         let mut file = MaybeVirtualFile::from(VirtualFile::open(&path, &ctx).await.unwrap());
-        let post = file.read_string(&ctx).await.unwrap();
+        let post = file.read_string_at(0, 3, &ctx).await.unwrap();
         assert_eq!(post, "foo");
         assert!(!tmp_path.exists());
         drop(file);
@@ -1756,7 +1530,7 @@ mod tests {
             .await
             .unwrap();
         let mut file = MaybeVirtualFile::from(VirtualFile::open(&path, &ctx).await.unwrap());
-        let post = file.read_string(&ctx).await.unwrap();
+        let post = file.read_string_at(0, 3, &ctx).await.unwrap();
         assert_eq!(post, "bar");
         assert!(!tmp_path.exists());
         drop(file);
@@ -1781,7 +1555,7 @@ mod tests {
             .unwrap();
 
         let mut file = MaybeVirtualFile::from(VirtualFile::open(&path, &ctx).await.unwrap());
-        let post = file.read_string(&ctx).await.unwrap();
+        let post = file.read_string_at(0, 3, &ctx).await.unwrap();
         assert_eq!(post, "foo");
         assert!(!tmp_path.exists());
         drop(file);

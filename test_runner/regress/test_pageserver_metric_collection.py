@@ -107,7 +107,7 @@ def test_metric_collection(
         ps_metrics = env.pageserver.http_client().get_metrics()
         total = 0.0
         for sample in ps_metrics.query_all(
-            name="pageserver_remote_operation_seconds_count",
+            name="pageserver_remote_timeline_client_seconds_global_count",
             filter={
                 "file_kind": str(file_kind),
                 "op_kind": str(op_kind),
@@ -506,7 +506,6 @@ class SyntheticSizeVerifier:
 
 PER_METRIC_VERIFIERS = {
     "remote_storage_size": CannotVerifyAnything,
-    "resident_size": CannotVerifyAnything,
     "written_size": WrittenDataVerifier,
     "written_data_bytes_delta": WrittenDataDeltaVerifier,
     "timeline_logical_size": CannotVerifyAnything,

@@ -43,7 +43,7 @@ websockets = "^12.0"
 clickhouse-connect = "^0.7.16"
 kafka-python = "^2.0.2"
 jwcrypto = "^1.5.6"
-h2 = {git = "https://github.com/python-hyper/h2"}
+h2 = "^4.2.0"
 types-jwcrypto = "^1.5.0.20240925"
 pyyaml = "^6.0.2"
 types-pyyaml = "^6.0.12.20240917"

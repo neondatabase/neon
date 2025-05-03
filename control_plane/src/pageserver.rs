@@ -21,7 +21,6 @@ use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
 use postgres_connection::{PgConnectionConfig, parse_host_port};
-use reqwest::Certificate;
 use utils::auth::{Claims, Scope};
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
@@ -51,19 +50,6 @@ impl PageServerNode {
             parse_host_port(&conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
         let port = port.unwrap_or(5432);
 
-        let ssl_ca_certs = env.ssl_ca_cert_path().map(|ssl_ca_file| {
-            let buf = std::fs::read(ssl_ca_file).expect("SSL root CA file should exist");
-            Certificate::from_pem_bundle(&buf).expect("SSL CA file should be valid")
-        });
-
-        let mut http_client = reqwest::Client::builder();
-        for ssl_ca_cert in ssl_ca_certs.unwrap_or_default() {
-            http_client = http_client.add_root_certificate(ssl_ca_cert);
-        }
-        let http_client = http_client
-            .build()
-            .expect("Client constructs with no errors");
-
         let endpoint = if env.storage_controller.use_https_pageserver_api {
             format!(
                 "https://{}",
@@ -80,7 +66,7 @@ impl PageServerNode {
             conf: conf.clone(),
             env: env.clone(),
             http_client: mgmt_api::Client::new(
-                http_client,
+                env.create_http_client(),
                 endpoint,
                 {
                     match conf.http_auth_type {
@@ -413,6 +399,11 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("Failed to parse 'compaction_algorithm' json")?,
+            compaction_shard_ancestor: settings
+                .remove("compaction_shard_ancestor")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'compaction_shard_ancestor' as a bool")?,
             compaction_l0_first: settings
                 .remove("compaction_l0_first")
                 .map(|x| x.parse::<bool>())
@@ -535,6 +526,11 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'gc_compaction_enabled' as bool")?,
+            gc_compaction_verification: settings
+                .remove("gc_compaction_verification")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'gc_compaction_verification' as bool")?,
             gc_compaction_initial_threshold_kb: settings
                 .remove("gc_compaction_initial_threshold_kb")
                 .map(|x| x.parse::<u64>())
@@ -545,6 +541,11 @@ impl PageServerNode {
                 .map(|x| x.parse::<u64>())
                 .transpose()
                 .context("Failed to parse 'gc_compaction_ratio_percent' as integer")?,
+            sampling_ratio: settings
+                .remove("sampling_ratio")
+                .map(serde_json::from_str)
+                .transpose()
+                .context("Falied to parse 'sampling_ratio'")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
