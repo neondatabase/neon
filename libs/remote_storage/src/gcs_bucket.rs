@@ -8,7 +8,8 @@ use crate::metrics::{AttemptOutcome, start_counting_cancelled_wait, start_measur
 use crate::{
     ConcurrencyLimiter, Download, DownloadError, DownloadOpts, GCS_SCOPES, Listing, ListingMode,
     ListingObject, MAX_KEYS_PER_DELETE_GCS, REMOTE_STORAGE_PREFIX_SEPARATOR, RemotePath,
-    RemoteStorage, StorageMetadata, TimeTravelError, TimeoutOrCancel,
+    RemoteStorage, StorageMetadata, TimeTravelError, TimeoutOrCancel, Version, VersionId,
+    VersionListing,
 };
 use anyhow::Context;
 use azure_core::Etag;
@@ -26,7 +27,7 @@ use scopeguard::ScopeGuard;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, ParseIntError};
 use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,7 +35,8 @@ use std::time::SystemTime;
 use tokio_util::codec::{BytesCodec, FramedRead};
 use tokio_util::sync::CancellationToken;
 use tracing;
-use url::Url;
+use url::{ParseError, Url};
+use utils::backoff;
 use uuid::Uuid;
 
 // ---------
@@ -171,6 +173,146 @@ impl GCSBucket {
             .wait_seconds
             .observe_elapsed(kind, started_at);
         Ok(permit)
+    }
+
+    async fn list_object_versions(
+        &self,
+        prefix: Option<&RemotePath>,
+        key_marker: Option<String>,
+        version_id_marker: Option<String>,
+    ) -> Result<GCSObject, DownloadError> {
+        todo!();
+        //let mut list_versions_uri = format!(
+        //    "https://storage.googleapis.com/storage/v1/b/{}/o?prefix={}&maxResults={}",
+        //    self.bucket_name.clone(),
+        //    list_prefix,
+        //);
+
+        //// on ListingMode:
+        //// https://github.com/neondatabase/neon/blob/edc11253b65e12a10843711bd88ad277511396d7/libs/remote_storage/src/lib.rs#L158C1-L164C2
+        //if let ListingMode::WithDelimiter = mode {
+        //    list_uri.push_str(&format!(
+        //        "&delimiter={}",
+        //        REMOTE_STORAGE_PREFIX_SEPARATOR.to_string()
+        //    ));
+        //}
+    }
+
+    async fn list_versions_with_permit(
+        &self,
+        _permit: &tokio::sync::SemaphorePermit<'_>,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> Result<crate::VersionListing, DownloadError> {
+        todo!();
+        //// get the passed prefix or if it is not set use prefix_in_bucket value
+        //let prefix = prefix
+        //    .map(|p| self.relative_path_to_gcs_object(p))
+        //    .or_else(|| self.prefix_in_bucket.clone());
+
+        //let warn_threshold = 3;
+        //let max_retries = 10;
+        //let is_permanent = |e: &_| matches!(e, DownloadError::Cancelled);
+
+        //let mut key_marker = None;
+        //let mut version_id_marker = None;
+        //let mut versions_and_deletes = Vec::new();
+
+        //loop {
+        //    let response = backoff::retry(
+        //        || async {
+        //            let mut request = self.list_object_versions(
+        //                prefix.clone(),
+        //                key_marker.clone(),
+        //                version_id_marker.clone(),
+        //            );
+
+        //            if let ListingMode::WithDelimiter = mode {
+        //                request = request.delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string());
+        //            }
+
+        //            let op = request.send();
+
+        //            tokio::select! {
+        //                res = op => res.map_err(|e| DownloadError::Other(e.into())),
+        //                _ = cancel.cancelled() => Err(DownloadError::Cancelled),
+        //            }
+        //        },
+        //        is_permanent,
+        //        warn_threshold,
+        //        max_retries,
+        //        "listing object versions",
+        //        cancel,
+        //    )
+        //    .await
+        //    .ok_or_else(|| DownloadError::Cancelled)
+        //    .and_then(|x| x)?;
+
+        //    tracing::trace!(
+        //        "  Got List response version_id_marker={:?}, key_marker={:?}",
+        //        response.version_id_marker,
+        //        response.key_marker
+        //    );
+        //    let versions = response
+        //        .versions
+        //        .unwrap_or_default()
+        //        .into_iter()
+        //        .map(|version| {
+        //            let key = version.key.expect("response does not contain a key");
+        //            let key = self.gcs_object_to_relative_path(&key);
+        //            let version_id = VersionId(version.version_id.expect("needing version id"));
+        //            let last_modified =
+        //                SystemTime::try_from(version.last_modified.expect("no last_modified"))?;
+        //            Ok(Version {
+        //                key,
+        //                last_modified,
+        //                kind: crate::VersionKind::Version(version_id),
+        //            })
+        //        });
+        //    let deletes = response
+        //        .delete_markers
+        //        .unwrap_or_default()
+        //        .into_iter()
+        //        .map(|version| {
+        //            let key = version.key.expect("response does not contain a key");
+        //            let key = self.gcs_object_to_relative_path(&key);
+        //            let last_modified =
+        //                SystemTime::try_from(version.last_modified.expect("no last_modified"))?;
+        //            Ok(Version {
+        //                key,
+        //                last_modified,
+        //                kind: crate::VersionKind::DeletionMarker,
+        //            })
+        //        });
+        //    itertools::process_results(versions.chain(deletes), |n_vds| {
+        //        versions_and_deletes.extend(n_vds)
+        //    })
+        //    .map_err(DownloadError::Other)?;
+        //    fn none_if_empty(v: Option<String>) -> Option<String> {
+        //        v.filter(|v| !v.is_empty())
+        //    }
+        //    version_id_marker = none_if_empty(response.next_version_id_marker);
+        //    key_marker = none_if_empty(response.next_key_marker);
+        //    if version_id_marker.is_none() {
+        //        // The final response is not supposed to be truncated
+        //        if response.is_truncated.unwrap_or_default() {
+        //            return Err(DownloadError::Other(anyhow::anyhow!(
+        //                "Received truncated ListObjectVersions response for prefix={prefix:?}"
+        //            )));
+        //        }
+        //        break;
+        //    }
+        //    if let Some(max_keys) = max_keys {
+        //        if versions_and_deletes.len() >= max_keys.get().try_into().unwrap() {
+        //            return Err(DownloadError::Other(anyhow::anyhow!("too many versions")));
+        //        }
+        //    }
+        //}
+        //Ok(VersionListing {
+        //    versions: versions_and_deletes,
+        //})
     }
 
     async fn put_object(
@@ -436,16 +578,13 @@ impl GCSBucket {
         Ok(())
     }
 
-    async fn head(
+    async fn head_object(
         &self,
         key: String,
         cancel: &CancellationToken,
-    ) -> Result<ListingObject, DownloadError> {
+    ) -> Result<GCSObject, DownloadError> {
         let kind = RequestKind::Head;
-
         let _permit = self.permit(kind, cancel).await?;
-
-        let started_at = start_measuring_requests(kind);
 
         let encoded_path: String = url::form_urlencoded::byte_serialize(key.as_bytes()).collect();
 
@@ -457,7 +596,7 @@ impl GCSBucket {
             metadata_uri_mod
         );
 
-        let res = Client::new()
+        let head_future = Client::new()
             .get(download_uri)
             .bearer_auth(
                 self.token_provider
@@ -466,28 +605,9 @@ impl GCSBucket {
                     .map_err(|e: gcp_auth::Error| DownloadError::Other(e.into()))?
                     .as_str(),
             )
-            .send()
-            .await
-            .map_err(|e: reqwest::Error| DownloadError::Other(e.into()))?;
+            .send();
 
-        if !res.status().is_success() {
-            match res.status() {
-                StatusCode::NOT_FOUND => return Err(DownloadError::NotFound),
-                _ => {
-                    return Err(DownloadError::Other(anyhow::anyhow!(
-                        "GCS GET resposne contained no response body"
-                    )));
-                }
-            }
-        };
-
-        let body = res
-            .text()
-            .await
-            .map_err(|e: reqwest::Error| DownloadError::Other(e.into()))?;
-
-        let resp: GCSObject = serde_json::from_str(&body)
-            .map_err(|e: serde_json::Error| DownloadError::Other(e.into()))?;
+        let started_at = start_measuring_requests(kind);
 
         let head_future = tokio::time::timeout(self.timeout, head_future);
 
@@ -505,17 +625,19 @@ impl GCSBucket {
             .observe_elapsed(kind, &res, started_at);
 
         let data = match res {
-            Ok(object_output) => object_output,
-            Err(SdkError::ServiceError(e)) if matches!(e.err(), HeadObjectError::NotFound(_)) => {
-                // Count this in the AttemptOutcome::Ok bucket, because 404 is not
-                // an error: we expect to sometimes fetch an object and find it missing,
-                // e.g. when probing for timeline indices.
-                crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
-                    kind,
-                    AttemptOutcome::Ok,
-                    started_at,
-                );
-                return Err(DownloadError::NotFound);
+            Ok(data) => {
+                if !data.status().is_success() {
+                    match data.status() {
+                        StatusCode::NOT_FOUND => return Err(DownloadError::NotFound),
+                        _ => {
+                            return Err(DownloadError::Other(anyhow::anyhow!(
+                                "GCS head response contained no response body"
+                            )));
+                        }
+                    }
+                } else {
+                    data
+                }
             }
             Err(e) => {
                 crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
@@ -525,23 +647,20 @@ impl GCSBucket {
                 );
 
                 return Err(DownloadError::Other(
-                    anyhow::Error::new(e).context("s3 head object"),
+                    anyhow::Error::new(e).context("error in HEAD of GCS object"),
                 ));
             }
         };
 
-        let (Some(last_modified), Some(size)) = (data.last_modified, data.content_length) else {
-            return Err(DownloadError::Other(anyhow::anyhow!(
-                "head_object doesn't contain last_modified or content_length"
-            )))?;
-        };
-        Ok(ListingObject {
-            key: self.gcs_object_to_relative_path(&key),
-            last_modified: SystemTime::try_from(last_modified).map_err(|e| {
-                DownloadError::Other(anyhow::anyhow!("can't convert time '{last_modified}': {e}"))
-            })?,
-            size: size as u64,
-        })
+        let body = data
+            .text()
+            .await
+            .map_err(|e: reqwest::Error| DownloadError::Other(e.into()))?;
+
+        let resp: GCSObject = serde_json::from_str(&body)
+            .map_err(|e: serde_json::Error| DownloadError::Other(e.into()))?;
+
+        Ok(resp)
     }
 
     async fn list_objects_v2(&self, list_uri: String) -> anyhow::Result<reqwest::RequestBuilder> {
@@ -571,7 +690,58 @@ impl GCSBucket {
         /// 2. We do not .await the second request pass on the pinned stream to the 'get_object'
         ///    caller
         // 1. Serialize Metadata in initial request
-        let resp = self.head_object(request.key, cancel).await?;
+        let metadata_uri_mod = "alt=json";
+        let download_uri = format!(
+            "https://storage.googleapis.com/storage/v1/b/{}/o/{}?{}",
+            self.bucket_name.clone(),
+            encoded_path,
+            metadata_uri_mod
+        );
+
+        let res = Client::new()
+            .get(download_uri)
+            .bearer_auth(
+                self.token_provider
+                    .token(GCS_SCOPES)
+                    .await
+                    .map_err(|e: gcp_auth::Error| DownloadError::Other(e.into()))?
+                    .as_str(),
+            )
+            .send();
+
+        let obj_metadata = tokio::select! {
+            res = res => res,
+            _ = tokio::time::sleep(self.timeout) => return Err(DownloadError::Timeout),
+            _ = cancel.cancelled() => return Err(DownloadError::Cancelled),
+        };
+
+        let resp = match obj_metadata {
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    match resp.status() {
+                        StatusCode::NOT_FOUND => return Err(DownloadError::NotFound),
+                        _ => {
+                            return Err(DownloadError::Other(anyhow::anyhow!(
+                                "GCS GET resposne contained no response body"
+                            )));
+                        }
+                    }
+                } else {
+                    resp
+                }
+            }
+            _ => {
+                return Err(DownloadError::Other(anyhow::anyhow!("download gcs object")));
+            }
+        };
+
+        let body = resp
+            .text()
+            .await
+            .map_err(|e: reqwest::Error| DownloadError::Other(e.into()))?;
+
+        let resp: GCSObject = serde_json::from_str(&body)
+            .map_err(|e: serde_json::Error| DownloadError::Other(e.into()))?;
 
         // 2. Byte Stream request
         let mut headers = header::HeaderMap::new();
@@ -769,13 +939,12 @@ impl RemoteStorage for GCSBucket {
                 let mut result = Listing::default();
 
                 for res in keys.iter() {
-
                    let last_modified: SystemTime = res.updated.clone()
                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
                        .map(|s| s.into())
                        .unwrap_or(SystemTime::now());
 
-                   let size = res.size.clone().unwrap_or("0".to_string()).parse::<u64>().unwrap();
+                   let size = res.size.unwrap_or(0) as u64;
 
                    let key = res.name.clone();
 
@@ -783,7 +952,7 @@ impl RemoteStorage for GCSBucket {
                         ListingObject{
                             key: self.gcs_object_to_relative_path(&key),
                             last_modified,
-                            size,
+                            size
                         }
                    );
 
@@ -940,6 +1109,50 @@ impl RemoteStorage for GCSBucket {
     ) -> Result<(), TimeTravelError> {
         Ok(())
     }
+
+    async fn head_object(
+        &self,
+        key: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> Result<ListingObject, DownloadError> {
+        let path = self
+            .relative_path_to_gcs_object(key)
+            .trim_start_matches("/")
+            .to_string();
+
+        let resp = self.head_object(path.clone(), cancel).await?;
+
+        let last_modified: SystemTime = resp
+            .updated
+            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+            .map(|s| s.into())
+            .unwrap_or(SystemTime::now());
+
+        let Some(size) = resp.size else {
+            return Err(DownloadError::Other(anyhow::anyhow!(
+                "Missing size (content length) header"
+            )));
+        };
+
+        Ok(ListingObject {
+            key: self.gcs_object_to_relative_path(&path),
+            last_modified,
+            size: size as u64,
+        })
+    }
+
+    async fn list_versions(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> Result<crate::VersionListing, DownloadError> {
+        let kind = RequestKind::ListVersions;
+        let permit = self.permit(kind, cancel).await?;
+        self.list_versions_with_permit(&permit, prefix, mode, max_keys, cancel)
+            .await
+    }
 }
 
 // ---------
@@ -964,7 +1177,7 @@ pub struct GCSObject {
     pub content_type: Option<String>,
     #[serde(rename = "storageClass")]
     pub storage_class: String,
-    pub size: Option<String>,
+    pub size: Option<i64>,
     #[serde(rename = "md5Hash")]
     pub md5_hash: Option<String>,
     pub crc32c: String,
@@ -974,6 +1187,8 @@ pub struct GCSObject {
     pub updated: Option<String>,
     #[serde(rename = "timeStorageClassUpdated")]
     pub time_storage_class_updated: String,
+    #[serde(rename = "timeDeleted")]
+    pub time_deleted: Option<String>,
     #[serde(rename = "timeFinalized")]
     pub time_finalized: String,
     pub metadata: Option<HashMap<String, String>>,
@@ -1004,35 +1219,36 @@ mod tests {
 
     #[tokio::test]
     async fn list_returns_keys_from_bucket() {
-        let provider = gcp_auth::provider().await.unwrap();
-        let gcs = GCSBucket {
-            token_provider: Arc::clone(&provider),
-            bucket_name: BUCKET.to_string(),
-            prefix_in_bucket: None,
-            max_keys_per_list_response: Some(100),
-            concurrency_limiter: ConcurrencyLimiter::new(100),
-            timeout: std::time::Duration::from_secs(120),
-        };
+        todo!();
+        //let provider = gcp_auth::provider().await.unwrap();
+        //let gcs = GCSBucket {
+        //    token_provider: Arc::clone(&provider),
+        //    bucket_name: BUCKET.to_string(),
+        //    prefix_in_bucket: None,
+        //    max_keys_per_list_response: Some(100),
+        //    concurrency_limiter: ConcurrencyLimiter::new(100),
+        //    timeout: std::time::Duration::from_secs(120),
+        //};
 
-        let cancel = CancellationToken::new();
-        let remote_prefix = "box/tiff/2023/TN".to_string();
-        let max_keys: u32 = 100;
-        let mut stream = pin!(gcs.list_streaming(Some(remote_prefix), NonZero::new(max_keys)));
-        let mut combined = stream
-            .next()
-            .await
-            .expect("At least one item required")
-            .unwrap();
-        while let Some(list) = stream.next().await {
-            let list = list.unwrap();
-            combined.keys.extend(list.keys.into_iter());
-            combined.prefixes.extend_from_slice(&list.prefixes);
-        }
+        //let cancel = CancellationToken::new();
+        //let remote_prefix = "box/tiff/2023/TN".to_string();
+        //let max_keys: u32 = 100;
+        //let mut stream = pin!(gcs.list_streaming(Some(remote_prefix), NonZero::new(max_keys)));
+        //let mut combined = stream
+        //    .next()
+        //    .await
+        //    .expect("At least one item required")
+        //    .unwrap();
+        //while let Some(list) = stream.next().await {
+        //    let list = list.unwrap();
+        //    combined.keys.extend(list.keys.into_iter());
+        //    combined.prefixes.extend_from_slice(&list.prefixes);
+        //}
 
-        for key in combined.keys.iter() {
-            println!("Item: {} -- {:?}", key.key, key.last_modified);
-        }
+        //for key in combined.keys.iter() {
+        //    println!("Item: {} -- {:?}", key.key, key.last_modified);
+        //}
 
-        assert_ne!(0, combined.keys.len());
+        //assert_ne!(0, combined.keys.len());
     }
 }

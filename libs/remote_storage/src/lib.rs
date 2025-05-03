@@ -537,6 +537,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::AwsS3(s) => s.list_versions(prefix, mode, max_keys, cancel).await,
             Self::AzureBlob(s) => s.list_versions(prefix, mode, max_keys, cancel).await,
             Self::Unreliable(s) => s.list_versions(prefix, mode, max_keys, cancel).await,
+            Self::GCS(s) => s.list_versions(prefix, mode, max_keys, cancel).await,
         }
     }
 
@@ -551,7 +552,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::AwsS3(s) => s.head_object(key, cancel).await,
             Self::AzureBlob(s) => s.head_object(key, cancel).await,
             Self::Unreliable(s) => s.head_object(key, cancel).await,
-            Self::GCS(_) => todo!(),
+            Self::GCS(s) => s.head_object(key, cancel).await,
         }
     }
 
