@@ -153,7 +153,7 @@ impl IoEngine {
             IoEngine::TokioEpollUring => {
                 let system = tokio_epoll_uring_ext::thread_local_system().await;
                 let (resources, res) =
-                    retry_ecanceled_once((file_guard, slice), async move |(file_guard, slice)| {
+                    retry_ecanceled_once((file_guard, slice), |(file_guard, slice)| async {
                         system.read(file_guard, offset, slice).await
                     })
                     .await;
@@ -171,7 +171,7 @@ impl IoEngine {
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
                 let system = tokio_epoll_uring_ext::thread_local_system().await;
-                let (resources, res) = retry_ecanceled_once(file_guard, async move |file_guard| {
+                let (resources, res) = retry_ecanceled_once(file_guard, |file_guard| async {
                     system.fsync(file_guard).await
                 })
                 .await;
@@ -192,7 +192,7 @@ impl IoEngine {
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
                 let system = tokio_epoll_uring_ext::thread_local_system().await;
-                let (resources, res) = retry_ecanceled_once(file_guard, async move |file_guard| {
+                let (resources, res) = retry_ecanceled_once(file_guard, |file_guard| async {
                     system.fdatasync(file_guard).await
                 })
                 .await;
@@ -214,7 +214,7 @@ impl IoEngine {
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
                 let system = tokio_epoll_uring_ext::thread_local_system().await;
-                let (resources, res) = retry_ecanceled_once(file_guard, async move |file_guard| {
+                let (resources, res) = retry_ecanceled_once(file_guard, |file_guard| async {
                     system.statx(file_guard).await
                 })
                 .await;
@@ -264,7 +264,7 @@ impl IoEngine {
                 let system = tokio_epoll_uring_ext::thread_local_system().await;
                 let ((file_guard, slice), res) = retry_ecanceled_once(
                     (file_guard, buf.into_raw_slice()),
-                    async move |(file_guard, buf)| system.write(file_guard, offset, buf).await,
+                    async |(file_guard, buf)| system.write(file_guard, offset, buf).await,
                 )
                 .await;
                 (
@@ -309,12 +309,13 @@ impl IoEngine {
 ///
 /// This function retries the operation once if it fails with ECANCELED.
 /// ONLY USE FOR IDEMPOTENT [`VirtualFile`] operations.
-pub(super) async fn retry_ecanceled_once<Fut, T, V>(
+pub(super) async fn retry_ecanceled_once<F, Fut, T, V>(
     resources: T,
-    f: Fut,
+    f: F,
 ) -> (T, Result<V, tokio_epoll_uring::Error<std::io::Error>>)
 where
-    Fut: Send + AsyncFn(T) -> (T, Result<V, tokio_epoll_uring::Error<std::io::Error>>),
+    F: Fn(T) -> Fut,
+    Fut: std::future::Future<Output = (T, Result<V, tokio_epoll_uring::Error<std::io::Error>>)>,
     T: Send,
     V: Send,
 {

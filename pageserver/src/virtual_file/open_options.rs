@@ -120,7 +120,7 @@ impl OpenOptions {
             #[cfg(target_os = "linux")]
             Inner::TokioEpollUring(x) => {
                 let system = super::io_engine::tokio_epoll_uring_ext::thread_local_system().await;
-                let (_, res) = super::io_engine::retry_ecanceled_once((), async move |()| {
+                let (_, res) = super::io_engine::retry_ecanceled_once((), |()| async {
                     let res = system.open(path, x).await;
                     ((), res)
                 })
