@@ -40,6 +40,7 @@ services:
     volumes:
       - ./pageserver_config:/data/.neon/
     depends_on:
+      - storage_broker
       - minio_create_buckets
 
   safekeeper1:
@@ -48,6 +49,7 @@ services:
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper1:5454
       - SAFEKEEPER_ID=1
+      - BROKER_ENDPOINT=http://storage_broker:50051
       - AWS_ACCESS_KEY_ID=minio
       - AWS_SECRET_ACCESS_KEY=password
       #- RUST_BACKTRACE=1
@@ -68,6 +70,7 @@ services:
                                         bucket_region='eu-north-1',
                                         prefix_in_bucket='/safekeeper/'}\""
     depends_on:
+      - storage_broker
       - minio_create_buckets
 
   safekeeper2:
@@ -76,6 +79,7 @@ services:
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper2:5454
       - SAFEKEEPER_ID=2
+      - BROKER_ENDPOINT=http://storage_broker:50051
       - AWS_ACCESS_KEY_ID=minio
       - AWS_SECRET_ACCESS_KEY=password
       #- RUST_BACKTRACE=1
@@ -96,6 +100,7 @@ services:
                                         bucket_region='eu-north-1',
                                         prefix_in_bucket='/safekeeper/'}\""
     depends_on:
+      - storage_broker
       - minio_create_buckets
 
   safekeeper3:
@@ -104,6 +109,7 @@ services:
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper3:5454
       - SAFEKEEPER_ID=3
+      - BROKER_ENDPOINT=http://storage_broker:50051
       - AWS_ACCESS_KEY_ID=minio
       - AWS_SECRET_ACCESS_KEY=password
       #- RUST_BACKTRACE=1
@@ -124,8 +130,17 @@ services:
                                         bucket_region='eu-north-1',
                                         prefix_in_bucket='/safekeeper/'}\""
     depends_on:
+      - storage_broker
       - minio_create_buckets
 
+  storage_broker:
+    restart: always
+    image: ${REPOSITORY:-ghcr.io/neondatabase}/neon:${TAG:-latest}
+    ports:
+      - 50051:50051
+    command:
+      - "storage_broker"
+      - "--listen-addr=0.0.0.0:50051"
 
   compute:
     restart: always

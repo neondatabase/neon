@@ -21,6 +21,7 @@ You can see a [docker compose](https://docs.docker.com/compose/) example to crea
 
 - pageserver x 1
 - safekeeper x 3
+- storage_broker x 1
 - compute x 1
 - MinIO x 1        # This is Amazon S3 compatible object storage
 
@@ -36,6 +37,7 @@ $ cd docker-compose/
 $ docker-compose down   # remove the containers if exists
 $ PG_VERSION=16 TAG=latest docker-compose up --build -d  # You can specify the postgres and image version
 Creating network "dockercompose_default" with the default driver
+Creating docker-compose_storage_broker_1       ... done
 (...omit...)
 ```
 

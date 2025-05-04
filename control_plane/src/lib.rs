@@ -7,6 +7,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 mod background_process;
+pub mod broker;
 pub mod endpoint;
 pub mod endpoint_storage;
 pub mod local_env;

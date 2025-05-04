@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use utils::auth::encode_from_key_file;
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 
+use crate::broker::StorageBroker;
 use crate::endpoint_storage::{ENDPOINT_STORAGE_REMOTE_STORAGE_DIR, EndpointStorage};
 use crate::pageserver::{PAGESERVER_REMOTE_STORAGE_DIR, PageServerNode};
 use crate::safekeeper::SafekeeperNode;
@@ -60,6 +61,8 @@ pub struct LocalEnv {
     /// Path to environment's public key
     pub public_key_path: PathBuf,
 
+    pub broker: NeonBroker,
+
     // Configuration for the storage controller (1 per neon_local environment)
     pub storage_controller: NeonStorageControllerConf,
 
@@ -100,6 +103,7 @@ pub struct OnDiskConfig {
     pub default_tenant_id: Option<TenantId>,
     pub private_key_path: PathBuf,
     pub public_key_path: PathBuf,
+    pub broker: NeonBroker,
     pub storage_controller: NeonStorageControllerConf,
     #[serde(
         skip_serializing,
@@ -137,6 +141,7 @@ pub struct NeonLocalInitConf {
     // TODO: do we need this? Seems unused
     pub neon_distrib_dir: Option<PathBuf>,
     pub default_tenant_id: TenantId,
+    pub broker: NeonBroker,
     pub storage_controller: Option<NeonStorageControllerConf>,
     pub pageservers: Vec<NeonLocalInitPageserverConf>,
     pub safekeepers: Vec<SafekeeperConf>,
@@ -150,6 +155,19 @@ pub struct NeonLocalInitConf {
 #[serde(default)]
 pub struct EndpointStorageConf {
     pub port: u16,
+}
+
+/// Broker config for cluster internal communication.
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug, Default)]
+#[serde(default)]
+pub struct NeonBroker {
+    /// Broker listen HTTP address for storage nodes coordination, e.g. '127.0.0.1:50051'.
+    /// At least one of listen_addr or listen_https_addr must be set.
+    pub listen_addr: Option<SocketAddr>,
+    /// Broker listen HTTPS address for storage nodes coordination, e.g. '127.0.0.1:50051'.
+    /// At least one of listen_addr or listen_https_addr must be set.
+    /// listen_https_addr is preferred over listen_addr in neon_local.
+    pub listen_https_addr: Option<SocketAddr>,
 }
 
 /// A part of storage controller's config the neon_local knows about.
@@ -220,6 +238,22 @@ impl Default for NeonStorageControllerConf {
             use_https_safekeeper_api: false,
             use_local_compute_notifications: true,
         }
+    }
+}
+
+impl NeonBroker {
+    pub fn client_url(&self) -> Url {
+        let url = if let Some(addr) = self.listen_https_addr {
+            format!("https://{}", addr)
+        } else {
+            format!(
+                "http://{}",
+                self.listen_addr
+                    .expect("at least one address should be set")
+            )
+        };
+
+        Url::parse(&url).expect("failed to construct url")
     }
 }
 
@@ -406,8 +440,16 @@ impl LocalEnv {
         self.neon_distrib_dir.join("safekeeper")
     }
 
+    pub fn storage_broker_bin(&self) -> PathBuf {
+        self.neon_distrib_dir.join("storage_broker")
+    }
+
     pub fn endpoints_path(&self) -> PathBuf {
         self.base_data_dir.join("endpoints")
+    }
+
+    pub fn storage_broker_data_dir(&self) -> PathBuf {
+        self.base_data_dir.join("storage_broker")
     }
 
     pub fn pageserver_data_dir(&self, pageserver_id: NodeId) -> PathBuf {
@@ -592,6 +634,7 @@ impl LocalEnv {
                 default_tenant_id,
                 private_key_path,
                 public_key_path,
+                broker,
                 storage_controller,
                 pageservers,
                 safekeepers,
@@ -609,6 +652,7 @@ impl LocalEnv {
                 default_tenant_id,
                 private_key_path,
                 public_key_path,
+                broker,
                 storage_controller,
                 pageservers,
                 safekeepers,
@@ -717,6 +761,7 @@ impl LocalEnv {
                 default_tenant_id: self.default_tenant_id,
                 private_key_path: self.private_key_path.clone(),
                 public_key_path: self.public_key_path.clone(),
+                broker: self.broker.clone(),
                 storage_controller: self.storage_controller.clone(),
                 pageservers: vec![], // it's skip_serializing anyway
                 safekeepers: self.safekeepers.clone(),
@@ -825,6 +870,7 @@ impl LocalEnv {
             pg_distrib_dir,
             neon_distrib_dir,
             default_tenant_id,
+            broker,
             storage_controller,
             pageservers,
             safekeepers,
@@ -875,6 +921,7 @@ impl LocalEnv {
             default_tenant_id: Some(default_tenant_id),
             private_key_path,
             public_key_path,
+            broker,
             storage_controller: storage_controller.unwrap_or_default(),
             pageservers: pageservers.iter().map(Into::into).collect(),
             safekeepers,
@@ -891,6 +938,12 @@ impl LocalEnv {
 
         // create endpoints dir
         fs::create_dir_all(env.endpoints_path())?;
+
+        // create storage broker dir
+        fs::create_dir_all(env.storage_broker_data_dir())?;
+        StorageBroker::from_env(&env)
+            .initialize()
+            .context("storage broker init failed")?;
 
         // create safekeeper dirs
         for safekeeper in &env.safekeepers {

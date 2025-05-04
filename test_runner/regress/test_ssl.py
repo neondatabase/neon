@@ -214,3 +214,23 @@ def test_server_and_cert_metrics(neon_env_builder: NeonEnvBuilder):
 
     wait_until(reload_failed)
 
+
+def test_storage_broker_https_api(neon_env_builder: NeonEnvBuilder):
+    """
+    Test HTTPS storage broker API.
+    1. Make /status request to HTTPS API to ensure it's appropriately configured.
+    2. Generate simple workload to ensure that SK -> broker -> PS communication works well.
+    """
+    neon_env_builder.use_https_storage_broker_api = True
+    env = neon_env_builder.init_start()
+
+    # 1. Simple check that HTTPS is enabled and works.
+    url = env.broker.client_url() + "/status"
+    assert url.startswith("https://")
+    requests.get(url, verify=str(env.ssl_ca_file)).raise_for_status()
+
+    # 2. Simple workload to check that SK -> broker -> PS communication works over HTTPS.
+    workload = Workload(env, env.initial_tenant, env.initial_timeline)
+    workload.init()
+    workload.write_rows(10)
+    workload.validate()

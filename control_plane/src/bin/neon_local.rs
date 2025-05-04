@@ -17,12 +17,13 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use compute_api::spec::ComputeMode;
+use control_plane::broker::StorageBroker;
 use control_plane::endpoint::ComputeControlPlane;
 use control_plane::endpoint_storage::{ENDPOINT_STORAGE_DEFAULT_PORT, EndpointStorage};
 use control_plane::local_env;
 use control_plane::local_env::{
-    EndpointStorageConf, InitForceMode, LocalEnv, NeonLocalInitConf, NeonLocalInitPageserverConf,
-    SafekeeperConf,
+    EndpointStorageConf, InitForceMode, LocalEnv, NeonBroker, NeonLocalInitConf,
+    NeonLocalInitPageserverConf, SafekeeperConf,
 };
 use control_plane::pageserver::PageServerNode;
 use control_plane::safekeeper::SafekeeperNode;
@@ -48,6 +49,7 @@ use safekeeper_api::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_SAFEKEEPER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
 };
+use storage_broker::DEFAULT_LISTEN_ADDR as DEFAULT_BROKER_ADDR;
 use tokio::task::JoinSet;
 use url::Host;
 use utils::auth::{Claims, Scope};
@@ -85,6 +87,9 @@ enum NeonLocalCmd {
     #[command(subcommand)]
     #[clap(alias = "storage_controller")]
     StorageController(StorageControllerCmd),
+    #[command(subcommand)]
+    #[clap(alias = "storage_broker")]
+    StorageBroker(StorageBrokerCmd),
     #[command(subcommand)]
     Safekeeper(SafekeeperCmd),
     #[command(subcommand)]
@@ -417,6 +422,32 @@ struct StorageControllerStopCmdArgs {
     )]
     #[arg(default_value_t = 1)]
     instance_id: u8,
+}
+
+#[derive(clap::Subcommand)]
+#[clap(about = "Manage storage broker")]
+enum StorageBrokerCmd {
+    Start(StorageBrokerStartCmdArgs),
+    Stop(StorageBrokerStopCmdArgs),
+}
+
+#[derive(clap::Args)]
+#[clap(about = "Start broker")]
+struct StorageBrokerStartCmdArgs {
+    #[clap(short = 't', long, help = "timeout until we fail the command")]
+    #[arg(default_value = "10s")]
+    start_timeout: humantime::Duration,
+}
+
+#[derive(clap::Args)]
+#[clap(about = "stop broker")]
+struct StorageBrokerStopCmdArgs {
+    #[clap(
+        short = 'm',
+        help = "If 'immediate', don't flush repository data at shutdown"
+    )]
+    #[arg(value_enum, default_value = "fast")]
+    stop_mode: StopMode,
 }
 
 #[derive(clap::Subcommand)]
@@ -764,6 +795,7 @@ fn main() -> Result<()> {
             NeonLocalCmd::StorageController(subcmd) => {
                 rt.block_on(handle_storage_controller(&subcmd, env))
             }
+            NeonLocalCmd::StorageBroker(subcmd) => rt.block_on(handle_storage_broker(&subcmd, env)),
             NeonLocalCmd::Safekeeper(subcmd) => rt.block_on(handle_safekeeper(&subcmd, env)),
             NeonLocalCmd::EndpointStorage(subcmd) => {
                 rt.block_on(handle_endpoint_storage(&subcmd, env))
@@ -956,6 +988,10 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
         // User (likely interactive) did not provide a description of the environment, give them the default
         NeonLocalInitConf {
             control_plane_api: Some(DEFAULT_PAGESERVER_CONTROL_PLANE_API.parse().unwrap()),
+            broker: NeonBroker {
+                listen_addr: Some(DEFAULT_BROKER_ADDR.parse().unwrap()),
+                listen_https_addr: None,
+            },
             safekeepers: vec![SafekeeperConf {
                 id: DEFAULT_SAFEKEEPER_ID,
                 pg_port: DEFAULT_SAFEKEEPER_PG_PORT,
@@ -1740,6 +1776,28 @@ async fn handle_endpoint_storage(
     Ok(())
 }
 
+async fn handle_storage_broker(subcmd: &StorageBrokerCmd, env: &local_env::LocalEnv) -> Result<()> {
+    match subcmd {
+        StorageBrokerCmd::Start(args) => {
+            let storage_broker = StorageBroker::from_env(env);
+            if let Err(e) = storage_broker.start(&args.start_timeout).await {
+                eprintln!("broker start failed: {e}");
+                exit(1);
+            }
+        }
+
+        StorageBrokerCmd::Stop(_args) => {
+            // FIXME: stop_mode unused
+            let storage_broker = StorageBroker::from_env(env);
+            if let Err(e) = storage_broker.stop() {
+                eprintln!("broker stop failed: {e}");
+                exit(1);
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn handle_start_all(
     args: &StartCmdArgs,
     env: &'static local_env::LocalEnv,
@@ -1780,6 +1838,14 @@ async fn handle_start_all_impl(
     // force infalliblity through closure
     #[allow(clippy::redundant_closure_call)]
     (|| {
+        js.spawn(async move {
+            let storage_broker = StorageBroker::from_env(env);
+            storage_broker
+                .start(&retry_timeout)
+                .await
+                .map_err(|e| e.context("start storage_broker"))
+        });
+
         js.spawn(async move {
             let storage_controller = StorageController::from_env(env);
             storage_controller
@@ -1930,6 +1996,11 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
         if let Err(e) = safekeeper.stop(immediate) {
             eprintln!("safekeeper {} stop failed: {:#}", safekeeper.id, e);
         }
+    }
+
+    let storage_broker = StorageBroker::from_env(env);
+    if let Err(e) = storage_broker.stop() {
+        eprintln!("neon broker stop failed: {e:#}");
     }
 
     // Stop all storage controller instances. In the most common case there's only one,
