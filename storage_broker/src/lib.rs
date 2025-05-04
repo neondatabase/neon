@@ -40,9 +40,16 @@ pub struct TimelineUpdatesSubscriber {
 }
 
 /// Wrapper type to weed out all places in the codebase that interact directly with the gRPC generated code.
-/// We want all to go through the facade structs above so we can implement brokerless mode in the future.
 pub struct BrokerClientChannel {
     client: proto::broker_service_client::BrokerServiceClient<tonic::transport::Channel>,
+}
+
+impl BrokerClientChannel {
+    pub fn into_raw_grpc_client(
+        self,
+    ) -> proto::broker_service_client::BrokerServiceClient<tonic::transport::Channel> {
+        self.client
+    }
 }
 
 pub struct TimelineShardUpdate {

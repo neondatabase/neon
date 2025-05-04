@@ -428,7 +428,9 @@ fn start_pageserver(
                 conf.broker_keepalive_interval,
                 tls_config,
             )?;
-            anyhow::Ok(storage_broker::TimelineUpdatesSubscriber::new(service_client))
+            anyhow::Ok(storage_broker::TimelineUpdatesSubscriber::new(
+                service_client,
+            ))
         })
         .with_context(|| {
             format!(
