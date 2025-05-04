@@ -87,11 +87,11 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                 let authenticated_router = Router::<Arc<ComputeNode>>::new()
                     .route(
                         "/lfc/prewarm",
-                        get(prewarm_lfc::status).post(prewarm_lfc::prewarm),
+                        get(prewarm_lfc::state).post(prewarm_lfc::prewarm),
                     )
                     .route(
                         "/lfc/offload",
-                        get(prewarm_lfc::offload_status).post(prewarm_lfc::offload),
+                        get(prewarm_lfc::offload_state).post(prewarm_lfc::offload),
                     )
                     .route("/check_writability", post(check_writability::is_writable))
                     .route("/configure", post(configure::configure))

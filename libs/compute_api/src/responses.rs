@@ -69,6 +69,7 @@ pub enum PrewarmOffloadStatus {
 #[derive(Serialize, Default, Debug, Deserialize, Clone)]
 pub struct PrewarmState {
     pub status: PrewarmStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
