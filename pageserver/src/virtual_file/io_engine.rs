@@ -305,10 +305,10 @@ impl IoEngine {
 /// We observe in tests that stop pageserver with SIGTERM immediately after it was ingesting data,
 /// occasionally buffered writers fail (and get retried by BufferedWriter) with ECANCELED.
 /// The problem is believed to be a race condition in how io_uring handles punted async work (io-wq) and signals.
-/// Investigation ticket: https://github.com/neondatabase/neon/issues/11446
+/// Investigation ticket: <https://github.com/neondatabase/neon/issues/11446>
 ///
 /// This function retries the operation once if it fails with ECANCELED.
-/// ONLY USE FOR IDEMPOTENT [`VirtualFile`] operations.
+/// ONLY USE FOR IDEMPOTENT [`super::VirtualFile`] operations.
 pub(super) async fn retry_ecanceled_once<F, Fut, T, V>(
     resources: T,
     f: F,
@@ -342,7 +342,7 @@ where
     }
     tokio::time::sleep(Duration::from_millis(100)).await; // something big enough to beat even heavily overcommitted CI runners
     let (resources, res) = f(resources).await;
-    return (resources, res);
+    (resources, res)
 }
 
 pub(super) fn panic_operation_must_be_idempotent() {
