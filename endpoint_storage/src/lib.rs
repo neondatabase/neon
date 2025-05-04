@@ -1,5 +1,5 @@
 pub mod claims;
-use crate::claims::{DeletePrefixClaims, EndpointClaims, EndpointId};
+use crate::claims::{DeletePrefixClaims, EndpointId, EndpointStorageClaims};
 use anyhow::Result;
 use axum::extract::{FromRequestParts, Path};
 use axum::response::{IntoResponse, Response};
@@ -154,7 +154,7 @@ impl FromRequestParts<Arc<Storage>> for S3Path {
             .extract::<TypedHeader<Authorization<Bearer>>>()
             .await
             .map_err(|e| bad_request(e, "invalid token"))?;
-        let claims: EndpointClaims = state
+        let claims: EndpointStorageClaims = state
             .auth
             .decode(bearer.token())
             .map_err(|e| bad_request(e, "decoding token"))?;
@@ -167,7 +167,7 @@ impl FromRequestParts<Arc<Storage>> for S3Path {
             path.endpoint_id.clone()
         };
 
-        let route = EndpointClaims {
+        let route = EndpointStorageClaims {
             tenant_id: path.tenant_id,
             timeline_id: path.timeline_id,
             endpoint_id,
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn s3_path() {
-        let auth = EndpointClaims {
+        let auth = EndpointStorageClaims {
             tenant_id: TENANT_ID,
             timeline_id: TIMELINE_ID,
             endpoint_id: ENDPOINT_ID.into(),
