@@ -1,16 +1,19 @@
 use std::collections::HashSet;
+use std::collections::BTreeMap;
 
+use crate::ArtAllocator;
 use crate::ArtMultiSlabAllocator;
 use crate::TreeInitStruct;
 
 use crate::{Key, Value};
 
 use rand::seq::SliceRandom;
-use rand::thread_rng;
+use rand::Rng;
+use rand_distr::Zipf;
 
 const TEST_KEY_LEN: usize = 16;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct TestKey([u8; TEST_KEY_LEN]);
 
 impl Key for TestKey {
@@ -39,12 +42,9 @@ fn test_inserts<K: Into<TestKey> + Copy>(keys: &[K]) {
     let tree_writer = init_struct.attach_writer();
 
     for (idx, k) in keys.iter().enumerate() {
-        let mut w = tree_writer.start_write();
+        let w = tree_writer.start_write();
         w.insert(&(*k).into(), idx);
-        eprintln!("INSERTED {:?}", Into::<TestKey>::into(*k));
     }
-
-    //tree_writer.start_read().dump();
 
     for (idx, k) in keys.iter().enumerate() {
         let r = tree_writer.start_read();
@@ -67,7 +67,7 @@ fn dense() {
 
     // Do the same in random orders
     for _ in 1..10 {
-        keys.shuffle(&mut thread_rng());
+        keys.shuffle(&mut rand::rng());
         test_inserts(&keys);
     }
 }
@@ -89,4 +89,57 @@ fn sparse() {
         }
     }
     test_inserts(&keys);
+}
+
+
+
+#[derive(Clone, Copy, Debug)]
+struct TestOp(TestKey, Option<usize>);
+
+fn apply_op<A: ArtAllocator<usize>>(op: &TestOp, tree: &crate::TreeWriteAccess<TestKey, usize, A>, shadow: &mut BTreeMap<TestKey, usize>) {
+    eprintln!("applying op: {op:?}");
+
+    // apply the change to the shadow tree first
+    let shadow_existing = if let Some(v) = op.1 {
+        shadow.insert(op.0, v)
+    } else {
+        shadow.remove(&op.0)
+    };
+
+    // apply to Art tree
+    let w = tree.start_write();    
+    w.update_with_fn(&op.0, |existing| {
+        assert_eq!(existing, shadow_existing.as_ref());
+        return op.1;
+    });
+}
+
+#[test]
+fn random_ops() {
+    const MEM_SIZE: usize = 10000000;
+    let mut area = Box::new_uninit_slice(MEM_SIZE);
+
+    let allocator = ArtMultiSlabAllocator::new(&mut area);
+
+    let init_struct = TreeInitStruct::<TestKey, usize, _>::new(allocator);
+    let tree_writer = init_struct.attach_writer();
+
+    let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();
+
+    let distribution = Zipf::new(u128::MAX as f64, 1.1).unwrap();
+    let mut rng = rand::rng();
+    for i in 0..100000 {
+        let key: TestKey = (rng.sample(distribution) as u128).into();
+
+        let op = TestOp(
+            key, 
+            if rng.random_bool(0.75) {
+                Some(i)
+            } else {
+                None
+            },
+        );
+
+        apply_op(&op, &tree_writer, &mut shadow);
+    }
 }

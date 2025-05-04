@@ -404,6 +404,19 @@ impl<V: Value> NodePtr<V> {
         }
     }
 
+    pub(crate) fn delete_value(&mut self, key_byte: u8) {
+        match self.variant_mut() {
+            NodeVariantMut::Internal4(_)
+            | NodeVariantMut::Internal16(_)
+            | NodeVariantMut::Internal48(_)
+            | NodeVariantMut::Internal256(_) => panic!("delete_value called on internal node"),
+            NodeVariantMut::Leaf4(n) => n.delete_value(key_byte),
+            NodeVariantMut::Leaf16(n) => n.delete_value(key_byte),
+            NodeVariantMut::Leaf48(n) => n.delete_value(key_byte),
+            NodeVariantMut::Leaf256(n) => n.delete_value(key_byte),
+        }
+    }
+
     pub(crate) fn deallocate(self, allocator: &impl ArtAllocator<V>) {
         match self.variant() {
             NodeVariant::Internal4(_) => allocator.dealloc_node_internal4(self.ptr.cast()),
@@ -766,7 +779,7 @@ impl<V: Value> NodeLeaf4<V> {
     }
 
     fn insert_value(&mut self, key_byte: u8, value: V) {
-        assert!(self.num_values < 16);
+        assert!(self.num_values < 4);
 
         let idx = self.num_values as usize;
         self.child_keys[idx] = key_byte;
@@ -796,6 +809,23 @@ impl<V: Value> NodeLeaf4<V> {
         }
         unsafe { ptr.write(init) };
         ptr.into()
+    }
+
+    fn delete_value(&mut self, key_byte: u8) {
+        assert!(self.num_values <= 4);
+
+        for i in 0..self.num_values as usize {
+            if self.child_keys[i] == key_byte {
+                assert!(self.child_values[i].is_some());
+                if i < self.num_values as usize - 1 {
+                    self.child_keys[i] = self.child_keys[self.num_values as usize - 1];
+                    self.child_values[i] = std::mem::replace(&mut self.child_values[self.num_values as usize - 1], None);
+                }
+                self.num_values -= 1;
+                return;
+            }
+        }
+        panic!("key to delete not found in leaf4 node");
     }
 }
 
@@ -859,6 +889,23 @@ impl<V: Value> NodeLeaf16<V> {
         unsafe { ptr.write(init) };
         ptr.into()
     }
+
+    fn delete_value(&mut self, key_byte: u8) {
+        assert!(self.num_values <= 16);
+
+        for i in 0..self.num_values as usize {
+            if self.child_keys[i as usize] == key_byte {
+                assert!(self.child_values[i as usize].is_some());
+                if i < self.num_values as usize - 1 {
+                    self.child_keys[i] = self.child_keys[self.num_values as usize - 1];
+                    self.child_values[i] = std::mem::replace(&mut self.child_values[self.num_values as usize - 1], None);
+                }
+                self.num_values -= 1;
+                return;
+            }
+        }
+        panic!("key to delete not found in leaf16 node");
+    }
 }
 
 impl<V: Value> NodeLeaf48<V> {
@@ -921,6 +968,34 @@ impl<V: Value> NodeLeaf48<V> {
         unsafe { ptr.write(init) };
         ptr.into()
     }
+
+    fn delete_value(&mut self, key_byte: u8) {
+        assert!(self.num_values <= 48);
+
+        let idx = self.child_indexes[key_byte as usize];
+        if idx == INVALID_CHILD_INDEX {
+            panic!("key to delete not found in leaf48 node");
+        }
+        self.child_indexes[key_byte as usize] = INVALID_CHILD_INDEX;
+        self.num_values -= 1;
+
+        if idx < self.num_values {
+            // Move all existing values with higher indexes down one position
+            for i in idx as usize ..self.num_values as usize {
+                self.child_values[i] = std::mem::replace(&mut self.child_values[i + 1], None);
+            }
+
+            // Update all higher indexes
+            for i in 0..256 {
+                if self.child_indexes[i] != INVALID_CHILD_INDEX {
+                    if self.child_indexes[i] > idx {
+                        self.child_indexes[i] -= 1;
+                    }
+                    assert!(self.child_indexes[i] < self.num_values);
+                }
+            }
+        }
+    }
 }
 
 impl<V: Value> NodeLeaf256<V> {
@@ -951,6 +1026,14 @@ impl<V: Value> NodeLeaf256<V> {
         assert!(self.child_values[key_byte as usize].is_none());
         self.child_values[key_byte as usize] = Some(value);
         self.num_values += 1;
+    }
+
+    fn delete_value(&mut self, key_byte: u8) {
+        if self.child_values[key_byte as usize].is_none() {
+            panic!("key to delete not found in leaf256 node");
+        }
+        self.child_values[key_byte as usize] = None;
+        self.num_values -= 1;
     }
 }
 

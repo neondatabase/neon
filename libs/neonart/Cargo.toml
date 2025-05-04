@@ -9,5 +9,6 @@ crossbeam-utils.workspace = true
 spin.workspace = true
 tracing.workspace = true
 
-rand.workspace = true # for tests
-zerocopy = "0.8"
+[dev-dependencies]
+rand = "0.9.1"
+rand_distr = "0.5.1"

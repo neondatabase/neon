@@ -128,6 +128,7 @@ mod epoch;
 use algorithm::RootPtr;
 use algorithm::node_ptr::NodePtr;
 
+use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
@@ -163,8 +164,6 @@ pub struct Tree<V: Value> {
     writer_attached: AtomicBool,
 
     epoch: epoch::EpochShared,
-
-    garbage: spin::Mutex<GarbageQueue<V>>,
 }
 
 unsafe impl<V: Value + Sync> Sync for Tree<V> {}
@@ -172,43 +171,29 @@ unsafe impl<V: Value + Send> Send for Tree<V> {}
 
 struct GarbageQueueFullError();
 
-struct GarbageQueue<V> {
-    slots: [(NodePtr<V>, u64); MAX_GARBAGE],
-    front: usize,
-    back: usize,
-}
+struct GarbageQueue<V>(VecDeque<(NodePtr<V>, u64)>);
+
+unsafe impl<V: Value + Sync> Sync for GarbageQueue<V> {}
+unsafe impl<V: Value + Send> Send for GarbageQueue<V> {}
+
 impl<V> GarbageQueue<V> {
     fn new() -> GarbageQueue<V> {
-        GarbageQueue {
-            slots: [const { (NodePtr::null(), 0) }; MAX_GARBAGE],
-            front: 0,
-            back: 0,
-        }
+        GarbageQueue(VecDeque::with_capacity(MAX_GARBAGE))
     }
 
     fn remember_obsolete_node(
         &mut self,
         ptr: NodePtr<V>,
         epoch: u64,
-    ) -> Result<(), GarbageQueueFullError> {
-        if self.front == self.back.wrapping_add(MAX_GARBAGE) {
-            return Err(GarbageQueueFullError());
-        }
-
-        self.slots[self.front % MAX_GARBAGE] = (ptr, epoch);
-        self.front = self.front.wrapping_add(1);
-        Ok(())
+    ) {
+        self.0.push_front((ptr, epoch));
     }
 
     fn next_obsolete(&mut self, cutoff_epoch: u64) -> Option<NodePtr<V>> {
-        if self.front == self.back {
-            return None;
-        }
-        let slot = &self.slots[self.back % MAX_GARBAGE];
-        // FIXME: performing wrapping comparison
-        if slot.1 < cutoff_epoch {
-            self.back += 1;
-            return Some(slot.0);
+        if let Some(back) = self.0.back() {
+            if back.1 < cutoff_epoch {
+                return Some(self.0.pop_back().unwrap().0);
+            }
         }
         None
     }
@@ -237,6 +222,9 @@ where
     epoch_handle: epoch::LocalHandle<'t>,
 
     phantom_key: PhantomData<K>,
+
+    /// Obsolete nodes that cannot be recycled until their epoch expires.
+    garbage: spin::Mutex<GarbageQueue<V>>,
 }
 
 /// The backends have a reference to this. It cannot be used to modify the tree
@@ -260,7 +248,6 @@ impl<'a, 't: 'a, K: Key, V: Value, A: ArtAllocator<V>> TreeInitStruct<'t, K, V, 
             root: algorithm::new_root(allocator),
             writer_attached: AtomicBool::new(false),
             epoch: epoch::EpochShared::new(),
-            garbage: spin::Mutex::new(GarbageQueue::new()),
         };
         unsafe { tree_ptr.write(init) };
 
@@ -281,6 +268,7 @@ impl<'a, 't: 'a, K: Key, V: Value, A: ArtAllocator<V>> TreeInitStruct<'t, K, V, 
             allocator: self.allocator,
             phantom_key: PhantomData,
             epoch_handle: self.tree.epoch.register(),
+            garbage: spin::Mutex::new(GarbageQueue::new()),
         }
     }
 
@@ -294,13 +282,14 @@ impl<'a, 't: 'a, K: Key, V: Value, A: ArtAllocator<V>> TreeInitStruct<'t, K, V, 
 }
 
 impl<'t, K: Key + Clone, V: Value, A: ArtAllocator<V>> TreeWriteAccess<'t, K, V, A> {
-    pub fn start_write(&'t self) -> TreeWriteGuard<'t, K, V, A> {
-        // TODO: grab epoch guard
+    pub fn start_write<'g>(&'t self) -> TreeWriteGuard<'g, K, V, A>
+        where 't: 'g
+    {
         TreeWriteGuard {
-            allocator: self.allocator,
-            tree: &self.tree,
+            tree_writer: self,
             epoch_pin: self.epoch_handle.pin(),
             phantom_key: PhantomData,
+            created_garbage: false
         }
     }
 
@@ -344,49 +333,72 @@ pub struct TreeWriteGuard<'e, K, V, A>
 where
     K: Key,
     V: Value,
+    A: ArtAllocator<V>,
 {
-    tree: &'e Tree<V>,
-    allocator: &'e A,
+    tree_writer: &'e TreeWriteAccess<'e, K, V, A>,
 
     epoch_pin: EpochPin<'e>,
     phantom_key: PhantomData<K>,
+
+    created_garbage: bool,
 }
 
 impl<'t, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteGuard<'t, K, V, A> {
-    pub fn insert(&mut self, key: &K, value: V) {
+
+    /// Get a value
+    pub fn get(&mut self, key: &K) -> Option<V> {
+        algorithm::search(key, self.tree_writer.tree.root, &self.epoch_pin)
+    }
+
+    /// Insert a value
+    pub fn insert(self, key: &K, value: V) {
         self.update_with_fn(key, |_| Some(value))
     }
 
-    pub fn update_with_fn<F>(&mut self, key: &K, value_fn: F)
+    /// Remove value
+    pub fn remove(self, key: &K) {
+        self.update_with_fn(key, |_| None)
+    }
+
+    /// Update key using the given function. All the other modifying operations are based on this.
+    ///
+    /// The function is passed a reference to the existing value, if any. If the function
+    /// returns None, the value is removed from the tree (or if there was no existing value,
+    /// does nothing). If the function returns Some, the existing value is replaced, of if there
+    /// was no existing value, it is inserted.
+    pub fn update_with_fn<F>(mut self, key: &K, value_fn: F)
     where
         F: FnOnce(Option<&V>) -> Option<V>,
     {
-        algorithm::update_fn(key, value_fn, self.tree.root, self)
+        let result = algorithm::update_fn(key, value_fn, self.tree_writer.tree.root, &mut self);
+
+        if self.created_garbage {
+            let n = self.collect_garbage();
+            eprintln!("collected {n} obsolete nodes");
+        }
+        result   
     }
 
-    pub fn get(&mut self, key: &K) -> Option<V> {
-        algorithm::search(key, self.tree.root, &self.epoch_pin)
-    }
-
-    fn remember_obsolete_node(&'t self, ptr: NodePtr<V>) -> Result<(), GarbageQueueFullError> {
-        self.tree
+    fn remember_obsolete_node(&mut self, ptr: NodePtr<V>) {
+        self.tree_writer
             .garbage
             .lock()
-            .remember_obsolete_node(ptr, self.epoch_pin.epoch)
+            .remember_obsolete_node(ptr, self.epoch_pin.epoch);
+        self.created_garbage = true;
     }
 
-    // returns true if something was free'd up
-    fn collect_garbage(&'t self) -> bool {
-        let mut result = false;
-        self.tree.epoch.advance();
-        self.tree.epoch.broadcast();
+    // returns number of nodes recycled
+    fn collect_garbage(&self) -> usize {
+        self.tree_writer.tree.epoch.advance();
+        self.tree_writer.tree.epoch.broadcast();
 
-        let cutoff_epoch = self.tree.epoch.get_oldest();
+        let cutoff_epoch = self.tree_writer.tree.epoch.get_oldest();
 
-        let mut garbage_queue = self.tree.garbage.lock();
+        let mut result = 0;
+        let mut garbage_queue = self.tree_writer.garbage.lock();
         while let Some(ptr) = garbage_queue.next_obsolete(cutoff_epoch) {
-            ptr.deallocate(self.allocator);
-            result = true;
+            ptr.deallocate(self.tree_writer.allocator);
+            result += 1;
         }
         result
     }
@@ -400,7 +412,7 @@ impl<'t, K: Key, V: Value + Debug> TreeReadGuard<'t, K, V> {
 }
 impl<'t, K: Key, V: Value + Debug> TreeWriteGuard<'t, K, V, ArtMultiSlabAllocator<'t, V>> {
     pub fn get_statistics(&self) -> ArtTreeStatistics {
-        self.allocator.get_statistics()
+        self.tree_writer.allocator.get_statistics()
     }
 }
 

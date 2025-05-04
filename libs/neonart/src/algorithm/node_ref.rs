@@ -152,6 +152,10 @@ impl<'e, V: Value> WriteLockedNodeRef<'e, V> {
         self.ptr.insert_value(key_byte, value)
     }
 
+    pub(crate) fn delete_value(&mut self, key_byte: u8) {
+        self.ptr.delete_value(key_byte)
+    }
+
     pub(crate) fn grow<'a, A>(
         &self,
         allocator: &'a A,

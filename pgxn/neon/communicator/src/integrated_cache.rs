@@ -267,8 +267,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
     }
 
     pub fn remember_rel_size(&'t self, rel: &RelTag, nblocks: u32) {
-        let mut w = self.cache_tree.start_write();
-
+        let w = self.cache_tree.start_write();
         w.insert(
             &TreeKey::from(rel),
             TreeEntry::Rel(RelEntry {
@@ -286,7 +285,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         lw_lsn: Lsn,
     ) {
         if let Some(file_cache) = self.file_cache.as_ref() {
-            let mut w = self.cache_tree.start_write();
+            let w = self.cache_tree.start_write();
 
             let key = TreeKey::from((rel, block_number));
 
@@ -324,7 +323,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
     /// Forget information about given relation in the cache. (For DROP TABLE and such)
     pub fn forget_rel(&'t self, rel: &RelTag) {
         // FIXME: not implemented properly. smgrexists() would still return true for this
-        let mut w = self.cache_tree.start_write();
+        let w = self.cache_tree.start_write();
         w.insert(
             &TreeKey::from(rel),
             TreeEntry::Rel(RelEntry { nblocks: None }),

@@ -60,11 +60,11 @@ pub(crate) fn search<'e, K: Key, V: Value>(
     }
 }
 
-pub(crate) fn update_fn<'e, K: Key, V: Value, A: ArtAllocator<V>, F>(
+pub(crate) fn update_fn<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>, F>(
     key: &K,
     value_fn: F,
     root: RootPtr<V>,
-    guard: &'e TreeWriteGuard<K, V, A>,
+    guard: &'g mut TreeWriteGuard<'e, K, V, A>,
 ) where
     F: FnOnce(Option<&V>) -> Option<V>,
 {
@@ -84,17 +84,17 @@ pub(crate) fn update_fn<'e, K: Key, V: Value, A: ArtAllocator<V>, F>(
             key_bytes,
         ) {
             Ok(()) => break,
-            Err(ArtError::ConcurrentUpdate) => continue, // retry
+            Err(ArtError::ConcurrentUpdate) => {
+                eprintln!("retrying");
+                continue; // retry
+            },
             Err(ArtError::OutOfMemory) => {
                 panic!("todo: OOM: try to GC, propagate to caller");
             },
             Err(ArtError::GarbageQueueFull) => {
-                if guard.collect_garbage() {
-                    continue;
-                }
                 // FIXME: This can happen if someone is holding back the epoch. We should
                 // wait for the epoch to advance
-                panic!("todo: GC queue is full and couldn't free up space");
+                panic!("todo: GC queue is full");
             },
         }
     }
@@ -144,12 +144,12 @@ fn lookup_recurse<'e, V: Value>(
 }
 
 // This corresponds to the 'insertOpt' function in the paper
-pub(crate) fn update_recurse<'e, K: Key, V: Value, A: ArtAllocator<V>, F>(
+pub(crate) fn update_recurse<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>, F>(
     key: &[u8],
     value_fn: F,
     node: NodeRef<'e, V>,
     rparent: Option<(ReadLockedNodeRef<V>, u8)>,
-    guard: &'e TreeWriteGuard<K, V, A>,
+    guard: &'g mut TreeWriteGuard<'e, K, V, A>,
     level: usize,
     orig_key: &[u8],
 ) -> Result<(), ArtError>
@@ -211,7 +211,7 @@ where
         match next_node {
             ChildOrValue::Value(existing_value_ptr) => {
                 assert!(key.len() == 1);
-                let wnode = rnode.upgrade_to_write_lock_or_restart()?;
+                let mut wnode = rnode.upgrade_to_write_lock_or_restart()?;
 
                 // safety: Now that we have acquired the write lock, we have exclusive access to the
                 // value
@@ -219,7 +219,10 @@ where
                 if let Some(new_value) = value_fn(Some(vmut)) {
                     *vmut = new_value;
                 } else {
-                    // TODO: Treat this as deletion?
+                    // TODO: Shrink the node
+                    // TODO: If the node becomes empty, unlink it from parent
+                    wnode.delete_value(key[0]);
+                    
                 }
                 wnode.write_unlock();
 
@@ -320,11 +323,11 @@ fn insert_split_prefix<'e, K: Key, V: Value, A: ArtAllocator<V>>(
 
     // Allocate a node for the new value.
     let new_value_node =
-        allocate_node_for_value(&key[common_prefix_len + 1..], value, guard.allocator)?;
+        allocate_node_for_value(&key[common_prefix_len + 1..], value, guard.tree_writer.allocator)?;
 
     // Allocate a new internal node with the common prefix
     // FIXME: deallocate 'new_value_node' on OOM
-    let mut prefix_node = node_ref::new_internal(&key[..common_prefix_len], guard.allocator)?;
+    let mut prefix_node = node_ref::new_internal(&key[..common_prefix_len], guard.tree_writer.allocator)?;
 
     // Add the old node and the new nodes to the new internal node
     prefix_node.insert_old_child(old_prefix[common_prefix_len], old_node);
@@ -348,36 +351,34 @@ fn insert_to_node<'e, K: Key, V: Value, A: ArtAllocator<V>>(
     if wnode.is_leaf() {
         wnode.insert_value(key[0], value);
     } else {
-        let value_child = allocate_node_for_value(&key[1..], value, guard.allocator)?;
+        let value_child = allocate_node_for_value(&key[1..], value, guard.tree_writer.allocator)?;
         wnode.insert_child(key[0], value_child.into_ptr());
     }
     Ok(())
 }
 
 // On entry: 'parent' and 'node' are locked
-fn insert_and_grow<'e, K: Key, V: Value, A: ArtAllocator<V>>(
+fn insert_and_grow<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>>(
     key: &[u8],
     value: V,
     wnode: &WriteLockedNodeRef<V>,
     parent: &mut WriteLockedNodeRef<V>,
     parent_key_byte: u8,
-    guard: &'e TreeWriteGuard<K, V, A>,
+    guard: &'g mut TreeWriteGuard<'e, K, V, A>,
 ) -> Result<(), ArtError> {
-    let mut bigger_node = wnode.grow(guard.allocator)?;
-
+    let mut bigger_node = wnode.grow(guard.tree_writer.allocator)?;
     if wnode.is_leaf() {
         bigger_node.insert_value(key[0], value);
     } else {
         // FIXME: deallocate 'bigger_node' on OOM
-        let value_child = allocate_node_for_value(&key[1..], value, guard.allocator)?;
+        let value_child = allocate_node_for_value(&key[1..], value, guard.tree_writer.allocator)?;
         bigger_node.insert_new_child(key[0], value_child);
     }
 
     // Replace the pointer in the parent
     parent.replace_child(parent_key_byte, bigger_node.into_ptr());
 
-    // FIXME: if this errors out, deallocate stuff we already allocated
-    guard.remember_obsolete_node(wnode.as_ptr())?;
+    guard.remember_obsolete_node(wnode.as_ptr());
 
     Ok(())
 }
