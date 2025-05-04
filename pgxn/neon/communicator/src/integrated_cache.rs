@@ -11,15 +11,29 @@
 //! Note: This deals with "relations", which is really just one "relation fork" in Postgres
 //! terms. RelFileLocator + ForkNumber is the key.
 
+//
+// TODO: Thoughts on eviction:
+//
+// There are two things we need to track, and evict if we run out of space:
+// - blocks in the file cache's file. If the file grows too large, need to evict something.
+//   Also if the cache is resized
+//
+// - entries in the cache tree. If we run out of memory in the shmem area, need to evict
+//   something
+//
+
 use std::mem::MaybeUninit;
+use std::ops::Range;
 
 use utils::lsn::Lsn;
+use zerocopy::FromBytes;
 
 use crate::file_cache::{CacheBlock, FileCache};
 use pageserver_page_api::model::RelTag;
 
 use neonart;
 use neonart::TreeInitStruct;
+use neonart::TreeIterator;
 
 const CACHE_AREA_SIZE: usize = 10 * 1024 * 1024;
 
@@ -131,6 +145,7 @@ struct RelEntry {
     Ord,
     zerocopy_derive::IntoBytes,
     zerocopy_derive::Immutable,
+    zerocopy_derive::FromBytes,
 )]
 #[repr(packed)]
 struct TreeKey {
@@ -139,6 +154,31 @@ struct TreeKey {
     rel_number: u32,
     fork_number: u8,
     block_number: u32,
+}
+
+impl<'a> From<&'a [u8]> for TreeKey {
+    fn from(bytes: &'a [u8]) -> Self {
+        Self::read_from_bytes(bytes).expect("invalid key length")
+    }
+}
+
+fn key_range_for_rel_blocks(rel: &RelTag) -> Range<TreeKey> {
+    Range {
+        start: TreeKey {
+            spc_oid: rel.spc_oid,
+            db_oid: rel.db_oid,
+            rel_number: rel.rel_number,
+            fork_number: rel.fork_number,
+            block_number: 0,
+        },
+        end:  TreeKey {
+            spc_oid: rel.spc_oid,
+            db_oid: rel.db_oid,
+            rel_number: rel.rel_number,
+            fork_number: rel.fork_number,
+            block_number: u32::MAX,
+        },
+    }
 }
 
 impl From<&RelTag> for TreeKey {
@@ -322,12 +362,15 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 
     /// Forget information about given relation in the cache. (For DROP TABLE and such)
     pub fn forget_rel(&'t self, rel: &RelTag) {
-        // FIXME: not implemented properly. smgrexists() would still return true for this
         let w = self.cache_tree.start_write();
-        w.insert(
-            &TreeKey::from(rel),
-            TreeEntry::Rel(RelEntry { nblocks: None }),
-        );
+        w.remove(&TreeKey::from(rel));
+
+        // also forget all cached blocks for the relation
+        let mut iter = TreeIterator::new(&key_range_for_rel_blocks(rel));
+        while let Some((k, _v)) = iter.next(self.cache_tree.start_read()) {
+            let w = self.cache_tree.start_write();
+            w.remove(&k);
+        }
     }
 }
 

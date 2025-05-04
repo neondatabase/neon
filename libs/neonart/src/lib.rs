@@ -325,7 +325,8 @@ where
 
 impl<'e, K: Key, V: Value> TreeReadGuard<'e, K, V> {
     pub fn get(&self, key: &K) -> Option<V> {
-        algorithm::search(key, self.tree.root, &self.epoch_pin)
+        let vref = algorithm::search(key, self.tree.root, &self.epoch_pin);
+        vref.cloned()
     }
 }
 
@@ -347,7 +348,8 @@ impl<'t, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteGuard<'t, K, V, A> {
 
     /// Get a value
     pub fn get(&mut self, key: &K) -> Option<V> {
-        algorithm::search(key, self.tree_writer.tree.root, &self.epoch_pin)
+        let v = algorithm::search(key, self.tree_writer.tree.root, &self.epoch_pin);
+        v.cloned()
     }
 
     /// Insert a value
@@ -403,6 +405,69 @@ impl<'t, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteGuard<'t, K, V, A> {
         result
     }
 }
+
+pub struct TreeIterator<K>
+    where K: Key + for<'a> From<&'a [u8]>,
+{
+    done: bool,
+    next_key: Vec<u8>,
+    max_key: Option<Vec<u8>>,
+
+    phantom_key: PhantomData<K>,
+}
+
+impl<K> TreeIterator<K>
+    where K: Key + for<'a> From<&'a [u8]>,
+{
+    pub fn new(range: &std::ops::Range<K>) -> TreeIterator<K> {
+        TreeIterator {
+            done: false,
+            next_key: Vec::from(range.start.as_bytes()),
+            max_key: Some(Vec::from(range.end.as_bytes())),
+            phantom_key: PhantomData,
+        }
+    }
+
+    
+    pub fn next<'g, V>(&mut self, read_guard: TreeReadGuard<'g, K, V>) -> Option<(K, V)>
+        where V: Value
+    {
+        if self.done {
+            return None;
+        }
+        if let Some((k , v)) = algorithm::iter_next(&mut self.next_key, read_guard.tree.root, &read_guard.epoch_pin) {
+            assert_eq!(k.len(), self.next_key.len());
+            if let Some(max_key) = &self.max_key {
+                assert_eq!(k.len(), max_key.len());
+                if k.as_slice() >= max_key.as_slice() {
+                    self.done = true;
+                    return None;
+                }
+            }
+            // increment the key
+            self.next_key = k.clone();
+            increment_key(self.next_key.as_mut_slice());
+            let k = k.as_slice().into();
+
+            Some((k, v.clone()))
+        } else {
+            self.done = true;
+            None
+        }
+    }
+}
+
+fn increment_key(key: &mut [u8]) -> bool {
+    for i in (0..key.len()).rev() {
+        let (byte, overflow) = key[i].overflowing_add(1);
+        key[i] = byte;
+        if !overflow {
+            return false;
+        }
+    }
+    true
+}
+
 
 // Debugging functions
 impl<'t, K: Key, V: Value + Debug> TreeReadGuard<'t, K, V> {

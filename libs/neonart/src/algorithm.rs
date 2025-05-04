@@ -50,13 +50,36 @@ pub(crate) fn search<'e, K: Key, V: Value>(
     key: &K,
     root: RootPtr<V>,
     epoch_pin: &'e EpochPin,
-) -> Option<V> {
+) -> Option<&'e V> {
     loop {
         let root_ref = NodeRef::from_root_ptr(root);
         if let Ok(result) = lookup_recurse(key.as_bytes(), root_ref, None, epoch_pin) {
             break result;
         }
         // retry
+    }
+}
+
+pub(crate) fn iter_next<'e, V: Value>(
+    key: &[u8],
+    root: RootPtr<V>,
+    epoch_pin: &'e EpochPin,
+) -> Option<(Vec<u8>, &'e V)> {
+    loop {
+        let mut path = Vec::new();
+        let root_ref = NodeRef::from_root_ptr(root);
+
+        match next_recurse(key, &mut path, root_ref, epoch_pin) {
+            Ok(Some(v)) => {
+                assert_eq!(path.len(), key.len());
+                break Some((path, v))
+            },
+            Ok(None) => break None,
+            Err(ConcurrentUpdateError()) => {
+                // retry
+                continue;
+            },
+        }
     }
 }
 
@@ -114,7 +137,7 @@ fn lookup_recurse<'e, V: Value>(
     node: NodeRef<'e, V>,
     parent: Option<ReadLockedNodeRef<V>>,
     epoch_pin: &'e EpochPin,
-) -> Result<Option<V>, ConcurrentUpdateError> {
+) -> Result<Option<&'e V>, ConcurrentUpdateError> {
     let rnode = node.read_lock_or_restart()?;
     if let Some(parent) = parent {
         parent.read_unlock_or_restart()?;
@@ -135,11 +158,72 @@ fn lookup_recurse<'e, V: Value>(
     match next_node {
         None => Ok(None), // key not found
         Some(ChildOrValue::Value(vptr)) => {
-            // safety: It's OK to follow the pointer because we checked the version.
-            let v = unsafe { (*vptr).clone() };
+            // safety: It's OK to return a ref of the pointer because we checked the version
+            // and the lifetime of 'epoch_pin' enforces that the reference is only accessible
+            // as long as the epoch is pinned.
+            let v = unsafe { vptr.as_ref().unwrap() };
             Ok(Some(v))
         }
         Some(ChildOrValue::Child(v)) => lookup_recurse(&key[1..], v, Some(rnode), epoch_pin),
+    }
+}
+
+fn next_recurse<'e, V: Value>(
+    min_key: &[u8],
+    path: &mut Vec<u8>,
+    node: NodeRef<'e, V>,
+    epoch_pin: &'e EpochPin,
+) -> Result<Option<&'e V>, ConcurrentUpdateError> {
+    let rnode = node.read_lock_or_restart()?;
+    let prefix = rnode.get_prefix();
+    if prefix.len() != 0 {
+        path.extend_from_slice(prefix);
+    }
+    assert!(path.len() < min_key.len());
+
+    use std::cmp::Ordering;
+    let mut key_byte = match path.as_slice().cmp(&min_key[0..path.len()]) {
+        Ordering::Less => {
+            rnode.read_unlock_or_restart()?;
+            return Ok(None);
+        }
+        Ordering::Equal => min_key[path.len()],
+        Ordering::Greater => 0,
+    };
+    loop {
+        // TODO: This iterates through all possible byte values. That's pretty unoptimal.
+        // Implement a function to scan the node for next key value efficiently.
+        match rnode.find_child_or_value_or_restart(key_byte)? {
+            None => {
+                if key_byte == u8::MAX {
+                    return Ok(None);
+                }
+                key_byte += 1;
+                continue;
+            }
+            Some(ChildOrValue::Child(child_ref)) => {
+                let path_len = path.len();
+                path.push(key_byte);
+                let result = next_recurse(min_key, path, child_ref, epoch_pin)?;
+                if result.is_some() {
+                    return Ok(result);
+                }
+                if key_byte == u8::MAX {
+                    return Ok(None);
+                }
+                path.truncate(path_len);
+                key_byte += 1;
+            }
+            Some(ChildOrValue::Value(vptr)) => {
+                path.push(key_byte);
+                assert_eq!(path.len(), min_key.len());
+                // safety: It's OK to return a ref of the pointer because we checked the version
+                // and the lifetime of 'epoch_pin' enforces that the reference is only accessible
+                // as long as the epoch is pinned.
+                let v = unsafe { vptr.as_ref().unwrap() };
+                return Ok(Some(v))
+            }
+        }
     }
 }
 

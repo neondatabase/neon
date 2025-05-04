@@ -94,7 +94,7 @@ impl<'e, V: Value> ReadLockedNodeRef<'e, V> {
             }))),
         }
     }
-
+    
     pub(crate) fn upgrade_to_write_lock_or_restart(
         self,
     ) -> Result<WriteLockedNodeRef<'e, V>, ConcurrentUpdateError> {
