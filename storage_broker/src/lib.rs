@@ -5,7 +5,7 @@ use proto::TenantTimelineId as ProtoTenantTimelineId;
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
 use tonic::transport::Endpoint;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use utils::backoff::{
     DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS, exponential_backoff,
 };
@@ -50,8 +50,9 @@ pub struct TimelineShardUpdate {
     pub inner: proto::SafekeeperDiscoveryResponse,
 }
 
-pub enum SubscriberError {
-    Cancelled,
+pub struct DiscoveryRequester {
+    id: ProtoTenantTimelineId,
+    client: proto::broker_service_client::BrokerServiceClient<tonic::transport::Channel>,
 }
 
 impl TimelineUpdatesSubscriber {
@@ -65,8 +66,16 @@ impl TimelineUpdatesSubscriber {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         cancel: &CancellationToken,
-    ) -> impl Stream<Item = Result<TimelineShardUpdate, SubscriberError>> {
-        async_stream::stream! {
+    ) -> (impl Stream<Item = TimelineShardUpdate>, DiscoveryRequester) {
+        let id = ProtoTenantTimelineId {
+            tenant_id: tenant_shard_id.tenant_id.as_ref().to_owned(),
+            timeline_id: timeline_id.as_ref().to_owned(),
+        };
+        let discovery_requester = DiscoveryRequester {
+            id: id.clone(),
+            client: self.client.clone(),
+        };
+        let stream = async_stream::stream! {
             let mut attempt = 0;
             'resubscribe: loop {
                 exponential_backoff(
@@ -91,16 +100,13 @@ impl TimelineUpdatesSubscriber {
                     ],
                     tenant_timeline_id: Some(FilterTenantTimelineId {
                         enabled: true,
-                        tenant_timeline_id: Some(ProtoTenantTimelineId {
-                            tenant_id: tenant_shard_id.tenant_id.as_ref().to_owned(),
-                            timeline_id: timeline_id.as_ref().to_owned(),
-                        }),
+                        tenant_timeline_id: Some(id.clone()),
                     }),
                 };
 
                 let res = tokio::select! {
                     r = self.client.subscribe_by_filter(request) => { r }
-                    _ = cancel.cancelled() => { yield Err(SubscriberError::Cancelled); return; }
+                    _ = cancel.cancelled() => { return; }
                 };
                 let mut update_stream = match res
                  {
@@ -119,7 +125,7 @@ impl TimelineUpdatesSubscriber {
                 loop {
                     let broker_update = tokio::select!{
                         _ = cancel.cancelled() => {
-                            yield Err(SubscriberError::Cancelled); return;
+                            return;
                         }
                         update = update_stream.message() => { update }
                     };
@@ -161,7 +167,7 @@ impl TimelineUpdatesSubscriber {
                                 }
                             };
                             attempt = 0; // reset backoff iff we received a valid update
-                            yield Ok(TimelineShardUpdate{is_discovery, inner: timeline_update });
+                            yield TimelineShardUpdate{is_discovery, inner: timeline_update };
                         },
                         Err(status) => {
                             match status.code() {
@@ -184,7 +190,34 @@ impl TimelineUpdatesSubscriber {
                     }
                 }
             }
-        }
+        };
+        (stream, discovery_requester)
+    }
+}
+
+impl DiscoveryRequester {
+    pub async fn request(&mut self) {
+        let request = proto::SafekeeperDiscoveryRequest {
+            tenant_timeline_id: Some(self.id.clone()),
+        };
+        let msg = proto::TypedMessage {
+            r#type: proto::MessageType::SafekeeperDiscoveryRequest as i32,
+            safekeeper_timeline_info: None,
+            safekeeper_discovery_request: Some(request),
+            safekeeper_discovery_response: None,
+        };
+
+        // Cancellation safety: we want to send a message to the broker, but publish_one()
+        // function can get cancelled by the other select! arm. This is absolutely fine, because
+        // we just want to receive broker updates and discovery is not important if we already
+        // receive updates.
+        //
+        // It is possible that `last_discovery_ts` will be updated, but the message will not be sent.
+        // This is totally fine because of the reason above.
+
+        // This is a fire-and-forget request, we don't care about the response
+        let _ = self.client.publish_one(msg).await;
+        debug!("Discovery request sent to the broker");
     }
 }
 

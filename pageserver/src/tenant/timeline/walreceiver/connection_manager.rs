@@ -20,10 +20,7 @@ use chrono::{NaiveDateTime, Utc};
 use futures::StreamExt;
 use pageserver_api::models::TimelineState;
 use postgres_connection::PgConnectionConfig;
-use storage_broker::proto::{
-    MessageType, SafekeeperDiscoveryRequest, SafekeeperDiscoveryResponse,
-    TenantTimelineId as ProtoTenantTimelineId, TypedMessage,
-};
+use storage_broker::proto::SafekeeperDiscoveryResponse;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::id::{NodeId, TenantTimelineId};
@@ -77,11 +74,6 @@ pub(super) async fn connection_manager_loop_step(
         WALRECEIVER_ACTIVE_MANAGERS.dec();
     }
 
-    let id: TenantTimelineId = TenantTimelineId {
-        tenant_id: connection_manager_state.timeline.tenant_shard_id.tenant_id,
-        timeline_id: connection_manager_state.timeline.timeline_id,
-    };
-
     let mut timeline_state_updates = connection_manager_state
         .timeline
         .subscribe_for_state_updates();
@@ -97,11 +89,12 @@ pub(super) async fn connection_manager_loop_step(
     // Subscribe to the broker updates. Stream shares underlying TCP connection
     // with other streams on this client (other connection managers). When
     // object goes out of scope, stream finishes in drop() automatically.
-    let mut timeline_updates = Box::pin(broker_client.subscribe(
+    let (timeline_updates, mut discovery_requester) = broker_client.subscribe(
         connection_manager_state.timeline.tenant_shard_id,
         connection_manager_state.timeline.timeline_id,
         cancel,
-    ));
+    );
+    let mut timeline_updates = Box::pin(timeline_updates);
     debug!("Subscribed for broker timeline updates");
 
     loop {
@@ -155,8 +148,9 @@ pub(super) async fn connection_manager_loop_step(
                 }
             },
 
-            // Got a new update from the broker
-            timeline_update = timeline_updates.next() => {
+            // Got a new update from the broker.
+            // The stream ends with None if and only if `cancel` is cancelled.
+            Some(timeline_update) = timeline_updates.next() => {
                 connection_manager_state.register_timeline_update(timeline_update)
             },
 
@@ -238,32 +232,11 @@ pub(super) async fn connection_manager_loop_step(
                     tokio::time::sleep(next_discovery_ts - now).await;
                 }
 
-                let tenant_timeline_id = Some(ProtoTenantTimelineId {
-                    tenant_id: id.tenant_id.as_ref().to_owned(),
-                    timeline_id: id.timeline_id.as_ref().to_owned(),
-                });
-                let request = SafekeeperDiscoveryRequest { tenant_timeline_id };
-                let msg = TypedMessage {
-                    r#type: MessageType::SafekeeperDiscoveryRequest as i32,
-                    safekeeper_timeline_info: None,
-                    safekeeper_discovery_request: Some(request),
-                    safekeeper_discovery_response: None,
-                    };
+                info!("No active connection and no candidates, sending discovery request to the broker");
+                discovery_requester.request().await;
 
                 last_discovery_ts = Some(std::time::Instant::now());
-                info!("No active connection and no candidates, sending discovery request to the broker");
 
-                // Cancellation safety: we want to send a message to the broker, but publish_one()
-                // function can get cancelled by the other select! arm. This is absolutely fine, because
-                // we just want to receive broker updates and discovery is not important if we already
-                // receive updates.
-                //
-                // It is possible that `last_discovery_ts` will be updated, but the message will not be sent.
-                // This is totally fine because of the reason above.
-
-                // This is a fire-and-forget request, we don't care about the response
-                let _ = broker_client.publish_one(msg).await;
-                debug!("Discovery request sent to the broker");
                 None
             } => {}
         }
