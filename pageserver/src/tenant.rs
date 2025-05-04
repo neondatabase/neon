@@ -48,7 +48,6 @@ use remote_timeline_client::{
     download_tenant_manifest,
 };
 use secondary::heatmap::{HeatMapTenant, HeatMapTimeline};
-use storage_broker::BrokerClientChannel;
 use timeline::compaction::{CompactionOutcome, GcCompactionQueue};
 use timeline::offload::{OffloadError, offload_timeline};
 use timeline::{
@@ -152,7 +151,7 @@ pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 /// as the shared remote storage client and process initialization state.
 #[derive(Clone)]
 pub struct TenantSharedResources {
-    pub broker_client: storage_broker::BrokerClientChannel,
+    pub broker_client: storage_broker::TimelineUpdatesSubscriber,
     pub remote_storage: GenericRemoteStorage,
     pub deletion_queue_client: DeletionQueueClient,
     pub l0_flush_global_state: L0FlushGlobalState,
@@ -2122,7 +2121,7 @@ impl TenantShard {
     async fn unoffload_timeline(
         self: &Arc<Self>,
         timeline_id: TimelineId,
-        broker_client: storage_broker::BrokerClientChannel,
+        broker_client: storage_broker::TimelineUpdatesSubscriber,
         ctx: RequestContext,
     ) -> Result<Arc<Timeline>, TimelineArchivalError> {
         info!("unoffloading timeline");
@@ -2257,7 +2256,7 @@ impl TenantShard {
         self: &Arc<Self>,
         timeline_id: TimelineId,
         new_state: TimelineArchivalState,
-        broker_client: storage_broker::BrokerClientChannel,
+        broker_client: storage_broker::TimelineUpdatesSubscriber,
         ctx: RequestContext,
     ) -> Result<(), TimelineArchivalError> {
         info!("setting timeline archival config");
@@ -2586,7 +2585,7 @@ impl TenantShard {
     pub(crate) async fn create_timeline(
         self: &Arc<TenantShard>,
         params: CreateTimelineParams,
-        broker_client: storage_broker::BrokerClientChannel,
+        broker_client: storage_broker::TimelineUpdatesSubscriber,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         if !self.is_active() {
@@ -3321,7 +3320,7 @@ impl TenantShard {
     /// to delay background jobs. Background jobs can be started right away when None is given.
     fn activate(
         self: &Arc<Self>,
-        broker_client: BrokerClientChannel,
+        broker_client: storage_broker::TimelineUpdatesSubscriber,
         background_jobs_can_start: Option<&completion::Barrier>,
         ctx: &RequestContext,
     ) {
@@ -3951,7 +3950,7 @@ where
 
 enum ActivateTimelineArgs {
     Yes {
-        broker_client: storage_broker::BrokerClientChannel,
+        broker_client: storage_broker::TimelineUpdatesSubscriber,
     },
     No,
 }

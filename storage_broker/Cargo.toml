@@ -27,6 +27,7 @@ parking_lot.workspace = true
 prost.workspace = true
 tonic.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio-util.workspace = true
 tokio-rustls.workspace = true
 tracing.workspace = true
 metrics.workspace = true
