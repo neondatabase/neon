@@ -145,10 +145,8 @@ Python (3.11 or higher), and install the python3 packages using `./scripts/pysyn
 > cargo neon init
 Initializing pageserver node 1 at '127.0.0.1:64000' in ".neon"
 
-# start pageserver, safekeeper, and broker for their intercommunication
+# start pageserver, safekeeper, for their intercommunication
 > cargo neon start
-Starting neon broker at 127.0.0.1:50051.
-storage_broker started, pid: 2918372
 Starting pageserver node 1 at '127.0.0.1:64000' in ".neon".
 pageserver started, pid: 2918386
 Starting safekeeper at '127.0.0.1:5454' in '.neon/safekeepers/sk1'.

@@ -104,9 +104,7 @@ impl PageServerNode {
             self.env.pg_distrib_dir_raw().display()
         );
 
-        let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
-
-        let mut overrides = vec![pg_distrib_dir_param, broker_endpoint_param];
+        let mut overrides = vec![pg_distrib_dir_param];
 
         overrides.push(format!(
             "control_plane_api='{}'",

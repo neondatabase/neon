@@ -89,7 +89,6 @@ def test_storage_controller_smoke(
     env = neon_env_builder.init_configs()
 
     # Start services by hand so that we can skip a pageserver (this will start + register later)
-    env.broker.start()
     env.storage_controller.start()
     env.pageservers[0].start()
     env.pageservers[1].start()
@@ -345,7 +344,6 @@ def prepare_onboarding_env(
 
     # Start services by hand so that we can skip registration on one of the pageservers
     env = neon_env_builder.init_configs()
-    env.broker.start()
     env.storage_controller.start()
     env.endpoint_storage.start()
 
@@ -2776,10 +2774,6 @@ def start_env(env: NeonEnv, storage_controller_port: int):
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=2 + len(env.pageservers) + len(env.safekeepers)
     ) as executor:
-        futs.append(
-            executor.submit(lambda: env.broker.start() or None)
-        )  # The `or None` is for the linter
-
         for pageserver in env.pageservers:
             futs.append(
                 executor.submit(

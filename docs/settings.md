@@ -24,13 +24,10 @@ max_file_descriptors = '100'
 # initial superuser role name to use when creating a new tenant
 initial_superuser_name = 'cloud_admin'
 
-broker_endpoint = 'http://127.0.0.1:50051'
-
 # [remote_storage]
 ```
 
-The config above shows default values for all basic pageserver settings, besides `broker_endpoint`: that one has to be set by the user,
-see the corresponding section below.
+The config above shows default values for all basic pageserver settings.
 Pageserver uses default values for all files that are missing in the config, so it's not a hard error to leave the config blank.
 Yet, it validates the config values it can (e.g. postgres install dir) and errors if the validation fails, refusing to start.
 
@@ -47,11 +44,6 @@ All values can be passed as an argument to the pageserver binary, using the `-c`
 Example: `${PAGESERVER_BIN} -c "checkpoint_timeout = '10 m'" -c "remote_storage={local_path='/some/local/path/'}"`
 
 Note that TOML distinguishes between strings and integers, the former require single or double quotes around them.
-
-#### broker_endpoint
-
-A storage broker endpoint to connect and pull the information from. Default is
-`'http://127.0.0.1:50051'`. 
 
 #### checkpoint_distance
 

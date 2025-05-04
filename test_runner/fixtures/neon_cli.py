@@ -475,18 +475,6 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["-m", "immediate"])
         return self.raw_cli(args)
 
-    def storage_broker_start(
-        self, timeout_in_seconds: int | None = None
-    ) -> subprocess.CompletedProcess[str]:
-        cmd = ["storage_broker", "start"]
-        if timeout_in_seconds is not None:
-            cmd.append(f"--start-timeout={timeout_in_seconds}s")
-        return self.raw_cli(cmd)
-
-    def storage_broker_stop(self) -> subprocess.CompletedProcess[str]:
-        cmd = ["storage_broker", "stop"]
-        return self.raw_cli(cmd)
-
     def endpoint_create(
         self,
         branch_name: str,

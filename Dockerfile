@@ -86,7 +86,6 @@ RUN set -e \
       --bin pageserver  \
       --bin pagectl  \
       --bin safekeeper  \
-      --bin storage_broker  \
       --bin storage_controller  \
       --bin proxy  \
       --bin endpoint_storage \
@@ -119,7 +118,6 @@ COPY --from=build --chown=neon:neon /home/nonroot/target/release/pg_sni_router  
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/pageserver          /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/pagectl             /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/safekeeper          /usr/local/bin
-COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_broker      /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_controller  /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy               /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/endpoint_storage    /usr/local/bin
@@ -136,8 +134,7 @@ COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 # Now, when `docker run ... pageserver` is run, it can start without errors, yet will have some default dummy values.
 RUN mkdir -p /data/.neon/ && \
   echo "id=1234" > "/data/.neon/identity.toml" && \
-  echo "broker_endpoint='http://storage_broker:50051'\n" \
-       "pg_distrib_dir='/usr/local/'\n" \
+  echo "pg_distrib_dir='/usr/local/'\n" \
        "listen_pg_addr='0.0.0.0:6400'\n" \
        "listen_http_addr='0.0.0.0:9898'\n" \
        "availability_zone='local'\n" \

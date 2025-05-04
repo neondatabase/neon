@@ -2,11 +2,6 @@
 
 Below you will find a brief overview of each subdir in the source tree in alphabetical order.
 
-`storage_broker`:
-
-Neon storage broker, providing messaging between safekeepers and pageservers.
-[storage_broker.md](./storage_broker.md)
-
 `storage_controller`:
 
 Neon storage controller, manages a cluster of pageservers and exposes an API that enables

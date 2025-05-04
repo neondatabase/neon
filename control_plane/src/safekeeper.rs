@@ -182,9 +182,6 @@ impl SafekeeperNode {
             args.push("--no-sync".to_owned());
         }
 
-        let broker_endpoint = format!("{}", self.env.broker.client_url());
-        args.extend(["--broker-endpoint".to_owned(), broker_endpoint]);
-
         let mut backup_threads = String::new();
         if let Some(threads) = self.conf.backup_threads {
             backup_threads = threads.to_string();

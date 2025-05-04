@@ -501,9 +501,6 @@ class NeonEnvBuilder:
         # Flag to use https listener in storage controller, generate local ssl certs,
         # and force pageservers and neon_local to use https for storage controller api.
         self.use_https_storage_controller_api: bool = False
-        # Flag to use https listener in storage broker, generate local ssl certs,
-        # and force pageservers and safekeepers to use https for storage broker api.
-        self.use_https_storage_broker_api: bool = False
 
         self.pageserver_virtual_file_io_engine: str | None = pageserver_virtual_file_io_engine
         self.pageserver_get_vectored_concurrent_io: str | None = (
@@ -1030,8 +1027,6 @@ class NeonEnvBuilder:
 
             self.env.storage_controller.assert_no_errors()
 
-            self.env.broker.assert_no_errors()
-
             self.env.endpoint_storage.assert_no_errors()
 
         try:
@@ -1089,7 +1084,6 @@ class NeonEnv:
         self.safekeepers: list[Safekeeper] = []
         self.pageservers: list[NeonPageserver] = []
         self.num_azs = config.num_azs
-        self.broker = NeonBroker(self, config.use_https_storage_broker_api)
         self.pageserver_remote_storage = config.pageserver_remote_storage
         self.safekeepers_remote_storage = config.safekeepers_remote_storage
         self.pg_version = config.pg_version
@@ -1109,7 +1103,6 @@ class NeonEnv:
             config.use_https_pageserver_api
             or config.use_https_safekeeper_api
             or config.use_https_storage_controller_api
-            or config.use_https_storage_broker_api
         )
         self.ssl_ca_file = (
             self.repo_dir.joinpath("rootCA.crt") if self.generate_local_ssl_certs else None
@@ -1188,11 +1181,6 @@ class NeonEnv:
             "endpoint_storage": {"port": self.port_distributor.get_port()},
             "generate_local_ssl_certs": self.generate_local_ssl_certs,
         }
-
-        if config.use_https_storage_broker_api:
-            cfg["broker"]["listen_https_addr"] = self.broker.listen_addr()
-        else:
-            cfg["broker"]["listen_addr"] = self.broker.listen_addr()
 
         cfg["control_plane_api"] = self.control_plane_api
 
@@ -1388,8 +1376,6 @@ class NeonEnv:
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=2 + len(self.pageservers) + len(self.safekeepers)
         ) as executor:
-            futs.append(executor.submit(lambda: self.broker.start()))
-
             for pageserver in self.pageservers:
                 futs.append(
                     executor.submit(
@@ -1478,7 +1464,6 @@ class NeonEnv:
                 pageserver.stop(immediate=immediate)
             except RuntimeError:
                 stop_later.append(pageserver)
-        self.broker.stop()
 
         # TODO: for nice logging we need python 3.11 ExceptionGroup
         for ps in stop_later:
@@ -4935,41 +4920,6 @@ class Safekeeper(LogUtils):
 
         for sk in members_sks:
             sk.http_client().timeline_create(create_r)
-
-
-class NeonBroker(LogUtils):
-    """An object managing storage_broker instance"""
-
-    def __init__(self, env: NeonEnv, use_https: bool):
-        super().__init__(logfile=env.repo_dir / "storage_broker" / "storage_broker.log")
-        self.env = env
-        self.scheme = "https" if use_https else "http"
-        self.port: int = self.env.port_distributor.get_port()
-        self.running = False
-
-    def start(
-        self,
-        timeout_in_seconds: int | None = None,
-    ) -> Self:
-        assert not self.running
-        self.env.neon_cli.storage_broker_start(timeout_in_seconds)
-        self.running = True
-        return self
-
-    def stop(self) -> Self:
-        if self.running:
-            self.env.neon_cli.storage_broker_stop()
-            self.running = False
-        return self
-
-    def listen_addr(self):
-        return f"127.0.0.1:{self.port}"
-
-    def client_url(self):
-        return f"{self.scheme}://{self.listen_addr()}"
-
-    def assert_no_errors(self):
-        assert_no_errors(self.logfile, "storage_controller", [])
 
 
 class NodeKind(StrEnum):
