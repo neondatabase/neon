@@ -36,7 +36,7 @@ impl TryFrom<&crate::compute::ParsedSpec> for EndpointStoragePair {
         let timeline_id = pspec.timeline_id;
 
         let url = format!("http://{base_uri}/{tenant_id}/{timeline_id}/{endpoint_id}/{KEY}");
-        let Some(ref token) = pspec.endpoint_storage_token else {
+        let Some(ref token) = pspec.endpoint_storage_auth_token else {
             bail!("pspec.endpoint_storage_token missing")
         };
         let token = token.clone();

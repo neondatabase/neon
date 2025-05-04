@@ -173,11 +173,12 @@ pub struct ComputeSpec {
     /// Example: config-shy-breeze-123-collector-monitoring.neon-telemetry.svc.cluster.local:10514
     pub logs_export_host: Option<String>,
 
-    // Address of endpoint storage service
+    /// Address of endpoint storage service
     pub endpoint_storage_addr: Option<String>,
-
-    // JWT for authorizing requests to endpoint storage service
+    /// JWT for authorizing requests to endpoint storage service
     pub endpoint_storage_auth_token: Option<String>,
+    /// If true, download LFC state from endpoint_storage and pass it to Postgres on startup
+    pub prewarm_lfc_on_startup: bool,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
@@ -188,8 +189,6 @@ pub enum ComputeFeature {
     /// Enable the experimental activity monitor logic, which uses `pg_stat_database` to
     /// track short-lived connections as user activity.
     ActivityMonitorExperimental,
-
-    PrewarmLfcOnStartup,
 
     /// This is a special feature flag that is used to represent unknown feature flags.
     /// Basically all unknown to enum flags are represented as this one. See unit test

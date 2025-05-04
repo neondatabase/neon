@@ -207,7 +207,7 @@ pub struct ParsedSpec {
     pub safekeeper_connstrings: Vec<String>,
     pub storage_auth_token: Option<String>,
     pub endpoint_storage_addr: Option<SocketAddr>,
-    pub endpoint_storage_token: Option<String>,
+    pub endpoint_storage_auth_token: Option<String>,
 }
 
 impl TryFrom<ComputeSpec> for ParsedSpec {
@@ -268,7 +268,7 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             .unwrap_or_default()
             .parse()
             .ok();
-        let endpoint_storage_token = spec
+        let endpoint_storage_auth_token = spec
             .endpoint_storage_auth_token
             .clone()
             .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_token"));
@@ -281,7 +281,7 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             tenant_id,
             timeline_id,
             endpoint_storage_addr,
-            endpoint_storage_token,
+            endpoint_storage_auth_token,
         })
     }
 }
@@ -760,8 +760,7 @@ impl ComputeNode {
         // Log metrics so that we can search for slow operations in logs
         info!(?metrics, postmaster_pid = %postmaster_pid, "compute start finished");
 
-        let features = &pspec.spec.features;
-        if features.contains(&ComputeFeature::PrewarmLfcOnStartup) {
+        if pspec.spec.prewarm_lfc_on_startup {
             self.prewarm();
         }
         Ok(())
