@@ -33,44 +33,14 @@ def prom_parse(client: EndpointHttpClient) -> dict[str, float]:
     }
 
 
-def prewarm_lfc_blocking(client: EndpointHttpClient):
-    client.prewarm_lfc()
-    for _ in range(20):
-        prewarm_status = client.prewarm_lfc_status()
-        match prewarm_status["status"]:
-            case "prewarming":
-                time.sleep(1)
-            case "completed":
-                break
-            case status:
-                error = prewarm_status["error"]
-                raise AssertionError(f"invalid status {status}, error: {error}")
-    else:
-        raise AssertionError("failed to prewarm within 20 seconds")
-
-
-def prewarm_lfc_offload_blocking(client: EndpointHttpClient):
-    client.prewarm_lfc_offload()
-    for _ in range(20):
-        offload_status = client.prewarm_lfc_offload_status()
-        match offload_status["status"]:
-            case "offloading":
-                time.sleep(1)
-            case "completed":
-                break
-            case status:
-                error = offload_status["error"]
-                raise AssertionError(f"invalid status {status}, error: {error}")
-    else:
-        raise AssertionError("failed to offload prewarm data within 20 seconds")
-
-
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
-@pytest.mark.parametrize("with_compute_ctl", [False, True], ids=["", "compute-ctl"])
+@pytest.mark.parametrize("with_compute_ctl", [False, True], ids=["pg-only", "compute-ctl"])
 def test_lfc_prewarm(neon_simple_env: NeonEnv, with_compute_ctl: bool):
+    """
+    with_compute_ctl: Test compute ctl's methods instead of querying Postgres directly
+    """
     env = neon_simple_env
     n_records = 1000000
-
     endpoint = env.endpoints.create_start(
         branch_name="main",
         config_lines=[
@@ -92,9 +62,7 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, with_compute_ctl: bool):
         status = http_client.prewarm_lfc_status()
         assert status["status"] == "not_prewarmed"
         assert "error" not in status
-
-        prewarm_lfc_offload_blocking(http_client)
-
+        http_client.offload_lfc()
         assert http_client.prewarm_lfc_status()["status"] == "not_prewarmed"
         assert prom_parse(http_client) == {OFFLOAD_LABEL: 1, PREWARM_LABEL: 0}
     else:
@@ -111,7 +79,7 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, with_compute_ctl: bool):
     cur.execute("alter extension neon update to '1.6'")
 
     if with_compute_ctl:
-        prewarm_lfc_blocking(http_client)
+        http_client.prewarm_lfc()
     else:
         cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
 
@@ -148,12 +116,14 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, with_compute_ctl: bool):
 
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
-@pytest.mark.parametrize("with_compute_ctl", [False, True], ids=["", "compute-ctl"])
+@pytest.mark.parametrize("with_compute_ctl", [False, True], ids=["pg-only", "compute-ctl"])
 def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, with_compute_ctl: bool):
+    """
+    with_compute_ctl: Test compute ctl's methods instead of querying Postgres directly
+    """
     env = neon_simple_env
     n_records = 10000
     n_threads = 4
-
     endpoint = env.endpoints.create_start(
         branch_name="main",
         config_lines=[
@@ -173,7 +143,7 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, with_compute_ctl: 
 
     http_client = endpoint.http_client()
     if with_compute_ctl:
-        prewarm_lfc_offload_blocking(http_client)
+        http_client.offload_lfc()
     else:
         cur.execute("select get_local_cache_state()")
         lfc_state = cur.fetchall()[0][0]
@@ -203,7 +173,7 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, with_compute_ctl: 
             cur.execute("select pg_reload_conf()")
 
             if with_compute_ctl:
-                prewarm_lfc_blocking(http_client)
+                http_client.prewarm_lfc()
             else:
                 cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
 
