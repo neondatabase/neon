@@ -1822,7 +1822,7 @@ def test_timeline_detach_with_aux_files_with_detach_v1(
     endpoint2.safe_psql(
         "SELECT pg_create_logical_replication_slot('test_slot_restore', 'pgoutput')"
     )
-    lsn3 = wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, branch_timeline_id)
+    lsn3 = wait_for_last_flush_lsn(env, endpoint2, env.initial_tenant, branch_timeline_id)
     assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn1).keys()) == set([])
     assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn3).keys()) == set(
         ["pg_replslot/test_slot_restore/state"]
@@ -1839,7 +1839,7 @@ def test_timeline_detach_with_aux_files_with_detach_v1(
     assert all_reparented == set([])
 
     # We need to ensure all safekeeper data are ingested before checking aux files: the API does not wait for LSN.
-    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, branch_timeline_id)
+    wait_for_last_flush_lsn(env, endpoint2, env.initial_tenant, branch_timeline_id)
     assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn2).keys()) == set(
         ["pg_replslot/test_slot_parent_1/state", "pg_replslot/test_slot_parent_2/state"]
     ), "main branch unaffected"
