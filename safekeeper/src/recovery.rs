@@ -360,6 +360,7 @@ async fn recovery_stream(
         listen_pg_addr_str: &donor.pg_connstr,
         auth_token: None,
         availability_zone: None,
+        pageserver_generation: None,
     };
     let cfg = wal_stream_connection_config(connection_conf_args)?;
     let mut cfg = cfg.to_tokio_postgres_config();

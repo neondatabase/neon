@@ -4,7 +4,6 @@ use std::io::Write as _;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use desim::node_os;
 use http_utils::endpoint::{
     self, ChannelWriter, auth_middleware, check_permission_with, profile_cpu_handler,
     profile_heap_handler, prometheus_metrics_handler, request_span,
@@ -38,6 +37,7 @@ use utils::shard::TenantShardId;
 use crate::debug_dump::TimelineDigestRequest;
 use crate::safekeeper::TermLsn;
 use crate::timelines_global_map::DeleteOrExclude;
+use crate::wal_advertiser::advmap::UpdatePageserverAttachmentsArg;
 use crate::{
     GlobalTimelines, SafeKeeperConf, copy_timeline, debug_dump, patch_control_file, pull_timeline,
     wal_advertiser,
@@ -95,39 +95,37 @@ async fn tenant_delete_handler(mut request: Request<Body>) -> Result<Response<Bo
     json_response(StatusCode::OK, response_body)
 }
 
-async fn tenant_put_pageserver_locations_handler(
+async fn tenant_put_pageserver_attachments(
     mut request: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
-    let tenant_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
-    check_permission(&request, Some(tenant_id))?;
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let PutTenantPageserverLocationRequest {
         pageserver_locations,
     }: PutTenantPageserverLocationRequest = json_request(&mut request).await?;
 
     let global_timelines = get_global_timelines(&request);
-    global_timelines
-        .update_tenant_locations(tenant_id, pageserver_locations)
-        .await?;
+    let wal_advertiser = global_timelines.get_wal_advertiser();
+    wal_advertiser
+        .update_pageserver_attachments(
+            tenant_shard_id,
+            pageserver_locations
+                .into_iter()
+                .map(
+                    |TenantShardPageserverLocation {
+                         generation,
+                         pageserver_node_id,
+                     }| UpdatePageserverAttachmentsArg {
+                        generation,
+                        pageserver_node_id,
+                    },
+                )
+                .collect(),
+        )
+        .map_err(ApiError::InternalServerError)?;
 
-    json_response(StatusCode::OK, response_body)
-}
-
-
-async fn tenant_get_pageserver_locations_handler(
-    mut request: Request<Body>,
-) -> Result<Response<Body>, ApiError> {
-
-    let tenant_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
-    check_permission(&request, Some(tenant_id))?;
-
-    let global_timelines = get_global_timelines(&request);
-    let locations = global_timelines
-        .get_tenant_locations(tenant_id)
-        .await?;
-
-    json_response(StatusCode::OK, locations)
-
+    json_response(StatusCode::OK, ())
 }
 
 async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -753,11 +751,8 @@ pub fn make_router(
         .delete("/v1/tenant/:tenant_id", |r| {
             request_span(r, tenant_delete_handler)
         })
-        .put("/v1/tenant/:tenant_shard_id/pageserver_locations", |r| {
-            request_span(r, tenant_put_pageserver_locations_handler)
-        })
-        .get("/v1/tenant/:tenant_shard_id/pageserver_locations", |r| {
-            request_span(r, tenant_get_pageserver_locations_handler)
+        .put("/v1/tenant/:tenant_shard_id/pageserver_attachments", |r| {
+            request_span(r, tenant_put_pageserver_attachments)
         })
         // Will be used in the future instead of implicit timeline creation
         .post("/v1/tenant/timeline", |r| {

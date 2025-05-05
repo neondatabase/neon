@@ -38,13 +38,12 @@ pub mod timeline_eviction;
 pub mod timeline_guard;
 pub mod timeline_manager;
 pub mod timelines_set;
+pub mod wal_advertiser;
 pub mod wal_backup;
 pub mod wal_backup_partial;
 pub mod wal_reader_stream;
 pub mod wal_service;
 pub mod wal_storage;
-pub mod tenant;
-pub mod wal_advertiser;
 
 #[cfg(any(test, feature = "benchmarking"))]
 pub mod test_utils;

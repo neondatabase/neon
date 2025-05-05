@@ -33,14 +33,15 @@ use crate::receive_wal::WalReceivers;
 use crate::safekeeper::{AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, TermLsn};
 use crate::send_wal::{WalSenders, WalSendersTimelineMetricValues};
 use crate::state::{EvictionState, TimelineMemState, TimelinePersistentState, TimelineState};
-use crate::tenant::Tenant;
 use crate::timeline_guard::ResidenceGuard;
 use crate::timeline_manager::{AtomicStatus, ManagerCtl};
 use crate::timelines_set::TimelinesSet;
 use crate::wal_backup::{self, remote_timeline_path};
 use crate::wal_backup_partial::PartialRemoteSegment;
 use crate::wal_storage::{Storage as wal_storage_iface, WalReader};
-use crate::{SafeKeeperConf, control_file, debug_dump, timeline_manager, wal_storage};
+use crate::{
+    SafeKeeperConf, control_file, debug_dump, timeline_manager, wal_advertiser, wal_storage,
+};
 
 fn peer_info_from_sk_info(sk_info: &SafekeeperTimelineInfo, ts: Instant) -> PeerInfo {
     PeerInfo {
@@ -427,7 +428,6 @@ type RemoteDeletionReceiver = tokio::sync::watch::Receiver<Option<anyhow::Result
 /// It also holds SharedState and provides mutually exclusive access to it.
 pub struct Timeline {
     pub ttid: TenantTimelineId,
-    pub tenant: Arc<Tenant>,
     pub remote_path: RemotePath,
 
     /// Used to broadcast commit_lsn updates to all background jobs.
@@ -449,6 +449,7 @@ pub struct Timeline {
     /// synchronized with the disk. This is tokio mutex as we write WAL to disk
     /// while holding it, ensuring that consensus checks are in order.
     mutex: RwLock<SharedState>,
+    pub(crate) wal_advertiser: Arc<wal_advertiser::advmap::SafekeeperTimeline>,
     walsenders: Arc<WalSenders>,
     walreceivers: Arc<WalReceivers>,
     timeline_dir: Utf8PathBuf,
@@ -478,7 +479,7 @@ impl Timeline {
         timeline_dir: &Utf8Path,
         remote_path: &RemotePath,
         shared_state: SharedState,
-        tenant: Arc<Tenant>,
+        wal_advertiser: Arc<wal_advertiser::advmap::SafekeeperTimeline>,
         conf: Arc<SafeKeeperConf>,
     ) -> Arc<Self> {
         let (commit_lsn_watch_tx, commit_lsn_watch_rx) =
@@ -493,7 +494,6 @@ impl Timeline {
 
         Arc::new(Self {
             ttid,
-            tenant,
             remote_path: remote_path.to_owned(),
             timeline_dir: timeline_dir.to_owned(),
             commit_lsn_watch_tx,
@@ -503,6 +503,7 @@ impl Timeline {
             shared_state_version_tx,
             shared_state_version_rx,
             mutex: RwLock::new(shared_state),
+            wal_advertiser,
             walsenders: WalSenders::new(walreceivers.clone()),
             walreceivers,
             gate: Default::default(),
@@ -520,8 +521,8 @@ impl Timeline {
     /// Load existing timeline from disk.
     pub fn load_timeline(
         conf: Arc<SafeKeeperConf>,
-        tenant: Arc<Tenant>,
         ttid: TenantTimelineId,
+        wal_advertiser: Arc<wal_advertiser::advmap::SafekeeperTimeline>,
     ) -> Result<Arc<Timeline>> {
         let _enter = info_span!("load_timeline", timeline = %ttid.timeline_id).entered();
 
@@ -534,7 +535,7 @@ impl Timeline {
             &timeline_dir,
             &remote_path,
             shared_state,
-            tenant,
+            wal_advertiser,
             conf,
         ))
     }
@@ -1069,19 +1070,12 @@ impl WalResidentTimeline {
     }
 
     /// Update in memory remote consistent lsn.
-    pub async fn update_remote_consistent_lsn(&self, shard: Option<ShardId>, candidate: Lsn) {
+    pub async fn update_remote_consistent_lsn(&self, candidate: Lsn) {
         let mut shared_state = self.write_shared_state().await;
         shared_state.sk.state_mut().inmem.remote_consistent_lsn = max(
             shared_state.sk.state().inmem.remote_consistent_lsn,
             candidate,
         );
-        drop(shared_state);
-        self.tli.tenant.update_remote_consistent_lsn(
-            todo!(),
-            todo!(),
-            todo!(),
-
-        )
     }
 }
 

@@ -37,6 +37,7 @@ use crate::send_interpreted_wal::{
     Batch, InterpretedWalReader, InterpretedWalReaderHandle, InterpretedWalSender,
 };
 use crate::timeline::WalResidentTimeline;
+use crate::wal_advertiser;
 use crate::wal_reader_stream::StreamingWalReader;
 use crate::wal_storage::WalReader;
 
@@ -657,11 +658,29 @@ impl SafekeeperPostgresHandler {
 
         let tli_cancel = tli.cancel.clone();
 
+        let wal_advertiser = match (self.shard, self.pageserver_generation) {
+            (Some(shard), Some(pageserver_generation)) => {
+                Some(tli.wal_advertiser.get_pageserver_timeline(
+                    self.ttid,
+                    shard.shard_index(),
+                    pageserver_generation,
+                ))
+            }
+            (shard, pageserver_generation) => {
+                debug!(
+                    ?shard,
+                    ?pageserver_generation,
+                    "cannot feedback last_record_lsn to wal_advertiser subsystem, client must specify shard and pageserver_generation"
+                );
+                None
+            }
+        };
+
         let mut reply_reader = ReplyReader {
             reader,
             ws_guard: ws_guard.clone(),
             tli,
-            shard: self.shard.clone(),
+            wal_advertiser,
         };
 
         let res = tokio::select! {
@@ -978,7 +997,7 @@ struct ReplyReader<IO> {
     reader: PostgresBackendReader<IO>,
     ws_guard: Arc<WalSenderGuard>,
     tli: WalResidentTimeline,
-    shard: Option<ShardId>,
+    wal_advertiser: Option<Arc<wal_advertiser::advmap::PageserverTimeline>>,
 }
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
@@ -1023,8 +1042,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
                     .walsenders
                     .record_ps_feedback(self.ws_guard.id, &ps_feedback);
                 self.tli
-                    .update_remote_consistent_lsn(shard, ps_feedback.remote_consistent_lsn)
+                    .update_remote_consistent_lsn(ps_feedback.remote_consistent_lsn)
                     .await;
+                if let Some(wal_advertiser) = &self.wal_advertiser {
+                    wal_advertiser.update_remote_consistent_lsn(ps_feedback.remote_consistent_lsn);
+                }
                 // in principle new remote_consistent_lsn could allow to
                 // deactivate the timeline, but we check that regularly through
                 // broker updated, not need to do it here

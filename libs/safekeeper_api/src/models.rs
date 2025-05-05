@@ -318,7 +318,6 @@ pub struct PutTenantPageserverLocationRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TenantShardPageserverLocation {
-    pub tenant_shard_id: TenantShardId,
     pub generation: Generation,
     pub pageserver_node_id: NodeId,
 }

@@ -18,7 +18,7 @@ use utils::measured_stream::MeasuredStream;
 
 use crate::handler::SafekeeperPostgresHandler;
 use crate::metrics::TrafficMetrics;
-use crate::{GlobalTimelines, SafeKeeperConf};
+use crate::{GlobalTimelines, SafeKeeperConf, wal_advertiser};
 
 /// Accept incoming TCP connections and spawn them into a background thread.
 ///
@@ -51,7 +51,7 @@ pub async fn task_main(
                     error!("connection handler exited: {}", err);
                 }
             }
-            .instrument(info_span!("", cid = %conn_id, ttid = field::Empty, application_name = field::Empty, shard = field::Empty)),
+            .instrument(info_span!("", cid = %conn_id, ttid = field::Empty, application_name = field::Empty, shard = field::Empty, pageserver_generation = field::Empty)),
         );
     }
 }
