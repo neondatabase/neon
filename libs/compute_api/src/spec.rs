@@ -177,7 +177,9 @@ pub struct ComputeSpec {
     pub endpoint_storage_addr: Option<String>,
     /// JWT for authorizing requests to endpoint storage service
     pub endpoint_storage_auth_token: Option<String>,
+
     /// If true, download LFC state from endpoint_storage and pass it to Postgres on startup
+    #[serde(default)]
     pub prewarm_lfc_on_startup: bool,
 }
 
