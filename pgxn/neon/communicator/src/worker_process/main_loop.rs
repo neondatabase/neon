@@ -39,7 +39,7 @@ pub(super) async fn init(
     timeline_id: String,
     auth_token: Option<String>,
     shard_map: HashMap<utils::shard::ShardIndex, String>,
-    _file_cache_size: u64,
+    file_cache_size: u64,
     file_cache_path: Option<PathBuf>,
 ) -> CommunicatorWorkerProcessStruct<'static> {
     let last_lsn = get_request_lsn();
@@ -47,11 +47,11 @@ pub(super) async fn init(
     let uring_system = tokio_epoll_uring::System::launch().await.unwrap();
 
     let file_cache = if let Some(path) = file_cache_path {
-        Some(FileCache::new(&path, uring_system).expect("could not create cache file"))
+        Some(FileCache::new(&path, file_cache_size, uring_system).expect("could not create cache file"))
     } else {
         // FIXME: temporarily for testing, use LFC even if disabled
         Some(
-            FileCache::new(&PathBuf::from("new_filecache"), uring_system)
+            FileCache::new(&PathBuf::from("new_filecache"), 1000, uring_system)
                 .expect("could not create cache file"),
         )
     };

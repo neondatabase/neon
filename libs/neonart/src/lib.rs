@@ -358,8 +358,13 @@ impl<'t, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteGuard<'t, K, V, A> {
     }
 
     /// Remove value
-    pub fn remove(self, key: &K) {
-        self.update_with_fn(key, |_| None)
+    pub fn remove(self, key: &K) -> Option<V> {
+        let mut old = None;
+        self.update_with_fn(key, |existing| {
+            old = existing.cloned();
+            None
+        });
+        old
     }
 
     /// Update key using the given function. All the other modifying operations are based on this.
@@ -419,6 +424,17 @@ pub struct TreeIterator<K>
 impl<K> TreeIterator<K>
     where K: Key + for<'a> From<&'a [u8]>,
 {
+    pub fn new_wrapping() -> TreeIterator<K> {
+        let mut next_key = Vec::new();
+        next_key.resize(K::KEY_LEN, 0);
+        TreeIterator {
+            done: false,
+            next_key,
+            max_key: None,
+            phantom_key: PhantomData,
+        }
+    }
+
     pub fn new(range: &std::ops::Range<K>) -> TreeIterator<K> {
         TreeIterator {
             done: false,
@@ -429,7 +445,7 @@ impl<K> TreeIterator<K>
     }
 
     
-    pub fn next<'g, V>(&mut self, read_guard: TreeReadGuard<'g, K, V>) -> Option<(K, V)>
+    pub fn next<'g, V>(&mut self, read_guard: &'g TreeReadGuard<'g, K, V>) -> Option<(K, &'g V)>
         where V: Value
     {
         if self.done {
@@ -437,6 +453,8 @@ impl<K> TreeIterator<K>
         }
         if let Some((k , v)) = algorithm::iter_next(&mut self.next_key, read_guard.tree.root, &read_guard.epoch_pin) {
             assert_eq!(k.len(), self.next_key.len());
+
+            // Check if we reached the end of the range
             if let Some(max_key) = &self.max_key {
                 assert_eq!(k.len(), max_key.len());
                 if k.as_slice() >= max_key.as_slice() {
@@ -444,12 +462,13 @@ impl<K> TreeIterator<K>
                     return None;
                 }
             }
+
             // increment the key
             self.next_key = k.clone();
             increment_key(self.next_key.as_mut_slice());
             let k = k.as_slice().into();
 
-            Some((k, v.clone()))
+            Some((k, v))
         } else {
             self.done = true;
             None

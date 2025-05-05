@@ -1,6 +1,6 @@
 //! Integrated communicator cache
 //!
-//! Tracks:
+//! It tracks:
 //! - Relation sizes and existence
 //! - Last-written LSN
 //! - TODO: Block cache (also known as LFC)
@@ -24,6 +24,7 @@
 
 use std::mem::MaybeUninit;
 use std::ops::Range;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use utils::lsn::Lsn;
 use zerocopy::FromBytes;
@@ -55,9 +56,12 @@ pub struct IntegratedCacheWriteAccess<'t> {
         neonart::ArtMultiSlabAllocator<'t, TreeEntry>,
     >,
 
-    global_lw_lsn: Lsn,
+    global_lw_lsn: AtomicU64,
 
     file_cache: Option<FileCache>,
+
+    // Fields for eviction
+    clock_hand: std::sync::Mutex<TreeIterator<TreeKey>>,
 }
 
 /// Represents read-only access to the integrated cache. Backend processes have this.
@@ -99,8 +103,9 @@ impl<'t> IntegratedCacheInitStruct<'t> {
 
         IntegratedCacheWriteAccess {
             cache_tree: tree_writer,
-            global_lw_lsn: lsn,
+            global_lw_lsn: AtomicU64::new(lsn.0),
             file_cache,
+            clock_hand: std::sync::Mutex::new(TreeIterator::new_wrapping()),
         }
     }
 
@@ -124,10 +129,22 @@ enum TreeEntry {
     Block(BlockEntry),
 }
 
-#[derive(Clone)]
 struct BlockEntry {
     lw_lsn: Lsn,
     cache_block: Option<CacheBlock>,
+
+    // 'referenced' bit for the clock algorithm
+    referenced: AtomicBool,
+}
+
+impl Clone for BlockEntry {
+    fn clone(&self) -> BlockEntry {
+        BlockEntry {
+            lw_lsn: self.lw_lsn,
+            cache_block: self.cache_block,
+            referenced: AtomicBool::new(self.referenced.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -233,7 +250,8 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         if let Some(nblocks) = get_rel_size(&r, rel) {
             CacheResult::Found(nblocks)
         } else {
-            CacheResult::NotFound(self.global_lw_lsn)
+            let lsn = Lsn(self.global_lw_lsn.load(Ordering::Relaxed));
+            CacheResult::NotFound(lsn)
         }
     }
 
@@ -262,7 +280,8 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                 Ok(CacheResult::NotFound(block_entry.lw_lsn))
             }
         } else {
-            Ok(CacheResult::NotFound(self.global_lw_lsn))
+            let lsn = Lsn(self.global_lw_lsn.load(Ordering::Relaxed));
+            Ok(CacheResult::NotFound(lsn))
         }
     }
 
@@ -285,7 +304,8 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                 Ok(CacheResult::NotFound(block_entry.lw_lsn))
             }
         } else {
-            Ok(CacheResult::NotFound(self.global_lw_lsn))
+            let lsn = Lsn(self.global_lw_lsn.load(Ordering::Relaxed));
+            Ok(CacheResult::NotFound(lsn))
         }
     }
 
@@ -297,13 +317,19 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         if let Some(_rel_entry) = r.get(&TreeKey::from(rel)) {
             CacheResult::Found(true)
         } else {
-            CacheResult::NotFound(self.global_lw_lsn)
+            let lsn = Lsn(self.global_lw_lsn.load(Ordering::Relaxed));
+            CacheResult::NotFound(lsn)
         }
     }
 
     pub fn get_db_size(&'t self, _db_oid: u32) -> CacheResult<u64> {
+        // TODO: it would be nice to cache database sizes too. Getting the database size
+        // is not a very common operation, but when you do it, it's often interactive, with
+        // e.g. psql \l+ command, so the user will feel the latency.
+
         // fixme: is this right lsn?
-        CacheResult::NotFound(self.global_lw_lsn)
+        let lsn = Lsn(self.global_lw_lsn.load(Ordering::Relaxed));
+        CacheResult::NotFound(lsn)
     }
 
     pub fn remember_rel_size(&'t self, rel: &RelTag, nblocks: u32) {
@@ -329,6 +355,15 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 
             let key = TreeKey::from((rel, block_number));
 
+            let mut reserved_cache_block = loop {
+                if let Some(x) = file_cache.alloc_block() {
+                    break Some(x);
+                }
+                if let Some(x) = self.try_evict_one_cache_block() {
+                    break Some(x);
+                }
+            };
+
             let mut cache_block = None;
 
             w.update_with_fn(&key, |existing| {
@@ -340,24 +375,30 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                     };
                     block_entry.lw_lsn = lw_lsn;
                     if block_entry.cache_block.is_none() {
-                        block_entry.cache_block = Some(file_cache.alloc_block());
+                        block_entry.cache_block = reserved_cache_block.take();
                     }
                     cache_block = block_entry.cache_block;
                     Some(TreeEntry::Block(block_entry))
                 } else {
-                    cache_block = Some(file_cache.alloc_block());
+                    cache_block = reserved_cache_block.take();
                     Some(TreeEntry::Block(BlockEntry {
                         lw_lsn: lw_lsn,
                         cache_block: cache_block,
+                        referenced: AtomicBool::new(true),
                     }))
                 }
             });
+
+            if let Some(x) = reserved_cache_block {
+                file_cache.dealloc_block(x);
+            }
+
             let cache_block = cache_block.unwrap();
             file_cache
                 .write_block(cache_block, src)
                 .await
                 .expect("error writing to cache");
-        }
+        };
     }
 
     /// Forget information about given relation in the cache. (For DROP TABLE and such)
@@ -367,10 +408,50 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 
         // also forget all cached blocks for the relation
         let mut iter = TreeIterator::new(&key_range_for_rel_blocks(rel));
-        while let Some((k, _v)) = iter.next(self.cache_tree.start_read()) {
+        let r = self.cache_tree.start_read();
+        while let Some((k, _v)) = iter.next(&r) {
             let w = self.cache_tree.start_write();
             w.remove(&k);
         }
+    }
+
+    // Maintenance routines
+
+    /// Evict one block from the file cache. This is used when the file cache fills up
+    /// Returns the evicted block, it's not put to the fre list, so it's available for the
+    /// caller to use immediately.
+    pub fn try_evict_one_cache_block(&self) -> Option<CacheBlock> {
+        let mut clock_hand = self.clock_hand.lock().unwrap();
+        for _ in 0..1000 {
+            let r = self.cache_tree.start_read();
+            match clock_hand.next(&r) {
+                None => {
+                    // The cache is completely empty. Pretty unexpected that this function
+                    // was called then..
+                },
+                Some((_k, TreeEntry::Rel(_))) => {
+                    // ignore rel entries for now.
+                    // TODO: They stick in the cache forever
+                },
+                Some((k, TreeEntry::Block(blk_entry))) => {
+                    if !blk_entry.referenced.swap(false, Ordering::Relaxed) {
+                        // Evict this
+                        let w = self.cache_tree.start_write();
+                        let old = w.remove(&k);
+                        if let Some(TreeEntry::Block(old)) = old {
+                            let _ = self.global_lw_lsn.fetch_max(old.lw_lsn.0, Ordering::Relaxed);
+                            if let Some(cache_block) = old.cache_block {
+                                return Some(cache_block);
+                            }
+                        } else {
+                            assert!(old.is_none());
+                        }
+                    }
+                },
+            }
+        }
+        // Give up if we didn't find anything
+        None
     }
 }
 

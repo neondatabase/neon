@@ -131,8 +131,9 @@ fn test_iter<A: ArtAllocator<usize>>(tree: &TreeWriteAccess<TestKey, usize, A>, 
     let mut iter = TreeIterator::new(&(TestKey::MIN..TestKey::MAX));
 
     loop {
-        let shadow_item = shadow_iter.next().map(|(k, v)| (k.clone(), v.clone()));
-        let item = iter.next(tree.start_read());
+        let shadow_item = shadow_iter.next().map(|(k, v)| (k.clone(), v));
+        let r = tree.start_read();
+        let item = iter.next(&r);
 
         if shadow_item != item {
             eprintln!("FAIL: iterator returned {:?}, expected {:?}", item, shadow_item);

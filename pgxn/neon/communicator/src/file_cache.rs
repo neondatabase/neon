@@ -11,9 +11,10 @@
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio_epoll_uring;
+
+use std::sync::Mutex;
 
 use crate::BLCKSZ;
 
@@ -24,15 +25,21 @@ pub struct FileCache {
 
     file: Arc<File>,
 
-    // TODO: there's no reclamation mechanism, the cache grows
-    // indefinitely. This is the next free block, i.e. the current
-    // size of the file
-    next_free_block: AtomicU64,
+    free_list: Mutex<FreeList>
+}
+
+// TODO: We keep track of all free blocks in this vec. That doesn't really scale.
+struct FreeList {
+    next_free_block: CacheBlock,
+    max_blocks: u64,
+
+    free_blocks: Vec<CacheBlock>,
 }
 
 impl FileCache {
     pub fn new(
         file_cache_path: &Path,
+        initial_size: u64,
         uring_system: tokio_epoll_uring::SystemHandle,
     ) -> Result<FileCache, std::io::Error> {
         let file = std::fs::OpenOptions::new()
@@ -47,7 +54,11 @@ impl FileCache {
         Ok(FileCache {
             file: Arc::new(file),
             uring_system,
-            next_free_block: AtomicU64::new(0),
+            free_list: Mutex::new(FreeList {
+                next_free_block: 0,
+                max_blocks: initial_size,
+                free_blocks: Vec::new(),
+            }),
         })
     }
 
@@ -94,8 +105,22 @@ impl FileCache {
         Ok(())
     }
 
-    pub fn alloc_block(&self) -> CacheBlock {
-        self.next_free_block.fetch_add(1, Ordering::Relaxed)
+    pub fn alloc_block(&self) -> Option<CacheBlock> {
+        let mut free_list = self.free_list.lock().unwrap();
+        if let Some(x) = free_list.free_blocks.pop() {
+            return Some(x);
+        }
+        if free_list.next_free_block < free_list.max_blocks {
+            let result = free_list.next_free_block;
+            free_list.next_free_block -= 1;
+            return Some(result);
+        }
+        None
+    }
+
+    pub fn dealloc_block(&self, cache_block: CacheBlock) {
+        let mut free_list = self.free_list.lock().unwrap();
+        free_list.free_blocks.push(cache_block);
     }
 }
 
