@@ -105,6 +105,11 @@
                     "vartype": "string"
                 },
                 {
+                    "name": "neon.safekeeper_connstrings",
+                    "value": "host=safekeeper1 port=5454,host=safekeeper2 port=5454,host=safekeeper3 port=5454",
+                    "vartype": "string"
+                },
+                {
                     "name": "neon.timeline_id",
                     "value": "TIMELINE_ID",
                     "vartype": "string"

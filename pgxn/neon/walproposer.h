@@ -707,12 +707,11 @@ typedef struct WalProposerConfig
 	char	   *neon_timeline;
 
 	/*
-	 * Comma-separated list of safekeepers, in the following format:
-	 * host1:port1,host2:port2,host3:port3
+	 * Comma-separated list of safekeeper connection strings
 	 *
 	 * This cstr should be editable.
 	 */
-	char	   *safekeepers_list;
+	char	   *safekeeper_connstrings;
 
 	/*
 	 * WalProposer reconnects to offline safekeepers once in this interval.
@@ -788,14 +787,15 @@ typedef struct WalProposer
 	/*
 	 * Generation of the membership conf of which safekeepers[] are presumably
 	 * members. To make cplane life a bit easier and have more control in
-	 * tests with which sks walproposer gets connected neon.safekeepers GUC
-	 * doesn't provide full mconf, only the list of endpoints to connect to.
-	 * We still would like to know generation associated with it because 1) we
-	 * need some handle to enforce using generations in walproposer, and
-	 * non-zero value of this serves the purpose; 2) currently we don't do
-	 * that, but in theory walproposer can update list of safekeepers to
-	 * connect to upon receiving mconf from safekeepers, and generation number
-	 * must be checked to see which list is newer.
+	 * tests with which sks walproposer gets connected
+	 * neon.safekeeper_connstrings GUC doesn't provide full mconf, only the list
+	 * of endpoints to connect to. We still would like to know generation
+	 * associated with it because 1) we need some handle to enforce using
+	 * generations in walproposer, and non-zero value of this serves the
+	 * purpose; 2) currently we don't do that, but in theory walproposer can
+	 * update list of safekeepers to connect to upon receiving mconf from
+	 * safekeepers, and generation number must be checked to see which list is
+	 * newer.
 	 */
 	Generation	safekeepers_generation;
 	/* Number of occupied slots in safekeepers[] */

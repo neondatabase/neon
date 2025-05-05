@@ -63,6 +63,7 @@
 char	   *wal_acceptors_list = "";
 int			wal_acceptor_reconnect_timeout = 1000;
 int			wal_acceptor_connection_timeout = 10000;
+char	   *safekeeper_connstrings = "";
 int			safekeeper_proto_version = 3;
 
 /* Set to true in the walproposer bgw. */
@@ -81,6 +82,7 @@ static HotStandbyFeedback agg_hs_feedback;
 static void nwp_shmem_startup_hook(void);
 static void nwp_register_gucs(void);
 static void assign_neon_safekeepers(const char *newval, void *extra);
+static void assign_neon_safekeeper_connstrings(const char *newval, void *extra);
 static void nwp_prepare_shmem(void);
 static uint64 backpressure_lag_impl(void);
 static uint64 startup_backpressure_wrap(void);
@@ -117,8 +119,11 @@ init_walprop_config(bool syncSafekeepers)
 {
 	walprop_config.neon_tenant = neon_tenant;
 	walprop_config.neon_timeline = neon_timeline;
+	/* TODO(tristan957): Remove this compatibility code after the control plane
+	 * is updated to pass neon.safekeeper_connstrings
+	 */
 	/* WalProposerCreate scribbles directly on it, so pstrdup */
-	walprop_config.safekeepers_list = pstrdup(wal_acceptors_list);
+	walprop_config.safekeeper_connstrings = pstrdup(wal_acceptors_list[0] == '\0' ? safekeeper_connstrings : wal_acceptors_list);
 	walprop_config.safekeeper_reconnect_timeout = wal_acceptor_reconnect_timeout;
 	walprop_config.safekeeper_connection_timeout = wal_acceptor_connection_timeout;
 	walprop_config.wal_segment_size = wal_segment_size;
@@ -203,6 +208,15 @@ nwp_register_gucs(void)
 												 * GUC_LIST_QUOTE */
 							   NULL, assign_neon_safekeepers, NULL);
 
+	DefineCustomStringVariable(
+							   "neon.safekeeper_connstrings",
+							   "Comma-separated list of safekeeper connection strings with an optional generation prefix of the form g#X:",
+							   NULL,
+							   &safekeeper_connstrings,
+							   "",
+							   PGC_SIGHUP,
+							   GUC_LIST_INPUT,
+							   NULL, assign_neon_safekeeper_connstrings, NULL);
 	DefineCustomIntVariable(
 							"neon.safekeeper_reconnect_timeout",
 							"Walproposer reconnects to offline safekeepers once in this interval.",
@@ -236,24 +250,24 @@ nwp_register_gucs(void)
 
 
 static int
-split_safekeepers_list(char *safekeepers_list, char *safekeepers[])
+split_safekeeper_connstrings(char *connstrings, char *safekeepers[])
 {
 	int			n_safekeepers = 0;
-	char	   *curr_sk = safekeepers_list;
+	char	   *curr_sk = connstrings;
 
-	for (char *coma = safekeepers_list; coma != NULL && *coma != '\0'; curr_sk = coma)
+	for (char *comma = connstrings; comma != NULL && *comma != '\0'; curr_sk = comma)
 	{
 		if (++n_safekeepers >= MAX_SAFEKEEPERS)
 		{
 			wpg_log(FATAL, "too many safekeepers");
 		}
 
-		coma = strchr(coma, ',');
+		comma = strchr(comma, ',');
 		safekeepers[n_safekeepers - 1] = curr_sk;
 
-		if (coma != NULL)
+		if (comma != NULL)
 		{
-			*coma++ = '\0';
+			*comma++ = '\0';
 		}
 	}
 
@@ -261,19 +275,19 @@ split_safekeepers_list(char *safekeepers_list, char *safekeepers[])
 }
 
 /*
- * Accept two coma-separated strings with list of safekeeper host:port addresses.
+ * Accept two comma-separated strings with list of safekeeper host:port addresses.
  * Split them into arrays and return false if two sets do not match, ignoring the order.
  */
 static bool
-safekeepers_cmp(char *old, char *new)
+safekeeper_connstrings_cmp(char *old, char *new)
 {
 	char	   *safekeepers_old[MAX_SAFEKEEPERS];
 	char	   *safekeepers_new[MAX_SAFEKEEPERS];
 	int			len_old = 0;
 	int			len_new = 0;
 
-	len_old = split_safekeepers_list(old, safekeepers_old);
-	len_new = split_safekeepers_list(new, safekeepers_new);
+	len_old = split_safekeeper_connstrings(old, safekeepers_old);
+	len_new = split_safekeeper_connstrings(new, safekeepers_new);
 
 	if (len_old != len_new)
 	{
@@ -292,6 +306,44 @@ safekeepers_cmp(char *old, char *new)
 	}
 
 	return true;
+}
+
+/*
+ * GUC assign_hook for neon.safekeeper_connstrings. Restarts walproposer through
+ * FATAL if the list changed.
+ */
+static void
+assign_neon_safekeeper_connstrings(const char *newval, void *extra)
+{
+	char	   *newval_copy;
+	char	   *oldval;
+
+	if (!am_walproposer)
+		return;
+
+	if (!newval)
+	{
+		/* should never happen */
+		wpg_log(FATAL, "neon.safekeeper_connstrings is empty");
+	}
+
+	/* Copy values because we will modify them in split_safekeeper_connstrings() */
+	newval_copy = pstrdup(newval);
+	oldval = pstrdup(safekeeper_connstrings);
+
+	/*
+	 * TODO: restarting through FATAL is stupid and introduces 1s delay before
+	 * next bgw start. We should refactor walproposer to allow graceful exit
+	 * and thus remove this delay. XXX: If you change anything here, sync with
+	 * test_safekeepers_reconfigure_reorder.
+	 */
+	if (!safekeeper_connstrings_cmp(oldval, newval_copy))
+	{
+		wpg_log(FATAL, "restarting walproposer to change safekeeper list from \"%s\" to \"%s\"",
+				safekeeper_connstrings, newval);
+	}
+	pfree(newval_copy);
+	pfree(oldval);
 }
 
 /*
@@ -323,7 +375,7 @@ assign_neon_safekeepers(const char *newval, void *extra)
 	 * and thus remove this delay. XXX: If you change anything here, sync with
 	 * test_safekeepers_reconfigure_reorder.
 	 */
-	if (!safekeepers_cmp(oldval, newval_copy))
+	if (!safekeeper_connstrings_cmp(oldval, newval_copy))
 	{
 		wpg_log(FATAL, "restarting walproposer to change safekeeper list from %s to %s",
 				wal_acceptors_list, newval);
@@ -500,8 +552,8 @@ walprop_register_bgworker(void)
 {
 	BackgroundWorker bgw;
 
-	/* If no wal acceptors are specified, don't start the background worker. */
-	if (*wal_acceptors_list == '\0')
+	/* If no safekeepers are specified, don't start the background worker. */
+	if (*safekeeper_connstrings == '\0')
 		return;
 
 	memset(&bgw, 0, sizeof(bgw));
@@ -841,7 +893,7 @@ walprop_status(Safekeeper *sk)
 }
 
 WalProposerConn *
-libpqwp_connect_start(char *conninfo)
+libpqwp_connect_start(const char *conninfo)
 {
 
 	PGconn	   *pg_conn;

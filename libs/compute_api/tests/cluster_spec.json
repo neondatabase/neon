@@ -85,8 +85,8 @@
                 "vartype": "bool"
             },
             {
-                "name": "neon.safekeepers",
-                "value": "127.0.0.1:6502,127.0.0.1:6503,127.0.0.1:6501",
+                "name": "neon.safekeeper_connstrings",
+                "value": "host=127.0.0.1 port=6502,host=127.0.0.1 port=6503,host=127.0.0.1 port=6501",
                 "vartype": "string"
             },
             {

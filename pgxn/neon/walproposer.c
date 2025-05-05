@@ -35,9 +35,11 @@
  *
  *-------------------------------------------------------------------------
  */
+#include <string.h>
 #include <sys/resource.h>
 
 #include "postgres.h"
+#include "libpq-fe.h"
 #include "libpq/pqformat.h"
 #include "neon.h"
 #include "walproposer.h"
@@ -90,9 +92,8 @@ static void MembershipConfigurationFree(MembershipConfiguration *mconf);
 WalProposer *
 WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 {
-	char	   *host;
+	char	   *connstring;
 	char	   *sep;
-	char	   *port;
 	WalProposer *wp;
 
 	wp = palloc0(sizeof(WalProposer));
@@ -103,72 +104,122 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 	wp->mconf.members.len = 0;
 	wp->mconf.new_members.len = 0;
 
-	wp_log(LOG, "neon.safekeepers=%s", wp->config->safekeepers_list);
+	wp_log(LOG, "neon.safekeeper_connstrings=%s", wp->config->safekeeper_connstrings);
 
 	/*
 	 * If safekeepers list starts with g# parse generation number followed by
 	 * :
 	 */
-	if (strncmp(wp->config->safekeepers_list, "g#", 2) == 0)
+	if (strncmp(wp->config->safekeeper_connstrings, "g#", 2) == 0)
 	{
 		char	   *endptr;
 
 		errno = 0;
-		wp->safekeepers_generation = strtoul(wp->config->safekeepers_list + 2, &endptr, 10);
+		wp->safekeepers_generation = strtoul(wp->config->safekeeper_connstrings + 2, &endptr, 10);
 		if (errno != 0)
 		{
-			wp_log(FATAL, "failed to parse neon.safekeepers generation number: %m");
+			wp_log(FATAL, "failed to parse neon.safekeeper_connstrings generation number: %m");
 		}
 		/* Skip past : to the first hostname. */
-		host = endptr + 1;
+		connstring = endptr + 1;
 	}
 	else
 	{
 		wp->safekeepers_generation = INVALID_GENERATION;
-		host = wp->config->safekeepers_list;
+		connstring = wp->config->safekeeper_connstrings;
 	}
 	wp_log(LOG, "safekeepers_generation=%u", wp->safekeepers_generation);
 
-	for (; host != NULL && *host != '\0'; host = sep)
+	for (; connstring != NULL && *connstring != '\0'; connstring = sep)
 	{
-		port = strchr(host, ':');
-		if (port == NULL)
-		{
-			wp_log(FATAL, "port is not specified");
-		}
-		*port++ = '\0';
-		sep = strchr(port, ',');
+		char	   *port;
+		char	   *errmsg;
+		Safekeeper *sk;
+		PQconninfoOption *conninfo_options, *option;
+
+		sk = &wp->safekeeper[wp->n_safekeepers];
+
+		sep = strchr(connstring, ',');
 		if (sep != NULL)
 			*sep++ = '\0';
 		if (wp->n_safekeepers + 1 >= MAX_SAFEKEEPERS)
 		{
 			wp_log(FATAL, "too many safekeepers");
 		}
-		wp->safekeeper[wp->n_safekeepers].host = host;
-		wp->safekeeper[wp->n_safekeepers].port = port;
-		wp->safekeeper[wp->n_safekeepers].state = SS_OFFLINE;
-		wp->safekeeper[wp->n_safekeepers].active_state = SS_ACTIVE_SEND;
-		wp->safekeeper[wp->n_safekeepers].wp = wp;
+
+		/* TODO(tristan957): Remove this compatibility code and only keep the
+		 * else branch.
+		 *
+		 * Check if we have a connection string formatted as host:port, and use
+		 * the old parsing code.
+		 */
+		port = strchr(connstring, ':');
+		if (port)
+		{
+			sk->host = connstring;
+			*port++ = '\0';
+			sk->port = port;
+		}
+		else
+		{
+			conninfo_options = PQconninfoParse(connstring, &errmsg);
+			if (!conninfo_options)
+				wp_log(FATAL, "invalid safekeeper connection string: %s", errmsg);
+
+			// Save off the host and port for identification purposes
+			option = conninfo_options;
+			while (option)
+			{
+				if (!option->keyword)
+					break;
+
+				if (strcmp(option->keyword, "host") == 0)
+				{
+					sk->host = pstrdup(option->val);
+					goto end;
+				}
+
+				if (strcmp(option->keyword, "port") == 0)
+				{
+					sk->port = pstrdup(option->val);
+					goto end;
+				}
+
+			end:
+				// We've saved both the host and port, so we can skip iterating
+				// the rest of the list
+				if (sk->host && sk->port)
+					break;
+
+				option++;
+			}
+
+			PQconninfoFree(conninfo_options);
+			conninfo_options = option = NULL;
+		}
+
+		sk->state = SS_OFFLINE;
+		sk->active_state = SS_ACTIVE_SEND;
+		sk->wp = wp;
 
 		{
-			Safekeeper *sk = &wp->safekeeper[wp->n_safekeepers];
 			int			written = 0;
 
-			written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
+			written = snprintf(sk->conninfo, sizeof(sk->conninfo),
 							   "host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
 							   sk->host, sk->port, wp->config->neon_timeline, wp->config->neon_tenant);
-			if (written > MAXCONNINFO || written < 0)
+			if (written > sizeof(sk->conninfo) || written < 0)
 				wp_log(FATAL, "could not create connection string for safekeeper %s:%s", sk->host, sk->port);
 		}
 
-		initStringInfo(&wp->safekeeper[wp->n_safekeepers].outbuf);
-		wp->safekeeper[wp->n_safekeepers].startStreamingAt = InvalidXLogRecPtr;
-		wp->safekeeper[wp->n_safekeepers].streamingAt = InvalidXLogRecPtr;
+		initStringInfo(&sk->outbuf);
+		sk->startStreamingAt = InvalidXLogRecPtr;
+		sk->streamingAt = InvalidXLogRecPtr;
 		wp->n_safekeepers += 1;
 	}
 	if (wp->n_safekeepers < 1)
 	{
-		wp_log(FATAL, "safekeepers addresses are not specified");
+		wp_log(FATAL, "safekeepers connection strings are not specified");
 	}
 	wp->quorum = wp->n_safekeepers / 2 + 1;
 

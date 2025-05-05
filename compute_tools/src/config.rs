@@ -75,7 +75,7 @@ pub fn write_postgres_conf(
         neon_safekeepers_value.push_str(&spec.safekeeper_connstrings.join(","));
         writeln!(
             file,
-            "neon.safekeepers={}",
+            "neon.safekeeper_connstrings={}",
             escape_conf_value(&neon_safekeepers_value)
         )?;
     }

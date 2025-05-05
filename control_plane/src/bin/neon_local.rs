@@ -632,7 +632,7 @@ struct EndpointStartCmdArgs {
 
     #[clap(
         long,
-        help = "Safekeepers membership generation to prefix neon.safekeepers with. Normally neon_local sets it on its own, but this option allows to override. Non zero value forces endpoint to use membership configurations."
+        help = "Safekeepers membership generation to prefix neon.safekeeper_connstrings with. Normally neon_local sets it on its own, but this option allows to override. Non zero value forces endpoint to use membership configurations."
     )]
     safekeepers_generation: Option<u32>,
     #[clap(

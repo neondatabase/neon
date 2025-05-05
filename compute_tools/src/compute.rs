@@ -218,7 +218,9 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             if matches!(spec.mode, ComputeMode::Primary) {
                 spec.cluster
                     .settings
-                    .find("neon.safekeepers")
+                    .find("neon.safekeeper_connstrings")
+                    // TODO(tristan957): Remove the compatibility code here.
+                    .or(spec.cluster.settings.find("neon.safekeepers"))
                     .ok_or("safekeeper connstrings should be provided")?
                     .split(',')
                     .map(|str| str.to_string())

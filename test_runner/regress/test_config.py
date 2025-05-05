@@ -49,9 +49,9 @@ def test_safekeepers_reconfigure_reorder(
     old_sks = ""
     with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
-            cur.execute("SHOW neon.safekeepers")
+            cur.execute("SHOW neon.safekeeper_connstrings")
             res = cur.fetchone()
-            assert res is not None, "neon.safekeepers GUC is set"
+            assert res is not None, "neon.safekeeper_connstrings GUC is set"
             old_sks = res[0]
 
     # Reorder safekeepers
@@ -62,9 +62,9 @@ def test_safekeepers_reconfigure_reorder(
 
     with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
-            cur.execute("SHOW neon.safekeepers")
+            cur.execute("SHOW neon.safekeeper_connstrings")
             res = cur.fetchone()
-            assert res is not None, "neon.safekeepers GUC is set"
+            assert res is not None, "neon.safekeeper_connstrings GUC is set"
             new_sks = res[0]
 
             assert new_sks != old_sks, "GUC changes were applied"

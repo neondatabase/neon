@@ -24,7 +24,7 @@ because configs may be parsed and dumped into logs.
 #### Tokens generation and validation
 JWT tokens are signed using a private key.
 Compute/pageserver/safekeeper use the private key's public counterpart to validate JWT tokens.
-These components should not have access to the private key and may only get tokens from their configuration or external clients. 
+These components should not have access to the private key and may only get tokens from their configuration or external clients.
 
 The key pair is generated once for an installation of compute/pageserver/safekeeper, e.g. by `neon_local init`.
 There is currently no way to rotate the key without bringing down all components.
@@ -117,8 +117,8 @@ pageserver uses JWT tokens for authentication, so the password is really a
 token.)
 
 Compute connects to Safekeepers to write and commit data. The list of safekeeper
-addresses is given in the `neon.safekeepers` GUC. The connections to the
-safekeepers take the password from the `$NEON_AUTH_TOKEN` environment
+addresses is given in the `neon.safekeeper_connstrings` GUC. The connections to
+the safekeepers take the password from the `$NEON_AUTH_TOKEN` environment
 variable, if set.
 
 The `compute_ctl` binary that runs before the PostgreSQL server, and launches

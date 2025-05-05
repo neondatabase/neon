@@ -269,11 +269,13 @@ calls should be retried until they succeed.
 
 When compute receives safekeepers list from control plane it needs to know the
 generation to checked whether it should be updated (note that compute may get
-safekeeper list from either cplane or safekeepers). Currently `neon.safekeepers`
-GUC is just a comma separates list of `host:port`. Let's prefix it with
-`g#<generation>:` to this end, so it will look like
+safekeeper list from either cplane or safekeepers). Currently
+`neon.safekeeper_connstrings` GUC is just a comma separates list of Postgres
+connection strings. Let's prefix it with `g#<generation>:` to this end, so it
+will look like:
+
 ```
-g#42:safekeeper-0.eu-central-1.aws.neon.tech:6401,safekeeper-2.eu-central-1.aws.neon.tech:6401,safekeeper-1.eu-central-1.aws.neon.tech:6401
+g#42:host=safekeeper-0.eu-central-1.aws.neon.tech port=6401,host=safekeeper-2.eu-central-1.aws.neon.tech port=6401,host=safekeeper-1.eu-central-1.aws.neon.tech port=6401
 ```
 
 To summarize, list of cplane changes:
@@ -281,7 +283,7 @@ To summarize, list of cplane changes:
 - `/notify-safekeepers` endpoint.
 - Branch creation call may return list of safekeepers and when it is
   present cplane should adopt it instead of choosing on its own like it does currently.
-- `neon.safekeepers` GUC should be prefixed with `g#<generation>:`.
+- `neon.safekeeper_connstrings` GUC should be prefixed with `g#<generation>:`.
 
 ### storage_controller implementation
 
@@ -455,16 +457,16 @@ So, main loop of per sk reconcile reads `safekeeper_timeline_pending_ops`
 joined with timeline configuration to get current conf (with generation `n`)
 for the safekeeper and does the jobs, infinitely retrying failures:
 1) If node is member (`include`):
-  - Check if timeline exists on it, if not, call pull_timeline on it from 
+  - Check if timeline exists on it, if not, call pull_timeline on it from
      other members
   - Call switch configuration to the current
 2) If node is not member (`exclude`):
   - Call switch configuration to the current, 404 is ok.
 3) If timeline is deleted (`delete`), call delete.
 
-In cases 1 and 2 remove `safekeeper_timeline_pending_ops` for the sk and 
+In cases 1 and 2 remove `safekeeper_timeline_pending_ops` for the sk and
 timeline with generation <= `n` if `op_type` is not `delete`.
-In case 3 also remove `safekeeper_timeline_pending_ops` 
+In case 3 also remove `safekeeper_timeline_pending_ops`
 entry + remove `timelines` entry if there is nothing left  in `safekeeper_timeline_pending_ops` for the timeline.
 
 Let's consider in details how APIs can be implemented from this angle.
@@ -483,7 +485,7 @@ corruption. The following sequence works:
    changes once ingestion starts, insert must not overwrite it (as well as other
    fields like membership conf). On the contrary, start_lsn used in the next
    step must be set to the value in the db. cplane_notified_generation can be set
-   to 1 (initial generation) in insert to avoid notifying cplane about initial 
+   to 1 (initial generation) in insert to avoid notifying cplane about initial
    conf as cplane will receive it in timeline creation request anyway.
 3) Issue timeline creation calls to at least majority of safekeepers. Using
    majority here is not necessary but handy because it guarantees that any live
@@ -492,15 +494,15 @@ corruption. The following sequence works:
    create timeline special init case. OFC if timeline is already exists call is
    ignored.
 4) For minority of safekeepers which could have missed creation insert
-   entries to `safekeeper_timeline_pending_ops`. We won't miss this insertion 
-   because response to cplane is sent only after it has happened, and cplane 
+   entries to `safekeeper_timeline_pending_ops`. We won't miss this insertion
+   because response to cplane is sent only after it has happened, and cplane
    retries the call until 200 response.
 
    There is a small question how request handler (timeline creation in this
    case) would interact with per sk reconciler. As always I prefer to do the
    simplest possible thing and here it seems to be just waking it up so it
    re-reads the db for work to do. Passing work in memory is faster, but
-   that shouldn't matter, and path to scan db for work will exist anyway, 
+   that shouldn't matter, and path to scan db for work will exist anyway,
    simpler to reuse it.
 
 For pg version / wal segment size: while we may persist them in `timelines`
@@ -514,13 +516,13 @@ Timeline migration.
    as well as deliver this conf to current ones; poke per sk reconcilers to work
    on it. Also any conf change should also poke cplane notifier task(s).
 2) Once it becomes possible per alg description above, get out of joint conf
-   with another CAS. Task should get wakeups from per sk reconcilers because 
+   with another CAS. Task should get wakeups from per sk reconcilers because
    conf switch is required for advancement; however retries should be sleep
-   based as well as LSN advancement might be needed, though in happy path 
+   based as well as LSN advancement might be needed, though in happy path
    it isn't. To see whether further transition is possible on wakup migration
    executor polls safekeepers per the algorithm. CAS creating new conf with only
    new members should again insert entries to `safekeeper_timeline_pending_ops`
-   to switch them there, as well as `exclude` rows to remove timeline from 
+   to switch them there, as well as `exclude` rows to remove timeline from
    old members.
 
 Timeline deletion: just set `deleted_at` on the timeline row and insert
@@ -601,7 +603,7 @@ Let's have the following implementation bits for gradual rollout:
   (and returns them in response to cplane) only when it is set to
   true.
 - control_plane [see above](storage_controller-<->-control-plane interface-and-changes)
-  prefixes `neon.safekeepers` GUC with generation number. When it is 0
+  prefixes `neon.safekeeper_connstrings` GUC with generation number. When it is 0
   (or prefix not present at all), walproposer behaves as currently, committing on
   the provided safekeeper list -- generations are disabled.
   If it is non 0 it follows this RFC rules.

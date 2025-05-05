@@ -711,10 +711,10 @@ async def run_quorum_sanity(env: NeonEnv):
     await quorum_sanity_single(env, [2, 3, 4], [1, 2, 3], [2, 3, 4], [2], False)
 
 
-# Test various combinations of membership configurations / neon.safekeepers
-# (list of safekeepers endpoint connects to) values / up & down safekeepers and
-# check that endpont can start and write data when we have quorum and can't when
-# we don't.
+# Test various combinations of membership configurations /
+# neon.safekeeper_connstrings (list of safekeeper connection strings) values /
+# up & down safekeepers and check that endpont can start and write data when we
+# have quorum and can't when we don't.
 def test_quorum_sanity(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 4
     env = neon_env_builder.init_start()

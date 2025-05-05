@@ -454,10 +454,10 @@ impl Endpoint {
                         .env
                         .safekeepers
                         .iter()
-                        .map(|sk| format!("localhost:{}", sk.get_compute_port()))
+                        .map(|sk| format!("host=localhost port={}", sk.get_compute_port()))
                         .collect::<Vec<String>>()
                         .join(",");
-                    conf.append("neon.safekeepers", &safekeepers);
+                    conf.append("neon.safekeeper_connstrings", &safekeepers);
                 } else {
                     // We only use setup without safekeepers for tests,
                     // and don't care about data durability on pageserver,
@@ -623,7 +623,8 @@ impl Endpoint {
                     .iter()
                     .find(|node| node.id == sk_id)
                     .ok_or_else(|| anyhow!("safekeeper {sk_id} does not exist"))?;
-                safekeeper_connstrings.push(format!("127.0.0.1:{}", sk.get_compute_port()));
+                safekeeper_connstrings
+                    .push(format!("host=127.0.0.1 port={}", sk.get_compute_port()));
             }
         }
         Ok(safekeeper_connstrings)

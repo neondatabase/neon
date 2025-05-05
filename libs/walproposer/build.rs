@@ -35,6 +35,7 @@ fn main() -> anyhow::Result<()> {
     println!("cargo:rustc-link-lib=static=walproposer");
     println!("cargo:rustc-link-lib=static=pgport");
     println!("cargo:rustc-link-lib=static=pgcommon");
+    println!("cargo:rustc-link-lib=pq");
     println!("cargo:rustc-link-search={walproposer_lib_search_str}");
 
     // Rebuild crate when libwalproposer.a changes
