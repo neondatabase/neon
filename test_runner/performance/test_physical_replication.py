@@ -63,7 +63,7 @@ def test_ro_replica_lag(
     pgbench_duration = f"-T{test_duration_min * 60 * 2}"
 
     project = neon_api.create_project(
-        pg_version, f"Test readonly replica lag, GITHUB_RUND_ID={os.getenv('GITHUB_RUN_ID')}"
+        pg_version, f"Test readonly replica lag, GITHUB_RUN_ID={os.getenv('GITHUB_RUN_ID')}"
     )
     project_id = project["project"]["id"]
     log.info("Project ID: %s", project_id)
