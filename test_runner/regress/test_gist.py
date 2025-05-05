@@ -7,7 +7,7 @@ if TYPE_CHECKING:
 
 
 #
-# Test unlogged buiuld for GIST index
+# Test unlogged build for GIST index
 #
 def test_gist(neon_simple_env: NeonEnv):
     env = neon_simple_env
