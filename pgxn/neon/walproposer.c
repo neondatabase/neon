@@ -836,7 +836,7 @@ TermsCollectedMset(WalProposer *wp, MemberSet *mset, Safekeeper **msk, StringInf
 {
 	uint32		n_greeted = 0;
 
-	for (uint32 i = 0; i < wp->mconf.members.len; i++)
+	for (uint32 i = 0; i < mset->len; i++)
 	{
 		Safekeeper *sk = msk[i];
 
@@ -1106,7 +1106,7 @@ VotesCollectedMset(WalProposer *wp, MemberSet *mset, Safekeeper **msk, StringInf
 {
 	uint32		n_votes = 0;
 
-	for (uint32 i = 0; i < wp->mconf.members.len; i++)
+	for (uint32 i = 0; i < mset->len; i++)
 	{
 		Safekeeper *sk = msk[i];
 
