@@ -140,7 +140,7 @@ message GetPageResponse {
   // The response status code.
   GetPageStatus status = 2;
   // A string describing the status, if any.
-  optional string reason = 3;
+  string reason = 3;
   // The 8KB page image. Empty if status != OK.
   bytes page_image = 4;
 }
