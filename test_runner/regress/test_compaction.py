@@ -202,6 +202,8 @@ def test_pageserver_gc_compaction_preempt(
     env = neon_env_builder.init_start(initial_tenant_conf=conf)
 
     env.pageserver.allowed_errors.append(".*The timeline or pageserver is shutting down.*")
+    env.pageserver.allowed_errors.append(".*flush task cancelled.*")
+    env.pageserver.allowed_errors.append(".*failed to pipe.*")
 
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
