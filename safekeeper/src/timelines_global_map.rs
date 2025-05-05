@@ -2,6 +2,7 @@
 //! All timelines should always be present in this map, this is done by loading them
 //! all from the disk on startup and keeping them in memory.
 
+use std::any;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -11,18 +12,22 @@ use anyhow::{Context, Result, bail};
 use camino::Utf8PathBuf;
 use camino_tempfile::Utf8TempDir;
 use safekeeper_api::membership::Configuration;
-use safekeeper_api::models::{SafekeeperUtilization, TimelineDeleteResult};
+use safekeeper_api::models::{
+    SafekeeperUtilization, TenantShardPageserverLocation, TimelineDeleteResult,
+};
 use safekeeper_api::{ServerInfo, membership};
 use tokio::fs;
 use tracing::*;
 use utils::crashsafe::{durable_rename, fsync_async_opt};
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
+use utils::shard::TenantShardId;
 
 use crate::defaults::DEFAULT_EVICTION_CONCURRENCY;
 use crate::http::routes::DeleteOrExcludeError;
 use crate::rate_limit::RateLimiter;
 use crate::state::TimelinePersistentState;
+use crate::tenant::Tenant;
 use crate::timeline::{Timeline, TimelineError, delete_dir, get_tenant_dir, get_timeline_dir};
 use crate::timelines_set::TimelinesSet;
 use crate::wal_storage::Storage;
@@ -37,6 +42,7 @@ enum GlobalMapTimeline {
 }
 
 struct GlobalTimelinesState {
+    tenants: HashMap<TenantShardId, Arc<Tenant>>,
     timelines: HashMap<TenantTimelineId, GlobalMapTimeline>,
 
     // A tombstone indicates this timeline used to exist has been deleted.  These are used to prevent
@@ -87,6 +93,7 @@ impl GlobalTimelines {
     pub fn new(conf: Arc<SafeKeeperConf>) -> Self {
         Self {
             state: Mutex::new(GlobalTimelinesState {
+                tenants: HashMap::new(),
                 timelines: HashMap::new(),
                 tombstones: HashMap::new(),
                 conf,
@@ -153,6 +160,18 @@ impl GlobalTimelines {
         };
 
         let timelines_dir = get_tenant_dir(&conf, &tenant_id);
+
+        let tenant = match Tenant::load(conf.clone(), tenant_id) {
+            Ok(tenant) => {
+                let mut state = self.state.lock().unwrap();
+                state.tenants.insert(tenant_id, Arc::clone(&tenant));
+                tenant
+            }
+            Err(e) => {
+                todo!("should we fail the whole startup process?")
+            }
+        };
+
         for timelines_dir_entry in std::fs::read_dir(&timelines_dir)
             .with_context(|| format!("failed to list timelines dir {}", timelines_dir))?
         {
@@ -162,7 +181,7 @@ impl GlobalTimelines {
                         TimelineId::from_str(timeline_dir_entry.file_name().to_str().unwrap_or(""))
                     {
                         let ttid = TenantTimelineId::new(tenant_id, timeline_id);
-                        match Timeline::load_timeline(conf.clone(), ttid) {
+                        match Timeline::load_timeline(conf.clone(), tenant, ttid) {
                             Ok(tli) => {
                                 let mut shared_state = tli.write_shared_state().await;
                                 self.state
@@ -563,6 +582,27 @@ impl GlobalTimelines {
         delete_dir(&tenant_dir).await?;
 
         Ok(deleted)
+    }
+
+    pub async fn update_tenant_locations(
+        &self,
+        tenant_id: &TenantId,
+        locations: Vec<TenantShardPageserverLocation>,
+    ) -> anyhow::Result<()> {
+        let tenant = {
+            let mut state = self.state.lock().unwrap();
+            state.tenants.get(tenant_id).context("tenant not found")?
+        };
+        tenant.update_locations(locations).await?
+    }
+
+    pub fn get_tenant_locations(
+        &self,
+        tenant_id: &TenantId,
+    ) -> anyhow::Result<Vec<TenantShardPageserverLocation>> {
+        let state = self.state.lock().unwrap();
+        let tenant = state.tenants.get(tenant_id).context("tenant not found")?;
+        Ok(tenant.get_locations())
     }
 
     pub fn housekeeping(&self, tombstone_ttl: &Duration) {

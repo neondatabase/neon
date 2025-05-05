@@ -661,6 +661,7 @@ impl SafekeeperPostgresHandler {
             reader,
             ws_guard: ws_guard.clone(),
             tli,
+            shard: self.shard.clone(),
         };
 
         let res = tokio::select! {
@@ -977,6 +978,7 @@ struct ReplyReader<IO> {
     reader: PostgresBackendReader<IO>,
     ws_guard: Arc<WalSenderGuard>,
     tli: WalResidentTimeline,
+    shard: Option<ShardId>,
 }
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
@@ -1021,7 +1023,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
                     .walsenders
                     .record_ps_feedback(self.ws_guard.id, &ps_feedback);
                 self.tli
-                    .update_remote_consistent_lsn(ps_feedback.remote_consistent_lsn)
+                    .update_remote_consistent_lsn(shard, ps_feedback.remote_consistent_lsn)
                     .await;
                 // in principle new remote_consistent_lsn could allow to
                 // deactivate the timeline, but we check that regularly through

@@ -43,6 +43,8 @@ pub mod wal_backup_partial;
 pub mod wal_reader_stream;
 pub mod wal_service;
 pub mod wal_storage;
+pub mod tenant;
+pub mod wal_advertiser;
 
 #[cfg(any(test, feature = "benchmarking"))]
 pub mod test_utils;
