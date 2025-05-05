@@ -53,7 +53,9 @@ pub enum LfcPrewarmState {
     NotPrewarmed,
     Prewarming,
     Completed,
-    Failed { error: String },
+    Failed {
+        error: String,
+    },
 }
 
 #[derive(Serialize, Default, Debug, Clone)]
@@ -63,7 +65,9 @@ pub enum LfcOffloadState {
     NotOffloaded,
     Offloading,
     Completed,
-    Failed { error: String },
+    Failed {
+        error: String,
+    },
 }
 
 /// Response of the /status API

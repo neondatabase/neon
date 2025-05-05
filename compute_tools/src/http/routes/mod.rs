@@ -11,9 +11,9 @@ pub(in crate::http) mod extensions;
 pub(in crate::http) mod failpoints;
 pub(in crate::http) mod grants;
 pub(in crate::http) mod insights;
+pub(in crate::http) mod lfc;
 pub(in crate::http) mod metrics;
 pub(in crate::http) mod metrics_json;
-pub(in crate::http) mod lfc;
 pub(in crate::http) mod status;
 pub(in crate::http) mod terminate;
 
