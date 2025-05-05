@@ -20,11 +20,14 @@ syntax = "proto3";
 package page_service;
 
 service PageService {
-  // Returns the total size of a database, as # of bytes.
-  rpc DbSize (DbSizeRequest) returns (DbSizeResponse);
+  // Returns whether a relation exists.
+  rpc CheckRelExists(CheckRelExistsRequest) returns (CheckRelExistsResponse);
 
   // Fetches a base backup.
   rpc GetBaseBackup (GetBaseBackupRequest) returns (stream GetBaseBackupResponseChunk);
+
+  // Returns the total size of a database, as # of bytes.
+  rpc GetDbSize (GetDbSizeRequest) returns (GetDbSizeResponse);
 
   // Fetches pages.
   //
@@ -40,14 +43,11 @@ service PageService {
   // Most errors are therefore sent as GetPageResponse.status instead.
   rpc GetPages (stream GetPageRequestBatch) returns (stream GetPageResponse);
 
+  // Returns the size of a relation, as # of blocks.
+  rpc GetRelSize (GetRelSizeRequest) returns (GetRelSizeResponse);
+
   // Fetches an SLRU segment.
   rpc GetSlruSegment (GetSlruSegmentRequest) returns (GetSlruSegmentResponse);
-
-  // Returns whether a relation exists.
-  rpc RelExists(RelExistsRequest) returns (RelExistsResponse);
-
-  // Returns the size of a relation, as # of blocks.
-  rpc RelSize (RelSizeRequest) returns (RelSizeResponse);
 }
 
 // Common request fields.
@@ -68,16 +68,16 @@ message RelTag {
     uint32 fork_number = 4;
 }
 
-// Requests the size of a database, as # of bytes. This is only accurate on
-// shard 0; other shards will return their view of the database according to
+// Checks whether a relation exists, at the given LSN. This is only accurate on
+// shard 0; other shards will return their view of the relation according to
 // which pages they have.
-message DbSizeRequest {
+message CheckRelExistsRequest {
   RequestCommon common = 1;
-  uint32 db_oid = 2;
+  RelTag rel = 2;
 }
 
-message DbSizeResponse {
-  uint64 num_bytes = 1;
+message CheckRelExistsResponse {
+  bool exists = 1;
 }
 
 // Requests a base backup at a given LSN.
@@ -93,6 +93,18 @@ message GetBaseBackupResponseChunk {
   // A basebackup data chunk. The size is undefined, but bounded by the 4 MB
   // gRPC message size limit.
   bytes chunk = 1;
+}
+
+// Requests the size of a database, as # of bytes. This is only accurate on
+// shard 0; other shards will return their view of the database according to
+// which pages they have.
+message GetDbSizeRequest {
+  RequestCommon common = 1;
+  uint32 db_oid = 2;
+}
+
+message GetDbSizeResponse {
+  uint64 num_bytes = 1;
 }
 
 // Requests a single page.
@@ -163,6 +175,18 @@ enum GetPageStatus {
   GET_PAGE_STATUS_SLOW_DOWN = 4;
 }
 
+// Fetches the size of a relation at a given LSN, as # of blocks. This is only
+// accurate on shard 0; other shards will return their view of the relation
+// according to which pages they have.
+message GetRelSizeRequest {
+  RequestCommon common = 1;
+  RelTag rel = 2;
+}
+
+message GetRelSizeResponse {
+  uint32 num_blocks = 1;
+}
+
 // Requests an SLRU segment.
 message GetSlruSegmentRequest {
   RequestCommon common = 1;
@@ -175,28 +199,4 @@ message GetSlruSegmentRequest {
 // These are up 32 pages (256 KB), so we can send them as a single response.
 message GetSlruSegmentResponse {
   bytes segment = 1;
-}
-
-// Checks whether a relation exists, at the given LSN. This is only accurate on
-// shard 0; other shards will return their view of the relation according to
-// which pages they have.
-message RelExistsRequest {
-  RequestCommon common = 1;
-  RelTag rel = 2;
-}
-
-message RelExistsResponse {
-  bool exists = 1;
-}
-
-// Fetches the size of a relation at a given LSN, as # of blocks. This is only
-// accurate on shard 0; other shards will return their view of the relation
-// according to which pages they have.
-message RelSizeRequest {
-  RequestCommon common = 1;
-  RelTag rel = 2;
-}
-
-message RelSizeResponse {
-  uint32 num_blocks = 1;
 }
