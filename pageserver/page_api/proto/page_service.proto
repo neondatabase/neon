@@ -99,15 +99,15 @@ message GetBaseBackupResponseChunk {
 message GetPageRequest {
   // A request ID. Will be included in the response. Should be unique for
   // in-flight requests on the stream.
-  uint64 id = 1;
-  // The LSN to read at.
-  RequestCommon common = 2;
-  // The relation to read from.
-  RelTag rel = 3;
-  // The page number to read. Must belong to the remote shard.
-  uint32 block_number = 4;
+  uint64 request_id = 1;
   // The request class.
-  GetPageClass class = 5;
+  GetPageClass request_class = 2;
+  // The LSN to read at.
+  RequestCommon common = 3;
+  // The relation to read from.
+  RelTag rel = 4;
+  // The page number to read. Must belong to the remote shard.
+  uint32 block_number = 5;
 }
 
 // A GetPageRequest class. Primarily intended for observability, but may also be
@@ -136,7 +136,7 @@ message GetPageRequestBatch {
 // A GetPage response. May be emitted out of order.
 message GetPageResponse {
   // The original request's ID.
-  uint64 id = 1;
+  uint64 request_id = 1;
   // The response status code.
   GetPageStatus status = 2;
   // A string describing the status, if any.
