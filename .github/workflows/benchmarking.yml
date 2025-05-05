@@ -66,7 +66,7 @@ jobs:
       LIMIT: 100
       SEARCH: "Created by actions/neon-project-create; GITHUB_RUN_ID"
       BASE_URL: https://console-stage.neon.build/api/v2
-      DRY_RUN: "true"  # Set to "false" to enable actual deletion
+      DRY_RUN: "false"  # Set to "true" to just test out the workflow
 
     steps:
     - name: Harden the runner (Audit all outbound calls)
