@@ -50,9 +50,12 @@ service PageService {
   rpc GetSlruSegment (GetSlruSegmentRequest) returns (GetSlruSegmentResponse);
 }
 
-// Common request fields.
-message RequestCommon {
-  // The LSN to read at. Required.
+// The LSN a request should read at.
+//
+// TODO: is not_modified_since_lsn meaningful for any other requests than GetPage? If not, inline
+// the relevant fields directly in each request type.
+message ReadLsn {
+  // The request's read LSN. Required.
   uint64 request_lsn = 1;
   // If given, the caller guarantees that the page has not been modified since
   // this LSN. Must be smaller than request_lsn. This allows the Pageserver to
@@ -72,7 +75,7 @@ message RelTag {
 // shard 0; other shards will return their view of the relation according to
 // which pages they have.
 message CheckRelExistsRequest {
-  RequestCommon common = 1;
+  ReadLsn read_lsn = 1;
   RelTag rel = 2;
 }
 
@@ -83,7 +86,7 @@ message CheckRelExistsResponse {
 // Requests a base backup at a given LSN.
 message GetBaseBackupRequest {
   // The LSN to fetch a base backup at.
-  RequestCommon common = 1;
+  ReadLsn read_lsn = 1;
   // If true, logical replication slots will not be created.
   bool replica = 2;
 }
@@ -99,7 +102,7 @@ message GetBaseBackupResponseChunk {
 // shard 0; other shards will return their view of the database according to
 // which pages they have.
 message GetDbSizeRequest {
-  RequestCommon common = 1;
+  ReadLsn read_lsn = 1;
   uint32 db_oid = 2;
 }
 
@@ -115,7 +118,7 @@ message GetPageRequest {
   // The request class.
   GetPageClass request_class = 2;
   // The LSN to read at.
-  RequestCommon common = 3;
+  ReadLsn read_lsn = 3;
   // The relation to read from.
   RelTag rel = 4;
   // The page number to read. Must belong to the remote shard.
@@ -179,7 +182,7 @@ enum GetPageStatus {
 // accurate on shard 0; other shards will return their view of the relation
 // according to which pages they have.
 message GetRelSizeRequest {
-  RequestCommon common = 1;
+  ReadLsn read_lsn = 1;
   RelTag rel = 2;
 }
 
@@ -189,7 +192,7 @@ message GetRelSizeResponse {
 
 // Requests an SLRU segment.
 message GetSlruSegmentRequest {
-  RequestCommon common = 1;
+  ReadLsn read_lsn = 1;
   uint32 kind = 2;
   uint32 segno = 3;
 }
