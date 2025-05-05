@@ -72,6 +72,12 @@ pub struct FeatureStore {
     flags: HashMap<String, PostHogLocalEvaluationFlag>,
 }
 
+impl Default for FeatureStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FeatureStore {
     pub fn new() -> Self {
         Self {
@@ -179,16 +185,16 @@ impl FeatureStore {
             }
             // If all conditions are met, return the variant
             if self.evaluate_percentage(mapped_user_id, group.rollout_percentage / 100.0) {
-                return group.variant.clone();
+                group.variant.clone()
             } else {
-                return None;
+                None
             }
         } else {
             // No matchers, apply to all users
             if self.evaluate_percentage(mapped_user_id, group.rollout_percentage / 100.0) {
-                return group.variant.clone();
+                group.variant.clone()
             } else {
-                return None;
+                None
             }
         }
     }
@@ -221,7 +227,7 @@ impl FeatureStore {
         if let Some(flag_config) = self.flags.get(flag_key) {
             // First, try to evaluate each group
             for group in &flag_config.filters.groups {
-                if let Some(variant) = self.evaluate_group(&group, mapped_user_id, properties) {
+                if let Some(variant) = self.evaluate_group(group, mapped_user_id, properties) {
                     return Some(variant);
                 }
             }
