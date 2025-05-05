@@ -356,11 +356,11 @@ pub async fn hcc_pull_timelines(
 /// true if the last background scan found total usage > limit
 pub static GLOBAL_DISK_LIMIT_EXCEEDED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 
-/// Returns global disk usage in bytes for the current working directory's filesystem; ignores errors.
+/// Returns filesystem usage in bytes for the filesystem containing the given path.
 // Need to suppress the clippy::unnecessary_cast warning because the casts on the block count and the
 // block size are required on macOS (they are 32-bit integers on macOS, apparantly).
 #[allow(clippy::unnecessary_cast)]
-pub fn get_global_disk_usage() -> u64 {
+pub fn get_filesystem_usage(path: &std::path::Path) -> u64 {
     // Allow overriding disk usage via failpoint for tests
     fail::fail_point!("sk-global-disk-usage", |val| {
         // val is Option<String>; parse payload if present
@@ -369,8 +369,7 @@ pub fn get_global_disk_usage() -> u64 {
 
     // Call statvfs(3) for filesystem usage
     use nix::sys::statvfs::statvfs;
-    use std::path::Path;
-    match statvfs(Path::new(".")) {
+    match statvfs(path) {
         Ok(stat) => {
             // fragment size (f_frsize) if non-zero else block size (f_bsize)
             let frsize = stat.fragment_size();
@@ -401,11 +400,10 @@ pub fn get_global_disk_usage() -> u64 {
 
 /// Returns the total capacity of the current working directory's filesystem in bytes.
 #[allow(clippy::unnecessary_cast)]
-pub fn get_filesystem_capacity() -> Result<u64> {
+pub fn get_filesystem_capacity(path: &std::path::Path) -> Result<u64> {
     // Call statvfs(3) for filesystem stats
     use nix::sys::statvfs::statvfs;
-    use std::path::Path;
-    match statvfs(Path::new(".")) {
+    match statvfs(path) {
         Ok(stat) => {
             // fragment size (f_frsize) if non-zero else block size (f_bsize)
             let frsize = stat.fragment_size();

@@ -44,7 +44,7 @@ use utils::sentry_init::init_sentry;
 use utils::{pid_file, project_build_tag, project_git_version, tcp_listener};
 
 use safekeeper::hadron::{self, get_filesystem_capacity};
-use safekeeper::hadron::{GLOBAL_DISK_LIMIT_EXCEEDED, get_global_disk_usage};
+use safekeeper::hadron::{GLOBAL_DISK_LIMIT_EXCEEDED, get_filesystem_usage};
 use safekeeper::metrics::GLOBAL_DISK_UTIL_CHECK_SECONDS;
 use std::sync::atomic::Ordering;
 
@@ -638,28 +638,32 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
     /* BEGIN_HADRON */
     // Spawn global disk usage watcher task, if a global disk usage limit is specified.
     let interval = conf.global_disk_check_interval;
-    // Panic if we can't read the file system capacity for the circuit breakers. This only runs once on startup, so
+    let data_dir = conf.workdir.clone();
+    // Use the safekeeper data directory to compute filesystem capacity. This only runs once on startup, so
     // there is little point to continue if we can't have the proper protections in place.
-    let fs_capacity_bytes = get_filesystem_capacity().expect("Failed to get filesystem capacity");
+    let fs_capacity_bytes = get_filesystem_capacity(data_dir.as_std_path())
+        .expect("Failed to get filesystem capacity for data directory");
     let limit: u64 = (conf.max_global_disk_usage_ratio * fs_capacity_bytes as f64) as u64;
     if limit > 0 {
         let disk_usage_watch_handle = BACKGROUND_RUNTIME
             .handle()
             .spawn(async move {
-                // Use Tokio interval to preserve fixed cadence between directory size checks
+                // Use Tokio interval to preserve fixed cadence between filesystem utilization checks
                 let mut ticker = tokio::time::interval(interval);
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
                 loop {
                     ticker.tick().await;
-                    // record start time
-                    let scan_start = Instant::now();
-                    // Offload filesystem traversal to blocking thread
-                    let usage = tokio::task::spawn_blocking(get_global_disk_usage)
-                        .await
-                        .unwrap_or(0);
-                    // record scan duration
-                    let elapsed = scan_start.elapsed().as_secs_f64();
+                    let data_dir_clone = data_dir.clone();
+                    let check_start = Instant::now();
+
+                    let usage = tokio::task::spawn_blocking(move || {
+                        get_filesystem_usage(data_dir_clone.as_std_path())
+                    })
+                    .await
+                    .unwrap_or(0);
+
+                    let elapsed = check_start.elapsed().as_secs_f64();
                     GLOBAL_DISK_UTIL_CHECK_SECONDS.observe(elapsed);
                     if usage > limit {
                         warn!(
