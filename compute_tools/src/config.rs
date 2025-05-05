@@ -171,15 +171,17 @@ pub fn write_postgres_conf(
     // Always add pgaudit to shared_preload_libraries.
     //
     // This is needed to handle the downgrade scenario.
-    // pgaudit extension once installed
-    // will not be removed when audit_log_level is set to disabled,
-    // and it creates event triggers that require library to be loaded.
+    // pgaudit extension creates event triggers that require library to be loaded.
+    // so, once extension was installed it must always be present in shared_preload_libraries.
     let mut extra_shared_preload_libraries = String::new();
     let libs = spec
         .cluster
         .settings
         .find("shared_preload_libraries")
         .expect("shared_preload_libraries setting is missing in the spec");
+    // We don't distribute pgaudit in the testing image,
+    // so disable this logic there.
+    #[cfg(not(feature = "testing"))]
     if !libs.contains("pgaudit") {
         extra_shared_preload_libraries.push_str(",pgaudit");
     };
