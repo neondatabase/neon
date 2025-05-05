@@ -335,7 +335,7 @@ where
         let mut guard = RATE_LIMIT.lock().unwrap();
         guard.call2(|rate_limit_stats| {
             info!(
-                %rate_limit_stats, "ECANCELED observed, assuming it is due to  signal being received by the submitting thread, retrying after a delay; this message is rate-limited"
+                %rate_limit_stats, "ECANCELED observed, assuming it is due to a signal being received by the submitting thread, retrying after a delay; this message is rate-limited"
             );
         });
         drop(guard);
