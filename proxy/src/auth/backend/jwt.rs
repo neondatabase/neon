@@ -411,7 +411,7 @@ impl JwkCacheEntryLock {
             if now >= exp + CLOCK_SKEW_LEEWAY {
                 return Err(JwtError::InvalidClaims(JwtClaimsError::JwtTokenHasExpired(
                     exp.duration_since(SystemTime::UNIX_EPOCH)
-                        .expect("pre-validated SystemTime")
+                        .unwrap_or_default()
                         .as_secs(),
                 )));
             }
@@ -422,7 +422,7 @@ impl JwkCacheEntryLock {
                 return Err(JwtError::InvalidClaims(
                     JwtClaimsError::JwtTokenNotYetReadyToUse(
                         nbf.duration_since(SystemTime::UNIX_EPOCH)
-                            .expect("pre-validated SystemTime")
+                            .unwrap_or_default()
                             .as_secs(),
                     ),
                 ));
@@ -617,8 +617,15 @@ impl<'de> Deserialize<'de> for OneOrMany {
 }
 
 fn numeric_date_opt<'de, D: Deserializer<'de>>(d: D) -> Result<Option<SystemTime>, D::Error> {
-    let d = <Option<u64>>::deserialize(d)?;
-    Ok(d.map(|n| SystemTime::UNIX_EPOCH + Duration::from_secs(n)))
+    <Option<u64>>::deserialize(d)?
+        .map(|t| {
+            SystemTime::UNIX_EPOCH
+                .checked_add(Duration::from_secs(t))
+                .ok_or_else(|| {
+                    serde::de::Error::custom(format_args!("timestamp out of bounds: {t}"))
+                })
+        })
+        .transpose()
 }
 
 struct JwkRenewalPermit<'a> {
