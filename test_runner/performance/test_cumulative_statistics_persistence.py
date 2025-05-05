@@ -90,7 +90,7 @@ def test_cumulative_statistics_persistence(
     """
     project = neon_api.create_project(
         pg_version,
-        f"Test cumulative statistics persistence, GITHUB_RUND_ID={os.getenv('GITHUB_RUN_ID')}",
+        f"Test cumulative statistics persistence, GITHUB_RUN_ID={os.getenv('GITHUB_RUN_ID')}",
     )
     project_id = project["project"]["id"]
     neon_api.wait_for_operation_to_finish(project_id)
