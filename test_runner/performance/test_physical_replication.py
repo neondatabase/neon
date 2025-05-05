@@ -198,7 +198,7 @@ def test_replication_start_stop(
     error_occurred = False
 
     project = neon_api.create_project(
-        pg_version, f"Test replication start stop, GITHUB_RUND_ID={os.getenv('GITHUB_RUN_ID')}"
+        pg_version, f"Test replication start stop, GITHUB_RUN_ID={os.getenv('GITHUB_RUN_ID')}"
     )
     project_id = project["project"]["id"]
     log.info("Project ID: %s", project_id)
