@@ -10,3 +10,4 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+workspace_hack.workspace = true
