@@ -1,5 +1,5 @@
 pub mod claims;
-use crate::claims::{DeletePrefixClaims, EndpointId, EndpointStorageClaims};
+use crate::claims::{DeletePrefixClaims, EndpointStorageClaims};
 use anyhow::Result;
 use axum::extract::{FromRequestParts, Path};
 use axum::response::{IntoResponse, Response};
@@ -15,7 +15,7 @@ use std::result::Result as StdResult;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
-use utils::id::{TenantId, TimelineId};
+use utils::id::{EndpointId, TenantId, TimelineId};
 
 // simplified version of utils::auth::JwtAuth
 pub struct JwtAuth {

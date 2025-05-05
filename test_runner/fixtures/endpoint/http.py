@@ -75,7 +75,7 @@ class EndpointHttpClient(requests.Session):
         def prewarmed():
             json = self.prewarm_lfc_status()
             status, err = json["status"], json.get("error")
-            assert status == "completed", f"invalid status {status}, error {err}"
+            assert status == "completed", f"{status}, error {err}"
 
         wait_until(prewarmed)
 
@@ -88,7 +88,7 @@ class EndpointHttpClient(requests.Session):
             res.raise_for_status()
             json = res.json()
             status, err = json["status"], json.get("error")
-            assert status == "completed", f"invalid status {status}, error {err}"
+            assert status == "completed", f"{status}, error {err}"
 
         wait_until(offloaded)
 

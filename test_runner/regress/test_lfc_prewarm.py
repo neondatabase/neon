@@ -8,9 +8,17 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import USE_LFC
 from prometheus_client.parser import text_string_to_metric_families as prom_parse_impl
+from enum import Enum
+
+
+class LfcQueryMethod(Enum):
+    COMPUTE_CTL = False
+    POSTGRES = True
+
 
 PREWARM_LABEL = "compute_ctl_lfc_prewarm_requests_total"
-OFFLOAD_LABEL = "compute_ctl_lfc_prewarm_offload_requests_total"
+OFFLOAD_LABEL = "compute_ctl_lfc_offload_requests_total"
+QUERY_OPTIONS = LfcQueryMethod.POSTGRES, LfcQueryMethod.COMPUTE_CTL
 
 
 def check_pinned_entries(cur):
@@ -34,11 +42,8 @@ def prom_parse(client: EndpointHttpClient) -> dict[str, float]:
 
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
-@pytest.mark.parametrize("with_compute_ctl", [False, True], ids=["pg-only", "compute-ctl"])
-def test_lfc_prewarm(neon_simple_env: NeonEnv, with_compute_ctl: bool):
-    """
-    with_compute_ctl: Test compute ctl's methods instead of querying Postgres directly
-    """
+@pytest.mark.parametrize("query", QUERY_OPTIONS, ids=["pg-only", "compute-ctl"])
+def test_lfc_prewarm(neon_simple_env: NeonEnv, query: LfcQueryMethod):
     env = neon_simple_env
     n_records = 1000000
     endpoint = env.endpoints.create_start(
@@ -58,7 +63,7 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, with_compute_ctl: bool):
     cur.execute(f"insert into t (pk) values (generate_series(1,{n_records}))")
 
     http_client = endpoint.http_client()
-    if with_compute_ctl:
+    if query == LfcQueryMethod.COMPUTE_CTL:
         status = http_client.prewarm_lfc_status()
         assert status["status"] == "not_prewarmed"
         assert "error" not in status
@@ -78,7 +83,7 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, with_compute_ctl: bool):
     time.sleep(1)
     cur.execute("alter extension neon update to '1.6'")
 
-    if with_compute_ctl:
+    if query == LfcQueryMethod.COMPUTE_CTL:
         http_client.prewarm_lfc()
     else:
         cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
@@ -104,7 +109,7 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, with_compute_ctl: bool):
     assert cur.fetchall()[0][0] == n_records * (n_records + 1) / 2
 
     check_pinned_entries(cur)
-    if with_compute_ctl:
+    if query == LfcQueryMethod.COMPUTE_CTL:
         desired = {
             "status": "completed",
             "total": total,
@@ -116,10 +121,10 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, with_compute_ctl: bool):
 
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
-@pytest.mark.parametrize("with_compute_ctl", [False, True], ids=["pg-only", "compute-ctl"])
-def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, with_compute_ctl: bool):
+@pytest.mark.parametrize("query", QUERY_OPTIONS, ids=["pg-only", "compute-ctl"])
+def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, query: LfcQueryMethod):
     """
-    with_compute_ctl: Test compute ctl's methods instead of querying Postgres directly
+    with_compute_ctl: Test compute_ctl's methods instead of querying Postgres directly
     """
     env = neon_simple_env
     n_records = 10000
@@ -142,7 +147,7 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, with_compute_ctl: 
     cur.execute(f"insert into accounts(id) values (generate_series(1,{n_records}))")
 
     http_client = endpoint.http_client()
-    if with_compute_ctl:
+    if query == LfcQueryMethod.COMPUTE_CTL:
         http_client.offload_lfc()
     else:
         cur.execute("select get_local_cache_state()")
@@ -172,7 +177,7 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, with_compute_ctl: 
             cur.execute("alter system set neon.file_cache_size_limit='1GB'")
             cur.execute("select pg_reload_conf()")
 
-            if with_compute_ctl:
+            if query == LfcQueryMethod.COMPUTE_CTL:
                 http_client.prewarm_lfc()
             else:
                 cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
@@ -202,5 +207,5 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, with_compute_ctl: 
     assert total_balance == 0
 
     check_pinned_entries(cur)
-    if with_compute_ctl:
+    if query == LfcQueryMethod.COMPUTE_CTL:
         assert prom_parse(http_client) == {OFFLOAD_LABEL: 1, PREWARM_LABEL: n_prewarms}

@@ -46,38 +46,24 @@ pub struct ExtensionInstallResponse {
     pub version: ExtVersion,
 }
 
-#[derive(Serialize, Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PrewarmStatus {
+#[derive(Serialize, Default, Debug, Clone)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum LfcPrewarmState {
     #[default]
     NotPrewarmed,
     Prewarming,
     Completed,
-    Failed,
+    Failed { error: String },
 }
 
-#[derive(Serialize, Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PrewarmOffloadStatus {
+#[derive(Serialize, Default, Debug, Clone)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum LfcOffloadState {
     #[default]
     NotOffloaded,
     Offloading,
     Completed,
-    Failed,
-}
-
-#[derive(Serialize, Default, Debug, Deserialize, Clone)]
-pub struct PrewarmState {
-    pub status: PrewarmStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-#[derive(Serialize, Default, Debug, Deserialize, Clone)]
-pub struct PrewarmOffloadState {
-    pub status: PrewarmOffloadStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    Failed { error: String },
 }
 
 /// Response of the /status API

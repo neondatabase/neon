@@ -1498,14 +1498,14 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 exp,
             };
 
-            let endpoint_storage_auth_token = env.generate_auth_token(&claims)?;
+            let endpoint_storage_token = env.generate_auth_token(&claims)?;
             let endpoint_storage_addr = env.endpoint_storage.listen_addr.to_string();
 
             println!("Starting existing endpoint {endpoint_id}...");
             endpoint
                 .start(
                     &auth_token,
-                    endpoint_storage_auth_token,
+                    endpoint_storage_token,
                     endpoint_storage_addr,
                     safekeepers_generation,
                     safekeepers,

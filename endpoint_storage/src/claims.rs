@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
-use utils::id::{TenantId, TimelineId};
-
-pub type EndpointId = String; // If needed, reuse small string from proxy/src/types.rc
+use utils::id::{EndpointId, TenantId, TimelineId};
 
 /// Claims to add, remove, or retrieve endpoint data. Used by compute_ctl
 #[derive(Deserialize, Serialize, PartialEq)]

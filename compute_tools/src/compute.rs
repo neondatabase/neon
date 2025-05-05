@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
 use compute_api::responses::{
-    ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus, PrewarmOffloadState,
-    PrewarmState,
+    ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus, LfcOffloadState,
+    LfcPrewarmState,
 };
 use compute_api::spec::{
     ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent,
@@ -153,8 +153,8 @@ pub struct ComputeState {
     /// set up the span relationship ourselves.
     pub startup_span: Option<tracing::span::Span>,
 
-    pub prewarm_state: PrewarmState,
-    pub prewarm_offload_state: PrewarmOffloadState,
+    pub lfc_prewarm_state: LfcPrewarmState,
+    pub lfc_offload_state: LfcOffloadState,
 
     pub metrics: ComputeMetrics,
 }
@@ -169,8 +169,8 @@ impl ComputeState {
             pspec: None,
             startup_span: None,
             metrics: ComputeMetrics::default(),
-            prewarm_state: PrewarmState::default(),
-            prewarm_offload_state: PrewarmOffloadState::default(),
+            lfc_prewarm_state: LfcPrewarmState::default(),
+            lfc_offload_state: LfcOffloadState::default(),
         }
     }
 
@@ -207,7 +207,7 @@ pub struct ParsedSpec {
     pub safekeeper_connstrings: Vec<String>,
     pub storage_auth_token: Option<String>,
     pub endpoint_storage_addr: Option<SocketAddr>,
-    pub endpoint_storage_auth_token: Option<String>,
+    pub endpoint_storage_token: Option<String>,
 }
 
 impl TryFrom<ComputeSpec> for ParsedSpec {
@@ -268,8 +268,8 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             .unwrap_or_default()
             .parse()
             .ok();
-        let endpoint_storage_auth_token = spec
-            .endpoint_storage_auth_token
+        let endpoint_storage_token = spec
+            .endpoint_storage_token
             .clone()
             .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_token"));
 
@@ -281,7 +281,7 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             tenant_id,
             timeline_id,
             endpoint_storage_addr,
-            endpoint_storage_auth_token,
+            endpoint_storage_token,
         })
     }
 }
@@ -761,7 +761,7 @@ impl ComputeNode {
         info!(?metrics, postmaster_pid = %postmaster_pid, "compute start finished");
 
         if pspec.spec.prewarm_lfc_on_startup {
-            self.prewarm();
+            self.prewarm_lfc();
         }
         Ok(())
     }
