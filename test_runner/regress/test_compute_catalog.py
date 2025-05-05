@@ -544,3 +544,56 @@ def test_drop_role_with_table_privileges_from_non_neon_superuser(neon_simple_env
         )
         role = cursor.fetchone()
         assert role is None
+
+
+def test_db_with_custom_settings(neon_simple_env: NeonEnv):
+    """
+    Test that compute_ctl can work with databases that have some custom settings.
+    For example, role=some_other_role and default_transaction_read_only=on.
+    """
+    env = neon_simple_env
+
+    endpoint = env.endpoints.create_start("main")
+
+    TEST_ROLE_NAME = "some_other_role"
+    TEST_DB_NAME = "db_with_custom_settings"
+
+    endpoint.respec_deep(
+        **{
+            "spec": {
+                "skip_pg_catalog_updates": False,
+                "cluster": {
+                    "databases": [
+                        {
+                            "name": TEST_DB_NAME,
+                            "owner": TEST_ROLE_NAME,
+                        }
+                    ],
+                    "roles": [
+                        {
+                            "name": TEST_ROLE_NAME,
+                        }
+                    ],
+                },
+            }
+        }
+    )
+
+    endpoint.reconfigure()
+
+    with endpoint.cursor(dbname=TEST_DB_NAME) as cursor:
+        cursor.execute(f"ALTER DATABASE {TEST_DB_NAME} SET role = {TEST_ROLE_NAME}")
+        cursor.execute(f"ALTER DATABASE {TEST_DB_NAME} SET default_transaction_read_only = on")
+
+    with endpoint.cursor(dbname=TEST_DB_NAME) as cursor:
+        cursor.execute("SELECT current_role")
+        role = cursor.fetchone()
+        assert role is not None
+        assert role[0] == TEST_ROLE_NAME
+
+        cursor.execute("SHOW default_transaction_read_only")
+        default_transaction_read_only = cursor.fetchone()
+        assert default_transaction_read_only is not None
+        assert default_transaction_read_only[0] == "on"
+
+    endpoint.reconfigure()
