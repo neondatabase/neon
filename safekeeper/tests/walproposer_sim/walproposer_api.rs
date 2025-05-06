@@ -207,7 +207,7 @@ impl SimulationApi {
         // initialize connection state for each safekeeper
         let sk_conns = args
             .config
-            .safekeepers_list
+            .safekeeper_connstrings
             .iter()
             .map(|s| {
                 SafekeeperConn::new(

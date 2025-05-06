@@ -111,7 +111,7 @@ pub struct ComputeSpec {
     pub endpoint_id: Option<String>,
 
     /// Safekeeper membership config generation. It is put in
-    /// neon.safekeepers GUC and serves two purposes:
+    /// neon.safekeeper_connstrings GUC and serves two purposes:
     /// 1) Non zero value forces walproposer to use membership configurations.
     /// 2) If walproposer wants to update list of safekeepers to connect to
     ///    taking them from some safekeeper mconf, it should check what value

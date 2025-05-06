@@ -86,7 +86,7 @@ typedef struct WalProposerConn
 								 * walprop_async_read */
 } WalProposerConn;
 
-extern WalProposerConn *libpqwp_connect_start(char *conninfo);
+extern WalProposerConn *libpqwp_connect_start(const char *conninfo);
 extern bool libpqwp_send_query(WalProposerConn *conn, char *query);
 extern WalProposerExecStatusType libpqwp_get_query_result(WalProposerConn *conn);
 extern PGAsyncReadResult libpqwp_async_read(WalProposerConn *conn, char **buf, int *amount);

@@ -14,7 +14,7 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import psycopg2
 import psycopg2.errors
@@ -685,7 +685,7 @@ class ProposerPostgres(PgProtocol):
                 f"neon.timeline_id = '{self.timeline_id}'\n",
                 f"neon.tenant_id = '{self.tenant_id}'\n",
                 "neon.pageserver_connstring = ''\n",
-                f"neon.safekeepers = '{safekeepers}'\n",
+                f"neon.safekeeper_connstrings = '{safekeepers}'\n",
                 f"listen_addresses = '{self.listen_addr}'\n",
                 f"port = '{self.port}'\n",
             ]
@@ -1464,7 +1464,15 @@ class SafekeeperEnv:
 
     def get_safekeeper_connstrs(self):
         assert self.safekeepers is not None, "safekeepers are not initialized"
-        return ",".join([sk_proc.args[2] for sk_proc in self.safekeepers])
+
+        def to_connstring(proc: subprocess.CompletedProcess[Any]) -> str:
+            """
+            Parse <host>:<port> string into Postgres connection string
+            """
+            (host, port, *_) = cast("str", proc.args[2]).split(":")
+            return f"host={host} port={port}"
+
+        return ",".join([to_connstring(sk_proc) for sk_proc in self.safekeepers])
 
     def create_postgres(self):
         assert self.tenant_id is not None, "tenant_id is not initialized"
@@ -2000,8 +2008,9 @@ def test_membership_api(neon_env_builder: NeonEnvBuilder):
 
 def test_explicit_timeline_creation(neon_env_builder: NeonEnvBuilder):
     """
-    Test that having neon.safekeepers starting with g#n: with non zero n enables
-    generations, which as a side effect disables automatic timeline creation.
+    Test that having neon.safekeeper_connstrings starting with g#n: with non
+    zero n enables generations, which as a side effect disables automatic
+    timeline creation.
 
     This is kind of bootstrapping test: here membership conf & timeline is
     created manually, later storcon will do that.
@@ -2032,10 +2041,10 @@ def test_explicit_timeline_creation(neon_env_builder: NeonEnvBuilder):
 
 def test_explicit_timeline_creation_storcon(neon_env_builder: NeonEnvBuilder):
     """
-    Test that having neon.safekeepers starting with g#n: with non zero n enables
-    generations, which as a side effect disables automatic timeline creation.
-    Like test_explicit_timeline_creation, but asks the storcon to
-    create membership conf & timeline.
+    Test that having neon.safekeeper_connstrings starting with g#n: with non
+    zero n enables generations, which as a side effect disables automatic
+    timeline creation. Like test_explicit_timeline_creation, but asks the
+    storcon to create membership conf & timeline.
     """
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.storage_controller_config = {

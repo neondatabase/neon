@@ -171,8 +171,8 @@ pub enum WaitResult {
 pub struct Config {
     /// Tenant and timeline id
     pub ttid: TenantTimelineId,
-    /// List of safekeepers in format `host:port`
-    pub safekeepers_list: Vec<String>,
+    /// List of safekeeper connection strings
+    pub safekeeper_connstrings: Vec<String>,
     /// Safekeeper reconnect timeout in milliseconds
     pub safekeeper_reconnect_timeout: i32,
     /// Safekeeper connection timeout in milliseconds
@@ -185,7 +185,7 @@ pub struct Config {
 /// WalProposer main struct. C methods are reexported as Rust functions.
 pub struct Wrapper {
     wp: *mut WalProposer,
-    _safekeepers_list_vec: Vec<u8>,
+    _safekeeper_connstrings_vec: Vec<u8>,
 }
 
 impl Wrapper {
@@ -197,18 +197,19 @@ impl Wrapper {
             .unwrap()
             .into_raw();
 
-        let mut safekeepers_list_vec = CString::new(config.safekeepers_list.join(","))
+        let mut safekeeper_connstrings_vec = CString::new(config.safekeeper_connstrings.join(","))
             .unwrap()
             .into_bytes_with_nul();
-        assert!(safekeepers_list_vec.len() == safekeepers_list_vec.capacity());
-        let safekeepers_list = safekeepers_list_vec.as_mut_ptr() as *mut std::ffi::c_char;
+        assert!(safekeeper_connstrings_vec.len() == safekeeper_connstrings_vec.capacity());
+        let safekeeper_connstrings =
+            safekeeper_connstrings_vec.as_mut_ptr() as *mut std::ffi::c_char;
 
         let callback_data = Box::into_raw(Box::new(api)) as *mut ::std::os::raw::c_void;
 
         let c_config = WalProposerConfig {
             neon_tenant,
             neon_timeline,
-            safekeepers_list,
+            safekeeper_connstrings,
             safekeeper_reconnect_timeout: config.safekeeper_reconnect_timeout,
             safekeeper_connection_timeout: config.safekeeper_connection_timeout,
             wal_segment_size: WAL_SEGMENT_SIZE as i32, // default 16MB
@@ -224,7 +225,7 @@ impl Wrapper {
         let wp = unsafe { WalProposerCreate(c_config, api) };
         Wrapper {
             wp,
-            _safekeepers_list_vec: safekeepers_list_vec,
+            _safekeeper_connstrings_vec: safekeeper_connstrings_vec,
         }
     }
 
@@ -575,7 +576,7 @@ mod tests {
         });
         let config = crate::walproposer::Config {
             ttid,
-            safekeepers_list: vec!["localhost:5000".to_string()],
+            safekeeper_connstrings: vec!["host=localhost port=5000".to_string()],
             safekeeper_reconnect_timeout: 1000,
             safekeeper_connection_timeout: 10000,
             sync_safekeepers: true,

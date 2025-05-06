@@ -239,6 +239,7 @@ walproposer-lib: neon-pg-ext-v17
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile walproposer-lib
 	cp $(POSTGRES_INSTALL_DIR)/v17/lib/libpgport.a $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
 	cp $(POSTGRES_INSTALL_DIR)/v17/lib/libpgcommon.a $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
+	cp $(POSTGRES_INSTALL_DIR)/v17/lib/libpq.so $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
 	$(AR) d $(POSTGRES_INSTALL_DIR)/build/walproposer-lib/libpgport.a \
 		pg_strong_random.o
 	$(AR) d $(POSTGRES_INSTALL_DIR)/build/walproposer-lib/libpgcommon.a \
