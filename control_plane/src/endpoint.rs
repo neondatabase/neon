@@ -635,8 +635,8 @@ impl Endpoint {
     pub fn generate_jwt(&self, scope: Option<ComputeClaimsScope>) -> Result<String> {
         self.env.generate_auth_token(&ComputeClaims {
             audience: match scope {
-                Some(ComputeClaimsScope::Admin) => Some(COMPUTE_AUDIENCE.to_owned()),
-                _ => Some(self.endpoint_id.clone()),
+                Some(ComputeClaimsScope::Admin) => Some(vec![COMPUTE_AUDIENCE.to_owned()]),
+                _ => None,
             },
             compute_id: match scope {
                 Some(ComputeClaimsScope::Admin) => None,

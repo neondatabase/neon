@@ -10,9 +10,9 @@ use crate::spec::{ComputeSpec, ExtVersion, PgIdent};
 /// The value to place in the [`ComputeClaims::audience`] claim.
 pub static COMPUTE_AUDIENCE: &str = "compute";
 
+/// Available scopes for a compute's JWT.
 #[derive(Copy, Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-/// Available scopes for a compute's JWT.
 pub enum ComputeClaimsScope {
     /// An admin-scoped token allows access to all of `compute_ctl`'s authorized
     /// facilities.
@@ -48,8 +48,11 @@ pub struct ComputeClaims {
     ///
     /// See [RFC 7519](https://www.rfc-editor.org/rfc/rfc7519#section-4.1.3) for
     /// more information.
+    ///
+    /// TODO: Remove the [`Option`] wrapper when control plane learns to send
+    /// the claim.
     #[serde(rename = "aud")]
-    pub audience: Option<String>,
+    pub audience: Option<Vec<String>>,
 }
 
 /// Request of the /configure API
