@@ -110,7 +110,7 @@ pub(crate) static LFC_PREWARM_REQUESTS: Lazy<IntCounter> = Lazy::new(|| {
 pub(crate) static LFC_OFFLOAD_REQUESTS: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
         "compute_ctl_lfc_offload_requests_total",
-        "Total number of LFC prewarm offload requests made by compute_ctl",
+        "Total number of LFC offload requests made by compute_ctl",
     )
     .expect("failed to define a metric")
 });

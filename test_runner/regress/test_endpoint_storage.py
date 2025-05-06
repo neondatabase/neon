@@ -4,10 +4,12 @@ import pytest
 from aiohttp import ClientSession
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
+from fixtures.utils import run_only_on_default_postgres
 from jwcrypto import jwk, jwt
 
 
 @pytest.mark.asyncio
+@run_only_on_default_postgres("test doesn't use postgres")
 async def test_endpoint_storage_insert_retrieve_delete(neon_simple_env: NeonEnv):
     """
     Inserts, retrieves, and deletes test file using a JWT token
