@@ -1434,10 +1434,10 @@ jobs:
             ;;
           esac
 
-  notify-storage-release-deploy-failure:
-    needs: [ deploy ]
+  notify-release-deploy-failure:
+    needs: [ meta, deploy ]
     # We want this to run even if (transitive) dependencies are skipped, because deploy should really be successful on release branch workflow runs.
-    if: github.ref_name == 'release' && needs.deploy.result != 'success' && always()
+    if: contains(fromJSON('["storage-release", "compute-release", "proxy-release"]'), needs.meta.outputs.run-kind) && needs.deploy.result != 'success' && always()
     runs-on: ubuntu-22.04
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -1445,15 +1445,40 @@ jobs:
         with:
           egress-policy: audit
 
-      - name: Post release-deploy failure to team-storage slack channel
+      - name: Post release-deploy failure to team slack channel
         uses: slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d # v2.0.0
+        env:
+          TEAM_ONCALL: >-
+            ${{
+              fromJSON(format('{
+                "storage-release": "<!subteam^{0}|@oncall-storage>",
+                "compute-release": "<!subteam^{1}|@oncall-compute>",
+                "proxy-release":   "<!subteam^{2}|@oncall-proxy>"
+              }',
+                vars.SLACK_ONCALL_STORAGE_GROUP,
+                vars.SLACK_ONCALL_COMPUTE_GROUP,
+                vars.SLACK_ONCALL_PROXY_GROUP
+              ))[needs.meta.outputs.run-kind]
+            }}
+          CHANNEL: >-
+            ${{
+              fromJSON(format('{
+                "storage-release": "{0}",
+                "compute-release": "{1}",
+                "proxy-release":   "{2}"
+              }',
+                vars.SLACK_STORAGE_CHANNEL_ID,
+                vars.SLACK_COMPUTE_CHANNEL_ID,
+                vars.SLACK_PROXY_CHANNEL_ID
+              ))[needs.meta.outputs.run-kind]
+            }}
         with:
           method: chat.postMessage
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
-            channel: ${{ vars.SLACK_STORAGE_CHANNEL_ID }}
+            channel: ${{ env.CHANNEL }}
             text: |
-              🔴 <!subteam^S06CJ87UMNY|@oncall-storage>: deploy job on release branch had unexpected status "${{ needs.deploy.result }}" <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>.
+              🔴 ${{ env.TEAM_ONCALL }}: deploy job on release branch had unexpected status "${{ needs.deploy.result }}" <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>.
 
   # The job runs on `release` branch and copies compatibility data and Neon artifact from the last *release PR* to the latest directory
   promote-compatibility-data:

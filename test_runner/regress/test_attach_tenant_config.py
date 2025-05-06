@@ -186,7 +186,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
             "type": "interpreted",
             "args": {"format": "bincode", "compression": {"zstd": {"level": 1}}},
         },
-        "rel_size_v2_enabled": False,  # test suite enables it by default as of https://github.com/neondatabase/neon/issues/11081, so, custom config means disabling it
+        "rel_size_v2_enabled": True,
         "gc_compaction_enabled": True,
         "gc_compaction_verification": False,
         "gc_compaction_initial_threshold_kb": 1024000,

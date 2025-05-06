@@ -1,0 +1,129 @@
+diff --git a/sql/anon.sql b/sql/anon.sql
+index 0cdc769..f6cc950 100644
+--- a/sql/anon.sql
++++ b/sql/anon.sql
+@@ -1141,3 +1141,8 @@ $$
+ -- TODO : https://en.wikipedia.org/wiki/L-diversity
+ 
+ -- TODO : https://en.wikipedia.org/wiki/T-closeness
++
++-- NEON Patches
++
++GRANT ALL ON SCHEMA anon to neon_superuser;
++GRANT ALL ON ALL TABLES IN SCHEMA anon TO neon_superuser;
+diff --git a/sql/init.sql b/sql/init.sql
+index 7da6553..9b6164b 100644
+--- a/sql/init.sql
++++ b/sql/init.sql
+@@ -74,50 +74,49 @@ $$
+ 
+ SECURITY LABEL FOR anon ON FUNCTION anon.load_csv IS 'UNTRUSTED';
+ 
+--- load fake data from a given path
+-CREATE OR REPLACE FUNCTION anon.init(
+-  datapath TEXT
+-)
++CREATE OR REPLACE FUNCTION anon.load_fake_data()
+ RETURNS BOOLEAN
+ AS $$
+ DECLARE
+-  datapath_check TEXT;
+   success BOOLEAN;
++  sharedir TEXT;
++  datapath TEXT;
+ BEGIN
+ 
+-  IF anon.is_initialized() THEN
+-    RAISE NOTICE 'The anon extension is already initialized.';
+-    RETURN TRUE;
+-  END IF;
++  datapath := '/extension/anon/';
++  -- find the local extension directory
++  SELECT setting INTO sharedir
++  FROM pg_catalog.pg_config
++  WHERE name = 'SHAREDIR';
+ 
+   SELECT bool_or(results) INTO success
+   FROM unnest(array[
+-    anon.load_csv('anon.identifiers_category',datapath||'/identifiers_category.csv'),
+-    anon.load_csv('anon.identifier',datapath ||'/identifier.csv'),
+-    anon.load_csv('anon.address',datapath ||'/address.csv'),
+-    anon.load_csv('anon.city',datapath ||'/city.csv'),
+-    anon.load_csv('anon.company',datapath ||'/company.csv'),
+-    anon.load_csv('anon.country',datapath ||'/country.csv'),
+-    anon.load_csv('anon.email', datapath ||'/email.csv'),
+-    anon.load_csv('anon.first_name',datapath ||'/first_name.csv'),
+-    anon.load_csv('anon.iban',datapath ||'/iban.csv'),
+-    anon.load_csv('anon.last_name',datapath ||'/last_name.csv'),
+-    anon.load_csv('anon.postcode',datapath ||'/postcode.csv'),
+-    anon.load_csv('anon.siret',datapath ||'/siret.csv'),
+-    anon.load_csv('anon.lorem_ipsum',datapath ||'/lorem_ipsum.csv')
++    anon.load_csv('anon.identifiers_category',sharedir || datapath || '/identifiers_category.csv'),
++    anon.load_csv('anon.identifier',sharedir || datapath || '/identifier.csv'),
++    anon.load_csv('anon.address',sharedir || datapath || '/address.csv'),
++    anon.load_csv('anon.city',sharedir || datapath || '/city.csv'),
++    anon.load_csv('anon.company',sharedir || datapath || '/company.csv'),
++    anon.load_csv('anon.country',sharedir || datapath || '/country.csv'),
++    anon.load_csv('anon.email', sharedir || datapath || '/email.csv'),
++    anon.load_csv('anon.first_name',sharedir || datapath || '/first_name.csv'),
++    anon.load_csv('anon.iban',sharedir || datapath || '/iban.csv'),
++    anon.load_csv('anon.last_name',sharedir || datapath || '/last_name.csv'),
++    anon.load_csv('anon.postcode',sharedir || datapath || '/postcode.csv'),
++    anon.load_csv('anon.siret',sharedir || datapath || '/siret.csv'),
++    anon.load_csv('anon.lorem_ipsum',sharedir || datapath || '/lorem_ipsum.csv')
+   ]) results;
+   RETURN success;
+-
+ END;
+ $$
+-  LANGUAGE PLPGSQL
++  LANGUAGE plpgsql
+   VOLATILE
+   RETURNS NULL ON NULL INPUT
+-  PARALLEL UNSAFE -- because load_csv is unsafe
+-  SECURITY INVOKER
++  PARALLEL UNSAFE -- because of the EXCEPTION
++  SECURITY DEFINER
+   SET search_path=''
+ ;
+-SECURITY LABEL FOR anon ON FUNCTION anon.init(TEXT) IS 'UNTRUSTED';
++
++SECURITY LABEL FOR anon ON FUNCTION anon.load_fake_data IS 'UNTRUSTED';
+ 
+ -- People tend to forget the anon.init() step
+ -- This is a friendly notice for them
+@@ -144,7 +143,7 @@ SECURITY LABEL FOR anon ON FUNCTION anon.notice_if_not_init IS 'UNTRUSTED';
+ CREATE OR REPLACE FUNCTION anon.load(TEXT)
+ RETURNS BOOLEAN AS
+ $$
+-  SELECT anon.init($1);
++  SELECT anon.init();
+ $$
+   LANGUAGE SQL
+   VOLATILE
+@@ -159,16 +158,16 @@ SECURITY LABEL FOR anon ON FUNCTION anon.load(TEXT) IS 'UNTRUSTED';
+ CREATE OR REPLACE FUNCTION anon.init()
+ RETURNS BOOLEAN
+ AS $$
+-  WITH conf AS (
+-        -- find the local extension directory
+-        SELECT setting AS sharedir
+-        FROM pg_catalog.pg_config
+-        WHERE name = 'SHAREDIR'
+-    )
+-  SELECT anon.init(conf.sharedir || '/extension/anon/')
+-  FROM conf;
++BEGIN
++  IF anon.is_initialized() THEN
++    RAISE NOTICE 'The anon extension is already initialized.';
++    RETURN TRUE;
++  END IF;
++
++  RETURN anon.load_fake_data();
++END;
+ $$
+-  LANGUAGE SQL
++  LANGUAGE plpgsql
+   VOLATILE
+   PARALLEL UNSAFE -- because init is unsafe
+   SECURITY INVOKER

@@ -62,7 +62,9 @@ def test_ro_replica_lag(
 
     pgbench_duration = f"-T{test_duration_min * 60 * 2}"
 
-    project = neon_api.create_project(pg_version)
+    project = neon_api.create_project(
+        pg_version, f"Test readonly replica lag, GITHUB_RUN_ID={os.getenv('GITHUB_RUN_ID')}"
+    )
     project_id = project["project"]["id"]
     log.info("Project ID: %s", project_id)
     log.info("Primary endpoint ID: %s", project["endpoints"][0]["id"])
@@ -195,7 +197,9 @@ def test_replication_start_stop(
     pgbench_duration = f"-T{2**num_replicas * configuration_test_time_sec}"
     error_occurred = False
 
-    project = neon_api.create_project(pg_version)
+    project = neon_api.create_project(
+        pg_version, f"Test replication start stop, GITHUB_RUN_ID={os.getenv('GITHUB_RUN_ID')}"
+    )
     project_id = project["project"]["id"]
     log.info("Project ID: %s", project_id)
     log.info("Primary endpoint ID: %s", project["endpoints"][0]["id"])
