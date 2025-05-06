@@ -13,7 +13,7 @@ use serde::Serialize;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, error, info};
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
-use utils::lsn::Lsn;
+use utils::lsn::{Lsn, SegmentSize};
 
 use crate::cloud_admin_api::CloudAdminApiClient;
 use crate::metadata_stream::stream_listing;
@@ -22,7 +22,7 @@ use crate::{
 };
 
 /// Generally we should ask safekeepers, but so far we use everywhere default 16MB.
-const WAL_SEGSIZE: usize = 16 * 1024 * 1024;
+const WAL_SEGSIZE: SegmentSize = 16 * 1024 * 1024;
 
 #[derive(Serialize)]
 pub struct MetadataSummary {

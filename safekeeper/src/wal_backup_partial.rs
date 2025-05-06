@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 use utils::id::NodeId;
-use utils::lsn::Lsn;
+use utils::lsn::{Lsn, SegmentSize};
 
 use crate::SafeKeeperConf;
 use crate::metrics::{
@@ -149,7 +149,7 @@ impl State {
 }
 
 pub struct PartialBackup {
-    wal_seg_size: usize,
+    wal_seg_size: SegmentSize,
     tli: WalResidentTimeline,
     conf: SafeKeeperConf,
     local_prefix: Utf8PathBuf,

@@ -11,6 +11,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncWriteExt};
 use tracing::{debug, info, instrument, warn};
 use utils::crashsafe::durable_rename;
+use utils::lsn::SegmentSize;
 
 use crate::metrics::{
     EVICTION_EVENTS_COMPLETED, EVICTION_EVENTS_STARTED, EvictionEvent, NUM_EVICTED_TIMELINES,
@@ -256,11 +257,11 @@ async fn compare_local_segment_with_remote(
 async fn do_validation(
     mgr: &Manager,
     file: &mut File,
-    wal_seg_size: usize,
+    wal_seg_size: SegmentSize,
     partial: &PartialRemoteSegment,
 ) -> anyhow::Result<()> {
-    let local_size = file.metadata().await?.len() as usize;
-    if local_size != wal_seg_size {
+    let local_size = file.metadata().await?.len();
+    if SegmentSize::try_from(local_size) != Ok(wal_seg_size) {
         anyhow::bail!(
             "local segment size is invalid: found {}, expected {}",
             local_size,
@@ -275,12 +276,12 @@ async fn do_validation(
     // remote segment should have bytes excatly up to `flush_lsn`
     let expected_remote_size = partial.flush_lsn.segment_offset(mgr.wal_seg_size);
     // let's compare the first `expected_remote_size` bytes
-    compare_n_bytes(&mut remote_reader, file, expected_remote_size).await?;
+    compare_n_bytes(&mut remote_reader, file, expected_remote_size as usize).await?;
     // and check that the remote segment ends here
     check_end(&mut remote_reader).await?;
 
     // if local segment is longer, the rest should be zeroes
-    read_n_zeroes(file, mgr.wal_seg_size - expected_remote_size).await?;
+    read_n_zeroes(file, (mgr.wal_seg_size - expected_remote_size) as usize).await?;
     // and check that the local segment ends here
     check_end(file).await?;
 
