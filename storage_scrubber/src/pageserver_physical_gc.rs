@@ -790,6 +790,7 @@ pub async fn pageserver_physical_gc(
                 &accumulator,
                 tenant_manifest_arc,
             )
+            .instrument(info_span!("gc_timeline", %ttid))
         });
         let timelines = timelines.try_buffered(CONCURRENCY);
         let mut timelines = std::pin::pin!(timelines);
