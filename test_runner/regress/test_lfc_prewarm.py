@@ -6,7 +6,7 @@ from enum import Enum
 import pytest
 from fixtures.endpoint.http import EndpointHttpClient
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, Endpoint
+from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import USE_LFC
 from prometheus_client.parser import text_string_to_metric_families as prom_parse_impl
 
