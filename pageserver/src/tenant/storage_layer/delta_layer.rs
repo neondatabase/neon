@@ -484,17 +484,11 @@ impl DeltaLayerWriterInner {
         val: Value,
         ctx: &RequestContext,
     ) -> Result<(), DeltaLayerWriterError> {
-        let val_ser = Value::ser(&val)
-            .map_err(|e| DeltaLayerWriterError::Other(anyhow::anyhow!(e)))?;
-        
+        let val_ser =
+            Value::ser(&val).map_err(|e| DeltaLayerWriterError::Other(anyhow::anyhow!(e)))?;
+
         let (_, res) = self
-            .put_value_bytes(
-                key,
-                lsn,
-                val_ser.slice_len(),
-                val.will_init(),
-                ctx,
-            )
+            .put_value_bytes(key, lsn, val_ser.slice_len(), val.will_init(), ctx)
             .await;
         res
     }
@@ -511,29 +505,41 @@ impl DeltaLayerWriterInner {
         Buf: IoBuf + Send,
     {
         if self.lsn_range.start > lsn {
-            return (val, Err(DeltaLayerWriterError::Other(anyhow::anyhow!(
-                "lsn_start={}, lsn={}",
-                self.lsn_range.start,
-                lsn
-            ))));
+            return (
+                val,
+                Err(DeltaLayerWriterError::Other(anyhow::anyhow!(
+                    "lsn_start={}, lsn={}",
+                    self.lsn_range.start,
+                    lsn
+                ))),
+            );
         }
-        
+
         // We don't want to use compression in delta layer creation
         let compression = ImageCompressionAlgorithm::Disabled;
         let (val, res) = self
             .blob_writer
             .write_blob_maybe_compressed(val, ctx, compression)
             .await;
-        
+
         let off = match res {
             Ok((off, _)) => off,
-            Err(e) => return (val, Err(match e {
-                crate::tenant::blob_io::WriteBlobError::Flush(blob_err) => match blob_err {
-                    crate::tenant::blob_io::BlobWriterError::Cancelled => DeltaLayerWriterError::Cancelled,
-                    crate::tenant::blob_io::BlobWriterError::Other(err) => DeltaLayerWriterError::Other(err),
-                },
-                other => DeltaLayerWriterError::Other(anyhow::anyhow!(other)),
-            })),
+            Err(e) => {
+                return (
+                    val,
+                    Err(match e {
+                        crate::tenant::blob_io::WriteBlobError::Flush(blob_err) => match blob_err {
+                            crate::tenant::blob_io::BlobWriterError::Cancelled => {
+                                DeltaLayerWriterError::Cancelled
+                            }
+                            crate::tenant::blob_io::BlobWriterError::Other(err) => {
+                                DeltaLayerWriterError::Other(err)
+                            }
+                        },
+                        other => DeltaLayerWriterError::Other(anyhow::anyhow!(other)),
+                    }),
+                );
+            }
         };
 
         let blob_ref = BlobRef::new(off, will_init);
@@ -543,7 +549,10 @@ impl DeltaLayerWriterInner {
 
         self.num_keys += 1;
 
-        (val, res.map_err(|e| DeltaLayerWriterError::Other(anyhow::anyhow!(e))))
+        (
+            val,
+            res.map_err(|e| DeltaLayerWriterError::Other(anyhow::anyhow!(e))),
+        )
     }
 
     fn size(&self) -> u64 {

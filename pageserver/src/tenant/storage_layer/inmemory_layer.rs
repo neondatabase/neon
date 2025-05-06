@@ -26,6 +26,7 @@ use utils::lsn::Lsn;
 use utils::vec_map::VecMap;
 use wal_decoder::serialized_batch::{SerializedValueBatch, SerializedValueMeta, ValueMeta};
 
+use super::delta_layer::DeltaLayerWriterError;
 use super::{DeltaLayerWriter, PersistentLayerDesc, ValuesReconstructState};
 use crate::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64, u64_to_usize};
 use crate::config::PageServerConf;
@@ -615,7 +616,10 @@ impl InMemoryLayer {
         } = serialized_batch;
 
         // Write the batch to the file
-        inner.file.write_raw(&raw, ctx).await
+        inner
+            .file
+            .write_raw(&raw, ctx)
+            .await
             .map_err(|e| InMemoryLayerError::Other(anyhow::anyhow!(e)))?;
         let new_size = inner.file.len();
 
@@ -648,7 +652,8 @@ impl InMemoryLayer {
                 batch_offset,
                 len,
                 will_init,
-            })?;
+            })
+            .map_err(|e| InMemoryLayerError::Other(anyhow::anyhow!(e)))?;
 
             let vec_map = inner.index.entry(key).or_default();
             let old = vec_map.append_or_update_last(lsn, index_entry).unwrap().0;
@@ -805,14 +810,25 @@ impl InMemoryLayer {
                                 ctx,
                             )
                             .await;
-                        res?;
+                        res.map_err(|e| match e {
+                            DeltaLayerWriterError::Cancelled => {
+                                anyhow::anyhow!("flush task cancelled")
+                            }
+                            DeltaLayerWriterError::Other(err) => err,
+                        })?;
                     }
                 }
             }
         }
 
         // MAX is used here because we identify L0 layers by full key range
-        let (desc, path) = delta_layer_writer.finish(Key::MAX, ctx).await?;
+        let (desc, path) = delta_layer_writer
+            .finish(Key::MAX, ctx)
+            .await
+            .map_err(|e| match e {
+                DeltaLayerWriterError::Cancelled => anyhow::anyhow!("flush task cancelled"),
+                DeltaLayerWriterError::Other(err) => err,
+            })?;
 
         // Hold the permit until all the IO is done, including the fsync in `delta_layer_writer.finish()``.
         //

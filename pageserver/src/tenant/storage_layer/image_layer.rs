@@ -866,9 +866,11 @@ impl ImageLayerWriterInner {
         ctx: &RequestContext,
     ) -> Result<(), ImageLayerWriterError> {
         if !self.key_range.contains(&key) {
-            return Err(ImageLayerWriterError::Other(anyhow::anyhow!("key not in range")));
+            return Err(ImageLayerWriterError::Other(anyhow::anyhow!(
+                "key not in range"
+            )));
         }
-        
+
         let compression = self.conf.image_compression;
         let uncompressed_len = img.len() as u64;
         self.uncompressed_bytes += uncompressed_len;
@@ -880,12 +882,16 @@ impl ImageLayerWriterInner {
         // TODO: re-use the buffer for `img` further upstack
         let (off, compression_info) = res.map_err(|e| match e {
             crate::tenant::blob_io::WriteBlobError::Flush(blob_err) => match blob_err {
-                crate::tenant::blob_io::BlobWriterError::Cancelled => ImageLayerWriterError::Cancelled,
-                crate::tenant::blob_io::BlobWriterError::Other(err) => ImageLayerWriterError::Other(err),
+                crate::tenant::blob_io::BlobWriterError::Cancelled => {
+                    ImageLayerWriterError::Cancelled
+                }
+                crate::tenant::blob_io::BlobWriterError::Other(err) => {
+                    ImageLayerWriterError::Other(err)
+                }
             },
             other => ImageLayerWriterError::Other(anyhow::anyhow!(other)),
         })?;
-        
+
         if compression_info.compressed_size.is_some() {
             // The image has been considered for compression at least
             self.uncompressed_bytes_eligible += uncompressed_len;
@@ -897,7 +903,8 @@ impl ImageLayerWriterInner {
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
-        self.tree.append(&keybuf, off)
+        self.tree
+            .append(&keybuf, off)
             .map_err(|e| ImageLayerWriterError::Other(anyhow::anyhow!(e)))?;
 
         #[cfg(feature = "testing")]
@@ -920,7 +927,9 @@ impl ImageLayerWriterInner {
         ctx: &RequestContext,
     ) -> Result<(), ImageLayerWriterError> {
         if !self.key_range.contains(&key) {
-            return Err(ImageLayerWriterError::Other(anyhow::anyhow!("key not in range")));
+            return Err(ImageLayerWriterError::Other(anyhow::anyhow!(
+                "key not in range"
+            )));
         }
 
         // NB: we don't update the (un)compressed metrics, since we can't determine them without
@@ -933,15 +942,20 @@ impl ImageLayerWriterInner {
             .await;
         let offset = res.map_err(|e| match e {
             crate::tenant::blob_io::WriteBlobError::Flush(blob_err) => match blob_err {
-                crate::tenant::blob_io::BlobWriterError::Cancelled => ImageLayerWriterError::Cancelled,
-                crate::tenant::blob_io::BlobWriterError::Other(err) => ImageLayerWriterError::Other(err),
+                crate::tenant::blob_io::BlobWriterError::Cancelled => {
+                    ImageLayerWriterError::Cancelled
+                }
+                crate::tenant::blob_io::BlobWriterError::Other(err) => {
+                    ImageLayerWriterError::Other(err)
+                }
             },
             other => ImageLayerWriterError::Other(anyhow::anyhow!(other)),
         })?;
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
-        self.tree.append(&keybuf, offset)
+        self.tree
+            .append(&keybuf, offset)
             .map_err(|e| ImageLayerWriterError::Other(anyhow::anyhow!(e)))?;
 
         #[cfg(feature = "testing")]

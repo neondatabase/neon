@@ -119,6 +119,8 @@ use crate::tenant::gc_result::GcResult;
 use crate::tenant::layer_map::LayerMap;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::storage_layer::delta_layer::DeltaEntry;
+use crate::tenant::storage_layer::image_layer::ImageLayerWriterError;
+use crate::tenant::storage_layer::inmemory_layer::InMemoryLayerError;
 use crate::tenant::storage_layer::inmemory_layer::IndexEntry;
 use crate::tenant::storage_layer::{
     AsLayerDesc, BatchLayerWriter, DeltaLayerWriter, EvictionError, ImageLayerName,
@@ -5232,7 +5234,17 @@ impl Timeline {
                         };
 
                         // Write all the keys we just read into our new image layer.
-                        image_layer_writer.put_image(img_key, img, ctx).await?;
+                        image_layer_writer
+                            .put_image(img_key, img, ctx)
+                            .await
+                            .map_err(|e| match e {
+                                ImageLayerWriterError::Cancelled => CreateImageLayersError::Other(
+                                    anyhow::anyhow!("flush task cancelled"),
+                                ),
+                                ImageLayerWriterError::Other(err) => {
+                                    CreateImageLayersError::Other(err)
+                                }
+                            })?;
                         wrote_keys = true;
                     }
                 }
@@ -5329,7 +5341,15 @@ impl Timeline {
 
             // TODO: split image layers to avoid too large layer files. Too large image files are not handled
             // on the normal data path either.
-            image_layer_writer.put_image(k, v, ctx).await?;
+            image_layer_writer
+                .put_image(k, v, ctx)
+                .await
+                .map_err(|e| match e {
+                    ImageLayerWriterError::Cancelled => {
+                        CreateImageLayersError::Other(anyhow::anyhow!("flush task cancelled"))
+                    }
+                    ImageLayerWriterError::Other(err) => CreateImageLayersError::Other(err),
+                })?;
         }
 
         if wrote_any_image {
@@ -6922,9 +6942,22 @@ impl Timeline {
         )
         .await?;
         for (key, img) in images {
-            image_layer_writer.put_image(key, img, ctx).await?;
+            image_layer_writer
+                .put_image(key, img, ctx)
+                .await
+                .map_err(|e| match e {
+                    ImageLayerWriterError::Cancelled => {
+                        anyhow::anyhow!("flush task cancelled")
+                    }
+                    ImageLayerWriterError::Other(err) => err,
+                })?;
         }
-        let (desc, path) = image_layer_writer.finish(ctx).await?;
+        let (desc, path) = image_layer_writer.finish(ctx).await.map_err(|e| match e {
+            ImageLayerWriterError::Cancelled => {
+                anyhow::anyhow!("flush task cancelled")
+            }
+            ImageLayerWriterError::Other(err) => err,
+        })?;
         let image_layer = Layer::finish_creating(self.conf, self, desc, &path)?;
         info!("force created image layer {}", image_layer.local_path());
         {
@@ -7378,7 +7411,10 @@ impl TimelineWriter<'_> {
             state.max_lsn = std::cmp::max(state.max_lsn, Some(batch_max_lsn));
         }
 
-        res
+        res.map_err(|e| match e {
+            InMemoryLayerError::Cancelled => anyhow::anyhow!("flush task cancelled"),
+            InMemoryLayerError::Other(err) => err,
+        })
     }
 
     #[cfg(test)]

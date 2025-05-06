@@ -274,7 +274,13 @@ impl<'a> SplitImageLayerWriter<'a> {
             );
             self.start_key = key;
         }
-        self.inner.put_image(key, img, ctx).await
+        self.inner
+            .put_image(key, img, ctx)
+            .await
+            .map_err(|e| match e {
+                ImageLayerWriterError::Cancelled => anyhow::anyhow!("flush task cancelled"),
+                ImageLayerWriterError::Other(err) => err,
+            })
     }
 
     pub(crate) async fn finish_with_discard_fn<D, F>(
@@ -417,7 +423,13 @@ impl<'a> SplitDeltaLayerWriter<'a> {
         }
         self.last_key_written = key;
         let (_, inner) = self.inner.as_mut().unwrap();
-        inner.put_value(key, lsn, val, ctx).await
+        inner
+            .put_value(key, lsn, val, ctx)
+            .await
+            .map_err(|e| match e {
+                DeltaLayerWriterError::Cancelled => anyhow::anyhow!("flush task cancelled"),
+                DeltaLayerWriterError::Other(err) => err,
+            })
     }
 
     pub(crate) async fn finish_with_discard_fn<D, F>(
