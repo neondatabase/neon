@@ -1084,23 +1084,12 @@ RUN cargo install --locked --version 0.12.9 cargo-pgrx && \
     /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
 
 USER root
+
 #########################################################################################
 #
 # Layer "rust extensions pgrx14"
 #
-#########################################################################################
-FROM pg-build-nonroot-with-cargo AS rust-extensions-build-pgrx14
-ARG PG_VERSION
-
-RUN cargo install --locked --version 0.14.1 cargo-pgrx && \
-    /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
-
-USER root
-#########################################################################################
-#
-# Layer "rust extensions pgrx14"
-#
-# Version 14 is now required by a few 
+# Version 14 is now required by a few
 # This layer should be used as a base for new pgrx extensions,
 # and eventually get merged with `rust-extensions-build`
 #
