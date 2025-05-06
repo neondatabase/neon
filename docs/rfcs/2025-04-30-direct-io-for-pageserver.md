@@ -212,7 +212,7 @@ In Neon production environments we currently use ext4 with Linux 6.1.X on AWS an
 Instead of dynamic discovery using `statx`, we statically hard-code 512 bytes as the buffer/offset alignment and size-multiple.
 We made this decision because:
 - a) it is compatible with all the environments we need to run in
-- b) our primary workload is small random reads, typically smaller than 512 bytes
+- b) our primary workload can be small-random-read-heavy (we do merge adjacent reads if possible, but the worst case is that all `Value`s that needs to be read are far apart)
 - c) 512-byte tail latency on the production instance types is much better than 4k (p99.9: 3x lower, p99.99 5x lower).
 - d) hard-coding at compile-time allows us to use the Rust type system to enforce the use of only aligned IO buffers, eliminating a source of runtime errors typically associated with direct IO.
 
