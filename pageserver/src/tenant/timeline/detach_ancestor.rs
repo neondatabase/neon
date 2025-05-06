@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::tenant::storage_layer::delta_layer::DeltaLayerWriterError;
 use anyhow::Context;
 use bytes::Bytes;
 use http_utils::error::ApiError;
@@ -816,7 +817,12 @@ async fn copy_lsn_prefix(
         let (desc, path) = writer
             .finish(reused_highest_key, ctx)
             .await
-            .map_err(Error::Prepare)?;
+            .map_err(|e| match e {
+                DeltaLayerWriterError::Cancelled => {
+                    Error::Prepare(anyhow::anyhow!("flush task cancelled"))
+                }
+                DeltaLayerWriterError::Other(err) => Error::Prepare(err),
+            })?;
         let copied = Layer::finish_creating(target_timeline.conf, target_timeline, desc, &path)
             .map_err(Error::Prepare)?;
 

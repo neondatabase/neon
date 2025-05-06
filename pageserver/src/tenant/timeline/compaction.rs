@@ -15,6 +15,8 @@ use super::{
     GetVectoredError, ImageLayerCreationMode, LastImageLayerCreationStatus, RecordedDuration,
     Timeline,
 };
+use crate::tenant::storage_layer::delta_layer::DeltaLayerWriterError;
+use crate::tenant::storage_layer::image_layer::ImageLayerWriterError;
 
 use crate::tenant::timeline::DeltaEntry;
 use crate::walredo::RedoAttemptType;
@@ -1569,10 +1571,12 @@ impl Timeline {
                 .await?;
 
             if keys_written > 0 {
-                let (desc, path) = image_layer_writer
-                    .finish(ctx)
-                    .await
-                    .map_err(CompactionError::Other)?;
+                let (desc, path) = image_layer_writer.finish(ctx).await.map_err(|e| match e {
+                    ImageLayerWriterError::Cancelled => {
+                        CompactionError::Other(anyhow::anyhow!("flush task cancelled"))
+                    }
+                    ImageLayerWriterError::Other(err) => CompactionError::Other(err),
+                })?;
                 let new_layer = Layer::finish_creating(self.conf, self, desc, &path)
                     .map_err(CompactionError::Other)?;
                 info!(layer=%new_layer, "rewrote layer, {} -> {} bytes",
@@ -2140,7 +2144,12 @@ impl Timeline {
                             .unwrap()
                             .finish(prev_key.unwrap().next(), ctx)
                             .await
-                            .map_err(CompactionError::Other)?;
+                            .map_err(|e| match e {
+                                DeltaLayerWriterError::Cancelled => {
+                                    CompactionError::Other(anyhow::anyhow!("flush task cancelled"))
+                                }
+                                DeltaLayerWriterError::Other(err) => CompactionError::Other(err),
+                            })?;
                         let new_delta = Layer::finish_creating(self.conf, self, desc, &path)
                             .map_err(CompactionError::Other)?;
 
@@ -2217,7 +2226,12 @@ impl Timeline {
             let (desc, path) = writer
                 .finish(prev_key.unwrap().next(), ctx)
                 .await
-                .map_err(CompactionError::Other)?;
+                .map_err(|e| match e {
+                    DeltaLayerWriterError::Cancelled => {
+                        CompactionError::Other(anyhow::anyhow!("flush task cancelled"))
+                    }
+                    DeltaLayerWriterError::Other(err) => CompactionError::Other(err),
+                })?;
             let new_delta = Layer::finish_creating(self.conf, self, desc, &path)
                 .map_err(CompactionError::Other)?;
             new_layers.push(new_delta);
@@ -4253,7 +4267,15 @@ impl TimelineAdaptor {
             unfinished_image_layer,
         } = outcome
         {
-            let (desc, path) = unfinished_image_layer.finish(ctx).await?;
+            let (desc, path) = unfinished_image_layer
+                .finish(ctx)
+                .await
+                .map_err(|e| match e {
+                    ImageLayerWriterError::Cancelled => {
+                        CreateImageLayersError::Other(anyhow::anyhow!("flush task cancelled"))
+                    }
+                    ImageLayerWriterError::Other(err) => CreateImageLayersError::Other(err),
+                })?;
             let image_layer =
                 Layer::finish_creating(self.timeline.conf, &self.timeline, desc, &path)?;
             self.new_images.push(image_layer);

@@ -545,7 +545,7 @@ impl DeltaLayerWriterInner {
         self,
         key_end: Key,
         ctx: &RequestContext,
-    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
+    ) -> Result<(PersistentLayerDesc, Utf8PathBuf), DeltaLayerWriterError> {
         let index_start_blk = self.blob_writer.size().div_ceil(PAGE_SZ as u64) as u32;
 
         let file = self
@@ -554,17 +554,24 @@ impl DeltaLayerWriterInner {
                 BufferedWriterShutdownMode::ZeroPadToNextMultiple(PAGE_SZ),
                 ctx,
             )
-            .await?;
+            .await
+            .map_err(|e| match e {
+                BlobWriterError::Cancelled => DeltaLayerWriterError::Cancelled,
+                BlobWriterError::Other(err) => DeltaLayerWriterError::Other(err),
+            })?;
 
         // Write out the index
-        let (index_root_blk, block_buf) = self.tree.finish()?;
+        let (index_root_blk, block_buf) = self
+            .tree
+            .finish()
+            .map_err(|e| DeltaLayerWriterError::Other(anyhow::anyhow!(e)))?;
         let mut offset = index_start_blk as u64 * PAGE_SZ as u64;
 
         // TODO(yuchen): https://github.com/neondatabase/neon/issues/10092
         // Should we just replace BlockBuf::blocks with one big buffer
         for buf in block_buf.blocks {
             let (_buf, res) = file.write_all_at(buf.slice_len(), offset, ctx).await;
-            res?;
+            res.map_err(|e| DeltaLayerWriterError::Other(anyhow::anyhow!(e)))?;
             offset += PAGE_SZ as u64;
         }
         assert!(self.lsn_range.start < self.lsn_range.end);
@@ -581,24 +588,29 @@ impl DeltaLayerWriterInner {
         };
 
         // Writes summary at the first block (offset 0).
-        let buf = summary.ser_into_page()?;
+        let buf = summary
+            .ser_into_page()
+            .map_err(|e| DeltaLayerWriterError::Other(anyhow::anyhow!(e)))?;
         let (_buf, res) = file.write_all_at(buf.slice_len(), 0, ctx).await;
-        res?;
+        res.map_err(|e| DeltaLayerWriterError::Other(anyhow::anyhow!(e)))?;
 
-        let metadata = file
-            .metadata()
-            .await
-            .context("get file metadata to determine size")?;
+        let metadata = file.metadata().await.map_err(|e| {
+            DeltaLayerWriterError::Other(anyhow::anyhow!(
+                "get file metadata to determine size: {}",
+                e
+            ))
+        })?;
 
         // 5GB limit for objects without multipart upload (which we don't want to use)
         // Make it a little bit below to account for differing GB units
         // https://docs.aws.amazon.com/AmazonS3/latest/userguide/upload-objects.html
-        ensure!(
-            metadata.len() <= S3_UPLOAD_LIMIT,
-            "Created delta layer file at {} of size {} above limit {S3_UPLOAD_LIMIT}!",
-            file.path(),
-            metadata.len()
-        );
+        if metadata.len() > S3_UPLOAD_LIMIT {
+            return Err(DeltaLayerWriterError::Other(anyhow::anyhow!(
+                "Created delta layer file at {} of size {} above limit {S3_UPLOAD_LIMIT}!",
+                file.path(),
+                metadata.len()
+            )));
+        }
 
         // Note: Because we opened the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't
@@ -613,9 +625,9 @@ impl DeltaLayerWriterInner {
         );
 
         // fsync the file
-        file.sync_all()
-            .await
-            .maybe_fatal_err("delta_layer sync_all")?;
+        file.sync_all().await.map_err(|e| {
+            DeltaLayerWriterError::Other(anyhow::anyhow!("delta_layer sync_all: {}", e))
+        })?;
 
         trace!("created delta layer {}", self.path);
 
@@ -737,7 +749,7 @@ impl DeltaLayerWriter {
         mut self,
         key_end: Key,
         ctx: &RequestContext,
-    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
+    ) -> Result<(PersistentLayerDesc, Utf8PathBuf), DeltaLayerWriterError> {
         self.inner.take().unwrap().finish(key_end, ctx).await
     }
 
@@ -749,6 +761,14 @@ impl DeltaLayerWriter {
         let inner = self.inner.as_ref().unwrap();
         inner.blob_writer.size() + inner.tree.borrow_writer().size() + PAGE_SZ as u64
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DeltaLayerWriterError {
+    #[error("flush task cancelled")]
+    Cancelled,
+    #[error(transparent)]
+    Other(anyhow::Error),
 }
 
 #[derive(thiserror::Error, Debug)]

@@ -18,6 +18,8 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::tenant::Timeline;
 use crate::tenant::storage_layer::Layer;
+use crate::tenant::storage_layer::delta_layer::DeltaLayerWriterError;
+use crate::tenant::storage_layer::image_layer::ImageLayerWriterError;
 
 pub(crate) enum BatchWriterResult {
     Produced(ResidentLayer),
@@ -139,14 +141,24 @@ impl BatchLayerWriter {
                 generated_layers.push(BatchWriterResult::Discarded(layer_key));
             } else {
                 let res = match inner {
-                    LayerWriterWrapper::Delta(writer) => {
-                        writer.finish(layer_key.key_range.end, ctx).await
-                    }
-                    LayerWriterWrapper::Image(writer) => {
-                        writer
-                            .finish_with_end_key(layer_key.key_range.end, ctx)
-                            .await
-                    }
+                    LayerWriterWrapper::Delta(writer) => writer
+                        .finish(layer_key.key_range.end, ctx)
+                        .await
+                        .map_err(|e| match e {
+                            DeltaLayerWriterError::Cancelled => {
+                                anyhow::anyhow!("flush task cancelled")
+                            }
+                            DeltaLayerWriterError::Other(err) => err,
+                        }),
+                    LayerWriterWrapper::Image(writer) => writer
+                        .finish_with_end_key(layer_key.key_range.end, ctx)
+                        .await
+                        .map_err(|e| match e {
+                            ImageLayerWriterError::Cancelled => {
+                                anyhow::anyhow!("flush task cancelled")
+                            }
+                            ImageLayerWriterError::Other(err) => err,
+                        }),
                 };
                 let layer = match res {
                     Ok((desc, path)) => {

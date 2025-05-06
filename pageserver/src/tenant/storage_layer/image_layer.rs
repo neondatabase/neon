@@ -342,6 +342,14 @@ impl ImageLayer {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ImageLayerWriterError {
+    #[error("flush task cancelled")]
+    Cancelled,
+    #[error(transparent)]
+    Other(anyhow::Error),
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum RewriteSummaryError {
     #[error("magic mismatch")]
@@ -931,7 +939,7 @@ impl ImageLayerWriterInner {
         self,
         ctx: &RequestContext,
         end_key: Option<Key>,
-    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
+    ) -> Result<(PersistentLayerDesc, Utf8PathBuf), ImageLayerWriterError> {
         let index_start_blk = self.blob_writer.size().div_ceil(PAGE_SZ as u64) as u32;
 
         // Calculate compression ratio
@@ -954,17 +962,24 @@ impl ImageLayerWriterInner {
                 BufferedWriterShutdownMode::ZeroPadToNextMultiple(PAGE_SZ),
                 ctx,
             )
-            .await?;
+            .await
+            .map_err(|e| match e {
+                BlobWriterError::Cancelled => ImageLayerWriterError::Cancelled,
+                BlobWriterError::Other(err) => ImageLayerWriterError::Other(err),
+            })?;
 
         // Write out the index
         let mut offset = index_start_blk as u64 * PAGE_SZ as u64;
-        let (index_root_blk, block_buf) = self.tree.finish()?;
+        let (index_root_blk, block_buf) = self
+            .tree
+            .finish()
+            .map_err(|e| ImageLayerWriterError::Other(anyhow::anyhow!(e)))?;
 
         // TODO(yuchen): https://github.com/neondatabase/neon/issues/10092
         // Should we just replace BlockBuf::blocks with one big buffer?
         for buf in block_buf.blocks {
             let (_buf, res) = file.write_all_at(buf.slice_len(), offset, ctx).await;
-            res?;
+            res.map_err(|e| ImageLayerWriterError::Other(anyhow::anyhow!(e)))?;
             offset += PAGE_SZ as u64;
         }
 
@@ -987,14 +1002,18 @@ impl ImageLayerWriterInner {
         };
 
         // Writes summary at the first block (offset 0).
-        let buf = summary.ser_into_page()?;
+        let buf = summary
+            .ser_into_page()
+            .map_err(|e| ImageLayerWriterError::Other(anyhow::anyhow!(e)))?;
         let (_buf, res) = file.write_all_at(buf.slice_len(), 0, ctx).await;
-        res?;
+        res.map_err(|e| ImageLayerWriterError::Other(anyhow::anyhow!(e)))?;
 
-        let metadata = file
-            .metadata()
-            .await
-            .context("get metadata to determine file size")?;
+        let metadata = file.metadata().await.map_err(|e| {
+            ImageLayerWriterError::Other(anyhow::anyhow!(
+                "get metadata to determine file size: {}",
+                e
+            ))
+        })?;
 
         let desc = PersistentLayerDesc::new_img(
             self.tenant_shard_id,
@@ -1017,9 +1036,9 @@ impl ImageLayerWriterInner {
         // set inner.file here. The first read will have to re-open it.
 
         // fsync the file
-        file.sync_all()
-            .await
-            .maybe_fatal_err("image_layer sync_all")?;
+        file.sync_all().await.map_err(|e| {
+            ImageLayerWriterError::Other(anyhow::anyhow!("image_layer sync_all: {}", e))
+        })?;
 
         trace!("created image layer {}", self.path);
 
@@ -1138,7 +1157,7 @@ impl ImageLayerWriter {
     pub(crate) async fn finish(
         mut self,
         ctx: &RequestContext,
-    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
+    ) -> Result<(PersistentLayerDesc, Utf8PathBuf), ImageLayerWriterError> {
         self.inner.take().unwrap().finish(ctx, None).await
     }
 
@@ -1147,7 +1166,7 @@ impl ImageLayerWriter {
         mut self,
         end_key: Key,
         ctx: &RequestContext,
-    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
+    ) -> Result<(PersistentLayerDesc, Utf8PathBuf), ImageLayerWriterError> {
         self.inner.take().unwrap().finish(ctx, Some(end_key)).await
     }
 }
