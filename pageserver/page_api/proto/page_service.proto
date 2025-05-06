@@ -51,15 +51,13 @@ service PageService {
 }
 
 // The LSN a request should read at.
-//
-// TODO: is not_modified_since_lsn meaningful for any other requests than GetPage? If not, inline
-// the relevant fields directly in each request type.
 message ReadLsn {
   // The request's read LSN. Required.
   uint64 request_lsn = 1;
   // If given, the caller guarantees that the page has not been modified since
   // this LSN. Must be smaller than request_lsn. This allows the Pageserver to
-  // serve an old page without waiting for the request LSN to arrive.
+  // serve an old page without waiting for the request LSN to arrive. Valid for
+  // all request types.
   uint64 not_modified_since_lsn = 2;
 }
 
