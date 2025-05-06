@@ -11,10 +11,9 @@
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use tokio_epoll_uring;
-
-use std::sync::Mutex;
 
 use crate::BLCKSZ;
 
@@ -25,7 +24,11 @@ pub struct FileCache {
 
     file: Arc<File>,
 
-    free_list: Mutex<FreeList>
+    free_list: Mutex<FreeList>,
+
+    // metrics
+    max_blocks_gauge: metrics::IntGauge,
+    num_free_blocks_gauge: metrics::IntGauge,
 }
 
 // TODO: We keep track of all free blocks in this vec. That doesn't really scale.
@@ -39,9 +42,14 @@ struct FreeList {
 impl FileCache {
     pub fn new(
         file_cache_path: &Path,
-        initial_size: u64,
+        mut initial_size: u64,
         uring_system: tokio_epoll_uring::SystemHandle,
     ) -> Result<FileCache, std::io::Error> {
+        if initial_size < 100 {
+            tracing::warn!("min size for file cache is 100 blocks, {} requested", initial_size);
+            initial_size = 100;
+        }
+
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -49,7 +57,16 @@ impl FileCache {
             .create(true)
             .open(file_cache_path)?;
 
-        tracing::info!("Created cache file {file_cache_path:?}");
+        let max_blocks_gauge = metrics::IntGauge::new(
+            "file_cache_max_blocks",
+            "Local File Cache size in 8KiB blocks",
+            ).unwrap();
+        let num_free_blocks_gauge = metrics::IntGauge::new(
+            "file_cache_num_free_blocks",
+            "Number of free 8KiB blocks in Local File Cache",
+        ).unwrap();
+
+        tracing::info!("initialized file cache with {} blocks", initial_size);
 
         Ok(FileCache {
             file: Arc::new(file),
@@ -59,6 +76,8 @@ impl FileCache {
                 max_blocks: initial_size,
                 free_blocks: Vec::new(),
             }),
+            max_blocks_gauge,
+            num_free_blocks_gauge,
         })
     }
 
@@ -112,7 +131,7 @@ impl FileCache {
         }
         if free_list.next_free_block < free_list.max_blocks {
             let result = free_list.next_free_block;
-            free_list.next_free_block -= 1;
+            free_list.next_free_block += 1;
             return Some(result);
         }
         None
@@ -130,5 +149,31 @@ fn map_io_uring_error(err: tokio_epoll_uring::Error<std::io::Error>) -> std::io:
         tokio_epoll_uring::Error::System(err) => {
             std::io::Error::new(std::io::ErrorKind::Other, err)
         }
+    }
+}
+
+impl metrics::core::Collector for FileCache {
+    fn desc(&self) -> Vec<&metrics::core::Desc> {
+        let mut descs = Vec::new();
+        descs.append(&mut self.max_blocks_gauge.desc());
+        descs.append(&mut self.num_free_blocks_gauge.desc());
+        descs
+    }
+    fn collect(&self) -> Vec<metrics::proto::MetricFamily> {
+        // Update the gauges with fresh values first
+        {
+            let free_list = self.free_list.lock().unwrap();
+            self.max_blocks_gauge.set(free_list.max_blocks as i64);
+
+            let total_free_blocks: i64 =
+                free_list.free_blocks.len() as i64
+                + (free_list.max_blocks as i64 - free_list.next_free_block as i64);
+            self.num_free_blocks_gauge.set(total_free_blocks as i64);
+        }
+
+        let mut values = Vec::new();
+        values.append(&mut self.max_blocks_gauge.collect());
+        values.append(&mut self.num_free_blocks_gauge.collect());
+        values
     }
 }

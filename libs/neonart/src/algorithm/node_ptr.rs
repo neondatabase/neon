@@ -100,8 +100,6 @@ pub struct NodeInternal16<V> {
     child_ptrs: [NodePtr<V>; 16],
 }
 
-const INVALID_CHILD_INDEX: u8 = u8::MAX;
-
 #[repr(C)]
 pub struct NodeInternal48<V> {
     tag: NodeTag,
@@ -114,6 +112,7 @@ pub struct NodeInternal48<V> {
     child_indexes: [u8; 256],
     child_ptrs: [NodePtr<V>; 48],
 }
+const INVALID_CHILD_INDEX: u8 = u8::MAX;
 
 #[repr(C)]
 pub struct NodeInternal256<V> {
@@ -339,6 +338,35 @@ impl<V: Value> NodePtr<V> {
         }
     }
 
+    pub(crate) fn find_next_child_or_value(&self, key_byte: u8) -> Option<(u8, ChildOrValuePtr<V>)> {
+        match self.variant() {
+            NodeVariant::Internal4(n) => n
+                .find_next_child(key_byte)
+                .map(|(k, c)| (k, ChildOrValuePtr::Child(c))),
+            NodeVariant::Internal16(n) => n
+                .find_next_child(key_byte)
+                .map(|(k, c)| (k, ChildOrValuePtr::Child(c))),
+            NodeVariant::Internal48(n) => n
+                .find_next_child(key_byte)
+                .map(|(k, c)| (k, ChildOrValuePtr::Child(c))),
+            NodeVariant::Internal256(n) => n
+                .find_next_child(key_byte)
+                .map(|(k, c)| (k, ChildOrValuePtr::Child(c))),
+            NodeVariant::Leaf4(n) => n
+                .find_next_leaf_value(key_byte)
+                .map(|(k, v)| (k, ChildOrValuePtr::Value(v))),
+            NodeVariant::Leaf16(n) => n
+                .find_next_leaf_value(key_byte)
+                .map(|(k, v)| (k, ChildOrValuePtr::Value(v))),
+            NodeVariant::Leaf48(n) => n
+                .find_next_leaf_value(key_byte)
+                .map(|(k, v)| (k, ChildOrValuePtr::Value(v))),
+            NodeVariant::Leaf256(n) => n
+                .find_next_leaf_value(key_byte)
+                .map(|(k, v)| (k, ChildOrValuePtr::Value(v))),
+        }
+    }
+    
     pub(crate) fn truncate_prefix(&mut self, new_prefix_len: usize) {
         match self.variant_mut() {
             NodeVariantMut::Internal4(n) => n.truncate_prefix(new_prefix_len),
@@ -512,6 +540,27 @@ impl<V: Value> NodeInternal4<V> {
         None
     }
 
+    fn find_next_child(&self, min_key: u8) -> Option<(u8, NodePtr<V>)> {
+        let mut found: Option<(usize, u8)> = None;
+        for i in 0..self.num_children as usize {
+            let this_key = self.child_keys[i];
+            if this_key >= min_key {
+                if let Some((_, found_key)) = found {
+                    if this_key < found_key {
+                        found = Some((i, this_key));
+                    }
+                } else {
+                    found = Some((i, this_key));
+                }
+            }
+        }
+        if let Some((found_idx, found_key)) = found {
+            Some((found_key, self.child_ptrs[found_idx]))
+        } else {
+            None
+        }
+    }
+
     fn replace_child(&mut self, key_byte: u8, replacement: NodePtr<V>) {
         for i in 0..self.num_children as usize {
             if self.child_keys[i] == key_byte {
@@ -582,6 +631,27 @@ impl<V: Value> NodeInternal16<V> {
             }
         }
         None
+    }
+
+    fn find_next_child(&self, min_key: u8) -> Option<(u8, NodePtr<V>)> {
+        let mut found: Option<(usize, u8)> = None;
+        for i in 0..self.num_children as usize {
+            let this_key = self.child_keys[i];
+            if this_key >= min_key {
+                if let Some((_, found_key)) = found {
+                    if this_key < found_key {
+                        found = Some((i, this_key));
+                    }
+                } else {
+                    found = Some((i, this_key));
+                }
+            }
+        }
+        if let Some((found_idx, found_key)) = found {
+            Some((found_key, self.child_ptrs[found_idx]))
+        } else {
+            None
+        }
     }
 
     fn replace_child(&mut self, key_byte: u8, replacement: NodePtr<V>) {
@@ -657,6 +727,16 @@ impl<V: Value> NodeInternal48<V> {
         }
     }
 
+    fn find_next_child(&self, min_key: u8) -> Option<(u8, NodePtr<V>)> {
+        for key in min_key..=u8::MAX {
+            let idx = self.child_indexes[key as usize];
+            if idx != INVALID_CHILD_INDEX {
+                return Some((key, self.child_ptrs[idx as usize]));
+            }
+        }
+        None
+    }
+
     fn replace_child(&mut self, key_byte: u8, replacement: NodePtr<V>) {
         let idx = self.child_indexes[key_byte as usize];
         if idx != INVALID_CHILD_INDEX {
@@ -729,6 +809,15 @@ impl<V: Value> NodeInternal256<V> {
         }
     }
 
+    fn find_next_child(&self, min_key: u8) -> Option<(u8, NodePtr<V>)> {
+        for key in min_key..=u8::MAX {
+            if !self.child_ptrs[key as usize].is_null() {
+                return Some((key, self.child_ptrs[key as usize]));
+            }
+        }
+        None
+    }
+
     fn replace_child(&mut self, key_byte: u8, replacement: NodePtr<V>) {
         let idx = key_byte as usize;
         if !self.child_ptrs[idx].is_null() {
@@ -774,6 +863,28 @@ impl<V: Value> NodeLeaf4<V> {
         }
         None
     }
+
+    fn find_next_leaf_value<'a: 'b, 'b>(&'a self, min_key: u8) -> Option<(u8, &'b V)> {
+        let mut found: Option<(usize, u8)> = None;
+        for i in 0..self.num_values as usize {
+            let this_key = self.child_keys[i];
+            if this_key >= min_key {
+                if let Some((_, found_key)) = found {
+                    if this_key < found_key {
+                        found = Some((i, this_key));
+                    }
+                } else {
+                    found = Some((i, this_key));
+                }
+            }
+        }
+        if let Some((found_idx, found_key)) = found {
+            Some((found_key, self.child_values[found_idx].as_ref().unwrap()))
+        } else {
+            None
+        }
+    }
+
     fn is_full(&self) -> bool {
         self.num_values == 4
     }
@@ -853,6 +964,28 @@ impl<V: Value> NodeLeaf16<V> {
         }
         None
     }
+
+    fn find_next_leaf_value<'a: 'b, 'b>(&'a self, min_key: u8) -> Option<(u8, &'b V)> {
+        let mut found: Option<(usize, u8)> = None;
+        for i in 0..self.num_values as usize {
+            let this_key = self.child_keys[i];
+            if this_key >= min_key {
+                if let Some((_, found_key)) = found {
+                    if this_key < found_key {
+                        found = Some((i, this_key));
+                    }
+                } else {
+                    found = Some((i, this_key));
+                }
+            }
+        }
+        if let Some((found_idx, found_key)) = found {
+            Some((found_key, self.child_values[found_idx].as_ref().unwrap()))
+        } else {
+            None
+        }
+    }
+
     fn is_full(&self) -> bool {
         self.num_values == 16
     }
@@ -932,6 +1065,17 @@ impl<V: Value> NodeLeaf48<V> {
             None
         }
     }
+
+    fn find_next_leaf_value<'a: 'b, 'b>(&'a self, min_key: u8) -> Option<(u8, &'b V)> {
+        for key in min_key..=u8::MAX {
+            let idx = self.child_indexes[key as usize];
+            if idx != INVALID_CHILD_INDEX {
+                return Some((key, &self.child_values[idx as usize].as_ref().unwrap()));
+            }
+        }
+        None
+    }
+
     fn is_full(&self) -> bool {
         self.num_values == 48
     }
@@ -1017,6 +1161,16 @@ impl<V: Value> NodeLeaf256<V> {
         let idx = key as usize;
         self.child_values[idx].as_ref()
     }
+
+    fn find_next_leaf_value<'a: 'b, 'b>(&'a self, min_key: u8) -> Option<(u8, &'b V)> {
+        for key in min_key..=u8::MAX {
+            if let Some(v) = &self.child_values[key as usize] {
+                return Some((key, v));
+            }
+        }
+        None
+    }
+
     fn is_full(&self) -> bool {
         self.num_values == 256
     }

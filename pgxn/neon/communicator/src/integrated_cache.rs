@@ -58,7 +58,7 @@ pub struct IntegratedCacheWriteAccess<'t> {
 
     global_lw_lsn: AtomicU64,
 
-    file_cache: Option<FileCache>,
+    pub(crate) file_cache: Option<FileCache>,
 
     // Fields for eviction
     clock_hand: std::sync::Mutex<TreeIterator<TreeKey>>,
@@ -223,7 +223,7 @@ impl From<(&RelTag, u32)> for TreeKey {
 }
 
 impl neonart::Key for TreeKey {
-    const KEY_LEN: usize = 4 + 4 + 4 + 1 + 32;
+    const KEY_LEN: usize = 4 + 4 + 4 + 1 + 4;
 
     fn as_bytes(&self) -> &[u8] {
         zerocopy::IntoBytes::as_bytes(self)
@@ -268,6 +268,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
             } else {
                 panic!("unexpected tree entry type for block key");
             };
+            block_entry.referenced.store(true, Ordering::Relaxed);
 
             if let Some(cache_block) = block_entry.cache_block {
                 self.file_cache
@@ -297,6 +298,10 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
             } else {
                 panic!("unexpected tree entry type for block key");
             };
+
+            // This is used for prefetch requests. Treat the probe as an 'access', to keep it
+            // in cache.
+            block_entry.referenced.store(true, Ordering::Relaxed);
 
             if let Some(_cache_block) = block_entry.cache_block {
                 Ok(CacheResult::Found(()))
@@ -373,6 +378,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                     } else {
                         panic!("unexpected tree entry type for block key");
                     };
+                    block_entry.referenced.store(true, Ordering::Relaxed);
                     block_entry.lw_lsn = lw_lsn;
                     if block_entry.cache_block.is_none() {
                         block_entry.cache_block = reserved_cache_block.take();
@@ -389,6 +395,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                 }
             });
 
+            // If we didn't need to block we reserved, put it back to the free list
             if let Some(x) = reserved_cache_block {
                 file_cache.dealloc_block(x);
             }
@@ -422,12 +429,13 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
     /// caller to use immediately.
     pub fn try_evict_one_cache_block(&self) -> Option<CacheBlock> {
         let mut clock_hand = self.clock_hand.lock().unwrap();
-        for _ in 0..1000 {
+        for _ in 0..100 {
             let r = self.cache_tree.start_read();
             match clock_hand.next(&r) {
                 None => {
                     // The cache is completely empty. Pretty unexpected that this function
                     // was called then..
+                    break;
                 },
                 Some((_k, TreeEntry::Rel(_))) => {
                     // ignore rel entries for now.
@@ -512,6 +520,7 @@ impl<'e> BackendCacheReadOp<'e> {
             } else {
                 panic!("unexpected tree entry type for block key");
             };
+            block_entry.referenced.store(true, Ordering::Relaxed);
 
             block_entry.cache_block
         } else {

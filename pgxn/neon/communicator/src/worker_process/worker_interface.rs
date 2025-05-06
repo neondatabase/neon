@@ -65,6 +65,8 @@ pub extern "C" fn communicator_worker_process_launch(
         error!("error: {err:?}");
     });
 
+    runtime.block_on(worker_struct.launch_exporter_task());
+
     // keep the runtime running after we exit this function
     Box::leak(Box::new(runtime));
 }

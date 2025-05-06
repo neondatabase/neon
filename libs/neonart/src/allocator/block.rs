@@ -116,6 +116,8 @@ impl<'t> BlockAllocator<'t> {
         return INVALID_BLOCK;
     }
 
+    // TODO: this is currently unused. The slab allocator never releases blocks
+    #[allow(dead_code)]
     pub(crate) fn release_block(&self, block_ptr: *mut u8) {
         let blockno = unsafe { block_ptr.byte_offset_from(self.blocks_ptr) / BLOCK_SIZE as isize };
         self.release_block_internal(blockno as u64);

@@ -324,9 +324,8 @@ where
 }
 
 impl<'e, K: Key, V: Value> TreeReadGuard<'e, K, V> {
-    pub fn get(&self, key: &K) -> Option<V> {
-        let vref = algorithm::search(key, self.tree.root, &self.epoch_pin);
-        vref.cloned()
+    pub fn get(&'e self, key: &K) -> Option<&'e V> {
+        algorithm::search(key, self.tree.root, &self.epoch_pin)
     }
 }
 
@@ -347,9 +346,8 @@ where
 impl<'t, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteGuard<'t, K, V, A> {
 
     /// Get a value
-    pub fn get(&mut self, key: &K) -> Option<V> {
-        let v = algorithm::search(key, self.tree_writer.tree.root, &self.epoch_pin);
-        v.cloned()
+    pub fn get(&'t mut self, key: &K) -> Option<&'t V> {
+        algorithm::search(key, self.tree_writer.tree.root, &self.epoch_pin)
     }
 
     /// Insert a value
@@ -377,13 +375,11 @@ impl<'t, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteGuard<'t, K, V, A> {
     where
         F: FnOnce(Option<&V>) -> Option<V>,
     {
-        let result = algorithm::update_fn(key, value_fn, self.tree_writer.tree.root, &mut self);
+        algorithm::update_fn(key, value_fn, self.tree_writer.tree.root, &mut self);
 
         if self.created_garbage {
-            let n = self.collect_garbage();
-            eprintln!("collected {n} obsolete nodes");
+            let _ = self.collect_garbage();
         }
-        result   
     }
 
     fn remember_obsolete_node(&mut self, ptr: NodePtr<V>) {
@@ -415,7 +411,7 @@ pub struct TreeIterator<K>
     where K: Key + for<'a> From<&'a [u8]>,
 {
     done: bool,
-    next_key: Vec<u8>,
+    pub next_key: Vec<u8>,
     max_key: Option<Vec<u8>>,
 
     phantom_key: PhantomData<K>,
@@ -436,12 +432,16 @@ impl<K> TreeIterator<K>
     }
 
     pub fn new(range: &std::ops::Range<K>) -> TreeIterator<K> {
-        TreeIterator {
+        let result = TreeIterator {
             done: false,
             next_key: Vec::from(range.start.as_bytes()),
             max_key: Some(Vec::from(range.end.as_bytes())),
             phantom_key: PhantomData,
-        }
+        };
+        assert_eq!(result.next_key.len(), K::KEY_LEN);
+        assert_eq!(result.max_key.as_ref().unwrap().len(), K::KEY_LEN);
+        
+        result
     }
 
     
@@ -451,27 +451,48 @@ impl<K> TreeIterator<K>
         if self.done {
             return None;
         }
-        if let Some((k , v)) = algorithm::iter_next(&mut self.next_key, read_guard.tree.root, &read_guard.epoch_pin) {
-            assert_eq!(k.len(), self.next_key.len());
 
-            // Check if we reached the end of the range
-            if let Some(max_key) = &self.max_key {
-                assert_eq!(k.len(), max_key.len());
-                if k.as_slice() >= max_key.as_slice() {
-                    self.done = true;
-                    return None;
+        let mut wrapped_around = false;
+        loop {
+            assert_eq!(self.next_key.len(), K::KEY_LEN);
+            if let Some((k , v)) = algorithm::iter_next(&mut self.next_key, read_guard.tree.root, &read_guard.epoch_pin) {
+                assert_eq!(k.len(), K::KEY_LEN);
+                assert_eq!(self.next_key.len(), K::KEY_LEN);
+
+                // Check if we reached the end of the range
+                if let Some(max_key) = &self.max_key {
+                    if k.as_slice() >= max_key.as_slice() {
+                        self.done = true;
+                        break None;
+                    }
                 }
+
+                // increment the key
+                self.next_key = k.clone();
+                increment_key(self.next_key.as_mut_slice());
+                let k = k.as_slice().into();
+
+                break Some((k, v))
+            } else {
+                if self.max_key.is_some() {
+                    self.done = true;
+                } else {
+                    // Start from beginning
+                    if !wrapped_around {
+                        for i in 0..K::KEY_LEN {
+                            self.next_key[i] = 0;
+                        }
+                        wrapped_around = true;
+                        continue;
+                    } else {
+                        // The tree is completely empty
+                        // FIXME: perhaps we should remember the starting point instead.
+                        // Currently this will scan some ranges twice.
+                        break None;
+                    }
+                }
+                break None
             }
-
-            // increment the key
-            self.next_key = k.clone();
-            increment_key(self.next_key.as_mut_slice());
-            let k = k.as_slice().into();
-
-            Some((k, v))
-        } else {
-            self.done = true;
-            None
         }
     }
 }

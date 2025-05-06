@@ -390,3 +390,21 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         Ok(())
     }
 }
+
+
+impl<'t> metrics::core::Collector for CommunicatorWorkerProcessStruct<'t> {
+    fn desc(&self) -> Vec<&metrics::core::Desc> {
+        let mut descs = Vec::new();
+        if let Some(file_cache) = &self.cache.file_cache {
+            descs.append(&mut file_cache.desc());
+        }
+        descs
+    }
+    fn collect(&self) -> Vec<metrics::proto::MetricFamily> {
+        let mut values = Vec::new();
+        if let Some(file_cache) = &self.cache.file_cache {
+            values.append(&mut file_cache.collect());
+        }
+        values
+    }
+}

@@ -1346,14 +1346,17 @@ name = "communicator"
 version = "0.1.0"
 dependencies = [
  "atomic_enum",
+ "axum 0.8.1",
  "bytes",
  "cbindgen",
  "http 1.1.0",
  "libc",
+ "metrics",
  "neonart",
  "nix 0.27.1",
  "pageserver_client_grpc",
  "pageserver_page_api",
+ "prometheus",
  "prost 0.13.3",
  "thiserror 1.0.69",
  "tokio",

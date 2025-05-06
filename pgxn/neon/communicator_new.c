@@ -211,6 +211,10 @@ communicator_new_bgworker_main(Datum main_arg)
 	struct LoggingState *logging;
 	char		errbuf[1000];
 	int			elevel;
+	uint64		initial_file_cache_size;
+
+	/* lfc_size_limit is in MBs */
+	initial_file_cache_size = lfc_size_limit * (1024 * 1024 / BLCKSZ);
 
 	/* Establish signal handlers. */
 	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
@@ -231,7 +235,7 @@ communicator_new_bgworker_main(Datum main_arg)
 									   connstrs,
 									   num_shards,
 									   lfc_path,
-									   lfc_size_limit);
+									   initial_file_cache_size);
 	cis = NULL;
 
 	elog(LOG, "communicator threads started");
