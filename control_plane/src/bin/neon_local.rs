@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
+use compute_api::requests::ComputeClaimsScope;
 use compute_api::spec::ComputeMode;
 use control_plane::broker::StorageBroker;
 use control_plane::endpoint::ComputeControlPlane;
@@ -705,6 +706,9 @@ struct EndpointStopCmdArgs {
 struct EndpointGenerateJwtCmdArgs {
     #[clap(help = "Postgres endpoint id")]
     endpoint_id: String,
+
+    #[clap(short = 's', long, help = "Scope to generate the JWT with", value_parser = ComputeClaimsScope::from_str)]
+    scope: Option<ComputeClaimsScope>,
 }
 
 #[derive(clap::Subcommand)]
@@ -1540,12 +1544,16 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             endpoint.stop(&args.mode, args.destroy)?;
         }
         EndpointCmd::GenerateJwt(args) => {
-            let endpoint_id = &args.endpoint_id;
-            let endpoint = cplane
-                .endpoints
-                .get(endpoint_id)
-                .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
-            let jwt = endpoint.generate_jwt()?;
+            let endpoint = {
+                let endpoint_id = &args.endpoint_id;
+
+                cplane
+                    .endpoints
+                    .get(endpoint_id)
+                    .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?
+            };
+
+            let jwt = endpoint.generate_jwt(args.scope)?;
 
             print!("{jwt}");
         }

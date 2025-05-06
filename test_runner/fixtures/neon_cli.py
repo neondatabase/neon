@@ -21,6 +21,7 @@ if TYPE_CHECKING:
         Any,
     )
 
+    from fixtures.endpoint.http import ComputeClaimsScope
     from fixtures.pg_version import PgVersion
 
 
@@ -535,12 +536,16 @@ class NeonLocalCli(AbstractNeonCli):
         res.check_returncode()
         return res
 
-    def endpoint_generate_jwt(self, endpoint_id: str) -> str:
+    def endpoint_generate_jwt(
+        self, endpoint_id: str, scope: ComputeClaimsScope | None = None
+    ) -> str:
         """
         Generate a JWT for making requests to the endpoint's external HTTP
         server.
         """
         args = ["endpoint", "generate-jwt", endpoint_id]
+        if scope:
+            args += ["--scope", str(scope)]
 
         cmd = self.raw_cli(args)
         cmd.check_returncode()
