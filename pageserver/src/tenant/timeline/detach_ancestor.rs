@@ -818,9 +818,7 @@ async fn copy_lsn_prefix(
             .finish(reused_highest_key, ctx)
             .await
             .map_err(|e| match e {
-                DeltaLayerWriterError::Cancelled => {
-                    Error::Prepare(anyhow::anyhow!("flush task cancelled"))
-                }
+                DeltaLayerWriterError::Cancelled => Error::ShuttingDown,
                 DeltaLayerWriterError::Other(err) => Error::Prepare(err),
             })?;
         let copied = Layer::finish_creating(target_timeline.conf, target_timeline, desc, &path)

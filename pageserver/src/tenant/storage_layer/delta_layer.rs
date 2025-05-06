@@ -485,7 +485,7 @@ impl DeltaLayerWriterInner {
         ctx: &RequestContext,
     ) -> Result<(), DeltaLayerWriterError> {
         let val_ser =
-            Value::ser(&val).map_err(|e| DeltaLayerWriterError::Other(anyhow::anyhow!(e)))?;
+            Value::ser(&val).map_err(|e| DeltaLayerWriterError::Other(anyhow::Error::new(e)))?;
 
         let (_, res) = self
             .put_value_bytes(key, lsn, val_ser.slice_len(), val.will_init(), ctx)
@@ -585,14 +585,14 @@ impl DeltaLayerWriterInner {
         let (index_root_blk, block_buf) = self
             .tree
             .finish()
-            .map_err(|e| DeltaLayerWriterError::Other(anyhow::anyhow!(e)))?;
+            .map_err(|e| DeltaLayerWriterError::Other(anyhow::Error::new(e)))?;
         let mut offset = index_start_blk as u64 * PAGE_SZ as u64;
 
         // TODO(yuchen): https://github.com/neondatabase/neon/issues/10092
         // Should we just replace BlockBuf::blocks with one big buffer
         for buf in block_buf.blocks {
             let (_buf, res) = file.write_all_at(buf.slice_len(), offset, ctx).await;
-            res.map_err(|e| DeltaLayerWriterError::Other(anyhow::anyhow!(e)))?;
+            res.map_err(|e| DeltaLayerWriterError::Other(anyhow::Error::new(e)))?;
             offset += PAGE_SZ as u64;
         }
         assert!(self.lsn_range.start < self.lsn_range.end);
@@ -611,15 +611,12 @@ impl DeltaLayerWriterInner {
         // Writes summary at the first block (offset 0).
         let buf = summary
             .ser_into_page()
-            .map_err(|e| DeltaLayerWriterError::Other(anyhow::anyhow!(e)))?;
+            .map_err(|e| DeltaLayerWriterError::Other(anyhow::Error::new(e)))?;
         let (_buf, res) = file.write_all_at(buf.slice_len(), 0, ctx).await;
-        res.map_err(|e| DeltaLayerWriterError::Other(anyhow::anyhow!(e)))?;
+        res.map_err(|e| DeltaLayerWriterError::Other(anyhow::Error::new(e)))?;
 
         let metadata = file.metadata().await.map_err(|e| {
-            DeltaLayerWriterError::Other(anyhow::anyhow!(
-                "get file metadata to determine size: {}",
-                e
-            ))
+            DeltaLayerWriterError::Other(anyhow::Error::new(e))
         })?;
 
         // 5GB limit for objects without multipart upload (which we don't want to use)
@@ -632,6 +629,7 @@ impl DeltaLayerWriterInner {
                 metadata.len()
             )));
         }
+        
 
         // Note: Because we opened the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't
@@ -646,9 +644,9 @@ impl DeltaLayerWriterInner {
         );
 
         // fsync the file
-        file.sync_all().await.map_err(|e| {
-            DeltaLayerWriterError::Other(anyhow::anyhow!("delta_layer sync_all: {}", e))
-        })?;
+        file.sync_all()
+            .await
+            .maybe_fatal_err("delta_layer sync_all")?;
 
         trace!("created delta layer {}", self.path);
 
@@ -786,7 +784,7 @@ impl DeltaLayerWriter {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DeltaLayerWriterError {
-    #[error("flush task cancelled")]
+    #[error("cancelled")]
     Cancelled,
     #[error(transparent)]
     Other(anyhow::Error),
@@ -802,7 +800,7 @@ pub enum RewriteSummaryError {
 
 impl From<std::io::Error> for RewriteSummaryError {
     fn from(e: std::io::Error) -> Self {
-        Self::Other(anyhow::anyhow!(e))
+        Self::Other(anyhow::Error::new(e))
     }
 }
 

@@ -92,7 +92,7 @@ impl Header {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlobWriterError {
-    #[error("flush task cancelled")]
+    #[error("cancelled")]
     Cancelled,
     #[error(transparent)]
     Other(anyhow::Error),
@@ -247,7 +247,7 @@ where
         ctx: &RequestContext,
         flush_task_span: tracing::Span,
     ) -> Result<Self, BlobWriterError> {
-        let gate_token = gate.enter().map_err(|e| BlobWriterError::Other(e.into()))?;
+        let gate_token = gate.enter().map_err(|_| BlobWriterError::Cancelled)?;
 
         Ok(Self {
             io_buf: Some(BytesMut::new()),

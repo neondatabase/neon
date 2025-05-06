@@ -5863,6 +5863,8 @@ pub(crate) enum CompactionError {
     Other(anyhow::Error),
     #[error("Compaction already running: {0}")]
     AlreadyRunning(&'static str),
+    #[error("cancelled")]
+    Cancelled,
 }
 
 impl CompactionError {
@@ -5877,6 +5879,7 @@ impl CompactionError {
                     PageReconstructError::Cancelled
                 ))
                 | Self::Offload(OffloadError::Cancelled)
+                | Self::Cancelled
         )
     }
 
