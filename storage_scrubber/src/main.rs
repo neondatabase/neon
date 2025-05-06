@@ -73,8 +73,12 @@ enum Command {
         node_kind: NodeKind,
         #[arg(short, long, default_value_t = false)]
         json: bool,
+        /// If provided, only these tenants will be listed from the remote storage.
         #[arg(long = "tenant-id", num_args = 0..)]
         tenant_ids: Vec<TenantShardId>,
+        /// If provided, we will list all tenants, but then filter with the prefix.
+        #[arg(long = "tenant-id-prefix")]
+        tenant_id_prefix: Option<TenantId>,
         #[arg(long = "post", default_value_t = false)]
         post_to_storcon: bool,
         #[arg(long, default_value = None)]
@@ -178,6 +182,7 @@ async fn main() -> anyhow::Result<()> {
         Command::ScanMetadata {
             json,
             tenant_ids,
+            tenant_id_prefix,
             node_kind,
             post_to_storcon,
             dump_db_connstr,
@@ -186,6 +191,9 @@ async fn main() -> anyhow::Result<()> {
             verbose,
         } => {
             if let NodeKind::Safekeeper = node_kind {
+                if tenant_id_prefix.is_some() {
+                    bail!("`tenant_id_prefix` is not supported for safekeeper node_kind");
+                }
                 let db_or_list = match (timeline_lsns, dump_db_connstr) {
                     (Some(timeline_lsns), _) => {
                         let timeline_lsns = serde_json::from_str(&timeline_lsns)
@@ -227,6 +235,7 @@ async fn main() -> anyhow::Result<()> {
                     bucket_config,
                     controller_client.as_ref(),
                     tenant_ids,
+                    tenant_id_prefix,
                     json,
                     post_to_storcon,
                     verbose,
@@ -338,6 +347,7 @@ pub async fn run_cron_job(
         bucket_config,
         controller_client,
         Vec::new(),
+        None,
         true,
         post_to_storcon,
         false, // default to non-verbose mode
@@ -384,10 +394,12 @@ pub async fn pageserver_physical_gc_cmd(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn scan_pageserver_metadata_cmd(
     bucket_config: BucketConfig,
     controller_client: Option<&control_api::Client>,
     tenant_shard_ids: Vec<TenantShardId>,
+    tenant_id_prefix: Option<TenantId>,
     json: bool,
     post_to_storcon: bool,
     verbose: bool,
@@ -398,7 +410,14 @@ pub async fn scan_pageserver_metadata_cmd(
             "Posting pageserver scan health status to storage controller requires `--controller-api` and `--controller-jwt` to run"
         ));
     }
-    match scan_pageserver_metadata(bucket_config.clone(), tenant_shard_ids, verbose).await {
+    match scan_pageserver_metadata(
+        bucket_config.clone(),
+        tenant_shard_ids,
+        tenant_id_prefix,
+        verbose,
+    )
+    .await
+    {
         Err(e) => {
             tracing::error!("Failed: {e}");
             Err(e)
