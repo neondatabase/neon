@@ -1575,9 +1575,7 @@ impl Timeline {
 
             if keys_written > 0 {
                 let (desc, path) = image_layer_writer.finish(ctx).await.map_err(|e| match e {
-                    ImageLayerWriterError::Cancelled => {
-                        CompactionError::Other(anyhow::anyhow!("flush task cancelled"))
-                    }
+                    ImageLayerWriterError::Cancelled => CompactionError::Cancelled,
                     ImageLayerWriterError::Other(err) => CompactionError::Other(err),
                 })?;
                 let new_layer = Layer::finish_creating(self.conf, self, desc, &path)
@@ -2148,9 +2146,7 @@ impl Timeline {
                             .finish(prev_key.unwrap().next(), ctx)
                             .await
                             .map_err(|e| match e {
-                                DeltaLayerWriterError::Cancelled => {
-                                    CompactionError::Other(anyhow::anyhow!("flush task cancelled"))
-                                }
+                                DeltaLayerWriterError::Cancelled => CompactionError::Cancelled,
                                 DeltaLayerWriterError::Other(err) => CompactionError::Other(err),
                             })?;
                         let new_delta = Layer::finish_creating(self.conf, self, desc, &path)
@@ -2212,9 +2208,7 @@ impl Timeline {
                     .put_value(key, lsn, value, ctx)
                     .await
                     .map_err(|e| match e {
-                        DeltaLayerWriterError::Cancelled => {
-                            CompactionError::Other(anyhow::anyhow!("flush task cancelled"))
-                        }
+                        DeltaLayerWriterError::Cancelled => CompactionError::Cancelled,
                         DeltaLayerWriterError::Other(err) => CompactionError::Other(err),
                     })?;
             } else {
@@ -3703,9 +3697,7 @@ impl Timeline {
                     .finish(job_desc.compaction_key_range.start, ctx)
                     .await
                     .map_err(|e| match e {
-                        DeltaLayerWriterError::Cancelled => {
-                            CompactionError::Other(anyhow::anyhow!("flush task cancelled"))
-                        }
+                        DeltaLayerWriterError::Cancelled => CompactionError::Cancelled,
                         DeltaLayerWriterError::Other(err) => CompactionError::Other(err),
                     })?;
                 let layer = Layer::finish_creating(self.conf, self, desc, &path)
@@ -3718,9 +3710,7 @@ impl Timeline {
                     .finish(key.key_range.end, ctx)
                     .await
                     .map_err(|e| match e {
-                        DeltaLayerWriterError::Cancelled => {
-                            CompactionError::Other(anyhow::anyhow!("flush task cancelled"))
-                        }
+                        DeltaLayerWriterError::Cancelled => CompactionError::Cancelled,
                         DeltaLayerWriterError::Other(err) => CompactionError::Other(err),
                     })?;
                 let layer = Layer::finish_creating(self.conf, self, desc, &path)

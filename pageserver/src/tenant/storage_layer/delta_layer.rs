@@ -615,9 +615,10 @@ impl DeltaLayerWriterInner {
         let (_buf, res) = file.write_all_at(buf.slice_len(), 0, ctx).await;
         res.map_err(|e| DeltaLayerWriterError::Other(anyhow::Error::new(e)))?;
 
-        let metadata = file.metadata().await.map_err(|e| {
-            DeltaLayerWriterError::Other(anyhow::Error::new(e))
-        })?;
+        let metadata = file
+            .metadata()
+            .await
+            .map_err(|e| DeltaLayerWriterError::Other(anyhow::Error::new(e)))?;
 
         // 5GB limit for objects without multipart upload (which we don't want to use)
         // Make it a little bit below to account for differing GB units
@@ -629,7 +630,6 @@ impl DeltaLayerWriterInner {
                 metadata.len()
             )));
         }
-        
 
         // Note: Because we opened the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't
@@ -646,7 +646,7 @@ impl DeltaLayerWriterInner {
         // fsync the file
         file.sync_all()
             .await
-            .maybe_fatal_err("delta_layer sync_all")?;
+            .map_err(|e| DeltaLayerWriterError::Other(anyhow::Error::new(e)))?;
 
         trace!("created delta layer {}", self.path);
 
