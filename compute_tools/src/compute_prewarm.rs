@@ -50,7 +50,7 @@ impl ComputeNode {
     // If prewarm failed, we want to get overall number of segments as well as done ones.
     // However, this function should be reliable even if querying postgres failed.
     pub async fn lfc_prewarm_state(&self) -> LfcPrewarmStateWithProgress {
-        info!("requesting LFC prewarm status from postgres");
+        info!("requesting LFC prewarm state from postgres");
         let mut state = LfcPrewarmStateWithProgress::default();
         {
             state.base = self.state.lock().unwrap().lfc_prewarm_state.clone();
@@ -79,7 +79,7 @@ impl ComputeNode {
         state
     }
 
-    pub fn lfc_offload_state(&self) -> compute_api::responses::LfcOffloadState {
+    pub fn lfc_offload_state(&self) -> LfcOffloadState {
         self.state.lock().unwrap().lfc_offload_state.clone()
     }
 
@@ -118,7 +118,7 @@ impl ComputeNode {
         let EndpointStoragePair { url, token } = self.endpoint_storage_pair()?;
         info!(%url, "requesting LFC state from endpoint storage");
 
-        let request = Client::new().get(url.clone()).bearer_auth(token);
+        let request = Client::new().get(&url).bearer_auth(token);
         let res = request.send().await.context("querying endpoint storage")?;
         let status = res.status();
         if status != StatusCode::OK {

@@ -1,6 +1,6 @@
 use crate::compute_prewarm::LfcPrewarmStateWithProgress;
 use crate::http::JsonResponse;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::{Json, http::StatusCode};
 use compute_api::responses::LfcOffloadState;
 type Compute = axum::extract::State<std::sync::Arc<crate::compute::ComputeNode>>;
@@ -18,7 +18,7 @@ pub(in crate::http) async fn offload_state(compute: Compute) -> Json<LfcOffloadS
 
 pub(in crate::http) async fn prewarm(compute: Compute) -> Response {
     if compute.prewarm_lfc() {
-        JsonResponse::success(StatusCode::OK, "")
+        StatusCode::ACCEPTED.into_response()
     } else {
         JsonResponse::error(
             StatusCode::TOO_MANY_REQUESTS,
@@ -29,7 +29,7 @@ pub(in crate::http) async fn prewarm(compute: Compute) -> Response {
 
 pub(in crate::http) async fn offload(compute: Compute) -> Response {
     if compute.offload_lfc() {
-        JsonResponse::success(StatusCode::OK, "")
+        StatusCode::ACCEPTED.into_response()
     } else {
         JsonResponse::error(
             StatusCode::TOO_MANY_REQUESTS,
