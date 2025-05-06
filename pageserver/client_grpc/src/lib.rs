@@ -286,6 +286,10 @@ impl tonic::service::Interceptor for AuthInterceptor {
     fn call(&mut self, mut req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
         req.metadata_mut()
             .insert("neon-tenant-id", self.tenant_id.clone());
+        if let Some(shard_id) = &self.shard_id {
+            req.metadata_mut()
+                .insert("neon-shard-id", shard_id.clone());
+        }
         req.metadata_mut()
             .insert("neon-timeline-id", self.timeline_id.clone());
         if let Some(auth_header) = &self.auth_header {
