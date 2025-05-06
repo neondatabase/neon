@@ -15,6 +15,7 @@ use super::{
     GetVectoredError, ImageLayerCreationMode, LastImageLayerCreationStatus, RecordedDuration,
     Timeline,
 };
+use crate::tenant::storage_layer::delta_layer::DeltaLayerWriterError;
 use crate::tenant::storage_layer::image_layer::ImageLayerWriterError;
 
 use crate::tenant::timeline::DeltaEntry;
@@ -1552,7 +1553,7 @@ impl Timeline {
                 if e.to_string().contains("flush task cancelled") {
                     CompactionError::Other(anyhow::anyhow!("flush task cancelled"))
                 } else {
-                    CompactionError::Other(anyhow::anyhow!(e))
+                    CompactionError::Other(e)
                 }
             })?;
 
@@ -1576,12 +1577,11 @@ impl Timeline {
                 .await?;
 
             if keys_written > 0 {
-                let (desc, path) = image_layer_writer.finish(ctx).await.map_err(|e| {
-                    if e.to_string().contains("flush task cancelled") {
+                let (desc, path) = image_layer_writer.finish(ctx).await.map_err(|e| match e {
+                    ImageLayerWriterError::Cancelled => {
                         CompactionError::Other(anyhow::anyhow!("flush task cancelled"))
-                    } else {
-                        CompactionError::Other(anyhow::anyhow!(e))
                     }
+                    ImageLayerWriterError::Other(err) => CompactionError::Other(err),
                 })?;
                 let new_layer = Layer::finish_creating(self.conf, self, desc, &path)
                     .map_err(CompactionError::Other)?;
@@ -2150,12 +2150,11 @@ impl Timeline {
                             .unwrap()
                             .finish(prev_key.unwrap().next(), ctx)
                             .await
-                            .map_err(|e| {
-                                if e.to_string().contains("flush task cancelled") {
+                            .map_err(|e| match e {
+                                DeltaLayerWriterError::Cancelled => {
                                     CompactionError::Other(anyhow::anyhow!("flush task cancelled"))
-                                } else {
-                                    CompactionError::Other(anyhow::anyhow!(e))
                                 }
+                                DeltaLayerWriterError::Other(err) => CompactionError::Other(err),
                             })?;
                         let new_delta = Layer::finish_creating(self.conf, self, desc, &path)
                             .map_err(CompactionError::Other)?;
@@ -2215,12 +2214,11 @@ impl Timeline {
                     .unwrap()
                     .put_value(key, lsn, value, ctx)
                     .await
-                    .map_err(|e| {
-                        if e.to_string().contains("flush task cancelled") {
+                    .map_err(|e| match e {
+                        DeltaLayerWriterError::Cancelled => {
                             CompactionError::Other(anyhow::anyhow!("flush task cancelled"))
-                        } else {
-                            CompactionError::Other(anyhow::anyhow!(e))
                         }
+                        DeltaLayerWriterError::Other(err) => CompactionError::Other(err),
                     })?;
             } else {
                 let owner = self.shard_identity.get_shard_number(&key);
@@ -2243,7 +2241,7 @@ impl Timeline {
                     if e.to_string().contains("flush task cancelled") {
                         CompactionError::Other(anyhow::anyhow!("flush task cancelled"))
                     } else {
-                        CompactionError::Other(anyhow::anyhow!(e))
+                        CompactionError::Other(e.into())
                     }
                 })?;
             let new_delta = Layer::finish_creating(self.conf, self, desc, &path)
@@ -3710,12 +3708,11 @@ impl Timeline {
                 let (desc, path) = delta_writer_before
                     .finish(job_desc.compaction_key_range.start, ctx)
                     .await
-                    .map_err(|e| {
-                        if e.to_string().contains("flush task cancelled") {
+                    .map_err(|e| match e {
+                        DeltaLayerWriterError::Cancelled => {
                             CompactionError::Other(anyhow::anyhow!("flush task cancelled"))
-                        } else {
-                            CompactionError::Other(anyhow::anyhow!(e))
                         }
+                        DeltaLayerWriterError::Other(err) => CompactionError::Other(err),
                     })?;
                 let layer = Layer::finish_creating(self.conf, self, desc, &path)
                     .context("failed to finish creating delta layer")
@@ -3726,12 +3723,11 @@ impl Timeline {
                 let (desc, path) = delta_writer_after
                     .finish(key.key_range.end, ctx)
                     .await
-                    .map_err(|e| {
-                        if e.to_string().contains("flush task cancelled") {
+                    .map_err(|e| match e {
+                        DeltaLayerWriterError::Cancelled => {
                             CompactionError::Other(anyhow::anyhow!("flush task cancelled"))
-                        } else {
-                            CompactionError::Other(anyhow::anyhow!(e))
                         }
+                        DeltaLayerWriterError::Other(err) => CompactionError::Other(err),
                     })?;
                 let layer = Layer::finish_creating(self.conf, self, desc, &path)
                     .context("failed to finish creating delta layer")
@@ -3755,7 +3751,7 @@ impl Timeline {
                         if e.to_string().contains("flush task cancelled") {
                             CompactionError::Other(anyhow::anyhow!("flush task cancelled"))
                         } else {
-                            CompactionError::Other(anyhow::anyhow!(e))
+                            CompactionError::Other(e.into())
                         }
                     })?
             } else {
@@ -3774,7 +3770,7 @@ impl Timeline {
                     if e.to_string().contains("flush task cancelled") {
                         CompactionError::Other(anyhow::anyhow!("flush task cancelled"))
                     } else {
-                        CompactionError::Other(anyhow::anyhow!(e))
+                        CompactionError::Other(e.into())
                     }
                 })?
         } else {
