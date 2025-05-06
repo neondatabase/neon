@@ -581,15 +581,17 @@ impl InMemoryLayer {
             estimated_in_mem_size: AtomicU64::new(0),
         })
     }
+}
 
-    #[derive(Debug, thiserror::Error)]
-    pub enum InMemoryLayerError {
-        #[error("flush task cancelled")]
-        Cancelled,
-        #[error(transparent)]
-        Other(anyhow::Error),
-    }
+#[derive(Debug, thiserror::Error)]
+pub enum InMemoryLayerError {
+    #[error("flush task cancelled")]
+    Cancelled,
+    #[error(transparent)]
+    Other(anyhow::Error),
+}
 
+impl InMemoryLayer {
     /// Write path.
     ///
     /// Errors are not retryable, the [`InMemoryLayer`] must be discarded, and not be read from.
