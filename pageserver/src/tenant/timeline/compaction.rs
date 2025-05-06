@@ -1994,7 +1994,7 @@ impl Timeline {
                 let l = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
                 deltas.push(l);
             }
-            MergeIterator::create_with_options(&deltas, &[], ctx, 1024 * 8192, 1024)
+            MergeIterator::create_with_options(&deltas, &[], ctx, 1024 * 8192 /* 8 MiB buffer per layer iterator */ , 1024)
         };
 
         // This iterator walks through all keys and is needed to calculate size used by each key
