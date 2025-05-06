@@ -224,7 +224,7 @@ pub fn write_postgres_conf(
             writeln!(file, "pgaudit.log_rotation_age=5")?;
 
             // Enable audit logs for pg_session_jwt extension
-            writeln!(file, "pg_session_jwt.audit_log='on'")?;
+            writeln!(file, "pg_session_jwt.audit_log=on")?;
 
             // Add audit shared_preload_libraries, if they are not present.
             //
