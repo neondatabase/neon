@@ -555,8 +555,9 @@ def test_db_with_custom_settings(neon_simple_env: NeonEnv):
 
     endpoint = env.endpoints.create_start("main")
 
-    TEST_ROLE_NAME = "some_other_role"
-    TEST_DB_NAME = "db_with_custom_settings"
+    TEST_ROLE = "some_other_role"
+    TEST_DB = "db_with_custom_settings"
+    TEST_SCHEMA = "non_public_schema"
 
     endpoint.respec_deep(
         **{
@@ -565,13 +566,13 @@ def test_db_with_custom_settings(neon_simple_env: NeonEnv):
                 "cluster": {
                     "databases": [
                         {
-                            "name": TEST_DB_NAME,
-                            "owner": TEST_ROLE_NAME,
+                            "name": TEST_DB,
+                            "owner": TEST_ROLE,
                         }
                     ],
                     "roles": [
                         {
-                            "name": TEST_ROLE_NAME,
+                            "name": TEST_ROLE,
                         }
                     ],
                 },
@@ -581,19 +582,26 @@ def test_db_with_custom_settings(neon_simple_env: NeonEnv):
 
     endpoint.reconfigure()
 
-    with endpoint.cursor(dbname=TEST_DB_NAME) as cursor:
-        cursor.execute(f"ALTER DATABASE {TEST_DB_NAME} SET role = {TEST_ROLE_NAME}")
-        cursor.execute(f"ALTER DATABASE {TEST_DB_NAME} SET default_transaction_read_only = on")
+    with endpoint.cursor(dbname=TEST_DB) as cursor:
+        cursor.execute(f"CREATE SCHEMA {TEST_SCHEMA}")
+        cursor.execute(f"ALTER DATABASE {TEST_DB} SET role = {TEST_ROLE}")
+        cursor.execute(f"ALTER DATABASE {TEST_DB} SET default_transaction_read_only = on")
+        cursor.execute(f"ALTER DATABASE {TEST_DB} SET search_path = {TEST_SCHEMA}")
 
-    with endpoint.cursor(dbname=TEST_DB_NAME) as cursor:
+    with endpoint.cursor(dbname=TEST_DB) as cursor:
         cursor.execute("SELECT current_role")
         role = cursor.fetchone()
         assert role is not None
-        assert role[0] == TEST_ROLE_NAME
+        assert role[0] == TEST_ROLE
 
         cursor.execute("SHOW default_transaction_read_only")
         default_transaction_read_only = cursor.fetchone()
         assert default_transaction_read_only is not None
         assert default_transaction_read_only[0] == "on"
+
+        cursor.execute("SHOW search_path")
+        search_path = cursor.fetchone()
+        assert search_path is not None
+        assert search_path[0] == TEST_SCHEMA
 
     endpoint.reconfigure()

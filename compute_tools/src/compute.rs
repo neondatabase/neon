@@ -340,6 +340,9 @@ impl ComputeNode {
         //
         //   - role=some_other_role
         //   - default_transaction_read_only=on
+        //   - search_path=non_public_schema, this should be actually safe because
+        //     we don't call any functions in user databases, but better to always reset
+        //     it to public.
         //
         // that can affect `compute_ctl` and prevent it from properly configuring the database schema.
         // Unset them via connection string options before connecting to the database.
@@ -349,7 +352,8 @@ impl ComputeNode {
         // as well. After rolling out this code, we can remove this parameter from control plane.
         // In the meantime, double-passing is fine, the last value is applied.
         // See: <https://github.com/neondatabase/cloud/blob/133dd8c4dbbba40edfbad475bf6a45073ca63faf/goapp/controlplane/internal/pkg/compute/provisioner/provisioner_common.go#L70>
-        const EXTRA_OPTIONS: &str = "-c role=cloud_admin -c default_transaction_read_only=off";
+        const EXTRA_OPTIONS: &str =
+            "-c role=cloud_admin -c default_transaction_read_only=off -c search_path=public";
         let options = match conn_conf.get_options() {
             Some(options) => format!("{} {}", options, EXTRA_OPTIONS),
             None => EXTRA_OPTIONS.to_string(),
@@ -1483,8 +1487,7 @@ impl ComputeNode {
 
                     // It doesn't matter what were the options before, here we just want
                     // to connect and create a new superuser role.
-                    const ZENITH_OPTIONS: &str =
-                        "-c role=zenith_admin -c default_transaction_read_only=off";
+                    const ZENITH_OPTIONS: &str = "-c role=zenith_admin -c default_transaction_read_only=off -c search_path=public";
                     zenith_admin_conf.options(ZENITH_OPTIONS);
 
                     let mut client =
