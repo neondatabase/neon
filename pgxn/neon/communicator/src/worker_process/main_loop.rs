@@ -12,7 +12,7 @@ use pageserver_client_grpc::PageserverClient;
 use pageserver_page_api::model;
 
 use tokio::io::AsyncReadExt;
-use tokio_epoll_uring::IoBuf;
+use uring_common::buf::IoBuf;
 use tokio_pipe::PipeRead;
 
 use super::callbacks::{get_request_lsn, notify_proc};
@@ -44,17 +44,15 @@ pub(super) async fn init(
 ) -> CommunicatorWorkerProcessStruct<'static> {
     let last_lsn = get_request_lsn();
 
-    let uring_system = tokio_epoll_uring::System::launch().await.unwrap();
-
     let file_cache = if let Some(path) = file_cache_path {
         Some(
-            FileCache::new(&path, file_cache_size, uring_system)
+            FileCache::new(&path, file_cache_size)
                 .expect("could not create cache file"),
         )
     } else {
         // FIXME: temporarily for testing, use LFC even if disabled
         Some(
-            FileCache::new(&PathBuf::from("new_filecache"), 1000, uring_system)
+            FileCache::new(&PathBuf::from("new_filecache"), 1000)
                 .expect("could not create cache file"),
         )
     };

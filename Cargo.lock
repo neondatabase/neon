@@ -1360,7 +1360,6 @@ dependencies = [
  "prost 0.13.3",
  "thiserror 1.0.69",
  "tokio",
- "tokio-epoll-uring",
  "tokio-pipe",
  "tonic",
  "tracing",

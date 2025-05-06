@@ -9,19 +9,18 @@
 //! process. The backend processes *also* read the file (and sometimes also
 //! write it? ), but the backends use direct C library calls for that.
 use std::fs::File;
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use tokio_epoll_uring;
-
 use crate::BLCKSZ;
+
+use tokio::task::spawn_blocking;
 
 pub type CacheBlock = u64;
 
 pub struct FileCache {
-    uring_system: tokio_epoll_uring::SystemHandle,
-
     file: Arc<File>,
 
     free_list: Mutex<FreeList>,
@@ -43,7 +42,6 @@ impl FileCache {
     pub fn new(
         file_cache_path: &Path,
         mut initial_size: u64,
-        uring_system: tokio_epoll_uring::SystemHandle,
     ) -> Result<FileCache, std::io::Error> {
         if initial_size < 100 {
             tracing::warn!(
@@ -75,7 +73,6 @@ impl FileCache {
 
         Ok(FileCache {
             file: Arc::new(file),
-            uring_system,
             free_list: Mutex::new(FreeList {
                 next_free_block: 0,
                 max_blocks: initial_size,
@@ -91,21 +88,14 @@ impl FileCache {
     pub async fn read_block(
         &self,
         cache_block: CacheBlock,
-        dst: impl uring_common::buf::IoBufMut + Send + Sync,
+        mut dst: impl uring_common::buf::IoBufMut + Send + Sync,
     ) -> Result<(), std::io::Error> {
         assert!(dst.bytes_total() == BLCKSZ);
         let file = self.file.clone();
 
-        let ((_file, _buf), res) = self
-            .uring_system
-            .read(file, cache_block as u64 * BLCKSZ as u64, dst)
-            .await;
+        let dst_ref = unsafe { std::slice::from_raw_parts_mut(dst.stable_mut_ptr(), BLCKSZ) };
 
-        let res = res.map_err(map_io_uring_error)?;
-        if res != BLCKSZ {
-            panic!("unexpected read result");
-        }
-
+        spawn_blocking(move || file.read_exact_at(dst_ref, cache_block as u64 * BLCKSZ as u64)).await??;
         Ok(())
     }
 
@@ -117,14 +107,9 @@ impl FileCache {
         assert!(src.bytes_init() == BLCKSZ);
         let file = self.file.clone();
 
-        let ((_file, _buf), res) = self
-            .uring_system
-            .write(file, cache_block as u64 * BLCKSZ as u64, src)
-            .await;
-        let res = res.map_err(map_io_uring_error)?;
-        if res != BLCKSZ {
-            panic!("unexpected read result");
-        }
+        let src_ref = unsafe { std::slice::from_raw_parts(src.stable_ptr(), BLCKSZ) };
+
+        spawn_blocking(move || file.write_all_at(src_ref, cache_block as u64 * BLCKSZ as u64)).await??;
 
         Ok(())
     }
@@ -145,15 +130,6 @@ impl FileCache {
     pub fn dealloc_block(&self, cache_block: CacheBlock) {
         let mut free_list = self.free_list.lock().unwrap();
         free_list.free_blocks.push(cache_block);
-    }
-}
-
-fn map_io_uring_error(err: tokio_epoll_uring::Error<std::io::Error>) -> std::io::Error {
-    match err {
-        tokio_epoll_uring::Error::Op(err) => err,
-        tokio_epoll_uring::Error::System(err) => {
-            std::io::Error::new(std::io::ErrorKind::Other, err)
-        }
     }
 }
 
