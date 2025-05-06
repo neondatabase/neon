@@ -177,6 +177,7 @@ Thereby, it can issue all the data blocks as it traverses the index, and only wa
 
 The amortized "wait-for-disk time" contribution of this direct IO proposal to a series of sequential getpage requests is `1/32 * read IOP latency` for each getpage request.
 We accomplish this by server-side batching of up to 32 reads into a single `Timeline::get_vectored` call.
+(This is an ideal world where our batches are full - that's not the case in prod today because of lack of queue depth).
 
 ## Design & Implementation
 
