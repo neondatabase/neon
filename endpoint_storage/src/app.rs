@@ -343,7 +343,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         TimelineId::from_array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 1, 2, 3, 4, 5, 7]);
     const ENDPOINT_ID: &str = "ep-winter-frost-a662z3vg";
     fn token() -> String {
-        let claims = endpoint_storage::Claims {
+        let claims = endpoint_storage::claims::EndpointStorageClaims {
             tenant_id: TENANT_ID,
             timeline_id: TIMELINE_ID,
             endpoint_id: ENDPOINT_ID.into(),
@@ -489,16 +489,8 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
     }
 
     fn delete_prefix_token(uri: &str) -> String {
-        use serde::Serialize;
         let parts = uri.split("/").collect::<Vec<&str>>();
-        #[derive(Serialize)]
-        struct PrefixClaims {
-            tenant_id: TenantId,
-            timeline_id: Option<TimelineId>,
-            endpoint_id: Option<endpoint_storage::EndpointId>,
-            exp: u64,
-        }
-        let claims = PrefixClaims {
+        let claims = endpoint_storage::claims::DeletePrefixClaims {
             tenant_id: parts.get(1).map(|c| c.parse().unwrap()).unwrap(),
             timeline_id: parts.get(2).map(|c| c.parse().unwrap()),
             endpoint_id: parts.get(3).map(ToString::to_string),

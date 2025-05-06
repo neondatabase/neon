@@ -1,17 +1,10 @@
-use std::collections::HashMap;
-use std::os::unix::fs::{PermissionsExt, symlink};
-use std::path::Path;
-use std::process::{Command, Stdio};
-use std::str::FromStr;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
-use std::time::{Duration, Instant};
-use std::{env, fs};
-
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
-use compute_api::responses::{ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus};
+use compute_api::responses::{
+    ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus, LfcOffloadState,
+    LfcPrewarmState,
+};
 use compute_api::spec::{
     ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent,
 };
@@ -25,6 +18,16 @@ use postgres;
 use postgres::NoTls;
 use postgres::error::SqlState;
 use remote_storage::{DownloadError, RemotePath};
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::os::unix::fs::{PermissionsExt, symlink};
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::str::FromStr;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::time::{Duration, Instant};
+use std::{env, fs};
 use tokio::spawn;
 use tracing::{Instrument, debug, error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
@@ -150,6 +153,9 @@ pub struct ComputeState {
     /// set up the span relationship ourselves.
     pub startup_span: Option<tracing::span::Span>,
 
+    pub lfc_prewarm_state: LfcPrewarmState,
+    pub lfc_offload_state: LfcOffloadState,
+
     pub metrics: ComputeMetrics,
 }
 
@@ -163,6 +169,8 @@ impl ComputeState {
             pspec: None,
             startup_span: None,
             metrics: ComputeMetrics::default(),
+            lfc_prewarm_state: LfcPrewarmState::default(),
+            lfc_offload_state: LfcOffloadState::default(),
         }
     }
 
@@ -198,6 +206,8 @@ pub struct ParsedSpec {
     pub pageserver_connstr: String,
     pub safekeeper_connstrings: Vec<String>,
     pub storage_auth_token: Option<String>,
+    pub endpoint_storage_addr: Option<SocketAddr>,
+    pub endpoint_storage_token: Option<String>,
 }
 
 impl TryFrom<ComputeSpec> for ParsedSpec {
@@ -251,6 +261,18 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
                 .or(Err("invalid timeline id"))?
         };
 
+        let endpoint_storage_addr: Option<SocketAddr> = spec
+            .endpoint_storage_addr
+            .clone()
+            .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_addr"))
+            .unwrap_or_default()
+            .parse()
+            .ok();
+        let endpoint_storage_token = spec
+            .endpoint_storage_token
+            .clone()
+            .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_token"));
+
         Ok(ParsedSpec {
             spec,
             pageserver_connstr,
@@ -258,6 +280,8 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             storage_auth_token,
             tenant_id,
             timeline_id,
+            endpoint_storage_addr,
+            endpoint_storage_token,
         })
     }
 }
@@ -736,6 +760,9 @@ impl ComputeNode {
         // Log metrics so that we can search for slow operations in logs
         info!(?metrics, postmaster_pid = %postmaster_pid, "compute start finished");
 
+        if pspec.spec.prewarm_lfc_on_startup {
+            self.prewarm_lfc();
+        }
         Ok(())
     }
 

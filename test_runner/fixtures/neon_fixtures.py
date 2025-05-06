@@ -1185,7 +1185,9 @@ class NeonEnv:
             "broker": {},
             "safekeepers": [],
             "pageservers": [],
-            "endpoint_storage": {"port": self.port_distributor.get_port()},
+            "endpoint_storage": {
+                "listen_addr": f"127.0.0.1:{self.port_distributor.get_port()}",
+            },
             "generate_local_ssl_certs": self.generate_local_ssl_certs,
         }
 
