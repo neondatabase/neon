@@ -1441,14 +1441,6 @@ impl DeltaLayerInner {
         offset
     }
 
-    pub fn iter<'a>(&'a self, ctx: &'a RequestContext) -> DeltaLayerIterator<'a> {
-        self.iter_with_options(
-            ctx,
-            1024 * 8192, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
-            1024,        // The default value. Unit tests might use a different value
-        )
-    }
-
     pub fn iter_with_options<'a>(
         &'a self,
         ctx: &'a RequestContext,
@@ -1634,7 +1626,6 @@ pub(crate) mod test {
     use crate::tenant::disk_btree::tests::TestDisk;
     use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
     use crate::tenant::storage_layer::{Layer, ResidentLayer};
-    use crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner;
     use crate::tenant::{TenantShard, Timeline};
 
     /// Construct an index for a fictional delta layer and and then
@@ -2311,8 +2302,7 @@ pub(crate) mod test {
             for batch_size in [1, 2, 4, 8, 3, 7, 13] {
                 println!("running with batch_size={batch_size} max_read_size={max_read_size}");
                 // Test if the batch size is correctly determined
-                let mut iter = delta_layer.iter(&ctx);
-                iter.planner = StreamingVectoredReadPlanner::new(max_read_size, batch_size);
+                let mut iter = delta_layer.iter_with_options(&ctx, max_read_size, batch_size);
                 let mut num_items = 0;
                 for _ in 0..3 {
                     iter.next_batch().await.unwrap();
@@ -2329,8 +2319,7 @@ pub(crate) mod test {
                     iter.key_values_batch.clear();
                 }
                 // Test if the result is correct
-                let mut iter = delta_layer.iter(&ctx);
-                iter.planner = StreamingVectoredReadPlanner::new(max_read_size, batch_size);
+                let mut iter = delta_layer.iter_with_options(&ctx, max_read_size, batch_size);
                 assert_delta_iter_equal(&mut iter, &test_deltas).await;
             }
         }
