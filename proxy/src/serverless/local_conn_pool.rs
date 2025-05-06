@@ -53,11 +53,11 @@ pub(crate) struct ClientDataLocal {
 }
 
 impl ClientDataLocal {
-    pub fn session(&mut self) -> &mut tokio::sync::watch::Sender<uuid::Uuid> {
-        &mut self.session
+    pub fn session(&self) -> &tokio::sync::watch::Sender<uuid::Uuid> {
+        &self.session
     }
 
-    pub fn cancel(&mut self) {
+    pub fn cancel(&self) {
         self.cancel.cancel();
     }
 }
@@ -99,7 +99,7 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
             .map(|entry| entry.conn);
 
         // ok return cached connection if found and establish a new one otherwise
-        if let Some(mut client) = client {
+        if let Some(client) = client {
             if client.inner.is_closed() {
                 info!("local_pool: cached connection '{conn_info}' is closed, opening a new one");
                 return Ok(None);
@@ -120,11 +120,9 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
                 ClientDataEnum::Local(data) => {
                     data.session().send(ctx.session_id())?;
                 }
-
                 ClientDataEnum::Remote(data) => {
                     data.session().send(ctx.session_id())?;
                 }
-                ClientDataEnum::Http(_) => (),
             }
 
             ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
