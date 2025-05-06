@@ -1,7 +1,6 @@
 # Direct IO For Pageserver
 
 Date: Apr 30, 2025
-Author: Christian Schwarz
 
 ## Summary
 
@@ -27,7 +26,7 @@ For posterity, here is the rough timeline of the development work that got us to
   - Feb 2024: [Vectored Get Implementation](https://github.com/neondatabase/neon/pull/6576) bypasses delta & image layer blocks for page requests
   - Apr to June 2024: [Epic: bypass PageCache for use data blocks](https://github.com/neondatabase/neon/issues/7386) addresses remaining users
 - Aug to Nov 2024: direct IO: first code; preliminaries; read path coding; BufferedWriter; benchmarks show perf regressions too high, no-go.
-- Nov to Jan 2024: address perf regressions by developing page_service pipelining (aka batching) and concurrent IO ([Epic](https://github.com/neondatabase/neon/issues/9376))
+- Nov 2024 to Jan 2025: address perf regressions by developing page_service pipelining (aka batching) and concurrent IO ([Epic](https://github.com/neondatabase/neon/issues/9376))
 - Feb to March 2024: rollout batching, then concurrent+direct IO => read path and InMemoryLayer is now direct IO
 - Apr 2025: develop & roll out direct IO for the write path
 
