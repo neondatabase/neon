@@ -5181,7 +5181,8 @@ impl Service {
             }
 
             // We don't expect any new_shard_count shards to exist here, but drop them just in case
-            tenants.retain(|_id, s| s.shard.count != *new_shard_count);
+            tenants
+                .retain(|id, s| !(id.tenant_id == *tenant_id && s.shard.count == *new_shard_count));
 
             detach_locations
         };
