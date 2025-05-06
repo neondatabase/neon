@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use futures_util::StreamExt;
@@ -55,7 +56,7 @@ impl TimelineAnalysis {
 pub(crate) async fn branch_cleanup_and_check_errors(
     remote_client: &GenericRemoteStorage,
     id: &TenantShardTimelineId,
-    tenant_objects: &mut TenantObjectListing,
+    tenant_objects: Arc<tokio::sync::Mutex<TenantObjectListing>>,
     s3_active_branch: Option<&BranchData>,
     console_branch: Option<BranchData>,
     s3_data: Option<RemoteTimelineBlobData>,
@@ -150,7 +151,11 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                             ))
                         }
 
-                        if !tenant_objects.check_ref(id.timeline_id, &layer, &metadata) {
+                        if !tenant_objects
+                            .lock()
+                            .await
+                            .check_ref(id.timeline_id, &layer, &metadata)
+                        {
                             let path = remote_layer_path(
                                 &id.tenant_shard_id.tenant_id,
                                 &id.timeline_id,
