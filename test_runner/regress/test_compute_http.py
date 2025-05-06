@@ -56,9 +56,9 @@ def test_compute_admin_scope_claim(neon_simple_env: NeonEnv, audience: str | Non
 
     endpoint = env.endpoints.create_start("main")
 
-    data = {"scope": str(ComputeClaimsScope.ADMIN)}
+    data: dict[str, str | list[str]] = {"scope": str(ComputeClaimsScope.ADMIN)}
     if audience:
-        data["aud"] = audience
+        data["aud"] = [audience]
 
     token = jwt.encode(data, env.auth_keys.priv, algorithm="EdDSA")
 

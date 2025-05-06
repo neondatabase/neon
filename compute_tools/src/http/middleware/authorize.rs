@@ -79,7 +79,7 @@ impl AsyncAuthorizeRequest<Body> for Authorize {
                         ));
                     };
 
-                    if audience != COMPUTE_AUDIENCE {
+                    if !audience.iter().any(|a| a == COMPUTE_AUDIENCE) {
                         return Err(JsonResponse::error(
                             StatusCode::UNAUTHORIZED,
                             "invalid audience in authorization token claims",
