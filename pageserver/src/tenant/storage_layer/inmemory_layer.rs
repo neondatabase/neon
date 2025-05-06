@@ -582,6 +582,14 @@ impl InMemoryLayer {
         })
     }
 
+    #[derive(Debug, thiserror::Error)]
+    pub enum InMemoryLayerError {
+        #[error("flush task cancelled")]
+        Cancelled,
+        #[error(transparent)]
+        Other(anyhow::Error),
+    }
+
     /// Write path.
     ///
     /// Errors are not retryable, the [`InMemoryLayer`] must be discarded, and not be read from.
@@ -591,7 +599,7 @@ impl InMemoryLayer {
         &self,
         serialized_batch: SerializedValueBatch,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), InMemoryLayerError> {
         let mut inner = self.inner.write().await;
         self.assert_writable();
 
@@ -605,7 +613,8 @@ impl InMemoryLayer {
         } = serialized_batch;
 
         // Write the batch to the file
-        inner.file.write_raw(&raw, ctx).await?;
+        inner.file.write_raw(&raw, ctx).await
+            .map_err(|e| InMemoryLayerError::Other(anyhow::anyhow!(e)))?;
         let new_size = inner.file.len();
 
         let expected_new_len = base_offset
