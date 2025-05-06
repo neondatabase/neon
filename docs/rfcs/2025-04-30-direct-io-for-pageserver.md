@@ -187,10 +187,10 @@ A lot of prerequisite work had to happen to enable use of direct IO.
 To meet the "wait-for-disk time" requirements from the DoD, we implement for the read path:
 - page_service level server-side batching (config field `page_service_pipelining`)
 - concurrent IO (config field `get_vectored_concurrent_io`)
-There is no RFC for either; the work for these was tracked [in the epic](https://github.com/neondatabase/neon/issues/9376).
+The work for both of these these was tracked [in the epic](https://github.com/neondatabase/neon/issues/9376).
 Server-side batching will likely be obsoleted by the [#proj-compute-communicator](https://github.com/neondatabase/neon/pull/10799).
-The Concurrent IO work is described well in [the PR description](https://github.com/neondatabase/neon/pull/9353).
-The implementation is relatively brittle and needs further investment, see "Punted" list in https://github.com/neondatabase/neon/issues/9378.
+The Concurrent IO work is described in retroactive RFC `2025-04-30-pageserver-concurrent-io-on-read-path.md`.
+The implementation is relatively brittle and needs further investment, see the `Future Work` section in that RFC.
 
 For the write path, and especially WAL ingest, we need to hide write latency.
 We accomplish this by implementing a (`BufferedWriter`) type that does double-buffering: flushes of the filled
