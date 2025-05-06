@@ -70,8 +70,12 @@ pub extern "C" fn communicator_worker_process_launch(
 }
 
 /// Convert the "shard map" from an array of C strings, indexed by shard no to a rust HashMap
-fn parse_shard_map(nshards: u32, shard_map: *mut *mut c_char) -> HashMap<u16, String> {
-    let mut result: HashMap<u16, String> = HashMap::new();
+fn parse_shard_map(nshards: u32, shard_map: *mut *mut c_char) -> HashMap<utils::shard::ShardIndex, String> {
+    use utils::shard::*;
+
+    assert!(nshards <= u8::MAX as u32);
+
+    let mut result: HashMap<ShardIndex, String> = HashMap::new();
     let mut p = shard_map;
 
     for i in 0..nshards {
@@ -80,7 +84,12 @@ fn parse_shard_map(nshards: u32, shard_map: *mut *mut c_char) -> HashMap<u16, St
         p = unsafe { p.add(1) };
 
         let s = c_str.to_str().unwrap();
-        result.insert(i as u16, s.into());
+        let k = if nshards > 1 {
+            ShardIndex::new(ShardNumber(i as u8), ShardCount(nshards as u8))
+        } else {
+            ShardIndex::unsharded()
+        };
+        result.insert(k, s.into());
     }
     result
 }

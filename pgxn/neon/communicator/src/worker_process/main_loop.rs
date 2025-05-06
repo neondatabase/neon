@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::backend_comms::NeonIOHandle;
 use crate::file_cache::FileCache;
@@ -28,6 +29,8 @@ pub struct CommunicatorWorkerProcessStruct<'a> {
     cache: IntegratedCacheWriteAccess<'a>,
 
     submission_pipe_read_raw_fd: i32,
+
+    next_request_id: AtomicU64,
 }
 
 pub(super) async fn init(
@@ -35,7 +38,7 @@ pub(super) async fn init(
     tenant_id: String,
     timeline_id: String,
     auth_token: Option<String>,
-    shard_map: HashMap<u16, String>,
+    shard_map: HashMap<utils::shard::ShardIndex, String>,
     _file_cache_size: u64,
     file_cache_path: Option<PathBuf>,
 ) -> CommunicatorWorkerProcessStruct<'static> {
@@ -65,6 +68,7 @@ pub(super) async fn init(
         pageserver_client,
         cache,
         submission_pipe_read_raw_fd: cis.submission_pipe_read_fd,
+        next_request_id: AtomicU64::new(1),
     };
 
     this
@@ -294,9 +298,11 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             match self
                 .pageserver_client
                 .get_page(&model::GetPageRequest {
+                    id: self.next_request_id.fetch_add(1, Ordering::Relaxed),
                     common: self.request_common(not_modified_since),
                     rel: rel.clone(),
                     block_number: *blkno,
+                    class: model::GetPageClass::Normal,
                 })
                 .await
             {
@@ -358,9 +364,11 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             match self
                 .pageserver_client
                 .get_page(&model::GetPageRequest {
+                    id: self.next_request_id.fetch_add(1, Ordering::Relaxed),
                     common: self.request_common(not_modified_since),
                     rel: rel.clone(),
                     block_number: *blkno,
+                    class: model::GetPageClass::Prefetch,
                 })
                 .await
             {

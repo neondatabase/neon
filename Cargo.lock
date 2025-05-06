@@ -4531,9 +4531,11 @@ dependencies = [
  "http 1.1.0",
  "pageserver_page_api",
  "thiserror 1.0.69",
+ "tokio",
  "tonic",
  "tracing",
  "utils",
+ "uuid",
 ]
 
 [[package]]
