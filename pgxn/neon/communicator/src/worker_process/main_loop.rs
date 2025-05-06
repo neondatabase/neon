@@ -47,7 +47,10 @@ pub(super) async fn init(
     let uring_system = tokio_epoll_uring::System::launch().await.unwrap();
 
     let file_cache = if let Some(path) = file_cache_path {
-        Some(FileCache::new(&path, file_cache_size, uring_system).expect("could not create cache file"))
+        Some(
+            FileCache::new(&path, file_cache_size, uring_system)
+                .expect("could not create cache file"),
+        )
     } else {
         // FIXME: temporarily for testing, use LFC even if disabled
         Some(
@@ -390,7 +393,6 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         Ok(())
     }
 }
-
 
 impl<'t> metrics::core::Collector for CommunicatorWorkerProcessStruct<'t> {
     fn desc(&self) -> Vec<&metrics::core::Desc> {

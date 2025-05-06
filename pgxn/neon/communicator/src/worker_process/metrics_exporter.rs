@@ -2,15 +2,15 @@
 //! prometheus metrics.
 
 use axum::Router;
-use axum::extract::State;
 use axum::body::Body;
+use axum::extract::State;
 use axum::response::Response;
 use http::StatusCode;
 use http::header::CONTENT_TYPE;
 
+use metrics;
 use metrics::proto::MetricFamily;
 use metrics::{Encoder, TextEncoder};
-use metrics;
 
 use crate::worker_process::main_loop::CommunicatorWorkerProcessStruct;
 
@@ -19,10 +19,12 @@ impl<'a> CommunicatorWorkerProcessStruct<'a> {
         use axum::routing::get;
         let app = Router::new()
             .route("/metrics", get(get_metrics))
-            .with_state(self);            
+            .with_state(self);
 
         // TODO: make configurable. Or listen on unix domain socket?
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:9090").await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:9090")
+            .await
+            .unwrap();
 
         tokio::spawn(async {
             tracing::info!("metrics listener spawned");
@@ -32,9 +34,7 @@ impl<'a> CommunicatorWorkerProcessStruct<'a> {
 }
 
 /// Expose Prometheus metrics.
-async fn get_metrics(
-    State(state): State<&CommunicatorWorkerProcessStruct<'static>>
-) -> Response {
+async fn get_metrics(State(state): State<&CommunicatorWorkerProcessStruct<'static>>) -> Response {
     tracing::warn!("get_metrics called");
 
     use metrics::core::Collector;
@@ -52,7 +52,7 @@ async fn get_metrics(
     let mut buffer = vec![];
 
     tracing::warn!("get_metrics done");
-    
+
     if let Err(e) = encoder.encode(&metrics, &mut buffer) {
         Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)

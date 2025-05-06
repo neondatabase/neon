@@ -72,13 +72,13 @@ pub(crate) fn iter_next<'e, V: Value>(
         match next_recurse(key, &mut path, root_ref, epoch_pin) {
             Ok(Some(v)) => {
                 assert_eq!(path.len(), key.len());
-                break Some((path, v))
-            },
+                break Some((path, v));
+            }
             Ok(None) => break None,
             Err(ConcurrentUpdateError()) => {
                 // retry
                 continue;
-            },
+            }
         }
     }
 }
@@ -110,15 +110,15 @@ pub(crate) fn update_fn<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>, F>(
             Err(ArtError::ConcurrentUpdate) => {
                 eprintln!("retrying");
                 continue; // retry
-            },
+            }
             Err(ArtError::OutOfMemory) => {
                 panic!("todo: OOM: try to GC, propagate to caller");
-            },
+            }
             Err(ArtError::GarbageQueueFull) => {
                 // FIXME: This can happen if someone is holding back the epoch. We should
                 // wait for the epoch to advance
                 panic!("todo: GC queue is full");
-            },
+            }
         }
     }
 }
@@ -194,7 +194,7 @@ fn next_recurse<'e, V: Value>(
         match rnode.find_next_child_or_value_or_restart(min_key_byte)? {
             None => {
                 return Ok(None);
-            },
+            }
             Some((key_byte, ChildOrValue::Child(child_ref))) => {
                 let path_len = path.len();
                 path.push(key_byte);
@@ -207,7 +207,7 @@ fn next_recurse<'e, V: Value>(
                 }
                 path.truncate(path_len);
                 min_key_byte = key_byte + 1;
-            },
+            }
             Some((key_byte, ChildOrValue::Value(vptr))) => {
                 path.push(key_byte);
                 assert_eq!(path.len(), min_key.len());
@@ -215,8 +215,8 @@ fn next_recurse<'e, V: Value>(
                 // and the lifetime of 'epoch_pin' enforces that the reference is only accessible
                 // as long as the epoch is pinned.
                 let v = unsafe { vptr.as_ref().unwrap() };
-                return Ok(Some(v))
-            },
+                return Ok(Some(v));
+            }
         }
     }
 }
@@ -300,7 +300,6 @@ where
                     // TODO: Shrink the node
                     // TODO: If the node becomes empty, unlink it from parent
                     wnode.delete_value(key[0]);
-                    
                 }
                 wnode.write_unlock();
 
@@ -400,12 +399,16 @@ fn insert_split_prefix<'e, K: Key, V: Value, A: ArtAllocator<V>>(
     let common_prefix_len = common_prefix(key, old_prefix);
 
     // Allocate a node for the new value.
-    let new_value_node =
-        allocate_node_for_value(&key[common_prefix_len + 1..], value, guard.tree_writer.allocator)?;
+    let new_value_node = allocate_node_for_value(
+        &key[common_prefix_len + 1..],
+        value,
+        guard.tree_writer.allocator,
+    )?;
 
     // Allocate a new internal node with the common prefix
     // FIXME: deallocate 'new_value_node' on OOM
-    let mut prefix_node = node_ref::new_internal(&key[..common_prefix_len], guard.tree_writer.allocator)?;
+    let mut prefix_node =
+        node_ref::new_internal(&key[..common_prefix_len], guard.tree_writer.allocator)?;
 
     // Add the old node and the new nodes to the new internal node
     prefix_node.insert_old_child(old_prefix[common_prefix_len], old_node);

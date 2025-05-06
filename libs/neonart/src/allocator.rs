@@ -44,7 +44,8 @@ pub trait ArtAllocator<V: crate::Value> {
 }
 
 pub struct ArtMultiSlabAllocator<'t, V>
-    where V: crate::Value
+where
+    V: crate::Value,
 {
     tree_area: spin::Mutex<Option<&'t mut MaybeUninit<Tree<V>>>>,
 
@@ -139,7 +140,6 @@ impl<'t, V: crate::Value> ArtAllocator<V> for ArtMultiSlabAllocator<'t, V> {
         self.inner.dealloc_slab(7, ptr.cast())
     }
 }
-
 
 impl<'t, V: crate::Value> ArtMultiSlabAllocator<'t, V> {
     pub fn get_statistics(&self) -> ArtTreeStatistics {

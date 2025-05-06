@@ -181,11 +181,7 @@ impl<V> GarbageQueue<V> {
         GarbageQueue(VecDeque::with_capacity(MAX_GARBAGE))
     }
 
-    fn remember_obsolete_node(
-        &mut self,
-        ptr: NodePtr<V>,
-        epoch: u64,
-    ) {
+    fn remember_obsolete_node(&mut self, ptr: NodePtr<V>, epoch: u64) {
         self.0.push_front((ptr, epoch));
     }
 
@@ -283,13 +279,14 @@ impl<'a, 't: 'a, K: Key, V: Value, A: ArtAllocator<V>> TreeInitStruct<'t, K, V, 
 
 impl<'t, K: Key + Clone, V: Value, A: ArtAllocator<V>> TreeWriteAccess<'t, K, V, A> {
     pub fn start_write<'g>(&'t self) -> TreeWriteGuard<'g, K, V, A>
-        where 't: 'g
+    where
+        't: 'g,
     {
         TreeWriteGuard {
             tree_writer: self,
             epoch_pin: self.epoch_handle.pin(),
             phantom_key: PhantomData,
-            created_garbage: false
+            created_garbage: false,
         }
     }
 
@@ -344,7 +341,6 @@ where
 }
 
 impl<'t, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteGuard<'t, K, V, A> {
-
     /// Get a value
     pub fn get(&'t mut self, key: &K) -> Option<&'t V> {
         algorithm::search(key, self.tree_writer.tree.root, &self.epoch_pin)
@@ -408,7 +404,8 @@ impl<'t, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteGuard<'t, K, V, A> {
 }
 
 pub struct TreeIterator<K>
-    where K: Key + for<'a> From<&'a [u8]>,
+where
+    K: Key + for<'a> From<&'a [u8]>,
 {
     done: bool,
     pub next_key: Vec<u8>,
@@ -418,7 +415,8 @@ pub struct TreeIterator<K>
 }
 
 impl<K> TreeIterator<K>
-    where K: Key + for<'a> From<&'a [u8]>,
+where
+    K: Key + for<'a> From<&'a [u8]>,
 {
     pub fn new_wrapping() -> TreeIterator<K> {
         let mut next_key = Vec::new();
@@ -440,13 +438,13 @@ impl<K> TreeIterator<K>
         };
         assert_eq!(result.next_key.len(), K::KEY_LEN);
         assert_eq!(result.max_key.as_ref().unwrap().len(), K::KEY_LEN);
-        
+
         result
     }
 
-    
     pub fn next<'g, V>(&mut self, read_guard: &'g TreeReadGuard<'g, K, V>) -> Option<(K, &'g V)>
-        where V: Value
+    where
+        V: Value,
     {
         if self.done {
             return None;
@@ -455,7 +453,11 @@ impl<K> TreeIterator<K>
         let mut wrapped_around = false;
         loop {
             assert_eq!(self.next_key.len(), K::KEY_LEN);
-            if let Some((k , v)) = algorithm::iter_next(&mut self.next_key, read_guard.tree.root, &read_guard.epoch_pin) {
+            if let Some((k, v)) = algorithm::iter_next(
+                &mut self.next_key,
+                read_guard.tree.root,
+                &read_guard.epoch_pin,
+            ) {
                 assert_eq!(k.len(), K::KEY_LEN);
                 assert_eq!(self.next_key.len(), K::KEY_LEN);
 
@@ -472,7 +474,7 @@ impl<K> TreeIterator<K>
                 increment_key(self.next_key.as_mut_slice());
                 let k = k.as_slice().into();
 
-                break Some((k, v))
+                break Some((k, v));
             } else {
                 if self.max_key.is_some() {
                     self.done = true;
@@ -491,7 +493,7 @@ impl<K> TreeIterator<K>
                         break None;
                     }
                 }
-                break None
+                break None;
             }
         }
     }
@@ -507,7 +509,6 @@ fn increment_key(key: &mut [u8]) -> bool {
     }
     true
 }
-
 
 // Debugging functions
 impl<'t, K: Key, V: Value + Debug> TreeReadGuard<'t, K, V> {

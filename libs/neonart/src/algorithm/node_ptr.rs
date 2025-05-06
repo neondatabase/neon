@@ -338,7 +338,10 @@ impl<V: Value> NodePtr<V> {
         }
     }
 
-    pub(crate) fn find_next_child_or_value(&self, key_byte: u8) -> Option<(u8, ChildOrValuePtr<V>)> {
+    pub(crate) fn find_next_child_or_value(
+        &self,
+        key_byte: u8,
+    ) -> Option<(u8, ChildOrValuePtr<V>)> {
         match self.variant() {
             NodeVariant::Internal4(n) => n
                 .find_next_child(key_byte)
@@ -366,7 +369,7 @@ impl<V: Value> NodePtr<V> {
                 .map(|(k, v)| (k, ChildOrValuePtr::Value(v))),
         }
     }
-    
+
     pub(crate) fn truncate_prefix(&mut self, new_prefix_len: usize) {
         match self.variant_mut() {
             NodeVariantMut::Internal4(n) => n.truncate_prefix(new_prefix_len),
@@ -930,7 +933,10 @@ impl<V: Value> NodeLeaf4<V> {
                 assert!(self.child_values[i].is_some());
                 if i < self.num_values as usize - 1 {
                     self.child_keys[i] = self.child_keys[self.num_values as usize - 1];
-                    self.child_values[i] = std::mem::replace(&mut self.child_values[self.num_values as usize - 1], None);
+                    self.child_values[i] = std::mem::replace(
+                        &mut self.child_values[self.num_values as usize - 1],
+                        None,
+                    );
                 }
                 self.num_values -= 1;
                 return;
@@ -1031,7 +1037,10 @@ impl<V: Value> NodeLeaf16<V> {
                 assert!(self.child_values[i as usize].is_some());
                 if i < self.num_values as usize - 1 {
                     self.child_keys[i] = self.child_keys[self.num_values as usize - 1];
-                    self.child_values[i] = std::mem::replace(&mut self.child_values[self.num_values as usize - 1], None);
+                    self.child_values[i] = std::mem::replace(
+                        &mut self.child_values[self.num_values as usize - 1],
+                        None,
+                    );
                 }
                 self.num_values -= 1;
                 return;
@@ -1125,7 +1134,7 @@ impl<V: Value> NodeLeaf48<V> {
 
         if idx < self.num_values {
             // Move all existing values with higher indexes down one position
-            for i in idx as usize ..self.num_values as usize {
+            for i in idx as usize..self.num_values as usize {
                 self.child_values[i] = std::mem::replace(&mut self.child_values[i + 1], None);
             }
 

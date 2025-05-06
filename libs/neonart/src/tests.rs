@@ -1,16 +1,16 @@
-use std::collections::HashSet;
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 
 use crate::ArtAllocator;
 use crate::ArtMultiSlabAllocator;
 use crate::TreeInitStruct;
-use crate::TreeWriteAccess;
 use crate::TreeIterator;
+use crate::TreeWriteAccess;
 
 use crate::{Key, Value};
 
-use rand::seq::SliceRandom;
 use rand::Rng;
+use rand::seq::SliceRandom;
 use rand_distr::Zipf;
 
 const TEST_KEY_LEN: usize = 16;
@@ -103,12 +103,14 @@ fn sparse() {
     test_inserts(&keys);
 }
 
-
-
 #[derive(Clone, Copy, Debug)]
 struct TestOp(TestKey, Option<usize>);
 
-fn apply_op<A: ArtAllocator<usize>>(op: &TestOp, tree: &TreeWriteAccess<TestKey, usize, A>, shadow: &mut BTreeMap<TestKey, usize>) {
+fn apply_op<A: ArtAllocator<usize>>(
+    op: &TestOp,
+    tree: &TreeWriteAccess<TestKey, usize, A>,
+    shadow: &mut BTreeMap<TestKey, usize>,
+) {
     eprintln!("applying op: {op:?}");
 
     // apply the change to the shadow tree first
@@ -119,14 +121,17 @@ fn apply_op<A: ArtAllocator<usize>>(op: &TestOp, tree: &TreeWriteAccess<TestKey,
     };
 
     // apply to Art tree
-    let w = tree.start_write();    
+    let w = tree.start_write();
     w.update_with_fn(&op.0, |existing| {
         assert_eq!(existing, shadow_existing.as_ref());
         return op.1;
     });
 }
 
-fn test_iter<A: ArtAllocator<usize>>(tree: &TreeWriteAccess<TestKey, usize, A>, shadow: &BTreeMap<TestKey, usize>) {
+fn test_iter<A: ArtAllocator<usize>>(
+    tree: &TreeWriteAccess<TestKey, usize, A>,
+    shadow: &BTreeMap<TestKey, usize>,
+) {
     let mut shadow_iter = shadow.iter();
     let mut iter = TreeIterator::new(&(TestKey::MIN..TestKey::MAX));
 
@@ -136,7 +141,10 @@ fn test_iter<A: ArtAllocator<usize>>(tree: &TreeWriteAccess<TestKey, usize, A>, 
         let item = iter.next(&r);
 
         if shadow_item != item {
-            eprintln!("FAIL: iterator returned {:?}, expected {:?}", item, shadow_item);
+            eprintln!(
+                "FAIL: iterator returned {:?}, expected {:?}",
+                item, shadow_item
+            );
             tree.start_read().dump();
 
             eprintln!("SHADOW:");
@@ -144,7 +152,10 @@ fn test_iter<A: ArtAllocator<usize>>(tree: &TreeWriteAccess<TestKey, usize, A>, 
             while let Some(si) = si.next() {
                 eprintln!("key: {:?}, val: {}", si.0, si.1);
             }
-            panic!("FAIL: iterator returned {:?}, expected {:?}", item, shadow_item);
+            panic!(
+                "FAIL: iterator returned {:?}, expected {:?}",
+                item, shadow_item
+            );
         }
         if item.is_none() {
             break;
@@ -169,14 +180,7 @@ fn random_ops() {
     for i in 0..100000 {
         let key: TestKey = (rng.sample(distribution) as u128).into();
 
-        let op = TestOp(
-            key, 
-            if rng.random_bool(0.75) {
-                Some(i)
-            } else {
-                None
-            },
-        );
+        let op = TestOp(key, if rng.random_bool(0.75) { Some(i) } else { None });
 
         apply_op(&op, &tree_writer, &mut shadow);
 

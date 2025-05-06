@@ -65,7 +65,7 @@ impl<'t> BlockAllocator<'t> {
     pub(crate) fn alloc_block(&self) -> &mut [MaybeUninit<u8>] {
         // FIXME: handle OOM
         let ptr: *mut MaybeUninit<u8> = self.get_block_ptr(self.alloc_block_internal()).cast();
-        unsafe { std::slice::from_raw_parts_mut( ptr, BLOCK_SIZE) }
+        unsafe { std::slice::from_raw_parts_mut(ptr, BLOCK_SIZE) }
     }
 
     fn alloc_block_internal(&self) -> u64 {
@@ -156,7 +156,7 @@ impl<'t> BlockAllocator<'t> {
     pub(crate) fn get_statistics(&self) -> BlockAllocatorStats {
         let mut num_free_blocks = 0;
 
-        let mut _prev_lock= None;
+        let mut _prev_lock = None;
         let head_lock = self.freelist_head.lock();
         let mut next_blk = *head_lock;
         let mut _head_lock = Some(head_lock);

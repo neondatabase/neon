@@ -78,16 +78,16 @@ impl<'t> IntegratedCacheInitStruct<'t> {
 
     /// Initialize the shared memory segment. This runs once in postmaster. Returns a struct which
     /// will be inherited by all processes through fork.
-    pub fn shmem_init(_max_procs: u32, shmem_area: &'t mut [MaybeUninit<u8>]) -> IntegratedCacheInitStruct<'t> {
+    pub fn shmem_init(
+        _max_procs: u32,
+        shmem_area: &'t mut [MaybeUninit<u8>],
+    ) -> IntegratedCacheInitStruct<'t> {
         let allocator = neonart::ArtMultiSlabAllocator::new(shmem_area);
 
         let handle = IntegratedCacheTreeInitStruct::new(allocator);
 
         // Initialize the shared memory area
-        IntegratedCacheInitStruct {
-            allocator,
-            handle,
-        }
+        IntegratedCacheInitStruct { allocator, handle }
     }
 
     pub fn worker_process_init(
@@ -188,7 +188,7 @@ fn key_range_for_rel_blocks(rel: &RelTag) -> Range<TreeKey> {
             fork_number: rel.fork_number,
             block_number: 0,
         },
-        end:  TreeKey {
+        end: TreeKey {
             spc_oid: rel.spc_oid,
             db_oid: rel.db_oid,
             rel_number: rel.rel_number,
@@ -436,18 +436,20 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                     // The cache is completely empty. Pretty unexpected that this function
                     // was called then..
                     break;
-                },
+                }
                 Some((_k, TreeEntry::Rel(_))) => {
                     // ignore rel entries for now.
                     // TODO: They stick in the cache forever
-                },
+                }
                 Some((k, TreeEntry::Block(blk_entry))) => {
                     if !blk_entry.referenced.swap(false, Ordering::Relaxed) {
                         // Evict this
                         let w = self.cache_tree.start_write();
                         let old = w.remove(&k);
                         if let Some(TreeEntry::Block(old)) = old {
-                            let _ = self.global_lw_lsn.fetch_max(old.lw_lsn.0, Ordering::Relaxed);
+                            let _ = self
+                                .global_lw_lsn
+                                .fetch_max(old.lw_lsn.0, Ordering::Relaxed);
                             if let Some(cache_block) = old.cache_block {
                                 return Some(cache_block);
                             }
@@ -455,7 +457,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                             assert!(old.is_none());
                         }
                     }
-                },
+                }
             }
         }
         // Give up if we didn't find anything

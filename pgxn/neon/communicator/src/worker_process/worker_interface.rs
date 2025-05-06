@@ -72,7 +72,10 @@ pub extern "C" fn communicator_worker_process_launch(
 }
 
 /// Convert the "shard map" from an array of C strings, indexed by shard no to a rust HashMap
-fn parse_shard_map(nshards: u32, shard_map: *mut *mut c_char) -> HashMap<utils::shard::ShardIndex, String> {
+fn parse_shard_map(
+    nshards: u32,
+    shard_map: *mut *mut c_char,
+) -> HashMap<utils::shard::ShardIndex, String> {
     use utils::shard::*;
 
     assert!(nshards <= u8::MAX as u32);

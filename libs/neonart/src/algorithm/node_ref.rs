@@ -104,14 +104,17 @@ impl<'e, V: Value> ReadLockedNodeRef<'e, V> {
 
         match child_or_value {
             None => Ok(None),
-            Some((k, ChildOrValuePtr::Value(vptr)) )=> Ok(Some((k, ChildOrValue::Value(vptr)))),
-            Some((k, ChildOrValuePtr::Child(child_ptr))) => Ok(Some((k, ChildOrValue::Child(NodeRef {
-                ptr: child_ptr,
-                phantom: self.phantom,
-            })))),
+            Some((k, ChildOrValuePtr::Value(vptr))) => Ok(Some((k, ChildOrValue::Value(vptr)))),
+            Some((k, ChildOrValuePtr::Child(child_ptr))) => Ok(Some((
+                k,
+                ChildOrValue::Child(NodeRef {
+                    ptr: child_ptr,
+                    phantom: self.phantom,
+                }),
+            ))),
         }
     }
-    
+
     pub(crate) fn upgrade_to_write_lock_or_restart(
         self,
     ) -> Result<WriteLockedNodeRef<'e, V>, ConcurrentUpdateError> {

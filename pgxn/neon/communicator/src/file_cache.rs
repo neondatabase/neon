@@ -46,7 +46,10 @@ impl FileCache {
         uring_system: tokio_epoll_uring::SystemHandle,
     ) -> Result<FileCache, std::io::Error> {
         if initial_size < 100 {
-            tracing::warn!("min size for file cache is 100 blocks, {} requested", initial_size);
+            tracing::warn!(
+                "min size for file cache is 100 blocks, {} requested",
+                initial_size
+            );
             initial_size = 100;
         }
 
@@ -60,11 +63,13 @@ impl FileCache {
         let max_blocks_gauge = metrics::IntGauge::new(
             "file_cache_max_blocks",
             "Local File Cache size in 8KiB blocks",
-            ).unwrap();
+        )
+        .unwrap();
         let num_free_blocks_gauge = metrics::IntGauge::new(
             "file_cache_num_free_blocks",
             "Number of free 8KiB blocks in Local File Cache",
-        ).unwrap();
+        )
+        .unwrap();
 
         tracing::info!("initialized file cache with {} blocks", initial_size);
 
@@ -165,8 +170,7 @@ impl metrics::core::Collector for FileCache {
             let free_list = self.free_list.lock().unwrap();
             self.max_blocks_gauge.set(free_list.max_blocks as i64);
 
-            let total_free_blocks: i64 =
-                free_list.free_blocks.len() as i64
+            let total_free_blocks: i64 = free_list.free_blocks.len() as i64
                 + (free_list.max_blocks as i64 - free_list.next_free_block as i64);
             self.num_free_blocks_gauge.set(total_free_blocks as i64);
         }

@@ -85,9 +85,8 @@ pub extern "C" fn rcommunicator_shmem_init(
     shmem_area_ptr: *mut MaybeUninit<u8>,
     shmem_area_len: u64,
 ) -> &'static mut CommunicatorInitStruct {
-    let shmem_area: &'static mut [MaybeUninit<u8>] = unsafe {
-        std::slice::from_raw_parts_mut(shmem_area_ptr, shmem_area_len as usize)
-    };
+    let shmem_area: &'static mut [MaybeUninit<u8>] =
+        unsafe { std::slice::from_raw_parts_mut(shmem_area_ptr, shmem_area_len as usize) };
 
     // Carve out the request slots from the shmem area and initialize them
     let num_neon_request_slots_per_backend = NUM_NEON_REQUEST_SLOTS_PER_BACKEND as usize;
@@ -103,7 +102,9 @@ pub extern "C" fn rcommunicator_shmem_init(
     // 'neon_request_slots' is initialized now. (MaybeUninit::slice_assume_init_mut() is nightly-only
     // as of this writing.)
     let neon_request_slots = unsafe {
-        std::mem::transmute::<&mut [MaybeUninit<NeonIOHandle>], &mut[NeonIOHandle]>(neon_request_slots)
+        std::mem::transmute::<&mut [MaybeUninit<NeonIOHandle>], &mut [NeonIOHandle]>(
+            neon_request_slots,
+        )
     };
 
     // Give the rest of the area to the integrated cache

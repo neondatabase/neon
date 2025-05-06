@@ -1,5 +1,12 @@
-use std::{collections::HashMap, sync::Arc, time::{Duration, Instant}};
-use tokio::{sync::{Mutex, Notify, mpsc, watch}, time::sleep};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::{
+    sync::{Mutex, Notify, mpsc, watch},
+    time::sleep,
+};
 use tonic::transport::{Channel, Endpoint};
 
 use uuid;
@@ -95,7 +102,11 @@ impl ConnectionPool {
             while let Some(responder) = request_rx.recv().await {
                 // TODO: This call should time out and return an error
                 let (id, channel) = bg_pool.acquire_connection().await;
-                let client = PooledClient { channel, pool: Arc::clone(&bg_pool), id };
+                let client = PooledClient {
+                    channel,
+                    pool: Arc::clone(&bg_pool),
+                    id,
+                };
                 let _ = responder.send(client).await;
             }
         });
@@ -109,7 +120,8 @@ impl ConnectionPool {
             {
                 let mut inner = self.inner.lock().await;
                 // TODO: Use a heap, although the number of connections is small
-                if let Some((&id, entry)) = inner.entries
+                if let Some((&id, entry)) = inner
+                    .entries
                     .iter_mut()
                     .filter(|(_, e)| e.active_consumers < self.max_consumers)
                     .filter(|(_, e)| e.consecutive_errors < self.error_threshold)
@@ -122,7 +134,6 @@ impl ConnectionPool {
                 // possible that a consumer will release a connection while the new one is being created, in
                 // which case we will use it right away, but the new connection will be created anyway.)
                 let _ = self.cc_watch_tx.send(true);
-
             }
             // Wait for a new connection, or for one of the consumers to release a connection
             // TODO: Put this notify in a timeout
@@ -131,7 +142,6 @@ impl ConnectionPool {
     }
 
     async fn create_connection(&self) -> () {
-
         // Wait to be signalled to create a connection.
         let mut recv = self.cc_watch_tx.subscribe();
         if !*self.cc_watch_rx.borrow() {
@@ -172,19 +182,23 @@ impl ConnectionPool {
                     .expect("invalid endpoint")
                     .timeout(self.connect_timeout)
                     .connect(),
-            ).await;
+            )
+            .await;
 
             match attempt {
                 Ok(Ok(channel)) => {
                     {
                         let mut inner = self.inner.lock().await;
                         let id = uuid::Uuid::new_v4();
-                        inner.entries.insert(id, ConnectionEntry {
-                            channel: channel.clone(),
-                            active_consumers: 0,
-                            consecutive_successes: 0,
-                            consecutive_errors: 0,
-                        });
+                        inner.entries.insert(
+                            id,
+                            ConnectionEntry {
+                                channel: channel.clone(),
+                                active_consumers: 0,
+                                consecutive_successes: 0,
+                                consecutive_errors: 0,
+                            },
+                        );
                         self.notify.notify_one();
                         let _ = self.cc_watch_tx.send(false);
                         return;
@@ -194,15 +208,21 @@ impl ConnectionPool {
                     let mut inner = self.inner.lock().await;
                     inner.last_connect_failure = Some(Instant::now());
                 }
-             }
+            }
         }
     }
 
     /// Get a client we can use to send gRPC messages.
     pub async fn get_client(&self) -> PooledClient {
         let (resp_tx, mut resp_rx) = mpsc::channel(1);
-        self.request_tx.send(resp_tx).await.expect("ConnectionPool task has shut down");
-        resp_rx.recv().await.expect("ConnectionPool task has shut down")
+        self.request_tx
+            .send(resp_tx)
+            .await
+            .expect("ConnectionPool task has shut down");
+        resp_rx
+            .recv()
+            .await
+            .expect("ConnectionPool task has shut down")
     }
 
     /// Return client to the pool, indicating success or error.
@@ -256,4 +276,3 @@ impl PooledClient {
         self.pool.return_client(self.id, result.is_ok()).await;
     }
 }
-

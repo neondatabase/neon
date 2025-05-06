@@ -4,9 +4,9 @@
 //! - Send requests to correct shards
 //!
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
-use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::Stream;
@@ -18,7 +18,6 @@ use pageserver_page_api::proto;
 
 use pageserver_page_api::proto::PageServiceClient;
 use utils::shard::ShardIndex;
-
 
 mod client_cache;
 
@@ -131,7 +130,6 @@ impl PageserverClient {
                 return Ok(response.page_image);
             }
         }
-
     }
 
     // TODO: this should use model::GetPageRequest and GetPageResponse
@@ -142,7 +140,6 @@ impl PageserverClient {
         tonic::Response<tonic::codec::Streaming<proto::GetPageResponse>>,
         PageserverClientError,
     > {
-
         // FIXME: calculate the shard number correctly
         let shard = ShardIndex::unsharded();
 
@@ -158,7 +155,6 @@ impl PageserverClient {
         // TODO: check for an error and pass it to "finish"
         pooled_client.finish(Ok(())).await;
         return Ok(client.get_pages(tonic::Request::new(requests)).await?);
-
     }
 
     /// Process a request to get the size of a database.
@@ -216,17 +212,13 @@ impl PageserverClient {
     ///
     /// Get a client from the pool for this shard, also creating the pool if it doesn't exist.
     ///
-    async fn get_client(
-        &self,
-        shard: ShardIndex,
-    ) -> client_cache::PooledClient {
-
+    async fn get_client(&self, shard: ShardIndex) -> client_cache::PooledClient {
         let reused_pool: Option<Arc<client_cache::ConnectionPool>> = {
             let channels = self.channels.read().unwrap();
             channels.get(&shard).cloned()
         };
 
-        let usable_pool : Arc<client_cache::ConnectionPool>;
+        let usable_pool: Arc<client_cache::ConnectionPool>;
         match reused_pool {
             Some(pool) => {
                 let pooled_client = pool.get_client().await;
@@ -235,7 +227,11 @@ impl PageserverClient {
             None => {
                 let new_pool = client_cache::ConnectionPool::new(
                     self.shard_map.get(&shard).unwrap(),
-                    5000, 5, Duration::from_millis(200), Duration::from_secs(1));
+                    5000,
+                    5,
+                    Duration::from_millis(200),
+                    Duration::from_secs(1),
+                );
                 let mut write_pool = self.channels.write().unwrap();
                 write_pool.insert(shard, new_pool.clone());
                 usable_pool = new_pool.clone();
@@ -245,7 +241,6 @@ impl PageserverClient {
         let pooled_client = usable_pool.get_client().await;
         return pooled_client;
     }
-
 }
 
 /// Inject tenant_id, timeline_id and authentication token to all pageserver requests.
@@ -287,8 +282,7 @@ impl tonic::service::Interceptor for AuthInterceptor {
         req.metadata_mut()
             .insert("neon-tenant-id", self.tenant_id.clone());
         if let Some(shard_id) = &self.shard_id {
-            req.metadata_mut()
-                .insert("neon-shard-id", shard_id.clone());
+            req.metadata_mut().insert("neon-shard-id", shard_id.clone());
         }
         req.metadata_mut()
             .insert("neon-timeline-id", self.timeline_id.clone());
