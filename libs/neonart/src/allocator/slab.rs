@@ -34,12 +34,12 @@ struct BlockList {
 impl BlockList {
     unsafe fn push_head(&mut self, elem: *mut SlabBlockHeader) {
         unsafe {
-            (*elem).next = self.head;
             if self.is_empty() {
                 self.tail = elem;
                 (*elem).next = std::ptr::null_mut();
             } else {
                 (*elem).next = self.head;
+                (*self.head).prev = elem;
             }
             (*elem).prev = std::ptr::null_mut();
             self.head = elem;
@@ -53,17 +53,17 @@ impl BlockList {
     unsafe fn unlink(&mut self, elem: *mut SlabBlockHeader) {
         unsafe {
             if (*elem).next.is_null() {
-                assert!(self.tail == elem);
+                assert_eq!(self.tail, elem);
                 self.tail = (*elem).prev;
             } else {
-                assert!((*(*elem).next).prev == elem);
+                assert_eq!((*(*elem).next).prev, elem);
                 (*(*elem).next).prev = (*elem).prev;
             }
             if (*elem).prev.is_null() {
-                assert!(self.head == elem);
+                assert_eq!(self.head, elem);
                 self.head = (*elem).next;
             } else {
-                assert!((*(*elem).prev).next == elem);
+                assert_eq!((*(*elem).prev).next, elem);
                 (*(*elem).prev).next = (*elem).next;
             }
         }
@@ -231,6 +231,52 @@ impl SlabDesc {
             });
 
             (block_header, result_chunk.cast())
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn new_test_blk(i: u32) -> *mut SlabBlockHeader {
+        Box::into_raw(Box::new(SlabBlockHeader {
+            free_chunks_head: spin::Mutex::new(std::ptr::null_mut()),
+            num_free_chunks: AtomicU32::new(0),
+            num_chunks: i,
+            prev: std::ptr::null_mut(),
+            next: std::ptr::null_mut(),
+        }))
+    }
+
+    #[test]
+    fn test_block_linked_list() {
+        // note: these are leaked, but that's OK for tests
+        let a = new_test_blk(0);
+        let b = new_test_blk(1);
+
+        let mut list = BlockList::default();
+        assert!(list.is_empty());
+
+        unsafe {
+            list.push_head(a);
+            assert!(!list.is_empty());
+            list.unlink(a);
+        }
+        assert!(list.is_empty());
+
+        unsafe {
+            list.push_head(b);
+            list.push_head(a);
+            assert_eq!(list.head, a);
+            assert_eq!((*a).next, b);
+            assert_eq!((*b).prev, a);
+            assert_eq!(list.tail, b);
+
+            list.unlink(a);
+            list.unlink(b);
+            assert!(list.is_empty());
         }
     }
 }
