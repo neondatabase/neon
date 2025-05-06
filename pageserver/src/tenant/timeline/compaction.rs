@@ -8,7 +8,6 @@ use std::cmp::min;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
 
 use super::layer_manager::LayerManagerLockHolder;
 use super::{
@@ -47,7 +46,6 @@ use wal_decoder::models::value::Value;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
-use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::statvfs::Statvfs;
 use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::gc_block::GcBlock;
@@ -1271,10 +1269,7 @@ impl Timeline {
         // Define partitioning schema if needed
 
         // HADRON
-        let force_image_creation_lsn = self
-            .get_or_compute_force_image_creation_lsn(cancel, ctx)
-            .await
-            .map_err(CompactionError::Other)?;
+        let force_image_creation_lsn = self.get_force_image_creation_lsn();
 
         // 1. L0 Compact
         let l0_outcome = {
@@ -1484,59 +1479,38 @@ impl Timeline {
     }
 
     /* BEGIN_HADRON */
-    // Get the force image creation LSN. Compute it if the last computed LSN is too old.
-    async fn get_or_compute_force_image_creation_lsn(
-        self: &Arc<Self>,
-        cancel: &CancellationToken,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<Option<Lsn>> {
-        const FORCE_IMAGE_CREATION_LSN_COMPUTE_INTERVAL: Duration = Duration::from_secs(10 * 60); // 10 minutes
-        let image_layer_force_creation_period = self.get_image_creation_timeout();
-        if image_layer_force_creation_period.is_none() {
-            return Ok(None);
+    // Get the force image creation LSN based on gc_cutoff_lsn.
+    // Note that this is an estimation and the workload rate may suddenly change. When that happens,
+    // the force image creation may be too early or too late, but eventually it should be able to catch up.
+    pub(crate) fn get_force_image_creation_lsn(self: &Arc<Self>) -> Option<Lsn> {
+        let image_creation_period = self.get_image_layer_force_creation_period()?;
+        let current_lsn: Lsn = self.get_last_record_lsn();
+        let pitr_lsn: Lsn = self.gc_info.read().unwrap().cutoffs.time;
+        let pitr_interval = self.get_pitr_interval();
+        if pitr_interval.is_zero() {
+            tracing::warn!(
+                "Tenant {} has no PITR interval set, skipping force image creation LSN calculation",
+                self.tenant_shard_id
+            );
+            return None;
         }
 
-        let image_layer_force_creation_period = image_layer_force_creation_period.unwrap();
-        let force_image_creation_lsn_computed_at =
-            *self.force_image_creation_lsn_computed_at.lock().unwrap();
-        if force_image_creation_lsn_computed_at.is_none()
-            || force_image_creation_lsn_computed_at.unwrap().elapsed()
-                > FORCE_IMAGE_CREATION_LSN_COMPUTE_INTERVAL
-        {
-            let now: SystemTime = SystemTime::now();
-            let timestamp = now
-                .checked_sub(image_layer_force_creation_period)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "image creation timeout is too large: {image_layer_force_creation_period:?}"
-                    )
-                })?;
-            let timestamp = to_pg_timestamp(timestamp);
-            let force_image_creation_lsn = match self
-                .find_lsn_for_timestamp(timestamp, cancel, ctx)
-                .await?
-            {
-                LsnForTimestamp::Present(lsn) | LsnForTimestamp::Future(lsn) => lsn,
-                _ => {
-                    let gc_lsn = *self.get_applied_gc_cutoff_lsn();
-                    tracing::info!(
-                        "no LSN found for timestamp {timestamp:?}, using latest GC cutoff LSN {}",
-                        gc_lsn
-                    );
-                    gc_lsn
-                }
-            };
-            self.force_image_creation_lsn
-                .store(force_image_creation_lsn);
-            *self.force_image_creation_lsn_computed_at.lock().unwrap() = Some(Instant::now());
-            tracing::info!(
-                "computed force image creation LSN: {}",
-                force_image_creation_lsn
-            );
-            Ok(Some(force_image_creation_lsn))
-        } else {
-            Ok(Some(self.force_image_creation_lsn.load()))
-        }
+        let delta_lsn = current_lsn.checked_sub(pitr_lsn).unwrap().0
+            * image_creation_period.as_secs()
+            / pitr_interval.as_secs();
+        let force_image_creation_lsn = current_lsn.checked_sub(delta_lsn).unwrap_or(Lsn(0));
+
+        tracing::info!(
+            "Tenant shard {} computed force_image_creation_lsn: {}. Current lsn: {}, image_layer_force_creation_period: {:?}, GC cutoff: {}, PITR interval: {:?}",
+            self.tenant_shard_id,
+            force_image_creation_lsn,
+            current_lsn,
+            image_creation_period,
+            pitr_lsn,
+            pitr_interval
+        );
+
+        Some(force_image_creation_lsn)
     }
     /* END_HADRON */
 
