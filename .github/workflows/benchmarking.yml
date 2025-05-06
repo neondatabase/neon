@@ -64,7 +64,7 @@ jobs:
     env:
       ORG_ID: org-solitary-dew-09443886
       LIMIT: 100
-      SEARCH: "Created by actions/neon-project-create; GITHUB_RUN_ID"
+      SEARCH: "GITHUB_RUN_ID="
       BASE_URL: https://console-stage.neon.build/api/v2
       DRY_RUN: "false"  # Set to "true" to just test out the workflow
 
