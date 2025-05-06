@@ -91,9 +91,17 @@ impl Header {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub enum BlobWriterError {
+    #[error("flush task cancelled")]
+    Cancelled,
+    #[error(transparent)]
+    Other(anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum WriteBlobError {
     #[error(transparent)]
-    Flush(FlushTaskError),
+    Flush(BlobWriterError),
     #[error("blob too large ({len} bytes)")]
     BlobTooLarge { len: usize },
     #[error(transparent)]
@@ -238,14 +246,16 @@ where
         cancel: CancellationToken,
         ctx: &RequestContext,
         flush_task_span: tracing::Span,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, BlobWriterError> {
+        let gate_token = gate.enter().map_err(|e| BlobWriterError::Other(e.into()))?;
+
         Ok(Self {
             io_buf: Some(BytesMut::new()),
             writer: BufferedWriter::new(
                 file,
                 start_offset,
                 || IoBufferMut::with_capacity(Self::CAPACITY),
-                gate.enter()?,
+                gate_token,
                 cancel,
                 ctx,
                 flush_task_span,
@@ -265,13 +275,16 @@ where
         &mut self,
         src_buf: FullSlice<Buf>,
         ctx: &RequestContext,
-    ) -> (FullSlice<Buf>, Result<(), FlushTaskError>) {
+    ) -> (FullSlice<Buf>, Result<(), BlobWriterError>) {
         let res = self
             .writer
             // TODO: why are we taking a FullSlice if we're going to pass a borrow downstack?
             // Can remove all the complexity around owned buffers upstack
             .write_buffered_borrowed(&src_buf, ctx)
             .await
+            .map_err(|e| match e {
+                FlushTaskError::Cancelled => BlobWriterError::Cancelled,
+            })
             .map(|len| {
                 self.offset += len as u64;
             });
@@ -418,8 +431,10 @@ where
         self,
         mode: BufferedWriterShutdownMode,
         ctx: &RequestContext,
-    ) -> Result<W, FlushTaskError> {
-        let (_, file) = self.writer.shutdown(mode, ctx).await?;
+    ) -> Result<W, BlobWriterError> {
+        let (_, file) = self.writer.shutdown(mode, ctx).await.map_err(|e| match e {
+            FlushTaskError::Cancelled => BlobWriterError::Cancelled,
+        })?;
         Ok(file)
     }
 }
@@ -467,8 +482,11 @@ pub(crate) mod tests {
                 .await?,
                 gate.enter()?,
             );
-            let mut wtr =
-                BlobWriter::new(file, 0, &gate, cancel.clone(), ctx, info_span!("test")).unwrap();
+            let mut wtr = BlobWriter::new(file, 0, &gate, cancel.clone(), ctx, info_span!("test"))
+                .map_err(|e| match e {
+                    BlobWriterError::Cancelled => anyhow::anyhow!("flush task cancelled"),
+                    BlobWriterError::Other(err) => err,
+                })?;
             for blob in blobs.iter() {
                 let (_, res) = if compression {
                     let res = wtr
@@ -490,7 +508,11 @@ pub(crate) mod tests {
                     BufferedWriterShutdownMode::ZeroPadToNextMultiple(PAGE_SZ),
                     ctx,
                 )
-                .await?;
+                .await
+                .map_err(|e| match e {
+                    BlobWriterError::Cancelled => anyhow::anyhow!("flush task cancelled"),
+                    BlobWriterError::Other(err) => err,
+                })?;
             file.disarm_into_inner()
         };
         Ok((temp_dir, pathbuf, offsets))

@@ -35,6 +35,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
+use crate::tenant::blob_io::BlobWriterError;
+
 use anyhow::{Context, Result, bail, ensure};
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
@@ -448,7 +450,11 @@ impl DeltaLayerWriterInner {
             cancel,
             ctx,
             info_span!(parent: None, "delta_layer_writer_flush_task", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%timeline_id, path = %path),
-        )?;
+        )
+        .map_err(|e| match e {
+            BlobWriterError::Cancelled => anyhow::anyhow!("flush task cancelled"),
+            BlobWriterError::Other(err) => err,
+        })?;
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();
