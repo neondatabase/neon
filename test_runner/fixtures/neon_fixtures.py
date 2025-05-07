@@ -4644,7 +4644,10 @@ class EndpointFactory:
         return self
 
     def new_replica(
-        self, origin: Endpoint, endpoint_id: str, config_lines: list[str] | None = None
+        self,
+        origin: Endpoint,
+        endpoint_id: str | None = None,
+        config_lines: list[str] | None = None,
     ):
         branch_name = origin.branch_name
         assert origin in self.endpoints
@@ -4660,7 +4663,10 @@ class EndpointFactory:
         )
 
     def new_replica_start(
-        self, origin: Endpoint, endpoint_id: str, config_lines: list[str] | None = None
+        self,
+        origin: Endpoint,
+        endpoint_id: str | None = None,
+        config_lines: list[str] | None = None,
     ):
         branch_name = origin.branch_name
         assert origin in self.endpoints
