@@ -11,6 +11,7 @@ use compute_api::spec::{
 use futures::StreamExt;
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
+use itertools::Itertools;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use once_cell::sync::Lazy;
@@ -2008,37 +2009,27 @@ LIMIT 100",
             .await
             .with_context(|| format!("Failed to execute query: {select}"))?;
 
-        let mut already_granted = HashSet::new();
-        for row in rows {
-            let grant: String = row.get(0);
-            already_granted.insert(grant);
-        }
-
-        // check if all privileges are granted.
-        if privileges
-            .iter()
-            .all(|g| already_granted.contains(g.as_str()))
-        {
-            return Ok(());
-        }
+        let already_granted: HashSet<String> = rows.into_iter().map(|row| row.get(0)).collect();
 
         let grants = privileges
             .iter()
+            .filter(|p| !already_granted.contains(p.as_str()))
             // should not be quoted as it's part of the command.
             // is already sanitized so it's ok
             .map(|p| p.as_str())
-            .collect::<Vec<&'static str>>()
             .join(", ");
 
-        // quote the schema and role name as identifiers to sanitize them.
-        let schema_name = schema_name.pg_quote();
-        let role_name = role_name.pg_quote();
+        if !grants.is_empty() {
+            // quote the schema and role name as identifiers to sanitize them.
+            let schema_name = schema_name.pg_quote();
+            let role_name = role_name.pg_quote();
 
-        let query = format!("GRANT {grants} ON SCHEMA {schema_name} TO {role_name}",);
-        db_client
-            .simple_query(&query)
-            .await
-            .with_context(|| format!("Failed to execute query: {}", query))?;
+            let query = format!("GRANT {grants} ON SCHEMA {schema_name} TO {role_name}",);
+            db_client
+                .simple_query(&query)
+                .await
+                .with_context(|| format!("Failed to execute query: {}", query))?;
+        }
 
         Ok(())
     }
