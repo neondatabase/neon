@@ -150,6 +150,10 @@ enum GetPageClass {
 }
 
 // A GetPage response. May be emitted out of order for a batch.
+//
+// TODO: should we send a single batch response instead of individual pages?
+// That would prevent eager responses, e.g. in the case of a layer download in
+// the middle of the batch.
 message GetPageResponse {
   // The original request's ID.
   uint64 request_id = 1;
