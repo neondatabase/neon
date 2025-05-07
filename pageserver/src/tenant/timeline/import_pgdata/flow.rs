@@ -43,6 +43,7 @@ use pageserver_api::key::{
     slru_segment_size_to_key,
 };
 use pageserver_api::keyspace::{contiguous_range_len, is_contiguous_range, singleton_range};
+use pageserver_api::models::{ShardImportProgress, ShardImportStatus};
 use pageserver_api::reltag::{RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::relfile_utils::parse_relfilename;
@@ -59,6 +60,7 @@ use super::Timeline;
 use super::importbucket_client::{ControlFile, RemoteStorageWrapper};
 use crate::assert_u64_eq_usize::UsizeIsU64;
 use crate::context::{DownloadBehavior, RequestContext};
+use crate::controller_upcall_client::{StorageControllerUpcallApi, StorageControllerUpcallClient};
 use crate::pgdatadir_mapping::{
     DbDirectory, RelDirectory, SlruSegmentDirectory, TwoPhaseDirectory,
 };
@@ -69,6 +71,7 @@ pub async fn run(
     timeline: Arc<Timeline>,
     control_file: ControlFile,
     storage: RemoteStorageWrapper,
+    import_progress: Option<ShardImportProgress>,
     ctx: &RequestContext,
 ) -> anyhow::Result<()> {
     let planner = Planner {
@@ -81,9 +84,18 @@ pub async fn run(
     let import_config = &timeline.conf.timeline_import_config;
     let plan = planner.plan(import_config).await?;
 
+    if let Some(progress) = &import_progress {
+        // TODO(vlad): Stronger check here
+        if progress.jobs != plan.jobs.len() {
+            anyhow::bail!("Import plan does not match storcon metadata");
+        }
+    }
+
     pausable_failpoint!("import-timeline-pre-execute-pausable");
 
-    plan.execute(timeline, import_config, ctx).await
+    let start_from_job_idx = import_progress.map(|progress| progress.completed);
+    plan.execute(timeline, start_from_job_idx, import_config, ctx)
+        .await
 }
 
 struct Planner {
@@ -327,25 +339,37 @@ impl Plan {
     async fn execute(
         self,
         timeline: Arc<Timeline>,
+        start_after_job_idx: Option<usize>,
         import_config: &TimelineImportConfig,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        let storcon_client = StorageControllerUpcallClient::new(timeline.conf, &timeline.cancel);
+
         let mut work = FuturesOrdered::new();
         let semaphore = Arc::new(Semaphore::new(import_config.import_job_concurrency.into()));
 
         let jobs_in_plan = self.jobs.len();
 
-        let mut jobs = self.jobs.into_iter().enumerate().peekable();
-        let mut results = Vec::new();
+        let mut jobs = self
+            .jobs
+            .into_iter()
+            .enumerate()
+            .map(|(idx, job)| (idx + 1, job))
+            .peekable();
+        let mut last_completed_job_idx = 0;
 
         // Run import jobs concurrently up to the limit specified by the pageserver configuration.
         // Note that we process completed futures in the oreder of insertion. This will be the
         // building block for resuming imports across pageserver restarts or tenant migrations.
-        while results.len() < jobs_in_plan {
+        while last_completed_job_idx < jobs_in_plan {
             tokio::select! {
                 permit = semaphore.clone().acquire_owned(), if jobs.peek().is_some() => {
                     let permit = permit.expect("never closed");
                     let (job_idx, job) = jobs.next().expect("we peeked");
+                    if Some(job_idx) <= start_after_job_idx {
+                        continue;
+                    }
+
                     let job_timeline = timeline.clone();
                     let ctx = ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Error);
 
@@ -357,8 +381,25 @@ impl Plan {
                 },
                 maybe_complete_job_idx = work.next() => {
                     match maybe_complete_job_idx {
-                        Some(Ok((_job_idx, res))) => {
-                            results.push(res?);
+                        Some(Ok((job_idx, res))) => {
+                            res?;
+                            last_completed_job_idx = job_idx;
+
+                            // TODO(vlad): make this configurable
+                            if last_completed_job_idx % 2 == 0 {
+                                storcon_client.put_timeline_import_status(
+                                    timeline.tenant_shard_id,
+                                    timeline.timeline_id,
+                                    ShardImportStatus::InProgress(Some(ShardImportProgress {
+                                        jobs: jobs_in_plan,
+                                        completed: last_completed_job_idx,
+                                    }))
+                                )
+                                .await
+                                .map_err(|_err| {
+                                    anyhow::anyhow!("Shut down while putting timeline import status")
+                                })?;
+                            }
                         },
                         Some(Err(_)) => {
                             anyhow::bail!(
