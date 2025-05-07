@@ -41,7 +41,7 @@ storage_broker.workspace = true
 http-utils.workspace = true
 utils.workspace = true
 whoami.workspace = true
-
+endpoint_storage.workspace = true
 compute_api.workspace = true
 workspace_hack.workspace = true
 tracing.workspace = true

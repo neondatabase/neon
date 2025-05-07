@@ -51,7 +51,7 @@ from fixtures.common_types import (
     TimelineId,
 )
 from fixtures.compute_migrations import NUM_COMPUTE_MIGRATIONS
-from fixtures.endpoint.http import EndpointHttpClient
+from fixtures.endpoint.http import ComputeClaimsScope, EndpointHttpClient
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.neon_cli import NeonLocalCli, Pagectl
@@ -1185,7 +1185,9 @@ class NeonEnv:
             "broker": {},
             "safekeepers": [],
             "pageservers": [],
-            "endpoint_storage": {"port": self.port_distributor.get_port()},
+            "endpoint_storage": {
+                "listen_addr": f"127.0.0.1:{self.port_distributor.get_port()}",
+            },
             "generate_local_ssl_certs": self.generate_local_ssl_certs,
         }
 
@@ -4218,13 +4220,13 @@ class Endpoint(PgProtocol, LogUtils):
 
         self.config(config_lines)
 
-        self.__jwt = self.env.neon_cli.endpoint_generate_jwt(self.endpoint_id)
+        self.__jwt = self.generate_jwt()
 
         return self
 
     def start(
         self,
-        remote_ext_config: str | None = None,
+        remote_ext_base_url: str | None = None,
         pageserver_id: int | None = None,
         safekeeper_generation: int | None = None,
         safekeepers: list[int] | None = None,
@@ -4250,7 +4252,7 @@ class Endpoint(PgProtocol, LogUtils):
             self.endpoint_id,
             safekeepers_generation=safekeeper_generation,
             safekeepers=self.active_safekeepers,
-            remote_ext_config=remote_ext_config,
+            remote_ext_base_url=remote_ext_base_url,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
             create_test_user=create_test_user,
@@ -4264,6 +4266,14 @@ class Endpoint(PgProtocol, LogUtils):
         self.log_config_value("neon.file_cache_size_limit")
 
         return self
+
+    def generate_jwt(self, scope: ComputeClaimsScope | None = None) -> str:
+        """
+        Generate a JWT for making requests to the endpoint's external HTTP
+        server.
+        """
+        assert self.endpoint_id is not None
+        return self.env.neon_cli.endpoint_generate_jwt(self.endpoint_id, scope)
 
     def endpoint_path(self) -> Path:
         """Path to endpoint directory"""
@@ -4457,7 +4467,7 @@ class Endpoint(PgProtocol, LogUtils):
         hot_standby: bool = False,
         lsn: Lsn | None = None,
         config_lines: list[str] | None = None,
-        remote_ext_config: str | None = None,
+        remote_ext_base_url: str | None = None,
         pageserver_id: int | None = None,
         allow_multiple: bool = False,
         basebackup_request_tries: int | None = None,
@@ -4476,7 +4486,7 @@ class Endpoint(PgProtocol, LogUtils):
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
         ).start(
-            remote_ext_config=remote_ext_config,
+            remote_ext_base_url=remote_ext_base_url,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
             basebackup_request_tries=basebackup_request_tries,
@@ -4560,7 +4570,7 @@ class EndpointFactory:
         lsn: Lsn | None = None,
         hot_standby: bool = False,
         config_lines: list[str] | None = None,
-        remote_ext_config: str | None = None,
+        remote_ext_base_url: str | None = None,
         pageserver_id: int | None = None,
         basebackup_request_tries: int | None = None,
     ) -> Endpoint:
@@ -4580,7 +4590,7 @@ class EndpointFactory:
             hot_standby=hot_standby,
             config_lines=config_lines,
             lsn=lsn,
-            remote_ext_config=remote_ext_config,
+            remote_ext_base_url=remote_ext_base_url,
             pageserver_id=pageserver_id,
             basebackup_request_tries=basebackup_request_tries,
         )

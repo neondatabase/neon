@@ -1994,7 +1994,13 @@ impl Timeline {
                 let l = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
                 deltas.push(l);
             }
-            MergeIterator::create(&deltas, &[], ctx)
+            MergeIterator::create_with_options(
+                &deltas,
+                &[],
+                ctx,
+                1024 * 8192, /* 8 MiB buffer per layer iterator */
+                1024,
+            )
         };
 
         // This iterator walks through all keys and is needed to calculate size used by each key
@@ -2828,7 +2834,7 @@ impl Timeline {
         Ok(())
     }
 
-    /// Check if the memory usage is within the limit.
+    /// Check to bail out of gc compaction early if it would use too much memory.
     async fn check_memory_usage(
         self: &Arc<Self>,
         layer_selection: &[Layer],
@@ -2841,7 +2847,8 @@ impl Timeline {
             let layer_desc = layer.layer_desc();
             if layer_desc.is_delta() {
                 // Delta layers at most have 1MB buffer; 3x to make it safe (there're deltas as large as 16KB).
-                // Multiply the layer size so that tests can pass.
+                // Scale it by target_layer_size_bytes so that tests can pass (some tests, e.g., `test_pageserver_gc_compaction_preempt
+                // use 3MB layer size and we need to account for that).
                 estimated_memory_usage_mb +=
                     3.0 * (layer_desc.file_size / target_layer_size_bytes) as f64;
                 num_delta_layers += 1;

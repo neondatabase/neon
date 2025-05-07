@@ -158,14 +158,14 @@ fn parse_pg_version(human_version: &str) -> PostgresMajorVersion {
 pub async fn download_extension(
     ext_name: &str,
     ext_path: &RemotePath,
-    ext_remote_storage: &str,
+    remote_ext_base_url: &str,
     pgbin: &str,
 ) -> Result<u64> {
     info!("Download extension {:?} from {:?}", ext_name, ext_path);
 
     // TODO add retry logic
     let download_buffer =
-        match download_extension_tar(ext_remote_storage, &ext_path.to_string()).await {
+        match download_extension_tar(remote_ext_base_url, &ext_path.to_string()).await {
             Ok(buffer) => buffer,
             Err(error_message) => {
                 return Err(anyhow::anyhow!(
@@ -272,8 +272,8 @@ pub fn create_control_files(remote_extensions: &RemoteExtSpec, pgbin: &str) {
 // Do request to extension storage proxy, e.g.,
 // curl http://pg-ext-s3-gateway/latest/v15/extensions/anon.tar.zst
 // using HTTP GET and return the response body as bytes.
-async fn download_extension_tar(ext_remote_storage: &str, ext_path: &str) -> Result<Bytes> {
-    let uri = format!("{}/{}", ext_remote_storage, ext_path);
+async fn download_extension_tar(remote_ext_base_url: &str, ext_path: &str) -> Result<Bytes> {
+    let uri = format!("{}/{}", remote_ext_base_url, ext_path);
     let filename = Path::new(ext_path)
         .file_name()
         .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))

@@ -243,6 +243,7 @@ azure_storage_blobs = { git = "https://github.com/neondatabase/azure-sdk-for-rus
 ## Local libraries
 compute_api = { version = "0.1", path = "./libs/compute_api/" }
 consumption_metrics = { version = "0.1", path = "./libs/consumption_metrics/" }
+endpoint_storage = { version = "0.0.1", path = "./endpoint_storage/" }
 http-utils = { version = "0.1", path = "./libs/http-utils/" }
 metrics = { version = "0.1", path = "./libs/metrics/" }
 pageserver = { path = "./pageserver" }

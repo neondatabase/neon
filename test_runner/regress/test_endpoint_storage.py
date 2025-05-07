@@ -4,10 +4,12 @@ import pytest
 from aiohttp import ClientSession
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
+from fixtures.utils import run_only_on_default_postgres
 from jwcrypto import jwk, jwt
 
 
 @pytest.mark.asyncio
+@run_only_on_default_postgres("test doesn't use postgres")
 async def test_endpoint_storage_insert_retrieve_delete(neon_simple_env: NeonEnv):
     """
     Inserts, retrieves, and deletes test file using a JWT token
@@ -35,7 +37,6 @@ async def test_endpoint_storage_insert_retrieve_delete(neon_simple_env: NeonEnv)
     key = f"http://{base_url}/{tenant_id}/{timeline_id}/{endpoint_id}/key"
     headers = {"Authorization": f"Bearer {token}"}
     log.info(f"cache key url {key}")
-    log.info(f"token {token}")
 
     async with ClientSession(headers=headers) as session:
         async with session.get(key) as res:

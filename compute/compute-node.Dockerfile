@@ -1084,23 +1084,12 @@ RUN cargo install --locked --version 0.12.9 cargo-pgrx && \
     /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
 
 USER root
+
 #########################################################################################
 #
 # Layer "rust extensions pgrx14"
 #
-#########################################################################################
-FROM pg-build-nonroot-with-cargo AS rust-extensions-build-pgrx14
-ARG PG_VERSION
-
-RUN cargo install --locked --version 0.14.1 cargo-pgrx && \
-    /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
-
-USER root
-#########################################################################################
-#
-# Layer "rust extensions pgrx14"
-#
-# Version 14 is now required by a few 
+# Version 14 is now required by a few
 # This layer should be used as a base for new pgrx extensions,
 # and eventually get merged with `rust-extensions-build`
 #
@@ -1333,8 +1322,8 @@ ARG PG_VERSION
 # Do not update without approve from proxy team
 # Make sure the version is reflected in proxy/src/serverless/local_conn_pool.rs
 WORKDIR /ext-src
-RUN wget https://github.com/neondatabase/pg_session_jwt/archive/refs/tags/v0.3.0.tar.gz -O pg_session_jwt.tar.gz && \
-    echo "19be2dc0b3834d643706ed430af998bb4c2cdf24b3c45e7b102bb3a550e8660c pg_session_jwt.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/neondatabase/pg_session_jwt/archive/refs/tags/v0.3.1.tar.gz -O pg_session_jwt.tar.gz && \
+    echo "62fec9e472cb805c53ba24a0765afdb8ea2720cfc03ae7813e61687b36d1b0ad pg_session_jwt.tar.gz" | sha256sum --check && \
     mkdir pg_session_jwt-src && cd pg_session_jwt-src && tar xzf ../pg_session_jwt.tar.gz --strip-components=1 -C . && \
     sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.9", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     sed -i 's/version = "0.12.6"/version = "0.12.9"/g' pgrx-tests/Cargo.toml && \
@@ -1362,7 +1351,8 @@ COPY compute/patches/anon_v2.patch .
 # This is an experimental extension, never got to real production.
 # !Do not remove! It can be present in shared_preload_libraries and compute will fail to start if library is not found.
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
-RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/latest/postgresql_anonymizer-latest.tar.gz -O pg_anon.tar.gz && \
+RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/2.1.0/postgresql_anonymizer-latest.tar.gz -O pg_anon.tar.gz && \
+    echo "48e7f5ae2f1ca516df3da86c5c739d48dd780a4e885705704ccaad0faa89d6c0  pg_anon.tar.gz" | sha256sum --check && \
     mkdir pg_anon-src && cd pg_anon-src && tar xzf ../pg_anon.tar.gz --strip-components=1 -C . && \
     find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt && \
     sed -i 's/pgrx = "0.14.1"/pgrx = { version = "=0.14.1", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \

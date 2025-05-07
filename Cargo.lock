@@ -1284,6 +1284,7 @@ name = "compute_tools"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-compression",
  "aws-config",
  "aws-sdk-kms",
  "aws-sdk-s3",
@@ -1420,6 +1421,7 @@ dependencies = [
  "clap",
  "comfy-table",
  "compute_api",
+ "endpoint_storage",
  "futures",
  "http-utils",
  "humantime",

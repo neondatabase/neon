@@ -1,3 +1,5 @@
+pub mod claims;
+use crate::claims::{DeletePrefixClaims, EndpointStorageClaims};
 use anyhow::Result;
 use axum::extract::{FromRequestParts, Path};
 use axum::response::{IntoResponse, Response};
@@ -13,7 +15,7 @@ use std::result::Result as StdResult;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
-use utils::id::{TenantId, TimelineId};
+use utils::id::{EndpointId, TenantId, TimelineId};
 
 // simplified version of utils::auth::JwtAuth
 pub struct JwtAuth {
@@ -79,32 +81,19 @@ pub struct Storage {
     pub max_upload_file_limit: usize,
 }
 
-pub type EndpointId = String; // If needed, reuse small string from proxy/src/types.rc
-
-#[derive(Deserialize, Serialize, PartialEq)]
-pub struct Claims {
-    pub tenant_id: TenantId,
-    pub timeline_id: TimelineId,
-    pub endpoint_id: EndpointId,
-    pub exp: u64,
-}
-
-impl Display for Claims {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Claims(tenant_id {} timeline_id {} endpoint_id {} exp {})",
-            self.tenant_id, self.timeline_id, self.endpoint_id, self.exp
-        )
-    }
-}
-
 #[derive(Deserialize, Serialize)]
 struct KeyRequest {
     tenant_id: TenantId,
     timeline_id: TimelineId,
     endpoint_id: EndpointId,
     path: String,
+}
+
+#[derive(Deserialize, Serialize, PartialEq)]
+struct PrefixKeyRequest {
+    tenant_id: TenantId,
+    timeline_id: Option<TimelineId>,
+    endpoint_id: Option<EndpointId>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -165,7 +154,7 @@ impl FromRequestParts<Arc<Storage>> for S3Path {
             .extract::<TypedHeader<Authorization<Bearer>>>()
             .await
             .map_err(|e| bad_request(e, "invalid token"))?;
-        let claims: Claims = state
+        let claims: EndpointStorageClaims = state
             .auth
             .decode(bearer.token())
             .map_err(|e| bad_request(e, "decoding token"))?;
@@ -178,7 +167,7 @@ impl FromRequestParts<Arc<Storage>> for S3Path {
             path.endpoint_id.clone()
         };
 
-        let route = Claims {
+        let route = EndpointStorageClaims {
             tenant_id: path.tenant_id,
             timeline_id: path.timeline_id,
             endpoint_id,
@@ -193,38 +182,13 @@ impl FromRequestParts<Arc<Storage>> for S3Path {
     }
 }
 
-#[derive(Deserialize, Serialize, PartialEq)]
-pub struct PrefixKeyPath {
-    pub tenant_id: TenantId,
-    pub timeline_id: Option<TimelineId>,
-    pub endpoint_id: Option<EndpointId>,
-}
-
-impl Display for PrefixKeyPath {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "PrefixKeyPath(tenant_id {} timeline_id {} endpoint_id {})",
-            self.tenant_id,
-            self.timeline_id
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or("".to_string()),
-            self.endpoint_id
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or("".to_string())
-        )
-    }
-}
-
 #[derive(Debug, PartialEq)]
 pub struct PrefixS3Path {
     pub path: RemotePath,
 }
 
-impl From<&PrefixKeyPath> for PrefixS3Path {
-    fn from(path: &PrefixKeyPath) -> Self {
+impl From<&DeletePrefixClaims> for PrefixS3Path {
+    fn from(path: &DeletePrefixClaims) -> Self {
         let timeline_id = path
             .timeline_id
             .as_ref()
@@ -250,21 +214,27 @@ impl FromRequestParts<Arc<Storage>> for PrefixS3Path {
         state: &Arc<Storage>,
     ) -> Result<Self, Self::Rejection> {
         let Path(path) = parts
-            .extract::<Path<PrefixKeyPath>>()
+            .extract::<Path<PrefixKeyRequest>>()
             .await
             .map_err(|e| bad_request(e, "invalid route"))?;
         let TypedHeader(Authorization(bearer)) = parts
             .extract::<TypedHeader<Authorization<Bearer>>>()
             .await
             .map_err(|e| bad_request(e, "invalid token"))?;
-        let claims: PrefixKeyPath = state
+        let claims: DeletePrefixClaims = state
             .auth
             .decode(bearer.token())
             .map_err(|e| bad_request(e, "invalid token"))?;
-        if path != claims {
-            return Err(unauthorized(path, claims));
+        let route = DeletePrefixClaims {
+            tenant_id: path.tenant_id,
+            timeline_id: path.timeline_id,
+            endpoint_id: path.endpoint_id,
+            exp: claims.exp,
+        };
+        if route != claims {
+            return Err(unauthorized(route, claims));
         }
-        Ok((&path).into())
+        Ok((&route).into())
     }
 }
 
@@ -297,7 +267,7 @@ mod tests {
 
     #[test]
     fn s3_path() {
-        let auth = Claims {
+        let auth = EndpointStorageClaims {
             tenant_id: TENANT_ID,
             timeline_id: TIMELINE_ID,
             endpoint_id: ENDPOINT_ID.into(),
@@ -327,10 +297,11 @@ mod tests {
 
     #[test]
     fn prefix_s3_path() {
-        let mut path = PrefixKeyPath {
+        let mut path = DeletePrefixClaims {
             tenant_id: TENANT_ID,
             timeline_id: None,
             endpoint_id: None,
+            exp: 0,
         };
         let prefix_path = |s: String| RemotePath::from_string(&s).unwrap();
         assert_eq!(

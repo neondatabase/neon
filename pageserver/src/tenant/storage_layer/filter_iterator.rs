@@ -157,7 +157,7 @@ mod tests {
             .await
             .unwrap();
 
-        let merge_iter = MergeIterator::create(
+        let merge_iter = MergeIterator::create_for_testing(
             &[resident_layer_1.get_as_delta(&ctx).await.unwrap()],
             &[],
             &ctx,
@@ -182,7 +182,7 @@ mod tests {
         result.extend(test_deltas1[90..100].iter().cloned());
         assert_filter_iter_equal(&mut filter_iter, &result).await;
 
-        let merge_iter = MergeIterator::create(
+        let merge_iter = MergeIterator::create_for_testing(
             &[resident_layer_1.get_as_delta(&ctx).await.unwrap()],
             &[],
             &ctx,
