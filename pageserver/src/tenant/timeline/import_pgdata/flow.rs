@@ -32,7 +32,7 @@ use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
 
-use anyhow::{bail, ensure};
+use anyhow::ensure;
 use bytes::Bytes;
 use futures::stream::FuturesOrdered;
 use itertools::Itertools;
@@ -358,12 +358,12 @@ impl Plan {
                 maybe_complete_job_idx = work.next() => {
                     match maybe_complete_job_idx {
                         Some(Ok((_job_idx, res))) => {
-                            results.push(res);
+                            results.push(res?);
                         },
                         Some(Err(_)) => {
-                            results.push(Err(anyhow::anyhow!(
-                                "parallel job panicked or cancelled, check pageserver logs"
-                            )));
+                            anyhow::bail!(
+                                "import job panicked or cancelled"
+                            );
                         }
                         None => {}
                     }
@@ -371,17 +371,7 @@ impl Plan {
             }
         }
 
-        if results.iter().all(|r| r.is_ok()) {
-            Ok(())
-        } else {
-            let mut msg = String::new();
-            for result in results {
-                if let Err(err) = result {
-                    msg.push_str(&format!("{err:?}\n\n"));
-                }
-            }
-            bail!("Some parallel jobs failed:\n\n{msg}");
-        }
+        Ok(())
     }
 }
 

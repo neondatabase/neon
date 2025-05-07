@@ -161,7 +161,28 @@ pub async fn doit(
             }
             .await?;
 
-            flow::run(timeline.clone(), control_file, storage.clone(), ctx).await?;
+            let res = flow::run(timeline.clone(), control_file, storage.clone(), ctx).await;
+            if let Err(err) = res {
+                // The import task is a aborted on tenant shutdown, so in principle, it should
+                // never be cancelled. To be on the safe side, check the cancellation tokens
+                // before marking the import as failed.
+                if !(cancel.is_cancelled() || timeline.cancel.is_cancelled()) {
+                    storcon_client
+                        .put_timeline_import_status(
+                            timeline.tenant_shard_id,
+                            timeline.timeline_id,
+                            ShardImportStatus::Error(format!("{}", err.root_cause())),
+                        )
+                        .await
+                        .map_err(|_err| {
+                            anyhow::anyhow!("Shut down while putting timeline import status")
+                        })?;
+
+                    return Err(err);
+                } else {
+                    return Err(anyhow::anyhow!("Import task cancelled"));
+                }
+            }
 
             // Communicate that shard is done.
             // Ensure at-least-once delivery of the upcall to storage controller
@@ -175,7 +196,6 @@ pub async fn doit(
                 .put_timeline_import_status(
                     timeline.tenant_shard_id,
                     timeline.timeline_id,
-                    // TODO(vlad): What about import errors?
                     ShardImportStatus::Done,
                 )
                 .await
