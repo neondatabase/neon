@@ -1035,10 +1035,27 @@ impl PageServerHandler {
                 // avoid a somewhat costly Span::record() by constructing the entire span in one go.
                 macro_rules! mkspan {
                     (before shard routing) => {{
-                        tracing::info_span!(parent: &parent_span, "handle_get_page_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.hdr.request_lsn)
+                        tracing::info_span!(
+                            parent: &parent_span,
+                            "handle_get_page_request",
+                            request_id = %req.hdr.reqid,
+                            rel = %req.rel,
+                            blkno = %req.blkno,
+                            req_lsn = %req.hdr.request_lsn,
+                            not_modified_since_lsn = %req.hdr.not_modified_since,
+                        )
                     }};
                     ($shard_id:expr) => {{
-                        tracing::info_span!(parent: &parent_span, "handle_get_page_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.hdr.request_lsn, shard_id = %$shard_id)
+                        tracing::info_span!(
+                            parent: &parent_span,
+                            "handle_get_page_request",
+                            request_id = %req.hdr.reqid,
+                            rel = %req.rel,
+                            blkno = %req.blkno,
+                            req_lsn = %req.hdr.request_lsn,
+                            not_modified_since_lsn = %req.hdr.not_modified_since,
+                            shard_id = %$shard_id,
+                        )
                     }};
                 }
 
@@ -1102,6 +1119,7 @@ impl PageServerHandler {
                             shard_id = %shard.get_shard_identity().shard_slug(),
                             timeline_id = %timeline_id,
                             lsn = %req.hdr.request_lsn,
+                            not_modified_since_lsn = %req.hdr.not_modified_since,
                             request_id = %req.hdr.reqid,
                             key = %key,
                             )

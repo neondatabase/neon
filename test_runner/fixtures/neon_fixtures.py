@@ -51,7 +51,7 @@ from fixtures.common_types import (
     TimelineId,
 )
 from fixtures.compute_migrations import NUM_COMPUTE_MIGRATIONS
-from fixtures.endpoint.http import EndpointHttpClient
+from fixtures.endpoint.http import ComputeClaimsScope, EndpointHttpClient
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.neon_cli import NeonLocalCli, Pagectl
@@ -1185,7 +1185,9 @@ class NeonEnv:
             "broker": {},
             "safekeepers": [],
             "pageservers": [],
-            "endpoint_storage": {"port": self.port_distributor.get_port()},
+            "endpoint_storage": {
+                "listen_addr": f"127.0.0.1:{self.port_distributor.get_port()}",
+            },
             "generate_local_ssl_certs": self.generate_local_ssl_certs,
         }
 
@@ -1279,7 +1281,8 @@ class NeonEnv:
                 )
 
             tenant_config = ps_cfg.setdefault("tenant_config", {})
-            tenant_config["rel_size_v2_enabled"] = True  # Enable relsize_v2 by default in tests
+            # This feature is pending rollout.
+            # tenant_config["rel_size_v2_enabled"] = True
 
             if self.pageserver_remote_storage is not None:
                 ps_cfg["remote_storage"] = remote_storage_to_toml_dict(
@@ -4217,7 +4220,7 @@ class Endpoint(PgProtocol, LogUtils):
 
         self.config(config_lines)
 
-        self.__jwt = self.env.neon_cli.endpoint_generate_jwt(self.endpoint_id)
+        self.__jwt = self.generate_jwt()
 
         return self
 
@@ -4263,6 +4266,14 @@ class Endpoint(PgProtocol, LogUtils):
         self.log_config_value("neon.file_cache_size_limit")
 
         return self
+
+    def generate_jwt(self, scope: ComputeClaimsScope | None = None) -> str:
+        """
+        Generate a JWT for making requests to the endpoint's external HTTP
+        server.
+        """
+        assert self.endpoint_id is not None
+        return self.env.neon_cli.endpoint_generate_jwt(self.endpoint_id, scope)
 
     def endpoint_path(self) -> Path:
         """Path to endpoint directory"""

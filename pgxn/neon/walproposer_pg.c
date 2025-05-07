@@ -63,7 +63,7 @@
 char	   *wal_acceptors_list = "";
 int			wal_acceptor_reconnect_timeout = 1000;
 int			wal_acceptor_connection_timeout = 10000;
-int			safekeeper_proto_version = 2;
+int			safekeeper_proto_version = 3;
 
 /* Set to true in the walproposer bgw. */
 static bool am_walproposer;
@@ -228,7 +228,7 @@ nwp_register_gucs(void)
 							"Version of compute <-> safekeeper protocol.",
 							"Used while migrating from 2 to 3.",
 							&safekeeper_proto_version,
-							2, 0, INT_MAX,
+							3, 0, INT_MAX,
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);

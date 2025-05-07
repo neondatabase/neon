@@ -199,8 +199,7 @@ fn get_conn_info(
     let endpoint = match connection_url.host() {
         Some(url::Host::Domain(hostname)) => {
             if let Some(tls) = tls {
-                endpoint_sni(hostname, &tls.common_names)?
-                    .ok_or(ConnInfoError::MalformedEndpoint)?
+                endpoint_sni(hostname, &tls.common_names).ok_or(ConnInfoError::MalformedEndpoint)?
             } else {
                 hostname
                     .split_once('.')

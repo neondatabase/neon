@@ -687,8 +687,14 @@ prefetch_wait_for(uint64 ring_index)
 		END_PREFETCH_RECEIVE_WORK();
 		CHECK_FOR_INTERRUPTS();
 	}
-
-	return result;
+	if (result)
+	{
+		/* Check that slot is actually received (srver can be disconnected in prefetch_pump_state called from CHECK_FOR_INTERRUPTS */
+		PrefetchRequest *slot = GetPrfSlot(ring_index);
+		return slot->status == PRFS_RECEIVED;
+	}
+	return false;
+;
 }
 
 /*

@@ -148,7 +148,7 @@ histogram_to_metrics(IOHistogram histogram,
 static metric_t *
 neon_perf_counters_to_metrics(neon_per_backend_counters *counters)
 {
-#define NUM_METRICS ((2 + NUM_IO_WAIT_BUCKETS) * 3 + 10)
+#define NUM_METRICS ((2 + NUM_IO_WAIT_BUCKETS) * 3 + 12)
 	metric_t   *metrics = palloc((NUM_METRICS + 1) * sizeof(metric_t));
 	int			i = 0;
 
@@ -166,6 +166,8 @@ neon_perf_counters_to_metrics(neon_per_backend_counters *counters)
 
 	APPEND_METRIC(getpage_prefetch_requests_total);
 	APPEND_METRIC(getpage_sync_requests_total);
+	APPEND_METRIC(compute_getpage_stuck_requests_total);
+	APPEND_METRIC(compute_getpage_max_inflight_stuck_time_ms);
 	APPEND_METRIC(getpage_prefetch_misses_total);
 	APPEND_METRIC(getpage_prefetch_discards_total);
 	APPEND_METRIC(pageserver_requests_sent_total);
@@ -294,6 +296,11 @@ neon_get_perf_counters(PG_FUNCTION_ARGS)
 		totals.file_cache_hits_total += counters->file_cache_hits_total;
 		histogram_merge_into(&totals.file_cache_read_hist, &counters->file_cache_read_hist);
 		histogram_merge_into(&totals.file_cache_write_hist, &counters->file_cache_write_hist);
+
+		totals.compute_getpage_stuck_requests_total += counters->compute_getpage_stuck_requests_total;
+		totals.compute_getpage_max_inflight_stuck_time_ms = Max(
+			totals.compute_getpage_max_inflight_stuck_time_ms,
+			counters->compute_getpage_max_inflight_stuck_time_ms);
 	}
 
 	metrics = neon_perf_counters_to_metrics(&totals);
