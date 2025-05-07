@@ -253,6 +253,11 @@ impl FlushTaskError {
             FlushTaskError::Cancelled => true,
         }
     }
+    pub fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            FlushTaskError::Cancelled => anyhow::anyhow!(self),
+        }
+    }
 }
 
 impl<Buf, W> FlushBackgroundTask<Buf, W>

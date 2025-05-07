@@ -2204,8 +2204,7 @@ impl Timeline {
                     .as_mut()
                     .unwrap()
                     .put_value(key, lsn, value, ctx)
-                    .await
-                    .map_err(CompactionError::Other)?;
+                    .await?;
             } else {
                 let owner = self.shard_identity.get_shard_number(&key);
 
