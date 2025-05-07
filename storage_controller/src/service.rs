@@ -3978,7 +3978,7 @@ impl Service {
 
     #[instrument(skip_all, fields(
         tenant_id=%import.tenant_id,
-        shard_id=%import.timeline_id,
+        timeline_id=%import.timeline_id,
     ))]
     async fn finalize_timeline_import(
         self: &Arc<Self>,
