@@ -18,8 +18,14 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::tenant::Timeline;
 use crate::tenant::storage_layer::Layer;
-use crate::tenant::storage_layer::delta_layer::DeltaLayerWriterError;
-use crate::tenant::storage_layer::image_layer::ImageLayerWriterError;
+
+#[derive(Debug, thiserror::Error)]
+pub enum BatchSplitWriterError {
+    #[error("cancelled")]
+    Cancelled,
+    #[error(transparent)]
+    Other(anyhow::Error),
+}
 
 pub(crate) enum BatchWriterResult {
     Produced(ResidentLayer),
@@ -99,7 +105,7 @@ impl BatchLayerWriter {
         self,
         tline: &Arc<Timeline>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<ResidentLayer>> {
+    ) -> Result<Vec<ResidentLayer>, BatchSplitWriterError> {
         let res = self
             .finish_with_discard_fn(tline, ctx, |_| async { false })
             .await?;
@@ -117,7 +123,7 @@ impl BatchLayerWriter {
         tline: &Arc<Timeline>,
         ctx: &RequestContext,
         discard_fn: D,
-    ) -> anyhow::Result<Vec<BatchWriterResult>>
+    ) -> Result<Vec<BatchWriterResult>, BatchSplitWriterError>
     where
         D: Fn(&PersistentLayerKey) -> F,
         F: Future<Output = bool>,
@@ -144,21 +150,11 @@ impl BatchLayerWriter {
                     LayerWriterWrapper::Delta(writer) => writer
                         .finish(layer_key.key_range.end, ctx)
                         .await
-                        .map_err(|e| match e {
-                            DeltaLayerWriterError::Cancelled => {
-                                anyhow::anyhow!("flush task cancelled")
-                            }
-                            DeltaLayerWriterError::Other(err) => err,
-                        }),
+                        .map_err(|e| BatchSplitWriterError::Other(anyhow::anyhow!(e))),
                     LayerWriterWrapper::Image(writer) => writer
                         .finish_with_end_key(layer_key.key_range.end, ctx)
                         .await
-                        .map_err(|e| match e {
-                            ImageLayerWriterError::Cancelled => {
-                                anyhow::anyhow!("flush task cancelled")
-                            }
-                            ImageLayerWriterError::Other(err) => err,
-                        }),
+                        .map_err(|e| BatchSplitWriterError::Other(anyhow::anyhow!(e))),
                 };
                 let layer = match res {
                     Ok((desc, path)) => {
@@ -167,7 +163,7 @@ impl BatchLayerWriter {
                             Err(e) => {
                                 tokio::fs::remove_file(&path).await.ok();
                                 clean_up_layers(generated_layers);
-                                return Err(e);
+                                return Err(BatchSplitWriterError::Other(e));
                             }
                         }
                     }
@@ -247,7 +243,7 @@ impl<'a> SplitImageLayerWriter<'a> {
         key: Key,
         img: Bytes,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), BatchSplitWriterError> {
         // The current estimation is an upper bound of the space that the key/image could take
         // because we did not consider compression in this estimation. The resulting image layer
         // could be smaller than the target size.
@@ -265,7 +261,8 @@ impl<'a> SplitImageLayerWriter<'a> {
                 self.cancel.clone(),
                 ctx,
             )
-            .await?;
+            .await
+            .map_err(|e| BatchSplitWriterError::Other(anyhow::anyhow!(e)))?;
             let prev_image_writer = std::mem::replace(&mut self.inner, next_image_writer);
             self.batches.add_unfinished_image_writer(
                 prev_image_writer,
@@ -277,10 +274,7 @@ impl<'a> SplitImageLayerWriter<'a> {
         self.inner
             .put_image(key, img, ctx)
             .await
-            .map_err(|e| match e {
-                ImageLayerWriterError::Cancelled => anyhow::anyhow!("flush task cancelled"),
-                ImageLayerWriterError::Other(err) => err,
-            })
+            .map_err(|e| BatchSplitWriterError::Other(anyhow::anyhow!(e)))
     }
 
     pub(crate) async fn finish_with_discard_fn<D, F>(
@@ -289,7 +283,7 @@ impl<'a> SplitImageLayerWriter<'a> {
         ctx: &RequestContext,
         end_key: Key,
         discard_fn: D,
-    ) -> anyhow::Result<Vec<BatchWriterResult>>
+    ) -> Result<Vec<BatchWriterResult>, BatchSplitWriterError>
     where
         D: Fn(&PersistentLayerKey) -> F,
         F: Future<Output = bool>,
@@ -309,7 +303,7 @@ impl<'a> SplitImageLayerWriter<'a> {
         tline: &Arc<Timeline>,
         ctx: &RequestContext,
         end_key: Key,
-    ) -> anyhow::Result<Vec<BatchWriterResult>> {
+    ) -> Result<Vec<BatchWriterResult>, BatchSplitWriterError> {
         self.finish_with_discard_fn(tline, ctx, end_key, |_| async { false })
             .await
     }
@@ -364,7 +358,7 @@ impl<'a> SplitDeltaLayerWriter<'a> {
         lsn: Lsn,
         val: Value,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), BatchSplitWriterError> {
         // The current estimation is key size plus LSN size plus value size estimation. This is not an accurate
         // number, and therefore the final layer size could be a little bit larger or smaller than the target.
         //
@@ -384,7 +378,8 @@ impl<'a> SplitDeltaLayerWriter<'a> {
                     self.cancel.clone(),
                     ctx,
                 )
-                .await?,
+                .await
+                .map_err(|e| BatchSplitWriterError::Other(anyhow::anyhow!(e)))?,
             ));
         }
         let (_, inner) = self.inner.as_mut().unwrap();
@@ -404,7 +399,8 @@ impl<'a> SplitDeltaLayerWriter<'a> {
                     self.cancel.clone(),
                     ctx,
                 )
-                .await?;
+                .await
+                .map_err(|e| BatchSplitWriterError::Other(anyhow::anyhow!(e)))?;
                 let (start_key, prev_delta_writer) =
                     self.inner.replace((key, next_delta_writer)).unwrap();
                 self.batches.add_unfinished_delta_writer(
@@ -414,11 +410,11 @@ impl<'a> SplitDeltaLayerWriter<'a> {
                 );
             } else if inner.estimated_size() >= S3_UPLOAD_LIMIT {
                 // We have to produce a very large file b/c a key is updated too often.
-                anyhow::bail!(
+                return Err(BatchSplitWriterError::Other(anyhow::anyhow!(
                     "a single key is updated too often: key={}, estimated_size={}, and the layer file cannot be produced",
                     key,
                     inner.estimated_size()
-                );
+                )));
             }
         }
         self.last_key_written = key;
@@ -426,10 +422,7 @@ impl<'a> SplitDeltaLayerWriter<'a> {
         inner
             .put_value(key, lsn, val, ctx)
             .await
-            .map_err(|e| match e {
-                DeltaLayerWriterError::Cancelled => anyhow::anyhow!("flush task cancelled"),
-                DeltaLayerWriterError::Other(err) => err,
-            })
+            .map_err(|e| BatchSplitWriterError::Other(anyhow::anyhow!(e)))
     }
 
     pub(crate) async fn finish_with_discard_fn<D, F>(
@@ -437,7 +430,7 @@ impl<'a> SplitDeltaLayerWriter<'a> {
         tline: &Arc<Timeline>,
         ctx: &RequestContext,
         discard_fn: D,
-    ) -> anyhow::Result<Vec<BatchWriterResult>>
+    ) -> Result<Vec<BatchWriterResult>, BatchSplitWriterError>
     where
         D: Fn(&PersistentLayerKey) -> F,
         F: Future<Output = bool>,
@@ -463,7 +456,7 @@ impl<'a> SplitDeltaLayerWriter<'a> {
         self,
         tline: &Arc<Timeline>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<BatchWriterResult>> {
+    ) -> Result<Vec<BatchWriterResult>, BatchSplitWriterError> {
         self.finish_with_discard_fn(tline, ctx, |_| async { false })
             .await
     }

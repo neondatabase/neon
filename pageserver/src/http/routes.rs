@@ -2469,6 +2469,7 @@ async fn timeline_checkpoint_handler(
                 .map_err(|e|
                     match e {
                         CompactionError::ShuttingDown => ApiError::ShuttingDown,
+                        CompactionError::Cancelled => ApiError::ShuttingDown,
                         CompactionError::Offload(e) => ApiError::InternalServerError(anyhow::anyhow!(e)),
                         CompactionError::CollectKeySpaceError(e) => ApiError::InternalServerError(anyhow::anyhow!(e)),
                         CompactionError::Other(e) => ApiError::InternalServerError(e),

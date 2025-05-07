@@ -3198,6 +3198,7 @@ impl TenantShard {
         match err {
             err if err.is_cancel() => {}
             CompactionError::ShuttingDown => (),
+            CompactionError::Cancelled => (),
             // Offload failures don't trip the circuit breaker, since they're cheap to retry and
             // shouldn't block compaction.
             CompactionError::Offload(_) => {}

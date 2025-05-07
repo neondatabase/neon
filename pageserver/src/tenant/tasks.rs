@@ -300,6 +300,7 @@ pub(crate) fn log_compaction_error(
     let level = match err {
         e if e.is_cancel() => return,
         ShuttingDown => return,
+        Cancelled => return,
         Offload(_) => Level::ERROR,
         AlreadyRunning(_) => Level::ERROR,
         CollectKeySpaceError(_) => Level::ERROR,

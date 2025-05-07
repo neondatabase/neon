@@ -775,6 +775,21 @@ impl From<layer_manager::Shutdown> for CreateImageLayersError {
     }
 }
 
+impl From<crate::tenant::storage_layer::batch_split_writer::BatchSplitWriterError>
+    for CreateImageLayersError
+{
+    fn from(err: crate::tenant::storage_layer::batch_split_writer::BatchSplitWriterError) -> Self {
+        match err {
+            crate::tenant::storage_layer::batch_split_writer::BatchSplitWriterError::Cancelled => {
+                Self::Cancelled
+            }
+            crate::tenant::storage_layer::batch_split_writer::BatchSplitWriterError::Other(err) => {
+                Self::Other(err)
+            }
+        }
+    }
+}
+
 #[derive(thiserror::Error, Debug, Clone)]
 pub(crate) enum FlushLayerError {
     /// Timeline cancellation token was cancelled
@@ -2041,6 +2056,9 @@ impl Timeline {
             Ok(_) => self.compaction_failed.store(false, AtomicOrdering::Relaxed),
             Err(e) if e.is_cancel() => {}
             Err(CompactionError::ShuttingDown) => {
+                // Covered by the `Err(e) if e.is_cancel()` branch.
+            }
+            Err(CompactionError::Cancelled) => {
                 // Covered by the `Err(e) if e.is_cancel()` branch.
             }
             Err(CompactionError::AlreadyRunning(_)) => {

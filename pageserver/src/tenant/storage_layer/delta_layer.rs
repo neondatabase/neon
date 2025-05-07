@@ -37,7 +37,7 @@ use std::sync::atomic::AtomicU64;
 
 use crate::tenant::blob_io::BlobWriterError;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
 use itertools::Itertools;
@@ -78,7 +78,7 @@ use crate::tenant::vectored_blob_io::{
 use crate::virtual_file::TempVirtualFile;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
 use crate::virtual_file::owned_buffers_io::write::{Buffer, BufferedWriterShutdownMode};
-use crate::virtual_file::{self, IoBuffer, IoBufferMut, MaybeFatalIo, VirtualFile};
+use crate::virtual_file::{self, IoBuffer, IoBufferMut, VirtualFile};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 
 ///
