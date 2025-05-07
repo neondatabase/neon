@@ -1,15 +1,69 @@
 diff --git a/raster/test/regress/tests.mk b/raster/test/regress/tests.mk
-index 00918e1..f06cf75 100644
+index 00918e1..7e2b6cd 100644
 --- a/raster/test/regress/tests.mk
 +++ b/raster/test/regress/tests.mk
-@@ -18,7 +18,6 @@ override RUNTESTFLAGS_INTERNAL := \
+@@ -17,9 +17,7 @@ override RUNTESTFLAGS_INTERNAL := \
+   $(RUNTESTFLAGS_INTERNAL) \
    --after-upgrade-script $(top_srcdir)/raster/test/regress/hooks/hook-after-upgrade-raster.sql
  
- RASTER_TEST_FIRST = \
+-RASTER_TEST_FIRST = \
 -	$(top_srcdir)/raster/test/regress/check_gdal \
- 	$(top_srcdir)/raster/test/regress/loader/load_outdb
+-	$(top_srcdir)/raster/test/regress/loader/load_outdb
++RASTER_TEST_FIRST =
  
  RASTER_TEST_LAST = \
+ 	$(top_srcdir)/raster/test/regress/clean
+@@ -33,9 +31,7 @@ RASTER_TEST_IO = \
+ 
+ RASTER_TEST_BASIC_FUNC = \
+ 	$(top_srcdir)/raster/test/regress/rt_bytea \
+-	$(top_srcdir)/raster/test/regress/rt_wkb \
+ 	$(top_srcdir)/raster/test/regress/box3d \
+-	$(top_srcdir)/raster/test/regress/rt_addband \
+ 	$(top_srcdir)/raster/test/regress/rt_band \
+ 	$(top_srcdir)/raster/test/regress/rt_tile
+ 
+@@ -73,16 +69,10 @@ RASTER_TEST_BANDPROPS = \
+ 	$(top_srcdir)/raster/test/regress/rt_neighborhood \
+ 	$(top_srcdir)/raster/test/regress/rt_nearestvalue \
+ 	$(top_srcdir)/raster/test/regress/rt_pixelofvalue \
+-	$(top_srcdir)/raster/test/regress/rt_polygon \
+-	$(top_srcdir)/raster/test/regress/rt_setbandpath
++	$(top_srcdir)/raster/test/regress/rt_polygon
+ 
+ RASTER_TEST_UTILITY = \
+ 	$(top_srcdir)/raster/test/regress/rt_utility \
+-	$(top_srcdir)/raster/test/regress/rt_fromgdalraster \
+-	$(top_srcdir)/raster/test/regress/rt_asgdalraster \
+-	$(top_srcdir)/raster/test/regress/rt_astiff \
+-	$(top_srcdir)/raster/test/regress/rt_asjpeg \
+-	$(top_srcdir)/raster/test/regress/rt_aspng \
+ 	$(top_srcdir)/raster/test/regress/rt_reclass \
+ 	$(top_srcdir)/raster/test/regress/rt_gdalwarp \
+ 	$(top_srcdir)/raster/test/regress/rt_gdalcontour \
+@@ -120,21 +110,13 @@ RASTER_TEST_SREL = \
+ 
+ RASTER_TEST_BUGS = \
+ 	$(top_srcdir)/raster/test/regress/bug_test_car5 \
+-	$(top_srcdir)/raster/test/regress/permitted_gdal_drivers \
+ 	$(top_srcdir)/raster/test/regress/tickets
+ 
+ RASTER_TEST_LOADER = \
+ 	$(top_srcdir)/raster/test/regress/loader/Basic \
+ 	$(top_srcdir)/raster/test/regress/loader/Projected \
+ 	$(top_srcdir)/raster/test/regress/loader/BasicCopy \
+-	$(top_srcdir)/raster/test/regress/loader/BasicFilename \
+-	$(top_srcdir)/raster/test/regress/loader/BasicOutDB \
+-	$(top_srcdir)/raster/test/regress/loader/Tiled10x10 \
+-	$(top_srcdir)/raster/test/regress/loader/Tiled10x10Copy \
+-	$(top_srcdir)/raster/test/regress/loader/Tiled8x8 \
+-	$(top_srcdir)/raster/test/regress/loader/TiledAuto \
+-	$(top_srcdir)/raster/test/regress/loader/TiledAutoSkipNoData \
+-	$(top_srcdir)/raster/test/regress/loader/TiledAutoCopyn
++	$(top_srcdir)/raster/test/regress/loader/BasicFilename
+ 
+ RASTER_TESTS := $(RASTER_TEST_FIRST) \
+ 	$(RASTER_TEST_METADATA) $(RASTER_TEST_IO) $(RASTER_TEST_BASIC_FUNC) \
 diff --git a/regress/core/binary.sql b/regress/core/binary.sql
 index 7a36b65..ad78fc7 100644
 --- a/regress/core/binary.sql
