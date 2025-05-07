@@ -926,17 +926,8 @@ enum StartCreatingTimelineResult {
 
 #[allow(clippy::large_enum_variant, reason = "TODO")]
 enum TimelineInitAndSyncResult {
-    ReadyToActivate(Arc<Timeline>),
+    ReadyToActivate,
     NeedsSpawnImportPgdata(TimelineInitAndSyncNeedsSpawnImportPgdata),
-}
-
-impl TimelineInitAndSyncResult {
-    fn ready_to_activate(self) -> Option<Arc<Timeline>> {
-        match self {
-            Self::ReadyToActivate(timeline) => Some(timeline),
-            _ => None,
-        }
-    }
 }
 
 #[must_use]
@@ -1015,10 +1006,6 @@ enum CreateTimelineCause {
 enum LoadTimelineCause {
     Attach,
     Unoffload,
-    ImportPgdata {
-        create_guard: TimelineCreateGuard,
-        activate: ActivateTimelineArgs,
-    },
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -1130,7 +1117,7 @@ impl TenantShard {
             }
         };
 
-        let (timeline, timeline_ctx) = self.create_timeline_struct(
+        let (timeline, _timeline_ctx) = self.create_timeline_struct(
             timeline_id,
             &metadata,
             previous_heatmap,
@@ -1200,14 +1187,6 @@ impl TenantShard {
 
         match import_pgdata {
             Some(import_pgdata) if !import_pgdata.is_done() => {
-                match cause {
-                    LoadTimelineCause::Attach | LoadTimelineCause::Unoffload => (),
-                    LoadTimelineCause::ImportPgdata { .. } => {
-                        unreachable!(
-                            "ImportPgdata should not be reloading timeline import is done and persisted as such in s3"
-                        )
-                    }
-                }
                 let mut guard = self.timelines_creating.lock().unwrap();
                 if !guard.insert(timeline_id) {
                     // We should never try and load the same timeline twice during startup
@@ -1263,26 +1242,7 @@ impl TenantShard {
                     "Timeline has no ancestor and no layer files"
                 );
 
-                match cause {
-                    LoadTimelineCause::Attach | LoadTimelineCause::Unoffload => (),
-                    LoadTimelineCause::ImportPgdata {
-                        create_guard,
-                        activate,
-                    } => {
-                        // TODO: see the comment in the task code above how I'm not so certain
-                        // it is safe to activate here because of concurrent shutdowns.
-                        match activate {
-                            ActivateTimelineArgs::Yes { broker_client } => {
-                                info!("activating timeline after reload from pgdata import task");
-                                timeline.activate(self.clone(), broker_client, None, &timeline_ctx);
-                            }
-                            ActivateTimelineArgs::No => (),
-                        }
-                        drop(create_guard);
-                    }
-                }
-
-                Ok(TimelineInitAndSyncResult::ReadyToActivate(timeline))
+                Ok(TimelineInitAndSyncResult::ReadyToActivate)
             }
         }
     }
@@ -1771,7 +1731,7 @@ impl TenantShard {
                 })?;
 
             match effect {
-                TimelineInitAndSyncResult::ReadyToActivate(_) => {
+                TimelineInitAndSyncResult::ReadyToActivate => {
                     // activation happens later, on Tenant::activate
                 }
                 TimelineInitAndSyncResult::NeedsSpawnImportPgdata(
@@ -1786,7 +1746,6 @@ impl TenantShard {
                         tokio::task::spawn(self.clone().create_timeline_import_pgdata_task(
                             timeline.clone(),
                             import_pgdata,
-                            ActivateTimelineArgs::No,
                             guard,
                             ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn),
                         ));
@@ -2691,14 +2650,7 @@ impl TenantShard {
                     .await?
             }
             CreateTimelineParams::ImportPgdata(params) => {
-                self.create_timeline_import_pgdata(
-                    params,
-                    ActivateTimelineArgs::Yes {
-                        broker_client: broker_client.clone(),
-                    },
-                    ctx,
-                )
-                .await?
+                self.create_timeline_import_pgdata(params, ctx).await?
             }
         };
 
@@ -2772,7 +2724,6 @@ impl TenantShard {
     async fn create_timeline_import_pgdata(
         self: &Arc<Self>,
         params: CreateTimelineParamsImportPgdata,
-        activate: ActivateTimelineArgs,
         ctx: &RequestContext,
     ) -> Result<CreateTimelineResult, CreateTimelineError> {
         let CreateTimelineParamsImportPgdata {
@@ -2856,7 +2807,6 @@ impl TenantShard {
         let import_task_handle = tokio::spawn(self.clone().create_timeline_import_pgdata_task(
             timeline.clone(),
             index_part,
-            activate,
             timeline_create_guard,
             timeline_ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn),
         ));
@@ -2878,7 +2828,6 @@ impl TenantShard {
         self: Arc<TenantShard>,
         timeline: Arc<Timeline>,
         index_part: import_pgdata::index_part_format::Root,
-        activate: ActivateTimelineArgs,
         timeline_create_guard: TimelineCreateGuard,
         ctx: RequestContext,
     ) {
@@ -2890,7 +2839,6 @@ impl TenantShard {
             .create_timeline_import_pgdata_task_impl(
                 timeline,
                 index_part,
-                activate,
                 timeline_create_guard,
                 ctx,
             )
@@ -2906,8 +2854,7 @@ impl TenantShard {
         self: Arc<TenantShard>,
         timeline: Arc<Timeline>,
         index_part: import_pgdata::index_part_format::Root,
-        activate: ActivateTimelineArgs,
-        timeline_create_guard: TimelineCreateGuard,
+        _timeline_create_guard: TimelineCreateGuard,
         ctx: RequestContext,
     ) -> Result<(), anyhow::Error> {
         info!("importing pgdata");
@@ -2922,50 +2869,10 @@ impl TenantShard {
             .unwrap()
             .remove(&timeline.timeline_id);
 
-        //
-        // Reload timeline from remote.
-        // This proves that the remote state is attachable, and it reuses the code.
-        //
-        // TODO: think about whether this is safe to do with concurrent TenantShard::shutdown.
-        // timeline_create_guard hols the tenant gate open, so, shutdown cannot _complete_ until we exit.
-        // But our activate() call might launch new background tasks after TenantShard::shutdown
-        // already went past shutting down the TenantShard::timelines, which this timeline here is no part of.
-        // I think the same problem exists with the bootstrap & branch mgmt API tasks (tenant shutting
-        // down while bootstrapping/branching + activating), but, the race condition is much more likely
-        // to manifest because of the long runtime of this import task.
-
-        //        in theory this shouldn't even .await anything except for coop yield
         info!("shutting down timeline");
+        // In theory this shouldn't even .await anything except for coop yield
         timeline.shutdown(ShutdownMode::Hard).await;
-        info!("timeline shut down, reloading from remote");
-        // TODO: we can't do the following check because create_timeline_import_pgdata must return an Arc<Timeline>
-        // let Some(timeline) = Arc::into_inner(timeline) else {
-        //     anyhow::bail!("implementation error: timeline that we shut down was still referenced from somewhere");
-        // };
-        let timeline_id = timeline.timeline_id;
-
-        // load from object storage like TenantShard::attach does
-        let resources = self.build_timeline_resources(timeline_id);
-        let index_part = resources
-            .remote_client
-            .download_index_file(&self.cancel)
-            .await?;
-        let index_part = match index_part {
-            MaybeDeletedIndexPart::Deleted(_) => {
-                // likely concurrent delete call, cplane should prevent this
-                anyhow::bail!(
-                    "index part says deleted but we are not done creating yet, this should not happen but"
-                )
-            }
-            MaybeDeletedIndexPart::IndexPart(p) => p,
-        };
-        let metadata = index_part.metadata.clone();
-        self
-            .load_remote_timeline(timeline_id, index_part, metadata, None, resources, LoadTimelineCause::ImportPgdata{
-                create_guard: timeline_create_guard, activate, }, &ctx)
-            .await?
-            .ready_to_activate()
-            .context("implementation error: reloaded timeline still needs import after import reported success")?;
+        info!("timeline shut down, waiting for tenant reset");
 
         anyhow::Ok(())
     }
@@ -3982,13 +3889,6 @@ where
     }
 
     Ok(result)
-}
-
-enum ActivateTimelineArgs {
-    Yes {
-        broker_client: storage_broker::BrokerClientChannel,
-    },
-    No,
 }
 
 impl TenantShard {

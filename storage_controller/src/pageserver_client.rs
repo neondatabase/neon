@@ -357,4 +357,13 @@ impl PageserverClient {
             self.inner.wait_lsn(tenant_shard_id, request).await
         )
     }
+
+    pub(crate) async fn reset_shard(&self, tenant_shard_id: TenantShardId) -> Result<StatusCode> {
+        measured_request!(
+            "reset_shard",
+            crate::metrics::Method::Post,
+            &self.node_id_label,
+            self.inner.reset_shard(tenant_shard_id).await
+        )
+    }
 }

@@ -819,4 +819,15 @@ impl Client {
             .await
             .map(|resp| resp.status())
     }
+
+    pub async fn reset_shard(&self, tenant_shard_id: TenantShardId) -> Result<StatusCode> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_shard_id}/reset",
+            self.mgmt_api_endpoint,
+        );
+
+        self.request_noerror(Method::POST, uri, ())
+            .await
+            .map(|resp| resp.status())
+    }
 }
