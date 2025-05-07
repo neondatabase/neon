@@ -4331,6 +4331,7 @@ dependencies = [
  "toml_edit",
  "tracing",
  "tracing-utils",
+ "twox-hash",
  "url",
  "utils",
  "uuid",

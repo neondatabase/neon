@@ -336,14 +336,25 @@ impl TimelineCreateRequest {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ShardImportStatus {
-    InProgress,
+    InProgress(Option<ShardImportProgress>),
     Done,
     Error(String),
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ShardImportProgress {
+    /// Total number of jobs in the import plan
+    pub jobs: usize,
+    /// Number of jobs completed
+    pub completed: usize,
+    /// Hash of the plan
+    pub import_plan_hash: u64,
+}
+
 impl ShardImportStatus {
     pub fn is_terminal(&self) -> bool {
         match self {
-            ShardImportStatus::InProgress => false,
+            ShardImportStatus::InProgress(_) => false,
             ShardImportStatus::Done | ShardImportStatus::Error(_) => true,
         }
     }

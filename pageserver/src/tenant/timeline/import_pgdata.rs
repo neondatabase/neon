@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, bail};
+use importbucket_client::{ControlFile, RemoteStorageWrapper};
 use pageserver_api::models::ShardImportStatus;
 use remote_storage::RemotePath;
 use tokio::task::JoinHandle;
@@ -53,135 +54,35 @@ pub async fn doit(
         .map_err(|_err| anyhow::anyhow!("Shut down while getting timeline import status"))?;
 
     info!(?shard_status, "peeking shard status");
-    match shard_status {
-        None | Some(ShardImportStatus::InProgress) => {
-            // TODO: checkpoint the progress into the IndexPart instead of restarting
-            // from the beginning.
-
-            //
-            // Wipe the slate clean - the flow does not allow resuming.
-            // We can implement resuming in the future by checkpointing the progress into the IndexPart.
-            //
-            info!("wipe the slate clean");
-            {
-                // TODO: do we need to hold GC lock for this?
-                let mut guard = timeline.layers.write().await;
-                assert!(
-                    guard.layer_map()?.open_layer.is_none(),
-                    "while importing, there should be no in-memory layer" // this just seems like a good place to assert it
-                );
-                let all_layers_keys = guard.all_persistent_layers();
-                let all_layers: Vec<_> = all_layers_keys
-                    .iter()
-                    .map(|key| guard.get_from_key(key))
-                    .collect();
-                let open = guard.open_mut().context("open_mut")?;
-
-                timeline.remote_client.schedule_gc_update(&all_layers)?;
-                open.finish_gc_timeline(&all_layers);
-            }
-
-            //
-            // Wait for pgdata to finish uploading
-            //
-            info!("wait for pgdata to reach status 'done'");
+    match shard_status.unwrap_or(ShardImportStatus::InProgress(None)) {
+        ShardImportStatus::InProgress(maybe_progress) => {
             let storage =
                 importbucket_client::new(timeline.conf, &location, cancel.clone()).await?;
-            let status_prefix = RemotePath::from_string("status").unwrap();
-            let pgdata_status_key = status_prefix.join("pgdata");
-            loop {
-                let res = async {
-                    let pgdata_status: Option<importbucket_format::PgdataStatus> = storage
-                        .get_json(&pgdata_status_key)
-                        .await
-                        .context("get pgdata status")?;
-                    info!(?pgdata_status, "peeking pgdata status");
-                    if pgdata_status.map(|st| st.done).unwrap_or(false) {
-                        Ok(())
-                    } else {
-                        Err(anyhow::anyhow!("pgdata not done yet"))
-                    }
+
+            let control_file_res = if maybe_progress.is_none() {
+                // Only prepare the import once when there's no progress.
+                prepare_import(timeline, storage.clone(), &cancel).await
+            } else {
+                storage.get_control_file().await
+            };
+
+            let control_file = match control_file_res {
+                Ok(cf) => cf,
+                Err(err) => {
+                    return Err(handle_import_error(timeline, err, &storcon_client, &cancel).await);
                 }
-                .await;
-                match res {
-                    Ok(_) => break,
-                    Err(err) => {
-                        info!(?err, "indefinitely waiting for pgdata to finish");
-                        if tokio::time::timeout(
-                            std::time::Duration::from_secs(10),
-                            cancel.cancelled(),
-                        )
-                        .await
-                        .is_ok()
-                        {
-                            bail!("cancelled while waiting for pgdata");
-                        }
-                    }
-                }
-            }
+            };
 
-            //
-            // Do the import
-            //
-            info!("do the import");
-            let control_file = storage.get_control_file().await?;
-            let base_lsn = control_file.base_lsn();
-
-            info!("update TimelineMetadata based on LSNs from control file");
-            {
-                let pg_version = control_file.pg_version();
-                let _ctx: &RequestContext = ctx;
-                async move {
-                    // FIXME: The 'disk_consistent_lsn' should be the LSN at the *end* of the
-                    // checkpoint record, and prev_record_lsn should point to its beginning.
-                    // We should read the real end of the record from the WAL, but here we
-                    // just fake it.
-                    let disk_consistent_lsn = Lsn(base_lsn.0 + 8);
-                    let prev_record_lsn = base_lsn;
-                    let metadata = TimelineMetadata::new(
-                        disk_consistent_lsn,
-                        Some(prev_record_lsn),
-                        None,     // no ancestor
-                        Lsn(0),   // no ancestor lsn
-                        base_lsn, // latest_gc_cutoff_lsn
-                        base_lsn, // initdb_lsn
-                        pg_version,
-                    );
-
-                    let _start_lsn = disk_consistent_lsn + 1;
-
-                    timeline
-                        .remote_client
-                        .schedule_index_upload_for_full_metadata_update(&metadata)?;
-
-                    timeline.remote_client.wait_completion().await?;
-
-                    anyhow::Ok(())
-                }
-            }
-            .await?;
-
-            let res = flow::run(timeline.clone(), control_file, storage.clone(), ctx).await;
+            let res = flow::run(
+                timeline.clone(),
+                control_file,
+                storage.clone(),
+                maybe_progress,
+                ctx,
+            )
+            .await;
             if let Err(err) = res {
-                // The import task is a aborted on tenant shutdown, so in principle, it should
-                // never be cancelled. To be on the safe side, check the cancellation tokens
-                // before marking the import as failed.
-                if !(cancel.is_cancelled() || timeline.cancel.is_cancelled()) {
-                    storcon_client
-                        .put_timeline_import_status(
-                            timeline.tenant_shard_id,
-                            timeline.timeline_id,
-                            ShardImportStatus::Error(format!("{}", err.root_cause())),
-                        )
-                        .await
-                        .map_err(|_err| {
-                            anyhow::anyhow!("Shut down while putting timeline import status")
-                        })?;
-
-                    return Err(err);
-                } else {
-                    return Err(anyhow::anyhow!("Import task cancelled"));
-                }
+                return Err(handle_import_error(timeline, err, &storcon_client, &cancel).await);
             }
 
             // Communicate that shard is done.
@@ -203,16 +104,144 @@ pub async fn doit(
                     anyhow::anyhow!("Shut down while putting timeline import status")
                 })?;
         }
-        Some(ShardImportStatus::Error(err)) => {
+        ShardImportStatus::Error(err) => {
             info!(
                 "shard status indicates that the shard is done (error), skipping import {}",
                 err
             );
         }
-        Some(ShardImportStatus::Done) => {
+        ShardImportStatus::Done => {
             info!("shard status indicates that the shard is done (success), skipping import");
         }
     }
 
     Ok(())
+}
+
+async fn prepare_import(
+    timeline: &Arc<Timeline>,
+    storage: RemoteStorageWrapper,
+    cancel: &CancellationToken,
+) -> anyhow::Result<ControlFile> {
+    // Wipe the slate clean before starting the import as a precaution.
+    // This method is only called when there's no recorded checkpoint for the import
+    // in the storage controller.
+    info!("wipe the slate clean");
+    {
+        // TODO: do we need to hold GC lock for this?
+        let mut guard = timeline.layers.write().await;
+        assert!(
+            guard.layer_map()?.open_layer.is_none(),
+            "while importing, there should be no in-memory layer" // this just seems like a good place to assert it
+        );
+        let all_layers_keys = guard.all_persistent_layers();
+        let all_layers: Vec<_> = all_layers_keys
+            .iter()
+            .map(|key| guard.get_from_key(key))
+            .collect();
+        let open = guard.open_mut().context("open_mut")?;
+
+        timeline.remote_client.schedule_gc_update(&all_layers)?;
+        open.finish_gc_timeline(&all_layers);
+    }
+
+    //
+    // Wait for pgdata to finish uploading
+    //
+    info!("wait for pgdata to reach status 'done'");
+    let status_prefix = RemotePath::from_string("status").unwrap();
+    let pgdata_status_key = status_prefix.join("pgdata");
+    loop {
+        let res = async {
+            let pgdata_status: Option<importbucket_format::PgdataStatus> = storage
+                .get_json(&pgdata_status_key)
+                .await
+                .context("get pgdata status")?;
+            info!(?pgdata_status, "peeking pgdata status");
+            if pgdata_status.map(|st| st.done).unwrap_or(false) {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("pgdata not done yet"))
+            }
+        }
+        .await;
+        match res {
+            Ok(_) => break,
+            Err(err) => {
+                info!(?err, "indefinitely waiting for pgdata to finish");
+                if tokio::time::timeout(std::time::Duration::from_secs(10), cancel.cancelled())
+                    .await
+                    .is_ok()
+                {
+                    bail!("cancelled while waiting for pgdata");
+                }
+            }
+        }
+    }
+
+    let control_file = storage.get_control_file().await?;
+    let base_lsn = control_file.base_lsn();
+
+    info!("update TimelineMetadata based on LSNs from control file");
+    {
+        let pg_version = control_file.pg_version();
+        async move {
+            // FIXME: The 'disk_consistent_lsn' should be the LSN at the *end* of the
+            // checkpoint record, and prev_record_lsn should point to its beginning.
+            // We should read the real end of the record from the WAL, but here we
+            // just fake it.
+            let disk_consistent_lsn = Lsn(base_lsn.0 + 8);
+            let prev_record_lsn = base_lsn;
+            let metadata = TimelineMetadata::new(
+                disk_consistent_lsn,
+                Some(prev_record_lsn),
+                None,     // no ancestor
+                Lsn(0),   // no ancestor lsn
+                base_lsn, // latest_gc_cutoff_lsn
+                base_lsn, // initdb_lsn
+                pg_version,
+            );
+
+            let _start_lsn = disk_consistent_lsn + 1;
+
+            timeline
+                .remote_client
+                .schedule_index_upload_for_full_metadata_update(&metadata)?;
+
+            timeline.remote_client.wait_completion().await?;
+
+            anyhow::Ok(())
+        }
+    }
+    .await?;
+
+    Ok(control_file)
+}
+
+async fn handle_import_error(
+    timeline: &Arc<Timeline>,
+    error: anyhow::Error,
+    storcon_client: &StorageControllerUpcallClient,
+    cancel: &CancellationToken,
+) -> anyhow::Error {
+    // The import task is a aborted on tenant shutdown, so in principle, it should
+    // never be cancelled. To be on the safe side, check the cancellation tokens
+    // before marking the import as failed.
+    if !(cancel.is_cancelled() || timeline.cancel.is_cancelled()) {
+        let res = storcon_client
+            .put_timeline_import_status(
+                timeline.tenant_shard_id,
+                timeline.timeline_id,
+                ShardImportStatus::Error(format!("{}", error.root_cause())),
+            )
+            .await;
+
+        if let Err(_notify_error) = res {
+            error.context("Shut down while putting timeline import error status")
+        } else {
+            error
+        }
+    } else {
+        anyhow::anyhow!("Import task cancelled")
+    }
 }

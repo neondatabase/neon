@@ -29,6 +29,7 @@
 //! - version-specific CheckPointData (=> pgv abstraction, already exists for regular walingest)
 
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -43,6 +44,7 @@ use pageserver_api::key::{
     slru_segment_size_to_key,
 };
 use pageserver_api::keyspace::{contiguous_range_len, is_contiguous_range, singleton_range};
+use pageserver_api::models::{ShardImportProgress, ShardImportStatus};
 use pageserver_api::reltag::{RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::relfile_utils::parse_relfilename;
@@ -59,6 +61,7 @@ use super::Timeline;
 use super::importbucket_client::{ControlFile, RemoteStorageWrapper};
 use crate::assert_u64_eq_usize::UsizeIsU64;
 use crate::context::{DownloadBehavior, RequestContext};
+use crate::controller_upcall_client::{StorageControllerUpcallApi, StorageControllerUpcallClient};
 use crate::pgdatadir_mapping::{
     DbDirectory, RelDirectory, SlruSegmentDirectory, TwoPhaseDirectory,
 };
@@ -69,6 +72,7 @@ pub async fn run(
     timeline: Arc<Timeline>,
     control_file: ControlFile,
     storage: RemoteStorageWrapper,
+    import_progress: Option<ShardImportProgress>,
     ctx: &RequestContext,
 ) -> anyhow::Result<()> {
     let planner = Planner {
@@ -81,9 +85,28 @@ pub async fn run(
     let import_config = &timeline.conf.timeline_import_config;
     let plan = planner.plan(import_config).await?;
 
+    // Hash the plan and compare with the hash of the plan we got back from the storage controller.
+    // If the two match, it means that the planning stage had the same output.
+    //
+    // This is not intended to be a cryptographically secure hash.
+    const SEED: u64 = 42;
+    let mut hasher = twox_hash::XxHash64::with_seed(SEED);
+    plan.hash(&mut hasher);
+    let plan_hash = hasher.finish();
+
+    if let Some(progress) = &import_progress {
+        if !(plan_hash == progress.import_plan_hash || progress.jobs != plan.jobs.len()) {
+            anyhow::bail!("Import plan does not match storcon metadata");
+        }
+    }
+
     pausable_failpoint!("import-timeline-pre-execute-pausable");
 
-    plan.execute(timeline, import_config, ctx).await
+    let start_from_job_idx = import_progress.map(|progress| progress.completed);
+    // TODO(vlad): We might write the same layer twice if we lose progress and redo
+    // some stuff. Allow that for imports in the remote client.
+    plan.execute(timeline, start_from_job_idx, plan_hash, import_config, ctx)
+        .await
 }
 
 struct Planner {
@@ -93,6 +116,7 @@ struct Planner {
     tasks: Vec<AnyImportTask>,
 }
 
+#[derive(Hash)]
 struct Plan {
     jobs: Vec<ChunkProcessingJob>,
 }
@@ -327,25 +351,40 @@ impl Plan {
     async fn execute(
         self,
         timeline: Arc<Timeline>,
+        start_after_job_idx: Option<usize>,
+        import_plan_hash: u64,
         import_config: &TimelineImportConfig,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        let storcon_client = StorageControllerUpcallClient::new(timeline.conf, &timeline.cancel);
+
         let mut work = FuturesOrdered::new();
         let semaphore = Arc::new(Semaphore::new(import_config.import_job_concurrency.into()));
 
         let jobs_in_plan = self.jobs.len();
 
-        let mut jobs = self.jobs.into_iter().enumerate().peekable();
-        let mut results = Vec::new();
+        let mut jobs = self
+            .jobs
+            .into_iter()
+            .enumerate()
+            .map(|(idx, job)| (idx + 1, job))
+            .peekable();
+        let mut last_completed_job_idx = 0;
+
+        let checkpoint_every: usize = import_config.import_job_checkpoint_threshold.into();
 
         // Run import jobs concurrently up to the limit specified by the pageserver configuration.
         // Note that we process completed futures in the oreder of insertion. This will be the
         // building block for resuming imports across pageserver restarts or tenant migrations.
-        while results.len() < jobs_in_plan {
+        while last_completed_job_idx < jobs_in_plan {
             tokio::select! {
                 permit = semaphore.clone().acquire_owned(), if jobs.peek().is_some() => {
                     let permit = permit.expect("never closed");
                     let (job_idx, job) = jobs.next().expect("we peeked");
+                    if Some(job_idx) <= start_after_job_idx {
+                        continue;
+                    }
+
                     let job_timeline = timeline.clone();
                     let ctx = ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Error);
 
@@ -357,8 +396,25 @@ impl Plan {
                 },
                 maybe_complete_job_idx = work.next() => {
                     match maybe_complete_job_idx {
-                        Some(Ok((_job_idx, res))) => {
-                            results.push(res?);
+                        Some(Ok((job_idx, res))) => {
+                            res?;
+                            last_completed_job_idx = job_idx;
+
+                            if last_completed_job_idx % checkpoint_every == 0 {
+                                storcon_client.put_timeline_import_status(
+                                    timeline.tenant_shard_id,
+                                    timeline.timeline_id,
+                                    ShardImportStatus::InProgress(Some(ShardImportProgress {
+                                        jobs: jobs_in_plan,
+                                        completed: last_completed_job_idx,
+                                        import_plan_hash,
+                                    }))
+                                )
+                                .await
+                                .map_err(|_err| {
+                                    anyhow::anyhow!("Shut down while putting timeline import status")
+                                })?;
+                            }
                         },
                         Some(Err(_)) => {
                             anyhow::bail!(
@@ -543,6 +599,15 @@ struct ImportSingleKeyTask {
     buf: Bytes,
 }
 
+impl Hash for ImportSingleKeyTask {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let ImportSingleKeyTask { key, buf } = self;
+
+        key.hash(state);
+        buf.hash(state);
+    }
+}
+
 impl ImportSingleKeyTask {
     fn new(key: Key, buf: Bytes) -> Self {
         ImportSingleKeyTask { key, buf }
@@ -569,6 +634,20 @@ struct ImportRelBlocksTask {
     key_range: Range<Key>,
     path: RemotePath,
     storage: RemoteStorageWrapper,
+}
+
+impl Hash for ImportRelBlocksTask {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let ImportRelBlocksTask {
+            shard_identity: _,
+            key_range,
+            path,
+            storage: _,
+        } = self;
+
+        key_range.hash(state);
+        path.hash(state);
+    }
 }
 
 impl ImportRelBlocksTask {
@@ -655,6 +734,19 @@ struct ImportSlruBlocksTask {
     storage: RemoteStorageWrapper,
 }
 
+impl Hash for ImportSlruBlocksTask {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let ImportSlruBlocksTask {
+            key_range,
+            path,
+            storage: _,
+        } = self;
+
+        key_range.hash(state);
+        path.hash(state);
+    }
+}
+
 impl ImportSlruBlocksTask {
     fn new(key_range: Range<Key>, path: &RemotePath, storage: RemoteStorageWrapper) -> Self {
         ImportSlruBlocksTask {
@@ -697,6 +789,7 @@ impl ImportTask for ImportSlruBlocksTask {
     }
 }
 
+#[derive(Hash)]
 enum AnyImportTask {
     SingleKey(ImportSingleKeyTask),
     RelBlocks(ImportRelBlocksTask),
@@ -743,6 +836,7 @@ impl From<ImportSlruBlocksTask> for AnyImportTask {
     }
 }
 
+#[derive(Hash)]
 struct ChunkProcessingJob {
     range: Range<Key>,
     tasks: Vec<AnyImportTask>,

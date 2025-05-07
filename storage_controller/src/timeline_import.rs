@@ -28,7 +28,7 @@ impl ShardImportStatuses {
         ShardImportStatuses(
             shards
                 .into_iter()
-                .map(|ts_id| (ts_id, ShardImportStatus::InProgress))
+                .map(|ts_id| (ts_id, ShardImportStatus::InProgress(None)))
                 .collect(),
         )
     }
