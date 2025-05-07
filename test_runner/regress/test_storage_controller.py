@@ -4278,6 +4278,36 @@ def test_storcon_few_sk(
     wait_until(timeline_deleted_on_sk)
 
 
+def test_storcon_sk_graceful_migration(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 3
+    neon_env_builder.storage_controller_config = {
+        "timelines_onto_safekeepers": True,
+    }
+    env = neon_env_builder.init_start()
+
+    ep = env.endpoints.create(
+        "main", tenant_id=env.initial_tenant
+    )
+    ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
+    ep.safe_psql("CREATE TABLE t(a int)")
+
+    env.storage_controller.migrate_safekeepers(env.initial_tenant, env.initial_timeline, [1, 2, 3], [1], 2)
+
+    env.safekeepers[1].stop()
+    env.safekeepers[2].stop()
+
+    ep.safe_psql("INSERT INTO t VALUES (1)")
+
+    # env.safekeepers[1].start()
+
+    # env.storage_controller.migrate_safekeepers(env.initial_tenant, env.initial_timeline, [1], [2], 4)
+
+    # env.safekeepers[0].start()
+
+    # ep.safe_psql("INSERT INTO t VALUES (2)")
+
+
+
 @pytest.mark.parametrize("wrong_az", [True, False])
 def test_storage_controller_graceful_migration(neon_env_builder: NeonEnvBuilder, wrong_az: bool):
     """

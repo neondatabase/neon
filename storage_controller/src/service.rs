@@ -51,7 +51,12 @@ use pageserver_api::upcall_api::{
 };
 use pageserver_client::{BlockUnblock, mgmt_api};
 use reqwest::{Certificate, StatusCode};
-use safekeeper_api::models::SafekeeperUtilization;
+use safekeeper_api::membership::SafekeeperId;
+use safekeeper_api::membership::{self, SafekeeperGeneration};
+use safekeeper_api::models::{
+    PullTimelineRequest, SafekeeperUtilization, TimelineMembershipSwitchRequest,
+    TimelineTermBumpRequest,
+};
 use safekeeper_reconciler::SafekeeperReconcilers;
 use tokio::sync::TryAcquireError;
 use tokio::sync::mpsc::error::TrySendError;
@@ -60,6 +65,7 @@ use tracing::{Instrument, debug, error, info, info_span, instrument, warn};
 use utils::completion::Barrier;
 use utils::generation::Generation;
 use utils::id::{NodeId, TenantId, TimelineId};
+use utils::logging::SecretString;
 use utils::lsn::Lsn;
 use utils::sync::gate::{Gate, GateGuard};
 use utils::{failpoint_support, pausable_failpoint};
@@ -89,6 +95,7 @@ use crate::reconciler::{
     attached_location_conf,
 };
 use crate::safekeeper::Safekeeper;
+use crate::safekeeper_client::SafekeeperClient;
 use crate::scheduler::{
     AttachedShardTag, MaySchedule, ScheduleContext, ScheduleError, ScheduleMode, Scheduler,
 };
@@ -157,6 +164,7 @@ enum TenantOperations {
     DropDetached,
     DownloadHeatmapLayers,
     TimelineLsnLease,
+    TimelineSafekeeperMigrate,
 }
 
 #[derive(Clone, strum_macros::Display)]
@@ -200,6 +208,13 @@ pub const SAFEKEEPER_RECONCILER_CONCURRENCY_DEFAULT: usize = 32;
 // This channel is finite-size to avoid using excessive memory if we get into a state where reconciles are finishing more slowly
 // than they're being pushed onto the queue.
 const MAX_DELAYED_RECONCILES: usize = 10000;
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct TimelineSafekeeperMigrateRequest {
+    pub generation: u32,
+    pub old_set: Vec<NodeId>,
+    pub new_set: Vec<NodeId>,
+}
 
 // Top level state available to all HTTP handlers
 struct ServiceState {
@@ -4438,6 +4453,232 @@ impl Service {
             &self.cancel,
         )
         .await;
+
+        Ok(())
+    }
+
+    pub(crate) async fn tenant_timeline_safekeeper_migrate(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        request: TimelineSafekeeperMigrateRequest,
+    ) -> Result<(), ApiError> {
+        tracing::info!("Migrating timeline {tenant_id}/{timeline_id} to safekeeper ",);
+
+        let _tenant_lock = trace_exclusive_lock(
+            &self.tenant_op_locks,
+            tenant_id,
+            TenantOperations::TimelineSafekeeperMigrate,
+        )
+        .await;
+
+        // 1-2. Fetch current timeline configuration
+        // TODO
+
+        // 3.
+
+        let old_set: Vec<SafekeeperId> = request
+            .old_set
+            .iter()
+            .map(|&id| SafekeeperId {
+                id,
+                host: "".to_string(),
+                pg_port: 0,
+            })
+            .collect();
+
+        let new_set: Vec<SafekeeperId> = request
+            .new_set
+            .iter()
+            .map(|&id| SafekeeperId {
+                id,
+                host: "".to_string(),
+                pg_port: 0,
+            })
+            .collect();
+
+        let safekeepers = self.inner.read().unwrap().safekeepers.clone();
+        // let locked = self.inner.read().unwrap();
+
+        // for sk_id in &request.old_set {
+        //     let Some(sk) = locked.safekeepers.get(sk_id) else {
+        //         return Err(ApiError::BadRequest(anyhow::anyhow!(
+        //             "Safekeeper {sk_id} not found"
+        //         )));
+        //     };
+        //     old_set.push(membershipo::SafekeeperId{
+        //         id: sk_id.to_string(),
+        //         host: sk.host.clone(),
+        //         port: sk.port,
+        //     });
+        // }
+
+        let joint_config = membership::Configuration {
+            generation: SafekeeperGeneration::new(request.generation),
+            members: membership::MemberSet { m: old_set },
+            new_members: Some(membership::MemberSet { m: new_set.clone() }),
+        };
+
+        // 4. Call PUT configuration on safekeepers from the current set, delivering them joint_conf.
+
+        let mut results = Vec::new();
+
+        for sk in safekeepers.values() {
+            if joint_config.members.contains(sk.get_id()) {
+                let client = SafekeeperClient::new(
+                    sk.get_id(),
+                    self.http_client.clone(),
+                    sk.base_url(),
+                    self.config
+                        .safekeeper_jwt_token
+                        .clone()
+                        .map(SecretString::from),
+                );
+
+                let res = client
+                    .switch_timeline_membership(
+                        tenant_id,
+                        timeline_id,
+                        &TimelineMembershipSwitchRequest {
+                            mconf: joint_config.clone(),
+                        },
+                    )
+                    .await
+                    .map_err(|e| ApiError::BadRequest(anyhow::anyhow!(e)))?;
+
+                results.push(res);
+            }
+        }
+
+        // 5. Initialize timeline on safekeeper(s) from new_sk_set where it doesn't exist yet by doing pull_timeline from the majority of the current set.
+
+        for sk in safekeepers.values() {
+            if joint_config
+                .new_members
+                .as_ref()
+                .unwrap()
+                .contains(sk.get_id())
+                && !joint_config.members.contains(sk.get_id())
+            {
+                let client = SafekeeperClient::new(
+                    sk.get_id(),
+                    self.http_client.clone(),
+                    sk.base_url(),
+                    self.config
+                        .safekeeper_jwt_token
+                        .clone()
+                        .map(SecretString::from),
+                );
+
+                let _res = client
+                    .pull_timeline(&PullTimelineRequest {
+                        tenant_id,
+                        timeline_id,
+                        http_hosts: Vec::new(),
+                    })
+                    .await
+                    .map_err(|e| ApiError::BadRequest(anyhow::anyhow!(e)))?;
+
+                // results.push(res);
+            }
+        }
+
+        // 6. Call POST bump_term(sync_term) on safekeepers from the new set. Success on majority is enough.
+
+        for sk in safekeepers.values() {
+            if joint_config
+                .new_members
+                .as_ref()
+                .unwrap()
+                .contains(sk.get_id())
+            {
+                let client = SafekeeperClient::new(
+                    sk.get_id(),
+                    self.http_client.clone(),
+                    sk.base_url(),
+                    self.config
+                        .safekeeper_jwt_token
+                        .clone()
+                        .map(SecretString::from),
+                );
+
+                let _res = client
+                    .bump_timeline_term(
+                        tenant_id,
+                        timeline_id,
+                        &TimelineTermBumpRequest { term: Some(0) }, // TODO
+                    )
+                    .await
+                    .map_err(|e| ApiError::BadRequest(anyhow::anyhow!(e)))?;
+            }
+        }
+
+        // 7. Repeatedly call PUT configuration on safekeepers from the new set, delivering them joint_conf and collecting their positions.
+
+        for sk in safekeepers.values() {
+            if joint_config
+                .new_members
+                .as_ref()
+                .unwrap()
+                .contains(sk.get_id())
+            {
+                let client = SafekeeperClient::new(
+                    sk.get_id(),
+                    self.http_client.clone(),
+                    sk.base_url(),
+                    self.config
+                        .safekeeper_jwt_token
+                        .clone()
+                        .map(SecretString::from),
+                );
+
+                let _res = client
+                    .switch_timeline_membership(
+                        tenant_id,
+                        timeline_id,
+                        &TimelineMembershipSwitchRequest {
+                            mconf: joint_config.clone(),
+                        },
+                    )
+                    .await
+                    .map_err(|e| ApiError::BadRequest(anyhow::anyhow!(e)))?;
+            }
+        }
+
+        // 8. Create new_conf: Configuration incrementing join_conf generation and having new safekeeper set as sk_set and None new_sk_set.
+
+        let joint_conf = membership::Configuration {
+            generation: SafekeeperGeneration::new(request.generation + 1),
+            members: membership::MemberSet { m: new_set },
+            new_members: None,
+        };
+
+        // 9. Call PUT configuration on safekeepers from the new set, delivering them new_conf.
+
+        for sk in safekeepers.values() {
+            if joint_conf.members.contains(sk.get_id()) {
+                let client = SafekeeperClient::new(
+                    sk.get_id(),
+                    self.http_client.clone(),
+                    sk.base_url(),
+                    self.config
+                        .safekeeper_jwt_token
+                        .clone()
+                        .map(SecretString::from),
+                );
+
+                let _res = client
+                    .switch_timeline_membership(
+                        tenant_id,
+                        timeline_id,
+                        &TimelineMembershipSwitchRequest {
+                            mconf: joint_conf.clone(),
+                        },
+                    )
+                    .await
+                    .map_err(|e| ApiError::BadRequest(anyhow::anyhow!(e)))?;
+            }
+        }
 
         Ok(())
     }
