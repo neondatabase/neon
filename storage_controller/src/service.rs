@@ -35,7 +35,7 @@ use pageserver_api::controller_api::{
 };
 use pageserver_api::models::{
     self, DetachBehavior, LocationConfig, LocationConfigListResponse, LocationConfigMode, LsnLease,
-    PageserverUtilization, SecondaryProgress, ShardParameters, TenantConfig,
+    PageserverUtilization, SecondaryProgress, ShardImportStatus, ShardParameters, TenantConfig,
     TenantConfigPatchRequest, TenantConfigRequest, TenantLocationConfigRequest,
     TenantLocationConfigResponse, TenantShardLocation, TenantShardSplitRequest,
     TenantShardSplitResponse, TenantSorting, TenantTimeTravelRequest,
@@ -3905,6 +3905,38 @@ impl Service {
         })
     }
 
+    pub(crate) async fn handle_timeline_shard_import_progress(
+        self: &Arc<Self>,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Result<ShardImportStatus, ApiError> {
+        let maybe_import = self
+            .persistence
+            .get_timeline_import(tenant_shard_id.tenant_id, timeline_id)
+            .await?;
+
+        let import = maybe_import.ok_or_else(|| {
+            ApiError::NotFound(
+                format!(
+                    "import for {}/{} not found",
+                    tenant_shard_id.tenant_id, timeline_id
+                )
+                .into(),
+            )
+        })?;
+
+        import
+            .shard_statuses
+            .0
+            .get(&tenant_shard_id.to_index())
+            .cloned()
+            .ok_or_else(|| {
+                ApiError::NotFound(
+                    format!("shard {} not found", tenant_shard_id.shard_slug()).into(),
+                )
+            })
+    }
+
     pub(crate) async fn handle_timeline_shard_import_progress_upcall(
         self: &Arc<Self>,
         req: PutTimelineImportStatusRequest,
@@ -4069,6 +4101,8 @@ impl Service {
                 &self.cancel,
             )
             .await;
+
+        tracing::info!("timeline_details={results:?}");
 
         Ok(results.into_iter().all(|res| match res {
             Ok(info) => info.state == TimelineState::Active,
