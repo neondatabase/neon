@@ -247,6 +247,14 @@ pub enum FlushTaskError {
     Cancelled,
 }
 
+impl FlushTaskError {
+    pub fn is_cancel(&self) -> bool {
+        match self {
+            FlushTaskError::Cancelled => true,
+        }
+    }
+}
+
 impl<Buf, W> FlushBackgroundTask<Buf, W>
 where
     Buf: IoBufAligned + Send + Sync,

@@ -5,6 +5,7 @@ pub mod delta_layer;
 pub mod filter_iterator;
 pub mod image_layer;
 pub mod inmemory_layer;
+pub mod errors;
 pub(crate) mod layer;
 mod layer_desc;
 mod layer_name;

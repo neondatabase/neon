@@ -100,6 +100,16 @@ pub enum WriteBlobError {
     WriteBlobRaw(anyhow::Error),
 }
 
+impl WriteBlobError {
+    pub fn is_cancel(&self) -> bool {
+        match self {
+            WriteBlobError::Flush(e) => e.is_cancel(),
+            WriteBlobError::BlobTooLarge { .. } => false,
+            WriteBlobError::WriteBlobRaw(e) => e.is_cancel(),
+        }
+    }
+}
+
 impl BlockCursor<'_> {
     /// Read a blob into a new buffer.
     pub async fn read_blob(

@@ -53,6 +53,7 @@ use utils::bin_ser::SerializeError;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
+use super::errors::PutError;
 use super::layer_name::ImageLayerName;
 use super::{
     AsLayerDesc, LayerName, OnDiskValue, OnDiskValueIo, PersistentLayerDesc, ResidentLayer,
@@ -842,8 +843,14 @@ impl ImageLayerWriterInner {
         key: Key,
         img: Bytes,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        ensure!(self.key_range.contains(&key));
+    ) -> Result<(), PutError> {
+        if !self.key_range.contains(&key) {
+            return Err(PutError::Other(anyhow::anyhow!(
+                "key {:?} not in range {:?}",
+                key,
+                self.key_range
+            )));
+        }
         let compression = self.conf.image_compression;
         let uncompressed_len = img.len() as u64;
         self.uncompressed_bytes += uncompressed_len;
@@ -853,7 +860,7 @@ impl ImageLayerWriterInner {
             .write_blob_maybe_compressed(img.slice_len(), ctx, compression)
             .await;
         // TODO: re-use the buffer for `img` further upstack
-        let (off, compression_info) = res?;
+        let (off, compression_info) = res.map_err(PutError::WriteBlob)?;
         if compression_info.compressed_size.is_some() {
             // The image has been considered for compression at least
             self.uncompressed_bytes_eligible += uncompressed_len;
@@ -865,7 +872,10 @@ impl ImageLayerWriterInner {
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
-        self.tree.append(&keybuf, off)?;
+        self.tree
+            .append(&keybuf, off)
+            .map_err(anyhow::Error::new)
+            .map_err(PutError::Other)?;
 
         #[cfg(feature = "testing")]
         {
@@ -1085,7 +1095,7 @@ impl ImageLayerWriter {
         key: Key,
         img: Bytes,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PutError> {
         self.inner.as_mut().unwrap().put_image(key, img, ctx).await
     }
 
