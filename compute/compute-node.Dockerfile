@@ -1971,7 +1971,8 @@ COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql
 COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector_autoscaling.yml /etc/neon_collector_autoscaling.yml
 
 # Make the libraries we built available
-RUN echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig
+COPY --chmod=0666 compute/etc/ld.so.conf.d/00-neon.conf /etc/ld.so.conf.d/00-neon.conf
+RUN /sbin/ldconfig
 
 # rsyslog config permissions
 # directory for rsyslogd pid file
