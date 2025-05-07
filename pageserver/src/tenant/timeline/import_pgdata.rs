@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context, bail};
 use pageserver_api::models::ShardImportStatus;
 use remote_storage::RemotePath;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use utils::lsn::Lsn;
@@ -16,6 +17,16 @@ mod flow;
 mod importbucket_client;
 mod importbucket_format;
 pub(crate) mod index_part_format;
+
+pub(crate) struct ImportingTimeline {
+    pub import_task_handle: JoinHandle<()>,
+}
+
+impl ImportingTimeline {
+    pub(crate) fn shutdown(self) {
+        self.import_task_handle.abort();
+    }
+}
 
 pub async fn doit(
     timeline: &Arc<Timeline>,

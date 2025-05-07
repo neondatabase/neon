@@ -50,6 +50,7 @@ use remote_timeline_client::{
 use secondary::heatmap::{HeatMapTenant, HeatMapTimeline};
 use storage_broker::BrokerClientChannel;
 use timeline::compaction::{CompactionOutcome, GcCompactionQueue};
+use timeline::import_pgdata::ImportingTimeline;
 use timeline::offload::{OffloadError, offload_timeline};
 use timeline::{
     CompactFlags, CompactOptions, CompactionError, PreviousHeatmap, ShutdownMode, import_pgdata,
@@ -283,6 +284,8 @@ pub struct TenantShard {
     /// Possibly offloaded and archived timelines
     /// **Lock order**: if acquiring all (or a subset), acquire them in order `timelines`, `timelines_offloaded`, `timelines_creating`
     timelines_offloaded: Mutex<HashMap<TimelineId, Arc<OffloadedTimeline>>>,
+
+    timelines_importing: std::sync::Mutex<HashMap<TimelineId, ImportingTimeline>>,
 
     /// The last tenant manifest known to be in remote storage. None if the manifest has not yet
     /// been either downloaded or uploaded. Always Some after tenant attach.
@@ -1097,7 +1100,7 @@ impl TenantShard {
         self: &Arc<Self>,
         timeline_id: TimelineId,
         resources: TimelineResources,
-        mut index_part: IndexPart,
+        index_part: IndexPart,
         metadata: TimelineMetadata,
         previous_heatmap: Option<PreviousHeatmap>,
         ancestor: Option<Arc<Timeline>>,
@@ -1106,7 +1109,7 @@ impl TenantShard {
     ) -> anyhow::Result<TimelineInitAndSyncResult> {
         let tenant_id = self.tenant_shard_id;
 
-        let import_pgdata = index_part.import_pgdata.take();
+        let import_pgdata = index_part.import_pgdata.clone();
         let idempotency = match &import_pgdata {
             Some(import_pgdata) => {
                 CreateTimelineIdempotency::ImportPgdata(CreatingTimelineIdempotencyImportPgdata {
@@ -1778,13 +1781,23 @@ impl TenantShard {
                         guard,
                     },
                 ) => {
-                    tokio::task::spawn(self.clone().create_timeline_import_pgdata_task(
-                        timeline,
-                        import_pgdata,
-                        ActivateTimelineArgs::No,
-                        guard,
-                        ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn),
-                    ));
+                    let timeline_id = timeline.timeline_id;
+                    let import_task_handle =
+                        tokio::task::spawn(self.clone().create_timeline_import_pgdata_task(
+                            timeline.clone(),
+                            import_pgdata,
+                            ActivateTimelineArgs::No,
+                            guard,
+                            ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn),
+                        ));
+
+                    let prev = self
+                        .timelines_importing
+                        .lock()
+                        .unwrap()
+                        .insert(timeline_id, ImportingTimeline { import_task_handle });
+
+                    assert!(prev.is_none());
                 }
             }
         }
@@ -2840,13 +2853,21 @@ impl TenantShard {
 
         let (timeline, timeline_create_guard) = uninit_timeline.finish_creation_myself();
 
-        tokio::spawn(self.clone().create_timeline_import_pgdata_task(
+        let import_task_handle = tokio::spawn(self.clone().create_timeline_import_pgdata_task(
             timeline.clone(),
             index_part,
             activate,
             timeline_create_guard,
             timeline_ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn),
         ));
+
+        let prev = self.timelines_importing.lock().unwrap().insert(
+            timeline.timeline_id,
+            ImportingTimeline { import_task_handle },
+        );
+
+        // Idempotency is enforced higher up the stack
+        assert!(prev.is_none());
 
         // NB: the timeline doesn't exist in self.timelines at this point
         Ok(CreateTimelineResult::ImportSpawned(timeline))
@@ -2890,10 +2911,16 @@ impl TenantShard {
         ctx: RequestContext,
     ) -> Result<(), anyhow::Error> {
         info!("importing pgdata");
+        let ctx = ctx.with_scope_timeline(&timeline);
         import_pgdata::doit(&timeline, index_part, &ctx, self.cancel.clone())
             .await
             .context("import")?;
         info!("import done");
+
+        self.timelines_importing
+            .lock()
+            .unwrap()
+            .remove(&timeline.timeline_id);
 
         //
         // Reload timeline from remote.
@@ -3474,6 +3501,14 @@ impl TenantShard {
             timelines_offloaded.values().for_each(|timeline| {
                 timeline.defuse_for_tenant_drop();
             });
+        }
+        {
+            let mut timelines_importing = self.timelines_importing.lock().unwrap();
+            timelines_importing
+                .drain()
+                .for_each(|(_timeline_id, importing_timeline)| {
+                    importing_timeline.shutdown();
+                });
         }
         // test_long_timeline_create_then_tenant_delete is leaning on this message
         tracing::info!("Waiting for timelines...");
@@ -4322,6 +4357,7 @@ impl TenantShard {
             timelines: Mutex::new(HashMap::new()),
             timelines_creating: Mutex::new(HashSet::new()),
             timelines_offloaded: Mutex::new(HashMap::new()),
+            timelines_importing: Mutex::new(HashMap::new()),
             remote_tenant_manifest: Default::default(),
             gc_cs: tokio::sync::Mutex::new(()),
             walredo_mgr,
