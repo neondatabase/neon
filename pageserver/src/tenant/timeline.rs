@@ -987,6 +987,16 @@ impl From<PageReconstructError> for CreateImageLayersError {
     }
 }
 
+impl From<super::storage_layer::errors::PutError> for CreateImageLayersError {
+    fn from(e: super::storage_layer::errors::PutError) -> Self {
+        if e.is_cancel() {
+            CreateImageLayersError::Cancelled
+        } else {
+            CreateImageLayersError::Other(e.into_anyhow())
+        }
+    }
+}
+
 impl From<GetVectoredError> for CreateImageLayersError {
     fn from(e: GetVectoredError) -> Self {
         match e {
@@ -5920,6 +5930,16 @@ impl From<super::storage_layer::layer::DownloadError> for CompactionError {
 impl From<layer_manager::Shutdown> for CompactionError {
     fn from(_: layer_manager::Shutdown) -> Self {
         CompactionError::ShuttingDown
+    }
+}
+
+impl From<super::storage_layer::errors::PutError> for CompactionError {
+    fn from(e: super::storage_layer::errors::PutError) -> Self {
+        if e.is_cancel() {
+            CompactionError::ShuttingDown
+        } else {
+            CompactionError::Other(e.into_anyhow())
+        }
     }
 }
 
