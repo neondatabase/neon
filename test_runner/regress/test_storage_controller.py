@@ -4291,7 +4291,7 @@ def test_storcon_sk_graceful_migration(neon_env_builder: NeonEnvBuilder):
     ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
     ep.safe_psql("CREATE TABLE t(a int)")
 
-    env.storage_controller.migrate_safekeepers(env.initial_tenant, env.initial_timeline, [1, 2, 3], [1], 2)
+    env.storage_controller.migrate_safekeepers(env.initial_tenant, env.initial_timeline, [1])
 
     env.safekeepers[1].stop()
     env.safekeepers[2].stop()
