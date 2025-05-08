@@ -320,8 +320,9 @@ impl FeatureStore {
         properties: &HashMap<String, PostHogFlagFilterPropertyValue>,
     ) -> Result<String, PostHogEvaluationError> {
         if let Some(flag_config) = self.flags.get(flag_key) {
-            // TODO: sort the groups so that variant overrides always get evaluated first; for now we don't configure
-            // conditions without variant overrides.
+            // TODO: sort the groups so that variant overrides always get evaluated first and it follows the PostHog
+            // Python SDK behavior; for now we do not configure conditions without variant overrides in Neon so it
+            // does not matter.
             for group in &flag_config.filters.groups {
                 match self.evaluate_group(group, hash_on_group_rollout_percentage, properties)? {
                     GroupEvaluationResult::MatchedAndOverride(variant) => return Ok(variant),
