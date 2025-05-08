@@ -132,7 +132,7 @@ impl OpenOptions {
         if self.direct {
             #[cfg(target_os = "linux")]
             {
-                custom_flags |= tokio_epoll_uring::sys::O_DIRECT;
+                custom_flags |= nix::libc::O_DIRECT;
             }
             #[cfg(not(target_os = "linux"))]
             {
@@ -152,7 +152,7 @@ impl OpenOptions {
                 x.custom_flags(custom_flags);
                 let system = super::io_engine::tokio_epoll_uring_ext::thread_local_system().await;
                 let (_, res) = super::io_engine::retry_ecanceled_once((), |()| async {
-                    let res = system.open(path, x).await;
+                    let res = system.open(path, &x).await;
                     ((), res)
                 })
                 .await;
