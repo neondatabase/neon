@@ -71,12 +71,33 @@ pub struct PostHogLocalEvaluationFlagMultivariateVariant {
     rollout_percentage: i64,
 }
 
+/// A lite PostHog client.
+///
+/// At the point of writing this code, PostHog does not have a functional Rust client with feature flag support.
+/// This is a lite version that only supports local evaluation of feature flags and only supports those JSON specs
+/// that will be used within Neon.
+///
+/// PostHog is designed as a browser-server system: the browser (client) side uses the client key and is exposed
+/// to the end users; the server side uses a server key and is not exposed to the end users. The client and the
+/// server has different API keys and provide a different set of APIs. In Neon, we only have the server (that is
+/// pageserver), and it will use both the client API and the server API. So we need to store two API keys within
+/// our PostHog client.
+///
+/// The server API is used to fetch the feature flag specs. The client API is used to capture events in case we
+/// want to report the feature flag usage back to PostHog. The current plan is to use PostHog only as an UI to
+/// configure feature flags so it is very likely that the client API will not be used.
 pub struct PostHogClient {
+    /// The server API key.
     server_api_key: String,
+    /// The client API key.
     client_api_key: String,
+    /// The project ID.
     project_id: String,
+    /// The private API URL.
     private_api_url: String,
+    /// The public API URL.
     public_api_url: String,
+    /// The HTTP client.
     client: Arc<reqwest::Client>,
 }
 
