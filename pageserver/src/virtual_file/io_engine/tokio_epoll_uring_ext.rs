@@ -201,7 +201,7 @@ impl std::ops::Deref for Handle {
 }
 
 impl Handle {
-    pub async fn ftruncate<F: tokio_epoll_uring::IoFd + Send>(
+    pub async fn ftruncate<F: tokio_epoll_uring::IoFd + Send + std::os::unix::io::AsRawFd>(
         &self,
         file: F,
         len: u64,
@@ -214,6 +214,6 @@ impl Handle {
         let res = std_file.set_len(len);
         let _ = std_file.into_raw_fd();
         
-        (file, res.map_err(tokio_epoll_uring::Error::Io))
+        (file, res.map_err(|e| tokio_epoll_uring::Error::System(e)))
     }
 }
