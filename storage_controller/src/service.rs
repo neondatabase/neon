@@ -8485,7 +8485,7 @@ impl Service {
         // By default, live migrations are generous about the wait time for getting
         // the secondary location up to speed. When draining, give up earlier in order
         // to not stall the operation when a cold secondary is encountered.
-        const SECONDARY_WARMUP_TIMEOUT: Duration = Duration::from_secs(20);
+        const SECONDARY_WARMUP_TIMEOUT: Duration = Duration::from_secs(30);
         const SECONDARY_DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
         let reconciler_config = ReconcilerConfigBuilder::new(ReconcilerPriority::Normal)
             .secondary_warmup_timeout(SECONDARY_WARMUP_TIMEOUT)
