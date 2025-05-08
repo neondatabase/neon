@@ -103,11 +103,8 @@ impl VirtualFile {
         let mode = get_io_mode();
         let set_o_direct = match (mode, open_options.is_write()) {
             (IoMode::Buffered, _) => false,
-            #[cfg(target_os = "linux")]
             (IoMode::Direct, false) => true,
-            #[cfg(target_os = "linux")]
             (IoMode::Direct, true) => false,
-            #[cfg(target_os = "linux")]
             (IoMode::DirectRw, _) => true,
         };
         if set_o_direct {
@@ -116,9 +113,10 @@ impl VirtualFile {
                 open_options = open_options.custom_flags(nix::libc::O_DIRECT);
             }
             #[cfg(not(target_os = "linux"))]
-            unreachable!(
-                "O_DIRECT is not supported on this platform, IoMode's that result in set_o_direct=true shouldn't even be defined"
-            );
+            {
+                // macOS doesn't have a 1:1 equivalent of O_DIRECT.
+                // Since it's not a production platform anyway, simply ignore the requestf or direct IO.
+            }
         }
         let inner = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
         Ok(VirtualFile { inner, _mode: mode })

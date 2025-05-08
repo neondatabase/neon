@@ -1843,10 +1843,8 @@ pub mod virtual_file {
         /// Uses buffered IO.
         Buffered,
         /// Uses direct IO for reads only.
-        #[cfg(target_os = "linux")]
         Direct,
         /// Use direct IO for reads and writes.
-        #[cfg(target_os = "linux")]
         DirectRw,
     }
 
