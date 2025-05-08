@@ -63,6 +63,10 @@ After the last read from the last layer is submitted, we wait for the IOs to com
 Assuming the filesystem / disk is able to actually process the submitted IOs without queuing,
 we arrive at _time spent waiting for disk_ ~ `random_read_io_latency * O(1 + traversal)`.
 
+Note this whole RFC is concerned with the steady state where all layer files required for reconstruction are resident on local NVMe.
+Traversal will stall on on-demand layer download if a layer is not yet resident.
+It cannot proceed without the layer being resident beccause its next step depends on the contents of the layer index.
+
 ### Avoiding Waiting For IO During Traversal
 
 The `traversal` component in above time-spent-waiting-for-disk estimation is dominant and needs to be minimized.
@@ -206,6 +210,16 @@ piece of code uses concurrent vs sequential mode: one has to recurisvely walk up
 place that puts the `IoConcurrency` into the `RequestContext`.
 We'd have to use `::Sequential` as the conservative default value in a fresh `RequestContext`, and add some
 observability to weed out places that fail to enrich with a properly spanwed `IoConcurrency::spawn_from_conf`.
+
+### Concurrent On-Demand Downloads enabled by Detached Indices
+
+As stated earlier, traversal stalls on on-demand download because its next step depends on the contents of the layer index.
+Once we have separated indices from data blocks (=> https://github.com/neondatabase/neon/issues/11695)
+we will only need to stall if the index is not resident. The download of the data blocks can happen concurrently or in the background. For example:
+- Move the `Layer::get_or_maybe_download().await` inside the IO futures.
+  This goes in the opposite direction of the next "future work" item below, but it's easy to do.
+- Serve the IO future directly from object storage and dispatch the layer download
+  to some other actor, e.g., an actor that is responsible for both downloads & eviction.
 
 ### New `tokio-epoll-uring` API That Separates Submission & Wait-For-Completion
 
