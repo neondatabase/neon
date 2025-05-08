@@ -115,7 +115,7 @@ const MAX_SUPPORTED_BLOB_LEN_BITS: usize = {
     trailing_ones
 };
 
-/// See [`InMemoryLayerInner::index`].
+/// See [`InMemoryLayer::index`].
 ///
 /// For memory efficiency, the data is packed into a u64.
 ///
