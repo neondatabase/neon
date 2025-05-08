@@ -206,6 +206,14 @@ impl Handle {
         file: F,
         len: u64,
     ) -> (F, Result<(), tokio_epoll_uring::Error<std::io::Error>>) {
-        self.deref().ftruncate(file, len).await
+        let system_handle = self.deref();
+        let op = tokio_epoll_uring::FtruncateOp { file, len };
+        tokio_epoll_uring::system::submission::op_fut::execute_op(
+            op,
+            system_handle.submit_side_weak(),
+            None,
+            system_handle.metrics().clone(),
+        )
+        .await
     }
 }
