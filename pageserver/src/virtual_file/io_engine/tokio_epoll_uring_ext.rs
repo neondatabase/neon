@@ -198,3 +198,13 @@ impl std::ops::Deref for Handle {
             .expect("must be already initialized when using this")
     }
 }
+
+impl Handle {
+    pub async fn ftruncate<F: tokio_epoll_uring::IoFd + Send>(
+        &self,
+        file: F,
+        len: u64,
+    ) -> (F, Result<(), tokio_epoll_uring::Error<std::io::Error>>) {
+        self.deref().ftruncate(file, len).await
+    }
+}
