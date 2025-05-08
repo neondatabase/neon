@@ -206,9 +206,8 @@ impl Handle {
         len: u64,
     ) -> (F, Result<(), tokio_epoll_uring::Error<std::io::Error>>) {
         
-        let std_file = std::fs::File::from(file.as_fd());
-        let res = std_file.set_len(len);
+        let res = file.with_std_file(|std_file| std_file.set_len(len));
         
-        (file, res.map_err(tokio_epoll_uring::Error::from))
+        (file, res.map_err(tokio_epoll_uring::Error::System))
     }
 }
