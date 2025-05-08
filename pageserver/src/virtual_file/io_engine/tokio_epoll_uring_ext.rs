@@ -204,7 +204,7 @@ impl Handle {
     pub async fn ftruncate<F: tokio_epoll_uring::IoFd + Send>(
         &self,
         file: F,
-        len: u64,
+        _len: u64,
     ) -> (F, Result<(), tokio_epoll_uring::Error<std::io::Error>>) {
         let err = std::io::Error::new(
             std::io::ErrorKind::Other,
