@@ -200,14 +200,16 @@ impl std::ops::Deref for Handle {
 }
 
 impl Handle {
+    // This is a temporary implementation until we can properly implement ftruncate
     pub async fn ftruncate<F: tokio_epoll_uring::IoFd + Send>(
         &self,
         file: F,
         len: u64,
     ) -> (F, Result<(), tokio_epoll_uring::Error<std::io::Error>>) {
-        
-        let res = file.with_std_file(|std_file| std_file.set_len(len));
-        
-        (file, res.map_err(tokio_epoll_uring::Error::System))
+        let err = std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "ftruncate operation not yet implemented for tokio-epoll-uring",
+        );
+        (file, Err(tokio_epoll_uring::Error::System(err)))
     }
 }
