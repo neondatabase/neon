@@ -97,27 +97,17 @@ impl VirtualFile {
 
     pub async fn open_with_options_v2<P: AsRef<Utf8Path>>(
         path: P,
-        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))] mut open_options: OpenOptions,
+        mut open_options: OpenOptions,
         ctx: &RequestContext,
     ) -> Result<Self, std::io::Error> {
         let mode = get_io_mode();
-        let set_o_direct = match (mode, open_options.is_write()) {
+        let direct = match (mode, open_options.is_write()) {
             (IoMode::Buffered, _) => false,
             (IoMode::Direct, false) => true,
             (IoMode::Direct, true) => false,
             (IoMode::DirectRw, _) => true,
         };
-        if set_o_direct {
-            #[cfg(target_os = "linux")]
-            {
-                open_options = open_options.custom_flags(nix::libc::O_DIRECT);
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                // macOS doesn't have a 1:1 equivalent of O_DIRECT.
-                // Since it's not a production platform anyway, simply ignore the requestf or direct IO.
-            }
-        }
+        open_options = open_options.direct(direct);
         let inner = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
         Ok(VirtualFile { inner, _mode: mode })
     }
@@ -789,6 +779,12 @@ impl VirtualFileInner {
     where
         Buf: tokio_epoll_uring::IoBufMut + Send,
     {
+        self.validate_direct_io(
+            Slice::stable_ptr(&buf).addr(),
+            Slice::bytes_total(&buf),
+            offset,
+        );
+
         let file_guard = match self
             .lock_file()
             .await
@@ -814,6 +810,8 @@ impl VirtualFileInner {
         offset: u64,
         ctx: &RequestContext,
     ) -> (FullSlice<B>, Result<usize, Error>) {
+        self.validate_direct_io(buf.as_ptr().addr(), buf.len(), offset);
+
         let file_guard = match self.lock_file().await {
             Ok(file_guard) => file_guard,
             Err(e) => return (buf, Err(e)),
@@ -827,6 +825,64 @@ impl VirtualFileInner {
             }
             (buf, result)
         })
+    }
+
+    /// Validate all reads and writes to adhere to the O_DIRECT requirements of our production systems.
+    ///
+    /// Validating it iin userspace sets a consistent bar, independent of what actual OS/filesystem/block device is in use.
+    fn validate_direct_io(&self, addr: usize, size: usize, offset: u64) {
+        // TODO: eventually enable validation in the builds we use in real environments like staging, preprod, and prod.
+        if !(cfg!(feature = "testing") || cfg!(test)) {
+            return;
+        }
+        if !self.open_options.is_direct() {
+            return;
+        }
+
+        // Validate buffer memory alignment.
+        //
+        // What practically matters as of Linux 6.1 is bdev_dma_alignment()
+        // which is practically between 512 and 4096.
+        // On our production systems, the value is 512.
+        // The IoBuffer/IoBufferMut hard-code that value.
+        //
+        // Because the alloctor might return _more_ aligned addresses than requested,
+        // there is a chance that testing would not catch violations of a runtime requirement stricter than 512.
+        {
+            let requirement = 512;
+            let remainder = addr & requirement;
+            assert!(
+                remainder == 0,
+                "Direct I/O buffer must be aligned: buffer_addr=0x{addr:x} & 0x{requirement:x} = 0x{remainder:x}"
+            );
+        }
+
+        // Validate offset alignment.
+        //
+        // We hard-code 512 throughout the code base.
+        // So enforce just that and not anything more restrictive.
+        // Even the shallowest testing will expose more restrictive requirements if those ever arise.
+        {
+            let requirement = 512;
+            let remainder = offset & requirement;
+            assert!(
+                remainder == 0,
+                "Direct I/O offset must be aligned: offset=0x{offset:x} & 0x{requirement:x} = 0x{remainder:x}"
+            );
+        }
+
+        // Validate buffer size multiple requirement.
+        //
+        // The requirement in Linux 6.1 is bdev_logical_block_size().
+        // On our production systems, that is 512.
+        {
+            let requirement = 512;
+            let remainder = size & requirement;
+            assert!(
+                remainder == 0,
+                "Direct I/O buffer size must be a multiple of {requirement}: size=0x{size:x} & 0x{requirement:x} = 0x{remainder:x}"
+            );
+        }
     }
 }
 
