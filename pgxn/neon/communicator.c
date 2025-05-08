@@ -434,6 +434,8 @@ compact_prefetch_buffers(void)
 void
 communicator_prefetch_pump_state(bool IsHandlingInterrupts)
 {
+	START_PREFETCH_RECEIVE_WORK();
+
 	while (MyPState->ring_receive != MyPState->ring_flush)
 	{
 		NeonResponse   *response;
@@ -482,9 +484,7 @@ communicator_prefetch_pump_state(bool IsHandlingInterrupts)
 		}
 	}
 
-	/* We never pump the prefetch state while handling other pages */
-	if (!IsHandlingInterrupts)
-		END_PREFETCH_RECEIVE_WORK();
+	END_PREFETCH_RECEIVE_WORK();
 
 	communicator_reconfigure_timeout_if_needed();
 }
@@ -672,9 +672,10 @@ prefetch_wait_for(uint64 ring_index)
 
 	Assert(MyPState->ring_unused > ring_index);
 
+	START_PREFETCH_RECEIVE_WORK();
+
 	while (MyPState->ring_receive <= ring_index)
 	{
-		START_PREFETCH_RECEIVE_WORK();
 		entry = GetPrfSlot(MyPState->ring_receive);
 
 		Assert(entry->status == PRFS_REQUESTED);
@@ -683,10 +684,11 @@ prefetch_wait_for(uint64 ring_index)
 			result = false;
 			break;
 		}
-
-		END_PREFETCH_RECEIVE_WORK();
 		CHECK_FOR_INTERRUPTS();
 	}
+
+	END_PREFETCH_RECEIVE_WORK();
+
 	if (result)
 	{
 		/* Check that slot is actually received (srver can be disconnected in prefetch_pump_state called from CHECK_FOR_INTERRUPTS */
@@ -823,6 +825,8 @@ prefetch_on_ps_disconnect(void)
 {
 	MyPState->ring_flush = MyPState->ring_unused;
 
+	START_PREFETCH_RECEIVE_WORK();
+
 	while (MyPState->ring_receive < MyPState->ring_unused)
 	{
 		PrefetchRequest *slot;
@@ -850,6 +854,8 @@ prefetch_on_ps_disconnect(void)
 		pgBufferUsage.prefetch.expired += 1;
 		MyNeonCounters->getpage_prefetch_discards_total += 1;
 	}
+
+	END_PREFETCH_RECEIVE_WORK();
 
 	/*
 	 * We can have gone into retry due to network error, so update stats with
