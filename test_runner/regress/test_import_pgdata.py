@@ -98,6 +98,10 @@ def test_pgdata_import_smoke(
         f"http://{cplane_mgmt_api_server.host}:{cplane_mgmt_api_server.port}/storage/api/v1/"
     )
 
+    if neon_env_builder.storage_controller_config is None:
+        neon_env_builder.storage_controller_config = {}
+    neon_env_builder.storage_controller_config["timelines_onto_safekeepers"] = True
+
     env = neon_env_builder.init_start()
 
     # The test needs LocalFs support, which is only built in testing mode.
