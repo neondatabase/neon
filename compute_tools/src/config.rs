@@ -1,5 +1,4 @@
 use anyhow::Result;
-use std::fmt::Write as FmtWrite;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::Write;
@@ -56,28 +55,8 @@ pub fn write_postgres_conf(
 
     // Add options for connecting to storage
     writeln!(file, "# Neon storage settings")?;
-    if let Some(s) = &spec.pageserver_connstring {
-        writeln!(file, "neon.pageserver_connstring={}", escape_conf_value(s))?;
-    }
     if let Some(stripe_size) = spec.shard_stripe_size {
         writeln!(file, "neon.stripe_size={stripe_size}")?;
-    }
-    if !spec.safekeeper_connstrings.is_empty() {
-        let mut neon_safekeepers_value = String::new();
-        tracing::info!(
-            "safekeepers_connstrings is not zero, gen: {:?}",
-            spec.safekeepers_generation
-        );
-        // If generation is given, prepend sk list with g#number:
-        if let Some(generation) = spec.safekeepers_generation {
-            write!(neon_safekeepers_value, "g#{}:", generation)?;
-        }
-        neon_safekeepers_value.push_str(&spec.safekeeper_connstrings.join(","));
-        writeln!(
-            file,
-            "neon.safekeepers={}",
-            escape_conf_value(&neon_safekeepers_value)
-        )?;
     }
     if let Some(s) = &spec.tenant_id {
         writeln!(file, "neon.tenant_id={}", escape_conf_value(&s.to_string()))?;
@@ -165,6 +144,21 @@ pub fn write_postgres_conf(
     if spec.cluster.settings.is_some() {
         writeln!(file, "# Managed by compute_ctl: begin")?;
         write!(file, "{}", spec.cluster.settings.as_pg_settings())?;
+        // If generation is given, prepend sk list with g#number:
+        if let Some(generation) = spec.safekeepers_generation {
+            let neon_safekeepers = spec.cluster.settings.find("neon.safekeepers").unwrap();
+            // Don't try to add it if it already exists
+            if !neon_safekeepers.starts_with("g#") {
+                writeln!(
+                    file,
+                    "# Overwriting original neon.safekeepers value to include generation"
+                )?;
+                writeln!(
+                    file,
+                    "neon.safekeepers = 'g#{generation}:{neon_safekeepers}'"
+                )?;
+            }
+        }
         writeln!(file, "# Managed by compute_ctl: end")?;
     }
 

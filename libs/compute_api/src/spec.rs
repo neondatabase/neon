@@ -90,19 +90,17 @@ pub struct ComputeSpec {
 
     // Information needed to connect to the storage layer.
     //
-    // `tenant_id`, `timeline_id` and `pageserver_connstring` are always needed.
+    // `tenant_id` and `timeline_id` are always needed.
     //
     // Depending on `mode`, this can be a primary read-write node, a read-only
     // replica, or a read-only node pinned at an older LSN.
-    // `safekeeper_connstrings` must be set for a primary.
     //
-    // For backwards compatibility, the control plane may leave out all of
+    // For backwards compatibility, the control plane may leave out both of
     // these, and instead set the "neon.tenant_id", "neon.timeline_id",
     // etc. GUCs in cluster.settings. TODO: Once the control plane has been
     // updated to fill these fields, we can make these non optional.
     pub tenant_id: Option<TenantId>,
     pub timeline_id: Option<TimelineId>,
-    pub pageserver_connstring: Option<String>,
 
     // More neon ids that we expose to the compute_ctl
     // and to postgres as neon extension GUCs.
@@ -121,8 +119,6 @@ pub struct ComputeSpec {
     /// compute_ctl with postgres_ffi.
     #[serde(default)]
     pub safekeepers_generation: Option<u32>,
-    #[serde(default)]
-    pub safekeeper_connstrings: Vec<String>,
 
     #[serde(default)]
     pub mode: ComputeMode,
