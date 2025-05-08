@@ -13,7 +13,7 @@
 pub(super) mod tokio_epoll_uring_ext;
 
 use tokio_epoll_uring::IoBuf;
-use tracing::{Instrument, info};
+use tracing::Instrument;
 
 pub(crate) use super::api::IoEngineKind;
 #[derive(Clone, Copy)]
@@ -111,7 +111,8 @@ pub(crate) fn get() -> IoEngine {
 
 use std::os::unix::prelude::FileExt;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::time::Duration;
+#[cfg(target_os = "linux")]
+use {std::time::Duration, tracing::info};
 
 use super::owned_buffers_io::io_buf_ext::FullSlice;
 use super::owned_buffers_io::slice::SliceMutExt;
@@ -309,6 +310,7 @@ impl IoEngine {
 ///
 /// This function retries the operation once if it fails with ECANCELED.
 /// ONLY USE FOR IDEMPOTENT [`super::VirtualFile`] operations.
+#[cfg(target_os = "linux")]
 pub(super) async fn retry_ecanceled_once<F, Fut, T, V>(
     resources: T,
     f: F,
