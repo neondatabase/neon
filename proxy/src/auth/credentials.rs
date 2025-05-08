@@ -128,25 +128,23 @@ impl ComputeUserInfoMaybeEndpoint {
 
         let metrics = Metrics::get();
         debug!(%user, "credentials");
-        if sni.is_some() {
+
+        let protocol = ctx.protocol();
+        let kind = if sni.is_some() {
             debug!("Connection with sni");
-            metrics.proxy.accepted_connections_by_sni.inc(SniGroup {
-                protocol: ctx.protocol(),
-                kind: SniKind::Sni,
-            });
+            SniKind::Sni
         } else if endpoint.is_some() {
-            metrics.proxy.accepted_connections_by_sni.inc(SniGroup {
-                protocol: ctx.protocol(),
-                kind: SniKind::NoSni,
-            });
             debug!("Connection without sni");
+            SniKind::NoSni
         } else {
-            metrics.proxy.accepted_connections_by_sni.inc(SniGroup {
-                protocol: ctx.protocol(),
-                kind: SniKind::PasswordHack,
-            });
             debug!("Connection with password hack");
-        }
+            SniKind::PasswordHack
+        };
+
+        metrics
+            .proxy
+            .accepted_connections_by_sni
+            .inc(SniGroup { protocol, kind });
 
         let options = NeonOptions::parse_params(params);
 

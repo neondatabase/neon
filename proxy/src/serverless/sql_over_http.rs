@@ -246,13 +246,11 @@ fn get_conn_info(
             SniKind::NoSni
         };
 
+        let protocol = ctx.protocol();
         Metrics::get()
             .proxy
             .accepted_connections_by_sni
-            .inc(SniGroup {
-                protocol: ctx.protocol(),
-                kind,
-            });
+            .inc(SniGroup { protocol, kind });
     }
 
     ctx.set_user_agent(
