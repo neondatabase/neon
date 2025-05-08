@@ -19,6 +19,7 @@ use context_iterator::TenantShardContextIterator;
 use control_plane::storage_controller::{
     AttachHookRequest, AttachHookResponse, InspectRequest, InspectResponse,
 };
+use diesel::JoinTo;
 use diesel::result::DatabaseErrorKind;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -211,9 +212,7 @@ const MAX_DELAYED_RECONCILES: usize = 10000;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct TimelineSafekeeperMigrateRequest {
-    pub generation: u32,
-    pub old_set: Vec<NodeId>,
-    pub new_set: Vec<NodeId>,
+    pub desired_sk_set: Vec<NodeId>,
 }
 
 // Top level state available to all HTTP handlers
@@ -479,6 +478,7 @@ impl From<DatabaseError> for ApiError {
             DatabaseError::Logical(reason) | DatabaseError::Migration(reason) => {
                 ApiError::InternalServerError(anyhow::anyhow!(reason))
             }
+            DatabaseError::CAS(reason) => ApiError::Conflict(reason),
         }
     }
 }
@@ -4463,7 +4463,13 @@ impl Service {
         timeline_id: TimelineId,
         request: TimelineSafekeeperMigrateRequest,
     ) -> Result<(), ApiError> {
-        tracing::info!("Migrating timeline {tenant_id}/{timeline_id} to safekeeper ",);
+        tracing::info!(
+            "Migrating timeline {tenant_id}/{timeline_id} to new safekeeper set {:?}",
+            request.desired_sk_set
+        );
+
+        let mut desired_sk_ids = request.desired_sk_set.clone();
+        desired_sk_ids.sort();
 
         let _tenant_lock = trace_exclusive_lock(
             &self.tenant_op_locks,
@@ -4472,52 +4478,110 @@ impl Service {
         )
         .await;
 
-        // 1-2. Fetch current timeline configuration
-        // TODO
+        // 1. Fetch current timeline configuration from the configuration storage.
+        let timeline = self
+            .persistence
+            .get_timeline(tenant_id, timeline_id)
+            .await?;
 
-        // 3.
-
-        let old_set: Vec<SafekeeperId> = request
-            .old_set
-            .iter()
-            .map(|&id| SafekeeperId {
-                id,
-                host: "".to_string(),
-                pg_port: 0,
-            })
-            .collect();
-
-        let new_set: Vec<SafekeeperId> = request
-            .new_set
-            .iter()
-            .map(|&id| SafekeeperId {
-                id,
-                host: "".to_string(),
-                pg_port: 0,
-            })
-            .collect();
+        let Some(timeline) = timeline else {
+            return Err(ApiError::NotFound(
+                anyhow::anyhow!("Timeline {tenant_id}/{timeline_id} not found").into(),
+            ));
+        };
 
         let safekeepers = self.inner.read().unwrap().safekeepers.clone();
-        // let locked = self.inner.read().unwrap();
 
-        // for sk_id in &request.old_set {
-        //     let Some(sk) = locked.safekeepers.get(sk_id) else {
-        //         return Err(ApiError::BadRequest(anyhow::anyhow!(
-        //             "Safekeeper {sk_id} not found"
-        //         )));
-        //     };
-        //     old_set.push(membershipo::SafekeeperId{
-        //         id: sk_id.to_string(),
-        //         host: sk.host.clone(),
-        //         port: sk.port,
-        //     });
-        // }
+        let to_node_ids = |ids: &[i64]| {
+            ids.iter()
+                .map(|&id| NodeId(id as u64))
+                .sorted()
+                .collect::<Vec<_>>()
+        };
+
+        let current_sk_ids = to_node_ids(&timeline.sk_set);
+
+        let current_safekeepers = current_sk_ids
+            .iter()
+            .map(|id| {
+                safekeepers.get(id).ok_or_else(|| {
+                    ApiError::InternalServerError(anyhow::anyhow!(
+                        "Safekeeper {id} from current set not found"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let desired_safekeepers = desired_sk_ids
+            .iter()
+            .map(|id| {
+                safekeepers.get(id).ok_or_else(|| {
+                    ApiError::BadRequest(anyhow::anyhow!(
+                        "Safekeeper {id} from desired set not found"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let generation = if let Some(new_sk_set) = timeline.new_sk_set.as_ref() {
+            // Migration is already in progress
+            if desired_sk_ids != to_node_ids(new_sk_set) {
+                return Err(ApiError::Conflict(format!(
+                    "Migration to another sk set has already started: desiired set ({:?}) and timeline.new_sk_set ({:?})",
+                    request.desired_sk_set, new_sk_set
+                )));
+            }
+
+            // Restart current migration.
+            SafekeeperGeneration::new(timeline.generation as u32)
+        } else {
+            // 3. increment current conf number n and put desired_set to new_sk_set
+            let generation = SafekeeperGeneration::new(timeline.generation as u32).next();
+
+            self.persistence
+                .update_timeline_membership(
+                    tenant_id,
+                    timeline_id,
+                    generation,
+                    &current_sk_ids,
+                    Some(&desired_sk_ids),
+                )
+                .await?;
+
+            generation
+        };
+
+        let current_memmber_set = membership::MemberSet::new(
+            current_safekeepers
+                .iter()
+                .map(|sk| sk.get_safekeeper_id())
+                .collect(),
+        )
+        .map_err(|e| {
+            ApiError::InternalServerError(anyhow::anyhow!(
+                "Failed to create current member set: {e}"
+            ))
+        })?;
+
+        let desired_member_set = membership::MemberSet::new(
+            desired_safekeepers
+                .iter()
+                .map(|sk| sk.get_safekeeper_id())
+                .collect(),
+        )
+        .map_err(|e| {
+            ApiError::InternalServerError(anyhow::anyhow!(
+                "Failed to create current member set: {e}"
+            ))
+        })?;
 
         let joint_config = membership::Configuration {
-            generation: SafekeeperGeneration::new(request.generation),
-            members: membership::MemberSet { m: old_set },
-            new_members: Some(membership::MemberSet { m: new_set.clone() }),
+            generation,
+            members: current_memmber_set,
+            new_members: Some(desired_member_set.clone()),
         };
+
+        // 3.
 
         // 4. Call PUT configuration on safekeepers from the current set, delivering them joint_conf.
 
@@ -4647,16 +4711,26 @@ impl Service {
 
         // 8. Create new_conf: Configuration incrementing join_conf generation and having new safekeeper set as sk_set and None new_sk_set.
 
-        let joint_conf = membership::Configuration {
-            generation: SafekeeperGeneration::new(request.generation + 1),
-            members: membership::MemberSet { m: new_set },
+        let new_conf = membership::Configuration {
+            generation: generation.next(),
+            members: desired_member_set,
             new_members: None,
         };
+
+        self.persistence
+            .update_timeline_membership(
+                tenant_id,
+                timeline_id,
+                new_conf.generation,
+                &desired_sk_ids,
+                None,
+            )
+            .await?;
 
         // 9. Call PUT configuration on safekeepers from the new set, delivering them new_conf.
 
         for sk in safekeepers.values() {
-            if joint_conf.members.contains(sk.get_id()) {
+            if new_conf.members.contains(sk.get_id()) {
                 let client = SafekeeperClient::new(
                     sk.get_id(),
                     self.http_client.clone(),
@@ -4672,7 +4746,7 @@ impl Service {
                         tenant_id,
                         timeline_id,
                         &TimelineMembershipSwitchRequest {
-                            mconf: joint_conf.clone(),
+                            mconf: new_conf.clone(),
                         },
                     )
                     .await

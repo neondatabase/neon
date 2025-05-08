@@ -107,7 +107,7 @@ impl SafekeeperClient {
     ) -> Result<models::TimelineMembershipSwitchResponse> {
         measured_request!(
             "switch_timeline_membership",
-            crate::metrics::Method::Post,
+            crate::metrics::Method::Put,
             &self.node_id_label,
             self.inner
                 .switch_timeline_membership(tenant_id, timeline_id, req)
