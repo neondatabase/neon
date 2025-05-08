@@ -217,7 +217,8 @@ impl SnapshotDownloader {
 
     pub async fn download(&self) -> anyhow::Result<()> {
         // Generate a stream of TenantShardId
-        let shards = stream_tenant_shards(&self.remote_client, &self.target, self.tenant_id).await?;
+        let shards =
+            stream_tenant_shards(&self.remote_client, &self.target, self.tenant_id).await?;
         let shards: Vec<TenantShardId> = shards.try_collect().await?;
 
         // Only read from shards that have the highest count: avoids redundantly downloading
@@ -235,7 +236,8 @@ impl SnapshotDownloader {
 
         for shard in shards.into_iter().filter(|s| s.shard_count == shard_count) {
             // Generate a stream of TenantTimelineId
-            let timelines = stream_tenant_timelines(&self.remote_client, &self.target, shard).await?;
+            let timelines =
+                stream_tenant_timelines(&self.remote_client, &self.target, shard).await?;
 
             // Generate a stream of S3TimelineBlobData
             async fn load_timeline_index(
@@ -246,8 +248,8 @@ impl SnapshotDownloader {
                 let data = list_timeline_blobs(remote_client, ttid, target).await?;
                 Ok((ttid, data))
             }
-            let timelines =
-                timelines.map_ok(|ttid| load_timeline_index(&self.remote_client, &self.target, ttid));
+            let timelines = timelines
+                .map_ok(|ttid| load_timeline_index(&self.remote_client, &self.target, ttid));
             let mut timelines = std::pin::pin!(timelines.try_buffered(8));
 
             while let Some(i) = timelines.next().await {
