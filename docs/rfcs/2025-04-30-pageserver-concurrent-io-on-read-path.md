@@ -4,7 +4,7 @@ Date: May 6, 2025
 
 ## Summary
 
-This document is a retroactive RFC on the Pageserver Concurrent IO work that happened in late 204 / early 2025.
+This document is a retroactive RFC on the Pageserver Concurrent IO work that happened in late 2024 / early 2025.
 
 The gist of it is that Pageserver's `Timeline::get_vectored` now _issues_ the data block read operations against layer files
 _as it traverses the layer map_ and only _wait_ once, for all of them, after traversal is complete.
