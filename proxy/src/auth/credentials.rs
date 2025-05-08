@@ -12,9 +12,9 @@ use tracing::{debug, warn};
 use crate::auth::password_hack::parse_endpoint_param;
 use crate::context::RequestContext;
 use crate::error::{ReportableError, UserFacingError};
-use crate::metrics::{Metrics, SniKind};
+use crate::metrics::{Metrics, SniGroup, SniKind};
 use crate::proxy::NeonOptions;
-use crate::serverless::SERVERLESS_DRIVER_SNI;
+use crate::serverless::{AUTH_BROKER_SNI, SERVERLESS_DRIVER_SNI};
 use crate::types::{EndpointId, RoleName};
 
 #[derive(Debug, Error, PartialEq, Eq, Clone)]
@@ -65,7 +65,7 @@ pub(crate) fn endpoint_sni(sni: &str, common_names: &HashSet<String>) -> Option<
     if !common_names.contains(common_name) {
         return None;
     }
-    if subdomain == SERVERLESS_DRIVER_SNI {
+    if subdomain == SERVERLESS_DRIVER_SNI || subdomain == AUTH_BROKER_SNI {
         return None;
     }
     Some(EndpointId::from(subdomain))
@@ -130,18 +130,21 @@ impl ComputeUserInfoMaybeEndpoint {
         debug!(%user, "credentials");
         if sni.is_some() {
             debug!("Connection with sni");
-            metrics.proxy.accepted_connections_by_sni.inc(SniKind::Sni);
+            metrics.proxy.accepted_connections_by_sni.inc(SniGroup {
+                protocol: ctx.protocol(),
+                kind: SniKind::Sni,
+            });
         } else if endpoint.is_some() {
-            metrics
-                .proxy
-                .accepted_connections_by_sni
-                .inc(SniKind::NoSni);
+            metrics.proxy.accepted_connections_by_sni.inc(SniGroup {
+                protocol: ctx.protocol(),
+                kind: SniKind::NoSni,
+            });
             debug!("Connection without sni");
         } else {
-            metrics
-                .proxy
-                .accepted_connections_by_sni
-                .inc(SniKind::PasswordHack);
+            metrics.proxy.accepted_connections_by_sni.inc(SniGroup {
+                protocol: ctx.protocol(),
+                kind: SniKind::PasswordHack,
+            });
             debug!("Connection with password hack");
         }
 
