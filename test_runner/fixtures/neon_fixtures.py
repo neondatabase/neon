@@ -3866,7 +3866,7 @@ class NeonAuthBroker:
         external_http_port: int,
         auth_backend: NeonAuthBroker.ProxyV1,
     ):
-        self.domain = "apiauth.local.neon.build"  # resolves to 127.0.0.1
+        self.domain = "local.neon.build"  # resolves to 127.0.0.1
         self.host = "127.0.0.1"
         self.http_port = http_port
         self.external_http_port = external_http_port
@@ -3883,7 +3883,7 @@ class NeonAuthBroker:
         # generate key of it doesn't exist
         crt_path = self.test_output_dir / "proxy.crt"
         key_path = self.test_output_dir / "proxy.key"
-        generate_proxy_tls_certs("apiauth.local.neon.build", key_path, crt_path)
+        generate_proxy_tls_certs(f"apiauth.{self.domain}", key_path, crt_path)
 
         args = [
             str(self.neon_binpath / "proxy"),
@@ -3927,10 +3927,10 @@ class NeonAuthBroker:
 
         log.info(f"Executing http query: {query}")
 
-        connstr = f"postgresql://{user}@{self.domain}/postgres"
+        connstr = f"postgresql://{user}@ep-foo-bar-1234.{self.domain}/postgres"
         async with httpx.AsyncClient(verify=str(self.test_output_dir / "proxy.crt")) as client:
             response = await client.post(
-                f"https://{self.domain}:{self.external_http_port}/sql",
+                f"https://apiauth.{self.domain}:{self.external_http_port}/sql",
                 json={"query": query, "params": args},
                 headers={
                     "Neon-Connection-String": connstr,
