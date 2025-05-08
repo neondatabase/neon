@@ -7,6 +7,7 @@ use bytes::Bytes;
 use camino::Utf8PathBuf;
 use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt, TryStreamExt};
+use http_utils::error::ApiError;
 use postgres_ffi::{PG_TLI, XLogFileName, XLogSegNo};
 use reqwest::Certificate;
 use safekeeper_api::Term;
@@ -395,7 +396,7 @@ pub async fn handle_request(
     sk_auth_token: Option<SecretString>,
     ssl_ca_certs: Vec<Certificate>,
     global_timelines: Arc<GlobalTimelines>,
-) -> Result<PullTimelineResponse> {
+) -> Result<PullTimelineResponse, ApiError> {
     let existing_tli = global_timelines.get(TenantTimelineId::new(
         request.tenant_id,
         request.timeline_id,
@@ -411,7 +412,9 @@ pub async fn handle_request(
     for ssl_ca_cert in ssl_ca_certs {
         http_client = http_client.add_root_certificate(ssl_ca_cert);
     }
-    let http_client = http_client.build()?;
+    let http_client = http_client
+        .build()
+        .map_err(|e| ApiError::InternalServerError(e.into()))?;
 
     let http_hosts = request.http_hosts.clone();
 
@@ -443,10 +446,10 @@ pub async fn handle_request(
     // offline and C comes online. Then we want a pull on C with A and B as hosts to work.
     let min_required_successful = (http_hosts.len() - 1).max(1);
     if statuses.len() < min_required_successful {
-        bail!(
+        return Err(ApiError::InternalServerError(anyhow::anyhow!(
             "only got {} successful status responses. required: {min_required_successful}",
             statuses.len()
-        )
+        )));
     }
 
     // Find the most advanced safekeeper
@@ -476,14 +479,16 @@ pub async fn handle_request(
     {
         Ok(resp) => Ok(resp),
         Err(e) => {
-            if let Some(TimelineError::AlreadyExists(_) | TimelineError::CreationInProgress(_)) =
-                e.downcast_ref::<TimelineError>()
-            {
-                return Ok(PullTimelineResponse {
+            match e.downcast_ref::<TimelineError>() {
+                Some(TimelineError::AlreadyExists(_)) => Ok(PullTimelineResponse {
                     safekeeper_host: None,
-                });
+                }),
+                Some(TimelineError::CreationInProgress(_)) => {
+                    // We don't return success here because creation might still fail.
+                    Err(ApiError::Conflict("Creation in progress".to_owned()))
+                }
+                _ => Err(ApiError::InternalServerError(e)),
             }
-            Err(e)
         }
     }
 }
