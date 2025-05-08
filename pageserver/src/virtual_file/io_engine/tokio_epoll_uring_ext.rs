@@ -206,14 +206,14 @@ impl Handle {
         file: F,
         len: u64,
     ) -> (F, Result<(), tokio_epoll_uring::Error<std::io::Error>>) {
-        let system_handle = self.deref();
-        let op = tokio_epoll_uring::FtruncateOp { file, len };
-        tokio_epoll_uring::system::submission::op_fut::execute_op(
-            op,
-            system_handle.submit_side_weak(),
-            None,
-            system_handle.metrics().clone(),
-        )
-        .await
+        use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
+        use std::fs::File;
+        
+        let fd = file.as_raw_fd();
+        let mut std_file = unsafe { File::from_raw_fd(fd) };
+        let res = std_file.set_len(len);
+        let _ = std_file.into_raw_fd();
+        
+        (file, res.map_err(tokio_epoll_uring::Error::Io))
     }
 }
