@@ -1299,13 +1299,6 @@ class NeonEnv:
                         for key, value in override.items():
                             ps_cfg[key] = value
 
-            if self.pageserver_virtual_file_io_mode is not None:
-                # TODO(christian): https://github.com/neondatabase/neon/issues/11598
-                if not config.test_may_use_compatibility_snapshot_binaries:
-                    ps_cfg["virtual_file_io_mode"] = self.pageserver_virtual_file_io_mode
-                else:
-                    log.info("ignoring virtual_file_io_mode parametrization for compatibility test")
-
             if self.pageserver_wal_receiver_protocol is not None:
                 key, value = PageserverWalReceiverProtocol.to_config_key_value(
                     self.pageserver_wal_receiver_protocol
