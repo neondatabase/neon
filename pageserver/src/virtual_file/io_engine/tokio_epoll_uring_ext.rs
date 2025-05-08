@@ -210,6 +210,6 @@ impl Handle {
             std::io::ErrorKind::Other,
             "ftruncate operation not yet implemented for tokio-epoll-uring",
         );
-        (file, Err(tokio_epoll_uring::Error::System(err)))
+        (file, Err(tokio_epoll_uring::Error::Op(err)))
     }
 }
