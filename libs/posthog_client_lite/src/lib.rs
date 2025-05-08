@@ -390,13 +390,13 @@ impl PostHogClient {
     }
 
     /// Fetch the feature flag specs from the server.
-    /// 
+    ///
     /// This is unfortunately an undocumented API at:
-    /// - https://posthog.com/docs/api/feature-flags#get-api-projects-project_id-feature_flags-local_evaluation
-    /// - https://posthog.com/docs/feature-flags/local-evaluation
-    /// 
+    /// - <https://posthog.com/docs/api/feature-flags#get-api-projects-project_id-feature_flags-local_evaluation>
+    /// - <https://posthog.com/docs/feature-flags/local-evaluation>
+    ///
     /// The handling logic in [`FeatureStore`] mostly follows the Python API implementation.
-    /// See `_compute_flag_locally` in https://github.com/PostHog/posthog-python/blob/master/posthog/client.py
+    /// See `_compute_flag_locally` in <https://github.com/PostHog/posthog-python/blob/master/posthog/client.py>
     pub async fn get_feature_flags_local_evaluation(
         &self,
     ) -> anyhow::Result<PostHogLocalEvaluationResponse> {
@@ -418,8 +418,8 @@ impl PostHogClient {
 
     /// Capture an event. This will only be used to report the feature flag usage back to PostHog, though
     /// it also support a lot of other functionalities.
-    /// 
-    /// https://posthog.com/docs/api/capture
+    ///
+    /// <https://posthog.com/docs/api/capture>
     pub async fn capture_event(
         &self,
         event: &str,
