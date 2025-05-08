@@ -103,7 +103,7 @@ impl FeatureStore {
         }
     }
 
-    pub fn update_flags(&mut self, flags: Vec<PostHogLocalEvaluationFlag>) {
+    pub fn set_flags(&mut self, flags: Vec<PostHogLocalEvaluationFlag>) {
         self.flags.clear();
         for flag in flags {
             if flag.active {
@@ -516,7 +516,7 @@ mod tests {
     fn evaluate_multivariate() {
         let mut store = FeatureStore::new();
         let response: PostHogLocalEvaluationResponse = serde_json::from_str(data()).unwrap();
-        store.update_flags(response.flags);
+        store.set_flags(response.flags);
 
         // This lacks the required properties and cannot be evaluated.
         let variant =
