@@ -5,7 +5,6 @@
 //! on older kernels, such as some (but not all) older kernels in the Linux 5.10 series.
 //! See <https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391> for more details.
 
-use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -201,19 +200,15 @@ impl std::ops::Deref for Handle {
 }
 
 impl Handle {
-    pub async fn ftruncate<F: tokio_epoll_uring::IoFd + Send + std::os::unix::io::AsRawFd>(
+    pub async fn ftruncate<F: tokio_epoll_uring::IoFd + Send>(
         &self,
         file: F,
         len: u64,
     ) -> (F, Result<(), tokio_epoll_uring::Error<std::io::Error>>) {
-        use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
-        use std::fs::File;
         
-        let fd = file.as_raw_fd();
-        let mut std_file = unsafe { File::from_raw_fd(fd) };
+        let std_file = std::fs::File::from(file.as_fd());
         let res = std_file.set_len(len);
-        let _ = std_file.into_raw_fd();
         
-        (file, res.map_err(|e| tokio_epoll_uring::Error::System(e)))
+        (file, res.map_err(tokio_epoll_uring::Error::from))
     }
 }
