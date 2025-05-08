@@ -240,10 +240,12 @@ impl IoEngine {
             }
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
-                // TODO: ftruncate op for tokio-epoll-uring
-                // Don't forget to use retry_ecanceled_once
-                let res = file_guard.with_std_file(|std_file| std_file.set_len(len));
-                (file_guard, res)
+                let system = tokio_epoll_uring_ext::thread_local_system().await;
+                let (resources, res) = retry_ecanceled_once(file_guard, |file_guard| async {
+                    system.ftruncate(file_guard, len).await
+                })
+                .await;
+                (resources, res.map_err(epoll_uring_error_to_std))
             }
         }
     }
