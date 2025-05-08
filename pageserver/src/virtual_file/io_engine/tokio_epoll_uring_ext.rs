@@ -5,6 +5,7 @@
 //! on older kernels, such as some (but not all) older kernels in the Linux 5.10 series.
 //! See <https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391> for more details.
 
+use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
