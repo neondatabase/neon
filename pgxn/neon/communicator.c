@@ -425,14 +425,9 @@ compact_prefetch_buffers(void)
  * point inside and outside PostgreSQL.
  *
  * This still does throw errors when it receives malformed responses from PS.
- *
- * When we're not called from CHECK_FOR_INTERRUPTS (indicated by
- * IsHandlingInterrupts) we also report we've ended prefetch receive work,
- * just in case state tracking was lost due to an error in the sync getPage
- * response code.
  */
 void
-communicator_prefetch_pump_state(bool IsHandlingInterrupts)
+communicator_prefetch_pump_state(void)
 {
 	START_PREFETCH_RECEIVE_WORK();
 
@@ -687,15 +682,15 @@ prefetch_wait_for(uint64 ring_index)
 		CHECK_FOR_INTERRUPTS();
 	}
 
-	END_PREFETCH_RECEIVE_WORK();
-
 	if (result)
 	{
 		/* Check that slot is actually received (srver can be disconnected in prefetch_pump_state called from CHECK_FOR_INTERRUPTS */
 		PrefetchRequest *slot = GetPrfSlot(ring_index);
-		return slot->status == PRFS_RECEIVED;
+		result = slot->status == PRFS_RECEIVED;
 	}
-	return false;
+	END_PREFETCH_RECEIVE_WORK();
+
+	return result;
 ;
 }
 
@@ -804,6 +799,7 @@ communicator_prefetch_receive(BufferTag tag)
 	PrfHashEntry *entry;
 	PrefetchRequest hashkey;
 
+	Assert(readpage_reentrant_guard);
 	hashkey.buftag = tag;
 	entry = prfh_lookup(MyPState->prf_hash, &hashkey);
 	if (entry != NULL && prefetch_wait_for(entry->slot->my_ring_index))
@@ -823,8 +819,10 @@ communicator_prefetch_receive(BufferTag tag)
 void
 prefetch_on_ps_disconnect(void)
 {
+	bool save_readpage_reentrant_guard = readpage_reentrant_guard;
 	MyPState->ring_flush = MyPState->ring_unused;
 
+	/* Prohibit callig of prefetch_pump_state */
 	START_PREFETCH_RECEIVE_WORK();
 
 	while (MyPState->ring_receive < MyPState->ring_unused)
@@ -855,7 +853,8 @@ prefetch_on_ps_disconnect(void)
 		MyNeonCounters->getpage_prefetch_discards_total += 1;
 	}
 
-	END_PREFETCH_RECEIVE_WORK();
+	/* Restore guard */
+	readpage_reentrant_guard = save_readpage_reentrant_guard;
 
 	/*
 	 * We can have gone into retry due to network error, so update stats with
@@ -2515,7 +2514,7 @@ communicator_processinterrupts(void)
 	if (timeout_signaled)
 	{
 		if (!readpage_reentrant_guard && readahead_getpage_pull_timeout_ms > 0)
-			communicator_prefetch_pump_state(true);
+			communicator_prefetch_pump_state();
 
 		timeout_signaled = false;
 		communicator_reconfigure_timeout_if_needed();
