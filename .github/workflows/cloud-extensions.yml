@@ -38,7 +38,7 @@ jobs:
     runs-on: [self-hosted, small]
     container:
       # We use the neon-test-extensions image here as it contains the source code for the extensions.
-      image: ghcr.io/neondatabase/neon-test-extensions-v${{ matrix.pg-version }}:14923168141
+      image: ghcr.io/neondatabase/neon-test-extensions-v${{ matrix.pg-version }}:14926435185
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
