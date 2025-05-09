@@ -305,6 +305,7 @@ impl From<OtelExporterProtocol> for tracing_utils::Protocol {
 pub struct TimelineImportConfig {
     pub import_job_concurrency: NonZeroUsize,
     pub import_job_soft_size_limit: NonZeroUsize,
+    pub import_job_checkpoint_threshold: NonZeroUsize,
 }
 
 pub mod statvfs {
@@ -669,6 +670,7 @@ impl Default for ConfigToml {
             timeline_import_config: TimelineImportConfig {
                 import_job_concurrency: NonZeroUsize::new(128).unwrap(),
                 import_job_soft_size_limit: NonZeroUsize::new(1024 * 1024 * 1024).unwrap(),
+                import_job_checkpoint_threshold: NonZeroUsize::new(128).unwrap(),
             },
         }
     }

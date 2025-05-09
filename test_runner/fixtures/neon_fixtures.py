@@ -1255,6 +1255,12 @@ class NeonEnv:
                 "no_sync": True,
                 # Look for gaps in WAL received from safekeepeers
                 "validate_wal_contiguity": True,
+                # TODO(vlad): make these configurable through the builder
+                "timeline_import_config": {
+                    "import_job_concurrency": 4,
+                    "import_job_soft_size_limit": 512 * 1024,
+                    "import_job_checkpoint_threshold": 4,
+                },
             }
 
             # Batching (https://github.com/neondatabase/neon/issues/9377):

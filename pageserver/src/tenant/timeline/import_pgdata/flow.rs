@@ -29,9 +29,9 @@
 //! - version-specific CheckPointData (=> pgv abstraction, already exists for regular walingest)
 
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::sync::Arc;
-use std::hash::{Hash, Hasher};
 
 use anyhow::ensure;
 use bytes::Bytes;
@@ -371,6 +371,8 @@ impl Plan {
             .peekable();
         let mut last_completed_job_idx = 0;
 
+        let checkpoint_every: usize = import_config.import_job_checkpoint_threshold.into();
+
         // Run import jobs concurrently up to the limit specified by the pageserver configuration.
         // Note that we process completed futures in the oreder of insertion. This will be the
         // building block for resuming imports across pageserver restarts or tenant migrations.
@@ -398,8 +400,7 @@ impl Plan {
                             res?;
                             last_completed_job_idx = job_idx;
 
-                            // TODO(vlad): make this configurable
-                            if last_completed_job_idx % 2 == 0 {
+                            if last_completed_job_idx % checkpoint_every == 0 {
                                 storcon_client.put_timeline_import_status(
                                     timeline.tenant_shard_id,
                                     timeline.timeline_id,
@@ -600,10 +601,7 @@ struct ImportSingleKeyTask {
 
 impl Hash for ImportSingleKeyTask {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        let ImportSingleKeyTask {
-            key,
-            buf,
-        } = self;
+        let ImportSingleKeyTask { key, buf } = self;
 
         key.hash(state);
         buf.hash(state);
