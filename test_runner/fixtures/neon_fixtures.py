@@ -1651,7 +1651,8 @@ def neon_simple_env(
     repo_dir = get_test_repo_dir(request, top_output_dir)
     combination = (
         request._pyfuncitem.callspec.params["combination"]
-        if "combination" in request._pyfuncitem.callspec.params
+        if hasattr(request._pyfuncitem, "callspec")
+        and "combination" in request._pyfuncitem.callspec.params
         else None
     )
 
@@ -1718,7 +1719,8 @@ def neon_env_builder(
     repo_dir = os.path.join(test_output_dir, "repo")
     combination = (
         request._pyfuncitem.callspec.params["combination"]
-        if "combination" in request._pyfuncitem.callspec.params
+        if hasattr(request._pyfuncitem, "callspec")
+        and "combination" in request._pyfuncitem.callspec.params
         else None
     )
 
