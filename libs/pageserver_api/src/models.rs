@@ -1866,7 +1866,7 @@ pub mod virtual_file {
             } else {
                 None
             };
-            env_override.unwrap_or(IoMode::Buffered)
+            env_override.unwrap_or(IoMode::DirectRw)
         }
     }
 
