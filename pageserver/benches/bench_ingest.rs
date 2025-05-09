@@ -244,7 +244,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     ];
     let exploded_parameters = {
         let mut out = Vec::new();
-        for io_mode in [IoMode::Buffered, IoMode::Direct, IoMode::DirectRw] {
+        for io_mode in IoMode::iter() {
             for param in expect.clone() {
                 let HandPickedParameters {
                     volume_mib,

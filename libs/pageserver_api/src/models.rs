@@ -1832,6 +1832,7 @@ pub mod virtual_file {
         Eq,
         Hash,
         strum_macros::EnumString,
+        strum_macros::EnumIter,
         strum_macros::Display,
         serde_with::DeserializeFromStr,
         serde_with::SerializeDisplay,
