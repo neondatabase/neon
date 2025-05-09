@@ -1,4 +1,9 @@
-use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    str::FromStr,
+    sync::{Arc, atomic::AtomicU64},
+    time::Duration,
+};
 
 use clashmap::{ClashMap, Entry};
 use safekeeper_api::models::PullTimelineRequest;
@@ -169,12 +174,17 @@ pub(crate) struct ScheduleRequest {
     pub(crate) kind: SafekeeperTimelineOpKind,
 }
 
-type OngoingTokens = ClashMap<(TenantId, Option<TimelineId>), CancellationToken>;
+/// A way to keep ongoing/queued reconcile requests apart
+#[derive(Copy, Clone, PartialEq, Eq)]
+struct TokenId(u64);
+
+type OngoingTokens = ClashMap<(TenantId, Option<TimelineId>), (CancellationToken, TokenId)>;
 
 /// Handle to per safekeeper reconciler.
 struct ReconcilerHandle {
-    tx: UnboundedSender<(ScheduleRequest, CancellationToken)>,
+    tx: UnboundedSender<(ScheduleRequest, CancellationToken, TokenId)>,
     ongoing_tokens: Arc<OngoingTokens>,
+    token_id_counter: AtomicU64,
     cancel: CancellationToken,
 }
 
@@ -187,24 +197,28 @@ impl ReconcilerHandle {
         &self,
         tenant_id: TenantId,
         timeline_id: Option<TimelineId>,
-    ) -> CancellationToken {
+    ) -> (CancellationToken, TokenId) {
+        let token_id = self
+            .token_id_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let token_id = TokenId(token_id);
         let entry = self.ongoing_tokens.entry((tenant_id, timeline_id));
         if let Entry::Occupied(entry) = &entry {
-            let cancel: &CancellationToken = entry.get();
+            let (cancel, _) = entry.get();
             cancel.cancel();
         }
-        entry.insert(self.cancel.child_token()).clone()
+        entry.insert((self.cancel.child_token(), token_id)).clone()
     }
     /// Cancel an ongoing reconciliation
     fn cancel_reconciliation(&self, tenant_id: TenantId, timeline_id: Option<TimelineId>) {
-        if let Some((_, cancel)) = self.ongoing_tokens.remove(&(tenant_id, timeline_id)) {
+        if let Some((_, (cancel, _id))) = self.ongoing_tokens.remove(&(tenant_id, timeline_id)) {
             cancel.cancel();
         }
     }
     fn schedule_reconcile(&self, req: ScheduleRequest) {
-        let cancel = self.new_token_slot(req.tenant_id, req.timeline_id);
+        let (cancel, token_id) = self.new_token_slot(req.tenant_id, req.timeline_id);
         let hostname = req.safekeeper.skp.host.clone();
-        if let Err(err) = self.tx.send((req, cancel)) {
+        if let Err(err) = self.tx.send((req, cancel, token_id)) {
             tracing::info!("scheduling request onto {hostname} returned error: {err}");
         }
     }
@@ -213,7 +227,7 @@ impl ReconcilerHandle {
 pub(crate) struct SafekeeperReconciler {
     inner: SafekeeperReconcilerInner,
     concurrency_limiter: Arc<Semaphore>,
-    rx: UnboundedReceiver<(ScheduleRequest, CancellationToken)>,
+    rx: UnboundedReceiver<(ScheduleRequest, CancellationToken, TokenId)>,
     cancel: CancellationToken,
 }
 
@@ -242,6 +256,7 @@ impl SafekeeperReconciler {
         let handle = ReconcilerHandle {
             tx,
             ongoing_tokens,
+            token_id_counter: AtomicU64::new(0),
             cancel,
         };
         tokio::spawn(async move { reconciler.run().await });
@@ -253,7 +268,9 @@ impl SafekeeperReconciler {
                 req = self.rx.recv() => req,
                 _ = self.cancel.cancelled() => break,
             };
-            let Some((req, req_cancel)) = req else { break };
+            let Some((req, req_cancel, req_token_id)) = req else {
+                break;
+            };
 
             let permit_res = tokio::select! {
                 req = self.concurrency_limiter.clone().acquire_owned() => req,
@@ -272,7 +289,7 @@ impl SafekeeperReconciler {
                 let timeline_id = req.timeline_id;
                 let node_id = req.safekeeper.skp.id;
                 inner
-                    .reconcile_one(req, req_cancel)
+                    .reconcile_one(req, req_cancel, req_token_id)
                     .instrument(tracing::info_span!(
                         "reconcile_one",
                         ?kind,
@@ -287,7 +304,12 @@ impl SafekeeperReconciler {
 }
 
 impl SafekeeperReconcilerInner {
-    async fn reconcile_one(&self, req: ScheduleRequest, req_cancel: CancellationToken) {
+    async fn reconcile_one(
+        &self,
+        req: ScheduleRequest,
+        req_cancel: CancellationToken,
+        req_token_id: TokenId,
+    ) {
         let req_host = req.safekeeper.skp.host.clone();
         let success;
         match req.kind {
@@ -381,11 +403,13 @@ impl SafekeeperReconcilerInner {
             }
         }
         if success {
-            self.ongoing_tokens
-                .remove_if(&(req.tenant_id, req.timeline_id), |_ttid, _cancel| {
-                    // TODO check if it's really that cancellation and not a new one
-                    true
-                });
+            self.ongoing_tokens.remove_if(
+                &(req.tenant_id, req.timeline_id),
+                |_ttid, (_cancel, token_id)| {
+                    // Ensure that this request is indeed the request we just finished and not a new one
+                    req_token_id == *token_id
+                },
+            );
         }
     }
     async fn delete_timeline_from_db(&self, tenant_id: TenantId, timeline_id: TimelineId) {
