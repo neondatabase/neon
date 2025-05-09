@@ -45,6 +45,16 @@ pub struct PageserverClient {
     channels: RwLock<HashMap<ShardIndex, Arc<client_cache::ConnectionPool>>>,
 
     auth_interceptor: AuthInterceptor,
+
+    client_cache_options: ClientCacheOptions,
+}
+
+pub struct ClientCacheOptions {
+    pub max_consumers: usize,
+    pub error_threshold: usize,
+    pub connect_timeout: Duration,
+    pub connect_backoff: Duration,
+    pub max_idle_duration: Duration,
 }
 
 impl PageserverClient {
@@ -55,6 +65,28 @@ impl PageserverClient {
         auth_token: &Option<String>,
         shard_map: HashMap<ShardIndex, String>,
     ) -> Self {
+        let options = ClientCacheOptions {
+            max_consumers: 10,
+            error_threshold: 5,
+            connect_timeout: Duration::from_secs(5),
+            connect_backoff: Duration::from_secs(1),
+            max_idle_duration: Duration::from_secs(60),
+        };
+        Self::new_with_config(
+            tenant_id,
+            timeline_id,
+            auth_token,
+            shard_map,
+            options,
+        )
+    }
+    pub fn new_with_config(
+        tenant_id: &str,
+        timeline_id: &str,
+        auth_token: &Option<String>,
+        shard_map: HashMap<ShardIndex, String>,
+        options: ClientCacheOptions,
+    ) -> Self {
         Self {
             _tenant_id: tenant_id.to_string(),
             _timeline_id: timeline_id.to_string(),
@@ -62,16 +94,15 @@ impl PageserverClient {
             shard_map,
             channels: RwLock::new(HashMap::new()),
             auth_interceptor: AuthInterceptor::new(tenant_id, timeline_id, auth_token.as_deref()),
+            client_cache_options: options,
         }
     }
-
     pub async fn process_rel_exists_request(
         &self,
         request: &RelExistsRequest,
     ) -> Result<bool, PageserverClientError> {
         // Current sharding model assumes that all metadata is present only at shard 0.
         let shard = ShardIndex::unsharded();
-
         let pooled_client = self.get_client(shard).await;
         let chan = pooled_client.channel();
 
@@ -79,11 +110,18 @@ impl PageserverClient {
             PageServiceClient::with_interceptor(chan, self.auth_interceptor.for_shard(shard));
 
         let request = proto::RelExistsRequest::from(request);
-        let response = client.rel_exists(tonic::Request::new(request)).await?;
+        let response = client.rel_exists(tonic::Request::new(request)).await;
 
-        // TODO: check for an error and pass it to "finish"
-        pooled_client.finish(Ok(())).await;
-        Ok(response.get_ref().exists)
+        match response {
+            Err(status) => {
+                pooled_client.finish(Err(status.clone())).await; // Pass error to finish
+                return Err(PageserverClientError::RequestError(status));
+            }
+            Ok(resp) => {
+                pooled_client.finish(Ok(())).await; // Pass success to finish
+                return Ok(resp.get_ref().exists);
+            }
+        }
     }
 
     pub async fn process_rel_size_request(
@@ -92,7 +130,6 @@ impl PageserverClient {
     ) -> Result<u32, PageserverClientError> {
         // Current sharding model assumes that all metadata is present only at shard 0.
         let shard = ShardIndex::unsharded();
-
         let pooled_client = self.get_client(shard).await;
         let chan = pooled_client.channel();
 
@@ -100,17 +137,23 @@ impl PageserverClient {
             PageServiceClient::with_interceptor(chan, self.auth_interceptor.for_shard(shard));
 
         let request = proto::RelSizeRequest::from(request);
-        let response = client.rel_size(tonic::Request::new(request)).await?;
+        let response = client.rel_size(tonic::Request::new(request)).await;
 
-        // TODO: check for an error and pass it to "finish"
-        pooled_client.finish(Ok(())).await;
-        Ok(response.get_ref().num_blocks)
+        match response {
+            Err(status) => {
+                pooled_client.finish(Err(status.clone())).await; // Pass error to finish
+                return Err(PageserverClientError::RequestError(status));
+            }
+            Ok(resp) => {
+                pooled_client.finish(Ok(())).await; // Pass success to finish
+                return Ok(resp.get_ref().num_blocks);
+            }
+        }
     }
 
     pub async fn get_page(&self, request: &GetPageRequest) -> Result<Bytes, PageserverClientError> {
         // FIXME: calculate the shard number correctly
         let shard = ShardIndex::unsharded();
-
         let pooled_client = self.get_client(shard).await;
         let chan = pooled_client.channel();
 
@@ -119,17 +162,19 @@ impl PageserverClient {
 
         let request = proto::GetPageRequest::from(request);
         let response = client.get_page(tonic::Request::new(request)).await;
+
         match response {
             Err(status) => {
-                pooled_client.finish(Err(status.clone())).await;
+                pooled_client.finish(Err(status.clone())).await; // Pass error to finish
                 return Err(PageserverClientError::RequestError(status));
             }
             Ok(resp) => {
-                pooled_client.finish(Ok(())).await;
+                pooled_client.finish(Ok(())).await; // Pass success to finish
                 let response: GetPageResponse = resp.into_inner().try_into()?;
                 return Ok(response.page_image);
             }
         }
+
     }
 
     // TODO: this should use model::GetPageRequest and GetPageResponse
@@ -142,21 +187,26 @@ impl PageserverClient {
     > {
         // FIXME: calculate the shard number correctly
         let shard = ShardIndex::unsharded();
-
+        let request = tonic::Request::new(requests);
         let pooled_client = self.get_client(shard).await;
         let chan = pooled_client.channel();
 
         let mut client =
             PageServiceClient::with_interceptor(chan, self.auth_interceptor.for_shard(shard));
 
-        // Check for an error return from get_pages
-        // Declare response
+        let response = client.get_pages(request).await;
 
-        // TODO: check for an error and pass it to "finish"
-        pooled_client.finish(Ok(())).await;
-        return Ok(client.get_pages(tonic::Request::new(requests)).await?);
+        match response {
+            Err(status) => {
+                pooled_client.finish(Err(status.clone())).await;
+                return Err(PageserverClientError::RequestError(status));
+            }
+            Ok(resp) => {
+                pooled_client.finish(Ok(())).await; // Pass success to finish
+                return Ok(resp);
+            }
+        }
     }
-
     /// Process a request to get the size of a database.
     pub async fn process_dbsize_request(
         &self,
@@ -171,13 +221,19 @@ impl PageserverClient {
             PageServiceClient::with_interceptor(chan, self.auth_interceptor.for_shard(shard));
 
         let request = proto::DbSizeRequest::from(request);
-        let response = client.db_size(tonic::Request::new(request)).await?;
+        let response = client.db_size(tonic::Request::new(request)).await;
 
-        // TODO: check for an error and pass it to "finish"
-        pooled_client.finish(Ok(())).await;
-        Ok(response.get_ref().num_bytes)
+        match response {
+            Err(status) => {
+                pooled_client.finish(Err(status.clone())).await; // Pass error to finish
+                return Err(PageserverClientError::RequestError(status));
+            }
+            Ok(resp) => {
+                pooled_client.finish(Ok(())).await; // Pass success to finish
+                return Ok(resp.get_ref().num_bytes);
+            }
+        }
     }
-
     /// Process a request to get the size of a database.
     pub async fn get_base_backup(
         &self,
@@ -189,7 +245,6 @@ impl PageserverClient {
     > {
         // Current sharding model assumes that all metadata is present only at shard 0.
         let shard = ShardIndex::unsharded();
-
         let pooled_client = self.get_client(shard).await;
         let chan = pooled_client.channel();
 
@@ -201,13 +256,19 @@ impl PageserverClient {
         }
 
         let request = proto::GetBaseBackupRequest::from(request);
-        let response = client.get_base_backup(tonic::Request::new(request)).await?;
+        let response = client.get_base_backup(tonic::Request::new(request)).await;
 
-        // TODO: check for an error and pass it to "finish"
-        pooled_client.finish(Ok(())).await;
-        Ok(response)
+        match response {
+            Err(status) => {
+                pooled_client.finish(Err(status.clone())).await; // Pass error to finish
+                return Err(PageserverClientError::RequestError(status));
+            }
+            Ok(resp) => {
+                pooled_client.finish(Ok(())).await; // Pass success to finish
+                return Ok(resp);
+            }
+        }
     }
-
     /// Get a client for given shard
     ///
     /// Get a client from the pool for this shard, also creating the pool if it doesn't exist.
@@ -225,12 +286,17 @@ impl PageserverClient {
                 return pooled_client;
             }
             None => {
-                let new_pool = client_cache::ConnectionPool::new(
+                // Create a new pool using client_cache_options
+                // declare new_pool
+
+                let new_pool: Arc<client_cache::ConnectionPool>;
+                new_pool = client_cache::ConnectionPool::new(
                     self.shard_map.get(&shard).unwrap(),
-                    5000,
-                    5,
-                    Duration::from_millis(200),
-                    Duration::from_secs(1),
+                    self.client_cache_options.max_consumers,
+                    self.client_cache_options.error_threshold,
+                    self.client_cache_options.connect_timeout,
+                    self.client_cache_options.connect_backoff,
+                    self.client_cache_options.max_idle_duration,
                 );
                 let mut write_pool = self.channels.write().unwrap();
                 write_pool.insert(shard, new_pool.clone());

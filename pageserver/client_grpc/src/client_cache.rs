@@ -21,6 +21,8 @@ pub struct ConnectionPool {
     error_threshold: usize,
     connect_timeout: Duration,
     connect_backoff: Duration,
+    // The maximum duration a connection can be idle before being removed
+    max_idle_duration: Duration,
 
     // This notify is signaled when a connection is released or created.
     notify: Notify,
@@ -48,6 +50,7 @@ struct ConnectionEntry {
     active_consumers: usize,
     consecutive_successes: usize,
     consecutive_errors: usize,
+    last_used: Instant,
 }
 
 /// A client borrowed from the pool.
@@ -65,6 +68,7 @@ impl ConnectionPool {
         error_threshold: usize,
         connect_timeout: Duration,
         connect_backoff: Duration,
+        max_idle_duration: Duration,
     ) -> Arc<Self> {
         let (request_tx, mut request_rx) = mpsc::channel::<mpsc::Sender<PooledClient>>(100);
         let (watch_tx, watch_rx) = watch::channel(false);
@@ -78,10 +82,11 @@ impl ConnectionPool {
             cc_watch_rx: watch_rx,
             endpoint: endpoint.clone(),
             max_consumers: max_consumers,
-            error_threshold,
-            connect_timeout,
-            connect_backoff,
-            request_tx,
+            error_threshold: error_threshold,
+            connect_timeout: connect_timeout,
+            connect_backoff: connect_backoff,
+            max_idle_duration: max_idle_duration,
+            request_tx: request_tx,
         });
 
         //
@@ -111,8 +116,31 @@ impl ConnectionPool {
             }
         });
 
+        // Background task to sweep idle connections
+        let sweeper_pool = Arc::clone(&pool);
+        tokio::spawn(async move {
+            loop {
+                sweeper_pool.sweep_idle_connections().await;
+                sleep(Duration::from_secs(5)).await; // Run every 60 seconds
+            }
+        });
+
         pool
     }
+
+    // Sweep and remove idle connections
+    async fn sweep_idle_connections(&self) {
+        let mut inner = self.inner.lock().await;
+        let now = Instant::now();
+        inner.entries.retain(|_id, entry| {
+            if entry.active_consumers == 0 && now.duration_since(entry.last_used) > self.max_idle_duration {
+                // Remove idle connection
+                return false;
+            }
+            true
+        });
+    }
+
 
     async fn acquire_connection(&self) -> (uuid::Uuid, Channel) {
         loop {
@@ -153,22 +181,20 @@ impl ConnectionPool {
         }
 
         loop {
-            //
-            // TODO: This would be more accurate if it waited for a timer, and the timer
-            // was reset when a connection failed. Using timestamps, we may miss new failures
-            // that occur while we are sleeping.
-            //
-            // TODO: Should the backoff be exponential?
-            //
-            if let Some(delay) = {
-                let inner = self.inner.lock().await;
-                inner.last_connect_failure.and_then(|at| {
-                    (at.elapsed() < self.connect_backoff)
-                        .then(|| self.connect_backoff - at.elapsed())
-                })
-            } {
-                sleep(delay).await;
+            loop {
+                if let Some(delay) = {
+                    let inner = self.inner.lock().await;
+                    inner.last_connect_failure.and_then(|at| {
+                        (at.elapsed() < self.connect_backoff)
+                            .then(|| self.connect_backoff - at.elapsed())
+                    })
+                } {
+                    sleep(delay).await;
+                } else {
+                    break   // No delay, so we can create a connection
+                }
             }
+
             //
             // Create a new connection.
             //
@@ -197,6 +223,7 @@ impl ConnectionPool {
                                 active_consumers: 0,
                                 consecutive_successes: 0,
                                 consecutive_errors: 0,
+                                last_used: Instant::now(),
                             },
                         );
                         self.notify.notify_one();
@@ -230,6 +257,7 @@ impl ConnectionPool {
         let mut inner = self.inner.lock().await;
         let mut new_failure = false;
         if let Some(entry) = inner.entries.get_mut(&id) {
+            entry.last_used = Instant::now();
             // TODO: This should be a debug_assert
             if entry.active_consumers <= 0 {
                 panic!("A consumer completed when active_consumers was zero!")

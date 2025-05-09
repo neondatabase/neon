@@ -73,7 +73,23 @@ pub(crate) struct Args {
     #[clap(long, default_value = "1")]
     queue_depth: NonZeroUsize,
 
+    #[clap(long, default_value = "100")]
+    pool_max_consumers: NonZeroUsize,
+
+    #[clap(long, default_value = "5")]
+    pool_error_threshold: NonZeroUsize,
+
+    #[clap(long, default_value = "5000")]
+    pool_connect_timeout: NonZeroUsize,
+
+    #[clap(long, default_value = "1000")]
+    pool_connect_backoff: NonZeroUsize,
+
+    #[clap(long, default_value = "60000")]
+    pool_max_idle_duration: NonZeroUsize,
+
     targets: Option<Vec<TenantTimelineId>>,
+
 }
 
 /// State shared by all clients
@@ -463,11 +479,19 @@ async fn client_grpc(
         ShardIndex::unsharded(),
         args.page_service_connstring.clone(),
     )]);
-    let client = pageserver_client_grpc::PageserverClient::new(
+    let options = pageserver_client_grpc::ClientCacheOptions {
+        max_consumers: args.pool_max_consumers.get(),
+        error_threshold: args.pool_error_threshold.get(),
+        connect_timeout: Duration::from_millis(args.pool_connect_timeout.get() as u64),
+        connect_backoff: Duration::from_millis(args.pool_connect_backoff.get() as u64),
+        max_idle_duration: Duration::from_millis(args.pool_max_idle_duration.get() as u64),
+    };
+    let client = pageserver_client_grpc::PageserverClient::new_with_config(
         &worker_id.timeline.tenant_id.to_string(),
         &worker_id.timeline.timeline_id.to_string(),
         &None,
         shard_map,
+        options,
     );
     let client = Arc::new(client);
 
