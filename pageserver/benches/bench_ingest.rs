@@ -14,6 +14,7 @@ use pageserver_api::key::Key;
 use pageserver_api::models::virtual_file::IoMode;
 use pageserver_api::shard::TenantShardId;
 use pageserver_api::value::Value;
+use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
 use utils::bin_ser::BeSer;
 use utils::id::{TenantId, TimelineId};
