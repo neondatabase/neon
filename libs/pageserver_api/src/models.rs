@@ -1852,8 +1852,7 @@ pub mod virtual_file {
         pub fn preferred() -> Self {
             // The default behavior when running Rust unit tests without any further
             // flags is to use the newest behavior (DirectRw).
-            // The CI uses the following environment variable to unit tests for all
-            // different modes.
+            // The CI uses the environment variable to unit tests for all different modes.
             // NB: the Python regression & perf tests have their own defaults management
             // that writes pageserver.toml; they do not use this variable.
             if cfg!(test) {
@@ -1870,7 +1869,7 @@ pub mod virtual_file {
                 });
                 *CACHED
             } else {
-                IoMode::Buffered
+                IoMode::DirectRw
             }
         }
     }
@@ -1881,9 +1880,7 @@ pub mod virtual_file {
         fn try_from(value: u8) -> Result<Self, Self::Error> {
             Ok(match value {
                 v if v == (IoMode::Buffered as u8) => IoMode::Buffered,
-                #[cfg(target_os = "linux")]
                 v if v == (IoMode::Direct as u8) => IoMode::Direct,
-                #[cfg(target_os = "linux")]
                 v if v == (IoMode::DirectRw as u8) => IoMode::DirectRw,
                 x => return Err(x),
             })
