@@ -3606,6 +3606,13 @@ impl Timeline {
                     last_key = Some(key);
                 }
                 accumulated_values.push((key, lsn, val));
+
+                if accumulated_values.len() >= 65536 {
+                    // Assume all of them are images, that would be 512MB of data in memory for a single key.
+                    return Err(CompactionError::Other(anyhow!(
+                        "too many values for a single key, giving up gc-compaction"
+                    )));
+                }
             } else {
                 let last_key: &mut Key = last_key.as_mut().unwrap();
                 stat.on_unique_key_visited(); // TODO: adjust statistics for partial compaction
