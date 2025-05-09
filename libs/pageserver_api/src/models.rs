@@ -1856,22 +1856,17 @@ pub mod virtual_file {
             // The CI uses the environment variable to unit tests for all different modes.
             // NB: the Python regression & perf tests have their own defaults management
             // that writes pageserver.toml; they do not use this variable.
-            if cfg!(test) {
-                static CACHED: LazyLock<IoMode> = LazyLock::new(|| {
+            let env_override = if cfg!(test) {
+                static CACHED: LazyLock<Option<IoMode>> = LazyLock::new(|| {
                     utils::env::var_serde_json_string(
                         "NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IO_MODE",
-                    )
-                    .unwrap_or(
-                        #[cfg(target_os = "linux")]
-                        IoMode::DirectRw,
-                        #[cfg(not(target_os = "linux"))]
-                        IoMode::Buffered,
                     )
                 });
                 *CACHED
             } else {
-                IoMode::DirectRw
-            }
+                None
+            };
+            env_override.unwrap_or(IoMode::Buffered)
         }
     }
 
