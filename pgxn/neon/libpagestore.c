@@ -447,10 +447,18 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		/*
 		 * If we did other tasks between reconnect attempts, then we won't
 		 * need to wait as long as a full delay.
+		 *
+		 * This is a loop to protect against interrupted sleeps.
 		 */
-		if (us_since_last_attempt < shard->delay_us)
+		while (us_since_last_attempt < shard->delay_us)
 		{
 			pg_usleep(shard->delay_us - us_since_last_attempt);
+
+			/* At least we should handle cancellations here */
+			CHECK_FOR_INTERRUPTS();
+
+			now = GetCurrentTimestamp();
+			us_since_last_attempt = (int64) (now - shard->last_reconnect_time);
 		}
 
 		/* update the delay metric */
