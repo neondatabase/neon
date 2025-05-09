@@ -4,7 +4,7 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::bail;
+use anyhow::{bail, ensure};
 use arc_swap::ArcSwapOption;
 use futures::future::Either;
 use remote_storage::RemoteStorageConfig;
@@ -230,6 +230,9 @@ struct ProxyCliArgs {
     // TODO: rename to `console_redirect_confirmation_timeout`.
     #[clap(long, default_value = "2m", value_parser = humantime::parse_duration)]
     webauth_confirmation_timeout: std::time::Duration,
+
+    #[clap(flatten)]
+    pg_sni_router: PgSniRouterArgs,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -278,6 +281,25 @@ struct SqlOverHttpArgs {
     sql_over_http_max_response_size_bytes: usize,
 }
 
+#[derive(clap::Args, Clone, Debug)]
+struct PgSniRouterArgs {
+    /// listen for incoming client connections on ip:port
+    #[clap(long = "pg-sni-router-listen", default_value = "127.0.0.1:4432")]
+    listen: SocketAddr,
+    /// listen for incoming client connections on ip:port, requiring TLS to compute
+    #[clap(long = "pg-sni-router-listen-tls", default_value = "127.0.0.1:4433")]
+    listen_tls: SocketAddr,
+    /// path to TLS key for client postgres connections
+    #[clap(long = "pg-sni-router-tls-key")]
+    tls_key: Option<PathBuf>,
+    /// path to TLS cert for client postgres connections
+    #[clap(long = "pg-sni-router-tls-cert")]
+    tls_cert: Option<PathBuf>,
+    /// append this domain zone to the SNI hostname to get the destination address
+    #[clap(long = "pg-sni-router-destination")]
+    dest: Option<String>,
+}
+
 pub async fn run() -> anyhow::Result<()> {
     let _logging_guard = crate::logging::init().await?;
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
@@ -322,6 +344,29 @@ pub async fn run() -> anyhow::Result<()> {
     } else {
         info!("Starting proxy on {}", args.proxy);
         Some(TcpListener::bind(args.proxy).await?)
+    };
+
+    let sni_router_listeners = if args.pg_sni_router.dest.is_some() {
+        ensure!(
+            args.pg_sni_router.tls_key.is_some(),
+            "pg-sni-router-tls-key must be provided"
+        );
+        ensure!(
+            args.pg_sni_router.tls_cert.is_some(),
+            "pg-sni-router-tls-key must be provided"
+        );
+
+        info!(
+            "Starting pg-sni-router on {} and {}",
+            args.pg_sni_router.listen, args.pg_sni_router.listen_tls
+        );
+
+        Some((
+            TcpListener::bind(args.pg_sni_router.listen).await?,
+            TcpListener::bind(args.pg_sni_router.listen_tls).await?,
+        ))
+    } else {
+        None
     };
 
     // TODO: rename the argument to something like serverless.
@@ -409,6 +454,37 @@ pub async fn run() -> anyhow::Result<()> {
                 ));
             }
         }
+    }
+
+    // spawn pg-sni-router mode.
+    if let Some((listen, listen_tls)) = sni_router_listeners {
+        let args = args.pg_sni_router;
+        let dest = args.dest.expect("already asserted it is set");
+        let key_path = args.tls_key.expect("already asserted it is set");
+        let cert_path = args.tls_cert.expect("already asserted it is set");
+
+        let (tls_config, tls_server_end_point) =
+            super::pg_sni_router::parse_tls(&*key_path, &*cert_path)?;
+
+        let dest = Arc::new(dest);
+
+        client_tasks.spawn(super::pg_sni_router::task_main(
+            dest.clone(),
+            tls_config.clone(),
+            None,
+            tls_server_end_point,
+            listen,
+            cancellation_token.clone(),
+        ));
+
+        client_tasks.spawn(super::pg_sni_router::task_main(
+            dest,
+            tls_config,
+            Some(config.connect_to_compute.tls.clone()),
+            tls_server_end_point,
+            listen_tls,
+            cancellation_token.clone(),
+        ));
     }
 
     client_tasks.spawn(crate::context::parquet::worker(
