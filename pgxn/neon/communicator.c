@@ -717,6 +717,7 @@ prefetch_read(PrefetchRequest *slot)
 	Assert(slot->status == PRFS_REQUESTED);
 	Assert(slot->response == NULL);
 	Assert(slot->my_ring_index == MyPState->ring_receive);
+	Assert(readpage_reentrant_guard);
 
 	if (slot->status != PRFS_REQUESTED ||
 		slot->response != NULL ||
