@@ -285,6 +285,17 @@ pub struct TenantShard {
     /// **Lock order**: if acquiring all (or a subset), acquire them in order `timelines`, `timelines_offloaded`, `timelines_creating`
     timelines_offloaded: Mutex<HashMap<TimelineId, Arc<OffloadedTimeline>>>,
 
+    /// Tracks the timelines that are currently importing into this tenant shard.
+    ///
+    /// Note that importing timelines are also present in [`Self::timelines_creating`].
+    /// Keep this in mind when ordering lock acquisition.
+    ///
+    /// Lifetime:
+    /// * An imported timeline is created while scanning the bucket on tenant attach
+    ///   if the index part contains an `import_pgdata` entry and said field marks the import
+    ///   as in progress.
+    /// * Imported timelines are removed when the storage controller calls the post timeline
+    ///   import activation endpoint.
     timelines_importing: std::sync::Mutex<HashMap<TimelineId, ImportingTimeline>>,
 
     /// The last tenant manifest known to be in remote storage. None if the manifest has not yet
