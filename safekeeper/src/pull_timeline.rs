@@ -468,12 +468,15 @@ pub async fn handle_request(
     assert!(status.tenant_id == request.tenant_id);
     assert!(status.timeline_id == request.timeline_id);
 
+    let check_tombstone = !request.ignore_tombstone.unwrap_or_default();
+
     match pull_timeline(
         status,
         safekeeper_host,
         sk_auth_token,
         http_client,
         global_timelines,
+        check_tombstone,
     )
     .await
     {
@@ -499,6 +502,7 @@ async fn pull_timeline(
     sk_auth_token: Option<SecretString>,
     http_client: reqwest::Client,
     global_timelines: Arc<GlobalTimelines>,
+    check_tombstone: bool,
 ) -> Result<PullTimelineResponse> {
     let ttid = TenantTimelineId::new(status.tenant_id, status.timeline_id);
     info!(
@@ -570,7 +574,7 @@ async fn pull_timeline(
 
     // Finally, load the timeline.
     let _tli = global_timelines
-        .load_temp_timeline(ttid, &tli_dir_path, false)
+        .load_temp_timeline(ttid, &tli_dir_path, check_tombstone)
         .await?;
 
     Ok(PullTimelineResponse {
