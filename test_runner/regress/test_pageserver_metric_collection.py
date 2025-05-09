@@ -508,7 +508,9 @@ PER_METRIC_VERIFIERS = {
     "remote_storage_size": CannotVerifyAnything,
     "written_size": WrittenDataVerifier,
     "written_data_bytes_delta": WrittenDataDeltaVerifier,
+    "written_size_since_parent": WrittenDataVerifier,  # same as written_size on root
     "pitr_cutoff": CannotVerifyAnything,
+    "pitr_history_size_since_parent": WrittenDataVerifier,  # same as written_size on root w/o GC
     "timeline_logical_size": CannotVerifyAnything,
     "synthetic_storage_size": SyntheticSizeVerifier,
 }

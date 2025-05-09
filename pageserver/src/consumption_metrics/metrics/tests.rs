@@ -19,6 +19,7 @@ fn startup_collected_timeline_metrics_before_advancing() {
     let snap = TimelineSnapshot {
         loaded_at: (disk_consistent_lsn, SystemTime::now()),
         last_record_lsn: disk_consistent_lsn,
+        ancestor_lsn: Lsn(0),
         current_exact_logical_size: Some(logical_size),
         pitr_cutoff: Some(pitr_cutoff),
     };
@@ -37,6 +38,10 @@ fn startup_collected_timeline_metrics_before_advancing() {
             ),
             MetricsKey::written_size(tenant_id, timeline_id).at(now, disk_consistent_lsn.0),
             MetricsKey::pitr_cutoff(tenant_id, timeline_id).at(now, pitr_cutoff.0),
+            MetricsKey::written_size_since_parent(tenant_id, timeline_id)
+                .at(now, disk_consistent_lsn.0),
+            MetricsKey::pitr_history_size_since_parent(tenant_id, timeline_id)
+                .at(now, disk_consistent_lsn.0 - pitr_cutoff.0),
             MetricsKey::timeline_logical_size(tenant_id, timeline_id).at(now, logical_size)
         ]
     );
@@ -65,6 +70,7 @@ fn startup_collected_timeline_metrics_second_round() {
     let snap = TimelineSnapshot {
         loaded_at: (disk_consistent_lsn, init),
         last_record_lsn: disk_consistent_lsn,
+        ancestor_lsn: Lsn(0),
         current_exact_logical_size: Some(logical_size),
         pitr_cutoff: Some(pitr_cutoff),
     };
@@ -77,6 +83,10 @@ fn startup_collected_timeline_metrics_second_round() {
             MetricsKey::written_size_delta(tenant_id, timeline_id).from_until(before, now, 0),
             MetricsKey::written_size(tenant_id, timeline_id).at(now, disk_consistent_lsn.0),
             MetricsKey::pitr_cutoff(tenant_id, timeline_id).at(now, pitr_cutoff.0),
+            MetricsKey::written_size_since_parent(tenant_id, timeline_id)
+                .at(now, disk_consistent_lsn.0),
+            MetricsKey::pitr_history_size_since_parent(tenant_id, timeline_id)
+                .at(now, disk_consistent_lsn.0 - pitr_cutoff.0),
             MetricsKey::timeline_logical_size(tenant_id, timeline_id).at(now, logical_size)
         ]
     );
@@ -113,6 +123,7 @@ fn startup_collected_timeline_metrics_nth_round_at_same_lsn() {
     let snap = TimelineSnapshot {
         loaded_at: (disk_consistent_lsn, init),
         last_record_lsn: disk_consistent_lsn,
+        ancestor_lsn: Lsn(0),
         current_exact_logical_size: Some(logical_size),
         pitr_cutoff: Some(pitr_cutoff),
     };
@@ -125,6 +136,10 @@ fn startup_collected_timeline_metrics_nth_round_at_same_lsn() {
             MetricsKey::written_size_delta(tenant_id, timeline_id).from_until(just_before, now, 0),
             MetricsKey::written_size(tenant_id, timeline_id).at(now, disk_consistent_lsn.0),
             MetricsKey::pitr_cutoff(tenant_id, timeline_id).at(now, pitr_cutoff.0),
+            MetricsKey::written_size_since_parent(tenant_id, timeline_id)
+                .at(now, disk_consistent_lsn.0),
+            MetricsKey::pitr_history_size_since_parent(tenant_id, timeline_id)
+                .at(now, disk_consistent_lsn.0 - pitr_cutoff.0),
             MetricsKey::timeline_logical_size(tenant_id, timeline_id).at(now, logical_size)
         ]
     );
@@ -152,6 +167,7 @@ fn post_restart_written_sizes_with_rolled_back_last_record_lsn_and_pitr_cutoff()
     let snap = TimelineSnapshot {
         loaded_at: (Lsn(50), at_restart),
         last_record_lsn: Lsn(50),
+        ancestor_lsn: Lsn(0),
         current_exact_logical_size: None,
         pitr_cutoff: Some(Lsn(20)),
     };
@@ -186,6 +202,8 @@ fn post_restart_written_sizes_with_rolled_back_last_record_lsn_and_pitr_cutoff()
             ),
             MetricsKey::written_size(tenant_id, timeline_id).at(now, 100),
             MetricsKey::pitr_cutoff(tenant_id, timeline_id).at(now, 70),
+            MetricsKey::written_size_since_parent(tenant_id, timeline_id).at(now, 100),
+            MetricsKey::pitr_history_size_since_parent(tenant_id, timeline_id).at(now, 30),
         ]
     );
 
@@ -201,6 +219,88 @@ fn post_restart_written_sizes_with_rolled_back_last_record_lsn_and_pitr_cutoff()
             MetricsKey::written_size_delta(tenant_id, timeline_id).from_until(now, later, 0),
             MetricsKey::written_size(tenant_id, timeline_id).at(later, 100),
             MetricsKey::pitr_cutoff(tenant_id, timeline_id).at(later, 70),
+            MetricsKey::written_size_since_parent(tenant_id, timeline_id).at(later, 100),
+            MetricsKey::pitr_history_size_since_parent(tenant_id, timeline_id).at(later, 30),
+        ]
+    );
+}
+
+#[test]
+fn post_restart_written_sizes_with_rolled_back_last_record_lsn_and_pitr_cutoff_and_ancestor_lsn() {
+    // it can happen that we lose the inmemorylayer but have previously sent metrics and we
+    // should never go backwards
+
+    let tenant_id = TenantId::generate();
+    let timeline_id = TimelineId::generate();
+
+    let [later, now, at_restart] = time_backwards();
+
+    // FIXME: tests would be so much easier if we did not need to juggle back and forth
+    // SystemTime and DateTime::<Utc> ... Could do the conversion only at upload time?
+    let now = DateTime::<Utc>::from(now);
+    let later = DateTime::<Utc>::from(later);
+    let before_restart = at_restart - std::time::Duration::from_secs(5 * 60);
+    let way_before = before_restart - std::time::Duration::from_secs(10 * 60);
+    let before_restart = DateTime::<Utc>::from(before_restart);
+    let way_before = DateTime::<Utc>::from(way_before);
+
+    let snap = TimelineSnapshot {
+        loaded_at: (Lsn(50), at_restart),
+        last_record_lsn: Lsn(50),
+        ancestor_lsn: Lsn(40),
+        current_exact_logical_size: None,
+        pitr_cutoff: Some(Lsn(20)),
+    };
+
+    let mut cache = HashMap::from([
+        MetricsKey::written_size(tenant_id, timeline_id)
+            .at(before_restart, 100)
+            .to_kv_pair(),
+        MetricsKey::written_size_delta(tenant_id, timeline_id)
+            .from_until(
+                way_before,
+                before_restart,
+                // not taken into account, but the timestamps are important
+                999_999_999,
+            )
+            .to_kv_pair(),
+        MetricsKey::pitr_cutoff(tenant_id, timeline_id)
+            .at(before_restart, 70)
+            .to_kv_pair(),
+    ]);
+
+    let mut metrics = Vec::new();
+    snap.to_metrics(tenant_id, timeline_id, now, &mut metrics, &cache);
+
+    assert_eq!(
+        metrics,
+        &[
+            MetricsKey::written_size_delta(tenant_id, timeline_id).from_until(
+                before_restart,
+                now,
+                0
+            ),
+            MetricsKey::written_size(tenant_id, timeline_id).at(now, 100),
+            MetricsKey::pitr_cutoff(tenant_id, timeline_id).at(now, 70),
+            MetricsKey::written_size_since_parent(tenant_id, timeline_id).at(now, 60),
+            MetricsKey::pitr_history_size_since_parent(tenant_id, timeline_id).at(now, 30),
+        ]
+    );
+
+    // now if we cache these metrics, and re-run while "still in recovery"
+    cache.extend(metrics.drain(..).map(|x| x.to_kv_pair()));
+
+    // "still in recovery", because our snapshot did not change
+    snap.to_metrics(tenant_id, timeline_id, later, &mut metrics, &cache);
+
+    assert_eq!(
+        metrics,
+        &[
+            MetricsKey::written_size_delta(tenant_id, timeline_id).from_until(now, later, 0),
+            MetricsKey::written_size(tenant_id, timeline_id).at(later, 100),
+            MetricsKey::pitr_cutoff(tenant_id, timeline_id).at(later, 70),
+            MetricsKey::written_size_since_parent(tenant_id, timeline_id).at(later, 60),
+            MetricsKey::pitr_history_size_since_parent(tenant_id, timeline_id).at(later, 30),
         ]
     );
 }
@@ -219,6 +319,7 @@ fn post_restart_current_exact_logical_size_uses_cached() {
     let snap = TimelineSnapshot {
         loaded_at: (Lsn(50), at_restart),
         last_record_lsn: Lsn(50),
+        ancestor_lsn: Lsn(0),
         current_exact_logical_size: None,
         pitr_cutoff: None,
     };
@@ -319,6 +420,7 @@ fn pitr_cutoff_none_yields_last_record_lsn() {
     let snap = TimelineSnapshot {
         loaded_at: (disk_consistent_lsn, SystemTime::now()),
         last_record_lsn: disk_consistent_lsn,
+        ancestor_lsn: Lsn(0),
         current_exact_logical_size: None,
         pitr_cutoff: None,
     };
@@ -337,6 +439,9 @@ fn pitr_cutoff_none_yields_last_record_lsn() {
             ),
             MetricsKey::written_size(tenant_id, timeline_id).at(now, disk_consistent_lsn.0),
             MetricsKey::pitr_cutoff(tenant_id, timeline_id).at(now, disk_consistent_lsn.0),
+            MetricsKey::written_size_since_parent(tenant_id, timeline_id)
+                .at(now, disk_consistent_lsn.0),
+            MetricsKey::pitr_history_size_since_parent(tenant_id, timeline_id).at(now, 0),
         ]
     );
 }
@@ -346,12 +451,14 @@ pub(crate) const fn metric_examples_old(
     timeline_id: TimelineId,
     now: DateTime<Utc>,
     before: DateTime<Utc>,
-) -> [RawMetric; 6] {
+) -> [RawMetric; 8] {
     [
         MetricsKey::written_size(tenant_id, timeline_id).at_old_format(now, 0),
         MetricsKey::written_size_delta(tenant_id, timeline_id)
             .from_until_old_format(before, now, 0),
+        MetricsKey::written_size_since_parent(tenant_id, timeline_id).at_old_format(now, 0),
         MetricsKey::pitr_cutoff(tenant_id, timeline_id).at_old_format(now, 0),
+        MetricsKey::pitr_history_size_since_parent(tenant_id, timeline_id).at_old_format(now, 0),
         MetricsKey::timeline_logical_size(tenant_id, timeline_id).at_old_format(now, 0),
         MetricsKey::remote_storage_size(tenant_id).at_old_format(now, 0),
         MetricsKey::synthetic_size(tenant_id).at_old_format(now, 1),
@@ -363,11 +470,13 @@ pub(crate) const fn metric_examples(
     timeline_id: TimelineId,
     now: DateTime<Utc>,
     before: DateTime<Utc>,
-) -> [NewRawMetric; 6] {
+) -> [NewRawMetric; 8] {
     [
         MetricsKey::written_size(tenant_id, timeline_id).at(now, 0),
         MetricsKey::written_size_delta(tenant_id, timeline_id).from_until(before, now, 0),
+        MetricsKey::written_size_since_parent(tenant_id, timeline_id).at(now, 0),
         MetricsKey::pitr_cutoff(tenant_id, timeline_id).at(now, 0),
+        MetricsKey::pitr_history_size_since_parent(tenant_id, timeline_id).at(now, 0),
         MetricsKey::timeline_logical_size(tenant_id, timeline_id).at(now, 0),
         MetricsKey::remote_storage_size(tenant_id).at(now, 0),
         MetricsKey::synthetic_size(tenant_id).at(now, 1),

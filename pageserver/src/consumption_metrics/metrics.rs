@@ -18,18 +18,26 @@ use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 // management.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(super) enum Name {
-    /// Timeline last_record_lsn, absolute
+    /// Timeline last_record_lsn, absolute. Does not regress.
     #[serde(rename = "written_size")]
     WrittenSize,
     /// Timeline last_record_lsn, incremental
     #[serde(rename = "written_data_bytes_delta")]
     WrittenSizeDelta,
+    /// Written bytes only on this timeline (not including ancestors):
+    /// written_size - ancestor_lsn
+    #[serde(rename = "written_size_since_parent")]
+    WrittenSizeSinceParent,
     /// Timeline's PITR cutoff LSN (now - pitr_interval). If PITR is disabled
     /// (pitr_interval = 0), this will equal WrittenSize.
     ///
     /// Updated periodically during GC. Does not regress.
     #[serde(rename = "pitr_cutoff")]
     PitrCutoff,
+    /// PITR history size only on this timeline (not including ancestors):
+    /// last_record_lsn - max(pitr_cutoff, ancestor_lsn)
+    #[serde(rename = "pitr_history_size_since_parent")]
+    PitrHistorySizeSinceParent,
     /// Timeline logical size
     #[serde(rename = "timeline_logical_size")]
     LogicalSize,
@@ -163,6 +171,21 @@ impl MetricsKey {
         .incremental_values()
     }
 
+    /// Absolute value of `written_size` - [`Timeline::get_ancestor_lsn`].
+    ///
+    /// [`Timeline::get_ancestor_lsn`]: crate::tenant::Timeline::get_ancestor_lsn
+    const fn written_size_since_parent(
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> AbsoluteValueFactory {
+        MetricsKey {
+            tenant_id,
+            timeline_id: Some(timeline_id),
+            metric: Name::WrittenSizeSinceParent,
+        }
+        .absolute_values()
+    }
+
     /// [`GcCutoffs::time`] (i.e. `now` - `pitr_interval`)
     ///
     /// [`GcCutoffs::time`]: crate::tenant::timeline::GcCutoffs::time
@@ -171,6 +194,19 @@ impl MetricsKey {
             tenant_id,
             timeline_id: Some(timeline_id),
             metric: Name::PitrCutoff,
+        }
+        .absolute_values()
+    }
+
+    /// Absolute value of `written_size` - max(`pitr_cutoff`, `ancestor_lsn`).
+    const fn pitr_history_size_since_parent(
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> AbsoluteValueFactory {
+        MetricsKey {
+            tenant_id,
+            timeline_id: Some(timeline_id),
+            metric: Name::PitrHistorySizeSinceParent,
         }
         .absolute_values()
     }
@@ -352,6 +388,7 @@ impl TenantSnapshot {
 struct TimelineSnapshot {
     loaded_at: (Lsn, SystemTime),
     last_record_lsn: Lsn,
+    ancestor_lsn: Lsn,
     current_exact_logical_size: Option<u64>,
     /// The PITR cutoff LSN. None if PITR is disabled.
     pitr_cutoff: Option<Lsn>,
@@ -374,6 +411,7 @@ impl TimelineSnapshot {
         } else {
             let loaded_at = t.loaded_at;
             let last_record_lsn = t.get_last_record_lsn();
+            let ancestor_lsn = t.get_ancestor_lsn();
             let pitr_cutoff = (t.get_pitr_interval() != Duration::ZERO)
                 .then(|| t.gc_info.read().unwrap().cutoffs.time);
 
@@ -395,6 +433,7 @@ impl TimelineSnapshot {
             Ok(Some(TimelineSnapshot {
                 loaded_at,
                 last_record_lsn,
+                ancestor_lsn,
                 current_exact_logical_size,
                 pitr_cutoff,
             }))
@@ -447,6 +486,8 @@ impl TimelineSnapshot {
 
         let up_to = now;
 
+        let written_size_last = written_size_now.value.max(prev.1); // don't regress
+
         if let Some(delta) = written_size_now.value.checked_sub(prev.1) {
             let key_value = written_size_delta_key.from_until(prev.0, up_to, delta);
             // written_size_delta
@@ -482,6 +523,23 @@ impl TimelineSnapshot {
             pitr_cutoff = pitr_cutoff.max(Lsn(prev.value)); // don't regress
         }
         metrics.push(pitr_cutoff_key.at(now, pitr_cutoff.into()));
+
+        // Compute the branch-local written size and PITR history size since the
+        // parent. We rely on the caching of `written_size` and `pitr_cutoff`
+        // for monotonicity.
+        let written_size_since_parent_key =
+            MetricsKey::written_size_since_parent(tenant_id, timeline_id);
+        metrics.push(
+            written_size_since_parent_key
+                .at(now, written_size_last.saturating_sub(self.ancestor_lsn.0)),
+        );
+
+        let pitr_history_size_since_parent_key =
+            MetricsKey::pitr_history_size_since_parent(tenant_id, timeline_id);
+        metrics.push(pitr_history_size_since_parent_key.at(
+            now,
+            written_size_last.saturating_sub(pitr_cutoff.0.max(self.ancestor_lsn.0)),
+        ));
 
         {
             let factory = MetricsKey::timeline_logical_size(tenant_id, timeline_id);
