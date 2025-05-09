@@ -14,7 +14,7 @@ from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin
 from fixtures.pageserver.makelayers import l0stack
 from fixtures.utils import humantime_to_ms
 
-TARGET_RUNTIME = 5
+TARGET_RUNTIME = 30
 
 
 @dataclass
