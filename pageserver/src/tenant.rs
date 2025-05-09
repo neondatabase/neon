@@ -1750,11 +1750,13 @@ impl TenantShard {
                             ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn),
                         ));
 
-                    let prev = self
-                        .timelines_importing
-                        .lock()
-                        .unwrap()
-                        .insert(timeline_id, ImportingTimeline { import_task_handle });
+                    let prev = self.timelines_importing.lock().unwrap().insert(
+                        timeline_id,
+                        ImportingTimeline {
+                            timeline: timeline.clone(),
+                            import_task_handle,
+                        },
+                    );
 
                     assert!(prev.is_none());
                 }
@@ -2813,7 +2815,10 @@ impl TenantShard {
 
         let prev = self.timelines_importing.lock().unwrap().insert(
             timeline.timeline_id,
-            ImportingTimeline { import_task_handle },
+            ImportingTimeline {
+                timeline: timeline.clone(),
+                import_task_handle,
+            },
         );
 
         // Idempotency is enforced higher up the stack
@@ -2821,6 +2826,33 @@ impl TenantShard {
 
         // NB: the timeline doesn't exist in self.timelines at this point
         Ok(CreateTimelineResult::ImportSpawned(timeline))
+    }
+
+    /// Finalize the import of a timeline on this shard by marking it complete in
+    /// the index part.
+    pub(crate) async fn finalize_importing_timeline(
+        &self,
+        timeline_id: TimelineId,
+    ) -> anyhow::Result<()> {
+        let timeline = {
+            let locked = self.timelines_importing.lock().unwrap();
+            let importing_timeline = locked
+                .get(&timeline_id)
+                .ok_or(anyhow::anyhow!("timeline not found"))?;
+            importing_timeline.timeline.clone()
+        };
+
+        timeline
+            .remote_client
+            .schedule_index_upload_for_import_pgdata_finalize()?;
+        timeline.remote_client.wait_completion().await?;
+
+        self.timelines_importing
+            .lock()
+            .unwrap()
+            .remove(&timeline_id);
+
+        Ok(())
     }
 
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%timeline.timeline_id))]
@@ -2862,17 +2894,7 @@ impl TenantShard {
         import_pgdata::doit(&timeline, index_part, &ctx, self.cancel.clone())
             .await
             .context("import")?;
-        info!("import done");
-
-        self.timelines_importing
-            .lock()
-            .unwrap()
-            .remove(&timeline.timeline_id);
-
-        info!("shutting down timeline");
-        // In theory this shouldn't even .await anything except for coop yield
-        timeline.shutdown(ShutdownMode::Hard).await;
-        info!("timeline shut down, waiting for tenant reset");
+        info!("import done - waiting for activation");
 
         anyhow::Ok(())
     }

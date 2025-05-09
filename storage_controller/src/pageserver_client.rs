@@ -358,12 +358,18 @@ impl PageserverClient {
         )
     }
 
-    pub(crate) async fn reset_shard(&self, tenant_shard_id: TenantShardId) -> Result<StatusCode> {
+    pub(crate) async fn activate_post_import(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Result<StatusCode> {
         measured_request!(
-            "reset_shard",
-            crate::metrics::Method::Post,
+            "activate_post_import",
+            crate::metrics::Method::Put,
             &self.node_id_label,
-            self.inner.reset_shard(tenant_shard_id).await
+            self.inner
+                .activate_post_import(tenant_shard_id, timeline_id)
+                .await
         )
     }
 }

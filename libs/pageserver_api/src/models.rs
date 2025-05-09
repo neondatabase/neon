@@ -337,14 +337,13 @@ impl TimelineCreateRequest {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ShardImportStatus {
     InProgress,
-    Finalizing,
     Done,
     Error(String),
 }
 impl ShardImportStatus {
     pub fn is_terminal(&self) -> bool {
         match self {
-            ShardImportStatus::InProgress | ShardImportStatus::Finalizing => false,
+            ShardImportStatus::InProgress => false,
             ShardImportStatus::Done | ShardImportStatus::Error(_) => true,
         }
     }

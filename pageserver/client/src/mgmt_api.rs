@@ -820,13 +820,17 @@ impl Client {
             .map(|resp| resp.status())
     }
 
-    pub async fn reset_shard(&self, tenant_shard_id: TenantShardId) -> Result<StatusCode> {
+    pub async fn activate_post_import(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Result<StatusCode> {
         let uri = format!(
-            "{}/v1/tenant/{tenant_shard_id}/reset",
-            self.mgmt_api_endpoint,
+            "{}/v1/tenant/{}/timeline/{}/activate_post_import",
+            self.mgmt_api_endpoint, tenant_shard_id, timeline_id,
         );
 
-        self.request_noerror(Method::POST, uri, ())
+        self.request(Method::PUT, uri, ())
             .await
             .map(|resp| resp.status())
     }

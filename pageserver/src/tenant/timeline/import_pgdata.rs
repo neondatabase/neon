@@ -20,6 +20,7 @@ pub(crate) mod index_part_format;
 
 pub(crate) struct ImportingTimeline {
     pub import_task_handle: JoinHandle<()>,
+    pub timeline: Arc<Timeline>,
 }
 
 impl ImportingTimeline {
@@ -37,8 +38,8 @@ pub async fn doit(
     let index_part_format::Root::V1(v1) = index_part;
     let index_part_format::InProgress {
         location,
-        idempotency_key,
-        started_at,
+        idempotency_key: _,
+        started_at: _,
     } = match v1 {
         index_part_format::V1::Done(_) => return Ok(()),
         index_part_format::V1::InProgress(in_progress) => in_progress,
@@ -162,79 +163,19 @@ pub async fn doit(
 
             flow::run(timeline.clone(), control_file, storage.clone(), ctx).await?;
 
-            //
             // Communicate that shard is done.
             // Ensure at-least-once delivery of the upcall to storage controller
             // before we mark the task as done and never come here again.
             //
+            // Note that we do not mark the import complete in the index part now.
+            // This happens in [`Tenant::finalize_importing_timeline`] in response
+            // to the storage controller calling
+            // `/v1/tenant/:tenant_id/timeline/:timeline_id/activate_post_import`.
             storcon_client
                 .put_timeline_import_status(
                     timeline.tenant_shard_id,
                     timeline.timeline_id,
                     // TODO(vlad): What about import errors?
-                    ShardImportStatus::Finalizing,
-                )
-                .await
-                .map_err(|_err| {
-                    anyhow::anyhow!("Shut down while putting timeline import status")
-                })?;
-
-            //
-            // Mark as done in index_part.
-            // This makes subsequent timeline loads enter the normal load code path
-            // instead of spawning the import task and calling this here function.
-            //
-            info!("mark import as complete in index part");
-            timeline
-                .remote_client
-                .schedule_index_upload_for_import_pgdata_state_update(Some(
-                    index_part_format::Root::V1(index_part_format::V1::Done(
-                        index_part_format::Done {
-                            idempotency_key,
-                            started_at,
-                            finished_at: chrono::Utc::now().naive_utc(),
-                        },
-                    )),
-                ))?;
-
-            timeline.remote_client.wait_completion().await?;
-
-            storcon_client
-                .put_timeline_import_status(
-                    timeline.tenant_shard_id,
-                    timeline.timeline_id,
-                    ShardImportStatus::Done,
-                )
-                .await
-                .map_err(|_err| {
-                    anyhow::anyhow!("Shut down while putting timeline import status")
-                })?;
-        }
-        Some(ShardImportStatus::Finalizing) => {
-            //
-            // Mark as done in index_part.
-            // This makes subsequent timeline loads enter the normal load code path
-            // instead of spawning the import task and calling this here function.
-            //
-            info!("mark import as complete in index part");
-            timeline
-                .remote_client
-                .schedule_index_upload_for_import_pgdata_state_update(Some(
-                    index_part_format::Root::V1(index_part_format::V1::Done(
-                        index_part_format::Done {
-                            idempotency_key,
-                            started_at,
-                            finished_at: chrono::Utc::now().naive_utc(),
-                        },
-                    )),
-                ))?;
-
-            timeline.remote_client.wait_completion().await?;
-
-            storcon_client
-                .put_timeline_import_status(
-                    timeline.tenant_shard_id,
-                    timeline.timeline_id,
                     ShardImportStatus::Done,
                 )
                 .await

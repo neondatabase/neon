@@ -3991,7 +3991,7 @@ impl Service {
         let import_failed = import.completion_error().is_some();
 
         if !import_failed {
-            self.reset_tenant_post_import(&import).await?;
+            self.activate_timeline_post_import(&import).await?;
             tracing::info!("Post import shard reset complete");
 
             loop {
@@ -4048,7 +4048,7 @@ impl Service {
         Ok(())
     }
 
-    async fn reset_tenant_post_import(
+    async fn activate_timeline_post_import(
         self: &Arc<Self>,
         import: &TimelineImport,
     ) -> anyhow::Result<()> {
@@ -4082,11 +4082,6 @@ impl Service {
                             .get(node_id)
                             .expect("Pageservers may not be deleted while referenced");
                         targets.push((*tenant_shard_id, node.clone()));
-                    } else {
-                        // Since there's no attached location, the shard will be attached
-                        // somewhere else and the imported timeline will be activated without
-                        // the need of a reset.
-                        shards_to_reset.remove(&tenant_shard_id.to_index());
                     }
                 }
 
@@ -4099,7 +4094,9 @@ impl Service {
                 .tenant_for_shards_api(
                     targets,
                     |tenant_shard_id, client| async move {
-                        client.reset_shard(tenant_shard_id).await
+                        client
+                            .activate_post_import(tenant_shard_id, import.timeline_id)
+                            .await
                     },
                     1,
                     1,
@@ -4121,7 +4118,9 @@ impl Service {
             }
 
             if failed > 0 {
-                tracing::info!("Failed to reset {failed} shards post import. Will retry");
+                tracing::info!(
+                    "Failed to actiave timeline on {failed} shards post import. Will retry"
+                );
             }
 
             tokio::select! {
