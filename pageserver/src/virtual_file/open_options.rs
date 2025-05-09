@@ -139,6 +139,12 @@ impl OpenOptions {
                 // Other platforms may be used for development but don't necessarily have a 1:1 equivalent to Linux's O_DIRECT (macOS!).
                 // Just don't set the flag; to catch alignment bugs typical for O_DIRECT,
                 // we have a runtime validation layer inside `VirtualFile::write_at` and `VirtualFile::read_at`.
+                static WARNING: std::sync::Once = std::sync::Once::new();
+                WARNING.call_once(|| {
+                    let span = tracing::info_span!(parent: None, "open_options");
+                    let _enter = span.enter();
+                    tracing::warn!("your platform is not a supported production platform, ignoing request for O_DIRECT; this could hide alignment bugs; this warning is logged once per process");
+                });
             }
         }
 
