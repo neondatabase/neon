@@ -275,6 +275,46 @@ impl Timeline {
                 continue;
             }
 
+            // Check relation size only for VM/FSM forks
+            if tag.forknum == FSM_FORKNUM || tag.forknum == VISIBILITYMAP_FORKNUM {
+                let nblocks = {
+                    let ctx = RequestContextBuilder::from(&ctx)
+                        .perf_span(|crnt_perf_span| {
+                            info_span!(
+                                target: PERF_TRACE_TARGET,
+                                parent: crnt_perf_span,
+                                "GET_REL_SIZE",
+                                reltag=%tag,
+                                lsn=%lsn,
+                            )
+                        })
+                        .attached_child();
+
+                    match self
+                        .get_rel_size(*tag, Version::Lsn(lsn), &ctx)
+                        .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
+                        .await
+                    {
+                        Ok(nblocks) => nblocks,
+                        Err(err) => {
+                            result_slots[response_slot_idx].write(Err(err));
+                            slots_filled += 1;
+                            continue;
+                        }
+                    }
+                };
+
+                if *blknum >= nblocks {
+                    debug!(
+                        "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
+                        tag, blknum, lsn, nblocks
+                    );
+                    result_slots[response_slot_idx].write(Ok(ZERO_PAGE.clone()));
+                    slots_filled += 1;
+                    continue;
+                }
+            }
+
             let key = rel_block_to_key(*tag, *blknum);
 
             let ctx = RequestContextBuilder::from(&ctx)
