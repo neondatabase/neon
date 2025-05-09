@@ -31,6 +31,7 @@
 use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
+use std::hash::{Hash, Hasher};
 
 use anyhow::ensure;
 use bytes::Bytes;
@@ -84,9 +85,17 @@ pub async fn run(
     let import_config = &timeline.conf.timeline_import_config;
     let plan = planner.plan(import_config).await?;
 
+    // Hash the plan and compare with the hash of the plan we got back from the storage controller.
+    // If the two match, it means that the planning stage had the same output.
+    //
+    // This is not intended to be a cryptographically secure hash.
+    const SEED: u64 = 42;
+    let mut hasher = twox_hash::XxHash64::with_seed(SEED);
+    plan.hash(&mut hasher);
+    let plan_hash = hasher.finish();
+
     if let Some(progress) = &import_progress {
-        // TODO(vlad): Stronger check here
-        if progress.jobs != plan.jobs.len() {
+        if !(plan_hash == progress.import_plan_hash || progress.jobs != plan.jobs.len()) {
             anyhow::bail!("Import plan does not match storcon metadata");
         }
     }
@@ -94,7 +103,9 @@ pub async fn run(
     pausable_failpoint!("import-timeline-pre-execute-pausable");
 
     let start_from_job_idx = import_progress.map(|progress| progress.completed);
-    plan.execute(timeline, start_from_job_idx, import_config, ctx)
+    // TODO(vlad): We might write the same layer twice if we lose progress and redo
+    // some stuff. Allow that for imports in the remote client.
+    plan.execute(timeline, start_from_job_idx, plan_hash, import_config, ctx)
         .await
 }
 
@@ -105,6 +116,7 @@ struct Planner {
     tasks: Vec<AnyImportTask>,
 }
 
+#[derive(Hash)]
 struct Plan {
     jobs: Vec<ChunkProcessingJob>,
 }
@@ -340,6 +352,7 @@ impl Plan {
         self,
         timeline: Arc<Timeline>,
         start_after_job_idx: Option<usize>,
+        import_plan_hash: u64,
         import_config: &TimelineImportConfig,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
@@ -393,6 +406,7 @@ impl Plan {
                                     ShardImportStatus::InProgress(Some(ShardImportProgress {
                                         jobs: jobs_in_plan,
                                         completed: last_completed_job_idx,
+                                        import_plan_hash,
                                     }))
                                 )
                                 .await
@@ -584,6 +598,18 @@ struct ImportSingleKeyTask {
     buf: Bytes,
 }
 
+impl Hash for ImportSingleKeyTask {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let ImportSingleKeyTask {
+            key,
+            buf,
+        } = self;
+
+        key.hash(state);
+        buf.hash(state);
+    }
+}
+
 impl ImportSingleKeyTask {
     fn new(key: Key, buf: Bytes) -> Self {
         ImportSingleKeyTask { key, buf }
@@ -610,6 +636,20 @@ struct ImportRelBlocksTask {
     key_range: Range<Key>,
     path: RemotePath,
     storage: RemoteStorageWrapper,
+}
+
+impl Hash for ImportRelBlocksTask {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let ImportRelBlocksTask {
+            shard_identity: _,
+            key_range,
+            path,
+            storage: _,
+        } = self;
+
+        key_range.hash(state);
+        path.hash(state);
+    }
 }
 
 impl ImportRelBlocksTask {
@@ -696,6 +736,19 @@ struct ImportSlruBlocksTask {
     storage: RemoteStorageWrapper,
 }
 
+impl Hash for ImportSlruBlocksTask {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let ImportSlruBlocksTask {
+            key_range,
+            path,
+            storage: _,
+        } = self;
+
+        key_range.hash(state);
+        path.hash(state);
+    }
+}
+
 impl ImportSlruBlocksTask {
     fn new(key_range: Range<Key>, path: &RemotePath, storage: RemoteStorageWrapper) -> Self {
         ImportSlruBlocksTask {
@@ -738,6 +791,7 @@ impl ImportTask for ImportSlruBlocksTask {
     }
 }
 
+#[derive(Hash)]
 enum AnyImportTask {
     SingleKey(ImportSingleKeyTask),
     RelBlocks(ImportRelBlocksTask),
@@ -784,6 +838,7 @@ impl From<ImportSlruBlocksTask> for AnyImportTask {
     }
 }
 
+#[derive(Hash)]
 struct ChunkProcessingJob {
     range: Range<Key>,
     tasks: Vec<AnyImportTask>,

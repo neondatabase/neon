@@ -345,6 +345,7 @@ pub enum ShardImportStatus {
 pub struct ShardImportProgress {
     pub jobs: usize,
     pub completed: usize,
+    pub import_plan_hash: u64,
     // TODO: unique identifier to enforce same job plan
 }
 

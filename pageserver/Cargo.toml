@@ -96,6 +96,7 @@ strum.workspace = true
 strum_macros.workspace = true
 wal_decoder.workspace = true
 smallvec.workspace = true
+twox-hash.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 procfs.workspace = true
