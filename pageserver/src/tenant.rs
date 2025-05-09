@@ -4254,9 +4254,7 @@ impl TenantShard {
         deletion_queue_client: DeletionQueueClient,
         l0_flush_global_state: L0FlushGlobalState,
     ) -> TenantShard {
-        debug_assert!(
-            !attached_conf.location.generation.is_none() || conf.control_plane_api.is_none()
-        );
+        assert!(!attached_conf.location.generation.is_none());
 
         let (state, mut rx) = watch::channel(state);
 
@@ -5949,7 +5947,9 @@ mod tests {
     use itertools::Itertools;
     #[cfg(feature = "testing")]
     use models::CompactLsnRange;
-    use pageserver_api::key::{AUX_KEY_PREFIX, Key, NON_INHERITED_RANGE, RELATION_SIZE_PREFIX};
+    use pageserver_api::key::{
+        AUX_KEY_PREFIX, Key, NON_INHERITED_RANGE, RELATION_SIZE_PREFIX, repl_origin_key,
+    };
     use pageserver_api::keyspace::KeySpace;
     #[cfg(feature = "testing")]
     use pageserver_api::keyspace::KeySpaceRandomAccum;
@@ -8183,6 +8183,54 @@ mod tests {
             .unwrap();
         assert_eq!(files.get("pg_logical/mappings/test1"), None);
         assert_eq!(files.get("pg_logical/mappings/test2"), None);
+    }
+
+    #[tokio::test]
+    async fn test_repl_origin_tombstones() {
+        let harness = TenantHarness::create("test_repl_origin_tombstones")
+            .await
+            .unwrap();
+
+        let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
+
+        let mut lsn = Lsn(0x08);
+
+        let tline: Arc<Timeline> = tenant
+            .create_test_timeline(TIMELINE_ID, lsn, DEFAULT_PG_VERSION, &ctx)
+            .await
+            .unwrap();
+
+        let repl_lsn = Lsn(0x10);
+        {
+            lsn += 8;
+            let mut modification = tline.begin_modification(lsn);
+            modification.put_for_unit_test(repl_origin_key(2), Value::Image(Bytes::new()));
+            modification.set_replorigin(1, repl_lsn).await.unwrap();
+            modification.commit(&ctx).await.unwrap();
+        }
+
+        // we can read everything from the storage
+        let repl_origins = tline
+            .get_replorigins(lsn, &ctx, io_concurrency.clone())
+            .await
+            .unwrap();
+        assert_eq!(repl_origins.len(), 1);
+        assert_eq!(repl_origins[&1], lsn);
+
+        {
+            lsn += 8;
+            let mut modification = tline.begin_modification(lsn);
+            modification.put_for_unit_test(
+                repl_origin_key(3),
+                Value::Image(Bytes::copy_from_slice(b"cannot_decode_this")),
+            );
+            modification.commit(&ctx).await.unwrap();
+        }
+        let result = tline
+            .get_replorigins(lsn, &ctx, io_concurrency.clone())
+            .await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

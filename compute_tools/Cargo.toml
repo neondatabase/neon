@@ -10,6 +10,7 @@ default = []
 testing = ["fail/failpoints"]
 
 [dependencies]
+async-compression.workspace = true
 base64.workspace = true
 aws-config.workspace = true
 aws-sdk-s3.workspace = true

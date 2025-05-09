@@ -14,8 +14,6 @@
 use std::fs::File;
 use std::io::{Error, ErrorKind};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
-#[cfg(target_os = "linux")]
-use std::os::unix::fs::OpenOptionsExt;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
@@ -99,7 +97,7 @@ impl VirtualFile {
 
     pub async fn open_with_options_v2<P: AsRef<Utf8Path>>(
         path: P,
-        open_options: &OpenOptions,
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))] mut open_options: OpenOptions,
         ctx: &RequestContext,
     ) -> Result<Self, std::io::Error> {
         let mode = get_io_mode();
@@ -112,21 +110,16 @@ impl VirtualFile {
             #[cfg(target_os = "linux")]
             (IoMode::DirectRw, _) => true,
         };
-        let open_options = open_options.clone();
-        let open_options = if set_o_direct {
+        if set_o_direct {
             #[cfg(target_os = "linux")]
             {
-                let mut open_options = open_options;
-                open_options.custom_flags(nix::libc::O_DIRECT);
-                open_options
+                open_options = open_options.custom_flags(nix::libc::O_DIRECT);
             }
             #[cfg(not(target_os = "linux"))]
             unreachable!(
                 "O_DIRECT is not supported on this platform, IoMode's that result in set_o_direct=true shouldn't even be defined"
             );
-        } else {
-            open_options
-        };
+        }
         let inner = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
         Ok(VirtualFile { inner, _mode: mode })
     }
@@ -530,7 +523,7 @@ impl VirtualFileInner {
         path: P,
         ctx: &RequestContext,
     ) -> Result<VirtualFileInner, std::io::Error> {
-        Self::open_with_options(path.as_ref(), OpenOptions::new().read(true).clone(), ctx).await
+        Self::open_with_options(path.as_ref(), OpenOptions::new().read(true), ctx).await
     }
 
     /// Open a file with given options.
@@ -558,10 +551,11 @@ impl VirtualFileInner {
         // It would perhaps be nicer to check just for the read and write flags
         // explicitly, but OpenOptions doesn't contain any functions to read flags,
         // only to set them.
-        let mut reopen_options = open_options.clone();
-        reopen_options.create(false);
-        reopen_options.create_new(false);
-        reopen_options.truncate(false);
+        let reopen_options = open_options
+            .clone()
+            .create(false)
+            .create_new(false)
+            .truncate(false);
 
         let vfile = VirtualFileInner {
             handle: RwLock::new(handle),
@@ -1307,7 +1301,7 @@ mod tests {
                 opts: OpenOptions,
                 ctx: &RequestContext,
             ) -> Result<MaybeVirtualFile, anyhow::Error> {
-                let vf = VirtualFile::open_with_options_v2(&path, &opts, ctx).await?;
+                let vf = VirtualFile::open_with_options_v2(&path, opts, ctx).await?;
                 Ok(MaybeVirtualFile::VirtualFile(vf))
             }
         }
@@ -1374,7 +1368,7 @@ mod tests {
         let _ = file_a.read_string_at(0, 1, &ctx).await.unwrap_err();
 
         // Close the file and re-open for reading
-        let mut file_a = A::open(path_a, OpenOptions::new().read(true).to_owned(), &ctx).await?;
+        let mut file_a = A::open(path_a, OpenOptions::new().read(true), &ctx).await?;
 
         // cannot write to a file opened in read-only mode
         let _ = file_a
@@ -1393,8 +1387,7 @@ mod tests {
                 .read(true)
                 .write(true)
                 .create(true)
-                .truncate(true)
-                .to_owned(),
+                .truncate(true),
             &ctx,
         )
         .await?;
@@ -1412,12 +1405,7 @@ mod tests {
 
         let mut vfiles = Vec::new();
         for _ in 0..100 {
-            let mut vfile = A::open(
-                path_b.clone(),
-                OpenOptions::new().read(true).to_owned(),
-                &ctx,
-            )
-            .await?;
+            let mut vfile = A::open(path_b.clone(), OpenOptions::new().read(true), &ctx).await?;
             assert_eq!("FOOBAR", vfile.read_string_at(0, 6, &ctx).await?);
             vfiles.push(vfile);
         }
@@ -1466,7 +1454,7 @@ mod tests {
         for _ in 0..VIRTUAL_FILES {
             let f = VirtualFileInner::open_with_options(
                 &test_file_path,
-                OpenOptions::new().read(true).clone(),
+                OpenOptions::new().read(true),
                 &ctx,
             )
             .await?;

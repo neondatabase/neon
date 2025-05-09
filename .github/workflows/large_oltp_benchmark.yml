@@ -33,9 +33,9 @@ jobs:
       fail-fast: false # allow other variants to continue even if one fails
       matrix:
         include:
-          - target: new_branch 
+          - target: new_branch
             custom_scripts: insert_webhooks.sql@200 select_any_webhook_with_skew.sql@300 select_recent_webhook.sql@397 select_prefetch_webhook.sql@3 IUD_one_transaction.sql@100
-          - target: reuse_branch 
+          - target: reuse_branch
             custom_scripts: insert_webhooks.sql@200 select_any_webhook_with_skew.sql@300 select_recent_webhook.sql@397 select_prefetch_webhook.sql@3 IUD_one_transaction.sql@100
       max-parallel: 1 # we want to run each stripe size sequentially to be able to compare the results
     permissions:
@@ -43,7 +43,7 @@ jobs:
       statuses: write
       id-token: write # aws-actions/configure-aws-credentials
     env:
-      TEST_PG_BENCH_DURATIONS_MATRIX: "1h" # todo update to > 1 h 
+      TEST_PG_BENCH_DURATIONS_MATRIX: "1h" # todo update to > 1 h
       TEST_PGBENCH_CUSTOM_SCRIPTS: ${{ matrix.custom_scripts }}
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       PG_VERSION: 16 # pre-determined by pre-determined project
@@ -85,7 +85,7 @@ jobs:
         name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
         path: /tmp/neon/
         prefix: latest
-        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Create Neon Branch for large tenant
       if: ${{ matrix.target == 'new_branch' }}
@@ -129,7 +129,7 @@ jobs:
         ${PSQL} "${BENCHMARK_CONNSTR}" -c "SET statement_timeout = 0; DELETE FROM webhook.incoming_webhooks WHERE created_at > '2025-02-27 23:59:59+00';"
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Finished deleting rows in table webhook.incoming_webhooks from prior runs"
 
-    - name: Benchmark pgbench with custom-scripts 
+    - name: Benchmark pgbench with custom-scripts
       uses: ./.github/actions/run-python-test-set
       with:
         build_type: ${{ env.BUILD_TYPE }}
@@ -138,7 +138,7 @@ jobs:
         save_perf_report: true
         extra_params: -m remote_cluster --timeout 7200 -k test_perf_oltp_large_tenant_pgbench
         pg_version: ${{ env.PG_VERSION }}
-        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -153,7 +153,7 @@ jobs:
         save_perf_report: true
         extra_params: -m remote_cluster --timeout 172800 -k test_perf_oltp_large_tenant_maintenance
         pg_version: ${{ env.PG_VERSION }}
-        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr_without_pooler }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -179,8 +179,8 @@ jobs:
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
       with:
-        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
-  
+        aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@fcfb566f8b0aab22203f066d80ca1d7e4b5d05b3 # v1.27.1

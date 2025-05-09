@@ -14,7 +14,7 @@ from fixtures.log_helper import log
 from fixtures.metrics import parse_metrics
 from fixtures.paths import BASE_DIR
 from fixtures.pg_config import PgConfigKey
-from fixtures.utils import subprocess_capture
+from fixtures.utils import WITH_SANITIZERS, subprocess_capture
 from werkzeug.wrappers.response import Response
 
 if TYPE_CHECKING:
@@ -148,6 +148,15 @@ def test_remote_extensions(
     pg_config: PgConfig,
     extension: RemoteExtension,
 ):
+    if WITH_SANITIZERS and extension is RemoteExtension.WITH_LIB:
+        pytest.skip(
+            """
+            For this test to work with sanitizers enabled, we would need to
+            compile the dummy Postgres extension with the same CFLAGS that we
+            compile Postgres and the neon extension with to link the sanitizers.
+            """
+        )
+
     # Setup a mock nginx S3 gateway which will return our test extension.
     (host, port) = httpserver_listen_address
     extensions_endpoint = f"http://{host}:{port}/pg-ext-s3-gateway"
@@ -212,7 +221,7 @@ def test_remote_extensions(
 
     endpoint.create_remote_extension_spec(spec)
 
-    endpoint.start(remote_ext_config=extensions_endpoint)
+    endpoint.start(remote_ext_base_url=extensions_endpoint)
 
     with endpoint.connect() as conn:
         with conn.cursor() as cur:
@@ -240,7 +249,7 @@ def test_remote_extensions(
     # Remove the extension files to force a redownload of the extension.
     extension.remove(test_output_dir, pg_version)
 
-    endpoint.start(remote_ext_config=extensions_endpoint)
+    endpoint.start(remote_ext_base_url=extensions_endpoint)
 
     # Test that ALTER EXTENSION UPDATE statements also fetch remote extensions.
     with endpoint.connect() as conn:

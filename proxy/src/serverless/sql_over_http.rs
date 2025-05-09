@@ -38,7 +38,7 @@ use crate::config::{AuthenticationConfig, HttpConfig, ProxyConfig, TlsConfig};
 use crate::context::RequestContext;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::http::{ReadBodyError, read_body_with_limit};
-use crate::metrics::{HttpDirection, Metrics};
+use crate::metrics::{HttpDirection, Metrics, SniGroup, SniKind};
 use crate::proxy::{NeonOptions, run_until_cancelled};
 use crate::serverless::backend::HttpConnError;
 use crate::types::{DbName, RoleName};
@@ -199,8 +199,7 @@ fn get_conn_info(
     let endpoint = match connection_url.host() {
         Some(url::Host::Domain(hostname)) => {
             if let Some(tls) = tls {
-                endpoint_sni(hostname, &tls.common_names)?
-                    .ok_or(ConnInfoError::MalformedEndpoint)?
+                endpoint_sni(hostname, &tls.common_names).ok_or(ConnInfoError::MalformedEndpoint)?
             } else {
                 hostname
                     .split_once('.')
@@ -226,6 +225,32 @@ fn get_conn_info(
         if key == "options" {
             options = Some(NeonOptions::parse_options_raw(&value));
         }
+    }
+
+    // check the URL that was used, for metrics
+    {
+        let host_endpoint = headers
+            // get the host header
+            .get("host")
+            // extract the domain
+            .and_then(|h| {
+                let (host, _port) = h.to_str().ok()?.split_once(':')?;
+                Some(host)
+            })
+            // get the endpoint prefix
+            .map(|h| h.split_once('.').map_or(h, |(prefix, _)| prefix));
+
+        let kind = if host_endpoint == Some(&*endpoint) {
+            SniKind::Sni
+        } else {
+            SniKind::NoSni
+        };
+
+        let protocol = ctx.protocol();
+        Metrics::get()
+            .proxy
+            .accepted_connections_by_sni
+            .inc(SniGroup { protocol, kind });
     }
 
     ctx.set_user_agent(

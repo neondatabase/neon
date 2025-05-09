@@ -3,7 +3,10 @@ use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
 use clashmap::{ClashMap, Entry};
 use safekeeper_api::models::PullTimelineRequest;
 use safekeeper_client::mgmt_api;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::{
+    Semaphore,
+    mpsc::{self, UnboundedReceiver, UnboundedSender},
+};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use utils::{
@@ -206,18 +209,27 @@ impl ReconcilerHandle {
 }
 
 pub(crate) struct SafekeeperReconciler {
-    service: Arc<Service>,
+    inner: SafekeeperReconcilerInner,
+    concurrency_limiter: Arc<Semaphore>,
     rx: UnboundedReceiver<(ScheduleRequest, CancellationToken)>,
     cancel: CancellationToken,
+}
+
+/// Thin wrapper over `Service` to not clutter its inherent functions
+#[derive(Clone)]
+struct SafekeeperReconcilerInner {
+    service: Arc<Service>,
 }
 
 impl SafekeeperReconciler {
     fn spawn(cancel: CancellationToken, service: Arc<Service>) -> ReconcilerHandle {
         // We hold the ServiceInner lock so we don't want to make sending to the reconciler channel to be blocking.
         let (tx, rx) = mpsc::unbounded_channel();
+        let concurrency = service.config.safekeeper_reconciler_concurrency;
         let mut reconciler = SafekeeperReconciler {
-            service,
+            inner: SafekeeperReconcilerInner { service },
             rx,
+            concurrency_limiter: Arc::new(Semaphore::new(concurrency)),
             cancel: cancel.clone(),
         };
         let handle = ReconcilerHandle {
@@ -230,31 +242,44 @@ impl SafekeeperReconciler {
     }
     async fn run(&mut self) {
         loop {
-            // TODO add parallelism with semaphore here
             let req = tokio::select! {
                 req = self.rx.recv() => req,
                 _ = self.cancel.cancelled() => break,
             };
             let Some((req, req_cancel)) = req else { break };
+
+            let permit_res = tokio::select! {
+                req = self.concurrency_limiter.clone().acquire_owned() => req,
+                _ = self.cancel.cancelled() => break,
+            };
+            let Ok(_permit) = permit_res else { return };
+
+            let inner = self.inner.clone();
             if req_cancel.is_cancelled() {
                 continue;
             }
 
-            let kind = req.kind;
-            let tenant_id = req.tenant_id;
-            let timeline_id = req.timeline_id;
-            let node_id = req.safekeeper.skp.id;
-            self.reconcile_one(req, req_cancel)
-                .instrument(tracing::info_span!(
-                    "reconcile_one",
-                    ?kind,
-                    %tenant_id,
-                    ?timeline_id,
-                    %node_id,
-                ))
-                .await;
+            tokio::task::spawn(async move {
+                let kind = req.kind;
+                let tenant_id = req.tenant_id;
+                let timeline_id = req.timeline_id;
+                let node_id = req.safekeeper.skp.id;
+                inner
+                    .reconcile_one(req, req_cancel)
+                    .instrument(tracing::info_span!(
+                        "reconcile_one",
+                        ?kind,
+                        %tenant_id,
+                        ?timeline_id,
+                        %node_id,
+                    ))
+                    .await;
+            });
         }
     }
+}
+
+impl SafekeeperReconcilerInner {
     async fn reconcile_one(&self, req: ScheduleRequest, req_cancel: CancellationToken) {
         let req_host = req.safekeeper.skp.host.clone();
         match req.kind {
@@ -281,10 +306,11 @@ impl SafekeeperReconciler {
                     req,
                     async |client| client.pull_timeline(&pull_req).await,
                     |resp| {
-                        tracing::info!(
-                            "pulled timeline from {} onto {req_host}",
-                            resp.safekeeper_host,
-                        );
+                        if let Some(host) = resp.safekeeper_host {
+                            tracing::info!("pulled timeline from {host} onto {req_host}");
+                        } else {
+                            tracing::info!("timeline already present on safekeeper on {req_host}");
+                        }
                     },
                     req_cancel,
                 )

@@ -165,16 +165,17 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                                 .head_object(&path, &CancellationToken::new())
                                 .await;
 
-                            if response.is_err() {
+                            if let Err(e) = response {
                                 // Object is not present.
                                 let is_l0 = LayerMap::is_l0(layer.key_range(), layer.is_delta());
 
                                 let msg = format!(
-                                    "index_part.json contains a layer {}{} (shard {}) that is not present in remote storage (layer_is_l0: {})",
+                                    "index_part.json contains a layer {}{} (shard {}) that is not present in remote storage (layer_is_l0: {}) with error: {}",
                                     layer,
                                     metadata.generation.get_suffix(),
                                     metadata.shard,
                                     is_l0,
+                                    e,
                                 );
 
                                 if is_l0 || ignore_error {

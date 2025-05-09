@@ -20,7 +20,9 @@ use utils::auth::encode_from_key_file;
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 
 use crate::broker::StorageBroker;
-use crate::endpoint_storage::{ENDPOINT_STORAGE_REMOTE_STORAGE_DIR, EndpointStorage};
+use crate::endpoint_storage::{
+    ENDPOINT_STORAGE_DEFAULT_ADDR, ENDPOINT_STORAGE_REMOTE_STORAGE_DIR, EndpointStorage,
+};
 use crate::pageserver::{PAGESERVER_REMOTE_STORAGE_DIR, PageServerNode};
 use crate::safekeeper::SafekeeperNode;
 
@@ -151,10 +153,10 @@ pub struct NeonLocalInitConf {
     pub generate_local_ssl_certs: bool,
 }
 
-#[derive(Serialize, Default, Deserialize, PartialEq, Eq, Clone, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(default)]
 pub struct EndpointStorageConf {
-    pub port: u16,
+    pub listen_addr: SocketAddr,
 }
 
 /// Broker config for cluster internal communication.
@@ -237,6 +239,14 @@ impl Default for NeonStorageControllerConf {
             timelines_onto_safekeepers: false,
             use_https_safekeeper_api: false,
             use_local_compute_notifications: true,
+        }
+    }
+}
+
+impl Default for EndpointStorageConf {
+    fn default() -> Self {
+        Self {
+            listen_addr: ENDPOINT_STORAGE_DEFAULT_ADDR,
         }
     }
 }

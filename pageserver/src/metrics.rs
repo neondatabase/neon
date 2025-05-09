@@ -497,6 +497,24 @@ pub(crate) static WAIT_LSN_IN_PROGRESS_GLOBAL_MICROS: Lazy<IntCounter> = Lazy::n
     .expect("failed to define a metric")
 });
 
+pub(crate) static ONDEMAND_DOWNLOAD_BYTES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_ondemand_download_bytes_total",
+        "Total bytes of layers on-demand downloaded",
+        &["task_kind"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static ONDEMAND_DOWNLOAD_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_ondemand_download_count",
+        "Total count of layers on-demand downloaded",
+        &["task_kind"]
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) mod wait_ondemand_download_time {
     use super::*;
     const WAIT_ONDEMAND_DOWNLOAD_TIME_BUCKETS: &[f64] = &[
@@ -1774,8 +1792,12 @@ static SMGR_QUERY_STARTED_PER_TENANT_TIMELINE: Lazy<IntCounterVec> = Lazy::new(|
     .expect("failed to define a metric")
 });
 
-// Alias so all histograms recording per-timeline smgr timings use the same buckets.
-static SMGR_QUERY_TIME_PER_TENANT_TIMELINE_BUCKETS: &[f64] = CRITICAL_OP_BUCKETS;
+/// Per-timeline smgr histogram buckets should be the same as the compute buckets, such that the
+/// metrics are comparable across compute and Pageserver. See also:
+/// <https://github.com/neondatabase/neon/blob/1a87975d956a8ad17ec8b85da32a137ec4893fcc/pgxn/neon/neon_perf_counters.h#L18-L27>
+/// <https://github.com/neondatabase/flux-fleet/blob/556182a939edda87ff1d85a6b02e5cec901e0e9e/apps/base/compute-metrics/scrape-compute-sql-exporter.yaml#L29-L35>
+static SMGR_QUERY_TIME_PER_TENANT_TIMELINE_BUCKETS: &[f64] =
+    &[0.0006, 0.001, 0.003, 0.006, 0.01, 0.03, 0.1, 1.0, 3.0];
 
 static SMGR_QUERY_TIME_PER_TENANT_TIMELINE: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
@@ -2176,6 +2198,10 @@ impl BasebackupQueryTimeOngoingRecording<'_> {
         // If you want to change categorize of a specific error, also change it in `log_query_error`.
         let metric = match res {
             Ok(_) => &self.parent.ok,
+            Err(QueryError::Shutdown) => {
+                // Do not observe ok/err for shutdown
+                return;
+            }
             Err(QueryError::Disconnected(ConnectionError::Io(io_error)))
                 if is_expected_io_error(io_error) =>
             {
