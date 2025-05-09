@@ -1277,6 +1277,8 @@ impl Timeline {
             return Ok(CompactionOutcome::YieldForL0);
         }
 
+        let gc_cutoff = *self.applied_gc_cutoff_lsn.read();
+
         // 2. Repartition and create image layers if necessary
         match self
             .repartition(
@@ -1287,7 +1289,7 @@ impl Timeline {
             )
             .await
         {
-            Ok(((dense_partitioning, sparse_partitioning), lsn)) => {
+            Ok(((dense_partitioning, sparse_partitioning), lsn)) if lsn >= gc_cutoff => {
                 // Disables access_stats updates, so that the files we read remain candidates for eviction after we're done with them
                 let image_ctx = RequestContextBuilder::from(ctx)
                     .access_stats_behavior(AccessStatsBehavior::Skip)
@@ -1339,6 +1341,10 @@ impl Timeline {
                     );
                     return Ok(CompactionOutcome::YieldForL0);
                 }
+            }
+
+            Ok(_) => {
+                info!("skipping repartitioning due to image compaction LSN being below GC cutoff");
             }
 
             // Suppress errors when cancelled.
