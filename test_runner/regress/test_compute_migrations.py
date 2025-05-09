@@ -75,6 +75,7 @@ def test_compute_migrations_retry(neon_simple_env: NeonEnv, compute_migrations_d
             pattern = rf"Running migration id={i}"
 
         endpoint.log_contains(pattern)
+        endpoint.log_contains(rf"Finished migration id={i}")
 
 
 @pytest.mark.parametrize(
