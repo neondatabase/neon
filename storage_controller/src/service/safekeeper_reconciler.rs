@@ -301,6 +301,7 @@ impl SafekeeperReconcilerInner {
                     http_hosts,
                     tenant_id: req.tenant_id,
                     timeline_id,
+                    ignore_tombstone: Some(false),
                 };
                 self.reconcile_inner(
                     req,
