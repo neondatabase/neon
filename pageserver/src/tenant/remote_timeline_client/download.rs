@@ -105,13 +105,13 @@ pub async fn download_layer_file<'a>(
                 .map_err(DownloadError::Other)?,
                 gate.enter().map_err(|_| DownloadError::Cancelled)?,
             );
-            if let Ok(file_size) = TryInto::<i64>::try_into(layer_metadata.file_size.next_multiple_of(
-64 * 1024 /* TODO this is the max roundtup size by the buffered writer set_len_then_truncate */
-
-            )) {
+            {
                 temp_file.fallocate(
                     0,
-                    file_size,
+                    layer_metadata.file_size.next_multiple_of(
+64 * 1024 /* TODO this is the max roundtup size by the buffered writer set_len_then_truncate */
+
+            ),
                     ctx,
                 ).await.unwrap();
             };

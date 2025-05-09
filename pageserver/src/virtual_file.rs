@@ -156,8 +156,8 @@ impl VirtualFile {
 
     pub async fn fallocate(
         &self,
-        offset: i64,
-        size: i64,
+        offset: u64,
+        size: u64,
         ctx: &RequestContext,
     ) -> Result<(), Error> {
         self.inner.fallocate(offset, size, ctx).await
@@ -643,8 +643,8 @@ impl VirtualFileInner {
 
     pub async fn fallocate(
         &self,
-        offset: i64,
-        size: i64,
+        offset: u64,
+        size: u64,
         _ctx: &RequestContext,
     ) -> Result<(), Error> {
         with_file!(self, StorageIoOperation::Fallocate, |file_guard| {
