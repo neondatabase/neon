@@ -3969,13 +3969,15 @@ impl Service {
                     Some(timeline_info) => {
                         tracing::info!("Timeline became active on all shards");
 
-                        // Now that we know the start LSN of this timeline, create it on the
-                        // safekeepers.
-                        self.tenant_timeline_create_safekeepers_until_success(
-                            import.tenant_id,
-                            timeline_info,
-                        )
-                        .await?;
+                        if self.config.timelines_onto_safekeepers {
+                            // Now that we know the start LSN of this timeline, create it on the
+                            // safekeepers.
+                            self.tenant_timeline_create_safekeepers_until_success(
+                                import.tenant_id,
+                                timeline_info,
+                            )
+                            .await?;
+                        }
 
                         break;
                     }
