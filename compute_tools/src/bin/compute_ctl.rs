@@ -60,12 +60,16 @@ use utils::failpoint_support;
 // Compatibility hack: if the control plane specified any remote-ext-config
 // use the default value for extension storage proxy gateway.
 // Remove this once the control plane is updated to pass the gateway URL
-fn parse_remote_ext_config(arg: &str) -> Result<String> {
-    if arg.starts_with("http") {
-        Ok(arg.trim_end_matches('/').to_string())
+fn parse_remote_ext_base_url(arg: &str) -> Result<String> {
+    const FALLBACK_PG_EXT_GATEWAY_BASE_URL: &str =
+        "http://pg-ext-s3-gateway.pg-ext-s3-gateway.svc.cluster.local";
+
+    Ok(if arg.starts_with("http") {
+        arg
     } else {
-        Ok("http://pg-ext-s3-gateway".to_string())
+        FALLBACK_PG_EXT_GATEWAY_BASE_URL
     }
+    .to_owned())
 }
 
 #[derive(Parser)]
@@ -74,8 +78,10 @@ struct Cli {
     #[arg(short = 'b', long, default_value = "postgres", env = "POSTGRES_PATH")]
     pub pgbin: String,
 
-    #[arg(short = 'r', long, value_parser = parse_remote_ext_config)]
-    pub remote_ext_config: Option<String>,
+    /// The base URL for the remote extension storage proxy gateway.
+    /// Should be in the form of `http(s)://<gateway-hostname>[:<port>]`.
+    #[arg(short = 'r', long, value_parser = parse_remote_ext_base_url, alias = "remote-ext-config")]
+    pub remote_ext_base_url: Option<String>,
 
     /// The port to bind the external listening HTTP server to. Clients running
     /// outside the compute will talk to the compute through this port. Keep
@@ -164,7 +170,7 @@ fn main() -> Result<()> {
             pgversion: get_pg_version_string(&cli.pgbin),
             external_http_port: cli.external_http_port,
             internal_http_port: cli.internal_http_port,
-            ext_remote_storage: cli.remote_ext_config.clone(),
+            remote_ext_base_url: cli.remote_ext_base_url.clone(),
             resize_swap_on_bind: cli.resize_swap_on_bind,
             set_disk_quota_for_fs: cli.set_disk_quota_for_fs,
             #[cfg(target_os = "linux")]
@@ -264,5 +270,19 @@ mod test {
     #[test]
     fn verify_cli() {
         Cli::command().debug_assert()
+    }
+
+    #[test]
+    fn parse_pg_ext_gateway_base_url() {
+        let arg = "http://pg-ext-s3-gateway2";
+        let result = super::parse_remote_ext_base_url(arg).unwrap();
+        assert_eq!(result, arg);
+
+        let arg = "pg-ext-s3-gateway";
+        let result = super::parse_remote_ext_base_url(arg).unwrap();
+        assert_eq!(
+            result,
+            "http://pg-ext-s3-gateway.pg-ext-s3-gateway.svc.cluster.local"
+        );
     }
 }

@@ -55,6 +55,7 @@ use utils::bin_ser::SerializeError;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
+use super::errors::PutError;
 use super::{
     AsLayerDesc, LayerName, OnDiskValue, OnDiskValueIo, PersistentLayerDesc, ResidentLayer,
     ValuesReconstructState,
@@ -477,12 +478,15 @@ impl DeltaLayerWriterInner {
         lsn: Lsn,
         val: Value,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PutError> {
         let (_, res) = self
             .put_value_bytes(
                 key,
                 lsn,
-                Value::ser(&val)?.slice_len(),
+                Value::ser(&val)
+                    .map_err(anyhow::Error::new)
+                    .map_err(PutError::Other)?
+                    .slice_len(),
                 val.will_init(),
                 ctx,
             )
@@ -497,7 +501,7 @@ impl DeltaLayerWriterInner {
         val: FullSlice<Buf>,
         will_init: bool,
         ctx: &RequestContext,
-    ) -> (FullSlice<Buf>, anyhow::Result<()>)
+    ) -> (FullSlice<Buf>, Result<(), PutError>)
     where
         Buf: IoBuf + Send,
     {
@@ -513,19 +517,24 @@ impl DeltaLayerWriterInner {
             .blob_writer
             .write_blob_maybe_compressed(val, ctx, compression)
             .await;
+        let res = res.map_err(PutError::WriteBlob);
         let off = match res {
             Ok((off, _)) => off,
-            Err(e) => return (val, Err(anyhow::anyhow!(e))),
+            Err(e) => return (val, Err(e)),
         };
 
         let blob_ref = BlobRef::new(off, will_init);
 
         let delta_key = DeltaKey::from_key_lsn(&key, lsn);
-        let res = self.tree.append(&delta_key.0, blob_ref.0);
+        let res = self
+            .tree
+            .append(&delta_key.0, blob_ref.0)
+            .map_err(anyhow::Error::new)
+            .map_err(PutError::Other);
 
         self.num_keys += 1;
 
-        (val, res.map_err(|e| anyhow::anyhow!(e)))
+        (val, res)
     }
 
     fn size(&self) -> u64 {
@@ -694,7 +703,7 @@ impl DeltaLayerWriter {
         lsn: Lsn,
         val: Value,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PutError> {
         self.inner
             .as_mut()
             .unwrap()
@@ -709,7 +718,7 @@ impl DeltaLayerWriter {
         val: FullSlice<Buf>,
         will_init: bool,
         ctx: &RequestContext,
-    ) -> (FullSlice<Buf>, anyhow::Result<()>)
+    ) -> (FullSlice<Buf>, Result<(), PutError>)
     where
         Buf: IoBuf + Send,
     {

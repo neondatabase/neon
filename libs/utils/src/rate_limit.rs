@@ -17,7 +17,7 @@ impl std::fmt::Display for RateLimitStats {
 }
 
 impl RateLimit {
-    pub fn new(interval: Duration) -> Self {
+    pub const fn new(interval: Duration) -> Self {
         Self {
             last: None,
             interval,

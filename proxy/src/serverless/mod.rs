@@ -56,6 +56,7 @@ use crate::serverless::backend::PoolingBackend;
 use crate::serverless::http_util::{api_error_into_response, json_response};
 
 pub(crate) const SERVERLESS_DRIVER_SNI: &str = "api";
+pub(crate) const AUTH_BROKER_SNI: &str = "apiauth";
 
 pub async fn task_main(
     config: &'static ProxyConfig,

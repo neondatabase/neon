@@ -641,6 +641,55 @@ def test_fast_import_binary(
         assert res[0][0] == 10
 
 
+def test_fast_import_event_triggers(
+    test_output_dir,
+    vanilla_pg: VanillaPostgres,
+    port_distributor: PortDistributor,
+    fast_import: FastImport,
+):
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("""
+        CREATE FUNCTION test_event_trigger_for_drops()
+                RETURNS event_trigger LANGUAGE plpgsql AS $$
+        DECLARE
+            obj record;
+        BEGIN
+            FOR obj IN SELECT * FROM pg_event_trigger_dropped_objects()
+            LOOP
+                RAISE NOTICE '% dropped object: % %.% %',
+                            tg_tag,
+                            obj.object_type,
+                            obj.schema_name,
+                            obj.object_name,
+                            obj.object_identity;
+            END LOOP;
+        END
+        $$;
+
+        CREATE EVENT TRIGGER test_event_trigger_for_drops
+        ON sql_drop
+        EXECUTE PROCEDURE test_event_trigger_for_drops();
+    """)
+
+    pg_port = port_distributor.get_port()
+    p = fast_import.run_pgdata(pg_port=pg_port, source_connection_string=vanilla_pg.connstr())
+    assert p.returncode == 0
+
+    vanilla_pg.stop()
+
+    pgbin = PgBin(test_output_dir, fast_import.pg_distrib_dir, fast_import.pg_version)
+    with VanillaPostgres(
+        fast_import.workdir / "pgdata", pgbin, pg_port, False
+    ) as new_pgdata_vanilla_pg:
+        new_pgdata_vanilla_pg.start()
+
+        # database name and user are hardcoded in fast_import binary, and they are different from normal vanilla postgres
+        conn = PgProtocol(dsn=f"postgresql://cloud_admin@localhost:{pg_port}/neondb")
+        res = conn.safe_psql("SELECT count(*) FROM pg_event_trigger;")
+        log.info(f"Result: {res}")
+        assert res[0][0] == 0, f"Neon does not support importing event triggers, got: {res[0][0]}"
+
+
 def test_fast_import_restore_to_connstring(
     test_output_dir,
     vanilla_pg: VanillaPostgres,

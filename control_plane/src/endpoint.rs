@@ -655,7 +655,7 @@ impl Endpoint {
         safekeepers_generation: Option<SafekeeperGeneration>,
         safekeepers: Vec<NodeId>,
         pageservers: Vec<(Host, u16)>,
-        remote_ext_config: Option<&String>,
+        remote_ext_base_url: Option<&String>,
         shard_stripe_size: usize,
         create_test_user: bool,
         start_timeout: Duration,
@@ -825,8 +825,8 @@ impl Endpoint {
         .stderr(logfile.try_clone()?)
         .stdout(logfile);
 
-        if let Some(remote_ext_config) = remote_ext_config {
-            cmd.args(["--remote-ext-config", remote_ext_config]);
+        if let Some(remote_ext_base_url) = remote_ext_base_url {
+            cmd.args(["--remote-ext-base-url", remote_ext_base_url]);
         }
 
         let child = cmd.spawn()?;

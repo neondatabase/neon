@@ -110,18 +110,23 @@ impl OpenOptions {
         self
     }
 
+    /// Don't use, `O_APPEND` is not supported.
+    pub fn append(&mut self, _append: bool) {
+        super::io_engine::panic_operation_must_be_idempotent();
+    }
+
     pub(in crate::virtual_file) async fn open(&self, path: &Path) -> std::io::Result<OwnedFd> {
         match &self.inner {
             Inner::StdFs(x) => x.open(path).map(|file| file.into()),
             #[cfg(target_os = "linux")]
             Inner::TokioEpollUring(x) => {
                 let system = super::io_engine::tokio_epoll_uring_ext::thread_local_system().await;
-                system.open(path, x).await.map_err(|e| match e {
-                    tokio_epoll_uring::Error::Op(e) => e,
-                    tokio_epoll_uring::Error::System(system) => {
-                        std::io::Error::new(std::io::ErrorKind::Other, system)
-                    }
+                let (_, res) = super::io_engine::retry_ecanceled_once((), |()| async {
+                    let res = system.open(path, x).await;
+                    ((), res)
                 })
+                .await;
+                res.map_err(super::io_engine::epoll_uring_error_to_std)
             }
         }
     }
@@ -140,6 +145,9 @@ impl OpenOptions {
     }
 
     pub fn custom_flags(mut self, flags: i32) -> Self {
+        if flags & nix::libc::O_APPEND != 0 {
+            super::io_engine::panic_operation_must_be_idempotent();
+        }
         match &mut self.inner {
             Inner::StdFs(x) => {
                 let _ = x.custom_flags(flags);

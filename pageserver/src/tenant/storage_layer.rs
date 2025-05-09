@@ -2,6 +2,7 @@
 
 pub mod batch_split_writer;
 pub mod delta_layer;
+pub mod errors;
 pub mod filter_iterator;
 pub mod image_layer;
 pub mod inmemory_layer;

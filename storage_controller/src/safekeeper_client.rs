@@ -98,6 +98,23 @@ impl SafekeeperClient {
         )
     }
 
+    #[allow(unused)]
+    pub(crate) async fn switch_timeline_membership(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        req: &models::TimelineMembershipSwitchRequest,
+    ) -> Result<models::TimelineMembershipSwitchResponse> {
+        measured_request!(
+            "switch_timeline_membership",
+            crate::metrics::Method::Put,
+            &self.node_id_label,
+            self.inner
+                .switch_timeline_membership(tenant_id, timeline_id, req)
+                .await
+        )
+    }
+
     pub(crate) async fn delete_tenant(
         &self,
         tenant_id: TenantId,

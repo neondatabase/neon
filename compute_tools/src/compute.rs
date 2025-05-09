@@ -95,7 +95,7 @@ pub struct ComputeNodeParams {
     pub internal_http_port: u16,
 
     /// the address of extension storage proxy gateway
-    pub ext_remote_storage: Option<String>,
+    pub remote_ext_base_url: Option<String>,
 }
 
 /// Compute node info shared across several `compute_ctl` threads.
@@ -329,10 +329,38 @@ struct StartVmMonitorResult {
 impl ComputeNode {
     pub fn new(params: ComputeNodeParams, config: ComputeConfig) -> Result<Self> {
         let connstr = params.connstr.as_str();
-        let conn_conf = postgres::config::Config::from_str(connstr)
+        let mut conn_conf = postgres::config::Config::from_str(connstr)
             .context("cannot build postgres config from connstr")?;
-        let tokio_conn_conf = tokio_postgres::config::Config::from_str(connstr)
+        let mut tokio_conn_conf = tokio_postgres::config::Config::from_str(connstr)
             .context("cannot build tokio postgres config from connstr")?;
+
+        // Users can set some configuration parameters per database with
+        //   ALTER DATABASE ... SET ...
+        //
+        // There are at least these parameters:
+        //
+        //   - role=some_other_role
+        //   - default_transaction_read_only=on
+        //   - statement_timeout=1, i.e., 1ms, which will cause most of the queries to fail
+        //   - search_path=non_public_schema, this should be actually safe because
+        //     we don't call any functions in user databases, but better to always reset
+        //     it to public.
+        //
+        // that can affect `compute_ctl` and prevent it from properly configuring the database schema.
+        // Unset them via connection string options before connecting to the database.
+        // N.B. keep it in sync with `ZENITH_OPTIONS` in `get_maintenance_client()`.
+        //
+        // TODO(ololobus): we currently pass `-c default_transaction_read_only=off` from control plane
+        // as well. After rolling out this code, we can remove this parameter from control plane.
+        // In the meantime, double-passing is fine, the last value is applied.
+        // See: <https://github.com/neondatabase/cloud/blob/133dd8c4dbbba40edfbad475bf6a45073ca63faf/goapp/controlplane/internal/pkg/compute/provisioner/provisioner_common.go#L70>
+        const EXTRA_OPTIONS: &str = "-c role=cloud_admin -c default_transaction_read_only=off -c search_path=public -c statement_timeout=0";
+        let options = match conn_conf.get_options() {
+            Some(options) => format!("{} {}", options, EXTRA_OPTIONS),
+            None => EXTRA_OPTIONS.to_string(),
+        };
+        conn_conf.options(&options);
+        tokio_conn_conf.options(&options);
 
         let mut new_state = ComputeState::new();
         if let Some(spec) = config.spec {
@@ -1449,14 +1477,19 @@ impl ComputeNode {
             Err(e) => match e.code() {
                 Some(&SqlState::INVALID_PASSWORD)
                 | Some(&SqlState::INVALID_AUTHORIZATION_SPECIFICATION) => {
-                    // Connect with zenith_admin if cloud_admin could not authenticate
+                    // Connect with `zenith_admin` if `cloud_admin` could not authenticate
                     info!(
-                        "cannot connect to postgres: {}, retrying with `zenith_admin` username",
+                        "cannot connect to Postgres: {}, retrying with 'zenith_admin' username",
                         e
                     );
                     let mut zenith_admin_conf = postgres::config::Config::from(conf.clone());
                     zenith_admin_conf.application_name("compute_ctl:apply_config");
                     zenith_admin_conf.user("zenith_admin");
+
+                    // It doesn't matter what were the options before, here we just want
+                    // to connect and create a new superuser role.
+                    const ZENITH_OPTIONS: &str = "-c role=zenith_admin -c default_transaction_read_only=off -c search_path=public -c statement_timeout=0";
+                    zenith_admin_conf.options(ZENITH_OPTIONS);
 
                     let mut client =
                         zenith_admin_conf.connect(NoTls)
@@ -1623,9 +1656,7 @@ impl ComputeNode {
                 self.pg_reload_conf()?;
 
                 if spec.mode == ComputeMode::Primary {
-                    let mut conf =
-                        tokio_postgres::Config::from_str(self.params.connstr.as_str()).unwrap();
-                    conf.application_name("apply_config");
+                    let conf = self.get_tokio_conn_conf(Some("compute_ctl:reconfigure"));
                     let conf = Arc::new(conf);
 
                     let spec = Arc::new(spec.clone());
@@ -1865,9 +1896,9 @@ LIMIT 100",
         real_ext_name: String,
         ext_path: RemotePath,
     ) -> Result<u64, DownloadError> {
-        let ext_remote_storage =
+        let remote_ext_base_url =
             self.params
-                .ext_remote_storage
+                .remote_ext_base_url
                 .as_ref()
                 .ok_or(DownloadError::BadInput(anyhow::anyhow!(
                     "Remote extensions storage is not configured",
@@ -1929,7 +1960,7 @@ LIMIT 100",
         let download_size = extension_server::download_extension(
             &real_ext_name,
             &ext_path,
-            ext_remote_storage,
+            remote_ext_base_url,
             &self.params.pgbin,
         )
         .await
@@ -2038,7 +2069,7 @@ LIMIT 100",
         &self,
         spec: &ComputeSpec,
     ) -> Result<RemoteExtensionMetrics> {
-        if self.params.ext_remote_storage.is_none() {
+        if self.params.remote_ext_base_url.is_none() {
             return Ok(RemoteExtensionMetrics {
                 num_ext_downloaded: 0,
                 largest_ext_size: 0,

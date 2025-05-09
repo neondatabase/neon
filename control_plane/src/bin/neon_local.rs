@@ -644,9 +644,10 @@ struct EndpointStartCmdArgs {
 
     #[clap(
         long,
-        help = "Configure the remote extensions storage proxy gateway to request for extensions."
+        help = "Configure the remote extensions storage proxy gateway URL to request for extensions.",
+        alias = "remote-ext-config"
     )]
-    remote_ext_config: Option<String>,
+    remote_ext_base_url: Option<String>,
 
     #[clap(
         long,
@@ -1414,9 +1415,16 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
         EndpointCmd::Start(args) => {
             let endpoint_id = &args.endpoint_id;
             let pageserver_id = args.endpoint_pageserver_id;
-            let remote_ext_config = &args.remote_ext_config;
+            let remote_ext_base_url = &args.remote_ext_base_url;
 
-            let safekeepers_generation = args.safekeepers_generation.map(SafekeeperGeneration::new);
+            let default_generation = env
+                .storage_controller
+                .timelines_onto_safekeepers
+                .then_some(1);
+            let safekeepers_generation = args
+                .safekeepers_generation
+                .or(default_generation)
+                .map(SafekeeperGeneration::new);
             // If --safekeepers argument is given, use only the listed
             // safekeeper nodes; otherwise all from the env.
             let safekeepers = if let Some(safekeepers) = parse_safekeepers(&args.safekeepers)? {
@@ -1510,7 +1518,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                     safekeepers_generation,
                     safekeepers,
                     pageservers,
-                    remote_ext_config.as_ref(),
+                    remote_ext_base_url.as_ref(),
                     stripe_size.0 as usize,
                     args.create_test_user,
                     args.start_timeout,

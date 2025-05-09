@@ -10,7 +10,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use hyper0::Uri;
 use nix::unistd::Pid;
 use pageserver_api::controller_api::{
-    NodeConfigureRequest, NodeDescribeResponse, NodeRegisterRequest, TenantCreateRequest,
+    NodeConfigureRequest, NodeDescribeResponse, NodeRegisterRequest,
+    SafekeeperSchedulingPolicyRequest, SkSchedulingPolicy, TenantCreateRequest,
     TenantCreateResponse, TenantLocateResponse,
 };
 use pageserver_api::models::{
@@ -20,7 +21,7 @@ use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use pem::Pem;
 use postgres_backend::AuthType;
-use reqwest::Method;
+use reqwest::{Method, Response};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
@@ -570,6 +571,11 @@ impl StorageController {
             let peer_jwt_token = encode_from_key_file(&peer_claims, private_key)
                 .expect("failed to generate jwt token");
             args.push(format!("--peer-jwt-token={peer_jwt_token}"));
+
+            let claims = Claims::new(None, Scope::SafekeeperData);
+            let jwt_token =
+                encode_from_key_file(&claims, private_key).expect("failed to generate jwt token");
+            args.push(format!("--safekeeper-jwt-token={jwt_token}"));
         }
 
         if let Some(public_key) = &self.public_key {
@@ -614,6 +620,10 @@ impl StorageController {
             self.env.base_data_dir.display()
         ));
 
+        if self.env.safekeepers.iter().any(|sk| sk.auth_enabled) && self.private_key.is_none() {
+            anyhow::bail!("Safekeeper set up for auth but no private key specified");
+        }
+
         if self.config.timelines_onto_safekeepers {
             args.push("--timelines-onto-safekeepers".to_string());
         }
@@ -639,6 +649,10 @@ impl StorageController {
             },
         )
         .await?;
+
+        if self.config.timelines_onto_safekeepers {
+            self.register_safekeepers().await?;
+        }
 
         Ok(())
     }
@@ -744,6 +758,23 @@ impl StorageController {
         RQ: Serialize + Sized,
         RS: DeserializeOwned + Sized,
     {
+        let response = self.dispatch_inner(method, path, body).await?;
+        Ok(response
+            .json()
+            .await
+            .map_err(pageserver_client::mgmt_api::Error::ReceiveBody)?)
+    }
+
+    /// Simple HTTP request wrapper for calling into storage controller
+    async fn dispatch_inner<RQ>(
+        &self,
+        method: reqwest::Method,
+        path: String,
+        body: Option<RQ>,
+    ) -> anyhow::Result<Response>
+    where
+        RQ: Serialize + Sized,
+    {
         // In the special case of the `storage_controller start` subcommand, we wish
         // to use the API endpoint of the newly started storage controller in order
         // to pass the readiness check. In this scenario [`Self::listen_port`] will
@@ -785,10 +816,31 @@ impl StorageController {
         let response = builder.send().await?;
         let response = response.error_from_body().await?;
 
-        Ok(response
-            .json()
-            .await
-            .map_err(pageserver_client::mgmt_api::Error::ReceiveBody)?)
+        Ok(response)
+    }
+
+    /// Register the safekeepers in the storage controller
+    #[instrument(skip(self))]
+    async fn register_safekeepers(&self) -> anyhow::Result<()> {
+        for sk in self.env.safekeepers.iter() {
+            let sk_id = sk.id;
+            let body = serde_json::json!({
+                "id": sk_id,
+                "created_at": "2023-10-25T09:11:25Z",
+                "updated_at": "2024-08-28T11:32:43Z",
+                "region_id": "aws-us-east-2",
+                "host": "127.0.0.1",
+                "port": sk.pg_port,
+                "http_port": sk.http_port,
+                "https_port": sk.https_port,
+                "version": 5957,
+                "availability_zone_id": format!("us-east-2b-{sk_id}"),
+            });
+            self.upsert_safekeeper(sk_id, body).await?;
+            self.safekeeper_scheduling_policy(sk_id, SkSchedulingPolicy::Active)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Call into the attach_hook API, for use before handing out attachments to pageservers
@@ -814,6 +866,42 @@ impl StorageController {
             .await?;
 
         Ok(response.generation)
+    }
+
+    #[instrument(skip(self))]
+    pub async fn upsert_safekeeper(
+        &self,
+        node_id: NodeId,
+        request: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let resp = self
+            .dispatch_inner::<serde_json::Value>(
+                Method::POST,
+                format!("control/v1/safekeeper/{node_id}"),
+                Some(request),
+            )
+            .await?;
+        if !resp.status().is_success() {
+            anyhow::bail!(
+                "setting scheduling policy unsuccessful for safekeeper {node_id}: {}",
+                resp.status()
+            );
+        }
+        Ok(())
+    }
+
+    #[instrument(skip(self))]
+    pub async fn safekeeper_scheduling_policy(
+        &self,
+        node_id: NodeId,
+        scheduling_policy: SkSchedulingPolicy,
+    ) -> anyhow::Result<()> {
+        self.dispatch::<SafekeeperSchedulingPolicyRequest, ()>(
+            Method::POST,
+            format!("control/v1/safekeeper/{node_id}/scheduling_policy"),
+            Some(SafekeeperSchedulingPolicyRequest { scheduling_policy }),
+        )
+        .await
     }
 
     #[instrument(skip(self))]

@@ -340,7 +340,7 @@ pub(crate) fn log_compaction_error(
     } else {
         match level {
             Level::ERROR if degrade_to_warning => warn!("Compaction failed and discarded: {err:#}"),
-            Level::ERROR => error!("Compaction failed: {err:#}"),
+            Level::ERROR => error!("Compaction failed: {err:?}"),
             Level::INFO => info!("Compaction failed: {err:#}"),
             level => unimplemented!("unexpected level {level:?}"),
         }

@@ -987,6 +987,16 @@ impl From<PageReconstructError> for CreateImageLayersError {
     }
 }
 
+impl From<super::storage_layer::errors::PutError> for CreateImageLayersError {
+    fn from(e: super::storage_layer::errors::PutError) -> Self {
+        if e.is_cancel() {
+            CreateImageLayersError::Cancelled
+        } else {
+            CreateImageLayersError::Other(e.into_anyhow())
+        }
+    }
+}
+
 impl From<GetVectoredError> for CreateImageLayersError {
     fn from(e: GetVectoredError) -> Self {
         match e {
@@ -2117,22 +2127,14 @@ impl Timeline {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
         // Regardless of whether we're going to try_freeze_and_flush
-        // or not, stop ingesting any more data. Walreceiver only provides
-        // cancellation but no "wait until gone", because it uses the Timeline::gate.
-        // So, only after the self.gate.close() below will we know for sure that
-        // no walreceiver tasks are left.
-        // For `try_freeze_and_flush=true`, this means that we might still be ingesting
-        // data during the call to `self.freeze_and_flush()` below.
-        // That's not ideal, but, we don't have the concept of a ChildGuard,
-        // which is what we'd need to properly model early shutdown of the walreceiver
-        // task sub-tree before the other Timeline task sub-trees.
+        // or not, stop ingesting any more data.
         let walreceiver = self.walreceiver.lock().unwrap().take();
         tracing::debug!(
             is_some = walreceiver.is_some(),
             "Waiting for WalReceiverManager..."
         );
         if let Some(walreceiver) = walreceiver {
-            walreceiver.cancel();
+            walreceiver.shutdown().await;
         }
         // ... and inform any waiters for newer LSNs that there won't be any.
         self.last_record_lsn.shutdown();
@@ -5920,6 +5922,16 @@ impl From<super::storage_layer::layer::DownloadError> for CompactionError {
 impl From<layer_manager::Shutdown> for CompactionError {
     fn from(_: layer_manager::Shutdown) -> Self {
         CompactionError::ShuttingDown
+    }
+}
+
+impl From<super::storage_layer::errors::PutError> for CompactionError {
+    fn from(e: super::storage_layer::errors::PutError) -> Self {
+        if e.is_cancel() {
+            CompactionError::ShuttingDown
+        } else {
+            CompactionError::Other(e.into_anyhow())
+        }
     }
 }
 

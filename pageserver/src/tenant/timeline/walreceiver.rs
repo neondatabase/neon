@@ -63,6 +63,7 @@ pub struct WalReceiver {
     /// All task spawned by [`WalReceiver::start`] and its children are sensitive to this token.
     /// It's a child token of [`Timeline`] so that timeline shutdown can cancel WalReceiver tasks early for `freeze_and_flush=true`.
     cancel: CancellationToken,
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl WalReceiver {
@@ -79,7 +80,7 @@ impl WalReceiver {
         let loop_status = Arc::new(std::sync::RwLock::new(None));
         let manager_status = Arc::clone(&loop_status);
         let cancel = timeline.cancel.child_token();
-        WALRECEIVER_RUNTIME.spawn({
+        let task = WALRECEIVER_RUNTIME.spawn({
             let cancel = cancel.clone();
             async move {
                 debug_assert_current_span_has_tenant_and_timeline_id();
@@ -120,14 +121,25 @@ impl WalReceiver {
         Self {
             manager_status,
             cancel,
+            task,
         }
     }
 
     #[instrument(skip_all, level = tracing::Level::DEBUG)]
-    pub fn cancel(&self) {
+    pub async fn shutdown(self) {
         debug_assert_current_span_has_tenant_and_timeline_id();
         debug!("cancelling walreceiver tasks");
         self.cancel.cancel();
+        match self.task.await {
+            Ok(()) => debug!("Shutdown success"),
+            Err(je) if je.is_cancelled() => unreachable!("not used"),
+            Err(je) if je.is_panic() => {
+                // already logged by panic hook
+            }
+            Err(je) => {
+                error!("shutdown walreceiver task join error: {je}")
+            }
+        }
     }
 
     pub(crate) fn status(&self) -> Option<ConnectionManagerStatus> {
