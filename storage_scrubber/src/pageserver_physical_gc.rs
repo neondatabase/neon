@@ -137,11 +137,10 @@ struct TenantRefAccumulator {
 impl TenantRefAccumulator {
     fn update(&mut self, ttid: TenantShardTimelineId, index_part: &IndexPart) {
         let this_shard_idx = ttid.tenant_shard_id.to_index();
-        (*self
-            .shards_seen
+        self.shards_seen
             .entry(ttid.tenant_shard_id.tenant_id)
-            .or_default())
-        .insert(this_shard_idx);
+            .or_default()
+            .insert(this_shard_idx);
 
         let mut ancestor_refs = Vec::new();
         for (layer_name, layer_metadata) in &index_part.layer_metadata {
@@ -767,10 +766,13 @@ pub async fn pageserver_physical_gc(
                 stream_tenant_timelines(remote_client_ref, target_ref, tenant_shard_id).await?,
             );
             Ok(try_stream! {
+                let mut cnt = 0;
                 while let Some(ttid_res) = timelines.next().await {
                     let ttid = ttid_res?;
+                    cnt += 1;
                     yield (ttid, tenant_manifest_arc.clone());
                 }
+                tracing::info!(%tenant_shard_id, "Found {} timelines", cnt);
             })
         }
     });
@@ -790,6 +792,7 @@ pub async fn pageserver_physical_gc(
                 &accumulator,
                 tenant_manifest_arc,
             )
+            .instrument(info_span!("gc_timeline", %ttid))
         });
         let timelines = timelines.try_buffered(CONCURRENCY);
         let mut timelines = std::pin::pin!(timelines);

@@ -845,9 +845,6 @@ typedef struct WalProposer
 	/* timeline globally starts at this LSN */
 	XLogRecPtr	timelineStartLsn;
 
-	/* number of votes collected from safekeepers */
-	int			n_votes;
-
 	/* number of successful connections over the lifetime of walproposer */
 	int			n_connected;
 

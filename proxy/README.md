@@ -32,7 +32,7 @@ To play with it locally one may start proxy over a local postgres installation
 (see end of this page on how to generate certs with openssl):
 
 ```
-./target/debug/proxy -c server.crt -k server.key --auth-backend=postgres --auth-endpoint=postgres://stas@127.0.0.1:5432/stas --wss 0.0.0.0:4444
+LOGFMT=text ./target/debug/proxy -c server.crt -k server.key --auth-backend=postgres --auth-endpoint=postgres://stas@127.0.0.1:5432/stas --wss 0.0.0.0:4444
 ```
 
 If both postgres and proxy are running you may send a SQL query:
@@ -130,7 +130,7 @@ openssl req -new -x509 -days 365 -nodes -text -out server.crt -keyout server.key
 
 Then we need to build proxy with 'testing' feature and run, e.g.:
 ```sh
-RUST_LOG=proxy cargo run -p proxy --bin proxy --features testing -- --auth-backend postgres --auth-endpoint 'postgresql://postgres:proxy-postgres@127.0.0.1:5432/postgres' -c server.crt -k server.key
+RUST_LOG=proxy LOGFMT=text cargo run -p proxy --bin proxy --features testing -- --auth-backend postgres --auth-endpoint 'postgresql://postgres:proxy-postgres@127.0.0.1:5432/postgres' -c server.crt -k server.key
 ```
 
 Now from client you can start a new session:

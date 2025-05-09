@@ -37,6 +37,8 @@ extern int communicator_prefetch_lookupv(NRelFileInfo rinfo, ForkNumber forknum,
 										 BlockNumber nblocks, void **buffers, bits8 *mask);
 extern void communicator_prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
 												   BlockNumber nblocks, const bits8 *mask);
+extern bool communicator_prefetch_receive(BufferTag tag);
+
 extern int communicator_read_slru_segment(SlruKind kind, int64 segno,
 										  neon_request_lsns *request_lsns,
 										  void *buffer);

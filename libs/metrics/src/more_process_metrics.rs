@@ -16,6 +16,7 @@ pub struct Collector {
 const NMETRICS: usize = 2;
 
 static CLK_TCK_F64: Lazy<f64> = Lazy::new(|| {
+    // SAFETY: libc::sysconf is safe, it merely returns a value.
     let long = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
     if long == -1 {
         panic!("sysconf(_SC_CLK_TCK) failed");

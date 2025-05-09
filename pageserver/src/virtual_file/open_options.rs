@@ -1,6 +1,7 @@
 //! Enum-dispatch to the `OpenOptions` type of the respective [`super::IoEngineKind`];
 
 use std::os::fd::OwnedFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use super::io_engine::IoEngine;
@@ -43,7 +44,7 @@ impl OpenOptions {
         self.write
     }
 
-    pub fn read(&mut self, read: bool) -> &mut OpenOptions {
+    pub fn read(mut self, read: bool) -> Self {
         match &mut self.inner {
             Inner::StdFs(x) => {
                 let _ = x.read(read);
@@ -56,7 +57,7 @@ impl OpenOptions {
         self
     }
 
-    pub fn write(&mut self, write: bool) -> &mut OpenOptions {
+    pub fn write(mut self, write: bool) -> Self {
         self.write = write;
         match &mut self.inner {
             Inner::StdFs(x) => {
@@ -70,7 +71,7 @@ impl OpenOptions {
         self
     }
 
-    pub fn create(&mut self, create: bool) -> &mut OpenOptions {
+    pub fn create(mut self, create: bool) -> Self {
         match &mut self.inner {
             Inner::StdFs(x) => {
                 let _ = x.create(create);
@@ -83,7 +84,7 @@ impl OpenOptions {
         self
     }
 
-    pub fn create_new(&mut self, create_new: bool) -> &mut OpenOptions {
+    pub fn create_new(mut self, create_new: bool) -> Self {
         match &mut self.inner {
             Inner::StdFs(x) => {
                 let _ = x.create_new(create_new);
@@ -96,7 +97,7 @@ impl OpenOptions {
         self
     }
 
-    pub fn truncate(&mut self, truncate: bool) -> &mut OpenOptions {
+    pub fn truncate(mut self, truncate: bool) -> Self {
         match &mut self.inner {
             Inner::StdFs(x) => {
                 let _ = x.truncate(truncate);
@@ -107,6 +108,11 @@ impl OpenOptions {
             }
         }
         self
+    }
+
+    /// Don't use, `O_APPEND` is not supported.
+    pub fn append(&mut self, _append: bool) {
+        super::io_engine::panic_operation_must_be_idempotent();
     }
 
     pub(in crate::virtual_file) async fn open(&self, path: &Path) -> std::io::Result<OwnedFd> {
@@ -115,19 +121,17 @@ impl OpenOptions {
             #[cfg(target_os = "linux")]
             Inner::TokioEpollUring(x) => {
                 let system = super::io_engine::tokio_epoll_uring_ext::thread_local_system().await;
-                system.open(path, x).await.map_err(|e| match e {
-                    tokio_epoll_uring::Error::Op(e) => e,
-                    tokio_epoll_uring::Error::System(system) => {
-                        std::io::Error::new(std::io::ErrorKind::Other, system)
-                    }
+                let (_, res) = super::io_engine::retry_ecanceled_once((), |()| async {
+                    let res = system.open(path, x).await;
+                    ((), res)
                 })
+                .await;
+                res.map_err(super::io_engine::epoll_uring_error_to_std)
             }
         }
     }
-}
 
-impl std::os::unix::prelude::OpenOptionsExt for OpenOptions {
-    fn mode(&mut self, mode: u32) -> &mut OpenOptions {
+    pub fn mode(mut self, mode: u32) -> Self {
         match &mut self.inner {
             Inner::StdFs(x) => {
                 let _ = x.mode(mode);
@@ -140,7 +144,10 @@ impl std::os::unix::prelude::OpenOptionsExt for OpenOptions {
         self
     }
 
-    fn custom_flags(&mut self, flags: i32) -> &mut OpenOptions {
+    pub fn custom_flags(mut self, flags: i32) -> Self {
+        if flags & nix::libc::O_APPEND != 0 {
+            super::io_engine::panic_operation_must_be_idempotent();
+        }
         match &mut self.inner {
             Inner::StdFs(x) => {
                 let _ = x.custom_flags(flags);
