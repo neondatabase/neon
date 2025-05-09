@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -62,18 +63,18 @@ struct ProxyCliArgs {
     region: String,
     /// listen for incoming client connections on ip:port
     #[clap(short, long, default_value = "127.0.0.1:4432")]
-    proxy: String,
+    proxy: SocketAddr,
     #[clap(value_enum, long, default_value_t = AuthBackendType::ConsoleRedirect)]
     auth_backend: AuthBackendType,
     /// listen for management callback connection on ip:port
     #[clap(short, long, default_value = "127.0.0.1:7000")]
-    mgmt: String,
+    mgmt: SocketAddr,
     /// listen for incoming http connections (metrics, etc) on ip:port
     #[clap(long, default_value = "127.0.0.1:7001")]
-    http: String,
+    http: SocketAddr,
     /// listen for incoming wss connections on ip:port
     #[clap(long)]
-    wss: Option<String>,
+    wss: Option<SocketAddr>,
     /// redirect unauthenticated users to the given uri in case of console redirect auth
     #[clap(short, long, default_value = "http://localhost:3000/psql_session/")]
     uri: String,
@@ -99,18 +100,18 @@ struct ProxyCliArgs {
     ///
     /// tls-key and tls-cert are for backwards compatibility, we can put all certs in one dir
     #[clap(short = 'k', long, alias = "ssl-key")]
-    tls_key: Option<String>,
+    tls_key: Option<PathBuf>,
     /// path to TLS cert for client postgres connections
     ///
     /// tls-key and tls-cert are for backwards compatibility, we can put all certs in one dir
     #[clap(short = 'c', long, alias = "ssl-cert")]
-    tls_cert: Option<String>,
+    tls_cert: Option<PathBuf>,
     /// Allow writing TLS session keys to the given file pointed to by the environment variable `SSLKEYLOGFILE`.
     #[clap(long, alias = "allow-ssl-keylogfile")]
     allow_tls_keylogfile: bool,
     /// path to directory with TLS certificates for client postgres connections
     #[clap(long)]
-    certs_dir: Option<String>,
+    certs_dir: Option<PathBuf>,
     /// timeout for the TLS handshake
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     handshake_timeout: tokio::time::Duration,
@@ -353,27 +354,22 @@ pub async fn run() -> anyhow::Result<()> {
     };
 
     // Check that we can bind to address before further initialization
-    let http_address: SocketAddr = args.http.parse()?;
-    info!("Starting http on {http_address}");
-    let http_listener = TcpListener::bind(http_address).await?.into_std()?;
+    info!("Starting http on {}", args.http);
+    let http_listener = TcpListener::bind(args.http).await?.into_std()?;
 
-    let mgmt_address: SocketAddr = args.mgmt.parse()?;
-    info!("Starting mgmt on {mgmt_address}");
-    let mgmt_listener = TcpListener::bind(mgmt_address).await?;
+    info!("Starting mgmt on {}", args.mgmt);
+    let mgmt_listener = TcpListener::bind(args.mgmt).await?;
 
     let proxy_listener = if args.is_auth_broker {
         None
     } else {
-        let proxy_address: SocketAddr = args.proxy.parse()?;
-        info!("Starting proxy on {proxy_address}");
-
-        Some(TcpListener::bind(proxy_address).await?)
+        info!("Starting proxy on {}", args.proxy);
+        Some(TcpListener::bind(args.proxy).await?)
     };
 
     // TODO: rename the argument to something like serverless.
     // It now covers more than just websockets, it also covers SQL over HTTP.
     let serverless_listener = if let Some(serverless_address) = args.wss {
-        let serverless_address: SocketAddr = serverless_address.parse()?;
         info!("Starting wss on {serverless_address}");
         Some(TcpListener::bind(serverless_address).await?)
     } else if args.is_auth_broker {
@@ -565,7 +561,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         (Some(key_path), Some(cert_path)) => Some(config::configure_tls(
             key_path,
             cert_path,
-            args.certs_dir.as_ref(),
+            args.certs_dir.as_deref(),
             args.allow_tls_keylogfile,
         )?),
         (None, None) => None,
