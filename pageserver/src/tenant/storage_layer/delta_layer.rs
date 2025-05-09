@@ -441,6 +441,10 @@ impl DeltaLayerWriterInner {
             gate.enter()?,
         );
 
+        file.fallocate(0, 1 * 1024 * 1024 * 1024, ctx)
+            .await
+            .unwrap();
+
         // Start at PAGE_SZ, make room for the header block
         let blob_writer = BlobWriter::new(
             file,
