@@ -291,11 +291,9 @@ The correctness risks with this project were:
 We sadly do not have infrastructure to run pageserver under `cargo miri`.
 So for memory safety issues, we relied on careful peer review.
 
-Originally, we planned to implement a validation mode at the VirtualFile level to check adherence to alignment/size-multiple requirements.
-That mode would have its own (maximally restrictive) model of alignment requirements and runtime-check that all calls made to VirtualFile adhere to it.
-It would also work as a point of injecting transient errors, short reads, and the like.
-However, such a mode was never implemented.
-The validation happened in staging and pre-prod instead.
+We do assert the production-like alignment requirements in testing builds.
+However, these asserts were added retroactively.
+The actual validation before rollout happened in staging and pre-prod.
 We eventually enabled  `=direct`/`=direct-rw` for Rust unit tests and the regression test suite.
 I cannot recall a single instance of staging/pre-prod/production errors caused by non-adherence to alignment/size-multiple requirements.
 Evidently developer testing was good enough.
@@ -328,15 +326,9 @@ Write Path:
 - Reduce conditional compilation around `virtual_file_io_mode`: https://github.com/neondatabase/neon/issues/11676
 
 Both:
-- A runtime validation mode to check adherence to alignment and size-multiple requirements at the VirtualFile level.
-  This would allow catching such bugs on systems that don't have O_DIRECT (macOS).
-  It would also prevent alignment bugs from slipping into production because test systems may have more lax requirements than production.
-  (This is not the case today, but it could change in the future).
-- Along with the validation mode, a performance simulation mode that pads VirtualFile op latencies to typical NVMe latencies, even if the underlying storage is faster.
+- A performance simulation mode that pads VirtualFile op latencies to typical NVMe latencies, even if the underlying storage is faster.
   This would avoid misleadingly good performance on developer systems and in benchmarks on systems that are less busy than production hosts.
   However, padding latencies at microsecond scale is non-trivial.
-- Remove the `virtual_file_io_mode` feature gating altogether: always do direct IO, and fake it on systems that don't have it.
-  This idea is (also) tracked in https://github.com/neondatabase/neon/issues/11676
 
 Misc:
 - We should finish trimming VirtualFile's scope to be truly limited to core data path read & write.
