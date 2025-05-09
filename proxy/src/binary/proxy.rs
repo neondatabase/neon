@@ -308,50 +308,7 @@ pub async fn run() -> anyhow::Result<()> {
         Either::Right(auth_backend) => info!("Authentication backend: {auth_backend:?}"),
     }
     info!("Using region: {}", args.aws_region);
-
-    // TODO: untangle the config args
-    let regional_redis_client = match (args.redis_auth_type.as_str(), &args.redis_notifications) {
-        ("plain", redis_url) => match redis_url {
-            None => {
-                bail!("plain auth requires redis_notifications to be set");
-            }
-            Some(url) => {
-                Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url.clone()))
-            }
-        },
-        ("irsa", _) => match (&args.redis_host, args.redis_port) {
-            (Some(host), Some(port)) => Some(
-                ConnectionWithCredentialsProvider::new_with_credentials_provider(
-                    host.to_string(),
-                    port,
-                    elasticache::CredentialsProvider::new(
-                        args.aws_region,
-                        args.redis_cluster_name,
-                        args.redis_user_id,
-                    )
-                    .await,
-                ),
-            ),
-            (None, None) => {
-                warn!(
-                    "irsa auth requires redis-host and redis-port to be set, continuing without regional_redis_client"
-                );
-                None
-            }
-            _ => {
-                bail!("redis-host and redis-port must be specified together");
-            }
-        },
-        _ => {
-            bail!("unknown auth type given");
-        }
-    };
-
-    let redis_notifications_client = if let Some(url) = args.redis_notifications {
-        Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url))
-    } else {
-        regional_redis_client.clone()
-    };
+    let (regional_redis_client, redis_notifications_client) = configure_redis(&args).await?;
 
     // Check that we can bind to address before further initialization
     info!("Starting http on {}", args.http);
@@ -805,6 +762,60 @@ fn build_auth_backend(
             Ok(Either::Right(config))
         }
     }
+}
+
+async fn configure_redis(
+    args: &ProxyCliArgs,
+) -> anyhow::Result<(
+    Option<ConnectionWithCredentialsProvider>,
+    Option<ConnectionWithCredentialsProvider>,
+)> {
+    // TODO: untangle the config args
+    let regional_redis_client = match (args.redis_auth_type.as_str(), &args.redis_notifications) {
+        ("plain", redis_url) => match redis_url {
+            None => {
+                bail!("plain auth requires redis_notifications to be set");
+            }
+            Some(url) => {
+                Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url.clone()))
+            }
+        },
+        ("irsa", _) => match (&args.redis_host, args.redis_port) {
+            (Some(host), Some(port)) => Some(
+                ConnectionWithCredentialsProvider::new_with_credentials_provider(
+                    host.to_string(),
+                    port,
+                    elasticache::CredentialsProvider::new(
+                        args.aws_region.clone(),
+                        args.redis_cluster_name.clone(),
+                        args.redis_user_id.clone(),
+                    )
+                    .await,
+                ),
+            ),
+            (None, None) => {
+                // todo: upgrade to error?
+                warn!(
+                    "irsa auth requires redis-host and redis-port to be set, continuing without regional_redis_client"
+                );
+                None
+            }
+            _ => {
+                bail!("redis-host and redis-port must be specified together");
+            }
+        },
+        _ => {
+            bail!("unknown auth type given");
+        }
+    };
+
+    let redis_notifications_client = if let Some(url) = &args.redis_notifications {
+        Some(ConnectionWithCredentialsProvider::new_with_static_credentials(&**url))
+    } else {
+        regional_redis_client.clone()
+    };
+
+    Ok((regional_redis_client, redis_notifications_client))
 }
 
 #[cfg(test)]
