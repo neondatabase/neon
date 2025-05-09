@@ -2,7 +2,6 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 
 use super::node_ptr;
-use super::node_ptr::ChildOrValuePtr;
 use super::node_ptr::NodePtr;
 use crate::EpochPin;
 use crate::Value;
@@ -56,12 +55,11 @@ pub struct ReadLockedNodeRef<'e, V> {
     phantom: PhantomData<&'e EpochPin<'e>>,
 }
 
-pub(crate) enum ChildOrValue<'e, V> {
-    Child(NodeRef<'e, V>),
-    Value(*const V),
-}
-
 impl<'e, V: Value> ReadLockedNodeRef<'e, V> {
+    pub(crate) fn is_leaf(&self) -> bool {
+        self.ptr.is_leaf()
+    }
+
     pub(crate) fn is_full(&self) -> bool {
         self.ptr.is_full()
     }
@@ -78,41 +76,49 @@ impl<'e, V: Value> ReadLockedNodeRef<'e, V> {
         self.ptr.prefix_matches(key)
     }
 
-    pub(crate) fn find_child_or_value_or_restart(
+    pub(crate) fn find_child_or_restart(
         &self,
         key_byte: u8,
-    ) -> Result<Option<ChildOrValue<'e, V>>, ConcurrentUpdateError> {
-        let child_or_value = self.ptr.find_child_or_value(key_byte);
+    ) -> Result<Option<NodeRef<'e, V>>, ConcurrentUpdateError> {
+        let child_or_value = self.ptr.find_child(key_byte);
         self.ptr.lockword().check_or_restart(self.version)?;
 
         match child_or_value {
             None => Ok(None),
-            Some(ChildOrValuePtr::Value(vptr)) => Ok(Some(ChildOrValue::Value(vptr))),
-            Some(ChildOrValuePtr::Child(child_ptr)) => Ok(Some(ChildOrValue::Child(NodeRef {
+            Some(child_ptr) => Ok(Some(NodeRef {
                 ptr: child_ptr,
                 phantom: self.phantom,
-            }))),
+            })),
         }
     }
 
-    pub(crate) fn find_next_child_or_value_or_restart(
+    pub(crate) fn find_next_child_or_restart(
         &self,
         min_key_byte: u8,
-    ) -> Result<Option<(u8, ChildOrValue<'e, V>)>, ConcurrentUpdateError> {
-        let child_or_value = self.ptr.find_next_child_or_value(min_key_byte);
+    ) -> Result<Option<(u8, NodeRef<'e, V>)>, ConcurrentUpdateError> {
+        let child_or_value = self.ptr.find_next_child(min_key_byte);
         self.ptr.lockword().check_or_restart(self.version)?;
 
         match child_or_value {
             None => Ok(None),
-            Some((k, ChildOrValuePtr::Value(vptr))) => Ok(Some((k, ChildOrValue::Value(vptr)))),
-            Some((k, ChildOrValuePtr::Child(child_ptr))) => Ok(Some((
+            Some((k, child_ptr)) => Ok(Some((
                 k,
-                ChildOrValue::Child(NodeRef {
+                NodeRef {
                     ptr: child_ptr,
                     phantom: self.phantom,
-                }),
+                },
             ))),
         }
+    }
+
+    pub(crate) fn get_leaf_value_ptr(&self) -> Result<*const V, ConcurrentUpdateError> {
+        let result = self.ptr.get_leaf_value();
+        self.ptr.lockword().check_or_restart(self.version)?;
+
+        // Extend the lifetime.
+        let result = std::ptr::from_ref(result);
+
+        Ok(result)
     }
 
     pub(crate) fn upgrade_to_write_lock_or_restart(
@@ -142,10 +148,6 @@ pub struct WriteLockedNodeRef<'e, V> {
 }
 
 impl<'e, V: Value> WriteLockedNodeRef<'e, V> {
-    pub(crate) fn is_leaf(&self) -> bool {
-        self.ptr.is_leaf()
-    }
-
     pub(crate) fn write_unlock(mut self) {
         self.ptr.lockword().write_unlock();
         self.ptr = NodePtr::null();
@@ -168,12 +170,8 @@ impl<'e, V: Value> WriteLockedNodeRef<'e, V> {
         self.ptr.insert_child(key_byte, child)
     }
 
-    pub(crate) fn insert_value(&mut self, key_byte: u8, value: V) {
-        self.ptr.insert_value(key_byte, value)
-    }
-
-    pub(crate) fn delete_value(&mut self, key_byte: u8) {
-        self.ptr.delete_value(key_byte)
+    pub(crate) fn get_leaf_value_mut(&mut self) -> &mut V {
+        self.ptr.get_leaf_value_mut()
     }
 
     pub(crate) fn grow<'a, A>(
@@ -198,6 +196,10 @@ impl<'e, V: Value> WriteLockedNodeRef<'e, V> {
 
     pub(crate) fn replace_child(&mut self, key_byte: u8, replacement: NodePtr<V>) {
         self.ptr.replace_child(key_byte, replacement);
+    }
+
+    pub(crate) fn delete_child(&mut self, key_byte: u8) {
+        self.ptr.delete_child(key_byte);
     }
 }
 
@@ -227,10 +229,6 @@ where
 {
     pub(crate) fn insert_old_child(&mut self, key_byte: u8, child: &WriteLockedNodeRef<V>) {
         self.ptr.insert_child(key_byte, child.as_ptr())
-    }
-
-    pub(crate) fn insert_value(&mut self, key_byte: u8, value: V) {
-        self.ptr.insert_value(key_byte, value)
     }
 
     pub(crate) fn into_ptr(mut self) -> NodePtr<V> {
@@ -279,6 +277,7 @@ where
 
 pub(crate) fn new_leaf<'a, V, A>(
     prefix: &[u8],
+    value: V,
     allocator: &'a A,
 ) -> Result<NewNodeRef<'a, V, A>, OutOfMemoryError>
 where
@@ -286,7 +285,7 @@ where
     A: ArtAllocator<V>,
 {
     Ok(NewNodeRef {
-        ptr: node_ptr::new_leaf(prefix, allocator),
+        ptr: node_ptr::new_leaf(prefix, value, allocator),
         allocator,
         extra_nodes: Vec::new(),
     })

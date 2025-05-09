@@ -24,15 +24,17 @@
 
 use std::mem::MaybeUninit;
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use utils::lsn::Lsn;
+use utils::lsn::{Lsn, AtomicLsn};
 use zerocopy::FromBytes;
 
 use crate::file_cache::{CacheBlock, FileCache};
+use crate::file_cache::INVALID_CACHE_BLOCK;
 use pageserver_page_api::model::RelTag;
 
 use neonart;
+use neonart::UpdateAction;
 use neonart::TreeInitStruct;
 use neonart::TreeIterator;
 
@@ -123,36 +125,25 @@ impl<'t> IntegratedCacheInitStruct<'t> {
     }
 }
 
-#[derive(Clone)]
 enum TreeEntry {
     Rel(RelEntry),
     Block(BlockEntry),
 }
 
 struct BlockEntry {
-    lw_lsn: Lsn,
-    cache_block: Option<CacheBlock>,
+    lw_lsn: AtomicLsn,
+    cache_block: AtomicU64,
 
-    io_in_progress: AtomicBool,
+    pinned: AtomicBool,
 
     // 'referenced' bit for the clock algorithm
     referenced: AtomicBool,
 }
 
-impl Clone for BlockEntry {
-    fn clone(&self) -> BlockEntry {
-        BlockEntry {
-            lw_lsn: self.lw_lsn,
-            cache_block: self.cache_block,
-            referenced: AtomicBool::new(self.referenced.load(Ordering::Relaxed)),
-        }
-    }
-}
-
-#[derive(Clone, Default)]
 struct RelEntry {
     /// cached size of the relation
-    nblocks: Option<u32>,
+    /// u32::MAX means 'not known' (that's InvalidBlockNumber in Postgres)
+    nblocks: AtomicU32,
 }
 
 #[derive(
@@ -272,7 +263,8 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
             };
             block_entry.referenced.store(true, Ordering::Relaxed);
 
-            if let Some(cache_block) = block_entry.cache_block {
+            let cache_block = block_entry.cache_block.load(Ordering::Relaxed);
+            if cache_block != INVALID_CACHE_BLOCK {
                 self.file_cache
                     .as_ref()
                     .unwrap()
@@ -280,7 +272,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                     .await?;
                 Ok(CacheResult::Found(()))
             } else {
-                Ok(CacheResult::NotFound(block_entry.lw_lsn))
+                Ok(CacheResult::NotFound(block_entry.lw_lsn.load()))
             }
         } else {
             let lsn = Lsn(self.global_lw_lsn.load(Ordering::Relaxed));
@@ -305,10 +297,12 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
             // in cache.
             block_entry.referenced.store(true, Ordering::Relaxed);
 
-            if let Some(_cache_block) = block_entry.cache_block {
+            let cache_block = block_entry.cache_block.load(Ordering::Relaxed);
+
+            if cache_block != INVALID_CACHE_BLOCK {
                 Ok(CacheResult::Found(()))
             } else {
-                Ok(CacheResult::NotFound(block_entry.lw_lsn))
+                Ok(CacheResult::NotFound(block_entry.lw_lsn.load()))
             }
         } else {
             let lsn = Lsn(self.global_lw_lsn.load(Ordering::Relaxed));
@@ -341,12 +335,19 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 
     pub fn remember_rel_size(&'t self, rel: &RelTag, nblocks: u32) {
         let w = self.cache_tree.start_write();
-        w.insert(
-            &TreeKey::from(rel),
-            TreeEntry::Rel(RelEntry {
-                nblocks: Some(nblocks),
-            }),
-        );
+        w.update_with_fn(&TreeKey::from(rel), |existing| {
+            match existing {
+                None => UpdateAction::Insert(
+                    TreeEntry::Rel(RelEntry {
+                        nblocks: AtomicU32::new(nblocks),
+                    })),
+                Some(TreeEntry::Block(_)) => panic!("unexpected tree entry type for rel key"),
+                Some(TreeEntry::Rel(rel)) => {
+                    rel.nblocks.store(nblocks, Ordering::Relaxed);
+                    UpdateAction::Nothing
+                }
+            }
+        });
     }
 
     /// Remember the given page contents in the cache.
@@ -356,58 +357,159 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         block_number: u32,
         src: impl uring_common::buf::IoBuf + Send + Sync,
         lw_lsn: Lsn,
+        is_write: bool,
     ) {
-        if let Some(file_cache) = self.file_cache.as_ref() {
+        let key = TreeKey::from((rel, block_number));
+
+        // FIXME: make this work when file cache is disabled. Or make it mandatory
+        let file_cache = self.file_cache.as_ref().unwrap();
+
+        if is_write {
+            // there should be no concurrent IOs. If a backend tries to read the page
+            // at the same time, they may get a torn write. That's the same as with
+            // regular POSIX filesystem read() and write()
+
+            // First check if we have a block in cache already
             let w = self.cache_tree.start_write();
 
-            let key = TreeKey::from((rel, block_number));
-
-            let mut reserved_cache_block = loop {
-                if let Some(x) = file_cache.alloc_block() {
-                    break Some(x);
-                }
-                if let Some(x) = self.try_evict_one_cache_block() {
-                    break Some(x);
-                }
-            };
-
-            let mut cache_block = None;
+            let mut old_cache_block = None;
+            let mut found_existing = false;
 
             w.update_with_fn(&key, |existing| {
                 if let Some(existing) = existing {
-                    let mut block_entry = if let TreeEntry::Block(e) = existing.clone() {
+                    let block_entry = if let TreeEntry::Block(e) = existing {
                         e
                     } else {
                         panic!("unexpected tree entry type for block key");
                     };
-                    block_entry.referenced.store(true, Ordering::Relaxed);
-                    block_entry.lw_lsn = lw_lsn;
-                    if block_entry.cache_block.is_none() {
-                        block_entry.cache_block = reserved_cache_block.take();
+
+                    found_existing = true;
+
+                    // Prevent this entry from being evicted
+                    let was_pinned = block_entry.pinned.swap(true, Ordering::Relaxed);
+                    if was_pinned {
+                        // this is unexpected, because the caller has obtained the io-in-progress lock,
+                        // so no one else should try to modify the page at the same time.
+                        panic!("block entry was unexpectedly pinned");
                     }
-                    cache_block = block_entry.cache_block;
-                    Some(TreeEntry::Block(block_entry))
-                } else {
-                    cache_block = reserved_cache_block.take();
-                    Some(TreeEntry::Block(BlockEntry {
-                        lw_lsn: lw_lsn,
-                        cache_block: cache_block,
-                        referenced: AtomicBool::new(true),
-                    }))
+
+                    let cache_block = block_entry.cache_block.load(Ordering::Relaxed);
+                    old_cache_block = if cache_block != INVALID_CACHE_BLOCK {
+                        Some(cache_block)
+                    } else {
+                        None
+                    };
+                }
+                // if there was no existing entry, we will insert one, but not yet
+                UpdateAction::Nothing
+            });
+
+            // Allocate a new block if required
+            let cache_block = old_cache_block.unwrap_or_else(|| {
+                loop {
+                    if let Some(x) = file_cache.alloc_block() {
+                        break x;
+                    }
+                    if let Some(x) = self.try_evict_one_cache_block() {
+                        break x;
+                    }
                 }
             });
 
-            // If we didn't need to block we reserved, put it back to the free list
-            if let Some(x) = reserved_cache_block {
-                file_cache.dealloc_block(x);
-            }
-
-            let cache_block = cache_block.unwrap();
+            // Write the page to the cache file
             file_cache
                 .write_block(cache_block, src)
                 .await
                 .expect("error writing to cache");
-        };
+            // FIXME: handle errors gracefully.
+            // FIXME: unpin the block entry on error
+
+            // Update the block entry
+            let w = self.cache_tree.start_write();
+            w.update_with_fn(&key, |existing| {
+                assert_eq!(found_existing, existing.is_some());
+                if let Some(existing) = existing {
+                    let block_entry = if let TreeEntry::Block(e) = existing {
+                        e
+                    } else {
+                        panic!("unexpected tree entry type for block key");
+                    };
+
+                    // Update the cache block
+                    let old_blk = block_entry.cache_block.compare_exchange(INVALID_CACHE_BLOCK, cache_block, Ordering::Relaxed, Ordering::Relaxed);
+                    assert!(old_blk == Ok(INVALID_CACHE_BLOCK) || old_blk == Err(cache_block));
+
+                    block_entry.lw_lsn.store(lw_lsn);
+
+                    block_entry.referenced.store(true, Ordering::Relaxed);
+
+                    let was_pinned = block_entry.pinned.swap(false, Ordering::Relaxed);
+                    assert!(was_pinned);
+                    UpdateAction::Nothing
+                }
+                else
+                {
+                    UpdateAction::Insert(TreeEntry::Block(BlockEntry {
+                        lw_lsn: AtomicLsn::new(lw_lsn.0),
+                        cache_block: AtomicU64::new(cache_block),
+                        pinned: AtomicBool::new(false),
+                        referenced: AtomicBool::new(true),
+                    }))
+                }
+            });
+        } else {
+            // !is_write
+            //
+            // We can assume that it doesn't already exist, because the
+            // caller is assumed to have already checked it, and holds
+            // the io-in-progress lock. (The BlockEntry might exist, but no cache block)
+            
+            // Allocate a new block first
+            let cache_block = {
+                loop {
+                    if let Some(x) = file_cache.alloc_block() {
+                        break x;
+                    }
+                    if let Some(x) = self.try_evict_one_cache_block() {
+                        break x;
+                    }
+                }
+            };
+
+            // Write the page to the cache file
+            file_cache
+                .write_block(cache_block, src)
+                .await
+                .expect("error writing to cache");
+            // FIXME: handle errors gracefully.
+
+            let w = self.cache_tree.start_write();
+
+            w.update_with_fn(&key, |existing| {
+                if let Some(existing) = existing {
+                    let block_entry = if let TreeEntry::Block(e) = existing {
+                        e
+                    } else {
+                        panic!("unexpected tree entry type for block key");
+                    };
+
+                    assert!(!block_entry.pinned.load(Ordering::Relaxed));
+
+                    let old_cache_block = block_entry.cache_block.swap(cache_block, Ordering::Relaxed);
+                    if old_cache_block != INVALID_CACHE_BLOCK {
+                        panic!("remember_page called in !is_write mode, but page is already cached at blk {}", old_cache_block);
+                    }
+                    UpdateAction::Nothing
+                } else {
+                    UpdateAction::Insert(TreeEntry::Block(BlockEntry {
+                        lw_lsn: AtomicLsn::new(lw_lsn.0),
+                        cache_block: AtomicU64::new(cache_block),
+                        pinned: AtomicBool::new(false),
+                        referenced: AtomicBool::new(true),
+                    }))
+                }
+            });
+        }
     }
 
     /// Forget information about given relation in the cache. (For DROP TABLE and such)
@@ -447,17 +549,26 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                     if !blk_entry.referenced.swap(false, Ordering::Relaxed) {
                         // Evict this
                         let w = self.cache_tree.start_write();
-                        let old = w.remove(&k);
-                        if let Some(TreeEntry::Block(old)) = old {
-                            let _ = self
-                                .global_lw_lsn
-                                .fetch_max(old.lw_lsn.0, Ordering::Relaxed);
-                            if let Some(cache_block) = old.cache_block {
-                                return Some(cache_block);
+
+                        let mut evicted_cache_block = None;
+                        w.update_with_fn(&k, |old| {
+                            match old {
+                                None => UpdateAction::Nothing,
+                                Some(TreeEntry::Rel(_)) => panic!("unexepcted Rel entry"),
+                                Some(TreeEntry::Block(old)) => {
+                                    let _ = self
+                                    .global_lw_lsn
+                                    .fetch_max(old.lw_lsn.load().0, Ordering::Relaxed);
+                                    let cache_block = old.cache_block.load(Ordering::Relaxed);
+                                    if cache_block != INVALID_CACHE_BLOCK {
+                                        evicted_cache_block = Some(cache_block);
+                                    }
+                                    // TODO: we don't evict the entry, just the block. Does it make
+                                    // sense to keep the entry?
+                                    UpdateAction::Nothing
+                                }
                             }
-                        } else {
-                            assert!(old.is_none());
-                        }
+                        });
                     }
                 }
             }
@@ -479,7 +590,8 @@ fn get_rel_size<'t>(r: &neonart::TreeReadGuard<TreeKey, TreeEntry>, rel: &RelTag
             panic!("unexpected tree entry type for rel key");
         };
 
-        if let Some(nblocks) = rel_entry.nblocks {
+        let nblocks = rel_entry.nblocks.load(Ordering::Relaxed);
+        if nblocks != u32::MAX {
             Some(nblocks)
         } else {
             None
@@ -526,7 +638,12 @@ impl<'e> BackendCacheReadOp<'e> {
             };
             block_entry.referenced.store(true, Ordering::Relaxed);
 
-            block_entry.cache_block
+            let cache_block = block_entry.cache_block.load(Ordering::Relaxed);
+            if cache_block != INVALID_CACHE_BLOCK {
+                Some(cache_block)
+            } else {
+                None
+            }
         } else {
             None
         }

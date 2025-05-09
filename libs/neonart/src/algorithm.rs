@@ -6,12 +6,12 @@ use std::vec::Vec;
 
 use crate::algorithm::lock_and_version::ConcurrentUpdateError;
 use crate::algorithm::node_ptr::MAX_PREFIX_LEN;
-use crate::algorithm::node_ref::ChildOrValue;
 use crate::algorithm::node_ref::{NewNodeRef, NodeRef, ReadLockedNodeRef, WriteLockedNodeRef};
 use crate::allocator::OutOfMemoryError;
 
 use crate::GarbageQueueFullError;
 use crate::TreeWriteGuard;
+use crate::UpdateAction;
 use crate::allocator::ArtAllocator;
 use crate::epoch::EpochPin;
 use crate::{Key, Value};
@@ -89,7 +89,7 @@ pub(crate) fn update_fn<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>, F>(
     root: RootPtr<V>,
     guard: &'g mut TreeWriteGuard<'e, K, V, A>,
 ) where
-    F: FnOnce(Option<&V>) -> Option<V>,
+    F: FnOnce(Option<&V>) -> UpdateAction<V>,
 {
     let value_fn_cell = std::cell::Cell::new(Some(value_fn));
     loop {
@@ -108,7 +108,6 @@ pub(crate) fn update_fn<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>, F>(
         ) {
             Ok(()) => break,
             Err(ArtError::ConcurrentUpdate) => {
-                eprintln!("retrying");
                 continue; // retry
             }
             Err(ArtError::OutOfMemory) => {
@@ -150,21 +149,25 @@ fn lookup_recurse<'e, V: Value>(
         rnode.read_unlock_or_restart()?;
         return Ok(None);
     };
+
+    if rnode.is_leaf() {
+        assert_eq!(key.len(), prefix_len);
+        let vptr = rnode.get_leaf_value_ptr()?;
+        // safety: It's OK to return a ref of the pointer because we checked the version
+        // and the lifetime of 'epoch_pin' enforces that the reference is only accessible
+        // as long as the epoch is pinned.
+        let v = unsafe { vptr.as_ref().unwrap() };
+        return Ok(Some(v));
+    }
+
     let key = &key[prefix_len..];
 
     // find child (or leaf value)
-    let next_node = rnode.find_child_or_value_or_restart(key[0])?;
+    let next_node = rnode.find_child_or_restart(key[0])?;
 
     match next_node {
         None => Ok(None), // key not found
-        Some(ChildOrValue::Value(vptr)) => {
-            // safety: It's OK to return a ref of the pointer because we checked the version
-            // and the lifetime of 'epoch_pin' enforces that the reference is only accessible
-            // as long as the epoch is pinned.
-            let v = unsafe { vptr.as_ref().unwrap() };
-            Ok(Some(v))
-        }
-        Some(ChildOrValue::Child(v)) => lookup_recurse(&key[1..], v, Some(rnode), epoch_pin),
+        Some(child) => lookup_recurse(&key[1..], child, Some(rnode), epoch_pin),
     }
 }
 
@@ -179,23 +182,36 @@ fn next_recurse<'e, V: Value>(
     if prefix.len() != 0 {
         path.extend_from_slice(prefix);
     }
-    assert!(path.len() < min_key.len());
 
     use std::cmp::Ordering;
-    let mut min_key_byte = match path.as_slice().cmp(&min_key[0..path.len()]) {
-        Ordering::Less => {
-            rnode.read_unlock_or_restart()?;
-            return Ok(None);
-        }
+    let comparison = path.as_slice().cmp(&min_key[0..path.len()]);
+    if comparison == Ordering::Less {
+        rnode.read_unlock_or_restart()?;
+        return Ok(None);
+    }
+
+    if rnode.is_leaf() {
+        assert_eq!(path.len(), min_key.len());
+        let vptr = rnode.get_leaf_value_ptr()?;
+        // safety: It's OK to return a ref of the pointer because we checked the version
+        // and the lifetime of 'epoch_pin' enforces that the reference is only accessible
+        // as long as the epoch is pinned.
+        let v = unsafe { vptr.as_ref().unwrap() };
+        return Ok(Some(v));
+    }
+
+    let mut min_key_byte = match comparison {
+        Ordering::Less => unreachable!(), // checked this above already
         Ordering::Equal => min_key[path.len()],
         Ordering::Greater => 0,
     };
+
     loop {
-        match rnode.find_next_child_or_value_or_restart(min_key_byte)? {
+        match rnode.find_next_child_or_restart(min_key_byte)? {
             None => {
                 return Ok(None);
             }
-            Some((key_byte, ChildOrValue::Child(child_ref))) => {
+            Some((key_byte, child_ref)) => {
                 let path_len = path.len();
                 path.push(key_byte);
                 let result = next_recurse(min_key, path, child_ref, epoch_pin)?;
@@ -207,15 +223,6 @@ fn next_recurse<'e, V: Value>(
                 }
                 path.truncate(path_len);
                 min_key_byte = key_byte + 1;
-            }
-            Some((key_byte, ChildOrValue::Value(vptr))) => {
-                path.push(key_byte);
-                assert_eq!(path.len(), min_key.len());
-                // safety: It's OK to return a ref of the pointer because we checked the version
-                // and the lifetime of 'epoch_pin' enforces that the reference is only accessible
-                // as long as the epoch is pinned.
-                let v = unsafe { vptr.as_ref().unwrap() };
-                return Ok(Some(v));
             }
         }
     }
@@ -232,7 +239,7 @@ pub(crate) fn update_recurse<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>, F>(
     orig_key: &[u8],
 ) -> Result<(), ArtError>
 where
-    F: FnOnce(Option<&V>) -> Option<V>,
+    F: FnOnce(Option<&V>) -> UpdateAction<V>,
 {
     let rnode = node.read_lock_or_restart()?;
 
@@ -242,8 +249,14 @@ where
         let mut wparent = rparent.upgrade_to_write_lock_or_restart()?;
         let mut wnode = rnode.upgrade_to_write_lock_or_restart()?;
 
-        if let Some(new_value) = value_fn(None) {
-            insert_split_prefix(key, new_value, &mut wnode, &mut wparent, parent_key, guard)?;
+        match value_fn(None) {
+            UpdateAction::Nothing => {}
+            UpdateAction::Insert(new_value) => {
+                insert_split_prefix(key, new_value, &mut wnode, &mut wparent, parent_key, guard)?;
+            }
+            UpdateAction::Remove => {
+                panic!("unexpected Remove action on insertion");
+            }
         }
         wnode.write_unlock();
         wparent.write_unlock();
@@ -253,7 +266,34 @@ where
     let key = &key[prefix_match_len as usize..];
     let level = level + prefix_match_len as usize;
 
-    let next_node = rnode.find_child_or_value_or_restart(key[0])?;
+    if rnode.is_leaf() {
+        assert_eq!(key.len(), 0);
+        let (rparent, parent_key) = rparent.expect("root cannot be leaf");
+        let mut wparent = rparent.upgrade_to_write_lock_or_restart()?;
+        let mut wnode = rnode.upgrade_to_write_lock_or_restart()?;
+
+        // safety: Now that we have acquired the write lock, we have exclusive access to the
+        // value. XXX: There might be concurrent reads though?
+        let value_mut = wnode.get_leaf_value_mut();
+
+        match value_fn(Some(value_mut)) {
+            UpdateAction::Nothing => {}
+            UpdateAction::Insert(_) => panic!("cannot insert over existing value"),
+            UpdateAction::Remove => {
+                // TODO: Shrink the node
+                // TODO: If the parent becomes empty, unlink it from grandparent
+                // TODO: If parent has only one child left, merge it with the child, extending its
+                // prefix
+                wparent.delete_child(parent_key);
+            }
+        }
+        wnode.write_unlock();
+        wparent.write_unlock();
+
+        return Ok(());
+    }
+
+    let next_node = rnode.find_child_or_restart(key[0])?;
 
     if next_node.is_none() {
         if rnode.is_full() {
@@ -261,63 +301,53 @@ where
             let mut wparent = rparent.upgrade_to_write_lock_or_restart()?;
             let wnode = rnode.upgrade_to_write_lock_or_restart()?;
 
-            if let Some(new_value) = value_fn(None) {
-                insert_and_grow(key, new_value, &wnode, &mut wparent, parent_key, guard)?;
-                wnode.write_unlock_obsolete();
-                wparent.write_unlock();
-            } else {
-                wnode.write_unlock();
-                wparent.write_unlock();
-            }
+            match value_fn(None) {
+                UpdateAction::Nothing => {
+                    wnode.write_unlock();
+                    wparent.write_unlock();
+                }
+                UpdateAction::Insert(new_value) => {
+                    insert_and_grow(key, new_value, &wnode, &mut wparent, parent_key, guard)?;
+                    wnode.write_unlock_obsolete();
+                    wparent.write_unlock();
+                }
+                UpdateAction::Remove => {
+                    panic!("unexpected Remove action on insertion");
+                }
+            };
         } else {
             let mut wnode = rnode.upgrade_to_write_lock_or_restart()?;
             if let Some((rparent, _)) = rparent {
                 rparent.read_unlock_or_restart()?;
             }
-            if let Some(new_value) = value_fn(None) {
-                insert_to_node(&mut wnode, key, new_value, guard)?;
-            }
+            match value_fn(None) {
+                UpdateAction::Nothing => {}
+                UpdateAction::Insert(new_value) => {
+                    insert_to_node(&mut wnode, key, new_value, guard)?;
+                }
+                UpdateAction::Remove => {
+                    panic!("unexpected Remove action on insertion");
+                }
+            };
             wnode.write_unlock();
         }
         return Ok(());
     } else {
-        let next_node = next_node.unwrap(); // checked above it's not None
+        let next_child = next_node.unwrap(); // checked above it's not None
         if let Some((rparent, _)) = rparent {
             rparent.read_unlock_or_restart()?;
         }
 
-        match next_node {
-            ChildOrValue::Value(existing_value_ptr) => {
-                assert!(key.len() == 1);
-                let mut wnode = rnode.upgrade_to_write_lock_or_restart()?;
-
-                // safety: Now that we have acquired the write lock, we have exclusive access to the
-                // value
-                let vmut = unsafe { existing_value_ptr.cast_mut().as_mut() }.unwrap();
-                if let Some(new_value) = value_fn(Some(vmut)) {
-                    *vmut = new_value;
-                } else {
-                    // TODO: Shrink the node
-                    // TODO: If the node becomes empty, unlink it from parent
-                    wnode.delete_value(key[0]);
-                }
-                wnode.write_unlock();
-
-                Ok(())
-            }
-            ChildOrValue::Child(next_child) => {
-                // recurse to next level
-                update_recurse(
-                    &key[1..],
-                    value_fn,
-                    next_child,
-                    Some((rnode, key[0])),
-                    guard,
-                    level + 1,
-                    orig_key,
-                )
-            }
-        }
+        // recurse to next level
+        update_recurse(
+            &key[1..],
+            value_fn,
+            next_child,
+            Some((rnode, key[0])),
+            guard,
+            level + 1,
+            orig_key,
+        )
     }
 }
 
@@ -351,10 +381,19 @@ fn dump_recurse<'e, V: Value + std::fmt::Debug>(
         path.push(PathElement::Prefix(Vec::from(prefix)));
     }
 
+    if rnode.is_leaf() {
+        let vptr = rnode.get_leaf_value_ptr()?;
+        // safety: It's OK to return a ref of the pointer because we checked the version
+        // and the lifetime of 'epoch_pin' enforces that the reference is only accessible
+        // as long as the epoch is pinned.
+        let val = unsafe { vptr.as_ref().unwrap() };
+        eprintln!("{} {:?}: {:?}", indent, path, val);
+    }
+
     for key_byte in 0..u8::MAX {
-        match rnode.find_child_or_value_or_restart(key_byte)? {
+        match rnode.find_child_or_restart(key_byte)? {
             None => continue,
-            Some(ChildOrValue::Child(child_ref)) => {
+            Some(child_ref) => {
                 let rchild = child_ref.read_lock_or_restart()?;
                 eprintln!(
                     "{} {:?}, {}: prefix {:?}",
@@ -368,11 +407,6 @@ fn dump_recurse<'e, V: Value + std::fmt::Debug>(
                 child_path.push(PathElement::KeyByte(key_byte));
 
                 dump_recurse(&child_path, child_ref, epoch_pin, level + 1)?;
-            }
-            Some(ChildOrValue::Value(val)) => {
-                eprintln!("{} {:?}, {}: {:?}", indent, path, key_byte, unsafe {
-                    val.as_ref().unwrap()
-                });
             }
         }
     }
@@ -429,12 +463,8 @@ fn insert_to_node<'e, K: Key, V: Value, A: ArtAllocator<V>>(
     value: V,
     guard: &'e TreeWriteGuard<K, V, A>,
 ) -> Result<(), OutOfMemoryError> {
-    if wnode.is_leaf() {
-        wnode.insert_value(key[0], value);
-    } else {
-        let value_child = allocate_node_for_value(&key[1..], value, guard.tree_writer.allocator)?;
-        wnode.insert_child(key[0], value_child.into_ptr());
-    }
+    let value_child = allocate_node_for_value(&key[1..], value, guard.tree_writer.allocator)?;
+    wnode.insert_child(key[0], value_child.into_ptr());
     Ok(())
 }
 
@@ -448,13 +478,10 @@ fn insert_and_grow<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>>(
     guard: &'g mut TreeWriteGuard<'e, K, V, A>,
 ) -> Result<(), ArtError> {
     let mut bigger_node = wnode.grow(guard.tree_writer.allocator)?;
-    if wnode.is_leaf() {
-        bigger_node.insert_value(key[0], value);
-    } else {
-        // FIXME: deallocate 'bigger_node' on OOM
-        let value_child = allocate_node_for_value(&key[1..], value, guard.tree_writer.allocator)?;
-        bigger_node.insert_new_child(key[0], value_child);
-    }
+
+    // FIXME: deallocate 'bigger_node' on OOM
+    let value_child = allocate_node_for_value(&key[1..], value, guard.tree_writer.allocator)?;
+    bigger_node.insert_new_child(key[0], value_child);
 
     // Replace the pointer in the parent
     parent.replace_child(parent_key_byte, bigger_node.into_ptr());
@@ -464,17 +491,16 @@ fn insert_and_grow<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>>(
     Ok(())
 }
 
-// Allocate a new leaf node to hold 'value'. If key is long, we may need to allocate
-// new internal nodes to hold it too
+// Allocate a new leaf node to hold 'value'. If the key is long, we
+// may need to allocate new internal nodes to hold it too
 fn allocate_node_for_value<'a, V: Value, A: ArtAllocator<V>>(
     key: &[u8],
     value: V,
     allocator: &'a A,
 ) -> Result<NewNodeRef<'a, V, A>, OutOfMemoryError> {
-    let mut prefix_off = key.len().saturating_sub(MAX_PREFIX_LEN + 1);
+    let mut prefix_off = key.len().saturating_sub(MAX_PREFIX_LEN);
 
-    let mut leaf_node = node_ref::new_leaf(&key[prefix_off..key.len() - 1], allocator)?;
-    leaf_node.insert_value(*key.last().unwrap(), value);
+    let leaf_node = node_ref::new_leaf(&key[prefix_off..key.len()], value, allocator)?;
 
     let mut node = leaf_node;
     while prefix_off > 0 {

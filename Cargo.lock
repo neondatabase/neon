@@ -1349,6 +1349,7 @@ dependencies = [
  "axum 0.8.1",
  "bytes",
  "cbindgen",
+ "clashmap",
  "http 1.1.0",
  "libc",
  "metrics",

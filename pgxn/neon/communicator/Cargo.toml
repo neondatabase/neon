@@ -9,6 +9,7 @@ crate-type = ["staticlib"]
 [dependencies]
 axum.workspace = true
 bytes.workspace = true
+clashmap.workspace = true
 http.workspace = true
 libc.workspace = true
 nix.workspace = true

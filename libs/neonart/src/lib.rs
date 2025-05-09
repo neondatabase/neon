@@ -20,8 +20,7 @@
 //!
 //! - All keys have the same length
 //!
-//! - Multi-value leaves. The values are stored directly in one of the four different leaf node
-//!   types.
+//! - Single-value leaves.
 //!
 //! - For collapsing inner nodes, we use the Pessimistic approach, where each inner node stores a
 //!   variable length "prefix", which stores the keys of all the one-way nodes which have been
@@ -144,7 +143,7 @@ pub use allocator::ArtMultiSlabAllocator;
 
 /// Fixed-length key type.
 ///
-pub trait Key: Clone + Debug {
+pub trait Key: Debug {
     const KEY_LEN: usize;
 
     fn as_bytes(&self) -> &[u8];
@@ -154,7 +153,8 @@ pub trait Key: Clone + Debug {
 ///
 /// Values need to be Cloneable, because when a node "grows", the value is copied to a new node and
 /// the old sticks around until all readers that might see the old value are gone.
-pub trait Value: Clone {}
+// fixme obsolete, no longer needs Clone
+pub trait Value {}
 
 const MAX_GARBAGE: usize = 1024;
 
@@ -277,7 +277,7 @@ impl<'a, 't: 'a, K: Key, V: Value, A: ArtAllocator<V>> TreeInitStruct<'t, K, V, 
     }
 }
 
-impl<'t, K: Key + Clone, V: Value, A: ArtAllocator<V>> TreeWriteAccess<'t, K, V, A> {
+impl<'t, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteAccess<'t, K, V, A> {
     pub fn start_write<'g>(&'t self) -> TreeWriteGuard<'g, K, V, A>
     where
         't: 'g,
@@ -299,7 +299,7 @@ impl<'t, K: Key + Clone, V: Value, A: ArtAllocator<V>> TreeWriteAccess<'t, K, V,
     }
 }
 
-impl<'t, K: Key + Clone, V: Value> TreeReadAccess<'t, K, V> {
+impl<'t, K: Key, V: Value> TreeReadAccess<'t, K, V> {
     pub fn start_read(&'t self) -> TreeReadGuard<'t, K, V> {
         TreeReadGuard {
             tree: &self.tree,
@@ -340,23 +340,58 @@ where
     created_garbage: bool,
 }
 
-impl<'t, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteGuard<'t, K, V, A> {
+pub enum UpdateAction<V> {
+    Nothing,
+    Insert(V),
+    Remove,
+}
+
+impl<'e, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteGuard<'e, K, V, A> {
     /// Get a value
-    pub fn get(&'t mut self, key: &K) -> Option<&'t V> {
+    pub fn get(&'e mut self, key: &K) -> Option<&'e V> {
         algorithm::search(key, self.tree_writer.tree.root, &self.epoch_pin)
     }
 
     /// Insert a value
-    pub fn insert(self, key: &K, value: V) {
-        self.update_with_fn(key, |_| Some(value))
+    pub fn insert(self, key: &K, value: V) -> Result<(), ()> {
+        let mut success = None;
+
+        self.update_with_fn(key, |existing| {
+            if let Some(_) = existing {
+                success = Some(false);
+                UpdateAction::Nothing
+            } else {
+                success = Some(true);
+                UpdateAction::Insert(value)
+            }
+        });
+        if success.expect("value_fn not called") {
+            Ok(())
+        } else {
+            Err(())
+        }
     }
 
-    /// Remove value
-    pub fn remove(self, key: &K) -> Option<V> {
+    /// Remove value. Returns true if it existed
+    pub fn remove(self, key: &K) -> bool
+    {
+        let mut result = false;
+        self.update_with_fn(key, |existing| {
+            result = existing.is_some();
+            UpdateAction::Remove
+        });
+        result
+    }
+
+    /// Try to remove value and return the old value.
+    pub fn remove_and_return(self, key: &K) -> Option<V>
+    where
+        V: Clone,
+    {
         let mut old = None;
         self.update_with_fn(key, |existing| {
             old = existing.cloned();
-            None
+            UpdateAction::Remove
         });
         old
     }
@@ -366,10 +401,10 @@ impl<'t, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteGuard<'t, K, V, A> {
     /// The function is passed a reference to the existing value, if any. If the function
     /// returns None, the value is removed from the tree (or if there was no existing value,
     /// does nothing). If the function returns Some, the existing value is replaced, of if there
-    /// was no existing value, it is inserted.
+    /// was no existing value, it is inserted. FIXME: update comment
     pub fn update_with_fn<F>(mut self, key: &K, value_fn: F)
     where
-        F: FnOnce(Option<&V>) -> Option<V>,
+        F: FnOnce(Option<&V>) -> UpdateAction<V>,
     {
         algorithm::update_fn(key, value_fn, self.tree_writer.tree.root, &mut self);
 
@@ -511,12 +546,12 @@ fn increment_key(key: &mut [u8]) -> bool {
 }
 
 // Debugging functions
-impl<'t, K: Key, V: Value + Debug> TreeReadGuard<'t, K, V> {
+impl<'e, K: Key, V: Value + Debug> TreeReadGuard<'e, K, V> {
     pub fn dump(&mut self) {
         algorithm::dump_tree(self.tree.root, &self.epoch_pin)
     }
 }
-impl<'t, K: Key, V: Value + Debug> TreeWriteGuard<'t, K, V, ArtMultiSlabAllocator<'t, V>> {
+impl<'e, K: Key, V: Value + Debug> TreeWriteGuard<'e, K, V, ArtMultiSlabAllocator<'e, V>> {
     pub fn get_statistics(&self) -> ArtTreeStatistics {
         self.tree_writer.allocator.get_statistics()
     }

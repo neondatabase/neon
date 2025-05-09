@@ -20,6 +20,8 @@ use tokio::task::spawn_blocking;
 
 pub type CacheBlock = u64;
 
+pub const INVALID_CACHE_BLOCK: CacheBlock = u64::MAX;
+
 pub struct FileCache {
     file: Arc<File>,
 
@@ -39,10 +41,7 @@ struct FreeList {
 }
 
 impl FileCache {
-    pub fn new(
-        file_cache_path: &Path,
-        mut initial_size: u64,
-    ) -> Result<FileCache, std::io::Error> {
+    pub fn new(file_cache_path: &Path, mut initial_size: u64) -> Result<FileCache, std::io::Error> {
         if initial_size < 100 {
             tracing::warn!(
                 "min size for file cache is 100 blocks, {} requested",
@@ -95,7 +94,8 @@ impl FileCache {
 
         let dst_ref = unsafe { std::slice::from_raw_parts_mut(dst.stable_mut_ptr(), BLCKSZ) };
 
-        spawn_blocking(move || file.read_exact_at(dst_ref, cache_block as u64 * BLCKSZ as u64)).await??;
+        spawn_blocking(move || file.read_exact_at(dst_ref, cache_block as u64 * BLCKSZ as u64))
+            .await??;
         Ok(())
     }
 
@@ -109,7 +109,8 @@ impl FileCache {
 
         let src_ref = unsafe { std::slice::from_raw_parts(src.stable_ptr(), BLCKSZ) };
 
-        spawn_blocking(move || file.write_all_at(src_ref, cache_block as u64 * BLCKSZ as u64)).await??;
+        spawn_blocking(move || file.write_all_at(src_ref, cache_block as u64 * BLCKSZ as u64))
+            .await??;
 
         Ok(())
     }

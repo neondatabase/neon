@@ -13,10 +13,7 @@ enum NodeTag {
     Internal16,
     Internal48,
     Internal256,
-    Leaf4,
-    Leaf16,
-    Leaf48,
-    Leaf256,
+    Leaf,
 }
 
 #[repr(C)]
@@ -29,6 +26,12 @@ pub(crate) struct NodePtr<V> {
     ptr: *mut NodeBase,
 
     phantom_value: PhantomData<V>,
+}
+
+impl<V> PartialEq for NodePtr<V> {
+    fn eq(&self, other: &NodePtr<V>) -> bool {
+        self.ptr == other.ptr
+    }
 }
 
 impl<V> std::fmt::Debug for NodePtr<V> {
@@ -52,10 +55,7 @@ enum NodeVariant<'a, V> {
     Internal16(&'a NodeInternal16<V>),
     Internal48(&'a NodeInternal48<V>),
     Internal256(&'a NodeInternal256<V>),
-    Leaf4(&'a NodeLeaf4<V>),
-    Leaf16(&'a NodeLeaf16<V>),
-    Leaf48(&'a NodeLeaf48<V>),
-    Leaf256(&'a NodeLeaf256<V>),
+    Leaf(&'a NodeLeaf<V>),
 }
 
 enum NodeVariantMut<'a, V> {
@@ -63,15 +63,7 @@ enum NodeVariantMut<'a, V> {
     Internal16(&'a mut NodeInternal16<V>),
     Internal48(&'a mut NodeInternal48<V>),
     Internal256(&'a mut NodeInternal256<V>),
-    Leaf4(&'a mut NodeLeaf4<V>),
-    Leaf16(&'a mut NodeLeaf16<V>),
-    Leaf48(&'a mut NodeLeaf48<V>),
-    Leaf256(&'a mut NodeLeaf256<V>),
-}
-
-pub(crate) enum ChildOrValuePtr<V> {
-    Child(NodePtr<V>),
-    Value(*const V),
+    Leaf(&'a mut NodeLeaf<V>),
 }
 
 #[repr(C)]
@@ -127,54 +119,14 @@ pub struct NodeInternal256<V> {
 }
 
 #[repr(C)]
-pub struct NodeLeaf4<V> {
+pub struct NodeLeaf<V> {
     tag: NodeTag,
     lock_and_version: AtomicLockAndVersion,
 
     prefix: [u8; MAX_PREFIX_LEN],
     prefix_len: u8,
 
-    num_values: u8,
-    child_keys: [u8; 4],
-    child_values: [Option<V>; 4],
-}
-
-#[repr(C)]
-pub struct NodeLeaf16<V> {
-    tag: NodeTag,
-    lock_and_version: AtomicLockAndVersion,
-
-    prefix: [u8; MAX_PREFIX_LEN],
-    prefix_len: u8,
-
-    num_values: u8,
-    child_keys: [u8; 16],
-    child_values: [Option<V>; 16],
-}
-
-#[repr(C)]
-pub struct NodeLeaf48<V> {
-    tag: NodeTag,
-    lock_and_version: AtomicLockAndVersion,
-
-    prefix: [u8; MAX_PREFIX_LEN],
-    prefix_len: u8,
-
-    num_values: u8,
-    child_indexes: [u8; 256],
-    child_values: [Option<V>; 48],
-}
-
-#[repr(C)]
-pub struct NodeLeaf256<V> {
-    tag: NodeTag,
-    lock_and_version: AtomicLockAndVersion,
-
-    prefix: [u8; MAX_PREFIX_LEN],
-    prefix_len: u8,
-
-    num_values: u16,
-    child_values: [Option<V>; 256],
+    value: V,
 }
 
 impl<V> NodePtr<V> {
@@ -184,10 +136,7 @@ impl<V> NodePtr<V> {
             NodeVariant::Internal16(_) => false,
             NodeVariant::Internal48(_) => false,
             NodeVariant::Internal256(_) => false,
-            NodeVariant::Leaf4(_) => true,
-            NodeVariant::Leaf16(_) => true,
-            NodeVariant::Leaf48(_) => true,
-            NodeVariant::Leaf256(_) => true,
+            NodeVariant::Leaf(_) => true,
         }
     }
 
@@ -197,10 +146,7 @@ impl<V> NodePtr<V> {
             NodeVariant::Internal16(n) => &n.lock_and_version,
             NodeVariant::Internal48(n) => &n.lock_and_version,
             NodeVariant::Internal256(n) => &n.lock_and_version,
-            NodeVariant::Leaf4(n) => &n.lock_and_version,
-            NodeVariant::Leaf16(n) => &n.lock_and_version,
-            NodeVariant::Leaf48(n) => &n.lock_and_version,
-            NodeVariant::Leaf256(n) => &n.lock_and_version,
+            NodeVariant::Leaf(n) => &n.lock_and_version,
         }
     }
 
@@ -230,17 +176,8 @@ impl<V> NodePtr<V> {
                 NodeTag::Internal256 => NodeVariant::Internal256(
                     NonNull::new_unchecked(self.ptr.cast::<NodeInternal256<V>>()).as_ref(),
                 ),
-                NodeTag::Leaf4 => NodeVariant::Leaf4(
-                    NonNull::new_unchecked(self.ptr.cast::<NodeLeaf4<V>>()).as_ref(),
-                ),
-                NodeTag::Leaf16 => NodeVariant::Leaf16(
-                    NonNull::new_unchecked(self.ptr.cast::<NodeLeaf16<V>>()).as_ref(),
-                ),
-                NodeTag::Leaf48 => NodeVariant::Leaf48(
-                    NonNull::new_unchecked(self.ptr.cast::<NodeLeaf48<V>>()).as_ref(),
-                ),
-                NodeTag::Leaf256 => NodeVariant::Leaf256(
-                    NonNull::new_unchecked(self.ptr.cast::<NodeLeaf256<V>>()).as_ref(),
+                NodeTag::Leaf => NodeVariant::Leaf(
+                    NonNull::new_unchecked(self.ptr.cast::<NodeLeaf<V>>()).as_ref(),
                 ),
             }
         }
@@ -261,17 +198,8 @@ impl<V> NodePtr<V> {
                 NodeTag::Internal256 => NodeVariantMut::Internal256(
                     NonNull::new_unchecked(self.ptr.cast::<NodeInternal256<V>>()).as_mut(),
                 ),
-                NodeTag::Leaf4 => NodeVariantMut::Leaf4(
-                    NonNull::new_unchecked(self.ptr.cast::<NodeLeaf4<V>>()).as_mut(),
-                ),
-                NodeTag::Leaf16 => NodeVariantMut::Leaf16(
-                    NonNull::new_unchecked(self.ptr.cast::<NodeLeaf16<V>>()).as_mut(),
-                ),
-                NodeTag::Leaf48 => NodeVariantMut::Leaf48(
-                    NonNull::new_unchecked(self.ptr.cast::<NodeLeaf48<V>>()).as_mut(),
-                ),
-                NodeTag::Leaf256 => NodeVariantMut::Leaf256(
-                    NonNull::new_unchecked(self.ptr.cast::<NodeLeaf256<V>>()).as_mut(),
+                NodeTag::Leaf => NodeVariantMut::Leaf(
+                    NonNull::new_unchecked(self.ptr.cast::<NodeLeaf<V>>()).as_mut(),
                 ),
             }
         }
@@ -295,10 +223,7 @@ impl<V: Value> NodePtr<V> {
             NodeVariant::Internal16(n) => n.get_prefix(),
             NodeVariant::Internal48(n) => n.get_prefix(),
             NodeVariant::Internal256(n) => n.get_prefix(),
-            NodeVariant::Leaf4(n) => n.get_prefix(),
-            NodeVariant::Leaf16(n) => n.get_prefix(),
-            NodeVariant::Leaf48(n) => n.get_prefix(),
-            NodeVariant::Leaf256(n) => n.get_prefix(),
+            NodeVariant::Leaf(n) => n.get_prefix(),
         }
     }
 
@@ -308,65 +233,27 @@ impl<V: Value> NodePtr<V> {
             NodeVariant::Internal16(n) => n.is_full(),
             NodeVariant::Internal48(n) => n.is_full(),
             NodeVariant::Internal256(n) => n.is_full(),
-            NodeVariant::Leaf4(n) => n.is_full(),
-            NodeVariant::Leaf16(n) => n.is_full(),
-            NodeVariant::Leaf48(n) => n.is_full(),
-            NodeVariant::Leaf256(n) => n.is_full(),
+            NodeVariant::Leaf(_) => panic!("is_full() called on leaf node"),
         }
     }
 
-    pub(crate) fn find_child_or_value(&self, key_byte: u8) -> Option<ChildOrValuePtr<V>> {
+    pub(crate) fn find_child(&self, key_byte: u8) -> Option<NodePtr<V>> {
         match self.variant() {
-            NodeVariant::Internal4(n) => n.find_child(key_byte).map(|c| ChildOrValuePtr::Child(c)),
-            NodeVariant::Internal16(n) => n.find_child(key_byte).map(|c| ChildOrValuePtr::Child(c)),
-            NodeVariant::Internal48(n) => n.find_child(key_byte).map(|c| ChildOrValuePtr::Child(c)),
-            NodeVariant::Internal256(n) => {
-                n.find_child(key_byte).map(|c| ChildOrValuePtr::Child(c))
-            }
-            NodeVariant::Leaf4(n) => n
-                .get_leaf_value(key_byte)
-                .map(|v| ChildOrValuePtr::Value(v)),
-            NodeVariant::Leaf16(n) => n
-                .get_leaf_value(key_byte)
-                .map(|v| ChildOrValuePtr::Value(v)),
-            NodeVariant::Leaf48(n) => n
-                .get_leaf_value(key_byte)
-                .map(|v| ChildOrValuePtr::Value(v)),
-            NodeVariant::Leaf256(n) => n
-                .get_leaf_value(key_byte)
-                .map(|v| ChildOrValuePtr::Value(v)),
+            NodeVariant::Internal4(n) => n.find_child(key_byte),
+            NodeVariant::Internal16(n) => n.find_child(key_byte),
+            NodeVariant::Internal48(n) => n.find_child(key_byte),
+            NodeVariant::Internal256(n) => n.find_child(key_byte),
+            NodeVariant::Leaf(_) => panic!("find_child called on leaf node"),
         }
     }
 
-    pub(crate) fn find_next_child_or_value(
-        &self,
-        key_byte: u8,
-    ) -> Option<(u8, ChildOrValuePtr<V>)> {
+    pub(crate) fn find_next_child(&self, key_byte: u8) -> Option<(u8, NodePtr<V>)> {
         match self.variant() {
-            NodeVariant::Internal4(n) => n
-                .find_next_child(key_byte)
-                .map(|(k, c)| (k, ChildOrValuePtr::Child(c))),
-            NodeVariant::Internal16(n) => n
-                .find_next_child(key_byte)
-                .map(|(k, c)| (k, ChildOrValuePtr::Child(c))),
-            NodeVariant::Internal48(n) => n
-                .find_next_child(key_byte)
-                .map(|(k, c)| (k, ChildOrValuePtr::Child(c))),
-            NodeVariant::Internal256(n) => n
-                .find_next_child(key_byte)
-                .map(|(k, c)| (k, ChildOrValuePtr::Child(c))),
-            NodeVariant::Leaf4(n) => n
-                .find_next_leaf_value(key_byte)
-                .map(|(k, v)| (k, ChildOrValuePtr::Value(v))),
-            NodeVariant::Leaf16(n) => n
-                .find_next_leaf_value(key_byte)
-                .map(|(k, v)| (k, ChildOrValuePtr::Value(v))),
-            NodeVariant::Leaf48(n) => n
-                .find_next_leaf_value(key_byte)
-                .map(|(k, v)| (k, ChildOrValuePtr::Value(v))),
-            NodeVariant::Leaf256(n) => n
-                .find_next_leaf_value(key_byte)
-                .map(|(k, v)| (k, ChildOrValuePtr::Value(v))),
+            NodeVariant::Internal4(n) => n.find_next_child(key_byte),
+            NodeVariant::Internal16(n) => n.find_next_child(key_byte),
+            NodeVariant::Internal48(n) => n.find_next_child(key_byte),
+            NodeVariant::Internal256(n) => n.find_next_child(key_byte),
+            NodeVariant::Leaf(_) => panic!("find_next_child called on leaf node"),
         }
     }
 
@@ -376,10 +263,7 @@ impl<V: Value> NodePtr<V> {
             NodeVariantMut::Internal16(n) => n.truncate_prefix(new_prefix_len),
             NodeVariantMut::Internal48(n) => n.truncate_prefix(new_prefix_len),
             NodeVariantMut::Internal256(n) => n.truncate_prefix(new_prefix_len),
-            NodeVariantMut::Leaf4(n) => n.truncate_prefix(new_prefix_len),
-            NodeVariantMut::Leaf16(n) => n.truncate_prefix(new_prefix_len),
-            NodeVariantMut::Leaf48(n) => n.truncate_prefix(new_prefix_len),
-            NodeVariantMut::Leaf256(n) => n.truncate_prefix(new_prefix_len),
+            NodeVariantMut::Leaf(n) => n.truncate_prefix(new_prefix_len),
         }
     }
 
@@ -389,10 +273,7 @@ impl<V: Value> NodePtr<V> {
             NodeVariant::Internal16(n) => n.grow(allocator),
             NodeVariant::Internal48(n) => n.grow(allocator),
             NodeVariant::Internal256(_) => panic!("cannot grow Internal256 node"),
-            NodeVariant::Leaf4(n) => n.grow(allocator),
-            NodeVariant::Leaf16(n) => n.grow(allocator),
-            NodeVariant::Leaf48(n) => n.grow(allocator),
-            NodeVariant::Leaf256(_) => panic!("cannot grow Leaf256 node"),
+            NodeVariant::Leaf(_) => panic!("cannot grow Leaf node"),
         }
     }
 
@@ -402,10 +283,7 @@ impl<V: Value> NodePtr<V> {
             NodeVariantMut::Internal16(n) => n.insert_child(key_byte, child),
             NodeVariantMut::Internal48(n) => n.insert_child(key_byte, child),
             NodeVariantMut::Internal256(n) => n.insert_child(key_byte, child),
-            NodeVariantMut::Leaf4(_)
-            | NodeVariantMut::Leaf16(_)
-            | NodeVariantMut::Leaf48(_)
-            | NodeVariantMut::Leaf256(_) => panic!("insert_child called on leaf node"),
+            NodeVariantMut::Leaf(_) => panic!("insert_child called on leaf node"),
         }
     }
 
@@ -415,36 +293,37 @@ impl<V: Value> NodePtr<V> {
             NodeVariantMut::Internal16(n) => n.replace_child(key_byte, replacement),
             NodeVariantMut::Internal48(n) => n.replace_child(key_byte, replacement),
             NodeVariantMut::Internal256(n) => n.replace_child(key_byte, replacement),
-            NodeVariantMut::Leaf4(_)
-            | NodeVariantMut::Leaf16(_)
-            | NodeVariantMut::Leaf48(_)
-            | NodeVariantMut::Leaf256(_) => panic!("replace_child called on leaf node"),
+            NodeVariantMut::Leaf(_) => panic!("replace_child called on leaf node"),
         }
     }
 
-    pub(crate) fn insert_value(&mut self, key_byte: u8, value: V) {
+    pub(crate) fn delete_child(&mut self, key_byte: u8) {
+        match self.variant_mut() {
+            NodeVariantMut::Internal4(n) => n.delete_child(key_byte),
+            NodeVariantMut::Internal16(n) => n.delete_child(key_byte),
+            NodeVariantMut::Internal48(n) => n.delete_child(key_byte),
+            NodeVariantMut::Internal256(n) => n.delete_child(key_byte),
+            NodeVariantMut::Leaf(_) => panic!("delete_child called on leaf node"),
+        }
+    }
+
+    pub(crate) fn get_leaf_value(&self) -> &V {
+        match self.variant() {
+            NodeVariant::Internal4(_)
+            | NodeVariant::Internal16(_)
+            | NodeVariant::Internal48(_)
+            | NodeVariant::Internal256(_) => panic!("get_leaf_value called on internal node"),
+            NodeVariant::Leaf(n) => n.get_leaf_value(),
+        }
+    }
+
+    pub(crate) fn get_leaf_value_mut(&mut self) -> &mut V {
         match self.variant_mut() {
             NodeVariantMut::Internal4(_)
             | NodeVariantMut::Internal16(_)
             | NodeVariantMut::Internal48(_)
-            | NodeVariantMut::Internal256(_) => panic!("insert_value called on internal node"),
-            NodeVariantMut::Leaf4(n) => n.insert_value(key_byte, value),
-            NodeVariantMut::Leaf16(n) => n.insert_value(key_byte, value),
-            NodeVariantMut::Leaf48(n) => n.insert_value(key_byte, value),
-            NodeVariantMut::Leaf256(n) => n.insert_value(key_byte, value),
-        }
-    }
-
-    pub(crate) fn delete_value(&mut self, key_byte: u8) {
-        match self.variant_mut() {
-            NodeVariantMut::Internal4(_)
-            | NodeVariantMut::Internal16(_)
-            | NodeVariantMut::Internal48(_)
-            | NodeVariantMut::Internal256(_) => panic!("delete_value called on internal node"),
-            NodeVariantMut::Leaf4(n) => n.delete_value(key_byte),
-            NodeVariantMut::Leaf16(n) => n.delete_value(key_byte),
-            NodeVariantMut::Leaf48(n) => n.delete_value(key_byte),
-            NodeVariantMut::Leaf256(n) => n.delete_value(key_byte),
+            | NodeVariantMut::Internal256(_) => panic!("get_leaf_value called on internal node"),
+            NodeVariantMut::Leaf(n) => n.get_leaf_value_mut(),
         }
     }
 
@@ -454,10 +333,7 @@ impl<V: Value> NodePtr<V> {
             NodeVariant::Internal16(_) => allocator.dealloc_node_internal16(self.ptr.cast()),
             NodeVariant::Internal48(_) => allocator.dealloc_node_internal48(self.ptr.cast()),
             NodeVariant::Internal256(_) => allocator.dealloc_node_internal256(self.ptr.cast()),
-            NodeVariant::Leaf4(_) => allocator.dealloc_node_leaf4(self.ptr.cast()),
-            NodeVariant::Leaf16(_) => allocator.dealloc_node_leaf16(self.ptr.cast()),
-            NodeVariant::Leaf48(_) => allocator.dealloc_node_leaf48(self.ptr.cast()),
-            NodeVariant::Leaf256(_) => allocator.dealloc_node_leaf256(self.ptr.cast()),
+            NodeVariant::Leaf(_) => allocator.dealloc_node_leaf(self.ptr.cast()),
         }
     }
 }
@@ -497,21 +373,19 @@ pub fn new_internal<V: Value>(prefix: &[u8], allocator: &impl ArtAllocator<V>) -
     ptr.into()
 }
 
-pub fn new_leaf<V: Value>(prefix: &[u8], allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
-    let ptr: *mut NodeLeaf4<V> = allocator.alloc_node_leaf4().cast();
+pub fn new_leaf<V: Value>(prefix: &[u8], value: V, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+    let ptr: *mut NodeLeaf<V> = allocator.alloc_node_leaf().cast();
     if ptr.is_null() {
         panic!("out of memory");
     }
-    let mut init = NodeLeaf4 {
-        tag: NodeTag::Leaf4,
+    let mut init = NodeLeaf {
+        tag: NodeTag::Leaf,
         lock_and_version: AtomicLockAndVersion::new(),
 
         prefix: [8; MAX_PREFIX_LEN],
         prefix_len: prefix.len() as u8,
-        num_values: 0,
 
-        child_keys: [0; 4],
-        child_values: [const { None }; 4],
+        value,
     };
     init.prefix[0..prefix.len()].copy_from_slice(prefix);
     unsafe { ptr.write(init) };
@@ -568,6 +442,20 @@ impl<V: Value> NodeInternal4<V> {
         for i in 0..self.num_children as usize {
             if self.child_keys[i] == key_byte {
                 self.child_ptrs[i] = replacement;
+                return;
+            }
+        }
+        panic!("could not re-find parent with key {}", key_byte);
+    }
+
+    fn delete_child(&mut self, key_byte: u8) {
+        for i in 0..self.num_children as usize {
+            if self.child_keys[i] == key_byte {
+                self.num_children -= 1;
+                for j in i..self.num_children as usize {
+                    self.child_keys[j] = self.child_keys[j + 1];
+                    self.child_ptrs[j] = self.child_ptrs[j + 1];
+                }
                 return;
             }
         }
@@ -667,6 +555,20 @@ impl<V: Value> NodeInternal16<V> {
         panic!("could not re-find parent with key {}", key_byte);
     }
 
+    fn delete_child(&mut self, key_byte: u8) {
+        for i in 0..self.num_children as usize {
+            if self.child_keys[i] == key_byte {
+                self.num_children -= 1;
+                for j in i..self.num_children as usize {
+                    self.child_keys[j] = self.child_keys[j + 1];
+                    self.child_ptrs[j] = self.child_ptrs[j + 1];
+                }
+                return;
+            }
+        }
+        panic!("could not re-find parent with key {}", key_byte);
+    }
+
     fn is_full(&self) -> bool {
         self.num_children == 16
     }
@@ -742,10 +644,31 @@ impl<V: Value> NodeInternal48<V> {
 
     fn replace_child(&mut self, key_byte: u8, replacement: NodePtr<V>) {
         let idx = self.child_indexes[key_byte as usize];
-        if idx != INVALID_CHILD_INDEX {
-            self.child_ptrs[idx as usize] = replacement
-        } else {
+        if idx == INVALID_CHILD_INDEX {
             panic!("could not re-find parent with key {}", key_byte);
+        }
+        self.child_ptrs[idx as usize] = replacement
+    }
+
+    fn delete_child(&mut self, key_byte: u8) {
+        let idx = self.child_indexes[key_byte as usize] as usize;
+        if idx == INVALID_CHILD_INDEX as usize {
+            panic!("could not re-find parent with key {}", key_byte);
+        }
+        self.child_indexes[key_byte as usize] = INVALID_CHILD_INDEX;
+        self.num_children -= 1;
+
+        // Compact the child_ptrs array
+        let removed_idx = self.num_children as usize;
+        if idx != removed_idx {
+            for i in 0..u8::MAX as usize {
+                if self.child_indexes[i] as usize == removed_idx {
+                    self.child_indexes[i] = idx as u8;
+                    self.child_ptrs[idx] = self.child_ptrs[removed_idx];
+                    return;
+                }
+            }
+            panic!("could not re-find last index on Internal48 node");
         }
     }
 
@@ -830,6 +753,15 @@ impl<V: Value> NodeInternal256<V> {
         }
     }
 
+    fn delete_child(&mut self, key_byte: u8) {
+        let idx = key_byte as usize;
+        if self.child_ptrs[idx].is_null() {
+            panic!("could not re-find parent with key {}", key_byte);
+        }
+        self.num_children -= 1;
+        self.child_ptrs[idx] = NodePtr::null();
+    }
+
     fn is_full(&self) -> bool {
         self.num_children == 256
     }
@@ -842,7 +774,7 @@ impl<V: Value> NodeInternal256<V> {
     }
 }
 
-impl<V: Value> NodeLeaf4<V> {
+impl<V: Value> NodeLeaf<V> {
     fn get_prefix(&self) -> &[u8] {
         &self.prefix[0..self.prefix_len as usize]
     }
@@ -857,346 +789,12 @@ impl<V: Value> NodeLeaf4<V> {
         self.prefix_len = new_prefix_len as u8;
     }
 
-    fn get_leaf_value<'a: 'b, 'b>(&'a self, key: u8) -> Option<&'b V> {
-        for i in 0..self.num_values {
-            if self.child_keys[i as usize] == key {
-                assert!(self.child_values[i as usize].is_some());
-                return self.child_values[i as usize].as_ref();
-            }
-        }
-        None
+    fn get_leaf_value<'a: 'b, 'b>(&'a self) -> &'b V {
+        &self.value
     }
 
-    fn find_next_leaf_value<'a: 'b, 'b>(&'a self, min_key: u8) -> Option<(u8, &'b V)> {
-        let mut found: Option<(usize, u8)> = None;
-        for i in 0..self.num_values as usize {
-            let this_key = self.child_keys[i];
-            if this_key >= min_key {
-                if let Some((_, found_key)) = found {
-                    if this_key < found_key {
-                        found = Some((i, this_key));
-                    }
-                } else {
-                    found = Some((i, this_key));
-                }
-            }
-        }
-        if let Some((found_idx, found_key)) = found {
-            Some((found_key, self.child_values[found_idx].as_ref().unwrap()))
-        } else {
-            None
-        }
-    }
-
-    fn is_full(&self) -> bool {
-        self.num_values == 4
-    }
-
-    fn insert_value(&mut self, key_byte: u8, value: V) {
-        assert!(self.num_values < 4);
-
-        let idx = self.num_values as usize;
-        self.child_keys[idx] = key_byte;
-        self.child_values[idx] = Some(value);
-        self.num_values += 1;
-    }
-
-    fn grow(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
-        let ptr: *mut NodeLeaf16<V> = allocator.alloc_node_leaf16();
-        if ptr.is_null() {
-            panic!("out of memory");
-        }
-        let mut init = NodeLeaf16 {
-            tag: NodeTag::Leaf16,
-            lock_and_version: AtomicLockAndVersion::new(),
-
-            prefix: self.prefix.clone(),
-            prefix_len: self.prefix_len,
-            num_values: self.num_values,
-
-            child_keys: [0; 16],
-            child_values: [const { None }; 16],
-        };
-        for i in 0..self.num_values as usize {
-            init.child_keys[i] = self.child_keys[i];
-            init.child_values[i] = self.child_values[i].clone();
-        }
-        unsafe { ptr.write(init) };
-        ptr.into()
-    }
-
-    fn delete_value(&mut self, key_byte: u8) {
-        assert!(self.num_values <= 4);
-
-        for i in 0..self.num_values as usize {
-            if self.child_keys[i] == key_byte {
-                assert!(self.child_values[i].is_some());
-                if i < self.num_values as usize - 1 {
-                    self.child_keys[i] = self.child_keys[self.num_values as usize - 1];
-                    self.child_values[i] = std::mem::replace(
-                        &mut self.child_values[self.num_values as usize - 1],
-                        None,
-                    );
-                }
-                self.num_values -= 1;
-                return;
-            }
-        }
-        panic!("key to delete not found in leaf4 node");
-    }
-}
-
-impl<V: Value> NodeLeaf16<V> {
-    fn get_prefix(&self) -> &[u8] {
-        &self.prefix[0..self.prefix_len as usize]
-    }
-
-    fn truncate_prefix(&mut self, new_prefix_len: usize) {
-        assert!(new_prefix_len < self.prefix_len as usize);
-        let prefix = &mut self.prefix;
-        let offset = self.prefix_len as usize - new_prefix_len;
-        for i in 0..new_prefix_len {
-            prefix[i] = prefix[i + offset];
-        }
-        self.prefix_len = new_prefix_len as u8;
-    }
-
-    fn get_leaf_value(&self, key: u8) -> Option<&V> {
-        for i in 0..self.num_values {
-            if self.child_keys[i as usize] == key {
-                assert!(self.child_values[i as usize].is_some());
-                return self.child_values[i as usize].as_ref();
-            }
-        }
-        None
-    }
-
-    fn find_next_leaf_value<'a: 'b, 'b>(&'a self, min_key: u8) -> Option<(u8, &'b V)> {
-        let mut found: Option<(usize, u8)> = None;
-        for i in 0..self.num_values as usize {
-            let this_key = self.child_keys[i];
-            if this_key >= min_key {
-                if let Some((_, found_key)) = found {
-                    if this_key < found_key {
-                        found = Some((i, this_key));
-                    }
-                } else {
-                    found = Some((i, this_key));
-                }
-            }
-        }
-        if let Some((found_idx, found_key)) = found {
-            Some((found_key, self.child_values[found_idx].as_ref().unwrap()))
-        } else {
-            None
-        }
-    }
-
-    fn is_full(&self) -> bool {
-        self.num_values == 16
-    }
-
-    fn insert_value(&mut self, key_byte: u8, value: V) {
-        assert!(self.num_values < 16);
-
-        let idx = self.num_values as usize;
-        self.child_keys[idx] = key_byte;
-        self.child_values[idx] = Some(value);
-        self.num_values += 1;
-    }
-    fn grow(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
-        let ptr: *mut NodeLeaf48<V> = allocator.alloc_node_leaf48().cast();
-        if ptr.is_null() {
-            panic!("out of memory");
-        }
-        let mut init = NodeLeaf48 {
-            tag: NodeTag::Leaf48,
-            lock_and_version: AtomicLockAndVersion::new(),
-
-            prefix: self.prefix.clone(),
-            prefix_len: self.prefix_len,
-            num_values: self.num_values,
-
-            child_indexes: [INVALID_CHILD_INDEX; 256],
-            child_values: [const { None }; 48],
-        };
-        for i in 0..self.num_values {
-            let idx = self.child_keys[i as usize];
-            init.child_indexes[idx as usize] = i;
-            init.child_values[i as usize] = self.child_values[i as usize].clone();
-        }
-        unsafe { ptr.write(init) };
-        ptr.into()
-    }
-
-    fn delete_value(&mut self, key_byte: u8) {
-        assert!(self.num_values <= 16);
-
-        for i in 0..self.num_values as usize {
-            if self.child_keys[i as usize] == key_byte {
-                assert!(self.child_values[i as usize].is_some());
-                if i < self.num_values as usize - 1 {
-                    self.child_keys[i] = self.child_keys[self.num_values as usize - 1];
-                    self.child_values[i] = std::mem::replace(
-                        &mut self.child_values[self.num_values as usize - 1],
-                        None,
-                    );
-                }
-                self.num_values -= 1;
-                return;
-            }
-        }
-        panic!("key to delete not found in leaf16 node");
-    }
-}
-
-impl<V: Value> NodeLeaf48<V> {
-    fn get_prefix(&self) -> &[u8] {
-        &self.prefix[0..self.prefix_len as usize]
-    }
-
-    fn truncate_prefix(&mut self, new_prefix_len: usize) {
-        assert!(new_prefix_len < self.prefix_len as usize);
-        let prefix = &mut self.prefix;
-        let offset = self.prefix_len as usize - new_prefix_len;
-        for i in 0..new_prefix_len {
-            prefix[i] = prefix[i + offset];
-        }
-        self.prefix_len = new_prefix_len as u8;
-    }
-
-    fn get_leaf_value(&self, key: u8) -> Option<&V> {
-        let idx = self.child_indexes[key as usize];
-        if idx != INVALID_CHILD_INDEX {
-            assert!(self.child_values[idx as usize].is_some());
-            self.child_values[idx as usize].as_ref()
-        } else {
-            None
-        }
-    }
-
-    fn find_next_leaf_value<'a: 'b, 'b>(&'a self, min_key: u8) -> Option<(u8, &'b V)> {
-        for key in min_key..=u8::MAX {
-            let idx = self.child_indexes[key as usize];
-            if idx != INVALID_CHILD_INDEX {
-                return Some((key, &self.child_values[idx as usize].as_ref().unwrap()));
-            }
-        }
-        None
-    }
-
-    fn is_full(&self) -> bool {
-        self.num_values == 48
-    }
-
-    fn insert_value(&mut self, key_byte: u8, value: V) {
-        assert!(self.num_values < 48);
-        assert!(self.child_indexes[key_byte as usize] == INVALID_CHILD_INDEX);
-        let idx = self.num_values;
-        self.child_indexes[key_byte as usize] = idx;
-        self.child_values[idx as usize] = Some(value);
-        self.num_values += 1;
-    }
-    fn grow(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
-        let ptr: *mut NodeLeaf256<V> = allocator.alloc_node_leaf256();
-        if ptr.is_null() {
-            panic!("out of memory");
-        }
-        let mut init = NodeLeaf256 {
-            tag: NodeTag::Leaf256,
-            lock_and_version: AtomicLockAndVersion::new(),
-
-            prefix: self.prefix.clone(),
-            prefix_len: self.prefix_len,
-            num_values: self.num_values as u16,
-
-            child_values: [const { None }; 256],
-        };
-        for i in 0..256 {
-            let idx = self.child_indexes[i];
-            if idx != INVALID_CHILD_INDEX {
-                init.child_values[i] = self.child_values[idx as usize].clone();
-            }
-        }
-        unsafe { ptr.write(init) };
-        ptr.into()
-    }
-
-    fn delete_value(&mut self, key_byte: u8) {
-        assert!(self.num_values <= 48);
-
-        let idx = self.child_indexes[key_byte as usize];
-        if idx == INVALID_CHILD_INDEX {
-            panic!("key to delete not found in leaf48 node");
-        }
-        self.child_indexes[key_byte as usize] = INVALID_CHILD_INDEX;
-        self.num_values -= 1;
-
-        if idx < self.num_values {
-            // Move all existing values with higher indexes down one position
-            for i in idx as usize..self.num_values as usize {
-                self.child_values[i] = std::mem::replace(&mut self.child_values[i + 1], None);
-            }
-
-            // Update all higher indexes
-            for i in 0..256 {
-                if self.child_indexes[i] != INVALID_CHILD_INDEX {
-                    if self.child_indexes[i] > idx {
-                        self.child_indexes[i] -= 1;
-                    }
-                    assert!(self.child_indexes[i] < self.num_values);
-                }
-            }
-        }
-    }
-}
-
-impl<V: Value> NodeLeaf256<V> {
-    fn get_prefix(&self) -> &[u8] {
-        &self.prefix[0..self.prefix_len as usize]
-    }
-
-    fn truncate_prefix(&mut self, new_prefix_len: usize) {
-        assert!(new_prefix_len < self.prefix_len as usize);
-        let prefix = &mut self.prefix;
-        let offset = self.prefix_len as usize - new_prefix_len;
-        for i in 0..new_prefix_len {
-            prefix[i] = prefix[i + offset];
-        }
-        self.prefix_len = new_prefix_len as u8;
-    }
-
-    fn get_leaf_value(&self, key: u8) -> Option<&V> {
-        let idx = key as usize;
-        self.child_values[idx].as_ref()
-    }
-
-    fn find_next_leaf_value<'a: 'b, 'b>(&'a self, min_key: u8) -> Option<(u8, &'b V)> {
-        for key in min_key..=u8::MAX {
-            if let Some(v) = &self.child_values[key as usize] {
-                return Some((key, v));
-            }
-        }
-        None
-    }
-
-    fn is_full(&self) -> bool {
-        self.num_values == 256
-    }
-
-    fn insert_value(&mut self, key_byte: u8, value: V) {
-        assert!(self.num_values < 256);
-        assert!(self.child_values[key_byte as usize].is_none());
-        self.child_values[key_byte as usize] = Some(value);
-        self.num_values += 1;
-    }
-
-    fn delete_value(&mut self, key_byte: u8) {
-        if self.child_values[key_byte as usize].is_none() {
-            panic!("key to delete not found in leaf256 node");
-        }
-        self.child_values[key_byte as usize] = None;
-        self.num_values -= 1;
+    fn get_leaf_value_mut<'a: 'b, 'b>(&'a mut self) -> &'b mut V {
+        &mut self.value
     }
 }
 
@@ -1250,34 +848,8 @@ impl<V: Value> From<*mut NodeInternal256<V>> for NodePtr<V> {
     }
 }
 
-impl<V: Value> From<*mut NodeLeaf4<V>> for NodePtr<V> {
-    fn from(val: *mut NodeLeaf4<V>) -> NodePtr<V> {
-        NodePtr {
-            ptr: val.cast(),
-            phantom_value: PhantomData,
-        }
-    }
-}
-impl<V: Value> From<*mut NodeLeaf16<V>> for NodePtr<V> {
-    fn from(val: *mut NodeLeaf16<V>) -> NodePtr<V> {
-        NodePtr {
-            ptr: val.cast(),
-            phantom_value: PhantomData,
-        }
-    }
-}
-
-impl<V: Value> From<*mut NodeLeaf48<V>> for NodePtr<V> {
-    fn from(val: *mut NodeLeaf48<V>) -> NodePtr<V> {
-        NodePtr {
-            ptr: val.cast(),
-            phantom_value: PhantomData,
-        }
-    }
-}
-
-impl<V: Value> From<*mut NodeLeaf256<V>> for NodePtr<V> {
-    fn from(val: *mut NodeLeaf256<V>) -> NodePtr<V> {
+impl<V: Value> From<*mut NodeLeaf<V>> for NodePtr<V> {
+    fn from(val: *mut NodeLeaf<V>) -> NodePtr<V> {
         NodePtr {
             ptr: val.cast(),
             phantom_value: PhantomData,

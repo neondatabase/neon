@@ -8,12 +8,13 @@ use crate::init::CommunicatorInitStruct;
 use crate::integrated_cache::{CacheResult, IntegratedCacheWriteAccess};
 use crate::neon_request::{CGetPageVRequest, CPrefetchVRequest};
 use crate::neon_request::{NeonIORequest, NeonIOResult};
+use crate::worker_process::in_progress_ios::{RequestInProgressTable, RequestInProgressKey};
 use pageserver_client_grpc::PageserverClient;
 use pageserver_page_api::model;
 
 use tokio::io::AsyncReadExt;
-use uring_common::buf::IoBuf;
 use tokio_pipe::PipeRead;
+use uring_common::buf::IoBuf;
 
 use super::callbacks::{get_request_lsn, notify_proc};
 
@@ -31,7 +32,10 @@ pub struct CommunicatorWorkerProcessStruct<'a> {
     submission_pipe_read_raw_fd: i32,
 
     next_request_id: AtomicU64,
+
+    in_progress_table: RequestInProgressTable,
 }
+
 
 pub(super) async fn init(
     cis: Box<CommunicatorInitStruct>,
@@ -45,10 +49,7 @@ pub(super) async fn init(
     let last_lsn = get_request_lsn();
 
     let file_cache = if let Some(path) = file_cache_path {
-        Some(
-            FileCache::new(&path, file_cache_size)
-                .expect("could not create cache file"),
-        )
+        Some(FileCache::new(&path, file_cache_size).expect("could not create cache file"))
     } else {
         // FIXME: temporarily for testing, use LFC even if disabled
         Some(
@@ -70,6 +71,7 @@ pub(super) async fn init(
         cache,
         submission_pipe_read_raw_fd: cis.submission_pipe_read_fd,
         next_request_id: AtomicU64::new(1),
+        in_progress_table: RequestInProgressTable::new(),
     };
 
     this
@@ -142,6 +144,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             NeonIORequest::RelExists(req) => {
                 let rel = req.reltag();
 
+                let _in_progress_guard = self.in_progress_table.lock(RequestInProgressKey::Rel(rel.clone()));
+
                 let not_modified_since = match self.cache.get_rel_exists(&rel) {
                     CacheResult::Found(exists) => return NeonIOResult::RelExists(exists),
                     CacheResult::NotFound(lsn) => lsn,
@@ -165,6 +169,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
 
             NeonIORequest::RelSize(req) => {
                 let rel = req.reltag();
+
+                let _in_progress_guard = self.in_progress_table.lock(RequestInProgressKey::Rel(rel.clone()));
 
                 // Check the cache first
                 let not_modified_since = match self.cache.get_rel_size(&rel) {
@@ -207,6 +213,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 NeonIOResult::PrefetchVLaunched
             }
             NeonIORequest::DbSize(req) => {
+                let _in_progress_guard = self.in_progress_table.lock(RequestInProgressKey::Db(req.db_oid));
+
                 // Check the cache first
                 let not_modified_since = match self.cache.get_db_size(req.db_oid) {
                     CacheResult::Found(db_size) => {
@@ -236,30 +244,36 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             NeonIORequest::WritePage(req) => {
                 // Also store it in the LFC while we still have it
                 let rel = req.reltag();
+                let _in_progress_guard = self.in_progress_table.lock(RequestInProgressKey::Block(rel.clone(), req.block_number));
                 self.cache
-                    .remember_page(&rel, req.block_number, req.src, Lsn(req.lsn))
+                    .remember_page(&rel, req.block_number, req.src, Lsn(req.lsn), true)
                     .await;
                 NeonIOResult::WriteOK
             }
             NeonIORequest::RelExtend(req) => {
+                // TODO: need to grab an io-in-progress lock for this? I guess not
                 self.cache
                     .remember_rel_size(&req.reltag(), req.block_number + 1);
                 NeonIOResult::WriteOK
             }
             NeonIORequest::RelZeroExtend(req) => {
+                // TODO: need to grab an io-in-progress lock for this? I guess not
                 self.cache
                     .remember_rel_size(&req.reltag(), req.block_number + req.nblocks);
                 NeonIOResult::WriteOK
             }
             NeonIORequest::RelCreate(req) => {
+                // TODO: need to grab an io-in-progress lock for this? I guess not
                 self.cache.remember_rel_size(&req.reltag(), 0);
                 NeonIOResult::WriteOK
             }
             NeonIORequest::RelTruncate(req) => {
+                // TODO: need to grab an io-in-progress lock for this? I guess not
                 self.cache.remember_rel_size(&req.reltag(), req.nblocks);
                 NeonIOResult::WriteOK
             }
             NeonIORequest::RelUnlink(req) => {
+                // TODO: need to grab an io-in-progress lock for this? I guess not
                 self.cache.forget_rel(&req.reltag());
                 NeonIOResult::WriteOK
             }
@@ -270,9 +284,14 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         let rel = req.reltag();
 
         // Check the cache first
-        let mut cache_misses = Vec::new();
+        let mut cache_misses = Vec::with_capacity(req.nblocks as usize);
         for i in 0..req.nblocks {
             let blkno = req.block_number + i as u32;
+
+            // note: this is deadlock-safe even though we hold multiple locks at the same time,
+            // because they're always acquired in the same order.
+            let in_progress_guard = self.in_progress_table.lock(RequestInProgressKey::Block(rel.clone(), blkno)).await;
+
             let dest = req.dest[i as usize];
             let not_modified_since = match self.cache.get_page(&rel, blkno, dest).await {
                 Ok(CacheResult::Found(_)) => {
@@ -283,19 +302,19 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 Ok(CacheResult::NotFound(lsn)) => lsn,
                 Err(_io_error) => return Err(-1), // FIXME errno?
             };
-            cache_misses.push((blkno, not_modified_since, dest));
+            cache_misses.push((blkno, not_modified_since, dest, in_progress_guard));
         }
         if cache_misses.is_empty() {
             return Ok(());
         }
         let not_modified_since = cache_misses
             .iter()
-            .map(|(_blkno, lsn, _dest)| *lsn)
+            .map(|(_blkno, lsn, _dest, _guard)| *lsn)
             .max()
             .unwrap();
 
         // TODO: Use batched protocol
-        for (blkno, _lsn, dest) in cache_misses.iter() {
+        for (blkno, _lsn, dest, _guard) in cache_misses.iter() {
             match self
                 .pageserver_client
                 .get_page(&model::GetPageRequest {
@@ -316,11 +335,9 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                         std::ptr::copy_nonoverlapping(src.as_ptr(), dest.as_mut_ptr(), len);
                     };
 
-                    trace!("remembering blk {} in rel {:?} in LFC", blkno, rel);
-
                     // Also store it in the LFC while we have it
                     self.cache
-                        .remember_page(&rel, *blkno, page_image, not_modified_since)
+                        .remember_page(&rel, *blkno, page_image, not_modified_since, false)
                         .await;
                 }
                 Err(err) => {
@@ -339,29 +356,34 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         let rel = req.reltag();
 
         // Check the cache first
-        let mut cache_misses = Vec::new();
+        let mut cache_misses = Vec::with_capacity(req.nblocks as usize);
         for i in 0..req.nblocks {
             let blkno = req.block_number + i as u32;
+
+            // note: this is deadlock-safe even though we hold multiple locks at the same time,
+            // because they're always acquired in the same order.
+            let in_progress_guard = self.in_progress_table.lock(RequestInProgressKey::Block(rel.clone(), blkno)).await;
+
             let not_modified_since = match self.cache.page_is_cached(&rel, blkno).await {
                 Ok(CacheResult::Found(_)) => {
-                    trace!("found blk {} in rel {:?} in LFC ", req.block_number, rel);
+                    trace!("found blk {} in rel {:?} in LFC ", blkno, rel);
                     continue;
                 }
                 Ok(CacheResult::NotFound(lsn)) => lsn,
                 Err(_io_error) => return Err(-1), // FIXME errno?
             };
-            cache_misses.push((req.block_number, not_modified_since));
+            cache_misses.push((blkno, not_modified_since, in_progress_guard));
         }
         if cache_misses.is_empty() {
             return Ok(());
         }
-        let not_modified_since = cache_misses.iter().map(|(_blkno, lsn)| *lsn).max().unwrap();
+        let not_modified_since = cache_misses.iter().map(|(_blkno, lsn, _guard)| *lsn).max().unwrap();
 
         // TODO: spawn separate tasks for these. Use the integrated cache to keep track of the
         // in-flight requests
 
         // TODO: Use batched protocol
-        for (blkno, _lsn) in cache_misses.iter() {
+        for (blkno, _lsn, _guard) in cache_misses.iter() {
             match self
                 .pageserver_client
                 .get_page(&model::GetPageRequest {
@@ -376,10 +398,10 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 Ok(page_image) => {
                     trace!(
                         "prefetch completed, remembering blk {} in rel {:?} in LFC",
-                        req.block_number, rel
+                        *blkno, rel
                     );
                     self.cache
-                        .remember_page(&rel, req.block_number, page_image, not_modified_since)
+                        .remember_page(&rel, *blkno, page_image, not_modified_since, false)
                         .await;
                 }
                 Err(err) => {

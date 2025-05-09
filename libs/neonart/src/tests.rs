@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
 use std::collections::HashSet;
+use std::fmt::{Debug, Formatter};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::ArtAllocator;
 use crate::ArtMultiSlabAllocator;
 use crate::TreeInitStruct;
 use crate::TreeIterator;
 use crate::TreeWriteAccess;
+use crate::UpdateAction;
 
 use crate::{Key, Value};
 
@@ -55,7 +58,8 @@ fn test_inserts<K: Into<TestKey> + Copy>(keys: &[K]) {
 
     for (idx, k) in keys.iter().enumerate() {
         let w = tree_writer.start_write();
-        w.insert(&(*k).into(), idx);
+        let res = w.insert(&(*k).into(), idx);
+        assert!(res.is_ok());
     }
 
     for (idx, k) in keys.iter().enumerate() {
@@ -103,12 +107,38 @@ fn sparse() {
     test_inserts(&keys);
 }
 
-#[derive(Clone, Copy, Debug)]
+struct TestValue(AtomicUsize);
+
+impl TestValue {
+    fn new(val: usize) -> TestValue {
+        TestValue(AtomicUsize::new(val))
+    }
+
+    fn load(&self) -> usize {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+impl Value for TestValue {}
+
+impl Clone for TestValue {
+    fn clone(&self) -> TestValue {
+        TestValue::new(self.load())
+    }
+}
+
+impl Debug for TestValue {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(fmt, "{:?}", self.load())
+    }
+}
+
+#[derive(Clone, Debug)]
 struct TestOp(TestKey, Option<usize>);
 
-fn apply_op<A: ArtAllocator<usize>>(
+fn apply_op<A: ArtAllocator<TestValue>>(
     op: &TestOp,
-    tree: &TreeWriteAccess<TestKey, usize, A>,
+    tree: &TreeWriteAccess<TestKey, TestValue, A>,
     shadow: &mut BTreeMap<TestKey, usize>,
 ) {
     eprintln!("applying op: {op:?}");
@@ -123,24 +153,33 @@ fn apply_op<A: ArtAllocator<usize>>(
     // apply to Art tree
     let w = tree.start_write();
     w.update_with_fn(&op.0, |existing| {
-        assert_eq!(existing, shadow_existing.as_ref());
-        return op.1;
+        assert_eq!(existing.map(TestValue::load), shadow_existing);
+
+        match (existing, op.1) {
+            (None, None) => UpdateAction::Nothing,
+            (None, Some(new_val)) => UpdateAction::Insert(TestValue::new(new_val)),
+            (Some(_old_val), None) => UpdateAction::Remove,
+            (Some(old_val), Some(new_val)) => {
+                old_val.0.store(new_val, Ordering::Relaxed);
+                UpdateAction::Nothing
+            }
+        }
     });
 }
 
-fn test_iter<A: ArtAllocator<usize>>(
-    tree: &TreeWriteAccess<TestKey, usize, A>,
+fn test_iter<A: ArtAllocator<TestValue>>(
+    tree: &TreeWriteAccess<TestKey, TestValue, A>,
     shadow: &BTreeMap<TestKey, usize>,
 ) {
     let mut shadow_iter = shadow.iter();
     let mut iter = TreeIterator::new(&(TestKey::MIN..TestKey::MAX));
 
     loop {
-        let shadow_item = shadow_iter.next().map(|(k, v)| (k.clone(), v));
+        let shadow_item = shadow_iter.next().map(|(k, v)| (k.clone(), v.clone()));
         let r = tree.start_read();
         let item = iter.next(&r);
 
-        if shadow_item != item {
+        if shadow_item != item.map(|(k, v)| (k, v.load())) {
             eprintln!(
                 "FAIL: iterator returned {:?}, expected {:?}",
                 item, shadow_item
@@ -170,7 +209,7 @@ fn random_ops() {
 
     let allocator = ArtMultiSlabAllocator::new(&mut area);
 
-    let init_struct = TreeInitStruct::<TestKey, usize, _>::new(allocator);
+    let init_struct = TreeInitStruct::<TestKey, TestValue, _>::new(allocator);
     let tree_writer = init_struct.attach_writer();
 
     let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();

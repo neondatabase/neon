@@ -235,7 +235,6 @@ impl SlabDesc {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
