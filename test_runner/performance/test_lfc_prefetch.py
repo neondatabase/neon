@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 import threading
 import time
+import timeit
 from typing import TYPE_CHECKING
 
 import pytest
@@ -126,6 +127,7 @@ def test_lfc_async_prefetch_performance(neon_simple_env: NeonEnv, zenbenchmark):
     cur.execute(f"insert into account values (generate_series(1,{n_records}))")
     cur.execute("vacuum account")
 
+    start = timeit.default_timer()
     with zenbenchmark.record_duration("do_not_store_prefetch_results"):
         cur.execute("set neon.store_prefetch_result_in_lfc=off")
         for _ in range(n_iterations):
@@ -135,7 +137,10 @@ def test_lfc_async_prefetch_performance(neon_simple_env: NeonEnv, zenbenchmark):
             cur.execute(
                 "select sum(balance) from (select balance from account where id between 6000 and 7000 limit 100) s"
             )
+    end = timeit.default_timer()
+    do_not_store_prefetch_results_duration = end - start
 
+    start = timeit.default_timer()
     with zenbenchmark.record_duration("store_prefetch_results"):
         cur.execute("set neon.store_prefetch_result_in_lfc=on")
         for _ in range(n_iterations):
@@ -145,3 +150,7 @@ def test_lfc_async_prefetch_performance(neon_simple_env: NeonEnv, zenbenchmark):
             cur.execute(
                 "select sum(balance) from (select balance from account where id between 6000 and 7000 limit 100) s"
             )
+    end = timeit.default_timer()
+    store_prefetch_results_duration = end - start
+
+    assert do_not_store_prefetch_results_duration >= store_prefetch_results_duration
