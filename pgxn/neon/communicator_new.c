@@ -391,7 +391,7 @@ communicator_new_prefetch_register_bufferv(NRelFileInfo rinfo, ForkNumber forkNu
 	};
 	struct NeonIOResult result;
 
-	elog(LOG, "prefetch called for rel %u/%u/%u.%u block %u (%u blocks)",
+	elog(DEBUG5, "prefetch called for rel %u/%u/%u.%u block %u (%u blocks)",
 		 RelFileInfoFmt(rinfo), forkNum, blockno, nblocks);
 
 	if (num_inflight_requests >= MAX_INFLIGHT_ASYNC_REQUESTS)
@@ -553,7 +553,7 @@ communicator_new_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumbe
 		}
 	};
 
-	elog(LOG, "getpagev called for rel %u/%u/%u.%u block %u (%u blocks)",
+	elog(DEBUG5, "getpagev called for rel %u/%u/%u.%u block %u (%u blocks)",
 		 RelFileInfoFmt(rinfo), forkNum, blockno, nblocks);
 
 	/* Fill in the destination buffers in the request */

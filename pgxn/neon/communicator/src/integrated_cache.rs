@@ -133,6 +133,8 @@ struct BlockEntry {
     lw_lsn: Lsn,
     cache_block: Option<CacheBlock>,
 
+    io_in_progress: AtomicBool,
+
     // 'referenced' bit for the clock algorithm
     referenced: AtomicBool,
 }
