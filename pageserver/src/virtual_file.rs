@@ -74,6 +74,8 @@ pub struct VirtualFile {
 
 impl VirtualFile {
     /// Open a file in read-only mode. Like File::open.
+    ///
+    /// Insensitive to `virtual_file_io_mode` setting.
     pub async fn open<P: AsRef<Utf8Path>>(
         path: P,
         ctx: &RequestContext,
@@ -95,6 +97,7 @@ impl VirtualFile {
         Self::open_with_options_v2(path.as_ref(), OpenOptions::new().read(true), ctx).await
     }
 
+    /// `O_DIRECT` will be enabled base on `virtual_file_io_mode`.
     pub async fn open_with_options_v2<P: AsRef<Utf8Path>>(
         path: P,
         mut open_options: OpenOptions,
@@ -1272,7 +1275,6 @@ mod tests {
     use std::sync::Arc;
 
     use owned_buffers_io::io_buf_ext::IoBufExt;
-    use owned_buffers_io::slice::SliceMutExt;
     use rand::seq::SliceRandom;
     use rand::{Rng, thread_rng};
 
@@ -1280,162 +1282,38 @@ mod tests {
     use crate::context::DownloadBehavior;
     use crate::task_mgr::TaskKind;
 
-    enum MaybeVirtualFile {
-        VirtualFile(VirtualFile),
-        File(File),
-    }
-
-    impl From<VirtualFile> for MaybeVirtualFile {
-        fn from(vf: VirtualFile) -> Self {
-            MaybeVirtualFile::VirtualFile(vf)
-        }
-    }
-
-    impl MaybeVirtualFile {
-        async fn read_exact_at(
-            &self,
-            mut slice: tokio_epoll_uring::Slice<IoBufferMut>,
-            offset: u64,
-            ctx: &RequestContext,
-        ) -> Result<tokio_epoll_uring::Slice<IoBufferMut>, Error> {
-            match self {
-                MaybeVirtualFile::VirtualFile(file) => file.read_exact_at(slice, offset, ctx).await,
-                MaybeVirtualFile::File(file) => {
-                    let rust_slice: &mut [u8] = slice.as_mut_rust_slice_full_zeroed();
-                    file.read_exact_at(rust_slice, offset).map(|()| slice)
-                }
-            }
-        }
-        async fn write_all_at<Buf: IoBufAligned + Send>(
-            &self,
-            buf: FullSlice<Buf>,
-            offset: u64,
-            ctx: &RequestContext,
-        ) -> Result<(), Error> {
-            match self {
-                MaybeVirtualFile::VirtualFile(file) => {
-                    let (_buf, res) = file.write_all_at(buf, offset, ctx).await;
-                    res
-                }
-                MaybeVirtualFile::File(file) => file.write_all_at(&buf[..], offset),
-            }
-        }
-
-        // Helper function to slurp a portion of a file into a string
-        async fn read_string_at(
-            &mut self,
-            pos: u64,
-            len: usize,
-            ctx: &RequestContext,
-        ) -> Result<String, Error> {
-            let slice = IoBufferMut::with_capacity(len).slice_full();
-            assert_eq!(slice.bytes_total(), len);
-            let slice = self.read_exact_at(slice, pos, ctx).await?;
-            let buf = slice.into_inner();
-            assert_eq!(buf.len(), len);
-
-            Ok(String::from_utf8(buf.to_vec()).unwrap())
-        }
-    }
-
     #[tokio::test]
     async fn test_virtual_files() -> anyhow::Result<()> {
-        // The real work is done in the test_files() helper function. This
-        // allows us to run the same set of tests against a native File, and
-        // VirtualFile. We trust the native Files and wouldn't need to test them,
-        // but this allows us to verify that the operations return the same
-        // results with VirtualFiles as with native Files. (Except that with
-        // native files, you will run out of file descriptors if the ulimit
-        // is low enough.)
-        struct A;
-
-        impl Adapter for A {
-            async fn open(
-                path: Utf8PathBuf,
-                opts: OpenOptions,
-                ctx: &RequestContext,
-            ) -> Result<MaybeVirtualFile, anyhow::Error> {
-                let vf = VirtualFile::open_with_options_v2(&path, opts, ctx).await?;
-                Ok(MaybeVirtualFile::VirtualFile(vf))
-            }
-        }
-        test_files::<A>("virtual_files").await
-    }
-
-    #[tokio::test]
-    async fn test_physical_files() -> anyhow::Result<()> {
-        struct B;
-
-        impl Adapter for B {
-            async fn open(
-                path: Utf8PathBuf,
-                opts: OpenOptions,
-                _ctx: &RequestContext,
-            ) -> Result<MaybeVirtualFile, anyhow::Error> {
-                Ok(MaybeVirtualFile::File({
-                    let owned_fd = opts.open(path.as_std_path()).await?;
-                    File::from(owned_fd)
-                }))
-            }
-        }
-
-        test_files::<B>("physical_files").await
-    }
-
-    /// This is essentially a closure which returns a MaybeVirtualFile, but because rust edition
-    /// 2024 is not yet out with new lifetime capture or outlives rules, this is a async function
-    /// in trait which benefits from the new lifetime capture rules already.
-    trait Adapter {
-        async fn open(
-            path: Utf8PathBuf,
-            opts: OpenOptions,
-            ctx: &RequestContext,
-        ) -> Result<MaybeVirtualFile, anyhow::Error>;
-    }
-
-    async fn test_files<A>(testname: &str) -> anyhow::Result<()>
-    where
-        A: Adapter,
-    {
         let ctx =
             RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
-        let testdir = crate::config::PageServerConf::test_repo_dir(testname);
+        let testdir = crate::config::PageServerConf::test_repo_dir("test_virtual_files");
         std::fs::create_dir_all(&testdir)?;
 
+        let zeropad512 = |content: &[u8]| {
+            let mut buf = IoBufferMut::with_capacity_zeroed(512);
+            buf[..content.len()].copy_from_slice(content);
+            buf.freeze().slice_len()
+        };
+
         let path_a = testdir.join("file_a");
-        let mut file_a = A::open(
+        let file_a = VirtualFile::open_with_options_v2(
             path_a.clone(),
             OpenOptions::new()
+                .read(true)
                 .write(true)
+                // set create & truncate flags to ensure when we trigger a reopen later in this test,
+                // the reopen_options must have masked out those flags; if they don't, then
+                // the after reopen we will fail to read the `content_a` that we write here.
                 .create(true)
-                .truncate(true)
-                .to_owned(),
+                .truncate(true),
             &ctx,
         )
         .await?;
+        let (_, res) = file_a.write_all_at(zeropad512(b"content_a"), 0, &ctx).await;
+        res?;
 
-        file_a
-            .write_all_at(IoBuffer::from(b"foobar").slice_len(), 0, &ctx)
-            .await?;
-
-        // cannot read from a file opened in write-only mode
-        let _ = file_a.read_string_at(0, 1, &ctx).await.unwrap_err();
-
-        // Close the file and re-open for reading
-        let mut file_a = A::open(path_a, OpenOptions::new().read(true), &ctx).await?;
-
-        // cannot write to a file opened in read-only mode
-        let _ = file_a
-            .write_all_at(IoBuffer::from(b"bar").slice_len(), 0, &ctx)
-            .await
-            .unwrap_err();
-
-        // Try simple read
-        assert_eq!("foobar", file_a.read_string_at(0, 6, &ctx).await?);
-
-        // Create another test file, and try FileExt functions on it.
         let path_b = testdir.join("file_b");
-        let mut file_b = A::open(
+        let file_b = VirtualFile::open_with_options_v2(
             path_b.clone(),
             OpenOptions::new()
                 .read(true)
@@ -1445,37 +1323,44 @@ mod tests {
             &ctx,
         )
         .await?;
-        file_b
-            .write_all_at(IoBuffer::from(b"BAR").slice_len(), 3, &ctx)
-            .await?;
-        file_b
-            .write_all_at(IoBuffer::from(b"FOO").slice_len(), 0, &ctx)
-            .await?;
+        let (_, res) = file_b.write_all_at(zeropad512(b"content_b"), 0, &ctx).await;
+        res?;
 
-        assert_eq!(file_b.read_string_at(2, 3, &ctx).await?, "OBA");
+        let assert_first_512_eq = async |vfile: &VirtualFile, expect: &[u8]| {
+            let buf = vfile
+                .read_exact_at(IoBufferMut::with_capacity_zeroed(512).slice_full(), 0, &ctx)
+                .await
+                .unwrap();
+            assert_eq!(&buf[..], &zeropad512(expect)[..]);
+        };
 
-        // Open a lot of files, enough to cause some evictions. (Or to be precise,
-        // open the same file many times. The effect is the same.)
+        // Open a lot of file descriptors / VirtualFile instances.
+        // Enough to cause some evictions in the fd cache.
 
-        let mut vfiles = Vec::new();
+        let mut file_b_dupes = Vec::new();
         for _ in 0..100 {
-            let mut vfile = A::open(path_b.clone(), OpenOptions::new().read(true), &ctx).await?;
-            assert_eq!("FOOBAR", vfile.read_string_at(0, 6, &ctx).await?);
-            vfiles.push(vfile);
+            let vfile = VirtualFile::open_with_options_v2(
+                path_b.clone(),
+                OpenOptions::new().read(true),
+                &ctx,
+            )
+            .await?;
+            assert_first_512_eq(&vfile, b"content_b").await;
+            file_b_dupes.push(vfile);
         }
 
         // make sure we opened enough files to definitely cause evictions.
-        assert!(vfiles.len() > TEST_MAX_FILE_DESCRIPTORS * 2);
+        assert!(file_b_dupes.len() > TEST_MAX_FILE_DESCRIPTORS * 2);
 
         // The underlying file descriptor for 'file_a' should be closed now. Try to read
-        // from it again.
-        assert_eq!("foobar", file_a.read_string_at(0, 6, &ctx).await?);
+        // from it again. The VirtualFile reopens the file internally.
+        assert_first_512_eq(&file_a, b"content_a").await;
 
         // Check that all the other FDs still work too. Use them in random order for
         // good measure.
-        vfiles.as_mut_slice().shuffle(&mut thread_rng());
-        for vfile in vfiles.iter_mut() {
-            assert_eq!("OOBAR", vfile.read_string_at(1, 5, &ctx).await?);
+        file_b_dupes.as_mut_slice().shuffle(&mut thread_rng());
+        for vfile in file_b_dupes.iter_mut() {
+            assert_first_512_eq(vfile, b"content_b").await;
         }
 
         Ok(())
@@ -1506,7 +1391,7 @@ mod tests {
         // Open the file many times.
         let mut files = Vec::new();
         for _ in 0..VIRTUAL_FILES {
-            let f = VirtualFileInner::open_with_options(
+            let f = VirtualFile::open_with_options_v2(
                 &test_file_path,
                 OpenOptions::new().read(true),
                 &ctx,
@@ -1551,8 +1436,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_atomic_overwrite_basic() {
-        let ctx =
-            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
         let testdir = crate::config::PageServerConf::test_repo_dir("test_atomic_overwrite_basic");
         std::fs::create_dir_all(&testdir).unwrap();
 
@@ -1562,26 +1445,22 @@ mod tests {
         VirtualFileInner::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"foo".to_vec())
             .await
             .unwrap();
-        let mut file = MaybeVirtualFile::from(VirtualFile::open(&path, &ctx).await.unwrap());
-        let post = file.read_string_at(0, 3, &ctx).await.unwrap();
+
+        let post = std::fs::read_to_string(&path).unwrap();
         assert_eq!(post, "foo");
         assert!(!tmp_path.exists());
-        drop(file);
 
         VirtualFileInner::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"bar".to_vec())
             .await
             .unwrap();
-        let mut file = MaybeVirtualFile::from(VirtualFile::open(&path, &ctx).await.unwrap());
-        let post = file.read_string_at(0, 3, &ctx).await.unwrap();
+
+        let post = std::fs::read_to_string(&path).unwrap();
         assert_eq!(post, "bar");
         assert!(!tmp_path.exists());
-        drop(file);
     }
 
     #[tokio::test]
     async fn test_atomic_overwrite_preexisting_tmp() {
-        let ctx =
-            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
         let testdir =
             crate::config::PageServerConf::test_repo_dir("test_atomic_overwrite_preexisting_tmp");
         std::fs::create_dir_all(&testdir).unwrap();
@@ -1596,10 +1475,8 @@ mod tests {
             .await
             .unwrap();
 
-        let mut file = MaybeVirtualFile::from(VirtualFile::open(&path, &ctx).await.unwrap());
-        let post = file.read_string_at(0, 3, &ctx).await.unwrap();
+        let post = std::fs::read_to_string(&path).unwrap();
         assert_eq!(post, "foo");
         assert!(!tmp_path.exists());
-        drop(file);
     }
 }
