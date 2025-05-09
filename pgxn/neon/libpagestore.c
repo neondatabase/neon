@@ -433,7 +433,6 @@ pageserver_connect(shardno_t shard_no, int elevel)
 
 		now = GetCurrentTimestamp();
 		us_since_last_attempt = (int64) (now - shard->last_reconnect_time);
-		shard->last_reconnect_time = now;
 
 		/*
 		 * Make sure we don't do exponential backoff with a constant multiplier
@@ -452,17 +451,19 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		 */
 		while (us_since_last_attempt < shard->delay_us)
 		{
+			TimestampTz	current_time;
 			pg_usleep(shard->delay_us - us_since_last_attempt);
 
 			/* At least we should handle cancellations here */
 			CHECK_FOR_INTERRUPTS();
 
-			now = GetCurrentTimestamp();
-			us_since_last_attempt = (int64) (now - shard->last_reconnect_time);
+			current_time = GetCurrentTimestamp();
+			us_since_last_attempt = (int64) (current_time - shard->last_reconnect_time);
 		}
 
 		/* update the delay metric */
 		shard->delay_us = Min(shard->delay_us * 2, MAX_RECONNECT_INTERVAL_USEC);
+		shard->last_reconnect_time = now;
 
 		/*
 		 * Connect using the connection string we got from the
