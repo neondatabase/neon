@@ -850,10 +850,10 @@ impl VirtualFileInner {
         // there is a chance that testing would not catch violations of a runtime requirement stricter than 512.
         {
             let requirement = 512;
-            let remainder = addr & requirement;
+            let remainder = addr % requirement;
             assert!(
                 remainder == 0,
-                "Direct I/O buffer must be aligned: buffer_addr=0x{addr:x} & 0x{requirement:x} = 0x{remainder:x}"
+                "Direct I/O buffer must be aligned: buffer_addr=0x{addr:x} % 0x{requirement:x} = 0x{remainder:x}"
             );
         }
 
@@ -864,10 +864,10 @@ impl VirtualFileInner {
         // Even the shallowest testing will expose more restrictive requirements if those ever arise.
         {
             let requirement = 512;
-            let remainder = offset & requirement;
+            let remainder = offset % requirement;
             assert!(
                 remainder == 0,
-                "Direct I/O offset must be aligned: offset=0x{offset:x} & 0x{requirement:x} = 0x{remainder:x}"
+                "Direct I/O offset must be aligned: offset=0x{offset:x} % 0x{requirement:x} = 0x{remainder:x}"
             );
         }
 
@@ -877,10 +877,10 @@ impl VirtualFileInner {
         // On our production systems, that is 512.
         {
             let requirement = 512;
-            let remainder = size & requirement;
+            let remainder = size % requirement;
             assert!(
                 remainder == 0,
-                "Direct I/O buffer size must be a multiple of {requirement}: size=0x{size:x} & 0x{requirement:x} = 0x{remainder:x}"
+                "Direct I/O buffer size must be a multiple of {requirement}: size=0x{size:x} % 0x{requirement:x} = 0x{remainder:x}"
             );
         }
     }
