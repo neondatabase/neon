@@ -284,19 +284,19 @@ struct SqlOverHttpArgs {
 #[derive(clap::Args, Clone, Debug)]
 struct PgSniRouterArgs {
     /// listen for incoming client connections on ip:port
-    #[clap(long = "pg-sni-router-listen", default_value = "127.0.0.1:4432")]
+    #[clap(id = "sni-router-listen", long, default_value = "127.0.0.1:4432")]
     listen: SocketAddr,
     /// listen for incoming client connections on ip:port, requiring TLS to compute
-    #[clap(long = "pg-sni-router-listen-tls", default_value = "127.0.0.1:4433")]
+    #[clap(id = "sni-router-listen-tls", long, default_value = "127.0.0.1:4433")]
     listen_tls: SocketAddr,
     /// path to TLS key for client postgres connections
-    #[clap(long = "pg-sni-router-tls-key")]
+    #[clap(id = "sni-router-tls-key", long)]
     tls_key: Option<PathBuf>,
     /// path to TLS cert for client postgres connections
-    #[clap(long = "pg-sni-router-tls-cert")]
+    #[clap(id = "sni-router-tls-cert", long)]
     tls_cert: Option<PathBuf>,
     /// append this domain zone to the SNI hostname to get the destination address
-    #[clap(long = "pg-sni-router-destination")]
+    #[clap(id = "sni-router-destination", long)]
     dest: Option<String>,
 }
 
@@ -346,27 +346,30 @@ pub async fn run() -> anyhow::Result<()> {
         Some(TcpListener::bind(args.proxy).await?)
     };
 
-    let sni_router_listeners = if args.pg_sni_router.dest.is_some() {
-        ensure!(
-            args.pg_sni_router.tls_key.is_some(),
-            "pg-sni-router-tls-key must be provided"
-        );
-        ensure!(
-            args.pg_sni_router.tls_cert.is_some(),
-            "pg-sni-router-tls-key must be provided"
-        );
+    let sni_router_listeners = {
+        let args = &args.pg_sni_router;
+        if args.dest.is_some() {
+            ensure!(
+                args.tls_key.is_some(),
+                "sni-router-tls-key must be provided"
+            );
+            ensure!(
+                args.tls_cert.is_some(),
+                "sni-router-tls-cert must be provided"
+            );
 
-        info!(
-            "Starting pg-sni-router on {} and {}",
-            args.pg_sni_router.listen, args.pg_sni_router.listen_tls
-        );
+            info!(
+                "Starting pg-sni-router on {} and {}",
+                args.listen, args.listen_tls
+            );
 
-        Some((
-            TcpListener::bind(args.pg_sni_router.listen).await?,
-            TcpListener::bind(args.pg_sni_router.listen_tls).await?,
-        ))
-    } else {
-        None
+            Some((
+                TcpListener::bind(args.listen).await?,
+                TcpListener::bind(args.listen_tls).await?,
+            ))
+        } else {
+            None
+        }
     };
 
     // TODO: rename the argument to something like serverless.

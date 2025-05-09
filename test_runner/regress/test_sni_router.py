@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import backoff
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import PgProtocol, VanillaPostgres
+from fixtures.neon_fixtures import NeonProxy, PgProtocol, VanillaPostgres
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -146,3 +146,21 @@ def test_pg_sni_router(
             hostaddr="127.0.0.1",
         )
         assert out[0][0] == 1
+
+
+def test_pg_sni_router_in_proxy(
+    static_proxy: NeonProxy,
+    vanilla_pg: VanillaPostgres,
+):
+    assert vanilla_pg.is_running()
+    pg_port = vanilla_pg.default_options["port"]
+
+    out = static_proxy.safe_psql(
+        "select 1",
+        dbname="postgres",
+        sslmode="require",
+        host=f"endpoint--namespace--{pg_port}.local.neon.build",
+        hostaddr="127.0.0.1",
+        port=static_proxy.router_port,
+    )
+    assert out[0][0] == 1

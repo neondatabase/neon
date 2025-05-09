@@ -3605,6 +3605,7 @@ class NeonProxy(PgProtocol):
         http_port: int,
         mgmt_port: int,
         external_http_port: int,
+        router_port: int,
         auth_backend: NeonProxy.AuthBackend,
         metric_collection_endpoint: str | None = None,
         metric_collection_interval: str | None = None,
@@ -3621,6 +3622,7 @@ class NeonProxy(PgProtocol):
         self.test_output_dir = test_output_dir
         self.proxy_port = proxy_port
         self.mgmt_port = mgmt_port
+        self.router_port = router_port
         self.auth_backend = auth_backend
         self.metric_collection_endpoint = metric_collection_endpoint
         self.metric_collection_interval = metric_collection_interval
@@ -3635,6 +3637,14 @@ class NeonProxy(PgProtocol):
         key_path = self.test_output_dir / "proxy.key"
         generate_proxy_tls_certs("*.local.neon.build", key_path, crt_path)
 
+        # generate key for pg-sni-router.
+        # endpoint.namespace.local.neon.build resolves to 127.0.0.1
+        generate_proxy_tls_certs(
+            "endpoint.namespace.local.neon.build",
+            self.test_output_dir / "router.key",
+            self.test_output_dir / "router.crt",
+        )
+
         args = [
             str(self.neon_binpath / "proxy"),
             *["--http", f"{self.host}:{self.http_port}"],
@@ -3644,6 +3654,12 @@ class NeonProxy(PgProtocol):
             *["--sql-over-http-timeout", f"{self.http_timeout_seconds}s"],
             *["-c", str(crt_path)],
             *["-k", str(key_path)],
+
+            *["--sni-router-listen", f"{self.host}:{self.router_port}"],
+            *["--sni-router-tls-cert", str(self.test_output_dir / "router.crt")],
+            *["--sni-router-tls-key", str(self.test_output_dir / "router.key")],
+            *["--sni-router-destination", "local.neon.build"],
+
             *self.auth_backend.extra_args(),
         ]
 
@@ -3943,6 +3959,7 @@ def link_proxy(
     proxy_port = port_distributor.get_port()
     mgmt_port = port_distributor.get_port()
     external_http_port = port_distributor.get_port()
+    router_port = port_distributor.get_port()
 
     with NeonProxy(
         neon_binpath=neon_binpath,
@@ -3950,6 +3967,7 @@ def link_proxy(
         proxy_port=proxy_port,
         http_port=http_port,
         mgmt_port=mgmt_port,
+        router_port=router_port,
         external_http_port=external_http_port,
         auth_backend=NeonProxy.Link(),
     ) as proxy:
@@ -3983,6 +4001,7 @@ def static_proxy(
     mgmt_port = port_distributor.get_port()
     http_port = port_distributor.get_port()
     external_http_port = port_distributor.get_port()
+    router_port = port_distributor.get_port()
 
     with NeonProxy(
         neon_binpath=neon_binpath,
@@ -3990,6 +4009,7 @@ def static_proxy(
         proxy_port=proxy_port,
         http_port=http_port,
         mgmt_port=mgmt_port,
+        router_port=router_port,
         external_http_port=external_http_port,
         auth_backend=NeonProxy.Postgres(auth_endpoint),
     ) as proxy:
