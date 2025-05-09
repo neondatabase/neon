@@ -199,11 +199,8 @@ pub struct TimelineResources {
 
 /// The relation size cache caches relation sizes at the end of the timeline. It speeds up WAL
 /// ingestion considerably, because WAL ingestion needs to check on most records if the record
-/// implicitly extends the relation.  At startup, `complete_as_of` is initialized to the current end
-/// of the timeline (disk_consistent_lsn).  It's used on reads of relation sizes to check if the
-/// value can be used to also update the cache, see [`Timeline::update_cached_rel_size`].
+/// implicitly extends the relation.
 pub(crate) struct RelSizeCache {
-    pub(crate) complete_as_of: Lsn,
     pub(crate) map: HashMap<RelTag, (Lsn, BlockNumber)>,
 }
 
@@ -2970,7 +2967,6 @@ impl Timeline {
 
                 last_received_wal: Mutex::new(None),
                 rel_size_cache: RwLock::new(RelSizeCache {
-                    complete_as_of: disk_consistent_lsn,
                     map: HashMap::new(),
                 }),
 
