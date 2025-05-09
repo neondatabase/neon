@@ -1666,6 +1666,39 @@ impl Persistence {
         }
     }
 
+    pub(crate) async fn get_timeline_import(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> DatabaseResult<Option<TimelineImport>> {
+        use crate::schema::timeline_imports::dsl;
+        let persistent_import = self
+            .with_measured_conn(DatabaseOperation::ListTimelineImports, move |conn| {
+                Box::pin(async move {
+                    let mut from_db: Vec<TimelineImportPersistence> = dsl::timeline_imports
+                        .filter(dsl::tenant_id.eq(tenant_id.to_string()))
+                        .filter(dsl::timeline_id.eq(timeline_id.to_string()))
+                        .load(conn)
+                        .await?;
+
+                    if from_db.len() > 1 {
+                        return Err(DatabaseError::Logical(format!(
+                            "unexpected number of rows ({})",
+                            from_db.len()
+                        )));
+                    }
+
+                    Ok(from_db.pop())
+                })
+            })
+            .await?;
+
+        persistent_import
+            .map(TimelineImport::from_persistent)
+            .transpose()
+            .map_err(|err| DatabaseError::Logical(format!("failed to deserialize import: {err}")))
+    }
+
     pub(crate) async fn delete_timeline_import(
         &self,
         tenant_id: TenantId,

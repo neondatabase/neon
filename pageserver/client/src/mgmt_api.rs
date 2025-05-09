@@ -819,4 +819,19 @@ impl Client {
             .await
             .map(|resp| resp.status())
     }
+
+    pub async fn activate_post_import(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Result<StatusCode> {
+        let uri = format!(
+            "{}/v1/tenant/{}/timeline/{}/activate_post_import",
+            self.mgmt_api_endpoint, tenant_shard_id, timeline_id,
+        );
+
+        self.request(Method::PUT, uri, ())
+            .await
+            .map(|resp| resp.status())
+    }
 }

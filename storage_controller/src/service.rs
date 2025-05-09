@@ -35,7 +35,7 @@ use pageserver_api::controller_api::{
 };
 use pageserver_api::models::{
     self, DetachBehavior, LocationConfig, LocationConfigListResponse, LocationConfigMode, LsnLease,
-    PageserverUtilization, SecondaryProgress, ShardParameters, TenantConfig,
+    PageserverUtilization, SecondaryProgress, ShardImportStatus, ShardParameters, TenantConfig,
     TenantConfigPatchRequest, TenantConfigRequest, TenantLocationConfigRequest,
     TenantLocationConfigResponse, TenantShardLocation, TenantShardSplitRequest,
     TenantShardSplitResponse, TenantSorting, TenantTimeTravelRequest,
@@ -61,6 +61,7 @@ use utils::completion::Barrier;
 use utils::generation::Generation;
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
+use utils::shard::ShardIndex;
 use utils::sync::gate::{Gate, GateGuard};
 use utils::{failpoint_support, pausable_failpoint};
 
@@ -3905,6 +3906,38 @@ impl Service {
         })
     }
 
+    pub(crate) async fn handle_timeline_shard_import_progress(
+        self: &Arc<Self>,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Result<ShardImportStatus, ApiError> {
+        let maybe_import = self
+            .persistence
+            .get_timeline_import(tenant_shard_id.tenant_id, timeline_id)
+            .await?;
+
+        let import = maybe_import.ok_or_else(|| {
+            ApiError::NotFound(
+                format!(
+                    "import for {}/{} not found",
+                    tenant_shard_id.tenant_id, timeline_id
+                )
+                .into(),
+            )
+        })?;
+
+        import
+            .shard_statuses
+            .0
+            .get(&tenant_shard_id.to_index())
+            .cloned()
+            .ok_or_else(|| {
+                ApiError::NotFound(
+                    format!("shard {} not found", tenant_shard_id.shard_slug()).into(),
+                )
+            })
+    }
+
     pub(crate) async fn handle_timeline_shard_import_progress_upcall(
         self: &Arc<Self>,
         req: PutTimelineImportStatusRequest,
@@ -3958,6 +3991,9 @@ impl Service {
         let import_failed = import.completion_error().is_some();
 
         if !import_failed {
+            self.activate_timeline_post_import(&import).await?;
+            tracing::info!("Post import shard reset complete");
+
             loop {
                 if self.cancel.is_cancelled() {
                     anyhow::bail!("Shut down requested while finalizing import");
@@ -4016,6 +4052,92 @@ impl Service {
             .for_each(|(_id, shard)| shard.importing = TimelineImportState::Idle);
 
         tracing::info!(%import_failed, "Timeline import complete");
+
+        Ok(())
+    }
+
+    async fn activate_timeline_post_import(
+        self: &Arc<Self>,
+        import: &TimelineImport,
+    ) -> anyhow::Result<()> {
+        let mut shards_to_reset: HashSet<ShardIndex> =
+            import.shard_statuses.0.keys().cloned().collect();
+
+        while !shards_to_reset.is_empty() {
+            if self.cancel.is_cancelled() {
+                anyhow::bail!("Shut down requested while finalizing import");
+            }
+
+            let targets = {
+                let locked = self.inner.read().unwrap();
+                let mut targets = Vec::new();
+
+                for (tenant_shard_id, shard) in locked
+                    .tenants
+                    .range(TenantShardId::tenant_range(import.tenant_id))
+                {
+                    if !import
+                        .shard_statuses
+                        .0
+                        .contains_key(&tenant_shard_id.to_index())
+                    {
+                        anyhow::bail!("Shard layout change detected on completion");
+                    }
+
+                    if let Some(node_id) = shard.intent.get_attached() {
+                        let node = locked
+                            .nodes
+                            .get(node_id)
+                            .expect("Pageservers may not be deleted while referenced");
+                        targets.push((*tenant_shard_id, node.clone()));
+                    }
+                }
+
+                targets
+            };
+
+            let targeted_tenant_shards: Vec<_> = targets.iter().map(|(tid, _node)| *tid).collect();
+
+            let results = self
+                .tenant_for_shards_api(
+                    targets,
+                    |tenant_shard_id, client| async move {
+                        client
+                            .activate_post_import(tenant_shard_id, import.timeline_id)
+                            .await
+                    },
+                    1,
+                    1,
+                    SHORT_RECONCILE_TIMEOUT,
+                    &self.cancel,
+                )
+                .await;
+
+            let mut failed = 0;
+            for (tid, result) in targeted_tenant_shards.iter().zip(results.into_iter()) {
+                match result {
+                    Ok(_ok) => {
+                        shards_to_reset.remove(&tid.to_index());
+                    }
+                    Err(_err) => {
+                        failed += 1;
+                    }
+                }
+            }
+
+            if failed > 0 {
+                tracing::info!(
+                    "Failed to actiave timeline on {failed} shards post import. Will retry"
+                );
+            }
+
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(250)) => {},
+                _ = self.cancel.cancelled() => {
+                    anyhow::bail!("Shut down requested while finalizing import");
+                }
+            }
+        }
 
         Ok(())
     }

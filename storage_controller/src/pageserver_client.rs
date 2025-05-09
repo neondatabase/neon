@@ -357,4 +357,19 @@ impl PageserverClient {
             self.inner.wait_lsn(tenant_shard_id, request).await
         )
     }
+
+    pub(crate) async fn activate_post_import(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Result<StatusCode> {
+        measured_request!(
+            "activate_post_import",
+            crate::metrics::Method::Put,
+            &self.node_id_label,
+            self.inner
+                .activate_post_import(tenant_shard_id, timeline_id)
+                .await
+        )
+    }
 }

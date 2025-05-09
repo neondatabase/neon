@@ -53,6 +53,11 @@ pub trait StorageControllerUpcallApi {
         timeline_id: TimelineId,
         status: ShardImportStatus,
     ) -> impl Future<Output = Result<(), RetryForeverError>> + Send;
+    fn get_timeline_import_status(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+    ) -> impl Future<Output = Result<Option<ShardImportStatus>, RetryForeverError>> + Send;
 }
 
 impl StorageControllerUpcallClient {
@@ -301,5 +306,40 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
         };
 
         self.retry_http_forever(&url, request).await
+    }
+
+    #[tracing::instrument(skip_all)] // so that warning logs from retry_http_forever have context
+    async fn get_timeline_import_status(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Result<Option<ShardImportStatus>, RetryForeverError> {
+        let url = self
+            .base_url
+            .join(format!("timeline_import_status/{}/{}", tenant_shard_id, timeline_id).as_str())
+            .expect("Failed to build path");
+
+        Ok(backoff::retry(
+            || async {
+                let response = self.http_client.get(url.clone()).send().await?;
+
+                if let Err(err) = response.error_for_status_ref() {
+                    if matches!(err.status(), Some(reqwest::StatusCode::NOT_FOUND)) {
+                        return Ok(None);
+                    } else {
+                        return Err(err);
+                    }
+                }
+                response.json::<ShardImportStatus>().await.map(Some)
+            },
+            |_| false,
+            3,
+            u32::MAX,
+            "storage controller upcall",
+            &self.cancel,
+        )
+        .await
+        .ok_or(RetryForeverError::ShuttingDown)?
+        .expect("We retry forever, this should never be reached"))
     }
 }

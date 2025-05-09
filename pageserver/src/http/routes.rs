@@ -3500,6 +3500,38 @@ async fn put_tenant_timeline_import_wal(
     }.instrument(span).await
 }
 
+async fn activate_post_import_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+
+    let state = get_state(&request);
+    let tenant = state
+        .tenant_manager
+        .get_attached_tenant_shard(tenant_shard_id)?;
+
+    tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+    tenant
+        .finalize_importing_timeline(timeline_id)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    // This is crude: we reset the whole tenant such that the new timeline is detected
+    // and activated. We can come up with something more granular in the future.
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+    state
+        .tenant_manager
+        .reset_tenant(tenant_shard_id, false, &ctx)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, ())
+}
+
 /// Read the end of a tar archive.
 ///
 /// A tar archive normally ends with two consecutive blocks of zeros, 512 bytes each.
@@ -3923,6 +3955,10 @@ pub fn make_router(
         .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/import_wal",
             |r| api_handler(r, put_tenant_timeline_import_wal),
+        )
+        .put(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/activate_post_import",
+            |r| api_handler(r, activate_post_import_handler),
         )
         .any(handler_404))
 }
