@@ -357,7 +357,7 @@ for max_batch_size in [1, 32]:
         for l0_stack_height in [0, 3, 10]
     ],
 )
-def test_pagebench(
+def test_random_reads(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
