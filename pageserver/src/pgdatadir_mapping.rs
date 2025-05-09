@@ -275,43 +275,6 @@ impl Timeline {
                 continue;
             }
 
-            let nblocks = {
-                let ctx = RequestContextBuilder::from(&ctx)
-                    .perf_span(|crnt_perf_span| {
-                        info_span!(
-                            target: PERF_TRACE_TARGET,
-                            parent: crnt_perf_span,
-                            "GET_REL_SIZE",
-                            reltag=%tag,
-                            lsn=%lsn,
-                        )
-                    })
-                    .attached_child();
-
-                match self
-                    .get_rel_size(*tag, Version::Lsn(lsn), &ctx)
-                    .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
-                    .await
-                {
-                    Ok(nblocks) => nblocks,
-                    Err(err) => {
-                        result_slots[response_slot_idx].write(Err(err));
-                        slots_filled += 1;
-                        continue;
-                    }
-                }
-            };
-
-            if *blknum >= nblocks {
-                debug!(
-                    "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
-                    tag, blknum, lsn, nblocks
-                );
-                result_slots[response_slot_idx].write(Ok(ZERO_PAGE.clone()));
-                slots_filled += 1;
-                continue;
-            }
-
             let key = rel_block_to_key(*tag, *blknum);
 
             let ctx = RequestContextBuilder::from(&ctx)
@@ -487,8 +450,6 @@ impl Timeline {
         let key = rel_size_to_key(tag);
         let mut buf = version.get(self, key, ctx).await?;
         let nblocks = buf.get_u32_le();
-
-        self.update_cached_rel_size(tag, version.get_lsn(), nblocks);
 
         Ok(nblocks)
     }
@@ -1341,32 +1302,6 @@ impl Timeline {
         }
         RELSIZE_CACHE_MISSES.inc();
         None
-    }
-
-    /// Update cached relation size if there is no more recent update
-    pub fn update_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
-        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-
-        if lsn < rel_size_cache.complete_as_of {
-            // Do not cache old values. It's safe to cache the size on read, as long as
-            // the read was at an LSN since we started the WAL ingestion. Reasoning: we
-            // never evict values from the cache, so if the relation size changed after
-            // 'lsn', the new value is already in the cache.
-            return;
-        }
-
-        match rel_size_cache.map.entry(tag) {
-            hash_map::Entry::Occupied(mut entry) => {
-                let cached_lsn = entry.get_mut();
-                if lsn >= cached_lsn.0 {
-                    *cached_lsn = (lsn, nblocks);
-                }
-            }
-            hash_map::Entry::Vacant(entry) => {
-                entry.insert((lsn, nblocks));
-                RELSIZE_CACHE_ENTRIES.inc();
-            }
-        }
     }
 
     /// Store cached relation size
