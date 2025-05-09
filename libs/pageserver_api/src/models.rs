@@ -343,10 +343,12 @@ pub enum ShardImportStatus {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ShardImportProgress {
+    /// Total number of jobs in the import plan
     pub jobs: usize,
+    /// Number of jobs completed
     pub completed: usize,
+    /// Hash of the plan
     pub import_plan_hash: u64,
-    // TODO: unique identifier to enforce same job plan
 }
 
 impl ShardImportStatus {
