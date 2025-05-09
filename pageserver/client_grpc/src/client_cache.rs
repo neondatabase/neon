@@ -121,7 +121,7 @@ impl ConnectionPool {
         tokio::spawn(async move {
             loop {
                 sweeper_pool.sweep_idle_connections().await;
-                sleep(Duration::from_secs(5)).await; // Run every 60 seconds
+                sleep(Duration::from_secs(5)).await; // Run every 5 seconds
             }
         });
 
