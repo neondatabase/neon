@@ -1448,6 +1448,9 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		neon_log(ERROR, "Read request too large: %d is larger than max %d",
 				 nblocks, PG_IOV_MAX);
 
+if (nblocks > 2)
+neon_log(PANIC, "neon_readv| nblocks: %d", nblocks);
+
 	/* Try to read PS results if they are available */
 	communicator_prefetch_pump_state();
 
