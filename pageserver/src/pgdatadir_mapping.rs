@@ -1331,13 +1331,18 @@ impl Timeline {
 
     /// Get cached size of relation if it not updated after specified LSN
     pub fn get_cached_rel_size(&self, tag: &RelTag, lsn: Lsn) -> Option<BlockNumber> {
-        let rel_size_cache = self.rel_size_cache.read().unwrap();
-        if let Some((cached_lsn, nblocks)) = rel_size_cache.map.get(tag) {
+        let rel_size_cache = self.rel_size_primary_cache.read().unwrap();
+        if let Some((cached_lsn, nblocks)) = rel_size_cache.get(tag) {
             if lsn >= *cached_lsn {
                 RELSIZE_CACHE_HITS.inc();
                 return Some(*nblocks);
             }
             RELSIZE_CACHE_MISSES_OLD.inc();
+        }
+        let mut rel_size_cache = self.rel_size_replica_cache.lock().unwrap();
+        if let Some(nblock) = rel_size_cache.get(&(lsn, *tag)) {
+            RELSIZE_CACHE_HITS.inc();
+            return Some(*nblock);
         }
         RELSIZE_CACHE_MISSES.inc();
         None
@@ -1345,42 +1350,22 @@ impl Timeline {
 
     /// Update cached relation size if there is no more recent update
     pub fn update_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
-        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-
-        if lsn < rel_size_cache.complete_as_of {
-            // Do not cache old values. It's safe to cache the size on read, as long as
-            // the read was at an LSN since we started the WAL ingestion. Reasoning: we
-            // never evict values from the cache, so if the relation size changed after
-            // 'lsn', the new value is already in the cache.
-            return;
-        }
-
-        match rel_size_cache.map.entry(tag) {
-            hash_map::Entry::Occupied(mut entry) => {
-                let cached_lsn = entry.get_mut();
-                if lsn >= cached_lsn.0 {
-                    *cached_lsn = (lsn, nblocks);
-                }
-            }
-            hash_map::Entry::Vacant(entry) => {
-                entry.insert((lsn, nblocks));
-                RELSIZE_CACHE_ENTRIES.inc();
-            }
-        }
+        let mut rel_size_cache = self.rel_size_replica_cache.lock().unwrap();
+        rel_size_cache.insert((lsn, tag), nblocks);
     }
 
     /// Store cached relation size
     pub fn set_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
-        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        if rel_size_cache.map.insert(tag, (lsn, nblocks)).is_none() {
+        let mut rel_size_cache = self.rel_size_primary_cache.write().unwrap();
+        if rel_size_cache.insert(tag, (lsn, nblocks)).is_none() {
             RELSIZE_CACHE_ENTRIES.inc();
         }
     }
 
     /// Remove cached relation size
     pub fn remove_cached_rel_size(&self, tag: &RelTag) {
-        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        if rel_size_cache.map.remove(tag).is_some() {
+        let mut rel_size_cache = self.rel_size_primary_cache.write().unwrap();
+        if rel_size_cache.remove(tag).is_some() {
             RELSIZE_CACHE_ENTRIES.dec();
         }
     }

@@ -4269,6 +4269,7 @@ dependencies = [
  "enumset",
  "fail",
  "futures",
+ "hashlink",
  "hex",
  "hex-literal",
  "http-utils",
