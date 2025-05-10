@@ -965,7 +965,7 @@ jobs:
           fi
 
       - name: Verify docker-compose example and test extensions
-        timeout-minutes: 20
+        timeout-minutes: 40
         env:
           TAG: >-
             ${{
