@@ -14,6 +14,7 @@ pub mod span;
 pub mod uninit;
 mod walreceiver;
 
+use hashlink::LruCache;
 use std::array;
 use std::cmp::{max, min};
 use std::collections::btree_map::Entry;
@@ -132,6 +133,8 @@ use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 use crate::walingest::WalLagCooldown;
 use crate::{ZERO_PAGE, task_mgr, walredo};
 
+const REL_SIZE_CACHE_CAPACITY: usize = 1024;
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum FlushLoopState {
     NotStarted,
@@ -195,16 +198,6 @@ pub struct TimelineResources {
     pub pagestream_throttle_metrics: Arc<crate::metrics::tenant_throttling::Pagestream>,
     pub l0_compaction_trigger: Arc<Notify>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
-}
-
-/// The relation size cache caches relation sizes at the end of the timeline. It speeds up WAL
-/// ingestion considerably, because WAL ingestion needs to check on most records if the record
-/// implicitly extends the relation.  At startup, `complete_as_of` is initialized to the current end
-/// of the timeline (disk_consistent_lsn).  It's used on reads of relation sizes to check if the
-/// value can be used to also update the cache, see [`Timeline::update_cached_rel_size`].
-pub(crate) struct RelSizeCache {
-    pub(crate) complete_as_of: Lsn,
-    pub(crate) map: HashMap<RelTag, (Lsn, BlockNumber)>,
 }
 
 pub struct Timeline {
@@ -365,7 +358,8 @@ pub struct Timeline {
     pub walreceiver: Mutex<Option<WalReceiver>>,
 
     /// Relation size cache
-    pub(crate) rel_size_cache: RwLock<RelSizeCache>,
+    pub(crate) rel_size_primary_cache: RwLock<HashMap<RelTag, (Lsn, BlockNumber)>>,
+    pub(crate) rel_size_replica_cache: Mutex<LruCache<(Lsn, RelTag), BlockNumber>>,
 
     download_all_remote_layers_task_info: RwLock<Option<DownloadRemoteLayersTaskInfo>>,
 
@@ -2969,10 +2963,8 @@ impl Timeline {
                 last_image_layer_creation_check_instant: Mutex::new(None),
 
                 last_received_wal: Mutex::new(None),
-                rel_size_cache: RwLock::new(RelSizeCache {
-                    complete_as_of: disk_consistent_lsn,
-                    map: HashMap::new(),
-                }),
+                rel_size_primary_cache: RwLock::new(HashMap::new()),
+                rel_size_replica_cache: Mutex::new(LruCache::new(REL_SIZE_CACHE_CAPACITY)),
 
                 download_all_remote_layers_task_info: RwLock::new(None),
 
