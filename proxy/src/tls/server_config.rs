@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, bail};
@@ -21,9 +22,9 @@ pub struct TlsConfig {
 
 /// Configure TLS for the main endpoint.
 pub fn configure_tls(
-    key_path: &str,
-    cert_path: &str,
-    certs_dir: Option<&String>,
+    key_path: &Path,
+    cert_path: &Path,
+    certs_dir: Option<&Path>,
     allow_tls_keylogfile: bool,
 ) -> anyhow::Result<TlsConfig> {
     // add default certificate
@@ -39,8 +40,7 @@ pub fn configure_tls(
                 let key_path = path.join("tls.key");
                 let cert_path = path.join("tls.crt");
                 if key_path.exists() && cert_path.exists() {
-                    cert_resolver
-                        .add_cert_path(&key_path.to_string_lossy(), &cert_path.to_string_lossy())?;
+                    cert_resolver.add_cert_path(&key_path, &cert_path)?;
                 }
             }
         }
@@ -86,7 +86,7 @@ pub struct CertResolver {
 }
 
 impl CertResolver {
-    fn parse_new(key_path: &str, cert_path: &str) -> anyhow::Result<Self> {
+    fn parse_new(key_path: &Path, cert_path: &Path) -> anyhow::Result<Self> {
         let (priv_key, cert_chain) = parse_key_cert(key_path, cert_path)?;
         Self::new(priv_key, cert_chain)
     }
@@ -103,7 +103,7 @@ impl CertResolver {
         Ok(Self { certs, default })
     }
 
-    fn add_cert_path(&mut self, key_path: &str, cert_path: &str) -> anyhow::Result<()> {
+    fn add_cert_path(&mut self, key_path: &Path, cert_path: &Path) -> anyhow::Result<()> {
         let (priv_key, cert_chain) = parse_key_cert(key_path, cert_path)?;
         self.add_cert(priv_key, cert_chain)
     }
@@ -124,26 +124,29 @@ impl CertResolver {
 }
 
 fn parse_key_cert(
-    key_path: &str,
-    cert_path: &str,
+    key_path: &Path,
+    cert_path: &Path,
 ) -> anyhow::Result<(PrivateKeyDer<'static>, Vec<CertificateDer<'static>>)> {
     let priv_key = {
         let key_bytes = std::fs::read(key_path)
-            .with_context(|| format!("Failed to read TLS keys at '{key_path}'"))?;
+            .with_context(|| format!("Failed to read TLS keys at '{}'", key_path.display()))?;
         rustls_pemfile::private_key(&mut &key_bytes[..])
-            .with_context(|| format!("Failed to parse TLS keys at '{key_path}'"))?
-            .with_context(|| format!("Failed to parse TLS keys at '{key_path}'"))?
+            .with_context(|| format!("Failed to parse TLS keys at '{}'", key_path.display()))?
+            .with_context(|| format!("Failed to parse TLS keys at '{}'", key_path.display()))?
     };
 
-    let cert_chain_bytes = std::fs::read(cert_path)
-        .context(format!("Failed to read TLS cert file at '{cert_path}.'"))?;
+    let cert_chain_bytes = std::fs::read(cert_path).context(format!(
+        "Failed to read TLS cert file at '{}.'",
+        cert_path.display()
+    ))?;
 
     let cert_chain = {
         rustls_pemfile::certs(&mut &cert_chain_bytes[..])
             .try_collect()
             .with_context(|| {
                 format!(
-                    "Failed to read TLS certificate chain from bytes from file at '{cert_path}'."
+                    "Failed to read TLS certificate chain from bytes from file at '{}'.",
+                    cert_path.display()
                 )
             })?
     };
