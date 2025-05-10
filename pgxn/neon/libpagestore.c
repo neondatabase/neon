@@ -314,7 +314,6 @@ get_shard_map(char ***connstrs_p, shardno_t *num_shards_p)
 		{
 			strlcpy(p, shard_map->connstring[i], MAX_PAGESERVER_CONNSTRING_SIZE);
 			connstrs[i] = p;
-			elog(LOG, "XX: connstrs[%d]: %p", i, p);
 			p += MAX_PAGESERVER_CONNSTRING_SIZE;
 		}
 

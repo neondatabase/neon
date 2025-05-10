@@ -139,7 +139,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         match req {
             NeonIORequest::Empty => {
                 error!("unexpected Empty IO request");
-                NeonIOResult::Error(-1)
+                NeonIOResult::Error(0)
             }
             NeonIORequest::RelExists(req) => {
                 let rel = req.reltag();
@@ -162,7 +162,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     Ok(exists) => NeonIOResult::RelExists(exists),
                     Err(err) => {
                         info!("tonic error: {err:?}");
-                        NeonIOResult::Error(-1)
+                        NeonIOResult::Error(0)
                     }
                 }
             }
@@ -199,7 +199,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     }
                     Err(err) => {
                         info!("tonic error: {err:?}");
-                        NeonIOResult::Error(-1)
+                        NeonIOResult::Error(0)
                     }
                 }
             }
@@ -235,7 +235,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     Ok(db_size) => NeonIOResult::DbSize(db_size),
                     Err(err) => {
                         info!("tonic error: {err:?}");
-                        NeonIOResult::Error(-1)
+                        NeonIOResult::Error(0)
                     }
                 }
             }
@@ -420,6 +420,7 @@ impl<'t> metrics::core::Collector for CommunicatorWorkerProcessStruct<'t> {
         if let Some(file_cache) = &self.cache.file_cache {
             descs.append(&mut file_cache.desc());
         }
+        descs.append(&mut self.cache.desc());
         descs
     }
     fn collect(&self) -> Vec<metrics::proto::MetricFamily> {
@@ -427,6 +428,7 @@ impl<'t> metrics::core::Collector for CommunicatorWorkerProcessStruct<'t> {
         if let Some(file_cache) = &self.cache.file_cache {
             values.append(&mut file_cache.collect());
         }
+        values.append(&mut self.cache.collect());
         values
     }
 }

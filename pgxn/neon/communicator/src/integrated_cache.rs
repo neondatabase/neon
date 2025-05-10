@@ -64,6 +64,10 @@ pub struct IntegratedCacheWriteAccess<'t> {
 
     // Fields for eviction
     clock_hand: std::sync::Mutex<TreeIterator<TreeKey>>,
+
+    // Metrics
+    page_evictions_counter: metrics::IntCounter,
+    clock_iterations_counter: metrics::IntCounter,
 }
 
 /// Represents read-only access to the integrated cache. Backend processes have this.
@@ -108,6 +112,16 @@ impl<'t> IntegratedCacheInitStruct<'t> {
             global_lw_lsn: AtomicU64::new(lsn.0),
             file_cache,
             clock_hand: std::sync::Mutex::new(TreeIterator::new_wrapping()),
+
+            page_evictions_counter: metrics::IntCounter::new(
+                "integrated_cache_evictions",
+                "Page evictions from the Local File Cache",
+            ).unwrap(),
+
+            clock_iterations_counter: metrics::IntCounter::new(
+                "clock_iterations",
+                "Number of times the clock hand has moved",
+            ).unwrap(),
         }
     }
 
@@ -535,6 +549,9 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         let mut clock_hand = self.clock_hand.lock().unwrap();
         for _ in 0..100 {
             let r = self.cache_tree.start_read();
+
+            self.clock_iterations_counter.inc();
+
             match clock_hand.next(&r) {
                 None => {
                     // The cache is completely empty. Pretty unexpected that this function
@@ -547,20 +564,30 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                 }
                 Some((k, TreeEntry::Block(blk_entry))) => {
                     if !blk_entry.referenced.swap(false, Ordering::Relaxed) {
-                        // Evict this
+                        // Evict this. Maybe.
                         let w = self.cache_tree.start_write();
 
                         let mut evicted_cache_block = None;
                         w.update_with_fn(&k, |old| {
                             match old {
                                 None => UpdateAction::Nothing,
-                                Some(TreeEntry::Rel(_)) => panic!("unexepcted Rel entry"),
+                                Some(TreeEntry::Rel(_)) => panic!("unexpected Rel entry"),
                                 Some(TreeEntry::Block(old)) => {
+
+                                    // note: all the accesses to 'pinned' currently happen
+                                    // within update_with_fn(), which protects from concurrent
+                                    // updates. Otherwise, another thread could set the 'pinned'
+                                    // flag just after we have checked it here.
+                                    if blk_entry.pinned.load(Ordering::Relaxed) {
+                                        return UpdateAction::Nothing;
+                                    }
+
                                     let _ = self
                                     .global_lw_lsn
                                     .fetch_max(old.lw_lsn.load().0, Ordering::Relaxed);
                                     let cache_block = old.cache_block.load(Ordering::Relaxed);
                                     if cache_block != INVALID_CACHE_BLOCK {
+                                        self.page_evictions_counter.inc();
                                         evicted_cache_block = Some(cache_block);
                                     }
                                     // TODO: we don't evict the entry, just the block. Does it make
@@ -569,12 +596,30 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                                 }
                             }
                         });
+                        if evicted_cache_block.is_some() {
+                            return evicted_cache_block;
+                        }
                     }
                 }
             }
         }
         // Give up if we didn't find anything
         None
+    }
+}
+
+impl metrics::core::Collector for IntegratedCacheWriteAccess<'_> {
+    fn desc(&self) -> Vec<&metrics::core::Desc> {
+        let mut descs = Vec::new();
+        descs.append(&mut self.page_evictions_counter.desc());
+        descs.append(&mut self.clock_iterations_counter.desc());
+        descs
+    }
+    fn collect(&self) -> Vec<metrics::proto::MetricFamily> {
+        let mut values = Vec::new();
+        values.append(&mut self.page_evictions_counter.collect());
+        values.append(&mut self.clock_iterations_counter.collect());
+        values
     }
 }
 
