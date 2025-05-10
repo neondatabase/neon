@@ -3656,13 +3656,11 @@ class NeonProxy(PgProtocol):
             *["--sql-over-http-timeout", f"{self.http_timeout_seconds}s"],
             *["-c", str(crt_path)],
             *["-k", str(key_path)],
-
             *["--sni-router-listen", f"{self.host}:{self.router_port}"],
             *["--sni-router-listen-tls", f"{self.host}:{self.router_tls_port}"],
             *["--sni-router-tls-cert", str(self.test_output_dir / "router.crt")],
             *["--sni-router-tls-key", str(self.test_output_dir / "router.key")],
             *["--sni-router-destination", "local.neon.build"],
-
             *self.auth_backend.extra_args(),
         ]
 
