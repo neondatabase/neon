@@ -467,7 +467,7 @@ pub async fn run() -> anyhow::Result<()> {
         let cert_path = args.tls_cert.expect("already asserted it is set");
 
         let (tls_config, tls_server_end_point) =
-            super::pg_sni_router::parse_tls(&*key_path, &*cert_path)?;
+            super::pg_sni_router::parse_tls(&key_path, &cert_path)?;
 
         let dest = Arc::new(dest);
 
