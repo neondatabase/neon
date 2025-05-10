@@ -135,13 +135,15 @@ runs:
         PERF_REPORT_DIR="$(realpath test_runner/perf-report-local)"
         echo "PERF_REPORT_DIR=${PERF_REPORT_DIR}" >> ${GITHUB_ENV}
         rm -rf $PERF_REPORT_DIR
-
-        TEST_SELECTION="test_runner/${{ inputs.test_selection }}"
-        EXTRA_PARAMS="${{ inputs.extra_params }}"
+        TEST_SELECTION="${{ inputs.test_selection }}"
         if [ -z "$TEST_SELECTION" ]; then
           echo "test_selection must be set"
           exit 1
         fi
+        if [[ $TEST_SELECTION != test_runner/* ]]; then
+          TEST_SELECTION="test_runner/$TEST_SELECTION"
+        fi
+        EXTRA_PARAMS="${{ inputs.extra_params }}"
         if [[ "${{ inputs.run_in_parallel }}" == "true" ]]; then
           # -n sets the number of parallel processes that pytest-xdist will run
           EXTRA_PARAMS="-n12 $EXTRA_PARAMS"

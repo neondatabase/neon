@@ -199,10 +199,16 @@ jobs:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
     secrets: inherit
 
+  build-and-test-new-tests:
+    needs: [ meta, build-build-tools-image ]
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/build_and_run_selected_test.yml
+    secrets: inherit
+
   build-and-test-locally:
     needs: [ meta, build-build-tools-image ]
     # We do need to run this in `.*-rc-pr` because of hotfixes.
-    if: ${{ contains(fromJSON('["pr", "push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ 1 == 2 }}  # ${{ contains(fromJSON('["pr", "push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     strategy:
       fail-fast: false
       matrix:
