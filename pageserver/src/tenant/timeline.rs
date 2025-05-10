@@ -133,7 +133,7 @@ use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 use crate::walingest::WalLagCooldown;
 use crate::{ZERO_PAGE, task_mgr, walredo};
 
-const REL_SIZE_CACHE_CAPACITY: usize = 1024;
+const REL_SIZE_CACHE_CAPACITY: usize = 64*1024;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum FlushLoopState {

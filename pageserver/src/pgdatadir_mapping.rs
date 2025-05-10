@@ -1344,12 +1344,14 @@ impl Timeline {
             RELSIZE_CACHE_HITS.inc();
             return Some(*nblock);
         }
+		info!("RELSIZE_CACHE miss: {} @ {}", tag, lsn);
         RELSIZE_CACHE_MISSES.inc();
         None
     }
 
     /// Update cached relation size if there is no more recent update
     pub fn update_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
+		info!("RELSIZE_CACHE put: {} @ {}", tag, lsn);
         let mut rel_size_cache = self.rel_size_replica_cache.lock().unwrap();
         rel_size_cache.insert((lsn, tag), nblocks);
     }
