@@ -53,7 +53,7 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
     secondary_conn = secondary.connect()
     secondary_cur = secondary_conn.cursor()
 
-    if env.pg_version() is PgVersion.V14:
+    if env.pg_version is PgVersion.V14:
         signalfile = secondary.pgdata_dir / "standby.signal"
         assert signalfile.exists()
         signalfile.unlink()
