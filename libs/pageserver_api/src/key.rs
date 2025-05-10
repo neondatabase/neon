@@ -562,6 +562,21 @@ pub fn rel_block_to_key(rel: RelTag, blknum: BlockNumber) -> Key {
 }
 
 #[inline(always)]
+pub fn key_to_rel_tag(key: Key) -> RelTag {
+    RelTag {
+        spcnode: key.field2,
+        dbnode: key.field3,
+        relnode: key.field4,
+        forknum: key.field5,
+    }
+}
+
+#[inline(always)]
+pub fn key_to_blknum(key: Key) -> BlockNumber {
+    key.field6
+}
+
+#[inline(always)]
 pub fn rel_size_to_key(rel: RelTag) -> Key {
     Key {
         field1: 0x00,
