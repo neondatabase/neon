@@ -6,6 +6,7 @@ pub mod r#static;
 use std::alloc::Layout;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
+use std::sync::atomic::Ordering;
 
 use crate::allocator::multislab::MultiSlabAllocator;
 use crate::allocator::r#static::alloc_from_slice;
@@ -110,4 +111,47 @@ impl<'t, V: crate::Value> ArtAllocator<V> for ArtMultiSlabAllocator<'t, V> {
     fn dealloc_node_leaf(&self, ptr: *mut NodeLeaf<V>) {
         self.inner.dealloc_slab(4, ptr.cast())
     }
+}
+
+impl<'t, V: crate::Value> ArtMultiSlabAllocator<'t, V> {
+    pub(crate) fn get_statistics(&self) -> ArtMultiSlabStats {
+        ArtMultiSlabStats {
+            num_internal4: self.inner.slab_descs[0]
+                .num_allocated
+                .load(Ordering::Relaxed),
+            num_internal16: self.inner.slab_descs[1]
+                .num_allocated
+                .load(Ordering::Relaxed),
+            num_internal48: self.inner.slab_descs[2]
+                .num_allocated
+                .load(Ordering::Relaxed),
+            num_internal256: self.inner.slab_descs[3]
+                .num_allocated
+                .load(Ordering::Relaxed),
+            num_leaf: self.inner.slab_descs[4]
+                .num_allocated
+                .load(Ordering::Relaxed),
+
+            num_blocks_internal4: self.inner.slab_descs[0].num_blocks.load(Ordering::Relaxed),
+            num_blocks_internal16: self.inner.slab_descs[1].num_blocks.load(Ordering::Relaxed),
+            num_blocks_internal48: self.inner.slab_descs[2].num_blocks.load(Ordering::Relaxed),
+            num_blocks_internal256: self.inner.slab_descs[3].num_blocks.load(Ordering::Relaxed),
+            num_blocks_leaf: self.inner.slab_descs[4].num_blocks.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ArtMultiSlabStats {
+    pub num_internal4: u64,
+    pub num_internal16: u64,
+    pub num_internal48: u64,
+    pub num_internal256: u64,
+    pub num_leaf: u64,
+
+    pub num_blocks_internal4: u64,
+    pub num_blocks_internal16: u64,
+    pub num_blocks_internal48: u64,
+    pub num_blocks_internal256: u64,
+    pub num_blocks_leaf: u64,
 }

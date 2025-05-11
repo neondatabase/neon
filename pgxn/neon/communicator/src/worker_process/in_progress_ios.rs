@@ -1,6 +1,6 @@
+use std::cmp::Eq;
 use std::hash::Hash;
 use std::sync::Arc;
-use std::cmp::Eq;
 
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -21,22 +21,25 @@ pub type RequestInProgressTable = MutexHashSet<RequestInProgressKey>;
 // more primitive locking thingie:
 
 pub struct MutexHashSet<K>
-    where K: Clone + Eq + Hash
+where
+    K: Clone + Eq + Hash,
 {
     lock_table: ClashMap<K, Arc<Mutex<()>>>,
 }
 
 pub struct MutexHashSetGuard<'a, K>
-    where K: Clone + Eq + Hash
+where
+    K: Clone + Eq + Hash,
 {
     pub key: K,
-    set: &'a  MutexHashSet<K>,
+    set: &'a MutexHashSet<K>,
     mutex: Arc<Mutex<()>>,
     _guard: OwnedMutexGuard<()>,
 }
 
 impl<'a, K> Drop for MutexHashSetGuard<'a, K>
-    where K: Clone + Eq + Hash
+where
+    K: Clone + Eq + Hash,
 {
     fn drop(&mut self) {
         let (_old_key, old_val) = self.set.lock_table.remove(&self.key).unwrap();
@@ -47,7 +50,8 @@ impl<'a, K> Drop for MutexHashSetGuard<'a, K>
 }
 
 impl<K> MutexHashSet<K>
-    where K: Clone + Eq + Hash
+where
+    K: Clone + Eq + Hash,
 {
     pub fn new() -> MutexHashSet<K> {
         MutexHashSet {
@@ -55,8 +59,7 @@ impl<K> MutexHashSet<K>
         }
     }
 
-    pub async fn lock<'a>(&'a self, key: K) -> MutexHashSetGuard<'a, K>
-    {
+    pub async fn lock<'a>(&'a self, key: K) -> MutexHashSetGuard<'a, K> {
         let my_mutex = Arc::new(Mutex::new(()));
         let my_guard = Arc::clone(&my_mutex).lock_owned().await;
 

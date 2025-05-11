@@ -1,7 +1,7 @@
 use std::alloc::Layout;
 use std::mem::MaybeUninit;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use spin;
 
@@ -14,6 +14,9 @@ pub(crate) struct SlabDesc {
     pub(crate) layout: Layout,
 
     block_lists: spin::RwLock<BlockLists>,
+
+    pub(crate) num_blocks: AtomicU64,
+    pub(crate) num_allocated: AtomicU64,
 }
 
 unsafe impl Sync for SlabDesc {}
@@ -75,6 +78,8 @@ impl SlabDesc {
         SlabDesc {
             layout: *layout,
             block_lists: spin::RwLock::new(BlockLists::default()),
+            num_allocated: AtomicU64::new(0),
+            num_blocks: AtomicU64::new(0),
         }
     }
 }
@@ -130,6 +135,9 @@ impl SlabDesc {
                     let result = *free_chunks_head;
                     (*free_chunks_head) = (*result).next;
                     (*block_ptr).num_free_chunks.fetch_sub(1, Ordering::Relaxed);
+
+                    self.num_allocated.fetch_add(1, Ordering::Relaxed);
+
                     return result.cast();
                 }
             }
@@ -153,6 +161,7 @@ impl SlabDesc {
 
         // no free chunks. Allocate a new block (and the chunk from that)
         let (new_block, new_chunk) = self.alloc_block_and_chunk(block_allocator);
+        self.num_blocks.fetch_add(1, Ordering::Relaxed);
 
         // Add the block to the list in the SlabDesc
         unsafe {
@@ -160,6 +169,7 @@ impl SlabDesc {
             block_lists_guard.nonfull_blocks.push_head(new_block);
         }
 
+        self.num_allocated.fetch_add(1, Ordering::Relaxed);
         new_chunk
     }
 
@@ -195,6 +205,7 @@ impl SlabDesc {
             // the free blocks list, is it? Defer it as garbage to wait out concurrent updates?
             //block_allocator.release_block()
         }
+        self.num_allocated.fetch_sub(1, Ordering::Relaxed);
     }
 
     fn alloc_block_and_chunk(

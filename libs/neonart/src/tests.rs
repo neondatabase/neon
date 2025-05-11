@@ -68,7 +68,7 @@ fn test_inserts<K: Into<TestKey> + Copy>(keys: &[K]) {
         assert_eq!(value, Some(idx).as_ref());
     }
 
-    eprintln!("stats: {:?}", tree_writer.start_write().get_statistics());
+    eprintln!("stats: {:?}", tree_writer.get_statistics());
 }
 
 #[test]
@@ -225,7 +225,7 @@ fn random_ops() {
 
         if i % 1000 == 0 {
             eprintln!("{i} ops processed");
-            eprintln!("stats: {:?}", tree_writer.start_write().get_statistics());
+            eprintln!("stats: {:?}", tree_writer.get_statistics());
             test_iter(&tree_writer, &shadow);
         }
     }

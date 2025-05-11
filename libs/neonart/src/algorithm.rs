@@ -3,7 +3,6 @@ pub(crate) mod node_ptr;
 mod node_ref;
 
 use std::vec::Vec;
-use std::sync::atomic::Ordering;
 
 use crate::algorithm::lock_and_version::ConcurrentUpdateError;
 use crate::algorithm::node_ptr::MAX_PREFIX_LEN;
@@ -254,7 +253,6 @@ where
             UpdateAction::Nothing => {}
             UpdateAction::Insert(new_value) => {
                 insert_split_prefix(key, new_value, &mut wnode, &mut wparent, parent_key, guard)?;
-                guard.tree_writer.tree.num_values.fetch_add(1, Ordering::Relaxed);
             }
             UpdateAction::Remove => {
                 panic!("unexpected Remove action on insertion");
@@ -287,7 +285,6 @@ where
                 // TODO: If parent has only one child left, merge it with the child, extending its
                 // prefix
                 wparent.delete_child(parent_key);
-                guard.tree_writer.tree.num_values.fetch_sub(1, Ordering::Relaxed);
             }
         }
         wnode.write_unlock();
@@ -313,7 +310,6 @@ where
                     insert_and_grow(key, new_value, &wnode, &mut wparent, parent_key, guard)?;
                     wnode.write_unlock_obsolete();
                     wparent.write_unlock();
-                    guard.tree_writer.tree.num_values.fetch_add(1, Ordering::Relaxed);
                 }
                 UpdateAction::Remove => {
                     panic!("unexpected Remove action on insertion");
@@ -328,7 +324,6 @@ where
                 UpdateAction::Nothing => {}
                 UpdateAction::Insert(new_value) => {
                     insert_to_node(&mut wnode, key, new_value, guard)?;
-                    guard.tree_writer.tree.num_values.fetch_add(1, Ordering::Relaxed);
                 }
                 UpdateAction::Remove => {
                     panic!("unexpected Remove action on insertion");

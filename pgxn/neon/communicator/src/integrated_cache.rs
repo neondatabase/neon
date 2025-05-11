@@ -26,17 +26,19 @@ use std::mem::MaybeUninit;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use utils::lsn::{Lsn, AtomicLsn};
+use utils::lsn::{AtomicLsn, Lsn};
 use zerocopy::FromBytes;
 
-use crate::file_cache::{CacheBlock, FileCache};
 use crate::file_cache::INVALID_CACHE_BLOCK;
+use crate::file_cache::{CacheBlock, FileCache};
 use pageserver_page_api::model::RelTag;
 
+use metrics::{IntCounter, IntGauge, IntGaugeVec};
+
 use neonart;
-use neonart::UpdateAction;
 use neonart::TreeInitStruct;
 use neonart::TreeIterator;
+use neonart::UpdateAction;
 
 const CACHE_AREA_SIZE: usize = 10 * 1024 * 1024;
 
@@ -66,13 +68,26 @@ pub struct IntegratedCacheWriteAccess<'t> {
     clock_hand: std::sync::Mutex<TreeIterator<TreeKey>>,
 
     // Metrics
-    entries_total: metrics::IntGauge,
-    page_evictions_counter: metrics::IntCounter,
-    clock_iterations_counter: metrics::IntCounter,
+    page_evictions_counter: IntCounter,
+    clock_iterations_counter: IntCounter,
+
+    nodes_total: IntGaugeVec,
+    nodes_leaf_total: IntGauge,
+    nodes_internal4_total: IntGauge,
+    nodes_internal16_total: IntGauge,
+    nodes_internal48_total: IntGauge,
+    nodes_internal256_total: IntGauge,
+
+    nodes_memory_bytes: IntGaugeVec,
+    nodes_memory_leaf_bytes: IntGauge,
+    nodes_memory_internal4_bytes: IntGauge,
+    nodes_memory_internal16_bytes: IntGauge,
+    nodes_memory_internal48_bytes: IntGauge,
+    nodes_memory_internal256_bytes: IntGauge,
 
     // metrics from the art tree
-    cache_memory_size_bytes: metrics::IntGauge,
-    cache_memory_used_bytes: metrics::IntGauge,
+    cache_memory_size_bytes: IntGauge,
+    cache_memory_used_bytes: IntGauge,
 }
 
 /// Represents read-only access to the integrated cache. Backend processes have this.
@@ -112,35 +127,73 @@ impl<'t> IntegratedCacheInitStruct<'t> {
         } = self;
         let tree_writer = handle.attach_writer();
 
+        let nodes_total = IntGaugeVec::new(
+            metrics::core::Opts::new("nodes_total", "Number of nodes in cache tree."),
+            &["node_kind"],
+        )
+        .unwrap();
+        let nodes_leaf_total = nodes_total.with_label_values(&["leaf"]);
+        let nodes_internal4_total = nodes_total.with_label_values(&["internal4"]);
+        let nodes_internal16_total = nodes_total.with_label_values(&["internal16"]);
+        let nodes_internal48_total = nodes_total.with_label_values(&["internal48"]);
+        let nodes_internal256_total = nodes_total.with_label_values(&["internal256"]);
+
+        let nodes_memory_bytes = IntGaugeVec::new(
+            metrics::core::Opts::new(
+                "nodes_memory_bytes",
+                "Memory reserved for nodes in cache tree.",
+            ),
+            &["node_kind"],
+        )
+        .unwrap();
+        let nodes_memory_leaf_bytes = nodes_memory_bytes.with_label_values(&["leaf"]);
+        let nodes_memory_internal4_bytes = nodes_memory_bytes.with_label_values(&["internal4"]);
+        let nodes_memory_internal16_bytes = nodes_memory_bytes.with_label_values(&["internal16"]);
+        let nodes_memory_internal48_bytes = nodes_memory_bytes.with_label_values(&["internal48"]);
+        let nodes_memory_internal256_bytes = nodes_memory_bytes.with_label_values(&["internal256"]);
+
         IntegratedCacheWriteAccess {
             cache_tree: tree_writer,
             global_lw_lsn: AtomicU64::new(lsn.0),
             file_cache,
             clock_hand: std::sync::Mutex::new(TreeIterator::new_wrapping()),
 
-            entries_total: metrics::IntGauge::new(
-                "entries_total",
-                "Number of entries in the cache",
-            ).unwrap(),
-
             page_evictions_counter: metrics::IntCounter::new(
                 "integrated_cache_evictions",
                 "Page evictions from the Local File Cache",
-            ).unwrap(),
+            )
+            .unwrap(),
 
             clock_iterations_counter: metrics::IntCounter::new(
                 "clock_iterations",
                 "Number of times the clock hand has moved",
-            ).unwrap(),
+            )
+            .unwrap(),
+
+            nodes_total,
+            nodes_leaf_total,
+            nodes_internal4_total,
+            nodes_internal16_total,
+            nodes_internal48_total,
+            nodes_internal256_total,
+
+            nodes_memory_bytes,
+            nodes_memory_leaf_bytes,
+            nodes_memory_internal4_bytes,
+            nodes_memory_internal16_bytes,
+            nodes_memory_internal48_bytes,
+            nodes_memory_internal256_bytes,
 
             cache_memory_size_bytes: metrics::IntGauge::new(
                 "cache_memory_size_bytes",
                 "Memory reserved for cache metadata",
-            ).unwrap(),
+            )
+            .unwrap(),
             cache_memory_used_bytes: metrics::IntGauge::new(
                 "cache_memory_size_bytes",
                 "Memory used for cache metadata",
-            ).unwrap(),
+            )
+            .unwrap(),
         }
     }
 
@@ -369,17 +422,14 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 
     pub fn remember_rel_size(&'t self, rel: &RelTag, nblocks: u32) {
         let w = self.cache_tree.start_write();
-        w.update_with_fn(&TreeKey::from(rel), |existing| {
-            match existing {
-                None => UpdateAction::Insert(
-                    TreeEntry::Rel(RelEntry {
-                        nblocks: AtomicU32::new(nblocks),
-                    })),
-                Some(TreeEntry::Block(_)) => panic!("unexpected tree entry type for rel key"),
-                Some(TreeEntry::Rel(rel)) => {
-                    rel.nblocks.store(nblocks, Ordering::Relaxed);
-                    UpdateAction::Nothing
-                }
+        w.update_with_fn(&TreeKey::from(rel), |existing| match existing {
+            None => UpdateAction::Insert(TreeEntry::Rel(RelEntry {
+                nblocks: AtomicU32::new(nblocks),
+            })),
+            Some(TreeEntry::Block(_)) => panic!("unexpected tree entry type for rel key"),
+            Some(TreeEntry::Rel(rel)) => {
+                rel.nblocks.store(nblocks, Ordering::Relaxed);
+                UpdateAction::Nothing
             }
         });
     }
@@ -470,7 +520,12 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                     };
 
                     // Update the cache block
-                    let old_blk = block_entry.cache_block.compare_exchange(INVALID_CACHE_BLOCK, cache_block, Ordering::Relaxed, Ordering::Relaxed);
+                    let old_blk = block_entry.cache_block.compare_exchange(
+                        INVALID_CACHE_BLOCK,
+                        cache_block,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    );
                     assert!(old_blk == Ok(INVALID_CACHE_BLOCK) || old_blk == Err(cache_block));
 
                     block_entry.lw_lsn.store(lw_lsn);
@@ -480,9 +535,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                     let was_pinned = block_entry.pinned.swap(false, Ordering::Relaxed);
                     assert!(was_pinned);
                     UpdateAction::Nothing
-                }
-                else
-                {
+                } else {
                     UpdateAction::Insert(TreeEntry::Block(BlockEntry {
                         lw_lsn: AtomicLsn::new(lw_lsn.0),
                         cache_block: AtomicU64::new(cache_block),
@@ -593,7 +646,6 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                                 None => UpdateAction::Nothing,
                                 Some(TreeEntry::Rel(_)) => panic!("unexpected Rel entry"),
                                 Some(TreeEntry::Block(old)) => {
-
                                     // note: all the accesses to 'pinned' currently happen
                                     // within update_with_fn(), which protects from concurrent
                                     // updates. Otherwise, another thread could set the 'pinned'
@@ -605,7 +657,9 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                                     let _ = self
                                         .global_lw_lsn
                                         .fetch_max(old.lw_lsn.load().0, Ordering::Relaxed);
-                                    let cache_block = old.cache_block.swap(INVALID_CACHE_BLOCK, Ordering::Relaxed);
+                                    let cache_block = old
+                                        .cache_block
+                                        .swap(INVALID_CACHE_BLOCK, Ordering::Relaxed);
                                     if cache_block != INVALID_CACHE_BLOCK {
                                         evicted_cache_block = Some(cache_block);
                                     }
@@ -631,7 +685,8 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 impl metrics::core::Collector for IntegratedCacheWriteAccess<'_> {
     fn desc(&self) -> Vec<&metrics::core::Desc> {
         let mut descs = Vec::new();
-        descs.append(&mut self.entries_total.desc());
+        descs.append(&mut self.nodes_total.desc());
+        descs.append(&mut self.nodes_memory_bytes.desc());
         descs.append(&mut self.page_evictions_counter.desc());
         descs.append(&mut self.clock_iterations_counter.desc());
 
@@ -640,15 +695,43 @@ impl metrics::core::Collector for IntegratedCacheWriteAccess<'_> {
         descs
     }
     fn collect(&self) -> Vec<metrics::proto::MetricFamily> {
+        const ALLOC_BLOCK_SIZE: i64 = neonart::allocator::block::BLOCK_SIZE as i64;
+
         // Update gauges
         let art_statistics = self.cache_tree.get_statistics();
-        self.entries_total.set(art_statistics.num_values as i64);
+        self.nodes_leaf_total
+            .set(art_statistics.slabs.num_leaf as i64);
+        self.nodes_internal4_total
+            .set(art_statistics.slabs.num_internal4 as i64);
+        self.nodes_internal16_total
+            .set(art_statistics.slabs.num_internal16 as i64);
+        self.nodes_internal48_total
+            .set(art_statistics.slabs.num_internal48 as i64);
+        self.nodes_internal256_total
+            .set(art_statistics.slabs.num_internal256 as i64);
+
+        self.nodes_memory_leaf_bytes
+            .set(art_statistics.slabs.num_blocks_leaf as i64 * ALLOC_BLOCK_SIZE);
+        self.nodes_memory_internal4_bytes
+            .set(art_statistics.slabs.num_blocks_internal4 as i64 * ALLOC_BLOCK_SIZE);
+        self.nodes_memory_internal16_bytes
+            .set(art_statistics.slabs.num_blocks_internal16 as i64 * ALLOC_BLOCK_SIZE);
+        self.nodes_memory_internal48_bytes
+            .set(art_statistics.slabs.num_blocks_internal48 as i64 * ALLOC_BLOCK_SIZE);
+        self.nodes_memory_internal256_bytes
+            .set(art_statistics.slabs.num_blocks_internal256 as i64 * ALLOC_BLOCK_SIZE);
+
         let block_statistics = &art_statistics.blocks;
-        self.cache_memory_size_bytes.set(block_statistics.num_blocks as i64 * neonart::allocator::block::BLOCK_SIZE as i64);
-        self.cache_memory_used_bytes.set((block_statistics.num_initialized as i64 - block_statistics.num_free_blocks as i64 ) * neonart::allocator::block::BLOCK_SIZE as i64);
+        self.cache_memory_size_bytes
+            .set(block_statistics.num_blocks as i64 * ALLOC_BLOCK_SIZE as i64);
+        self.cache_memory_used_bytes.set(
+            (block_statistics.num_initialized as i64 - block_statistics.num_free_blocks as i64)
+                * ALLOC_BLOCK_SIZE as i64,
+        );
 
         let mut values = Vec::new();
-        values.append(&mut self.entries_total.collect());
+        values.append(&mut self.nodes_total.collect());
+        values.append(&mut self.nodes_memory_bytes.collect());
         values.append(&mut self.page_evictions_counter.collect());
         values.append(&mut self.clock_iterations_counter.collect());
 

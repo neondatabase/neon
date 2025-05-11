@@ -8,11 +8,11 @@ use crate::init::CommunicatorInitStruct;
 use crate::integrated_cache::{CacheResult, IntegratedCacheWriteAccess};
 use crate::neon_request::{CGetPageVRequest, CPrefetchVRequest};
 use crate::neon_request::{NeonIORequest, NeonIOResult};
-use crate::worker_process::in_progress_ios::{RequestInProgressTable, RequestInProgressKey};
+use crate::worker_process::in_progress_ios::{RequestInProgressKey, RequestInProgressTable};
 use pageserver_client_grpc::PageserverClient;
 use pageserver_page_api::model;
 
-use metrics::{IntCounterVec, IntCounter};
+use metrics::{IntCounter, IntCounterVec};
 
 use tokio::io::AsyncReadExt;
 use tokio_pipe::PipeRead;
@@ -60,7 +60,6 @@ pub struct CommunicatorWorkerProcessStruct<'a> {
     request_rel_zero_extend_nblocks_counter: IntCounter,
 }
 
-
 pub(super) async fn init(
     cis: Box<CommunicatorInitStruct>,
     tenant_id: String,
@@ -90,9 +89,13 @@ pub(super) async fn init(
     let pageserver_client = PageserverClient::new(&tenant_id, &timeline_id, &auth_token, shard_map);
 
     let request_counters = IntCounterVec::new(
-        metrics::core::Opts::new("backend_requests_total", "Number of requests from backends."),
+        metrics::core::Opts::new(
+            "backend_requests_total",
+            "Number of requests from backends.",
+        ),
         &["request_kind"],
-    ).unwrap();
+    )
+    .unwrap();
     let request_rel_exists_counter = request_counters.with_label_values(&["rel_exists"]);
     let request_rel_size_counter = request_counters.with_label_values(&["rel_size"]);
     let request_get_pagev_counter = request_counters.with_label_values(&["get_pagev"]);
@@ -106,20 +109,31 @@ pub(super) async fn init(
     let request_rel_unlink_counter = request_counters.with_label_values(&["rel_unlink"]);
 
     let getpage_cache_misses_counter = IntCounter::new(
-        "getpage_cache_misses", "Number of file cache misses in get_pagev requests."
-    ).unwrap();
+        "getpage_cache_misses",
+        "Number of file cache misses in get_pagev requests.",
+    )
+    .unwrap();
     let getpage_cache_hits_counter = IntCounter::new(
-        "getpage_cache_hits", "Number of file cache hits in get_pagev requests."
-    ).unwrap();
+        "getpage_cache_hits",
+        "Number of file cache hits in get_pagev requests.",
+    )
+    .unwrap();
 
     // For the requests that affect multiple blocks, have separate counters for the # of blocks affected
     let request_nblocks_counters = IntCounterVec::new(
-        metrics::core::Opts::new("request_nblocks_total", "Number of blocks in backend requests."),
+        metrics::core::Opts::new(
+            "request_nblocks_total",
+            "Number of blocks in backend requests.",
+        ),
         &["request_kind"],
-    ).unwrap();
-    let request_get_pagev_nblocks_counter = request_nblocks_counters.with_label_values(&["get_pagev"]);
-    let request_prefetchv_nblocks_counter = request_nblocks_counters.with_label_values(&["prefetchv"]);
-    let request_rel_zero_extend_nblocks_counter = request_nblocks_counters.with_label_values(&["rel_zero_extend"]);
+    )
+    .unwrap();
+    let request_get_pagev_nblocks_counter =
+        request_nblocks_counters.with_label_values(&["get_pagev"]);
+    let request_prefetchv_nblocks_counter =
+        request_nblocks_counters.with_label_values(&["prefetchv"]);
+    let request_rel_zero_extend_nblocks_counter =
+        request_nblocks_counters.with_label_values(&["rel_zero_extend"]);
 
     CommunicatorWorkerProcessStruct {
         neon_request_slots: cis.neon_request_slots,
@@ -221,7 +235,9 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 self.request_rel_exists_counter.inc();
                 let rel = req.reltag();
 
-                let _in_progress_guard = self.in_progress_table.lock(RequestInProgressKey::Rel(rel.clone()));
+                let _in_progress_guard = self
+                    .in_progress_table
+                    .lock(RequestInProgressKey::Rel(rel.clone()));
 
                 let not_modified_since = match self.cache.get_rel_exists(&rel) {
                     CacheResult::Found(exists) => return NeonIOResult::RelExists(exists),
@@ -248,7 +264,9 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 self.request_rel_size_counter.inc();
                 let rel = req.reltag();
 
-                let _in_progress_guard = self.in_progress_table.lock(RequestInProgressKey::Rel(rel.clone()));
+                let _in_progress_guard = self
+                    .in_progress_table
+                    .lock(RequestInProgressKey::Rel(rel.clone()));
 
                 // Check the cache first
                 let not_modified_since = match self.cache.get_rel_size(&rel) {
@@ -283,22 +301,26 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             }
             NeonIORequest::GetPageV(req) => {
                 self.request_get_pagev_counter.inc();
-                self.request_get_pagev_nblocks_counter.inc_by(req.nblocks as u64);
+                self.request_get_pagev_nblocks_counter
+                    .inc_by(req.nblocks as u64);
                 match self.handle_get_pagev_request(req).await {
                     Ok(()) => NeonIOResult::GetPageV,
                     Err(errno) => NeonIOResult::Error(errno),
                 }
-            },
+            }
             NeonIORequest::PrefetchV(req) => {
                 self.request_prefetchv_counter.inc();
-                self.request_prefetchv_nblocks_counter.inc_by(req.nblocks as u64);
+                self.request_prefetchv_nblocks_counter
+                    .inc_by(req.nblocks as u64);
                 let req = req.clone();
                 tokio::spawn(async move { self.handle_prefetchv_request(&req).await });
                 NeonIOResult::PrefetchVLaunched
             }
             NeonIORequest::DbSize(req) => {
                 self.request_db_size_counter.inc();
-                let _in_progress_guard = self.in_progress_table.lock(RequestInProgressKey::Db(req.db_oid));
+                let _in_progress_guard = self
+                    .in_progress_table
+                    .lock(RequestInProgressKey::Db(req.db_oid));
 
                 // Check the cache first
                 let not_modified_since = match self.cache.get_db_size(req.db_oid) {
@@ -331,7 +353,9 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
 
                 // Also store it in the LFC while we still have it
                 let rel = req.reltag();
-                let _in_progress_guard = self.in_progress_table.lock(RequestInProgressKey::Block(rel.clone(), req.block_number));
+                let _in_progress_guard = self
+                    .in_progress_table
+                    .lock(RequestInProgressKey::Block(rel.clone(), req.block_number));
                 self.cache
                     .remember_page(&rel, req.block_number, req.src, Lsn(req.lsn), true)
                     .await;
@@ -347,7 +371,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             }
             NeonIORequest::RelZeroExtend(req) => {
                 self.request_rel_zero_extend_counter.inc();
-                self.request_rel_zero_extend_nblocks_counter.inc_by(req.nblocks as u64);
+                self.request_rel_zero_extend_nblocks_counter
+                    .inc_by(req.nblocks as u64);
 
                 // TODO: need to grab an io-in-progress lock for this? I guess not
                 self.cache
@@ -396,7 +421,10 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
 
             // note: this is deadlock-safe even though we hold multiple locks at the same time,
             // because they're always acquired in the same order.
-            let in_progress_guard = self.in_progress_table.lock(RequestInProgressKey::Block(rel.clone(), blkno)).await;
+            let in_progress_guard = self
+                .in_progress_table
+                .lock(RequestInProgressKey::Block(rel.clone(), blkno))
+                .await;
 
             let dest = req.dest[i as usize];
             let not_modified_since = match self.cache.get_page(&rel, blkno, dest).await {
@@ -410,8 +438,10 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             };
             cache_misses.push((blkno, not_modified_since, dest, in_progress_guard));
         }
-        self.getpage_cache_misses_counter.inc_by(cache_misses.len() as u64);
-        self.getpage_cache_hits_counter.inc_by(req.nblocks as u64 - cache_misses.len() as u64);
+        self.getpage_cache_misses_counter
+            .inc_by(cache_misses.len() as u64);
+        self.getpage_cache_hits_counter
+            .inc_by(req.nblocks as u64 - cache_misses.len() as u64);
 
         if cache_misses.is_empty() {
             return Ok(());
@@ -471,7 +501,10 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
 
             // note: this is deadlock-safe even though we hold multiple locks at the same time,
             // because they're always acquired in the same order.
-            let in_progress_guard = self.in_progress_table.lock(RequestInProgressKey::Block(rel.clone(), blkno)).await;
+            let in_progress_guard = self
+                .in_progress_table
+                .lock(RequestInProgressKey::Block(rel.clone(), blkno))
+                .await;
 
             let not_modified_since = match self.cache.page_is_cached(&rel, blkno).await {
                 Ok(CacheResult::Found(_)) => {
@@ -486,7 +519,11 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         if cache_misses.is_empty() {
             return Ok(());
         }
-        let not_modified_since = cache_misses.iter().map(|(_blkno, lsn, _guard)| *lsn).max().unwrap();
+        let not_modified_since = cache_misses
+            .iter()
+            .map(|(_blkno, lsn, _guard)| *lsn)
+            .max()
+            .unwrap();
 
         // TODO: spawn separate tasks for these. Use the integrated cache to keep track of the
         // in-flight requests
