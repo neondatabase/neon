@@ -35,8 +35,6 @@ impl<'a> CommunicatorWorkerProcessStruct<'a> {
 
 /// Expose Prometheus metrics.
 async fn get_metrics(State(state): State<&CommunicatorWorkerProcessStruct<'static>>) -> Response {
-    tracing::warn!("get_metrics called");
-
     use metrics::core::Collector;
     let metrics = state.collect();
 
@@ -50,8 +48,6 @@ async fn get_metrics(State(state): State<&CommunicatorWorkerProcessStruct<'stati
 
     let encoder = TextEncoder::new();
     let mut buffer = vec![];
-
-    tracing::warn!("get_metrics done");
 
     if let Err(e) = encoder.encode(&metrics, &mut buffer) {
         Response::builder()

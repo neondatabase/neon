@@ -417,7 +417,10 @@ process_inflight_requests(void)
 
 	/* FIXME: log errors */
 	for (int i = 0; i < num_inflight_requests; i++)
+	{
+		elog(DEBUG4, "processing prefetch request with idx %d", inflight_requests[i]);
 		wait_request_completion(inflight_requests[i], &result);
+	}
 	num_inflight_requests = 0;
 }
 
@@ -603,13 +606,14 @@ retry:
 		for (int i = 0; i < nblocks; i++)
 		{
 			uint64_t	cached_block = cached_result.cache_block_numbers[i];
+			char	   *buffer = buffers[i];
 			ssize_t		bytes_total = 0;
 
 			while (bytes_total < BLCKSZ)
 			{
 				ssize_t		nbytes;
 
-				nbytes = FileRead(cache_file, ((char *) buffers[i]) + bytes_total, BLCKSZ - bytes_total, cached_block * BLCKSZ + bytes_total, WAIT_EVENT_NEON_LFC_READ);
+				nbytes = FileRead(cache_file, buffer + bytes_total, BLCKSZ - bytes_total, cached_block * BLCKSZ + bytes_total, WAIT_EVENT_NEON_LFC_READ);
 				if (nbytes == -1)
 					ereport(ERROR,
 							(errcode_for_file_access(),

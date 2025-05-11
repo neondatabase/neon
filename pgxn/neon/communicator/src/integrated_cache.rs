@@ -477,7 +477,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
             // We can assume that it doesn't already exist, because the
             // caller is assumed to have already checked it, and holds
             // the io-in-progress lock. (The BlockEntry might exist, but no cache block)
-            
+
             // Allocate a new block first
             let cache_block = {
                 loop {
@@ -543,7 +543,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
     // Maintenance routines
 
     /// Evict one block from the file cache. This is used when the file cache fills up
-    /// Returns the evicted block, it's not put to the fre list, so it's available for the
+    /// Returns the evicted block. It's not put to the free list, so it's available for the
     /// caller to use immediately.
     pub fn try_evict_one_cache_block(&self) -> Option<CacheBlock> {
         let mut clock_hand = self.clock_hand.lock().unwrap();
@@ -583,11 +583,10 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                                     }
 
                                     let _ = self
-                                    .global_lw_lsn
-                                    .fetch_max(old.lw_lsn.load().0, Ordering::Relaxed);
-                                    let cache_block = old.cache_block.load(Ordering::Relaxed);
+                                        .global_lw_lsn
+                                        .fetch_max(old.lw_lsn.load().0, Ordering::Relaxed);
+                                    let cache_block = old.cache_block.swap(INVALID_CACHE_BLOCK, Ordering::Relaxed);
                                     if cache_block != INVALID_CACHE_BLOCK {
-                                        self.page_evictions_counter.inc();
                                         evicted_cache_block = Some(cache_block);
                                     }
                                     // TODO: we don't evict the entry, just the block. Does it make
@@ -597,6 +596,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                             }
                         });
                         if evicted_cache_block.is_some() {
+                            self.page_evictions_counter.inc();
                             return evicted_cache_block;
                         }
                     }
