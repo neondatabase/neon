@@ -131,7 +131,7 @@ use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::epoch::EpochPin;
 
@@ -164,6 +164,9 @@ pub struct Tree<V: Value> {
     writer_attached: AtomicBool,
 
     epoch: epoch::EpochShared,
+
+    // for metrics
+    num_values: AtomicU64,
 }
 
 unsafe impl<V: Value + Sync> Sync for Tree<V> {}
@@ -213,7 +216,7 @@ where
 {
     tree: &'t Tree<V>,
 
-    allocator: &'t A,
+    pub allocator: &'t A,
 
     epoch_handle: epoch::LocalHandle<'t>,
 
@@ -244,6 +247,7 @@ impl<'a, 't: 'a, K: Key, V: Value, A: ArtAllocator<V>> TreeInitStruct<'t, K, V, 
             root: algorithm::new_root(allocator),
             writer_attached: AtomicBool::new(false),
             epoch: epoch::EpochShared::new(),
+            num_values: AtomicU64::new(0),
         };
         unsafe { tree_ptr.write(init) };
 
@@ -551,13 +555,17 @@ impl<'e, K: Key, V: Value + Debug> TreeReadGuard<'e, K, V> {
         algorithm::dump_tree(self.tree.root, &self.epoch_pin)
     }
 }
-impl<'e, K: Key, V: Value + Debug> TreeWriteGuard<'e, K, V, ArtMultiSlabAllocator<'e, V>> {
+impl<'e, K: Key, V: Value> TreeWriteAccess<'e, K, V, ArtMultiSlabAllocator<'e, V>> {
     pub fn get_statistics(&self) -> ArtTreeStatistics {
-        self.tree_writer.allocator.get_statistics()
+        ArtTreeStatistics {
+            num_values: self.tree.num_values.load(Ordering::Relaxed),
+            blocks: self.allocator.inner.block_allocator.get_statistics(),
+        }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct ArtTreeStatistics {
+    pub num_values: u64,
     pub blocks: allocator::block::BlockAllocatorStats,
 }

@@ -12,7 +12,6 @@ use crate::allocator::r#static::alloc_from_slice;
 
 use spin;
 
-use crate::ArtTreeStatistics;
 use crate::Tree;
 pub use crate::algorithm::node_ptr::{
     NodeInternal4, NodeInternal16, NodeInternal48, NodeInternal256, NodeLeaf,
@@ -42,7 +41,7 @@ where
 {
     tree_area: spin::Mutex<Option<&'t mut MaybeUninit<Tree<V>>>>,
 
-    inner: MultiSlabAllocator<'t, 5>,
+    pub(crate) inner: MultiSlabAllocator<'t, 5>,
 
     phantom_val: PhantomData<V>,
 }
@@ -110,13 +109,5 @@ impl<'t, V: crate::Value> ArtAllocator<V> for ArtMultiSlabAllocator<'t, V> {
     }
     fn dealloc_node_leaf(&self, ptr: *mut NodeLeaf<V>) {
         self.inner.dealloc_slab(4, ptr.cast())
-    }
-}
-
-impl<'t, V: crate::Value> ArtMultiSlabAllocator<'t, V> {
-    pub fn get_statistics(&self) -> ArtTreeStatistics {
-        ArtTreeStatistics {
-            blocks: self.inner.block_allocator.get_statistics(),
-        }
     }
 }

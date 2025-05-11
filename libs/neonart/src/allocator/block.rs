@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use spin;
 
-pub(crate) const BLOCK_SIZE: usize = 16 * 1024;
+pub const BLOCK_SIZE: usize = 16 * 1024;
 
 const INVALID_BLOCK: u64 = u64::MAX;
 

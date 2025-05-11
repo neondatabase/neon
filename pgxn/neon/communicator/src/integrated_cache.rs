@@ -66,8 +66,13 @@ pub struct IntegratedCacheWriteAccess<'t> {
     clock_hand: std::sync::Mutex<TreeIterator<TreeKey>>,
 
     // Metrics
+    entries_total: metrics::IntGauge,
     page_evictions_counter: metrics::IntCounter,
     clock_iterations_counter: metrics::IntCounter,
+
+    // metrics from the art tree
+    cache_memory_size_bytes: metrics::IntGauge,
+    cache_memory_used_bytes: metrics::IntGauge,
 }
 
 /// Represents read-only access to the integrated cache. Backend processes have this.
@@ -113,6 +118,11 @@ impl<'t> IntegratedCacheInitStruct<'t> {
             file_cache,
             clock_hand: std::sync::Mutex::new(TreeIterator::new_wrapping()),
 
+            entries_total: metrics::IntGauge::new(
+                "entries_total",
+                "Number of entries in the cache",
+            ).unwrap(),
+
             page_evictions_counter: metrics::IntCounter::new(
                 "integrated_cache_evictions",
                 "Page evictions from the Local File Cache",
@@ -121,6 +131,15 @@ impl<'t> IntegratedCacheInitStruct<'t> {
             clock_iterations_counter: metrics::IntCounter::new(
                 "clock_iterations",
                 "Number of times the clock hand has moved",
+            ).unwrap(),
+
+            cache_memory_size_bytes: metrics::IntGauge::new(
+                "cache_memory_size_bytes",
+                "Memory reserved for cache metadata",
+            ).unwrap(),
+            cache_memory_used_bytes: metrics::IntGauge::new(
+                "cache_memory_size_bytes",
+                "Memory used for cache metadata",
             ).unwrap(),
         }
     }
@@ -612,14 +631,30 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 impl metrics::core::Collector for IntegratedCacheWriteAccess<'_> {
     fn desc(&self) -> Vec<&metrics::core::Desc> {
         let mut descs = Vec::new();
+        descs.append(&mut self.entries_total.desc());
         descs.append(&mut self.page_evictions_counter.desc());
         descs.append(&mut self.clock_iterations_counter.desc());
+
+        descs.append(&mut self.cache_memory_size_bytes.desc());
+        descs.append(&mut self.cache_memory_used_bytes.desc());
         descs
     }
     fn collect(&self) -> Vec<metrics::proto::MetricFamily> {
+        // Update gauges
+        let art_statistics = self.cache_tree.get_statistics();
+        self.entries_total.set(art_statistics.num_values as i64);
+        let block_statistics = &art_statistics.blocks;
+        self.cache_memory_size_bytes.set(block_statistics.num_blocks as i64 * neonart::allocator::block::BLOCK_SIZE as i64);
+        self.cache_memory_used_bytes.set((block_statistics.num_initialized as i64 - block_statistics.num_free_blocks as i64 ) * neonart::allocator::block::BLOCK_SIZE as i64);
+
         let mut values = Vec::new();
+        values.append(&mut self.entries_total.collect());
         values.append(&mut self.page_evictions_counter.collect());
         values.append(&mut self.clock_iterations_counter.collect());
+
+        values.append(&mut self.cache_memory_size_bytes.collect());
+        values.append(&mut self.cache_memory_used_bytes.collect());
+
         values
     }
 }
