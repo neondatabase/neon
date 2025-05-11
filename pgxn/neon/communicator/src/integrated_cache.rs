@@ -284,6 +284,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                     .unwrap()
                     .read_block(cache_block, dst)
                     .await?;
+
                 Ok(CacheResult::Found(()))
             } else {
                 Ok(CacheResult::NotFound(block_entry.lw_lsn.load()))
