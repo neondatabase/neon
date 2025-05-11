@@ -1382,12 +1382,24 @@ impl Timeline {
 
     /// Update cached relation size if there is no more recent update
     pub fn update_cached_rel_size(&self, tag: RelTag, version: Version<'_>, nblocks: BlockNumber) {
+        let lsn = version.get_lsn();
         if version.is_latest() {
             let mut rel_size_cache = self.rel_size_primary_cache.write().unwrap();
-            rel_size_cache.insert(tag, (version.get_lsn(), nblocks));
+            match rel_size_cache.entry(tag) {
+                hash_map::Entry::Occupied(mut entry) => {
+                    let cached_lsn = entry.get_mut();
+                    if lsn >= cached_lsn.0 {
+                        *cached_lsn = (lsn, nblocks);
+                    }
+                }
+                hash_map::Entry::Vacant(entry) => {
+                    entry.insert((lsn, nblocks));
+                    RELSIZE_CACHE_ENTRIES.inc();
+                }
+            }
         } else {
             let mut rel_size_cache = self.rel_size_replica_cache.lock().unwrap();
-            rel_size_cache.insert((version.get_lsn(), tag), nblocks);
+            rel_size_cache.insert((lsn, tag), nblocks);
         }
     }
 
