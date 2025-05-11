@@ -19,7 +19,6 @@ enum NodeTag {
 #[repr(C)]
 struct NodeBase {
     tag: NodeTag,
-    lock_and_version: AtomicLockAndVersion,
 }
 
 pub(crate) struct NodePtr<V> {
@@ -69,25 +68,25 @@ enum NodeVariantMut<'a, V> {
 #[repr(C)]
 pub struct NodeInternal4<V> {
     tag: NodeTag,
-    lock_and_version: AtomicLockAndVersion,
-
-    prefix: [u8; MAX_PREFIX_LEN],
     prefix_len: u8,
     num_children: u8,
 
     child_keys: [u8; 4],
+
+    lock_and_version: AtomicLockAndVersion,
+    prefix: [u8; MAX_PREFIX_LEN],
+
     child_ptrs: [NodePtr<V>; 4],
 }
 
 #[repr(C)]
 pub struct NodeInternal16<V> {
     tag: NodeTag,
-    lock_and_version: AtomicLockAndVersion,
-
-    prefix: [u8; MAX_PREFIX_LEN],
     prefix_len: u8,
-
     num_children: u8,
+
+    lock_and_version: AtomicLockAndVersion,
+    prefix: [u8; MAX_PREFIX_LEN],
     child_keys: [u8; 16],
     child_ptrs: [NodePtr<V>; 16],
 }
@@ -95,12 +94,11 @@ pub struct NodeInternal16<V> {
 #[repr(C)]
 pub struct NodeInternal48<V> {
     tag: NodeTag,
-    lock_and_version: AtomicLockAndVersion,
-
-    prefix: [u8; MAX_PREFIX_LEN],
     prefix_len: u8,
-
     num_children: u8,
+
+    lock_and_version: AtomicLockAndVersion,
+    prefix: [u8; MAX_PREFIX_LEN],
     child_indexes: [u8; 256],
     child_ptrs: [NodePtr<V>; 48],
 }
@@ -109,22 +107,24 @@ const INVALID_CHILD_INDEX: u8 = u8::MAX;
 #[repr(C)]
 pub struct NodeInternal256<V> {
     tag: NodeTag,
-    lock_and_version: AtomicLockAndVersion,
-
-    prefix: [u8; MAX_PREFIX_LEN],
     prefix_len: u8,
-
     num_children: u16,
+
+    lock_and_version: AtomicLockAndVersion,
+    prefix: [u8; MAX_PREFIX_LEN],
+
     child_ptrs: [NodePtr<V>; 256],
 }
 
 #[repr(C)]
 pub struct NodeLeaf<V> {
     tag: NodeTag,
-    lock_and_version: AtomicLockAndVersion,
-
-    prefix: [u8; MAX_PREFIX_LEN],
     prefix_len: u8,
+
+    // TODO: It's not clear if we need a full version on leaf nodes. I think a single bit
+    // to indicate if the node is obsolete would be sufficient.
+    lock_and_version: AtomicLockAndVersion,
+    prefix: [u8; MAX_PREFIX_LEN],
 
     value: V,
 }
