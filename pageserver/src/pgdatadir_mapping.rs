@@ -90,6 +90,24 @@ pub enum LsnForTimestamp {
     NoData(Lsn),
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LsnRange {
+    pub effective_lsn: Lsn,
+    pub request_lsn: Lsn,
+}
+
+impl LsnRange {
+    pub fn pitr(lsn: Lsn) -> LsnRange {
+        LsnRange {
+            effective_lsn: lsn,
+            request_lsn: lsn,
+        }
+    }
+    pub fn is_latest(&self) -> bool {
+        self.request_lsn == Lsn::MAX
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CalculateLogicalSizeError {
     #[error("cancelled")]
@@ -202,12 +220,26 @@ impl Timeline {
         io_concurrency: IoConcurrency,
     ) -> Result<Bytes, PageReconstructError> {
         match version {
-            Version::Lsn(effective_lsn) => {
+            Version::Lsns(lsns) => {
+                let pages: smallvec::SmallVec<[_; 1]> = smallvec::smallvec![(tag, blknum)];
+                let res = self
+                    .get_rel_page_at_lsn_batched(
+                        pages
+                            .iter()
+                            .map(|(tag, blknum)| (tag, blknum, lsns, ctx.attached_child())),
+                        io_concurrency.clone(),
+                        ctx,
+                    )
+                    .await;
+                assert_eq!(res.len(), 1);
+                res.into_iter().next().unwrap()
+            }
+            Version::Lsn(lsn) => {
                 let pages: smallvec::SmallVec<[_; 1]> = smallvec::smallvec![(tag, blknum)];
                 let res = self
                     .get_rel_page_at_lsn_batched(
                         pages.iter().map(|(tag, blknum)| {
-                            (tag, blknum, effective_lsn, ctx.attached_child())
+                            (tag, blknum, LsnRange::pitr(lsn), ctx.attached_child())
                         }),
                         io_concurrency.clone(),
                         ctx,
@@ -246,7 +278,7 @@ impl Timeline {
     /// The ordering of the returned vec corresponds to the ordering of `pages`.
     pub(crate) async fn get_rel_page_at_lsn_batched(
         &self,
-        pages: impl ExactSizeIterator<Item = (&RelTag, &BlockNumber, Lsn, RequestContext)>,
+        pages: impl ExactSizeIterator<Item = (&RelTag, &BlockNumber, LsnRange, RequestContext)>,
         io_concurrency: IoConcurrency,
         ctx: &RequestContext,
     ) -> Vec<Result<Bytes, PageReconstructError>> {
@@ -265,7 +297,7 @@ impl Timeline {
         let mut req_keyspaces: HashMap<Lsn, KeySpaceRandomAccum> =
             HashMap::with_capacity(pages.len());
 
-        for (response_slot_idx, (tag, blknum, lsn, ctx)) in pages.enumerate() {
+        for (response_slot_idx, (tag, blknum, lsns, ctx)) in pages.enumerate() {
             if tag.relnode == 0 {
                 result_slots[response_slot_idx].write(Err(PageReconstructError::Other(
                     RelationError::InvalidRelnode.into(),
@@ -274,7 +306,7 @@ impl Timeline {
                 slots_filled += 1;
                 continue;
             }
-
+            let lsn = lsns.effective_lsn;
             let nblocks = {
                 let ctx = RequestContextBuilder::from(&ctx)
                     .perf_span(|crnt_perf_span| {
@@ -289,7 +321,7 @@ impl Timeline {
                     .attached_child();
 
                 match self
-                    .get_rel_size(*tag, Version::Lsn(lsn), &ctx)
+                    .get_rel_size(*tag, Version::Lsns(lsns), &ctx)
                     .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                     .await
                 {
@@ -488,7 +520,7 @@ impl Timeline {
         let mut buf = version.get(self, key, ctx).await?;
         let nblocks = buf.get_u32_le();
 
-        self.update_cached_rel_size(tag, version.get_lsn(), nblocks);
+        self.update_cached_rel_size(tag, version, nblocks);
 
         Ok(nblocks)
     }
@@ -1344,16 +1376,19 @@ impl Timeline {
             RELSIZE_CACHE_HITS.inc();
             return Some(*nblock);
         }
-		info!("RELSIZE_CACHE miss: {} @ {}", tag, lsn);
         RELSIZE_CACHE_MISSES.inc();
         None
     }
 
     /// Update cached relation size if there is no more recent update
-    pub fn update_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
-		info!("RELSIZE_CACHE put: {} @ {}", tag, lsn);
-        let mut rel_size_cache = self.rel_size_replica_cache.lock().unwrap();
-        rel_size_cache.insert((lsn, tag), nblocks);
+    pub fn update_cached_rel_size(&self, tag: RelTag, version: Version<'_>, nblocks: BlockNumber) {
+        if version.is_latest() {
+            let mut rel_size_cache = self.rel_size_primary_cache.write().unwrap();
+            rel_size_cache.insert(tag, (version.get_lsn(), nblocks));
+        } else {
+            let mut rel_size_cache = self.rel_size_replica_cache.lock().unwrap();
+            rel_size_cache.insert((version.get_lsn(), tag), nblocks);
+        }
     }
 
     /// Store cached relation size
@@ -2654,6 +2689,7 @@ pub struct DatadirModificationStats {
 /// timeline to not miss the latest updates.
 #[derive(Clone, Copy)]
 pub enum Version<'a> {
+    Lsns(LsnRange),
     Lsn(Lsn),
     Modified(&'a DatadirModification<'a>),
 }
@@ -2666,6 +2702,7 @@ impl Version<'_> {
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         match self {
+            Version::Lsns(lsns) => timeline.get(key, lsns.effective_lsn, ctx).await,
             Version::Lsn(lsn) => timeline.get(key, *lsn, ctx).await,
             Version::Modified(modification) => modification.get(key, ctx).await,
         }
@@ -2688,8 +2725,17 @@ impl Version<'_> {
         }
     }
 
+    fn is_latest(&self) -> bool {
+        match self {
+            Version::Lsns(lsns) => lsns.is_latest(),
+            Version::Lsn(_) => false,
+            Version::Modified(_) => true,
+        }
+    }
+
     fn get_lsn(&self) -> Lsn {
         match self {
+            Version::Lsns(lsns) => lsns.effective_lsn,
             Version::Lsn(lsn) => *lsn,
             Version::Modified(modification) => modification.lsn,
         }
