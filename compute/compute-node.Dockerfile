@@ -584,6 +584,28 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) && \
 
 #########################################################################################
 #
+# Layer "online_advisor-build"
+# compile online_advisor extension
+#
+#########################################################################################
+ARG PG_VERSION
+
+# not version-specific
+# last release 1.0 - May 12, 2025
+WORKDIR /ext-src
+RUN wget https://github.com/knizhnik/online_advisor/archive/refs/tags/1.0.tar.gz -O online_advisor.tar.gz && \
+    echo "d6f60e37efc276b36300fa75e1ab0c1a4dee98d1aab4a6c14af10f9fe6527fbc online_advisor.tar.gz" | sha256sum --check && \
+    mkdir online_advisor-src && cd online_advisor-src && tar xzf ../online_advisor.tar.gz --strip-components=1 -C .
+
+FROM pg-build AS online_advisor-build
+COPY --from=online_advisor-src /ext-src/ /ext-src/
+WORKDIR /ext-src/online_advisor-src
+RUN make -j $(getconf _NPROCESSORS_ONLN) && \
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/online_advisor.control
+
+#########################################################################################
+#
 # Layer "pg_hashids-build"
 # compile pg_hashids extension
 #
@@ -1648,6 +1670,7 @@ COPY --from=pg_jsonschema-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_graphql-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_tiktoken-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=hypopg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=online_advisor-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_hashids-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=rum-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgtap-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -1823,6 +1846,7 @@ COPY --from=pgjwt-src /ext-src/ /ext-src/
 COPY --from=pg_graphql-src /ext-src/ /ext-src/
 #COPY --from=pg_tiktoken-src /ext-src/ /ext-src/
 COPY --from=hypopg-src /ext-src/ /ext-src/
+COPY --from=online_advisor-src /ext-src/ /ext-src/
 COPY --from=pg_hashids-src /ext-src/ /ext-src/
 COPY --from=rum-src /ext-src/ /ext-src/
 COPY --from=pgtap-src /ext-src/ /ext-src/
