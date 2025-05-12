@@ -1289,7 +1289,7 @@ impl Timeline {
             )
             .await
         {
-            Ok(((dense_partitioning, sparse_partitioning), lsn)) if lsn >= gc_cutoff => {
+            Ok(((dense_partitioning, sparse_partitioning), lsn)) => {
                 // Disables access_stats updates, so that the files we read remain candidates for eviction after we're done with them
                 let image_ctx = RequestContextBuilder::from(ctx)
                     .access_stats_behavior(AccessStatsBehavior::Skip)
@@ -1301,7 +1301,7 @@ impl Timeline {
                     .extend(sparse_partitioning.into_dense().parts);
 
                 // 3. Create new image layers for partitions that have been modified "enough".
-                let (image_layers, outcome) = self
+                let res = self
                     .create_image_layers(
                         &partitioning,
                         lsn,
@@ -1328,23 +1328,38 @@ impl Timeline {
                         {
                             critical!("missing key during compaction: {err:?}");
                         }
-                    })?;
+                    });
 
-                self.last_image_layer_creation_status
-                    .store(Arc::new(outcome.clone()));
+                match res {
+                    Ok((image_layers, outcome)) => {
+                        self.last_image_layer_creation_status
+                            .store(Arc::new(outcome.clone()));
 
-                self.upload_new_image_layers(image_layers)?;
-                if let LastImageLayerCreationStatus::Incomplete { .. } = outcome {
-                    // Yield and do not do any other kind of compaction.
-                    info!(
-                        "skipping shard ancestor compaction due to pending image layer generation tasks (preempted by L0 compaction)."
-                    );
-                    return Ok(CompactionOutcome::YieldForL0);
-                }
-            }
-
-            Ok(_) => {
-                info!("skipping repartitioning due to image compaction LSN being below GC cutoff");
+                        self.upload_new_image_layers(image_layers)?;
+                        if let LastImageLayerCreationStatus::Incomplete { .. } = outcome {
+                            // Yield and do not do any other kind of compaction.
+                            info!(
+                                "skipping shard ancestor compaction due to pending image layer generation tasks (preempted by L0 compaction)."
+                            );
+                            return Ok(CompactionOutcome::YieldForL0);
+                        }
+                        // Fall through to shard ancestor compaction
+                    }
+                    Err(err) if lsn <= gc_cutoff => {
+                        if let CreateImageLayersError::GetVectoredError(_) = err {
+                            warn!(
+                                "could not create image layers due to {}; this is not critical because the requested image LSN is below the GC curoff",
+                                err
+                            );
+                            // Fall through to shard ancestor compaction
+                        } else {
+                            return Err(err.into());
+                        }
+                    }
+                    Err(e) => {
+                        return Err(e.into());
+                    }
+                };
             }
 
             // Suppress errors when cancelled.
