@@ -890,9 +890,15 @@ neon_unlink(NRelFileInfoBackend rinfo, ForkNumber forkNum, bool isRedo)
 	 * unlink, it won't do any harm if the file doesn't exist.
 	 */
 	mdunlink(rinfo, forkNum, isRedo);
+
 	if (!NRelFileInfoBackendIsTemp(rinfo))
 	{
-		forget_cached_relsize(InfoFromNInfoB(rinfo), forkNum);
+		if (neon_enable_new_communicator)
+		{
+			communicator_new_rel_unlink(InfoFromNInfoB(rinfo), forkNum);
+		}
+		else
+			forget_cached_relsize(InfoFromNInfoB(rinfo), forkNum);
 	}
 }
 

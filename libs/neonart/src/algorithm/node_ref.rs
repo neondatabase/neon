@@ -41,6 +41,16 @@ impl<'e, V: Value> NodeRef<'e, V> {
         })
     }
 
+    pub(crate) fn write_lock_or_restart(
+        &self,
+    ) -> Result<WriteLockedNodeRef<'e, V>, ConcurrentUpdateError> {
+        self.lockword().write_lock_or_restart()?;
+        Ok(WriteLockedNodeRef {
+            ptr: self.ptr,
+            phantom: self.phantom,
+        })
+    }
+
     fn lockword(&self) -> &AtomicLockAndVersion {
         self.ptr.lockword()
     }
@@ -153,8 +163,12 @@ pub struct WriteLockedNodeRef<'e, V> {
 }
 
 impl<'e, V: Value> WriteLockedNodeRef<'e, V> {
-    pub(crate) fn can_shrink_after_delete(&self) -> bool {
-        self.ptr.can_shrink_after_delete()
+    pub(crate) fn can_shrink(&self) -> bool {
+        self.ptr.can_shrink()
+    }
+
+    pub(crate) fn num_children(&self) -> usize {
+        self.ptr.num_children()
     }
 
     pub(crate) fn write_unlock(mut self) {
@@ -173,6 +187,10 @@ impl<'e, V: Value> WriteLockedNodeRef<'e, V> {
 
     pub(crate) fn truncate_prefix(&mut self, new_prefix_len: usize) {
         self.ptr.truncate_prefix(new_prefix_len)
+    }
+
+    pub(crate) fn prepend_prefix(&mut self, prefix: &[u8], prefix_byte: u8) {
+        self.ptr.prepend_prefix(prefix, prefix_byte)
     }
 
     pub(crate) fn insert_child(&mut self, key_byte: u8, child: NodePtr<V>) {
@@ -225,6 +243,22 @@ impl<'e, V: Value> WriteLockedNodeRef<'e, V> {
 
     pub(crate) fn delete_child(&mut self, key_byte: u8) {
         self.ptr.delete_child(key_byte);
+    }
+
+    pub(crate) fn find_remaining_child(&self) -> (u8, NodeRef<'e, V>) {
+        assert_eq!(self.num_children(), 1);
+        let child_or_value = self.ptr.find_next_child(0);
+
+        match child_or_value {
+            None => panic!("could not find only child in node"),
+            Some((k, child_ptr)) => (
+                k,
+                NodeRef {
+                    ptr: child_ptr,
+                    phantom: self.phantom,
+                },
+            ),
+        }
     }
 }
 

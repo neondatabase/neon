@@ -143,7 +143,7 @@ fn lookup_recurse<'e, V: Value>(
         parent.read_unlock_or_restart()?;
     }
 
-    // check if prefix matches, may increment level
+    // check if the prefix matches, may increment level
     let prefix_len = if let Some(prefix_len) = rnode.prefix_matches(key) {
         prefix_len
     } else {
@@ -285,25 +285,16 @@ where
             }
             UpdateAction::Insert(_) => panic!("cannot insert over existing value"),
             UpdateAction::Remove => {
-                // TODO: If the parent becomes empty, unlink it from grandparent
-                // TODO: If parent has only one child left, merge it with the child, extending its
-                // prefix
-                if wparent.can_shrink_after_delete() {
-                    if let Some((rgrandparent, grandparent_key)) = rgrandparent {
-                        let mut wgrandparent = rgrandparent.upgrade_to_write_lock_or_restart()?;
-                        wparent.delete_child(parent_key);
-                        shrink(&wparent, &mut wgrandparent, grandparent_key, guard)?;
-                        wparent.write_unlock_obsolete();
-                    } else {
-                        wparent.delete_child(parent_key);
-                        wparent.write_unlock();
-                    }
-                } else {
-                    wparent.delete_child(parent_key);
-                    wparent.write_unlock();
-                }
                 guard.remember_obsolete_node(wnode.as_ptr());
+                wparent.delete_child(parent_key);
                 wnode.write_unlock_obsolete();
+
+                if let Some(rgrandparent) = rgrandparent {
+                    // FIXME: Ignore concurrency error. It doesn't lead to
+                    // corruption, but it means we might leak something. Until
+                    // another update cleans it up.
+                    let _ = cleanup_parent(wparent, rgrandparent, guard);
+                }
             }
         }
 
@@ -324,8 +315,7 @@ where
                     wparent.write_unlock();
                 }
                 UpdateAction::Insert(new_value) => {
-                    insert_and_grow(key, new_value, &wnode, &mut wparent, parent_key, guard)?;
-                    wnode.write_unlock_obsolete();
+                    insert_and_grow(key, new_value, wnode, &mut wparent, parent_key, guard)?;
                     wparent.write_unlock();
                 }
                 UpdateAction::Remove => {
@@ -490,7 +480,7 @@ fn insert_to_node<'e, K: Key, V: Value, A: ArtAllocator<V>>(
 fn insert_and_grow<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>>(
     key: &[u8],
     value: V,
-    wnode: &WriteLockedNodeRef<V>,
+    wnode: WriteLockedNodeRef<V>,
     parent: &mut WriteLockedNodeRef<V>,
     parent_key_byte: u8,
     guard: &'g mut TreeWriteGuard<'e, K, V, A>,
@@ -505,25 +495,66 @@ fn insert_and_grow<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>>(
     parent.replace_child(parent_key_byte, bigger_node.into_ptr());
 
     guard.remember_obsolete_node(wnode.as_ptr());
+    wnode.write_unlock_obsolete();
 
     Ok(())
 }
 
-// On entry: 'parent' and 'node' are locked
-fn shrink<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>>(
-    wnode: &WriteLockedNodeRef<V>,
-    parent: &mut WriteLockedNodeRef<V>,
-    parent_key_byte: u8,
+fn cleanup_parent<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>>(
+    wparent: WriteLockedNodeRef<V>,
+    rgrandparent: (ReadLockedNodeRef<V>, u8),
     guard: &'g mut TreeWriteGuard<'e, K, V, A>,
 ) -> Result<(), ArtError> {
-    eprintln!("SHRINK!");
-    let smaller_node = wnode.shrink(guard.tree_writer.allocator)?;
+    let (rgrandparent, grandparent_key_byte) = rgrandparent;
 
-    // Replace the pointer in the parent
-    parent.replace_child(parent_key_byte, smaller_node.into_ptr());
+    // If the parent becomes completely empty after the deletion, remove the parent from the
+    // grandparent. (This case is possible because we reserve only 8 bytes for the prefix.)
+    // TODO: not implemented.
 
-    guard.remember_obsolete_node(wnode.as_ptr());
+    // If the parent has only one child, replace the parent with the remaining child. (This is not
+    // possible if the child's prefix field cannot absorb the parent's)
+    if wparent.num_children() == 1 {
+        // Try to lock the remaining child. This can fail if the child is updated
+        // concurrently.
+        let (key_byte, remaining_child) = wparent.find_remaining_child();
 
+        let mut wremaining_child = remaining_child.write_lock_or_restart()?;
+
+        if 1 + wremaining_child.get_prefix().len() + wparent.get_prefix().len() <= MAX_PREFIX_LEN {
+            let mut wgrandparent = rgrandparent.upgrade_to_write_lock_or_restart()?;
+
+            // Ok, we have locked the leaf, the parent, the grandparent, and the parent's only
+            // remaining leaf. Proceed with the updates.
+
+            // Update the prefix on the remaining leaf
+            wremaining_child.prepend_prefix(wparent.get_prefix(), key_byte);
+
+            // Replace the pointer in the grandparent to point directly to the remaining leaf
+            wgrandparent.replace_child(grandparent_key_byte, wremaining_child.as_ptr());
+
+            // Mark the parent as deleted.
+            guard.remember_obsolete_node(wparent.as_ptr());
+            wparent.write_unlock_obsolete();
+            return Ok(());
+        }
+    }
+
+    // If the parent's children would fit on a smaller node type after the deletion, replace it with
+    // a smaller node.
+    if wparent.can_shrink() {
+        let mut wgrandparent = rgrandparent.upgrade_to_write_lock_or_restart()?;
+        let smaller_node = wparent.shrink(guard.tree_writer.allocator)?;
+
+        // Replace the pointer in the grandparent
+        wgrandparent.replace_child(grandparent_key_byte, smaller_node.into_ptr());
+
+        guard.remember_obsolete_node(wparent.as_ptr());
+        wparent.write_unlock_obsolete();
+        return Ok(());
+    }
+
+    // nothing to do
+    wparent.write_unlock();
     Ok(())
 }
 

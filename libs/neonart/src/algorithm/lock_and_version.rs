@@ -53,6 +53,26 @@ impl AtomicLockAndVersion {
         Ok(())
     }
 
+    pub(crate) fn write_lock_or_restart(&self) -> Result<(), ConcurrentUpdateError> {
+        let old = self.inner.load(Ordering::Relaxed);
+        if is_obsolete(old) || is_locked(old) {
+            return Err(ConcurrentUpdateError());
+        }
+        if self
+            .inner
+            .compare_exchange(
+                old,
+                set_locked_bit(old),
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            return Err(ConcurrentUpdateError());
+        }
+        Ok(())
+    }
+
     pub(crate) fn write_unlock(&self) {
         // reset locked bit and overflow into version
         self.inner.fetch_add(2, Ordering::Release);
@@ -66,7 +86,7 @@ impl AtomicLockAndVersion {
     // Helper functions
     fn await_node_unlocked(&self) -> u64 {
         let mut version = self.inner.load(Ordering::Acquire);
-        while (version & 2) == 2 {
+        while is_locked(version) {
             // spinlock
             std::thread::yield_now();
             version = self.inner.load(Ordering::Acquire)
@@ -81,4 +101,8 @@ fn set_locked_bit(version: u64) -> u64 {
 
 fn is_obsolete(version: u64) -> bool {
     return (version & 1) == 1;
+}
+
+fn is_locked(version: u64) -> bool {
+    return (version & 2) == 2;
 }

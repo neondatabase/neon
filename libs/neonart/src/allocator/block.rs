@@ -64,7 +64,12 @@ impl<'t> BlockAllocator<'t> {
 
     pub(crate) fn alloc_block(&self) -> &mut [MaybeUninit<u8>] {
         // FIXME: handle OOM
-        let ptr: *mut MaybeUninit<u8> = self.get_block_ptr(self.alloc_block_internal()).cast();
+        let blkno = self.alloc_block_internal();
+        if blkno == INVALID_BLOCK {
+            panic!("out of memory");
+        }
+
+        let ptr: *mut MaybeUninit<u8> = self.get_block_ptr(blkno).cast();
         unsafe { std::slice::from_raw_parts_mut(ptr, BLOCK_SIZE) }
     }
 

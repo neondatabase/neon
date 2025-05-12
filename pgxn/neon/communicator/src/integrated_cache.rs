@@ -88,6 +88,9 @@ pub struct IntegratedCacheWriteAccess<'t> {
     // metrics from the art tree
     cache_memory_size_bytes: IntGauge,
     cache_memory_used_bytes: IntGauge,
+    cache_tree_epoch: IntGauge,
+    cache_tree_oldest_epoch: IntGauge,
+    cache_tree_garbage_total: IntGauge,
 }
 
 /// Represents read-only access to the integrated cache. Backend processes have this.
@@ -192,6 +195,22 @@ impl<'t> IntegratedCacheInitStruct<'t> {
             cache_memory_used_bytes: metrics::IntGauge::new(
                 "cache_memory_size_bytes",
                 "Memory used for cache metadata",
+            )
+            .unwrap(),
+
+            cache_tree_epoch: metrics::IntGauge::new(
+                "cache_tree_epoch",
+                "Current epoch of the cache tree",
+            )
+            .unwrap(),
+            cache_tree_oldest_epoch: metrics::IntGauge::new(
+                "cache_tree_oldest_epoch",
+                "Oldest active epoch of the cache tree",
+            )
+            .unwrap(),
+            cache_tree_garbage_total: metrics::IntGauge::new(
+                "cache_tree_garbage_total",
+                "Number of obsoleted nodes in cache tree pending GC",
             )
             .unwrap(),
         }
@@ -609,7 +628,34 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         let r = self.cache_tree.start_read();
         while let Some((k, _v)) = iter.next(&r) {
             let w = self.cache_tree.start_write();
-            w.remove(&k);
+
+            let mut evicted_cache_block = None;
+
+            w.update_with_fn(&k, |e| {
+                if let Some(e) = e {
+                    let block_entry = if let TreeEntry::Block(e) = e {
+                        e
+                    } else {
+                        panic!("unexpected tree entry type for block key");
+                    };
+                    let cache_block = block_entry
+                        .cache_block
+                        .swap(INVALID_CACHE_BLOCK, Ordering::Relaxed);
+                    if cache_block != INVALID_CACHE_BLOCK {
+                        evicted_cache_block = Some(cache_block);
+                    }
+                    UpdateAction::Remove
+                } else {
+                    UpdateAction::Nothing
+                }
+            });
+
+            if let Some(evicted_cache_block) = evicted_cache_block {
+                self.file_cache
+                    .as_ref()
+                    .unwrap()
+                    .dealloc_block(evicted_cache_block);
+            }
         }
     }
 
@@ -692,6 +738,11 @@ impl metrics::core::Collector for IntegratedCacheWriteAccess<'_> {
 
         descs.append(&mut self.cache_memory_size_bytes.desc());
         descs.append(&mut self.cache_memory_used_bytes.desc());
+
+        descs.append(&mut self.cache_tree_epoch.desc());
+        descs.append(&mut self.cache_tree_oldest_epoch.desc());
+        descs.append(&mut self.cache_tree_garbage_total.desc());
+
         descs
     }
     fn collect(&self) -> Vec<metrics::proto::MetricFamily> {
@@ -729,6 +780,12 @@ impl metrics::core::Collector for IntegratedCacheWriteAccess<'_> {
                 * ALLOC_BLOCK_SIZE as i64,
         );
 
+        self.cache_tree_epoch.set(art_statistics.epoch as i64);
+        self.cache_tree_oldest_epoch
+            .set(art_statistics.oldest_epoch as i64);
+        self.cache_tree_garbage_total
+            .set(art_statistics.num_garbage as i64);
+
         let mut values = Vec::new();
         values.append(&mut self.nodes_total.collect());
         values.append(&mut self.nodes_memory_bytes.collect());
@@ -737,6 +794,10 @@ impl metrics::core::Collector for IntegratedCacheWriteAccess<'_> {
 
         values.append(&mut self.cache_memory_size_bytes.collect());
         values.append(&mut self.cache_memory_used_bytes.collect());
+
+        values.append(&mut self.cache_tree_epoch.collect());
+        values.append(&mut self.cache_tree_oldest_epoch.collect());
+        values.append(&mut self.cache_tree_garbage_total.collect());
 
         values
     }

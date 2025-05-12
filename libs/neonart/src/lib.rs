@@ -375,9 +375,12 @@ impl<'e, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteGuard<'e, K, V, A> {
     /// Remove value. Returns true if it existed
     pub fn remove(self, key: &K) -> bool {
         let mut result = false;
-        self.update_with_fn(key, |existing| {
-            result = existing.is_some();
-            UpdateAction::Remove
+        self.update_with_fn(key, |existing| match existing {
+            Some(_) => {
+                result = true;
+                UpdateAction::Remove
+            }
+            None => UpdateAction::Nothing,
         });
         result
     }
@@ -556,6 +559,9 @@ impl<'e, K: Key, V: Value> TreeWriteAccess<'e, K, V, ArtMultiSlabAllocator<'e, V
         ArtTreeStatistics {
             blocks: self.allocator.inner.block_allocator.get_statistics(),
             slabs: self.allocator.get_statistics(),
+            epoch: self.tree.epoch.get_current(),
+            oldest_epoch: self.tree.epoch.get_oldest(),
+            num_garbage: self.garbage.lock().0.len() as u64,
         }
     }
 }
@@ -564,4 +570,8 @@ impl<'e, K: Key, V: Value> TreeWriteAccess<'e, K, V, ArtMultiSlabAllocator<'e, V
 pub struct ArtTreeStatistics {
     pub blocks: allocator::block::BlockAllocatorStats,
     pub slabs: allocator::ArtMultiSlabStats,
+
+    pub epoch: u64,
+    pub oldest_epoch: u64,
+    pub num_garbage: u64,
 }

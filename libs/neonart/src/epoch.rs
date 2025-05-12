@@ -107,6 +107,10 @@ impl EpochShared {
         }
         oldest
     }
+
+    pub(crate) fn get_current(&self) -> u64 {
+        self.global_epoch.load(Ordering::Relaxed)
+    }
 }
 
 pub(crate) struct EpochPin<'e> {

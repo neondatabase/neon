@@ -237,13 +237,23 @@ impl<V: Value> NodePtr<V> {
         }
     }
 
-    pub(crate) fn can_shrink_after_delete(&self) -> bool {
+    pub(crate) fn num_children(&self) -> usize {
         match self.variant() {
-            NodeVariant::Internal4(n) => n.can_shrink_after_delete(),
-            NodeVariant::Internal16(n) => n.can_shrink_after_delete(),
-            NodeVariant::Internal48(n) => n.can_shrink_after_delete(),
-            NodeVariant::Internal256(n) => n.can_shrink_after_delete(),
-            NodeVariant::Leaf(_) => panic!("can_shrink_after_delete() called on leaf node"),
+            NodeVariant::Internal4(n) => n.num_children as usize,
+            NodeVariant::Internal16(n) => n.num_children as usize,
+            NodeVariant::Internal48(n) => n.num_children as usize,
+            NodeVariant::Internal256(n) => n.num_children as usize,
+            NodeVariant::Leaf(_) => panic!("is_full() called on leaf node"),
+        }
+    }
+
+    pub(crate) fn can_shrink(&self) -> bool {
+        match self.variant() {
+            NodeVariant::Internal4(n) => n.can_shrink(),
+            NodeVariant::Internal16(n) => n.can_shrink(),
+            NodeVariant::Internal48(n) => n.can_shrink(),
+            NodeVariant::Internal256(n) => n.can_shrink(),
+            NodeVariant::Leaf(_) => panic!("can_shrink() called on leaf node"),
         }
     }
 
@@ -277,6 +287,16 @@ impl<V: Value> NodePtr<V> {
         }
     }
 
+    pub(crate) fn prepend_prefix(&mut self, prefix: &[u8], prefix_byte: u8) {
+        match self.variant_mut() {
+            NodeVariantMut::Internal4(n) => n.prepend_prefix(prefix, prefix_byte),
+            NodeVariantMut::Internal16(n) => n.prepend_prefix(prefix, prefix_byte),
+            NodeVariantMut::Internal48(n) => n.prepend_prefix(prefix, prefix_byte),
+            NodeVariantMut::Internal256(n) => n.prepend_prefix(prefix, prefix_byte),
+            NodeVariantMut::Leaf(n) => n.prepend_prefix(prefix, prefix_byte),
+        }
+    }
+
     pub(crate) fn grow(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
         let bigger = match self.variant() {
             NodeVariant::Internal4(n) => n.grow(allocator),
@@ -285,22 +305,22 @@ impl<V: Value> NodePtr<V> {
             NodeVariant::Internal256(_) => panic!("cannot grow Internal256 node"),
             NodeVariant::Leaf(_) => panic!("cannot grow Leaf node"),
         };
-/*
-        let mut key = 0;
-        loop {
-            let a = self.find_next_child(key);
-            let b = bigger.find_next_child(key);
-            assert_eq!(a, b);
-            if let Some((akey, _)) = a {
-                if akey == u8::MAX {
+        /*
+            let mut key = 0;
+            loop {
+                let a = self.find_next_child(key);
+                let b = bigger.find_next_child(key);
+                assert_eq!(a, b);
+                if let Some((akey, _)) = a {
+                    if akey == u8::MAX {
+                        break;
+                    }
+                    key = akey + 1;
+                } else {
                     break;
                 }
-                key = akey + 1;
-            } else {
-                break;
-            }
-    }
-        */
+        }
+            */
         bigger
     }
 
@@ -435,6 +455,16 @@ impl<V: Value> NodeInternal4<V> {
         &self.prefix[0..self.prefix_len as usize]
     }
 
+    fn prepend_prefix(&mut self, prefix: &[u8], prefix_byte: u8) {
+        assert!(1 + prefix.len() + self.prefix_len as usize <= MAX_PREFIX_LEN);
+        let mut new = Vec::with_capacity(MAX_PREFIX_LEN);
+        new.extend_from_slice(prefix);
+        new.push(prefix_byte);
+        new.extend_from_slice(&self.prefix[0..self.prefix_len as usize]);
+        (&mut self.prefix[0..new.len()]).copy_from_slice(&new);
+        self.prefix_len = new.len() as u8;
+    }
+
     fn truncate_prefix(&mut self, new_prefix_len: usize) {
         assert!(new_prefix_len < self.prefix_len as usize);
         let prefix = &mut self.prefix;
@@ -503,7 +533,7 @@ impl<V: Value> NodeInternal4<V> {
         self.num_children == 4
     }
 
-    fn can_shrink_after_delete(&self) -> bool {
+    fn can_shrink(&self) -> bool {
         false
     }
 
@@ -544,6 +574,16 @@ impl<V: Value> NodeInternal4<V> {
 impl<V: Value> NodeInternal16<V> {
     fn get_prefix(&self) -> &[u8] {
         &self.prefix[0..self.prefix_len as usize]
+    }
+
+    fn prepend_prefix(&mut self, prefix: &[u8], prefix_byte: u8) {
+        assert!(1 + prefix.len() + self.prefix_len as usize <= MAX_PREFIX_LEN);
+        let mut new = Vec::with_capacity(MAX_PREFIX_LEN);
+        new.extend_from_slice(prefix);
+        new.push(prefix_byte);
+        new.extend_from_slice(&self.prefix[0..self.prefix_len as usize]);
+        (&mut self.prefix[0..new.len()]).copy_from_slice(&new);
+        self.prefix_len = new.len() as u8;
     }
 
     fn truncate_prefix(&mut self, new_prefix_len: usize) {
@@ -614,8 +654,8 @@ impl<V: Value> NodeInternal16<V> {
         self.num_children == 16
     }
 
-    fn can_shrink_after_delete(&self) -> bool {
-        self.num_children <= 5
+    fn can_shrink(&self) -> bool {
+        self.num_children <= 4
     }
 
     fn insert_child(&mut self, key_byte: u8, child: NodePtr<V>) {
@@ -645,7 +685,6 @@ impl<V: Value> NodeInternal16<V> {
         };
         for i in 0..self.num_children as usize {
             let idx = self.child_keys[i] as usize;
-            eprintln!("grow {i}: {idx}");
             init.child_indexes[idx] = i as u8;
             init.child_ptrs[i] = self.child_ptrs[i];
         }
@@ -681,20 +720,35 @@ impl<V: Value> NodeInternal16<V> {
 }
 
 impl<V: Value> NodeInternal48<V> {
-
     fn validate(&self) {
         let mut shadow_indexes = std::collections::HashSet::new();
         let mut count = 0;
         for i in 0..256 {
             let idx = self.child_indexes[i];
             if idx != INVALID_CHILD_INDEX {
-                assert!(idx < self.num_children, "i {} idx {}, num_children {}", i, idx, self.num_children);
+                assert!(
+                    idx < self.num_children,
+                    "i {} idx {}, num_children {}",
+                    i,
+                    idx,
+                    self.num_children
+                );
                 assert!(shadow_indexes.get(&idx).is_none());
                 shadow_indexes.insert(idx);
                 count += 1;
             }
         }
         assert_eq!(count, self.num_children);
+    }
+
+    fn prepend_prefix(&mut self, prefix: &[u8], prefix_byte: u8) {
+        assert!(1 + prefix.len() + self.prefix_len as usize <= MAX_PREFIX_LEN);
+        let mut new = Vec::with_capacity(MAX_PREFIX_LEN);
+        new.extend_from_slice(prefix);
+        new.push(prefix_byte);
+        new.extend_from_slice(&self.prefix[0..self.prefix_len as usize]);
+        (&mut self.prefix[0..new.len()]).copy_from_slice(&new);
+        self.prefix_len = new.len() as u8;
     }
 
     fn get_prefix(&self) -> &[u8] {
@@ -759,7 +813,10 @@ impl<V: Value> NodeInternal48<V> {
                     return;
                 }
             }
-            panic!("could not re-find last index {} on Internal48 node", removed_idx);
+            panic!(
+                "could not re-find last index {} on Internal48 node",
+                removed_idx
+            );
         } else {
             self.child_indexes[key_byte as usize] = INVALID_CHILD_INDEX;
             self.num_children -= 1;
@@ -770,8 +827,8 @@ impl<V: Value> NodeInternal48<V> {
         self.num_children == 48
     }
 
-    fn can_shrink_after_delete(&self) -> bool {
-        self.num_children <= 17
+    fn can_shrink(&self) -> bool {
+        self.num_children <= 16
     }
 
     fn insert_child(&mut self, key_byte: u8, child: NodePtr<V>) {
@@ -846,6 +903,16 @@ impl<V: Value> NodeInternal256<V> {
         &self.prefix[0..self.prefix_len as usize]
     }
 
+    fn prepend_prefix(&mut self, prefix: &[u8], prefix_byte: u8) {
+        assert!(1 + prefix.len() + self.prefix_len as usize <= MAX_PREFIX_LEN);
+        let mut new = Vec::with_capacity(MAX_PREFIX_LEN);
+        new.extend_from_slice(prefix);
+        new.push(prefix_byte);
+        new.extend_from_slice(&self.prefix[0..self.prefix_len as usize]);
+        (&mut self.prefix[0..new.len()]).copy_from_slice(&new);
+        self.prefix_len = new.len() as u8;
+    }
+
     fn truncate_prefix(&mut self, new_prefix_len: usize) {
         assert!(new_prefix_len < self.prefix_len as usize);
         let prefix = &mut self.prefix;
@@ -896,8 +963,8 @@ impl<V: Value> NodeInternal256<V> {
         self.num_children == 256
     }
 
-    fn can_shrink_after_delete(&self) -> bool {
-        self.num_children <= 49
+    fn can_shrink(&self) -> bool {
+        self.num_children <= 48
     }
 
     fn insert_child(&mut self, key_byte: u8, child: NodePtr<V>) {
@@ -941,6 +1008,16 @@ impl<V: Value> NodeInternal256<V> {
 impl<V: Value> NodeLeaf<V> {
     fn get_prefix(&self) -> &[u8] {
         &self.prefix[0..self.prefix_len as usize]
+    }
+
+    fn prepend_prefix(&mut self, prefix: &[u8], prefix_byte: u8) {
+        assert!(1 + prefix.len() + self.prefix_len as usize <= MAX_PREFIX_LEN);
+        let mut new = Vec::with_capacity(MAX_PREFIX_LEN);
+        new.extend_from_slice(prefix);
+        new.push(prefix_byte);
+        new.extend_from_slice(&self.prefix[0..self.prefix_len as usize]);
+        (&mut self.prefix[0..new.len()]).copy_from_slice(&new);
+        self.prefix_len = new.len() as u8;
     }
 
     fn truncate_prefix(&mut self, new_prefix_len: usize) {
