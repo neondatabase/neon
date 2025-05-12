@@ -3513,61 +3513,72 @@ async fn activate_post_import_handler(
 
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
 
-    let state = get_state(&request);
-    let tenant = state
-        .tenant_manager
-        .get_attached_tenant_shard(tenant_shard_id)?;
+    let span = info_span!(
+        "activate_post_import_handler",
+        tenant_id=%tenant_shard_id.tenant_id,
+        timeline_id=%timeline_id,
+        shard_id=%tenant_shard_id.shard_slug()
+    );
 
-    tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+    async move {
+        let state = get_state(&request);
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
 
-    tenant
-        .finalize_importing_timeline(timeline_id)
+        tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
+        tenant
+            .finalize_importing_timeline(timeline_id)
+            .await
+            .map_err(ApiError::InternalServerError)?;
+
+        match tenant.get_timeline(timeline_id, false) {
+            Ok(_timeline) => {
+                // Timeline is already visible. Reset not required: fall through.
+            }
+            Err(GetTimelineError::NotFound { .. }) => {
+                // This is crude: we reset the whole tenant such that the new timeline is detected
+                // and activated. We can come up with something more granular in the future.
+                //
+                // Note that we only reset the tenant if required: when the timeline is
+                // not present in [`Tenant::timelines`].
+                let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+                state
+                    .tenant_manager
+                    .reset_tenant(tenant_shard_id, false, &ctx)
+                    .await
+                    .map_err(ApiError::InternalServerError)?;
+            }
+            Err(GetTimelineError::ShuttingDown) => {
+                return Err(ApiError::ShuttingDown);
+            }
+            Err(GetTimelineError::NotActive { .. }) => {
+                unreachable!("Called get_timeline with active_only=false");
+            }
+        }
+
+        // At this point the timeline should become eventually active.
+        // If the timeline is not active yet, then the caller will retry.
+        // TODO(vlad): if the tenant is broken, return a permananet error
+        let timeline = tenant.get_timeline(timeline_id, true)?;
+
+        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn)
+            .with_scope_timeline(&timeline);
+
+        let timeline_info = build_timeline_info(
+            &timeline, false, // include_non_incremental_logical_size,
+            false, // force_await_initial_logical_size
+            &ctx,
+        )
         .await
+        .context("get local timeline info")
         .map_err(ApiError::InternalServerError)?;
 
-    match tenant.get_timeline(timeline_id, false) {
-        Ok(_timeline) => {
-            // Timeline is already visible. Reset not required: fall through.
-        }
-        Err(GetTimelineError::NotFound { .. }) => {
-            // This is crude: we reset the whole tenant such that the new timeline is detected
-            // and activated. We can come up with something more granular in the future.
-            //
-            // Note that we only reset the tenant if required: when the timeline is
-            // not present in [`Tenant::timelines`].
-            let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
-            state
-                .tenant_manager
-                .reset_tenant(tenant_shard_id, false, &ctx)
-                .await
-                .map_err(ApiError::InternalServerError)?;
-        }
-        Err(GetTimelineError::ShuttingDown) => {
-            return Err(ApiError::ShuttingDown);
-        }
-        Err(GetTimelineError::NotActive { .. }) => {
-            unreachable!("Called get_timeline with active_only=false");
-        }
+        json_response(StatusCode::OK, timeline_info)
     }
-
-    // At this point the timeline should become eventually active.
-    // If the timeline is not active yet, then the caller will retry.
-    // TODO(vlad): if the tenant is broken, return a permananet error
-    let timeline = tenant.get_timeline(timeline_id, true)?;
-
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn)
-        .with_scope_timeline(&timeline);
-
-    let timeline_info = build_timeline_info(
-        &timeline, false, // include_non_incremental_logical_size,
-        false, // force_await_initial_logical_size
-        &ctx,
-    )
+    .instrument(span)
     .await
-    .context("get local timeline info")
-    .map_err(ApiError::InternalServerError)?;
-
-    json_response(StatusCode::OK, timeline_info)
 }
 
 /// Read the end of a tar archive.
