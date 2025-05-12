@@ -212,6 +212,7 @@ impl PageserverClient {
         )
     }
 
+    #[allow(unused)]
     pub(crate) async fn timeline_detail(
         &self,
         tenant_shard_id: TenantShardId,
