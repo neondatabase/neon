@@ -66,5 +66,5 @@ These tests attempt to modify the `postgis.gdal_enabled_drivers` parameter, whic
 ## Other Modifications
 
 - Binary.sql tests are modified to use explicit file paths
-- COPY commands are updated to use the newer FORMAT syntax
+- Server-side SQL COPY commands (which require superuser privileges) are converted to client-side `\copy` commands
 - Upgrade tests are disabled
