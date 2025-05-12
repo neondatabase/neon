@@ -595,7 +595,7 @@ ARG PG_VERSION
 # last release 1.0 - May 12, 2025
 WORKDIR /ext-src
 RUN wget https://github.com/knizhnik/online_advisor/archive/refs/tags/1.0.tar.gz -O online_advisor.tar.gz && \
-    echo "5ecaa95730f3f47f46a84d0940ffb8f226c94f251f2dba464c138f3c83045721 online_advisor.tar.gz" | sha256sum --check && \
+    echo "0cdad04778cc9a88b834b1d18fd4dca07b353fcd7c2970d687d1897281cb55cb online_advisor.tar.gz" | sha256sum --check && \
     mkdir online_advisor-src && cd online_advisor-src && tar xzf ../online_advisor.tar.gz --strip-components=1 -C .
 
 FROM pg-build AS online_advisor-build
