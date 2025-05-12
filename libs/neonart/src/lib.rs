@@ -169,8 +169,6 @@ pub struct Tree<V: Value> {
 unsafe impl<V: Value + Sync> Sync for Tree<V> {}
 unsafe impl<V: Value + Send> Send for Tree<V> {}
 
-struct GarbageQueueFullError();
-
 struct GarbageQueue<V>(VecDeque<(NodePtr<V>, u64)>);
 
 unsafe impl<V: Value + Sync> Sync for GarbageQueue<V> {}

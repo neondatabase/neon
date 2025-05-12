@@ -1,3 +1,12 @@
+//! Each node in the tree has contains one atomic word that stores three things:
+//!
+//! Bit 0: set if the node is "obsolete". An obsolete node has been removed from the tree,
+//!        but might still be accessed by concurrent readers until the epoch expires.
+//! Bit 1: set if the node is currently write-locked. Used as a spinlock.
+//! Bits 2-63: Version number, incremented every time the node is modified.
+//!
+//! AtomicLockAndVersion represents that.
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) struct ConcurrentUpdateError();

@@ -9,7 +9,6 @@ use crate::algorithm::node_ptr::MAX_PREFIX_LEN;
 use crate::algorithm::node_ref::{NewNodeRef, NodeRef, ReadLockedNodeRef, WriteLockedNodeRef};
 use crate::allocator::OutOfMemoryError;
 
-use crate::GarbageQueueFullError;
 use crate::TreeWriteGuard;
 use crate::UpdateAction;
 use crate::allocator::ArtAllocator;
@@ -21,7 +20,6 @@ pub(crate) type RootPtr<V> = node_ptr::NodePtr<V>;
 pub enum ArtError {
     ConcurrentUpdate, // need to retry
     OutOfMemory,
-    GarbageQueueFull,
 }
 
 impl From<ConcurrentUpdateError> for ArtError {
@@ -33,12 +31,6 @@ impl From<ConcurrentUpdateError> for ArtError {
 impl From<OutOfMemoryError> for ArtError {
     fn from(_: OutOfMemoryError) -> ArtError {
         ArtError::OutOfMemory
-    }
-}
-
-impl From<GarbageQueueFullError> for ArtError {
-    fn from(_: GarbageQueueFullError) -> ArtError {
-        ArtError::GarbageQueueFull
     }
 }
 
@@ -113,11 +105,6 @@ pub(crate) fn update_fn<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>, F>(
             }
             Err(ArtError::OutOfMemory) => {
                 panic!("todo: OOM: try to GC, propagate to caller");
-            }
-            Err(ArtError::GarbageQueueFull) => {
-                // FIXME: This can happen if someone is holding back the epoch. We should
-                // wait for the epoch to advance
-                panic!("todo: GC queue is full");
             }
         }
     }

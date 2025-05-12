@@ -1,3 +1,6 @@
+//! This file contains the implementations of all the different node variants.
+//! These implementations use pointers, see node_ref.rs for slightly safer
+//! wrappers that deal with references instead.
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 

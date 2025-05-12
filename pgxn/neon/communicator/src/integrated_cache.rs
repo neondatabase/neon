@@ -3,12 +3,12 @@
 //! It tracks:
 //! - Relation sizes and existence
 //! - Last-written LSN
-//! - TODO: Block cache (also known as LFC)
+//! - Block cache (also known as LFC)
 //!
 //! TODO: limit the size
 //! TODO: concurrency
 //!
-//! Note: This deals with "relations", which is really just one "relation fork" in Postgres
+//! Note: This deals with "relations" which is really just one "relation fork" in Postgres
 //! terms. RelFileLocator + ForkNumber is the key.
 
 //
