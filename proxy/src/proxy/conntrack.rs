@@ -1,12 +1,7 @@
-use std::pin::Pin;
+use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-use std::task::{Context, Poll};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
-use std::{fmt, io};
-
-use pin_project_lite::pin_project;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ConnId(usize);
@@ -87,24 +82,6 @@ pub enum ConnectionState {
     Unknown = 5,
 }
 
-impl ConnectionState {
-    const fn into_repr(self) -> u8 {
-        self as u8
-    }
-
-    const fn from_repr(value: u8) -> Option<Self> {
-        Some(match value {
-            0 => Self::Init,
-            1 => Self::Idle,
-            2 => Self::Transaction,
-            3 => Self::Busy,
-            4 => Self::Closed,
-            5 => Self::Unknown,
-            _ => return None,
-        })
-    }
-}
-
 impl fmt::Display for ConnectionState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
@@ -118,26 +95,11 @@ impl fmt::Display for ConnectionState {
     }
 }
 
-/// Stores the `ConnectionState`. Used by ConnectionTracker to avoid needing
-/// mutable references.
-#[derive(Debug, Default)]
-struct AtomicConnectionState(AtomicU8);
-
-impl AtomicConnectionState {
-    fn set(&self, state: ConnectionState) {
-        self.0.store(state.into_repr(), Ordering::Relaxed);
-    }
-
-    fn get(&self) -> ConnectionState {
-        ConnectionState::from_repr(self.0.load(Ordering::Relaxed)).expect("only valid variants")
-    }
-}
-
 /// Tracks the `ConnectionState` of a connection by inspecting the frontend and
 /// backend stream and reacting to specific messages. Used in combination with
 /// two `TrackedStream`s.
 pub struct ConnectionTracker<SCO: StateChangeObserver> {
-    state: AtomicConnectionState,
+    state: ConnectionState,
     observer: SCO,
     conn_id: SCO::ConnId,
 }
@@ -145,7 +107,7 @@ pub struct ConnectionTracker<SCO: StateChangeObserver> {
 impl<SCO: StateChangeObserver> Drop for ConnectionTracker<SCO> {
     fn drop(&mut self) {
         self.observer
-            .change(self.conn_id, self.state.get(), ConnectionState::Closed);
+            .change(self.conn_id, self.state, ConnectionState::Closed);
     }
 }
 
@@ -153,25 +115,25 @@ impl<SCO: StateChangeObserver> ConnectionTracker<SCO> {
     pub fn new(conn_id: SCO::ConnId, observer: SCO) -> Self {
         ConnectionTracker {
             conn_id,
-            state: AtomicConnectionState::default(),
+            state: ConnectionState::default(),
             observer,
         }
     }
 
-    pub fn frontend_message_tag(&self, tag: Tag) {
+    pub fn frontend_message_tag(&mut self, tag: Tag) {
         self.update_state(|old_state| Self::state_from_frontend_tag(old_state, tag));
     }
 
-    pub fn backend_message_tag(&self, tag: Tag) {
+    pub fn backend_message_tag(&mut self, tag: Tag) {
         self.update_state(|old_state| Self::state_from_backend_tag(old_state, tag));
     }
 
-    fn update_state(&self, new_state_fn: impl FnOnce(ConnectionState) -> ConnectionState) {
-        let old_state = self.state.get();
+    fn update_state(&mut self, new_state_fn: impl FnOnce(ConnectionState) -> ConnectionState) {
+        let old_state = self.state;
         let new_state = new_state_fn(old_state);
         if old_state != new_state {
             self.observer.change(self.conn_id, old_state, new_state);
-            self.state.set(new_state);
+            self.state = new_state;
         }
     }
 
@@ -242,73 +204,9 @@ impl<F: FnMut(Tag)> TagObserver for F {
     }
 }
 
-pin_project! {
-    pub struct TrackedStream<S, TO> {
-        #[pin]
-        stream: S,
-        scanner: StreamScanner<TO>,
-    }
-}
-
-impl<S: AsyncRead + AsyncWrite + Unpin, TO: TagObserver> TrackedStream<S, TO> {
-    pub const fn new(stream: S, midstream: bool, observer: TO) -> Self {
-        TrackedStream {
-            stream,
-            scanner: StreamScanner::new(midstream, observer),
-        }
-    }
-}
-
-impl<S: AsyncRead + Unpin, TO: TagObserver> AsyncRead for TrackedStream<S, TO> {
-    #[inline]
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let this = self.project();
-        let old_len = buf.filled().len();
-        match this.stream.poll_read(cx, buf) {
-            Poll::Ready(Ok(())) => {
-                let new_len = buf.filled().len();
-                this.scanner.scan_bytes(&buf.filled()[old_len..new_len]);
-                Poll::Ready(Ok(()))
-            }
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-impl<S: AsyncWrite + Unpin, TO> AsyncWrite for TrackedStream<S, TO> {
-    #[inline(always)]
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        self.project().stream.poll_write(cx, buf)
-    }
-
-    #[inline(always)]
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.project().stream.poll_flush(cx)
-    }
-
-    #[inline(always)]
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.project().stream.poll_shutdown(cx)
-    }
-}
-
-#[derive(Debug)]
-struct StreamScanner<TO> {
-    observer: TO,
-    state: StreamScannerState,
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum StreamScannerState {
+pub(super) enum StreamScannerState {
+    #[allow(dead_code)]
     /// Initial state when no message has been read and we are looling for a
     /// message without a tag.
     Start,
@@ -339,36 +237,23 @@ enum StreamScannerState {
     Lost,
 }
 
-impl<TO: TagObserver> StreamScanner<TO> {
-    const fn new(midstream: bool, observer: TO) -> Self {
-        StreamScanner {
-            observer,
-            state: if midstream {
-                StreamScannerState::Tag
-            } else {
-                StreamScannerState::Start
-            },
-        }
-    }
-}
-
-impl<TO: TagObserver> StreamScanner<TO> {
-    fn scan_bytes(&mut self, mut buf: &[u8]) {
+impl StreamScannerState {
+    pub(super) fn scan_bytes<TO: TagObserver>(&mut self, mut buf: &[u8], observer: &mut TO) {
         use StreamScannerState as S;
 
-        if matches!(self.state, S::End | S::Lost) {
+        if matches!(*self, S::End | S::Lost) {
             return;
         }
         if buf.is_empty() {
-            match self.state {
+            match *self {
                 S::Start | S::Tag => {
-                    self.observer.observe(Tag::End);
-                    self.state = S::End;
+                    observer.observe(Tag::End);
+                    *self = S::End;
                     return;
                 }
                 S::Length { .. } | S::Payload { .. } => {
-                    self.observer.observe(Tag::Lost);
-                    self.state = S::Lost;
+                    observer.observe(Tag::Lost);
+                    *self = S::Lost;
                     return;
                 }
                 S::End | S::Lost => unreachable!(),
@@ -376,9 +261,9 @@ impl<TO: TagObserver> StreamScanner<TO> {
         }
 
         while !buf.is_empty() {
-            match self.state {
+            match *self {
                 S::Start => {
-                    self.state = S::Length {
+                    *self = S::Length {
                         tag: Tag::Start,
                         length_bytes_missing: 4,
                         calculated_length: 0,
@@ -389,7 +274,7 @@ impl<TO: TagObserver> StreamScanner<TO> {
                     let tag = buf.first().copied().expect("buf not empty");
                     buf = &buf[1..];
 
-                    self.state = S::Length {
+                    *self = S::Length {
                         tag: Tag::Message(tag),
                         length_bytes_missing: 4,
                         calculated_length: 0,
@@ -413,23 +298,23 @@ impl<TO: TagObserver> StreamScanner<TO> {
                     length_bytes_missing -= consume;
                     if length_bytes_missing == 0 {
                         let Some(bytes_to_skip) = calculated_length.checked_sub(4) else {
-                            self.observer.observe(Tag::Lost);
-                            self.state = S::Lost;
+                            observer.observe(Tag::Lost);
+                            *self = S::Lost;
                             return;
                         };
 
                         if bytes_to_skip == 0 {
-                            self.observer.observe(tag);
-                            self.state = S::Tag;
+                            observer.observe(tag);
+                            *self = S::Tag;
                         } else {
-                            self.state = S::Payload {
+                            *self = S::Payload {
                                 tag,
                                 first: true,
                                 bytes_to_skip,
                             };
                         }
                     } else {
-                        self.state = S::Length {
+                        *self = S::Length {
                             tag,
                             length_bytes_missing,
                             calculated_length,
@@ -447,13 +332,13 @@ impl<TO: TagObserver> StreamScanner<TO> {
                     if bytes_to_skip == 0 {
                         if tag == Tag::READY_FOR_QUERY && first && consume == 1 {
                             let status = buf.first().copied().expect("buf not empty");
-                            self.observer.observe(Tag::ReadyForQuery(status));
+                            observer.observe(Tag::ReadyForQuery(status));
                         } else {
-                            self.observer.observe(tag);
+                            observer.observe(tag);
                         }
-                        self.state = S::Tag;
+                        *self = S::Tag;
                     } else {
-                        self.state = S::Payload {
+                        *self = S::Payload {
                             tag,
                             first: false,
                             bytes_to_skip,
@@ -471,13 +356,102 @@ impl<TO: TagObserver> StreamScanner<TO> {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::io;
+    use std::pin::Pin;
     use std::pin::pin;
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
 
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
     use tokio::io::{AsyncReadExt, BufReader};
 
     use super::*;
+
+    pub struct TrackedStream<S, TO> {
+        stream: S,
+        scanner: StreamScanner<TO>,
+    }
+
+    impl<S: Unpin, TO> Unpin for TrackedStream<S, TO> {}
+
+    impl<S: AsyncRead + AsyncWrite + Unpin, TO: TagObserver> TrackedStream<S, TO> {
+        pub const fn new(stream: S, midstream: bool, observer: TO) -> Self {
+            TrackedStream {
+                stream,
+                scanner: StreamScanner::new(midstream, observer),
+            }
+        }
+    }
+
+    impl<S: AsyncRead + Unpin, TO: TagObserver> AsyncRead for TrackedStream<S, TO> {
+        #[inline]
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let Self { stream, scanner } = Pin::into_inner(self);
+            let StreamScanner { observer, state } = scanner;
+
+            let old_len = buf.filled().len();
+            match Pin::new(stream).poll_read(cx, buf) {
+                Poll::Ready(Ok(())) => {
+                    let new_len = buf.filled().len();
+                    state.scan_bytes(&buf.filled()[old_len..new_len], observer);
+                    Poll::Ready(Ok(()))
+                }
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Pending => Poll::Pending,
+            }
+        }
+    }
+
+    impl<S: AsyncWrite + Unpin, TO> AsyncWrite for TrackedStream<S, TO> {
+        #[inline(always)]
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.stream).poll_write(cx, buf)
+        }
+
+        #[inline(always)]
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.stream).poll_flush(cx)
+        }
+
+        #[inline(always)]
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.stream).poll_shutdown(cx)
+        }
+    }
+
+    #[derive(Debug)]
+    struct StreamScanner<TO> {
+        observer: TO,
+        state: StreamScannerState,
+    }
+
+    impl<TO: TagObserver> StreamScanner<TO> {
+        const fn new(midstream: bool, observer: TO) -> Self {
+            StreamScanner {
+                observer,
+                state: if midstream {
+                    StreamScannerState::Tag
+                } else {
+                    StreamScannerState::Start
+                },
+            }
+        }
+    }
+
+    impl<TO: TagObserver> StreamScanner<TO> {
+        fn scan_bytes(&mut self, buf: &[u8]) {
+            self.state.scan_bytes(buf, &mut self.observer);
+        }
+    }
 
     #[test]
     fn test_stream_scanner() {
@@ -572,7 +546,7 @@ mod tests {
                 self.0.lock().unwrap().push((old_state, new_state));
             }
         }
-        let tracker = ConnectionTracker::new(42, Observer(transitions.clone()));
+        let mut tracker = ConnectionTracker::new(42, Observer(transitions.clone()));
 
         let stream = TestStream::new(
             &[

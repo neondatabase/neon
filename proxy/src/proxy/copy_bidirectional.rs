@@ -6,9 +6,11 @@ use std::task::{Context, Poll, ready};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tracing::info;
 
+use super::conntrack::{ConnectionTracker, StateChangeObserver, StreamScannerState, TagObserver};
+
 #[derive(Debug)]
 enum TransferState {
-    Running(CopyBuffer),
+    Running(CopyBuffer, StreamScannerState),
     ShuttingDown(u64),
     Done(u64),
 }
@@ -43,6 +45,7 @@ pub enum ErrorSource {
 fn transfer_one_direction<A, B>(
     cx: &mut Context<'_>,
     state: &mut TransferState,
+    mut observer: impl TagObserver,
     r: &mut A,
     w: &mut B,
 ) -> Poll<Result<u64, ErrorDirection>>
@@ -54,8 +57,9 @@ where
     let mut w = Pin::new(w);
     loop {
         match state {
-            TransferState::Running(buf) => {
-                let count = ready!(buf.poll_copy(cx, r.as_mut(), w.as_mut()))?;
+            TransferState::Running(buf, stream_state) => {
+                let count =
+                    ready!(buf.poll_copy(cx, stream_state, &mut observer, r.as_mut(), w.as_mut()))?;
                 *state = TransferState::ShuttingDown(count);
             }
             TransferState::ShuttingDown(count) => {
@@ -71,45 +75,66 @@ where
 pub async fn copy_bidirectional_client_compute<Client, Compute>(
     client: &mut Client,
     compute: &mut Compute,
+    conn_tracker: &mut ConnectionTracker<impl StateChangeObserver>,
 ) -> Result<(u64, u64), ErrorSource>
 where
     Client: AsyncRead + AsyncWrite + Unpin + ?Sized,
     Compute: AsyncRead + AsyncWrite + Unpin + ?Sized,
 {
-    let mut client_to_compute = TransferState::Running(CopyBuffer::new());
-    let mut compute_to_client = TransferState::Running(CopyBuffer::new());
+    let mut client_to_compute = TransferState::Running(CopyBuffer::new(), StreamScannerState::Tag);
+    let mut compute_to_client = TransferState::Running(CopyBuffer::new(), StreamScannerState::Tag);
 
     poll_fn(|cx| {
-        let mut client_to_compute_result =
-            transfer_one_direction(cx, &mut client_to_compute, client, compute)
-                .map_err(ErrorSource::from_client)?;
-        let mut compute_to_client_result =
-            transfer_one_direction(cx, &mut compute_to_client, compute, client)
-                .map_err(ErrorSource::from_compute)?;
+        let mut client_to_compute_result = transfer_one_direction(
+            cx,
+            &mut client_to_compute,
+            |tag| conn_tracker.frontend_message_tag(tag),
+            client,
+            compute,
+        )
+        .map_err(ErrorSource::from_client)?;
+        let mut compute_to_client_result = transfer_one_direction(
+            cx,
+            &mut compute_to_client,
+            |tag| conn_tracker.backend_message_tag(tag),
+            compute,
+            client,
+        )
+        .map_err(ErrorSource::from_compute)?;
 
         // TODO: 1 info log, with a enum label for close direction.
 
         // Early termination checks from compute to client.
         if let TransferState::Done(_) = compute_to_client {
-            if let TransferState::Running(buf) = &client_to_compute {
+            if let TransferState::Running(buf, _) = &client_to_compute {
                 info!("Compute is done, terminate client");
                 // Initiate shutdown
                 client_to_compute = TransferState::ShuttingDown(buf.amt);
-                client_to_compute_result =
-                    transfer_one_direction(cx, &mut client_to_compute, client, compute)
-                        .map_err(ErrorSource::from_client)?;
+                client_to_compute_result = transfer_one_direction(
+                    cx,
+                    &mut client_to_compute,
+                    |tag| conn_tracker.frontend_message_tag(tag),
+                    client,
+                    compute,
+                )
+                .map_err(ErrorSource::from_client)?;
             }
         }
 
         // Early termination checks from client to compute.
         if let TransferState::Done(_) = client_to_compute {
-            if let TransferState::Running(buf) = &compute_to_client {
+            if let TransferState::Running(buf, _) = &compute_to_client {
                 info!("Client is done, terminate compute");
                 // Initiate shutdown
                 compute_to_client = TransferState::ShuttingDown(buf.amt);
-                compute_to_client_result =
-                    transfer_one_direction(cx, &mut compute_to_client, compute, client)
-                        .map_err(ErrorSource::from_compute)?;
+                compute_to_client_result = transfer_one_direction(
+                    cx,
+                    &mut compute_to_client,
+                    |tag| conn_tracker.backend_message_tag(tag),
+                    compute,
+                    client,
+                )
+                .map_err(ErrorSource::from_compute)?;
             }
         }
 
@@ -148,6 +173,8 @@ impl CopyBuffer {
     fn poll_fill_buf<R>(
         &mut self,
         cx: &mut Context<'_>,
+        state: &mut StreamScannerState,
+        observer: &mut impl TagObserver,
         reader: Pin<&mut R>,
     ) -> Poll<io::Result<()>>
     where
@@ -158,6 +185,8 @@ impl CopyBuffer {
         buf.set_filled(me.cap);
 
         let res = reader.poll_read(cx, &mut buf);
+        state.scan_bytes(&buf.filled()[me.cap..], observer);
+
         if let Poll::Ready(Ok(())) = res {
             let filled_len = buf.filled().len();
             me.read_done = me.cap == filled_len;
@@ -169,6 +198,8 @@ impl CopyBuffer {
     fn poll_write_buf<R, W>(
         &mut self,
         cx: &mut Context<'_>,
+        state: &mut StreamScannerState,
+        observer: &mut impl TagObserver,
         mut reader: Pin<&mut R>,
         mut writer: Pin<&mut W>,
     ) -> Poll<Result<usize, ErrorDirection>>
@@ -182,7 +213,8 @@ impl CopyBuffer {
                 // Top up the buffer towards full if we can read a bit more
                 // data - this should improve the chances of a large write
                 if !me.read_done && me.cap < me.buf.len() {
-                    ready!(me.poll_fill_buf(cx, reader.as_mut())).map_err(ErrorDirection::Read)?;
+                    ready!(me.poll_fill_buf(cx, state, observer, reader.as_mut()))
+                        .map_err(ErrorDirection::Read)?;
                 }
                 Poll::Pending
             }
@@ -193,6 +225,8 @@ impl CopyBuffer {
     pub(super) fn poll_copy<R, W>(
         &mut self,
         cx: &mut Context<'_>,
+        state: &mut StreamScannerState,
+        observer: &mut impl TagObserver,
         mut reader: Pin<&mut R>,
         mut writer: Pin<&mut W>,
     ) -> Poll<Result<u64, ErrorDirection>>
@@ -204,7 +238,7 @@ impl CopyBuffer {
             // If there is some space left in our buffer, then we try to read some
             // data to continue, thus maximizing the chances of a large write.
             if self.cap < self.buf.len() && !self.read_done {
-                match self.poll_fill_buf(cx, reader.as_mut()) {
+                match self.poll_fill_buf(cx, state, observer, reader.as_mut()) {
                     Poll::Ready(Ok(())) => (),
                     Poll::Ready(Err(err)) => return Poll::Ready(Err(ErrorDirection::Read(err))),
                     Poll::Pending => {
@@ -227,7 +261,13 @@ impl CopyBuffer {
 
             // If our buffer has some data, let's write it out!
             while self.pos < self.cap {
-                let i = ready!(self.poll_write_buf(cx, reader.as_mut(), writer.as_mut()))?;
+                let i = ready!(self.poll_write_buf(
+                    cx,
+                    state,
+                    observer,
+                    reader.as_mut(),
+                    writer.as_mut()
+                ))?;
                 if i == 0 {
                     return Poll::Ready(Err(ErrorDirection::Write(io::Error::new(
                         io::ErrorKind::WriteZero,
@@ -263,9 +303,23 @@ impl CopyBuffer {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use tokio::io::AsyncWriteExt;
 
+    use crate::proxy::conntrack::ConnectionState;
+
     use super::*;
+
+    #[derive(Default)]
+    struct Observer(Mutex<Vec<(ConnectionState, ConnectionState)>>);
+
+    impl StateChangeObserver for Observer {
+        type ConnId = ();
+        fn change(&self, (): Self::ConnId, old_state: ConnectionState, new_state: ConnectionState) {
+            self.0.lock().unwrap().push((old_state, new_state));
+        }
+    }
 
     #[tokio::test]
     async fn test_client_to_compute() {
@@ -278,9 +332,15 @@ mod tests {
         compute_client.write_all(b"Neon").await.unwrap();
         compute_client.shutdown().await.unwrap();
 
-        let result = copy_bidirectional_client_compute(&mut client_proxy, &mut compute_proxy)
-            .await
-            .unwrap();
+        let mut conn_tracker = ConnectionTracker::new((), Observer::default());
+
+        let result = copy_bidirectional_client_compute(
+            &mut client_proxy,
+            &mut compute_proxy,
+            &mut conn_tracker,
+        )
+        .await
+        .unwrap();
 
         // Assert correct transferred amounts
         let (client_to_compute_count, compute_to_client_count) = result;
@@ -301,9 +361,15 @@ mod tests {
             .await
             .unwrap();
 
-        let result = copy_bidirectional_client_compute(&mut client_proxy, &mut compute_proxy)
-            .await
-            .unwrap();
+        let mut conn_tracker = ConnectionTracker::new((), Observer::default());
+
+        let result = copy_bidirectional_client_compute(
+            &mut client_proxy,
+            &mut compute_proxy,
+            &mut conn_tracker,
+        )
+        .await
+        .unwrap();
 
         // Assert correct transferred amounts
         let (client_to_compute_count, compute_to_client_count) = result;

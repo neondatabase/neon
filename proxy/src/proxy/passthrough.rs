@@ -11,7 +11,7 @@ use crate::compute::PostgresConnection;
 use crate::config::ComputeConfig;
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::metrics::{Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard};
-use crate::proxy::conntrack::{ConnectionTracking, TrackedStream};
+use crate::proxy::conntrack::ConnectionTracking;
 use crate::stream::Stream;
 use crate::usage_metrics::{Ids, MetricCounterRecorder, USAGE_METRICS};
 
@@ -31,11 +31,11 @@ pub(crate) async fn proxy_pass(
         private_link_id,
     });
 
-    let conn_tracker = conntracking.new_tracker();
+    let mut conn_tracker = conntracking.new_tracker();
 
     let metrics = &Metrics::get().proxy.io_bytes;
     let m_sent = metrics.with_labels(Direction::Tx);
-    let client = MeasuredStream::new(
+    let mut client = MeasuredStream::new(
         client,
         |_| {},
         |cnt| {
@@ -44,10 +44,9 @@ pub(crate) async fn proxy_pass(
             usage_tx.record_egress(cnt as u64);
         },
     );
-    let mut client = TrackedStream::new(client, true, |tag| conn_tracker.frontend_message_tag(tag));
 
     let m_recv = metrics.with_labels(Direction::Rx);
-    let compute = MeasuredStream::new(
+    let mut compute = MeasuredStream::new(
         compute,
         |_| {},
         |cnt| {
@@ -56,14 +55,13 @@ pub(crate) async fn proxy_pass(
             usage_tx.record_ingress(cnt as u64);
         },
     );
-    let mut compute =
-        TrackedStream::new(compute, true, |tag| conn_tracker.backend_message_tag(tag));
 
     // Starting from here we only proxy the client's traffic.
     debug!("performing the proxy pass...");
     let _ = crate::proxy::copy_bidirectional::copy_bidirectional_client_compute(
         &mut client,
         &mut compute,
+        &mut conn_tracker,
     )
     .await?;
 
