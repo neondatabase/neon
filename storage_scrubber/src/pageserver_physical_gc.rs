@@ -593,6 +593,7 @@ async fn gc_timeline(
             index_part_snapshot_time: _,
         } => (index_part, *index_part_generation, data.unused_index_keys),
         BlobDataParseResult::Relic => {
+            tracing::info!("Skipping timeline {ttid}, it is a relic");
             // Post-deletion tenant location: don't try and GC it.
             return Ok(summary);
         }
