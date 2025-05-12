@@ -111,6 +111,13 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*stalling layer flushes for compaction backpressure.*",
     ".*layer roll waiting for flush due to compaction backpressure.*",
     ".*BatchSpanProcessor.*",
+    *(
+        [
+            r".*your platform is not a supported production platform, ignoing request for O_DIRECT; this could hide alignment bugs.*"
+        ]
+        if sys.platform != "linux"
+        else []
+    ),
 )
 
 
