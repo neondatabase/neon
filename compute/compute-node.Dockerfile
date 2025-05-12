@@ -588,6 +588,7 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) && \
 # compile online_advisor extension
 #
 #########################################################################################
+FROM build-deps AS online_advisor-src
 ARG PG_VERSION
 
 # not version-specific
