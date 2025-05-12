@@ -17,6 +17,7 @@ use crate::{Key, Value};
 
 pub(crate) type RootPtr<V> = node_ptr::NodePtr<V>;
 
+#[derive(Debug)]
 pub enum ArtError {
     ConcurrentUpdate, // need to retry
     OutOfMemory,
@@ -34,7 +35,9 @@ impl From<OutOfMemoryError> for ArtError {
     }
 }
 
-pub fn new_root<V: Value>(allocator: &impl ArtAllocator<V>) -> RootPtr<V> {
+pub fn new_root<V: Value>(
+    allocator: &impl ArtAllocator<V>,
+) -> Result<RootPtr<V>, OutOfMemoryError> {
     node_ptr::new_root(allocator)
 }
 
@@ -80,7 +83,8 @@ pub(crate) fn update_fn<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>, F>(
     value_fn: F,
     root: RootPtr<V>,
     guard: &'g mut TreeWriteGuard<'e, K, V, A>,
-) where
+) -> Result<(), OutOfMemoryError>
+where
     F: FnOnce(Option<&V>) -> UpdateAction<V>,
 {
     let value_fn_cell = std::cell::Cell::new(Some(value_fn));
@@ -99,13 +103,11 @@ pub(crate) fn update_fn<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>, F>(
             0,
             key_bytes,
         ) {
-            Ok(()) => break,
+            Ok(()) => break Ok(()),
             Err(ArtError::ConcurrentUpdate) => {
                 continue; // retry
             }
-            Err(ArtError::OutOfMemory) => {
-                panic!("todo: OOM: try to GC, propagate to caller");
-            }
+            Err(ArtError::OutOfMemory) => break Err(OutOfMemoryError()),
         }
     }
 }

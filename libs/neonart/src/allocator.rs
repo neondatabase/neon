@@ -18,6 +18,7 @@ pub use crate::algorithm::node_ptr::{
     NodeInternal4, NodeInternal16, NodeInternal48, NodeInternal256, NodeLeaf,
 };
 
+#[derive(Debug)]
 pub struct OutOfMemoryError();
 
 pub trait ArtAllocator<V: crate::Value> {

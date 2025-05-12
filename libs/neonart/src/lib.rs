@@ -140,6 +140,7 @@ mod tests;
 
 use allocator::ArtAllocator;
 pub use allocator::ArtMultiSlabAllocator;
+pub use allocator::OutOfMemoryError;
 
 /// Fixed-length key type.
 ///
@@ -158,7 +159,11 @@ pub trait Value {}
 
 const MAX_GARBAGE: usize = 1024;
 
+/// The root of the tree, plus other tree-wide data. This is stored in the shared memory.
 pub struct Tree<V: Value> {
+    /// For simplicity, so that we never need to grow or shrink the root, the root node is always an
+    /// Internal256 node. Also, it never has a prefix (that's actually a bit wasteful, incurring one
+    /// indirection to every lookup)
     root: RootPtr<V>,
 
     writer_attached: AtomicBool,
@@ -239,7 +244,7 @@ impl<'a, 't: 'a, K: Key, V: Value, A: ArtAllocator<V>> TreeInitStruct<'t, K, V, 
         let tree_ptr = allocator.alloc_tree();
         let tree_ptr = NonNull::new(tree_ptr).expect("out of memory");
         let init = Tree {
-            root: algorithm::new_root(allocator),
+            root: algorithm::new_root(allocator).expect("out of memory"),
             writer_attached: AtomicBool::new(false),
             epoch: epoch::EpochShared::new(),
         };
@@ -351,7 +356,7 @@ impl<'e, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteGuard<'e, K, V, A> {
     }
 
     /// Insert a value
-    pub fn insert(self, key: &K, value: V) -> Result<(), ()> {
+    pub fn insert(self, key: &K, value: V) -> Result<bool, OutOfMemoryError> {
         let mut success = None;
 
         self.update_with_fn(key, |existing| {
@@ -362,24 +367,24 @@ impl<'e, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteGuard<'e, K, V, A> {
                 success = Some(true);
                 UpdateAction::Insert(value)
             }
-        });
-        if success.expect("value_fn not called") {
-            Ok(())
-        } else {
-            Err(())
-        }
+        })?;
+        Ok(success.expect("value_fn not called"))
     }
 
     /// Remove value. Returns true if it existed
     pub fn remove(self, key: &K) -> bool {
         let mut result = false;
+        // FIXME: It's not clear if OOM is expected while removing. It seems
+        // not nice, but shrinking a node can OOM. Then again, we could opt
+        // to not shrink a node if we cannot allocate, to live a little longer.
         self.update_with_fn(key, |existing| match existing {
             Some(_) => {
                 result = true;
                 UpdateAction::Remove
             }
             None => UpdateAction::Nothing,
-        });
+        })
+        .expect("out of memory while removing");
         result
     }
 
@@ -392,7 +397,8 @@ impl<'e, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteGuard<'e, K, V, A> {
         self.update_with_fn(key, |existing| {
             old = existing.cloned();
             UpdateAction::Remove
-        });
+        })
+        .expect("out of memory while removing");
         old
     }
 
@@ -402,15 +408,16 @@ impl<'e, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteGuard<'e, K, V, A> {
     /// returns None, the value is removed from the tree (or if there was no existing value,
     /// does nothing). If the function returns Some, the existing value is replaced, of if there
     /// was no existing value, it is inserted. FIXME: update comment
-    pub fn update_with_fn<F>(mut self, key: &K, value_fn: F)
+    pub fn update_with_fn<F>(mut self, key: &K, value_fn: F) -> Result<(), OutOfMemoryError>
     where
         F: FnOnce(Option<&V>) -> UpdateAction<V>,
     {
-        algorithm::update_fn(key, value_fn, self.tree_writer.tree.root, &mut self);
+        algorithm::update_fn(key, value_fn, self.tree_writer.tree.root, &mut self)?;
 
         if self.created_garbage {
             let _ = self.collect_garbage();
         }
+        Ok(())
     }
 
     fn remember_obsolete_node(&mut self, ptr: NodePtr<V>) {

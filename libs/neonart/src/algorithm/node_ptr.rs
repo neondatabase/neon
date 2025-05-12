@@ -8,6 +8,7 @@ use super::lock_and_version::AtomicLockAndVersion;
 
 use crate::Value;
 use crate::allocator::ArtAllocator;
+use crate::allocator::OutOfMemoryError;
 
 pub(crate) const MAX_PREFIX_LEN: usize = 8;
 
@@ -300,7 +301,10 @@ impl<V: Value> NodePtr<V> {
         }
     }
 
-    pub(crate) fn grow(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+    pub(crate) fn grow(
+        &self,
+        allocator: &impl ArtAllocator<V>,
+    ) -> Result<NodePtr<V>, OutOfMemoryError> {
         let bigger = match self.variant() {
             NodeVariant::Internal4(n) => n.grow(allocator),
             NodeVariant::Internal16(n) => n.grow(allocator),
@@ -308,22 +312,6 @@ impl<V: Value> NodePtr<V> {
             NodeVariant::Internal256(_) => panic!("cannot grow Internal256 node"),
             NodeVariant::Leaf(_) => panic!("cannot grow Leaf node"),
         };
-        /*
-            let mut key = 0;
-            loop {
-                let a = self.find_next_child(key);
-                let b = bigger.find_next_child(key);
-                assert_eq!(a, b);
-                if let Some((akey, _)) = a {
-                    if akey == u8::MAX {
-                        break;
-                    }
-                    key = akey + 1;
-                } else {
-                    break;
-                }
-        }
-            */
         bigger
     }
 
@@ -357,7 +345,10 @@ impl<V: Value> NodePtr<V> {
         }
     }
 
-    pub(crate) fn shrink(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+    pub(crate) fn shrink(
+        &self,
+        allocator: &impl ArtAllocator<V>,
+    ) -> Result<NodePtr<V>, OutOfMemoryError> {
         match self.variant() {
             NodeVariant::Internal4(_) => panic!("shrink called on internal4 node"),
             NodeVariant::Internal16(n) => n.shrink(allocator),
@@ -398,23 +389,28 @@ impl<V: Value> NodePtr<V> {
     }
 }
 
-pub fn new_root<V: Value>(allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+pub fn new_root<V: Value>(
+    allocator: &impl ArtAllocator<V>,
+) -> Result<NodePtr<V>, OutOfMemoryError> {
     let ptr: *mut NodeInternal256<V> = allocator.alloc_node_internal256().cast();
     if ptr.is_null() {
-        panic!("out of memory");
+        return Err(OutOfMemoryError());
     }
 
     unsafe {
         *ptr = NodeInternal256::<V>::new();
     }
 
-    ptr.into()
+    Ok(ptr.into())
 }
 
-pub fn new_internal<V: Value>(prefix: &[u8], allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+pub fn new_internal<V: Value>(
+    prefix: &[u8],
+    allocator: &impl ArtAllocator<V>,
+) -> Result<NodePtr<V>, OutOfMemoryError> {
     let ptr: *mut NodeInternal4<V> = allocator.alloc_node_internal4().cast();
     if ptr.is_null() {
-        panic!("out of memory");
+        return Err(OutOfMemoryError());
     }
     let mut init = NodeInternal4 {
         tag: NodeTag::Internal4,
@@ -430,13 +426,17 @@ pub fn new_internal<V: Value>(prefix: &[u8], allocator: &impl ArtAllocator<V>) -
     init.prefix[0..prefix.len()].copy_from_slice(prefix);
     unsafe { ptr.write(init) };
 
-    ptr.into()
+    Ok(ptr.into())
 }
 
-pub fn new_leaf<V: Value>(prefix: &[u8], value: V, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+pub fn new_leaf<V: Value>(
+    prefix: &[u8],
+    value: V,
+    allocator: &impl ArtAllocator<V>,
+) -> Result<NodePtr<V>, OutOfMemoryError> {
     let ptr: *mut NodeLeaf<V> = allocator.alloc_node_leaf().cast();
     if ptr.is_null() {
-        panic!("out of memory");
+        return Err(OutOfMemoryError());
     }
     let mut init = NodeLeaf {
         tag: NodeTag::Leaf,
@@ -450,7 +450,7 @@ pub fn new_leaf<V: Value>(prefix: &[u8], value: V, allocator: &impl ArtAllocator
     init.prefix[0..prefix.len()].copy_from_slice(prefix);
     unsafe { ptr.write(init) };
 
-    ptr.into()
+    Ok(ptr.into())
 }
 
 impl<V: Value> NodeInternal4<V> {
@@ -549,10 +549,10 @@ impl<V: Value> NodeInternal4<V> {
         self.num_children += 1;
     }
 
-    fn grow(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+    fn grow(&self, allocator: &impl ArtAllocator<V>) -> Result<NodePtr<V>, OutOfMemoryError> {
         let ptr: *mut NodeInternal16<V> = allocator.alloc_node_internal16().cast();
         if ptr.is_null() {
-            panic!("out of memory");
+            return Err(OutOfMemoryError());
         }
         let mut init = NodeInternal16 {
             tag: NodeTag::Internal16,
@@ -570,7 +570,7 @@ impl<V: Value> NodeInternal4<V> {
             init.child_ptrs[i] = self.child_ptrs[i];
         }
         unsafe { ptr.write(init) };
-        ptr.into()
+        Ok(ptr.into())
     }
 }
 
@@ -670,10 +670,10 @@ impl<V: Value> NodeInternal16<V> {
         self.num_children += 1;
     }
 
-    fn grow(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+    fn grow(&self, allocator: &impl ArtAllocator<V>) -> Result<NodePtr<V>, OutOfMemoryError> {
         let ptr: *mut NodeInternal48<V> = allocator.alloc_node_internal48().cast();
         if ptr.is_null() {
-            panic!("out of memory");
+            return Err(OutOfMemoryError());
         }
         let mut init = NodeInternal48 {
             tag: NodeTag::Internal48,
@@ -693,14 +693,14 @@ impl<V: Value> NodeInternal16<V> {
         }
         init.validate();
         unsafe { ptr.write(init) };
-        ptr.into()
+        Ok(ptr.into())
     }
 
-    fn shrink(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+    fn shrink(&self, allocator: &impl ArtAllocator<V>) -> Result<NodePtr<V>, OutOfMemoryError> {
         assert!(self.num_children <= 4);
         let ptr: *mut NodeInternal4<V> = allocator.alloc_node_internal4().cast();
         if ptr.is_null() {
-            panic!("out of memory");
+            return Err(OutOfMemoryError());
         }
         let mut init = NodeInternal4 {
             tag: NodeTag::Internal4,
@@ -718,7 +718,7 @@ impl<V: Value> NodeInternal16<V> {
             init.child_ptrs[i] = self.child_ptrs[i];
         }
         unsafe { ptr.write(init) };
-        ptr.into()
+        Ok(ptr.into())
     }
 }
 
@@ -844,10 +844,10 @@ impl<V: Value> NodeInternal48<V> {
         self.validate();
     }
 
-    fn grow(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+    fn grow(&self, allocator: &impl ArtAllocator<V>) -> Result<NodePtr<V>, OutOfMemoryError> {
         let ptr: *mut NodeInternal256<V> = allocator.alloc_node_internal256().cast();
         if ptr.is_null() {
-            panic!("out of memory");
+            return Err(OutOfMemoryError());
         }
         let mut init = NodeInternal256 {
             tag: NodeTag::Internal256,
@@ -866,14 +866,14 @@ impl<V: Value> NodeInternal48<V> {
             }
         }
         unsafe { ptr.write(init) };
-        ptr.into()
+        Ok(ptr.into())
     }
 
-    fn shrink(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+    fn shrink(&self, allocator: &impl ArtAllocator<V>) -> Result<NodePtr<V>, OutOfMemoryError> {
         assert!(self.num_children <= 16);
         let ptr: *mut NodeInternal16<V> = allocator.alloc_node_internal16().cast();
         if ptr.is_null() {
-            panic!("out of memory");
+            return Err(OutOfMemoryError());
         }
         let mut init = NodeInternal16 {
             tag: NodeTag::Internal16,
@@ -897,7 +897,7 @@ impl<V: Value> NodeInternal48<V> {
         }
         assert_eq!(j, self.num_children as usize);
         unsafe { ptr.write(init) };
-        ptr.into()
+        Ok(ptr.into())
     }
 }
 
@@ -977,11 +977,11 @@ impl<V: Value> NodeInternal256<V> {
         self.num_children += 1;
     }
 
-    fn shrink(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+    fn shrink(&self, allocator: &impl ArtAllocator<V>) -> Result<NodePtr<V>, OutOfMemoryError> {
         assert!(self.num_children <= 48);
         let ptr: *mut NodeInternal48<V> = allocator.alloc_node_internal48().cast();
         if ptr.is_null() {
-            panic!("out of memory");
+            return Err(OutOfMemoryError());
         }
         let mut init = NodeInternal48 {
             tag: NodeTag::Internal48,
@@ -1004,7 +1004,7 @@ impl<V: Value> NodeInternal256<V> {
         }
         assert_eq!(j as u16, self.num_children);
         unsafe { ptr.write(init) };
-        ptr.into()
+        Ok(ptr.into())
     }
 }
 

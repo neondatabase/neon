@@ -208,8 +208,7 @@ impl<'e, V: Value> WriteLockedNodeRef<'e, V> {
     where
         A: ArtAllocator<V>,
     {
-        // FIXME: check OOM
-        let new_node = self.ptr.grow(allocator);
+        let new_node = self.ptr.grow(allocator)?;
         Ok(NewNodeRef {
             ptr: new_node,
             allocator,
@@ -224,8 +223,7 @@ impl<'e, V: Value> WriteLockedNodeRef<'e, V> {
     where
         A: ArtAllocator<V>,
     {
-        // FIXME: check OOM
-        let new_node = self.ptr.shrink(allocator);
+        let new_node = self.ptr.shrink(allocator)?;
         Ok(NewNodeRef {
             ptr: new_node,
             allocator,
@@ -328,7 +326,7 @@ where
     A: ArtAllocator<V>,
 {
     Ok(NewNodeRef {
-        ptr: node_ptr::new_internal(prefix, allocator),
+        ptr: node_ptr::new_internal(prefix, allocator)?,
         allocator,
         extra_nodes: Vec::new(),
     })
@@ -344,7 +342,7 @@ where
     A: ArtAllocator<V>,
 {
     Ok(NewNodeRef {
-        ptr: node_ptr::new_leaf(prefix, value, allocator),
+        ptr: node_ptr::new_leaf(prefix, value, allocator)?,
         allocator,
         extra_nodes: Vec::new(),
     })

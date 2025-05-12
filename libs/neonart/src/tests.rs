@@ -170,7 +170,8 @@ fn apply_op<A: ArtAllocator<TestValue>>(
                 UpdateAction::Nothing
             }
         }
-    });
+    })
+    .expect("out of memory");
 }
 
 fn test_iter<A: ArtAllocator<TestValue>>(

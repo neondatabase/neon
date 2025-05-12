@@ -448,7 +448,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 
     pub fn remember_rel_size(&'t self, rel: &RelTag, nblocks: u32) {
         let w = self.cache_tree.start_write();
-        w.update_with_fn(&TreeKey::from(rel), |existing| match existing {
+        let result = w.update_with_fn(&TreeKey::from(rel), |existing| match existing {
             None => {
                 tracing::info!("inserting rel entry for {rel:?}, {nblocks} blocks");
                 UpdateAction::Insert(TreeEntry::Rel(RelEntry {
@@ -462,6 +462,10 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                 UpdateAction::Nothing
             }
         });
+
+        // FIXME: what to do if we run out of memory? Evict other relation entries? Remove
+        // block entries first?
+        result.expect("out of memory");
     }
 
     /// Remember the given page contents in the cache.
@@ -489,7 +493,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
             let mut old_cache_block = None;
             let mut found_existing = false;
 
-            w.update_with_fn(&key, |existing| {
+            let res = w.update_with_fn(&key, |existing| {
                 if let Some(existing) = existing {
                     let block_entry = if let TreeEntry::Block(e) = existing {
                         e
@@ -518,6 +522,10 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                 UpdateAction::Nothing
             });
 
+            // FIXME: what to do if we run out of memory? Evict other relation entries? Remove
+            // block entries first?
+            res.expect("out of memory");
+
             // Allocate a new block if required
             let cache_block = old_cache_block.unwrap_or_else(|| {
                 loop {
@@ -540,7 +548,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 
             // Update the block entry
             let w = self.cache_tree.start_write();
-            w.update_with_fn(&key, |existing| {
+            let res = w.update_with_fn(&key, |existing| {
                 assert_eq!(found_existing, existing.is_some());
                 if let Some(existing) = existing {
                     let block_entry = if let TreeEntry::Block(e) = existing {
@@ -574,6 +582,10 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                     }))
                 }
             });
+
+            // FIXME: what to do if we run out of memory? Evict other relation entries? Remove
+            // block entries first?
+            res.expect("out of memory");
         } else {
             // !is_write
             //
@@ -602,7 +614,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 
             let w = self.cache_tree.start_write();
 
-            w.update_with_fn(&key, |existing| {
+            let res = w.update_with_fn(&key, |existing| {
                 if let Some(existing) = existing {
                     let block_entry = if let TreeEntry::Block(e) = existing {
                         e
@@ -626,6 +638,10 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                     }))
                 }
             });
+
+            // FIXME: what to do if we run out of memory? Evict other relation entries? Remove
+            // block entries first?
+            res.expect("out of memory");
         }
     }
 
@@ -643,7 +659,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 
             let mut evicted_cache_block = None;
 
-            w.update_with_fn(&k, |e| {
+            let res = w.update_with_fn(&k, |e| {
                 if let Some(e) = e {
                     let block_entry = if let TreeEntry::Block(e) = e {
                         e
@@ -661,6 +677,10 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                     UpdateAction::Nothing
                 }
             });
+
+            // FIXME: It's pretty surprising to run out of memory while removing. But
+            // maybe it can happen because of trying to shrink a node?
+            res.expect("out of memory");
 
             if let Some(evicted_cache_block) = evicted_cache_block {
                 self.file_cache
@@ -699,7 +719,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                         let w = self.cache_tree.start_write();
 
                         let mut evicted_cache_block = None;
-                        w.update_with_fn(&k, |old| {
+                        let res = w.update_with_fn(&k, |old| {
                             match old {
                                 None => UpdateAction::Nothing,
                                 Some(TreeEntry::Rel(_)) => panic!("unexpected Rel entry"),
@@ -727,6 +747,12 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                                 }
                             }
                         });
+
+                        // FIXME: what to do if we run out of memory? Evict other relation entries? Remove
+                        // block entries first? It probably shouldn't happen here, as we're not
+                        // actually updating the tree.
+                        res.expect("out of memory");
+
                         if evicted_cache_block.is_some() {
                             self.page_evictions_counter.inc();
                             return evicted_cache_block;
