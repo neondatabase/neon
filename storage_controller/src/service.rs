@@ -47,7 +47,7 @@ use pageserver_api::shard::{
 };
 use pageserver_api::upcall_api::{
     PutTimelineImportStatusRequest, ReAttachRequest, ReAttachResponse, ReAttachResponseTenant,
-    ValidateRequest, ValidateResponse, ValidateResponseTenant,
+    TimelineImportStatusRequest, ValidateRequest, ValidateResponse, ValidateResponseTenant,
 };
 use pageserver_client::{BlockUnblock, mgmt_api};
 use reqwest::{Certificate, StatusCode};
@@ -192,6 +192,14 @@ pub(crate) enum LeadershipStatus {
     /// Initial state for a new storage controller instance. Will attempt to assume leadership.
     #[allow(unused)]
     Candidate,
+}
+
+enum ShardGenerationValidity {
+    Valid,
+    Mismatched {
+        claimed: Generation,
+        actual: Option<Generation>,
+    },
 }
 
 pub const RECONCILER_CONCURRENCY_DEFAULT: usize = 128;
@@ -3909,19 +3917,36 @@ impl Service {
 
     pub(crate) async fn handle_timeline_shard_import_progress(
         self: &Arc<Self>,
-        tenant_shard_id: TenantShardId,
-        timeline_id: TimelineId,
+        req: TimelineImportStatusRequest,
     ) -> Result<ShardImportStatus, ApiError> {
+        let validity = self
+            .validate_shard_generation(req.tenant_shard_id, req.generation)
+            .await?;
+        match validity {
+            ShardGenerationValidity::Valid => {
+                // fallthrough
+            }
+            ShardGenerationValidity::Mismatched { claimed, actual } => {
+                tracing::info!(
+                    claimed=?claimed.into(),
+                    actual=?actual.and_then(|g| g.into()),
+                    "Rejecting import progress fetch from stale generation"
+                );
+
+                return Err(ApiError::BadRequest(anyhow::anyhow!("Invalid generation")));
+            }
+        }
+
         let maybe_import = self
             .persistence
-            .get_timeline_import(tenant_shard_id.tenant_id, timeline_id)
+            .get_timeline_import(req.tenant_shard_id.tenant_id, req.timeline_id)
             .await?;
 
         let import = maybe_import.ok_or_else(|| {
             ApiError::NotFound(
                 format!(
                     "import for {}/{} not found",
-                    tenant_shard_id.tenant_id, timeline_id
+                    req.tenant_shard_id.tenant_id, req.timeline_id
                 )
                 .into(),
             )
@@ -3930,11 +3955,11 @@ impl Service {
         import
             .shard_statuses
             .0
-            .get(&tenant_shard_id.to_index())
+            .get(&req.tenant_shard_id.to_index())
             .cloned()
             .ok_or_else(|| {
                 ApiError::NotFound(
-                    format!("shard {} not found", tenant_shard_id.shard_slug()).into(),
+                    format!("shard {} not found", req.tenant_shard_id.shard_slug()).into(),
                 )
             })
     }
@@ -3943,6 +3968,24 @@ impl Service {
         self: &Arc<Self>,
         req: PutTimelineImportStatusRequest,
     ) -> Result<(), ApiError> {
+        let validity = self
+            .validate_shard_generation(req.tenant_shard_id, req.generation)
+            .await?;
+        match validity {
+            ShardGenerationValidity::Valid => {
+                // fallthrough
+            }
+            ShardGenerationValidity::Mismatched { claimed, actual } => {
+                tracing::info!(
+                    claimed=?claimed.into(),
+                    actual=?actual.and_then(|g| g.into()),
+                    "Rejecting import progress update from stale generation"
+                );
+
+                return Err(ApiError::BadRequest(anyhow::anyhow!("Invalid generation")));
+            }
+        }
+
         let res = self
             .persistence
             .update_timeline_import(req.tenant_shard_id, req.timeline_id, req.status)
@@ -3975,6 +4018,56 @@ impl Service {
         }
 
         Ok(())
+    }
+
+    /// Check that a provided generation for some tenant shard is the most recent one.
+    ///
+    /// Validate with the in-mem state first, and, if that passes, validate with the
+    /// database state which is authoritative.
+    async fn validate_shard_generation(
+        self: &Arc<Self>,
+        tenant_shard_id: TenantShardId,
+        generation: Generation,
+    ) -> Result<ShardGenerationValidity, ApiError> {
+        {
+            let locked = self.inner.read().unwrap();
+            let tenant_shard =
+                locked
+                    .tenants
+                    .get(&tenant_shard_id)
+                    .ok_or(ApiError::InternalServerError(anyhow::anyhow!(
+                        "{} shard not found",
+                        tenant_shard_id
+                    )))?;
+
+            if tenant_shard.generation != Some(generation) {
+                return Ok(ShardGenerationValidity::Mismatched {
+                    claimed: generation,
+                    actual: tenant_shard.generation,
+                });
+            }
+        }
+
+        let mut db_generations = self
+            .persistence
+            .shard_generations(std::iter::once(&tenant_shard_id))
+            .await?;
+        let (_tid, db_generation) =
+            db_generations
+                .pop()
+                .ok_or(ApiError::InternalServerError(anyhow::anyhow!(
+                    "{} shard not found",
+                    tenant_shard_id
+                )))?;
+
+        if db_generation != Some(generation) {
+            return Ok(ShardGenerationValidity::Mismatched {
+                claimed: generation,
+                actual: db_generation,
+            });
+        }
+
+        Ok(ShardGenerationValidity::Valid)
     }
 
     /// Finalize the import of a timeline
