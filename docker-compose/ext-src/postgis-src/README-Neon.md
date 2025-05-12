@@ -43,7 +43,7 @@ These tests need direct filesystem access that is only possible for superusers:
 ### Tests with Flaky Results
 
 These tests have assumptions that don't always hold true:
-- `regress/core/computed_columns` (excluded in v17 only) - Assumes computed columns always outperform alternatives, which is not consistently true
+- `regress/core/computed_columns` - Assumes computed columns always outperform alternatives, which is not consistently true
 
 ### Tests Requiring Tunable Parameter Modifications
 
