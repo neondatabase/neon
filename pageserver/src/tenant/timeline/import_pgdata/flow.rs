@@ -103,8 +103,6 @@ pub async fn run(
     pausable_failpoint!("import-timeline-pre-execute-pausable");
 
     let start_from_job_idx = import_progress.map(|progress| progress.completed);
-    // TODO(vlad): We might write the same layer twice if we lose progress and redo
-    // some stuff. Allow that for imports in the remote client.
     plan.execute(timeline, start_from_job_idx, plan_hash, import_config, ctx)
         .await
 }
@@ -882,6 +880,15 @@ impl ChunkProcessingJob {
 
         // this is sharing the same code as create_image_layers
         let mut guard = timeline.layers.write().await;
+
+        if guard.contains(resident_layer.as_ref()) {
+            // We do not checkpoint each job, therefore some chunk processing jobs might run twice.
+            // If we have already uploaded this layer, then skip the new upload such that we avoid
+            // overwriting layers.
+            // TODO(vlad): Is the job hashing enough to ensure the same result here?
+            return Ok(());
+        }
+
         guard
             .open_mut()?
             .track_new_image_layers(&[resident_layer.clone()], &timeline.metrics);
