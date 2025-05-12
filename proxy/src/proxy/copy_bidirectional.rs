@@ -303,8 +303,6 @@ impl CopyBuffer {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use tokio::io::AsyncWriteExt;
 
     use crate::proxy::conntrack::ConnectionState;
@@ -312,12 +310,11 @@ mod tests {
     use super::*;
 
     #[derive(Default)]
-    struct Observer(Mutex<Vec<(ConnectionState, ConnectionState)>>);
+    struct Observer(Vec<(ConnectionState, ConnectionState)>);
 
     impl StateChangeObserver for Observer {
-        type ConnId = ();
-        fn change(&self, (): Self::ConnId, old_state: ConnectionState, new_state: ConnectionState) {
-            self.0.lock().unwrap().push((old_state, new_state));
+        fn change(&mut self, old_state: ConnectionState, new_state: ConnectionState) {
+            self.0.push((old_state, new_state));
         }
     }
 
@@ -332,7 +329,7 @@ mod tests {
         compute_client.write_all(b"Neon").await.unwrap();
         compute_client.shutdown().await.unwrap();
 
-        let mut conn_tracker = ConnectionTracker::new((), Observer::default());
+        let mut conn_tracker = ConnectionTracker::new(Observer::default());
 
         let result = copy_bidirectional_client_compute(
             &mut client_proxy,
@@ -361,7 +358,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut conn_tracker = ConnectionTracker::new((), Observer::default());
+        let mut conn_tracker = ConnectionTracker::new(Observer::default());
 
         let result = copy_bidirectional_client_compute(
             &mut client_proxy,
