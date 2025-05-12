@@ -348,6 +348,7 @@ async fn run_dump_restore(
         "--no-security-labels".to_string(),
         "--no-subscriptions".to_string(),
         "--no-tablespaces".to_string(),
+        "--no-event-triggers".to_string(),
         // format
         "--format".to_string(),
         "directory".to_string(),

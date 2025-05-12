@@ -3888,10 +3888,10 @@ impl Service {
 
             None
         } else if safekeepers {
-            // Note that we do not support creating the timeline on the safekeepers
-            // for imported timelines. The `start_lsn` of the timeline is not known
-            // until the import finshes.
-            // https://github.com/neondatabase/neon/issues/11569
+            // Note that for imported timelines, we do not create the timeline on the safekeepers
+            // straight away. Instead, we do it once the import finalized such that we know what
+            // start LSN to provide for the safekeepers. This is done in
+            // [`Self::finalize_timeline_import`].
             let res = self
                 .tenant_timeline_create_safekeepers(tenant_id, &timeline_info)
                 .instrument(tracing::info_span!("timeline_create_safekeepers", %tenant_id, timeline_id=%timeline_info.timeline_id))
@@ -4001,10 +4001,22 @@ impl Service {
                 Ok(())
             }
             None => match self.activate_timeline_post_import(&import).await {
-                Ok(()) => {
+                Ok(timeline_info) => {
                     tracing::info!("Post import timeline activation complete");
+
+                    if self.config.timelines_onto_safekeepers {
+                        // Now that we know the start LSN of this timeline, create it on the
+                        // safekeepers.
+                        self.tenant_timeline_create_safekeepers_until_success(
+                            import.tenant_id,
+                            timeline_info,
+                        )
+                        .await?;
+                    }
+
                     self.notify_cplane_and_delete_import(tenant_id, timeline_id, Ok(()))
                         .await?;
+
                     tracing::info!("Timeline import completed successfully");
                     Ok(())
                 }
@@ -4064,9 +4076,10 @@ impl Service {
     async fn activate_timeline_post_import(
         self: &Arc<Self>,
         import: &TimelineImport,
-    ) -> Result<(), TimelineImportFinalizeError> {
+    ) -> Result<TimelineInfo, TimelineImportFinalizeError> {
         let mut shards_to_activate: HashSet<ShardIndex> =
             import.shard_statuses.0.keys().cloned().collect();
+        let mut shard_zero_timeline_info = None;
 
         while !shards_to_activate.is_empty() {
             if self.cancel.is_cancelled() {
@@ -4123,7 +4136,11 @@ impl Service {
             let mut failed = 0;
             for (tid, result) in targeted_tenant_shards.iter().zip(results.into_iter()) {
                 match result {
-                    Ok(_ok) => {
+                    Ok(ok) => {
+                        if tid.is_shard_zero() {
+                            shard_zero_timeline_info = Some(ok);
+                        }
+
                         shards_to_activate.remove(&tid.to_index());
                     }
                     Err(_err) => {
@@ -4146,7 +4163,7 @@ impl Service {
             }
         }
 
-        Ok(())
+        Ok(shard_zero_timeline_info.expect("All shards replied"))
     }
 
     async fn finalize_timeline_imports(self: &Arc<Self>, imports: Vec<TimelineImport>) {
@@ -8567,7 +8584,7 @@ impl Service {
         // By default, live migrations are generous about the wait time for getting
         // the secondary location up to speed. When draining, give up earlier in order
         // to not stall the operation when a cold secondary is encountered.
-        const SECONDARY_WARMUP_TIMEOUT: Duration = Duration::from_secs(20);
+        const SECONDARY_WARMUP_TIMEOUT: Duration = Duration::from_secs(30);
         const SECONDARY_DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
         let reconciler_config = ReconcilerConfigBuilder::new(ReconcilerPriority::Normal)
             .secondary_warmup_timeout(SECONDARY_WARMUP_TIMEOUT)
@@ -8900,7 +8917,7 @@ impl Service {
         node_id: NodeId,
         cancel: CancellationToken,
     ) -> Result<(), OperationError> {
-        const SECONDARY_WARMUP_TIMEOUT: Duration = Duration::from_secs(20);
+        const SECONDARY_WARMUP_TIMEOUT: Duration = Duration::from_secs(30);
         const SECONDARY_DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
         let reconciler_config = ReconcilerConfigBuilder::new(ReconcilerPriority::Normal)
             .secondary_warmup_timeout(SECONDARY_WARMUP_TIMEOUT)

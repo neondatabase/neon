@@ -3553,9 +3553,21 @@ async fn activate_post_import_handler(
     // At this point the timeline should become eventually active.
     // If the timeline is not active yet, then the caller will retry.
     // TODO(vlad): if the tenant is broken, return a permananet error
-    let _ = tenant.get_timeline(timeline_id, true)?;
+    let timeline = tenant.get_timeline(timeline_id, true)?;
 
-    json_response(StatusCode::OK, ())
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn)
+        .with_scope_timeline(&timeline);
+
+    let timeline_info = build_timeline_info(
+        &timeline, false, // include_non_incremental_logical_size,
+        false, // force_await_initial_logical_size
+        &ctx,
+    )
+    .await
+    .context("get local timeline info")
+    .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, timeline_info)
 }
 
 /// Read the end of a tar archive.

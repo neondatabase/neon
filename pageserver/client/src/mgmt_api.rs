@@ -824,14 +824,16 @@ impl Client {
         &self,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
-    ) -> Result<StatusCode> {
+    ) -> Result<TimelineInfo> {
         let uri = format!(
             "{}/v1/tenant/{}/timeline/{}/activate_post_import",
             self.mgmt_api_endpoint, tenant_shard_id, timeline_id,
         );
 
         self.request(Method::PUT, uri, ())
+            .await?
+            .json()
             .await
-            .map(|resp| resp.status())
+            .map_err(Error::ReceiveBody)
     }
 }

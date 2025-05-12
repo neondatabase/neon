@@ -1274,6 +1274,8 @@ class NeonEnv:
 
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
+            if self.pageserver_virtual_file_io_mode is not None:
+                ps_cfg["virtual_file_io_mode"] = self.pageserver_virtual_file_io_mode
             if config.pageserver_default_tenant_config_compaction_algorithm is not None:
                 tenant_config = ps_cfg.setdefault("tenant_config", {})
                 tenant_config["compaction_algorithm"] = (
@@ -1298,13 +1300,6 @@ class NeonEnv:
                         override = toml.loads(o)
                         for key, value in override.items():
                             ps_cfg[key] = value
-
-            if self.pageserver_virtual_file_io_mode is not None:
-                # TODO(christian): https://github.com/neondatabase/neon/issues/11598
-                if not config.test_may_use_compatibility_snapshot_binaries:
-                    ps_cfg["virtual_file_io_mode"] = self.pageserver_virtual_file_io_mode
-                else:
-                    log.info("ignoring virtual_file_io_mode parametrization for compatibility test")
 
             if self.pageserver_wal_receiver_protocol is not None:
                 key, value = PageserverWalReceiverProtocol.to_config_key_value(
@@ -1408,30 +1403,6 @@ class NeonEnv:
 
         for f in futs:
             f.result()
-
-        # Last step: register safekeepers at the storage controller
-        if (
-            self.storage_controller_config is not None
-            and self.storage_controller_config.get("timelines_onto_safekeepers") is True
-        ):
-            for sk_id, sk in enumerate(self.safekeepers):
-                # 0 is an invalid safekeeper id
-                sk_id = sk_id + 1
-                body = {
-                    "id": sk_id,
-                    "created_at": "2023-10-25T09:11:25Z",
-                    "updated_at": "2024-08-28T11:32:43Z",
-                    "region_id": "aws-us-east-2",
-                    "host": "127.0.0.1",
-                    "port": sk.port.pg,
-                    "http_port": sk.port.http,
-                    "https_port": None,
-                    "version": 5957,
-                    "availability_zone_id": f"us-east-2b-{sk_id}",
-                }
-
-                self.storage_controller.on_safekeeper_deploy(sk_id, body)
-                self.storage_controller.safekeeper_scheduling_policy(sk_id, "Active")
 
         self.endpoint_storage.start(timeout_in_seconds=timeout_in_seconds)
 
@@ -3866,7 +3837,7 @@ class NeonAuthBroker:
         external_http_port: int,
         auth_backend: NeonAuthBroker.ProxyV1,
     ):
-        self.domain = "apiauth.local.neon.build"  # resolves to 127.0.0.1
+        self.domain = "local.neon.build"  # resolves to 127.0.0.1
         self.host = "127.0.0.1"
         self.http_port = http_port
         self.external_http_port = external_http_port
@@ -3883,7 +3854,7 @@ class NeonAuthBroker:
         # generate key of it doesn't exist
         crt_path = self.test_output_dir / "proxy.crt"
         key_path = self.test_output_dir / "proxy.key"
-        generate_proxy_tls_certs("apiauth.local.neon.build", key_path, crt_path)
+        generate_proxy_tls_certs(f"apiauth.{self.domain}", key_path, crt_path)
 
         args = [
             str(self.neon_binpath / "proxy"),
@@ -3927,10 +3898,10 @@ class NeonAuthBroker:
 
         log.info(f"Executing http query: {query}")
 
-        connstr = f"postgresql://{user}@{self.domain}/postgres"
+        connstr = f"postgresql://{user}@ep-foo-bar-1234.{self.domain}/postgres"
         async with httpx.AsyncClient(verify=str(self.test_output_dir / "proxy.crt")) as client:
             response = await client.post(
-                f"https://{self.domain}:{self.external_http_port}/sql",
+                f"https://apiauth.{self.domain}:{self.external_http_port}/sql",
                 json={"query": query, "params": args},
                 headers={
                     "Neon-Connection-String": connstr,
@@ -4644,7 +4615,10 @@ class EndpointFactory:
         return self
 
     def new_replica(
-        self, origin: Endpoint, endpoint_id: str, config_lines: list[str] | None = None
+        self,
+        origin: Endpoint,
+        endpoint_id: str | None = None,
+        config_lines: list[str] | None = None,
     ):
         branch_name = origin.branch_name
         assert origin in self.endpoints
@@ -4660,7 +4634,10 @@ class EndpointFactory:
         )
 
     def new_replica_start(
-        self, origin: Endpoint, endpoint_id: str, config_lines: list[str] | None = None
+        self,
+        origin: Endpoint,
+        endpoint_id: str | None = None,
+        config_lines: list[str] | None = None,
     ):
         branch_name = origin.branch_name
         assert origin in self.endpoints
@@ -5477,6 +5454,13 @@ def wait_for_last_flush_lsn(
 
     if last_flush_lsn is None:
         last_flush_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+        # The last_flush_lsn may not correspond to a record boundary.
+        # For example, if the compute flushed WAL on a page boundary,
+        # the remaining part of the record might not be flushed for a long time.
+        # This would prevent the pageserver from reaching last_flush_lsn promptly.
+        # To ensure the rest of the record reaches the pageserver quickly,
+        # we forcibly flush the WAL by using CHECKPOINT.
+        endpoint.safe_psql("CHECKPOINT")
 
     results = []
     for tenant_shard_id, pageserver in shards:

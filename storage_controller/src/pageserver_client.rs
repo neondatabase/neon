@@ -363,7 +363,7 @@ impl PageserverClient {
         &self,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
-    ) -> Result<StatusCode> {
+    ) -> Result<TimelineInfo> {
         measured_request!(
             "activate_post_import",
             crate::metrics::Method::Put,
