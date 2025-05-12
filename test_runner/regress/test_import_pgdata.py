@@ -602,7 +602,9 @@ def test_fast_import_with_pageserver_ingest(
     env.neon_cli.mappings_map_branch(import_branch_name, tenant_id, timeline_id)
 
     # Run fast_import
-    fast_import.set_aws_creds(mock_s3_server, {"RUST_LOG": "aws_config=debug,aws_sdk_kms=debug"})
+    fast_import.set_aws_creds(
+        mock_s3_server, {"RUST_LOG": "info,aws_config=debug,aws_sdk_kms=debug"}
+    )
     pg_port = port_distributor.get_port()
     fast_import.run_pgdata(pg_port=pg_port, s3prefix=f"s3://{bucket}/{key_prefix}")
 
