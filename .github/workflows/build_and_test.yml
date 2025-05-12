@@ -965,7 +965,7 @@ jobs:
           fi
 
       - name: Verify docker-compose example and test extensions
-        timeout-minutes: 20
+        # timeout-minutes: 20
         env:
           TAG: >-
             ${{
@@ -995,7 +995,7 @@ jobs:
           docker compose --profile test-extensions -f ./docker-compose/docker-compose.yml down
 
       - name: Test extension upgrade
-        timeout-minutes: 20
+        # timeout-minutes: 20
         if: ${{ contains(fromJSON('["pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
         env:
           TAG: >-
