@@ -3500,6 +3500,10 @@ async fn put_tenant_timeline_import_wal(
     }.instrument(span).await
 }
 
+/// Activate a timeline after its import has completed
+///
+/// The endpoint is idempotent and callers are expected to retry all
+/// errors until a successful response.
 async fn activate_post_import_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
@@ -3515,19 +3519,41 @@ async fn activate_post_import_handler(
         .get_attached_tenant_shard(tenant_shard_id)?;
 
     tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
     tenant
         .finalize_importing_timeline(timeline_id)
         .await
         .map_err(ApiError::InternalServerError)?;
 
-    // This is crude: we reset the whole tenant such that the new timeline is detected
-    // and activated. We can come up with something more granular in the future.
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
-    state
-        .tenant_manager
-        .reset_tenant(tenant_shard_id, false, &ctx)
-        .await
-        .map_err(ApiError::InternalServerError)?;
+    match tenant.get_timeline(timeline_id, false) {
+        Ok(_timeline) => {
+            // Timeline is already visible. Reset not required: fall through.
+        }
+        Err(GetTimelineError::NotFound { .. }) => {
+            // This is crude: we reset the whole tenant such that the new timeline is detected
+            // and activated. We can come up with something more granular in the future.
+            //
+            // Note that we only reset the tenant if required: when the timeline is
+            // not present in [`Tenant::timelines`].
+            let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+            state
+                .tenant_manager
+                .reset_tenant(tenant_shard_id, false, &ctx)
+                .await
+                .map_err(ApiError::InternalServerError)?;
+        }
+        Err(GetTimelineError::ShuttingDown) => {
+            return Err(ApiError::ShuttingDown);
+        }
+        Err(GetTimelineError::NotActive { .. }) => {
+            unreachable!("Called get_timeline with active_only=false");
+        }
+    }
+
+    // At this point the timeline should become eventually active.
+    // If the timeline is not active yet, then the caller will retry.
+    // TODO(vlad): if the tenant is broken, return a permananet error
+    let _ = tenant.get_timeline(timeline_id, true)?;
 
     json_response(StatusCode::OK, ())
 }

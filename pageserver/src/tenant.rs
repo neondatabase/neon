@@ -2840,17 +2840,28 @@ impl TenantShard {
     }
 
     /// Finalize the import of a timeline on this shard by marking it complete in
-    /// the index part.
+    /// the index part. If the import task hasn't finished yet, returns an error.
+    ///
+    /// This method is idempotent. If the import was finalized once, the next call
+    /// will be a no-op.
     pub(crate) async fn finalize_importing_timeline(
         &self,
         timeline_id: TimelineId,
     ) -> anyhow::Result<()> {
         let timeline = {
             let locked = self.timelines_importing.lock().unwrap();
-            let importing_timeline = locked
-                .get(&timeline_id)
-                .ok_or(anyhow::anyhow!("timeline not found"))?;
-            importing_timeline.timeline.clone()
+            match locked.get(&timeline_id) {
+                Some(importing_timeline) => {
+                    if !importing_timeline.import_task_handle.is_finished() {
+                        return Err(anyhow::anyhow!("Import task not done yet"));
+                    }
+
+                    importing_timeline.timeline.clone()
+                }
+                None => {
+                    return Ok(());
+                }
+            }
         };
 
         timeline
