@@ -1303,6 +1303,7 @@ dependencies = [
  "futures",
  "http 1.1.0",
  "indexmap 2.0.1",
+ "itertools 0.10.5",
  "jsonwebtoken",
  "metrics",
  "nix 0.27.1",
