@@ -1278,13 +1278,19 @@ impl Timeline {
         }
 
         let gc_cutoff = *self.applied_gc_cutoff_lsn.read();
+        let mut flags = options.flags;
+        if let LastImageLayerCreationStatus::NeedRepartition =
+            self.last_image_layer_creation_status.load().as_ref()
+        {
+            flags.insert(CompactFlags::ForceRepartition);
+        }
 
         // 2. Repartition and create image layers if necessary
         match self
             .repartition(
                 self.get_last_record_lsn(),
                 self.get_compaction_target_size(),
-                options.flags,
+                flags,
                 ctx,
             )
             .await
@@ -1351,6 +1357,9 @@ impl Timeline {
                                 "could not create image layers due to {}; this is not critical because the requested image LSN is below the GC curoff",
                                 err
                             );
+                            self.last_image_layer_creation_status
+                                .store(Arc::new(LastImageLayerCreationStatus::NeedRepartition));
+
                             // Fall through to shard ancestor compaction
                         } else {
                             return Err(err.into());

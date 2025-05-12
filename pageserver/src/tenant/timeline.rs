@@ -165,6 +165,7 @@ pub enum LastImageLayerCreationStatus {
         /// attempt.
         last_key: Key,
     },
+    NeedRepartition,
     Complete,
     #[default]
     Initial,
