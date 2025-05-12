@@ -138,6 +138,11 @@ impl<'e, V: Value> ReadLockedNodeRef<'e, V> {
         self.ptr.lockword().check_or_restart(self.version)?;
         Ok(())
     }
+
+    pub(crate) fn check_or_restart(&self) -> Result<(), ConcurrentUpdateError> {
+        self.ptr.lockword().check_or_restart(self.version)?;
+        Ok(())
+    }
 }
 
 /// A reference to a node that has been optimistically read-locked. The functions re-check
@@ -148,6 +153,10 @@ pub struct WriteLockedNodeRef<'e, V> {
 }
 
 impl<'e, V: Value> WriteLockedNodeRef<'e, V> {
+    pub(crate) fn can_shrink_after_delete(&self) -> bool {
+        self.ptr.can_shrink_after_delete()
+    }
+
     pub(crate) fn write_unlock(mut self) {
         self.ptr.lockword().write_unlock();
         self.ptr = NodePtr::null();
@@ -183,6 +192,22 @@ impl<'e, V: Value> WriteLockedNodeRef<'e, V> {
     {
         // FIXME: check OOM
         let new_node = self.ptr.grow(allocator);
+        Ok(NewNodeRef {
+            ptr: new_node,
+            allocator,
+            extra_nodes: Vec::new(),
+        })
+    }
+
+    pub(crate) fn shrink<'a, A>(
+        &self,
+        allocator: &'a A,
+    ) -> Result<NewNodeRef<'a, V, A>, OutOfMemoryError>
+    where
+        A: ArtAllocator<V>,
+    {
+        // FIXME: check OOM
+        let new_node = self.ptr.shrink(allocator);
         Ok(NewNodeRef {
             ptr: new_node,
             allocator,

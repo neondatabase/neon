@@ -237,6 +237,16 @@ impl<V: Value> NodePtr<V> {
         }
     }
 
+    pub(crate) fn can_shrink_after_delete(&self) -> bool {
+        match self.variant() {
+            NodeVariant::Internal4(n) => n.can_shrink_after_delete(),
+            NodeVariant::Internal16(n) => n.can_shrink_after_delete(),
+            NodeVariant::Internal48(n) => n.can_shrink_after_delete(),
+            NodeVariant::Internal256(n) => n.can_shrink_after_delete(),
+            NodeVariant::Leaf(_) => panic!("can_shrink_after_delete() called on leaf node"),
+        }
+    }
+
     pub(crate) fn find_child(&self, key_byte: u8) -> Option<NodePtr<V>> {
         match self.variant() {
             NodeVariant::Internal4(n) => n.find_child(key_byte),
@@ -268,13 +278,30 @@ impl<V: Value> NodePtr<V> {
     }
 
     pub(crate) fn grow(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
-        match self.variant() {
+        let bigger = match self.variant() {
             NodeVariant::Internal4(n) => n.grow(allocator),
             NodeVariant::Internal16(n) => n.grow(allocator),
             NodeVariant::Internal48(n) => n.grow(allocator),
             NodeVariant::Internal256(_) => panic!("cannot grow Internal256 node"),
             NodeVariant::Leaf(_) => panic!("cannot grow Leaf node"),
-        }
+        };
+/*
+        let mut key = 0;
+        loop {
+            let a = self.find_next_child(key);
+            let b = bigger.find_next_child(key);
+            assert_eq!(a, b);
+            if let Some((akey, _)) = a {
+                if akey == u8::MAX {
+                    break;
+                }
+                key = akey + 1;
+            } else {
+                break;
+            }
+    }
+        */
+        bigger
     }
 
     pub(crate) fn insert_child(&mut self, key_byte: u8, child: NodePtr<V>) {
@@ -304,6 +331,16 @@ impl<V: Value> NodePtr<V> {
             NodeVariantMut::Internal48(n) => n.delete_child(key_byte),
             NodeVariantMut::Internal256(n) => n.delete_child(key_byte),
             NodeVariantMut::Leaf(_) => panic!("delete_child called on leaf node"),
+        }
+    }
+
+    pub(crate) fn shrink(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+        match self.variant() {
+            NodeVariant::Internal4(_) => panic!("shrink called on internal4 node"),
+            NodeVariant::Internal16(n) => n.shrink(allocator),
+            NodeVariant::Internal48(n) => n.shrink(allocator),
+            NodeVariant::Internal256(n) => n.shrink(allocator),
+            NodeVariant::Leaf(_) => panic!("shrink called on leaf node"),
         }
     }
 
@@ -466,6 +503,10 @@ impl<V: Value> NodeInternal4<V> {
         self.num_children == 4
     }
 
+    fn can_shrink_after_delete(&self) -> bool {
+        false
+    }
+
     fn insert_child(&mut self, key_byte: u8, child: NodePtr<V>) {
         assert!(self.num_children < 4);
 
@@ -573,6 +614,10 @@ impl<V: Value> NodeInternal16<V> {
         self.num_children == 16
     }
 
+    fn can_shrink_after_delete(&self) -> bool {
+        self.num_children <= 5
+    }
+
     fn insert_child(&mut self, key_byte: u8, child: NodePtr<V>) {
         assert!(self.num_children < 16);
 
@@ -600,7 +645,34 @@ impl<V: Value> NodeInternal16<V> {
         };
         for i in 0..self.num_children as usize {
             let idx = self.child_keys[i] as usize;
+            eprintln!("grow {i}: {idx}");
             init.child_indexes[idx] = i as u8;
+            init.child_ptrs[i] = self.child_ptrs[i];
+        }
+        init.validate();
+        unsafe { ptr.write(init) };
+        ptr.into()
+    }
+
+    fn shrink(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+        assert!(self.num_children <= 4);
+        let ptr: *mut NodeInternal4<V> = allocator.alloc_node_internal4().cast();
+        if ptr.is_null() {
+            panic!("out of memory");
+        }
+        let mut init = NodeInternal4 {
+            tag: NodeTag::Internal4,
+            lock_and_version: AtomicLockAndVersion::new(),
+
+            prefix: self.prefix.clone(),
+            prefix_len: self.prefix_len,
+            num_children: self.num_children,
+
+            child_keys: [0; 4],
+            child_ptrs: [const { NodePtr::null() }; 4],
+        };
+        for i in 0..self.num_children as usize {
+            init.child_keys[i] = self.child_keys[i];
             init.child_ptrs[i] = self.child_ptrs[i];
         }
         unsafe { ptr.write(init) };
@@ -609,6 +681,22 @@ impl<V: Value> NodeInternal16<V> {
 }
 
 impl<V: Value> NodeInternal48<V> {
+
+    fn validate(&self) {
+        let mut shadow_indexes = std::collections::HashSet::new();
+        let mut count = 0;
+        for i in 0..256 {
+            let idx = self.child_indexes[i];
+            if idx != INVALID_CHILD_INDEX {
+                assert!(idx < self.num_children, "i {} idx {}, num_children {}", i, idx, self.num_children);
+                assert!(shadow_indexes.get(&idx).is_none());
+                shadow_indexes.insert(idx);
+                count += 1;
+            }
+        }
+        assert_eq!(count, self.num_children);
+    }
+
     fn get_prefix(&self) -> &[u8] {
         &self.prefix[0..self.prefix_len as usize]
     }
@@ -647,7 +735,8 @@ impl<V: Value> NodeInternal48<V> {
         if idx == INVALID_CHILD_INDEX {
             panic!("could not re-find parent with key {}", key_byte);
         }
-        self.child_ptrs[idx as usize] = replacement
+        self.child_ptrs[idx as usize] = replacement;
+        self.validate();
     }
 
     fn delete_child(&mut self, key_byte: u8) {
@@ -655,25 +744,34 @@ impl<V: Value> NodeInternal48<V> {
         if idx == INVALID_CHILD_INDEX as usize {
             panic!("could not re-find parent with key {}", key_byte);
         }
-        self.child_indexes[key_byte as usize] = INVALID_CHILD_INDEX;
-        self.num_children -= 1;
 
         // Compact the child_ptrs array
-        let removed_idx = self.num_children as usize;
+        let removed_idx = (self.num_children - 1) as usize;
         if idx != removed_idx {
-            for i in 0..u8::MAX as usize {
+            for i in 0..=u8::MAX as usize {
                 if self.child_indexes[i] as usize == removed_idx {
                     self.child_indexes[i] = idx as u8;
                     self.child_ptrs[idx] = self.child_ptrs[removed_idx];
+
+                    self.child_indexes[key_byte as usize] = INVALID_CHILD_INDEX;
+                    self.num_children -= 1;
+                    self.validate();
                     return;
                 }
             }
-            panic!("could not re-find last index on Internal48 node");
+            panic!("could not re-find last index {} on Internal48 node", removed_idx);
+        } else {
+            self.child_indexes[key_byte as usize] = INVALID_CHILD_INDEX;
+            self.num_children -= 1;
         }
     }
 
     fn is_full(&self) -> bool {
         self.num_children == 48
+    }
+
+    fn can_shrink_after_delete(&self) -> bool {
+        self.num_children <= 17
     }
 
     fn insert_child(&mut self, key_byte: u8, child: NodePtr<V>) {
@@ -683,6 +781,7 @@ impl<V: Value> NodeInternal48<V> {
         self.child_indexes[key_byte as usize] = idx;
         self.child_ptrs[idx as usize] = child;
         self.num_children += 1;
+        self.validate();
     }
 
     fn grow(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
@@ -706,6 +805,37 @@ impl<V: Value> NodeInternal48<V> {
                 init.child_ptrs[i] = self.child_ptrs[idx as usize];
             }
         }
+        unsafe { ptr.write(init) };
+        ptr.into()
+    }
+
+    fn shrink(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+        assert!(self.num_children <= 16);
+        let ptr: *mut NodeInternal16<V> = allocator.alloc_node_internal16().cast();
+        if ptr.is_null() {
+            panic!("out of memory");
+        }
+        let mut init = NodeInternal16 {
+            tag: NodeTag::Internal16,
+            lock_and_version: AtomicLockAndVersion::new(),
+
+            prefix: self.prefix.clone(),
+            prefix_len: self.prefix_len,
+            num_children: self.num_children,
+
+            child_keys: [0; 16],
+            child_ptrs: [const { NodePtr::null() }; 16],
+        };
+        let mut j = 0;
+        for i in 0..256 {
+            let idx = self.child_indexes[i];
+            if idx != INVALID_CHILD_INDEX {
+                init.child_keys[j] = i as u8;
+                init.child_ptrs[j] = self.child_ptrs[idx as usize];
+                j += 1;
+            }
+        }
+        assert_eq!(j, self.num_children as usize);
         unsafe { ptr.write(init) };
         ptr.into()
     }
@@ -766,11 +896,45 @@ impl<V: Value> NodeInternal256<V> {
         self.num_children == 256
     }
 
+    fn can_shrink_after_delete(&self) -> bool {
+        self.num_children <= 49
+    }
+
     fn insert_child(&mut self, key_byte: u8, child: NodePtr<V>) {
         assert!(self.num_children < 256);
         assert!(self.child_ptrs[key_byte as usize].is_null());
         self.child_ptrs[key_byte as usize] = child;
         self.num_children += 1;
+    }
+
+    fn shrink(&self, allocator: &impl ArtAllocator<V>) -> NodePtr<V> {
+        assert!(self.num_children <= 48);
+        let ptr: *mut NodeInternal48<V> = allocator.alloc_node_internal48().cast();
+        if ptr.is_null() {
+            panic!("out of memory");
+        }
+        let mut init = NodeInternal48 {
+            tag: NodeTag::Internal48,
+            lock_and_version: AtomicLockAndVersion::new(),
+
+            prefix: self.prefix.clone(),
+            prefix_len: self.prefix_len,
+            num_children: self.num_children as u8,
+
+            child_indexes: [INVALID_CHILD_INDEX; 256],
+            child_ptrs: [const { NodePtr::null() }; 48],
+        };
+        let mut j = 0;
+        for i in 0..256 {
+            if !self.child_ptrs[i].is_null() {
+                init.child_indexes[i] = j;
+                init.child_ptrs[j as usize] = self.child_ptrs[i];
+                j += 1;
+            }
+        }
+        assert_eq!(j as u16, self.num_children);
+        unsafe { ptr.write(init) };
+        ptr.into()
     }
 }
 

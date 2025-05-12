@@ -102,6 +102,7 @@ pub(crate) fn update_fn<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>, F>(
             this_value_fn,
             root_ref,
             None,
+            None,
             guard,
             0,
             key_bytes,
@@ -234,6 +235,7 @@ pub(crate) fn update_recurse<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>, F>(
     value_fn: F,
     node: NodeRef<'e, V>,
     rparent: Option<(ReadLockedNodeRef<V>, u8)>,
+    rgrandparent: Option<(ReadLockedNodeRef<V>, u8)>,
     guard: &'g mut TreeWriteGuard<'e, K, V, A>,
     level: usize,
     orig_key: &[u8],
@@ -277,18 +279,33 @@ where
         let value_mut = wnode.get_leaf_value_mut();
 
         match value_fn(Some(value_mut)) {
-            UpdateAction::Nothing => {}
+            UpdateAction::Nothing => {
+                wparent.write_unlock();
+                wnode.write_unlock();
+            }
             UpdateAction::Insert(_) => panic!("cannot insert over existing value"),
             UpdateAction::Remove => {
-                // TODO: Shrink the node
                 // TODO: If the parent becomes empty, unlink it from grandparent
                 // TODO: If parent has only one child left, merge it with the child, extending its
                 // prefix
-                wparent.delete_child(parent_key);
+                if wparent.can_shrink_after_delete() {
+                    if let Some((rgrandparent, grandparent_key)) = rgrandparent {
+                        let mut wgrandparent = rgrandparent.upgrade_to_write_lock_or_restart()?;
+                        wparent.delete_child(parent_key);
+                        shrink(&wparent, &mut wgrandparent, grandparent_key, guard)?;
+                        wparent.write_unlock_obsolete();
+                    } else {
+                        wparent.delete_child(parent_key);
+                        wparent.write_unlock();
+                    }
+                } else {
+                    wparent.delete_child(parent_key);
+                    wparent.write_unlock();
+                }
+                guard.remember_obsolete_node(wnode.as_ptr());
+                wnode.write_unlock_obsolete();
             }
         }
-        wnode.write_unlock();
-        wparent.write_unlock();
 
         return Ok(());
     }
@@ -334,8 +351,8 @@ where
         return Ok(());
     } else {
         let next_child = next_node.unwrap(); // checked above it's not None
-        if let Some((rparent, _)) = rparent {
-            rparent.read_unlock_or_restart()?;
+        if let Some((ref rparent, _)) = rparent {
+            rparent.check_or_restart()?;
         }
 
         // recurse to next level
@@ -344,6 +361,7 @@ where
             value_fn,
             next_child,
             Some((rnode, key[0])),
+            rparent,
             guard,
             level + 1,
             orig_key,
@@ -485,6 +503,24 @@ fn insert_and_grow<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>>(
 
     // Replace the pointer in the parent
     parent.replace_child(parent_key_byte, bigger_node.into_ptr());
+
+    guard.remember_obsolete_node(wnode.as_ptr());
+
+    Ok(())
+}
+
+// On entry: 'parent' and 'node' are locked
+fn shrink<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>>(
+    wnode: &WriteLockedNodeRef<V>,
+    parent: &mut WriteLockedNodeRef<V>,
+    parent_key_byte: u8,
+    guard: &'g mut TreeWriteGuard<'e, K, V, A>,
+) -> Result<(), ArtError> {
+    eprintln!("SHRINK!");
+    let smaller_node = wnode.shrink(guard.tree_writer.allocator)?;
+
+    // Replace the pointer in the parent
+    parent.replace_child(parent_key_byte, smaller_node.into_ptr());
 
     guard.remember_obsolete_node(wnode.as_ptr());
 
