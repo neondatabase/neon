@@ -3977,6 +3977,16 @@ impl Service {
         Ok(())
     }
 
+    /// Finalize the import of a timeline
+    ///
+    /// This method should be called once all shards have reported that the import is complete.
+    /// Firstly, it polls the post import timeline activation endpoint exposed by the pageserver.
+    /// Once the timeline is active on all shards, the timeline also gets created on the
+    /// safekeepers. Finally, notify cplane of the import completion (whether failed or
+    /// successful), and remove the import from the database and in-memory.
+    ///
+    /// If this method gets pre-empted by shut down, it will be called again at start-up (on-going
+    /// imports are stored in the database).
     #[instrument(skip_all, fields(
         tenant_id=%import.tenant_id,
         shard_id=%import.timeline_id,
@@ -4073,6 +4083,8 @@ impl Service {
         Ok(())
     }
 
+    /// Activate an imported timeline on all shards once the import is complete.
+    /// Returns the [`TimelineInfo`] reported by shard zero.
     async fn activate_timeline_post_import(
         self: &Arc<Self>,
         import: &TimelineImport,
