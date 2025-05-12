@@ -1666,6 +1666,15 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder, live_sk_change: bool):
     res = env.safekeepers[3].pull_timeline(
         [env.safekeepers[0], env.safekeepers[2]], tenant_id, timeline_id
     )
+    sk_id_1 = env.safekeepers[0].safekeeper_id()
+    sk_id_3 = env.safekeepers[2].safekeeper_id()
+    sk_id_4 = env.safekeepers[3].safekeeper_id()
+    new_conf = MembershipConfiguration(
+        generation=2, members=[sk_id_1, sk_id_3, sk_id_4], new_members=None
+    )
+    for i in [0, 2, 3]:
+        env.safekeepers[i].http_client().membership_switch(tenant_id, timeline_id, new_conf)
+
     log.info("Finished pulling timeline")
     log.info(res)
 

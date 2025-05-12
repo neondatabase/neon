@@ -4871,6 +4871,9 @@ class Safekeeper(LogUtils):
         log.info(f"finished pulling timeline from {src_ids} to {self.id}")
         return res
 
+    def safekeeper_id(self) -> SafekeeperId:
+        return SafekeeperId(self.id, "localhost", self.port.pg_tenant_only)
+
     @property
     def data_dir(self) -> Path:
         return self.env.repo_dir / "safekeepers" / f"sk{self.id}"
