@@ -546,7 +546,7 @@ def test_fast_import_with_pageserver_ingest(
     # Sanity check that data in pgdata is expected:
     pgbin = PgBin(test_output_dir, fast_import.pg_distrib_dir, fast_import.pg_version)
     with VanillaPostgres(
-        fast_import.workdir / "pgdata", pgbin, pg_port, False
+        fast_import.workdir / "pgdata", pgbin, pg_port, None, False
     ) as new_pgdata_vanilla_pg:
         new_pgdata_vanilla_pg.start()
 
@@ -629,7 +629,7 @@ def test_fast_import_binary(
 
     pgbin = PgBin(test_output_dir, fast_import.pg_distrib_dir, fast_import.pg_version)
     with VanillaPostgres(
-        fast_import.workdir / "pgdata", pgbin, pg_port, False
+        fast_import.workdir / "pgdata", pgbin, pg_port, None, False
     ) as new_pgdata_vanilla_pg:
         new_pgdata_vanilla_pg.start()
 
@@ -678,7 +678,7 @@ def test_fast_import_event_triggers(
 
     pgbin = PgBin(test_output_dir, fast_import.pg_distrib_dir, fast_import.pg_version)
     with VanillaPostgres(
-        fast_import.workdir / "pgdata", pgbin, pg_port, False
+        fast_import.workdir / "pgdata", pgbin, pg_port, None, False
     ) as new_pgdata_vanilla_pg:
         new_pgdata_vanilla_pg.start()
 
