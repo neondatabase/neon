@@ -24,7 +24,7 @@ The test setup includes:
 
 ## Excluded Tests
 
-Several tests are excluded from the test runs for various reasons:
+**Important Note:** The test exclusions listed below are specifically for regular-user tests against staging instances. These exclusions are necessary because staging instances run with limited privileges and cannot perform operations requiring superuser access. Docker-compose based tests are not affected by these exclusions.
 
 ### Tests Requiring Superuser Permissions
 
