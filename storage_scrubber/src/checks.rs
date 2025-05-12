@@ -355,6 +355,7 @@ pub(crate) async fn list_timeline_blobs(
     match res {
         ListTimelineBlobsResult::Ready(data) => Ok(data),
         ListTimelineBlobsResult::MissingIndexPart(_) => {
+            tracing::warn!("listing raced with removal of an index, retrying");
             // Retry if listing raced with removal of an index
             let data = list_timeline_blobs_impl(remote_client, id, root_target)
                 .await?
@@ -441,7 +442,7 @@ async fn list_timeline_blobs_impl(
     }
 
     if index_part_keys.is_empty() && s3_layers.is_empty() {
-        tracing::debug!("Timeline is empty: expected post-deletion state.");
+        tracing::info!("Timeline is empty: expected post-deletion state.");
         if initdb_archive {
             tracing::info!("Timeline is post deletion but initdb archive is still present.");
         }
