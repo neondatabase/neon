@@ -1401,7 +1401,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 	}
 
 	/* Try to read PS results if they are available */
-	communicator_prefetch_pump_state(false);
+	communicator_prefetch_pump_state();
 
 	neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum, blkno, &request_lsns, 1);
 
@@ -1433,7 +1433,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 	/*
 	 * Try to receive prefetch results once again just to make sure we don't leave the smgr code while the OS might still have buffered bytes.
 	 */
-	communicator_prefetch_pump_state(false);
+	communicator_prefetch_pump_state();
 
 #ifdef DEBUG_COMPARE_LOCAL
 	compare_with_local(reln, forkNum, blkno, buffer, request_lsns.request_lsn);
