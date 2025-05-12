@@ -251,6 +251,24 @@ struct RelEntry {
     nblocks: AtomicU32,
 }
 
+impl std::fmt::Debug for TreeEntry {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        match self {
+            TreeEntry::Rel(e) => fmt
+                .debug_struct("Rel")
+                .field("nblocks", &e.nblocks.load(Ordering::Relaxed))
+                .finish(),
+            TreeEntry::Block(e) => fmt
+                .debug_struct("Block")
+                .field("lw_lsn", &e.lw_lsn.load())
+                .field("cache_block", &e.cache_block.load(Ordering::Relaxed))
+                .field("pinned", &e.pinned.load(Ordering::Relaxed))
+                .field("referenced", &e.referenced.load(Ordering::Relaxed))
+                .finish(),
+        }
+    }
+}
+
 #[derive(
     Clone,
     Debug,
@@ -263,14 +281,15 @@ struct RelEntry {
     zerocopy_derive::FromBytes,
 )]
 #[repr(packed)]
+// Note: the fields are stored in big-endian order, to make the radix tree more
+// efficient, and to make scans over ranges of blocks work correctly.
 struct TreeKey {
-    spc_oid: u32,
-    db_oid: u32,
-    rel_number: u32,
+    spc_oid_be: u32,
+    db_oid_be: u32,
+    rel_number_be: u32,
     fork_number: u8,
-    block_number: u32,
+    block_number_be: u32,
 }
-
 impl<'a> From<&'a [u8]> for TreeKey {
     fn from(bytes: &'a [u8]) -> Self {
         Self::read_from_bytes(bytes).expect("invalid key length")
@@ -279,31 +298,19 @@ impl<'a> From<&'a [u8]> for TreeKey {
 
 fn key_range_for_rel_blocks(rel: &RelTag) -> Range<TreeKey> {
     Range {
-        start: TreeKey {
-            spc_oid: rel.spc_oid,
-            db_oid: rel.db_oid,
-            rel_number: rel.rel_number,
-            fork_number: rel.fork_number,
-            block_number: 0,
-        },
-        end: TreeKey {
-            spc_oid: rel.spc_oid,
-            db_oid: rel.db_oid,
-            rel_number: rel.rel_number,
-            fork_number: rel.fork_number,
-            block_number: u32::MAX,
-        },
+        start: TreeKey::from((rel, 0)),
+        end: TreeKey::from((rel, u32::MAX)),
     }
 }
 
 impl From<&RelTag> for TreeKey {
     fn from(val: &RelTag) -> TreeKey {
         TreeKey {
-            spc_oid: val.spc_oid,
-            db_oid: val.db_oid,
-            rel_number: val.rel_number,
-            fork_number: val.fork_number,
-            block_number: u32::MAX,
+            spc_oid_be: val.spc_oid.to_be(),
+            db_oid_be: val.db_oid.to_be(),
+            rel_number_be: val.rel_number.to_be(),
+            fork_number: val.fork_number.to_be(),
+            block_number_be: u32::MAX.to_be(),
         }
     }
 }
@@ -311,11 +318,11 @@ impl From<&RelTag> for TreeKey {
 impl From<(&RelTag, u32)> for TreeKey {
     fn from(val: (&RelTag, u32)) -> TreeKey {
         TreeKey {
-            spc_oid: val.0.spc_oid,
-            db_oid: val.0.db_oid,
-            rel_number: val.0.rel_number,
-            fork_number: val.0.fork_number,
-            block_number: val.1,
+            spc_oid_be: val.0.spc_oid.to_be(),
+            db_oid_be: val.0.db_oid.to_be(),
+            rel_number_be: val.0.rel_number.to_be(),
+            fork_number: val.0.fork_number.to_be(),
+            block_number_be: val.1.to_be(),
         }
     }
 }
@@ -442,12 +449,16 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
     pub fn remember_rel_size(&'t self, rel: &RelTag, nblocks: u32) {
         let w = self.cache_tree.start_write();
         w.update_with_fn(&TreeKey::from(rel), |existing| match existing {
-            None => UpdateAction::Insert(TreeEntry::Rel(RelEntry {
-                nblocks: AtomicU32::new(nblocks),
-            })),
+            None => {
+                tracing::info!("inserting rel entry for {rel:?}, {nblocks} blocks");
+                UpdateAction::Insert(TreeEntry::Rel(RelEntry {
+                    nblocks: AtomicU32::new(nblocks),
+                }))
+            }
             Some(TreeEntry::Block(_)) => panic!("unexpected tree entry type for rel key"),
-            Some(TreeEntry::Rel(rel)) => {
-                rel.nblocks.store(nblocks, Ordering::Relaxed);
+            Some(TreeEntry::Rel(e)) => {
+                tracing::info!("updating rel entry for {rel:?}, {nblocks} blocks");
+                e.nblocks.store(nblocks, Ordering::Relaxed);
                 UpdateAction::Nothing
             }
         });
@@ -620,6 +631,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 
     /// Forget information about given relation in the cache. (For DROP TABLE and such)
     pub fn forget_rel(&'t self, rel: &RelTag) {
+        tracing::info!("forgetting rel entry for {rel:?}");
         let w = self.cache_tree.start_write();
         w.remove(&TreeKey::from(rel));
 
@@ -725,6 +737,10 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         }
         // Give up if we didn't find anything
         None
+    }
+
+    pub fn dump_tree(&self, dst: &mut dyn std::io::Write) {
+        self.cache_tree.start_read().dump(dst);
     }
 }
 

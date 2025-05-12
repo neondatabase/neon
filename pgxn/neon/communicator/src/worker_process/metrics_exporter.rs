@@ -19,6 +19,7 @@ impl<'a> CommunicatorWorkerProcessStruct<'a> {
         use axum::routing::get;
         let app = Router::new()
             .route("/metrics", get(get_metrics))
+            .route("/dump_cache_tree", get(dump_cache_tree))
             .with_state(self);
 
         // TODO: make configurable. Or listen on unix domain socket?
@@ -31,6 +32,19 @@ impl<'a> CommunicatorWorkerProcessStruct<'a> {
             axum::serve(listener, app).await.unwrap()
         });
     }
+}
+
+async fn dump_cache_tree(
+    State(state): State<&CommunicatorWorkerProcessStruct<'static>>,
+) -> Response {
+    let mut buf: Vec<u8> = Vec::new();
+    state.cache.dump_tree(&mut buf);
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/text")
+        .body(Body::from(buf))
+        .unwrap()
 }
 
 /// Expose Prometheus metrics.

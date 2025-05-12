@@ -29,7 +29,7 @@ pub struct CommunicatorWorkerProcessStruct<'a> {
 
     pageserver_client: PageserverClient,
 
-    cache: IntegratedCacheWriteAccess<'a>,
+    pub(crate) cache: IntegratedCacheWriteAccess<'a>,
 
     submission_pipe_read_raw_fd: i32,
 

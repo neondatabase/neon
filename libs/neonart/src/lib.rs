@@ -548,9 +548,14 @@ fn increment_key(key: &mut [u8]) -> bool {
 }
 
 // Debugging functions
+impl<'e, K: Key, V: Value + Debug, A: ArtAllocator<V>> TreeWriteGuard<'e, K, V, A> {
+    pub fn dump(&mut self, dst: &mut dyn std::io::Write) {
+        algorithm::dump_tree(self.tree_writer.tree.root, &self.epoch_pin, dst)
+    }
+}
 impl<'e, K: Key, V: Value + Debug> TreeReadGuard<'e, K, V> {
-    pub fn dump(&mut self) {
-        algorithm::dump_tree(self.tree.root, &self.epoch_pin)
+    pub fn dump(&mut self, dst: &mut dyn std::io::Write) {
+        algorithm::dump_tree(self.tree.root, &self.epoch_pin, dst)
     }
 }
 impl<'e, K: Key, V: Value> TreeWriteAccess<'e, K, V, ArtMultiSlabAllocator<'e, V>> {

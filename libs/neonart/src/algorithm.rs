@@ -123,12 +123,6 @@ pub(crate) fn update_fn<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>, F>(
     }
 }
 
-pub(crate) fn dump_tree<'e, V: Value + std::fmt::Debug>(root: RootPtr<V>, epoch_pin: &'e EpochPin) {
-    let root_ref = NodeRef::from_root_ptr(root);
-
-    let _ = dump_recurse(&[], root_ref, &epoch_pin, 0);
-}
-
 // Error means you must retry.
 //
 // This corresponds to the 'lookupOpt' function in the paper
@@ -374,11 +368,23 @@ impl std::fmt::Debug for PathElement {
     }
 }
 
+pub(crate) fn dump_tree<'e, V: Value + std::fmt::Debug>(
+    root: RootPtr<V>,
+    epoch_pin: &'e EpochPin,
+    dst: &mut dyn std::io::Write,
+) {
+    let root_ref = NodeRef::from_root_ptr(root);
+
+    let _ = dump_recurse(&[], root_ref, &epoch_pin, 0, dst);
+}
+
+// TODO: return an Err if writeln!() returns error, instead of unwrapping
 fn dump_recurse<'e, V: Value + std::fmt::Debug>(
     path: &[PathElement],
     node: NodeRef<'e, V>,
     epoch_pin: &'e EpochPin,
     level: usize,
+    dst: &mut dyn std::io::Write,
 ) -> Result<(), ConcurrentUpdateError> {
     let indent = str::repeat(" ", level);
 
@@ -395,26 +401,29 @@ fn dump_recurse<'e, V: Value + std::fmt::Debug>(
         // and the lifetime of 'epoch_pin' enforces that the reference is only accessible
         // as long as the epoch is pinned.
         let val = unsafe { vptr.as_ref().unwrap() };
-        eprintln!("{} {:?}: {:?}", indent, path, val);
+        writeln!(dst, "{} {:?}: {:?}", indent, path, val).unwrap();
+        return Ok(());
     }
 
-    for key_byte in 0..u8::MAX {
+    for key_byte in 0..=u8::MAX {
         match rnode.find_child_or_restart(key_byte)? {
             None => continue,
             Some(child_ref) => {
                 let rchild = child_ref.read_lock_or_restart()?;
-                eprintln!(
+                writeln!(
+                    dst,
                     "{} {:?}, {}: prefix {:?}",
                     indent,
                     &path,
                     key_byte,
                     rchild.get_prefix()
-                );
+                )
+                .unwrap();
 
                 let mut child_path = path.clone();
                 child_path.push(PathElement::KeyByte(key_byte));
 
-                dump_recurse(&child_path, child_ref, epoch_pin, level + 1)?;
+                dump_recurse(&child_path, child_ref, epoch_pin, level + 1, dst)?;
             }
         }
     }

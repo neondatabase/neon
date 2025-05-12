@@ -186,15 +186,9 @@ impl SlabDesc {
                     if !(*free_chunks_head).is_null() {
                         let result = *free_chunks_head;
                         (*free_chunks_head) = (*result).next;
-                        let old = (*block_ptr).num_free_chunks.fetch_sub(1, Ordering::Relaxed);
+                        let _old = (*block_ptr).num_free_chunks.fetch_sub(1, Ordering::Relaxed);
 
                         self.num_allocated.fetch_add(1, Ordering::Relaxed);
-
-                        eprintln!(
-                            "allocated chunk from block {:?}, {} chunks left",
-                            block_ptr,
-                            old - 1
-                        );
                         return result.cast();
                     }
                 }
@@ -226,8 +220,6 @@ impl SlabDesc {
             let mut block_lists_guard = self.block_lists.write();
             block_lists_guard.nonfull_blocks.push_head(new_block);
         }
-        eprintln!("allocated new block {:?}", new_block);
-
         self.num_allocated.fetch_add(1, Ordering::Relaxed);
         new_chunk
     }
@@ -251,10 +243,6 @@ impl SlabDesc {
 
             num_free_chunks = (*block_ptr).num_free_chunks.fetch_add(1, Ordering::Relaxed) + 1;
             num_chunks = (*block_ptr).num_chunks;
-            eprintln!(
-                "deallocated chunk, block {:?} now has {} chunks left",
-                block_ptr, num_free_chunks
-            );
         }
 
         if num_free_chunks == 1 {
@@ -267,14 +255,12 @@ impl SlabDesc {
                 block_lists.unlink(block_ptr);
                 block_lists.nonfull_blocks.push_head(block_ptr);
             };
-            eprintln!("block {:?} became non-full", block_ptr);
         } else if num_free_chunks == num_chunks {
             // If the block became completely empty, move it to the free list
             // TODO
             // FIXME: we're still holding the spinlock. It's not exactly safe to return it to
             // the free blocks list, is it? Defer it as garbage to wait out concurrent updates?
             //block_allocator.release_block()
-            eprintln!("block {:?} became empty", block_ptr);
         }
 
         // update stats

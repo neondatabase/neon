@@ -33,6 +33,12 @@ impl Key for TestKey {
     }
 }
 
+impl From<&TestKey> for u128 {
+    fn from(val: &TestKey) -> u128 {
+        u128::from_be_bytes(val.0)
+    }
+}
+
 impl From<u128> for TestKey {
     fn from(val: u128) -> TestKey {
         TestKey(val.to_be_bytes())
@@ -184,7 +190,7 @@ fn test_iter<A: ArtAllocator<TestValue>>(
                 "FAIL: iterator returned {:?}, expected {:?}",
                 item, shadow_item
             );
-            tree.start_read().dump();
+            tree.start_read().dump(&mut std::io::stderr());
 
             eprintln!("SHADOW:");
             let mut si = shadow.iter();
@@ -217,7 +223,11 @@ fn random_ops() {
     let distribution = Zipf::new(u128::MAX as f64, 1.1).unwrap();
     let mut rng = rand::rng();
     for i in 0..100000 {
-        let key: TestKey = (rng.sample(distribution) as u128).into();
+        let mut key: TestKey = (rng.sample(distribution) as u128).into();
+
+        if rng.random_bool(0.10) {
+            key = TestKey::from(u128::from(&key) | 0xffffffff);
+        }
 
         let op = TestOp(key, if rng.random_bool(0.75) { Some(i) } else { None });
 
