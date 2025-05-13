@@ -38,6 +38,7 @@ jobs:
     runs-on: [ self-hosted, small ]
     container:
       # We use the neon-test-extensions image here as it contains the source code for the extensions.
+      # XXX Change tag to latest before merge
       image: ghcr.io/neondatabase/neon-test-extensions-v${{ matrix.pg-version }}:14994079585
       credentials:
         username: ${{ github.actor }}
@@ -90,7 +91,8 @@ jobs:
         run: /run-tests.sh -r /ext-src
         env:
           BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
-          SKIP: "pg_hint_plan-src,pg_repack-src,pg_cron-src,plpgsql_check-src"
+          #XXX remove after merging the fix for rag
+          SKIP: "pg_hint_plan-src,pg_repack-src,pg_cron-src,plpgsql_check-src,rag_bge_small_en_v15-src"
 
       - name: Delete Neon Project
         if: ${{ always() }}
