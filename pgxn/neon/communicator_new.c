@@ -28,6 +28,7 @@
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
+#include "storage/pmsignal.h"
 #include "storage/procarray.h"
 #if PG_VERSION_NUM >= 170000
 #include "storage/procnumber.h"
@@ -213,11 +214,23 @@ communicator_new_bgworker_main(Datum main_arg)
 	int			elevel;
 	uint64		initial_file_cache_size;
 
+	/*
+	 * Pretend that this process is a WAL sender. That affects the shutdown
+	 * sequence: WAL senders are shut down last, after the final checkpoint
+	 * has been written. That's what we want for the communicator process too
+	 */
+	MarkPostmasterChildWalSender();
+
 	/* lfc_size_limit is in MBs */
 	initial_file_cache_size = lfc_size_limit * (1024 * 1024 / BLCKSZ);
 
 	/* Establish signal handlers. */
 	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
+	/*
+	 * Postmaster sends us SIGUSR2 when all regular backends and bgworkers
+	 * have exited, and it's time for us to exit too
+	 */
+	pqsignal(SIGUSR2, die);
 	pqsignal(SIGHUP, SignalHandlerForConfigReload);
 	pqsignal(SIGTERM, die);
 
