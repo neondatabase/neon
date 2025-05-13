@@ -79,6 +79,9 @@ jobs:
             exit 1
           fi
           URI=$(echo ${res::-3} | jq -r .uri)
+          sed +x
+          password=$(echo "$URI" | sed -n 's|.*://[^:]*:\([^@]*\)@.*|\1|p')
+          echo ::add-mask::$password
           echo uri=${URI} >> ${GITHUB_OUTPUT}
         env:
           PROJECT_ID: ${{ inputs.project_id }}
