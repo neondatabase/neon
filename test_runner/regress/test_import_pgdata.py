@@ -130,9 +130,8 @@ def test_pgdata_import_smoke(
     elif rel_block_size == RelBlockSize.TWO_STRPES_PER_SHARD:
         target_relblock_size = (shard_count or 1) * stripe_size * 8192 * 2
     elif rel_block_size == RelBlockSize.MULTIPLE_RELATION_SEGMENTS:
-        # Postgres uses a 1GiB segment size, fixed at compile time, so we must use >2GB of data
-        # to exercise multiple segments.
-        target_relblock_size = int(((2.333 * 1024 * 1024 * 1024) // 8192) * 8192)
+        segment_size = 16 * 1024 * 1024
+        target_relblock_size = segment_size * 8
     else:
         raise ValueError
 
