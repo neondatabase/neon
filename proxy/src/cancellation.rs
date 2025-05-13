@@ -56,9 +56,11 @@ pub enum CancelKeyOp {
     },
 }
 
+type Callback = Box<dyn FnOnce(anyhow::Result<&[redis::Value]>) + Send>;
 pub struct Pipeline {
     inner: redis::Pipeline,
-    replies: Vec<CancelReplyOp>,
+    // vec![(number of commands, fn(values))]
+    replies: Vec<(usize, Callback)>,
 }
 
 impl Pipeline {
@@ -70,29 +72,36 @@ impl Pipeline {
     }
 
     async fn execute(&mut self, client: &mut RedisKVClient) {
-        let responses = self.replies.len();
-        let batch_size = self.inner.len();
+        let commands = self.inner.len();
+        let batch_size = self.replies.len();
 
         match client.query(&self.inner).await {
-            // for each reply, we expect that many values.
-            Ok(Value::Array(values)) if values.len() == responses => {
+            Ok(Value::Array(values)) if values.len() == commands => {
                 debug!(
-                    batch_size,
-                    responses, "successfully completed cancellation jobs",
+                    commands,
+                    batch_size, "successfully completed cancellation jobs",
                 );
-                for (value, reply) in std::iter::zip(values, self.replies.drain(..)) {
-                    reply.send_value(value);
+                let mut values = &*values;
+                for (n, resp) in self.replies.drain(..) {
+                    let (v, rest) = values.split_at(n);
+                    values = rest;
+                    resp(Ok(v));
                 }
             }
             Ok(value) => {
-                error!(batch_size, ?value, "unexpected redis return value");
-                for reply in self.replies.drain(..) {
-                    reply.send_err(anyhow!("incorrect response type from redis"));
+                error!(
+                    commands,
+                    batch_size,
+                    ?value,
+                    "unexpected redis return value"
+                );
+                for (_n, resp) in self.replies.drain(..) {
+                    resp(Err(anyhow!("incorrect response type from redis")));
                 }
             }
             Err(err) => {
-                for reply in self.replies.drain(..) {
-                    reply.send_err(anyhow!("could not send cmd to redis: {err}"));
+                for (_n, resp) in self.replies.drain(..) {
+                    resp(Err(anyhow!("could not send cmd to redis: {err}")));
                 }
             }
         }
@@ -101,20 +110,27 @@ impl Pipeline {
         self.replies.clear();
     }
 
-    fn add_command_with_reply(&mut self, cmd: Cmd, reply: CancelReplyOp) {
-        self.inner.add_command(cmd);
-        self.replies.push(reply);
-    }
-
-    fn add_command_no_reply(&mut self, cmd: Cmd) {
-        self.inner.add_command(cmd).ignore();
-    }
-
-    fn add_command(&mut self, cmd: Cmd, reply: Option<CancelReplyOp>) {
-        match reply {
-            Some(reply) => self.add_command_with_reply(cmd, reply),
-            None => self.add_command_no_reply(cmd),
+    /// Add a batch of commands to the pipeline, and run the resp fn when they are all done.
+    ///
+    /// If multiple commands are provided, the response should be able to decode
+    /// all of the values. You can provide a tuple in that case.
+    fn add_commands<F, T, const N: usize>(&mut self, cmds: [Cmd; N], resp: F)
+    where
+        F: FnOnce(anyhow::Result<T>) + Send + 'static,
+        T: FromRedisValue,
+    {
+        for cmd in cmds {
+            self.inner.add_command(cmd);
         }
+        let reply = Box::new(move |res: anyhow::Result<&[redis::Value]>| {
+            let res = match res {
+                Ok(v) => T::from_redis_value(&redis::Value::Array(v.to_owned()))
+                    .context("could not parse value"),
+                Err(e) => Err(e),
+            };
+            resp(res);
+        });
+        self.replies.push((N, reply as Box<_>));
     }
 }
 
@@ -130,18 +146,30 @@ impl CancelKeyOp {
                 _guard,
                 expire,
             } => {
-                let reply =
-                    resp_tx.map(|resp_tx| CancelReplyOp::StoreCancelKey { resp_tx, _guard });
-                pipe.add_command(Cmd::hset(&key, field, value), reply);
-                pipe.add_command_no_reply(Cmd::expire(key, expire));
+                pipe.add_commands(
+                    [Cmd::hset(&key, field, value), Cmd::expire(key, expire)],
+                    // ignore all results
+                    move |res: anyhow::Result<()>| {
+                        let _guard = _guard;
+                        if let Some(resp_tx) = resp_tx {
+                            if resp_tx.send(res).is_err() {
+                                tracing::debug!("could not send reply");
+                            }
+                        }
+                    },
+                );
             }
             CancelKeyOp::GetCancelData {
                 key,
                 resp_tx,
                 _guard,
             } => {
-                let reply = CancelReplyOp::GetCancelData { resp_tx, _guard };
-                pipe.add_command_with_reply(Cmd::hgetall(key), reply);
+                pipe.add_commands([Cmd::hgetall(key)], move |res| {
+                    let _guard = _guard;
+                    if resp_tx.send(res).is_err() {
+                        tracing::debug!("could not send reply");
+                    }
+                });
             }
             CancelKeyOp::RemoveCancelKey {
                 key,
@@ -149,79 +177,14 @@ impl CancelKeyOp {
                 resp_tx,
                 _guard,
             } => {
-                let reply =
-                    resp_tx.map(|resp_tx| CancelReplyOp::RemoveCancelKey { resp_tx, _guard });
-                pipe.add_command(Cmd::hdel(key, field), reply);
-            }
-        }
-    }
-}
-
-// Message types for sending through mpsc channel
-pub enum CancelReplyOp {
-    StoreCancelKey {
-        resp_tx: oneshot::Sender<anyhow::Result<()>>,
-        _guard: CancelChannelSizeGuard<'static>,
-    },
-    GetCancelData {
-        resp_tx: oneshot::Sender<anyhow::Result<Vec<(String, String)>>>,
-        _guard: CancelChannelSizeGuard<'static>,
-    },
-    RemoveCancelKey {
-        resp_tx: oneshot::Sender<anyhow::Result<()>>,
-        _guard: CancelChannelSizeGuard<'static>,
-    },
-}
-
-impl CancelReplyOp {
-    fn send_err(self, e: anyhow::Error) {
-        match self {
-            CancelReplyOp::StoreCancelKey { resp_tx, _guard } => {
-                resp_tx
-                    .send(Err(e))
-                    .inspect_err(|_| tracing::debug!("could not send reply"))
-                    .ok();
-            }
-            CancelReplyOp::GetCancelData { resp_tx, _guard } => {
-                resp_tx
-                    .send(Err(e))
-                    .inspect_err(|_| tracing::debug!("could not send reply"))
-                    .ok();
-            }
-            CancelReplyOp::RemoveCancelKey { resp_tx, _guard } => {
-                resp_tx
-                    .send(Err(e))
-                    .inspect_err(|_| tracing::debug!("could not send reply"))
-                    .ok();
-            }
-        }
-    }
-
-    fn send_value(self, v: redis::Value) {
-        match self {
-            CancelReplyOp::StoreCancelKey { resp_tx, _guard } => {
-                let send =
-                    FromRedisValue::from_owned_redis_value(v).context("could not parse value");
-                resp_tx
-                    .send(send)
-                    .inspect_err(|_| tracing::debug!("could not send reply"))
-                    .ok();
-            }
-            CancelReplyOp::GetCancelData { resp_tx, _guard } => {
-                let send =
-                    FromRedisValue::from_owned_redis_value(v).context("could not parse value");
-                resp_tx
-                    .send(send)
-                    .inspect_err(|_| tracing::debug!("could not send reply"))
-                    .ok();
-            }
-            CancelReplyOp::RemoveCancelKey { resp_tx, _guard } => {
-                let send =
-                    FromRedisValue::from_owned_redis_value(v).context("could not parse value");
-                resp_tx
-                    .send(send)
-                    .inspect_err(|_| tracing::debug!("could not send reply"))
-                    .ok();
+                pipe.add_commands([Cmd::hdel(key, field)], move |res| {
+                    let _guard = _guard;
+                    if let Some(resp_tx) = resp_tx {
+                        if resp_tx.send(res).is_err() {
+                            tracing::debug!("could not send reply");
+                        }
+                    }
+                });
             }
         }
     }
