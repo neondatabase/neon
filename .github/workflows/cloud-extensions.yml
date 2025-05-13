@@ -13,7 +13,7 @@ on:
       project_id:
         description: 'Project region id. If not set, the default region will be used'
         required: false
-        default: 'curly-dew-86293917'
+        default: 'raspy-voice-43157743'
 
 defaults:
   run:
@@ -68,7 +68,7 @@ jobs:
         id: connect-uri
         run: |
           res=$(curl -w "%{http_code}" -X GET \
-                "https://console-stage.neon.build/api/v2/projects/${PROJECT_ID}/connection_uri?database_name=neondb&role_name=neondb_owner" \
+                "https://console-stage.neon.build/api/v2/projects/${PROJECT_ID}/connection_uri?database_name=neondb&role_name=neondb_owner&pooled=false" \
                 -H 'accept: application/json' \
                 -H "Authorization: Bearer ${API_KEY}" 
           )
