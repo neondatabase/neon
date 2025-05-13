@@ -106,7 +106,7 @@ def make_l0_stack_standalone(
         select ntuples, count(*) npages from ntuples_per_page group by ntuples order by ntuples;
     """)
     rows = cur.fetchall()
-    log.info(f"intial table layout: {rows}")
+    log.info(f"initial table layout: {rows}")
     assert len(rows) == 1
     assert rows[0][0] == 6, f"expected 6 tuples per page, got {rows[0][0]}"
     assert rows[0][1] == need_pages, f"expected {need_pages} pages, got {rows[0][1]}"
