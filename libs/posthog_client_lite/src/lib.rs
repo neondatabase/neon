@@ -1,6 +1,6 @@
 //! A lite version of the PostHog client that only supports local evaluation of feature flags.
 
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -10,48 +10,48 @@ use sha2::Digest;
 pub enum PostHogEvaluationError {
     /// The feature flag is not available, for example, because the local evaluation data is not populated yet.
     #[error("Feature flag not available: {0}")]
-    NotAvailable(&'static str),
+    NotAvailable(String),
     #[error("No condition group is matched")]
     NoConditionGroupMatched,
     /// Real errors, e.g., the rollout percentage does not add up to 100.
     #[error("Failed to evaluate feature flag: {0}")]
-    Internal(&'static str),
+    Internal(String),
 }
 
 #[derive(Deserialize)]
-pub struct PostHogLocalEvaluationResponse {
+pub struct LocalEvaluationResponse {
     #[allow(dead_code)]
-    flags: Vec<PostHogLocalEvaluationFlag>,
+    flags: Vec<LocalEvaluationFlag>,
 }
 
 #[derive(Deserialize)]
-pub struct PostHogLocalEvaluationFlag {
+pub struct LocalEvaluationFlag {
     key: String,
-    filters: PostHogLocalEvaluationFlagFilters,
+    filters: LocalEvaluationFlagFilters,
     active: bool,
 }
 
 #[derive(Deserialize)]
-pub struct PostHogLocalEvaluationFlagFilters {
-    groups: Vec<PostHogLocalEvaluationFlagFilterGroup>,
-    multivariate: PostHogLocalEvaluationFlagMultivariate,
+pub struct LocalEvaluationFlagFilters {
+    groups: Vec<LocalEvaluationFlagFilterGroup>,
+    multivariate: LocalEvaluationFlagMultivariate,
 }
 
 #[derive(Deserialize)]
-pub struct PostHogLocalEvaluationFlagFilterGroup {
+pub struct LocalEvaluationFlagFilterGroup {
     variant: Option<String>,
-    properties: Option<Vec<PostHogLocalEvaluationFlagFilterProperty>>,
+    properties: Option<Vec<LocalEvaluationFlagFilterProperty>>,
     rollout_percentage: i64,
 }
 
 #[derive(Deserialize)]
-pub struct PostHogLocalEvaluationFlagFilterProperty {
+pub struct LocalEvaluationFlagFilterProperty {
     key: String,
     value: PostHogFlagFilterPropertyValue,
     operator: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PostHogFlagFilterPropertyValue {
     String(String),
@@ -61,48 +61,18 @@ pub enum PostHogFlagFilterPropertyValue {
 }
 
 #[derive(Deserialize)]
-pub struct PostHogLocalEvaluationFlagMultivariate {
-    variants: Vec<PostHogLocalEvaluationFlagMultivariateVariant>,
+pub struct LocalEvaluationFlagMultivariate {
+    variants: Vec<LocalEvaluationFlagMultivariateVariant>,
 }
 
 #[derive(Deserialize)]
-pub struct PostHogLocalEvaluationFlagMultivariateVariant {
+pub struct LocalEvaluationFlagMultivariateVariant {
     key: String,
     rollout_percentage: i64,
 }
 
-/// A lite PostHog client.
-///
-/// At the point of writing this code, PostHog does not have a functional Rust client with feature flag support.
-/// This is a lite version that only supports local evaluation of feature flags and only supports those JSON specs
-/// that will be used within Neon.
-///
-/// PostHog is designed as a browser-server system: the browser (client) side uses the client key and is exposed
-/// to the end users; the server side uses a server key and is not exposed to the end users. The client and the
-/// server has different API keys and provide a different set of APIs. In Neon, we only have the server (that is
-/// pageserver), and it will use both the client API and the server API. So we need to store two API keys within
-/// our PostHog client.
-///
-/// The server API is used to fetch the feature flag specs. The client API is used to capture events in case we
-/// want to report the feature flag usage back to PostHog. The current plan is to use PostHog only as an UI to
-/// configure feature flags so it is very likely that the client API will not be used.
-pub struct PostHogClient {
-    /// The server API key.
-    server_api_key: String,
-    /// The client API key.
-    client_api_key: String,
-    /// The project ID.
-    project_id: String,
-    /// The private API URL.
-    private_api_url: String,
-    /// The public API URL.
-    public_api_url: String,
-    /// The HTTP client.
-    client: Arc<reqwest::Client>,
-}
-
 pub struct FeatureStore {
-    flags: HashMap<String, PostHogLocalEvaluationFlag>,
+    flags: HashMap<String, LocalEvaluationFlag>,
 }
 
 impl Default for FeatureStore {
@@ -124,12 +94,10 @@ impl FeatureStore {
         }
     }
 
-    pub fn set_flags(&mut self, flags: Vec<PostHogLocalEvaluationFlag>) {
+    pub fn set_flags(&mut self, flags: Vec<LocalEvaluationFlag>) {
         self.flags.clear();
         for flag in flags {
-            if flag.active {
-                self.flags.insert(flag.key.clone(), flag);
-            }
+            self.flags.insert(flag.key.clone(), flag);
         }
     }
 
@@ -137,7 +105,7 @@ impl FeatureStore {
     ///
     /// The implementation is different from PostHog SDK. In PostHog SDK, it is sha1 of `user_id.distinct_id.salt`.
     /// However, as we do not upload all of our tenant IDs to PostHog, we do not have the PostHog distinct_id for a
-    /// tenant. Therefore, the way we compute it is sha256 of `user_id.feature_id`.
+    /// tenant. Therefore, the way we compute it is sha256 of `user_id.feature_id.salt`.
     fn consistent_hash(user_id: &str, flag_key: &str, salt: &str) -> f64 {
         let mut hasher = sha2::Sha256::new();
         hasher.update(user_id);
@@ -150,7 +118,7 @@ impl FeatureStore {
         hash_int as f64 / u64::MAX as f64
     }
 
-    /// Evaluate a condition. Returns `None` if the condition cannot be evaluated due to parsing error or missing
+    /// Evaluate a condition. Returns an error if the condition cannot be evaluated due to parsing error or missing
     /// property.
     fn evaluate_condition(
         &self,
@@ -162,54 +130,66 @@ impl FeatureStore {
             "exact" => {
                 let PostHogFlagFilterPropertyValue::String(provided) = provided else {
                     // Left should be a string
-                    return Err(PostHogEvaluationError::Internal(
-                        "The left side of the condition is not a string",
-                    ));
+                    return Err(PostHogEvaluationError::Internal(format!(
+                        "The left side of the condition is not a string: {:?}",
+                        provided
+                    )));
                 };
                 let PostHogFlagFilterPropertyValue::List(requested) = requested else {
                     // Right should be a list of string
-                    return Err(PostHogEvaluationError::Internal(
-                        "The right side of the condition is not a list",
-                    ));
+                    return Err(PostHogEvaluationError::Internal(format!(
+                        "The right side of the condition is not a list: {:?}",
+                        requested
+                    )));
                 };
                 Ok(requested.contains(provided))
             }
             "lt" | "gt" => {
                 let PostHogFlagFilterPropertyValue::String(requested) = requested else {
                     // Right should be a string
-                    return Err(PostHogEvaluationError::Internal(
-                        "The right side of the condition is not a string",
-                    ));
+                    return Err(PostHogEvaluationError::Internal(format!(
+                        "The right side of the condition is not a string: {:?}",
+                        requested
+                    )));
                 };
                 let Ok(requested) = requested.parse::<f64>() else {
-                    return Err(PostHogEvaluationError::Internal(
-                        "Can not parse the right side of the condition as a number",
-                    ));
+                    return Err(PostHogEvaluationError::Internal(format!(
+                        "Can not parse the right side of the condition as a number: {:?}",
+                        requested
+                    )));
                 };
                 // Left can either be a number or a string
                 let provided = match provided {
                     PostHogFlagFilterPropertyValue::Number(provided) => *provided,
                     PostHogFlagFilterPropertyValue::String(provided) => {
                         let Ok(provided) = provided.parse::<f64>() else {
-                            return Err(PostHogEvaluationError::Internal(
-                                "Can not parse the left side of the condition as a number",
-                            ));
+                            return Err(PostHogEvaluationError::Internal(format!(
+                                "Can not parse the left side of the condition as a number: {:?}",
+                                provided
+                            )));
                         };
                         provided
                     }
                     _ => {
-                        return Err(PostHogEvaluationError::Internal(
-                            "The left side of the condition is not a number or a string",
-                        ));
+                        return Err(PostHogEvaluationError::Internal(format!(
+                            "The left side of the condition is not a number or a string: {:?}",
+                            provided
+                        )));
                     }
                 };
                 match operator {
                     "lt" => Ok(provided < requested),
                     "gt" => Ok(provided > requested),
-                    _ => Err(PostHogEvaluationError::Internal("Unreachable code path")),
+                    op => Err(PostHogEvaluationError::Internal(format!(
+                        "Unsupported operator: {}",
+                        op
+                    ))),
                 }
             }
-            _ => Err(PostHogEvaluationError::Internal("Unsupported operator")),
+            _ => Err(PostHogEvaluationError::Internal(format!(
+                "Unsupported operator: {}",
+                operator
+            ))),
         }
     }
 
@@ -218,15 +198,15 @@ impl FeatureStore {
         mapped_user_id <= percentage as f64 / 100.0
     }
 
-    /// Evaluate a filter group for a feature flag. Returns `None` if the group is not matched or if there are errors
-    /// during the evaluation.
+    /// Evaluate a filter group for a feature flag. Returns an error if there are errors during the evaluation.
     ///
     /// Return values:
-    /// Ok(Some(variant)): matched and evaluated to this value
-    /// Ok(None): condition unmatched and not evaluated
+    /// Ok(GroupEvaluationResult::MatchedAndOverride(variant)): matched and evaluated to this value
+    /// Ok(GroupEvaluationResult::MatchedAndEvaluate): condition matched but no variant override, use the global rollout percentage
+    /// Ok(GroupEvaluationResult::Unmatched): condition unmatched
     fn evaluate_group(
         &self,
-        group: &PostHogLocalEvaluationFlagFilterGroup,
+        group: &LocalEvaluationFlagFilterGroup,
         hash_on_group_rollout_percentage: f64,
         provided_properties: &HashMap<String, PostHogFlagFilterPropertyValue>,
     ) -> Result<GroupEvaluationResult, PostHogEvaluationError> {
@@ -243,9 +223,10 @@ impl FeatureStore {
                     }
                 } else {
                     // We cannot evaluate, the property is not available
-                    return Err(PostHogEvaluationError::NotAvailable(
-                        "The required property in the condition is not available",
-                    ));
+                    return Err(PostHogEvaluationError::NotAvailable(format!(
+                        "The required property in the condition is not available: {}",
+                        property.key
+                    )));
                 }
             }
         }
@@ -299,10 +280,9 @@ impl FeatureStore {
         )
     }
 
-    /// Evaluate a multivariate feature flag. Returns `None` if the flag is not available or if there are errors
-    /// during the evaluation. Note that we directly take the mapped user ID (a consistent hash ranging from 0 to 1)
-    /// so that it is easier to use it in the tests and avoid duplicate computations.
-    ///
+    /// Evaluate a multivariate feature flag. Note that we directly take the mapped user ID
+    /// (a consistent hash ranging from 0 to 1) so that it is easier to use it in the tests
+    /// and avoid duplicate computations.
     ///
     /// Use a different consistent hash for evaluating the group rollout percentage.
     /// The behavior: if the condition is set to rolling out to 10% of the users, and
@@ -312,7 +292,7 @@ impl FeatureStore {
     /// Note that the hash to determine group rollout percentage is shared across all groups. So if we have two
     /// exactly-the-same conditions with 10% and 20% rollout percentage respectively, a total of 20% of the users
     /// will be evaluated (versus 30% if group evaluation is done independently).
-    pub fn evaluate_multivariate_inner(
+    pub(crate) fn evaluate_multivariate_inner(
         &self,
         flag_key: &str,
         hash_on_global_rollout_percentage: f64,
@@ -320,6 +300,12 @@ impl FeatureStore {
         properties: &HashMap<String, PostHogFlagFilterPropertyValue>,
     ) -> Result<String, PostHogEvaluationError> {
         if let Some(flag_config) = self.flags.get(flag_key) {
+            if !flag_config.active {
+                return Err(PostHogEvaluationError::NotAvailable(format!(
+                    "The feature flag is not active: {}",
+                    flag_key
+                )));
+            }
             // TODO: sort the groups so that variant overrides always get evaluated first and it follows the PostHog
             // Python SDK behavior; for now we do not configure conditions without variant overrides in Neon so it
             // does not matter.
@@ -336,11 +322,12 @@ impl FeatureStore {
                                 return Ok(variant.key.clone());
                             }
                         }
-                        // This should not happen because the rollout percentage always adds up to 100, but just in case,
-                        // return None if we end up here.
-                        return Err(PostHogEvaluationError::Internal(
-                            "Rollout percentage does not add up to 100",
-                        ));
+                        // This should not happen because the rollout percentage always adds up to 100, but just in case that PostHog
+                        // returned invalid spec, we return an error.
+                        return Err(PostHogEvaluationError::Internal(format!(
+                            "Rollout percentage does not add up to 100: {}",
+                            flag_key
+                        )));
                     }
                     GroupEvaluationResult::Unmatched => continue,
                 }
@@ -349,11 +336,42 @@ impl FeatureStore {
             Err(PostHogEvaluationError::NoConditionGroupMatched)
         } else {
             // The feature flag is not available yet
-            Err(PostHogEvaluationError::NotAvailable(
-                "Not found in the local evaluation spec",
-            ))
+            Err(PostHogEvaluationError::NotAvailable(format!(
+                "Not found in the local evaluation spec: {}",
+                flag_key
+            )))
         }
     }
+}
+
+/// A lite PostHog client.
+///
+/// At the point of writing this code, PostHog does not have a functional Rust client with feature flag support.
+/// This is a lite version that only supports local evaluation of feature flags and only supports those JSON specs
+/// that will be used within Neon.
+///
+/// PostHog is designed as a browser-server system: the browser (client) side uses the client key and is exposed
+/// to the end users; the server side uses a server key and is not exposed to the end users. The client and the
+/// server has different API keys and provide a different set of APIs. In Neon, we only have the server (that is
+/// pageserver), and it will use both the client API and the server API. So we need to store two API keys within
+/// our PostHog client.
+///
+/// The server API is used to fetch the feature flag specs. The client API is used to capture events in case we
+/// want to report the feature flag usage back to PostHog. The current plan is to use PostHog only as an UI to
+/// configure feature flags so it is very likely that the client API will not be used.
+pub struct PostHogClient {
+    /// The server API key.
+    server_api_key: String,
+    /// The client API key.
+    client_api_key: String,
+    /// The project ID.
+    project_id: String,
+    /// The private API URL.
+    private_api_url: String,
+    /// The public API URL.
+    public_api_url: String,
+    /// The HTTP client.
+    client: reqwest::Client,
 }
 
 impl PostHogClient {
@@ -371,7 +389,7 @@ impl PostHogClient {
             project_id,
             private_api_url,
             public_api_url,
-            client: Arc::new(client),
+            client,
         }
     }
 
@@ -399,7 +417,7 @@ impl PostHogClient {
     /// See `_compute_flag_locally` in <https://github.com/PostHog/posthog-python/blob/master/posthog/client.py>
     pub async fn get_feature_flags_local_evaluation(
         &self,
-    ) -> anyhow::Result<PostHogLocalEvaluationResponse> {
+    ) -> anyhow::Result<LocalEvaluationResponse> {
         // BASE_URL/api/projects/:project_id/feature_flags/local_evaluation
         // with bearer token of self.server_api_key
         let url = format!(
@@ -543,13 +561,13 @@ mod tests {
     #[test]
     fn parse_local_evaluation() {
         let data = data();
-        let _: PostHogLocalEvaluationResponse = serde_json::from_str(data).unwrap();
+        let _: LocalEvaluationResponse = serde_json::from_str(data).unwrap();
     }
 
     #[test]
     fn evaluate_multivariate() {
         let mut store = FeatureStore::new();
-        let response: PostHogLocalEvaluationResponse = serde_json::from_str(data()).unwrap();
+        let response: LocalEvaluationResponse = serde_json::from_str(data()).unwrap();
         store.set_flags(response.flags);
 
         // This lacks the required properties and cannot be evaluated.
