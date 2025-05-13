@@ -297,11 +297,9 @@ async fn handle_client(
     // Starting from here we only proxy the client's traffic.
     info!("performing the proxy pass...");
 
-    // match copy_bidirectional_client_compute(&mut tls_stream, &mut client).await {
-    //     Ok(_) => Ok(()),
-    //     Err(ErrorSource::Client(err)) => Err(err).context("client"),
-    //     Err(ErrorSource::Compute(err)) => Err(err).context("compute"),
-    // }
-
-    Ok(())
+    match copy_bidirectional_client_compute(&mut tls_stream, &mut client, |_, _| {}).await {
+        Ok(_) => Ok(()),
+        Err(ErrorSource::Client(err)) => Err(err).context("client"),
+        Err(ErrorSource::Compute(err)) => Err(err).context("compute"),
+    }
 }
