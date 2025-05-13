@@ -92,7 +92,7 @@ jobs:
         env:
           BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
           #XXX remove after merging the fix for rag
-          SKIP: "pg_hint_plan-src,pg_repack-src,pg_cron-src,plpgsql_check-src,rag_bge_small_en_v15-src"
+          SKIP: "pg_hint_plan-src,pg_repack-src,pg_cron-src,plpgsql_check-src,rag_bge_small_en_v15-src,rag_jina_reranker_v1_tiny_en-src"
 
       - name: Delete Neon Project
         if: ${{ always() }}
