@@ -2236,9 +2236,10 @@ impl PageServerHandler {
 
         let ctx = match perf_instrument {
             true => RequestContextBuilder::from(ctx)
-                .root_perf_span(|| {
+                .perf_span(|get_page_span| {
                     info_span!(
                         target: PERF_TRACE_TARGET,
+                        parent: get_page_span,
                         "GET_VECTORED",
                         tenant_id = %timeline.tenant_shard_id.tenant_id,
                         timeline_id = %timeline.timeline_id,
