@@ -78,7 +78,7 @@ jobs:
             echo ${res::-3}
             exit 1
           fi
-          URI=$(echo ${res::-3} | jq .uri)
+          URI=$(echo ${res::-3} | jq -r .uri)
           echo uri=${URI} >> ${GITHUB_OUTPUT}
         env:
           PROJECT_ID: ${{ inputs.project_id }}
