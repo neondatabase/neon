@@ -70,6 +70,14 @@ enum Command {
         /// and maintenance_work_mem.
         #[clap(long, env = "NEON_IMPORTER_MEMORY_MB")]
         memory_mb: Option<usize>,
+
+        /// List of schemas to dump.
+        #[clap(long)]
+        schema: Vec<String>,
+
+        /// List of extensions to dump.
+        #[clap(long)]
+        extension: Vec<String>,
     },
 
     /// Runs pg_dump-pg_restore from source to destination without running local postgres.
@@ -82,6 +90,12 @@ enum Command {
         /// real scenario uses encrypted connection string in spec.json from s3.
         #[clap(long)]
         destination_connection_string: Option<String>,
+        /// List of schemas to dump.
+        #[clap(long)]
+        schema: Vec<String>,
+        /// List of extensions to dump.
+        #[clap(long)]
+        extension: Vec<String>,
     },
 }
 
@@ -117,6 +131,8 @@ struct Spec {
     source_connstring_ciphertext_base64: Vec<u8>,
     #[serde_as(as = "Option<serde_with::base64::Base64>")]
     destination_connstring_ciphertext_base64: Option<Vec<u8>>,
+    schemas: Option<Vec<String>>,
+    extensions: Option<Vec<String>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -337,6 +353,8 @@ async fn run_dump_restore(
     pg_lib_dir: Utf8PathBuf,
     source_connstring: String,
     destination_connstring: String,
+    schemas: Vec<String>,
+    extensions: Vec<String>,
 ) -> Result<(), anyhow::Error> {
     let dumpdir = workdir.join("dumpdir");
     let num_jobs = num_cpus::get().to_string();
@@ -351,6 +369,7 @@ async fn run_dump_restore(
         "--no-subscriptions".to_string(),
         "--no-tablespaces".to_string(),
         "--no-event-triggers".to_string(),
+        "--enable-row-security".to_string(),
         // format
         "--format".to_string(),
         "directory".to_string(),
@@ -361,10 +380,36 @@ async fn run_dump_restore(
         "--verbose".to_string(),
     ];
 
+    let mut pg_dump_args = vec![
+        // this makes sure any unsupported extensions are not included in the dump
+        // even if we don't specify supported extensions explicitly
+        "--extension".to_string(),
+        "plpgsql".to_string(),
+    ];
+
+    // if no schemas are specified, try to import all schemas
+    if !schemas.is_empty() {
+        // always include public schema objects
+        // but never create the schema itself
+        // it already exists in any pg cluster by default
+        pg_dump_args.push("--schema-no-create".to_string());
+        pg_dump_args.push("public".to_string());
+        for schema in &schemas {
+            pg_dump_args.push("--schema".to_string());
+            pg_dump_args.push(schema.clone());
+        }
+    }
+
+    for extension in &extensions {
+        pg_dump_args.push("--extension".to_string());
+        pg_dump_args.push(extension.clone());
+    }
+
     info!("dump into the working directory");
     {
         let mut pg_dump = tokio::process::Command::new(pg_bin_dir.join("pg_dump"))
             .args(&common_args)
+            .args(&pg_dump_args)
             .arg("-f")
             .arg(&dumpdir)
             .arg("--no-sync")
@@ -455,6 +500,8 @@ async fn cmd_pgdata(
     maybe_s3_prefix: Option<s3_uri::S3Uri>,
     maybe_spec: Option<Spec>,
     source_connection_string: Option<String>,
+    schemas: Vec<String>,
+    extensions: Vec<String>,
     interactive: bool,
     pg_port: u16,
     workdir: Utf8PathBuf,
@@ -470,19 +517,25 @@ async fn cmd_pgdata(
         bail!("only one of spec or source_connection_string can be provided");
     }
 
-    let source_connection_string = if let Some(spec) = maybe_spec {
+    let (source_connection_string, schemas, extensions) = if let Some(spec) = maybe_spec {
         match spec.encryption_secret {
             EncryptionSecret::KMS { key_id } => {
-                decode_connstring(
+                let schemas = spec.schemas.unwrap_or(vec![]);
+                let extensions = spec.extensions.unwrap_or(vec![]);
+
+                let source = decode_connstring(
                     kms_client.as_ref().unwrap(),
                     &key_id,
                     spec.source_connstring_ciphertext_base64,
                 )
-                .await?
+                .await
+                .context("decrypt source connection string")?;
+
+                (source, schemas, extensions)
             }
         }
     } else {
-        source_connection_string.unwrap()
+        (source_connection_string.unwrap(), schemas, extensions)
     };
 
     let superuser = "cloud_admin";
@@ -504,6 +557,8 @@ async fn cmd_pgdata(
         pg_lib_dir,
         source_connection_string,
         destination_connstring,
+        schemas,
+        extensions,
     )
     .await?;
 
@@ -546,18 +601,26 @@ async fn cmd_pgdata(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_dumprestore(
     kms_client: Option<aws_sdk_kms::Client>,
     maybe_spec: Option<Spec>,
     source_connection_string: Option<String>,
     destination_connection_string: Option<String>,
+    schemas: Vec<String>,
+    extensions: Vec<String>,
     workdir: Utf8PathBuf,
     pg_bin_dir: Utf8PathBuf,
     pg_lib_dir: Utf8PathBuf,
 ) -> Result<(), anyhow::Error> {
-    let (source_connstring, destination_connstring) = if let Some(spec) = maybe_spec {
+    let (source_connstring, destination_connstring, schemas, extensions) = if let Some(spec) =
+        maybe_spec
+    {
         match spec.encryption_secret {
             EncryptionSecret::KMS { key_id } => {
+                let schemas = spec.schemas.unwrap_or(vec![]);
+                let extensions = spec.extensions.unwrap_or(vec![]);
+
                 let source = decode_connstring(
                     kms_client.as_ref().unwrap(),
                     &key_id,
@@ -578,18 +641,17 @@ async fn cmd_dumprestore(
                     );
                 };
 
-                (source, dest)
+                (source, dest, schemas, extensions)
             }
         }
     } else {
-        (
-            source_connection_string.unwrap(),
-            if let Some(val) = destination_connection_string {
-                val
-            } else {
-                bail!("destination connection string must be provided for dump_restore command");
-            },
-        )
+        let dest = if let Some(val) = destination_connection_string {
+            val
+        } else {
+            bail!("destination connection string must be provided for dump_restore command");
+        };
+
+        (source_connection_string.unwrap(), dest, schemas, extensions)
     };
 
     run_dump_restore(
@@ -598,6 +660,8 @@ async fn cmd_dumprestore(
         pg_lib_dir,
         source_connstring,
         destination_connstring,
+        schemas,
+        extensions,
     )
     .await
 }
@@ -679,6 +743,8 @@ pub(crate) async fn main() -> anyhow::Result<()> {
                 pg_port,
                 num_cpus,
                 memory_mb,
+                schema,
+                extension,
             } => {
                 cmd_pgdata(
                     s3_client.as_ref(),
@@ -686,6 +752,8 @@ pub(crate) async fn main() -> anyhow::Result<()> {
                     args.s3_prefix.clone(),
                     spec,
                     source_connection_string,
+                    schema,
+                    extension,
                     interactive,
                     pg_port,
                     args.working_directory.clone(),
@@ -699,12 +767,16 @@ pub(crate) async fn main() -> anyhow::Result<()> {
             Command::DumpRestore {
                 source_connection_string,
                 destination_connection_string,
+                schema,
+                extension,
             } => {
                 cmd_dumprestore(
                     kms_client,
                     spec,
                     source_connection_string,
                     destination_connection_string,
+                    schema,
+                    extension,
                     args.working_directory.clone(),
                     args.pg_bin_dir,
                     args.pg_lib_dir,
