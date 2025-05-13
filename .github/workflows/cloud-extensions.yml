@@ -67,11 +67,16 @@ jobs:
       - name: Get the connection URI
         id: connect-uri
         run: |
-          URI=$(curl -f -X GET \
+          res=$(curl -w "%{http_code}" -X GET \
                 "https://console-stage.neon.build/api/v2/projects/${PROJECT_ID}/connection_uri?database_name=neondb&role_name=neondb_owner" \
                 -H 'accept: application/json' \
                 -H "Authorization: Bearer ${API_KEY}" | jq  -r .uri
           )
+          code=${res: -3}
+          if [[ ${code} -ge 400 ]]; then
+            echo ${res::-3}
+          fi
+          URI=$(echo ${res::-3} | jq .uri)
           echo uri=${URI} >> ${GITHUB_OUTPUT}
         env:
           PROJECT_ID: ${{ inputs.project_id }}
