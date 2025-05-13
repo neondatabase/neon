@@ -30,6 +30,8 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
         )
         primary_cur.execute("INSERT INTO t(payload) SELECT generate_series(1, 100)")
         primary_cur.execute("select pg_switch_wal()")
+        primary_cur.execute("show neon.safekeepers")
+        safekeepers = primary_cur.fetchall()[0][0]
 
     wait_replica_caughtup(primary, secondary)
 
@@ -73,11 +75,15 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
     secondary_conn = secondary.connect()
     secondary_cur = secondary_conn.cursor()
 
-    secondary_cur.execute("INSERT INTO t (payload) SELECT generate_series(101, 200)")
-    secondary_cur.fetchall()
+    secondary_cur.execute(f"alter system set neon.safekeepers='{safekeepers}'")
+    secondary_cur.execute("select pg_reload_conf()");
 
-    secondary_cur.execute("select count(*) from t")
-    assert secondary_cur.fetchone() == (200,)
+    new_primary_conn = secondary.connect()
+    new_primary_cur = new_primary_conn.cursor()
+    new_primary_cur.execute("INSERT INTO t (payload) SELECT generate_series(101, 200)")
+
+    new_primary_cur.execute("select count(*) from t")
+    assert new_primary_cur.fetchone() == (200,)
 
     secondary.stop(mode="immediate")
 
