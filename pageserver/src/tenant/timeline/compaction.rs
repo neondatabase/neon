@@ -3435,6 +3435,7 @@ impl Timeline {
 
         // Step 2: Produce images+deltas.
         let mut accumulated_values = Vec::new();
+        let mut accumulated_values_estimated_size = 0;
         let mut last_key: Option<Key> = None;
 
         // Only create image layers when there is no ancestor branches. TODO: create covering image layer
@@ -3611,10 +3612,11 @@ impl Timeline {
                 if last_key.is_none() {
                     last_key = Some(key);
                 }
+                accumulated_values_estimated_size += val.estimated_size();
                 accumulated_values.push((key, lsn, val));
 
-                if accumulated_values.len() >= 65536 {
-                    // Assume all of them are images, that would be 512MB of data in memory for a single key.
+                // Accumulated values should never exceed 512MB.
+                if accumulated_values_estimated_size >= 1024 * 512 {
                     return Err(CompactionError::Other(anyhow!(
                         "too many values for a single key, giving up gc-compaction"
                     )));
@@ -3651,6 +3653,7 @@ impl Timeline {
                     .map_err(CompactionError::Other)?;
                 accumulated_values.clear();
                 *last_key = key;
+                accumulated_values_estimated_size = val.estimated_size();
                 accumulated_values.push((key, lsn, val));
             }
         }

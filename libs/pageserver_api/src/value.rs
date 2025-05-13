@@ -36,6 +36,19 @@ impl Value {
             Value::WalRecord(rec) => rec.will_init(),
         }
     }
+
+    #[inline(always)]
+    pub fn estimated_size(&self) -> usize {
+        match self {
+            Value::Image(image) => image.len(),
+            Value::WalRecord(NeonWalRecord::AuxFile {
+                content: Some(content),
+                ..
+            }) => content.len(),
+            Value::WalRecord(NeonWalRecord::Postgres { rec, .. }) => rec.len(),
+            _ => 8192, /* use image size as the estimation */
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
