@@ -1038,21 +1038,23 @@ impl PageServerHandler {
                         tracing::info_span!(
                             parent: &parent_span,
                             "handle_get_page_request",
+                            request_id = %req.hdr.reqid,
                             rel = %req.rel,
                             blkno = %req.blkno,
                             req_lsn = %req.hdr.request_lsn,
-                            not_modified_since_lsn = %req.hdr.not_modified_since
+                            not_modified_since_lsn = %req.hdr.not_modified_since,
                         )
                     }};
                     ($shard_id:expr) => {{
                         tracing::info_span!(
                             parent: &parent_span,
                             "handle_get_page_request",
+                            request_id = %req.hdr.reqid,
                             rel = %req.rel,
                             blkno = %req.blkno,
                             req_lsn = %req.hdr.request_lsn,
                             not_modified_since_lsn = %req.hdr.not_modified_since,
-                            shard_id = %$shard_id
+                            shard_id = %$shard_id,
                         )
                     }};
                 }

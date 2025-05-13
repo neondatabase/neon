@@ -1179,7 +1179,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		blocknum += iterblocks;
 	}
 
-	communicator_prefetch_pump_state(false);
+	communicator_prefetch_pump_state();
 
 	return false;
 }
@@ -1218,7 +1218,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 
 	communicator_prefetch_register_bufferv(tag, NULL, 1, NULL);
 
-	communicator_prefetch_pump_state(false);
+	communicator_prefetch_pump_state();
 
 	return false;
 }
@@ -1262,7 +1262,7 @@ neon_writeback(SMgrRelation reln, ForkNumber forknum,
 	 */
 	neon_log(SmgrTrace, "writeback noop");
 
-	communicator_prefetch_pump_state(false);
+	communicator_prefetch_pump_state();
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -1315,7 +1315,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 	}
 
 	/* Try to read PS results if they are available */
-	communicator_prefetch_pump_state(false);
+	communicator_prefetch_pump_state();
 
 	neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum, blkno, &request_lsns, 1);
 
@@ -1339,7 +1339,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 	/*
 	 * Try to receive prefetch results once again just to make sure we don't leave the smgr code while the OS might still have buffered bytes.
 	 */
-	communicator_prefetch_pump_state(false);
+	communicator_prefetch_pump_state();
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (forkNum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
@@ -1449,7 +1449,7 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 				 nblocks, PG_IOV_MAX);
 
 	/* Try to read PS results if they are available */
-	communicator_prefetch_pump_state(false);
+	communicator_prefetch_pump_state();
 
 	neon_get_request_lsns(InfoFromSMgrRel(reln), forknum, blocknum,
 						  request_lsns, nblocks);
@@ -1480,7 +1480,7 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	/*
 	 * Try to receive prefetch results once again just to make sure we don't leave the smgr code while the OS might still have buffered bytes.
 	 */
-	communicator_prefetch_pump_state(false);
+	communicator_prefetch_pump_state();
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (forknum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
@@ -1665,7 +1665,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 
 	lfc_write(InfoFromSMgrRel(reln), forknum, blocknum, buffer);
 
-	communicator_prefetch_pump_state(false);
+	communicator_prefetch_pump_state();
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -1727,7 +1727,7 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 
 	lfc_writev(InfoFromSMgrRel(reln), forknum, blkno, buffers, nblocks);
 
-	communicator_prefetch_pump_state(false);
+	communicator_prefetch_pump_state();
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -1902,7 +1902,7 @@ neon_immedsync(SMgrRelation reln, ForkNumber forknum)
 
 	neon_log(SmgrTrace, "[NEON_SMGR] immedsync noop");
 
-	communicator_prefetch_pump_state(false);
+	communicator_prefetch_pump_state();
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -1989,8 +1989,14 @@ neon_start_unlogged_build(SMgrRelation reln)
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
+#if PG_MAJORVERSION_NUM >= 17
+	/*
+	 * We have to disable this check for pg14-16 because sorted build of GIST index requires
+	 * to perform unlogged build several times
+	 */
 	if (smgrnblocks(reln, MAIN_FORKNUM) != 0)
 		neon_log(ERROR, "cannot perform unlogged index build, index is not empty ");
+#endif
 
 	unlogged_build_rel = reln;
 	unlogged_build_phase = UNLOGGED_BUILD_PHASE_1;

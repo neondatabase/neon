@@ -423,8 +423,8 @@ async fn refresh_config_inner(
     if let Some(tls_config) = data.tls {
         let tls_config = tokio::task::spawn_blocking(move || {
             crate::tls::server_config::configure_tls(
-                &tls_config.key_path,
-                &tls_config.cert_path,
+                tls_config.key_path.as_ref(),
+                tls_config.cert_path.as_ref(),
                 None,
                 false,
             )

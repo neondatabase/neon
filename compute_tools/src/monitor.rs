@@ -424,10 +424,10 @@ pub fn launch_monitor(compute: &Arc<ComputeNode>) -> thread::JoinHandle<()> {
         experimental,
     };
 
-    let span = span!(Level::INFO, "compute_monitor");
     thread::Builder::new()
         .name("compute-monitor".into())
         .spawn(move || {
+            let span = span!(Level::INFO, "compute_monitor");
             let _enter = span.enter();
             monitor.run();
         })

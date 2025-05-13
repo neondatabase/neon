@@ -24,6 +24,7 @@ from fixtures.utils import (
     skip_in_debug_build,
     wait_until,
 )
+from fixtures.workload import Workload
 from mypy_boto3_kms import KMSClient
 from mypy_boto3_kms.type_defs import EncryptResponseTypeDef
 from mypy_boto3_s3 import S3Client
@@ -96,6 +97,10 @@ def test_pgdata_import_smoke(
     neon_env_builder.control_plane_hooks_api = (
         f"http://{cplane_mgmt_api_server.host}:{cplane_mgmt_api_server.port}/storage/api/v1/"
     )
+
+    if neon_env_builder.storage_controller_config is None:
+        neon_env_builder.storage_controller_config = {}
+    neon_env_builder.storage_controller_config["timelines_onto_safekeepers"] = True
 
     env = neon_env_builder.init_start()
 
@@ -286,34 +291,28 @@ def test_pgdata_import_smoke(
     #
     # validate that we can write
     #
-    rw_endpoint = env.endpoints.create_start(
-        branch_name=import_branch_name,
-        endpoint_id="rw",
-        tenant_id=tenant_id,
-        config_lines=ep_config,
-    )
-    rw_endpoint.safe_psql("create table othertable(values text)")
-    rw_lsn = Lsn(rw_endpoint.safe_psql_scalar("select pg_current_wal_flush_lsn()"))
+    workload = Workload(env, tenant_id, timeline_id, branch_name=import_branch_name)
+    workload.init()
+    workload.write_rows(64)
+    workload.validate()
 
-    # TODO: consider using `class Workload` here
-    # to do compaction and whatnot?
+    rw_lsn = Lsn(workload.endpoint().safe_psql_scalar("select pg_current_wal_flush_lsn()"))
 
     #
     # validate that we can branch (important use case)
     #
 
     # ... at the tip
-    _ = env.create_branch(
+    child_timeline_id = env.create_branch(
         new_branch_name="br-tip",
         ancestor_branch_name=import_branch_name,
         tenant_id=tenant_id,
         ancestor_start_lsn=rw_lsn,
     )
-    br_tip_endpoint = env.endpoints.create_start(
-        branch_name="br-tip", endpoint_id="br-tip-ro", tenant_id=tenant_id, config_lines=ep_config
-    )
-    validate_vanilla_equivalence(br_tip_endpoint)
-    br_tip_endpoint.safe_psql("select * from othertable")
+    child_workload = workload.branch(timeline_id=child_timeline_id, branch_name="br-tip")
+    child_workload.validate()
+
+    validate_vanilla_equivalence(child_workload.endpoint())
 
     # ... at the initdb lsn
     _ = env.create_branch(
@@ -330,7 +329,7 @@ def test_pgdata_import_smoke(
     )
     validate_vanilla_equivalence(br_initdb_endpoint)
     with pytest.raises(psycopg2.errors.UndefinedTable):
-        br_initdb_endpoint.safe_psql("select * from othertable")
+        br_initdb_endpoint.safe_psql(f"select * from {workload.table}")
 
 
 @run_only_on_default_postgres(reason="PG version is irrelevant here")
@@ -639,6 +638,55 @@ def test_fast_import_binary(
         res = conn.safe_psql("SELECT count(*) FROM foo;")
         log.info(f"Result: {res}")
         assert res[0][0] == 10
+
+
+def test_fast_import_event_triggers(
+    test_output_dir,
+    vanilla_pg: VanillaPostgres,
+    port_distributor: PortDistributor,
+    fast_import: FastImport,
+):
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("""
+        CREATE FUNCTION test_event_trigger_for_drops()
+                RETURNS event_trigger LANGUAGE plpgsql AS $$
+        DECLARE
+            obj record;
+        BEGIN
+            FOR obj IN SELECT * FROM pg_event_trigger_dropped_objects()
+            LOOP
+                RAISE NOTICE '% dropped object: % %.% %',
+                            tg_tag,
+                            obj.object_type,
+                            obj.schema_name,
+                            obj.object_name,
+                            obj.object_identity;
+            END LOOP;
+        END
+        $$;
+
+        CREATE EVENT TRIGGER test_event_trigger_for_drops
+        ON sql_drop
+        EXECUTE PROCEDURE test_event_trigger_for_drops();
+    """)
+
+    pg_port = port_distributor.get_port()
+    p = fast_import.run_pgdata(pg_port=pg_port, source_connection_string=vanilla_pg.connstr())
+    assert p.returncode == 0
+
+    vanilla_pg.stop()
+
+    pgbin = PgBin(test_output_dir, fast_import.pg_distrib_dir, fast_import.pg_version)
+    with VanillaPostgres(
+        fast_import.workdir / "pgdata", pgbin, pg_port, False
+    ) as new_pgdata_vanilla_pg:
+        new_pgdata_vanilla_pg.start()
+
+        # database name and user are hardcoded in fast_import binary, and they are different from normal vanilla postgres
+        conn = PgProtocol(dsn=f"postgresql://cloud_admin@localhost:{pg_port}/neondb")
+        res = conn.safe_psql("SELECT count(*) FROM pg_event_trigger;")
+        log.info(f"Result: {res}")
+        assert res[0][0] == 0, f"Neon does not support importing event triggers, got: {res[0][0]}"
 
 
 def test_fast_import_restore_to_connstring(

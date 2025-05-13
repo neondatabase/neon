@@ -1277,6 +1277,8 @@ impl Timeline {
             return Ok(CompactionOutcome::YieldForL0);
         }
 
+        let gc_cutoff = *self.applied_gc_cutoff_lsn.read();
+
         // 2. Repartition and create image layers if necessary
         match self
             .repartition(
@@ -1287,7 +1289,7 @@ impl Timeline {
             )
             .await
         {
-            Ok(((dense_partitioning, sparse_partitioning), lsn)) => {
+            Ok(((dense_partitioning, sparse_partitioning), lsn)) if lsn >= gc_cutoff => {
                 // Disables access_stats updates, so that the files we read remain candidates for eviction after we're done with them
                 let image_ctx = RequestContextBuilder::from(ctx)
                     .access_stats_behavior(AccessStatsBehavior::Skip)
@@ -1339,6 +1341,10 @@ impl Timeline {
                     );
                     return Ok(CompactionOutcome::YieldForL0);
                 }
+            }
+
+            Ok(_) => {
+                info!("skipping repartitioning due to image compaction LSN being below GC cutoff");
             }
 
             // Suppress errors when cancelled.
@@ -1994,7 +2000,13 @@ impl Timeline {
                 let l = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
                 deltas.push(l);
             }
-            MergeIterator::create(&deltas, &[], ctx)
+            MergeIterator::create_with_options(
+                &deltas,
+                &[],
+                ctx,
+                1024 * 8192, /* 8 MiB buffer per layer iterator */
+                1024,
+            )
         };
 
         // This iterator walks through all keys and is needed to calculate size used by each key
@@ -2198,8 +2210,7 @@ impl Timeline {
                     .as_mut()
                     .unwrap()
                     .put_value(key, lsn, value, ctx)
-                    .await
-                    .map_err(CompactionError::Other)?;
+                    .await?;
             } else {
                 let owner = self.shard_identity.get_shard_number(&key);
 
@@ -2828,7 +2839,7 @@ impl Timeline {
         Ok(())
     }
 
-    /// Check if the memory usage is within the limit.
+    /// Check to bail out of gc compaction early if it would use too much memory.
     async fn check_memory_usage(
         self: &Arc<Self>,
         layer_selection: &[Layer],
@@ -2841,7 +2852,8 @@ impl Timeline {
             let layer_desc = layer.layer_desc();
             if layer_desc.is_delta() {
                 // Delta layers at most have 1MB buffer; 3x to make it safe (there're deltas as large as 16KB).
-                // Multiply the layer size so that tests can pass.
+                // Scale it by target_layer_size_bytes so that tests can pass (some tests, e.g., `test_pageserver_gc_compaction_preempt
+                // use 3MB layer size and we need to account for that).
                 estimated_memory_usage_mb +=
                     3.0 * (layer_desc.file_size / target_layer_size_bytes) as f64;
                 num_delta_layers += 1;
@@ -3600,6 +3612,13 @@ impl Timeline {
                     last_key = Some(key);
                 }
                 accumulated_values.push((key, lsn, val));
+
+                if accumulated_values.len() >= 65536 {
+                    // Assume all of them are images, that would be 512MB of data in memory for a single key.
+                    return Err(CompactionError::Other(anyhow!(
+                        "too many values for a single key, giving up gc-compaction"
+                    )));
+                }
             } else {
                 let last_key: &mut Key = last_key.as_mut().unwrap();
                 stat.on_unique_key_visited(); // TODO: adjust statistics for partial compaction

@@ -165,16 +165,17 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                                 .head_object(&path, &CancellationToken::new())
                                 .await;
 
-                            if response.is_err() {
+                            if let Err(e) = response {
                                 // Object is not present.
                                 let is_l0 = LayerMap::is_l0(layer.key_range(), layer.is_delta());
 
                                 let msg = format!(
-                                    "index_part.json contains a layer {}{} (shard {}) that is not present in remote storage (layer_is_l0: {})",
+                                    "index_part.json contains a layer {}{} (shard {}) that is not present in remote storage (layer_is_l0: {}) with error: {}",
                                     layer,
                                     metadata.generation.get_suffix(),
                                     metadata.shard,
                                     is_l0,
+                                    e,
                                 );
 
                                 if is_l0 || ignore_error {
@@ -354,6 +355,7 @@ pub(crate) async fn list_timeline_blobs(
     match res {
         ListTimelineBlobsResult::Ready(data) => Ok(data),
         ListTimelineBlobsResult::MissingIndexPart(_) => {
+            tracing::warn!("listing raced with removal of an index, retrying");
             // Retry if listing raced with removal of an index
             let data = list_timeline_blobs_impl(remote_client, id, root_target)
                 .await?
@@ -440,7 +442,7 @@ async fn list_timeline_blobs_impl(
     }
 
     if index_part_keys.is_empty() && s3_layers.is_empty() {
-        tracing::debug!("Timeline is empty: expected post-deletion state.");
+        tracing::info!("Timeline is empty: expected post-deletion state.");
         if initdb_archive {
             tracing::info!("Timeline is post deletion but initdb archive is still present.");
         }
