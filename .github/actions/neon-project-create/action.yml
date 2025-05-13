@@ -68,7 +68,7 @@ runs:
     - name: Create Neon Project
       id: create-neon-project
       # A shell without `set -x` to not to expose password/dsn in logs
-      shell: bash -euo pipefail {0}
+      shell: bash -exuo pipefail {0}
       run: |
         res=$(curl \
           "https://${API_HOST}/api/v2/projects" \
@@ -98,7 +98,9 @@ runs:
         fi
 
         # Mask password
+        set +x
         echo "::add-mask::$(echo $project | jq --raw-output '.roles[] | select(.name != "web_access") | .password')"
+        set -x
 
         dsn=$(echo $project | jq --raw-output '.connection_uris[0].connection_uri')
         echo "::add-mask::${dsn}"
