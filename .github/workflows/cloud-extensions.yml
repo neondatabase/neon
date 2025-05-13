@@ -13,7 +13,7 @@ on:
       project_id:
         description: 'Project region id. If not set, the default region will be used'
         required: false
-        default: 'yellow-haze-08667610'
+        default: 'curly-dew-86293917'
 
 defaults:
   run:
@@ -76,6 +76,7 @@ jobs:
           echo ${code}
           if [[ ${code} -ge 400 ]]; then
             echo ${res::-3}
+            exit 1
           fi
           URI=$(echo ${res::-3} | jq .uri)
           echo uri=${URI} >> ${GITHUB_OUTPUT}
