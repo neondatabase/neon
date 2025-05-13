@@ -46,6 +46,11 @@ impl Value {
                 ..
             }) => content.len(),
             Value::WalRecord(NeonWalRecord::Postgres { rec, .. }) => rec.len(),
+            Value::WalRecord(NeonWalRecord::ClogSetAborted { xids }) => xids.len() * 4,
+            Value::WalRecord(NeonWalRecord::ClogSetCommitted { xids, .. }) => xids.len() * 4,
+            Value::WalRecord(NeonWalRecord::MultixactMembersCreate { members, .. }) => {
+                members.len() * 8
+            }
             _ => 8192, /* use image size as the estimation */
         }
     }
