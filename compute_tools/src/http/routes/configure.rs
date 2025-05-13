@@ -116,7 +116,7 @@ pub(in crate::http) async fn check(
 // check an already parsed configuration
 fn check_config(pspec: &ParsedSpec) -> Result<bool, &'static str> {
     // at least one entry is expected in the safekeeper connstrings vector
-    if pspec.safekeeper_connstrings.len() < 1 {
+    if pspec.safekeeper_connstrings.is_empty() {
         return Err("safekeeper_connstrings is empty");
     }
 
