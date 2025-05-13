@@ -144,6 +144,7 @@ runs:
         # XXX
         # This is a workaround for the default endpoint settings, which currently do not allow some settings in the public API.
         # https://github.com/neondatabase/cloud/issues/27108
+        exit 0
         if [[ -n ${DEFAULT_ENDPOINT_SETTINGS} && ${DEFAULT_ENDPOINT_SETTINGS} != "{}" ]] ; then
           PROJECT_DATA=$(curl -X GET \
               "https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/projects/${project_id}" \
