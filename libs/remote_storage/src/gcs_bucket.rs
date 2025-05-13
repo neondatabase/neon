@@ -24,11 +24,12 @@ use http::Method;
 use http::StatusCode;
 use reqwest::{Client, header};
 use scopeguard::ScopeGuard;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::num::{NonZeroU32, ParseIntError};
 use std::pin::{Pin, pin};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -182,20 +183,6 @@ impl GCSBucket {
         version_id_marker: Option<String>,
     ) -> Result<GCSObject, DownloadError> {
         todo!();
-        //let mut list_versions_uri = format!(
-        //    "https://storage.googleapis.com/storage/v1/b/{}/o?prefix={}&maxResults={}",
-        //    self.bucket_name.clone(),
-        //    list_prefix,
-        //);
-
-        //// on ListingMode:
-        //// https://github.com/neondatabase/neon/blob/edc11253b65e12a10843711bd88ad277511396d7/libs/remote_storage/src/lib.rs#L158C1-L164C2
-        //if let ListingMode::WithDelimiter = mode {
-        //    list_uri.push_str(&format!(
-        //        "&delimiter={}",
-        //        REMOTE_STORAGE_PREFIX_SEPARATOR.to_string()
-        //    ));
-        //}
     }
 
     async fn list_versions_with_permit(
@@ -207,112 +194,6 @@ impl GCSBucket {
         cancel: &CancellationToken,
     ) -> Result<crate::VersionListing, DownloadError> {
         todo!();
-        //// get the passed prefix or if it is not set use prefix_in_bucket value
-        //let prefix = prefix
-        //    .map(|p| self.relative_path_to_gcs_object(p))
-        //    .or_else(|| self.prefix_in_bucket.clone());
-
-        //let warn_threshold = 3;
-        //let max_retries = 10;
-        //let is_permanent = |e: &_| matches!(e, DownloadError::Cancelled);
-
-        //let mut key_marker = None;
-        //let mut version_id_marker = None;
-        //let mut versions_and_deletes = Vec::new();
-
-        //loop {
-        //    let response = backoff::retry(
-        //        || async {
-        //            let mut request = self.list_object_versions(
-        //                prefix.clone(),
-        //                key_marker.clone(),
-        //                version_id_marker.clone(),
-        //            );
-
-        //            if let ListingMode::WithDelimiter = mode {
-        //                request = request.delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string());
-        //            }
-
-        //            let op = request.send();
-
-        //            tokio::select! {
-        //                res = op => res.map_err(|e| DownloadError::Other(e.into())),
-        //                _ = cancel.cancelled() => Err(DownloadError::Cancelled),
-        //            }
-        //        },
-        //        is_permanent,
-        //        warn_threshold,
-        //        max_retries,
-        //        "listing object versions",
-        //        cancel,
-        //    )
-        //    .await
-        //    .ok_or_else(|| DownloadError::Cancelled)
-        //    .and_then(|x| x)?;
-
-        //    tracing::trace!(
-        //        "  Got List response version_id_marker={:?}, key_marker={:?}",
-        //        response.version_id_marker,
-        //        response.key_marker
-        //    );
-        //    let versions = response
-        //        .versions
-        //        .unwrap_or_default()
-        //        .into_iter()
-        //        .map(|version| {
-        //            let key = version.key.expect("response does not contain a key");
-        //            let key = self.gcs_object_to_relative_path(&key);
-        //            let version_id = VersionId(version.version_id.expect("needing version id"));
-        //            let last_modified =
-        //                SystemTime::try_from(version.last_modified.expect("no last_modified"))?;
-        //            Ok(Version {
-        //                key,
-        //                last_modified,
-        //                kind: crate::VersionKind::Version(version_id),
-        //            })
-        //        });
-        //    let deletes = response
-        //        .delete_markers
-        //        .unwrap_or_default()
-        //        .into_iter()
-        //        .map(|version| {
-        //            let key = version.key.expect("response does not contain a key");
-        //            let key = self.gcs_object_to_relative_path(&key);
-        //            let last_modified =
-        //                SystemTime::try_from(version.last_modified.expect("no last_modified"))?;
-        //            Ok(Version {
-        //                key,
-        //                last_modified,
-        //                kind: crate::VersionKind::DeletionMarker,
-        //            })
-        //        });
-        //    itertools::process_results(versions.chain(deletes), |n_vds| {
-        //        versions_and_deletes.extend(n_vds)
-        //    })
-        //    .map_err(DownloadError::Other)?;
-        //    fn none_if_empty(v: Option<String>) -> Option<String> {
-        //        v.filter(|v| !v.is_empty())
-        //    }
-        //    version_id_marker = none_if_empty(response.next_version_id_marker);
-        //    key_marker = none_if_empty(response.next_key_marker);
-        //    if version_id_marker.is_none() {
-        //        // The final response is not supposed to be truncated
-        //        if response.is_truncated.unwrap_or_default() {
-        //            return Err(DownloadError::Other(anyhow::anyhow!(
-        //                "Received truncated ListObjectVersions response for prefix={prefix:?}"
-        //            )));
-        //        }
-        //        break;
-        //    }
-        //    if let Some(max_keys) = max_keys {
-        //        if versions_and_deletes.len() >= max_keys.get().try_into().unwrap() {
-        //            return Err(DownloadError::Other(anyhow::anyhow!("too many versions")));
-        //        }
-        //    }
-        //}
-        //Ok(VersionListing {
-        //    versions: versions_and_deletes,
-        //})
     }
 
     async fn put_object(
@@ -321,52 +202,88 @@ impl GCSBucket {
         fs_size: usize,
         to: &RemotePath,
         cancel: &CancellationToken,
+        metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()> {
-        // https://cloud.google.com/storage/docs/xml-api/reference-headers#chunked
-        let mut headers = header::HeaderMap::new();
-        headers.insert(
-            header::TRANSFER_ENCODING,
-            header::HeaderValue::from_static("chunked"),
+        let kind = RequestKind::Put;
+        let _permit = self.permit(kind, cancel).await?;
+        let started_at = start_measuring_requests(kind);
+
+        let encoded_path: String =
+            url::form_urlencoded::byte_serialize(self.relative_path_to_gcs_object(to).as_bytes())
+                .collect();
+
+        let multipart_uri = format!(
+            "https://storage.googleapis.com/upload/storage/v1/b/{}/o?uploadType=multipart",
+            self.bucket_name.clone()
         );
 
-        // TODO Check if we need type 'multipart/related' file to attach metadata like Neon's S3
-        // `.upload()` does.
-        // https://cloud.google.com/storage/docs/uploading-objects#uploading-an-object
-        let upload_uri = format!(
-            "https://storage.googleapis.com/upload/storage/v1/b/{}/o/?uploadType=media&name={}",
-            self.bucket_name.clone(),
-            self.relative_path_to_gcs_object(to).trim_start_matches("/")
+        metadata
+            .clone()
+            .as_mut()
+            .map(|m| m.0.entry("name".to_string()).or_insert(to.to_string()));
+
+        let metadata_body = serde_json::to_string(&metadata.map(|m| m.0))?;
+        let metadata_part = reqwest::multipart::Part::text(metadata_body)
+            .mime_str("application/json; charset=UTF-8")?;
+
+        let stream_body = reqwest::Body::wrap_stream(byte_stream);
+        let data_part = reqwest::multipart::Part::stream_with_length(stream_body, fs_size as u64)
+            .mime_str("application/octet-stream")?;
+
+        let mut form = reqwest::multipart::Form::new()
+            .part("metadata", metadata_part)
+            .part("bodystream", data_part);
+
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_str(&format!(
+                "multipart/related; boundary={}",
+                form.boundary()
+            ))?,
         );
 
         let upload = Client::new()
-            .post(upload_uri)
-            .body(reqwest::Body::wrap_stream(byte_stream))
-            .headers(headers)
+            .post(multipart_uri)
             .bearer_auth(self.token_provider.token(GCS_SCOPES).await?.as_str())
+            .multipart(form)
+            .headers(headers)
             .send();
 
-        // We await it in a race against the Tokio timeout
         let upload = tokio::time::timeout(self.timeout, upload);
+
         let res = tokio::select! {
             res = upload => res,
             _ = cancel.cancelled() => return Err(TimeoutOrCancel::Cancel.into()),
         };
 
+        if let Ok(inner) = &res {
+            let started_at = ScopeGuard::into_inner(started_at);
+            crate::metrics::BUCKET_METRICS
+                .req_seconds
+                .observe_elapsed(kind, inner, started_at);
+        }
         match res {
             Ok(Ok(res)) => {
                 if !res.status().is_success() {
                     match res.status() {
-                        StatusCode::NOT_FOUND => {
-                            return Err(anyhow::anyhow!("GCS error: not found \n\t {:?}", res));
-                        }
-                        _ => {
-                            return Err(anyhow::anyhow!(
-                                "GCS PUT response contained no response body \n\t {:?}",
-                                res
-                            ));
-                        }
+                        _ => Err(anyhow::anyhow!("GCS PUT error \n\t {:?}", res)),
                     }
                 } else {
+                    let body = res
+                        .text()
+                        .await
+                        .map_err(|e: reqwest::Error| DownloadError::Other(e.into()))?;
+
+                    let resp: GCSObject = serde_json::from_str(&body)
+                        .map_err(|e: serde_json::Error| DownloadError::Other(e.into()))?;
+
+                    if !resp.size.is_some_and(|s| s == fs_size as i64) {
+                        return Err(anyhow::anyhow!(
+                            "Buy a lottery ticket. Boundary string from 'multipart/related' HTTP upload occurred in payload"
+                        ));
+                    };
+
                     Ok(())
                 }
             }
@@ -751,11 +668,18 @@ impl GCSBucket {
             url::form_urlencoded::byte_serialize(request.key.as_bytes()).collect();
 
         let stream_uri_mod = "alt=media";
+        // See: https://cloud.google.com/storage/docs/streaming-downloads#stream_a_download
+        // REST APIs > JSON API > 1st bullet  point
+        let generation = resp
+            .generation
+            .expect("object did not contain generation number");
+        let generation_mod = format!("generation={generation}");
         let stream_uri = format!(
-            "https://storage.googleapis.com/storage/v1/b/{}/o/{}?{}",
+            "https://storage.googleapis.com/storage/v1/b/{}/o/{}?{}&{}",
             self.bucket_name.clone(),
             encoded_path,
-            stream_uri_mod
+            stream_uri_mod,
+            generation_mod,
         );
 
         let mut req = Client::new()
@@ -785,7 +709,7 @@ impl GCSBucket {
                         StatusCode::NOT_FOUND => return Err(DownloadError::NotFound),
                         _ => {
                             return Err(DownloadError::Other(anyhow::anyhow!(
-                                "GCS GET resposne contained no response body"
+                                "GCS GET response contained no response body"
                             )));
                         }
                     }
@@ -1002,7 +926,7 @@ impl RemoteStorage for GCSBucket {
 
         let started_at = start_measuring_requests(kind);
 
-        let upload = self.put_object(from, from_size_bytes, to, cancel);
+        let upload = self.put_object(from, from_size_bytes, to, cancel, metadata);
 
         let upload = tokio::time::timeout(self.timeout, upload);
 
@@ -1021,7 +945,10 @@ impl RemoteStorage for GCSBucket {
 
         match res {
             Ok(Ok(_put)) => Ok(()),
-            Ok(Err(sdk)) => Err(sdk.into()),
+            Ok(Err(sdk)) => {
+                println!("{:?}", sdk);
+                Err(sdk.into())
+            }
             Err(_timeout) => Err(TimeoutOrCancel::Timeout.into()),
         }
     }
@@ -1166,17 +1093,30 @@ pub struct GCSListResponse {
     pub prefixes: Option<Vec<String>>,
 }
 
+fn de_from_str<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = Option::<String>::deserialize(deserializer)?;
+    match s {
+        Some(s) => i64::from_str(&s).map(Some).map_err(de::Error::custom),
+        None => Ok(None),
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "snake_case")]
 pub struct GCSObject {
     pub name: String,
     pub bucket: String,
-    pub generation: String,
+    #[serde(deserialize_with = "de_from_str")]
+    pub generation: Option<i64>,
     pub metageneration: String,
     #[serde(rename = "contentType")]
     pub content_type: Option<String>,
     #[serde(rename = "storageClass")]
     pub storage_class: String,
+    #[serde(deserialize_with = "de_from_str")]
     pub size: Option<i64>,
     #[serde(rename = "md5Hash")]
     pub md5_hash: Option<String>,
@@ -1200,55 +1140,5 @@ impl GCSListResponse {
     }
     pub fn common_prefixes(&self) -> &[String] {
         self.prefixes.as_deref().unwrap_or_default()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-    use gcp_auth;
-    use std::num::NonZero;
-    use std::pin::pin;
-    use std::sync::Arc;
-
-    const BUFFER_SIZE: usize = 32 * 1024;
-
-    // TODO what does Neon want here for integration tests?
-    const BUCKET: &str = "https://storage.googleapis.com/storage/v1/b/my-test-bucket";
-
-    #[tokio::test]
-    async fn list_returns_keys_from_bucket() {
-        todo!();
-        //let provider = gcp_auth::provider().await.unwrap();
-        //let gcs = GCSBucket {
-        //    token_provider: Arc::clone(&provider),
-        //    bucket_name: BUCKET.to_string(),
-        //    prefix_in_bucket: None,
-        //    max_keys_per_list_response: Some(100),
-        //    concurrency_limiter: ConcurrencyLimiter::new(100),
-        //    timeout: std::time::Duration::from_secs(120),
-        //};
-
-        //let cancel = CancellationToken::new();
-        //let remote_prefix = "box/tiff/2023/TN".to_string();
-        //let max_keys: u32 = 100;
-        //let mut stream = pin!(gcs.list_streaming(Some(remote_prefix), NonZero::new(max_keys)));
-        //let mut combined = stream
-        //    .next()
-        //    .await
-        //    .expect("At least one item required")
-        //    .unwrap();
-        //while let Some(list) = stream.next().await {
-        //    let list = list.unwrap();
-        //    combined.keys.extend(list.keys.into_iter());
-        //    combined.prefixes.extend_from_slice(&list.prefixes);
-        //}
-
-        //for key in combined.keys.iter() {
-        //    println!("Item: {} -- {:?}", key.key, key.last_modified);
-        //}
-
-        //assert_ne!(0, combined.keys.len());
     }
 }

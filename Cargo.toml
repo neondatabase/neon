@@ -41,6 +41,7 @@ members = [
     "libs/proxy/postgres-types2",
     "libs/proxy/tokio-postgres2",
     "endpoint_storage",
+    "ctrl_plane_local",
 ]
 
 [workspace.package]

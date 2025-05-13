@@ -47,7 +47,7 @@ pub use self::gcs_bucket::GCSBucket;
 pub use self::local_fs::LocalFs;
 pub use self::s3_bucket::S3Bucket;
 pub use self::simulate_failures::UnreliableWrapper;
-pub use crate::config::{AzureConfig, RemoteStorageConfig, RemoteStorageKind, S3Config};
+pub use crate::config::{AzureConfig, GCSConfig, RemoteStorageConfig, RemoteStorageKind, S3Config};
 
 /// Default concurrency limit for S3 operations
 ///
