@@ -639,23 +639,15 @@ impl Default for ConfigToml {
             tenant_config: TenantConfigToml::default(),
             no_sync: None,
             wal_receiver_protocol: DEFAULT_WAL_RECEIVER_PROTOCOL,
-            page_service_pipelining: if !cfg!(test) {
-                PageServicePipeliningConfig::Serial
-            } else {
-                // Do not turn this into the default until scattered reads have been
-                // validated and rolled-out fully.
-                PageServicePipeliningConfig::Pipelined(PageServicePipeliningConfigPipelined {
+            page_service_pipelining: PageServicePipeliningConfig::Pipelined(
+                PageServicePipeliningConfigPipelined {
                     max_batch_size: NonZeroUsize::new(32).unwrap(),
                     execution: PageServiceProtocolPipelinedExecutionStrategy::ConcurrentFutures,
                     batching: PageServiceProtocolPipelinedBatchingStrategy::ScatteredLsn,
-                })
-            },
-            get_vectored_concurrent_io: if !cfg!(test) {
-                GetVectoredConcurrentIo::Sequential
-            } else {
-                GetVectoredConcurrentIo::SidecarTask
-            },
-            enable_read_path_debugging: if cfg!(test) || cfg!(feature = "testing") {
+                },
+            ),
+            get_vectored_concurrent_io: GetVectoredConcurrentIo::SidecarTask,
+            enable_read_path_debugging: if cfg!(feature = "testing") {
                 Some(true)
             } else {
                 None
