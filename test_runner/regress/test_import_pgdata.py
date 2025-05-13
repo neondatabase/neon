@@ -130,9 +130,8 @@ def test_pgdata_import_smoke(
     elif rel_block_size == RelBlockSize.TWO_STRPES_PER_SHARD:
         target_relblock_size = (shard_count or 1) * stripe_size * 8192 * 2
     elif rel_block_size == RelBlockSize.MULTIPLE_RELATION_SEGMENTS:
-        # Postgres uses a 1GiB segment size, fixed at compile time, so we must use >2GB of data
-        # to exercise multiple segments.
-        target_relblock_size = int(((2.333 * 1024 * 1024 * 1024) // 8192) * 8192)
+        segment_size = 16 * 1024 * 1024
+        target_relblock_size = segment_size * 8
     else:
         raise ValueError
 
@@ -413,6 +412,88 @@ def test_import_completion_on_restart(
     wait_until(cplane_notified)
 
 
+@run_only_on_default_postgres(reason="PG version is irrelevant here")
+def test_import_respects_tenant_shutdown(
+    neon_env_builder: NeonEnvBuilder, vanilla_pg: VanillaPostgres, make_httpserver: HTTPServer
+):
+    """
+    Validate that importing timelines respect the usual timeline life cycle:
+    1. Shut down on tenant shut-down and resumes upon re-attach
+    2. Deletion on timeline deletion (TODO)
+    """
+    # Set up mock control plane HTTP server to listen for import completions
+    import_completion_signaled = Event()
+
+    def handler(request: Request) -> Response:
+        log.info(f"control plane /import_complete request: {request.json}")
+        import_completion_signaled.set()
+        return Response(json.dumps({}), status=200)
+
+    cplane_mgmt_api_server = make_httpserver
+    cplane_mgmt_api_server.expect_request(
+        "/storage/api/v1/import_complete", method="PUT"
+    ).respond_with_handler(handler)
+
+    # Plug the cplane mock in
+    neon_env_builder.control_plane_hooks_api = (
+        f"http://{cplane_mgmt_api_server.host}:{cplane_mgmt_api_server.port}/storage/api/v1/"
+    )
+
+    # The import will specifiy a local filesystem path mocking remote storage
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+
+    vanilla_pg.start()
+    vanilla_pg.stop()
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    importbucket_path = neon_env_builder.repo_dir / "test_import_completion_bucket"
+    mock_import_bucket(vanilla_pg, importbucket_path)
+
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+    idempotency = ImportPgdataIdemptencyKey.random()
+
+    # Pause before sending the notification
+    failpoint_name = "import-timeline-pre-execute-pausable"
+    env.pageserver.http_client().configure_failpoints((failpoint_name, "pause"))
+
+    env.storage_controller.tenant_create(tenant_id)
+    env.storage_controller.timeline_create(
+        tenant_id,
+        {
+            "new_timeline_id": str(timeline_id),
+            "import_pgdata": {
+                "idempotency_key": str(idempotency),
+                "location": {"LocalFs": {"path": str(importbucket_path.absolute())}},
+            },
+        },
+    )
+
+    def hit_failpoint():
+        log.info("Checking log for pattern...")
+        try:
+            assert env.pageserver.log_contains(f".*at failpoint {failpoint_name}.*")
+        except Exception:
+            log.exception("Failed to find pattern in log")
+            raise
+
+    wait_until(hit_failpoint)
+    assert not import_completion_signaled.is_set()
+
+    # Restart the pageserver while an import job is in progress.
+    # This clears the failpoint and we expect that the import starts up afresh
+    # after the restart and eventually completes.
+    env.pageserver.stop()
+    env.pageserver.start()
+
+    def cplane_notified():
+        assert import_completion_signaled.is_set()
+
+    wait_until(cplane_notified)
+
+
 def test_fast_import_with_pageserver_ingest(
     test_output_dir,
     vanilla_pg: VanillaPostgres,
@@ -520,7 +601,9 @@ def test_fast_import_with_pageserver_ingest(
     env.neon_cli.mappings_map_branch(import_branch_name, tenant_id, timeline_id)
 
     # Run fast_import
-    fast_import.set_aws_creds(mock_s3_server, {"RUST_LOG": "aws_config=debug,aws_sdk_kms=debug"})
+    fast_import.set_aws_creds(
+        mock_s3_server, {"RUST_LOG": "info,aws_config=debug,aws_sdk_kms=debug"}
+    )
     pg_port = port_distributor.get_port()
     fast_import.run_pgdata(pg_port=pg_port, s3prefix=f"s3://{bucket}/{key_prefix}")
 

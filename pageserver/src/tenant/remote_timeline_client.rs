@@ -949,6 +949,35 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    /// If the `import_pgdata` field marks the timeline as having an import in progress,
+    /// launch an index-file upload operation that transitions it to done in the background
+    pub(crate) fn schedule_index_upload_for_import_pgdata_finalize(
+        self: &Arc<Self>,
+    ) -> anyhow::Result<()> {
+        use import_pgdata::index_part_format;
+
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+        let to_update = match &upload_queue.dirty.import_pgdata {
+            Some(import) if !import.is_done() => Some(import),
+            Some(_) | None => None,
+        };
+
+        if let Some(old) = to_update {
+            let new =
+                index_part_format::Root::V1(index_part_format::V1::Done(index_part_format::Done {
+                    idempotency_key: old.idempotency_key().clone(),
+                    started_at: *old.started_at(),
+                    finished_at: chrono::Utc::now().naive_utc(),
+                }));
+
+            upload_queue.dirty.import_pgdata = Some(new);
+            self.schedule_index_upload(upload_queue);
+        }
+
+        Ok(())
+    }
+
     /// Launch an index-file upload operation in the background, setting `gc_compaction_state` field.
     pub(crate) fn schedule_index_upload_for_gc_compaction_state_update(
         self: &Arc<Self>,

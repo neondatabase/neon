@@ -53,6 +53,7 @@ use tokio_stream::StreamExt;
 use tracing::{debug, instrument};
 use utils::bin_ser::BeSer;
 use utils::lsn::Lsn;
+use utils::pausable_failpoint;
 
 use super::Timeline;
 use super::importbucket_client::{ControlFile, RemoteStorageWrapper};
@@ -79,6 +80,9 @@ pub async fn run(
 
     let import_config = &timeline.conf.timeline_import_config;
     let plan = planner.plan(import_config).await?;
+
+    pausable_failpoint!("import-timeline-pre-execute-pausable");
+
     plan.execute(timeline, import_config, ctx).await
 }
 
