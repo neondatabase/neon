@@ -10,10 +10,10 @@ on:
     - cron:  '45 1 * * *' # run once a day, timezone is utc
   workflow_dispatch: # adds ability to run this manually
     inputs:
-      region_id:
+      project_id:
         description: 'Project region id. If not set, the default region will be used'
         required: false
-        default: 'aws-us-east-2'
+        default: 'yellow-haze-08667610'
 
 defaults:
   run:
@@ -63,33 +63,24 @@ jobs:
           LIBS=timescaledb:rag_bge_small_en_v15,rag_jina_reranker_v1_tiny_en:$ULID
           settings=$(jq -c -n --arg libs $LIBS '{preload_libraries:{use_defaults:false,enabled_libraries:($libs| split(":"))}, compute_flags:{target_architecture:"x64"}}')
           echo settings=$settings >> $GITHUB_OUTPUT
-          
-      - name: Create Neon Project
-        id: create-neon-project
-        uses: ./.github/actions/neon-project-create
-        with:
-          region_id: ${{ inputs.region_id || 'aws-us-east-2' }}
-          postgres_version: ${{ matrix.pg-version }}
-          project_settings: ${{ steps.project-settings.outputs.settings }}
-          # We need these settings to get the expected output results.
-          # We cannot use the environment variables e.g. PGTZ due to
-          # https://github.com/neondatabase/neon/issues/1287
-          default_endpoint_settings: >
-            {
-              "pg_settings": {
-                "DateStyle": "Postgres,MDY",
-                "TimeZone": "America/Los_Angeles",
-                "compute_query_id": "off",
-                "neon.allow_unstable_extensions": "on"
-              }
-            }
-          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-          admin_api_key: ${{ secrets.NEON_STAGING_ADMIN_API_KEY }}
 
+      - name: Get the connection URI
+        id: connect-uri
+        run: |
+          URI=$(curl -X GET \
+                "https://console-stage.neon.build/api/v2/projects/${PROJECT_ID}/connection_uri?database_name=neondb&role_name=neondb_owner" \
+                -H 'accept: application/json' \
+                -H "Authorization: Bearer ${API_KEY}" | jq  -r .uri
+          )
+          echo uri=${URI} >> ${GITHUB_OUTPUT}
+        env:
+          PROJECT_ID: ${{ inputs.project_id }}
+          API_KEY: ${{ secrets.NEON_STAGING_API_KEY }}
+          
       - name: Run the regression tests
         run: /run-tests.sh -r /ext-src
         env:
-          BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
+          BENCHMARK_CONNSTR: ${{ steps.connect-uri.outputs.uri }}
           SKIP: "hll-src,hypopg-src,ip4r-src,pg_cron-src,pg_graphql-src,pg_hint_plan-src,pg_ivm-src,pg_jsonschema-src,pg_repack-src,pg_roaringbitmap-src,pg_semver-src,pg_session_jwt-src,pg_tiktoken-src,pg_uuidv7-src,pgjwt-src,pgrag-src,pgtap-src,pgvector-src,pgx_ulid-src,plv8-src,postgresql-unit-src,prefix-src,rag_bge_small_en_v15-src,rag_jina_reranker_v1_tiny_en-src,rum-src,plpgsql_check-src"
 
       - name: Delete Neon Project
