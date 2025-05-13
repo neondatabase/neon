@@ -67,7 +67,7 @@ jobs:
       - name: Get the connection URI
         id: connect-uri
         run: |
-          URI=$(curl -X GET \
+          URI=$(curl -f -X GET \
                 "https://console-stage.neon.build/api/v2/projects/${PROJECT_ID}/connection_uri?database_name=neondb&role_name=neondb_owner" \
                 -H 'accept: application/json' \
                 -H "Authorization: Bearer ${API_KEY}" | jq  -r .uri
