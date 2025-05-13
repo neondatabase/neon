@@ -85,3 +85,39 @@ pub(in crate::http) async fn configure(
 
     JsonResponse::success(StatusCode::OK, body)
 }
+
+// Accept spec in JSON format and validate the configuration
+// At the moment the validation is limited to the connstrings vector
+// for the safekeeper, and we only check that we have at least one entry
+// in there and no duplicate values
+pub(in crate::http) async fn check(
+    State(_compute): State<Arc<ComputeNode>>,
+    request: Json<ConfigurationRequest>,
+) -> Response {
+    let pspec = match ParsedSpec::try_from(request.spec.clone()) {
+        Ok(p) => p,
+        Err(e) => return JsonResponse::error(StatusCode::BAD_REQUEST, e),
+    };
+
+    // at least one entry is expected in the safekeeper connstrings vector
+    if pspec.safekeeper_connstrings.len() < 1 {
+        let err = "safekeeper_connstrings is empty";
+        return JsonResponse::error(StatusCode::BAD_REQUEST, err);
+    }
+
+    // check for unicity of the connection strings
+    let mut connstrings = pspec.safekeeper_connstrings.clone();
+
+    connstrings.sort();
+    let previous = &connstrings[0];
+
+    for current in connstrings.iter().skip(1) {
+        // duplicate entry
+        if current == previous {
+            let err = "duplicate entry in safekeeper_connstrings";
+            return JsonResponse::error(StatusCode::BAD_REQUEST, err);
+        }
+    }
+
+    JsonResponse::success(StatusCode::OK, true)
+}
