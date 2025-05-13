@@ -27,6 +27,12 @@ pub(in crate::http) async fn configure(
         Err(e) => return JsonResponse::error(StatusCode::BAD_REQUEST, e),
     };
 
+    // Now validate the given configuration (safekeeper_connstrings)
+    match check_config(&pspec) {
+        Ok(b) => b,
+        Err(e) => return JsonResponse::error(StatusCode::BAD_REQUEST, e),
+    };
+
     // XXX: wrap state update under lock in a code block. Otherwise, we will try
     // to `Send` `mut state` into the spawned thread bellow, which will cause
     // the following rustc error:
@@ -99,10 +105,19 @@ pub(in crate::http) async fn check(
         Err(e) => return JsonResponse::error(StatusCode::BAD_REQUEST, e),
     };
 
+    match check_config(&pspec) {
+        Ok(b) => b,
+        Err(e) => return JsonResponse::error(StatusCode::BAD_REQUEST, e),
+    };
+
+    JsonResponse::success(StatusCode::OK, true)
+}
+
+// check an already parsed configuration
+fn check_config(pspec: &ParsedSpec) -> Result<bool, &'static str> {
     // at least one entry is expected in the safekeeper connstrings vector
     if pspec.safekeeper_connstrings.len() < 1 {
-        let err = "safekeeper_connstrings is empty";
-        return JsonResponse::error(StatusCode::BAD_REQUEST, err);
+        return Err("safekeeper_connstrings is empty");
     }
 
     // check for unicity of the connection strings
@@ -114,10 +129,9 @@ pub(in crate::http) async fn check(
     for current in connstrings.iter().skip(1) {
         // duplicate entry
         if current == previous {
-            let err = "duplicate entry in safekeeper_connstrings";
-            return JsonResponse::error(StatusCode::BAD_REQUEST, err);
+            return Err("duplicate entry in safekeeper_connstrings");
         }
     }
 
-    JsonResponse::success(StatusCode::OK, true)
+    Ok(true)
 }
