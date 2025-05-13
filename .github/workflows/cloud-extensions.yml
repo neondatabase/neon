@@ -73,6 +73,7 @@ jobs:
                 -H "Authorization: Bearer ${API_KEY}" | jq  -r .uri
           )
           code=${res: -3}
+          echo ${code}
           if [[ ${code} -ge 400 ]]; then
             echo ${res::-3}
           fi
