@@ -35,7 +35,7 @@ jobs:
       matrix:
         pg-version: [16, 17]
 
-    runs-on: [self-hosted, small]
+    runs-on: us-east-2
     container:
       # We use the neon-test-extensions image here as it contains the source code for the extensions.
       image: ghcr.io/neondatabase/neon-test-extensions-v${{ matrix.pg-version }}:14928114423
