@@ -3616,7 +3616,7 @@ impl Timeline {
                 accumulated_values.push((key, lsn, val));
 
                 // Accumulated values should never exceed 512MB.
-                if accumulated_values_estimated_size >= 1024 * 512 {
+                if accumulated_values_estimated_size >= 1024 * 1024 * 512 {
                     return Err(CompactionError::Other(anyhow!(
                         "too many values for a single key: {} for key {}",
                         accumulated_values_estimated_size,
