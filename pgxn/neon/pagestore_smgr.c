@@ -1281,75 +1281,24 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	communicator_read_at_lsnv(rinfo, forkNum, blkno, &request_lsns, &buffer, 1, NULL);
 }
 
-#if PG_MAJORVERSION_NUM < 17
-/*
- *	neon_read() -- Read the specified block from a relation.
- */
-#if PG_MAJORVERSION_NUM < 16
-static void
-neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, char *buffer)
-#else
-static void
-neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer)
-#endif
-{
-	neon_request_lsns request_lsns;
-	bits8		present;
-	void	   *bufferp;
-
-	switch (reln->smgr_relpersistence)
-	{
-		case 0:
-			neon_log(ERROR, "cannot call smgrread() on rel with unknown persistence");
-
-		case RELPERSISTENCE_PERMANENT:
-			break;
-
-		case RELPERSISTENCE_TEMP:
-		case RELPERSISTENCE_UNLOGGED:
-			mdread(reln, forkNum, blkno, buffer);
-			return;
-
-		default:
-			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
-	}
-
-	/* Try to read PS results if they are available */
-	communicator_prefetch_pump_state();
-
-	neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum, blkno, &request_lsns, 1);
-
-	present = 0;
-	bufferp = buffer;
-	if (communicator_prefetch_lookupv(InfoFromSMgrRel(reln), forkNum, blkno, &request_lsns, 1, &bufferp, &present))
-	{
-		/* Prefetch hit */
-		return;
-	}
-
-	/* Try to read from local file cache */
-	if (lfc_read(InfoFromSMgrRel(reln), forkNum, blkno, buffer))
-	{
-		MyNeonCounters->file_cache_hits_total++;
-		return;
-	}
-
-	neon_read_at_lsn(InfoFromSMgrRel(reln), forkNum, blkno, request_lsns, buffer);
-
-	/*
-	 * Try to receive prefetch results once again just to make sure we don't leave the smgr code while the OS might still have buffered bytes.
-	 */
-	communicator_prefetch_pump_state();
-
 #ifdef DEBUG_COMPARE_LOCAL
+static void
+compare_with_local(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void* buffer, XLogRecPtr request_lsn)
+{
 	if (forkNum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
 	{
 		char		pageserver_masked[BLCKSZ];
 		PGIOAlignedBlock mdbuf;
 		PGIOAlignedBlock mdbuf_masked;
-		XLogRecPtr  request_lsn = request_lsns.request_lsn;
 
+#if PG_MAJORVERSION_NUM >= 17
+		{
+			void* mdbuffers[1] = { mdbuf.data };
+			mdreadv(reln, forkNum, blkno, mdbuffers, 1);
+		}
+#else
 		mdread(reln, forkNum, blkno, mdbuf.data);
+#endif
 
 		memcpy(pageserver_masked, buffer, BLCKSZ);
 		memcpy(mdbuf_masked.data, mdbuf.data, BLCKSZ);
@@ -1413,11 +1362,105 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 			}
 		}
 	}
+}
+#endif
+
+
+#if PG_MAJORVERSION_NUM < 17
+
+/*
+ *	neon_read() -- Read the specified block from a relation.
+ */
+#if PG_MAJORVERSION_NUM < 16
+static void
+neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, char *buffer)
+#else
+static void
+neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer)
+#endif
+{
+	neon_request_lsns request_lsns;
+	bits8		present;
+	void	   *bufferp;
+
+	switch (reln->smgr_relpersistence)
+	{
+		case 0:
+			neon_log(ERROR, "cannot call smgrread() on rel with unknown persistence");
+
+		case RELPERSISTENCE_PERMANENT:
+			break;
+
+		case RELPERSISTENCE_TEMP:
+		case RELPERSISTENCE_UNLOGGED:
+			mdread(reln, forkNum, blkno, buffer);
+			return;
+
+		default:
+			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
+	}
+
+	/* Try to read PS results if they are available */
+	communicator_prefetch_pump_state();
+
+	neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum, blkno, &request_lsns, 1);
+
+	present = 0;
+	bufferp = buffer;
+	if (communicator_prefetch_lookupv(InfoFromSMgrRel(reln), forkNum, blkno, &request_lsns, 1, &bufferp, &present))
+	{
+		/* Prefetch hit */
+#ifdef DEBUG_COMPARE_LOCAL
+		compare_with_local(reln, forkNum, blkno, buffer, request_lsns.request_lsn);
+#else
+		return;
+#endif
+	}
+
+	/* Try to read from local file cache */
+	if (lfc_read(InfoFromSMgrRel(reln), forkNum, blkno, buffer))
+	{
+		MyNeonCounters->file_cache_hits_total++;
+#ifdef DEBUG_COMPARE_LOCAL
+		compare_with_local(reln, forkNum, blkno, buffer, request_lsns.request_lsn);
+#else
+		return;
+#endif
+	}
+
+	neon_read_at_lsn(InfoFromSMgrRel(reln), forkNum, blkno, request_lsns, buffer);
+
+	/*
+	 * Try to receive prefetch results once again just to make sure we don't leave the smgr code while the OS might still have buffered bytes.
+	 */
+	communicator_prefetch_pump_state();
+
+#ifdef DEBUG_COMPARE_LOCAL
+	compare_with_local(reln, forkNum, blkno, buffer, request_lsns.request_lsn);
 #endif
 }
 #endif /* PG_MAJORVERSION_NUM <= 16 */
 
 #if PG_MAJORVERSION_NUM >= 17
+
+#ifdef DEBUG_COMPARE_LOCAL
+static void
+compare_with_localv(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void** buffers, BlockNumber nblocks, neon_request_lsns* request_lsns, bits8* read_pages)
+{
+	if (forkNum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
+	{
+		for (BlockNumber i = 0; i < nblocks; i++)
+		{
+			if (BITMAP_ISSET(read_pages, i))
+			{
+				compare_with_local(reln, forkNum, blkno + i, buffers[i], request_lsns[i].request_lsn);
+			}
+		}
+	}
+}
+#endif
+
+
 static void
 neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		   void **buffers, BlockNumber nblocks)
@@ -1460,8 +1503,13 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 													blocknum, request_lsns, nblocks,
 													buffers, read_pages);
 
+#ifdef DEBUG_COMPARE_LOCAL
+	compare_with_localv(reln, forknum, blocknum, buffers, nblocks, request_lsns, read_pages);
+	memset(read_pages, 0, sizeof(read_pages));
+#else
 	if (prefetch_result == nblocks)
 		return;
+#endif
 
 	/* Try to read from local file cache */
 	lfc_result = lfc_readv_select(InfoFromSMgrRel(reln), forknum, blocknum, buffers,
@@ -1470,9 +1518,14 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	if (lfc_result > 0)
 		MyNeonCounters->file_cache_hits_total += lfc_result;
 
+#ifdef DEBUG_COMPARE_LOCAL
+	compare_with_localv(reln, forknum, blocknum, buffers, nblocks, request_lsns, read_pages);
+	memset(read_pages, 0, sizeof(read_pages));
+#else
 	/* Read all blocks from LFC, so we're done */
 	if (prefetch_result + lfc_result == nblocks)
 		return;
+#endif
 
 	communicator_read_at_lsnv(InfoFromSMgrRel(reln), forknum, blocknum, request_lsns,
 							  buffers, nblocks, read_pages);
@@ -1483,91 +1536,8 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	communicator_prefetch_pump_state();
 
 #ifdef DEBUG_COMPARE_LOCAL
-	if (forknum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
-	{
-		char		pageserver_masked[BLCKSZ];
-		PGIOAlignedBlock mdbuf;
-		PGIOAlignedBlock mdbuf_masked;
-		XLogRecPtr  request_lsn = request_lsns->request_lsn;
-
-		for (int i = 0; i < nblocks; i++)
-		{
-			BlockNumber blkno = blocknum + i;
-			if (!BITMAP_ISSET(read_pages, i))
-				continue;
-
-#if PG_MAJORVERSION_NUM >= 17
-			{
-				void* mdbuffers[1] = { mdbuf.data };
-				mdreadv(reln, forknum, blkno, mdbuffers, 1);
-			}
-#else
-			mdread(reln, forknum, blkno, mdbuf.data);
-#endif
-
-			memcpy(pageserver_masked, buffers[i], BLCKSZ);
-			memcpy(mdbuf_masked.data, mdbuf.data, BLCKSZ);
-
-			if (PageIsNew((Page) mdbuf.data))
-			{
-				if (!PageIsNew((Page) pageserver_masked))
-				{
-					neon_log(PANIC, "page is new in MD but not in Page Server at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n%s\n",
-						 blkno,
-						 RelFileInfoFmt(InfoFromSMgrRel(reln)),
-						 forknum,
-						 (uint32) (request_lsn >> 32), (uint32) request_lsn,
-						 hexdump_page(buffers[i]));
-				}
-			}
-			else if (PageIsNew((Page) buffers[i]))
-			{
-				neon_log(PANIC, "page is new in Page Server but not in MD at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n%s\n",
-					 blkno,
-					 RelFileInfoFmt(InfoFromSMgrRel(reln)),
-					 forknum,
-					 (uint32) (request_lsn >> 32), (uint32) request_lsn,
-					 hexdump_page(mdbuf.data));
-			}
-			else if (PageGetSpecialSize(mdbuf.data) == 0)
-			{
-				/* assume heap */
-				RmgrTable[RM_HEAP_ID].rm_mask(mdbuf_masked.data, blkno);
-				RmgrTable[RM_HEAP_ID].rm_mask(pageserver_masked, blkno);
-
-				if (memcmp(mdbuf_masked.data, pageserver_masked, BLCKSZ) != 0)
-				{
-					neon_log(PANIC, "heap buffers differ at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n------ MD ------\n%s\n------ Page Server ------\n%s\n",
-						 blkno,
-						 RelFileInfoFmt(InfoFromSMgrRel(reln)),
-						 forknum,
-						 (uint32) (request_lsn >> 32), (uint32) request_lsn,
-						 hexdump_page(mdbuf_masked.data),
-						 hexdump_page(pageserver_masked));
-				}
-			}
-			else if (PageGetSpecialSize(mdbuf.data) == MAXALIGN(sizeof(BTPageOpaqueData)))
-			{
-				if (((BTPageOpaqueData *) PageGetSpecialPointer(mdbuf.data))->btpo_cycleid < MAX_BT_CYCLE_ID)
-				{
-					/* assume btree */
-					RmgrTable[RM_BTREE_ID].rm_mask(mdbuf_masked.data, blkno);
-					RmgrTable[RM_BTREE_ID].rm_mask(pageserver_masked, blkno);
-	
-					if (memcmp(mdbuf_masked.data, pageserver_masked, BLCKSZ) != 0)
-					{
-						neon_log(PANIC, "btree buffers differ at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n------ MD ------\n%s\n------ Page Server ------\n%s\n",
-							 blkno,
-							 RelFileInfoFmt(InfoFromSMgrRel(reln)),
-							 forknum,
-							 (uint32) (request_lsn >> 32), (uint32) request_lsn,
-							 hexdump_page(mdbuf_masked.data),
-							 hexdump_page(pageserver_masked));
-					}
-				}
-			}
-		}
-	}
+	memset(read_pages, 0xFF, sizeof(read_pages));
+	compare_with_localv(reln, forknum, blocknum, buffers, nblocks, request_lsns, read_pages);
 #endif
 }
 #endif
