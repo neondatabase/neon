@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::error::Error as _;
+use std::time::Duration;
 
 use bytes::Bytes;
 use detach_ancestor::AncestorDetached;
@@ -824,10 +825,14 @@ impl Client {
         &self,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
+        activate_timeline_timeout: Duration,
     ) -> Result<TimelineInfo> {
         let uri = format!(
-            "{}/v1/tenant/{}/timeline/{}/activate_post_import",
-            self.mgmt_api_endpoint, tenant_shard_id, timeline_id,
+            "{}/v1/tenant/{}/timeline/{}/activate_post_import?timeline_activate_timeout_ms={}",
+            self.mgmt_api_endpoint,
+            tenant_shard_id,
+            timeline_id,
+            activate_timeline_timeout.as_millis()
         );
 
         self.request(Method::PUT, uri, ())

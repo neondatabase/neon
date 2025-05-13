@@ -4089,6 +4089,8 @@ impl Service {
         self: &Arc<Self>,
         import: &TimelineImport,
     ) -> Result<TimelineInfo, TimelineImportFinalizeError> {
+        const TIMELINE_ACTIVATE_TIMEOUT: Duration = Duration::from_millis(128);
+
         let mut shards_to_activate: HashSet<ShardIndex> =
             import.shard_statuses.0.keys().cloned().collect();
         let mut shard_zero_timeline_info = None;
@@ -4135,7 +4137,11 @@ impl Service {
                     targets,
                     |tenant_shard_id, client| async move {
                         client
-                            .activate_post_import(tenant_shard_id, import.timeline_id)
+                            .activate_post_import(
+                                tenant_shard_id,
+                                import.timeline_id,
+                                TIMELINE_ACTIVATE_TIMEOUT,
+                            )
                             .await
                     },
                     1,

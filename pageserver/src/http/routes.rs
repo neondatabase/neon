@@ -3512,6 +3512,10 @@ async fn activate_post_import_handler(
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    const DEFAULT_ACTIVATE_TIMEOUT: Duration = Duration::from_secs(1);
+    let activate_timeout = parse_query_param(&request, "timeline_activate_timeout_ms")?
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_ACTIVATE_TIMEOUT);
 
     let span = info_span!(
         "activate_post_import_handler",
@@ -3558,13 +3562,29 @@ async fn activate_post_import_handler(
             }
         }
 
-        // At this point the timeline should become eventually active.
-        // If the timeline is not active yet, then the caller will retry.
-        // TODO(vlad): if the tenant is broken, return a permananet error
-        let timeline = tenant.get_timeline(timeline_id, true)?;
+        let timeline = tenant.get_timeline(timeline_id, false)?;
 
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn)
             .with_scope_timeline(&timeline);
+
+        let result =
+            tokio::time::timeout(activate_timeout, timeline.wait_to_become_active(&ctx)).await;
+        match result {
+            Ok(Ok(())) => {
+                // fallthrough
+            }
+            // Timeline reached some other state that's not active
+            // TODO(vlad): if the tenant is broken, return a permananet error
+            Ok(Err(_timeline_state)) => {
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                    "Timeline activation failed"
+                )));
+            }
+            // Activation timed out
+            Err(_) => {
+                return Err(ApiError::Timeout("Timeline activation timed out".into()));
+            }
+        }
 
         let timeline_info = build_timeline_info(
             &timeline, false, // include_non_incremental_logical_size,
