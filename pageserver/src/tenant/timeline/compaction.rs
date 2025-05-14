@@ -3618,9 +3618,10 @@ impl Timeline {
                 // Accumulated values should never exceed 512MB.
                 if accumulated_values_estimated_size >= 1024 * 1024 * 512 {
                     return Err(CompactionError::Other(anyhow!(
-                        "too many values for a single key: {} for key {}",
+                        "too many values for a single key: {} for key {}, {} items",
                         accumulated_values_estimated_size,
-                        key
+                        key,
+                        accumulated_values.len()
                     )));
                 }
             } else {
