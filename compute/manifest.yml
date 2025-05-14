@@ -24,4 +24,19 @@ pg_settings:
     log_temp_files: "1048576"
     log_error_verbosity: "terse"
     log_min_error_statement: "panic"
-    neon.unstable_extensions: "rag,rag_bge_small_en_v15,rag_jina_reranker_v1_tiny_en,pg_mooncake,anon" 
+    neon.unstable_extensions: "rag,rag_bge_small_en_v15,rag_jina_reranker_v1_tiny_en,pg_mooncake,anon"
+    neon.protocol_version: "3"
+    maintenance_io_concurrency: "100"
+
+  replica:
+    hot_standby: "on"
+
+  per_version:
+    17:
+      common:
+        io_combine_limit: "1"
+        recovery_prefetch: "off"
+    16:
+        recovery_prefetch: "off"
+    15:
+        recovery_prefetch: "off"
