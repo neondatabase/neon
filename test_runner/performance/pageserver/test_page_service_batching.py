@@ -383,6 +383,11 @@ def test_random_reads(
 
     env.start()
 
+    lsn = env.safekeepers[0].get_commit_lsn(env.initial_tenant, env.initial_timeline)
+    ep = env.endpoints.create_start("main", lsn=lsn)
+    data_table_relnode_oid = ep.safe_psql_scalar("SELECT 'data'::regclass::oid")
+    ep.stop_and_destroy()
+
     for sk in env.safekeepers:
         sk.stop()
 
@@ -406,6 +411,8 @@ def test_random_reads(
         "1",
         "--queue-depth",
         str(queue_depth),
+        "--only-relnode",
+        str(data_table_relnode_oid),
         "--runtime",
         "10s",
     ]

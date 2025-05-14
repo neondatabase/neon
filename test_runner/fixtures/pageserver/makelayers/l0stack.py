@@ -131,3 +131,11 @@ def make_l0_stack_standalone(
         settle_and_flush()
         post_update_mapping = fetch_id_to_page_mapping()
         assert initial_mapping == post_update_mapping, "Postgres should be doing HOT updates"
+
+    # Assert the layer count is what we expect it is
+    layer_map = vps_http.layer_map_info(tenant_id, timeline_id)
+    assert (
+        len(layer_map.delta_l0_layers()) == delta_stack_height + 1 + 1
+    )  # +1 for the initdb layer + 1 for the table creation & fill
+    assert len(layer_map.delta_l0_layers()) == len(layer_map.delta_layers())  # it's all L0s
+    assert len(layer_map.image_layers()) == 0  # no images
