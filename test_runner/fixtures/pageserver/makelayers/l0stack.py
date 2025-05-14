@@ -87,6 +87,8 @@ def make_l0_stack_standalone(
     need_rows = need_pages * 6
     log.info(f"Need {need_pages} pages, {need_rows} rows")
     cur.execute(f"INSERT INTO data SELECT i,'row'||i FROM generate_series(1, {need_rows}) as i")
+    # Raise fillfactor to 100% so that all updates are HOT updates.
+    # We assert they're hot updates by checking fetch_id_to_page_mapping remains the same.
     cur.execute("ALTER TABLE data SET (fillfactor=100)")
 
     def settle_and_flush():
