@@ -1,10 +1,10 @@
-name: Build and Run Selected Test
+name: Build and Run Selected Tests
 
 on:
   workflow_dispatch:
     inputs:
       test-selection:
-        description: 'Specification of selected test(s), as accepted by pytest -k'
+        description: 'Specification of selected test(s), e. g.: test_runner/regress/test_pg_regress.py::test_pg_regress'
         required: true
         type: string
       run-count:
@@ -26,6 +26,8 @@ on:
         default: '[{"pg_version":"v17"}]'
         required: true
         type: string
+  workflow_call:
+  pull_request: # TODO: remove before merge
 
 defaults:
   run:
@@ -42,26 +44,71 @@ jobs:
       github-event-name: ${{ github.event_name }}
       github-event-json: ${{ toJSON(github.event) }}
 
-  build-and-test-locally:
-    needs: [ meta ]
+
+  choose-test-parameters:
+    runs-on: [ self-hosted, small ]
+    container:
+      image: ghcr.io/neondatabase/build-tools:pinned-bookworm
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --init
+
+    outputs:
+      tests: ${{ inputs.test-selection != '' && inputs.test-selection || steps.detect_tests_to_test.outputs.tests }}
+      archs: ${{ inputs.test-selection != '' && inputs.archs  || '["x64", "arm64"]' }}
+      build-types: ${{ inputs.test-selection != '' && inputs.build-types || '["release"]' }}
+      pg-versions: ${{ inputs.test-selection != '' && inputs.pg-versions || '[{"pg_version":"v14"}, {"pg_version":"v17"}]' }}
+      run-count: ${{ inputs.test-selection != '' && inputs.run-count || 5 }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        if: inputs.test-selection == ''
+        with:
+          submodules: false
+          clean: false
+          fetch-depth: 1000
+
+      - name: Cache poetry deps
+        if: inputs.test-selection == ''
+        uses: actions/cache@v4
+        with:
+            path: ~/.cache/pypoetry/virtualenvs
+            key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-bookworm-${{ hashFiles('poetry.lock') }}
+
+      - name: Install Python deps
+        if: inputs.test-selection == ''
+        shell: bash -euxo pipefail {0}
+        run: ./scripts/pysync
+
+      - name: Detect new and updated tests
+        id: detect_tests_to_test
+        if: github.event.pull_request.head.sha && inputs.test-selection == ''
+        env:
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+        run: python3 .github/scripts/detect-updated-pytests.py
+
+  build-and-test-tests:
+    needs: [ meta, choose-test-parameters ]
+    if: needs.choose-test-parameters.outputs.tests != ''
     strategy:
       fail-fast: false
       matrix:
-        arch: ${{ fromJson(inputs.archs) }}
-        build-type: ${{ fromJson(inputs.build-types) }}
+        arch: ${{ fromJson(needs.choose-test-parameters.outputs.archs) }}
+        build-type: ${{ fromJson(needs.choose-test-parameters.outputs.build-types) }}
     uses: ./.github/workflows/_build-and-test-locally.yml
     with:
       arch: ${{ matrix.arch }}
       build-tools-image: ghcr.io/neondatabase/build-tools:pinned-bookworm
       build-tag: ${{ needs.meta.outputs.build-tag }}
       build-type: ${{ matrix.build-type }}
-      test-cfg: ${{ inputs.pg-versions }}
-      test-selection: ${{ inputs.test-selection }}
-      test-run-count: ${{ fromJson(inputs.run-count) }}
+      test-cfg: ${{ needs.choose-test-parameters.outputs.pg-versions }}
+      test-selection: ${{ needs.choose-test-parameters.outputs.tests }}
+      test-run-count: ${{ fromJson(needs.choose-test-parameters.outputs.run-count) }}
     secrets: inherit
 
   create-test-report:
-    needs: [ build-and-test-locally ]
+    needs: [ build-and-test-tests ]
     if: ${{ !cancelled() }}
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
@@ -96,6 +143,7 @@ jobs:
           aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         env:
           REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_DEV }}
+          REPORT_EXT: '-ext'
 
       - uses: actions/github-script@v7
         if: ${{ !cancelled() }}
