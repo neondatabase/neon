@@ -43,7 +43,8 @@ use crate::aux_file;
 use crate::context::{PerfInstrumentFutureExt, RequestContext, RequestContextBuilder};
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::metrics::{
-    RELSIZE_CACHE_ENTRIES, RELSIZE_CACHE_HITS, RELSIZE_CACHE_MISSES, RELSIZE_CACHE_MISSES_OLD,
+    RELSIZE_CACHE_MISSES, RELSIZE_CACHE_MISSES_OLD, RELSIZE_LATEST_CACHE_ENTRIES,
+    RELSIZE_LATEST_CACHE_HITS, RELSIZE_PITR_CACHE_ENTRIES, RELSIZE_PITR_CACHE_HITS,
 };
 use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id,
@@ -1363,17 +1364,17 @@ impl Timeline {
 
     /// Get cached size of relation if it not updated after specified LSN
     pub fn get_cached_rel_size(&self, tag: &RelTag, lsn: Lsn) -> Option<BlockNumber> {
-        let rel_size_cache = self.rel_size_primary_cache.read().unwrap();
+        let rel_size_cache = self.rel_size_latest_cache.read().unwrap();
         if let Some((cached_lsn, nblocks)) = rel_size_cache.get(tag) {
             if lsn >= *cached_lsn {
-                RELSIZE_CACHE_HITS.inc();
+                RELSIZE_LATEST_CACHE_HITS.inc();
                 return Some(*nblocks);
             }
             RELSIZE_CACHE_MISSES_OLD.inc();
         }
-        let mut rel_size_cache = self.rel_size_replica_cache.lock().unwrap();
+        let mut rel_size_cache = self.rel_size_pitr_cache.lock().unwrap();
         if let Some(nblock) = rel_size_cache.get(&(lsn, *tag)) {
-            RELSIZE_CACHE_HITS.inc();
+            RELSIZE_PITR_CACHE_HITS.inc();
             return Some(*nblock);
         }
         RELSIZE_CACHE_MISSES.inc();
@@ -1384,7 +1385,7 @@ impl Timeline {
     pub fn update_cached_rel_size(&self, tag: RelTag, version: Version<'_>, nblocks: BlockNumber) {
         let lsn = version.get_lsn();
         if version.is_latest() {
-            let mut rel_size_cache = self.rel_size_primary_cache.write().unwrap();
+            let mut rel_size_cache = self.rel_size_latest_cache.write().unwrap();
             match rel_size_cache.entry(tag) {
                 hash_map::Entry::Occupied(mut entry) => {
                     let cached_lsn = entry.get_mut();
@@ -1394,28 +1395,31 @@ impl Timeline {
                 }
                 hash_map::Entry::Vacant(entry) => {
                     entry.insert((lsn, nblocks));
-                    RELSIZE_CACHE_ENTRIES.inc();
+                    RELSIZE_LATEST_CACHE_ENTRIES.inc();
                 }
             }
         } else {
-            let mut rel_size_cache = self.rel_size_replica_cache.lock().unwrap();
-            rel_size_cache.insert((lsn, tag), nblocks);
+            let mut rel_size_cache = self.rel_size_pitr_cache.lock().unwrap();
+            if rel_size_cache.capacity() != 0 {
+                rel_size_cache.insert((lsn, tag), nblocks);
+                RELSIZE_PITR_CACHE_ENTRIES.set(rel_size_cache.len() as u64);
+            }
         }
     }
 
     /// Store cached relation size
     pub fn set_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
-        let mut rel_size_cache = self.rel_size_primary_cache.write().unwrap();
+        let mut rel_size_cache = self.rel_size_latest_cache.write().unwrap();
         if rel_size_cache.insert(tag, (lsn, nblocks)).is_none() {
-            RELSIZE_CACHE_ENTRIES.inc();
+            RELSIZE_LATEST_CACHE_ENTRIES.inc();
         }
     }
 
     /// Remove cached relation size
     pub fn remove_cached_rel_size(&self, tag: &RelTag) {
-        let mut rel_size_cache = self.rel_size_primary_cache.write().unwrap();
+        let mut rel_size_cache = self.rel_size_latest_cache.write().unwrap();
         if rel_size_cache.remove(tag).is_some() {
-            RELSIZE_CACHE_ENTRIES.dec();
+            RELSIZE_LATEST_CACHE_ENTRIES.dec();
         }
     }
 }

@@ -546,6 +546,11 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("Falied to parse 'sampling_ratio'")?,
+            relsize_pitr_cache_capacity: settings
+                .remove("relsize PITR cache capacity")
+                .map(|x| x.parse::<usize>())
+                .transpose()
+                .context("Falied to parse 'relsize_pitr_cache_capacity'")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")

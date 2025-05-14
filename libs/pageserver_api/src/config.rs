@@ -491,6 +491,8 @@ pub struct TenantConfigToml {
     /// Tenant level performance sampling ratio override. Controls the ratio of get page requests
     /// that will get perf sampling for the tenant.
     pub sampling_ratio: Option<Ratio>,
+    /// Capacity of relsize PITR cache
+    pub relsize_pitr_cache_capacity: usize,
 }
 
 pub mod defaults {
@@ -730,6 +732,7 @@ pub mod tenant_conf_defaults {
     pub const DEFAULT_GC_COMPACTION_VERIFICATION: bool = true;
     pub const DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB: u64 = 5 * 1024 * 1024; // 5GB
     pub const DEFAULT_GC_COMPACTION_RATIO_PERCENT: u64 = 100;
+    pub const DEFAULT_RELSIZE_PITR_CACHE_CAPACITY: usize = 1000;
 }
 
 impl Default for TenantConfigToml {
@@ -787,6 +790,7 @@ impl Default for TenantConfigToml {
             gc_compaction_initial_threshold_kb: DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB,
             gc_compaction_ratio_percent: DEFAULT_GC_COMPACTION_RATIO_PERCENT,
             sampling_ratio: None,
+            relsize_pitr_cache_capacity: DEFAULT_RELSIZE_PITR_CACHE_CAPACITY,
         }
     }
 }

@@ -843,17 +843,36 @@ pub(crate) static COMPRESSION_IMAGE_OUTPUT_BYTES: Lazy<IntCounter> = Lazy::new(|
     .expect("failed to define a metric")
 });
 
-pub(crate) static RELSIZE_CACHE_ENTRIES: Lazy<UIntGauge> = Lazy::new(|| {
+pub(crate) static RELSIZE_LATEST_CACHE_ENTRIES: Lazy<UIntGauge> = Lazy::new(|| {
     register_uint_gauge!(
-        "pageserver_relsize_cache_entries",
-        "Number of entries in the relation size cache",
+        "pageserver_relsize_latest_cache_entries",
+        "Number of entries in the latest relation size cache",
     )
     .expect("failed to define a metric")
 });
 
-pub(crate) static RELSIZE_CACHE_HITS: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!("pageserver_relsize_cache_hits", "Relation size cache hits",)
-        .expect("failed to define a metric")
+pub(crate) static RELSIZE_LATEST_CACHE_HITS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_relsize_latest_cache_hits",
+        "Latest relation size cache hits",
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static RELSIZE_PITR_CACHE_ENTRIES: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_relsize_pitr_cache_entries",
+        "Number of entries in the pitr relation size cache",
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static RELSIZE_PITR_CACHE_HITS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_relsize_pitr_cache_hits",
+        "Pitr relation size cache hits",
+    )
+    .expect("failed to define a metric")
 });
 
 pub(crate) static RELSIZE_CACHE_MISSES: Lazy<IntCounter> = Lazy::new(|| {
