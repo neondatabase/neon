@@ -204,7 +204,13 @@ pub struct TimelineResources {
 /// value can be used to also update the cache, see [`Timeline::update_cached_rel_size`].
 pub(crate) struct RelSizeCache {
     pub(crate) complete_as_of: Lsn,
-    pub(crate) map: HashMap<RelTag, (Lsn, BlockNumber)>,
+    pub(crate) map: HashMap<RelTag, (Lsn, RelSizeCacheEntry)>,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum RelSizeCacheEntry {
+    Present(BlockNumber),
+    Truncated,
 }
 
 pub struct Timeline {
@@ -690,15 +696,15 @@ impl std::fmt::Display for ReadPath {
 
 #[derive(thiserror::Error)]
 pub struct MissingKeyError {
-    keyspace: KeySpace,
-    shard: ShardNumber,
-    query: Option<VersionedKeySpaceQuery>,
+    pub keyspace: KeySpace,
+    pub shard: ShardNumber,
+    pub query: Option<VersionedKeySpaceQuery>,
     // This is largest request LSN from the get page request batch
-    original_hwm_lsn: Lsn,
-    ancestor_lsn: Option<Lsn>,
+    pub original_hwm_lsn: Lsn,
+    pub ancestor_lsn: Option<Lsn>,
     /// Debug information about the read path if there's an error
-    read_path: Option<ReadPath>,
-    backtrace: Option<std::backtrace::Backtrace>,
+    pub read_path: Option<ReadPath>,
+    pub backtrace: Option<std::backtrace::Backtrace>,
 }
 
 impl MissingKeyError {
