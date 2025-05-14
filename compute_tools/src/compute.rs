@@ -211,6 +211,44 @@ pub struct ParsedSpec {
     pub endpoint_storage_token: Option<String>,
 }
 
+impl ParsedSpec {
+    pub fn validate(&self) -> Result<&Self, String> {
+        // Only Primary nodes are using safekeeper_connstrings, and at the moment
+        // this method only validates that part of the specs.
+        if self.spec.mode != ComputeMode::Primary {
+            return Ok(self);
+        }
+
+        // While it seems like a good idea to check for an odd number of entries in
+        // the safekeepers connection string, changes to the list of safekeepers might
+        // incur appending a new server to a list of 3, in which case a list of 4
+        // entries is okay in production.
+        //
+        // Still we want unique entries, and at least one entry in the vector
+        if self.safekeeper_connstrings.is_empty() {
+            return Err(String::from("safekeeper_connstrings is empty"));
+        }
+
+        // check for unicity of the connection strings
+        let mut connstrings = self.safekeeper_connstrings.clone();
+
+        connstrings.sort();
+        let previous = &connstrings[0];
+
+        for current in connstrings.iter().skip(1) {
+            // duplicate entry?
+            if current == previous {
+                return Err(format!(
+                    "duplicate entry in safekeeper_connstrings: {}!",
+                    current,
+                ));
+            }
+        }
+
+        Ok(self)
+    }
+}
+
 impl TryFrom<ComputeSpec> for ParsedSpec {
     type Error = String;
     fn try_from(spec: ComputeSpec) -> Result<Self, String> {
@@ -240,34 +278,6 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
         } else {
             spec.safekeeper_connstrings.clone()
         };
-
-        // Now check the sakekeeper_connstrings validity
-        //
-        // While it seems like a good idea to check for an odd number of entries in
-        // the safekeepers connection string, changes to the list of safekeepers might
-        // incur appending a new server to a list of 3, in which case a list of 4
-        // entries is okay in production.
-        //
-        // Still we want unique entries, and at least one entry in the vector
-        if spec.safekeeper_connstrings.is_empty() {
-            return Err(String::from("safekeeper_connstrings is empty"));
-        }
-
-        // check for unicity of the connection strings
-        let mut connstrings = spec.safekeeper_connstrings.clone();
-
-        connstrings.sort();
-        let previous = &connstrings[0];
-
-        for current in connstrings.iter().skip(1) {
-            // duplicate entry?
-            if current == previous {
-                return Err(format!(
-                    "duplicate entry in safekeeper_connstrings: {}!",
-                    current,
-                ));
-            }
-        }
 
         let storage_auth_token = spec.storage_auth_token.clone();
         let tenant_id: TenantId = if let Some(tenant_id) = spec.tenant_id {
@@ -303,7 +313,7 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             .clone()
             .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_token"));
 
-        Ok(ParsedSpec {
+        let res = ParsedSpec {
             spec,
             pageserver_connstr,
             safekeeper_connstrings,
@@ -312,7 +322,15 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             timeline_id,
             endpoint_storage_addr,
             endpoint_storage_token,
-        })
+        };
+
+        // Now check validity of the parsed specification
+        match res.validate() {
+            Ok(_) => (),
+            Err(msg) => return Err(msg.clone()),
+        };
+
+        Ok(res)
     }
 }
 
