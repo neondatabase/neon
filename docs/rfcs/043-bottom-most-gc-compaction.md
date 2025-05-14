@@ -185,6 +185,7 @@ There are still some limitations of gc-compaction itself that needs to be resolv
 - The compaction trigger always schedules gc-compaction from the lowest LSN to the gc-horizon. Currently we do not schedule compaction jobs that only selects layers in the middle. Allowing this could potentially reduce the number of layers read/write throughout the process.
 - gc-compaction will give up if there are too many layers to rewrite or if there are not enough disk space for the compaction.
 - gc-compaction sometimes fails with "no key produced during compaction", which means that all existing keys within the compaction range can be collected; but we don't have a way to write this information back to the layer map -- we cannot generate an empty image layer.
+- We limit the maximum size of deltas for a single key to 512MB. If above this size, gc-compaction will give up. This can be resolved by changing `generate_key_retention` to be a stream instead of requiring to collect all the key history.
 
 In the future,
 
