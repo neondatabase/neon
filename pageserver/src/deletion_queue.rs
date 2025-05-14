@@ -663,6 +663,7 @@ mod test {
     use camino::Utf8Path;
     use hex_literal::hex;
     use pageserver_api::key::Key;
+    use pageserver_api::models::ShardImportStatus;
     use pageserver_api::shard::ShardIndex;
     use pageserver_api::upcall_api::ReAttachResponseTenant;
     use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
@@ -794,6 +795,14 @@ mod test {
             _timeline_id: TimelineId,
             _status: pageserver_api::models::ShardImportStatus,
         ) -> Result<(), RetryForeverError> {
+            unimplemented!()
+        }
+
+        async fn get_timeline_import_status(
+            &self,
+            _tenant_shard_id: TenantShardId,
+            _timeline_id: TimelineId,
+        ) -> Result<Option<ShardImportStatus>, RetryForeverError> {
             unimplemented!()
         }
     }

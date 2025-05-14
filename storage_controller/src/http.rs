@@ -157,6 +157,29 @@ async fn handle_validate(req: Request<Body>) -> Result<Response<Body>, ApiError>
     json_response(StatusCode::OK, state.service.validate(validate_req).await?)
 }
 
+async fn handle_get_timeline_import_status(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::GenerationsApi)?;
+
+    let tenant_shard_id: TenantShardId = parse_request_param(&req, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let state = get_state(&req);
+    json_response(
+        StatusCode::OK,
+        state
+            .service
+            .handle_timeline_shard_import_progress(tenant_shard_id, timeline_id)
+            .await?,
+    )
+}
+
 async fn handle_put_timeline_import_status(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::GenerationsApi)?;
 
@@ -2007,6 +2030,13 @@ pub fn make_router(
         })
         .post("/upcall/v1/validate", |r| {
             named_request_span(r, handle_validate, RequestName("upcall_v1_validate"))
+        })
+        .get("/upcall/v1/timeline_import_status", |r| {
+            named_request_span(
+                r,
+                handle_get_timeline_import_status,
+                RequestName("upcall_v1_timeline_import_status"),
+            )
         })
         .post("/upcall/v1/timeline_import_status", |r| {
             named_request_span(
