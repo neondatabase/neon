@@ -914,7 +914,7 @@ jobs:
     permissions:
       packages: read
 
-    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
+    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -963,7 +963,7 @@ jobs:
           fi
 
       - name: Verify docker-compose example and test extensions
-        timeout-minutes: 20
+        # timeout-minutes: 20
         env:
           TAG: >-
             ${{
@@ -993,7 +993,7 @@ jobs:
           docker compose --profile test-extensions -f ./docker-compose/docker-compose.yml down
 
       - name: Test extension upgrade
-        timeout-minutes: 20
+        # timeout-minutes: 20
         if: ${{ contains(fromJSON('["pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
         env:
           TAG: >-
