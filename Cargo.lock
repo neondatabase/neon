@@ -4849,6 +4849,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "posthog_client_lite"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "workspace_hack",
+]
+
+[[package]]
 name = "powerfmt"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8439,8 +8452,10 @@ dependencies = [
  "fail",
  "form_urlencoded",
  "futures-channel",
+ "futures-core",
  "futures-executor",
  "futures-io",
+ "futures-task",
  "futures-util",
  "generic-array",
  "getrandom 0.2.11",
@@ -8470,6 +8485,7 @@ dependencies = [
  "once_cell",
  "p256 0.13.2",
  "parquet",
+ "percent-encoding",
  "prettyplease",
  "proc-macro2",
  "prost 0.13.3",

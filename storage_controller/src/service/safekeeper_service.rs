@@ -10,6 +10,7 @@ use crate::persistence::{
     DatabaseError, SafekeeperTimelineOpKind, TimelinePendingOpPersistence, TimelinePersistence,
 };
 use crate::safekeeper::Safekeeper;
+use crate::timeline_import::TimelineImportFinalizeError;
 use anyhow::Context;
 use http_utils::error::ApiError;
 use pageserver_api::controller_api::{
@@ -327,12 +328,12 @@ impl Service {
         self: &Arc<Self>,
         tenant_id: TenantId,
         timeline_info: TimelineInfo,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), TimelineImportFinalizeError> {
         const BACKOFF: Duration = Duration::from_secs(5);
 
         loop {
             if self.cancel.is_cancelled() {
-                anyhow::bail!("Shut down requested while finalizing import");
+                return Err(TimelineImportFinalizeError::ShuttingDown);
             }
 
             let res = self
@@ -348,7 +349,7 @@ impl Service {
                     tracing::error!("Failed to create timeline on safekeepers: {err}");
                     tokio::select! {
                         _ = self.cancel.cancelled() => {
-                            anyhow::bail!("Shut down requested while finalizing import");
+                            return Err(TimelineImportFinalizeError::ShuttingDown);
                         },
                         _ = tokio::time::sleep(BACKOFF) => {}
                     };
