@@ -2776,6 +2776,11 @@ def test_timeline_disk_usage_limit(neon_env_builder: NeonEnvBuilder):
                 "SELECT value FROM neon_perf_counters WHERE metric = 'num_configured_safekeepers'"
             )
             assert cur.fetchone() == (1,), "Expected 1 configured safekeeper"
+            # Check that max_active_safekeeper_commit_lag metric exists and is zero with single safekeeper
+            cur.execute(
+                "SELECT value FROM neon_perf_counters WHERE metric = 'max_active_safekeeper_commit_lag'"
+            )
+            assert cur.fetchone() == (0,), "Expected zero commit lag with one safekeeper"
 
     # Get the safekeeper
     sk = env.safekeepers[0]
@@ -2819,6 +2824,11 @@ def test_timeline_disk_usage_limit(neon_env_builder: NeonEnvBuilder):
                 "SELECT value FROM neon_perf_counters WHERE metric = 'num_configured_safekeepers'"
             )
             assert cur.fetchone() == (1,), "Expected 1 configured safekeeper"
+            # Check that max_active_safekeeper_commit_lag metric exists and is zero with no active safekeepers
+            cur.execute(
+                "SELECT value FROM neon_perf_counters WHERE metric = 'max_active_safekeeper_commit_lag'"
+            )
+            assert cur.fetchone() == (0,), "Expected zero commit lag with no active safekeepers"
 
     # Sanity check that the hanging insert is indeed still hanging. Otherwise means the circuit breaker we
     # implemented didn't work as expected.
@@ -2933,3 +2943,77 @@ def test_global_disk_usage_limit(neon_env_builder: NeonEnvBuilder):
         with conn.cursor() as cur:
             cur.execute("select count(*) from t2")
             assert cur.fetchone() == (3000,)
+
+@pytest.mark.skip(reason="Lakebase Mode")
+def test_max_active_safekeeper_commit_lag(neon_env_builder: NeonEnvBuilder):
+    """
+    This test validates the `max_active_safekeeper_commit_lag` metric. The
+    strategy is to intentionally create a scenario where one safekeeper falls
+    behind (by pausing it with a failpoint), observe that the metric correctly
+    reports this lag, and then confirm that the metric returns to zero after the
+    lagging safekeeper catches up (once the failpoint is removed).
+    """
+    neon_env_builder.num_safekeepers = 2
+    env = neon_env_builder.init_start()
+    # Create branch and start endpoint
+    env.create_branch("test_commit_lsn_lag_failpoint")
+    endpoint = env.endpoints.create_start("test_commit_lsn_lag_failpoint")
+    # Enable neon extension and table
+    endpoint.safe_psql("CREATE EXTENSION IF NOT EXISTS neon")
+    endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
+
+    # Identify the lagging safekeeper and configure failpoint to pause
+    lagging_sk = env.safekeepers[1]
+    with lagging_sk.http_client() as http_cli:
+        http_cli.configure_failpoints(("sk-acceptor-pausable", "pause"))
+
+    # Note: Insert could hang because the failpoint above causes the safekeepers to lose quorum.
+    def run_hanging_insert():
+        endpoint.safe_psql("INSERT INTO t SELECT generate_series(1,500), 'payload'")
+
+    # Start the insert in a background thread
+    bg_thread = threading.Thread(target=run_hanging_insert)
+    bg_thread.start()
+
+    # Wait for the lag metric to become positive
+    def lag_is_positive():
+        with closing(endpoint.connect()) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT value FROM neon_perf_counters WHERE metric = 'max_active_safekeeper_commit_lag'"
+                )
+                row = cur.fetchone()
+                assert row is not None, "max_active_safekeeper_commit_lag metric not found"
+                lag = row[0]
+                log.info(f"Current commit lag: {lag}")
+                if lag == 0.0:
+                    raise Exception("Commit lag is still zero, trying again...")
+
+    # Confirm that we can observe a positive lag value
+    wait_until(lag_is_positive)
+
+    # Unpause the failpoint so that the safekeepers sync back up. This should also unstuck the hanging insert.
+    with lagging_sk.http_client() as http_cli:
+        http_cli.configure_failpoints(("sk-acceptor-pausable", "off"))
+
+    # Wait for the hanging insert to complete
+    bg_thread.join(timeout=30)
+    assert not bg_thread.is_alive(), "Hanging insert did not complete within timeout"
+    log.info("Hanging insert is unstuck successfully")
+
+    def lag_is_zero():
+        with closing(endpoint.connect()) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT value FROM neon_perf_counters WHERE metric = 'max_active_safekeeper_commit_lag'"
+                )
+                row = cur.fetchone()
+                assert (
+                    row is not None
+                ), "max_active_safekeeper_commit_lag metric not found in lag_is_zero"
+                lag = row[0]
+                log.info(f"Current commit lag: {lag}")
+                return lag == 0.0
+
+    # Confirm that the lag eventually returns to zero
+    wait_until(lag_is_zero)

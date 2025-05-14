@@ -436,6 +436,8 @@ typedef struct WalproposerShmemState
 	uint32 num_safekeepers;
 	/* Per-safekeeper status flags: 0=inactive, 1=active */
 	uint8 safekeeper_status[MAX_SAFEKEEPERS];
+	/* Per-safekeeper commit LSN for metrics */
+	XLogRecPtr safekeeper_commit_lsn[MAX_SAFEKEEPERS];
 	/* END_HADRON */
 } WalproposerShmemState;
 

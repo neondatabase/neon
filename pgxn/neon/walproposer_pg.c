@@ -2106,6 +2106,16 @@ walprop_pg_process_safekeeper_feedback(WalProposer *wp, Safekeeper *sk)
 	if (wp->config->syncSafekeepers)
 		return;
 
+	/* BEGIN_HADRON */
+    // Record safekeeper commit LSN in shared memory for lag monitoring
+	{
+		WalproposerShmemState *shmem = wp->api.get_shmem_state(wp);
+		Assert(sk->index < MAX_SAFEKEEPERS);
+		SpinLockAcquire(&shmem->mutex);
+		shmem->safekeeper_commit_lsn[sk->index] = sk->appendResponse.commitLsn;
+		SpinLockRelease(&shmem->mutex);
+	}
+	/* END_HADRON */
 
 	/* handle fresh ps_feedback */
 	if (sk->appendResponse.ps_feedback.present)
@@ -2243,6 +2253,7 @@ walprop_pg_reset_safekeeper_statuses_for_metrics(WalProposer *wp, uint32 num_saf
 	SpinLockAcquire(&shmem->mutex);
 	shmem->num_safekeepers = num_safekeepers;
 	memset(shmem->safekeeper_status, 0, sizeof(shmem->safekeeper_status));
+	memset(shmem->safekeeper_commit_lsn, 0, sizeof(shmem->safekeeper_commit_lsn));
 	SpinLockRelease(&shmem->mutex);
 }
 

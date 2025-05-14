@@ -396,6 +396,7 @@ neon_get_perf_counters(PG_FUNCTION_ARGS)
 	WalproposerShmemState *wp_shmem;
 	uint32 num_safekeepers;
 	uint32 num_active_safekeepers;
+	XLogRecPtr max_active_safekeeper_commit_lag;
 	/* END_HADRON */
 
 	/* We put all the tuples into a tuplestore in one go. */
@@ -451,35 +452,53 @@ neon_get_perf_counters(PG_FUNCTION_ARGS)
 		// Note that we are taking a mutex when reading from walproposer shared memory so that the total safekeeper count is
 		// consistent with the active wal acceptors count. Assuming that we don't query this view too often the mutex should
 		// not be a huge deal.
+		XLogRecPtr min_commit_lsn = InvalidXLogRecPtr;
+		XLogRecPtr max_commit_lsn = InvalidXLogRecPtr;
+		XLogRecPtr lsn;
+
 		wp_shmem = GetWalpropShmemState();
 		SpinLockAcquire(&wp_shmem->mutex);
+
 		num_safekeepers = wp_shmem->num_safekeepers;
 		num_active_safekeepers = 0;
 		for (int i = 0; i < num_safekeepers; i++) {
 			if (wp_shmem->safekeeper_status[i] == 1) {
 				num_active_safekeepers++;
+				// Only track the commit LSN lag among active safekeepers.
+				// If there are inactive safekeepers we will raise another alert so this lag value
+				// is less critical.
+				lsn = wp_shmem->safekeeper_commit_lsn[i];
+				if (XLogRecPtrIsInvalid(min_commit_lsn) || lsn < min_commit_lsn) {
+					min_commit_lsn = lsn;
+				}
+				if (XLogRecPtrIsInvalid(max_commit_lsn) || lsn > max_commit_lsn) {
+					max_commit_lsn = lsn;
+				}
 			}
 		}
+		// Calculate max commit LSN lag across active safekeepers
+		max_active_safekeeper_commit_lag = (XLogRecPtrIsInvalid(min_commit_lsn) ? 0 : max_commit_lsn - min_commit_lsn);
+
 		SpinLockRelease(&wp_shmem->mutex);
 	}
 	{
-			metric_t databricks_metrics[] = {
-				{"sql_index_corruption_count", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->index_corruption_count)},
-				{"sql_data_corruption_count", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->data_corruption_count)},
-				{"sql_internal_error_count", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->internal_error_count)},
-				{"ps_corruption_detected", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->ps_corruption_detected)},
-				{"num_active_safekeepers", false, 0.0, (double) num_active_safekeepers},
-				{"num_configured_safekeepers", false, 0.0, (double) num_safekeepers},
-				{NULL, false, 0, 0},
-			};
-			for (int i = 0; databricks_metrics[i].name != NULL; i++)
-			{
-				metric_to_datums(&databricks_metrics[i], &values[0], &nulls[0]);
-				tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
-			}
+		metric_t databricks_metrics[] = {
+			{"sql_index_corruption_count", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->index_corruption_count)},
+			{"sql_data_corruption_count", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->data_corruption_count)},
+			{"sql_internal_error_count", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->internal_error_count)},
+			{"ps_corruption_detected", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->ps_corruption_detected)},
+			{"num_active_safekeepers", false, 0.0, (double) num_active_safekeepers},
+			{"num_configured_safekeepers", false, 0.0, (double) num_safekeepers},
+			{"max_active_safekeeper_commit_lag", false, 0.0, (double) max_active_safekeeper_commit_lag},
+			{NULL, false, 0, 0},
+		};
+		for (int i = 0; databricks_metrics[i].name != NULL; i++)
+		{
+			metric_to_datums(&databricks_metrics[i], &values[0], &nulls[0]);
+			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 		}
-		/* END_HADRON */
 	}
+	/* END_HADRON */
 
 	pfree(metrics);
 

@@ -547,6 +547,7 @@ pgxn/neon/neon_perf_counters.c:neon_get_perf_counters(PG_FUNCTION_ARGS)
 pgxn/neon/neon_perf_counters.c:	neon_per_backend_counters totals = {0};
 pgxn/neon/neon_perf_counters.c:	uint32 num_safekeepers;
 pgxn/neon/neon_perf_counters.c:	uint32 num_active_safekeepers;
+pgxn/neon/neon_perf_counters.c:	XLogRecPtr max_active_safekeeper_commit_lag;
 pgxn/neon/neon_perf_counters.c:	for (int procno = 0; procno < NUM_NEON_PERF_COUNTER_SLOTS; procno++)
 pgxn/neon/neon_perf_counters.c:		neon_per_backend_counters *counters = &neon_per_backend_counters_shared[procno];
 pgxn/neon/neon_perf_counters.c:	metrics = neon_perf_counters_to_metrics(&totals);
@@ -559,8 +560,14 @@ pgxn/neon/neon_perf_counters.c:		num_active_safekeepers = 0;
 pgxn/neon/neon_perf_counters.c:		for (int i = 0; i < num_safekeepers; i++) {
 pgxn/neon/neon_perf_counters.c:			if (wp_shmem->safekeeper_status[i] == 1) {
 pgxn/neon/neon_perf_counters.c:				num_active_safekeepers++;
+pgxn/neon/neon_perf_counters.c:				// Only track the commit LSN lag among active safekeepers.
+pgxn/neon/neon_perf_counters.c:				// If there are inactive safekeepers we will raise another alert so this lag value
+pgxn/neon/neon_perf_counters.c:				lsn = wp_shmem->safekeeper_commit_lsn[i];
+pgxn/neon/neon_perf_counters.c:		// Calculate max commit LSN lag across active safekeepers
+pgxn/neon/neon_perf_counters.c:		max_active_safekeeper_commit_lag = (XLogRecPtrIsInvalid(min_commit_lsn) ? 0 : max_commit_lsn - min_commit_lsn);
 pgxn/neon/neon_perf_counters.c:			{"num_active_safekeepers", false, 0.0, (double) num_active_safekeepers},
 pgxn/neon/neon_perf_counters.c:			{"num_configured_safekeepers", false, 0.0, (double) num_safekeepers},
+pgxn/neon/neon_perf_counters.c:			{"max_active_safekeeper_commit_lag", false, 0.0, (double) max_active_safekeeper_commit_lag},
 pgxn/neon/neon_perf_counters.h: * neon_perf_counters.h
 pgxn/neon/neon_perf_counters.h: *	  Performance counters for neon storage requests
 pgxn/neon/neon_perf_counters.h:#ifndef NEON_PERF_COUNTERS_H
@@ -1487,6 +1494,8 @@ pgxn/neon/walproposer.h:	/* Number of safekeepers in the config */
 pgxn/neon/walproposer.h:	uint32 num_safekeepers;
 pgxn/neon/walproposer.h:	/* Per-safekeeper status flags: 0=inactive, 1=active */
 pgxn/neon/walproposer.h:	uint8 safekeeper_status[MAX_SAFEKEEPERS];
+pgxn/neon/walproposer.h:	/* Per-safekeeper commit LSN for metrics */
+pgxn/neon/walproposer.h:	XLogRecPtr safekeeper_commit_lsn[MAX_SAFEKEEPERS];
 pgxn/neon/walproposer.h: * Report safekeeper state to proposer
 pgxn/neon/walproposer.h:	 * Current term of the safekeeper; if it is higher than proposer's, the
 pgxn/neon/walproposer.h:	/* Safekeeper reports back his awareness about which WAL is committed, as */
@@ -1718,6 +1727,9 @@ pgxn/neon/walproposer_pg.c: * Based on commitLsn and safekeeper responses includ
 pgxn/neon/walproposer_pg.c: * None of that is functional in sync-safekeepers.
 pgxn/neon/walproposer_pg.c:walprop_pg_process_safekeeper_feedback(WalProposer *wp, Safekeeper *sk)
 pgxn/neon/walproposer_pg.c:	if (wp->config->syncSafekeepers)
+pgxn/neon/walproposer_pg.c:    // Record safekeeper commit LSN in shared memory for lag monitoring
+pgxn/neon/walproposer_pg.c:		Assert(sk->index < MAX_SAFEKEEPERS);
+pgxn/neon/walproposer_pg.c:		shmem->safekeeper_commit_lsn[sk->index] = sk->appendResponse.commitLsn;
 pgxn/neon/walproposer_pg.c:				SetNeonCurrentClusterSize(sk->appendResponse.ps_feedback.currentClusterSize);
 pgxn/neon/walproposer_pg.c:		 * hardened and will be fetched from one of safekeepers by
 pgxn/neon/walproposer_pg.c:		 * neon_walreader if needed.
@@ -1729,6 +1741,7 @@ pgxn/neon/walproposer_pg.c:uint64		GetNeonCurrentClusterSize(void);
 pgxn/neon/walproposer_pg.c:walprop_pg_reset_safekeeper_statuses_for_metrics(WalProposer *wp, uint32 num_safekeepers)
 pgxn/neon/walproposer_pg.c:	shmem->num_safekeepers = num_safekeepers;
 pgxn/neon/walproposer_pg.c:	memset(shmem->safekeeper_status, 0, sizeof(shmem->safekeeper_status));
+pgxn/neon/walproposer_pg.c:	memset(shmem->safekeeper_commit_lsn, 0, sizeof(shmem->safekeeper_commit_lsn));
 pgxn/neon/walproposer_pg.c:walprop_pg_update_safekeeper_status_for_metrics(WalProposer *wp, uint32 sk_index, uint8 status)
 pgxn/neon/walproposer_pg.c:	Assert(sk_index < MAX_SAFEKEEPERS);
 pgxn/neon/walproposer_pg.c:	shmem->safekeeper_status[sk_index] = status;

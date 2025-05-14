@@ -24,6 +24,7 @@ use tracing::*;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
 use utils::pageserver_feedback::PageserverFeedback;
+use utils::pausable_failpoint;
 
 use crate::GlobalTimelines;
 use crate::handler::SafekeeperPostgresHandler;
@@ -598,6 +599,8 @@ impl WalAcceptor {
                     // Note that a flush can still happen on segment bounds, which will result
                     // in an AppendResponse.
                     if let ProposerAcceptorMessage::AppendRequest(append_request) = msg {
+                        // allow tests to pause AppendRequest processing to simulate lag
+                        pausable_failpoint!("sk-acceptor-pausable");
                         msg = ProposerAcceptorMessage::NoFlushAppendRequest(append_request);
                         dirty = true;
                     }
