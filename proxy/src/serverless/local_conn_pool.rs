@@ -41,7 +41,7 @@ use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::Metrics;
 
 pub(crate) const EXT_NAME: &str = "pg_session_jwt";
-pub(crate) const EXT_VERSION: &str = "0.3.0";
+pub(crate) const EXT_VERSION: &str = "0.3.1";
 pub(crate) const EXT_SCHEMA: &str = "auth";
 
 #[derive(Clone)]

@@ -30,6 +30,7 @@ mod pg_helpers_tests {
             r#"fsync = off
 wal_level = logical
 hot_standby = on
+prewarm_lfc_on_startup = off
 neon.safekeepers = '127.0.0.1:6502,127.0.0.1:6503,127.0.0.1:6501'
 wal_log_hints = on
 log_connections = on

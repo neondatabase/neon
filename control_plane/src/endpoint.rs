@@ -45,7 +45,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use compute_api::requests::{ComputeClaims, ConfigurationRequest};
+use compute_api::requests::{
+    COMPUTE_AUDIENCE, ComputeClaims, ComputeClaimsScope, ConfigurationRequest,
+};
 use compute_api::responses::{
     ComputeConfig, ComputeCtlConfig, ComputeStatus, ComputeStatusResponse, TlsConfig,
 };
@@ -630,9 +632,17 @@ impl Endpoint {
     }
 
     /// Generate a JWT with the correct claims.
-    pub fn generate_jwt(&self) -> Result<String> {
+    pub fn generate_jwt(&self, scope: Option<ComputeClaimsScope>) -> Result<String> {
         self.env.generate_auth_token(&ComputeClaims {
-            compute_id: self.endpoint_id.clone(),
+            audience: match scope {
+                Some(ComputeClaimsScope::Admin) => Some(vec![COMPUTE_AUDIENCE.to_owned()]),
+                _ => None,
+            },
+            compute_id: match scope {
+                Some(ComputeClaimsScope::Admin) => None,
+                _ => Some(self.endpoint_id.clone()),
+            },
+            scope,
         })
     }
 
@@ -640,10 +650,12 @@ impl Endpoint {
     pub async fn start(
         &self,
         auth_token: &Option<String>,
+        endpoint_storage_token: String,
+        endpoint_storage_addr: String,
         safekeepers_generation: Option<SafekeeperGeneration>,
         safekeepers: Vec<NodeId>,
         pageservers: Vec<(Host, u16)>,
-        remote_ext_config: Option<&String>,
+        remote_ext_base_url: Option<&String>,
         shard_stripe_size: usize,
         create_test_user: bool,
         start_timeout: Duration,
@@ -733,6 +745,9 @@ impl Endpoint {
                 drop_subscriptions_before_start: self.drop_subscriptions_before_start,
                 audit_log_level: ComputeAudit::Disabled,
                 logs_export_host: None::<String>,
+                endpoint_storage_addr: Some(endpoint_storage_addr),
+                endpoint_storage_token: Some(endpoint_storage_token),
+                prewarm_lfc_on_startup: false,
             };
 
             // this strange code is needed to support respec() in tests
@@ -810,8 +825,8 @@ impl Endpoint {
         .stderr(logfile.try_clone()?)
         .stdout(logfile);
 
-        if let Some(remote_ext_config) = remote_ext_config {
-            cmd.args(["--remote-ext-config", remote_ext_config]);
+        if let Some(remote_ext_base_url) = remote_ext_base_url {
+            cmd.args(["--remote-ext-base-url", remote_ext_base_url]);
         }
 
         let child = cmd.spawn()?;
@@ -903,7 +918,7 @@ impl Endpoint {
                     self.external_http_address.port()
                 ),
             )
-            .bearer_auth(self.generate_jwt()?)
+            .bearer_auth(self.generate_jwt(None::<ComputeClaimsScope>)?)
             .send()
             .await?;
 
@@ -980,7 +995,7 @@ impl Endpoint {
                 self.external_http_address.port()
             ))
             .header(CONTENT_TYPE.as_str(), "application/json")
-            .bearer_auth(self.generate_jwt()?)
+            .bearer_auth(self.generate_jwt(None::<ComputeClaimsScope>)?)
             .body(
                 serde_json::to_string(&ConfigurationRequest {
                     spec,
