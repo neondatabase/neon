@@ -47,15 +47,15 @@ pub struct NodeMetadata {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PostHogConfig {
     /// PostHog project ID
-    project_id: String,
+    pub project_id: String,
     /// Server-side (private) API key
-    server_api_key: String,
+    pub server_api_key: String,
     /// Client-side (public) API key
-    client_api_key: String,
+    pub client_api_key: String,
     /// Private API URL
-    private_api_url: String,
+    pub private_api_url: String,
     /// Public API URL
-    public_api_url: String,
+    pub public_api_url: String,
 }
 
 /// `pageserver.toml`

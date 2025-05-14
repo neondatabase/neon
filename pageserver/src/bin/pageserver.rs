@@ -20,6 +20,7 @@ use pageserver::config::{PageServerConf, PageserverIdentity, ignored_fields};
 use pageserver::controller_upcall_client::StorageControllerUpcallClient;
 use pageserver::deletion_queue::DeletionQueue;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
+use pageserver::feature_resolver::FeatureResolver;
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::{
     BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
@@ -501,6 +502,12 @@ fn start_pageserver(
     // Set up remote storage client
     let remote_storage = BACKGROUND_RUNTIME.block_on(create_remote_storage_client(conf))?;
 
+    let feature_resolver = BACKGROUND_RUNTIME.block_on(create_feature_resolver(
+        conf,
+        shutdown_pageserver.clone(),
+        BACKGROUND_RUNTIME.handle(),
+    ))?;
+
     // Set up deletion queue
     let (deletion_queue, deletion_workers) = DeletionQueue::new(
         remote_storage.clone(),
@@ -551,6 +558,7 @@ fn start_pageserver(
             remote_storage: remote_storage.clone(),
             deletion_queue_client,
             l0_flush_global_state,
+            feature_resolver,
         },
         order,
         shutdown_pageserver.clone(),
@@ -794,6 +802,15 @@ fn start_pageserver(
         .await;
         unreachable!();
     })
+}
+
+/// Must call this function within tokio context even if this does not have async fn
+async fn create_feature_resolver(
+    conf: &'static PageServerConf,
+    shutdown_pageserver: CancellationToken,
+    handle: &tokio::runtime::Handle,
+) -> anyhow::Result<FeatureResolver> {
+    FeatureResolver::spawn(conf, shutdown_pageserver, handle)
 }
 
 async fn create_remote_storage_client(

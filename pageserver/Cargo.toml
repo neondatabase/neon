@@ -82,6 +82,7 @@ pem.workspace = true
 postgres_connection.workspace = true
 postgres_ffi.workspace = true
 pq_proto.workspace = true
+posthog_client_lite.workspace = true
 remote_storage.workspace = true
 storage_broker.workspace = true
 tenant_size_model.workspace = true

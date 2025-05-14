@@ -20,8 +20,7 @@ pub enum PostHogEvaluationError {
 
 #[derive(Deserialize)]
 pub struct LocalEvaluationResponse {
-    #[allow(dead_code)]
-    flags: Vec<LocalEvaluationFlag>,
+    pub flags: Vec<LocalEvaluationFlag>,
 }
 
 #[derive(Deserialize)]
@@ -267,6 +266,7 @@ impl FeatureStore {
         &self,
         flag_key: &str,
         user_id: &str,
+        properties: &HashMap<String, PostHogFlagFilterPropertyValue>,
     ) -> Result<String, PostHogEvaluationError> {
         let hash_on_global_rollout_percentage =
             Self::consistent_hash(user_id, flag_key, "multivariate");
@@ -276,7 +276,7 @@ impl FeatureStore {
             flag_key,
             hash_on_global_rollout_percentage,
             hash_on_group_rollout_percentage,
-            &HashMap::new(),
+            properties,
         )
     }
 

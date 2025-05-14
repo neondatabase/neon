@@ -268,6 +268,7 @@ utils = { version = "0.1", path = "./libs/utils/" }
 vm_monitor = { version = "0.1", path = "./libs/vm_monitor/" }
 walproposer = { version = "0.1", path = "./libs/walproposer/" }
 wal_decoder = { version = "0.1", path = "./libs/wal_decoder" }
+posthog_client_lite = { version = "0.1", path = "./libs/posthog_client_lite" }
 
 ## Common library dependency
 workspace_hack = { version = "0.1", path = "./workspace_hack/" }
