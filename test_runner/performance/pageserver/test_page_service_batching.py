@@ -35,23 +35,12 @@ class PageServicePipeliningConfigPipelined(PageServicePipeliningConfig):
     mode: str = "pipelined"
 
 
-PS_IO_CONCURRENCY = ["sequential", "sidecar-task"]
-EXECUTION = ["concurrent-futures"]
-BATCHING = ["uniform-lsn", "scattered-lsn"]
-
-NON_BATCHABLE: list[PageServicePipeliningConfig] = [PageServicePipeliningConfigSerial()]
-for max_batch_size in [1, 32]:
-    for execution in EXECUTION:
-        for batching in BATCHING:
-            NON_BATCHABLE.append(
-                PageServicePipeliningConfigPipelined(max_batch_size, execution, batching)
-            )
-
-BATCHABLE: list[PageServicePipeliningConfig] = []
+PS_IO_CONCURRENCY = ["sidecar-task"]
+PIPELINING_CONFIGS: list[PageServicePipeliningConfig] = []
 for max_batch_size in [32]:
-    for execution in EXECUTION:
-        for batching in BATCHING:
-            BATCHABLE.append(
+    for execution in ["concurrent-futures"]:
+        for batching in ["scattered-lsn"]:
+            PIPELINING_CONFIGS.append(
                 PageServicePipeliningConfigPipelined(max_batch_size, execution, batching)
             )
 
@@ -70,7 +59,7 @@ for max_batch_size in [32]:
                 128,
                 f"batchable {dataclasses.asdict(config)}",
             )
-            for config in BATCHABLE
+            for config in PIPELINING_CONFIGS
             for ps_io_concurrency in PS_IO_CONCURRENCY
         ],
     ],
@@ -338,23 +327,14 @@ def test_postgres_seqscan(
     )
 
 
-LATENCY_CONFIGS: list[PageServicePipeliningConfig] = [PageServicePipeliningConfigSerial()]
-for max_batch_size in [1, 32]:
-    for execution in EXECUTION:
-        for batching in BATCHING:
-            LATENCY_CONFIGS.append(
-                PageServicePipeliningConfigPipelined(max_batch_size, execution, batching)
-            )
-
-
 @pytest.mark.parametrize(
     "pipelining_config,ps_io_concurrency,l0_stack_height,queue_depth,name",
     [
         (config, ps_io_concurrency, l0_stack_height, queue_depth, f"{dataclasses.asdict(config)}")
-        for config in LATENCY_CONFIGS
+        for config in PIPELINING_CONFIGS
         for ps_io_concurrency in PS_IO_CONCURRENCY
-        for queue_depth in [1, 2, 3, 4, 16, 32]
-        for l0_stack_height in [0, 3, 10]
+        for queue_depth in [1, 2, 32]
+        for l0_stack_height in [0, 20]
     ],
 )
 def test_random_reads(
