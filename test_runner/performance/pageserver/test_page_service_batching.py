@@ -413,6 +413,8 @@ def test_random_reads(
 
     ps_http = env.pageserver.http_client()
 
+    metrics_before = ps_http.get_metrics()
+
     cmd = [
         str(env.neon_binpath / "pagebench"),
         "get-page-latest-lsn",
@@ -432,11 +434,21 @@ def test_random_reads(
     results_path = Path(basepath + ".stdout")
     log.info(f"Benchmark results at: {results_path}")
 
+    metrics_after = ps_http.get_metrics()
+
     with open(results_path) as f:
         results = json.load(f)
     log.info(f"Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
 
     total = results["total"]
+
+    metric = "request_count"
+    zenbenchmark.record(
+        metric,
+        metric_value=total[metric],
+        unit="",
+        report=MetricReport.HIGHER_IS_BETTER,
+    )
 
     metric = "latency_mean"
     zenbenchmark.record(
@@ -454,3 +466,17 @@ def test_random_reads(
             unit="ms",
             report=MetricReport.LOWER_IS_BETTER,
         )
+
+    reads_before = metrics_before.query_one(
+        "pageserver_io_operations_seconds_count", filter={"operation": "read"}
+    )
+    reads_after = metrics_after.query_one(
+        "pageserver_io_operations_seconds_count", filter={"operation": "read"}
+    )
+
+    zenbenchmark.record(
+        "virtual_file_reads",
+        metric_value=reads_after.value - reads_before.value,
+        unit="",
+        report=MetricReport.LOWER_IS_BETTER,
+    )
