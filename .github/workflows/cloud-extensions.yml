@@ -33,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg-version: [16, 17]
+        pg-version: [17]
 
     runs-on: us-east-2
     container:
