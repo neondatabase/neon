@@ -27,12 +27,6 @@ pub(in crate::http) async fn configure(
         Err(e) => return JsonResponse::error(StatusCode::BAD_REQUEST, e),
     };
 
-    // Now validate the given configuration (safekeeper_connstrings)
-    match check_config(&pspec) {
-        Ok(b) => b,
-        Err(e) => return JsonResponse::error(StatusCode::BAD_REQUEST, e),
-    };
-
     // XXX: wrap state update under lock in a code block. Otherwise, we will try
     // to `Send` `mut state` into the spawned thread bellow, which will cause
     // the following rustc error:
@@ -90,48 +84,4 @@ pub(in crate::http) async fn configure(
     let body = ComputeStatusResponse::from(&state);
 
     JsonResponse::success(StatusCode::OK, body)
-}
-
-// Accept spec in JSON format and validate the configuration
-// At the moment the validation is limited to the connstrings vector
-// for the safekeeper, and we only check that we have at least one entry
-// in there and no duplicate values
-pub(in crate::http) async fn check(
-    State(_compute): State<Arc<ComputeNode>>,
-    request: Json<ConfigurationRequest>,
-) -> Response {
-    let pspec = match ParsedSpec::try_from(request.spec.clone()) {
-        Ok(p) => p,
-        Err(e) => return JsonResponse::error(StatusCode::BAD_REQUEST, e),
-    };
-
-    match check_config(&pspec) {
-        Ok(b) => b,
-        Err(e) => return JsonResponse::error(StatusCode::BAD_REQUEST, e),
-    };
-
-    JsonResponse::success(StatusCode::OK, true)
-}
-
-// check an already parsed configuration
-fn check_config(pspec: &ParsedSpec) -> Result<bool, &'static str> {
-    // at least one entry is expected in the safekeeper connstrings vector
-    if pspec.safekeeper_connstrings.is_empty() {
-        return Err("safekeeper_connstrings is empty");
-    }
-
-    // check for unicity of the connection strings
-    let mut connstrings = pspec.safekeeper_connstrings.clone();
-
-    connstrings.sort();
-    let previous = &connstrings[0];
-
-    for current in connstrings.iter().skip(1) {
-        // duplicate entry
-        if current == previous {
-            return Err("duplicate entry in safekeeper_connstrings");
-        }
-    }
-
-    Ok(true)
 }

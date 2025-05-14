@@ -10,7 +10,7 @@ paths:
   /status:
     get:
       tags:
-        - Info
+      - Info
       summary: Get compute node internal status.
       description: ""
       operationId: getComputeStatus
@@ -25,7 +25,7 @@ paths:
   /metrics.json:
     get:
       tags:
-        - Info
+      - Info
       summary: Get compute node startup metrics in JSON format.
       description: ""
       operationId: getComputeMetricsJSON
@@ -40,7 +40,7 @@ paths:
   /metrics:
     get:
       tags:
-        - Info
+      - Info
       summary: Get compute node metrics in text format.
       description: ""
       operationId: getComputeMetrics
@@ -55,7 +55,7 @@ paths:
   /insights:
     get:
       tags:
-        - Info
+      - Info
       summary: Get current compute insights in JSON format.
       description: |
         Note, that this doesn't include any historical data.
@@ -126,7 +126,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/SetRoleGrantsRequest"
+                $ref: "#/components/schemas/SetRoleGrantsRequest"
       responses:
         200:
           description: Grants applied.
@@ -151,7 +151,7 @@ paths:
   /check_writability:
     post:
       tags:
-        - Check
+      - Check
       summary: Check that we can write new data on this compute.
       description: ""
       operationId: checkComputeWritability
@@ -203,7 +203,7 @@ paths:
   /configure:
     post:
       tags:
-        - Configure
+      - Configure
       summary: Perform compute node configuration.
       description: |
         This is a blocking API endpoint, i.e. it blocks waiting until
@@ -254,28 +254,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/GenericError"
-
-  /check_config:
-    post:
-      tags:
-        - Check
-      summary: Check that given compute configuration is valid.
-      description: ""
-      operationId: checkComputeConfig
-      responses:
-        200:
-          description: Check result
-          content:
-            text/plain:
-              schema:
-                type: string
-                description: Error text or 'true' if check passed.
-                example: "true"
-
   /extension_server:
     post:
       tags:
-        - Extension
+      - Extension
       summary: Download extension from S3 to local folder.
       description: ""
       operationId: downloadExtension
@@ -304,7 +286,7 @@ paths:
   /terminate:
     post:
       tags:
-        - Terminate
+      - Terminate
       summary: Terminate Postgres and wait for it to exit
       description: ""
       operationId: terminate

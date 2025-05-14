@@ -240,6 +240,35 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
         } else {
             spec.safekeeper_connstrings.clone()
         };
+
+        // Now check the sakekeeper_connstrings validity
+        //
+        // While it seems like a good idea to check for an odd number of entries in
+        // the safekeepers connection string, changes to the list of safekeepers might
+        // incur appending a new server to a list of 3, in which case a list of 4
+        // entries is okay in production.
+        //
+        // Still we want unique entries, and at least one entry in the vector
+        if spec.safekeeper_connstrings.is_empty() {
+            return Err(String::from("safekeeper_connstrings is empty"));
+        }
+
+        // check for unicity of the connection strings
+        let mut connstrings = spec.safekeeper_connstrings.clone();
+
+        connstrings.sort();
+        let previous = &connstrings[0];
+
+        for current in connstrings.iter().skip(1) {
+            // duplicate entry?
+            if current == previous {
+                return Err(format!(
+                    "duplicate entry in safekeeper_connstrings: {}!",
+                    current,
+                ));
+            }
+        }
+
         let storage_auth_token = spec.storage_auth_token.clone();
         let tenant_id: TenantId = if let Some(tenant_id) = spec.tenant_id {
             tenant_id

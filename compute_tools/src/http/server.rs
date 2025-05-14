@@ -89,7 +89,6 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                     .route("/lfc/offload", get(lfc::offload_state).post(lfc::offload))
                     .route("/check_writability", post(check_writability::is_writable))
                     .route("/configure", post(configure::configure))
-                    .route("/check_config", post(configure::check))
                     .route("/database_schema", get(database_schema::get_schema_dump))
                     .route("/dbs_and_roles", get(dbs_and_roles::get_catalog_objects))
                     .route("/insights", get(insights::get_insights))
