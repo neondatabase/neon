@@ -23,6 +23,7 @@ members = [
     "libs/postgres_ffi",
     "libs/safekeeper_api",
     "libs/desim",
+    "libs/neon-shmem",
     "libs/utils",
     "libs/consumption_metrics",
     "libs/postgres_backend",
