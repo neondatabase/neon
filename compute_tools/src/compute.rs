@@ -212,11 +212,11 @@ pub struct ParsedSpec {
 }
 
 impl ParsedSpec {
-    pub fn validate(&self) -> Result<&Self, String> {
+    pub fn validate(&self) -> Result<(), String> {
         // Only Primary nodes are using safekeeper_connstrings, and at the moment
         // this method only validates that part of the specs.
         if self.spec.mode != ComputeMode::Primary {
-            return Ok(self);
+            return Ok(());
         }
 
         // While it seems like a good idea to check for an odd number of entries in
@@ -247,7 +247,7 @@ impl ParsedSpec {
             previous = current;
         }
 
-        Ok(self)
+        Ok(())
     }
 }
 
@@ -327,11 +327,7 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
         };
 
         // Now check validity of the parsed specification
-        match res.validate() {
-            Ok(_) => (),
-            Err(msg) => return Err(msg.clone()),
-        };
-
+        res.validate()?;
         Ok(res)
     }
 }
