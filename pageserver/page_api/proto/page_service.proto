@@ -56,9 +56,15 @@ message ReadLsn {
   // The request's read LSN. Required.
   uint64 request_lsn = 1;
   // If given, the caller guarantees that the page has not been modified since
-  // this LSN. Must be smaller than request_lsn. This allows the Pageserver to
-  // serve an old page without waiting for the request LSN to arrive. Valid for
-  // all request types.
+  // this LSN. Must be smaller than or equal to request_lsn. This allows the
+  // Pageserver to serve an old page without waiting for the request LSN to
+  // arrive. Valid for all request types.
+  //
+  // It is undefined behaviour to make a request such that the page was, in
+  // fact, modified between request_lsn and not_modified_since_lsn. The
+  // Pageserver might detect it and return an error, or it might return the old
+  // page version or the new page version. Setting not_modified_since_lsn equal
+  // to request_lsn is always safe, but can lead to unnecessary waiting.
   uint64 not_modified_since_lsn = 2;
 }
 
