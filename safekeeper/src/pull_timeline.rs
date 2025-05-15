@@ -28,7 +28,7 @@ use crate::{
     state::{EvictionState, TimelinePersistentState},
     timeline::{Timeline, WalResidentTimeline},
     timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline},
-    wal_backup::{self},
+    wal_backup,
     wal_storage::open_wal_file,
     GlobalTimelines,
 };
