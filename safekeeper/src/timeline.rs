@@ -594,14 +594,11 @@ impl Timeline {
         // it is cancelled, so WAL storage won't be opened again.
         shared_state.sk.close_wal_store();
 
-        match (self.wal_backup.get_storage(), only_local) {
-            (Some(storage), false) => {
-                // Note: we concurrently delete remote storage data from multiple
-                // safekeepers. That's ok, s3 replies 200 if object doesn't exist and we
-                // do some retries anyway.
-                wal_backup::delete_timeline(&storage, &self.ttid).await?;
-            }
-            _ => {}
+        if let (Some(storage), false) = (self.wal_backup.get_storage(), only_local) {
+            // Note: we concurrently delete remote storage data from multiple
+            // safekeepers. That's ok, s3 replies 200 if object doesn't exist and we
+            // do some retries anyway.
+            wal_backup::delete_timeline(&storage, &self.ttid).await?;
         }
 
         let dir_existed = delete_dir(&self.timeline_dir).await?;

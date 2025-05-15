@@ -198,7 +198,7 @@ impl WalBackup {
 
         match conf.remote_storage.as_ref() {
             Some(config) => {
-                let storage = GenericRemoteStorage::from_config(&config).await?;
+                let storage = GenericRemoteStorage::from_config(config).await?;
                 Ok(Self {
                     storage: Some(Arc::new(storage)),
                 })
