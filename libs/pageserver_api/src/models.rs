@@ -630,6 +630,7 @@ pub struct TenantConfigPatch {
     pub gc_compaction_ratio_percent: FieldPatch<u64>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub sampling_ratio: FieldPatch<Option<Ratio>>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub relsize_pitr_cache_capacity: FieldPatch<usize>,
 }
 
