@@ -419,6 +419,7 @@ impl Plan {
                                 storcon_client.put_timeline_import_status(
                                     timeline.tenant_shard_id,
                                     timeline.timeline_id,
+                                    timeline.generation,
                                     ShardImportStatus::InProgress(Some(ShardImportProgress {
                                         jobs: jobs_in_plan,
                                         completed: last_completed_job_idx,

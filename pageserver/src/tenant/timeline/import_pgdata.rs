@@ -49,7 +49,11 @@ pub async fn doit(
     let storcon_client = StorageControllerUpcallClient::new(timeline.conf, &cancel);
 
     let shard_status = storcon_client
-        .get_timeline_import_status(timeline.tenant_shard_id, timeline.timeline_id)
+        .get_timeline_import_status(
+            timeline.tenant_shard_id,
+            timeline.timeline_id,
+            timeline.generation,
+        )
         .await
         .map_err(|_err| anyhow::anyhow!("Shut down while getting timeline import status"))?;
 
@@ -101,6 +105,7 @@ pub async fn doit(
                 .put_timeline_import_status(
                     timeline.tenant_shard_id,
                     timeline.timeline_id,
+                    timeline.generation,
                     ShardImportStatus::Done,
                 )
                 .await
@@ -239,6 +244,7 @@ async fn terminate_flow_with_error(
             .put_timeline_import_status(
                 timeline.tenant_shard_id,
                 timeline.timeline_id,
+                timeline.generation,
                 ShardImportStatus::Error(format!("{error:#}")),
             )
             .await;
