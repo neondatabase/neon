@@ -10,5 +10,5 @@ pub mod proto {
     tonic::include_proto!("page_service");
 
     pub use page_service_client::PageServiceClient;
-    pub use page_service_server::PageServiceServer;
+    pub use page_service_server::{PageService, PageServiceServer};
 }
