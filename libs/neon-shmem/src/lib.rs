@@ -161,8 +161,12 @@ impl ShmemHandle {
         }
         assert_eq!(self.max_size, shared.max_size);
 
-        // "Lock" the area by setting the bit in 'current_size'
-        let mut old_size = shared.current_size.load(Ordering::Relaxed);
+        // Lock the area by setting the bit in 'current_size'
+        //
+        // Ordering::Relaxed would probably be sufficient here, as we don't access any other memory
+        // and the posix_fallocate/ftruncate call is surely a synchronization point anyway. But
+        // since this is not performance-critical, better safe than sorry .
+        let mut old_size = shared.current_size.load(Ordering::Acquire);
         loop {
             if (old_size & RESIZE_IN_PROGRESS) != 0 {
                 return Err(Error::new(
@@ -173,7 +177,7 @@ impl ShmemHandle {
             match shared.current_size.compare_exchange(
                 old_size,
                 new_size,
-                Ordering::Relaxed,
+                Ordering::Acquire,
                 Ordering::Relaxed,
             ) {
                 Ok(_) => break,
@@ -181,9 +185,9 @@ impl ShmemHandle {
             }
         }
 
-        // Ok, we got the "lock".
+        // Ok, we got the lock.
         //
-        // NB: If anything goes wrong, we must clear the bit!
+        // NB: If anything goes wrong, we *must* clear the bit!
         let result = {
             use std::cmp::Ordering::{Equal, Greater, Less};
             match new_size.cmp(&old_size) {
@@ -203,7 +207,7 @@ impl ShmemHandle {
         // Unlock
         shared.current_size.store(
             if result.is_ok() { new_size } else { old_size },
-            Ordering::Relaxed,
+            Ordering::Release,
         );
 
         result
