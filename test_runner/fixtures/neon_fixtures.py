@@ -51,7 +51,7 @@ from fixtures.common_types import (
     TimelineId,
 )
 from fixtures.compute_migrations import NUM_COMPUTE_MIGRATIONS
-from fixtures.endpoint.http import EndpointHttpClient
+from fixtures.endpoint.http import ComputeClaimsScope, EndpointHttpClient
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.neon_cli import NeonLocalCli, Pagectl
@@ -1185,7 +1185,9 @@ class NeonEnv:
             "broker": {},
             "safekeepers": [],
             "pageservers": [],
-            "endpoint_storage": {"port": self.port_distributor.get_port()},
+            "endpoint_storage": {
+                "listen_addr": f"127.0.0.1:{self.port_distributor.get_port()}",
+            },
             "generate_local_ssl_certs": self.generate_local_ssl_certs,
         }
 
@@ -1272,6 +1274,8 @@ class NeonEnv:
 
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
+            if self.pageserver_virtual_file_io_mode is not None:
+                ps_cfg["virtual_file_io_mode"] = self.pageserver_virtual_file_io_mode
             if config.pageserver_default_tenant_config_compaction_algorithm is not None:
                 tenant_config = ps_cfg.setdefault("tenant_config", {})
                 tenant_config["compaction_algorithm"] = (
@@ -1296,13 +1300,6 @@ class NeonEnv:
                         override = toml.loads(o)
                         for key, value in override.items():
                             ps_cfg[key] = value
-
-            if self.pageserver_virtual_file_io_mode is not None:
-                # TODO(christian): https://github.com/neondatabase/neon/issues/11598
-                if not config.test_may_use_compatibility_snapshot_binaries:
-                    ps_cfg["virtual_file_io_mode"] = self.pageserver_virtual_file_io_mode
-                else:
-                    log.info("ignoring virtual_file_io_mode parametrization for compatibility test")
 
             if self.pageserver_wal_receiver_protocol is not None:
                 key, value = PageserverWalReceiverProtocol.to_config_key_value(
@@ -1406,30 +1403,6 @@ class NeonEnv:
 
         for f in futs:
             f.result()
-
-        # Last step: register safekeepers at the storage controller
-        if (
-            self.storage_controller_config is not None
-            and self.storage_controller_config.get("timelines_onto_safekeepers") is True
-        ):
-            for sk_id, sk in enumerate(self.safekeepers):
-                # 0 is an invalid safekeeper id
-                sk_id = sk_id + 1
-                body = {
-                    "id": sk_id,
-                    "created_at": "2023-10-25T09:11:25Z",
-                    "updated_at": "2024-08-28T11:32:43Z",
-                    "region_id": "aws-us-east-2",
-                    "host": "127.0.0.1",
-                    "port": sk.port.pg,
-                    "http_port": sk.port.http,
-                    "https_port": None,
-                    "version": 5957,
-                    "availability_zone_id": f"us-east-2b-{sk_id}",
-                }
-
-                self.storage_controller.on_safekeeper_deploy(sk_id, body)
-                self.storage_controller.safekeeper_scheduling_policy(sk_id, "Active")
 
         self.endpoint_storage.start(timeout_in_seconds=timeout_in_seconds)
 
@@ -3634,6 +3607,8 @@ class NeonProxy(PgProtocol):
         http_port: int,
         mgmt_port: int,
         external_http_port: int,
+        router_port: int,
+        router_tls_port: int,
         auth_backend: NeonProxy.AuthBackend,
         metric_collection_endpoint: str | None = None,
         metric_collection_interval: str | None = None,
@@ -3650,6 +3625,8 @@ class NeonProxy(PgProtocol):
         self.test_output_dir = test_output_dir
         self.proxy_port = proxy_port
         self.mgmt_port = mgmt_port
+        self.router_port = router_port
+        self.router_tls_port = router_tls_port
         self.auth_backend = auth_backend
         self.metric_collection_endpoint = metric_collection_endpoint
         self.metric_collection_interval = metric_collection_interval
@@ -3664,6 +3641,14 @@ class NeonProxy(PgProtocol):
         key_path = self.test_output_dir / "proxy.key"
         generate_proxy_tls_certs("*.local.neon.build", key_path, crt_path)
 
+        # generate key for pg-sni-router.
+        # endpoint.namespace.local.neon.build resolves to 127.0.0.1
+        generate_proxy_tls_certs(
+            "endpoint.namespace.local.neon.build",
+            self.test_output_dir / "router.key",
+            self.test_output_dir / "router.crt",
+        )
+
         args = [
             str(self.neon_binpath / "proxy"),
             *["--http", f"{self.host}:{self.http_port}"],
@@ -3673,6 +3658,11 @@ class NeonProxy(PgProtocol):
             *["--sql-over-http-timeout", f"{self.http_timeout_seconds}s"],
             *["-c", str(crt_path)],
             *["-k", str(key_path)],
+            *["--sni-router-listen", f"{self.host}:{self.router_port}"],
+            *["--sni-router-listen-tls", f"{self.host}:{self.router_tls_port}"],
+            *["--sni-router-tls-cert", str(self.test_output_dir / "router.crt")],
+            *["--sni-router-tls-key", str(self.test_output_dir / "router.key")],
+            *["--sni-router-destination", "local.neon.build"],
             *self.auth_backend.extra_args(),
         ]
 
@@ -3864,7 +3854,7 @@ class NeonAuthBroker:
         external_http_port: int,
         auth_backend: NeonAuthBroker.ProxyV1,
     ):
-        self.domain = "apiauth.local.neon.build"  # resolves to 127.0.0.1
+        self.domain = "local.neon.build"  # resolves to 127.0.0.1
         self.host = "127.0.0.1"
         self.http_port = http_port
         self.external_http_port = external_http_port
@@ -3881,7 +3871,7 @@ class NeonAuthBroker:
         # generate key of it doesn't exist
         crt_path = self.test_output_dir / "proxy.crt"
         key_path = self.test_output_dir / "proxy.key"
-        generate_proxy_tls_certs("apiauth.local.neon.build", key_path, crt_path)
+        generate_proxy_tls_certs(f"apiauth.{self.domain}", key_path, crt_path)
 
         args = [
             str(self.neon_binpath / "proxy"),
@@ -3925,10 +3915,10 @@ class NeonAuthBroker:
 
         log.info(f"Executing http query: {query}")
 
-        connstr = f"postgresql://{user}@{self.domain}/postgres"
+        connstr = f"postgresql://{user}@ep-foo-bar-1234.{self.domain}/postgres"
         async with httpx.AsyncClient(verify=str(self.test_output_dir / "proxy.crt")) as client:
             response = await client.post(
-                f"https://{self.domain}:{self.external_http_port}/sql",
+                f"https://apiauth.{self.domain}:{self.external_http_port}/sql",
                 json={"query": query, "params": args},
                 headers={
                     "Neon-Connection-String": connstr,
@@ -3972,6 +3962,8 @@ def link_proxy(
     proxy_port = port_distributor.get_port()
     mgmt_port = port_distributor.get_port()
     external_http_port = port_distributor.get_port()
+    router_port = port_distributor.get_port()
+    router_tls_port = port_distributor.get_port()
 
     with NeonProxy(
         neon_binpath=neon_binpath,
@@ -3979,6 +3971,8 @@ def link_proxy(
         proxy_port=proxy_port,
         http_port=http_port,
         mgmt_port=mgmt_port,
+        router_port=router_port,
+        router_tls_port=router_tls_port,
         external_http_port=external_http_port,
         auth_backend=NeonProxy.Link(),
     ) as proxy:
@@ -4012,6 +4006,8 @@ def static_proxy(
     mgmt_port = port_distributor.get_port()
     http_port = port_distributor.get_port()
     external_http_port = port_distributor.get_port()
+    router_port = port_distributor.get_port()
+    router_tls_port = port_distributor.get_port()
 
     with NeonProxy(
         neon_binpath=neon_binpath,
@@ -4019,6 +4015,8 @@ def static_proxy(
         proxy_port=proxy_port,
         http_port=http_port,
         mgmt_port=mgmt_port,
+        router_port=router_port,
+        router_tls_port=router_tls_port,
         external_http_port=external_http_port,
         auth_backend=NeonProxy.Postgres(auth_endpoint),
     ) as proxy:
@@ -4218,13 +4216,13 @@ class Endpoint(PgProtocol, LogUtils):
 
         self.config(config_lines)
 
-        self.__jwt = self.env.neon_cli.endpoint_generate_jwt(self.endpoint_id)
+        self.__jwt = self.generate_jwt()
 
         return self
 
     def start(
         self,
-        remote_ext_config: str | None = None,
+        remote_ext_base_url: str | None = None,
         pageserver_id: int | None = None,
         safekeeper_generation: int | None = None,
         safekeepers: list[int] | None = None,
@@ -4250,7 +4248,7 @@ class Endpoint(PgProtocol, LogUtils):
             self.endpoint_id,
             safekeepers_generation=safekeeper_generation,
             safekeepers=self.active_safekeepers,
-            remote_ext_config=remote_ext_config,
+            remote_ext_base_url=remote_ext_base_url,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
             create_test_user=create_test_user,
@@ -4264,6 +4262,14 @@ class Endpoint(PgProtocol, LogUtils):
         self.log_config_value("neon.file_cache_size_limit")
 
         return self
+
+    def generate_jwt(self, scope: ComputeClaimsScope | None = None) -> str:
+        """
+        Generate a JWT for making requests to the endpoint's external HTTP
+        server.
+        """
+        assert self.endpoint_id is not None
+        return self.env.neon_cli.endpoint_generate_jwt(self.endpoint_id, scope)
 
     def endpoint_path(self) -> Path:
         """Path to endpoint directory"""
@@ -4457,7 +4463,7 @@ class Endpoint(PgProtocol, LogUtils):
         hot_standby: bool = False,
         lsn: Lsn | None = None,
         config_lines: list[str] | None = None,
-        remote_ext_config: str | None = None,
+        remote_ext_base_url: str | None = None,
         pageserver_id: int | None = None,
         allow_multiple: bool = False,
         basebackup_request_tries: int | None = None,
@@ -4476,7 +4482,7 @@ class Endpoint(PgProtocol, LogUtils):
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
         ).start(
-            remote_ext_config=remote_ext_config,
+            remote_ext_base_url=remote_ext_base_url,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
             basebackup_request_tries=basebackup_request_tries,
@@ -4560,7 +4566,7 @@ class EndpointFactory:
         lsn: Lsn | None = None,
         hot_standby: bool = False,
         config_lines: list[str] | None = None,
-        remote_ext_config: str | None = None,
+        remote_ext_base_url: str | None = None,
         pageserver_id: int | None = None,
         basebackup_request_tries: int | None = None,
     ) -> Endpoint:
@@ -4580,7 +4586,7 @@ class EndpointFactory:
             hot_standby=hot_standby,
             config_lines=config_lines,
             lsn=lsn,
-            remote_ext_config=remote_ext_config,
+            remote_ext_base_url=remote_ext_base_url,
             pageserver_id=pageserver_id,
             basebackup_request_tries=basebackup_request_tries,
         )
@@ -4634,7 +4640,10 @@ class EndpointFactory:
         return self
 
     def new_replica(
-        self, origin: Endpoint, endpoint_id: str, config_lines: list[str] | None = None
+        self,
+        origin: Endpoint,
+        endpoint_id: str | None = None,
+        config_lines: list[str] | None = None,
     ):
         branch_name = origin.branch_name
         assert origin in self.endpoints
@@ -4650,7 +4659,10 @@ class EndpointFactory:
         )
 
     def new_replica_start(
-        self, origin: Endpoint, endpoint_id: str, config_lines: list[str] | None = None
+        self,
+        origin: Endpoint,
+        endpoint_id: str | None = None,
+        config_lines: list[str] | None = None,
     ):
         branch_name = origin.branch_name
         assert origin in self.endpoints
@@ -5467,6 +5479,13 @@ def wait_for_last_flush_lsn(
 
     if last_flush_lsn is None:
         last_flush_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+        # The last_flush_lsn may not correspond to a record boundary.
+        # For example, if the compute flushed WAL on a page boundary,
+        # the remaining part of the record might not be flushed for a long time.
+        # This would prevent the pageserver from reaching last_flush_lsn promptly.
+        # To ensure the rest of the record reaches the pageserver quickly,
+        # we forcibly flush the WAL by using CHECKPOINT.
+        endpoint.safe_psql("CHECKPOINT")
 
     results = []
     for tenant_shard_id, pageserver in shards:

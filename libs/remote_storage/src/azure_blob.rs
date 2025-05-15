@@ -330,11 +330,18 @@ impl AzureBlobStorage {
                 if let Err(DownloadError::Timeout) = &next_item {
                     timeout_try_cnt += 1;
                     if timeout_try_cnt <= 5 {
-                        continue;
+                        continue 'outer;
                     }
                 }
 
-                let next_item = next_item?;
+                let next_item = match next_item {
+                    Ok(next_item) => next_item,
+                    Err(e) => {
+                        // The error is potentially retryable, so we must rewind the loop after yielding.
+                        yield Err(e);
+                        continue 'outer;
+                    },
+                };
 
                 // Log a warning if we saw two timeouts in a row before a successful request
                 if timeout_try_cnt > 2 {

@@ -40,7 +40,7 @@ use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
 use super::tenant::{PageReconstructError, Timeline};
 use crate::aux_file;
-use crate::context::{PerfInstrumentFutureExt, RequestContext};
+use crate::context::{PerfInstrumentFutureExt, RequestContext, RequestContextBuilder};
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::metrics::{
     RELSIZE_CACHE_ENTRIES, RELSIZE_CACHE_HITS, RELSIZE_CACHE_MISSES, RELSIZE_CACHE_MISSES_OLD,
@@ -275,24 +275,30 @@ impl Timeline {
                 continue;
             }
 
-            let nblocks = match self
-                .get_rel_size(*tag, Version::Lsn(lsn), &ctx)
-                .maybe_perf_instrument(&ctx, |crnt_perf_span| {
-                    info_span!(
-                        target: PERF_TRACE_TARGET,
-                        parent: crnt_perf_span,
-                        "GET_REL_SIZE",
-                        reltag=%tag,
-                        lsn=%lsn,
-                    )
-                })
-                .await
-            {
-                Ok(nblocks) => nblocks,
-                Err(err) => {
-                    result_slots[response_slot_idx].write(Err(err));
-                    slots_filled += 1;
-                    continue;
+            let nblocks = {
+                let ctx = RequestContextBuilder::from(&ctx)
+                    .perf_span(|crnt_perf_span| {
+                        info_span!(
+                            target: PERF_TRACE_TARGET,
+                            parent: crnt_perf_span,
+                            "GET_REL_SIZE",
+                            reltag=%tag,
+                            lsn=%lsn,
+                        )
+                    })
+                    .attached_child();
+
+                match self
+                    .get_rel_size(*tag, Version::Lsn(lsn), &ctx)
+                    .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
+                    .await
+                {
+                    Ok(nblocks) => nblocks,
+                    Err(err) => {
+                        result_slots[response_slot_idx].write(Err(err));
+                        slots_filled += 1;
+                        continue;
+                    }
                 }
             };
 
@@ -307,6 +313,17 @@ impl Timeline {
             }
 
             let key = rel_block_to_key(*tag, *blknum);
+
+            let ctx = RequestContextBuilder::from(&ctx)
+                .perf_span(|crnt_perf_span| {
+                    info_span!(
+                        target: PERF_TRACE_TARGET,
+                        parent: crnt_perf_span,
+                        "GET_BATCH",
+                        batch_size = %page_count,
+                    )
+                })
+                .attached_child();
 
             let key_slots = keys_slots.entry(key).or_default();
             key_slots.push((response_slot_idx, ctx));
@@ -323,14 +340,7 @@ impl Timeline {
         let query = VersionedKeySpaceQuery::scattered(query);
         let res = self
             .get_vectored(query, io_concurrency, ctx)
-            .maybe_perf_instrument(ctx, |current_perf_span| {
-                info_span!(
-                    target: PERF_TRACE_TARGET,
-                    parent: current_perf_span,
-                    "GET_BATCH",
-                    batch_size = %page_count,
-                )
-            })
+            .maybe_perf_instrument(ctx, |current_perf_span| current_perf_span.clone())
             .await;
 
         match res {

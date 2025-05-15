@@ -513,7 +513,7 @@ impl SafekeeperPostgresHandler {
         let end_pos = end_watch.get();
 
         if end_pos < start_pos {
-            warn!(
+            info!(
                 "requested start_pos {} is ahead of available WAL end_pos {}",
                 start_pos, end_pos
             );

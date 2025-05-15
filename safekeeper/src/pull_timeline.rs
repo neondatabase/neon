@@ -7,6 +7,7 @@ use bytes::Bytes;
 use camino::Utf8PathBuf;
 use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt, TryStreamExt};
+use http_utils::error::ApiError;
 use postgres_ffi::{PG_TLI, XLogFileName, XLogSegNo};
 use reqwest::Certificate;
 use safekeeper_api::Term;
@@ -30,7 +31,7 @@ use utils::pausable_failpoint;
 
 use crate::control_file::CONTROL_FILE_NAME;
 use crate::state::{EvictionState, TimelinePersistentState};
-use crate::timeline::{Timeline, WalResidentTimeline};
+use crate::timeline::{Timeline, TimelineError, WalResidentTimeline};
 use crate::timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline};
 use crate::wal_storage::open_wal_file;
 use crate::{GlobalTimelines, debug_dump, wal_backup};
@@ -395,7 +396,7 @@ pub async fn handle_request(
     sk_auth_token: Option<SecretString>,
     ssl_ca_certs: Vec<Certificate>,
     global_timelines: Arc<GlobalTimelines>,
-) -> Result<PullTimelineResponse> {
+) -> Result<PullTimelineResponse, ApiError> {
     let existing_tli = global_timelines.get(TenantTimelineId::new(
         request.tenant_id,
         request.timeline_id,
@@ -411,7 +412,9 @@ pub async fn handle_request(
     for ssl_ca_cert in ssl_ca_certs {
         http_client = http_client.add_root_certificate(ssl_ca_cert);
     }
-    let http_client = http_client.build()?;
+    let http_client = http_client
+        .build()
+        .map_err(|e| ApiError::InternalServerError(e.into()))?;
 
     let http_hosts = request.http_hosts.clone();
 
@@ -443,10 +446,10 @@ pub async fn handle_request(
     // offline and C comes online. Then we want a pull on C with A and B as hosts to work.
     let min_required_successful = (http_hosts.len() - 1).max(1);
     if statuses.len() < min_required_successful {
-        bail!(
+        return Err(ApiError::InternalServerError(anyhow::anyhow!(
             "only got {} successful status responses. required: {min_required_successful}",
             statuses.len()
-        )
+        )));
     }
 
     // Find the most advanced safekeeper
@@ -465,14 +468,32 @@ pub async fn handle_request(
     assert!(status.tenant_id == request.tenant_id);
     assert!(status.timeline_id == request.timeline_id);
 
-    pull_timeline(
+    let check_tombstone = !request.ignore_tombstone.unwrap_or_default();
+
+    match pull_timeline(
         status,
         safekeeper_host,
         sk_auth_token,
         http_client,
         global_timelines,
+        check_tombstone,
     )
     .await
+    {
+        Ok(resp) => Ok(resp),
+        Err(e) => {
+            match e.downcast_ref::<TimelineError>() {
+                Some(TimelineError::AlreadyExists(_)) => Ok(PullTimelineResponse {
+                    safekeeper_host: None,
+                }),
+                Some(TimelineError::CreationInProgress(_)) => {
+                    // We don't return success here because creation might still fail.
+                    Err(ApiError::Conflict("Creation in progress".to_owned()))
+                }
+                _ => Err(ApiError::InternalServerError(e)),
+            }
+        }
+    }
 }
 
 async fn pull_timeline(
@@ -481,6 +502,7 @@ async fn pull_timeline(
     sk_auth_token: Option<SecretString>,
     http_client: reqwest::Client,
     global_timelines: Arc<GlobalTimelines>,
+    check_tombstone: bool,
 ) -> Result<PullTimelineResponse> {
     let ttid = TenantTimelineId::new(status.tenant_id, status.timeline_id);
     info!(
@@ -552,7 +574,7 @@ async fn pull_timeline(
 
     // Finally, load the timeline.
     let _tli = global_timelines
-        .load_temp_timeline(ttid, &tli_dir_path, false)
+        .load_temp_timeline(ttid, &tli_dir_path, check_tombstone)
         .await?;
 
     Ok(PullTimelineResponse {

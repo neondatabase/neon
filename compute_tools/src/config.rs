@@ -223,6 +223,12 @@ pub fn write_postgres_conf(
             // TODO: tune this after performance testing
             writeln!(file, "pgaudit.log_rotation_age=5")?;
 
+            // Enable audit logs for pg_session_jwt extension
+            // TODO: Consider a good approach for shipping pg_session_jwt logs to the same sink as
+            // pgAudit - additional context in https://github.com/neondatabase/cloud/issues/28863
+            //
+            // writeln!(file, "pg_session_jwt.audit_log=on")?;
+
             // Add audit shared_preload_libraries, if they are not present.
             //
             // The caller who sets the flag is responsible for ensuring that the necessary

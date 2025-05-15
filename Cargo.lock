@@ -1284,6 +1284,7 @@ name = "compute_tools"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-compression",
  "aws-config",
  "aws-sdk-kms",
  "aws-sdk-s3",
@@ -1302,6 +1303,7 @@ dependencies = [
  "futures",
  "http 1.1.0",
  "indexmap 2.0.1",
+ "itertools 0.10.5",
  "jsonwebtoken",
  "metrics",
  "nix 0.27.1",
@@ -1420,6 +1422,7 @@ dependencies = [
  "clap",
  "comfy-table",
  "compute_api",
+ "endpoint_storage",
  "futures",
  "http-utils",
  "humantime",
@@ -4852,6 +4855,19 @@ dependencies = [
  "camino",
  "thiserror 1.0.69",
  "tokio",
+ "workspace_hack",
+]
+
+[[package]]
+name = "posthog_client_lite"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
  "workspace_hack",
 ]
 
