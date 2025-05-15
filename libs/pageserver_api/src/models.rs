@@ -342,7 +342,12 @@ pub enum ShardImportStatus {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct ShardImportProgress {
+pub enum ShardImportProgress {
+    V1(ShardImportProgressV1),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ShardImportProgressV1 {
     /// Total number of jobs in the import plan
     pub jobs: usize,
     /// Number of jobs completed

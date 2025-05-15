@@ -44,7 +44,7 @@ use pageserver_api::key::{
     slru_segment_size_to_key,
 };
 use pageserver_api::keyspace::{contiguous_range_len, is_contiguous_range, singleton_range};
-use pageserver_api::models::{ShardImportProgress, ShardImportStatus};
+use pageserver_api::models::{ShardImportProgress, ShardImportProgressV1, ShardImportStatus};
 use pageserver_api::reltag::{RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::relfile_utils::parse_relfilename;
@@ -73,6 +73,24 @@ pub async fn run(
     control_file: ControlFile,
     storage: RemoteStorageWrapper,
     import_progress: Option<ShardImportProgress>,
+    ctx: &RequestContext,
+) -> anyhow::Result<()> {
+    // Match how we run the import based on the progress version.
+    // If there's no import progress, it means that this is a new import
+    // and we can use whichever version we want.
+    match import_progress {
+        Some(ShardImportProgress::V1(progress)) => {
+            run_v1(timeline, control_file, storage, Some(progress), ctx).await
+        }
+        None => run_v1(timeline, control_file, storage, None, ctx).await,
+    }
+}
+
+async fn run_v1(
+    timeline: Arc<Timeline>,
+    control_file: ControlFile,
+    storage: RemoteStorageWrapper,
+    import_progress: Option<ShardImportProgressV1>,
     ctx: &RequestContext,
 ) -> anyhow::Result<()> {
     let planner = Planner {
@@ -416,15 +434,17 @@ impl Plan {
                             last_completed_job_idx = job_idx;
 
                             if last_completed_job_idx % checkpoint_every == 0 {
+                                let progress = ShardImportProgressV1 {
+                                    jobs: jobs_in_plan,
+                                    completed: last_completed_job_idx,
+                                    import_plan_hash,
+                                };
+
                                 storcon_client.put_timeline_import_status(
                                     timeline.tenant_shard_id,
                                     timeline.timeline_id,
                                     timeline.generation,
-                                    ShardImportStatus::InProgress(Some(ShardImportProgress {
-                                        jobs: jobs_in_plan,
-                                        completed: last_completed_job_idx,
-                                        import_plan_hash,
-                                    }))
+                                    ShardImportStatus::InProgress(Some(ShardImportProgress::V1(progress)))
                                 )
                                 .await
                                 .map_err(|_err| {
