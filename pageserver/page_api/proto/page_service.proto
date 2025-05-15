@@ -134,6 +134,10 @@ message GetPageRequest {
   // TODO: this causes an allocation in the common single-block case. The sender
   // can use a SmallVec to stack-allocate it, but Prost will always deserialize
   // into a heap-allocated Vec. Consider optimizing this.
+  //
+  // TODO: we might be able to avoid a sort or something if we mandate that these
+  // are always in order. But we can't currenly rely on this on the server, because
+  // of compatibility with the libpq protocol handler.
   repeated uint32 block_number = 5;
 }
 
