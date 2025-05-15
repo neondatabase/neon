@@ -97,6 +97,9 @@ pub struct ComputeNodeParams {
 
     /// the address of extension storage proxy gateway
     pub remote_ext_base_url: Option<String>,
+
+    /// Interval for installed extensions collection
+    pub installed_extensions_collection_interval: u64,
 }
 
 /// Compute node info shared across several `compute_ctl` threads.
@@ -2195,9 +2198,18 @@ LIMIT 100",
 
     pub fn spawn_extension_stats_task(&self) {
         let conf = self.tokio_conn_conf.clone();
+        let installed_extensions_collection_interval =
+            self.params.installed_extensions_collection_interval;
         tokio::spawn(async move {
-            // TODO(thesuhas): Make this configurable, making it one minute for testing purposes
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+            // An initial sleep is added to ensure that two collections don't happen at the same time.
+            // The first collection happens during compute startup.
+            tokio::time::sleep(tokio::time::Duration::from_secs(
+                installed_extensions_collection_interval,
+            ))
+            .await;
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+                installed_extensions_collection_interval,
+            ));
             loop {
                 interval.tick().await;
                 let _ = installed_extensions(conf.clone()).await;
