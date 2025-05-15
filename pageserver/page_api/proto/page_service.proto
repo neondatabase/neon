@@ -149,8 +149,7 @@ enum GetPageClass {
   GET_PAGE_CLASS_UNKNOWN = 0;
   // A normal request. This is the default.
   GET_PAGE_CLASS_NORMAL = 1;
-  // A prefetch request.
-  // TODO: can we classify these in Postgres?
+  // A prefetch request. NB: can only be classified on pg < 18.
   GET_PAGE_CLASS_PREFETCH = 2;
   // A background request (e.g. vacuum).
   GET_PAGE_CLASS_BACKGROUND = 3;
