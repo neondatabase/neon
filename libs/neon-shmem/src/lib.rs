@@ -1,12 +1,11 @@
 //! Shared memory utilities for neon communicator
 
 use std::num::NonZeroUsize;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use nix::errno::Errno;
-use nix::fcntl::posix_fallocate as nix_posix_fallocate;
 use nix::sys::memfd::MFdFlags;
 use nix::sys::memfd::memfd_create as nix_memfd_create;
 use nix::sys::mman::MapFlags;
@@ -115,12 +114,7 @@ impl ShmemHandle {
         .map_err(|e| Error::new("mmap failed: {e}", e))?;
 
         // Reserve space for the initial size
-        nix_posix_fallocate(&fd, 0, initial_size as i64).map_err(|e| {
-            Error::new(
-                "could not reserve space for the shmem segment, posix_fallcate failed: {e}",
-                e,
-            )
-        })?;
+        enlarge_file(fd.as_fd(), initial_size as u64)?;
 
         // Initialize the header
         let shared: NonNull<SharedStruct> = start_ptr.cast();
@@ -195,12 +189,7 @@ impl ShmemHandle {
                     Error::new("could not shrink shmem segment, ftruncate failed: {e}", e)
                 }),
                 Equal => Ok(()),
-                Greater => nix_posix_fallocate(&self.fd, 0, new_size as i64).map_err(|e| {
-                    Error::new(
-                        "could not grow shmem segment, posix_fallocate failed: {e}",
-                        e,
-                    )
-                }),
+                Greater => enlarge_file(self.fd.as_fd(), new_size as u64),
             }
         };
 
@@ -230,6 +219,29 @@ impl Drop for ShmemHandle {
         // We unmap the entire region.
         let _ = unsafe { nix_munmap(self.shared_ptr.cast(), self.max_size) };
         // The fd is dropped automatically by OwnedFd.
+    }
+}
+
+fn enlarge_file(fd: BorrowedFd, size: u64) -> Result<(), Error> {
+    // Use posix_fallocate() to enlarge the file. It reserves the space correctly, so that
+    // we don't get a segfault later when trying to actually use it.
+    //
+    // As a fallback on macos, which doesn't have posix_fallocate, use plain 'fallocate'
+    if cfg!(not(target_os = "macos"))
+    {
+        nix::fcntl::posix_fallocate(fd, 0, size as i64)
+            .map_err(|e| Error::new(
+                "could not grow shmem segment, posix_fallocate failed: {e}",
+                e,
+            ))
+    }
+    else
+    {
+        nix::unistd::ftruncate(fd, size as i64)
+            .map_err(|e| Error::new(
+                "could not grow shmem segment, ftruncate failed: {e}",
+                e,
+            ))
     }
 }
 
