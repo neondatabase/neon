@@ -59,7 +59,7 @@ pub trait StorageControllerUpcallApi {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         generation: Generation,
-    ) -> impl Future<Output = Result<Option<ShardImportStatus>, RetryForeverError>> + Send;
+    ) -> impl Future<Output = Result<ShardImportStatus, RetryForeverError>> + Send;
 }
 
 impl StorageControllerUpcallClient {
@@ -104,6 +104,7 @@ impl StorageControllerUpcallClient {
         &self,
         url: &url::Url,
         request: R,
+        method: reqwest::Method,
     ) -> Result<T, RetryForeverError>
     where
         R: Serialize,
@@ -113,7 +114,7 @@ impl StorageControllerUpcallClient {
             || async {
                 let response = self
                     .http_client
-                    .post(url.clone())
+                    .request(method.clone(), url.clone())
                     .json(&request)
                     .send()
                     .await?;
@@ -222,7 +223,9 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
             register: register.clone(),
         };
 
-        let response: ReAttachResponse = self.retry_http_forever(&url, request).await?;
+        let response: ReAttachResponse = self
+            .retry_http_forever(&url, request, reqwest::Method::POST)
+            .await?;
         tracing::info!(
             "Received re-attach response with {} tenants (node {}, register: {:?})",
             response.tenants.len(),
@@ -275,7 +278,9 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
                 return Err(RetryForeverError::ShuttingDown);
             }
 
-            let response: ValidateResponse = self.retry_http_forever(&url, request).await?;
+            let response: ValidateResponse = self
+                .retry_http_forever(&url, request, reqwest::Method::POST)
+                .await?;
             for rt in response.tenants {
                 result.insert(rt.id, rt.valid);
             }
@@ -309,7 +314,8 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
             status,
         };
 
-        self.retry_http_forever(&url, request).await
+        self.retry_http_forever(&url, request, reqwest::Method::POST)
+            .await
     }
 
     #[tracing::instrument(skip_all)] // so that warning logs from retry_http_forever have context
@@ -318,7 +324,7 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         generation: Generation,
-    ) -> Result<Option<ShardImportStatus>, RetryForeverError> {
+    ) -> Result<ShardImportStatus, RetryForeverError> {
         let url = self
             .base_url
             .join("timeline_import_status")
@@ -330,32 +336,9 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
             generation,
         };
 
-        Ok(backoff::retry(
-            || async {
-                let response = self
-                    .http_client
-                    .get(url.clone())
-                    .json(&request)
-                    .send()
-                    .await?;
-
-                if let Err(err) = response.error_for_status_ref() {
-                    if matches!(err.status(), Some(reqwest::StatusCode::NOT_FOUND)) {
-                        return Ok(None);
-                    } else {
-                        return Err(err);
-                    }
-                }
-                response.json::<ShardImportStatus>().await.map(Some)
-            },
-            |_| false,
-            3,
-            u32::MAX,
-            "storage controller upcall",
-            &self.cancel,
-        )
-        .await
-        .ok_or(RetryForeverError::ShuttingDown)?
-        .expect("We retry forever, this should never be reached"))
+        let response: ShardImportStatus = self
+            .retry_http_forever(&url, request, reqwest::Method::GET)
+            .await?;
+        Ok(response)
     }
 }

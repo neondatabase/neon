@@ -58,7 +58,7 @@ pub async fn doit(
         .map_err(|_err| anyhow::anyhow!("Shut down while getting timeline import status"))?;
 
     info!(?shard_status, "peeking shard status");
-    match shard_status.unwrap_or(ShardImportStatus::InProgress(None)) {
+    match shard_status {
         ShardImportStatus::InProgress(maybe_progress) => {
             let storage =
                 importbucket_client::new(timeline.conf, &location, cancel.clone()).await?;
