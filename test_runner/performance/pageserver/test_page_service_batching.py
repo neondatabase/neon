@@ -91,6 +91,10 @@ def test_postgres_seqscan(
     If the compute provides pipeline depth (effective_io_concurrency=100), then
     pipelining configs, especially with max_batch_size>1 should yield dramatic improvements
     in all performance metrics.
+
+    We advance the LSN from a disruptor thread to simulate the effect of a workload with concurrent writes
+    in another table. The `scattered-lsn` batching mode handles this well whereas the
+    initial implementatin (`uniform-lsn`) would break the batch.
     """
 
     #
