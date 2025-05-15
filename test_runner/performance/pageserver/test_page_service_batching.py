@@ -361,14 +361,7 @@ def test_random_reads(
 
     def build_snapshot_cb(neon_env_builder: NeonEnvBuilder) -> NeonEnv:
         env = neon_env_builder.init_start()
-        endpoint = env.endpoints.create_start(
-            "main",
-            config_lines=[
-                # disable full page writes to avoid will_init pages due to checkpoints
-                # (not sure we even trigger a checkpoint, but, just rule it out as a potential source of noise)
-                "full_page_writes=off",
-            ],
-        )
+        endpoint = env.endpoints.create_start("main")
         l0stack.make_l0_stack(
             endpoint,
             l0stack.L0StackShape(logical_table_size_mib=50, delta_stack_height=l0_stack_height),

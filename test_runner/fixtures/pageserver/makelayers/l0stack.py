@@ -18,8 +18,6 @@ class L0StackShape:
 def make_l0_stack(endpoint: Endpoint, shape: L0StackShape):
     """
     Creates stack of L0 deltas each of which should have 1 Value::Delta per page in table `data`.
-    TODO: I think there's a chance that some of the deltas are `will_init`.
-    Could be avoided with disabling fullpage writes.
     """
     env = endpoint.env
 
@@ -28,6 +26,9 @@ def make_l0_stack(endpoint: Endpoint, shape: L0StackShape):
     shards = description["shards"]
     assert len(shards) == 1, "does not support sharding"
     tenant_shard_id = TenantShardId.parse(shards[0]["tenant_shard_id"])
+
+    endpoint.config(["full_page_writes=off"])
+    endpoint.reconfigure()
 
     ps = env.get_pageserver(shards[0]["node_attached"])
 
@@ -75,6 +76,12 @@ def make_l0_stack_standalone(
 
     conn.autocommit = True
     cur = conn.cursor()
+
+    # Ensure full_page_writes are disabled so that all Value::Delta in
+    # pageserver are !will_init, and therefore a getpage needs to read
+    # the entire delta stack.
+    cur.execute("SHOW full_page_writes")
+    assert cur.fetchall()[0][0] == "off", "full_page_writes should be off"
 
     # each tuple is 23 (header) + 100 bytes = 123 bytes
     # page header si 24 bytes
