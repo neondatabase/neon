@@ -371,9 +371,17 @@ impl Plan {
             .into_iter()
             .enumerate()
             .map(|(idx, job)| (idx + 1, job))
+            .filter(|(idx, _job)| {
+                // Filter out any jobs that have been done already
+                if let Some(start_after) = start_after_job_idx {
+                    *idx > start_after
+                } else {
+                    true
+                }
+            })
             .peekable();
-        let mut last_completed_job_idx = start_after_job_idx.unwrap_or(0);
 
+        let mut last_completed_job_idx = start_after_job_idx.unwrap_or(0);
         let checkpoint_every: usize = import_config.import_job_checkpoint_threshold.into();
 
         // Run import jobs concurrently up to the limit specified by the pageserver configuration.
@@ -384,9 +392,6 @@ impl Plan {
                 permit = semaphore.clone().acquire_owned(), if jobs.peek().is_some() => {
                     let permit = permit.expect("never closed");
                     let (job_idx, job) = jobs.next().expect("we peeked");
-                    if Some(job_idx) <= start_after_job_idx {
-                        continue;
-                    }
 
                     let job_timeline = timeline.clone();
                     let ctx = ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Error);
