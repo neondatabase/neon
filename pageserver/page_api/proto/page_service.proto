@@ -10,6 +10,7 @@
 // - neon-tenant-id: tenant ID ("7c4a1f9e3bd6470c8f3e21a65bd2e980")
 // - neon-shard-id: shard ID, as <number><count> in hex ("0b10" = shard 11 of 16, 0-based)
 // - neon-timeline-id: timeline ID ("f08c4e9a2d5f76b1e3a7c2d8910f4b3e")
+// - neon-compute-mode: compute mode ("primary", "static", "replica")
 //
 // TODO: write implementation guidance on
 // - Health checks
@@ -175,7 +176,6 @@ enum GetPageStatus {
   // The request was invalid.
   GET_PAGE_STATUS_INVALID = 3;
   // The client is rate limited. Slow down and retry later.
-  // TODO: should we use this?
   GET_PAGE_STATUS_SLOW_DOWN = 4;
 }
 
