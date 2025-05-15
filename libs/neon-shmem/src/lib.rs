@@ -157,7 +157,7 @@ impl ShmemHandle {
         let shared = self.shared();
 
         if new_size > self.max_size {
-            panic!("size is greater than max_size");
+            panic!("new size ({} is greater than max size ({})", new_size, self.max_size);
         }
         assert_eq!(self.max_size, shared.max_size);
 
