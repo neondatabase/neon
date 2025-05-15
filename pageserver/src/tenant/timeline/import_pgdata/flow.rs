@@ -372,7 +372,7 @@ impl Plan {
             .enumerate()
             .map(|(idx, job)| (idx + 1, job))
             .peekable();
-        let mut last_completed_job_idx = 0;
+        let mut last_completed_job_idx = start_after_job_idx.unwrap_or(0);
 
         let checkpoint_every: usize = import_config.import_job_checkpoint_threshold.into();
 
