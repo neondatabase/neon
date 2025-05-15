@@ -160,7 +160,7 @@ enum GetPageClass {
 // A batch response will contain all of the requested pages. We could eagerly
 // emit individual pages as soon as they are ready, but on a readv() Postgres
 // holds buffer pool locks on all pages in the batch and we'll only return once
-// the entire batch is ready, so noone can make use of the individual pages.
+// the entire batch is ready, so no one can make use of the individual pages.
 message GetPageResponse {
   // The original request's ID.
   uint64 request_id = 1;
