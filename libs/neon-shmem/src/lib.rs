@@ -193,7 +193,7 @@ impl ShmemHandle {
                 Equal => Ok(()),
                 Greater => nix_posix_fallocate(&self.fd, 0, new_size as i64).map_err(|e| {
                     Error::new(
-                        "could not grow shmem segment, posix_fallcate failed: {e}",
+                        "could not grow shmem segment, posix_fallocate failed: {e}",
                         e,
                     )
                 }),
