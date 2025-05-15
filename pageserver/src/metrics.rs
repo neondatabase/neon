@@ -859,17 +859,17 @@ pub(crate) static RELSIZE_LATEST_CACHE_HITS: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static RELSIZE_PITR_CACHE_ENTRIES: Lazy<UIntGauge> = Lazy::new(|| {
+pub(crate) static RELSIZE_SNAPSHOT_CACHE_ENTRIES: Lazy<UIntGauge> = Lazy::new(|| {
     register_uint_gauge!(
-        "pageserver_relsize_pitr_cache_entries",
+        "pageserver_relsize_snapshot_cache_entries",
         "Number of entries in the pitr relation size cache",
     )
     .expect("failed to define a metric")
 });
 
-pub(crate) static RELSIZE_PITR_CACHE_HITS: Lazy<IntCounter> = Lazy::new(|| {
+pub(crate) static RELSIZE_SNAPSHOT_CACHE_HITS: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
-        "pageserver_relsize_pitr_cache_hits",
+        "pageserver_relsize_snapshot_cache_hits",
         "Pitr relation size cache hits",
     )
     .expect("failed to define a metric")

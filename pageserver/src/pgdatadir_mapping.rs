@@ -44,7 +44,7 @@ use crate::context::{PerfInstrumentFutureExt, RequestContext, RequestContextBuil
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::metrics::{
     RELSIZE_CACHE_MISSES, RELSIZE_CACHE_MISSES_OLD, RELSIZE_LATEST_CACHE_ENTRIES,
-    RELSIZE_LATEST_CACHE_HITS, RELSIZE_PITR_CACHE_ENTRIES, RELSIZE_PITR_CACHE_HITS,
+    RELSIZE_LATEST_CACHE_HITS, RELSIZE_SNAPSHOT_CACHE_ENTRIES, RELSIZE_SNAPSHOT_CACHE_HITS,
 };
 use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id,
@@ -1372,9 +1372,9 @@ impl Timeline {
             }
             RELSIZE_CACHE_MISSES_OLD.inc();
         }
-        let mut rel_size_cache = self.rel_size_pitr_cache.lock().unwrap();
+        let mut rel_size_cache = self.rel_size_snapshot_cache.lock().unwrap();
         if let Some(nblock) = rel_size_cache.get(&(lsn, *tag)) {
-            RELSIZE_PITR_CACHE_HITS.inc();
+            RELSIZE_SNAPSHOT_CACHE_HITS.inc();
             return Some(*nblock);
         }
         RELSIZE_CACHE_MISSES.inc();
@@ -1399,10 +1399,10 @@ impl Timeline {
                 }
             }
         } else {
-            let mut rel_size_cache = self.rel_size_pitr_cache.lock().unwrap();
+            let mut rel_size_cache = self.rel_size_snapshot_cache.lock().unwrap();
             if rel_size_cache.capacity() != 0 {
                 rel_size_cache.insert((lsn, tag), nblocks);
-                RELSIZE_PITR_CACHE_ENTRIES.set(rel_size_cache.len() as u64);
+                RELSIZE_SNAPSHOT_CACHE_ENTRIES.set(rel_size_cache.len() as u64);
             }
         }
     }

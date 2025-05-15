@@ -631,7 +631,7 @@ pub struct TenantConfigPatch {
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub sampling_ratio: FieldPatch<Option<Ratio>>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
-    pub relsize_pitr_cache_capacity: FieldPatch<usize>,
+    pub relsize_snapshot_cache_capacity: FieldPatch<usize>,
 }
 
 /// Like [`crate::config::TenantConfigToml`], but preserves the information
@@ -763,7 +763,7 @@ pub struct TenantConfig {
     pub sampling_ratio: Option<Option<Ratio>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub relsize_pitr_cache_capacity: Option<usize>,
+    pub relsize_snapshot_cache_capacity: Option<usize>,
 }
 
 impl TenantConfig {
@@ -809,7 +809,7 @@ impl TenantConfig {
             mut gc_compaction_initial_threshold_kb,
             mut gc_compaction_ratio_percent,
             mut sampling_ratio,
-            mut relsize_pitr_cache_capacity,
+            mut relsize_snapshot_cache_capacity,
         } = self;
 
         patch.checkpoint_distance.apply(&mut checkpoint_distance);
@@ -912,8 +912,8 @@ impl TenantConfig {
             .apply(&mut gc_compaction_ratio_percent);
         patch.sampling_ratio.apply(&mut sampling_ratio);
         patch
-            .relsize_pitr_cache_capacity
-            .apply(&mut relsize_pitr_cache_capacity);
+            .relsize_snapshot_cache_capacity
+            .apply(&mut relsize_snapshot_cache_capacity);
 
         Ok(Self {
             checkpoint_distance,
@@ -953,7 +953,7 @@ impl TenantConfig {
             gc_compaction_initial_threshold_kb,
             gc_compaction_ratio_percent,
             sampling_ratio,
-            relsize_pitr_cache_capacity,
+            relsize_snapshot_cache_capacity,
         })
     }
 
@@ -1062,9 +1062,9 @@ impl TenantConfig {
                 .gc_compaction_ratio_percent
                 .unwrap_or(global_conf.gc_compaction_ratio_percent),
             sampling_ratio: self.sampling_ratio.unwrap_or(global_conf.sampling_ratio),
-            relsize_pitr_cache_capacity: self
-                .relsize_pitr_cache_capacity
-                .unwrap_or(global_conf.relsize_pitr_cache_capacity),
+            relsize_snapshot_cache_capacity: self
+                .relsize_snapshot_cache_capacity
+                .unwrap_or(global_conf.relsize_snapshot_cache_capacity),
         }
     }
 }

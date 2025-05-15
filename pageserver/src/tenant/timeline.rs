@@ -357,7 +357,7 @@ pub struct Timeline {
 
     /// Relation size cache
     pub(crate) rel_size_latest_cache: RwLock<HashMap<RelTag, (Lsn, BlockNumber)>>,
-    pub(crate) rel_size_pitr_cache: Mutex<LruCache<(Lsn, RelTag), BlockNumber>>,
+    pub(crate) rel_size_snapshot_cache: Mutex<LruCache<(Lsn, RelTag), BlockNumber>>,
 
     download_all_remote_layers_task_info: RwLock<Option<DownloadRemoteLayersTaskInfo>>,
 
@@ -2870,12 +2870,12 @@ impl Timeline {
             ancestor_gc_info.insert_child(timeline_id, metadata.ancestor_lsn(), is_offloaded);
         }
 
-        let relsize_pitr_cache_capacity = {
+        let relsize_snapshot_cache_capacity = {
             let loaded_tenant_conf = tenant_conf.load();
             loaded_tenant_conf
                 .tenant_conf
-                .relsize_pitr_cache_capacity
-                .unwrap_or(conf.default_tenant_conf.relsize_pitr_cache_capacity)
+                .relsize_snapshot_cache_capacity
+                .unwrap_or(conf.default_tenant_conf.relsize_snapshot_cache_capacity)
         };
 
         Arc::new_cyclic(|myself| {
@@ -2970,7 +2970,7 @@ impl Timeline {
 
                 last_received_wal: Mutex::new(None),
                 rel_size_latest_cache: RwLock::new(HashMap::new()),
-                rel_size_pitr_cache: Mutex::new(LruCache::new(relsize_pitr_cache_capacity)),
+                rel_size_snapshot_cache: Mutex::new(LruCache::new(relsize_snapshot_cache_capacity)),
 
                 download_all_remote_layers_task_info: RwLock::new(None),
 
