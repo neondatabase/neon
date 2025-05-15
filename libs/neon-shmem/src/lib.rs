@@ -80,9 +80,12 @@ impl ShmemHandle {
         } else {
             // macos doesn't have memfd_create(). We care less about performance macos, as long
             // as it works, so as a fallback, create a regular file instead.
-            let file = tempfile::tempfile()
-                .map_err(|e| Error::new("could not create temporary file to back shmem area: {e}",
-                                        nix::errno::Errno::from_raw(e.raw_os_error().unwrap_or(0))))?;
+            let file = tempfile::tempfile().map_err(|e| {
+                Error::new(
+                    "could not create temporary file to back shmem area: {e}",
+                    nix::errno::Errno::from_raw(e.raw_os_error().unwrap_or(0)),
+                )
+            })?;
             OwnedFd::from(file)
         };
 
@@ -163,7 +166,10 @@ impl ShmemHandle {
         let shared = self.shared();
 
         if new_size > self.max_size {
-            panic!("new size ({} is greater than max size ({})", new_size, self.max_size);
+            panic!(
+                "new size ({} is greater than max size ({})",
+                new_size, self.max_size
+            );
         }
         assert_eq!(self.max_size, shared.max_size);
 
@@ -239,21 +245,16 @@ fn enlarge_file(fd: BorrowedFd, size: u64) -> Result<(), Error> {
     // we don't get a segfault later when trying to actually use it.
     //
     // As a fallback on macos, which doesn't have posix_fallocate, use plain 'fallocate'
-    if cfg!(not(target_os = "macos"))
-    {
-        nix::fcntl::posix_fallocate(fd, 0, size as i64)
-            .map_err(|e| Error::new(
+    if cfg!(not(target_os = "macos")) {
+        nix::fcntl::posix_fallocate(fd, 0, size as i64).map_err(|e| {
+            Error::new(
                 "could not grow shmem segment, posix_fallocate failed: {e}",
                 e,
-            ))
-    }
-    else
-    {
+            )
+        })
+    } else {
         nix::unistd::ftruncate(fd, size as i64)
-            .map_err(|e| Error::new(
-                "could not grow shmem segment, ftruncate failed: {e}",
-                e,
-            ))
+            .map_err(|e| Error::new("could not grow shmem segment, ftruncate failed: {e}", e))
     }
 }
 
