@@ -47,7 +47,7 @@ pub async fn stream_snapshot(
     source: NodeId,
     destination: NodeId,
     tx: mpsc::Sender<Result<Bytes>>,
-    storage: Arc<GenericRemoteStorage>,
+    storage: Option<Arc<GenericRemoteStorage>>,
 ) {
     match tli.try_wal_residence_guard().await {
         Err(e) => {
@@ -63,13 +63,26 @@ pub async fn stream_snapshot(
                         source,
                         destination,
                         tx.clone(),
-                        &storage,
+                        storage,
                     )
                     .await
                 }
                 None => {
-                    stream_snapshot_offloaded_guts(tli, source, destination, tx.clone(), &storage)
+                    if let Some(storage) = storage {
+                        stream_snapshot_offloaded_guts(
+                            tli,
+                            source,
+                            destination,
+                            tx.clone(),
+                            &storage,
+                        )
                         .await
+                    } else {
+                        tx.send(Err(anyhow!("remote storage not configured")))
+                            .await
+                            .ok();
+                        return;
+                    }
                 }
             } {
                 // Error type/contents don't matter as they won't can't reach the client
@@ -155,7 +168,7 @@ pub async fn stream_snapshot_resident_guts(
     source: NodeId,
     destination: NodeId,
     tx: mpsc::Sender<Result<Bytes>>,
-    storage: &GenericRemoteStorage,
+    storage: Option<Arc<GenericRemoteStorage>>,
 ) -> Result<()> {
     let mut ar = prepare_tar_stream(tx);
 
@@ -283,7 +296,7 @@ impl WalResidentTimeline {
         ar: &mut tokio_tar::Builder<W>,
         source: NodeId,
         destination: NodeId,
-        storage: &GenericRemoteStorage,
+        storage: Option<Arc<GenericRemoteStorage>>,
     ) -> Result<SnapshotContext> {
         let mut shared_state = self.write_shared_state().await;
         let wal_seg_size = shared_state.get_wal_seg_size();
@@ -305,7 +318,7 @@ impl WalResidentTimeline {
 
             let remote_timeline_path = &self.tli.remote_path;
             wal_backup::copy_partial_segment(
-                storage,
+                &*storage.context("remote storage not configured")?,
                 &replace.previous.remote_path(remote_timeline_path),
                 &replace.current.remote_path(remote_timeline_path),
             )

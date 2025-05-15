@@ -251,11 +251,7 @@ async fn timeline_snapshot_handler(request: Request<Body>) -> Result<Response<Bo
     let global_timelines = get_global_timelines(&request);
     let tli = global_timelines.get(ttid).map_err(ApiError::from)?;
     let wal_backup = get_wal_back(&request);
-    let storage = wal_backup
-        .get_storage()
-        .ok_or(ApiError::BadRequest(anyhow::anyhow!(
-            "Remote Storage is not configured"
-        )))?;
+    let storage = wal_backup.get_storage();
 
     // To stream the body use wrap_stream which wants Stream of Result<Bytes>,
     // so create the chan and write to it in another task.
