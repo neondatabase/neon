@@ -108,7 +108,6 @@ jobs:
           echo "Error: artifact not found in S3 bucket s3://neon-github-public-dev/artifacts/$COMMIT_HASH" after 2 hours
         else
           mkdir -p $(dirname $ARCHIVE)
-          trap 'rm -rf $ARCHIVE ${TARGET}' EXIT
           time aws s3 cp --only-show-errors s3://neon-github-public-dev/${S3_KEY} ${ARCHIVE}
           mkdir -p ${TARGET}
           time tar -xf ${ARCHIVE} -C ${TARGET}
@@ -126,5 +125,5 @@ jobs:
         if [ -d "${TARGET}" ]; then
           rm -rf ${TARGET}
         fi
-        rm -f $(dirname $ARCHIVE)
+        rm -rf $(dirname $ARCHIVE)
 
