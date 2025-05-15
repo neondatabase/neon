@@ -6,8 +6,6 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use nix::errno::Errno;
-use nix::sys::memfd::MFdFlags;
-use nix::sys::memfd::memfd_create as nix_memfd_create;
 use nix::sys::mman::MapFlags;
 use nix::sys::mman::ProtFlags;
 use nix::sys::mman::mmap as nix_mmap;
@@ -72,8 +70,22 @@ impl ShmemHandle {
     /// If the ShmemHandle is dropped, the memory is unmapped from the current process. Other
     /// processes can continue using it, however.
     pub fn new(name: &str, initial_size: usize, max_size: usize) -> Result<ShmemHandle, Error> {
-        let fd = nix_memfd_create(name, MFdFlags::empty())
-            .map_err(|e| Error::new("memfd_create failed: {e}", e))?;
+        // Use memfd_create() to create the backing anonymous file.
+        let fd = if cfg!(not(target_os = "macos")) {
+            use nix::sys::memfd::MFdFlags;
+            use nix::sys::memfd::memfd_create as nix_memfd_create;
+
+            nix_memfd_create(name, MFdFlags::empty())
+                .map_err(|e| Error::new("memfd_create failed: {e}", e))?
+        } else {
+            // macos doesn't have memfd_create(). We care less about performance macos, as long
+            // as it works, so as a fallback, create a regular file instead.
+            let file = tempfile::tempfile()
+                .map_err(|e| Error::new("could not create temporary file to back shmem area: {e}",
+                                        nix::errno::Errno::from_raw(e.raw_os_error().unwrap_or(0))))?;
+            OwnedFd::from(file)
+        };
+
         Self::new_with_fd(fd, initial_size, max_size)
     }
 
