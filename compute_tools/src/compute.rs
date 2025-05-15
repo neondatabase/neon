@@ -749,17 +749,7 @@ impl ComputeNode {
 
             let conf = self.get_tokio_conn_conf(None);
             tokio::task::spawn(async {
-                let res = get_installed_extensions(conf).await;
-                match res {
-                    Ok(extensions) => {
-                        info!(
-                            "[NEON_EXT_STAT] {}",
-                            serde_json::to_string(&extensions)
-                                .expect("failed to serialize extensions list")
-                        );
-                    }
-                    Err(err) => error!("could not get installed extensions: {err:?}"),
-                }
+                let _ = installed_extensions(conf).await;
             });
         }
 
@@ -788,6 +778,9 @@ impl ComputeNode {
 
         // Log metrics so that we can search for slow operations in logs
         info!(?metrics, postmaster_pid = %postmaster_pid, "compute start finished");
+
+        // Spawn the extension stats background task
+        self.spawn_extension_stats_task();
 
         if pspec.spec.prewarm_lfc_on_startup {
             self.prewarm_lfc();
@@ -2199,6 +2192,32 @@ LIMIT 100",
             info!("Pageserver config changed");
         }
     }
+
+    pub fn spawn_extension_stats_task(&self) {
+        let conf = self.tokio_conn_conf.clone();
+        tokio::spawn(async move {
+            // TODO(thesuhas): Make this configurable, making it one minute for testing purposes
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let _ = installed_extensions(conf.clone()).await;
+            }
+        });
+    }
+}
+
+pub async fn installed_extensions(conf: tokio_postgres::Config) -> Result<()> {
+    let res = get_installed_extensions(conf).await;
+    match res {
+        Ok(extensions) => {
+            info!(
+                "[NEON_EXT_STAT] {}",
+                serde_json::to_string(&extensions).expect("failed to serialize extensions list")
+            );
+        }
+        Err(err) => error!("could not get installed extensions: {err:?}"),
+    }
+    Ok(())
 }
 
 pub fn forward_termination_signal() {
