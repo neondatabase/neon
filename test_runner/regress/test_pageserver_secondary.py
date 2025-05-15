@@ -248,8 +248,20 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
             last_generation = max(
                 [s[1] for s in last_state.values() if s[1] is not None], default=None
             )
+            is_last_generation = last_generation == generation
+            
+            # It's also only valid to connect if there are no conflicting attachments (i.e. no
+            # Pageserver in AttachedSingle with other attachments in same generation).
+            num_attached_single = len(
+                [s for s in last_state.values() if s[0] == "AttachedSingle" and s[1] == last_generation]
+            )
+            num_attached = len(
+                [s for s in last_state.values() if s[0].startswith("Attached") and s[1] == last_generation]
+            )
+            valid_attachment = (num_attached_single == 1 and num_attached == 1) \
+                or num_attached_single == 0
 
-            if mode.startswith("Attached") and generation == last_generation:
+            if mode.startswith("Attached") and is_last_generation and valid_attachment:
                 # This is a basic test: we are validating that he endpoint works properly _between_
                 # configuration changes.  A stronger test would be to validate that clients see
                 # no errors while we are making the changes.
