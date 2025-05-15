@@ -63,7 +63,16 @@ pub struct InMemoryLayer {
 
     opened_at: Instant,
 
-    /// The above fields never change, except for `end_lsn`, which is only set once.
+    /// All versions of all pages in the layer are kept here. Indexed
+    /// by block number and LSN. The [`IndexEntry`] is an offset into the
+    /// ephemeral file where the page version is stored.
+    ///
+    /// We use a separate lock for the index to reduce the critical section
+    /// during which reads cannot be planned.
+    index: RwLock<BTreeMap<CompactKey, VecMap<Lsn, IndexEntry>>>,
+
+    /// The above fields never change, except for `end_lsn`, which is only set once,
+    /// and `index` (see rationale there).
     /// All other changing parts are in `inner`, and protected by a mutex.
     inner: RwLock<InMemoryLayerInner>,
 
@@ -81,11 +90,6 @@ impl std::fmt::Debug for InMemoryLayer {
 }
 
 pub struct InMemoryLayerInner {
-    /// All versions of all pages in the layer are kept here. Indexed
-    /// by block number and LSN. The [`IndexEntry`] is an offset into the
-    /// ephemeral file where the page version is stored.
-    index: BTreeMap<CompactKey, VecMap<Lsn, IndexEntry>>,
-
     /// The values are stored in a serialized format in this file.
     /// Each serialized Value is preceded by a 'u32' length field.
     /// PerSeg::page_versions map stores offsets into this file.
@@ -425,7 +429,7 @@ impl InMemoryLayer {
             .page_content_kind(PageContentKind::InMemoryLayer)
             .attached_child();
 
-        let inner = self.inner.read().await;
+        let index = self.index.read().await;
 
         struct ValueRead {
             entry_lsn: Lsn,
@@ -435,10 +439,7 @@ impl InMemoryLayer {
         let mut ios: HashMap<(Key, Lsn), OnDiskValueIo> = Default::default();
 
         for range in keyspace.ranges.iter() {
-            for (key, vec_map) in inner
-                .index
-                .range(range.start.to_compact()..range.end.to_compact())
-            {
+            for (key, vec_map) in index.range(range.start.to_compact()..range.end.to_compact()) {
                 let key = Key::from_compact(*key);
                 let slice = vec_map.slice_range(lsn_range.clone());
 
@@ -466,7 +467,7 @@ impl InMemoryLayer {
                 }
             }
         }
-        drop(inner); // release the lock before we spawn the IO; if it's serial-mode IO we will deadlock on the read().await below
+        drop(index); // release the lock before we spawn the IO; if it's serial-mode IO we will deadlock on the read().await below
         let read_from = Arc::clone(self);
         let read_ctx = ctx.attached_child();
         reconstruct_state
@@ -573,8 +574,8 @@ impl InMemoryLayer {
             start_lsn,
             end_lsn: OnceLock::new(),
             opened_at: Instant::now(),
+            index: RwLock::new(BTreeMap::new()),
             inner: RwLock::new(InMemoryLayerInner {
-                index: BTreeMap::new(),
                 file,
                 resource_units: GlobalResourceUnits::new(),
             }),
@@ -592,31 +593,39 @@ impl InMemoryLayer {
         serialized_batch: SerializedValueBatch,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let mut inner = self.inner.write().await;
-        self.assert_writable();
+        let (base_offset, metadata) = {
+            let mut inner = self.inner.write().await;
+            self.assert_writable();
 
-        let base_offset = inner.file.len();
+            let base_offset = inner.file.len();
 
-        let SerializedValueBatch {
-            raw,
-            metadata,
-            max_lsn: _,
-            len: _,
-        } = serialized_batch;
+            let SerializedValueBatch {
+                raw,
+                metadata,
+                max_lsn: _,
+                len: _,
+            } = serialized_batch;
 
-        // Write the batch to the file
-        inner.file.write_raw(&raw, ctx).await?;
-        let new_size = inner.file.len();
+            // Write the batch to the file
+            inner.file.write_raw(&raw, ctx).await?;
+            let new_size = inner.file.len();
 
-        let expected_new_len = base_offset
-            .checked_add(raw.len().into_u64())
-            // write_raw would error if we were to overflow u64.
-            // also IndexEntry and higher levels in
-            //the code don't allow the file to grow that large
-            .unwrap();
-        assert_eq!(new_size, expected_new_len);
+            let expected_new_len = base_offset
+                .checked_add(raw.len().into_u64())
+                // write_raw would error if we were to overflow u64.
+                // also IndexEntry and higher levels in
+                //the code don't allow the file to grow that large
+                .unwrap();
+            assert_eq!(new_size, expected_new_len);
+
+            inner.resource_units.maybe_publish_size(new_size);
+
+            (base_offset, metadata)
+        };
 
         // Update the index with the new entries
+        let mut index = self.index.write().await;
+
         for meta in metadata {
             let SerializedValueMeta {
                 key,
@@ -639,7 +648,7 @@ impl InMemoryLayer {
                 will_init,
             })?;
 
-            let vec_map = inner.index.entry(key).or_default();
+            let vec_map = index.entry(key).or_default();
             let old = vec_map.append_or_update_last(lsn, index_entry).unwrap().0;
             if old.is_some() {
                 // This should not break anything, but is unexpected: ingestion code aims to filter out
@@ -657,8 +666,6 @@ impl InMemoryLayer {
                 AtomicOrdering::Relaxed,
             );
         }
-
-        inner.resource_units.maybe_publish_size(new_size);
 
         Ok(())
     }
@@ -700,8 +707,8 @@ impl InMemoryLayer {
 
         #[cfg(debug_assertions)]
         {
-            let inner = self.inner.write().await;
-            for vec_map in inner.index.values() {
+            let index = self.index.read().await;
+            for vec_map in index.values() {
                 for (lsn, _) in vec_map.as_slice() {
                     assert!(*lsn < end_lsn);
                 }
@@ -732,6 +739,7 @@ impl InMemoryLayer {
         // would have to wait until we release it. That race condition is very
         // rare though, so we just accept the potential latency hit for now.
         let inner = self.inner.read().await;
+        let index = self.index.read().await;
 
         use l0_flush::Inner;
         let _concurrency_permit = match l0_flush_global_state {
@@ -743,13 +751,9 @@ impl InMemoryLayer {
         let key_count = if let Some(key_range) = key_range {
             let key_range = key_range.start.to_compact()..key_range.end.to_compact();
 
-            inner
-                .index
-                .iter()
-                .filter(|(k, _)| key_range.contains(k))
-                .count()
+            index.iter().filter(|(k, _)| key_range.contains(k)).count()
         } else {
-            inner.index.len()
+            index.len()
         };
         if key_count == 0 {
             return Ok(None);
@@ -772,7 +776,7 @@ impl InMemoryLayer {
                 let file_contents = inner.file.load_to_io_buf(ctx).await?;
                 let file_contents = file_contents.freeze();
 
-                for (key, vec_map) in inner.index.iter() {
+                for (key, vec_map) in index.iter() {
                     // Write all page versions
                     for (lsn, entry) in vec_map
                         .as_slice()
