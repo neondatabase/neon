@@ -5371,13 +5371,16 @@ impl Timeline {
         }
 
         // HADRON
+        // for child timelines, we consider all pages up to ancestor_LSN are redone successfully by the parent timeline
+        min_image_lsn = min_image_lsn.max(self.get_ancestor_lsn());
         if min_image_lsn < force_image_creation_lsn.unwrap_or(Lsn(0)) && max_deltas > 0 {
             info!(
-                "forcing image creation for partitioned range {}-{}. Min image LSN: {}, force image creation LSN: {}",
+                "forcing image creation for partitioned range {}-{}. Min image LSN: {}, force image creation LSN: {}, num deltas: {}",
                 partition.ranges[0].start,
                 partition.ranges[0].end,
                 min_image_lsn,
-                force_image_creation_lsn.unwrap()
+                force_image_creation_lsn.unwrap(),
+                max_deltas
             );
             return true;
         }

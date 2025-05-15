@@ -1484,13 +1484,12 @@ impl Timeline {
     // the force image creation may be too early or too late, but eventually it should be able to catch up.
     pub(crate) fn get_force_image_creation_lsn(self: &Arc<Self>) -> Option<Lsn> {
         let image_creation_period = self.get_image_layer_force_creation_period()?;
-        let current_lsn: Lsn = self.get_last_record_lsn();
+        let current_lsn = self.get_last_record_lsn();
         let pitr_lsn = self.gc_info.read().unwrap().cutoffs.time?;
         let pitr_interval = self.get_pitr_interval();
-        if pitr_interval.is_zero() {
+        if pitr_lsn == Lsn::INVALID || pitr_interval.is_zero() {
             tracing::warn!(
-                "Tenant {} has no PITR interval set, skipping force image creation LSN calculation",
-                self.tenant_shard_id
+                "pitr LSN/interval not found, skipping force image creation LSN calculation"
             );
             return None;
         }
