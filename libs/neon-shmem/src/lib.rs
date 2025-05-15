@@ -210,6 +210,9 @@ impl ShmemHandle {
     }
 
     /// Returns the current user-visible size of the shared memory segment.
+    ///
+    /// NOTE: a concurrent set_size() call can change the size at any time. It is the caller's
+    /// responsibility not to access the area beyond the current size.
     pub fn current_size(&self) -> usize {
         let total_current_size =
             self.shared().current_size.load(Ordering::Relaxed) & !RESIZE_IN_PROGRESS;
