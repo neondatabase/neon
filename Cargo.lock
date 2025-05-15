@@ -4321,6 +4321,7 @@ dependencies = [
  "pageserver_api",
  "pageserver_client",
  "pageserver_compaction",
+ "pageserver_page_api",
  "pem",
  "pin-project-lite",
  "postgres-protocol",
@@ -4363,6 +4364,8 @@ dependencies = [
  "tokio-tar",
  "tokio-util",
  "toml_edit",
+ "tonic 0.13.1",
+ "tonic-reflection",
  "tracing",
  "tracing-utils",
  "twox-hash",
@@ -7520,8 +7523,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e581ba15a835f4d9ea06c55ab1bd4dce26fc53752c69a04aac00703bfb49ba9"
 dependencies = [
  "async-trait",
+ "axum",
  "base64 0.22.1",
  "bytes",
+ "h2 0.4.4",
  "http 1.1.0",
  "http-body 1.0.0",
  "http-body-util",
@@ -7532,6 +7537,7 @@ dependencies = [
  "pin-project",
  "prost 0.13.5",
  "rustls-native-certs 0.8.0",
+ "socket2",
  "tokio",
  "tokio-rustls 0.26.2",
  "tokio-stream",
@@ -7553,6 +7559,19 @@ dependencies = [
  "prost-types 0.13.3",
  "quote",
  "syn 2.0.100",
+]
+
+[[package]]
+name = "tonic-reflection"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9687bd5bfeafebdded2356950f278bba8226f0b32109537c4253406e09aafe1"
+dependencies = [
+ "prost 0.13.5",
+ "prost-types 0.13.3",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.13.1",
 ]
 
 [[package]]

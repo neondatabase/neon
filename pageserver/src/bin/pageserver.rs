@@ -387,8 +387,8 @@ fn start_pageserver(
     // We need to release the lock file only when the process exits.
     std::mem::forget(lock_file);
 
-    // Bind the HTTP and libpq ports early, so that if they are in use by some other
-    // process, we error out early.
+    // Bind the HTTP, libpq, and gRPC ports early, to error out if they are
+    // already in use.
     let http_addr = &conf.listen_http_addr;
     info!("Starting pageserver http handler on {http_addr}");
     let http_listener = tcp_listener::bind(http_addr)?;
@@ -411,6 +411,20 @@ fn start_pageserver(
     // TODO: also set this on the walreceiver socket, but tokio-postgres doesn't
     // support enabling keepalives while using the default OS sysctls.
     setsockopt(&pageserver_listener, sockopt::KeepAlive, &true)?;
+
+    let mut grpc_listener = None;
+    let mut grpc_tls_identity = None;
+    if let Some(grpc_addr) = &conf.listen_grpc_addr {
+        info!("Starting pageserver gRPC handler on {grpc_addr}");
+        grpc_listener = Some(tcp_listener::bind(grpc_addr).map_err(|e| anyhow!("{e}"))?);
+
+        // TODO: consider using TLS unconditionally.
+        if conf.enable_tls_page_service_api {
+            let ssl_cert = std::fs::read_to_string(&conf.ssl_cert_file)?;
+            let ssl_key = std::fs::read_to_string(&conf.ssl_key_file)?;
+            grpc_tls_identity = Some(tonic::transport::Identity::from_pem(ssl_cert, ssl_key));
+        }
+    }
 
     // Launch broker client
     // The storage_broker::connect call needs to happen inside a tokio runtime thread.
@@ -439,7 +453,8 @@ fn start_pageserver(
     // Initialize authentication for incoming connections
     let http_auth;
     let pg_auth;
-    if conf.http_auth_type == AuthType::NeonJWT || conf.pg_auth_type == AuthType::NeonJWT {
+    let grpc_auth;
+    if [conf.http_auth_type, conf.pg_auth_type, conf.grpc_auth_type].contains(&AuthType::NeonJWT) {
         // unwrap is ok because check is performed when creating config, so path is set and exists
         let key_path = conf.auth_validation_public_key_path.as_ref().unwrap();
         info!("Loading public key(s) for verifying JWT tokens from {key_path:?}");
@@ -447,17 +462,22 @@ fn start_pageserver(
         let jwt_auth = JwtAuth::from_key_path(key_path)?;
         let auth: Arc<SwappableJwtAuth> = Arc::new(SwappableJwtAuth::new(jwt_auth));
 
-        http_auth = match &conf.http_auth_type {
+        http_auth = match conf.http_auth_type {
             AuthType::Trust => None,
             AuthType::NeonJWT => Some(auth.clone()),
         };
-        pg_auth = match &conf.pg_auth_type {
+        pg_auth = match conf.pg_auth_type {
+            AuthType::Trust => None,
+            AuthType::NeonJWT => Some(auth.clone()),
+        };
+        grpc_auth = match conf.grpc_auth_type {
             AuthType::Trust => None,
             AuthType::NeonJWT => Some(auth),
         };
     } else {
         http_auth = None;
         pg_auth = None;
+        grpc_auth = None;
     }
     info!("Using auth for http API: {:#?}", conf.http_auth_type);
     info!("Using auth for pg connections: {:#?}", conf.pg_auth_type);
@@ -765,6 +785,24 @@ fn start_pageserver(
         },
     );
 
+    // Spawn a Pageserver gRPC server task. It will spawn separate tasks for
+    // each stream/request.
+    //
+    // TODO: this uses a separate Tokio runtime for the page service. If we want
+    // other gRPC services, they will need their own port and runtime. Is this
+    // necessary?
+    let mut page_service_grpc = None;
+    if let Some(grpc_listener) = grpc_listener {
+        page_service_grpc = Some(page_service::spawn_grpc(
+            conf,
+            tenant_manager.clone(),
+            grpc_auth,
+            otel_guard.as_ref().map(|g| g.dispatch.clone()),
+            grpc_listener,
+            grpc_tls_identity,
+        )?);
+    }
+
     // All started up! Now just sit and wait for shutdown signal.
     BACKGROUND_RUNTIME.block_on(async move {
         let signal_token = CancellationToken::new();
@@ -783,6 +821,7 @@ fn start_pageserver(
             http_endpoint_listener,
             https_endpoint_listener,
             page_service,
+            page_service_grpc,
             consumption_metrics_tasks,
             disk_usage_eviction_task,
             &tenant_manager,

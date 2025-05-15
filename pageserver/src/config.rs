@@ -58,11 +58,13 @@ pub struct PageServerConf {
     pub listen_http_addr: String,
     /// Example: 127.0.0.1:9899
     pub listen_https_addr: Option<String>,
+    /// Example: 127.0.0.1:51051
+    pub listen_grpc_addr: Option<String>,
 
-    /// Path to a file with certificate's private key for https API.
+    /// Path to a file with certificate's private key for https and gRPC API.
     /// Default: server.key
     pub ssl_key_file: Utf8PathBuf,
-    /// Path to a file with a X509 certificate for https API.
+    /// Path to a file with a X509 certificate for https and gRPC API.
     /// Default: server.crt
     pub ssl_cert_file: Utf8PathBuf,
     /// Period to reload certificate and private key from files.
@@ -100,6 +102,8 @@ pub struct PageServerConf {
     pub http_auth_type: AuthType,
     /// authentication method for libpq connections from compute
     pub pg_auth_type: AuthType,
+    /// authentication method for gRPC connections from compute
+    pub grpc_auth_type: AuthType,
     /// Path to a file or directory containing public key(s) for verifying JWT tokens.
     /// Used for both mgmt and compute auth, if enabled.
     pub auth_validation_public_key_path: Option<Utf8PathBuf>,
@@ -221,9 +225,11 @@ pub struct PageServerConf {
 
     pub tracing: Option<pageserver_api::config::Tracing>,
 
-    /// Enable TLS in page service API.
+    /// Enable TLS in page service API. This applies both to the libpq API and gRPC API.
     /// Does not force TLS: the client negotiates TLS usage during the handshake.
     /// Uses key and certificate from ssl_key_file/ssl_cert_file.
+    ///
+    /// TODO: consider making this unconditional for gRPC.
     pub enable_tls_page_service_api: bool,
 
     /// Run in development mode, which disables certain safety checks
@@ -349,6 +355,7 @@ impl PageServerConf {
             listen_pg_addr,
             listen_http_addr,
             listen_https_addr,
+            listen_grpc_addr,
             ssl_key_file,
             ssl_cert_file,
             ssl_cert_reload_period,
@@ -363,6 +370,7 @@ impl PageServerConf {
             pg_distrib_dir,
             http_auth_type,
             pg_auth_type,
+            grpc_auth_type,
             auth_validation_public_key_path,
             remote_storage,
             broker_endpoint,
@@ -416,6 +424,7 @@ impl PageServerConf {
             listen_pg_addr,
             listen_http_addr,
             listen_https_addr,
+            listen_grpc_addr,
             ssl_key_file,
             ssl_cert_file,
             ssl_cert_reload_period,
@@ -428,6 +437,7 @@ impl PageServerConf {
             max_file_descriptors,
             http_auth_type,
             pg_auth_type,
+            grpc_auth_type,
             auth_validation_public_key_path,
             remote_storage_config: remote_storage,
             broker_endpoint,
