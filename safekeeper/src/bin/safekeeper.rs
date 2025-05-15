@@ -8,7 +8,6 @@ use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 use remote_storage::RemoteStorageConfig;
-use safekeeper::wal_backup::WalBackup;
 use sd_notify::NotifyState;
 use tokio::runtime::Handle;
 use tokio::signal::unix::{signal, SignalKind};
@@ -33,6 +32,7 @@ use safekeeper::defaults::{
     DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR,
 };
 use safekeeper::http;
+use safekeeper::wal_backup::WalBackup;
 use safekeeper::wal_service;
 use safekeeper::GlobalTimelines;
 use safekeeper::SafeKeeperConf;
