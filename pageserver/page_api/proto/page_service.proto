@@ -41,7 +41,7 @@ service PageService {
   // NB: a status response (e.g. errors) will terminate the stream. The stream
   // may be shared by e.g. multiple Postgres backends, so we should avoid this.
   // Most errors are therefore sent as GetPageResponse.status instead.
-  rpc GetPages (stream GetPageRequest) returns (stream GetPageResponse);
+  rpc GetPages (stream GetPageRequestBatch) returns (stream GetPageResponse);
 
   // Returns the size of a relation, as # of blocks.
   rpc GetRelSize (GetRelSizeRequest) returns (GetRelSizeResponse);
@@ -108,15 +108,7 @@ message GetDbSizeResponse {
   uint64 num_bytes = 1;
 }
 
-// Requests a page, or a contiguous batch of pages if block_count > 1.
-//
-// A batch will be executed as a single batch by the Pageserver, amortizing
-// layer access costs and parallelizing them. This may increase the latency of
-// any individual page read, but generally improves the overall latency and
-// throughput of the batch as a whole.
-//
-// Batch responses will be emitted individually for each page. They may be
-// emitted out of order.
+// Requests a single page.
 message GetPageRequest {
   // A request ID. Will be included in the response. Should be unique for
   // in-flight requests on the stream.
@@ -129,12 +121,6 @@ message GetPageRequest {
   RelTag rel = 4;
   // The page number to read. Must belong to the remote shard.
   uint32 block_number = 5;
-  // The number of contiguous pages to read, starting at block_number. Must not
-  // straddle a shard boundary. Must be <= 32. 0 is equivalent to 1.
-  //
-  // TODO: bump the max to the typical Postgres batch size, e.g. 100
-  // (effective_io_concurrency).
-  uint32 block_count = 6;
 }
 
 // A GetPageRequest class. Primarily intended for observability, but may also be
@@ -149,7 +135,18 @@ enum GetPageClass {
   GET_PAGE_CLASS_PREFETCH = 2;
 }
 
-// A GetPage response. May be emitted out of order for a batch.
+// A batch of GetPage requests. These will be executed as a single batch by the
+// Pageserver, amortizing layer access costs and parallelizing them. This may
+// increase the latency of any individual request, but improves the overall
+// latency and throughput of the batch as a whole.
+//
+// Responses will be emitted individually, as soon as they are ready. They may
+// be emitted in a different order than the requests.
+message GetPageRequestBatch {
+  repeated GetPageRequest requests = 1;
+}
+
+// A GetPage response. May be emitted out of order.
 //
 // TODO: should we send a single batch response instead of individual pages?
 // That would prevent eager responses, e.g. in the case of a layer download in
@@ -161,10 +158,8 @@ message GetPageResponse {
   GetPageStatus status = 2;
   // A string describing the status, if any.
   string reason = 3;
-  // The block number of the page.
-  uint32 block_number = 4;
   // The 8KB page image. Empty if status != OK.
-  bytes page_image = 5;
+  bytes page_image = 4;
 }
 
 // A GetPageResponse status code. Since we use a bidirectional stream, we don't
