@@ -859,6 +859,14 @@ pub(crate) static RELSIZE_LATEST_CACHE_HITS: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub(crate) static RELSIZE_LATEST_CACHE_MISSES: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_relsize_latest_cache_misses",
+        "Relation size latest cache misses",
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) static RELSIZE_SNAPSHOT_CACHE_ENTRIES: Lazy<UIntGauge> = Lazy::new(|| {
     register_uint_gauge!(
         "pageserver_relsize_snapshot_cache_entries",
@@ -875,10 +883,10 @@ pub(crate) static RELSIZE_SNAPSHOT_CACHE_HITS: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static RELSIZE_CACHE_MISSES: Lazy<IntCounter> = Lazy::new(|| {
+pub(crate) static RELSIZE_SNAPSHOT_CACHE_MISSES: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
-        "pageserver_relsize_cache_misses",
-        "Relation size cache misses",
+        "pageserver_relsize_snapshot_cache_misses",
+        "Relation size snapshot cache misses",
     )
     .expect("failed to define a metric")
 });

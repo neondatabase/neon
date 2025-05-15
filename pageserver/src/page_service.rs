@@ -2128,7 +2128,14 @@ impl PageServerHandler {
         .await?;
 
         let exists = timeline
-            .get_rel_exists(req.rel, Version::Lsn(lsn), ctx)
+            .get_rel_exists(
+                req.rel,
+                Version::Lsns(LsnRange {
+                    effective_lsn: lsn,
+                    request_lsn: req.hdr.request_lsn,
+                }),
+                ctx,
+            )
             .await?;
 
         Ok(PagestreamBeMessage::Exists(PagestreamExistsResponse {
@@ -2189,7 +2196,15 @@ impl PageServerHandler {
         .await?;
 
         let total_blocks = timeline
-            .get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, Version::Lsn(lsn), ctx)
+            .get_db_size(
+                DEFAULTTABLESPACE_OID,
+                req.dbnode,
+                Version::Lsns(LsnRange {
+                    effective_lsn: lsn,
+                    request_lsn: req.hdr.request_lsn,
+                }),
+                ctx,
+            )
             .await?;
         let db_size = total_blocks as i64 * BLCKSZ as i64;
 

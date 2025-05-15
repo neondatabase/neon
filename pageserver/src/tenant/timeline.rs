@@ -2812,6 +2812,13 @@ impl Timeline {
 
             self.remote_client.update_config(&new_conf.location);
 
+            let mut rel_size_cache = self.rel_size_snapshot_cache.lock().unwrap();
+            if let Some(new_capacity) = new_conf.tenant_conf.relsize_snapshot_cache_capacity {
+                if new_capacity != rel_size_cache.capacity() {
+                    rel_size_cache.set_capacity(new_capacity);
+                }
+            }
+
             self.metrics
                 .evictions_with_low_residence_duration
                 .write()

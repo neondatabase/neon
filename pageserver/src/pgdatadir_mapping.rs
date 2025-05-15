@@ -43,8 +43,9 @@ use crate::aux_file;
 use crate::context::{PerfInstrumentFutureExt, RequestContext, RequestContextBuilder};
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::metrics::{
-    RELSIZE_CACHE_MISSES, RELSIZE_CACHE_MISSES_OLD, RELSIZE_LATEST_CACHE_ENTRIES,
-    RELSIZE_LATEST_CACHE_HITS, RELSIZE_SNAPSHOT_CACHE_ENTRIES, RELSIZE_SNAPSHOT_CACHE_HITS,
+    RELSIZE_CACHE_MISSES_OLD, RELSIZE_LATEST_CACHE_ENTRIES, RELSIZE_LATEST_CACHE_HITS,
+    RELSIZE_LATEST_CACHE_MISSES, RELSIZE_SNAPSHOT_CACHE_ENTRIES, RELSIZE_SNAPSHOT_CACHE_HITS,
+    RELSIZE_SNAPSHOT_CACHE_MISSES,
 };
 use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id,
@@ -98,7 +99,7 @@ pub struct LsnRange {
 }
 
 impl LsnRange {
-    pub fn pitr(lsn: Lsn) -> LsnRange {
+    pub fn at(lsn: Lsn) -> LsnRange {
         LsnRange {
             effective_lsn: lsn,
             request_lsn: lsn,
@@ -228,20 +229,6 @@ impl Timeline {
                         pages
                             .iter()
                             .map(|(tag, blknum)| (tag, blknum, lsns, ctx.attached_child())),
-                        io_concurrency.clone(),
-                        ctx,
-                    )
-                    .await;
-                assert_eq!(res.len(), 1);
-                res.into_iter().next().unwrap()
-            }
-            Version::Lsn(lsn) => {
-                let pages: smallvec::SmallVec<[_; 1]> = smallvec::smallvec![(tag, blknum)];
-                let res = self
-                    .get_rel_page_at_lsn_batched(
-                        pages.iter().map(|(tag, blknum)| {
-                            (tag, blknum, LsnRange::pitr(lsn), ctx.attached_child())
-                        }),
                         io_concurrency.clone(),
                         ctx,
                     )
@@ -503,7 +490,7 @@ impl Timeline {
             ));
         }
 
-        if let Some(nblocks) = self.get_cached_rel_size(&tag, version.get_lsn()) {
+        if let Some(nblocks) = self.get_cached_rel_size(&tag, version) {
             return Ok(nblocks);
         }
 
@@ -543,7 +530,7 @@ impl Timeline {
         }
 
         // first try to lookup relation in cache
-        if let Some(_nblocks) = self.get_cached_rel_size(&tag, version.get_lsn()) {
+        if let Some(_nblocks) = self.get_cached_rel_size(&tag, version) {
             return Ok(true);
         }
         // then check if the database was already initialized.
@@ -665,7 +652,7 @@ impl Timeline {
     ) -> Result<Bytes, PageReconstructError> {
         assert!(self.tenant_shard_id.is_shard_zero());
         let n_blocks = self
-            .get_slru_segment_size(kind, segno, Version::Lsn(lsn), ctx)
+            .get_slru_segment_size(kind, segno, Version::at(lsn), ctx)
             .await?;
 
         let keyspace = KeySpace::single(
@@ -900,11 +887,11 @@ impl Timeline {
         mut f: impl FnMut(TimestampTz) -> ControlFlow<T>,
     ) -> Result<T, PageReconstructError> {
         for segno in self
-            .list_slru_segments(SlruKind::Clog, Version::Lsn(probe_lsn), ctx)
+            .list_slru_segments(SlruKind::Clog, Version::at(probe_lsn), ctx)
             .await?
         {
             let nblocks = self
-                .get_slru_segment_size(SlruKind::Clog, segno, Version::Lsn(probe_lsn), ctx)
+                .get_slru_segment_size(SlruKind::Clog, segno, Version::at(probe_lsn), ctx)
                 .await?;
 
             let keyspace = KeySpace::single(
@@ -1170,7 +1157,7 @@ impl Timeline {
         let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
             for rel in self
-                .list_rels(*spcnode, *dbnode, Version::Lsn(lsn), ctx)
+                .list_rels(*spcnode, *dbnode, Version::at(lsn), ctx)
                 .await?
             {
                 if self.cancel.is_cancelled() {
@@ -1245,7 +1232,7 @@ impl Timeline {
             result.add_key(rel_dir_to_key(spcnode, dbnode));
 
             let mut rels: Vec<RelTag> = self
-                .list_rels(spcnode, dbnode, Version::Lsn(lsn), ctx)
+                .list_rels(spcnode, dbnode, Version::at(lsn), ctx)
                 .await?
                 .into_iter()
                 .collect();
@@ -1363,7 +1350,8 @@ impl Timeline {
     }
 
     /// Get cached size of relation if it not updated after specified LSN
-    pub fn get_cached_rel_size(&self, tag: &RelTag, lsn: Lsn) -> Option<BlockNumber> {
+    pub fn get_cached_rel_size(&self, tag: &RelTag, version: Version<'_>) -> Option<BlockNumber> {
+        let lsn = version.get_lsn();
         let rel_size_cache = self.rel_size_latest_cache.read().unwrap();
         if let Some((cached_lsn, nblocks)) = rel_size_cache.get(tag) {
             if lsn >= *cached_lsn {
@@ -1377,7 +1365,11 @@ impl Timeline {
             RELSIZE_SNAPSHOT_CACHE_HITS.inc();
             return Some(*nblock);
         }
-        RELSIZE_CACHE_MISSES.inc();
+        if version.is_latest() {
+            RELSIZE_LATEST_CACHE_MISSES.inc();
+        } else {
+            RELSIZE_SNAPSHOT_CACHE_MISSES.inc();
+        }
         None
     }
 
@@ -1623,7 +1615,10 @@ impl DatadirModification<'_> {
         //       check the cache too. This is because eagerly checking the cache results in
         //       less work overall and 10% better performance. It's more work on cache miss
         //       but cache miss is rare.
-        if let Some(nblocks) = self.tline.get_cached_rel_size(&rel, self.get_lsn()) {
+        if let Some(nblocks) = self
+            .tline
+            .get_cached_rel_size(&rel, Version::Modified(self))
+        {
             Ok(nblocks)
         } else if !self
             .tline
@@ -2706,7 +2701,6 @@ pub struct DatadirModificationStats {
 #[derive(Clone, Copy)]
 pub enum Version<'a> {
     Lsns(LsnRange),
-    Lsn(Lsn),
     Modified(&'a DatadirModification<'a>),
 }
 
@@ -2719,7 +2713,6 @@ impl Version<'_> {
     ) -> Result<Bytes, PageReconstructError> {
         match self {
             Version::Lsns(lsns) => timeline.get(key, lsns.effective_lsn, ctx).await,
-            Version::Lsn(lsn) => timeline.get(key, *lsn, ctx).await,
             Version::Modified(modification) => modification.get(key, ctx).await,
         }
     }
@@ -2741,20 +2734,25 @@ impl Version<'_> {
         }
     }
 
-    fn is_latest(&self) -> bool {
+    pub fn is_latest(&self) -> bool {
         match self {
             Version::Lsns(lsns) => lsns.is_latest(),
-            Version::Lsn(_) => false,
             Version::Modified(_) => true,
         }
     }
 
-    fn get_lsn(&self) -> Lsn {
+    pub fn get_lsn(&self) -> Lsn {
         match self {
             Version::Lsns(lsns) => lsns.effective_lsn,
-            Version::Lsn(lsn) => *lsn,
             Version::Modified(modification) => modification.lsn,
         }
+    }
+
+    pub fn at(lsn: Lsn) -> Self {
+        Version::Lsns(LsnRange {
+            effective_lsn: lsn,
+            request_lsn: lsn,
+        })
     }
 }
 
