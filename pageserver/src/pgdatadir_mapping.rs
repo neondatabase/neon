@@ -50,7 +50,9 @@ use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id,
 };
 use crate::tenant::storage_layer::IoConcurrency;
-use crate::tenant::timeline::{GetVectoredError, VersionedKeySpaceQuery};
+use crate::tenant::timeline::{
+    GetVectoredError, MissingKeyError, RelSizeCacheEntry, VersionedKeySpaceQuery,
+};
 
 /// Max delta records appended to the AUX_FILES_KEY (for aux v1). The write path will write a full image once this threshold is reached.
 pub const MAX_AUX_FILE_DELTAS: usize = 1024;
@@ -470,8 +472,26 @@ impl Timeline {
             ));
         }
 
-        if let Some(nblocks) = self.get_cached_rel_size(&tag, version.get_lsn()) {
-            return Ok(nblocks);
+        if let Some(entry) = self.get_cached_rel_size(&tag, version.get_lsn()) {
+            match entry {
+                RelSizeCacheEntry::Present(nblocks) => {
+                    return Ok(nblocks);
+                }
+                RelSizeCacheEntry::Truncated => {
+                    let key = rel_size_to_key(tag);
+                    return Err(PageReconstructError::MissingKey(Box::new(
+                        MissingKeyError {
+                            keyspace: KeySpace::single(key..key.next()),
+                            shard: self.get_shard_identity().number,
+                            query: None,
+                            original_hwm_lsn: version.get_lsn(),
+                            ancestor_lsn: None,
+                            read_path: None,
+                            backtrace: None,
+                        },
+                    )));
+                }
+            }
         }
 
         if (tag.forknum == FSM_FORKNUM || tag.forknum == VISIBILITYMAP_FORKNUM)
@@ -510,8 +530,15 @@ impl Timeline {
         }
 
         // first try to lookup relation in cache
-        if let Some(_nblocks) = self.get_cached_rel_size(&tag, version.get_lsn()) {
-            return Ok(true);
+        if let Some(entry) = self.get_cached_rel_size(&tag, version.get_lsn()) {
+            match entry {
+                RelSizeCacheEntry::Present(_) => {
+                    return Ok(true);
+                }
+                RelSizeCacheEntry::Truncated => {
+                    return Ok(false);
+                }
+            }
         }
         // then check if the database was already initialized.
         // get_rel_exists can be called before dbdir is created.
@@ -1330,12 +1357,12 @@ impl Timeline {
     }
 
     /// Get cached size of relation if it not updated after specified LSN
-    pub fn get_cached_rel_size(&self, tag: &RelTag, lsn: Lsn) -> Option<BlockNumber> {
+    pub fn get_cached_rel_size(&self, tag: &RelTag, lsn: Lsn) -> Option<RelSizeCacheEntry> {
         let rel_size_cache = self.rel_size_cache.read().unwrap();
-        if let Some((cached_lsn, nblocks)) = rel_size_cache.map.get(tag) {
+        if let Some((cached_lsn, entry)) = rel_size_cache.map.get(tag) {
             if lsn >= *cached_lsn {
                 RELSIZE_CACHE_HITS.inc();
-                return Some(*nblocks);
+                return Some(*entry);
             }
             RELSIZE_CACHE_MISSES_OLD.inc();
         }
@@ -1359,11 +1386,11 @@ impl Timeline {
             hash_map::Entry::Occupied(mut entry) => {
                 let cached_lsn = entry.get_mut();
                 if lsn >= cached_lsn.0 {
-                    *cached_lsn = (lsn, nblocks);
+                    *cached_lsn = (lsn, RelSizeCacheEntry::Present(nblocks));
                 }
             }
             hash_map::Entry::Vacant(entry) => {
-                entry.insert((lsn, nblocks));
+                entry.insert((lsn, RelSizeCacheEntry::Present(nblocks)));
                 RELSIZE_CACHE_ENTRIES.inc();
             }
         }
@@ -1372,15 +1399,23 @@ impl Timeline {
     /// Store cached relation size
     pub fn set_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
         let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        if rel_size_cache.map.insert(tag, (lsn, nblocks)).is_none() {
+        if rel_size_cache
+            .map
+            .insert(tag, (lsn, RelSizeCacheEntry::Present(nblocks)))
+            .is_none()
+        {
             RELSIZE_CACHE_ENTRIES.inc();
         }
     }
 
     /// Remove cached relation size
-    pub fn remove_cached_rel_size(&self, tag: &RelTag) {
+    pub fn remove_cached_rel_size(&self, tag: RelTag, lsn: Lsn) {
         let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        if rel_size_cache.map.remove(tag).is_some() {
+        if rel_size_cache
+            .map
+            .insert(tag, (lsn, RelSizeCacheEntry::Truncated))
+            .is_some()
+        {
             RELSIZE_CACHE_ENTRIES.dec();
         }
     }
@@ -1585,7 +1620,9 @@ impl DatadirModification<'_> {
         //       check the cache too. This is because eagerly checking the cache results in
         //       less work overall and 10% better performance. It's more work on cache miss
         //       but cache miss is rare.
-        if let Some(nblocks) = self.tline.get_cached_rel_size(&rel, self.get_lsn()) {
+        if let Some(RelSizeCacheEntry::Present(nblocks)) =
+            self.tline.get_cached_rel_size(&rel, self.get_lsn())
+        {
             Ok(nblocks)
         } else if !self
             .tline
@@ -2172,7 +2209,7 @@ impl DatadirModification<'_> {
                     self.pending_nblocks -= old_size as i64;
 
                     // Remove entry from relation size cache
-                    self.tline.remove_cached_rel_size(&rel_tag);
+                    self.tline.remove_cached_rel_size(rel_tag, self.lsn);
 
                     // Delete size entry, as well as all blocks; this is currently a no-op because we haven't implemented tombstones in storage.
                     self.delete(rel_key_range(rel_tag));
