@@ -69,7 +69,9 @@ pub async fn doit(
             let control_file = match control_file_res {
                 Ok(cf) => cf,
                 Err(err) => {
-                    return Err(handle_import_error(timeline, err, &storcon_client, &cancel).await);
+                    return Err(
+                        terminate_flow_with_error(timeline, err, &storcon_client, &cancel).await,
+                    );
                 }
             };
 
@@ -82,7 +84,9 @@ pub async fn doit(
             )
             .await;
             if let Err(err) = res {
-                return Err(handle_import_error(timeline, err, &storcon_client, &cancel).await);
+                return Err(
+                    terminate_flow_with_error(timeline, err, &storcon_client, &cancel).await,
+                );
             }
 
             // Communicate that shard is done.
@@ -221,7 +225,7 @@ async fn prepare_import(
     Ok(control_file)
 }
 
-async fn handle_import_error(
+async fn terminate_flow_with_error(
     timeline: &Arc<Timeline>,
     error: anyhow::Error,
     storcon_client: &StorageControllerUpcallClient,
@@ -231,7 +235,7 @@ async fn handle_import_error(
     // never be cancelled. To be on the safe side, check the cancellation tokens
     // before marking the import as failed.
     if !(cancel.is_cancelled() || timeline.cancel.is_cancelled()) {
-        let res = storcon_client
+        let notify_res = storcon_client
             .put_timeline_import_status(
                 timeline.tenant_shard_id,
                 timeline.timeline_id,
@@ -239,11 +243,14 @@ async fn handle_import_error(
             )
             .await;
 
-        if let Err(_notify_error) = res {
-            error.context("Shut down while putting timeline import error status")
-        } else {
-            error
+        if let Err(_notify_error) = notify_res {
+            // The [`StorageControllerUpcallClient::put_timeline_import_status`] retries
+            // forever internally, so errors returned by it can only be due to cancellation.
+            info!("failed to notify storcon about permanent import error");
         }
+
+        // Will be logged by [`Tenant::create_timeline_import_pgdata_task`]
+        error
     } else {
         anyhow::anyhow!("Import task cancelled")
     }
