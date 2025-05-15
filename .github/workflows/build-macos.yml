@@ -42,7 +42,7 @@ jobs:
     runs-on: macos-15
     strategy:
       matrix:
-        postgres-version: ${{ inputs.rebuild_everything && fromJSON('["v14", "v15", "v16", "v17"]') || fromJSON(inputs.pg_versions) }}
+        postgres-version: ${{ inputs.rebuild_everything && fromJSON('["v14", "v15", "v16", "v17"]') || fromJSON('["v17"]') }} # FIXME temporary hack to build on macos
     env:
       # Use release build only, to have less debug info around
       # Hence keeping target/ (and general cache size) smaller
