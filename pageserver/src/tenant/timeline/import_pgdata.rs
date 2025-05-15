@@ -235,7 +235,7 @@ async fn handle_import_error(
             .put_timeline_import_status(
                 timeline.tenant_shard_id,
                 timeline.timeline_id,
-                ShardImportStatus::Error(format!("{}", error.root_cause())),
+                ShardImportStatus::Error(format!("{error:#}")),
             )
             .await;
 
