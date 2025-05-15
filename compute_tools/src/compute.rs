@@ -233,7 +233,7 @@ impl ParsedSpec {
         let mut connstrings = self.safekeeper_connstrings.clone();
 
         connstrings.sort();
-        let previous = &connstrings[0];
+        let mut previous = &connstrings[0];
 
         for current in connstrings.iter().skip(1) {
             // duplicate entry?
@@ -243,6 +243,8 @@ impl ParsedSpec {
                     current,
                 ));
             }
+
+            previous = current;
         }
 
         Ok(self)
@@ -2284,5 +2286,23 @@ impl<T: 'static> JoinSetExt<T> for tokio::task::JoinSet<T> {
             let _e = sp.enter();
             f()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::File;
+
+    use super::*;
+
+    #[test]
+    fn duplicate_safekeeper_connstring() {
+        let file = File::open("tests/cluster_spec.json").unwrap();
+        let spec: ComputeSpec = serde_json::from_reader(file).unwrap();
+
+        match ParsedSpec::try_from(spec.clone()) {
+            Ok(_p) => panic!("Failed to detect duplicate entry"),
+            Err(e) => assert!(e.starts_with("duplicate entry in safekeeper_connstrings:")),
+        };
     }
 }
