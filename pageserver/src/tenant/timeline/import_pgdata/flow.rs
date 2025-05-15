@@ -66,7 +66,7 @@ use crate::pgdatadir_mapping::{
     DbDirectory, RelDirectory, SlruSegmentDirectory, TwoPhaseDirectory,
 };
 use crate::task_mgr::TaskKind;
-use crate::tenant::storage_layer::{ImageLayerWriter, Layer};
+use crate::tenant::storage_layer::{AsLayerDesc, ImageLayerWriter, Layer};
 
 pub async fn run(
     timeline: Arc<Timeline>,
@@ -890,26 +890,51 @@ impl ChunkProcessingJob {
 
         let resident_layer = if nimages > 0 {
             let (desc, path) = writer.finish(ctx).await?;
+
+            {
+                let guard = timeline.layers.read().await;
+                let existing_layer = guard.try_get_from_key(&desc.key());
+                if let Some(layer) = existing_layer {
+                    if layer.metadata().generation != timeline.generation {
+                        return Err(anyhow::anyhow!(
+                            "Import attempted to rewrite layer file in the same generation: {}",
+                            layer.local_path()
+                        ));
+                    }
+                }
+            }
+
             Layer::finish_creating(timeline.conf, &timeline, desc, &path)?
         } else {
             // dropping the writer cleans up
             return Ok(());
         };
 
-        // this is sharing the same code as create_image_layers
+        // The same import job might run multiple times since not each job is checkpointed.
+        // Hence, we must support the cases where the layer already exists. We cannot be
+        // certain that the existing layer is identical to the new one, so in that case
+        // we replace the old layer with the one we just generated.
+
         let mut guard = timeline.layers.write().await;
 
-        if guard.contains(resident_layer.as_ref()) {
-            // We do not checkpoint each job, therefore some chunk processing jobs might run twice.
-            // If we have already uploaded this layer, then skip the new upload such that we avoid
-            // overwriting layers.
-            // TODO(vlad): Is the job hashing enough to ensure the same result here?
-            return Ok(());
+        let existing_layer = guard
+            .try_get_from_key(&resident_layer.layer_desc().key())
+            .cloned();
+        match existing_layer {
+            Some(existing) => {
+                guard.open_mut()?.rewrite_layers(
+                    &[(existing.clone(), resident_layer.clone())],
+                    &[],
+                    &timeline.metrics,
+                );
+            }
+            None => {
+                guard
+                    .open_mut()?
+                    .track_new_image_layers(&[resident_layer.clone()], &timeline.metrics);
+            }
         }
 
-        guard
-            .open_mut()?
-            .track_new_image_layers(&[resident_layer.clone()], &timeline.metrics);
         crate::tenant::timeline::drop_wlock(guard);
 
         timeline
