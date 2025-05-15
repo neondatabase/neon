@@ -2195,9 +2195,18 @@ LIMIT 100",
 
     pub fn spawn_extension_stats_task(&self) {
         let conf = self.tokio_conn_conf.clone();
+        let installed_extensions_interval: u64 = 60;
         tokio::spawn(async move {
+            // An initial sleep is added to ensure that two collections don't happen at the same time.
+            // The first collection happens during compute startup.
+            tokio::time::sleep(tokio::time::Duration::from_secs(
+                installed_extensions_interval,
+            ))
+            .await;
             // TODO(thesuhas): Make this configurable, making it one minute for testing purposes
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+                installed_extensions_interval,
+            ));
             loop {
                 interval.tick().await;
                 let _ = installed_extensions(conf.clone()).await;
