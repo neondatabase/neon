@@ -804,7 +804,6 @@ fn start_pageserver(
     })
 }
 
-/// Must call this function within tokio context even if this does not have async fn
 async fn create_feature_resolver(
     conf: &'static PageServerConf,
     shutdown_pageserver: CancellationToken,

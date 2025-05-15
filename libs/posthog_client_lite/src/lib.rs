@@ -1,5 +1,9 @@
 //! A lite version of the PostHog client that only supports local evaluation of feature flags.
 
+mod background_loop;
+
+pub use background_loop::FeatureResolverBackgroundLoop;
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -344,6 +348,19 @@ impl FeatureStore {
     }
 }
 
+pub struct PostHogClientConfig {
+    /// The server API key.
+    pub server_api_key: String,
+    /// The client API key.
+    pub client_api_key: String,
+    /// The project ID.
+    pub project_id: String,
+    /// The private API URL.
+    pub private_api_url: String,
+    /// The public API URL.
+    pub public_api_url: String,
+}
+
 /// A lite PostHog client.
 ///
 /// At the point of writing this code, PostHog does not have a functional Rust client with feature flag support.
@@ -360,37 +377,16 @@ impl FeatureStore {
 /// want to report the feature flag usage back to PostHog. The current plan is to use PostHog only as an UI to
 /// configure feature flags so it is very likely that the client API will not be used.
 pub struct PostHogClient {
-    /// The server API key.
-    server_api_key: String,
-    /// The client API key.
-    client_api_key: String,
-    /// The project ID.
-    project_id: String,
-    /// The private API URL.
-    private_api_url: String,
-    /// The public API URL.
-    public_api_url: String,
+    /// The config.
+    config: PostHogClientConfig,
     /// The HTTP client.
     client: reqwest::Client,
 }
 
 impl PostHogClient {
-    pub fn new(
-        server_api_key: String,
-        client_api_key: String,
-        project_id: String,
-        private_api_url: String,
-        public_api_url: String,
-    ) -> Self {
+    pub fn new(config: PostHogClientConfig) -> Self {
         let client = reqwest::Client::new();
-        Self {
-            server_api_key,
-            client_api_key,
-            project_id,
-            private_api_url,
-            public_api_url,
-            client,
-        }
+        Self { config, client }
     }
 
     pub fn new_with_us_region(
@@ -398,13 +394,13 @@ impl PostHogClient {
         client_api_key: String,
         project_id: String,
     ) -> Self {
-        Self::new(
+        Self::new(PostHogClientConfig {
             server_api_key,
             client_api_key,
             project_id,
-            "https://us.posthog.com".to_string(),
-            "https://us.i.posthog.com".to_string(),
-        )
+            private_api_url: "https://us.posthog.com".to_string(),
+            public_api_url: "https://us.i.posthog.com".to_string(),
+        })
     }
 
     /// Fetch the feature flag specs from the server.
@@ -422,12 +418,12 @@ impl PostHogClient {
         // with bearer token of self.server_api_key
         let url = format!(
             "{}/api/projects/{}/feature_flags/local_evaluation",
-            self.private_api_url, self.project_id
+            self.config.private_api_url, self.config.project_id
         );
         let response = self
             .client
             .get(url)
-            .bearer_auth(&self.server_api_key)
+            .bearer_auth(&self.config.server_api_key)
             .send()
             .await?;
         let body = response.text().await?;
@@ -446,11 +442,11 @@ impl PostHogClient {
     ) -> anyhow::Result<()> {
         // PUBLIC_URL/capture/
         // with bearer token of self.client_api_key
-        let url = format!("{}/capture/", self.public_api_url);
+        let url = format!("{}/capture/", self.config.public_api_url);
         self.client
             .post(url)
             .body(serde_json::to_string(&json!({
-                "api_key": self.client_api_key,
+                "api_key": self.config.client_api_key,
                 "distinct_id": distinct_id,
                 "event": event,
                 "properties": properties,

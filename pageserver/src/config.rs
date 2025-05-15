@@ -231,7 +231,7 @@ pub struct PageServerConf {
     /// This is insecure and should only be used in development environments.
     pub dev_mode: bool,
 
-    /// PostHog integration config
+    /// PostHog integration config.
     pub posthog_config: Option<PostHogConfig>,
 
     pub timeline_import_config: pageserver_api::config::TimelineImportConfig,

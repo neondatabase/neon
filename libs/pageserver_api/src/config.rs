@@ -43,7 +43,7 @@ pub struct NodeMetadata {
     pub other: HashMap<String, serde_json::Value>,
 }
 
-/// PostHog integration config
+/// PostHog integration config.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PostHogConfig {
     /// PostHog project ID
