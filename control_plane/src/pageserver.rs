@@ -547,10 +547,10 @@ impl PageServerNode {
                 .transpose()
                 .context("Falied to parse 'sampling_ratio'")?,
             relsize_snapshot_cache_capacity: settings
-                .remove("relsize PITR cache capacity")
+                .remove("relsize snapshot cache capacity")
                 .map(|x| x.parse::<usize>())
                 .transpose()
-                .context("Falied to parse 'relsize_snapshot_cache_capacity'")?,
+                .context("Falied to parse 'relsize_snapshot_cache_capacity' as integer")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
