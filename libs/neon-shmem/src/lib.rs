@@ -132,7 +132,7 @@ impl ShmemHandle {
         };
 
         // The user data begins after the header
-        let data_ptr = unsafe { start_ptr.cast().offset(HEADER_SIZE as isize) };
+        let data_ptr = unsafe { start_ptr.cast().add(HEADER_SIZE) };
 
         Ok(ShmemHandle {
             fd,
@@ -236,16 +236,14 @@ mod tests {
     /// check that all bytes in given range have the expected value.
     fn assert_range(ptr: *const u8, expected: u8, range: Range<usize>) {
         for i in range {
-            let b = unsafe { *(ptr.offset(i as isize)) };
+            let b = unsafe { *(ptr.add(i)) };
             assert_eq!(expected, b, "unexpected byte at offset {}", i);
         }
     }
 
     /// Write 'b' to all bytes in the given range
     fn write_range(ptr: *mut u8, b: u8, range: Range<usize>) {
-        unsafe {
-            std::ptr::write_bytes(ptr.offset(range.start as isize), b, range.end - range.start)
-        };
+        unsafe { std::ptr::write_bytes(ptr.add(range.start), b, range.end - range.start) };
     }
 
     // simple single-process test of growing and shrinking
@@ -331,7 +329,7 @@ mod tests {
         // Store the SimpleBarrier in the first 1k of the area.
         init_struct.set_size(10000).unwrap();
         let barrier_ptr: *mut SimpleBarrier = unsafe {
-            ptr.offset(ptr.align_offset(std::mem::align_of::<SimpleBarrier>()) as isize)
+            ptr.add(ptr.align_offset(std::mem::align_of::<SimpleBarrier>()))
                 .cast()
         };
         unsafe { SimpleBarrier::init(barrier_ptr, 2) };
