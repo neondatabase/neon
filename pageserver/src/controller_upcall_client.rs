@@ -7,7 +7,7 @@ use pageserver_api::models::ShardImportStatus;
 use pageserver_api::shard::TenantShardId;
 use pageserver_api::upcall_api::{
     PutTimelineImportStatusRequest, ReAttachRequest, ReAttachResponse, ReAttachResponseTenant,
-    ValidateRequest, ValidateRequestTenant, ValidateResponse,
+    TimelineImportStatusRequest, ValidateRequest, ValidateRequestTenant, ValidateResponse,
 };
 use reqwest::Certificate;
 use serde::Serialize;
@@ -51,12 +51,14 @@ pub trait StorageControllerUpcallApi {
         &self,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
+        generation: Generation,
         status: ShardImportStatus,
     ) -> impl Future<Output = Result<(), RetryForeverError>> + Send;
     fn get_timeline_import_status(
         &self,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
+        generation: Generation,
     ) -> impl Future<Output = Result<Option<ShardImportStatus>, RetryForeverError>> + Send;
 }
 
@@ -292,6 +294,7 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
         &self,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
+        generation: Generation,
         status: ShardImportStatus,
     ) -> Result<(), RetryForeverError> {
         let url = self
@@ -302,6 +305,7 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
         let request = PutTimelineImportStatusRequest {
             tenant_shard_id,
             timeline_id,
+            generation,
             status,
         };
 
@@ -313,15 +317,27 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
         &self,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
+        generation: Generation,
     ) -> Result<Option<ShardImportStatus>, RetryForeverError> {
         let url = self
             .base_url
-            .join(format!("timeline_import_status/{}/{}", tenant_shard_id, timeline_id).as_str())
+            .join("timeline_import_status")
             .expect("Failed to build path");
+
+        let request = TimelineImportStatusRequest {
+            tenant_shard_id,
+            timeline_id,
+            generation,
+        };
 
         Ok(backoff::retry(
             || async {
-                let response = self.http_client.get(url.clone()).send().await?;
+                let response = self
+                    .http_client
+                    .get(url.clone())
+                    .json(&request)
+                    .send()
+                    .await?;
 
                 if let Err(err) = response.error_for_status_ref() {
                     if matches!(err.status(), Some(reqwest::StatusCode::NOT_FOUND)) {
