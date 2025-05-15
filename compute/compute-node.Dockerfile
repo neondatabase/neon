@@ -595,14 +595,14 @@ ARG PG_VERSION
 # last release 1.0 - May 15, 2025
 WORKDIR /ext-src
 RUN case "${PG_VERSION:?}" in \
-    "v14" | "v15" | "v16") \
+    "v17") \
         ;; \
     *) \
         echo "skipping the version of online_advistor for $PG_VERSION" && exit 0 \
         ;; \
     esac && \
 	wget https://github.com/knizhnik/online_advisor/archive/refs/tags/1.0.tar.gz -O online_advisor.tar.gz && \
-    echo "6ae6f5471f8a8b507c450b685284decae35cfe73c6538e3d75f4890f594591ec online_advisor.tar.gz" | sha256sum --check && \
+    echo "059b7d9e5a90013a58bdd22e9505b88406ce05790675eb2d8434e5b215652d54 online_advisor.tar.gz" | sha256sum --check && \
     mkdir online_advisor-src && cd online_advisor-src && tar xzf ../online_advisor.tar.gz --strip-components=1 -C .
 
 FROM pg-build AS online_advisor-build
