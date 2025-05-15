@@ -70,24 +70,8 @@ impl ShmemHandle {
     /// If the ShmemHandle is dropped, the memory is unmapped from the current process. Other
     /// processes can continue using it, however.
     pub fn new(name: &str, initial_size: usize, max_size: usize) -> Result<ShmemHandle, Error> {
-        // Use memfd_create() to create the backing anonymous file.
-        let fd = if cfg!(not(target_os = "macos")) {
-            use nix::sys::memfd::MFdFlags;
-            use nix::sys::memfd::memfd_create as nix_memfd_create;
-
-            nix_memfd_create(name, MFdFlags::empty())
-                .map_err(|e| Error::new("memfd_create failed: {e}", e))?
-        } else {
-            // macos doesn't have memfd_create(). We care less about performance macos, as long
-            // as it works, so as a fallback, create a regular file instead.
-            let file = tempfile::tempfile().map_err(|e| {
-                Error::new(
-                    "could not create temporary file to back shmem area: {e}",
-                    nix::errno::Errno::from_raw(e.raw_os_error().unwrap_or(0)),
-                )
-            })?;
-            OwnedFd::from(file)
-        };
+        // create the backing anonymous file.
+        let fd = create_backing_file(name)?;
 
         Self::new_with_fd(fd, initial_size, max_size)
     }
@@ -240,19 +224,44 @@ impl Drop for ShmemHandle {
     }
 }
 
+fn create_backing_file(name: &str) -> Result<OwnedFd, Error> {
+    // Use memfd_create() to create the backing anonymous file.
+    #[cfg(not(target_os = "macos"))]
+    {
+        nix::sys::memfd::memfd_create(
+            name,
+            nix::sys::memfd::MFdFlags::empty()
+        ).map_err(|e| Error::new("memfd_create failed: {e}", e))
+    }
+    // macos doesn't have memfd_create(). We care less about performance macos, as long
+    // as it works, so as a fallback, create a regular file instead.
+    #[cfg(target_os = "macos")]
+    {
+        let file = tempfile::tempfile().map_err(|e| {
+            Error::new(
+                "could not create temporary file to back shmem area: {e}",
+                nix::errno::Errno::from_raw(e.raw_os_error().unwrap_or(0)),
+            )
+        })?;
+        Ok(OwnedFd::from(file))
+    }
+}
+
 fn enlarge_file(fd: BorrowedFd, size: u64) -> Result<(), Error> {
     // Use posix_fallocate() to enlarge the file. It reserves the space correctly, so that
     // we don't get a segfault later when trying to actually use it.
-    //
-    // As a fallback on macos, which doesn't have posix_fallocate, use plain 'fallocate'
-    if cfg!(not(target_os = "macos")) {
+    #[cfg(not(target_os = "macos"))]
+    {
         nix::fcntl::posix_fallocate(fd, 0, size as i64).map_err(|e| {
             Error::new(
                 "could not grow shmem segment, posix_fallocate failed: {e}",
                 e,
             )
         })
-    } else {
+    }
+    // As a fallback on macos, which doesn't have posix_fallocate, use plain 'fallocate'
+    #[cfg(target_os = "macos")]
+    {
         nix::unistd::ftruncate(fd, size as i64)
             .map_err(|e| Error::new("could not grow shmem segment, ftruncate failed: {e}", e))
     }
