@@ -29,13 +29,13 @@ permissions:
   contents: read
 
 jobs:
-  trigger_bench_on_ec2_machine_in_eu_central_1:
+  run_periodic_pagebench_test:
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
       statuses: write
       contents: write
       pull-requests: write
-    runs-on: [ self-hosted, small ]
+    runs-on: [ self-hosted, unit-perf ]
     container:
       image: ghcr.io/neondatabase/build-tools:pinned-bookworm
       credentials:
@@ -44,10 +44,7 @@ jobs:
       options: --init
     timeout-minutes: 360  # Set the timeout to 6 hours
     env:
-      API_KEY: ${{ secrets.PERIODIC_PAGEBENCH_EC2_RUNNER_API_KEY }}
       RUN_ID: ${{ github.run_id }}
-      AWS_DEFAULT_REGION : "eu-central-1"
-      AWS_INSTANCE_ID : "i-02a59a3bf86bc7e74"
     steps:
     # we don't need the neon source code because we run everything remotely
     # however we still need the local github actions to run the allure step below
@@ -58,28 +55,11 @@ jobs:
 
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-    - name: Show my own (github runner) external IP address - usefull for IP allowlisting
-      run: curl https://ifconfig.me
-
-    - name: Assume AWS OIDC role that allows to manage (start/stop/describe... EC machine)
-      uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+    - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
       with:
         aws-region: eu-central-1
-        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_MANAGE_BENCHMARK_EC2_VMS_ARN }}
-        role-duration-seconds: 3600
-
-    - name: Start EC2 instance and wait for the instance to boot up
-      run: |
-        aws ec2 start-instances --instance-ids $AWS_INSTANCE_ID
-        aws ec2 wait instance-running --instance-ids $AWS_INSTANCE_ID
-        sleep 60 # sleep some time to allow cloudinit and our API server to start up
-
-    - name: Determine public IP of the EC2 instance and set env variable EC2_MACHINE_URL_US
-      run: |
-        public_ip=$(aws ec2 describe-instances --instance-ids $AWS_INSTANCE_ID --query 'Reservations[*].Instances[*].PublicIpAddress' --output text)
-        echo "Public IP of the EC2 instance: $public_ip"
-        echo "EC2_MACHINE_URL_US=https://${public_ip}:8443" >> $GITHUB_ENV
-
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 18000 # max 5 hours (needed in case commit hash is still being built)
     - name: Determine commit hash
       env:
         INPUT_COMMIT_HASH: ${{ github.event.inputs.commit_hash }}
@@ -92,91 +72,59 @@ jobs:
           echo "COMMIT_HASH_TYPE=manual" >> $GITHUB_ENV
         fi
 
-    - name: Start Bench with run_id
+    # does not reuse ./.github/actions/download because we need to download the artifact for the given commit hash
+    # example artifact
+    # s3://neon-github-public-dev/artifacts/48b870bc078bd2c450eb7b468e743b9c118549bf/15036827400/1/neon-Linux-X64-release-artifact.tar.zst /instance_store/artifacts/neon-Linux-release-artifact.tar.zst
+    - name: Determine artifact S3_KEY for commit hash ${COMMIT_HASH} and download and extract artifact
+      id: artifact_prefix
+      shell: bash -euxo pipefail {0}
+      env:
+        ARCHIVE: /tmp/downloads/neon-${{ runner.os }}-${{ runner.arch }}-release-artifact.tar.zst
+        TARGET: /tmp/neon
+        COMMIT_HASH: ${{ env.COMMIT_HASH }}
+        COMMIT_HASH_TYPE: ${{ env.COMMIT_HASH_TYPE }}
       run: |
-        curl -k -X 'POST' \
-        "${EC2_MACHINE_URL_US}/start_test/${GITHUB_RUN_ID}" \
-        -H 'accept: application/json' \
-        -H 'Content-Type: application/json' \
-        -H "Authorization: Bearer $API_KEY" \
-        -d "{\"neonRepoCommitHash\": \"${COMMIT_HASH}\", \"neonRepoCommitHashType\": \"${COMMIT_HASH_TYPE}\"}"
+        attempt=0
+        max_attempts=24 # 5 minutes * 24 = 2 hours
 
-    - name: Poll Test Status
-      id: poll_step
-      run: |
-        status=""
-        while [[ "$status" != "failure" && "$status" != "success" ]]; do
-          response=$(curl -k -X 'GET' \
-          "${EC2_MACHINE_URL_US}/test_status/${GITHUB_RUN_ID}" \
-          -H 'accept: application/json' \
-          -H "Authorization: Bearer $API_KEY")
-          echo "Response: $response"
-          set +x
-          status=$(echo $response | jq -r '.status')
-          echo "Test status: $status"
-          if [[ "$status" == "failure" ]]; then
-            echo "Test failed"
-            exit 1 # Fail the job step if status is failure
-          elif [[ "$status" == "success" || "$status" == "null" ]]; then
+        while [ $attempt -lt $max_attempts ]; do
+          set +e # the following command will fail until the artifacts are available
+          S3_KEY=$(aws s3api list-objects-v2 --bucket neon-github-public-dev --prefix artifacts/$COMMIT_HASH/ | jq -r '.Contents[]?.Key' | grep neon-${{ runner.os }}-${{ runner.arch }}-release-artifact.tar.zst | sort --version-sort | tail -1)
+          set -e
+
+          if [ ! -z "$S3_KEY" ]; then
+            echo "Artifact found: $S3_KEY"
+            echo "S3_KEY=$S3_KEY" >> $GITHUB_ENV
             break
-          elif [[ "$status" == "too_many_runs" ]]; then
-            echo "Too many runs already running"
-            echo "too_many_runs=true" >> "$GITHUB_OUTPUT"
-            exit 1
           fi
-
-          sleep 60 # Poll every 60 seconds
+          
+          # Increment attempt counter and sleep for 5 minutes
+          attempt=$((attempt + 1))
+          echo "Attempt $attempt of $max_attempts to find artifacts in S3 bucket s3://neon-github-public-dev/artifacts/$COMMIT_HASH failed. Retrying in 5 minutes..."
+          sleep 300 # Sleep for 5 minutes
         done
 
-    - name: Retrieve Test Logs
-      if: always() && steps.poll_step.outputs.too_many_runs != 'true'
-      run: |
-        curl -k -X 'GET' \
-        "${EC2_MACHINE_URL_US}/test_log/${GITHUB_RUN_ID}" \
-        -H 'accept: application/gzip' \
-        -H "Authorization: Bearer $API_KEY" \
-        --output "test_log_${GITHUB_RUN_ID}.gz"
-
-    - name: Unzip Test Log and Print it into this job's log
-      if: always() && steps.poll_step.outputs.too_many_runs != 'true'
-      run: |
-        gzip -d "test_log_${GITHUB_RUN_ID}.gz"
-        cat "test_log_${GITHUB_RUN_ID}"
-
-    - name: Create Allure report
-      if: ${{ !cancelled() }}
-      uses: ./.github/actions/allure-report-generate
-      with:
-        aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
-
-    - name: Post to a Slack channel
-      if: ${{ github.event.schedule && failure() }}
-      uses: slackapi/slack-github-action@fcfb566f8b0aab22203f066d80ca1d7e4b5d05b3 # v1.27.1
-      with:
-        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
-        slack-message: "Periodic pagebench testing on dedicated hardware: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-      env:
-        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-
+        if [ -z "$S3_KEY" ]; then
+          echo "Error: artifact not found in S3 bucket s3://neon-github-public-dev/artifacts/$COMMIT_HASH" after 2 hours
+        else
+          mkdir -p $(dirname $ARCHIVE)
+          trap 'rm -rf $ARCHIVE ${TARGET}' EXIT
+          time aws s3 cp --only-show-errors s3://neon-github-public-dev/${S3_KEY} ${ARCHIVE}
+          mkdir -p ${TARGET}
+          time tar -xf ${ARCHIVE} -C ${TARGET}
+          rm -f ${ARCHIVE}
+        fi
+       
     - name: Cleanup Test Resources
       if: always()
+      shell: bash -euxo pipefail {0}
+      env:
+        ARCHIVE: /tmp/downloads/neon-${{ runner.os }}-${{ runner.arch }}-release-artifact.tar.zst
+        TARGET: /tmp/neon
       run: |
-        curl -k -X 'POST' \
-        "${EC2_MACHINE_URL_US}/cleanup_test/${GITHUB_RUN_ID}" \
-        -H 'accept: application/json' \
-        -H "Authorization: Bearer $API_KEY" \
-        -d ''
+        # Cleanup the test resources
+        if [ -d "${TARGET}" ]; then
+          rm -rf ${TARGET}
+        fi
+        rm -f $(dirname $ARCHIVE)
 
-    - name: Assume AWS OIDC role that allows to manage (start/stop/describe... EC machine)
-      if: always() && steps.poll_step.outputs.too_many_runs != 'true'
-      uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
-      with:
-        aws-region: eu-central-1
-        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_MANAGE_BENCHMARK_EC2_VMS_ARN }}
-        role-duration-seconds: 3600
-
-    - name: Stop EC2 instance and wait for the instance to be stopped
-      if: always() && steps.poll_step.outputs.too_many_runs != 'true'
-      run: |
-        aws ec2 stop-instances --instance-ids $AWS_INSTANCE_ID
-        aws ec2 wait instance-stopped --instance-ids $AWS_INSTANCE_ID
