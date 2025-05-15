@@ -8,3 +8,4 @@ license.workspace = true
 thiserror.workspace = true
 
 nix = { version = "0.30.1", features = ["fs", "mman", "process"] }
+workspace_hack = { version = "0.1", path = "../../workspace_hack" }

@@ -3800,6 +3800,7 @@ version = "0.1.0"
 dependencies = [
  "nix 0.30.1",
  "thiserror 1.0.69",
+ "workspace_hack",
 ]
 
 [[package]]
