@@ -76,9 +76,8 @@ message RelTag {
     uint32 fork_number = 4;
 }
 
-// Checks whether a relation exists, at the given LSN. This is only accurate on
-// shard 0; other shards will return their view of the relation according to
-// which pages they have.
+// Checks whether a relation exists, at the given LSN. Only valid on shard 0,
+// other shards will error.
 message CheckRelExistsRequest {
   ReadLsn read_lsn = 1;
   RelTag rel = 2;
@@ -103,9 +102,8 @@ message GetBaseBackupResponseChunk {
   bytes chunk = 1;
 }
 
-// Requests the size of a database, as # of bytes. This is only accurate on
-// shard 0; other shards will return their view of the database according to
-// which pages they have.
+// Requests the size of a database, as # of bytes. Only valid on shard 0, other
+// shards will error.
 message GetDbSizeRequest {
   ReadLsn read_lsn = 1;
   uint32 db_oid = 2;
@@ -191,9 +189,8 @@ enum GetPageStatus {
   // requests while the layer download is in progress.
 }
 
-// Fetches the size of a relation at a given LSN, as # of blocks. This is only
-// accurate on shard 0; other shards will return their view of the relation
-// according to which pages they have.
+// Fetches the size of a relation at a given LSN, as # of blocks. Only valid on
+// shard 0, other shards will error.
 message GetRelSizeRequest {
   ReadLsn read_lsn = 1;
   RelTag rel = 2;
@@ -203,7 +200,7 @@ message GetRelSizeResponse {
   uint32 num_blocks = 1;
 }
 
-// Requests an SLRU segment.
+// Requests an SLRU segment. Only valid on shard 0, other shards will error.
 message GetSlruSegmentRequest {
   ReadLsn read_lsn = 1;
   uint32 kind = 2;
