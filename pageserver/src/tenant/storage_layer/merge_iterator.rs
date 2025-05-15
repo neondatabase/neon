@@ -1,21 +1,16 @@
-use std::{
-    cmp::Ordering,
-    collections::{binary_heap, BinaryHeap},
-    sync::Arc,
-};
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, binary_heap};
+use std::sync::Arc;
 
 use anyhow::bail;
 use pageserver_api::key::Key;
+use pageserver_api::value::Value;
 use utils::lsn::Lsn;
 
+use super::delta_layer::{DeltaLayerInner, DeltaLayerIterator};
+use super::image_layer::{ImageLayerInner, ImageLayerIterator};
+use super::{PersistentLayerDesc, PersistentLayerKey};
 use crate::context::RequestContext;
-use pageserver_api::value::Value;
-
-use super::{
-    delta_layer::{DeltaLayerInner, DeltaLayerIterator},
-    image_layer::{ImageLayerInner, ImageLayerIterator},
-    PersistentLayerDesc, PersistentLayerKey,
-};
 
 #[derive(Clone, Copy)]
 pub(crate) enum LayerRef<'a> {
@@ -24,10 +19,19 @@ pub(crate) enum LayerRef<'a> {
 }
 
 impl<'a> LayerRef<'a> {
-    fn iter(self, ctx: &'a RequestContext) -> LayerIterRef<'a> {
+    fn iter_with_options(
+        self,
+        ctx: &'a RequestContext,
+        max_read_size: u64,
+        max_batch_size: usize,
+    ) -> LayerIterRef<'a> {
         match self {
-            Self::Image(x) => LayerIterRef::Image(x.iter(ctx)),
-            Self::Delta(x) => LayerIterRef::Delta(x.iter(ctx)),
+            Self::Image(x) => {
+                LayerIterRef::Image(x.iter_with_options(ctx, max_read_size, max_batch_size))
+            }
+            Self::Delta(x) => {
+                LayerIterRef::Delta(x.iter_with_options(ctx, max_read_size, max_batch_size))
+            }
         }
     }
 
@@ -64,12 +68,15 @@ impl LayerIterRef<'_> {
 /// 1. Unified iterator for image and delta layers.
 /// 2. `Ord` for use in [`MergeIterator::heap`] (for the k-merge).
 /// 3. Lazy creation of the real delta/image iterator.
+#[allow(clippy::large_enum_variant, reason = "TODO")]
 pub(crate) enum IteratorWrapper<'a> {
     NotLoaded {
         ctx: &'a RequestContext,
         first_key_lower_bound: (Key, Lsn),
         layer: LayerRef<'a>,
         source_desc: Arc<PersistentLayerKey>,
+        max_read_size: u64,
+        max_batch_size: usize,
     },
     Loaded {
         iter: PeekableLayerIterRef<'a>,
@@ -150,6 +157,8 @@ impl<'a> IteratorWrapper<'a> {
     pub fn create_from_image_layer(
         image_layer: &'a ImageLayerInner,
         ctx: &'a RequestContext,
+        max_read_size: u64,
+        max_batch_size: usize,
     ) -> Self {
         Self::NotLoaded {
             layer: LayerRef::Image(image_layer),
@@ -161,12 +170,16 @@ impl<'a> IteratorWrapper<'a> {
                 is_delta: false,
             }
             .into(),
+            max_read_size,
+            max_batch_size,
         }
     }
 
     pub fn create_from_delta_layer(
         delta_layer: &'a DeltaLayerInner,
         ctx: &'a RequestContext,
+        max_read_size: u64,
+        max_batch_size: usize,
     ) -> Self {
         Self::NotLoaded {
             layer: LayerRef::Delta(delta_layer),
@@ -178,6 +191,8 @@ impl<'a> IteratorWrapper<'a> {
                 is_delta: true,
             }
             .into(),
+            max_read_size,
+            max_batch_size,
         }
     }
 
@@ -208,11 +223,13 @@ impl<'a> IteratorWrapper<'a> {
             first_key_lower_bound,
             layer,
             source_desc,
+            max_read_size,
+            max_batch_size,
         } = self
         else {
             unreachable!()
         };
-        let iter = layer.iter(ctx);
+        let iter = layer.iter_with_options(ctx, *max_read_size, *max_batch_size);
         let iter = PeekableLayerIterRef::create(iter).await?;
         if let Some((k1, l1, _)) = iter.peek() {
             let (k2, l2) = first_key_lower_bound;
@@ -297,17 +314,51 @@ impl MergeIteratorItem for ((Key, Lsn, Value), Arc<PersistentLayerKey>) {
 }
 
 impl<'a> MergeIterator<'a> {
-    pub fn create(
+    #[cfg(test)]
+    pub(crate) fn create_for_testing(
         deltas: &[&'a DeltaLayerInner],
         images: &[&'a ImageLayerInner],
         ctx: &'a RequestContext,
     ) -> Self {
+        Self::create_with_options(deltas, images, ctx, 1024 * 8192, 1024)
+    }
+
+    /// Create a new merge iterator with custom options.
+    ///
+    /// Adjust `max_read_size` and `max_batch_size` to trade memory usage for performance. The size should scale
+    /// with the number of layers to compact. If there are a lot of layers, consider reducing the values, so that
+    /// the buffer does not take too much memory.
+    ///
+    /// The default options for L0 compactions are:
+    /// - max_read_size: 1024 * 8192 (8MB)
+    /// - max_batch_size: 1024
+    ///
+    /// The default options for gc-compaction are:
+    /// - max_read_size: 128 * 8192 (1MB)
+    /// - max_batch_size: 128
+    pub fn create_with_options(
+        deltas: &[&'a DeltaLayerInner],
+        images: &[&'a ImageLayerInner],
+        ctx: &'a RequestContext,
+        max_read_size: u64,
+        max_batch_size: usize,
+    ) -> Self {
         let mut heap = Vec::with_capacity(images.len() + deltas.len());
         for image in images {
-            heap.push(IteratorWrapper::create_from_image_layer(image, ctx));
+            heap.push(IteratorWrapper::create_from_image_layer(
+                image,
+                ctx,
+                max_read_size,
+                max_batch_size,
+            ));
         }
         for delta in deltas {
-            heap.push(IteratorWrapper::create_from_delta_layer(delta, ctx));
+            heap.push(IteratorWrapper::create_from_delta_layer(
+                delta,
+                ctx,
+                max_read_size,
+                max_batch_size,
+            ));
         }
         Self {
             heap: BinaryHeap::from(heap),
@@ -349,24 +400,18 @@ impl<'a> MergeIterator<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use itertools::Itertools;
     use pageserver_api::key::Key;
-    use utils::lsn::Lsn;
-
-    use crate::{
-        tenant::{
-            harness::{TenantHarness, TIMELINE_ID},
-            storage_layer::delta_layer::test::{produce_delta_layer, sort_delta},
-        },
-        DEFAULT_PG_VERSION,
-    };
-
-    #[cfg(feature = "testing")]
-    use crate::tenant::storage_layer::delta_layer::test::sort_delta_value;
     #[cfg(feature = "testing")]
     use pageserver_api::record::NeonWalRecord;
+    use utils::lsn::Lsn;
+
+    use super::*;
+    use crate::DEFAULT_PG_VERSION;
+    use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
+    #[cfg(feature = "testing")]
+    use crate::tenant::storage_layer::delta_layer::test::sort_delta_value;
+    use crate::tenant::storage_layer::delta_layer::test::{produce_delta_layer, sort_delta};
 
     async fn assert_merge_iter_equal(
         merge_iter: &mut MergeIterator<'_>,
@@ -438,7 +483,7 @@ mod tests {
         let resident_layer_2 = produce_delta_layer(&tenant, &tline, test_deltas2.clone(), &ctx)
             .await
             .unwrap();
-        let mut merge_iter = MergeIterator::create(
+        let mut merge_iter = MergeIterator::create_for_testing(
             &[
                 resident_layer_2.get_as_delta(&ctx).await.unwrap(),
                 resident_layer_1.get_as_delta(&ctx).await.unwrap(),
@@ -510,7 +555,7 @@ mod tests {
         let resident_layer_3 = produce_delta_layer(&tenant, &tline, test_deltas3.clone(), &ctx)
             .await
             .unwrap();
-        let mut merge_iter = MergeIterator::create(
+        let mut merge_iter = MergeIterator::create_for_testing(
             &[
                 resident_layer_1.get_as_delta(&ctx).await.unwrap(),
                 resident_layer_2.get_as_delta(&ctx).await.unwrap(),
@@ -631,7 +676,7 @@ mod tests {
         // Test with different layer order for MergeIterator::create to ensure the order
         // is stable.
 
-        let mut merge_iter = MergeIterator::create(
+        let mut merge_iter = MergeIterator::create_for_testing(
             &[
                 resident_layer_4.get_as_delta(&ctx).await.unwrap(),
                 resident_layer_1.get_as_delta(&ctx).await.unwrap(),
@@ -643,7 +688,7 @@ mod tests {
         );
         assert_merge_iter_equal(&mut merge_iter, &expect).await;
 
-        let mut merge_iter = MergeIterator::create(
+        let mut merge_iter = MergeIterator::create_for_testing(
             &[
                 resident_layer_1.get_as_delta(&ctx).await.unwrap(),
                 resident_layer_4.get_as_delta(&ctx).await.unwrap(),

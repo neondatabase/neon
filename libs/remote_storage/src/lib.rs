@@ -18,39 +18,34 @@ mod s3_bucket;
 mod simulate_failures;
 mod support;
 
-use std::{
-    collections::HashMap,
-    fmt::Debug,
-    num::NonZeroU32,
-    ops::Bound,
-    pin::{pin, Pin},
-    sync::Arc,
-    time::SystemTime,
-};
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::num::NonZeroU32;
+use std::ops::Bound;
+use std::pin::{Pin, pin};
+use std::sync::Arc;
+use std::time::SystemTime;
 
 use anyhow::Context;
-use camino::{Utf8Path, Utf8PathBuf};
-
+/// Azure SDK's ETag type is a simple String wrapper: we use this internally instead of repeating it here.
+pub use azure_core::Etag;
 use bytes::Bytes;
-use futures::{stream::Stream, StreamExt};
+use camino::{Utf8Path, Utf8PathBuf};
+pub use error::{DownloadError, TimeTravelError, TimeoutOrCancel};
+use futures::StreamExt;
+use futures::stream::Stream;
 use itertools::Itertools as _;
+use s3_bucket::RequestKind;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-pub use self::{
-    azure_blob::AzureBlobStorage, local_fs::LocalFs, s3_bucket::S3Bucket,
-    simulate_failures::UnreliableWrapper,
-};
-use s3_bucket::RequestKind;
-
+pub use self::azure_blob::AzureBlobStorage;
+pub use self::local_fs::LocalFs;
+pub use self::s3_bucket::S3Bucket;
+pub use self::simulate_failures::UnreliableWrapper;
 pub use crate::config::{AzureConfig, RemoteStorageConfig, RemoteStorageKind, S3Config};
-
-/// Azure SDK's ETag type is a simple String wrapper: we use this internally instead of repeating it here.
-pub use azure_core::Etag;
-
-pub use error::{DownloadError, TimeTravelError, TimeoutOrCancel};
 
 /// Default concurrency limit for S3 operations
 ///
@@ -65,6 +60,12 @@ pub const DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT: usize = 100;
 /// Here, a limit of max 20k concurrent connections was noted.
 /// <https://learn.microsoft.com/en-us/answers/questions/1301863/is-there-any-limitation-to-concurrent-connections>
 pub const DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT: usize = 100;
+/// Set this limit analogously to the S3 limit.
+///
+/// The local filesystem backend doesn't enforce a concurrency limit itself, but this also bounds
+/// the upload queue concurrency. Some tests create thousands of uploads, which slows down the
+/// quadratic scheduling of the upload queue, and there is no point spawning so many Tokio tasks.
+pub const DEFAULT_REMOTE_STORAGE_LOCALFS_CONCURRENCY_LIMIT: usize = 100;
 /// No limits on the client side, which currenltly means 1000 for AWS S3.
 /// <https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_RequestSyntax>
 pub const DEFAULT_MAX_KEYS_PER_LIST_RESPONSE: Option<i32> = None;
@@ -175,6 +176,32 @@ pub struct Listing {
     pub keys: Vec<ListingObject>,
 }
 
+#[derive(Default)]
+pub struct VersionListing {
+    pub versions: Vec<Version>,
+}
+
+pub struct Version {
+    pub key: RemotePath,
+    pub last_modified: SystemTime,
+    pub kind: VersionKind,
+}
+
+impl Version {
+    pub fn version_id(&self) -> Option<&VersionId> {
+        match &self.kind {
+            VersionKind::Version(id) => Some(id),
+            VersionKind::DeletionMarker => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum VersionKind {
+    DeletionMarker,
+    Version(VersionId),
+}
+
 /// Options for downloads. The default value is a plain GET.
 pub struct DownloadOpts {
     /// If given, returns [`DownloadError::Unmodified`] if the object still has
@@ -185,6 +212,8 @@ pub struct DownloadOpts {
     /// The end of the byte range to download, or unbounded. Must be after the
     /// start bound.
     pub byte_end: Bound<u64>,
+    /// Optionally request a specific version of a key
+    pub version_id: Option<VersionId>,
     /// Indicate whether we're downloading something small or large: this indirectly controls
     /// timeouts: for something like an index/manifest/heatmap, we should time out faster than
     /// for layer files
@@ -196,12 +225,16 @@ pub enum DownloadKind {
     Small,
 }
 
+#[derive(Debug, Clone)]
+pub struct VersionId(pub String);
+
 impl Default for DownloadOpts {
     fn default() -> Self {
         Self {
             etag: Default::default(),
             byte_start: Bound::Unbounded,
             byte_end: Bound::Unbounded,
+            version_id: None,
             kind: DownloadKind::Large,
         }
     }
@@ -293,6 +326,14 @@ pub trait RemoteStorage: Send + Sync + 'static {
         }
         Ok(combined)
     }
+
+    async fn list_versions(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> Result<VersionListing, DownloadError>;
 
     /// Obtain metadata information about an object.
     async fn head_object(
@@ -474,6 +515,22 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         }
     }
 
+    // See [`RemoteStorage::list_versions`].
+    pub async fn list_versions<'a>(
+        &'a self,
+        prefix: Option<&'a RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &'a CancellationToken,
+    ) -> Result<VersionListing, DownloadError> {
+        match self {
+            Self::LocalFs(s) => s.list_versions(prefix, mode, max_keys, cancel).await,
+            Self::AwsS3(s) => s.list_versions(prefix, mode, max_keys, cancel).await,
+            Self::AzureBlob(s) => s.list_versions(prefix, mode, max_keys, cancel).await,
+            Self::Unreliable(s) => s.list_versions(prefix, mode, max_keys, cancel).await,
+        }
+    }
+
     // See [`RemoteStorage::head_object`].
     pub async fn head_object(
         &self,
@@ -634,8 +691,13 @@ impl GenericRemoteStorage {
                 let profile = std::env::var("AWS_PROFILE").unwrap_or_else(|_| "<none>".into());
                 let access_key_id =
                     std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_else(|_| "<none>".into());
-                info!("Using s3 bucket '{}' in region '{}' as a remote storage, prefix in bucket: '{:?}', bucket endpoint: '{:?}', profile: {profile}, access_key_id: {access_key_id}",
-                      s3_config.bucket_name, s3_config.bucket_region, s3_config.prefix_in_bucket, s3_config.endpoint);
+                info!(
+                    "Using s3 bucket '{}' in region '{}' as a remote storage, prefix in bucket: '{:?}', bucket endpoint: '{:?}', profile: {profile}, access_key_id: {access_key_id}",
+                    s3_config.bucket_name,
+                    s3_config.bucket_region,
+                    s3_config.prefix_in_bucket,
+                    s3_config.endpoint
+                );
                 Self::AwsS3(Arc::new(S3Bucket::new(s3_config, timeout).await?))
             }
             RemoteStorageKind::AzureContainer(azure_config) => {
@@ -643,8 +705,12 @@ impl GenericRemoteStorage {
                     .storage_account
                     .as_deref()
                     .unwrap_or("<AZURE_STORAGE_ACCOUNT>");
-                info!("Using azure container '{}' in account '{storage_account}' in region '{}' as a remote storage, prefix in container: '{:?}'",
-                      azure_config.container_name, azure_config.container_region, azure_config.prefix_in_container);
+                info!(
+                    "Using azure container '{}' in account '{storage_account}' in region '{}' as a remote storage, prefix in container: '{:?}'",
+                    azure_config.container_name,
+                    azure_config.container_region,
+                    azure_config.prefix_in_container
+                );
                 Self::AzureBlob(Arc::new(AzureBlobStorage::new(
                     azure_config,
                     timeout,
@@ -717,6 +783,7 @@ impl ConcurrencyLimiter {
             RequestKind::Copy => &self.write,
             RequestKind::TimeTravel => &self.write,
             RequestKind::Head => &self.read,
+            RequestKind::ListVersions => &self.read,
         }
     }
 

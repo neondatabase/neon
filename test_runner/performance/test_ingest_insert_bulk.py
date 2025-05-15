@@ -17,9 +17,10 @@ from fixtures.pageserver.utils import (
     wait_for_upload_queue_empty,
 )
 from fixtures.remote_storage import s3_storage
+from fixtures.utils import shared_buffers_for_max_cu
 
 
-@pytest.mark.timeout(900)
+@pytest.mark.timeout(1800)
 @pytest.mark.parametrize("size", [8, 1024, 8192])
 @pytest.mark.parametrize("s3", [True, False], ids=["s3", "local"])
 @pytest.mark.parametrize("backpressure", [True, False], ids=["backpressure", "nobackpressure"])
@@ -51,6 +52,8 @@ def test_ingest_insert_bulk(
         # would compete with Pageserver for bandwidth.
         # neon_env_builder.enable_safekeeper_remote_storage(s3_storage())
 
+    neon_env_builder.pageserver_config_override = "wait_lsn_timeout='600 s'"
+
     neon_env_builder.disable_scrub_on_exit()  # immediate shutdown may leave stray layers
     env = neon_env_builder.init_start()
 
@@ -60,6 +63,8 @@ def test_ingest_insert_bulk(
             f"fsync = {fsync}",
             "max_replication_apply_lag = 0",
             f"max_replication_flush_lag = {'10GB' if backpressure else '0'}",
+            # use shared_buffers size like in production for 8 CU compute
+            f"shared_buffers={shared_buffers_for_max_cu(8.0)}",
             # NB: neon_local defaults to 15MB, which is too slow -- production uses 500MB.
             f"max_replication_write_lag = {'500MB' if backpressure else '0'}",
         ],
@@ -89,7 +94,18 @@ def test_ingest_insert_bulk(
                     worker_rows = rows / CONCURRENCY
                     pool.submit(insert_rows, endpoint, f"table{i}", worker_rows, value)
 
-        end_lsn = Lsn(endpoint.safe_psql("select pg_current_wal_lsn()")[0][0])
+        for attempt in range(5):
+            try:
+                end_lsn = Lsn(endpoint.safe_psql("select pg_current_wal_lsn()")[0][0])
+                break
+            except Exception as e:
+                # if we disable backpressure, postgres can become unresponsive for longer than a minute
+                # and new connection attempts time out in postgres after 1 minute
+                # so if this happens we retry new connection
+                log.error(f"Attempt {attempt + 1}/5: Failed to select current wal lsn: {e}")
+            if attempt == 4:
+                log.error("Exceeded maximum retry attempts for selecting current wal lsn")
+                raise
 
         # Wait for pageserver to ingest the WAL.
         client = env.pageserver.http_client()

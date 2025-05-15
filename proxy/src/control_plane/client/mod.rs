@@ -6,18 +6,19 @@ use std::hash::Hash;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dashmap::DashMap;
+use clashmap::ClashMap;
 use tokio::time::Instant;
 use tracing::{debug, info};
 
-use crate::auth::backend::jwt::{AuthRule, FetchAuthRules, FetchAuthRulesError};
 use crate::auth::backend::ComputeUserInfo;
+use crate::auth::backend::jwt::{AuthRule, FetchAuthRules, FetchAuthRulesError};
 use crate::cache::endpoints::EndpointsCache;
 use crate::cache::project_info::ProjectInfoCacheImpl;
 use crate::config::{CacheOptions, EndpointCacheConfig, ProjectInfoCacheOptions};
 use crate::context::RequestContext;
 use crate::control_plane::{
-    errors, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, ControlPlaneApi, NodeInfoCache,
+    CachedAccessBlockerFlags, CachedAllowedIps, CachedAllowedVpcEndpointIds, CachedNodeInfo,
+    CachedRoleSecret, ControlPlaneApi, NodeInfoCache, errors,
 };
 use crate::error::ReportableError;
 use crate::metrics::ApiLockMetrics;
@@ -55,17 +56,45 @@ impl ControlPlaneApi for ControlPlaneClient {
         }
     }
 
-    async fn get_allowed_ips_and_secret(
+    async fn get_allowed_ips(
         &self,
         ctx: &RequestContext,
         user_info: &ComputeUserInfo,
-    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError> {
+    ) -> Result<CachedAllowedIps, errors::GetAuthInfoError> {
         match self {
-            Self::ProxyV1(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
+            Self::ProxyV1(api) => api.get_allowed_ips(ctx, user_info).await,
             #[cfg(any(test, feature = "testing"))]
-            Self::PostgresMock(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
+            Self::PostgresMock(api) => api.get_allowed_ips(ctx, user_info).await,
             #[cfg(test)]
-            Self::Test(api) => api.get_allowed_ips_and_secret(),
+            Self::Test(api) => api.get_allowed_ips(),
+        }
+    }
+
+    async fn get_allowed_vpc_endpoint_ids(
+        &self,
+        ctx: &RequestContext,
+        user_info: &ComputeUserInfo,
+    ) -> Result<CachedAllowedVpcEndpointIds, errors::GetAuthInfoError> {
+        match self {
+            Self::ProxyV1(api) => api.get_allowed_vpc_endpoint_ids(ctx, user_info).await,
+            #[cfg(any(test, feature = "testing"))]
+            Self::PostgresMock(api) => api.get_allowed_vpc_endpoint_ids(ctx, user_info).await,
+            #[cfg(test)]
+            Self::Test(api) => api.get_allowed_vpc_endpoint_ids(),
+        }
+    }
+
+    async fn get_block_public_or_vpc_access(
+        &self,
+        ctx: &RequestContext,
+        user_info: &ComputeUserInfo,
+    ) -> Result<CachedAccessBlockerFlags, errors::GetAuthInfoError> {
+        match self {
+            Self::ProxyV1(api) => api.get_block_public_or_vpc_access(ctx, user_info).await,
+            #[cfg(any(test, feature = "testing"))]
+            Self::PostgresMock(api) => api.get_block_public_or_vpc_access(ctx, user_info).await,
+            #[cfg(test)]
+            Self::Test(api) => api.get_block_public_or_vpc_access(),
         }
     }
 
@@ -102,9 +131,15 @@ impl ControlPlaneApi for ControlPlaneClient {
 pub(crate) trait TestControlPlaneClient: Send + Sync + 'static {
     fn wake_compute(&self) -> Result<CachedNodeInfo, errors::WakeComputeError>;
 
-    fn get_allowed_ips_and_secret(
+    fn get_allowed_ips(&self) -> Result<CachedAllowedIps, errors::GetAuthInfoError>;
+
+    fn get_allowed_vpc_endpoint_ids(
         &self,
-    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError>;
+    ) -> Result<CachedAllowedVpcEndpointIds, errors::GetAuthInfoError>;
+
+    fn get_block_public_or_vpc_access(
+        &self,
+    ) -> Result<CachedAccessBlockerFlags, errors::GetAuthInfoError>;
 
     fn dyn_clone(&self) -> Box<dyn TestControlPlaneClient>;
 }
@@ -148,7 +183,7 @@ impl ApiCaches {
 /// Various caches for [`control_plane`](super).
 pub struct ApiLocks<K> {
     name: &'static str,
-    node_locks: DashMap<K, Arc<DynamicLimiter>>,
+    node_locks: ClashMap<K, Arc<DynamicLimiter>>,
     config: RateLimiterConfig,
     timeout: Duration,
     epoch: std::time::Duration,
@@ -177,15 +212,15 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
         timeout: Duration,
         epoch: std::time::Duration,
         metrics: &'static ApiLockMetrics,
-    ) -> prometheus::Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             name,
-            node_locks: DashMap::with_shard_amount(shards),
+            node_locks: ClashMap::with_shard_amount(shards),
             config,
             timeout,
             epoch,
             metrics,
-        })
+        }
     }
 
     pub(crate) async fn get_permit(&self, key: &K) -> Result<WakeComputePermit, ApiLockError> {
@@ -238,7 +273,7 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
                 let mut lock = shard.write();
                 let timer = self.metrics.reclamation_lag_seconds.start_timer();
                 let count = lock
-                    .extract_if(|_, semaphore| Arc::strong_count(semaphore.get_mut()) == 1)
+                    .extract_if(|(_, semaphore)| Arc::strong_count(semaphore) == 1)
                     .count();
                 drop(lock);
                 self.metrics.semaphores_unregistered.inc_by(count as u64);

@@ -7,7 +7,6 @@ import subprocess
 import tempfile
 import textwrap
 from itertools import chain, product
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import toml
@@ -15,13 +14,15 @@ import toml
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.pageserver.common_types import IndexPartDump
-from fixtures.pg_version import PgVersion
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from typing import (
         Any,
-        cast,
     )
+
+    from fixtures.endpoint.http import ComputeClaimsScope
+    from fixtures.pg_version import PgVersion
 
 
 # Used to be an ABC. abc.ABC removed due to linter without name change.
@@ -36,7 +37,7 @@ class AbstractNeonCli:
         self.extra_env = extra_env
         self.binpath = binpath
 
-    COMMAND: str = cast(str, None)  # To be overwritten by the derived class.
+    COMMAND: str = cast("str", None)  # To be overwritten by the derived class.
 
     def raw_cli(
         self,
@@ -417,6 +418,19 @@ class NeonLocalCli(AbstractNeonCli):
             cmd.append(f"--instance-id={instance_id}")
         return self.raw_cli(cmd)
 
+    def endpoint_storage_start(self, timeout_in_seconds: int | None = None):
+        cmd = ["endpoint-storage", "start"]
+        if timeout_in_seconds is not None:
+            cmd.append(f"--start-timeout={timeout_in_seconds}s")
+        return self.raw_cli(cmd)
+
+    def endpoint_storage_stop(self, immediate: bool):
+        cmd = ["endpoint-storage", "stop"]
+        if immediate:
+            cmd.extend(["-m", "immediate"])
+        return self.raw_cli(cmd)
+        pass
+
     def pageserver_start(
         self,
         id: int,
@@ -478,7 +492,8 @@ class NeonLocalCli(AbstractNeonCli):
         self,
         branch_name: str,
         pg_port: int,
-        http_port: int,
+        external_http_port: int,
+        internal_http_port: int,
         tenant_id: TenantId,
         pg_version: PgVersion,
         endpoint_id: str | None = None,
@@ -486,6 +501,7 @@ class NeonLocalCli(AbstractNeonCli):
         lsn: Lsn | None = None,
         pageserver_id: int | None = None,
         allow_multiple=False,
+        update_catalog: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         args = [
             "endpoint",
@@ -501,8 +517,10 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["--lsn", str(lsn)])
         if pg_port is not None:
             args.extend(["--pg-port", str(pg_port)])
-        if http_port is not None:
-            args.extend(["--http-port", str(http_port)])
+        if external_http_port is not None:
+            args.extend(["--external-http-port", str(external_http_port)])
+        if internal_http_port is not None:
+            args.extend(["--internal-http-port", str(internal_http_port)])
         if endpoint_id is not None:
             args.append(endpoint_id)
         if hot_standby:
@@ -511,30 +529,54 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["--pageserver-id", str(pageserver_id)])
         if allow_multiple:
             args.extend(["--allow-multiple"])
+        if update_catalog:
+            args.extend(["--update-catalog"])
 
         res = self.raw_cli(args)
         res.check_returncode()
         return res
 
+    def endpoint_generate_jwt(
+        self, endpoint_id: str, scope: ComputeClaimsScope | None = None
+    ) -> str:
+        """
+        Generate a JWT for making requests to the endpoint's external HTTP
+        server.
+        """
+        args = ["endpoint", "generate-jwt", endpoint_id]
+        if scope:
+            args += ["--scope", str(scope)]
+
+        cmd = self.raw_cli(args)
+        cmd.check_returncode()
+
+        return cmd.stdout
+
     def endpoint_start(
         self,
         endpoint_id: str,
+        safekeepers_generation: int | None = None,
         safekeepers: list[int] | None = None,
-        remote_ext_config: str | None = None,
+        remote_ext_base_url: str | None = None,
         pageserver_id: int | None = None,
-        allow_multiple=False,
+        allow_multiple: bool = False,
+        create_test_user: bool = False,
         basebackup_request_tries: int | None = None,
+        timeout: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         args = [
             "endpoint",
             "start",
         ]
-        extra_env_vars = {}
+        extra_env_vars = env or {}
         if basebackup_request_tries is not None:
             extra_env_vars["NEON_COMPUTE_TESTING_BASEBACKUP_TRIES"] = str(basebackup_request_tries)
-        if remote_ext_config is not None:
-            args.extend(["--remote-ext-config", remote_ext_config])
+        if remote_ext_base_url is not None:
+            args.extend(["--remote-ext-base-url", remote_ext_base_url])
 
+        if safekeepers_generation is not None:
+            args.extend(["--safekeepers-generation", str(safekeepers_generation)])
         if safekeepers is not None:
             args.extend(["--safekeepers", (",".join(map(str, safekeepers)))])
         if endpoint_id is not None:
@@ -543,6 +585,10 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["--pageserver-id", str(pageserver_id)])
         if allow_multiple:
             args.extend(["--allow-multiple"])
+        if create_test_user:
+            args.extend(["--create-test-user"])
+        if timeout is not None:
+            args.extend(["--start-timeout", str(timeout)])
 
         res = self.raw_cli(args, extra_env_vars)
         res.check_returncode()

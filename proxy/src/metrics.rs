@@ -30,7 +30,16 @@ pub struct Metrics {
 static SELF: OnceLock<Metrics> = OnceLock::new();
 impl Metrics {
     pub fn install(thread_pool: Arc<ThreadPoolMetrics>) {
-        SELF.set(Metrics::new(thread_pool))
+        let mut metrics = Metrics::new(thread_pool);
+
+        metrics.proxy.errors_total.init_all_dense();
+        metrics.proxy.redis_errors_total.init_all_dense();
+        metrics.proxy.redis_events_count.init_all_dense();
+        metrics.proxy.retries_metric.init_all_dense();
+        metrics.proxy.invalid_endpoints_total.init_all_dense();
+        metrics.proxy.connection_failures_total.init_all_dense();
+
+        SELF.set(metrics)
             .ok()
             .expect("proxy metrics must not be installed more than once");
     }
@@ -56,6 +65,8 @@ pub struct ProxyMetrics {
     pub connection_requests: CounterPairVec<NumConnectionRequestsGauge>,
     #[metric(flatten)]
     pub http_endpoint_pools: HttpEndpointPools,
+    #[metric(flatten)]
+    pub cancel_channel_size: CounterPairVec<CancelChannelSizeGauge>,
 
     /// Time it took for proxy to establish a connection to the compute endpoint.
     // largest bucket = 2^16 * 0.5ms = 32s
@@ -94,8 +105,18 @@ pub struct ProxyMetrics {
     #[metric(metadata = Thresholds::with_buckets([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 50.0, 100.0]))]
     pub allowed_ips_number: Histogram<10>,
 
-    /// Number of connections (per sni).
-    pub accepted_connections_by_sni: CounterVec<StaticLabelSet<SniKind>>,
+    /// Number of cache hits/misses for VPC endpoint IDs.
+    pub vpc_endpoint_id_cache_stats: CounterVec<StaticLabelSet<CacheOutcome>>,
+
+    /// Number of cache hits/misses for access blocker flags.
+    pub access_blocker_flags_cache_stats: CounterVec<StaticLabelSet<CacheOutcome>>,
+
+    /// Number of allowed VPC endpoints IDs
+    #[metric(metadata = Thresholds::with_buckets([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 50.0, 100.0]))]
+    pub allowed_vpc_endpoint_ids: Histogram<10>,
+
+    /// Number of connections, by the method we used to determine the endpoint.
+    pub accepted_connections_by_sni: CounterVec<SniSet>,
 
     /// Number of connection failures (per kind).
     pub connection_failures_total: CounterVec<StaticLabelSet<ConnectionFailureKind>>,
@@ -193,7 +214,7 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Protocol::Http => "http",
             Protocol::Ws => "ws",
@@ -294,6 +315,16 @@ impl CounterPairAssoc for NumConnectionRequestsGauge {
 pub type NumConnectionRequestsGuard<'a> =
     metrics::MeasuredCounterPairGuard<'a, NumConnectionRequestsGauge>;
 
+pub struct CancelChannelSizeGauge;
+impl CounterPairAssoc for CancelChannelSizeGauge {
+    const INC_NAME: &'static MetricName = MetricName::from_str("opened_msgs_cancel_channel_total");
+    const DEC_NAME: &'static MetricName = MetricName::from_str("closed_msgs_cancel_channel_total");
+    const INC_HELP: &'static str = "Number of processing messages in the cancellation channel.";
+    const DEC_HELP: &'static str = "Number of closed messages in the cancellation channel.";
+    type LabelGroupSet = StaticLabelSet<RedisMsgKind>;
+}
+pub type CancelChannelSizeGuard<'a> = metrics::MeasuredCounterPairGuard<'a, CancelChannelSizeGauge>;
+
 #[derive(LabelGroup)]
 #[label(set = ComputeConnectionLatencySet)]
 pub struct ComputeConnectionLatencyGroup {
@@ -311,11 +342,20 @@ pub enum LatencyExclusions {
     ClientCplaneComputeRetry,
 }
 
+#[derive(LabelGroup)]
+#[label(set = SniSet)]
+pub struct SniGroup {
+    pub protocol: Protocol,
+    pub kind: SniKind,
+}
+
 #[derive(FixedCardinalityLabel, Copy, Clone)]
-#[label(singleton = "kind")]
 pub enum SniKind {
+    /// Domain name based routing. SNI for libpq/websockets. Host for HTTP
     Sni,
+    /// Metadata based routing. `options` for libpq/websockets. Header for HTTP
     NoSni,
+    /// Metadata based routing, using the password field.
     PasswordHack,
 }
 
@@ -341,13 +381,6 @@ pub struct RedisErrors<'a> {
 }
 
 #[derive(FixedCardinalityLabel, Copy, Clone)]
-pub enum CancellationSource {
-    FromClient,
-    FromRedis,
-    Local,
-}
-
-#[derive(FixedCardinalityLabel, Copy, Clone)]
 pub enum CancellationOutcome {
     NotFound,
     Found,
@@ -357,7 +390,6 @@ pub enum CancellationOutcome {
 #[derive(LabelGroup)]
 #[label(set = CancellationRequestSet)]
 pub struct CancellationRequest {
-    pub source: CancellationSource,
     pub kind: CancellationOutcome,
 }
 
@@ -369,12 +401,36 @@ pub enum Waiting {
     RetryTimeout,
 }
 
-#[derive(Default)]
-struct Accumulated {
+#[derive(FixedCardinalityLabel, Copy, Clone)]
+#[label(singleton = "kind")]
+#[allow(clippy::enum_variant_names)]
+pub enum RedisMsgKind {
+    HSet,
+    HSetMultiple,
+    HGet,
+    HGetAll,
+    HDel,
+}
+
+#[derive(Default, Clone)]
+pub struct LatencyAccumulated {
     cplane: time::Duration,
     client: time::Duration,
     compute: time::Duration,
     retry: time::Duration,
+}
+
+impl std::fmt::Display for LatencyAccumulated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "client: {}, cplane: {}, compute: {}, retry: {}",
+            self.client.as_micros(),
+            self.cplane.as_micros(),
+            self.compute.as_micros(),
+            self.retry.as_micros()
+        )
+    }
 }
 
 pub struct LatencyTimer {
@@ -383,7 +439,7 @@ pub struct LatencyTimer {
     // time since the stopwatch was stopped
     stop: Option<time::Instant>,
     // accumulated time on the stopwatch
-    accumulated: Accumulated,
+    accumulated: LatencyAccumulated,
     // label data
     protocol: Protocol,
     cold_start_info: ColdStartInfo,
@@ -397,7 +453,7 @@ impl LatencyTimer {
         Self {
             start: time::Instant::now(),
             stop: None,
-            accumulated: Accumulated::default(),
+            accumulated: LatencyAccumulated::default(),
             protocol,
             cold_start_info: ColdStartInfo::Unknown,
             // assume failed unless otherwise specified
@@ -410,7 +466,7 @@ impl LatencyTimer {
         Self {
             start: time::Instant::now(),
             stop: None,
-            accumulated: Accumulated::default(),
+            accumulated: LatencyAccumulated::default(),
             protocol,
             cold_start_info: ColdStartInfo::Unknown,
             // assume failed unless otherwise specified
@@ -439,6 +495,10 @@ impl LatencyTimer {
 
         // success
         self.outcome = ConnectOutcome::Success;
+    }
+
+    pub fn accumulated(&self) -> LatencyAccumulated {
+        self.accumulated.clone()
     }
 }
 
@@ -486,7 +546,7 @@ impl Drop for LatencyTimer {
             duration.saturating_sub(accumulated_total).as_secs_f64(),
         );
 
-        // Exclude client cplane, compue communication from the accumulated time.
+        // Exclude client, cplane, compute communication from the accumulated time.
         let accumulated_total =
             self.accumulated.client + self.accumulated.cplane + self.accumulated.compute;
         metric.observe(
@@ -499,7 +559,7 @@ impl Drop for LatencyTimer {
             duration.saturating_sub(accumulated_total).as_secs_f64(),
         );
 
-        // Exclude client cplane, compue, retry communication from the accumulated time.
+        // Exclude client, cplane, compute, retry communication from the accumulated time.
         let accumulated_total = self.accumulated.client
             + self.accumulated.cplane
             + self.accumulated.compute
@@ -518,11 +578,7 @@ impl Drop for LatencyTimer {
 
 impl From<bool> for Bool {
     fn from(value: bool) -> Self {
-        if value {
-            Bool::True
-        } else {
-            Bool::False
-        }
+        if value { Bool::True } else { Bool::False }
     }
 }
 
@@ -556,6 +612,9 @@ pub enum RedisEventsCount {
     CancelSession,
     PasswordUpdate,
     AllowedIpsUpdate,
+    AllowedVpcEndpointIdsUpdateForProjects,
+    AllowedVpcEndpointIdsUpdateForAllProjectsInOrg,
+    BlockPublicOrVpcAccessUpdate,
 }
 
 pub struct ThreadPoolWorkers(usize);

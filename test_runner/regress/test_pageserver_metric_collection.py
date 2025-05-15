@@ -5,7 +5,6 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from queue import SimpleQueue
 from typing import TYPE_CHECKING
 
@@ -20,14 +19,15 @@ from fixtures.remote_storage import (
     RemoteStorageKind,
     remote_storage_to_toml_inline_table,
 )
-from pytest_httpserver import HTTPServer
-from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from typing import Any
 
     from fixtures.httpserver import ListenAddress
+    from pytest_httpserver import HTTPServer
+    from werkzeug.wrappers.request import Request
 
 
 # TODO: collect all of the env setup *AFTER* removal of RemoteStorageKind.NOOP
@@ -107,7 +107,7 @@ def test_metric_collection(
         ps_metrics = env.pageserver.http_client().get_metrics()
         total = 0.0
         for sample in ps_metrics.query_all(
-            name="pageserver_remote_operation_seconds_count",
+            name="pageserver_remote_timeline_client_seconds_global_count",
             filter={
                 "file_kind": str(file_kind),
                 "op_kind": str(op_kind),
@@ -287,9 +287,9 @@ def test_metric_collection_cleans_up_tempfile(
 
     initially = iterate_pageserver_workdir(env.pageserver.workdir, "last_consumption_metrics.json")
 
-    assert (
-        len(initially.matching) == 2
-    ), f"expecting actual file and tempfile, but not found: {initially.matching}"
+    assert len(initially.matching) == 2, (
+        f"expecting actual file and tempfile, but not found: {initially.matching}"
+    )
 
     uploads.put("ready")
     env.pageserver.start()
@@ -308,9 +308,9 @@ def test_metric_collection_cleans_up_tempfile(
     # it is possible we shutdown the pageserver right at the correct time, so the old tempfile
     # is gone, but we also have a new one.
     only = set(["last_consumption_metrics.json"])
-    assert (
-        initially.matching.intersection(later.matching) == only
-    ), "only initial tempfile should had been removed"
+    assert initially.matching.intersection(later.matching) == only, (
+        "only initial tempfile should had been removed"
+    )
     assert initially.other.issuperset(later.other), "no other files should had been removed"
 
 
@@ -497,16 +497,15 @@ class SyntheticSizeVerifier:
     def post_batch(self, parent):
         if self.prev is not None:
             # this is assuming no one goes and deletes the cache file
-            assert (
-                self.value is not None
-            ), "after calculating first synthetic size, cached or more recent should be sent"
+            assert self.value is not None, (
+                "after calculating first synthetic size, cached or more recent should be sent"
+            )
         self.prev = self.value
         self.value = None
 
 
 PER_METRIC_VERIFIERS = {
     "remote_storage_size": CannotVerifyAnything,
-    "resident_size": CannotVerifyAnything,
     "written_size": WrittenDataVerifier,
     "written_data_bytes_delta": WrittenDataDeltaVerifier,
     "timeline_logical_size": CannotVerifyAnything,

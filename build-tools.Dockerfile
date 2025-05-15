@@ -1,7 +1,41 @@
 ARG DEBIAN_VERSION=bookworm
+ARG DEBIAN_FLAVOR=${DEBIAN_VERSION}-slim
 
-FROM debian:bookworm-slim AS pgcopydb_builder
+# Here are the INDEX DIGESTS for the images we use.
+# You can get them following next steps for now:
+# 1. Get an authentication token from DockerHub:
+#    TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/debian:pull" | jq -r .token)
+# 2. Using that token, query index for the given tag:
+#    curl -s -H "Authorization: Bearer $TOKEN" \
+#       -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+#       "https://registry.hub.docker.com/v2/library/debian/manifests/bullseye-slim" \
+#       -I | grep -i docker-content-digest
+# 3. As a next step, TODO(fedordikarev): create script and schedule workflow to run these checks
+#    and updates on regular bases and in automated way.
+ARG BOOKWORM_SLIM_SHA=sha256:40b107342c492725bc7aacbe93a49945445191ae364184a6d24fedb28172f6f7
+ARG BULLSEYE_SLIM_SHA=sha256:e831d9a884d63734fe3dd9c491ed9a5a3d4c6a6d32c5b14f2067357c49b0b7e1
+
+# Here we use ${var/search/replace} syntax, to check
+# if base image is one of the images, we pin image index for.
+# If var will match one the known images, we will replace it with the known sha.
+# If no match, than value will be unaffected, and will process with no-pinned image.
+ARG BASE_IMAGE_SHA=debian:${DEBIAN_FLAVOR}
+ARG BASE_IMAGE_SHA=${BASE_IMAGE_SHA/debian:bookworm-slim/debian@$BOOKWORM_SLIM_SHA}
+ARG BASE_IMAGE_SHA=${BASE_IMAGE_SHA/debian:bullseye-slim/debian@$BULLSEYE_SLIM_SHA}
+
+FROM $BASE_IMAGE_SHA AS pgcopydb_builder
 ARG DEBIAN_VERSION
+
+# Use strict mode for bash to catch errors early
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
+# By default, /bin/sh used in debian images will treat '\n' as eol,
+# but as we use bash as SHELL, and built-in echo in bash requires '-e' flag for that.
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
+    echo -e "retry_connrefused=on\ntimeout=15\ntries=5\nretry-on-host-error=on\n" > /root/.wgetrc && \
+    echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
+
+COPY build_tools/patches/pgcopydbv017.patch /pgcopydbv017.patch
 
 RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
         set -e && \
@@ -35,6 +69,7 @@ RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
         mkdir /tmp/pgcopydb && \
         tar -xzf /tmp/pgcopydb.tar.gz -C /tmp/pgcopydb --strip-components=1 && \
         cd /tmp/pgcopydb && \
+        patch -p1 < /pgcopydbv017.patch && \
         make -s clean && \
         make -s -j12 install && \
         libpq_path=$(find /lib /usr/lib -name "libpq.so.5" | head -n 1) && \
@@ -46,12 +81,13 @@ RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
         mkdir -p mkdir -p /pgcopydb/lib && touch /pgcopydb/lib/libpq.so.5; \
     fi
 
-FROM debian:${DEBIAN_VERSION}-slim AS build_tools
+FROM $BASE_IMAGE_SHA AS build_tools
 ARG DEBIAN_VERSION
 
 # Add nonroot user
 RUN useradd -ms /bin/bash nonroot -b /home
-SHELL ["/bin/bash", "-c"]
+# Use strict mode for bash to catch errors early
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
 RUN mkdir -p /pgcopydb/bin && \
     mkdir -p /pgcopydb/lib && \
@@ -60,6 +96,10 @@ RUN mkdir -p /pgcopydb/bin && \
 
 COPY --from=pgcopydb_builder /usr/lib/postgresql/16/bin/pgcopydb /pgcopydb/bin/pgcopydb
 COPY --from=pgcopydb_builder /pgcopydb/lib/libpq.so.5 /pgcopydb/lib/libpq.so.5
+
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
+    echo -e "retry_connrefused=on\ntimeout=15\ntries=5\nretry-on-host-error=on\n" > /root/.wgetrc && \
+    echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
 
 # System deps
 #
@@ -115,13 +155,14 @@ RUN set -e \
 
 # Keep the version the same as in compute/compute-node.Dockerfile and
 # test_runner/regress/test_compute_metrics.py.
-ENV SQL_EXPORTER_VERSION=0.16.0
+ENV SQL_EXPORTER_VERSION=0.17.0
 RUN curl -fsSL \
     "https://github.com/burningalchemist/sql_exporter/releases/download/${SQL_EXPORTER_VERSION}/sql_exporter-${SQL_EXPORTER_VERSION}.linux-$(case "$(uname -m)" in x86_64) echo amd64;; aarch64) echo arm64;; esac).tar.gz" \
     --output sql_exporter.tar.gz \
     && mkdir /tmp/sql_exporter \
     && tar xzvf sql_exporter.tar.gz -C /tmp/sql_exporter --strip-components=1 \
-    && mv /tmp/sql_exporter/sql_exporter /usr/local/bin/sql_exporter
+    && mv /tmp/sql_exporter/sql_exporter /usr/local/bin/sql_exporter \
+    && rm sql_exporter.tar.gz
 
 # protobuf-compiler (protoc)
 ENV PROTOC_VERSION=25.1
@@ -132,7 +173,7 @@ RUN curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v$
     && rm -rf protoc.zip protoc
 
 # s5cmd
-ENV S5CMD_VERSION=2.2.2
+ENV S5CMD_VERSION=2.3.0
 RUN curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/s5cmd_${S5CMD_VERSION}_Linux-$(uname -m | sed 's/x86_64/64bit/g' | sed 's/aarch64/arm64/g').tar.gz" | tar zxvf - s5cmd \
     && chmod +x s5cmd \
     && mv s5cmd /usr/local/bin/s5cmd
@@ -165,7 +206,7 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "aws
     && rm awscliv2.zip
 
 # Mold: A Modern Linker
-ENV MOLD_VERSION=v2.34.1
+ENV MOLD_VERSION=v2.37.1
 RUN set -e \
     && git clone https://github.com/rui314/mold.git \
     && mkdir mold/build \
@@ -182,28 +223,19 @@ RUN set -e \
 # It includes several bug fixes on top on v2.0 release (https://github.com/linux-test-project/lcov/compare/v2.0...master)
 # And patches from us:
 # - Generates json file with code coverage summary (https://github.com/neondatabase/lcov/commit/426e7e7a22f669da54278e9b55e6d8caabd00af0.tar.gz)
-RUN for package in Capture::Tiny DateTime Devel::Cover Digest::MD5 File::Spec JSON::XS Memory::Process Time::HiRes JSON; do yes | perl -MCPAN -e "CPAN::Shell->notest('install', '$package')"; done \
-    && wget https://github.com/neondatabase/lcov/archive/426e7e7a22f669da54278e9b55e6d8caabd00af0.tar.gz -O lcov.tar.gz \
+RUN set +o pipefail && \
+	 for package in Capture::Tiny DateTime Devel::Cover Digest::MD5 File::Spec JSON::XS Memory::Process Time::HiRes JSON; do \
+		yes | perl -MCPAN -e "CPAN::Shell->notest('install', '$package')";\
+	 done && \
+	set -o pipefail
+# Split into separate step to debug flaky failures here
+RUN wget https://github.com/neondatabase/lcov/archive/426e7e7a22f669da54278e9b55e6d8caabd00af0.tar.gz -O lcov.tar.gz \
+    && ls -laht lcov.tar.gz && sha256sum lcov.tar.gz \
     && echo "61a22a62e20908b8b9e27d890bd0ea31f567a7b9668065589266371dcbca0992  lcov.tar.gz" | sha256sum --check \
     && mkdir -p lcov && tar -xzf lcov.tar.gz -C lcov --strip-components=1 \
     && cd lcov \
     && make install \
     && rm -rf ../lcov.tar.gz
-
-# Compile and install the static OpenSSL library
-ENV OPENSSL_VERSION=1.1.1w
-ENV OPENSSL_PREFIX=/usr/local/openssl
-RUN wget -O /tmp/openssl-${OPENSSL_VERSION}.tar.gz https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz && \
-    echo "cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8 /tmp/openssl-${OPENSSL_VERSION}.tar.gz" | sha256sum --check && \
-    cd /tmp && \
-    tar xzvf /tmp/openssl-${OPENSSL_VERSION}.tar.gz && \
-    rm /tmp/openssl-${OPENSSL_VERSION}.tar.gz && \
-    cd /tmp/openssl-${OPENSSL_VERSION} && \
-    ./config --prefix=${OPENSSL_PREFIX}  -static --static no-shared -fPIC && \
-    make -j "$(nproc)" && \
-    make install && \
-    cd /tmp && \
-    rm -rf /tmp/openssl-${OPENSSL_VERSION}
 
 # Use the same version of libicu as the compute nodes so that
 # clusters created using inidb on pageserver can be used by computes.
@@ -233,8 +265,10 @@ RUN wget -O /tmp/libicu-${ICU_VERSION}.tgz https://github.com/unicode-org/icu/re
 USER nonroot:nonroot
 WORKDIR /home/nonroot
 
+RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
+
 # Python
-ENV PYTHON_VERSION=3.11.10 \
+ENV PYTHON_VERSION=3.11.12 \
     PYENV_ROOT=/home/nonroot/.pyenv \
     PATH=/home/nonroot/.pyenv/shims:/home/nonroot/.pyenv/bin:/home/nonroot/.poetry/bin:$PATH
 RUN set -e \
@@ -258,14 +292,16 @@ WORKDIR /home/nonroot
 
 # Rust
 # Please keep the version of llvm (installed above) in sync with rust llvm (`rustc --version --verbose | grep LLVM`)
-ENV RUSTC_VERSION=1.83.0
+ENV RUSTC_VERSION=1.86.0
 ENV RUSTUP_HOME="/home/nonroot/.rustup"
 ENV PATH="/home/nonroot/.cargo/bin:${PATH}"
 ARG RUSTFILT_VERSION=0.2.1
-ARG CARGO_HAKARI_VERSION=0.9.33
-ARG CARGO_DENY_VERSION=0.16.2
-ARG CARGO_HACK_VERSION=0.6.33
-ARG CARGO_NEXTEST_VERSION=0.9.85
+ARG CARGO_HAKARI_VERSION=0.9.36
+ARG CARGO_DENY_VERSION=0.18.2
+ARG CARGO_HACK_VERSION=0.6.36
+ARG CARGO_NEXTEST_VERSION=0.9.94
+ARG CARGO_CHEF_VERSION=0.1.71
+ARG CARGO_DIESEL_CLI_VERSION=2.2.9
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && whoami && \
 	chmod +x rustup-init && \
 	./rustup-init -y --default-toolchain ${RUSTC_VERSION} && \
@@ -279,6 +315,9 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     cargo install cargo-deny --locked --version ${CARGO_DENY_VERSION} && \
     cargo install cargo-hack          --version ${CARGO_HACK_VERSION} && \
     cargo install cargo-nextest       --version ${CARGO_NEXTEST_VERSION} && \
+    cargo install cargo-chef --locked --version ${CARGO_CHEF_VERSION} && \
+    cargo install diesel_cli          --version ${CARGO_DIESEL_CLI_VERSION} \
+                                      --features postgres-bundled --no-default-features && \
     rm -rf /home/nonroot/.cargo/registry && \
     rm -rf /home/nonroot/.cargo/git
 

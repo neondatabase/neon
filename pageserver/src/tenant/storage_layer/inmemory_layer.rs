@@ -4,41 +4,40 @@
 //! held in an ephemeral file, not in memory. The metadata for each page version, i.e.
 //! its position in the file, is kept in memory, though.
 //!
-use crate::assert_u64_eq_usize::{u64_to_usize, U64IsUsize, UsizeIsU64};
-use crate::config::PageServerConf;
-use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
-use crate::tenant::ephemeral_file::EphemeralFile;
-use crate::tenant::timeline::GetVectoredError;
-use crate::tenant::PageReconstructError;
-use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
-use crate::{l0_flush, page_cache};
-use anyhow::{anyhow, Result};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write;
+use std::ops::Range;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
+
+use anyhow::Result;
 use camino::Utf8PathBuf;
-use pageserver_api::key::CompactKey;
-use pageserver_api::key::Key;
+use pageserver_api::key::{CompactKey, Key};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
-use pageserver_api::value::Value;
-use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::{bin_ser::BeSer, id::TimelineId, lsn::Lsn, vec_map::VecMap};
+use utils::id::TimelineId;
+use utils::lsn::Lsn;
+use utils::vec_map::VecMap;
 use wal_decoder::serialized_batch::{SerializedValueBatch, SerializedValueMeta, ValueMeta};
+
+use super::{DeltaLayerWriter, PersistentLayerDesc, ValuesReconstructState};
+use crate::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64, u64_to_usize};
+use crate::config::PageServerConf;
+use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 // avoid binding to Write (conflicts with std::io::Write)
 // while being able to use std::fmt::Write's methods
 use crate::metrics::TIMELINE_EPHEMERAL_BYTES;
-use std::cmp::Ordering;
-use std::fmt::Write;
-use std::ops::Range;
-use std::sync::atomic::Ordering as AtomicOrdering;
-use std::sync::atomic::{AtomicU64, AtomicUsize};
-use tokio::sync::RwLock;
-
-use super::{
-    DeltaLayerWriter, PersistentLayerDesc, ValueReconstructSituation, ValuesReconstructState,
-};
+use crate::tenant::ephemeral_file::EphemeralFile;
+use crate::tenant::storage_layer::{OnDiskValue, OnDiskValueIo};
+use crate::tenant::timeline::GetVectoredError;
+use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
+use crate::{l0_flush, page_cache};
 
 pub(crate) mod vectored_dio_read;
 
@@ -112,8 +111,8 @@ const MAX_SUPPORTED_BLOB_LEN_BITS: usize = {
 ///
 /// Layout:
 /// - 1 bit: `will_init`
-/// - [`MAX_SUPPORTED_BLOB_LEN_BITS`]: `len`
-/// - [`MAX_SUPPORTED_POS_BITS`]: `pos`
+/// - [`MAX_SUPPORTED_BLOB_LEN_BITS`][]: `len`
+/// - [`MAX_SUPPORTED_POS_BITS`](IndexEntry::MAX_SUPPORTED_POS_BITS): `pos`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexEntry(u64);
 
@@ -415,18 +414,16 @@ impl InMemoryLayer {
 
     // Look up the keys in the provided keyspace and update
     // the reconstruct state with whatever is found.
-    //
-    // If the key is cached, go no further than the cached Lsn.
     pub(crate) async fn get_values_reconstruct_data(
-        &self,
+        self: &Arc<InMemoryLayer>,
         keyspace: KeySpace,
-        end_lsn: Lsn,
+        lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
-        let ctx = RequestContextBuilder::extend(ctx)
+        let ctx = RequestContextBuilder::from(ctx)
             .page_content_kind(PageContentKind::InMemoryLayer)
-            .build();
+            .attached_child();
 
         let inner = self.inner.read().await;
 
@@ -435,6 +432,7 @@ impl InMemoryLayer {
             read: vectored_dio_read::LogicalRead<Vec<u8>>,
         }
         let mut reads: HashMap<Key, Vec<ValueRead>> = HashMap::new();
+        let mut ios: HashMap<(Key, Lsn), OnDiskValueIo> = Default::default();
 
         for range in keyspace.ranges.iter() {
             for (key, vec_map) in inner
@@ -442,12 +440,7 @@ impl InMemoryLayer {
                 .range(range.start.to_compact()..range.end.to_compact())
             {
                 let key = Key::from_compact(*key);
-                let lsn_range = match reconstruct_state.get_cached_lsn(&key) {
-                    Some(cached_lsn) => (cached_lsn + 1)..end_lsn,
-                    None => self.start_lsn..end_lsn,
-                };
-
-                let slice = vec_map.slice_range(lsn_range);
+                let slice = vec_map.slice_range(lsn_range.clone());
 
                 for (entry_lsn, index_entry) in slice.iter().rev() {
                     let IndexEntryUnpacked {
@@ -463,55 +456,59 @@ impl InMemoryLayer {
                             Vec::with_capacity(len as usize),
                         ),
                     });
+
+                    let io = reconstruct_state.update_key(&key, *entry_lsn, will_init);
+                    ios.insert((key, *entry_lsn), io);
+
                     if will_init {
                         break;
                     }
                 }
             }
         }
+        drop(inner); // release the lock before we spawn the IO; if it's serial-mode IO we will deadlock on the read().await below
+        let read_from = Arc::clone(self);
+        let read_ctx = ctx.attached_child();
+        reconstruct_state
+            .spawn_io(async move {
+                let inner = read_from.inner.read().await;
+                let f = vectored_dio_read::execute(
+                    &inner.file,
+                    reads
+                        .iter()
+                        .flat_map(|(_, value_reads)| value_reads.iter().map(|v| &v.read)),
+                    &read_ctx,
+                );
+                send_future::SendFuture::send(f) // https://github.com/rust-lang/rust/issues/96865
+                    .await;
 
-        // Execute the reads.
-
-        let f = vectored_dio_read::execute(
-            &inner.file,
-            reads
-                .iter()
-                .flat_map(|(_, value_reads)| value_reads.iter().map(|v| &v.read)),
-            &ctx,
-        );
-        send_future::SendFuture::send(f) // https://github.com/rust-lang/rust/issues/96865
-            .await;
-
-        // Process results into the reconstruct state
-        'next_key: for (key, value_reads) in reads {
-            for ValueRead { entry_lsn, read } in value_reads {
-                match read.into_result().expect("we run execute() above") {
-                    Err(e) => {
-                        reconstruct_state.on_key_error(key, PageReconstructError::from(anyhow!(e)));
-                        continue 'next_key;
-                    }
-                    Ok(value_buf) => {
-                        let value = Value::des(&value_buf);
-                        if let Err(e) = value {
-                            reconstruct_state
-                                .on_key_error(key, PageReconstructError::from(anyhow!(e)));
-                            continue 'next_key;
+                for (key, value_reads) in reads {
+                    for ValueRead { entry_lsn, read } in value_reads {
+                        let io = ios.remove(&(key, entry_lsn)).expect("sender must exist");
+                        match read.into_result().expect("we run execute() above") {
+                            Err(e) => {
+                                io.complete(Err(std::io::Error::new(
+                                    e.kind(),
+                                    "dio vec read failed",
+                                )));
+                            }
+                            Ok(value_buf) => {
+                                io.complete(Ok(OnDiskValue::WalRecordOrImage(value_buf.into())));
+                            }
                         }
-
-                        let key_situation =
-                            reconstruct_state.update_key(&key, entry_lsn, value.unwrap());
-                        if key_situation == ValueReconstructSituation::Complete {
-                            // TODO: metric to see if we fetched more values than necessary
-                            continue 'next_key;
-                        }
-
-                        // process the next value in the next iteration of the loop
                     }
                 }
-            }
-        }
 
-        reconstruct_state.on_lsn_advanced(&keyspace, self.start_lsn);
+                assert!(ios.is_empty());
+
+                // Keep layer existent until this IO is done;
+                // This is kinda forced for InMemoryLayer because we need to inner.read() anyway,
+                // but it's less obvious for DeltaLayer and ImageLayer. So, keep this explicit
+                // drop for consistency among all three layer types.
+                drop(inner);
+                drop(read_from);
+            })
+            .await;
 
         Ok(())
     }
@@ -556,11 +553,15 @@ impl InMemoryLayer {
         tenant_shard_id: TenantShardId,
         start_lsn: Lsn,
         gate: &utils::sync::gate::Gate,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<InMemoryLayer> {
-        trace!("initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}");
+        trace!(
+            "initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}"
+        );
 
-        let file = EphemeralFile::create(conf, tenant_shard_id, timeline_id, gate, ctx).await?;
+        let file =
+            EphemeralFile::create(conf, tenant_shard_id, timeline_id, gate, cancel, ctx).await?;
         let key = InMemoryLayerFileId(file.page_cache_file_id());
 
         Ok(InMemoryLayer {
@@ -606,6 +607,7 @@ impl InMemoryLayer {
         // Write the batch to the file
         inner.file.write_raw(&raw, ctx).await?;
         let new_size = inner.file.len();
+
         let expected_new_len = base_offset
             .checked_add(raw.len().into_u64())
             // write_raw would error if we were to overflow u64.
@@ -717,6 +719,8 @@ impl InMemoryLayer {
         ctx: &RequestContext,
         key_range: Option<Range<Key>>,
         l0_flush_global_state: &l0_flush::Inner,
+        gate: &utils::sync::gate::Gate,
+        cancel: CancellationToken,
     ) -> Result<Option<(PersistentLayerDesc, Utf8PathBuf)>> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this
         // layer is not writeable anymore, no one should be trying to acquire the
@@ -757,6 +761,8 @@ impl InMemoryLayer {
             self.tenant_shard_id,
             Key::MIN,
             self.start_lsn..end_lsn,
+            gate,
+            cancel,
             ctx,
         )
         .await?;
@@ -818,8 +824,7 @@ mod tests {
     #[test]
     fn test_index_entry() {
         const MAX_SUPPORTED_POS: usize = IndexEntry::MAX_SUPPORTED_POS;
-        use IndexEntryNewArgs as Args;
-        use IndexEntryUnpacked as Unpacked;
+        use {IndexEntryNewArgs as Args, IndexEntryUnpacked as Unpacked};
 
         let roundtrip = |args, expect: Unpacked| {
             let res = IndexEntry::new(args).expect("this tests expects no errors");

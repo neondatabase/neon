@@ -6,17 +6,15 @@
 //! Probabilistic cardinality estimators, such as the HyperLogLog algorithm,
 //! use significantly less memory than this, but can only approximate the cardinality.
 
-use std::{
-    hash::{BuildHasher, BuildHasherDefault, Hash},
-    sync::atomic::AtomicU8,
-};
+use std::hash::{BuildHasher, BuildHasherDefault, Hash};
+use std::sync::atomic::AtomicU8;
 
-use measured::{
-    label::{LabelGroupVisitor, LabelName, LabelValue, LabelVisitor},
-    metric::{counter::CounterState, name::MetricNameEncoder, Metric, MetricType, MetricVec},
-    text::TextEncoder,
-    LabelGroup,
-};
+use measured::LabelGroup;
+use measured::label::{LabelGroupVisitor, LabelName, LabelValue, LabelVisitor};
+use measured::metric::counter::CounterState;
+use measured::metric::name::MetricNameEncoder;
+use measured::metric::{Metric, MetricType, MetricVec};
+use measured::text::TextEncoder;
 use twox_hash::xxh3;
 
 /// Create an [`HyperLogLogVec`] and registers to default registry.
@@ -27,9 +25,7 @@ macro_rules! register_hll_vec {
         $crate::register(Box::new(hll_vec.clone())).map(|_| hll_vec)
     }};
 
-    ($N:literal, $NAME:expr, $HELP:expr, $LABELS_NAMES:expr $(,)?) => {{
-        $crate::register_hll_vec!($N, $crate::opts!($NAME, $HELP), $LABELS_NAMES)
-    }};
+    ($N:literal, $NAME:expr, $HELP:expr, $LABELS_NAMES:expr $(,)?) => {{ $crate::register_hll_vec!($N, $crate::opts!($NAME, $HELP), $LABELS_NAMES) }};
 }
 
 /// Create an [`HyperLogLog`] and registers to default registry.
@@ -40,9 +36,7 @@ macro_rules! register_hll {
         $crate::register(Box::new(hll.clone())).map(|_| hll)
     }};
 
-    ($N:literal, $NAME:expr, $HELP:expr $(,)?) => {{
-        $crate::register_hll!($N, $crate::opts!($NAME, $HELP))
-    }};
+    ($N:literal, $NAME:expr, $HELP:expr $(,)?) => {{ $crate::register_hll!($N, $crate::opts!($NAME, $HELP)) }};
 }
 
 /// HLL is a probabilistic cardinality measure.
@@ -195,8 +189,10 @@ impl<W: std::io::Write, const N: usize> measured::metric::MetricEncoding<TextEnc
 mod tests {
     use std::collections::HashSet;
 
-    use measured::{label::StaticLabelSet, FixedCardinalityLabel};
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use measured::FixedCardinalityLabel;
+    use measured::label::StaticLabelSet;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
     use rand_distr::{Distribution, Zipf};
 
     use crate::HyperLogLogVec;

@@ -4,13 +4,12 @@ use bytes::BytesMut;
 use pageserver_api::key::Key;
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::SlruKind;
-use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::VISIBILITYMAP_FORKNUM;
 use postgres_ffi::v14::nonrelfile_utils::{
     mx_offset_to_flags_bitshift, mx_offset_to_flags_offset, mx_offset_to_member_offset,
     transaction_id_set_status,
 };
-use postgres_ffi::BLCKSZ;
+use postgres_ffi::{BLCKSZ, pg_constants};
 use tracing::*;
 use utils::lsn::Lsn;
 
@@ -277,6 +276,7 @@ pub(crate) fn apply_in_neon(
             append,
             clear,
             will_init,
+            only_if,
         } => {
             use bytes::BufMut;
             if *will_init {
@@ -288,6 +288,13 @@ pub(crate) fn apply_in_neon(
             }
             if *clear {
                 page.clear();
+            }
+            if let Some(only_if) = only_if {
+                if page != only_if.as_bytes() {
+                    return Err(anyhow::anyhow!(
+                        "the current image does not match the expected image, cannot append"
+                    ));
+                }
             }
             page.put_slice(append.as_bytes());
         }

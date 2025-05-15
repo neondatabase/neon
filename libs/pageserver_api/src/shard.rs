@@ -31,12 +31,15 @@
 //! - In a tenant with 4 shards, each shard has ShardCount(N), ShardNumber(i) where i in 0..N-1 (inclusive),
 //!   and their slugs are 0004, 0104, 0204, and 0304.
 
-use crate::{key::Key, models::ShardParameters};
-use postgres_ffi::relfile_utils::INIT_FORKNUM;
-use serde::{Deserialize, Serialize};
+use std::hash::{Hash, Hasher};
 
 #[doc(inline)]
 pub use ::utils::shard::*;
+use postgres_ffi::relfile_utils::INIT_FORKNUM;
+use serde::{Deserialize, Serialize};
+
+use crate::key::Key;
+use crate::models::ShardParameters;
 
 /// The ShardIdentity contains enough information to map a [`Key`] to a [`ShardNumber`],
 /// and to check whether that [`ShardNumber`] is the same as the current shard.
@@ -46,6 +49,23 @@ pub struct ShardIdentity {
     pub count: ShardCount,
     pub stripe_size: ShardStripeSize,
     layout: ShardLayout,
+}
+
+/// Hash implementation
+///
+/// The stripe size cannot change dynamically, so it can be ignored for efficiency reasons.
+impl Hash for ShardIdentity {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let ShardIdentity {
+            number,
+            count,
+            stripe_size: _,
+            layout: _,
+        } = self;
+
+        number.0.hash(state);
+        count.0.hash(state);
+    }
 }
 
 /// Stripe size in number of pages
@@ -58,16 +78,25 @@ impl Default for ShardStripeSize {
     }
 }
 
+impl std::fmt::Display for ShardStripeSize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// Layout version: for future upgrades where we might change how the key->shard mapping works
-#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Hash, Debug)]
 pub struct ShardLayout(u8);
 
 const LAYOUT_V1: ShardLayout = ShardLayout(1);
 /// ShardIdentity uses a magic layout value to indicate if it is unusable
 const LAYOUT_BROKEN: ShardLayout = ShardLayout(255);
 
-/// Default stripe size in pages: 256MiB divided by 8kiB page size.
-const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
+/// The default stripe size in pages. 16 MiB divided by 8 kiB page size.
+///
+/// A lower stripe size distributes ingest load better across shards, but reduces IO amortization.
+/// 16 MiB appears to be a reasonable balance: <https://github.com/neondatabase/neon/pull/10510>.
+pub const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(16 * 1024 / 8);
 
 #[derive(thiserror::Error, Debug, PartialEq, Eq)]
 pub enum ShardConfigError {
@@ -90,6 +119,16 @@ impl ShardIdentity {
             layout: LAYOUT_V1,
             stripe_size: DEFAULT_STRIPE_SIZE,
         }
+    }
+
+    /// An unsharded identity with the given stripe size (if non-zero). This is typically used to
+    /// carry over a stripe size for an unsharded tenant from persistent storage.
+    pub fn unsharded_with_stripe_size(stripe_size: ShardStripeSize) -> Self {
+        let mut shard_identity = Self::unsharded();
+        if stripe_size.0 > 0 {
+            shard_identity.stripe_size = stripe_size;
+        }
+        shard_identity
     }
 
     /// A broken instance of this type is only used for `TenantState::Broken` tenants,
@@ -318,7 +357,8 @@ pub fn describe(
 mod tests {
     use std::str::FromStr;
 
-    use utils::{id::TenantId, Hex};
+    use utils::Hex;
+    use utils::id::TenantId;
 
     use super::*;
 
@@ -506,7 +546,7 @@ mod tests {
             field6: 0x7d06,
         };
 
-        let shard = key_to_shard_number(ShardCount(10), DEFAULT_STRIPE_SIZE, &key);
+        let shard = key_to_shard_number(ShardCount(10), ShardStripeSize(32768), &key);
         assert_eq!(shard, ShardNumber(8));
     }
 

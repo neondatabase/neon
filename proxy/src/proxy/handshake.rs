@@ -8,12 +8,13 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, warn};
 
 use crate::auth::endpoint_sni;
-use crate::config::{TlsConfig, PG_ALPN_PROTOCOL};
+use crate::config::TlsConfig;
 use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::Metrics;
 use crate::proxy::ERR_INSECURE_CONNECTION;
 use crate::stream::{PqStream, Stream, StreamUpgradeError};
+use crate::tls::PG_ALPN_PROTOCOL;
 
 #[derive(Error, Debug)]
 pub(crate) enum HandshakeError {
@@ -22,9 +23,6 @@ pub(crate) enum HandshakeError {
 
     #[error("protocol violation")]
     ProtocolViolation,
-
-    #[error("missing certificate")]
-    MissingCertificate,
 
     #[error("{0}")]
     StreamUpgradeError(#[from] StreamUpgradeError),
@@ -41,10 +39,6 @@ impl ReportableError for HandshakeError {
         match self {
             HandshakeError::EarlyData => crate::error::ErrorKind::User,
             HandshakeError::ProtocolViolation => crate::error::ErrorKind::User,
-            // This error should not happen, but will if we have no default certificate and
-            // the client sends no SNI extension.
-            // If they provide SNI then we can be sure there is a certificate that matches.
-            HandshakeError::MissingCertificate => crate::error::ErrorKind::Service,
             HandshakeError::StreamUpgradeError(upgrade) => match upgrade {
                 StreamUpgradeError::AlreadyTls => crate::error::ErrorKind::Service,
                 StreamUpgradeError::Io(_) => crate::error::ErrorKind::ClientDisconnect,
@@ -113,7 +107,7 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 
                         let mut read_buf = read_buf.reader();
                         let mut res = Ok(());
-                        let accept = tokio_rustls::TlsAcceptor::from(tls.to_server_config())
+                        let accept = tokio_rustls::TlsAcceptor::from(tls.pg_config.clone())
                             .accept_with(raw, |session| {
                                 // push the early data to the tls session
                                 while !read_buf.get_ref().is_empty() {
@@ -145,7 +139,7 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                         // try parse endpoint
                         let ep = conn_info
                             .server_name()
-                            .and_then(|sni| endpoint_sni(sni, &tls.common_names).ok().flatten());
+                            .and_then(|sni| endpoint_sni(sni, &tls.common_names));
                         if let Some(ep) = ep {
                             ctx.set_endpoint_id(ep);
                         }
@@ -160,10 +154,8 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                             }
                         }
 
-                        let (_, tls_server_end_point) = tls
-                            .cert_resolver
-                            .resolve(conn_info.server_name())
-                            .ok_or(HandshakeError::MissingCertificate)?;
+                        let (_, tls_server_end_point) =
+                            tls.cert_resolver.resolve(conn_info.server_name());
 
                         stream = PqStream {
                             framed: Framed {
@@ -195,7 +187,11 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 // OR we didn't provide it at all (for dev purposes).
                 if tls.is_some() {
                     return stream
-                        .throw_error_str(ERR_INSECURE_CONNECTION, crate::error::ErrorKind::User)
+                        .throw_error_str(
+                            ERR_INSECURE_CONNECTION,
+                            crate::error::ErrorKind::User,
+                            None,
+                        )
                         .await?;
                 }
 

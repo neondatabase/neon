@@ -4,11 +4,11 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use arc_swap::ArcSwapOption;
-use dashmap::DashMap;
+use clashmap::ClashMap;
 use jose_jwk::crypto::KeyInfo;
-use reqwest::{redirect, Client};
-use reqwest_retry::policies::ExponentialBackoff;
+use reqwest::{Client, redirect};
 use reqwest_retry::RetryTransientMiddleware;
+use reqwest_retry::policies::ExponentialBackoff;
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
@@ -64,7 +64,7 @@ pub(crate) struct AuthRule {
 pub struct JwkCache {
     client: reqwest_middleware::ClientWithMiddleware,
 
-    map: DashMap<(EndpointId, RoleName), Arc<JwkCacheEntryLock>>,
+    map: ClashMap<(EndpointId, RoleName), Arc<JwkCacheEntryLock>>,
 }
 
 pub(crate) struct JwkCacheEntry {
@@ -220,11 +220,11 @@ async fn fetch_jwks(
 }
 
 impl JwkCacheEntryLock {
-    async fn acquire_permit<'a>(self: &'a Arc<Self>) -> JwkRenewalPermit<'a> {
+    async fn acquire_permit(self: &Arc<Self>) -> JwkRenewalPermit<'_> {
         JwkRenewalPermit::acquire_permit(self).await
     }
 
-    fn try_acquire_permit<'a>(self: &'a Arc<Self>) -> Option<JwkRenewalPermit<'a>> {
+    fn try_acquire_permit(self: &Arc<Self>) -> Option<JwkRenewalPermit<'_>> {
         JwkRenewalPermit::try_acquire_permit(self)
     }
 
@@ -393,7 +393,7 @@ impl JwkCacheEntryLock {
                 verify_rsa_signature(header_payload.as_bytes(), &sig, key, &header.algorithm)?;
             }
             key => return Err(JwtError::UnsupportedKeyType(key.into())),
-        };
+        }
 
         tracing::debug!(?payload, "JWT signature valid with claims");
 
@@ -409,14 +409,22 @@ impl JwkCacheEntryLock {
 
         if let Some(exp) = payload.expiration {
             if now >= exp + CLOCK_SKEW_LEEWAY {
-                return Err(JwtError::InvalidClaims(JwtClaimsError::JwtTokenHasExpired));
+                return Err(JwtError::InvalidClaims(JwtClaimsError::JwtTokenHasExpired(
+                    exp.duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                )));
             }
         }
 
         if let Some(nbf) = payload.not_before {
             if nbf >= now + CLOCK_SKEW_LEEWAY {
                 return Err(JwtError::InvalidClaims(
-                    JwtClaimsError::JwtTokenNotYetReadyToUse,
+                    JwtClaimsError::JwtTokenNotYetReadyToUse(
+                        nbf.duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                    ),
                 ));
             }
         }
@@ -469,7 +477,7 @@ impl Default for JwkCache {
 
         JwkCache {
             client,
-            map: DashMap::default(),
+            map: ClashMap::default(),
         }
     }
 }
@@ -498,8 +506,8 @@ fn verify_rsa_signature(
     alg: &jose_jwa::Algorithm,
 ) -> Result<(), JwtError> {
     use jose_jwa::{Algorithm, Signing};
-    use rsa::pkcs1v15::{Signature, VerifyingKey};
     use rsa::RsaPublicKey;
+    use rsa::pkcs1v15::{Signature, VerifyingKey};
 
     let key = RsaPublicKey::try_from(key).map_err(JwtError::InvalidRsaKey)?;
 
@@ -510,7 +518,7 @@ fn verify_rsa_signature(
             key.verify(data, &sig)?;
         }
         _ => return Err(JwtError::InvalidRsaSigningAlgorithm),
-    };
+    }
 
     Ok(())
 }
@@ -534,10 +542,10 @@ struct JwtPayload<'a> {
     #[serde(rename = "aud", default)]
     audience: OneOrMany,
     /// Expiration - Time after which the JWT expires
-    #[serde(deserialize_with = "numeric_date_opt", rename = "exp", default)]
+    #[serde(rename = "exp", deserialize_with = "numeric_date_opt", default)]
     expiration: Option<SystemTime>,
-    /// Not before - Time after which the JWT expires
-    #[serde(deserialize_with = "numeric_date_opt", rename = "nbf", default)]
+    /// Not before - Time before which the JWT is not valid
+    #[serde(rename = "nbf", deserialize_with = "numeric_date_opt", default)]
     not_before: Option<SystemTime>,
 
     // the following entries are only extracted for the sake of debug logging.
@@ -609,8 +617,15 @@ impl<'de> Deserialize<'de> for OneOrMany {
 }
 
 fn numeric_date_opt<'de, D: Deserializer<'de>>(d: D) -> Result<Option<SystemTime>, D::Error> {
-    let d = <Option<u64>>::deserialize(d)?;
-    Ok(d.map(|n| SystemTime::UNIX_EPOCH + Duration::from_secs(n)))
+    <Option<u64>>::deserialize(d)?
+        .map(|t| {
+            SystemTime::UNIX_EPOCH
+                .checked_add(Duration::from_secs(t))
+                .ok_or_else(|| {
+                    serde::de::Error::custom(format_args!("timestamp out of bounds: {t}"))
+                })
+        })
+        .transpose()
 }
 
 struct JwkRenewalPermit<'a> {
@@ -746,11 +761,11 @@ pub enum JwtClaimsError {
     #[error("invalid JWT token audience")]
     InvalidJwtTokenAudience,
 
-    #[error("JWT token has expired")]
-    JwtTokenHasExpired,
+    #[error("JWT token has expired (exp={0})")]
+    JwtTokenHasExpired(u64),
 
-    #[error("JWT token is not yet ready to use")]
-    JwtTokenNotYetReadyToUse,
+    #[error("JWT token is not yet ready to use (nbf={0})")]
+    JwtTokenNotYetReadyToUse(u64),
 }
 
 #[allow(dead_code, reason = "Debug use only")]
@@ -776,7 +791,6 @@ impl From<&jose_jwk::Key> for KeyType {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used)]
 mod tests {
     use std::future::IntoFuture;
     use std::net::SocketAddr;
@@ -1234,14 +1248,14 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
                     "nbf": now + 60,
                     "aud": "neon",
                 }},
-                error: JwtClaimsError::JwtTokenNotYetReadyToUse,
+                error: JwtClaimsError::JwtTokenNotYetReadyToUse(now + 60),
             },
             Test {
                 body: json! {{
                     "exp": now - 60,
                     "aud": ["neon"],
                 }},
-                error: JwtClaimsError::JwtTokenHasExpired,
+                error: JwtClaimsError::JwtTokenHasExpired(now - 60),
             },
             Test {
                 body: json! {{

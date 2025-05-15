@@ -1,17 +1,24 @@
-use std::{future::Future, ops::Range, sync::Arc};
+use std::future::Future;
+use std::ops::Range;
+use std::sync::Arc;
 
 use bytes::Bytes;
-use pageserver_api::key::{Key, KEY_SIZE};
-use utils::{id::TimelineId, lsn::Lsn, shard::TenantShardId};
-
-use crate::tenant::storage_layer::Layer;
-use crate::{config::PageServerConf, context::RequestContext, tenant::Timeline};
+use pageserver_api::key::{KEY_SIZE, Key};
 use pageserver_api::value::Value;
+use tokio_util::sync::CancellationToken;
+use utils::id::TimelineId;
+use utils::lsn::Lsn;
+use utils::shard::TenantShardId;
 
+use super::errors::PutError;
 use super::layer::S3_UPLOAD_LIMIT;
 use super::{
     DeltaLayerWriter, ImageLayerWriter, PersistentLayerDesc, PersistentLayerKey, ResidentLayer,
 };
+use crate::config::PageServerConf;
+use crate::context::RequestContext;
+use crate::tenant::Timeline;
+use crate::tenant::storage_layer::Layer;
 
 pub(crate) enum BatchWriterResult {
     Produced(ResidentLayer),
@@ -87,6 +94,23 @@ impl BatchLayerWriter {
         ));
     }
 
+    pub(crate) async fn finish(
+        self,
+        tline: &Arc<Timeline>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<ResidentLayer>> {
+        let res = self
+            .finish_with_discard_fn(tline, ctx, |_| async { false })
+            .await?;
+        let mut output = Vec::new();
+        for r in res {
+            if let BatchWriterResult::Produced(layer) = r {
+                output.push(layer);
+            }
+        }
+        Ok(output)
+    }
+
     pub(crate) async fn finish_with_discard_fn<D, F>(
         self,
         tline: &Arc<Timeline>,
@@ -149,11 +173,15 @@ impl BatchLayerWriter {
         // END: catch every error and do the recovery in the above section
         Ok(generated_layers)
     }
+
+    pub fn pending_layer_num(&self) -> usize {
+        self.generated_layer_writers.len()
+    }
 }
 
 /// An image writer that takes images and produces multiple image layers.
 #[must_use]
-pub struct SplitImageLayerWriter {
+pub struct SplitImageLayerWriter<'a> {
     inner: ImageLayerWriter,
     target_layer_size: u64,
     lsn: Lsn,
@@ -162,9 +190,12 @@ pub struct SplitImageLayerWriter {
     tenant_shard_id: TenantShardId,
     batches: BatchLayerWriter,
     start_key: Key,
+    gate: &'a utils::sync::gate::Gate,
+    cancel: CancellationToken,
 }
 
-impl SplitImageLayerWriter {
+impl<'a> SplitImageLayerWriter<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
@@ -172,6 +203,8 @@ impl SplitImageLayerWriter {
         start_key: Key,
         lsn: Lsn,
         target_layer_size: u64,
+        gate: &'a utils::sync::gate::Gate,
+        cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         Ok(Self {
@@ -182,6 +215,8 @@ impl SplitImageLayerWriter {
                 tenant_shard_id,
                 &(start_key..Key::MAX),
                 lsn,
+                gate,
+                cancel.clone(),
                 ctx,
             )
             .await?,
@@ -191,6 +226,8 @@ impl SplitImageLayerWriter {
             batches: BatchLayerWriter::new(conf).await?,
             lsn,
             start_key,
+            gate,
+            cancel,
         })
     }
 
@@ -199,7 +236,7 @@ impl SplitImageLayerWriter {
         key: Key,
         img: Bytes,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PutError> {
         // The current estimation is an upper bound of the space that the key/image could take
         // because we did not consider compression in this estimation. The resulting image layer
         // could be smaller than the target size.
@@ -213,9 +250,12 @@ impl SplitImageLayerWriter {
                 self.tenant_shard_id,
                 &(key..Key::MAX),
                 self.lsn,
+                self.gate,
+                self.cancel.clone(),
                 ctx,
             )
-            .await?;
+            .await
+            .map_err(PutError::Other)?;
             let prev_image_writer = std::mem::replace(&mut self.inner, next_image_writer);
             self.batches.add_unfinished_image_writer(
                 prev_image_writer,
@@ -265,7 +305,7 @@ impl SplitImageLayerWriter {
 /// into a single file. This behavior might change in the future. For reference, the legacy compaction algorithm
 /// will split them into multiple files based on size.
 #[must_use]
-pub struct SplitDeltaLayerWriter {
+pub struct SplitDeltaLayerWriter<'a> {
     inner: Option<(Key, DeltaLayerWriter)>,
     target_layer_size: u64,
     conf: &'static PageServerConf,
@@ -274,15 +314,19 @@ pub struct SplitDeltaLayerWriter {
     lsn_range: Range<Lsn>,
     last_key_written: Key,
     batches: BatchLayerWriter,
+    gate: &'a utils::sync::gate::Gate,
+    cancel: CancellationToken,
 }
 
-impl SplitDeltaLayerWriter {
+impl<'a> SplitDeltaLayerWriter<'a> {
     pub async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
         lsn_range: Range<Lsn>,
         target_layer_size: u64,
+        gate: &'a utils::sync::gate::Gate,
+        cancel: CancellationToken,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             target_layer_size,
@@ -293,6 +337,8 @@ impl SplitDeltaLayerWriter {
             lsn_range,
             last_key_written: Key::MIN,
             batches: BatchLayerWriter::new(conf).await?,
+            gate,
+            cancel,
         })
     }
 
@@ -302,7 +348,7 @@ impl SplitDeltaLayerWriter {
         lsn: Lsn,
         val: Value,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PutError> {
         // The current estimation is key size plus LSN size plus value size estimation. This is not an accurate
         // number, and therefore the final layer size could be a little bit larger or smaller than the target.
         //
@@ -318,9 +364,12 @@ impl SplitDeltaLayerWriter {
                     self.tenant_shard_id,
                     key,
                     self.lsn_range.clone(),
+                    self.gate,
+                    self.cancel.clone(),
                     ctx,
                 )
-                .await?,
+                .await
+                .map_err(PutError::Other)?,
             ));
         }
         let (_, inner) = self.inner.as_mut().unwrap();
@@ -336,11 +385,14 @@ impl SplitDeltaLayerWriter {
                     self.tenant_shard_id,
                     key,
                     self.lsn_range.clone(),
+                    self.gate,
+                    self.cancel.clone(),
                     ctx,
                 )
-                .await?;
+                .await
+                .map_err(PutError::Other)?;
                 let (start_key, prev_delta_writer) =
-                    std::mem::replace(&mut self.inner, Some((key, next_delta_writer))).unwrap();
+                    self.inner.replace((key, next_delta_writer)).unwrap();
                 self.batches.add_unfinished_delta_writer(
                     prev_delta_writer,
                     start_key..key,
@@ -348,11 +400,11 @@ impl SplitDeltaLayerWriter {
                 );
             } else if inner.estimated_size() >= S3_UPLOAD_LIMIT {
                 // We have to produce a very large file b/c a key is updated too often.
-                anyhow::bail!(
+                return Err(PutError::Other(anyhow::anyhow!(
                     "a single key is updated too often: key={}, estimated_size={}, and the layer file cannot be produced",
                     key,
                     inner.estimated_size()
-                );
+                )));
             }
         }
         self.last_key_written = key;
@@ -402,15 +454,10 @@ mod tests {
     use itertools::Itertools;
     use rand::{RngCore, SeedableRng};
 
-    use crate::{
-        tenant::{
-            harness::{TenantHarness, TIMELINE_ID},
-            storage_layer::AsLayerDesc,
-        },
-        DEFAULT_PG_VERSION,
-    };
-
     use super::*;
+    use crate::DEFAULT_PG_VERSION;
+    use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
+    use crate::tenant::storage_layer::AsLayerDesc;
 
     fn get_key(id: u32) -> Key {
         let mut key = Key::from_hex("000000000033333333444444445500000000").unwrap();
@@ -448,6 +495,8 @@ mod tests {
             get_key(0),
             Lsn(0x18),
             4 * 1024 * 1024,
+            &tline.gate,
+            tline.cancel.clone(),
             &ctx,
         )
         .await
@@ -459,6 +508,8 @@ mod tests {
             tenant.tenant_shard_id,
             Lsn(0x18)..Lsn(0x20),
             4 * 1024 * 1024,
+            &tline.gate,
+            tline.cancel.clone(),
         )
         .await
         .unwrap();
@@ -525,6 +576,8 @@ mod tests {
             get_key(0),
             Lsn(0x18),
             4 * 1024 * 1024,
+            &tline.gate,
+            tline.cancel.clone(),
             &ctx,
         )
         .await
@@ -535,6 +588,8 @@ mod tests {
             tenant.tenant_shard_id,
             Lsn(0x18)..Lsn(0x20),
             4 * 1024 * 1024,
+            &tline.gate,
+            tline.cancel.clone(),
         )
         .await
         .unwrap();
@@ -622,6 +677,8 @@ mod tests {
             get_key(0),
             Lsn(0x18),
             4 * 1024,
+            &tline.gate,
+            tline.cancel.clone(),
             &ctx,
         )
         .await
@@ -633,6 +690,8 @@ mod tests {
             tenant.tenant_shard_id,
             Lsn(0x18)..Lsn(0x20),
             4 * 1024,
+            &tline.gate,
+            tline.cancel.clone(),
         )
         .await
         .unwrap();
@@ -709,6 +768,8 @@ mod tests {
             tenant.tenant_shard_id,
             Lsn(0x10)..Lsn(N as u64 * 16 + 0x10),
             4 * 1024 * 1024,
+            &tline.gate,
+            tline.cancel.clone(),
         )
         .await
         .unwrap();

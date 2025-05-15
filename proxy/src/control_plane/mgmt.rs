@@ -6,7 +6,7 @@ use postgres_backend::{AuthType, PostgresBackend, PostgresBackendTCP, QueryError
 use pq_proto::{BeMessage, SINGLE_COL_ROWDESC};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, info_span, Instrument};
+use tracing::{Instrument, error, info, info_span};
 
 use crate::control_plane::messages::{DatabaseInfo, KickSession};
 use crate::waiters::{self, Waiter, Waiters};

@@ -1,14 +1,12 @@
 //! SASL-based authentication support.
 
+use std::fmt::Write;
+use std::{io, iter, mem, str};
+
 use hmac::{Hmac, Mac};
 use rand::{self, Rng};
 use sha2::digest::FixedOutput;
 use sha2::{Digest, Sha256};
-use std::fmt::Write;
-use std::io;
-use std::iter;
-use std::mem;
-use std::str;
 use tokio::task::yield_now;
 
 const NONCE_LENGTH: usize = 24;
@@ -214,7 +212,7 @@ impl ScramSha256 {
                     password,
                     channel_binding,
                 } => (nonce, password, channel_binding),
-                _ => return Err(io::Error::new(io::ErrorKind::Other, "invalid SCRAM state")),
+                _ => return Err(io::Error::other("invalid SCRAM state")),
             };
 
         let message =
@@ -293,7 +291,7 @@ impl ScramSha256 {
                 server_key,
                 auth_message,
             } => (server_key, auth_message),
-            _ => return Err(io::Error::new(io::ErrorKind::Other, "invalid SCRAM state")),
+            _ => return Err(io::Error::other("invalid SCRAM state")),
         };
 
         let message =
@@ -303,10 +301,7 @@ impl ScramSha256 {
 
         let verifier = match parsed {
             ServerFinalMessage::Error(e) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("SCRAM error: {}", e),
-                ));
+                return Err(io::Error::other(format!("SCRAM error: {}", e)));
             }
             ServerFinalMessage::Verifier(verifier) => verifier,
         };
@@ -493,11 +488,9 @@ mod test {
         let nonce = "9IZ2O01zb9IgiIZ1WJ/zgpJB";
 
         let client_first = "n,,n=,r=9IZ2O01zb9IgiIZ1WJ/zgpJB";
-        let server_first =
-            "r=9IZ2O01zb9IgiIZ1WJ/zgpJBjx/oIRLs02gGSHcw1KEty3eY,s=fs3IXBy7U7+IvVjZ,i\
+        let server_first = "r=9IZ2O01zb9IgiIZ1WJ/zgpJBjx/oIRLs02gGSHcw1KEty3eY,s=fs3IXBy7U7+IvVjZ,i\
              =4096";
-        let client_final =
-            "c=biws,r=9IZ2O01zb9IgiIZ1WJ/zgpJBjx/oIRLs02gGSHcw1KEty3eY,p=AmNKosjJzS3\
+        let client_final = "c=biws,r=9IZ2O01zb9IgiIZ1WJ/zgpJBjx/oIRLs02gGSHcw1KEty3eY,p=AmNKosjJzS3\
              1NTlQYNs5BTeQjdHdk7lOflDo5re2an8=";
         let server_final = "v=U+ppxD5XUKtradnv8e2MkeupiA8FU87Sg8CXzXHDAzw=";
 

@@ -2,6 +2,7 @@
 
 pub mod batch_split_writer;
 pub mod delta_layer;
+pub mod errors;
 pub mod filter_iterator;
 pub mod image_layer;
 pub mod inmemory_layer;
@@ -10,33 +11,42 @@ mod layer_desc;
 mod layer_name;
 pub mod merge_iterator;
 
-use crate::context::{AccessStatsBehavior, RequestContext};
-use bytes::Bytes;
-use pageserver_api::key::{Key, NON_INHERITED_SPARSE_RANGE};
-use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
-use pageserver_api::record::NeonWalRecord;
-use pageserver_api::value::Value;
-use std::cmp::{Ordering, Reverse};
+use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::collections::{BinaryHeap, HashMap};
 use std::ops::Range;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use utils::lsn::Lsn;
-
+use crate::PERF_TRACE_TARGET;
+pub use batch_split_writer::{BatchLayerWriter, SplitDeltaLayerWriter, SplitImageLayerWriter};
+use bytes::Bytes;
 pub use delta_layer::{DeltaLayer, DeltaLayerWriter, ValueRef};
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 pub use image_layer::{ImageLayer, ImageLayerWriter};
 pub use inmemory_layer::InMemoryLayer;
+pub(crate) use layer::{EvictionError, Layer, ResidentLayer};
 pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
 pub use layer_name::{DeltaLayerName, ImageLayerName, LayerName};
-
-pub(crate) use layer::{EvictionError, Layer, ResidentLayer};
+use pageserver_api::key::Key;
+use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
+use pageserver_api::record::NeonWalRecord;
+use pageserver_api::value::Value;
+use tracing::{Instrument, info_span, trace};
+use utils::lsn::Lsn;
+use utils::sync::gate::GateGuard;
 
 use self::inmemory_layer::InMemoryLayerFileId;
-
-use super::timeline::GetVectoredError;
 use super::PageReconstructError;
+use super::layer_map::InMemoryLayerDesc;
+use super::timeline::{GetVectoredError, ReadPath};
+use crate::config::PageServerConf;
+use crate::context::{
+    AccessStatsBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
+};
 
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
@@ -71,6 +81,16 @@ pub(crate) struct ValueReconstructState {
     pub(crate) img: Option<(Lsn, Bytes)>,
 }
 
+impl ValueReconstructState {
+    /// Returns the number of page deltas applied to the page image.
+    pub fn num_deltas(&self) -> usize {
+        match self.img {
+            Some(_) => self.records.len(),
+            None => self.records.len() - 1, // omit will_init record
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum ValueReconstructSituation {
     Complete,
@@ -78,30 +98,151 @@ pub(crate) enum ValueReconstructSituation {
     Continue,
 }
 
-/// Reconstruct data accumulated for a single key during a vectored get
-#[derive(Debug, Default, Clone)]
-pub(crate) struct VectoredValueReconstructState {
-    pub(crate) records: Vec<(Lsn, NeonWalRecord)>,
-    pub(crate) img: Option<(Lsn, Bytes)>,
-
-    situation: ValueReconstructSituation,
+/// On disk representation of a value loaded in a buffer
+#[derive(Debug)]
+pub(crate) enum OnDiskValue {
+    /// Unencoded [`Value::Image`]
+    RawImage(Bytes),
+    /// Encoded [`Value`]. Can deserialize into an image or a WAL record
+    WalRecordOrImage(Bytes),
 }
 
-impl VectoredValueReconstructState {
-    fn get_cached_lsn(&self) -> Option<Lsn> {
-        self.img.as_ref().map(|img| img.0)
+/// Reconstruct data accumulated for a single key during a vectored get
+#[derive(Debug, Default)]
+pub(crate) struct VectoredValueReconstructState {
+    pub(crate) on_disk_values: Vec<(Lsn, OnDiskValueIoWaiter)>,
+
+    pub(crate) situation: ValueReconstructSituation,
+}
+
+#[derive(Debug)]
+pub(crate) struct OnDiskValueIoWaiter {
+    rx: tokio::sync::oneshot::Receiver<OnDiskValueIoResult>,
+}
+
+#[derive(Debug)]
+#[must_use]
+pub(crate) enum OnDiskValueIo {
+    /// Traversal identified this IO as required to complete the vectored get.
+    Required {
+        num_active_ios: Arc<AtomicUsize>,
+        tx: tokio::sync::oneshot::Sender<OnDiskValueIoResult>,
+    },
+    /// Sparse keyspace reads always read all the values for a given key,
+    /// even though only the first value is needed.
+    ///
+    /// This variant represents the unnecessary IOs for those values at lower LSNs
+    /// that aren't needed, but are currently still being done.
+    ///
+    /// The execution of unnecessary IOs was a pre-existing behavior before concurrent IO.
+    /// We added this explicit representation here so that we can drop
+    /// unnecessary IO results immediately, instead of buffering them in
+    /// `oneshot` channels inside [`VectoredValueReconstructState`] until
+    /// [`VectoredValueReconstructState::collect_pending_ios`] gets called.
+    Unnecessary,
+}
+
+type OnDiskValueIoResult = Result<OnDiskValue, std::io::Error>;
+
+impl OnDiskValueIo {
+    pub(crate) fn complete(self, res: OnDiskValueIoResult) {
+        match self {
+            OnDiskValueIo::Required { num_active_ios, tx } => {
+                num_active_ios.fetch_sub(1, std::sync::atomic::Ordering::Release);
+                let _ = tx.send(res);
+            }
+            OnDiskValueIo::Unnecessary => {
+                // Nobody cared, see variant doc comment.
+            }
+        }
     }
 }
 
-impl From<VectoredValueReconstructState> for ValueReconstructState {
-    fn from(mut state: VectoredValueReconstructState) -> Self {
-        // walredo expects the records to be descending in terms of Lsn
-        state.records.sort_by_key(|(lsn, _)| Reverse(*lsn));
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum WaitCompletionError {
+    #[error("OnDiskValueIo was dropped without completing, likely the sidecar task panicked")]
+    IoDropped,
+}
 
-        ValueReconstructState {
-            records: state.records,
-            img: state.img,
+impl OnDiskValueIoWaiter {
+    pub(crate) async fn wait_completion(self) -> Result<OnDiskValueIoResult, WaitCompletionError> {
+        // NB: for Unnecessary IOs, this method never gets called because we don't add them to `on_disk_values`.
+        self.rx.await.map_err(|_| WaitCompletionError::IoDropped)
+    }
+}
+
+impl VectoredValueReconstructState {
+    /// # Cancel-Safety
+    ///
+    /// Technically fine to stop polling this future, but, the IOs will still
+    /// be executed to completion by the sidecar task and hold on to / consume resources.
+    /// Better not do it to make reasonsing about the system easier.
+    pub(crate) async fn collect_pending_ios(
+        self,
+    ) -> Result<ValueReconstructState, PageReconstructError> {
+        use utils::bin_ser::BeSer;
+
+        let mut res = Ok(ValueReconstructState::default());
+
+        // We should try hard not to bail early, so that by the time we return from this
+        // function, all IO for this value is done. It's not required -- we could totally
+        // stop polling the IO futures in the sidecar task, they need to support that,
+        // but just stopping to poll doesn't reduce the IO load on the disk. It's easier
+        // to reason about the system if we just wait for all IO to complete, even if
+        // we're no longer interested in the result.
+        //
+        // Revisit this when IO futures are replaced with a more sophisticated IO system
+        // and an IO scheduler, where we know which IOs were submitted and which ones
+        // just queued. Cf the comment on IoConcurrency::spawn_io.
+        for (lsn, waiter) in self.on_disk_values {
+            let value_recv_res = waiter
+                .wait_completion()
+                // we rely on the caller to poll us to completion, so this is not a bail point
+                .await;
+            // Force not bailing early by wrapping the code into a closure.
+            #[allow(clippy::redundant_closure_call)]
+            let _: () = (|| {
+                match (&mut res, value_recv_res) {
+                    (Err(_), _) => {
+                        // We've already failed, no need to process more.
+                    }
+                    (Ok(_), Err(wait_err)) => {
+                        // This shouldn't happen - likely the sidecar task panicked.
+                        res = Err(PageReconstructError::Other(wait_err.into()));
+                    }
+                    (Ok(_), Ok(Err(err))) => {
+                        let err: std::io::Error = err;
+                        // TODO: returning IO error here will fail a compute query.
+                        // Probably not what we want, we're not doing `maybe_fatal_err`
+                        // in the IO futures.
+                        // But it's been like that for a long time, not changing it
+                        // as part of concurrent IO.
+                        // => https://github.com/neondatabase/neon/issues/10454
+                        res = Err(PageReconstructError::Other(err.into()));
+                    }
+                    (Ok(ok), Ok(Ok(OnDiskValue::RawImage(img)))) => {
+                        assert!(ok.img.is_none());
+                        ok.img = Some((lsn, img));
+                    }
+                    (Ok(ok), Ok(Ok(OnDiskValue::WalRecordOrImage(buf)))) => {
+                        match Value::des(&buf) {
+                            Ok(Value::WalRecord(rec)) => {
+                                ok.records.push((lsn, rec));
+                            }
+                            Ok(Value::Image(img)) => {
+                                assert!(ok.img.is_none());
+                                ok.img = Some((lsn, img));
+                            }
+                            Err(err) => {
+                                res = Err(PageReconstructError::Other(err.into()));
+                            }
+                        }
+                    }
+                }
+            })();
         }
+
+        res
     }
 }
 
@@ -109,7 +250,7 @@ impl From<VectoredValueReconstructState> for ValueReconstructState {
 pub(crate) struct ValuesReconstructState {
     /// The keys will be removed after `get_vectored` completes. The caller outside `Timeline`
     /// should not expect to get anything from this hashmap.
-    pub(crate) keys: HashMap<Key, Result<VectoredValueReconstructState, PageReconstructError>>,
+    pub(crate) keys: HashMap<Key, VectoredValueReconstructState>,
     /// The keys which are already retrieved
     keys_done: KeySpaceRandomAccum,
 
@@ -119,27 +260,369 @@ pub(crate) struct ValuesReconstructState {
     // Statistics that are still accessible as a caller of `get_vectored_impl`.
     layers_visited: u32,
     delta_layers_visited: u32,
+
+    pub(crate) io_concurrency: IoConcurrency,
+    num_active_ios: Arc<AtomicUsize>,
+
+    pub(crate) read_path: Option<ReadPath>,
+}
+
+/// The level of IO concurrency to be used on the read path
+///
+/// The desired end state is that we always do parallel IO.
+/// This struct and the dispatching in the impl will be removed once
+/// we've built enough confidence.
+pub(crate) enum IoConcurrency {
+    Sequential,
+    SidecarTask {
+        task_id: usize,
+        ios_tx: tokio::sync::mpsc::UnboundedSender<IoFuture>,
+    },
+}
+
+type IoFuture = Pin<Box<dyn Send + Future<Output = ()>>>;
+
+pub(crate) enum SelectedIoConcurrency {
+    Sequential,
+    SidecarTask(GateGuard),
+}
+
+impl std::fmt::Debug for IoConcurrency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IoConcurrency::Sequential => write!(f, "Sequential"),
+            IoConcurrency::SidecarTask { .. } => write!(f, "SidecarTask"),
+        }
+    }
+}
+
+impl std::fmt::Debug for SelectedIoConcurrency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SelectedIoConcurrency::Sequential => write!(f, "Sequential"),
+            SelectedIoConcurrency::SidecarTask(_) => write!(f, "SidecarTask"),
+        }
+    }
+}
+
+impl IoConcurrency {
+    /// Force sequential IO. This is a temporary workaround until we have
+    /// moved plumbing-through-the-call-stack
+    /// of IoConcurrency into `RequestContextq.
+    ///
+    /// DO NOT USE for new code.
+    ///
+    /// Tracking issue: <https://github.com/neondatabase/neon/issues/10460>.
+    pub(crate) fn sequential() -> Self {
+        Self::spawn(SelectedIoConcurrency::Sequential)
+    }
+
+    pub(crate) fn spawn_from_conf(
+        conf: &'static PageServerConf,
+        gate_guard: GateGuard,
+    ) -> IoConcurrency {
+        use pageserver_api::config::GetVectoredConcurrentIo;
+        let selected = match conf.get_vectored_concurrent_io {
+            GetVectoredConcurrentIo::Sequential => SelectedIoConcurrency::Sequential,
+            GetVectoredConcurrentIo::SidecarTask => SelectedIoConcurrency::SidecarTask(gate_guard),
+        };
+        Self::spawn(selected)
+    }
+
+    pub(crate) fn spawn(io_concurrency: SelectedIoConcurrency) -> Self {
+        match io_concurrency {
+            SelectedIoConcurrency::Sequential => IoConcurrency::Sequential,
+            SelectedIoConcurrency::SidecarTask(gate_guard) => {
+                let (ios_tx, ios_rx) = tokio::sync::mpsc::unbounded_channel();
+                static TASK_ID: AtomicUsize = AtomicUsize::new(0);
+                let task_id = TASK_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // TODO: enrich the span with more context (tenant,shard,timeline) + (basebackup|pagestream|...)
+                let span =
+                    tracing::info_span!(parent: None, "IoConcurrency_sidecar", task_id = task_id);
+                trace!(task_id, "spawning sidecar task");
+                tokio::spawn(async move {
+                    trace!("start");
+                    scopeguard::defer!{ trace!("end") };
+                    type IosRx = tokio::sync::mpsc::UnboundedReceiver<IoFuture>;
+                    enum State {
+                        Waiting {
+                            // invariant: is_empty(), but we recycle the allocation
+                            empty_futures: FuturesUnordered<IoFuture>,
+                            ios_rx: IosRx,
+                        },
+                        Executing {
+                            futures: FuturesUnordered<IoFuture>,
+                            ios_rx: IosRx,
+                        },
+                        ShuttingDown {
+                            futures: FuturesUnordered<IoFuture>,
+                        },
+                    }
+                    let mut state = State::Waiting {
+                        empty_futures: FuturesUnordered::new(),
+                        ios_rx,
+                    };
+                    loop {
+                        match state {
+                            State::Waiting {
+                                empty_futures,
+                                mut ios_rx,
+                            } => {
+                                assert!(empty_futures.is_empty());
+                                tokio::select! {
+                                    fut = ios_rx.recv() => {
+                                        if let Some(fut) = fut {
+                                            trace!("received new io future");
+                                            empty_futures.push(fut);
+                                            state = State::Executing { futures: empty_futures, ios_rx };
+                                        } else {
+                                            state = State::ShuttingDown { futures: empty_futures }
+                                        }
+                                    }
+                                }
+                            }
+                            State::Executing {
+                                mut futures,
+                                mut ios_rx,
+                            } => {
+                                tokio::select! {
+                                    res = futures.next() => {
+                                        trace!("io future completed");
+                                        assert!(res.is_some());
+                                        if futures.is_empty() {
+                                            state = State::Waiting { empty_futures: futures, ios_rx};
+                                        } else {
+                                            state = State::Executing { futures, ios_rx };
+                                        }
+                                    }
+                                    fut = ios_rx.recv() => {
+                                        if let Some(fut) = fut {
+                                            trace!("received new io future");
+                                            futures.push(fut);
+                                            state =  State::Executing { futures, ios_rx};
+                                        } else {
+                                            state = State::ShuttingDown { futures };
+                                        }
+                                    }
+                                }
+                            }
+                            State::ShuttingDown {
+                                mut futures,
+                            } => {
+                                trace!("shutting down");
+                                while let Some(()) = futures.next().await {
+                                    trace!("io future completed (shutdown)");
+                                    // drain
+                                }
+                                trace!("shutdown complete");
+                                break;
+                            }
+                        }
+                    }
+                    drop(gate_guard); // drop it right before we exit
+                }.instrument(span));
+                IoConcurrency::SidecarTask { task_id, ios_tx }
+            }
+        }
+    }
+
+    pub(crate) fn clone(&self) -> Self {
+        match self {
+            IoConcurrency::Sequential => IoConcurrency::Sequential,
+            IoConcurrency::SidecarTask { task_id, ios_tx } => IoConcurrency::SidecarTask {
+                task_id: *task_id,
+                ios_tx: ios_tx.clone(),
+            },
+        }
+    }
+
+    /// Submit an IO to be executed in the background. DEADLOCK RISK, read the full doc string.
+    ///
+    /// The IO is represented as an opaque future.
+    /// IO completion must be handled inside the future, e.g., through a oneshot channel.
+    ///
+    /// The API seems simple but there are multiple **pitfalls** involving
+    /// DEADLOCK RISK.
+    ///
+    /// First, there are no guarantees about the exexecution of the IO.
+    /// It may be `await`ed in-place before this function returns.
+    /// It may be polled partially by this task and handed off to another task to be finished.
+    /// It may be polled and then dropped before returning ready.
+    ///
+    /// This means that submitted IOs must not be interedependent.
+    /// Interdependence may be through shared limited resources, e.g.,
+    /// - VirtualFile file descriptor cache slot acquisition
+    /// - tokio-epoll-uring slot
+    ///
+    /// # Why current usage is safe from deadlocks
+    ///
+    /// Textbook condition for a deadlock is that _all_ of the following be given
+    /// - Mutual exclusion
+    /// - Hold and wait
+    /// - No preemption
+    /// - Circular wait
+    ///
+    /// The current usage is safe because:
+    /// - Mutual exclusion: IO futures definitely use mutexes, no way around that for now
+    /// - Hold and wait: IO futures currently hold two kinds of locks/resources while waiting
+    ///   for acquisition of other resources:
+    ///    - VirtualFile file descriptor cache slot tokio mutex
+    ///    - tokio-epoll-uring slot (uses tokio notify => wait queue, much like mutex)
+    /// - No preemption: there's no taking-away of acquired locks/resources => given
+    /// - Circular wait: this is the part of the condition that isn't met: all IO futures
+    ///   first acquire VirtualFile mutex, then tokio-epoll-uring slot.
+    ///   There is no IO future that acquires slot before VirtualFile.
+    ///   Hence there can be no circular waiting.
+    ///   Hence there cannot be a deadlock.
+    ///
+    /// This is a very fragile situation and must be revisited whenver any code called from
+    /// inside the IO futures is changed.
+    ///
+    /// We will move away from opaque IO futures towards well-defined IOs at some point in
+    /// the future when we have shipped this first version of concurrent IO to production
+    /// and are ready to retire the Sequential mode which runs the futures in place.
+    /// Right now, while brittle, the opaque IO approach allows us to ship the feature
+    /// with minimal changes to the code and minimal changes to existing behavior in Sequential mode.
+    ///
+    /// Also read the comment in `collect_pending_ios`.
+    pub(crate) async fn spawn_io<F>(&mut self, fut: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        match self {
+            IoConcurrency::Sequential => fut.await,
+            IoConcurrency::SidecarTask { ios_tx, .. } => {
+                let fut = Box::pin(fut);
+                // NB: experiments showed that doing an opportunistic poll of `fut` here was bad for throughput
+                // while insignificant for latency.
+                // It would make sense to revisit the tokio-epoll-uring API in the future such that we can try
+                // a submission here, but never poll the future. That way, io_uring can make proccess while
+                // the future sits in the ios_tx queue.
+                match ios_tx.send(fut) {
+                    Ok(()) => {}
+                    Err(_) => {
+                        unreachable!("the io task must have exited, likely it panicked")
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spawn_for_test() -> impl std::ops::DerefMut<Target = Self> {
+        use std::ops::{Deref, DerefMut};
+
+        use tracing::info;
+        use utils::sync::gate::Gate;
+
+        // Spawn needs a Gate, give it one.
+        struct Wrapper {
+            inner: IoConcurrency,
+            #[allow(dead_code)]
+            gate: Box<Gate>,
+        }
+        impl Deref for Wrapper {
+            type Target = IoConcurrency;
+
+            fn deref(&self) -> &Self::Target {
+                &self.inner
+            }
+        }
+        impl DerefMut for Wrapper {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                &mut self.inner
+            }
+        }
+        let gate = Box::new(Gate::default());
+
+        // The default behavior when running Rust unit tests without any further
+        // flags is to use the new behavior.
+        // The CI uses the following environment variable to unit test both old
+        // and new behavior.
+        // NB: the Python regression & perf tests take the `else` branch
+        // below and have their own defaults management.
+        let selected = {
+            // The pageserver_api::config type is unsuitable because it's internally tagged.
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "kebab-case")]
+            enum TestOverride {
+                Sequential,
+                SidecarTask,
+            }
+            use once_cell::sync::Lazy;
+            static TEST_OVERRIDE: Lazy<TestOverride> = Lazy::new(|| {
+                utils::env::var_serde_json_string(
+                    "NEON_PAGESERVER_UNIT_TEST_GET_VECTORED_CONCURRENT_IO",
+                )
+                .unwrap_or(TestOverride::SidecarTask)
+            });
+
+            match *TEST_OVERRIDE {
+                TestOverride::Sequential => SelectedIoConcurrency::Sequential,
+                TestOverride::SidecarTask => {
+                    SelectedIoConcurrency::SidecarTask(gate.enter().expect("just created it"))
+                }
+            }
+        };
+
+        info!(?selected, "get_vectored_concurrent_io test");
+
+        Wrapper {
+            inner: Self::spawn(selected),
+            gate,
+        }
+    }
+}
+
+/// Make noise in case the [`ValuesReconstructState`] gets dropped while
+/// there are still IOs in flight.
+/// Refer to `collect_pending_ios` for why we prefer not to do that.
+//
+/// We log from here instead of from the sidecar task because the [`ValuesReconstructState`]
+/// gets dropped in a tracing span with more context.
+/// We repeat the sidecar tasks's `task_id` so we can correlate what we emit here with
+/// the logs / panic handler logs from the sidecar task, which also logs the `task_id`.
+impl Drop for ValuesReconstructState {
+    fn drop(&mut self) {
+        let num_active_ios = self
+            .num_active_ios
+            .load(std::sync::atomic::Ordering::Acquire);
+        if num_active_ios == 0 {
+            return;
+        }
+        let sidecar_task_id = match &self.io_concurrency {
+            IoConcurrency::Sequential => None,
+            IoConcurrency::SidecarTask { task_id, .. } => Some(*task_id),
+        };
+        tracing::warn!(
+            num_active_ios,
+            ?sidecar_task_id,
+            backtrace=%std::backtrace::Backtrace::force_capture(),
+            "dropping ValuesReconstructState while some IOs have not been completed",
+        );
+    }
 }
 
 impl ValuesReconstructState {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(io_concurrency: IoConcurrency) -> Self {
         Self {
             keys: HashMap::new(),
             keys_done: KeySpaceRandomAccum::new(),
             keys_with_image_coverage: None,
             layers_visited: 0,
             delta_layers_visited: 0,
+            io_concurrency,
+            num_active_ios: Arc::new(AtomicUsize::new(0)),
+            read_path: None,
         }
     }
 
-    /// Associate a key with the error which it encountered and mark it as done
-    pub(crate) fn on_key_error(&mut self, key: Key, err: PageReconstructError) {
-        let previous = self.keys.insert(key, Err(err));
-        if let Some(Ok(state)) = previous {
-            if state.situation == ValueReconstructSituation::Continue {
-                self.keys_done.add_key(key);
-            }
-        }
+    /// Absolutely read [`IoConcurrency::spawn_io`] to learn about assumptions & pitfalls.
+    pub(crate) async fn spawn_io<F>(&mut self, fut: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.io_concurrency.spawn_io(fut).await;
     }
 
     pub(crate) fn on_layer_visited(&mut self, layer: &ReadableLayer) {
@@ -159,29 +642,6 @@ impl ValuesReconstructState {
         self.layers_visited
     }
 
-    /// This function is called after reading a keyspace from a layer.
-    /// It checks if the read path has now moved past the cached Lsn for any keys.
-    ///
-    /// Implementation note: We intentionally iterate over the keys for which we've
-    /// already collected some reconstruct data. This avoids scaling complexity with
-    /// the size of the search space.
-    pub(crate) fn on_lsn_advanced(&mut self, keyspace: &KeySpace, advanced_to: Lsn) {
-        for (key, value) in self.keys.iter_mut() {
-            if !keyspace.contains(key) {
-                continue;
-            }
-
-            if let Ok(state) = value {
-                if state.situation != ValueReconstructSituation::Complete
-                    && state.get_cached_lsn() >= Some(advanced_to)
-                {
-                    state.situation = ValueReconstructSituation::Complete;
-                    self.keys_done.add_key(*key);
-                }
-            }
-        }
-    }
-
     /// On hitting image layer, we can mark all keys in this range as done, because
     /// if the image layer does not contain a key, it is deleted/never added.
     pub(crate) fn on_image_layer_visited(&mut self, key_range: &Range<Key>) {
@@ -199,70 +659,42 @@ impl ValuesReconstructState {
     ///
     /// If the key is in the sparse keyspace (i.e., aux files), we do not track them in
     /// `key_done`.
-    pub(crate) fn update_key(
-        &mut self,
-        key: &Key,
-        lsn: Lsn,
-        value: Value,
-    ) -> ValueReconstructSituation {
-        let state = self
-            .keys
-            .entry(*key)
-            .or_insert(Ok(VectoredValueReconstructState::default()));
-        let is_sparse_key = NON_INHERITED_SPARSE_RANGE.contains(key);
-        if let Ok(state) = state {
-            let key_done = match state.situation {
-                ValueReconstructSituation::Complete => {
-                    if is_sparse_key {
-                        // Sparse keyspace might be visited multiple times because
-                        // we don't track unmapped keyspaces.
-                        return ValueReconstructSituation::Complete;
-                    } else {
-                        unreachable!()
-                    }
-                }
-                ValueReconstructSituation::Continue => match value {
-                    Value::Image(img) => {
-                        state.img = Some((lsn, img));
-                        true
-                    }
-                    Value::WalRecord(rec) => {
-                        debug_assert!(
-                            Some(lsn) > state.get_cached_lsn(),
-                            "Attempt to collect a record below cached LSN for walredo: {} < {}",
-                            lsn,
-                            state
-                                .get_cached_lsn()
-                                .expect("Assertion can only fire if a cached lsn is present")
-                        );
+    // TODO: rename this method & update description.
+    pub(crate) fn update_key(&mut self, key: &Key, lsn: Lsn, completes: bool) -> OnDiskValueIo {
+        let state = self.keys.entry(*key).or_default();
 
-                        let will_init = rec.will_init();
-                        state.records.push((lsn, rec));
-                        will_init
-                    }
-                },
-            };
+        let is_sparse_key = key.is_sparse();
 
-            if key_done && state.situation == ValueReconstructSituation::Continue {
-                state.situation = ValueReconstructSituation::Complete;
-                if !is_sparse_key {
-                    self.keys_done.add_key(*key);
+        let required_io = match state.situation {
+            ValueReconstructSituation::Complete => {
+                if is_sparse_key {
+                    // Sparse keyspace might be visited multiple times because
+                    // we don't track unmapped keyspaces.
+                    return OnDiskValueIo::Unnecessary;
+                } else {
+                    unreachable!()
                 }
             }
+            ValueReconstructSituation::Continue => {
+                self.num_active_ios
+                    .fetch_add(1, std::sync::atomic::Ordering::Release);
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                state.on_disk_values.push((lsn, OnDiskValueIoWaiter { rx }));
+                OnDiskValueIo::Required {
+                    tx,
+                    num_active_ios: Arc::clone(&self.num_active_ios),
+                }
+            }
+        };
 
-            state.situation
-        } else {
-            ValueReconstructSituation::Complete
+        if completes && state.situation == ValueReconstructSituation::Continue {
+            state.situation = ValueReconstructSituation::Complete;
+            if !is_sparse_key {
+                self.keys_done.add_key(*key);
+            }
         }
-    }
 
-    /// Returns the Lsn at which this key is cached if one exists.
-    /// The read path should go no further than this Lsn for the given key.
-    pub(crate) fn get_cached_lsn(&self, key: &Key) -> Option<Lsn> {
-        self.keys
-            .get(key)
-            .and_then(|k| k.as_ref().ok())
-            .and_then(|state| state.get_cached_lsn())
+        required_io
     }
 
     /// Returns the key space describing the keys that have
@@ -276,12 +708,6 @@ impl ValuesReconstructState {
     }
 }
 
-impl Default for ValuesReconstructState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// A key that uniquely identifies a layer in a timeline
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub(crate) enum LayerId {
@@ -290,13 +716,40 @@ pub(crate) enum LayerId {
 }
 
 /// Uniquely identify a layer visit by the layer
-/// and LSN floor (or start LSN) of the reads.
-/// The layer itself is not enough since we may
-/// have different LSN lower bounds for delta layer reads.
+/// and LSN range of the reads. Note that the end of the range is exclusive.
+///
+/// The layer itself is not enough since we may have different LSN lower
+/// bounds for delta layer reads. Scenarios where this can happen are:
+///
+/// 1. Layer overlaps: imagine an image layer inside and in-memory layer
+///    and a query that only partially hits the image layer. Part of the query
+///    needs to read the whole in-memory layer and the other part needs to read
+///    only up to the image layer. Hence, they'll have different LSN floor values
+///    for the read.
+///
+/// 2. Scattered reads: the read path supports starting at different LSNs. Imagine
+///    The start LSN for one range is inside a layer and the start LSN for another range
+///    Is above the layer (includes all of it). Both ranges need to read the layer all the
+///    Way to the end but starting at different points. Hence, they'll have different LSN
+///    Ceil values.
+///
+/// The implication is that we might visit the same layer multiple times
+/// in order to read different LSN ranges from it. In practice, this isn't very concerning
+/// because:
+/// 1. Layer overlaps are rare and generally not intended
+/// 2. Scattered reads will stabilise after the first few layers provided their starting LSNs
+///    are grouped tightly enough (likely the case).
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
 struct LayerToVisitId {
     layer_id: LayerId,
     lsn_floor: Lsn,
+    lsn_ceil: Lsn,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub enum ReadableLayerWeak {
+    PersistentLayer(Arc<PersistentLayerDesc>),
+    InMemoryLayer(InMemoryLayerDesc),
 }
 
 /// Layer wrapper for the read path. Note that it is valid
@@ -374,6 +827,7 @@ impl LayerFringe {
         let layer_to_visit_id = LayerToVisitId {
             layer_id: layer.id(),
             lsn_floor: lsn_range.start,
+            lsn_ceil: lsn_range.end,
         };
 
         let entry = self.visit_reads.entry(layer_to_visit_id.clone());
@@ -445,13 +899,37 @@ impl ReadableLayer {
     ) -> Result<(), GetVectoredError> {
         match self {
             ReadableLayer::PersistentLayer(layer) => {
+                let ctx = RequestContextBuilder::from(ctx)
+                    .perf_span(|crnt_perf_span| {
+                        info_span!(
+                            target: PERF_TRACE_TARGET,
+                            parent: crnt_perf_span,
+                            "PLAN_LAYER",
+                            layer = %layer
+                        )
+                    })
+                    .attached_child();
+
                 layer
-                    .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, ctx)
+                    .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, &ctx)
+                    .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                     .await
             }
             ReadableLayer::InMemoryLayer(layer) => {
+                let ctx = RequestContextBuilder::from(ctx)
+                    .perf_span(|crnt_perf_span| {
+                        info_span!(
+                            target: PERF_TRACE_TARGET,
+                            parent: crnt_perf_span,
+                            "PLAN_LAYER",
+                            layer = %layer
+                        )
+                    })
+                    .attached_child();
+
                 layer
-                    .get_values_reconstruct_data(keyspace, lsn_range.end, reconstruct_state, ctx)
+                    .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, &ctx)
+                    .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                     .await
             }
         }
@@ -718,5 +1196,80 @@ struct RangeDisplayDebug<'a, T: std::fmt::Display>(&'a Range<T>);
 impl<T: std::fmt::Display> std::fmt::Debug for RangeDisplayDebug<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}..{}", self.0.start, self.0.end)
+    }
+}
+
+#[cfg(test)]
+mod tests2 {
+    use pageserver_api::key::DBDIR_KEY;
+    use tracing::info;
+
+    use super::*;
+    use crate::tenant::storage_layer::IoConcurrency;
+
+    /// TODO: currently this test relies on manual visual inspection of the --no-capture output.
+    /// Should look like so:
+    /// ```text
+    /// RUST_LOG=trace cargo nextest run  --features testing  --no-capture test_io_concurrency_noise
+    /// running 1 test
+    /// 2025-01-21T17:42:01.335679Z  INFO get_vectored_concurrent_io test selected=SidecarTask
+    /// 2025-01-21T17:42:01.335680Z TRACE spawning sidecar task task_id=0
+    /// 2025-01-21T17:42:01.335937Z TRACE IoConcurrency_sidecar{task_id=0}: start
+    /// 2025-01-21T17:42:01.335972Z TRACE IoConcurrency_sidecar{task_id=0}: received new io future
+    /// 2025-01-21T17:42:01.335999Z  INFO IoConcurrency_sidecar{task_id=0}: waiting for signal to complete IO
+    /// 2025-01-21T17:42:01.336229Z  WARN dropping ValuesReconstructState while some IOs have not been completed num_active_ios=1 sidecar_task_id=Some(0) backtrace=   0: <pageserver::tenant::storage_layer::ValuesReconstructState as core::ops::drop::Drop>::drop
+    ///              at ./src/tenant/storage_layer.rs:553:24
+    ///    1: core::ptr::drop_in_place<pageserver::tenant::storage_layer::ValuesReconstructState>
+    ///              at /home/christian/.rustup/toolchains/1.84.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:521:1
+    ///    2: core::mem::drop
+    ///              at /home/christian/.rustup/toolchains/1.84.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/mod.rs:942:24
+    ///    3: pageserver::tenant::storage_layer::tests2::test_io_concurrency_noise::{{closure}}
+    ///              at ./src/tenant/storage_layer.rs:1159:9
+    ///   ...
+    ///   49: <unknown>
+    /// 2025-01-21T17:42:01.452293Z  INFO IoConcurrency_sidecar{task_id=0}: completing IO
+    /// 2025-01-21T17:42:01.452357Z TRACE IoConcurrency_sidecar{task_id=0}: io future completed
+    /// 2025-01-21T17:42:01.452473Z TRACE IoConcurrency_sidecar{task_id=0}: end
+    /// test tenant::storage_layer::tests2::test_io_concurrency_noise ... ok
+    ///
+    /// ```
+    #[tokio::test]
+    async fn test_io_concurrency_noise() {
+        crate::tenant::harness::setup_logging();
+
+        let io_concurrency = IoConcurrency::spawn_for_test();
+        match *io_concurrency {
+            IoConcurrency::Sequential => {
+                // This test asserts behavior in sidecar mode, doesn't make sense in sequential mode.
+                return;
+            }
+            IoConcurrency::SidecarTask { .. } => {}
+        }
+        let mut reconstruct_state = ValuesReconstructState::new(io_concurrency.clone());
+
+        let (io_fut_is_waiting_tx, io_fut_is_waiting) = tokio::sync::oneshot::channel();
+        let (do_complete_io, should_complete_io) = tokio::sync::oneshot::channel();
+        let (io_fut_exiting_tx, io_fut_exiting) = tokio::sync::oneshot::channel();
+
+        let io = reconstruct_state.update_key(&DBDIR_KEY, Lsn(8), true);
+        reconstruct_state
+            .spawn_io(async move {
+                info!("waiting for signal to complete IO");
+                io_fut_is_waiting_tx.send(()).unwrap();
+                should_complete_io.await.unwrap();
+                info!("completing IO");
+                io.complete(Ok(OnDiskValue::RawImage(Bytes::new())));
+                io_fut_exiting_tx.send(()).unwrap();
+            })
+            .await;
+
+        io_fut_is_waiting.await.unwrap();
+
+        // this is what makes the noise
+        drop(reconstruct_state);
+
+        do_complete_io.send(()).unwrap();
+
+        io_fut_exiting.await.unwrap();
     }
 }

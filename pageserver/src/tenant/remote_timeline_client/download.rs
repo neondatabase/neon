@@ -6,43 +6,45 @@
 use std::collections::HashSet;
 use std::future::Future;
 use std::str::FromStr;
+use std::sync::atomic::AtomicU64;
 use std::time::SystemTime;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::shard::TenantShardId;
+use remote_storage::{
+    DownloadError, DownloadKind, DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath,
+};
 use tokio::fs::{self, File, OpenOptions};
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::io::AsyncSeekExt;
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
-use utils::backoff;
+use utils::crashsafe::path_with_suffix_extension;
+use utils::id::{TenantId, TimelineId};
+use utils::{backoff, pausable_failpoint};
 
+use super::index::{IndexPart, LayerFileMetadata};
+use super::manifest::TenantManifest;
+use super::{
+    FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES, INITDB_PATH, parse_remote_index_path,
+    parse_remote_tenant_manifest_path, remote_index_path, remote_initdb_archive_path,
+    remote_initdb_preserved_archive_path, remote_tenant_manifest_path,
+    remote_tenant_manifest_prefix, remote_tenant_path,
+};
+use crate::TEMP_FILE_SUFFIX;
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id, debug_assert_current_span_has_tenant_id,
 };
+use crate::tenant::Generation;
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerName;
-use crate::tenant::Generation;
-use crate::virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile};
-use crate::TEMP_FILE_SUFFIX;
-use remote_storage::{
-    DownloadError, DownloadKind, DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath,
-};
-use utils::crashsafe::path_with_suffix_extension;
-use utils::id::{TenantId, TimelineId};
-use utils::pausable_failpoint;
-
-use super::index::{IndexPart, LayerFileMetadata};
-use super::manifest::TenantManifest;
-use super::{
-    parse_remote_index_path, parse_remote_tenant_manifest_path, remote_index_path,
-    remote_initdb_archive_path, remote_initdb_preserved_archive_path, remote_tenant_manifest_path,
-    remote_tenant_manifest_prefix, remote_tenant_path, FAILED_DOWNLOAD_WARN_THRESHOLD,
-    FAILED_REMOTE_OP_RETRIES, INITDB_PATH,
-};
+use crate::virtual_file;
+use crate::virtual_file::owned_buffers_io::write::FlushTaskError;
+use crate::virtual_file::{IoBufferMut, MaybeFatalIo, VirtualFile};
+use crate::virtual_file::{TempVirtualFile, owned_buffers_io};
 
 ///
 /// If 'metadata' is given, we will validate that the downloaded file's size matches that
@@ -74,21 +76,34 @@ pub async fn download_layer_file<'a>(
         layer_metadata.generation,
     );
 
-    // Perform a rename inspired by durable_rename from file_utils.c.
-    // The sequence:
-    //     write(tmp)
-    //     fsync(tmp)
-    //     rename(tmp, new)
-    //     fsync(new)
-    //     fsync(parent)
-    // For more context about durable_rename check this email from postgres mailing list:
-    // https://www.postgresql.org/message-id/56583BDD.9060302@2ndquadrant.com
-    // If pageserver crashes the temp file will be deleted on startup and re-downloaded.
-    let temp_file_path = path_with_suffix_extension(local_path, TEMP_DOWNLOAD_EXTENSION);
-
-    let bytes_amount = download_retry(
+    let (bytes_amount, temp_file) = download_retry(
         || async {
-            download_object(storage, &remote_path, &temp_file_path, gate, cancel, ctx).await
+            // TempVirtualFile requires us to never reuse a filename while an old
+            // instance of TempVirtualFile created with that filename is not done dropping yet.
+            // So, we use a monotonic counter to disambiguate the filenames.
+            static NEXT_TEMP_DISAMBIGUATOR: AtomicU64 = AtomicU64::new(1);
+            let filename_disambiguator =
+                NEXT_TEMP_DISAMBIGUATOR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            let temp_file_path = path_with_suffix_extension(
+                local_path,
+                &format!("{filename_disambiguator:x}.{TEMP_DOWNLOAD_EXTENSION}"),
+            );
+
+            let temp_file = TempVirtualFile::new(
+                VirtualFile::open_with_options_v2(
+                    &temp_file_path,
+                    virtual_file::OpenOptions::new()
+                        .create_new(true)
+                        .write(true),
+                    ctx,
+                )
+                .await
+                .with_context(|| format!("create a temp file for layer download: {temp_file_path}"))
+                .map_err(DownloadError::Other)?,
+                gate.enter().map_err(|_| DownloadError::Cancelled)?,
+            );
+            download_object(storage, &remote_path, temp_file, gate, cancel, ctx).await
         },
         &format!("download {remote_path:?}"),
         cancel,
@@ -98,7 +113,8 @@ pub async fn download_layer_file<'a>(
     let expected = layer_metadata.file_size;
     if expected != bytes_amount {
         return Err(DownloadError::Other(anyhow!(
-            "According to layer file metadata should have downloaded {expected} bytes but downloaded {bytes_amount} bytes into file {temp_file_path:?}",
+            "According to layer file metadata should have downloaded {expected} bytes but downloaded {bytes_amount} bytes into file {:?}",
+            temp_file.path()
         )));
     }
 
@@ -108,10 +124,27 @@ pub async fn download_layer_file<'a>(
         )))
     });
 
-    fs::rename(&temp_file_path, &local_path)
+    // Try rename before disarming the temp file.
+    // That way, if rename fails for whatever reason, we clean up the temp file on the return path.
+
+    fs::rename(temp_file.path(), &local_path)
         .await
         .with_context(|| format!("rename download layer file to {local_path}"))
         .map_err(DownloadError::Other)?;
+
+    // The temp file's VirtualFile points to the temp_file_path which we moved above.
+    // Drop it immediately, it's invalid.
+    // This will get better in https://github.com/neondatabase/neon/issues/11692
+    let _: VirtualFile = temp_file.disarm_into_inner();
+    // NB: The gate guard that was stored in `temp_file` is dropped but we continue
+    // to operate on it and on the parent timeline directory.
+    // Those operations are safe to do because higher-level code is holding another gate guard:
+    // - attached mode: the download task spawned by struct Layer is holding the gate guard
+    // - secondary mode: The TenantDownloader::download holds the gate open
+
+    // The rename above is not durable yet.
+    // It doesn't matter for crash consistency because pageserver startup deletes temp
+    // files and we'll re-download on demand if necessary.
 
     // We use fatal_err() below because the after the rename above,
     // the in-memory state of the filesystem already has the layer file in its final place,
@@ -148,134 +181,64 @@ pub async fn download_layer_file<'a>(
 async fn download_object(
     storage: &GenericRemoteStorage,
     src_path: &RemotePath,
-    dst_path: &Utf8PathBuf,
-    #[cfg_attr(target_os = "macos", allow(unused_variables))] gate: &utils::sync::gate::Gate,
+    destination_file: TempVirtualFile,
+    gate: &utils::sync::gate::Gate,
     cancel: &CancellationToken,
-    #[cfg_attr(target_os = "macos", allow(unused_variables))] ctx: &RequestContext,
-) -> Result<u64, DownloadError> {
-    let res = match crate::virtual_file::io_engine::get() {
-        crate::virtual_file::io_engine::IoEngine::NotSet => panic!("unset"),
-        crate::virtual_file::io_engine::IoEngine::StdFs => {
-            async {
-                let destination_file = tokio::fs::File::create(dst_path)
-                    .await
-                    .with_context(|| format!("create a destination file for layer '{dst_path}'"))
-                    .map_err(DownloadError::Other)?;
+    ctx: &RequestContext,
+) -> Result<(u64, TempVirtualFile), DownloadError> {
+    let mut download = storage
+        .download(src_path, &DownloadOpts::default(), cancel)
+        .await?;
 
-                let download = storage
-                    .download(src_path, &DownloadOpts::default(), cancel)
-                    .await?;
+    pausable_failpoint!("before-downloading-layer-stream-pausable");
 
-                pausable_failpoint!("before-downloading-layer-stream-pausable");
+    let dst_path = destination_file.path().to_owned();
+    let mut buffered = owned_buffers_io::write::BufferedWriter::<IoBufferMut, _>::new(
+        destination_file,
+        0,
+        || IoBufferMut::with_capacity(super::BUFFER_SIZE),
+        gate.enter().map_err(|_| DownloadError::Cancelled)?,
+        cancel.child_token(),
+        ctx,
+        tracing::info_span!(parent: None, "download_object_buffered_writer", %dst_path),
+    );
 
-                let mut buf_writer =
-                    tokio::io::BufWriter::with_capacity(super::BUFFER_SIZE, destination_file);
-
-                let mut reader = tokio_util::io::StreamReader::new(download.download_stream);
-
-                let bytes_amount = tokio::io::copy_buf(&mut reader, &mut buf_writer).await?;
-                buf_writer.flush().await?;
-
-                let mut destination_file = buf_writer.into_inner();
-
-                // Tokio doc here: https://docs.rs/tokio/1.17.0/tokio/fs/struct.File.html states that:
-                // A file will not be closed immediately when it goes out of scope if there are any IO operations
-                // that have not yet completed. To ensure that a file is closed immediately when it is dropped,
-                // you should call flush before dropping it.
-                //
-                // From the tokio code I see that it waits for pending operations to complete. There shouldt be any because
-                // we assume that `destination_file` file is fully written. I e there is no pending .write(...).await operations.
-                // But for additional safety lets check/wait for any pending operations.
-                destination_file
-                    .flush()
-                    .await
-                    .maybe_fatal_err("download_object sync_all")
-                    .with_context(|| format!("flush source file at {dst_path}"))
-                    .map_err(DownloadError::Other)?;
-
-                // not using sync_data because it can lose file size update
-                destination_file
-                    .sync_all()
-                    .await
-                    .maybe_fatal_err("download_object sync_all")
-                    .with_context(|| format!("failed to fsync source file at {dst_path}"))
-                    .map_err(DownloadError::Other)?;
-
-                Ok(bytes_amount)
-            }
+    // TODO: use vectored write (writev) once supported by tokio-epoll-uring.
+    // There's chunks_vectored() on the stream.
+    let (bytes_amount, destination_file) = async {
+        while let Some(res) = futures::StreamExt::next(&mut download.download_stream).await {
+            let chunk = match res {
+                Ok(chunk) => chunk,
+                Err(e) => return Err(DownloadError::from(e)),
+            };
+            buffered
+                .write_buffered_borrowed(&chunk, ctx)
+                .await
+                .map_err(|e| match e {
+                    FlushTaskError::Cancelled => DownloadError::Cancelled,
+                })?;
+        }
+        buffered
+            .shutdown(
+                owned_buffers_io::write::BufferedWriterShutdownMode::PadThenTruncate,
+                ctx,
+            )
             .await
-        }
-        #[cfg(target_os = "linux")]
-        crate::virtual_file::io_engine::IoEngine::TokioEpollUring => {
-            use crate::virtual_file::owned_buffers_io;
-            use crate::virtual_file::IoBufferMut;
-            use std::sync::Arc;
-            async {
-                let destination_file = Arc::new(
-                    VirtualFile::create(dst_path, ctx)
-                        .await
-                        .with_context(|| {
-                            format!("create a destination file for layer '{dst_path}'")
-                        })
-                        .map_err(DownloadError::Other)?,
-                );
-
-                let mut download = storage
-                    .download(src_path, &DownloadOpts::default(), cancel)
-                    .await?;
-
-                pausable_failpoint!("before-downloading-layer-stream-pausable");
-
-                let mut buffered = owned_buffers_io::write::BufferedWriter::<IoBufferMut, _>::new(
-                    destination_file,
-                    || IoBufferMut::with_capacity(super::BUFFER_SIZE),
-                    gate.enter().map_err(|_| DownloadError::Cancelled)?,
-                    ctx,
-                );
-
-                // TODO: use vectored write (writev) once supported by tokio-epoll-uring.
-                // There's chunks_vectored() on the stream.
-                let (bytes_amount, destination_file) = async {
-                    while let Some(res) =
-                        futures::StreamExt::next(&mut download.download_stream).await
-                    {
-                        let chunk = match res {
-                            Ok(chunk) => chunk,
-                            Err(e) => return Err(e),
-                        };
-                        buffered.write_buffered_borrowed(&chunk, ctx).await?;
-                    }
-                    let inner = buffered.flush_and_into_inner(ctx).await?;
-                    Ok(inner)
-                }
-                .await?;
-
-                // not using sync_data because it can lose file size update
-                destination_file
-                    .sync_all()
-                    .await
-                    .maybe_fatal_err("download_object sync_all")
-                    .with_context(|| format!("failed to fsync source file at {dst_path}"))
-                    .map_err(DownloadError::Other)?;
-
-                Ok(bytes_amount)
-            }
-            .await
-        }
-    };
-
-    // in case the download failed, clean up
-    match res {
-        Ok(bytes_amount) => Ok(bytes_amount),
-        Err(e) => {
-            if let Err(e) = tokio::fs::remove_file(dst_path).await {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    on_fatal_io_error(&e, &format!("Removing temporary file {dst_path}"));
-                }
-            }
-            Err(e)
-        }
+            .map_err(|e| match e {
+                FlushTaskError::Cancelled => DownloadError::Cancelled,
+            })
     }
+    .await?;
+
+    // not using sync_data because it can lose file size update
+    destination_file
+        .sync_all()
+        .await
+        .maybe_fatal_err("download_object sync_all")
+        .with_context(|| format!("failed to fsync source file at {dst_path}"))
+        .map_err(DownloadError::Other)?;
+
+    Ok((bytes_amount, destination_file))
 }
 
 const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
@@ -441,7 +404,7 @@ async fn do_download_index_part(
 /// generation (normal case when migrating/restarting).  Only if both of these return 404 do we fall back
 /// to listing objects.
 ///
-/// * `my_generation`: the value of `[crate::tenant::Tenant::generation]`
+/// * `my_generation`: the value of `[crate::tenant::TenantShard::generation]`
 /// * `what`: for logging, what object are we downloading
 /// * `prefix`: when listing objects, use this prefix (i.e. the part of the object path before the generation)
 /// * `do_download`: a GET of the object in a particular generation, which should **retry indefinitely** unless

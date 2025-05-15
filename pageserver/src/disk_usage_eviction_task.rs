@@ -41,29 +41,31 @@
 // - The `#[allow(dead_code)]` above various structs are to suppress warnings about only the Debug impl
 //   reading these fields. We use the Debug impl for semi-structured logging, though.
 
-use std::{sync::Arc, time::SystemTime};
+use std::sync::Arc;
+use std::time::SystemTime;
 
 use anyhow::Context;
-use pageserver_api::{config::DiskUsageEvictionTaskConfig, shard::TenantShardId};
+use pageserver_api::config::DiskUsageEvictionTaskConfig;
+use pageserver_api::shard::TenantShardId;
 use remote_storage::GenericRemoteStorage;
 use serde::Serialize;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument, warn, Instrument};
-use utils::{completion, id::TimelineId};
+use tracing::{Instrument, debug, error, info, instrument, warn};
+use utils::completion;
+use utils::id::TimelineId;
 
-use crate::{
-    config::PageServerConf,
-    metrics::disk_usage_based_eviction::METRICS,
-    task_mgr::{self, BACKGROUND_RUNTIME},
-    tenant::{
-        mgr::TenantManager,
-        remote_timeline_client::LayerFileMetadata,
-        secondary::SecondaryTenant,
-        storage_layer::{AsLayerDesc, EvictionError, Layer, LayerName, LayerVisibilityHint},
-    },
-    CancellableTask, DiskUsageEvictionTask,
+use crate::config::PageServerConf;
+use crate::metrics::disk_usage_based_eviction::METRICS;
+use crate::task_mgr::{self, BACKGROUND_RUNTIME};
+use crate::tenant::mgr::TenantManager;
+use crate::tenant::remote_timeline_client::LayerFileMetadata;
+use crate::tenant::secondary::SecondaryTenant;
+use crate::tenant::storage_layer::{
+    AsLayerDesc, EvictionError, Layer, LayerName, LayerVisibilityHint,
 };
+use crate::tenant::tasks::sleep_random;
+use crate::{CancellableTask, DiskUsageEvictionTask};
 
 /// Selects the sort order for eviction candidates *after* per tenant `min_resident_size`
 /// partitioning.
@@ -210,14 +212,8 @@ async fn disk_usage_eviction_task(
         info!("disk usage based eviction task finishing");
     };
 
-    use crate::tenant::tasks::random_init_delay;
-    {
-        if random_init_delay(task_config.period, &cancel)
-            .await
-            .is_err()
-        {
-            return;
-        }
+    if sleep_random(task_config.period, &cancel).await.is_err() {
+        return;
     }
 
     let mut iteration_no = 0;
@@ -1012,10 +1008,14 @@ async fn collect_eviction_candidates(
         }
     }
 
-    debug_assert!(EvictionPartition::Above < EvictionPartition::Below,
-        "as explained in the function's doc comment, layers that aren't in the tenant's min_resident_size are evicted first");
-    debug_assert!(EvictionPartition::EvictNow < EvictionPartition::Above,
-        "as explained in the function's doc comment, layers that aren't in the tenant's min_resident_size are evicted first");
+    debug_assert!(
+        EvictionPartition::Above < EvictionPartition::Below,
+        "as explained in the function's doc comment, layers that aren't in the tenant's min_resident_size are evicted first"
+    );
+    debug_assert!(
+        EvictionPartition::EvictNow < EvictionPartition::Above,
+        "as explained in the function's doc comment, layers that aren't in the tenant's min_resident_size are evicted first"
+    );
 
     eviction_order.sort(&mut candidates);
 
@@ -1162,9 +1162,8 @@ mod filesystem_level_usage {
     use anyhow::Context;
     use camino::Utf8Path;
 
-    use crate::statvfs::Statvfs;
-
     use super::DiskUsageEvictionTaskConfig;
+    use crate::statvfs::Statvfs;
 
     #[derive(Debug, Clone, Copy)]
     pub struct Usage<'a> {
@@ -1229,9 +1228,11 @@ mod filesystem_level_usage {
 
     #[test]
     fn max_usage_pct_pressure() {
-        use super::Usage as _;
         use std::time::Duration;
+
         use utils::serde_percent::Percent;
+
+        use super::Usage as _;
 
         let mut usage = Usage {
             config: &DiskUsageEvictionTaskConfig {

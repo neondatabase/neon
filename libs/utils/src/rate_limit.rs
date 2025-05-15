@@ -17,7 +17,7 @@ impl std::fmt::Display for RateLimitStats {
 }
 
 impl RateLimit {
-    pub fn new(interval: Duration) -> Self {
+    pub const fn new(interval: Duration) -> Self {
         Self {
             last: None,
             interval,
@@ -53,9 +53,10 @@ mod tests {
 
     #[test]
     fn basics() {
-        use super::RateLimit;
         use std::sync::atomic::Ordering::Relaxed;
         use std::time::Duration;
+
+        use super::RateLimit;
 
         let called = AtomicUsize::new(0);
         let mut f = RateLimit::new(Duration::from_millis(100));

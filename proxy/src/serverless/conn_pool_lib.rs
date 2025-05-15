@@ -5,11 +5,12 @@ use std::sync::atomic::{self, AtomicUsize};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use dashmap::DashMap;
+use clashmap::ClashMap;
 use parking_lot::RwLock;
 use postgres_client::ReadyForQueryStatus;
 use rand::Rng;
-use tracing::{debug, info, Span};
+use smol_str::ToSmolStr;
+use tracing::{Span, debug, info};
 
 use super::backend::HttpConnError;
 use super::conn_pool::ClientDataRemote;
@@ -19,6 +20,7 @@ use crate::auth::backend::ComputeUserInfo;
 use crate::context::RequestContext;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
+use crate::protocol2::ConnectionInfoExtra;
 use crate::types::{DbName, EndpointCacheKey, RoleName};
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 
@@ -45,6 +47,7 @@ impl ConnInfo {
 }
 
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant, reason = "TODO")]
 pub(crate) enum ClientDataEnum {
     Remote(ClientDataRemote),
     Local(ClientDataLocal),
@@ -351,11 +354,11 @@ where
     //
     // That should be a fairly conteded map, so return reference to the per-endpoint
     // pool as early as possible and release the lock.
-    pub(crate) global_pool: DashMap<EndpointCacheKey, Arc<RwLock<P>>>,
+    pub(crate) global_pool: ClashMap<EndpointCacheKey, Arc<RwLock<P>>>,
 
     /// Number of endpoint-connection pools
     ///
-    /// [`DashMap::len`] iterates over all inner pools and acquires a read lock on each.
+    /// [`ClashMap::len`] iterates over all inner pools and acquires a read lock on each.
     /// That seems like far too much effort, so we're using a relaxed increment counter instead.
     /// It's only used for diagnostics.
     pub(crate) global_pool_size: AtomicUsize,
@@ -396,7 +399,7 @@ where
     pub(crate) fn new(config: &'static crate::config::HttpConfig) -> Arc<Self> {
         let shards = config.pool_options.pool_shards;
         Arc::new(Self {
-            global_pool: DashMap::with_shard_amount(shards),
+            global_pool: ClashMap::with_shard_amount(shards),
             global_pool_size: AtomicUsize::new(0),
             config,
             global_connections_count: Arc::new(AtomicUsize::new(0)),
@@ -442,10 +445,10 @@ where
             .start_timer();
         let current_len = shard.len();
         let mut clients_removed = 0;
-        shard.retain(|endpoint, x| {
+        shard.retain(|(endpoint, x)| {
             // if the current endpoint pool is unique (no other strong or weak references)
             // then it is currently not in use by any connections.
-            if let Some(pool) = Arc::get_mut(x.get_mut()) {
+            if let Some(pool) = Arc::get_mut(x) {
                 let endpoints = pool.get_mut();
                 clients_removed = endpoints.clear_closed();
 
@@ -473,7 +476,9 @@ where
                 .http_pool_opened_connections
                 .get_metric()
                 .dec_by(clients_removed as i64);
-            info!("pool: performed global pool gc. removed {clients_removed} clients, total number of clients in pool is {size}");
+            info!(
+                "pool: performed global pool gc. removed {clients_removed} clients, total number of clients in pool is {size}"
+            );
         }
         let removed = current_len - new_len;
 
@@ -635,15 +640,23 @@ impl<C: ClientInnerExt> Client<C> {
         (&mut inner.inner, Discard { conn_info, pool })
     }
 
-    pub(crate) fn metrics(&self) -> Arc<MetricCounter> {
+    pub(crate) fn metrics(&self, ctx: &RequestContext) -> Arc<MetricCounter> {
         let aux = &self
             .inner
             .as_ref()
             .expect("client inner should not be removed")
             .aux;
+
+        let private_link_id = match ctx.extra() {
+            None => None,
+            Some(ConnectionInfoExtra::Aws { vpce_id }) => Some(vpce_id.clone()),
+            Some(ConnectionInfoExtra::Azure { link_id }) => Some(link_id.to_smolstr()),
+        };
+
         USAGE_METRICS.register(Ids {
             endpoint_id: aux.endpoint_id,
             branch_id: aux.branch_id,
+            private_link_id,
         })
     }
 }
@@ -700,7 +713,9 @@ impl<C: ClientInnerExt> Discard<'_, C> {
     pub(crate) fn discard(&mut self) {
         let conn_info = &self.conn_info;
         if std::mem::take(self.pool).strong_count() > 0 {
-            info!("pool: throwing away connection '{conn_info}' because connection is potentially in a broken state");
+            info!(
+                "pool: throwing away connection '{conn_info}' because connection is potentially in a broken state"
+            );
         }
     }
 }

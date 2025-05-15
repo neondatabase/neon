@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -11,13 +9,16 @@ from fixtures.neon_fixtures import (
     NeonProxy,
     VanillaPostgres,
 )
-from fixtures.port_distributor import PortDistributor
-from pytest_httpserver import HTTPServer
-from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
     from fixtures.httpserver import ListenAddress
+    from fixtures.port_distributor import PortDistributor
+    from pytest_httpserver import HTTPServer
+    from werkzeug.wrappers.request import Request
 
 
 def proxy_metrics_handler(request: Request) -> Response:
@@ -51,6 +52,8 @@ def proxy_with_metric_collector(
     proxy_port = port_distributor.get_port()
     mgmt_port = port_distributor.get_port()
     external_http_port = port_distributor.get_port()
+    router_port = port_distributor.get_port()
+    router_tls_port = port_distributor.get_port()
 
     (host, port) = httpserver_listen_address
     metric_collection_endpoint = f"http://{host}:{port}/billing/api/v1/usage_events"
@@ -62,6 +65,8 @@ def proxy_with_metric_collector(
         proxy_port=proxy_port,
         http_port=http_port,
         mgmt_port=mgmt_port,
+        router_port=router_port,
+        router_tls_port=router_tls_port,
         external_http_port=external_http_port,
         metric_collection_endpoint=metric_collection_endpoint,
         metric_collection_interval=metric_collection_interval,

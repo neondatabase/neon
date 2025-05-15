@@ -1,10 +1,6 @@
-use std::{
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-    time::{Duration, Instant},
-};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use utils::leaky_bucket::{LeakyBucketConfig, RateLimiter};
@@ -16,9 +12,8 @@ use utils::leaky_bucket::{LeakyBucketConfig, RateLimiter};
 /// To share a throttle among multiple entities, wrap it in an [`Arc`].
 ///
 /// The intial use case for this is tenant-wide throttling of getpage@lsn requests.
-pub struct Throttle<M: Metric> {
+pub struct Throttle {
     inner: ArcSwap<Inner>,
-    metric: M,
     /// will be turned into [`Stats::count_accounted_start`]
     count_accounted_start: AtomicU64,
     /// will be turned into [`Stats::count_accounted_finish`]
@@ -36,15 +31,6 @@ pub struct Inner {
 
 pub type Config = pageserver_api::models::ThrottleConfig;
 
-pub struct Observation {
-    pub wait_time: Duration,
-}
-pub trait Metric {
-    fn accounting_start(&self);
-    fn accounting_finish(&self);
-    fn observe_throttling(&self, observation: &Observation);
-}
-
 /// See [`Throttle::reset_stats`].
 pub struct Stats {
     /// Number of requests that started [`Throttle::throttle`] calls.
@@ -59,18 +45,14 @@ pub struct Stats {
 }
 
 pub enum ThrottleResult {
-    NotThrottled { start: Instant },
-    Throttled { start: Instant, end: Instant },
+    NotThrottled { end: Instant },
+    Throttled { end: Instant },
 }
 
-impl<M> Throttle<M>
-where
-    M: Metric,
-{
-    pub fn new(config: Config, metric: M) -> Self {
+impl Throttle {
+    pub fn new(config: Config) -> Self {
         Self {
             inner: ArcSwap::new(Arc::new(Self::new_inner(config))),
-            metric,
             count_accounted_start: AtomicU64::new(0),
             count_accounted_finish: AtomicU64::new(0),
             count_throttled: AtomicU64::new(0),
@@ -127,32 +109,27 @@ where
         self.inner.load().rate_limiter.steady_rps()
     }
 
-    pub async fn throttle(&self, key_count: usize) -> ThrottleResult {
+    /// `start` must be [`Instant::now`] or earlier.
+    pub async fn throttle(&self, key_count: usize, start: Instant) -> ThrottleResult {
         let inner = self.inner.load_full(); // clones the `Inner` Arc
 
-        let start = std::time::Instant::now();
-
         if !inner.enabled {
-            return ThrottleResult::NotThrottled { start };
+            return ThrottleResult::NotThrottled { end: start };
         }
 
-        self.metric.accounting_start();
         self.count_accounted_start.fetch_add(1, Ordering::Relaxed);
         let did_throttle = inner.rate_limiter.acquire(key_count).await;
         self.count_accounted_finish.fetch_add(1, Ordering::Relaxed);
-        self.metric.accounting_finish();
 
         if did_throttle {
             self.count_throttled.fetch_add(1, Ordering::Relaxed);
-            let now = Instant::now();
-            let wait_time = now - start;
+            let end = Instant::now();
+            let wait_time = end - start;
             self.sum_throttled_usecs
                 .fetch_add(wait_time.as_micros() as u64, Ordering::Relaxed);
-            let observation = Observation { wait_time };
-            self.metric.observe_throttling(&observation);
-            ThrottleResult::Throttled { start, end: now }
+            ThrottleResult::Throttled { end }
         } else {
-            ThrottleResult::NotThrottled { start }
+            ThrottleResult::NotThrottled { end: start }
         }
     }
 }

@@ -1,38 +1,71 @@
-use anyhow::{anyhow, Context};
-use clap::Parser;
-use hyper0::Uri;
-use metrics::launch_timestamp::LaunchTimestamp;
-use metrics::BuildInfo;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+
+use anyhow::{Context, anyhow};
+use camino::Utf8PathBuf;
+use clap::Parser;
+use futures::future::OptionFuture;
+use http_utils::tls_certs::ReloadingCertificateResolver;
+use hyper0::Uri;
+use metrics::BuildInfo;
+use metrics::launch_timestamp::LaunchTimestamp;
+use reqwest::Certificate;
 use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
 use storage_controller::persistence::Persistence;
 use storage_controller::service::chaos_injector::ChaosInjector;
 use storage_controller::service::{
-    Config, Service, HEARTBEAT_INTERVAL_DEFAULT, LONG_RECONCILE_THRESHOLD_DEFAULT,
-    MAX_OFFLINE_INTERVAL_DEFAULT, MAX_WARMING_UP_INTERVAL_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT,
+    Config, HEARTBEAT_INTERVAL_DEFAULT, LONG_RECONCILE_THRESHOLD_DEFAULT,
+    MAX_OFFLINE_INTERVAL_DEFAULT, MAX_WARMING_UP_INTERVAL_DEFAULT,
+    PRIORITY_RECONCILER_CONCURRENCY_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT,
+    SAFEKEEPER_RECONCILER_CONCURRENCY_DEFAULT, Service,
 };
 use tokio::signal::unix::SignalKind;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::logging::{self, LogFormat};
-
 use utils::sentry_init::init_sentry;
 use utils::{project_build_tag, project_git_version, tcp_listener};
 
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
 
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// Configure jemalloc to profile heap allocations by sampling stack traces every 2 MB (1 << 21).
+/// This adds roughly 3% overhead for allocations on average, which is acceptable considering
+/// performance-sensitive code will avoid allocations as far as possible anyway.
+#[allow(non_upper_case_globals)]
+#[unsafe(export_name = "malloc_conf")]
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0";
+
+const DEFAULT_SSL_KEY_FILE: &str = "server.key";
+const DEFAULT_SSL_CERT_FILE: &str = "server.crt";
+const DEFAULT_SSL_CERT_RELOAD_PERIOD: &str = "60s";
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 #[command(arg_required_else_help(true))]
+#[clap(group(
+    clap::ArgGroup::new("listen-addresses")
+        .required(true)
+        .multiple(true)
+        .args(&["listen", "listen_https"]),
+))]
 struct Cli {
-    /// Host and port to listen on, like `127.0.0.1:1234`
+    /// Host and port to listen HTTP on, like `127.0.0.1:1234`.
+    /// At least one of ["listen", "listen_https"] should be specified.
+    // TODO: Make this option dev-only when https is out everywhere.
     #[arg(short, long)]
-    listen: std::net::SocketAddr,
+    listen: Option<std::net::SocketAddr>,
+    /// Host and port to listen HTTPS on, like `127.0.0.1:1234`.
+    /// At least one of ["listen", "listen_https"] should be specified.
+    #[arg(long)]
+    listen_https: Option<std::net::SocketAddr>,
 
     /// Public key for JWT authentication of clients
     #[arg(long)]
@@ -42,6 +75,10 @@ struct Cli {
     #[arg(long)]
     jwt_token: Option<String>,
 
+    /// Token for authenticating this service with the safekeepers it controls
+    #[arg(long)]
+    safekeeper_jwt_token: Option<String>,
+
     /// Token for authenticating this service with the control plane, when calling
     /// the compute notification endpoint
     #[arg(long)]
@@ -50,9 +87,9 @@ struct Cli {
     #[arg(long)]
     peer_jwt_token: Option<String>,
 
-    /// URL to control plane compute notification endpoint
+    /// URL to control plane storage API prefix
     #[arg(long)]
-    compute_hook_url: Option<String>,
+    control_plane_url: Option<String>,
 
     /// URL to connect to postgres, like postgresql://localhost:1234/storage_controller
     #[arg(long)]
@@ -75,9 +112,34 @@ struct Cli {
     #[arg(long)]
     split_threshold: Option<u64>,
 
-    /// Maximum number of reconcilers that may run in parallel
+    /// Maximum number of shards during autosplits. 0 disables autosplits. Defaults
+    /// to 16 as a safety to avoid too many shards by accident.
+    #[arg(long, default_value = "16")]
+    max_split_shards: u8,
+
+    /// Size threshold for initial shard splits of unsharded tenants. 0 disables initial splits.
+    #[arg(long)]
+    initial_split_threshold: Option<u64>,
+
+    /// Number of target shards for initial splits. 0 or 1 disables initial splits. Defaults to 2.
+    #[arg(long, default_value = "2")]
+    initial_split_shards: u8,
+
+    /// Maximum number of normal-priority reconcilers that may run in parallel
     #[arg(long)]
     reconciler_concurrency: Option<usize>,
+
+    /// Maximum number of high-priority reconcilers that may run in parallel
+    #[arg(long)]
+    priority_reconciler_concurrency: Option<usize>,
+
+    /// Maximum number of safekeeper reconciliations that may run in parallel (per safekeeper)
+    #[arg(long)]
+    safekeeper_reconciler_concurrency: Option<usize>,
+
+    /// Tenant API rate limit, as requests per second per tenant.
+    #[arg(long, default_value = "10")]
+    tenant_rate_limit: NonZeroU32,
 
     /// How long to wait for the initial database connection to be available.
     #[arg(long, default_value = "5s")]
@@ -96,21 +158,55 @@ struct Cli {
     #[arg(long)]
     neon_local_repo_dir: Option<PathBuf>,
 
-    /// Chaos testing
+    /// Chaos testing: exercise tenant migrations
     #[arg(long)]
     chaos_interval: Option<humantime::Duration>,
 
-    // Maximum acceptable lag for the secondary location while draining
-    // a pageserver
+    /// Chaos testing: exercise an immediate exit
+    #[arg(long)]
+    chaos_exit_crontab: Option<cron::Schedule>,
+
+    /// Maximum acceptable lag for the secondary location while draining
+    /// a pageserver
     #[arg(long)]
     max_secondary_lag_bytes: Option<u64>,
 
-    // Period with which to send heartbeats to registered nodes
+    /// Period with which to send heartbeats to registered nodes
     #[arg(long)]
     heartbeat_interval: Option<humantime::Duration>,
 
     #[arg(long)]
     long_reconcile_threshold: Option<humantime::Duration>,
+
+    /// Flag to use https for requests to pageserver API.
+    #[arg(long, default_value = "false")]
+    use_https_pageserver_api: bool,
+
+    // Whether to put timelines onto safekeepers
+    #[arg(long, default_value = "false")]
+    timelines_onto_safekeepers: bool,
+
+    /// Flag to use https for requests to safekeeper API.
+    #[arg(long, default_value = "false")]
+    use_https_safekeeper_api: bool,
+
+    /// Path to a file with certificate's private key for https API.
+    #[arg(long, default_value = DEFAULT_SSL_KEY_FILE)]
+    ssl_key_file: Utf8PathBuf,
+    /// Path to a file with a X509 certificate for https API.
+    #[arg(long, default_value = DEFAULT_SSL_CERT_FILE)]
+    ssl_cert_file: Utf8PathBuf,
+    /// Period to reload certificate and private key from files.
+    #[arg(long, default_value = DEFAULT_SSL_CERT_RELOAD_PERIOD)]
+    ssl_cert_reload_period: humantime::Duration,
+    /// Trusted root CA certificates to use in https APIs.
+    #[arg(long)]
+    ssl_ca_file: Option<Utf8PathBuf>,
+
+    /// Neon local specific flag. When set, ignore [`Cli::control_plane_url`] and deliver
+    /// the compute notification directly (instead of via control plane).
+    #[arg(long, default_value = "false")]
+    use_local_compute_notifications: bool,
 }
 
 enum StrictMode {
@@ -134,7 +230,8 @@ impl Default for StrictMode {
 struct Secrets {
     database_url: String,
     public_key: Option<JwtAuth>,
-    jwt_token: Option<String>,
+    pageserver_jwt_token: Option<String>,
+    safekeeper_jwt_token: Option<String>,
     control_plane_jwt_token: Option<String>,
     peer_jwt_token: Option<String>,
 }
@@ -142,6 +239,7 @@ struct Secrets {
 impl Secrets {
     const DATABASE_URL_ENV: &'static str = "DATABASE_URL";
     const PAGESERVER_JWT_TOKEN_ENV: &'static str = "PAGESERVER_JWT_TOKEN";
+    const SAFEKEEPER_JWT_TOKEN_ENV: &'static str = "SAFEKEEPER_JWT_TOKEN";
     const CONTROL_PLANE_JWT_TOKEN_ENV: &'static str = "CONTROL_PLANE_JWT_TOKEN";
     const PEER_JWT_TOKEN_ENV: &'static str = "PEER_JWT_TOKEN";
     const PUBLIC_KEY_ENV: &'static str = "PUBLIC_KEY";
@@ -165,7 +263,14 @@ impl Secrets {
         let this = Self {
             database_url,
             public_key,
-            jwt_token: Self::load_secret(&args.jwt_token, Self::PAGESERVER_JWT_TOKEN_ENV),
+            pageserver_jwt_token: Self::load_secret(
+                &args.jwt_token,
+                Self::PAGESERVER_JWT_TOKEN_ENV,
+            ),
+            safekeeper_jwt_token: Self::load_secret(
+                &args.safekeeper_jwt_token,
+                Self::SAFEKEEPER_JWT_TOKEN_ENV,
+            ),
             control_plane_jwt_token: Self::load_secret(
                 &args.control_plane_jwt_token,
                 Self::CONTROL_PLANE_JWT_TOKEN_ENV,
@@ -179,10 +284,8 @@ impl Secrets {
     fn load_secret(cli: &Option<String>, env_name: &str) -> Option<String> {
         if let Some(v) = cli {
             Some(v.clone())
-        } else if let Ok(v) = std::env::var(env_name) {
-            Some(v)
         } else {
-            None
+            std::env::var(env_name).ok()
         }
     }
 }
@@ -225,11 +328,10 @@ async fn async_main() -> anyhow::Result<()> {
 
     let args = Cli::parse();
     tracing::info!(
-        "version: {}, launch_timestamp: {}, build_tag {}, listening on {}",
+        "version: {}, launch_timestamp: {}, build_tag {}",
         GIT_VERSION,
         launch_ts.to_string(),
         BUILD_TAG,
-        args.listen
     );
 
     let build_info = BuildInfo {
@@ -249,21 +351,25 @@ async fn async_main() -> anyhow::Result<()> {
     match strict_mode {
         StrictMode::Strict
             if (secrets.public_key.is_none()
-                || secrets.jwt_token.is_none()
-                || secrets.control_plane_jwt_token.is_none()) =>
+                || secrets.pageserver_jwt_token.is_none()
+                || secrets.control_plane_jwt_token.is_none()
+                || secrets.safekeeper_jwt_token.is_none()) =>
         {
             // Production systems should always have secrets configured: if public_key was not set
             // then we would implicitly disable auth.
             anyhow::bail!(
-                    "Insecure config!  One or more secrets is not set.  This is only permitted in `--dev` mode"
-                );
+                "Insecure config!  One or more secrets is not set.  This is only permitted in `--dev` mode"
+            );
         }
-        StrictMode::Strict if args.compute_hook_url.is_none() => {
-            // Production systems should always have a compute hook set, to prevent falling
+        StrictMode::Strict if args.control_plane_url.is_none() => {
+            // Production systems should always have a control plane URL set, to prevent falling
             // back to trying to use neon_local.
             anyhow::bail!(
-                "`--compute-hook-url` is not set: this is only permitted in `--dev` mode"
+                "`--control-plane-url` is not set: this is only permitted in `--dev` mode"
             );
+        }
+        StrictMode::Strict if args.use_local_compute_notifications => {
+            anyhow::bail!("`--use-local-compute-notifications` is only permitted in `--dev` mode");
         }
         StrictMode::Strict => {
             tracing::info!("Starting in strict mode: configuration is OK.")
@@ -273,11 +379,21 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
+    let ssl_ca_certs = match args.ssl_ca_file.as_ref() {
+        Some(ssl_ca_file) => {
+            tracing::info!("Using ssl root CA file: {ssl_ca_file:?}");
+            let buf = tokio::fs::read(ssl_ca_file).await?;
+            Certificate::from_pem_bundle(&buf)?
+        }
+        None => Vec::new(),
+    };
+
     let config = Config {
-        jwt_token: secrets.jwt_token,
+        pageserver_jwt_token: secrets.pageserver_jwt_token,
+        safekeeper_jwt_token: secrets.safekeeper_jwt_token,
         control_plane_jwt_token: secrets.control_plane_jwt_token,
         peer_jwt_token: secrets.peer_jwt_token,
-        compute_hook_url: args.compute_hook_url,
+        control_plane_url: args.control_plane_url,
         max_offline_interval: args
             .max_offline_interval
             .map(humantime::Duration::into)
@@ -289,7 +405,17 @@ async fn async_main() -> anyhow::Result<()> {
         reconciler_concurrency: args
             .reconciler_concurrency
             .unwrap_or(RECONCILER_CONCURRENCY_DEFAULT),
+        priority_reconciler_concurrency: args
+            .priority_reconciler_concurrency
+            .unwrap_or(PRIORITY_RECONCILER_CONCURRENCY_DEFAULT),
+        safekeeper_reconciler_concurrency: args
+            .safekeeper_reconciler_concurrency
+            .unwrap_or(SAFEKEEPER_RECONCILER_CONCURRENCY_DEFAULT),
+        tenant_rate_limit: args.tenant_rate_limit,
         split_threshold: args.split_threshold,
+        max_split_shards: args.max_split_shards,
+        initial_split_threshold: args.initial_split_threshold,
+        initial_split_shards: args.initial_split_shards,
         neon_local_repo_dir: args.neon_local_repo_dir,
         max_secondary_lag_bytes: args.max_secondary_lag_bytes,
         heartbeat_interval: args
@@ -302,17 +428,19 @@ async fn async_main() -> anyhow::Result<()> {
             .unwrap_or(LONG_RECONCILE_THRESHOLD_DEFAULT),
         address_for_peers: args.address_for_peers,
         start_as_candidate: args.start_as_candidate,
-        http_service_port: args.listen.port() as i32,
+        use_https_pageserver_api: args.use_https_pageserver_api,
+        use_https_safekeeper_api: args.use_https_safekeeper_api,
+        ssl_ca_certs,
+        timelines_onto_safekeepers: args.timelines_onto_safekeepers,
+        use_local_compute_notifications: args.use_local_compute_notifications,
     };
 
     // Validate that we can connect to the database
     Persistence::await_connection(&secrets.database_url, args.db_connect_timeout.into()).await?;
 
-    let persistence = Arc::new(Persistence::new(secrets.database_url));
+    let persistence = Arc::new(Persistence::new(secrets.database_url).await);
 
     let service = Service::spawn(config, persistence.clone()).await?;
-
-    let http_listener = tcp_listener::bind(args.listen)?;
 
     let auth = secrets
         .public_key
@@ -320,29 +448,63 @@ async fn async_main() -> anyhow::Result<()> {
     let router = make_router(service.clone(), auth, build_info)
         .build()
         .map_err(|err| anyhow!(err))?;
-    let router_service = utils::http::RouterService::new(router).unwrap();
+    let http_service =
+        Arc::new(http_utils::RequestServiceBuilder::new(router).map_err(|err| anyhow!(err))?);
+
+    let api_shutdown = CancellationToken::new();
 
     // Start HTTP server
-    let server_shutdown = CancellationToken::new();
-    let server = hyper0::Server::from_tcp(http_listener)?
-        .serve(router_service)
-        .with_graceful_shutdown({
-            let server_shutdown = server_shutdown.clone();
-            async move {
-                server_shutdown.cancelled().await;
-            }
-        });
-    tracing::info!("Serving on {0}", args.listen);
-    let server_task = tokio::task::spawn(server);
+    let http_server_task: OptionFuture<_> = match args.listen {
+        Some(http_addr) => {
+            let http_listener = tcp_listener::bind(http_addr)?;
+            let http_server =
+                http_utils::server::Server::new(Arc::clone(&http_service), http_listener, None)?;
+
+            tracing::info!("Serving HTTP on {}", http_addr);
+            Some(tokio::task::spawn(http_server.serve(api_shutdown.clone())))
+        }
+        None => None,
+    }
+    .into();
+
+    // Start HTTPS server
+    let https_server_task: OptionFuture<_> = match args.listen_https {
+        Some(https_addr) => {
+            let https_listener = tcp_listener::bind(https_addr)?;
+
+            let resolver = ReloadingCertificateResolver::new(
+                "main",
+                &args.ssl_key_file,
+                &args.ssl_cert_file,
+                *args.ssl_cert_reload_period,
+            )
+            .await?;
+
+            let server_config = rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_cert_resolver(resolver);
+
+            let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+            let https_server =
+                http_utils::server::Server::new(http_service, https_listener, Some(tls_acceptor))?;
+
+            tracing::info!("Serving HTTPS on {}", https_addr);
+            Some(tokio::task::spawn(https_server.serve(api_shutdown.clone())))
+        }
+        None => None,
+    }
+    .into();
 
     let chaos_task = args.chaos_interval.map(|interval| {
         let service = service.clone();
         let cancel = CancellationToken::new();
         let cancel_bg = cancel.clone();
+        let chaos_exit_crontab = args.chaos_exit_crontab;
         (
             tokio::task::spawn(
                 async move {
-                    let mut chaos_injector = ChaosInjector::new(service, interval.into());
+                    let mut chaos_injector =
+                        ChaosInjector::new(service, interval.into(), chaos_exit_crontab);
                     chaos_injector.run(cancel_bg).await
                 }
                 .instrument(tracing::info_span!("chaos_injector")),
@@ -355,28 +517,41 @@ async fn async_main() -> anyhow::Result<()> {
     let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt())?;
     let mut sigquit = tokio::signal::unix::signal(SignalKind::quit())?;
     let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate())?;
+    tokio::pin!(http_server_task, https_server_task);
     tokio::select! {
         _ = sigint.recv() => {},
         _ = sigterm.recv() => {},
         _ = sigquit.recv() => {},
+        Some(err) = &mut http_server_task => {
+            panic!("HTTP server task failed: {err:#?}");
+        }
+        Some(err) = &mut https_server_task => {
+            panic!("HTTPS server task failed: {err:#?}");
+        }
     }
     tracing::info!("Terminating on signal");
 
-    // Stop HTTP server first, so that we don't have to service requests
+    // Stop HTTP and HTTPS servers first, so that we don't have to service requests
     // while shutting down Service.
-    server_shutdown.cancel();
-    match tokio::time::timeout(Duration::from_secs(5), server_task).await {
-        Ok(Ok(_)) => {
-            tracing::info!("Joined HTTP server task");
-        }
-        Ok(Err(e)) => {
-            tracing::error!("Error joining HTTP server task: {e}")
-        }
-        Err(_) => {
-            tracing::warn!("Timed out joining HTTP server task");
-            // We will fall through and shut down the service anyway, any request handlers
-            // in flight will experience cancellation & their clients will see a torn connection.
-        }
+    api_shutdown.cancel();
+
+    // If the deadline is exceeded, we will fall through and shut down the service anyway,
+    // any request handlers in flight will experience cancellation & their clients will
+    // see a torn connection.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+
+    match tokio::time::timeout_at(deadline, http_server_task).await {
+        Ok(Some(Ok(_))) => tracing::info!("Joined HTTP server task"),
+        Ok(Some(Err(e))) => tracing::error!("Error joining HTTP server task: {e}"),
+        Ok(None) => {} // HTTP is disabled.
+        Err(_) => tracing::warn!("Timed out joining HTTP server task"),
+    }
+
+    match tokio::time::timeout_at(deadline, https_server_task).await {
+        Ok(Some(Ok(_))) => tracing::info!("Joined HTTPS server task"),
+        Ok(Some(Err(e))) => tracing::error!("Error joining HTTPS server task: {e}"),
+        Ok(None) => {} // HTTPS is disabled.
+        Err(_) => tracing::warn!("Timed out joining HTTPS server task"),
     }
 
     // If we were injecting chaos, stop that so that we're not calling into Service while it shuts down

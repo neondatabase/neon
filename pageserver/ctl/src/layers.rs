@@ -1,3 +1,4 @@
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -5,12 +6,11 @@ use camino::{Utf8Path, Utf8PathBuf};
 use clap::Subcommand;
 use pageserver::context::{DownloadBehavior, RequestContext};
 use pageserver::task_mgr::TaskKind;
-use pageserver::tenant::storage_layer::{delta_layer, image_layer};
-use pageserver::tenant::storage_layer::{DeltaLayer, ImageLayer};
+use pageserver::tenant::storage_layer::{DeltaLayer, ImageLayer, delta_layer, image_layer};
 use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use pageserver::virtual_file::api::IoMode;
 use pageserver::{page_cache, virtual_file};
-use std::fs::{self, File};
+use pageserver_api::key::Key;
 use utils::id::{TenantId, TimelineId};
 
 use crate::layer_map_analyzer::parse_filename;
@@ -28,6 +28,7 @@ pub(crate) enum LayerCmd {
         path: PathBuf,
         tenant: String,
         timeline: String,
+        key: Option<Key>,
     },
     /// Dump all information of a layer file
     DumpLayer {
@@ -77,7 +78,8 @@ async fn read_image_file(path: impl AsRef<Path>, ctx: &RequestContext) -> Result
 }
 
 pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
-    let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
+    let ctx =
+        RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error).with_scope_debug_tools();
     match cmd {
         LayerCmd::List { path } => {
             for tenant in fs::read_dir(path.join(TENANTS_SEGMENT_NAME))? {
@@ -100,6 +102,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             path,
             tenant,
             timeline,
+            key,
         } => {
             let timeline_path = path
                 .join(TENANTS_SEGMENT_NAME)
@@ -107,20 +110,36 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                 .join(TIMELINES_SEGMENT_NAME)
                 .join(timeline);
             let mut idx = 0;
+            let mut to_print = Vec::default();
             for layer in fs::read_dir(timeline_path)? {
                 let layer = layer?;
                 if let Ok(layer_file) = parse_filename(&layer.file_name().into_string().unwrap()) {
-                    println!(
-                        "[{:3}]  key:{}-{}\n       lsn:{}-{}\n       delta:{}",
-                        idx,
-                        layer_file.key_range.start,
-                        layer_file.key_range.end,
-                        layer_file.lsn_range.start,
-                        layer_file.lsn_range.end,
-                        layer_file.is_delta,
-                    );
+                    if let Some(key) = key {
+                        if layer_file.key_range.start <= *key && *key < layer_file.key_range.end {
+                            to_print.push((idx, layer_file));
+                        }
+                    } else {
+                        to_print.push((idx, layer_file));
+                    }
                     idx += 1;
                 }
+            }
+
+            if key.is_some() {
+                to_print
+                    .sort_by_key(|(_idx, layer_file)| std::cmp::Reverse(layer_file.lsn_range.end));
+            }
+
+            for (idx, layer_file) in to_print {
+                println!(
+                    "[{:3}]  key:{}-{}\n       lsn:{}-{}\n       delta:{}",
+                    idx,
+                    layer_file.key_range.start,
+                    layer_file.key_range.end,
+                    layer_file.lsn_range.start,
+                    layer_file.lsn_range.end,
+                    layer_file.is_delta,
+                );
             }
             Ok(())
         }
@@ -177,7 +196,8 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             );
             pageserver::page_cache::init(100);
 
-            let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
+            let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error)
+                .with_scope_debug_tools();
 
             macro_rules! rewrite_closure {
                 ($($summary_ty:tt)*) => {{

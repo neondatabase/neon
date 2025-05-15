@@ -5,36 +5,6 @@
 //! easier to work with locally. The python tests in `test_runner`
 //! rely on `neon_local` to set up the environment for each test.
 //!
-use anyhow::{anyhow, bail, Context, Result};
-use clap::Parser;
-use compute_api::spec::ComputeMode;
-use control_plane::endpoint::ComputeControlPlane;
-use control_plane::local_env::{
-    InitForceMode, LocalEnv, NeonBroker, NeonLocalInitConf, NeonLocalInitPageserverConf,
-    SafekeeperConf,
-};
-use control_plane::pageserver::PageServerNode;
-use control_plane::safekeeper::SafekeeperNode;
-use control_plane::storage_controller::{
-    NeonStorageControllerStartArgs, NeonStorageControllerStopArgs, StorageController,
-};
-use control_plane::{broker, local_env};
-use nix::fcntl::{flock, FlockArg};
-use pageserver_api::config::{
-    DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
-    DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
-};
-use pageserver_api::controller_api::{
-    NodeAvailabilityWrapper, PlacementPolicy, TenantCreateRequest,
-};
-use pageserver_api::models::{ShardParameters, TimelineCreateRequest, TimelineInfo};
-use pageserver_api::shard::{ShardCount, ShardStripeSize, TenantShardId};
-use postgres_backend::AuthType;
-use postgres_connection::parse_host_port;
-use safekeeper_api::{
-    DEFAULT_HTTP_LISTEN_PORT as DEFAULT_SAFEKEEPER_HTTP_PORT,
-    DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
-};
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
@@ -43,15 +13,50 @@ use std::path::PathBuf;
 use std::process::exit;
 use std::str::FromStr;
 use std::time::Duration;
+
+use anyhow::{Context, Result, anyhow, bail};
+use clap::Parser;
+use compute_api::requests::ComputeClaimsScope;
+use compute_api::spec::ComputeMode;
+use control_plane::broker::StorageBroker;
+use control_plane::endpoint::ComputeControlPlane;
+use control_plane::endpoint_storage::{ENDPOINT_STORAGE_DEFAULT_ADDR, EndpointStorage};
+use control_plane::local_env;
+use control_plane::local_env::{
+    EndpointStorageConf, InitForceMode, LocalEnv, NeonBroker, NeonLocalInitConf,
+    NeonLocalInitPageserverConf, SafekeeperConf,
+};
+use control_plane::pageserver::PageServerNode;
+use control_plane::safekeeper::SafekeeperNode;
+use control_plane::storage_controller::{
+    NeonStorageControllerStartArgs, NeonStorageControllerStopArgs, StorageController,
+};
+use nix::fcntl::{FlockArg, flock};
+use pageserver_api::config::{
+    DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
+    DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
+};
+use pageserver_api::controller_api::{
+    NodeAvailabilityWrapper, PlacementPolicy, TenantCreateRequest,
+};
+use pageserver_api::models::{
+    ShardParameters, TenantConfigRequest, TimelineCreateRequest, TimelineInfo,
+};
+use pageserver_api::shard::{DEFAULT_STRIPE_SIZE, ShardCount, ShardStripeSize, TenantShardId};
+use postgres_backend::AuthType;
+use postgres_connection::parse_host_port;
+use safekeeper_api::membership::SafekeeperGeneration;
+use safekeeper_api::{
+    DEFAULT_HTTP_LISTEN_PORT as DEFAULT_SAFEKEEPER_HTTP_PORT,
+    DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
+};
 use storage_broker::DEFAULT_LISTEN_ADDR as DEFAULT_BROKER_ADDR;
 use tokio::task::JoinSet;
 use url::Host;
-use utils::{
-    auth::{Claims, Scope},
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
-    lsn::Lsn,
-    project_git_version,
-};
+use utils::auth::{Claims, Scope};
+use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
+use utils::lsn::Lsn;
+use utils::project_git_version;
 
 // Default id of a safekeeper node, if not specified on the command line.
 const DEFAULT_SAFEKEEPER_ID: NodeId = NodeId(1);
@@ -59,7 +64,7 @@ const DEFAULT_PAGESERVER_ID: NodeId = NodeId(1);
 const DEFAULT_BRANCH_NAME: &str = "main";
 project_git_version!(GIT_VERSION);
 
-const DEFAULT_PG_VERSION: u32 = 16;
+const DEFAULT_PG_VERSION: u32 = 17;
 
 const DEFAULT_PAGESERVER_CONTROL_PLANE_API: &str = "http://127.0.0.1:1234/upcall/v1/";
 
@@ -88,6 +93,8 @@ enum NeonLocalCmd {
     StorageBroker(StorageBrokerCmd),
     #[command(subcommand)]
     Safekeeper(SafekeeperCmd),
+    #[command(subcommand)]
+    EndpointStorage(EndpointStorageCmd),
     #[command(subcommand)]
     Endpoint(EndpointCmd),
     #[command(subcommand)]
@@ -452,6 +459,32 @@ enum SafekeeperCmd {
     Restart(SafekeeperRestartCmdArgs),
 }
 
+#[derive(clap::Subcommand)]
+#[clap(about = "Manage object storage")]
+enum EndpointStorageCmd {
+    Start(EndpointStorageStartCmd),
+    Stop(EndpointStorageStopCmd),
+}
+
+#[derive(clap::Args)]
+#[clap(about = "Start object storage")]
+struct EndpointStorageStartCmd {
+    #[clap(short = 't', long, help = "timeout until we fail the command")]
+    #[arg(default_value = "10s")]
+    start_timeout: humantime::Duration,
+}
+
+#[derive(clap::Args)]
+#[clap(about = "Stop object storage")]
+struct EndpointStorageStopCmd {
+    #[arg(value_enum, default_value = "fast")]
+    #[clap(
+        short = 'm',
+        help = "If 'immediate', don't flush repository data at shutdown"
+    )]
+    stop_mode: StopMode,
+}
+
 #[derive(clap::Args)]
 #[clap(about = "Start local safekeeper")]
 struct SafekeeperStartCmdArgs {
@@ -520,6 +553,7 @@ enum EndpointCmd {
     Start(EndpointStartCmdArgs),
     Reconfigure(EndpointReconfigureCmdArgs),
     Stop(EndpointStopCmdArgs),
+    GenerateJwt(EndpointGenerateJwtCmdArgs),
 }
 
 #[derive(clap::Args)]
@@ -552,8 +586,10 @@ struct EndpointCreateCmdArgs {
     lsn: Option<Lsn>,
     #[clap(long)]
     pg_port: Option<u16>,
+    #[clap(long, alias = "http-port")]
+    external_http_port: Option<u16>,
     #[clap(long)]
-    http_port: Option<u16>,
+    internal_http_port: Option<u16>,
     #[clap(long = "pageserver-id")]
     endpoint_pageserver_id: Option<NodeId>,
 
@@ -595,14 +631,23 @@ struct EndpointStartCmdArgs {
     #[clap(long = "pageserver-id")]
     endpoint_pageserver_id: Option<NodeId>,
 
-    #[clap(long)]
+    #[clap(
+        long,
+        help = "Safekeepers membership generation to prefix neon.safekeepers with. Normally neon_local sets it on its own, but this option allows to override. Non zero value forces endpoint to use membership configurations."
+    )]
+    safekeepers_generation: Option<u32>,
+    #[clap(
+        long,
+        help = "List of safekeepers endpoint will talk to. Normally neon_local chooses them on its own, but this option allows to override."
+    )]
     safekeepers: Option<String>,
 
     #[clap(
         long,
-        help = "Configure the remote extensions storage proxy gateway to request for extensions."
+        help = "Configure the remote extensions storage proxy gateway URL to request for extensions.",
+        alias = "remote-ext-config"
     )]
-    remote_ext_config: Option<String>,
+    remote_ext_base_url: Option<String>,
 
     #[clap(
         long,
@@ -616,9 +661,9 @@ struct EndpointStartCmdArgs {
     )]
     allow_multiple: bool,
 
-    #[clap(short = 't', long, help = "timeout until we fail the command")]
-    #[arg(default_value = "10s")]
-    start_timeout: humantime::Duration,
+    #[clap(short = 't', long, value_parser= humantime::parse_duration, help = "timeout until we fail the command")]
+    #[arg(default_value = "90s")]
+    start_timeout: Duration,
 }
 
 #[derive(clap::Args)]
@@ -655,6 +700,16 @@ struct EndpointStopCmdArgs {
     #[arg(value_parser(["smart", "fast", "immediate"]))]
     #[arg(default_value = "fast")]
     mode: String,
+}
+
+#[derive(clap::Args)]
+#[clap(about = "Generate a JWT for an endpoint")]
+struct EndpointGenerateJwtCmdArgs {
+    #[clap(help = "Postgres endpoint id")]
+    endpoint_id: String,
+
+    #[clap(short = 's', long, help = "Scope to generate the JWT with", value_parser = ComputeClaimsScope::from_str)]
+    scope: Option<ComputeClaimsScope>,
 }
 
 #[derive(clap::Subcommand)]
@@ -747,6 +802,9 @@ fn main() -> Result<()> {
             }
             NeonLocalCmd::StorageBroker(subcmd) => rt.block_on(handle_storage_broker(&subcmd, env)),
             NeonLocalCmd::Safekeeper(subcmd) => rt.block_on(handle_safekeeper(&subcmd, env)),
+            NeonLocalCmd::EndpointStorage(subcmd) => {
+                rt.block_on(handle_endpoint_storage(&subcmd, env))
+            }
             NeonLocalCmd::Endpoint(subcmd) => rt.block_on(handle_endpoint(&subcmd, env)),
             NeonLocalCmd::Mappings(subcmd) => handle_mappings(&subcmd, env),
         };
@@ -885,20 +943,6 @@ fn print_timeline(
     Ok(())
 }
 
-/// Returns a map of timeline IDs to timeline_id@lsn strings.
-/// Connects to the pageserver to query this information.
-async fn get_timeline_infos(
-    env: &local_env::LocalEnv,
-    tenant_shard_id: &TenantShardId,
-) -> Result<HashMap<TimelineId, TimelineInfo>> {
-    Ok(get_default_pageserver(env)
-        .timeline_list(tenant_shard_id)
-        .await?
-        .into_iter()
-        .map(|timeline_info| (timeline_info.timeline_id, timeline_info))
-        .collect())
-}
-
 /// Helper function to get tenant id from an optional --tenant_id option or from the config file
 fn get_tenant_id(
     tenant_id_arg: Option<TenantId>,
@@ -933,7 +977,9 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
     let init_conf: NeonLocalInitConf = if let Some(config_path) = &args.config {
         // User (likely the Python test suite) provided a description of the environment.
         if args.num_pageservers.is_some() {
-            bail!("Cannot specify both --num-pageservers and --config, use key `pageservers` in the --config file instead");
+            bail!(
+                "Cannot specify both --num-pageservers and --config, use key `pageservers` in the --config file instead"
+            );
         }
         // load and parse the file
         let contents = std::fs::read_to_string(config_path).with_context(|| {
@@ -948,7 +994,8 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
         NeonLocalInitConf {
             control_plane_api: Some(DEFAULT_PAGESERVER_CONTROL_PLANE_API.parse().unwrap()),
             broker: NeonBroker {
-                listen_addr: DEFAULT_BROKER_ADDR.parse().unwrap(),
+                listen_addr: Some(DEFAULT_BROKER_ADDR.parse().unwrap()),
+                listen_https_addr: None,
             },
             safekeepers: vec![SafekeeperConf {
                 id: DEFAULT_SAFEKEEPER_ID,
@@ -965,6 +1012,7 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
                         id: pageserver_id,
                         listen_pg_addr: format!("127.0.0.1:{pg_port}"),
                         listen_http_addr: format!("127.0.0.1:{http_port}"),
+                        listen_https_addr: None,
                         pg_auth_type: AuthType::Trust,
                         http_auth_type: AuthType::Trust,
                         other: Default::default(),
@@ -974,11 +1022,15 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
                     }
                 })
                 .collect(),
+            endpoint_storage: EndpointStorageConf {
+                listen_addr: ENDPOINT_STORAGE_DEFAULT_ADDR,
+            },
             pg_distrib_dir: None,
             neon_distrib_dir: None,
             default_tenant_id: TenantId::from_array(std::array::from_fn(|_| 0)),
             storage_controller: None,
-            control_plane_compute_hook_api: None,
+            control_plane_hooks_api: None,
+            generate_local_ssl_certs: false,
         }
     };
 
@@ -1081,7 +1133,7 @@ async fn handle_tenant(subcmd: &TenantCmd, env: &mut local_env::LocalEnv) -> any
                         stripe_size: args
                             .shard_stripe_size
                             .map(ShardStripeSize)
-                            .unwrap_or(ShardParameters::DEFAULT_STRIPE_SIZE),
+                            .unwrap_or(DEFAULT_STRIPE_SIZE),
                     },
                     placement_policy: args.placement_policy.clone(),
                     config: tenant_conf,
@@ -1129,12 +1181,16 @@ async fn handle_tenant(subcmd: &TenantCmd, env: &mut local_env::LocalEnv) -> any
             let tenant_id = get_tenant_id(args.tenant_id, env)?;
             let tenant_conf: HashMap<_, _> =
                 args.config.iter().flat_map(|c| c.split_once(':')).collect();
+            let config = PageServerNode::parse_config(tenant_conf)?;
 
-            pageserver
-                .tenant_config(tenant_id, tenant_conf)
+            let req = TenantConfigRequest { tenant_id, config };
+
+            let storage_controller = StorageController::from_env(env);
+            storage_controller
+                .set_tenant_config(&req)
                 .await
                 .with_context(|| format!("Tenant config failed for tenant with id {tenant_id}"))?;
-            println!("tenant {tenant_id} successfully configured on the pageserver");
+            println!("tenant {tenant_id} successfully configured via storcon");
         }
     }
     Ok(())
@@ -1249,12 +1305,6 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             // TODO(sharding): this command shouldn't have to specify a shard ID: we should ask the storage controller
             // where shard 0 is attached, and query there.
             let tenant_shard_id = get_tenant_shard_id(args.tenant_shard_id, env)?;
-            let timeline_infos = get_timeline_infos(env, &tenant_shard_id)
-                .await
-                .unwrap_or_else(|e| {
-                    eprintln!("Failed to load timeline info: {}", e);
-                    HashMap::new()
-                });
 
             let timeline_name_mappings = env.timeline_name_mappings();
 
@@ -1283,12 +1333,9 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                         lsn.to_string()
                     }
                     _ => {
-                        // -> primary endpoint or hot replica
-                        // Use the LSN at the end of the timeline.
-                        timeline_infos
-                            .get(&endpoint.timeline_id)
-                            .map(|bi| bi.last_record_lsn.to_string())
-                            .unwrap_or_else(|| "?".to_string())
+                        // As the LSN here refers to the one that the compute is started with,
+                        // we display nothing as it is a primary/hot standby compute.
+                        "---".to_string()
                     }
                 };
 
@@ -1336,10 +1383,14 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
 
             match (mode, args.hot_standby) {
                 (ComputeMode::Static(_), true) => {
-                    bail!("Cannot start a node in hot standby mode when it is already configured as a static replica")
+                    bail!(
+                        "Cannot start a node in hot standby mode when it is already configured as a static replica"
+                    )
                 }
                 (ComputeMode::Primary, true) => {
-                    bail!("Cannot start a node as a hot standby replica, it is already configured as primary node")
+                    bail!(
+                        "Cannot start a node as a hot standby replica, it is already configured as primary node"
+                    )
                 }
                 _ => {}
             }
@@ -1353,17 +1404,27 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 tenant_id,
                 timeline_id,
                 args.pg_port,
-                args.http_port,
+                args.external_http_port,
+                args.internal_http_port,
                 args.pg_version,
                 mode,
                 !args.update_catalog,
+                false,
             )?;
         }
         EndpointCmd::Start(args) => {
             let endpoint_id = &args.endpoint_id;
             let pageserver_id = args.endpoint_pageserver_id;
-            let remote_ext_config = &args.remote_ext_config;
+            let remote_ext_base_url = &args.remote_ext_base_url;
 
+            let default_generation = env
+                .storage_controller
+                .timelines_onto_safekeepers
+                .then_some(1);
+            let safekeepers_generation = args
+                .safekeepers_generation
+                .or(default_generation)
+                .map(SafekeeperGeneration::new);
             // If --safekeepers argument is given, use only the listed
             // safekeeper nodes; otherwise all from the env.
             let safekeepers = if let Some(safekeepers) = parse_safekeepers(&args.safekeepers)? {
@@ -1392,7 +1453,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                     vec![(parsed.0, parsed.1.unwrap_or(5432))],
                     // If caller is telling us what pageserver to use, this is not a tenant which is
                     // full managed by storage controller, therefore not sharded.
-                    ShardParameters::DEFAULT_STRIPE_SIZE,
+                    DEFAULT_STRIPE_SIZE,
                 )
             } else {
                 // Look up the currently attached location of the tenant, and its striping metadata,
@@ -1435,15 +1496,32 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 None
             };
 
+            let exp = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?
+                + Duration::from_secs(86400))
+            .as_secs();
+            let claims = endpoint_storage::claims::EndpointStorageClaims {
+                tenant_id: endpoint.tenant_id,
+                timeline_id: endpoint.timeline_id,
+                endpoint_id: endpoint_id.to_string(),
+                exp,
+            };
+
+            let endpoint_storage_token = env.generate_auth_token(&claims)?;
+            let endpoint_storage_addr = env.endpoint_storage.listen_addr.to_string();
+
             println!("Starting existing endpoint {endpoint_id}...");
             endpoint
                 .start(
                     &auth_token,
+                    endpoint_storage_token,
+                    endpoint_storage_addr,
+                    safekeepers_generation,
                     safekeepers,
                     pageservers,
-                    remote_ext_config.as_ref(),
+                    remote_ext_base_url.as_ref(),
                     stripe_size.0 as usize,
                     args.create_test_user,
+                    args.start_timeout,
                 )
                 .await?;
         }
@@ -1487,6 +1565,20 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 .get(endpoint_id)
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
             endpoint.stop(&args.mode, args.destroy)?;
+        }
+        EndpointCmd::GenerateJwt(args) => {
+            let endpoint = {
+                let endpoint_id = &args.endpoint_id;
+
+                cplane
+                    .endpoints
+                    .get(endpoint_id)
+                    .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?
+            };
+
+            let jwt = endpoint.generate_jwt(args.scope)?;
+
+            print!("{jwt}");
         }
     }
 
@@ -1677,10 +1769,49 @@ async fn handle_safekeeper(subcmd: &SafekeeperCmd, env: &local_env::LocalEnv) ->
     Ok(())
 }
 
+async fn handle_endpoint_storage(
+    subcmd: &EndpointStorageCmd,
+    env: &local_env::LocalEnv,
+) -> Result<()> {
+    use EndpointStorageCmd::*;
+    let storage = EndpointStorage::from_env(env);
+
+    // In tests like test_forward_compatibility or test_graceful_cluster_restart
+    // old neon binaries (without endpoint_storage) are present
+    if !storage.bin.exists() {
+        eprintln!(
+            "{} binary not found. Ignore if this is a compatibility test",
+            storage.bin
+        );
+        return Ok(());
+    }
+
+    match subcmd {
+        Start(EndpointStorageStartCmd { start_timeout }) => {
+            if let Err(e) = storage.start(start_timeout).await {
+                eprintln!("endpoint_storage start failed: {e}");
+                exit(1);
+            }
+        }
+        Stop(EndpointStorageStopCmd { stop_mode }) => {
+            let immediate = match stop_mode {
+                StopMode::Fast => false,
+                StopMode::Immediate => true,
+            };
+            if let Err(e) = storage.stop(immediate) {
+                eprintln!("proxy stop failed: {e}");
+                exit(1);
+            }
+        }
+    };
+    Ok(())
+}
+
 async fn handle_storage_broker(subcmd: &StorageBrokerCmd, env: &local_env::LocalEnv) -> Result<()> {
     match subcmd {
         StorageBrokerCmd::Start(args) => {
-            if let Err(e) = broker::start_broker_process(env, &args.start_timeout).await {
+            let storage_broker = StorageBroker::from_env(env);
+            if let Err(e) = storage_broker.start(&args.start_timeout).await {
                 eprintln!("broker start failed: {e}");
                 exit(1);
             }
@@ -1688,7 +1819,8 @@ async fn handle_storage_broker(subcmd: &StorageBrokerCmd, env: &local_env::Local
 
         StorageBrokerCmd::Stop(_args) => {
             // FIXME: stop_mode unused
-            if let Err(e) = broker::stop_broker_process(env) {
+            let storage_broker = StorageBroker::from_env(env);
+            if let Err(e) = storage_broker.stop() {
                 eprintln!("broker stop failed: {e}");
                 exit(1);
             }
@@ -1738,8 +1870,11 @@ async fn handle_start_all_impl(
     #[allow(clippy::redundant_closure_call)]
     (|| {
         js.spawn(async move {
-            let retry_timeout = retry_timeout;
-            broker::start_broker_process(env, &retry_timeout).await
+            let storage_broker = StorageBroker::from_env(env);
+            storage_broker
+                .start(&retry_timeout)
+                .await
+                .map_err(|e| e.context("start storage_broker"))
         });
 
         js.spawn(async move {
@@ -1771,6 +1906,13 @@ async fn handle_start_all_impl(
                     .map_err(|e| e.context(format!("start safekeeper {}", safekeeper.id)))
             });
         }
+
+        js.spawn(async move {
+            EndpointStorage::from_env(env)
+                .start(&retry_timeout)
+                .await
+                .map_err(|e| e.context("start endpoint_storage"))
+        });
     })();
 
     let mut errors = Vec::new();
@@ -1868,6 +2010,11 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
         }
     }
 
+    let storage = EndpointStorage::from_env(env);
+    if let Err(e) = storage.stop(immediate) {
+        eprintln!("endpoint_storage stop failed: {:#}", e);
+    }
+
     for ps_conf in &env.pageservers {
         let pageserver = PageServerNode::from_env(env, ps_conf);
         if let Err(e) = pageserver.stop(immediate) {
@@ -1882,7 +2029,8 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
         }
     }
 
-    if let Err(e) = broker::stop_broker_process(env) {
+    let storage_broker = StorageBroker::from_env(env);
+    if let Err(e) = storage_broker.stop() {
         eprintln!("neon broker stop failed: {e:#}");
     }
 

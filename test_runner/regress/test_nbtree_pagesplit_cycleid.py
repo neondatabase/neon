@@ -4,9 +4,19 @@ import time
 from fixtures.neon_fixtures import NeonEnv
 
 BTREE_NUM_CYCLEID_PAGES = """
-    WITH raw_pages AS (
-        SELECT blkno, get_raw_page_at_lsn('t_uidx', 'main', blkno, NULL, NULL) page
-        FROM generate_series(1, pg_relation_size('t_uidx'::regclass) / 8192) blkno
+    WITH lsns AS (
+        /*
+         * pg_switch_wal() ensures we have an LSN that
+         * 1. is after any previous modifications, but also,
+         * 2. (critically) is flushed, preventing any issues with waiting for
+         * unflushed WAL in PageServer.
+         */
+        SELECT pg_switch_wal() as lsn
+    ),
+    raw_pages AS (
+        SELECT blkno, get_raw_page_at_lsn('t_uidx', 'main', blkno, lsn, lsn) page
+        FROM generate_series(1, pg_relation_size('t_uidx'::regclass) / 8192) AS blkno,
+            lsns l(lsn)
     ),
     parsed_pages AS (
         /* cycle ID is the last 2 bytes of the btree page */
@@ -36,12 +46,11 @@ def test_nbtree_pagesplit_cycleid(neon_simple_env: NeonEnv):
     ses1.execute("CREATE UNIQUE INDEX t_uidx ON t(id);")
     ses1.execute("INSERT INTO t (txt) SELECT i::text FROM generate_series(1, 2035) i;")
 
-    ses1.execute("SELECT neon_xlogflush();")
     ses1.execute(BTREE_NUM_CYCLEID_PAGES)
     pages = ses1.fetchall()
-    assert (
-        len(pages) == 0
-    ), f"0 back splits with cycle ID expected, real {len(pages)} first {pages[0]}"
+    assert len(pages) == 0, (
+        f"0 back splits with cycle ID expected, real {len(pages)} first {pages[0]}"
+    )
     # Delete enough tuples to clear the first index page.
     # (there are up to 407 rows per 8KiB page; 406 for non-rightmost leafs.
     ses1.execute("DELETE FROM t WHERE id <= 406;")
@@ -57,7 +66,6 @@ def test_nbtree_pagesplit_cycleid(neon_simple_env: NeonEnv):
     ses1.execute("DELETE FROM t WHERE id <= 610;")
 
     # Flush wal, for checking purposes
-    ses1.execute("SELECT neon_xlogflush();")
     ses1.execute(BTREE_NUM_CYCLEID_PAGES)
     pages = ses1.fetchall()
     assert len(pages) == 0, f"No back splits with cycle ID expected, got batches of {pages} instead"
@@ -108,14 +116,12 @@ def test_nbtree_pagesplit_cycleid(neon_simple_env: NeonEnv):
     # unpin the btree page, allowing s3's vacuum to complete
     ses2.execute("FETCH ALL FROM foo;")
     ses2.execute("ROLLBACK;")
-    # flush WAL to make sure PS is up-to-date
-    ses1.execute("SELECT neon_xlogflush();")
     # check that our expectations are correct
     ses1.execute(BTREE_NUM_CYCLEID_PAGES)
     pages = ses1.fetchall()
-    assert (
-        len(pages) == 1 and pages[0][0] == 3
-    ), f"3 page splits with cycle ID expected; actual {pages}"
+    assert len(pages) == 1 and pages[0][0] == 3, (
+        f"3 page splits with cycle ID expected; actual {pages}"
+    )
 
     # final cleanup
     ses3t.join()

@@ -4,14 +4,22 @@
 //!
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
 use camino::Utf8Path;
 use futures::StreamExt;
 use pageserver_api::key::rel_block_to_key;
+use pageserver_api::reltag::{RelTag, SlruKind};
+use postgres_ffi::relfile_utils::*;
+use postgres_ffi::waldecoder::WalStreamDecoder;
+use postgres_ffi::{
+    BLCKSZ, ControlFileData, DBState_DB_SHUTDOWNED, Oid, WAL_SEGMENT_SIZE, XLogFileName,
+    pg_constants,
+};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_tar::Archive;
 use tracing::*;
+use utils::lsn::Lsn;
 use wal_decoder::models::InterpretedWalRecord;
 use walkdir::WalkDir;
 
@@ -19,17 +27,7 @@ use crate::context::RequestContext;
 use crate::metrics::WAL_INGEST;
 use crate::pgdatadir_mapping::*;
 use crate::tenant::Timeline;
-use crate::walingest::WalIngest;
-use pageserver_api::reltag::{RelTag, SlruKind};
-use postgres_ffi::pg_constants;
-use postgres_ffi::relfile_utils::*;
-use postgres_ffi::waldecoder::WalStreamDecoder;
-use postgres_ffi::ControlFileData;
-use postgres_ffi::DBState_DB_SHUTDOWNED;
-use postgres_ffi::Oid;
-use postgres_ffi::XLogFileName;
-use postgres_ffi::{BLCKSZ, WAL_SEGMENT_SIZE};
-use utils::lsn::Lsn;
+use crate::walingest::{WalIngest, WalIngestErrorKind};
 
 // Returns checkpoint LSN from controlfile
 pub fn get_lsn_from_controlfile(path: &Utf8Path) -> Result<Lsn> {
@@ -159,9 +157,9 @@ async fn import_rel(
         .put_rel_creation(rel, nblocks as u32, ctx)
         .await
     {
-        match e {
-            RelationError::AlreadyExists => {
-                debug!("Relation {} already exist. We must be extending it.", rel)
+        match e.kind {
+            WalIngestErrorKind::RelationAlreadyExists(rel) => {
+                debug!("Relation {rel} already exists. We must be extending it.")
             }
             _ => return Err(e.into()),
         }
@@ -278,6 +276,8 @@ async fn import_wal(
 
     let mut walingest = WalIngest::new(tline, startpoint, ctx).await?;
 
+    let shard = vec![*tline.get_shard_identity()];
+
     while last_lsn <= endpoint {
         // FIXME: assume postgresql tli 1 for now
         let filename = XLogFileName(1, segno, WAL_SEGMENT_SIZE);
@@ -314,10 +314,12 @@ async fn import_wal(
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                 let interpreted = InterpretedWalRecord::from_bytes_filtered(
                     recdata,
-                    tline.get_shard_identity(),
+                    &shard,
                     lsn,
                     tline.pg_version,
-                )?;
+                )?
+                .remove(tline.get_shard_identity())
+                .unwrap();
 
                 walingest
                     .ingest_record(interpreted, &mut modification, ctx)
@@ -411,6 +413,7 @@ pub async fn import_wal_from_tar(
     let mut offset = start_lsn.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = start_lsn;
     let mut walingest = WalIngest::new(tline, start_lsn, ctx).await?;
+    let shard = vec![*tline.get_shard_identity()];
 
     // Ingest wal until end_lsn
     info!("importing wal until {}", end_lsn);
@@ -459,10 +462,12 @@ pub async fn import_wal_from_tar(
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                 let interpreted = InterpretedWalRecord::from_bytes_filtered(
                     recdata,
-                    tline.get_shard_identity(),
+                    &shard,
                     lsn,
                     tline.pg_version,
-                )?;
+                )?
+                .remove(tline.get_shard_identity())
+                .unwrap();
 
                 walingest
                     .ingest_record(interpreted, &mut modification, ctx)

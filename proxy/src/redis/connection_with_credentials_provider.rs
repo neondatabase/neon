@@ -29,6 +29,7 @@ impl Clone for Credentials {
 /// Provides PubSub connection without credentials refresh.
 pub struct ConnectionWithCredentialsProvider {
     credentials: Credentials,
+    // TODO: with more load on the connection, we should consider using a connection pool
     con: Option<MultiplexedConnection>,
     refresh_token_task: Option<JoinHandle<()>>,
     mutex: tokio::sync::Mutex<()>,
@@ -142,6 +143,8 @@ impl ConnectionWithCredentialsProvider {
                         db: 0,
                         username: Some(username),
                         password: Some(password.clone()),
+                        // TODO: switch to RESP3 after testing new client version.
+                        protocol: redis::ProtocolVersion::RESP2,
                     },
                 })
             }

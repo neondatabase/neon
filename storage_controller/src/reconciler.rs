@@ -1,20 +1,18 @@
-use crate::pageserver_client::PageserverClient;
-use crate::persistence::Persistence;
-use crate::{compute_hook, service};
-use pageserver_api::controller_api::{AvailabilityZone, PlacementPolicy};
-use pageserver_api::models::{
-    LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig,
-};
-use pageserver_api::shard::{ShardIdentity, TenantShardId};
-use pageserver_client::mgmt_api;
-use reqwest::StatusCode;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use json_structural_diff::JsonDiff;
+use pageserver_api::controller_api::{AvailabilityZone, MigrationConfig, PlacementPolicy};
+use pageserver_api::models::{
+    LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig, TenantWaitLsnRequest,
+};
+use pageserver_api::shard::{ShardIdentity, TenantShardId};
+use pageserver_client::mgmt_api;
+use reqwest::StatusCode;
 use tokio_util::sync::CancellationToken;
 use utils::backoff::exponential_backoff;
-use utils::failpoint_support;
 use utils::generation::Generation;
 use utils::id::{NodeId, TimelineId};
 use utils::lsn::Lsn;
@@ -23,9 +21,12 @@ use utils::sync::gate::GateGuard;
 
 use crate::compute_hook::{ComputeHook, NotifyError};
 use crate::node::Node;
+use crate::pageserver_client::PageserverClient;
+use crate::persistence::Persistence;
 use crate::tenant_shard::{IntentState, ObservedState, ObservedStateDelta, ObservedStateLocation};
+use crate::{compute_hook, service};
 
-const DEFAULT_HEATMAP_PERIOD: &str = "60s";
+const DEFAULT_HEATMAP_PERIOD: Duration = Duration::from_secs(60);
 
 /// Object with the lifetime of the background reconcile task that is created
 /// for tenants which have a difference between their intent and observed states.
@@ -85,6 +86,9 @@ pub(super) struct Reconciler {
 
     /// Access to persistent storage for updating generation numbers
     pub(crate) persistence: Arc<Persistence>,
+
+    /// HTTP client with proper CA certs.
+    pub(crate) http_client: reqwest::Client,
 }
 
 pub(crate) struct ReconcilerConfigBuilder {
@@ -92,9 +96,10 @@ pub(crate) struct ReconcilerConfigBuilder {
 }
 
 impl ReconcilerConfigBuilder {
-    pub(crate) fn new() -> Self {
+    /// Priority is special: you must pick one thoughtfully, do not just use 'normal' as the default
+    pub(crate) fn new(priority: ReconcilerPriority) -> Self {
         Self {
-            config: ReconcilerConfig::default(),
+            config: ReconcilerConfig::new(priority),
         }
     }
 
@@ -116,13 +121,32 @@ impl ReconcilerConfigBuilder {
         }
     }
 
+    pub(crate) fn tenant_creation_hint(self, hint: bool) -> Self {
+        Self {
+            config: ReconcilerConfig {
+                tenant_creation_hint: hint,
+                ..self.config
+            },
+        }
+    }
+
     pub(crate) fn build(self) -> ReconcilerConfig {
         self.config
     }
 }
 
-#[derive(Default, Debug, Copy, Clone)]
+// Higher priorities are used for user-facing tasks, so that a long backlog of housekeeping work (e.g. reconciling on startup, rescheduling
+// things on node changes) does not starve user-facing tasks.
+#[derive(Debug, Copy, Clone)]
+pub(crate) enum ReconcilerPriority {
+    Normal,
+    High,
+}
+
+#[derive(Debug, Copy, Clone)]
 pub(crate) struct ReconcilerConfig {
+    pub(crate) priority: ReconcilerPriority,
+
     // During live migration give up on warming-up the secondary
     // after this timeout.
     secondary_warmup_timeout: Option<Duration>,
@@ -130,9 +154,25 @@ pub(crate) struct ReconcilerConfig {
     // During live migrations this is the amount of time that
     // the pagserver will hold our poll.
     secondary_download_request_timeout: Option<Duration>,
+
+    // A hint indicating whether this reconciliation is done on the
+    // creation of a new tenant. This only informs logging behaviour.
+    tenant_creation_hint: bool,
 }
 
 impl ReconcilerConfig {
+    /// Configs are always constructed with an explicit priority, to force callers to think about whether
+    /// the operation they're scheduling is high-priority or not. Normal priority is not a safe default, because
+    /// scheduling something user-facing at normal priority can result in it getting starved out by background work.
+    pub(crate) fn new(priority: ReconcilerPriority) -> Self {
+        Self {
+            priority,
+            secondary_warmup_timeout: None,
+            secondary_download_request_timeout: None,
+            tenant_creation_hint: false,
+        }
+    }
+
     pub(crate) fn get_secondary_warmup_timeout(&self) -> Duration {
         const SECONDARY_WARMUP_TIMEOUT_DEFAULT: Duration = Duration::from_secs(300);
         self.secondary_warmup_timeout
@@ -143,6 +183,28 @@ impl ReconcilerConfig {
         const SECONDARY_DOWNLOAD_REQUEST_TIMEOUT_DEFAULT: Duration = Duration::from_secs(20);
         self.secondary_download_request_timeout
             .unwrap_or(SECONDARY_DOWNLOAD_REQUEST_TIMEOUT_DEFAULT)
+    }
+
+    pub(crate) fn tenant_creation_hint(&self) -> bool {
+        self.tenant_creation_hint
+    }
+}
+
+impl From<&MigrationConfig> for ReconcilerConfig {
+    fn from(value: &MigrationConfig) -> Self {
+        // Run reconciler at high priority because MigrationConfig comes from human requests that should
+        // be presumed urgent.
+        let mut builder = ReconcilerConfigBuilder::new(ReconcilerPriority::High);
+
+        if let Some(timeout) = value.secondary_warmup_timeout {
+            builder = builder.secondary_warmup_timeout(timeout)
+        }
+
+        if let Some(timeout) = value.secondary_download_request_timeout {
+            builder = builder.secondary_download_request_timeout(timeout)
+        }
+
+        builder.build()
     }
 }
 
@@ -212,11 +274,12 @@ impl Reconciler {
         lazy: bool,
     ) -> Result<(), ReconcileError> {
         if !node.is_available() && config.mode == LocationConfigMode::Detached {
-            // Attempts to detach from offline nodes may be imitated without doing I/O: a node which is offline
-            // will get fully reconciled wrt the shard's intent state when it is reactivated, irrespective of
-            // what we put into `observed`, in [`crate::service::Service::node_activate_reconcile`]
-            tracing::info!("Node {node} is unavailable during detach: proceeding anyway, it will be detached on next activation");
-            self.observed.locations.remove(&node.get_id());
+            // [`crate::service::Service::node_activate_reconcile`] will update the observed state
+            // when the node comes back online. At that point, the intent and observed states will
+            // be mismatched and a background reconciliation will detach.
+            tracing::info!(
+                "Node {node} is unavailable during detach: proceeding anyway, it will be detached via background reconciliation"
+            );
             return Ok(());
         }
 
@@ -238,7 +301,8 @@ impl Reconciler {
                         .location_config(tenant_shard_id, config.clone(), flush_ms, lazy)
                         .await
                 },
-                &self.service_config.jwt_token,
+                &self.http_client,
+                &self.service_config.pageserver_jwt_token,
                 1,
                 3,
                 timeout,
@@ -348,6 +412,33 @@ impl Reconciler {
         Ok(())
     }
 
+    async fn wait_lsn(
+        &self,
+        node: &Node,
+        tenant_shard_id: TenantShardId,
+        timelines: HashMap<TimelineId, Lsn>,
+    ) -> Result<StatusCode, ReconcileError> {
+        const TIMEOUT: Duration = Duration::from_secs(10);
+
+        let client = PageserverClient::new(
+            node.get_id(),
+            self.http_client.clone(),
+            node.base_url(),
+            self.service_config.pageserver_jwt_token.as_deref(),
+        );
+
+        client
+            .wait_lsn(
+                tenant_shard_id,
+                TenantWaitLsnRequest {
+                    timelines,
+                    timeout: TIMEOUT,
+                },
+            )
+            .await
+            .map_err(|e| e.into())
+    }
+
     async fn get_lsns(
         &self,
         tenant_shard_id: TenantShardId,
@@ -355,8 +446,9 @@ impl Reconciler {
     ) -> anyhow::Result<HashMap<TimelineId, Lsn>> {
         let client = PageserverClient::new(
             node.get_id(),
+            self.http_client.clone(),
             node.base_url(),
-            self.service_config.jwt_token.as_deref(),
+            self.service_config.pageserver_jwt_token.as_deref(),
         );
 
         let timelines = client.timeline_list(&tenant_shard_id).await?;
@@ -394,7 +486,8 @@ impl Reconciler {
                             )
                             .await
                     },
-                    &self.service_config.jwt_token,
+                    &self.http_client,
+                    &self.service_config.pageserver_jwt_token,
                     1,
                     3,
                     request_download_timeout * 2,
@@ -426,7 +519,8 @@ impl Reconciler {
             } else if status == StatusCode::ACCEPTED {
                 let total_runtime = started_at.elapsed();
                 if total_runtime > total_download_timeout {
-                    tracing::warn!("Timed out after {}ms downloading layers to {node}.  Progress so far: {}/{} layers, {}/{} bytes",
+                    tracing::warn!(
+                        "Timed out after {}ms downloading layers to {node}.  Progress so far: {}/{} layers, {}/{} bytes",
                         total_runtime.as_millis(),
                         progress.layers_downloaded,
                         progress.layers_total,
@@ -461,6 +555,39 @@ impl Reconciler {
         node: &Node,
         baseline: HashMap<TimelineId, Lsn>,
     ) -> anyhow::Result<()> {
+        // Signal to the pageserver that it should ingest up to the baseline LSNs.
+        loop {
+            match self.wait_lsn(node, tenant_shard_id, baseline.clone()).await {
+                Ok(StatusCode::OK) => {
+                    // Everything is caught up
+                    return Ok(());
+                }
+                Ok(StatusCode::ACCEPTED) => {
+                    // Some timelines are not caught up yet.
+                    // They'll be polled below.
+                    break;
+                }
+                Ok(StatusCode::NOT_FOUND) => {
+                    // None of the timelines are present on the pageserver.
+                    // This is correct if they've all been deleted, but
+                    // let let the polling loop below cross check.
+                    break;
+                }
+                Ok(status_code) => {
+                    tracing::warn!(
+                        "Unexpected status code ({status_code}) returned by wait_lsn endpoint"
+                    );
+                    break;
+                }
+                Err(e) => {
+                    tracing::info!("🕑 Can't trigger LSN wait on {node} yet, waiting ({e})",);
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+            }
+        }
+
+        // Poll the LSNs until they catch up
         loop {
             let latest = match self.get_lsns(tenant_shard_id, node).await {
                 Ok(l) => l,
@@ -559,6 +686,8 @@ impl Reconciler {
                 .await?,
         );
 
+        pausable_failpoint!("reconciler-live-migrate-post-generation-inc");
+
         let dest_conf = build_location_config(
             &self.shard,
             &self.config,
@@ -633,7 +762,9 @@ impl Reconciler {
         Ok(())
     }
 
-    async fn maybe_refresh_observed(&mut self) -> Result<(), ReconcileError> {
+    /// Returns true if the observed state of the attached location was refreshed
+    /// and false otherwise.
+    async fn maybe_refresh_observed(&mut self) -> Result<bool, ReconcileError> {
         // If the attached node has uncertain state, read it from the pageserver before proceeding: this
         // is important to avoid spurious generation increments.
         //
@@ -643,7 +774,7 @@ impl Reconciler {
 
         let Some(attached_node) = self.intent.attached.as_ref() else {
             // Nothing to do
-            return Ok(());
+            return Ok(false);
         };
 
         if matches!(
@@ -654,7 +785,8 @@ impl Reconciler {
             let observed_conf = match attached_node
                 .with_client_retries(
                     |client| async move { client.get_location_config(tenant_shard_id).await },
-                    &self.service_config.jwt_token,
+                    &self.http_client,
+                    &self.service_config.pageserver_jwt_token,
                     1,
                     1,
                     Duration::from_secs(5),
@@ -687,7 +819,7 @@ impl Reconciler {
             }
         }
 
-        Ok(())
+        Ok(true)
     }
 
     /// Reconciling a tenant makes API calls to pageservers until the observed state
@@ -696,9 +828,14 @@ impl Reconciler {
     /// First we apply special case handling (e.g. for live migrations), and then a
     /// general case reconciliation where we walk through the intent by pageserver
     /// and call out to the pageserver to apply the desired state.
+    ///
+    /// An Ok(()) result indicates that we successfully attached the tenant, but _not_ that
+    /// all locations for the tenant are in the expected state. When nodes that are to be detached
+    /// or configured as secondary are unavailable, we may return Ok(()) but leave the shard in a
+    /// state where it still requires later reconciliation.
     pub(crate) async fn reconcile(&mut self) -> Result<(), ReconcileError> {
         // Prepare: if we have uncertain `observed` state for our would-be attachement location, then refresh it
-        self.maybe_refresh_observed().await?;
+        let refreshed = self.maybe_refresh_observed().await?;
 
         // Special case: live migration
         self.maybe_live_migrate().await?;
@@ -722,8 +859,14 @@ impl Reconciler {
             );
             match self.observed.locations.get(&node.get_id()) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {
-                    // Nothing to do
-                    tracing::info!(node_id=%node.get_id(), "Observed configuration already correct.")
+                    if refreshed {
+                        tracing::info!(
+                            node_id=%node.get_id(), "Observed configuration correct after refresh. Notifying compute.");
+                        self.compute_notify().await?;
+                    } else {
+                        // Nothing to do
+                        tracing::info!(node_id=%node.get_id(), "Observed configuration already correct.");
+                    }
                 }
                 observed => {
                     // In all cases other than a matching observed configuration, we will
@@ -749,6 +892,8 @@ impl Reconciler {
                     };
 
                     if increment_generation {
+                        pausable_failpoint!("reconciler-pre-increment-generation");
+
                         let generation = self
                             .persistence
                             .increment_generation(self.tenant_shard_id, node.get_id())
@@ -756,7 +901,27 @@ impl Reconciler {
                         self.generation = Some(generation);
                         wanted_conf.generation = generation.into();
                     }
-                    tracing::info!(node_id=%node.get_id(), "Observed configuration requires update.");
+
+                    let diff = match observed {
+                        Some(ObservedStateLocation {
+                            conf: Some(observed),
+                        }) => {
+                            let diff = JsonDiff::diff(
+                                &serde_json::to_value(observed.clone()).unwrap(),
+                                &serde_json::to_value(wanted_conf.clone()).unwrap(),
+                                false,
+                            );
+
+                            if let Some(json_diff) = diff.diff {
+                                serde_json::to_string(&json_diff).unwrap_or("diff err".to_string())
+                            } else {
+                                "unknown".to_string()
+                            }
+                        }
+                        _ => "full".to_string(),
+                    };
+
+                    tracing::info!(node_id=%node.get_id(), "Observed configuration requires update: {diff}");
 
                     // Because `node` comes from a ref to &self, clone it before calling into a &mut self
                     // function: this could be avoided by refactoring the state mutated by location_config into
@@ -782,10 +947,18 @@ impl Reconciler {
                     tracing::info!(node_id=%node.get_id(), "Observed configuration already correct.")
                 }
                 _ => {
-                    // In all cases other than a matching observed configuration, we will
-                    // reconcile this location.
-                    tracing::info!(node_id=%node.get_id(), "Observed configuration requires update.");
-                    changes.push((node.clone(), wanted_conf))
+                    // Only try and configure secondary locations on nodes that are available.  This
+                    // allows the reconciler to "succeed" while some secondaries are offline (e.g. after
+                    // a node failure, where the failed node will have a secondary intent)
+                    if node.is_available() {
+                        tracing::info!(node_id=%node.get_id(), "Observed configuration requires update.");
+                        changes.push((node.clone(), wanted_conf))
+                    } else {
+                        tracing::info!(node_id=%node.get_id(), "Skipping configuration as secondary, node is unavailable");
+                        self.observed
+                            .locations
+                            .insert(node.get_id(), ObservedStateLocation { conf: None });
+                    }
                 }
             }
         }
@@ -811,7 +984,21 @@ impl Reconciler {
             if self.cancel.is_cancelled() {
                 return Err(ReconcileError::Cancel);
             }
-            self.location_config(&node, conf, None, false).await?;
+            // We only try to configure secondary locations if the node is available.  This does
+            // not stop us succeeding with the reconcile, because our core goal is to make the
+            // shard _available_ (the attached location), and configuring secondary locations
+            // can be done lazily when the node becomes available (via background reconciliation).
+            if node.is_available() {
+                self.location_config(&node, conf, None, false).await?;
+            } else {
+                // If the node is unavailable, we skip and consider the reconciliation successful: this
+                // is a common case where a pageserver is marked unavailable: we demote a location on
+                // that unavailable pageserver to secondary.
+                tracing::info!("Skipping configuring secondary location {node}, it is unavailable");
+                self.observed
+                    .locations
+                    .insert(node.get_id(), ObservedStateLocation { conf: None });
+            }
         }
 
         // The condition below identifies a detach. We must have no attached intent and
@@ -824,7 +1011,7 @@ impl Reconciler {
                 .handle_detach(self.tenant_shard_id, self.shard.stripe_size);
         }
 
-        failpoint_support::sleep_millis_async!("sleep-on-reconcile-epilogue");
+        pausable_failpoint!("reconciler-epilogue");
 
         Ok(())
     }
@@ -846,16 +1033,35 @@ impl Reconciler {
                 )
                 .await;
             if let Err(e) = &result {
-                // It is up to the caller whether they want to drop out on this error, but they don't have to:
-                // in general we should avoid letting unavailability of the cloud control plane stop us from
-                // making progress.
-                if !matches!(e, NotifyError::ShuttingDown) {
-                    tracing::warn!("Failed to notify compute of attached pageserver {node}: {e}");
-                }
-
                 // Set this flag so that in our ReconcileResult we will set the flag on the shard that it
                 // needs to retry at some point.
                 self.compute_notify_failure = true;
+
+                // It is up to the caller whether they want to drop out on this error, but they don't have to:
+                // in general we should avoid letting unavailability of the cloud control plane stop us from
+                // making progress.
+                match e {
+                    // 404s from cplane during tenant creation are expected.
+                    // Cplane only persists the shards to the database after
+                    // creating the tenant and the timeline. If we notify before
+                    // that, we'll get a 404.
+                    //
+                    // This is fine because tenant creations happen via /location_config
+                    // and that returns the list of locations in the response. Hence, we
+                    // silence the error and return Ok(()) here. Reconciliation will still
+                    // be retried because we set [`Reconciler::compute_notify_failure`] above.
+                    NotifyError::Unexpected(hyper::StatusCode::NOT_FOUND)
+                        if self.reconciler_config.tenant_creation_hint() =>
+                    {
+                        return Ok(());
+                    }
+                    NotifyError::ShuttingDown => {}
+                    _ => {
+                        tracing::warn!(
+                            "Failed to notify compute of attached pageserver {node}: {e}"
+                        );
+                    }
+                }
             }
             result
         } else {
@@ -934,7 +1140,8 @@ impl Reconciler {
             match origin
                 .with_client_retries(
                     |client| async move { client.get_location_config(tenant_shard_id).await },
-                    &self.service_config.jwt_token,
+                    &self.http_client,
+                    &self.service_config.pageserver_jwt_token,
                     1,
                     3,
                     Duration::from_secs(5),
@@ -1015,7 +1222,7 @@ fn ha_aware_config(config: &TenantConfig, has_secondaries: bool) -> TenantConfig
     let mut config = config.clone();
     if has_secondaries {
         if config.heatmap_period.is_none() {
-            config.heatmap_period = Some(DEFAULT_HEATMAP_PERIOD.to_string());
+            config.heatmap_period = Some(DEFAULT_HEATMAP_PERIOD);
         }
     } else {
         config.heatmap_period = None;

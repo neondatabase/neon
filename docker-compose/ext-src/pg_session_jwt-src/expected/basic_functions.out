@@ -1,0 +1,36 @@
+-- Basic functionality tests for pg_session_jwt
+-- Test auth.init() function
+SELECT auth.init();
+ init 
+------
+ 
+(1 row)
+
+-- Test an invalid JWT
+SELECT auth.jwt_session_init('INVALID-JWT');
+ERROR:  invalid JWT encoding
+-- Test creating a session with an expired JWT
+SELECT auth.jwt_session_init('eyJhbGciOiJFZERTQSJ9.eyJleHAiOjE3NDI1NjQ0MzIsImlhdCI6MTc0MjU2NDI1MiwianRpIjo0MjQyNDIsInN1YiI6InVzZXIxMjMifQ.A6FwKuaSduHB9O7Gz37g0uoD_U9qVS0JNtT7YABGVgB7HUD1AMFc9DeyhNntWBqncg8k5brv-hrNTuUh5JYMAw');
+ERROR:  Token used after it has expired
+DETAIL:  exp=1742564432
+-- Test creating a session with a valid JWT
+SELECT auth.jwt_session_init('eyJhbGciOiJFZERTQSJ9.eyJleHAiOjQ4OTYxNjQyNTIsImlhdCI6MTc0MjU2NDI1MiwianRpIjo0MzQzNDMsInN1YiI6InVzZXIxMjMifQ.2TXVgjb6JSUq6_adlvp-m_SdOxZSyGS30RS9TLB0xu2N83dMSs2NybwE1NMU8Fb0tcAZR_ET7M2rSxbTrphfCg');
+ jwt_session_init 
+------------------
+ 
+(1 row)
+
+-- Test auth.session() function
+SELECT auth.session();
+                                 session                                 
+-------------------------------------------------------------------------
+ {"exp": 4896164252, "iat": 1742564252, "jti": 434343, "sub": "user123"}
+(1 row)
+
+-- Test auth.user_id() function
+SELECT auth.user_id() AS user_id;
+ user_id 
+---------
+ user123
+(1 row)
+

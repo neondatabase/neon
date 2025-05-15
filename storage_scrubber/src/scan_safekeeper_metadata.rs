@@ -1,23 +1,24 @@
-use std::{collections::HashSet, str::FromStr, sync::Arc};
+use std::collections::HashSet;
+use std::str::FromStr;
+use std::sync::Arc;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use futures::stream::{StreamExt, TryStreamExt};
 use once_cell::sync::OnceCell;
 use pageserver_api::shard::TenantShardId;
-use postgres_ffi::{XLogFileName, PG_TLI};
+use postgres_ffi::{PG_TLI, XLogFileName};
 use remote_storage::GenericRemoteStorage;
 use rustls::crypto::ring;
 use serde::Serialize;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, error, info};
-use utils::{
-    id::{TenantId, TenantTimelineId, TimelineId},
-    lsn::Lsn,
-};
+use utils::id::{TenantId, TenantTimelineId, TimelineId};
+use utils::lsn::Lsn;
 
+use crate::cloud_admin_api::CloudAdminApiClient;
+use crate::metadata_stream::stream_listing;
 use crate::{
-    cloud_admin_api::CloudAdminApiClient, init_remote, metadata_stream::stream_listing,
-    BucketConfig, ConsoleConfig, NodeKind, RootTarget, TenantShardTimelineId,
+    BucketConfig, ConsoleConfig, NodeKind, RootTarget, TenantShardTimelineId, init_remote,
 };
 
 /// Generally we should ask safekeepers, but so far we use everywhere default 16MB.

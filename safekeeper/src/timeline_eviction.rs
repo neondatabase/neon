@@ -7,23 +7,19 @@
 use anyhow::Context;
 use camino::Utf8PathBuf;
 use remote_storage::{GenericRemoteStorage, RemotePath};
-use tokio::{
-    fs::File,
-    io::{AsyncRead, AsyncWriteExt},
-};
+use tokio::fs::File;
+use tokio::io::{AsyncRead, AsyncWriteExt};
 use tracing::{debug, info, instrument, warn};
 use utils::crashsafe::durable_rename;
 
-use crate::{
-    metrics::{
-        EvictionEvent, EVICTION_EVENTS_COMPLETED, EVICTION_EVENTS_STARTED, NUM_EVICTED_TIMELINES,
-    },
-    rate_limit::rand_duration,
-    timeline_manager::{Manager, StateSnapshot},
-    wal_backup,
-    wal_backup_partial::{self, PartialRemoteSegment},
-    wal_storage::wal_file_paths,
+use crate::metrics::{
+    EVICTION_EVENTS_COMPLETED, EVICTION_EVENTS_STARTED, EvictionEvent, NUM_EVICTED_TIMELINES,
 };
+use crate::rate_limit::rand_duration;
+use crate::timeline_manager::{Manager, StateSnapshot};
+use crate::wal_backup;
+use crate::wal_backup_partial::{self, PartialRemoteSegment};
+use crate::wal_storage::wal_file_paths;
 
 impl Manager {
     /// Returns true if the timeline is ready for eviction.
@@ -39,7 +35,7 @@ impl Manager {
         next_event: &Option<tokio::time::Instant>,
         state: &StateSnapshot,
     ) -> bool {
-        let ready = self.backup_task.is_none()
+        self.backup_task.is_none()
             && self.recovery_task.is_none()
             && self.wal_removal_task.is_none()
             && self.partial_backup_task.is_none()
@@ -65,8 +61,7 @@ impl Manager {
                 .unwrap()
                 .flush_lsn
                 .segment_number(self.wal_seg_size)
-                == self.last_removed_segno + 1;
-        ready
+                == self.last_removed_segno + 1
     }
 
     /// Evict the timeline to remote storage. Returns whether the eviction was successful.

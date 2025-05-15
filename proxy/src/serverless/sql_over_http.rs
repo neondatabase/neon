@@ -2,27 +2,28 @@ use std::pin::pin;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use futures::future::{select, try_join, Either};
+use futures::future::{Either, select, try_join};
 use futures::{StreamExt, TryFutureExt};
-use http::header::AUTHORIZATION;
 use http::Method;
+use http::header::AUTHORIZATION;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
+use http_utils::error::ApiError;
 use hyper::body::Incoming;
 use hyper::http::{HeaderName, HeaderValue};
-use hyper::{header, HeaderMap, Request, Response, StatusCode};
+use hyper::{HeaderMap, Request, Response, StatusCode, header};
+use indexmap::IndexMap;
 use postgres_client::error::{DbError, ErrorPosition, SqlState};
 use postgres_client::{GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, Transaction};
 use pq_proto::StartupMessageParamsBuilder;
 use serde::Serialize;
 use serde_json::Value;
+use serde_json::value::RawValue;
 use tokio::time::{self, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 use typed_json::json;
 use url::Url;
-use urlencoding;
-use utils::http::error::ApiError;
 use uuid::Uuid;
 
 use super::backend::{LocalProxyConnError, PoolingBackend};
@@ -30,15 +31,15 @@ use super::conn_pool::{AuthData, ConnInfoWithAuth};
 use super::conn_pool_lib::{self, ConnInfo};
 use super::error::HttpCodeError;
 use super::http_util::json_response;
-use super::json::{json_to_pg_text, pg_text_row_to_json, JsonConversionError};
+use super::json::{JsonConversionError, json_to_pg_text, pg_text_row_to_json};
 use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
-use crate::auth::{endpoint_sni, ComputeUserInfoParseError};
+use crate::auth::{ComputeUserInfoParseError, endpoint_sni};
 use crate::config::{AuthenticationConfig, HttpConfig, ProxyConfig, TlsConfig};
 use crate::context::RequestContext;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
-use crate::http::{read_body_with_limit, ReadBodyError};
-use crate::metrics::{HttpDirection, Metrics};
-use crate::proxy::{run_until_cancelled, NeonOptions};
+use crate::http::{ReadBodyError, read_body_with_limit};
+use crate::metrics::{HttpDirection, Metrics, SniGroup, SniKind};
+use crate::proxy::{NeonOptions, run_until_cancelled};
 use crate::serverless::backend::HttpConnError;
 use crate::types::{DbName, RoleName};
 use crate::usage_metrics::{MetricCounter, MetricCounterRecorder};
@@ -198,8 +199,7 @@ fn get_conn_info(
     let endpoint = match connection_url.host() {
         Some(url::Host::Domain(hostname)) => {
             if let Some(tls) = tls {
-                endpoint_sni(hostname, &tls.common_names)?
-                    .ok_or(ConnInfoError::MalformedEndpoint)?
+                endpoint_sni(hostname, &tls.common_names).ok_or(ConnInfoError::MalformedEndpoint)?
             } else {
                 hostname
                     .split_once('.')
@@ -208,7 +208,7 @@ fn get_conn_info(
             }
         }
         Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) | None => {
-            return Err(ConnInfoError::MissingHostname)
+            return Err(ConnInfoError::MissingHostname);
         }
     };
     ctx.set_endpoint_id(endpoint.clone());
@@ -226,6 +226,39 @@ fn get_conn_info(
             options = Some(NeonOptions::parse_options_raw(&value));
         }
     }
+
+    // check the URL that was used, for metrics
+    {
+        let host_endpoint = headers
+            // get the host header
+            .get("host")
+            // extract the domain
+            .and_then(|h| {
+                let (host, _port) = h.to_str().ok()?.split_once(':')?;
+                Some(host)
+            })
+            // get the endpoint prefix
+            .map(|h| h.split_once('.').map_or(h, |(prefix, _)| prefix));
+
+        let kind = if host_endpoint == Some(&*endpoint) {
+            SniKind::Sni
+        } else {
+            SniKind::NoSni
+        };
+
+        let protocol = ctx.protocol();
+        Metrics::get()
+            .proxy
+            .accepted_connections_by_sni
+            .inc(SniGroup { protocol, kind });
+    }
+
+    ctx.set_user_agent(
+        headers
+            .get(hyper::header::USER_AGENT)
+            .and_then(|h| h.to_str().ok())
+            .map(Into::into),
+    );
 
     let user_info = ComputeUserInfo {
         endpoint,
@@ -249,6 +282,50 @@ pub(crate) async fn handle(
     let mut response = match result {
         Ok(r) => {
             ctx.set_success();
+
+            // Handling the error response from local proxy here
+            if config.authentication_config.is_auth_broker && r.status().is_server_error() {
+                let status = r.status();
+
+                let body_bytes = r
+                    .collect()
+                    .await
+                    .map_err(|e| {
+                        ApiError::InternalServerError(anyhow::Error::msg(format!(
+                            "could not collect http body: {e}"
+                        )))
+                    })?
+                    .to_bytes();
+
+                if let Ok(mut json_map) =
+                    serde_json::from_slice::<IndexMap<&str, &RawValue>>(&body_bytes)
+                {
+                    let message = json_map.get("message");
+                    if let Some(message) = message {
+                        let msg: String = match serde_json::from_str(message.get()) {
+                            Ok(msg) => msg,
+                            Err(_) => {
+                                "Unable to parse the response message from server".to_string()
+                            }
+                        };
+
+                        error!("Error response from local_proxy: {status} {msg}");
+
+                        json_map.retain(|key, _| !key.starts_with("neon:")); // remove all the neon-related keys
+
+                        let resp_json = serde_json::to_string(&json_map)
+                            .unwrap_or("failed to serialize the response message".to_string());
+
+                        return json_response(status, resp_json);
+                    }
+                }
+
+                error!("Unable to parse the response message from local_proxy");
+                return json_response(
+                    status,
+                    json!({ "message": "Unable to parse the response message from server".to_string() }),
+                );
+            }
             r
         }
         Err(e @ SqlOverHttpError::Cancelled(_)) => {
@@ -360,8 +437,12 @@ pub(crate) enum SqlOverHttpError {
     ResponseTooLarge(usize),
     #[error("invalid isolation level")]
     InvalidIsolationLevel,
+    /// for queries our customers choose to run
     #[error("{0}")]
-    Postgres(#[from] postgres_client::Error),
+    Postgres(#[source] postgres_client::Error),
+    /// for queries we choose to run
+    #[error("{0}")]
+    InternalPostgres(#[source] postgres_client::Error),
     #[error("{0}")]
     JsonConversion(#[from] JsonConversionError),
     #[error("{0}")]
@@ -377,6 +458,13 @@ impl ReportableError for SqlOverHttpError {
             SqlOverHttpError::ResponseTooLarge(_) => ErrorKind::User,
             SqlOverHttpError::InvalidIsolationLevel => ErrorKind::User,
             SqlOverHttpError::Postgres(p) => p.get_error_kind(),
+            SqlOverHttpError::InternalPostgres(p) => {
+                if p.as_db_error().is_some() {
+                    ErrorKind::Service
+                } else {
+                    ErrorKind::Compute
+                }
+            }
             SqlOverHttpError::JsonConversion(_) => ErrorKind::Postgres,
             SqlOverHttpError::Cancelled(c) => c.get_error_kind(),
         }
@@ -392,6 +480,7 @@ impl UserFacingError for SqlOverHttpError {
             SqlOverHttpError::ResponseTooLarge(_) => self.to_string(),
             SqlOverHttpError::InvalidIsolationLevel => self.to_string(),
             SqlOverHttpError::Postgres(p) => p.to_string(),
+            SqlOverHttpError::InternalPostgres(p) => p.to_string(),
             SqlOverHttpError::JsonConversion(_) => "could not parse postgres response".to_string(),
             SqlOverHttpError::Cancelled(_) => self.to_string(),
         }
@@ -410,6 +499,7 @@ impl HttpCodeError for SqlOverHttpError {
             SqlOverHttpError::ResponseTooLarge(_) => StatusCode::INSUFFICIENT_STORAGE,
             SqlOverHttpError::InvalidIsolationLevel => StatusCode::BAD_REQUEST,
             SqlOverHttpError::Postgres(_) => StatusCode::BAD_REQUEST,
+            SqlOverHttpError::InternalPostgres(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SqlOverHttpError::JsonConversion(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SqlOverHttpError::Cancelled(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -549,7 +639,9 @@ async fn handle_inner(
         &config.authentication_config,
         ctx,
         request.headers(),
-        config.tls_config.as_ref(),
+        // todo: race condition?
+        // we're unlikely to change the common names.
+        config.tls_config.load().as_deref(),
     )?;
     info!(
         user = conn_info.conn_info.user_info.user.as_str(),
@@ -596,6 +688,7 @@ async fn handle_db_inner(
 
     let parsed_headers = HttpHeaders::try_parse(headers)?;
 
+    let mut request_len = 0;
     let fetch_and_process_request = Box::pin(
         async {
             let body = read_body_with_limit(
@@ -603,6 +696,8 @@ async fn handle_db_inner(
                 config.http_config.max_request_size_bytes,
             )
             .await?;
+
+            request_len = body.len();
 
             Metrics::get()
                 .proxy
@@ -618,23 +713,21 @@ async fn handle_db_inner(
 
     let authenticate_and_connect = Box::pin(
         async {
-            let is_local_proxy = matches!(backend.auth_backend, crate::auth::Backend::Local(_));
-
             let keys = match auth {
-                AuthData::Password(pw) => {
-                    backend
-                        .authenticate_with_password(ctx, &conn_info.user_info, &pw)
-                        .await?
-                }
-                AuthData::Jwt(jwt) => {
-                    backend
-                        .authenticate_with_jwt(ctx, &conn_info.user_info, jwt)
-                        .await?
-                }
+                AuthData::Password(pw) => backend
+                    .authenticate_with_password(ctx, &conn_info.user_info, &pw)
+                    .await
+                    .map_err(HttpConnError::AuthError)?,
+                AuthData::Jwt(jwt) => backend
+                    .authenticate_with_jwt(ctx, &conn_info.user_info, jwt)
+                    .await
+                    .map_err(HttpConnError::AuthError)?,
             };
 
             let client = match keys.keys {
-                ComputeCredentialKeys::JwtPayload(payload) if is_local_proxy => {
+                ComputeCredentialKeys::JwtPayload(payload)
+                    if backend.auth_backend.is_local_proxy() =>
+                {
                     let mut client = backend.connect_to_local_postgres(ctx, conn_info).await?;
                     let (cli_inner, _dsc) = client.client_inner();
                     cli_inner.set_jwt_session(&payload).await?;
@@ -651,7 +744,7 @@ async fn handle_db_inner(
             // not strictly necessary to mark success here,
             // but it's just insurance for if we forget it somewhere else
             ctx.success();
-            Ok::<_, HttpConnError>(client)
+            Ok::<_, SqlOverHttpError>(client)
         }
         .map_err(SqlOverHttpError::from),
     );
@@ -700,7 +793,7 @@ async fn handle_db_inner(
         }
     };
 
-    let metrics = client.metrics();
+    let metrics = client.metrics(ctx);
 
     let len = json_output.len();
     let response = response
@@ -716,6 +809,8 @@ async fn handle_db_inner(
     // count the egress bytes - we miss the TLS and header overhead but oh well...
     // moving this later in the stack is going to be a lot of effort and ehhhh
     metrics.record_egress(len as u64);
+    metrics.record_ingress(request_len as u64);
+
     Metrics::get()
         .proxy
         .http_conn_content_length_bytes
@@ -773,7 +868,7 @@ async fn handle_auth_broker_inner(
         .expect("all headers and params received via hyper should be valid for request");
 
     // todo: map body to count egress
-    let _metrics = client.metrics();
+    let _metrics = client.metrics(ctx);
 
     Ok(client
         .inner
@@ -796,8 +891,14 @@ impl QueryData {
         let (inner, mut discard) = client.inner();
         let cancel_token = inner.cancel_token();
 
-        let res = match select(
-            pin!(query_to_json(config, &*inner, self, &mut 0, parsed_headers)),
+        match select(
+            pin!(query_to_json(
+                config,
+                &mut *inner,
+                self,
+                &mut 0,
+                parsed_headers
+            )),
             pin!(cancel.cancelled()),
         )
         .await
@@ -813,7 +914,7 @@ impl QueryData {
             // The query failed with an error
             Either::Left((Err(e), __not_yet_cancelled)) => {
                 discard.discard();
-                return Err(e);
+                Err(e)
             }
             // The query was cancelled.
             Either::Right((_cancelled, query)) => {
@@ -854,8 +955,7 @@ impl QueryData {
                     }
                 }
             }
-        };
-        res
+        }
     }
 }
 
@@ -881,16 +981,20 @@ impl BatchQueryData {
             builder = builder.deferrable(true);
         }
 
-        let transaction = builder.start().await.inspect_err(|_| {
-            // if we cannot start a transaction, we should return immediately
-            // and not return to the pool. connection is clearly broken
-            discard.discard();
-        })?;
+        let mut transaction = builder
+            .start()
+            .await
+            .inspect_err(|_| {
+                // if we cannot start a transaction, we should return immediately
+                // and not return to the pool. connection is clearly broken
+                discard.discard();
+            })
+            .map_err(SqlOverHttpError::Postgres)?;
 
         let json_output = match query_batch(
             config,
             cancel.child_token(),
-            &transaction,
+            &mut transaction,
             self,
             parsed_headers,
         )
@@ -898,11 +1002,15 @@ impl BatchQueryData {
         {
             Ok(json_output) => {
                 info!("commit");
-                let status = transaction.commit().await.inspect_err(|_| {
-                    // if we cannot commit - for now don't return connection to pool
-                    // TODO: get a query status from the error
-                    discard.discard();
-                })?;
+                let status = transaction
+                    .commit()
+                    .await
+                    .inspect_err(|_| {
+                        // if we cannot commit - for now don't return connection to pool
+                        // TODO: get a query status from the error
+                        discard.discard();
+                    })
+                    .map_err(SqlOverHttpError::Postgres)?;
                 discard.check_idle(status);
                 json_output
             }
@@ -917,11 +1025,15 @@ impl BatchQueryData {
             }
             Err(err) => {
                 info!("rollback");
-                let status = transaction.rollback().await.inspect_err(|_| {
-                    // if we cannot rollback - for now don't return connection to pool
-                    // TODO: get a query status from the error
-                    discard.discard();
-                })?;
+                let status = transaction
+                    .rollback()
+                    .await
+                    .inspect_err(|_| {
+                        // if we cannot rollback - for now don't return connection to pool
+                        // TODO: get a query status from the error
+                        discard.discard();
+                    })
+                    .map_err(SqlOverHttpError::Postgres)?;
                 discard.check_idle(status);
                 return Err(err);
             }
@@ -934,7 +1046,7 @@ impl BatchQueryData {
 async fn query_batch(
     config: &'static HttpConfig,
     cancel: CancellationToken,
-    transaction: &Transaction<'_>,
+    transaction: &mut Transaction<'_>,
     queries: BatchQueryData,
     parsed_headers: HttpHeaders,
 ) -> Result<String, SqlOverHttpError> {
@@ -972,15 +1084,20 @@ async fn query_batch(
 
 async fn query_to_json<T: GenericClient>(
     config: &'static HttpConfig,
-    client: &T,
+    client: &mut T,
     data: QueryData,
     current_size: &mut usize,
     parsed_headers: HttpHeaders,
-) -> Result<(ReadyForQueryStatus, impl Serialize), SqlOverHttpError> {
+) -> Result<(ReadyForQueryStatus, impl Serialize + use<T>), SqlOverHttpError> {
     let query_start = Instant::now();
 
     let query_params = data.params;
-    let mut row_stream = std::pin::pin!(client.query_raw_txt(&data.query, query_params).await?);
+    let mut row_stream = std::pin::pin!(
+        client
+            .query_raw_txt(&data.query, query_params)
+            .await
+            .map_err(SqlOverHttpError::Postgres)?
+    );
     let query_acknowledged = Instant::now();
 
     // Manually drain the stream into a vector to leave row_stream hanging
@@ -988,7 +1105,7 @@ async fn query_to_json<T: GenericClient>(
     // big.
     let mut rows: Vec<postgres_client::Row> = Vec::new();
     while let Some(row) = row_stream.next().await {
-        let row = row?;
+        let row = row.map_err(SqlOverHttpError::Postgres)?;
         *current_size += row.body_len();
         rows.push(row);
         // we don't have a streaming response support yet so this is to prevent OOM
@@ -1039,7 +1156,14 @@ async fn query_to_json<T: GenericClient>(
             "dataTypeModifier": c.type_modifier(),
             "format": "text",
         }));
-        columns.push(client.get_type(c.type_oid()).await?);
+
+        match client.get_type(c.type_oid()).await {
+            Ok(t) => columns.push(t),
+            Err(err) => {
+                tracing::warn!(?err, "unable to query type information");
+                return Err(SqlOverHttpError::InternalPostgres(err));
+            }
+        }
     }
 
     let array_mode = data.array_mode.unwrap_or(parsed_headers.default_array_mode);
@@ -1073,10 +1197,10 @@ enum Discard<'a> {
 }
 
 impl Client {
-    fn metrics(&self) -> Arc<MetricCounter> {
+    fn metrics(&self, ctx: &RequestContext) -> Arc<MetricCounter> {
         match self {
-            Client::Remote(client) => client.metrics(),
-            Client::Local(local_client) => local_client.metrics(),
+            Client::Remote(client) => client.metrics(ctx),
+            Client::Local(local_client) => local_client.metrics(ctx),
         }
     }
 
@@ -1110,7 +1234,6 @@ impl Discard<'_> {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

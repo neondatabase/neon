@@ -1,20 +1,21 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::checks::{
-    branch_cleanup_and_check_errors, list_timeline_blobs, BlobDataParseResult,
-    RemoteTimelineBlobData, TenantObjectListing, TimelineAnalysis,
-};
-use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
-use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId};
 use futures_util::{StreamExt, TryStreamExt};
 use pageserver::tenant::remote_timeline_client::remote_layer_path;
 use pageserver_api::controller_api::MetadataHealthUpdateRequest;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::GenericRemoteStorage;
 use serde::Serialize;
-use tracing::{info_span, Instrument};
+use tracing::{Instrument, info_span};
 use utils::id::TenantId;
 use utils::shard::ShardCount;
+
+use crate::checks::{
+    BlobDataParseResult, RemoteTimelineBlobData, TenantObjectListing, TimelineAnalysis,
+    branch_cleanup_and_check_errors, list_timeline_blobs,
+};
+use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
+use crate::{BucketConfig, NodeKind, RootTarget, TenantShardTimelineId, init_remote};
 
 #[derive(Serialize, Default)]
 pub struct MetadataSummary {
@@ -47,6 +48,8 @@ impl MetadataSummary {
             index_part,
             index_part_generation: _,
             s3_layers: _,
+            index_part_last_modified_time: _,
+            index_part_snapshot_time: _,
         } = &data.blob_data
         {
             *self
@@ -150,7 +153,10 @@ pub async fn scan_pageserver_metadata(
     const CONCURRENCY: usize = 32;
 
     // Generate a stream of TenantTimelineId
-    let timelines = tenants.map_ok(|t| stream_tenant_timelines(&remote_client, &target, t));
+    let timelines = tenants.map_ok(|t| {
+        tracing::info!("Found tenant: {}", t);
+        stream_tenant_timelines(&remote_client, &target, t)
+    });
     let timelines = timelines.try_buffered(CONCURRENCY);
     let timelines = timelines.try_flatten();
 
@@ -195,7 +201,9 @@ pub async fn scan_pageserver_metadata(
                     if let BlobDataParseResult::Parsed {
                         index_part,
                         index_part_generation,
-                        s3_layers: _s3_layers,
+                        s3_layers: _,
+                        index_part_last_modified_time: _,
+                        index_part_snapshot_time: _,
                     } = &data.blob_data
                     {
                         if index_part.deleted_at.is_some() {
@@ -318,9 +326,11 @@ pub async fn scan_pageserver_metadata(
 
         match &data.blob_data {
             BlobDataParseResult::Parsed {
-                index_part: _index_part,
+                index_part: _,
                 index_part_generation: _index_part_generation,
                 s3_layers,
+                index_part_last_modified_time: _,
+                index_part_snapshot_time: _,
             } => {
                 tenant_objects.push(ttid, s3_layers.clone());
             }

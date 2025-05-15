@@ -20,22 +20,14 @@ use std::time::Duration;
 
 use camino::Utf8PathBuf;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
-use tracing::info;
-use tracing::warn;
-
-use crate::config::PageServerConf;
-use crate::controller_upcall_client::ControlPlaneGenerationsApi;
-use crate::controller_upcall_client::RetryForeverError;
-use crate::metrics;
-use crate::virtual_file::MaybeFatalIo;
+use tracing::{debug, info, warn};
 
 use super::deleter::DeleterMessage;
-use super::DeletionHeader;
-use super::DeletionList;
-use super::DeletionQueueError;
-use super::FlushOp;
-use super::VisibleLsnUpdates;
+use super::{DeletionHeader, DeletionList, DeletionQueueError, FlushOp, VisibleLsnUpdates};
+use crate::config::PageServerConf;
+use crate::controller_upcall_client::{RetryForeverError, StorageControllerUpcallApi};
+use crate::metrics;
+use crate::virtual_file::MaybeFatalIo;
 
 // After this length of time, do any validation work that is pending,
 // even if we haven't accumulated many keys to delete.
@@ -54,14 +46,14 @@ pub(super) enum ValidatorQueueMessage {
 }
 pub(super) struct Validator<C>
 where
-    C: ControlPlaneGenerationsApi,
+    C: StorageControllerUpcallApi,
 {
     conf: &'static PageServerConf,
     rx: tokio::sync::mpsc::Receiver<ValidatorQueueMessage>,
     tx: tokio::sync::mpsc::Sender<DeleterMessage>,
 
     // Client for calling into control plane API for validation of deletes
-    controller_upcall_client: Option<C>,
+    controller_upcall_client: C,
 
     // DeletionLists which are waiting generation validation.  Not safe to
     // execute until [`validate`] has processed them.
@@ -88,13 +80,13 @@ where
 
 impl<C> Validator<C>
 where
-    C: ControlPlaneGenerationsApi,
+    C: StorageControllerUpcallApi,
 {
     pub(super) fn new(
         conf: &'static PageServerConf,
         rx: tokio::sync::mpsc::Receiver<ValidatorQueueMessage>,
         tx: tokio::sync::mpsc::Sender<DeleterMessage>,
-        controller_upcall_client: Option<C>,
+        controller_upcall_client: C,
         lsn_table: Arc<std::sync::RwLock<VisibleLsnUpdates>>,
         cancel: CancellationToken,
     ) -> Self {
@@ -145,20 +137,16 @@ where
             return Ok(());
         }
 
-        let tenants_valid = if let Some(controller_upcall_client) = &self.controller_upcall_client {
-            match controller_upcall_client
-                .validate(tenant_generations.iter().map(|(k, v)| (*k, *v)).collect())
-                .await
-            {
-                Ok(tenants) => tenants,
-                Err(RetryForeverError::ShuttingDown) => {
-                    // The only way a validation call returns an error is when the cancellation token fires
-                    return Err(DeletionQueueError::ShuttingDown);
-                }
+        let tenants_valid = match self
+            .controller_upcall_client
+            .validate(tenant_generations.iter().map(|(k, v)| (*k, *v)).collect())
+            .await
+        {
+            Ok(tenants) => tenants,
+            Err(RetryForeverError::ShuttingDown) => {
+                // The only way a validation call returns an error is when the cancellation token fires
+                return Err(DeletionQueueError::ShuttingDown);
             }
-        } else {
-            // Control plane API disabled.  In legacy mode we consider everything valid.
-            tenant_generations.keys().map(|k| (*k, true)).collect()
         };
 
         let mut validated_sequence: Option<u64> = None;
@@ -190,7 +178,10 @@ where
                 }
             } else {
                 // If we failed validation, then do not apply any of the projected updates
-                info!("Dropped remote consistent LSN updates for tenant {tenant_id} in stale generation {:?}", tenant_lsn_state.generation);
+                info!(
+                    "Dropped remote consistent LSN updates for tenant {tenant_id} in stale generation {:?}",
+                    tenant_lsn_state.generation
+                );
                 metrics::DELETION_QUEUE.dropped_lsn_updates.inc();
             }
         }

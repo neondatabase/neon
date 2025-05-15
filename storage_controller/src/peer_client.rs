@@ -1,14 +1,16 @@
-use crate::tenant_shard::ObservedState;
-use pageserver_api::shard::TenantShardId;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error as _;
 use std::time::Duration;
-use tokio_util::sync::CancellationToken;
 
+use http_utils::error::HttpErrorBody;
 use hyper::Uri;
+use pageserver_api::shard::TenantShardId;
 use reqwest::{StatusCode, Url};
-use utils::{backoff, http::error::HttpErrorBody};
+use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
+use utils::backoff;
+
+use crate::tenant_shard::ObservedState;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PeerClient {
@@ -53,15 +55,18 @@ impl ResponseErrorMessageExt for reqwest::Response {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub(crate) struct GlobalObservedState(pub(crate) HashMap<TenantShardId, ObservedState>);
 
+const STEP_DOWN_RETRIES: u32 = 8;
+const STEP_DOWN_TIMEOUT: Duration = Duration::from_secs(1);
+
 impl PeerClient {
-    pub(crate) fn new(uri: Uri, jwt: Option<String>) -> Self {
+    pub(crate) fn new(http_client: reqwest::Client, uri: Uri, jwt: Option<String>) -> Self {
         Self {
             uri,
             jwt,
-            client: reqwest::Client::new(),
+            client: http_client,
         }
     }
 
@@ -74,7 +79,7 @@ impl PeerClient {
             req
         };
 
-        let req = req.timeout(Duration::from_secs(2));
+        let req = req.timeout(STEP_DOWN_TIMEOUT);
 
         let res = req
             .send()
@@ -92,8 +97,7 @@ impl PeerClient {
     }
 
     /// Request the peer to step down and return its current observed state
-    /// All errors are retried with exponential backoff for a maximum of 4 attempts.
-    /// Assuming all retries are performed, the function times out after roughly 4 seconds.
+    /// All errors are re-tried
     pub(crate) async fn step_down(
         &self,
         cancel: &CancellationToken,
@@ -102,7 +106,7 @@ impl PeerClient {
             || self.request_step_down(),
             |_e| false,
             2,
-            4,
+            STEP_DOWN_RETRIES,
             "Send step down request",
             cancel,
         )

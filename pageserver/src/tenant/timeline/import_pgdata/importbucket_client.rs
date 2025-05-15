@@ -1,4 +1,5 @@
-use std::{ops::Bound, sync::Arc};
+use std::ops::Bound;
+use std::sync::Arc;
 
 use anyhow::Context;
 use bytes::Bytes;
@@ -12,9 +13,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument};
 use utils::lsn::Lsn;
 
-use crate::{assert_u64_eq_usize::U64IsUsize, config::PageServerConf};
-
-use super::{importbucket_format, index_part_format};
+use super::index_part_format;
+use crate::assert_u64_eq_usize::U64IsUsize;
+use crate::config::PageServerConf;
 
 pub async fn new(
     conf: &'static PageServerConf,
@@ -172,12 +173,6 @@ impl RemoteStorageWrapper {
         res
     }
 
-    pub async fn get_spec(&self) -> Result<Option<importbucket_format::Spec>, anyhow::Error> {
-        self.get_json(&RemotePath::from_string("spec.json").unwrap())
-            .await
-            .context("get spec")
-    }
-
     #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
     pub async fn get_json<T: DeserializeOwned>(
         &self,
@@ -193,31 +188,6 @@ impl RemoteStorageWrapper {
             // TODO: own error type
             .map_err(DownloadError::Other)?;
         Ok(Some(res))
-    }
-
-    #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
-    pub async fn put_json<T>(&self, path: &RemotePath, value: &T) -> anyhow::Result<()>
-    where
-        T: serde::Serialize,
-    {
-        let buf = serde_json::to_vec(value)?;
-        let bytes = Bytes::from(buf);
-        utils::backoff::retry(
-            || async {
-                let size = bytes.len();
-                let bytes = futures::stream::once(futures::future::ready(Ok(bytes.clone())));
-                self.storage
-                    .upload_storage_object(bytes, size, path, &self.cancel)
-                    .await
-            },
-            remote_storage::TimeoutOrCancel::caused_by_cancel,
-            1,
-            u32::MAX,
-            &format!("put json {path}"),
-            &self.cancel,
-        )
-        .await
-        .expect("practically infinite retries")
     }
 
     #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
@@ -243,7 +213,8 @@ impl RemoteStorageWrapper {
                             kind: DownloadKind::Large,
                             etag: None,
                             byte_start: Bound::Included(start_inclusive),
-                            byte_end: Bound::Excluded(end_exclusive)
+                            byte_end: Bound::Excluded(end_exclusive),
+                            version_id: None,
                         },
                         &self.cancel)
                     .await?;
@@ -308,7 +279,7 @@ impl ControlFile {
             202107181 => 14,
             202209061 => 15,
             202307071 => 16,
-            /* XXX pg17 */
+            202406281 => 17,
             catversion => {
                 anyhow::bail!("unrecognized catalog version {catversion}")
             }

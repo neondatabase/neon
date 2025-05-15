@@ -127,12 +127,12 @@ macro_rules! __check_fields_present {
 
             match check_fields_present0($extractors) {
                 Ok(FoundEverything) => Ok(()),
-                Ok(Unconfigured) if cfg!(test) => {
+                Ok(Unconfigured) if cfg!(feature = "testing") => {
                     // allow unconfigured in tests
                     Ok(())
                 },
                 Ok(Unconfigured) => {
-                    panic!("utils::tracing_span_assert: outside of #[cfg(test)] expected tracing to be configured with tracing_error::ErrorLayer")
+                    panic!(r#"utils::tracing_span_assert: outside of #[cfg(feature = "testing")] expected tracing to be configured with tracing_error::ErrorLayer"#)
                 },
                 Err(missing) => Err(missing)
             }
@@ -172,15 +172,13 @@ fn tracing_subscriber_configured() -> bool {
 #[cfg(test)]
 mod tests {
 
+    use std::collections::HashSet;
+    use std::fmt::{self};
+    use std::hash::{Hash, Hasher};
+
     use tracing_subscriber::prelude::*;
 
     use super::*;
-
-    use std::{
-        collections::HashSet,
-        fmt::{self},
-        hash::{Hash, Hasher},
-    };
 
     struct MemoryIdentity<'a>(&'a dyn Extractor);
 

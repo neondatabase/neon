@@ -3,7 +3,7 @@
 Tests in this module exercise the pageserver's behavior around generation numbers,
 as defined in docs/rfcs/025-generation-numbers.md.  Briefly, the behaviors we require
 of the pageserver are:
-- Do not start a tenant without a generation number if control_plane_api is set
+- Do not start a tenant without a generation number
 - Remote objects must be suffixed with generation
 - Deletions may only be executed after validating generation
 - Updates to remote_consistent_lsn may only be made visible after validating generation
@@ -12,7 +12,6 @@ of the pageserver are:
 from __future__ import annotations
 
 import os
-import re
 import time
 from enum import StrEnum
 
@@ -29,7 +28,6 @@ from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
     assert_tenant_state,
-    list_prefix,
     wait_for_last_record_lsn,
     wait_for_upload,
 )
@@ -122,109 +120,6 @@ def assert_deletion_queue(ps_http, size_fn) -> None:
     v = get_deletion_queue_depth(ps_http)
     assert v is not None
     assert size_fn(v) is True
-
-
-def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
-    """
-    Validate behavior when a pageserver is run without generation support enabled,
-    then started again after activating it:
-    - Before upgrade, no objects should have generation suffixes
-    - After upgrade, the bucket should contain a mixture.
-    - In both cases, postgres I/O should work.
-    """
-    neon_env_builder.enable_pageserver_remote_storage(
-        RemoteStorageKind.MOCK_S3,
-    )
-
-    env = neon_env_builder.init_configs()
-    env.broker.start()
-    for sk in env.safekeepers:
-        sk.start()
-    env.storage_controller.start()
-
-    # We will start a pageserver with no control_plane_api set, so it won't be able to self-register
-    env.storage_controller.node_register(env.pageserver)
-
-    def remove_control_plane_api_field(config):
-        return config.pop("control_plane_api")
-
-    control_plane_api = env.pageserver.edit_config_toml(remove_control_plane_api_field)
-    env.pageserver.start()
-    env.storage_controller.node_configure(env.pageserver.id, {"availability": "Active"})
-
-    env.create_tenant(
-        tenant_id=env.initial_tenant, conf=TENANT_CONF, timeline_id=env.initial_timeline
-    )
-
-    generate_uploads_and_deletions(env, pageserver=env.pageserver)
-
-    def parse_generation_suffix(key):
-        m = re.match(".+-([0-9a-zA-Z]{8})$", key)
-        if m is None:
-            return None
-        else:
-            log.info(f"match: {m}")
-            log.info(f"group: {m.group(1)}")
-            return int(m.group(1), 16)
-
-    assert neon_env_builder.pageserver_remote_storage is not None
-    pre_upgrade_keys = list(
-        [
-            o["Key"]
-            for o in list_prefix(neon_env_builder.pageserver_remote_storage, delimiter="")[
-                "Contents"
-            ]
-        ]
-    )
-    for key in pre_upgrade_keys:
-        assert parse_generation_suffix(key) is None
-
-    env.pageserver.stop()
-    # Starting without the override that disabled control_plane_api
-    env.pageserver.patch_config_toml_nonrecursive(
-        {
-            "control_plane_api": control_plane_api,
-        }
-    )
-    env.pageserver.start()
-
-    generate_uploads_and_deletions(env, pageserver=env.pageserver, init=False)
-
-    legacy_objects: list[str] = []
-    suffixed_objects = []
-    post_upgrade_keys = list(
-        [
-            o["Key"]
-            for o in list_prefix(neon_env_builder.pageserver_remote_storage, delimiter="")[
-                "Contents"
-            ]
-        ]
-    )
-    for key in post_upgrade_keys:
-        log.info(f"post-upgrade key: {key}")
-        if parse_generation_suffix(key) is not None:
-            suffixed_objects.append(key)
-        else:
-            legacy_objects.append(key)
-
-    # Bucket now contains a mixture of suffixed and non-suffixed objects
-    assert len(suffixed_objects) > 0
-    assert len(legacy_objects) > 0
-
-    # Flush through deletions to get a clean state for scrub: we are implicitly validating
-    # that our generations-enabled pageserver was able to do deletions of layers
-    # from earlier which don't have a generation.
-    env.pageserver.http_client().deletion_queue_flush(execute=True)
-
-    assert get_deletion_queue_unexpected_errors(env.pageserver.http_client()) == 0
-
-    # Having written a mixture of generation-aware and legacy index_part.json,
-    # ensure the scrubber handles the situation as expected.
-    healthy, metadata_summary = env.storage_scrubber.scan_metadata()
-    assert metadata_summary["tenant_count"] == 1  # Scrubber should have seen our timeline
-    assert metadata_summary["timeline_count"] == 1
-    assert metadata_summary["timeline_shard_count"] == 1
-    assert healthy
 
 
 def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):

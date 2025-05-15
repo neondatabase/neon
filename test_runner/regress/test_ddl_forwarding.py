@@ -1,21 +1,21 @@
 from __future__ import annotations
 
-from types import TracebackType
 from typing import TYPE_CHECKING
 
 import psycopg2
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, VanillaPostgres
 from psycopg2.errors import UndefinedObject
-from pytest_httpserver import HTTPServer
-from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 if TYPE_CHECKING:
+    from types import TracebackType
     from typing import Any, Self
 
     from fixtures.httpserver import ListenAddress
+    from fixtures.neon_fixtures import NeonEnv, VanillaPostgres
+    from pytest_httpserver import HTTPServer
+    from werkzeug.wrappers.request import Request
 
 
 def handle_db(dbs, roles, operation):

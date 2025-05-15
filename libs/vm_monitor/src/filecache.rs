@@ -2,11 +2,13 @@
 
 use std::num::NonZeroU64;
 
-use crate::MiB;
-use anyhow::{anyhow, Context};
-use tokio_postgres::{types::ToSql, Client, NoTls, Row};
+use anyhow::{Context, anyhow};
+use tokio_postgres::types::ToSql;
+use tokio_postgres::{Client, NoTls, Row};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
+
+use crate::MiB;
 
 /// Manages Postgres' file cache by keeping a connection open.
 #[derive(Debug)]
@@ -177,8 +179,8 @@ impl FileCacheState {
         crate::spawn_with_cancel(
             token,
             |res| {
-                if let Err(error) = res {
-                    error!(%error, "postgres error")
+                if let Err(e) = res {
+                    error!(error = format_args!("{e:#}"), "postgres error");
                 }
             },
             conn,
@@ -205,7 +207,7 @@ impl FileCacheState {
         {
             Ok(rows) => Ok(rows),
             Err(e) => {
-                error!(error = ?e, "postgres error: {e} -> retrying");
+                error!(error = format_args!("{e:#}"), "postgres error -> retrying");
 
                 let client = FileCacheState::connect(&self.conn_str, self.token.clone())
                     .await

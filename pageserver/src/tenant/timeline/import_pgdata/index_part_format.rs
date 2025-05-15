@@ -1,7 +1,6 @@
-use serde::{Deserialize, Serialize};
-
 #[cfg(feature = "testing")]
 use camino::Utf8PathBuf;
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Root {
@@ -62,6 +61,14 @@ impl Root {
             Root::V1(v1) => match v1 {
                 V1::InProgress(in_progress) => &in_progress.idempotency_key,
                 V1::Done(done) => &done.idempotency_key,
+            },
+        }
+    }
+    pub fn started_at(&self) -> &chrono::NaiveDateTime {
+        match self {
+            Root::V1(v1) => match v1 {
+                V1::InProgress(in_progress) => &in_progress.started_at,
+                V1::Done(done) => &done.started_at,
             },
         }
     }

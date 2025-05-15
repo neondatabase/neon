@@ -4,26 +4,27 @@
 //! is rather narrow, but we can extend it once required.
 #![deny(unsafe_code)]
 #![deny(clippy::undocumented_unsafe_blocks)]
+use std::future::Future;
+use std::net::SocketAddr;
+use std::os::fd::{AsRawFd, RawFd};
+use std::pin::Pin;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::task::{Poll, ready};
+use std::{fmt, io};
+
 use anyhow::Context;
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
-use std::io::ErrorKind;
-use std::net::SocketAddr;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{ready, Poll};
-use std::{fmt, io};
-use std::{future::Future, str::FromStr};
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_rustls::TlsAcceptor;
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace, warn};
-
 use pq_proto::framed::{ConnectionError, Framed, FramedReader, FramedWriter};
 use pq_proto::{
     BeMessage, FeMessage, FeStartupPacket, ProtocolError, SQLSTATE_ADMIN_SHUTDOWN,
     SQLSTATE_INTERNAL_ERROR, SQLSTATE_SUCCESSFUL_COMPLETION,
 };
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_rustls::TlsAcceptor;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, trace, warn};
 
 /// An error, occurred during query processing:
 /// either during the connection ([`ConnectionError`]) or before/after it.
@@ -225,7 +226,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> MaybeWriteOnly<IO> {
         match self {
             MaybeWriteOnly::Full(framed) => framed.read_startup_message().await,
             MaybeWriteOnly::WriteOnly(_) => {
-                Err(io::Error::new(ErrorKind::Other, "reading from write only half").into())
+                Err(io::Error::other("reading from write only half").into())
             }
             MaybeWriteOnly::Broken => panic!("IO on invalid MaybeWriteOnly"),
         }
@@ -235,7 +236,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> MaybeWriteOnly<IO> {
         match self {
             MaybeWriteOnly::Full(framed) => framed.read_message().await,
             MaybeWriteOnly::WriteOnly(_) => {
-                Err(io::Error::new(ErrorKind::Other, "reading from write only half").into())
+                Err(io::Error::other("reading from write only half").into())
             }
             MaybeWriteOnly::Broken => panic!("IO on invalid MaybeWriteOnly"),
         }
@@ -268,6 +269,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> MaybeWriteOnly<IO> {
 }
 
 pub struct PostgresBackend<IO> {
+    pub socket_fd: RawFd,
     framed: MaybeWriteOnly<IO>,
 
     pub state: ProtoState,
@@ -293,9 +295,11 @@ impl PostgresBackend<tokio::net::TcpStream> {
         tls_config: Option<Arc<rustls::ServerConfig>>,
     ) -> io::Result<Self> {
         let peer_addr = socket.peer_addr()?;
+        let socket_fd = socket.as_raw_fd();
         let stream = MaybeTlsStream::Unencrypted(socket);
 
         Ok(Self {
+            socket_fd,
             framed: MaybeWriteOnly::Full(Framed::new(stream)),
             state: ProtoState::Initialization,
             auth_type,
@@ -307,6 +311,7 @@ impl PostgresBackend<tokio::net::TcpStream> {
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
     pub fn new_from_io(
+        socket_fd: RawFd,
         socket: IO,
         peer_addr: SocketAddr,
         auth_type: AuthType,
@@ -315,6 +320,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         let stream = MaybeTlsStream::Unencrypted(socket);
 
         Ok(Self {
+            socket_fd,
             framed: MaybeWriteOnly::Full(Framed::new(stream)),
             state: ProtoState::Initialization,
             auth_type,
@@ -739,7 +745,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
                     match e {
                         QueryError::Shutdown => return Ok(ProcessMsgResult::Break),
                         QueryError::SimulatedConnectionError => {
-                            return Err(QueryError::SimulatedConnectionError)
+                            return Err(QueryError::SimulatedConnectionError);
                         }
                         err @ QueryError::Reconnect => {
                             // Instruct the client to reconnect, stop processing messages
@@ -835,6 +841,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
 
         let expected_end = match &end {
             ServerInitiated(_) | CopyDone | CopyFail | Terminate | EOF | Cancelled => true,
+            // The timeline doesn't exist and we have been requested to not auto-create it.
+            // Compute requests for timelines that haven't been created yet
+            // might reach us before the storcon request to create those timelines.
+            TimelineNoCreate => true,
             CopyStreamHandlerEnd::Disconnected(ConnectionError::Io(io_error))
                 if is_expected_io_error(io_error) =>
             {
@@ -968,7 +978,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for CopyDataWriter<'_, IO> {
             .write_message_noflush(&BeMessage::CopyData(buf))
             // write_message only writes to the buffer, so it can fail iff the
             // message is invaid, but CopyData can't be invalid.
-            .map_err(|_| io::Error::new(ErrorKind::Other, "failed to serialize CopyData"))?;
+            .map_err(|_| io::Error::other("failed to serialize CopyData"))?;
 
         Poll::Ready(Ok(buf.len()))
     }
@@ -1013,7 +1023,9 @@ fn log_query_error(query: &str, e: &QueryError) {
             }
         }
         QueryError::Disconnected(other_connection_error) => {
-            error!("query handler for '{query}' failed with connection error: {other_connection_error:?}")
+            error!(
+                "query handler for '{query}' failed with connection error: {other_connection_error:?}"
+            )
         }
         QueryError::SimulatedConnectionError => {
             error!("query handler for query '{query}' failed due to a simulated connection error")
@@ -1051,6 +1063,8 @@ pub enum CopyStreamHandlerEnd {
     Terminate,
     #[error("EOF on COPY stream")]
     EOF,
+    #[error("timeline not found, and allow_timeline_creation is false")]
+    TimelineNoCreate,
     /// The connection was lost
     #[error("connection error: {0}")]
     Disconnected(#[from] ConnectionError),

@@ -7,7 +7,7 @@ inputs:
     type: boolean
     required: false
     default: false
-  aws-oicd-role-arn:
+  aws-oidc-role-arn:
     description: 'OIDC role arn to interract with S3'
     required: true
 
@@ -38,9 +38,11 @@ runs:
     #
     - name: Set variables
       shell: bash -euxo pipefail {0}
+      env:
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        BUCKET: neon-github-public-dev
       run: |
-        PR_NUMBER=$(jq --raw-output .pull_request.number "$GITHUB_EVENT_PATH" || true)
-        if [ "${PR_NUMBER}" != "null" ]; then
+        if [ -n "${PR_NUMBER}" ]; then
           BRANCH_OR_PR=pr-${PR_NUMBER}
         elif [ "${GITHUB_REF_NAME}" = "main" ] || [ "${GITHUB_REF_NAME}" = "release" ] || \
              [ "${GITHUB_REF_NAME}" = "release-proxy" ] || [ "${GITHUB_REF_NAME}" = "release-compute" ]; then
@@ -59,8 +61,6 @@ runs:
         echo "LOCK_FILE=${LOCK_FILE}"       >> $GITHUB_ENV
         echo "WORKDIR=${WORKDIR}"           >> $GITHUB_ENV
         echo "BUCKET=${BUCKET}"             >> $GITHUB_ENV
-      env:
-        BUCKET: neon-github-public-dev
 
     # TODO: We can replace with a special docker image with Java and Allure pre-installed
     - uses: actions/setup-java@v4
@@ -70,6 +70,7 @@ runs:
 
     - name: Install Allure
       shell: bash -euxo pipefail {0}
+      working-directory: /tmp
       run: |
         if ! which allure; then
           ALLURE_ZIP=allure-${ALLURE_VERSION}.zip
@@ -80,14 +81,14 @@ runs:
           rm -f ${ALLURE_ZIP}
         fi
       env:
-        ALLURE_VERSION: 2.27.0
-        ALLURE_ZIP_SHA256: b071858fb2fa542c65d8f152c5c40d26267b2dfb74df1f1608a589ecca38e777
+        ALLURE_VERSION: 2.32.2
+        ALLURE_ZIP_SHA256: 3f28885e2118f6317c92f667eaddcc6491400af1fb9773c1f3797a5fa5174953
 
     - uses: aws-actions/configure-aws-credentials@v4
       if: ${{ !cancelled() }}
       with:
         aws-region: eu-central-1
-        role-to-assume: ${{ inputs.aws-oicd-role-arn }}
+        role-to-assume: ${{ inputs.aws-oidc-role-arn }}
         role-duration-seconds: 3600 # 1 hour should be more than enough to upload report
 
     # Potentially we could have several running build for the same key (for example, for the main branch), so we use improvised lock for this

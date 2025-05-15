@@ -1,16 +1,16 @@
 //! Types used in safekeeper http API. Many of them are also reused internally.
 
+use std::net::SocketAddr;
+
+use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::TimestampTz;
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
 use tokio::time::Instant;
+use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
+use utils::lsn::Lsn;
+use utils::pageserver_feedback::PageserverFeedback;
 
-use utils::{
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
-    lsn::Lsn,
-    pageserver_feedback::PageserverFeedback,
-};
-
+use crate::membership::Configuration;
 use crate::{ServerInfo, Term};
 
 #[derive(Debug, Serialize)]
@@ -18,17 +18,21 @@ pub struct SafekeeperStatus {
     pub id: NodeId,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct TimelineCreateRequest {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
-    pub peer_ids: Option<Vec<NodeId>>,
+    pub mconf: Configuration,
+    /// In the PG_VERSION_NUM macro format, like 140017.
     pub pg_version: u32,
     pub system_id: Option<u64>,
+    // By default WAL_SEGMENT_SIZE
     pub wal_seg_size: Option<u32>,
-    pub commit_lsn: Lsn,
-    // If not passed, it is assigned to the beginning of commit_lsn segment.
-    pub local_start_lsn: Option<Lsn>,
+    pub start_lsn: Lsn,
+    // Normal creation should omit this field (start_lsn initializes all LSNs).
+    // However, we allow specifying custom value higher than start_lsn for
+    // manual recovery case, see test_s3_wal_replay.
+    pub commit_lsn: Option<Lsn>,
 }
 
 /// Same as TermLsn, but serializes LSN using display serializer
@@ -67,6 +71,7 @@ pub struct PeerInfo {
     pub ts: Instant,
     pub pg_connstr: String,
     pub http_connstr: String,
+    pub https_connstr: Option<String>,
 }
 
 pub type FullTransactionId = u64;
@@ -143,8 +148,25 @@ pub type ConnectionId = u32;
 
 /// Serialize is used only for json'ing in API response. Also used internally.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WalSenderState {
+pub enum WalSenderState {
+    Vanilla(VanillaWalSenderState),
+    Interpreted(InterpretedWalSenderState),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VanillaWalSenderState {
     pub ttid: TenantTimelineId,
+    pub addr: SocketAddr,
+    pub conn_id: ConnectionId,
+    // postgres application_name
+    pub appname: Option<String>,
+    pub feedback: ReplicationFeedback,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterpretedWalSenderState {
+    pub ttid: TenantTimelineId,
+    pub shard: ShardIdentity,
     pub addr: SocketAddr,
     pub conn_id: ConnectionId,
     // postgres application_name
@@ -172,6 +194,7 @@ pub enum WalReceiverStatus {
 pub struct TimelineStatus {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
+    pub mconf: Configuration,
     pub acceptor_state: AcceptorStateStatus,
     pub pg_info: ServerInfo,
     pub flush_lsn: Lsn,
@@ -185,6 +208,27 @@ pub struct TimelineStatus {
     pub walsenders: Vec<WalSenderState>,
     pub walreceivers: Vec<WalReceiverState>,
 }
+
+/// Request to switch membership configuration.
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TimelineMembershipSwitchRequest {
+    pub mconf: Configuration,
+}
+
+/// In response both previous and current configuration are sent.
+#[derive(Serialize, Deserialize)]
+pub struct TimelineMembershipSwitchResponse {
+    pub previous_conf: Configuration,
+    pub current_conf: Configuration,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct TimelineDeleteResult {
+    pub dir_existed: bool,
+}
+
+pub type TenantDeleteResult = std::collections::HashMap<String, TimelineDeleteResult>;
 
 fn lsn_invalid() -> Lsn {
     Lsn::INVALID
@@ -218,6 +262,8 @@ pub struct SkTimelineInfo {
     pub safekeeper_connstr: Option<String>,
     #[serde(default)]
     pub http_connstr: Option<String>,
+    #[serde(default)]
+    pub https_connstr: Option<String>,
     // Minimum of all active RO replicas flush LSN
     #[serde(default = "lsn_invalid")]
     pub standby_horizon: Lsn,
@@ -240,4 +286,26 @@ pub struct TimelineTermBumpResponse {
     // before the request
     pub previous_term: u64,
     pub current_term: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SafekeeperUtilization {
+    pub timeline_count: u64,
+}
+
+/// pull_timeline request body.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PullTimelineRequest {
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
+    pub http_hosts: Vec<String>,
+    pub ignore_tombstone: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PullTimelineResponse {
+    /// Donor safekeeper host.
+    /// None if no pull happened because the timeline already exists.
+    pub safekeeper_host: Option<String>,
+    // TODO: add more fields?
 }

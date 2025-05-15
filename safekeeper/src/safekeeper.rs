@@ -1,36 +1,34 @@
 //! Acceptor part of proposer-acceptor consensus algorithm.
 
-use anyhow::{bail, Context, Result};
-use byteorder::{LittleEndian, ReadBytesExt};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-
-use postgres_ffi::{TimeLineID, MAX_SEND_SIZE};
-use safekeeper_api::models::HotStandbyFeedback;
-use safekeeper_api::Term;
-use safekeeper_api::INVALID_TERM;
-use serde::{Deserialize, Serialize};
-use std::cmp::max;
-use std::cmp::min;
+use std::cmp::{max, min};
 use std::fmt;
 use std::io::Read;
-use storage_broker::proto::SafekeeperTimelineInfo;
+use std::str::FromStr;
 
-use tracing::*;
-
-use crate::control_file;
-use crate::metrics::MISC_OPERATION_SECONDS;
-
-use crate::state::TimelineState;
-use crate::wal_storage;
+use anyhow::{Context, Result, bail};
+use byteorder::{LittleEndian, ReadBytesExt};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use postgres_ffi::{MAX_SEND_SIZE, TimeLineID};
 use pq_proto::SystemId;
-use utils::pageserver_feedback::PageserverFeedback;
-use utils::{
-    bin_ser::LeSer,
-    id::{NodeId, TenantId, TimelineId},
-    lsn::Lsn,
+use safekeeper_api::membership::{
+    INVALID_GENERATION, MemberSet, SafekeeperGeneration as Generation, SafekeeperId,
 };
+use safekeeper_api::models::HotStandbyFeedback;
+use safekeeper_api::{Term, membership};
+use serde::{Deserialize, Serialize};
+use storage_broker::proto::SafekeeperTimelineInfo;
+use tracing::*;
+use utils::bin_ser::LeSer;
+use utils::id::{NodeId, TenantId, TimelineId};
+use utils::lsn::Lsn;
+use utils::pageserver_feedback::PageserverFeedback;
 
-const SK_PROTOCOL_VERSION: u32 = 2;
+use crate::metrics::MISC_OPERATION_SECONDS;
+use crate::state::TimelineState;
+use crate::{control_file, wal_storage};
+
+pub const SK_PROTO_VERSION_2: u32 = 2;
+pub const SK_PROTO_VERSION_3: u32 = 3;
 pub const UNKNOWN_SERVER_VERSION: u32 = 0;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -57,8 +55,28 @@ impl TermHistory {
         TermHistory(Vec::new())
     }
 
-    // Parse TermHistory as n_entries followed by TermLsn pairs
+    // Parse TermHistory as n_entries followed by TermLsn pairs in network order.
     pub fn from_bytes(bytes: &mut Bytes) -> Result<TermHistory> {
+        let n_entries = bytes
+            .get_u32_f()
+            .with_context(|| "TermHistory misses len")?;
+        let mut res = Vec::with_capacity(n_entries as usize);
+        for i in 0..n_entries {
+            let term = bytes
+                .get_u64_f()
+                .with_context(|| format!("TermHistory pos {} misses term", i))?;
+            let lsn = bytes
+                .get_u64_f()
+                .with_context(|| format!("TermHistory pos {} misses lsn", i))?
+                .into();
+            res.push(TermLsn { term, lsn })
+        }
+        Ok(TermHistory(res))
+    }
+
+    // Parse TermHistory as n_entries followed by TermLsn pairs in LE order.
+    // TODO remove once v2 protocol is fully dropped.
+    pub fn from_bytes_le(bytes: &mut Bytes) -> Result<TermHistory> {
         if bytes.remaining() < 4 {
             bail!("TermHistory misses len");
         }
@@ -193,41 +211,23 @@ impl AcceptorState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct PersistedPeerInfo {
-    /// LSN up to which safekeeper offloaded WAL to s3.
-    pub backup_lsn: Lsn,
-    /// Term of the last entry.
-    pub term: Term,
-    /// LSN of the last record.
-    pub flush_lsn: Lsn,
-    /// Up to which LSN safekeeper regards its WAL as committed.
-    pub commit_lsn: Lsn,
-}
-
-impl PersistedPeerInfo {
-    pub fn new() -> Self {
-        Self {
-            backup_lsn: Lsn::INVALID,
-            term: INVALID_TERM,
-            flush_lsn: Lsn(0),
-            commit_lsn: Lsn(0),
-        }
-    }
-}
-
-// make clippy happy
-impl Default for PersistedPeerInfo {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // protocol messages
 
 /// Initial Proposer -> Acceptor message
 #[derive(Debug, Deserialize)]
 pub struct ProposerGreeting {
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
+    pub mconf: membership::Configuration,
+    /// Postgres server version
+    pub pg_version: u32,
+    pub system_id: SystemId,
+    pub wal_seg_size: u32,
+}
+
+/// V2 of the message; exists as a struct because we (de)serialized it as is.
+#[derive(Debug, Deserialize)]
+pub struct ProposerGreetingV2 {
     /// proposer-acceptor protocol version
     pub protocol_version: u32,
     /// Postgres server version
@@ -244,39 +244,47 @@ pub struct ProposerGreeting {
 /// (acceptor voted for).
 #[derive(Debug, Serialize)]
 pub struct AcceptorGreeting {
-    term: u64,
     node_id: NodeId,
+    mconf: membership::Configuration,
+    term: u64,
 }
 
 /// Vote request sent from proposer to safekeepers
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct VoteRequest {
+    pub generation: Generation,
+    pub term: Term,
+}
+
+/// V2 of the message; exists as a struct because we (de)serialized it as is.
+#[derive(Debug, Deserialize)]
+pub struct VoteRequestV2 {
     pub term: Term,
 }
 
 /// Vote itself, sent from safekeeper to proposer
 #[derive(Debug, Serialize)]
 pub struct VoteResponse {
+    generation: Generation, // membership conf generation
     pub term: Term, // safekeeper's current term; if it is higher than proposer's, the compute is out of date.
-    vote_given: u64, // fixme u64 due to padding
+    vote_given: bool,
     // Safekeeper flush_lsn (end of WAL) + history of term switches allow
     // proposer to choose the most advanced one.
     pub flush_lsn: Lsn,
     truncate_lsn: Lsn,
     pub term_history: TermHistory,
-    timeline_start_lsn: Lsn,
 }
 
 /*
  * Proposer -> Acceptor message announcing proposer is elected and communicating
  * term history to it.
  */
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ProposerElected {
+    pub generation: Generation, // membership conf generation
     pub term: Term,
     pub start_streaming_at: Lsn,
     pub term_history: TermHistory,
-    pub timeline_start_lsn: Lsn,
 }
 
 /// Request with WAL message sent from proposer to safekeeper. Along the way it
@@ -288,6 +296,22 @@ pub struct AppendRequest {
 }
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppendRequestHeader {
+    pub generation: Generation, // membership conf generation
+    // safekeeper's current term; if it is higher than proposer's, the compute is out of date.
+    pub term: Term,
+    /// start position of message in WAL
+    pub begin_lsn: Lsn,
+    /// end position of message in WAL
+    pub end_lsn: Lsn,
+    /// LSN committed by quorum of safekeepers
+    pub commit_lsn: Lsn,
+    /// minimal LSN which may be needed by proposer to perform recovery of some safekeeper
+    pub truncate_lsn: Lsn,
+}
+
+/// V2 of the message; exists as a struct because we (de)serialized it as is.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppendRequestHeaderV2 {
     // safekeeper's current term; if it is higher than proposer's, the compute is out of date.
     pub term: Term,
     // TODO: remove this field from the protocol, it in unused -- LSN of term
@@ -308,6 +332,9 @@ pub struct AppendRequestHeader {
 /// Report safekeeper state to proposer
 #[derive(Debug, Serialize, Clone)]
 pub struct AppendResponse {
+    // Membership conf generation. Not strictly required because on mismatch
+    // connection is reset, but let's sanity check it.
+    generation: Generation,
     // Current term of the safekeeper; if it is higher than proposer's, the
     // compute is out of date.
     pub term: Term,
@@ -324,8 +351,9 @@ pub struct AppendResponse {
 }
 
 impl AppendResponse {
-    fn term_only(term: Term) -> AppendResponse {
+    fn term_only(generation: Generation, term: Term) -> AppendResponse {
         AppendResponse {
+            generation,
             term,
             flush_lsn: Lsn(0),
             commit_lsn: Lsn(0),
@@ -346,65 +374,322 @@ pub enum ProposerAcceptorMessage {
     FlushWAL,
 }
 
+/// Augment Bytes with fallible get_uN where N is number of bytes methods.
+/// All reads are in network (big endian) order.
+trait BytesF {
+    fn get_u8_f(&mut self) -> Result<u8>;
+    fn get_u16_f(&mut self) -> Result<u16>;
+    fn get_u32_f(&mut self) -> Result<u32>;
+    fn get_u64_f(&mut self) -> Result<u64>;
+}
+
+impl BytesF for Bytes {
+    fn get_u8_f(&mut self) -> Result<u8> {
+        if self.is_empty() {
+            bail!("no bytes left, expected 1");
+        }
+        Ok(self.get_u8())
+    }
+    fn get_u16_f(&mut self) -> Result<u16> {
+        if self.remaining() < 2 {
+            bail!("no bytes left, expected 2");
+        }
+        Ok(self.get_u16())
+    }
+    fn get_u32_f(&mut self) -> Result<u32> {
+        if self.remaining() < 4 {
+            bail!("only {} bytes left, expected 4", self.remaining());
+        }
+        Ok(self.get_u32())
+    }
+    fn get_u64_f(&mut self) -> Result<u64> {
+        if self.remaining() < 8 {
+            bail!("only {} bytes left, expected 8", self.remaining());
+        }
+        Ok(self.get_u64())
+    }
+}
+
 impl ProposerAcceptorMessage {
-    /// Parse proposer message.
-    pub fn parse(msg_bytes: Bytes) -> Result<ProposerAcceptorMessage> {
-        // xxx using Reader is inefficient but easy to work with bincode
-        let mut stream = msg_bytes.reader();
-        // u64 is here to avoid padding; it will be removed once we stop packing C structs into the wire as is
-        let tag = stream.read_u64::<LittleEndian>()? as u8 as char;
-        match tag {
-            'g' => {
-                let msg = ProposerGreeting::des_from(&mut stream)?;
-                Ok(ProposerAcceptorMessage::Greeting(msg))
-            }
-            'v' => {
-                let msg = VoteRequest::des_from(&mut stream)?;
-                Ok(ProposerAcceptorMessage::VoteRequest(msg))
-            }
-            'e' => {
-                let mut msg_bytes = stream.into_inner();
-                if msg_bytes.remaining() < 16 {
-                    bail!("ProposerElected message is not complete");
-                }
-                let term = msg_bytes.get_u64_le();
-                let start_streaming_at = msg_bytes.get_u64_le().into();
-                let term_history = TermHistory::from_bytes(&mut msg_bytes)?;
-                if msg_bytes.remaining() < 8 {
-                    bail!("ProposerElected message is not complete");
-                }
-                let timeline_start_lsn = msg_bytes.get_u64_le().into();
-                let msg = ProposerElected {
-                    term,
-                    start_streaming_at,
-                    timeline_start_lsn,
-                    term_history,
+    /// Read cstring from Bytes.
+    fn get_cstr(buf: &mut Bytes) -> Result<String> {
+        let pos = buf
+            .iter()
+            .position(|x| *x == 0)
+            .ok_or_else(|| anyhow::anyhow!("missing cstring terminator"))?;
+        let result = buf.split_to(pos);
+        buf.advance(1); // drop the null terminator
+        match std::str::from_utf8(&result) {
+            Ok(s) => Ok(s.to_string()),
+            Err(e) => bail!("invalid utf8 in cstring: {}", e),
+        }
+    }
+
+    /// Read membership::Configuration from Bytes.
+    fn get_mconf(buf: &mut Bytes) -> Result<membership::Configuration> {
+        let generation = Generation::new(buf.get_u32_f().with_context(|| "reading generation")?);
+        let members_len = buf.get_u32_f().with_context(|| "reading members_len")?;
+        // Main member set must have at least someone in valid configuration.
+        // Empty conf is allowed until we fully migrate.
+        if generation != INVALID_GENERATION && members_len == 0 {
+            bail!("empty members_len");
+        }
+        let mut members = MemberSet::empty();
+        for i in 0..members_len {
+            let id = buf
+                .get_u64_f()
+                .with_context(|| format!("reading member {} node_id", i))?;
+            let host = Self::get_cstr(buf).with_context(|| format!("reading member {} host", i))?;
+            let pg_port = buf
+                .get_u16_f()
+                .with_context(|| format!("reading member {} port", i))?;
+            let sk = SafekeeperId {
+                id: NodeId(id),
+                host,
+                pg_port,
+            };
+            members.add(sk)?;
+        }
+        let new_members_len = buf.get_u32_f().with_context(|| "reading new_members_len")?;
+        // Non joint conf.
+        if new_members_len == 0 {
+            Ok(membership::Configuration {
+                generation,
+                members,
+                new_members: None,
+            })
+        } else {
+            let mut new_members = MemberSet::empty();
+            for i in 0..new_members_len {
+                let id = buf
+                    .get_u64_f()
+                    .with_context(|| format!("reading new member {} node_id", i))?;
+                let host = Self::get_cstr(buf)
+                    .with_context(|| format!("reading new member {} host", i))?;
+                let pg_port = buf
+                    .get_u16_f()
+                    .with_context(|| format!("reading new member {} port", i))?;
+                let sk = SafekeeperId {
+                    id: NodeId(id),
+                    host,
+                    pg_port,
                 };
-                Ok(ProposerAcceptorMessage::Elected(msg))
+                new_members.add(sk)?;
             }
-            'a' => {
-                // read header followed by wal data
-                let hdr = AppendRequestHeader::des_from(&mut stream)?;
-                let rec_size = hdr
-                    .end_lsn
-                    .checked_sub(hdr.begin_lsn)
-                    .context("begin_lsn > end_lsn in AppendRequest")?
-                    .0 as usize;
-                if rec_size > MAX_SEND_SIZE {
-                    bail!(
-                        "AppendRequest is longer than MAX_SEND_SIZE ({})",
-                        MAX_SEND_SIZE
-                    );
+            Ok(membership::Configuration {
+                generation,
+                members,
+                new_members: Some(new_members),
+            })
+        }
+    }
+
+    /// Parse proposer message.
+    pub fn parse(mut msg_bytes: Bytes, proto_version: u32) -> Result<ProposerAcceptorMessage> {
+        if proto_version == SK_PROTO_VERSION_3 {
+            if msg_bytes.is_empty() {
+                bail!("ProposerAcceptorMessage is not complete: missing tag");
+            }
+            let tag = msg_bytes.get_u8_f().with_context(|| {
+                "ProposerAcceptorMessage is not complete: missing tag".to_string()
+            })? as char;
+            match tag {
+                'g' => {
+                    let tenant_id_str =
+                        Self::get_cstr(&mut msg_bytes).with_context(|| "reading tenant_id")?;
+                    let tenant_id = TenantId::from_str(&tenant_id_str)?;
+                    let timeline_id_str =
+                        Self::get_cstr(&mut msg_bytes).with_context(|| "reading timeline_id")?;
+                    let timeline_id = TimelineId::from_str(&timeline_id_str)?;
+                    let mconf = Self::get_mconf(&mut msg_bytes)?;
+                    let pg_version = msg_bytes
+                        .get_u32_f()
+                        .with_context(|| "reading pg_version")?;
+                    let system_id = msg_bytes.get_u64_f().with_context(|| "reading system_id")?;
+                    let wal_seg_size = msg_bytes
+                        .get_u32_f()
+                        .with_context(|| "reading wal_seg_size")?;
+                    let g = ProposerGreeting {
+                        tenant_id,
+                        timeline_id,
+                        mconf,
+                        pg_version,
+                        system_id,
+                        wal_seg_size,
+                    };
+                    Ok(ProposerAcceptorMessage::Greeting(g))
                 }
+                'v' => {
+                    let generation = Generation::new(
+                        msg_bytes
+                            .get_u32_f()
+                            .with_context(|| "reading generation")?,
+                    );
+                    let term = msg_bytes.get_u64_f().with_context(|| "reading term")?;
+                    let v = VoteRequest { generation, term };
+                    Ok(ProposerAcceptorMessage::VoteRequest(v))
+                }
+                'e' => {
+                    let generation = Generation::new(
+                        msg_bytes
+                            .get_u32_f()
+                            .with_context(|| "reading generation")?,
+                    );
+                    let term = msg_bytes.get_u64_f().with_context(|| "reading term")?;
+                    let start_streaming_at: Lsn = msg_bytes
+                        .get_u64_f()
+                        .with_context(|| "reading start_streaming_at")?
+                        .into();
+                    let term_history = TermHistory::from_bytes(&mut msg_bytes)?;
+                    let msg = ProposerElected {
+                        generation,
+                        term,
+                        start_streaming_at,
+                        term_history,
+                    };
+                    Ok(ProposerAcceptorMessage::Elected(msg))
+                }
+                'a' => {
+                    let generation = Generation::new(
+                        msg_bytes
+                            .get_u32_f()
+                            .with_context(|| "reading generation")?,
+                    );
+                    let term = msg_bytes.get_u64_f().with_context(|| "reading term")?;
+                    let begin_lsn: Lsn = msg_bytes
+                        .get_u64_f()
+                        .with_context(|| "reading begin_lsn")?
+                        .into();
+                    let end_lsn: Lsn = msg_bytes
+                        .get_u64_f()
+                        .with_context(|| "reading end_lsn")?
+                        .into();
+                    let commit_lsn: Lsn = msg_bytes
+                        .get_u64_f()
+                        .with_context(|| "reading commit_lsn")?
+                        .into();
+                    let truncate_lsn: Lsn = msg_bytes
+                        .get_u64_f()
+                        .with_context(|| "reading truncate_lsn")?
+                        .into();
+                    let hdr = AppendRequestHeader {
+                        generation,
+                        term,
+                        begin_lsn,
+                        end_lsn,
+                        commit_lsn,
+                        truncate_lsn,
+                    };
+                    let rec_size = hdr
+                        .end_lsn
+                        .checked_sub(hdr.begin_lsn)
+                        .context("begin_lsn > end_lsn in AppendRequest")?
+                        .0 as usize;
+                    if rec_size > MAX_SEND_SIZE {
+                        bail!(
+                            "AppendRequest is longer than MAX_SEND_SIZE ({})",
+                            MAX_SEND_SIZE
+                        );
+                    }
+                    if msg_bytes.remaining() < rec_size {
+                        bail!(
+                            "reading WAL: only {} bytes left, wanted {}",
+                            msg_bytes.remaining(),
+                            rec_size
+                        );
+                    }
+                    let wal_data = msg_bytes.copy_to_bytes(rec_size);
+                    let msg = AppendRequest { h: hdr, wal_data };
 
-                let mut wal_data_vec: Vec<u8> = vec![0; rec_size];
-                stream.read_exact(&mut wal_data_vec)?;
-                let wal_data = Bytes::from(wal_data_vec);
-                let msg = AppendRequest { h: hdr, wal_data };
-
-                Ok(ProposerAcceptorMessage::AppendRequest(msg))
+                    Ok(ProposerAcceptorMessage::AppendRequest(msg))
+                }
+                _ => bail!("unknown proposer-acceptor message tag: {}", tag),
             }
-            _ => bail!("unknown proposer-acceptor message tag: {}", tag),
+        } else if proto_version == SK_PROTO_VERSION_2 {
+            // xxx using Reader is inefficient but easy to work with bincode
+            let mut stream = msg_bytes.reader();
+            // u64 is here to avoid padding; it will be removed once we stop packing C structs into the wire as is
+            let tag = stream.read_u64::<LittleEndian>()? as u8 as char;
+            match tag {
+                'g' => {
+                    let msgv2 = ProposerGreetingV2::des_from(&mut stream)?;
+                    let g = ProposerGreeting {
+                        tenant_id: msgv2.tenant_id,
+                        timeline_id: msgv2.timeline_id,
+                        mconf: membership::Configuration {
+                            generation: INVALID_GENERATION,
+                            members: MemberSet::empty(),
+                            new_members: None,
+                        },
+                        pg_version: msgv2.pg_version,
+                        system_id: msgv2.system_id,
+                        wal_seg_size: msgv2.wal_seg_size,
+                    };
+                    Ok(ProposerAcceptorMessage::Greeting(g))
+                }
+                'v' => {
+                    let msg = VoteRequestV2::des_from(&mut stream)?;
+                    let v = VoteRequest {
+                        generation: INVALID_GENERATION,
+                        term: msg.term,
+                    };
+                    Ok(ProposerAcceptorMessage::VoteRequest(v))
+                }
+                'e' => {
+                    let mut msg_bytes = stream.into_inner();
+                    if msg_bytes.remaining() < 16 {
+                        bail!("ProposerElected message is not complete");
+                    }
+                    let term = msg_bytes.get_u64_le();
+                    let start_streaming_at = msg_bytes.get_u64_le().into();
+                    let term_history = TermHistory::from_bytes_le(&mut msg_bytes)?;
+                    if msg_bytes.remaining() < 8 {
+                        bail!("ProposerElected message is not complete");
+                    }
+                    let _timeline_start_lsn = msg_bytes.get_u64_le();
+                    let msg = ProposerElected {
+                        generation: INVALID_GENERATION,
+                        term,
+                        start_streaming_at,
+                        term_history,
+                    };
+                    Ok(ProposerAcceptorMessage::Elected(msg))
+                }
+                'a' => {
+                    // read header followed by wal data
+                    let hdrv2 = AppendRequestHeaderV2::des_from(&mut stream)?;
+                    let hdr = AppendRequestHeader {
+                        generation: INVALID_GENERATION,
+                        term: hdrv2.term,
+                        begin_lsn: hdrv2.begin_lsn,
+                        end_lsn: hdrv2.end_lsn,
+                        commit_lsn: hdrv2.commit_lsn,
+                        truncate_lsn: hdrv2.truncate_lsn,
+                    };
+                    let rec_size = hdr
+                        .end_lsn
+                        .checked_sub(hdr.begin_lsn)
+                        .context("begin_lsn > end_lsn in AppendRequest")?
+                        .0 as usize;
+                    if rec_size > MAX_SEND_SIZE {
+                        bail!(
+                            "AppendRequest is longer than MAX_SEND_SIZE ({})",
+                            MAX_SEND_SIZE
+                        );
+                    }
+
+                    let mut wal_data_vec: Vec<u8> = vec![0; rec_size];
+                    stream.read_exact(&mut wal_data_vec)?;
+                    let wal_data = Bytes::from(wal_data_vec);
+
+                    let msg = AppendRequest { h: hdr, wal_data };
+
+                    Ok(ProposerAcceptorMessage::AppendRequest(msg))
+                }
+                _ => bail!("unknown proposer-acceptor message tag: {}", tag),
+            }
+        } else {
+            bail!("unsupported protocol version {}", proto_version);
         }
     }
 
@@ -418,36 +703,21 @@ impl ProposerAcceptorMessage {
         // We explicitly list all fields, to draw attention here when new fields are added.
         let mut size = BASE_SIZE;
         size += match self {
-            Self::Greeting(ProposerGreeting {
-                protocol_version: _,
-                pg_version: _,
-                proposer_id: _,
-                system_id: _,
-                timeline_id: _,
-                tenant_id: _,
-                tli: _,
-                wal_seg_size: _,
-            }) => 0,
+            Self::Greeting(_) => 0,
 
-            Self::VoteRequest(VoteRequest { term: _ }) => 0,
+            Self::VoteRequest(_) => 0,
 
-            Self::Elected(ProposerElected {
-                term: _,
-                start_streaming_at: _,
-                term_history: _,
-                timeline_start_lsn: _,
-            }) => 0,
+            Self::Elected(_) => 0,
 
             Self::AppendRequest(AppendRequest {
                 h:
                     AppendRequestHeader {
+                        generation: _,
                         term: _,
-                        term_start_lsn: _,
                         begin_lsn: _,
                         end_lsn: _,
                         commit_lsn: _,
                         truncate_lsn: _,
-                        proposer_uuid: _,
                     },
                 wal_data,
             }) => wal_data.len(),
@@ -455,13 +725,12 @@ impl ProposerAcceptorMessage {
             Self::NoFlushAppendRequest(AppendRequest {
                 h:
                     AppendRequestHeader {
+                        generation: _,
                         term: _,
-                        term_start_lsn: _,
                         begin_lsn: _,
                         end_lsn: _,
                         commit_lsn: _,
                         truncate_lsn: _,
-                        proposer_uuid: _,
                     },
                 wal_data,
             }) => wal_data.len(),
@@ -482,45 +751,118 @@ pub enum AcceptorProposerMessage {
 }
 
 impl AcceptorProposerMessage {
-    /// Serialize acceptor -> proposer message.
-    pub fn serialize(&self, buf: &mut BytesMut) -> Result<()> {
-        match self {
-            AcceptorProposerMessage::Greeting(msg) => {
-                buf.put_u64_le('g' as u64);
-                buf.put_u64_le(msg.term);
-                buf.put_u64_le(msg.node_id.0);
-            }
-            AcceptorProposerMessage::VoteResponse(msg) => {
-                buf.put_u64_le('v' as u64);
-                buf.put_u64_le(msg.term);
-                buf.put_u64_le(msg.vote_given);
-                buf.put_u64_le(msg.flush_lsn.into());
-                buf.put_u64_le(msg.truncate_lsn.into());
-                buf.put_u32_le(msg.term_history.0.len() as u32);
-                for e in &msg.term_history.0 {
-                    buf.put_u64_le(e.term);
-                    buf.put_u64_le(e.lsn.into());
-                }
-                buf.put_u64_le(msg.timeline_start_lsn.into());
-            }
-            AcceptorProposerMessage::AppendResponse(msg) => {
-                buf.put_u64_le('a' as u64);
-                buf.put_u64_le(msg.term);
-                buf.put_u64_le(msg.flush_lsn.into());
-                buf.put_u64_le(msg.commit_lsn.into());
-                buf.put_i64_le(msg.hs_feedback.ts);
-                buf.put_u64_le(msg.hs_feedback.xmin);
-                buf.put_u64_le(msg.hs_feedback.catalog_xmin);
+    fn put_cstr(buf: &mut BytesMut, s: &str) {
+        buf.put_slice(s.as_bytes());
+        buf.put_u8(0); // null terminator
+    }
 
-                // AsyncReadMessage in walproposer.c will not try to decode pageserver_feedback
-                // if it is not present.
-                if let Some(ref msg) = msg.pageserver_feedback {
-                    msg.serialize(buf);
-                }
-            }
+    /// Serialize membership::Configuration into buf.
+    fn serialize_mconf(buf: &mut BytesMut, mconf: &membership::Configuration) {
+        buf.put_u32(mconf.generation.into_inner());
+        buf.put_u32(mconf.members.m.len() as u32);
+        for sk in &mconf.members.m {
+            buf.put_u64(sk.id.0);
+            Self::put_cstr(buf, &sk.host);
+            buf.put_u16(sk.pg_port);
         }
+        if let Some(ref new_members) = mconf.new_members {
+            buf.put_u32(new_members.m.len() as u32);
+            for sk in &new_members.m {
+                buf.put_u64(sk.id.0);
+                Self::put_cstr(buf, &sk.host);
+                buf.put_u16(sk.pg_port);
+            }
+        } else {
+            buf.put_u32(0);
+        }
+    }
 
-        Ok(())
+    /// Serialize acceptor -> proposer message.
+    pub fn serialize(&self, buf: &mut BytesMut, proto_version: u32) -> Result<()> {
+        if proto_version == SK_PROTO_VERSION_3 {
+            match self {
+                AcceptorProposerMessage::Greeting(msg) => {
+                    buf.put_u8(b'g');
+                    buf.put_u64(msg.node_id.0);
+                    Self::serialize_mconf(buf, &msg.mconf);
+                    buf.put_u64(msg.term)
+                }
+                AcceptorProposerMessage::VoteResponse(msg) => {
+                    buf.put_u8(b'v');
+                    buf.put_u32(msg.generation.into_inner());
+                    buf.put_u64(msg.term);
+                    buf.put_u8(msg.vote_given as u8);
+                    buf.put_u64(msg.flush_lsn.into());
+                    buf.put_u64(msg.truncate_lsn.into());
+                    buf.put_u32(msg.term_history.0.len() as u32);
+                    for e in &msg.term_history.0 {
+                        buf.put_u64(e.term);
+                        buf.put_u64(e.lsn.into());
+                    }
+                }
+                AcceptorProposerMessage::AppendResponse(msg) => {
+                    buf.put_u8(b'a');
+                    buf.put_u32(msg.generation.into_inner());
+                    buf.put_u64(msg.term);
+                    buf.put_u64(msg.flush_lsn.into());
+                    buf.put_u64(msg.commit_lsn.into());
+                    buf.put_i64(msg.hs_feedback.ts);
+                    buf.put_u64(msg.hs_feedback.xmin);
+                    buf.put_u64(msg.hs_feedback.catalog_xmin);
+
+                    // AsyncReadMessage in walproposer.c will not try to decode pageserver_feedback
+                    // if it is not present.
+                    if let Some(ref msg) = msg.pageserver_feedback {
+                        msg.serialize(buf);
+                    }
+                }
+            }
+            Ok(())
+        // TODO remove 3 after converting all msgs
+        } else if proto_version == SK_PROTO_VERSION_2 {
+            match self {
+                AcceptorProposerMessage::Greeting(msg) => {
+                    buf.put_u64_le('g' as u64);
+                    // v2 didn't have mconf and fields were reordered
+                    buf.put_u64_le(msg.term);
+                    buf.put_u64_le(msg.node_id.0);
+                }
+                AcceptorProposerMessage::VoteResponse(msg) => {
+                    // v2 didn't have generation, had u64 vote_given and timeline_start_lsn
+                    buf.put_u64_le('v' as u64);
+                    buf.put_u64_le(msg.term);
+                    buf.put_u64_le(msg.vote_given as u64);
+                    buf.put_u64_le(msg.flush_lsn.into());
+                    buf.put_u64_le(msg.truncate_lsn.into());
+                    buf.put_u32_le(msg.term_history.0.len() as u32);
+                    for e in &msg.term_history.0 {
+                        buf.put_u64_le(e.term);
+                        buf.put_u64_le(e.lsn.into());
+                    }
+                    // removed timeline_start_lsn
+                    buf.put_u64_le(0);
+                }
+                AcceptorProposerMessage::AppendResponse(msg) => {
+                    // v2 didn't have generation
+                    buf.put_u64_le('a' as u64);
+                    buf.put_u64_le(msg.term);
+                    buf.put_u64_le(msg.flush_lsn.into());
+                    buf.put_u64_le(msg.commit_lsn.into());
+                    buf.put_i64_le(msg.hs_feedback.ts);
+                    buf.put_u64_le(msg.hs_feedback.xmin);
+                    buf.put_u64_le(msg.hs_feedback.catalog_xmin);
+
+                    // AsyncReadMessage in walproposer.c will not try to decode pageserver_feedback
+                    // if it is not present.
+                    if let Some(ref msg) = msg.pageserver_feedback {
+                        msg.serialize(buf);
+                    }
+                }
+            }
+            Ok(())
+        } else {
+            bail!("unsupported protocol version {}", proto_version);
+        }
     }
 }
 
@@ -617,14 +959,6 @@ where
         &mut self,
         msg: &ProposerGreeting,
     ) -> Result<Option<AcceptorProposerMessage>> {
-        // Check protocol compatibility
-        if msg.protocol_version != SK_PROTOCOL_VERSION {
-            bail!(
-                "incompatible protocol version {}, expected {}",
-                msg.protocol_version,
-                SK_PROTOCOL_VERSION
-            );
-        }
         /* Postgres major version mismatch is treated as fatal error
          * because safekeepers parse WAL headers and the format
          * may change between versions.
@@ -679,15 +1013,19 @@ where
             self.state.finish_change(&state).await?;
         }
 
-        info!(
-            "processed greeting from walproposer {}, sending term {:?}",
-            msg.proposer_id.map(|b| format!("{:X}", b)).join(""),
-            self.state.acceptor_state.term
-        );
-        Ok(Some(AcceptorProposerMessage::Greeting(AcceptorGreeting {
-            term: self.state.acceptor_state.term,
+        // Switch into conf given by proposer conf if it is higher.
+        self.state.membership_switch(msg.mconf.clone()).await?;
+
+        let apg = AcceptorGreeting {
             node_id: self.node_id,
-        })))
+            mconf: self.state.mconf.clone(),
+            term: self.state.acceptor_state.term,
+        };
+        info!(
+            "processed greeting {:?} from walproposer, sending {:?}",
+            msg, apg
+        );
+        Ok(Some(AcceptorProposerMessage::Greeting(apg)))
     }
 
     /// Give vote for the given term, if we haven't done that previously.
@@ -695,25 +1033,27 @@ where
         &mut self,
         msg: &VoteRequest,
     ) -> Result<Option<AcceptorProposerMessage>> {
+        if self.state.mconf.generation != msg.generation {
+            bail!(
+                "refusing {:?} due to generation mismatch: sk generation {}",
+                msg,
+                self.state.mconf.generation
+            );
+        }
         // Once voted, we won't accept data from older proposers; flush
         // everything we've already received so that new proposer starts
-        // streaming at end of our WAL, without overlap. Currently we truncate
-        // WAL at streaming point, so this avoids truncating already committed
-        // WAL.
-        //
-        // TODO: it would be smoother to not truncate committed piece at
-        // handle_elected instead. Currently not a big deal, as proposer is the
-        // only source of WAL; with peer2peer recovery it would be more
-        // important.
+        // streaming at end of our WAL, without overlap. WAL is truncated at
+        // streaming point and commit_lsn may be advanced from peers, so this
+        // also avoids possible spurious attempt to truncate committed WAL.
         self.wal_store.flush_wal().await?;
         // initialize with refusal
         let mut resp = VoteResponse {
+            generation: self.state.mconf.generation,
             term: self.state.acceptor_state.term,
-            vote_given: false as u64,
+            vote_given: false,
             flush_lsn: self.flush_lsn(),
             truncate_lsn: self.state.inmem.peer_horizon_lsn,
             term_history: self.get_term_history(),
-            timeline_start_lsn: self.state.timeline_start_lsn,
         };
         if self.state.acceptor_state.term < msg.term {
             let mut state = self.state.start_change();
@@ -722,15 +1062,16 @@ where
             self.state.finish_change(&state).await?;
 
             resp.term = self.state.acceptor_state.term;
-            resp.vote_given = true as u64;
+            resp.vote_given = true;
         }
-        info!("processed VoteRequest for term {}: {:?}", msg.term, &resp);
+        info!("processed {:?}: sending {:?}", msg, &resp);
         Ok(Some(AcceptorProposerMessage::VoteResponse(resp)))
     }
 
     /// Form AppendResponse from current state.
     fn append_response(&self) -> AppendResponse {
         let ar = AppendResponse {
+            generation: self.state.mconf.generation,
             term: self.state.acceptor_state.term,
             flush_lsn: self.flush_lsn(),
             commit_lsn: self.state.commit_lsn,
@@ -757,6 +1098,13 @@ where
             self.get_last_log_term(),
             self.flush_lsn()
         );
+        if self.state.mconf.generation != msg.generation {
+            bail!(
+                "refusing {:?} due to generation mismatch: sk generation {}",
+                msg,
+                self.state.mconf.generation
+            );
+        }
         if self.state.acceptor_state.term < msg.term {
             let mut state = self.state.start_change();
             state.acceptor_state.term = msg.term;
@@ -793,9 +1141,14 @@ where
         // and walproposer recalculates the streaming point. OTOH repeating
         // error indicates a serious bug.
         if last_common_point.lsn != msg.start_streaming_at {
-            bail!("refusing ProposerElected with unexpected truncation point: lcp={:?} start_streaming_at={}, term={}, sk_th={:?} flush_lsn={}, wp_th={:?}",
-                    last_common_point, msg.start_streaming_at,
-                    self.state.acceptor_state.term, sk_th, self.flush_lsn(), msg.term_history,
+            bail!(
+                "refusing ProposerElected with unexpected truncation point: lcp={:?} start_streaming_at={}, term={}, sk_th={:?} flush_lsn={}, wp_th={:?}",
+                last_common_point,
+                msg.start_streaming_at,
+                self.state.acceptor_state.term,
+                sk_th,
+                self.flush_lsn(),
+                msg.term_history,
             );
         }
 
@@ -803,8 +1156,12 @@ where
         assert!(
             msg.start_streaming_at >= self.state.inmem.commit_lsn,
             "attempt to truncate committed data: start_streaming_at={}, commit_lsn={}, term={}, sk_th={:?} flush_lsn={}, wp_th={:?}",
-            msg.start_streaming_at, self.state.inmem.commit_lsn,
-            self.state.acceptor_state.term, sk_th, self.flush_lsn(), msg.term_history,
+            msg.start_streaming_at,
+            self.state.inmem.commit_lsn,
+            self.state.acceptor_state.term,
+            sk_th,
+            self.flush_lsn(),
+            msg.term_history,
         );
 
         // Before first WAL write initialize its segment. It makes first segment
@@ -829,18 +1186,22 @@ where
             // Here we learn initial LSN for the first time, set fields
             // interested in that.
 
-            if state.timeline_start_lsn == Lsn(0) {
-                // Remember point where WAL begins globally.
-                state.timeline_start_lsn = msg.timeline_start_lsn;
-                info!(
-                    "setting timeline_start_lsn to {:?}",
-                    state.timeline_start_lsn
-                );
+            if let Some(start_lsn) = msg.term_history.0.first() {
+                if state.timeline_start_lsn == Lsn(0) {
+                    // Remember point where WAL begins globally. In the future it
+                    // will be intialized immediately on timeline creation.
+                    state.timeline_start_lsn = start_lsn.lsn;
+                    info!(
+                        "setting timeline_start_lsn to {:?}",
+                        state.timeline_start_lsn
+                    );
+                }
             }
+
             if state.peer_horizon_lsn == Lsn(0) {
                 // Update peer_horizon_lsn as soon as we know where timeline starts.
                 // It means that peer_horizon_lsn cannot be zero after we know timeline_start_lsn.
-                state.peer_horizon_lsn = msg.timeline_start_lsn;
+                state.peer_horizon_lsn = state.timeline_start_lsn;
             }
             if state.local_start_lsn == Lsn(0) {
                 state.local_start_lsn = msg.start_streaming_at;
@@ -914,13 +1275,29 @@ where
         msg: &AppendRequest,
         require_flush: bool,
     ) -> Result<Option<AcceptorProposerMessage>> {
+        // Refuse message on generation mismatch. On reconnect wp will get full
+        // configuration from greeting.
+        if self.state.mconf.generation != msg.h.generation {
+            bail!(
+                "refusing append request due to generation mismatch: request {}, sk {}",
+                msg.h.generation,
+                self.state.mconf.generation
+            );
+        }
+
         if self.state.acceptor_state.term < msg.h.term {
             bail!("got AppendRequest before ProposerElected");
         }
 
-        // If our term is higher, immediately refuse the message.
+        // If our term is higher, immediately refuse the message. Send term only
+        // response; elected walproposer can never advance the term, so it will
+        // figure out the refusal from it -- which is important as term change
+        // should cause not just reconnection but whole walproposer re-election.
         if self.state.acceptor_state.term > msg.h.term {
-            let resp = AppendResponse::term_only(self.state.acceptor_state.term);
+            let resp = AppendResponse::term_only(
+                self.state.mconf.generation,
+                self.state.acceptor_state.term,
+            );
             return Ok(Some(AcceptorProposerMessage::AppendResponse(resp)));
         }
 
@@ -948,10 +1325,8 @@ where
             );
         }
 
-        // Now we know that we are in the same term as the proposer,
-        // processing the message.
-
-        self.state.inmem.proposer_uuid = msg.h.proposer_uuid;
+        // Now we know that we are in the same term as the proposer, process the
+        // message.
 
         // do the job
         if !msg.wal_data.is_empty() {
@@ -1010,7 +1385,7 @@ where
 
     /// Update commit_lsn from peer safekeeper data.
     pub async fn record_safekeeper_info(&mut self, sk_info: &SafekeeperTimelineInfo) -> Result<()> {
-        if (Lsn(sk_info.commit_lsn) != Lsn::INVALID) && (sk_info.last_log_term != INVALID_TERM) {
+        if Lsn(sk_info.commit_lsn) != Lsn::INVALID {
             // Note: the check is too restrictive, generally we can update local
             // commit_lsn if our history matches (is part of) history of advanced
             // commit_lsn provider.
@@ -1024,13 +1399,19 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Deref;
+    use std::str::FromStr;
+    use std::time::{Instant, UNIX_EPOCH};
+
     use futures::future::BoxFuture;
-    use postgres_ffi::{XLogSegNo, WAL_SEGMENT_SIZE};
+    use postgres_ffi::{WAL_SEGMENT_SIZE, XLogSegNo};
     use safekeeper_api::ServerInfo;
+    use safekeeper_api::membership::{
+        Configuration, MemberSet, SafekeeperGeneration, SafekeeperId,
+    };
 
     use super::*;
-    use crate::state::{EvictionState, PersistedPeers, TimelinePersistentState};
-    use std::{ops::Deref, str::FromStr, time::Instant};
+    use crate::state::{EvictionState, TimelinePersistentState};
 
     // fake storage for tests
     struct InMemoryState {
@@ -1112,11 +1493,21 @@ mod tests {
         let wal_store = DummyWalStore { lsn: Lsn(0) };
         let mut sk = SafeKeeper::new(TimelineState::new(storage), wal_store, NodeId(0)).unwrap();
 
+        // Vote with generation mismatch should be rejected.
+        let gen_mismatch_vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest {
+            generation: SafekeeperGeneration::new(42),
+            term: 1,
+        });
+        assert!(sk.process_msg(&gen_mismatch_vote_request).await.is_err());
+
         // check voting for 1 is ok
-        let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest { term: 1 });
+        let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest {
+            generation: Generation::new(0),
+            term: 1,
+        });
         let mut vote_resp = sk.process_msg(&vote_request).await;
         match vote_resp.unwrap() {
-            Some(AcceptorProposerMessage::VoteResponse(resp)) => assert!(resp.vote_given != 0),
+            Some(AcceptorProposerMessage::VoteResponse(resp)) => assert!(resp.vote_given),
             r => panic!("unexpected response: {:?}", r),
         }
 
@@ -1131,7 +1522,7 @@ mod tests {
         // and ensure voting second time for 1 is not ok
         vote_resp = sk.process_msg(&vote_request).await;
         match vote_resp.unwrap() {
-            Some(AcceptorProposerMessage::VoteResponse(resp)) => assert!(resp.vote_given == 0),
+            Some(AcceptorProposerMessage::VoteResponse(resp)) => assert!(!resp.vote_given),
             r => panic!("unexpected response: {:?}", r),
         }
     }
@@ -1146,13 +1537,12 @@ mod tests {
         let mut sk = SafeKeeper::new(TimelineState::new(storage), wal_store, NodeId(0)).unwrap();
 
         let mut ar_hdr = AppendRequestHeader {
+            generation: Generation::new(0),
             term: 2,
-            term_start_lsn: Lsn(3),
             begin_lsn: Lsn(1),
             end_lsn: Lsn(2),
             commit_lsn: Lsn(0),
             truncate_lsn: Lsn(0),
-            proposer_uuid: [0; 16],
         };
         let mut append_request = AppendRequest {
             h: ar_hdr.clone(),
@@ -1160,6 +1550,7 @@ mod tests {
         };
 
         let pem = ProposerElected {
+            generation: Generation::new(0),
             term: 2,
             start_streaming_at: Lsn(1),
             term_history: TermHistory(vec![
@@ -1172,8 +1563,17 @@ mod tests {
                     lsn: Lsn(3),
                 },
             ]),
-            timeline_start_lsn: Lsn(1),
         };
+
+        // check that elected msg with generation mismatch is rejected
+        let mut pem_gen_mismatch = pem.clone();
+        pem_gen_mismatch.generation = SafekeeperGeneration::new(42);
+        assert!(
+            sk.process_msg(&ProposerAcceptorMessage::Elected(pem_gen_mismatch))
+                .await
+                .is_err()
+        );
+
         sk.process_msg(&ProposerAcceptorMessage::Elected(pem))
             .await
             .unwrap();
@@ -1207,31 +1607,45 @@ mod tests {
         let mut sk = SafeKeeper::new(TimelineState::new(storage), wal_store, NodeId(0)).unwrap();
 
         let pem = ProposerElected {
+            generation: Generation::new(0),
             term: 1,
             start_streaming_at: Lsn(1),
             term_history: TermHistory(vec![TermLsn {
                 term: 1,
                 lsn: Lsn(1),
             }]),
-            timeline_start_lsn: Lsn(1),
         };
         sk.process_msg(&ProposerAcceptorMessage::Elected(pem))
             .await
             .unwrap();
 
         let ar_hdr = AppendRequestHeader {
+            generation: Generation::new(0),
             term: 1,
-            term_start_lsn: Lsn(3),
             begin_lsn: Lsn(1),
             end_lsn: Lsn(2),
             commit_lsn: Lsn(0),
             truncate_lsn: Lsn(0),
-            proposer_uuid: [0; 16],
         };
         let append_request = AppendRequest {
             h: ar_hdr.clone(),
             wal_data: Bytes::from_static(b"b"),
         };
+
+        // check that append request with generation mismatch is rejected
+        let mut ar_hdr_gen_mismatch = ar_hdr.clone();
+        ar_hdr_gen_mismatch.generation = SafekeeperGeneration::new(42);
+        let append_request_gen_mismatch = AppendRequest {
+            h: ar_hdr_gen_mismatch,
+            wal_data: Bytes::from_static(b"b"),
+        };
+        assert!(
+            sk.process_msg(&ProposerAcceptorMessage::AppendRequest(
+                append_request_gen_mismatch
+            ))
+            .await
+            .is_err()
+        );
 
         // do write ending at 2, it should be ok
         sk.process_msg(&ProposerAcceptorMessage::AppendRequest(append_request))
@@ -1313,12 +1727,21 @@ mod tests {
 
     #[test]
     fn test_sk_state_bincode_serde_roundtrip() {
-        use utils::Hex;
         let tenant_id = TenantId::from_str("cf0480929707ee75372337efaa5ecf96").unwrap();
         let timeline_id = TimelineId::from_str("112ded66422aa5e953e5440fa5427ac4").unwrap();
         let state = TimelinePersistentState {
             tenant_id,
             timeline_id,
+            mconf: Configuration {
+                generation: SafekeeperGeneration::new(42),
+                members: MemberSet::new(vec![SafekeeperId {
+                    id: NodeId(1),
+                    host: "hehe.org".to_owned(),
+                    pg_port: 5432,
+                }])
+                .expect("duplicate member"),
+                new_members: None,
+            },
             acceptor_state: AcceptorState {
                 term: 42,
                 term_history: TermHistory(vec![TermLsn {
@@ -1342,69 +1765,12 @@ mod tests {
             backup_lsn: Lsn(1234567300),
             peer_horizon_lsn: Lsn(9999999),
             remote_consistent_lsn: Lsn(1234560000),
-            peers: PersistedPeers(vec![(
-                NodeId(1),
-                PersistedPeerInfo {
-                    backup_lsn: Lsn(1234567000),
-                    term: 42,
-                    flush_lsn: Lsn(1234567800 - 8),
-                    commit_lsn: Lsn(1234567600),
-                },
-            )]),
             partial_backup: crate::wal_backup_partial::State::default(),
             eviction_state: EvictionState::Present,
+            creation_ts: UNIX_EPOCH,
         };
 
         let ser = state.ser().unwrap();
-
-        #[rustfmt::skip]
-        let expected = [
-            // tenant_id as length prefixed hex
-            0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x63, 0x66, 0x30, 0x34, 0x38, 0x30, 0x39, 0x32, 0x39, 0x37, 0x30, 0x37, 0x65, 0x65, 0x37, 0x35, 0x33, 0x37, 0x32, 0x33, 0x33, 0x37, 0x65, 0x66, 0x61, 0x61, 0x35, 0x65, 0x63, 0x66, 0x39, 0x36,
-            // timeline_id as length prefixed hex
-            0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x31, 0x31, 0x32, 0x64, 0x65, 0x64, 0x36, 0x36, 0x34, 0x32, 0x32, 0x61, 0x61, 0x35, 0x65, 0x39, 0x35, 0x33, 0x65, 0x35, 0x34, 0x34, 0x30, 0x66, 0x61, 0x35, 0x34, 0x32, 0x37, 0x61, 0x63, 0x34,
-            // term
-            0x2a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // length prefix
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // unsure why this order is swapped
-            0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // pg_version
-            0x0e, 0x00, 0x00, 0x00,
-            // systemid
-            0x21, 0x43, 0x65, 0x87, 0x78, 0x56, 0x34, 0x12,
-            // wal_seg_size
-            0x78, 0x56, 0x34, 0x12,
-            // pguuid as length prefixed hex
-            0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x63, 0x34, 0x37, 0x61, 0x34, 0x32, 0x61, 0x35, 0x30, 0x66, 0x34, 0x34, 0x65, 0x35, 0x35, 0x33, 0x65, 0x39, 0x61, 0x35, 0x32, 0x61, 0x34, 0x32, 0x36, 0x36, 0x65, 0x64, 0x32, 0x64, 0x31, 0x31,
-
-            // timeline_start_lsn
-            0x00, 0x56, 0x34, 0x12, 0x00, 0x00, 0x00, 0x00,
-            0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x78, 0x02, 0x96, 0x49, 0x00, 0x00, 0x00, 0x00,
-            0x84, 0x00, 0x96, 0x49, 0x00, 0x00, 0x00, 0x00,
-            0x7f, 0x96, 0x98, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0xe4, 0x95, 0x49, 0x00, 0x00, 0x00, 0x00,
-            // length prefix for persistentpeers
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // nodeid
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // backuplsn
-            0x58, 0xff, 0x95, 0x49, 0x00, 0x00, 0x00, 0x00,
-            0x2a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x70, 0x02, 0x96, 0x49, 0x00, 0x00, 0x00, 0x00,
-            0xb0, 0x01, 0x96, 0x49, 0x00, 0x00, 0x00, 0x00,
-            // partial_backup
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // eviction_state
-            0x00, 0x00, 0x00, 0x00,
-        ];
-
-        assert_eq!(Hex(&ser), Hex(&expected));
 
         let deser = TimelinePersistentState::des(&ser).unwrap();
 

@@ -1,28 +1,28 @@
 //! Helper functions to upload files to remote storage with a RemoteStorage
 
-use anyhow::{bail, Context};
+use std::io::{ErrorKind, SeekFrom};
+use std::time::SystemTime;
+
+use anyhow::{Context, bail};
 use bytes::Bytes;
 use camino::Utf8Path;
 use fail::fail_point;
 use pageserver_api::shard::TenantShardId;
-use std::io::{ErrorKind, SeekFrom};
-use std::time::SystemTime;
+use remote_storage::{GenericRemoteStorage, RemotePath, TimeTravelError};
 use tokio::fs::{self, File};
 use tokio::io::AsyncSeekExt;
 use tokio_util::sync::CancellationToken;
+use tracing::info;
+use utils::id::{TenantId, TimelineId};
 use utils::{backoff, pausable_failpoint};
 
+use super::Generation;
 use super::index::IndexPart;
 use super::manifest::TenantManifest;
-use super::Generation;
 use crate::tenant::remote_timeline_client::{
     remote_index_path, remote_initdb_archive_path, remote_initdb_preserved_archive_path,
     remote_tenant_manifest_path,
 };
-use remote_storage::{GenericRemoteStorage, RemotePath, TimeTravelError};
-use utils::id::{TenantId, TimelineId};
-
-use tracing::info;
 
 /// Serializes and uploads the given index part data to the remote storage.
 pub(crate) async fn upload_index_part(
@@ -39,6 +39,10 @@ pub(crate) async fn upload_index_part(
         bail!("failpoint before-upload-index")
     });
     pausable_failpoint!("before-upload-index-pausable");
+
+    // Safety: refuse to persist invalid index metadata, to mitigate the impact of any bug that produces this
+    // (this should never happen)
+    index_part.validate().map_err(|e| anyhow::anyhow!(e))?;
 
     // FIXME: this error comes too late
     let serialized = index_part.to_json_bytes()?;
@@ -57,6 +61,7 @@ pub(crate) async fn upload_index_part(
         .await
         .with_context(|| format!("upload index part for '{tenant_shard_id} / {timeline_id}'"))
 }
+
 /// Serializes and uploads the given tenant manifest data to the remote storage.
 pub(crate) async fn upload_tenant_manifest(
     storage: &GenericRemoteStorage,
@@ -72,16 +77,14 @@ pub(crate) async fn upload_tenant_manifest(
     });
     pausable_failpoint!("before-upload-manifest-pausable");
 
-    let serialized = tenant_manifest.to_json_bytes()?;
-    let serialized = Bytes::from(serialized);
-
-    let tenant_manifest_site = serialized.len();
-
+    let serialized = Bytes::from(tenant_manifest.to_json_bytes()?);
+    let tenant_manifest_size = serialized.len();
     let remote_path = remote_tenant_manifest_path(tenant_shard_id, generation);
+
     storage
         .upload_storage_object(
             futures::stream::once(futures::future::ready(Ok(serialized))),
-            tenant_manifest_site,
+            tenant_manifest_size,
             &remote_path,
             cancel,
         )
@@ -130,7 +133,9 @@ pub(super) async fn upload_timeline_layer<'a>(
         .len();
 
     if metadata_size != fs_size {
-        bail!("File {local_path:?} has its current FS size {fs_size} diferent from initially determined {metadata_size}");
+        bail!(
+            "File {local_path:?} has its current FS size {fs_size} diferent from initially determined {metadata_size}"
+        );
     }
 
     let fs_size = usize::try_from(fs_size)

@@ -1,6 +1,8 @@
 //! An asynchronous, pipelined, PostgreSQL client.
 #![warn(clippy::all)]
 
+use postgres_protocol2::message::backend::ReadyForQueryBody;
+
 pub use crate::cancel_token::CancelToken;
 pub use crate::client::{Client, SocketConfig};
 pub use crate::config::Config;
@@ -14,11 +16,9 @@ pub use crate::row::{Row, SimpleQueryRow};
 pub use crate::simple_query::SimpleQueryStream;
 pub use crate::statement::{Column, Statement};
 pub use crate::tls::NoTls;
-pub use crate::to_statement::ToStatement;
 pub use crate::transaction::Transaction;
 pub use crate::transaction_builder::{IsolationLevel, TransactionBuilder};
 use crate::types::ToSql;
-use postgres_protocol2::message::backend::ReadyForQueryBody;
 
 /// After executing a query, the connection will be in one of these states
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -65,7 +65,6 @@ pub mod row;
 mod simple_query;
 mod statement;
 pub mod tls;
-mod to_statement;
 mod transaction;
 mod transaction_builder;
 pub mod types;

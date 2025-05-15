@@ -21,40 +21,35 @@
 //! redo Postgres process, but some records it can handle directly with
 //! bespoken Rust code.
 
+use std::backtrace::Backtrace;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::OnceLock;
-use std::time::Duration;
-use std::time::Instant;
-use std::time::SystemTime;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant, SystemTime};
 
+use bytes::{Buf, Bytes};
+use pageserver_api::key::{Key, rel_block_to_key};
+use pageserver_api::record::NeonWalRecord;
+use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
-use postgres_ffi::fsm_logical_to_physical;
+use postgres_ffi::relfile_utils::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::walrecord::*;
-use postgres_ffi::{dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch, TimestampTz};
+use postgres_ffi::{
+    TimestampTz, TransactionId, dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch,
+    fsm_logical_to_physical, pg_constants,
+};
+use tracing::*;
+use utils::bin_ser::{DeserializeError, SerializeError};
+use utils::lsn::Lsn;
+use utils::rate_limit::RateLimit;
+use utils::{critical, failpoint_support};
 use wal_decoder::models::*;
 
-use anyhow::{bail, Result};
-use bytes::{Buf, Bytes};
-use tracing::*;
-use utils::failpoint_support;
-use utils::rate_limit::RateLimit;
-
+use crate::ZERO_PAGE;
 use crate::context::RequestContext;
 use crate::metrics::WAL_INGEST;
 use crate::pgdatadir_mapping::{DatadirModification, Version};
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
-use crate::tenant::PageReconstructError;
-use crate::tenant::Timeline;
-use crate::ZERO_PAGE;
-use pageserver_api::key::rel_block_to_key;
-use pageserver_api::record::NeonWalRecord;
-use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
-use postgres_ffi::pg_constants;
-use postgres_ffi::relfile_utils::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
-use postgres_ffi::TransactionId;
-use utils::bin_ser::SerializeError;
-use utils::lsn::Lsn;
+use crate::tenant::{PageReconstructError, Timeline};
 
 enum_pgversion! {CheckPoint, pgv::CheckPoint}
 
@@ -109,12 +104,101 @@ struct WarnIngestLag {
     timestamp_invalid_msg_ratelimit: RateLimit,
 }
 
+pub struct WalIngestError {
+    pub backtrace: std::backtrace::Backtrace,
+    pub kind: WalIngestErrorKind,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum WalIngestErrorKind {
+    #[error(transparent)]
+    #[allow(private_interfaces)]
+    PageReconstructError(#[from] PageReconstructError),
+    #[error(transparent)]
+    DeserializationFailure(#[from] DeserializeError),
+    #[error(transparent)]
+    SerializationFailure(#[from] SerializeError),
+    #[error("the request contains data not supported by pageserver: {0} @ {1}")]
+    InvalidKey(Key, Lsn),
+    #[error("twophase file for xid {0} already exists")]
+    FileAlreadyExists(u64),
+    #[error("slru segment {0:?}/{1} already exists")]
+    SlruAlreadyExists(SlruKind, u32),
+    #[error("relation already exists")]
+    RelationAlreadyExists(RelTag),
+    #[error("invalid reldir key {0}")]
+    InvalidRelDirKey(Key),
+
+    #[error(transparent)]
+    LogicalError(anyhow::Error),
+    #[error(transparent)]
+    EncodeAuxFileError(anyhow::Error),
+    #[error(transparent)]
+    MaybeRelSizeV2Error(anyhow::Error),
+
+    #[error("timeline shutting down")]
+    Cancelled,
+}
+
+impl<T> From<T> for WalIngestError
+where
+    WalIngestErrorKind: From<T>,
+{
+    fn from(value: T) -> Self {
+        WalIngestError {
+            backtrace: Backtrace::capture(),
+            kind: WalIngestErrorKind::from(value),
+        }
+    }
+}
+
+impl std::error::Error for WalIngestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.kind.source()
+    }
+}
+
+impl core::fmt::Display for WalIngestError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.kind.fmt(f)
+    }
+}
+
+impl core::fmt::Debug for WalIngestError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if f.alternate() {
+            f.debug_map()
+                .key(&"backtrace")
+                .value(&self.backtrace)
+                .key(&"kind")
+                .value(&self.kind)
+                .finish()
+        } else {
+            writeln!(f, "Error: {:?}", self.kind)?;
+            if self.backtrace.status() == std::backtrace::BacktraceStatus::Captured {
+                writeln!(f, "Stack backtrace: {:?}", self.backtrace)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! ensure_walingest {
+    ($($t:tt)*) => {
+        _ = || -> Result<(), anyhow::Error> {
+            anyhow::ensure!($($t)*);
+            Ok(())
+        }().map_err(WalIngestErrorKind::LogicalError)?;
+    };
+}
+
 impl WalIngest {
     pub async fn new(
         timeline: &Timeline,
         startpoint: Lsn,
         ctx: &RequestContext,
-    ) -> anyhow::Result<WalIngest> {
+    ) -> Result<WalIngest, WalIngestError> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
         // quickly in `ingest_record` and update it when it changes.
         let checkpoint_bytes = timeline.get_checkpoint(startpoint, ctx).await?;
@@ -150,7 +234,7 @@ impl WalIngest {
         interpreted: InterpretedWalRecord,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<bool> {
+    ) -> Result<bool, WalIngestError> {
         WAL_INGEST.records_received.inc();
         let prev_len = modification.len();
 
@@ -293,7 +377,7 @@ impl WalIngest {
     }
 
     /// This is the same as AdjustToFullTransactionId(xid) in PostgreSQL
-    fn adjust_to_full_transaction_id(&self, xid: TransactionId) -> Result<u64> {
+    fn adjust_to_full_transaction_id(&self, xid: TransactionId) -> Result<u64, WalIngestError> {
         let next_full_xid =
             enum_pgversion_dispatch!(&self.checkpoint, CheckPoint, cp, { cp.nextXid.value });
 
@@ -303,12 +387,14 @@ impl WalIngest {
         if xid > next_xid {
             // Wraparound occurred, must be from a prev epoch.
             if epoch == 0 {
-                bail!("apparent XID wraparound with prepared transaction XID {xid}, nextXid is {next_full_xid}");
+                Err(WalIngestErrorKind::LogicalError(anyhow::anyhow!(
+                    "apparent XID wraparound with prepared transaction XID {xid}, nextXid is {next_full_xid}"
+                )))?;
             }
             epoch -= 1;
         }
 
-        Ok((epoch as u64) << 32 | xid as u64)
+        Ok(((epoch as u64) << 32) | xid as u64)
     }
 
     async fn ingest_clear_vm_bits(
@@ -316,7 +402,7 @@ impl WalIngest {
         clear_vm_bits: ClearVmBits,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         let ClearVmBits {
             new_heap_blkno,
             old_heap_blkno,
@@ -327,93 +413,75 @@ impl WalIngest {
         let mut new_vm_blk = new_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
         let mut old_vm_blk = old_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
 
-        // Sometimes, Postgres seems to create heap WAL records with the
-        // ALL_VISIBLE_CLEARED flag set, even though the bit in the VM page is
-        // not set. In fact, it's possible that the VM page does not exist at all.
-        // In that case, we don't want to store a record to clear the VM bit;
-        // replaying it would fail to find the previous image of the page, because
-        // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
-        // record if it doesn't.
-        //
-        // TODO: analyze the metrics and tighten this up accordingly. This logic
-        // implicitly assumes that VM pages see explicit WAL writes before
-        // implicit ClearVmBits, and will otherwise silently drop updates.
+        // VM bits can only be cleared on the shard(s) owning the VM relation, and must be within
+        // its view of the VM relation size. Out of caution, error instead of failing WAL ingestion,
+        // as there has historically been cases where PostgreSQL has cleared spurious VM pages. See:
+        // https://github.com/neondatabase/neon/pull/10634.
         let Some(vm_size) = get_relsize(modification, vm_rel, ctx).await? else {
-            WAL_INGEST
-                .clear_vm_bits_unknown
-                .with_label_values(&["relation"])
-                .inc();
+            critical!("clear_vm_bits for unknown VM relation {vm_rel}");
             return Ok(());
         };
         if let Some(blknum) = new_vm_blk {
             if blknum >= vm_size {
-                WAL_INGEST
-                    .clear_vm_bits_unknown
-                    .with_label_values(&["new_page"])
-                    .inc();
+                critical!("new_vm_blk {blknum} not in {vm_rel} of size {vm_size}");
                 new_vm_blk = None;
             }
         }
         if let Some(blknum) = old_vm_blk {
             if blknum >= vm_size {
-                WAL_INGEST
-                    .clear_vm_bits_unknown
-                    .with_label_values(&["old_page"])
-                    .inc();
+                critical!("old_vm_blk {blknum} not in {vm_rel} of size {vm_size}");
                 old_vm_blk = None;
             }
         }
 
-        if new_vm_blk.is_some() || old_vm_blk.is_some() {
-            if new_vm_blk == old_vm_blk {
-                // An UPDATE record that needs to clear the bits for both old and the
-                // new page, both of which reside on the same VM page.
+        if new_vm_blk.is_none() && old_vm_blk.is_none() {
+            return Ok(());
+        } else if new_vm_blk == old_vm_blk {
+            // An UPDATE record that needs to clear the bits for both old and the new page, both of
+            // which reside on the same VM page.
+            self.put_rel_wal_record(
+                modification,
+                vm_rel,
+                new_vm_blk.unwrap(),
+                NeonWalRecord::ClearVisibilityMapFlags {
+                    new_heap_blkno,
+                    old_heap_blkno,
+                    flags,
+                },
+                ctx,
+            )
+            .await?;
+        } else {
+            // Clear VM bits for one heap page, or for two pages that reside on different VM pages.
+            if let Some(new_vm_blk) = new_vm_blk {
                 self.put_rel_wal_record(
                     modification,
                     vm_rel,
-                    new_vm_blk.unwrap(),
+                    new_vm_blk,
                     NeonWalRecord::ClearVisibilityMapFlags {
                         new_heap_blkno,
+                        old_heap_blkno: None,
+                        flags,
+                    },
+                    ctx,
+                )
+                .await?;
+            }
+            if let Some(old_vm_blk) = old_vm_blk {
+                self.put_rel_wal_record(
+                    modification,
+                    vm_rel,
+                    old_vm_blk,
+                    NeonWalRecord::ClearVisibilityMapFlags {
+                        new_heap_blkno: None,
                         old_heap_blkno,
                         flags,
                     },
                     ctx,
                 )
                 .await?;
-            } else {
-                // Clear VM bits for one heap page, or for two pages that reside on
-                // different VM pages.
-                if let Some(new_vm_blk) = new_vm_blk {
-                    self.put_rel_wal_record(
-                        modification,
-                        vm_rel,
-                        new_vm_blk,
-                        NeonWalRecord::ClearVisibilityMapFlags {
-                            new_heap_blkno,
-                            old_heap_blkno: None,
-                            flags,
-                        },
-                        ctx,
-                    )
-                    .await?;
-                }
-                if let Some(old_vm_blk) = old_vm_blk {
-                    self.put_rel_wal_record(
-                        modification,
-                        vm_rel,
-                        old_vm_blk,
-                        NeonWalRecord::ClearVisibilityMapFlags {
-                            new_heap_blkno: None,
-                            old_heap_blkno,
-                            flags,
-                        },
-                        ctx,
-                    )
-                    .await?;
-                }
             }
         }
-
         Ok(())
     }
 
@@ -423,7 +491,7 @@ impl WalIngest {
         create: DbaseCreate,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         let DbaseCreate {
             db_id,
             tablespace_id,
@@ -499,7 +567,13 @@ impl WalIngest {
 
                 let content = modification
                     .tline
-                    .get_rel_page_at_lsn(src_rel, blknum, Version::Modified(modification), ctx)
+                    .get_rel_page_at_lsn(
+                        src_rel,
+                        blknum,
+                        Version::Modified(modification),
+                        ctx,
+                        crate::tenant::storage_layer::IoConcurrency::sequential(),
+                    )
                     .await?;
                 modification.put_rel_page_image(dst_rel, blknum, content)?;
                 num_blocks_copied += 1;
@@ -520,7 +594,7 @@ impl WalIngest {
         dbase_drop: DbaseDrop,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         let DbaseDrop {
             db_id,
             tablespace_ids,
@@ -538,7 +612,7 @@ impl WalIngest {
         create: SmgrCreate,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         let SmgrCreate { rel } = create;
         self.put_rel_creation(modification, rel, ctx).await?;
         Ok(())
@@ -552,7 +626,7 @@ impl WalIngest {
         truncate: XlSmgrTruncate,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         let XlSmgrTruncate {
             blkno,
             rnode,
@@ -704,7 +778,7 @@ impl WalIngest {
         record: XactRecord,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         let (xact_common, is_commit, is_prepared) = match record {
             XactRecord::Prepare(XactPrepare { xl_xid, data }) => {
                 let xid: u64 = if modification.tline.pg_version >= 17 {
@@ -809,9 +883,7 @@ impl WalIngest {
             // Remove twophase file. see RemoveTwoPhaseFile() in postgres code
             trace!(
                 "Drop twophaseFile for xid {} parsed_xact.xid {} here at {}",
-                xl_xid,
-                parsed.xid,
-                lsn,
+                xl_xid, parsed.xid, lsn,
             );
 
             let xid: u64 = if modification.tline.pg_version >= 17 {
@@ -830,7 +902,7 @@ impl WalIngest {
         truncate: ClogTruncate,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         let ClogTruncate {
             pageno,
             oldest_xid,
@@ -906,7 +978,7 @@ impl WalIngest {
         zero_page: ClogZeroPage,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         let ClogZeroPage { segno, rpageno } = zero_page;
 
         self.put_slru_page_image(
@@ -924,7 +996,7 @@ impl WalIngest {
         &mut self,
         modification: &mut DatadirModification,
         xlrec: &XlMultiXactCreate,
-    ) -> Result<()> {
+    ) -> Result<(), WalIngestError> {
         // Create WAL record for updating the multixact-offsets page
         let pageno = xlrec.mid / pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
         let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
@@ -1027,7 +1099,7 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         xlrec: &XlMultiXactTruncate,
         ctx: &RequestContext,
-    ) -> Result<()> {
+    ) -> Result<(), WalIngestError> {
         let (maxsegment, startsegment, endsegment) =
             enum_pgversion_dispatch!(&mut self.checkpoint, CheckPoint, cp, {
                 cp.oldestMulti = xlrec.end_trunc_off;
@@ -1075,7 +1147,7 @@ impl WalIngest {
         zero_page: MultiXactZeroPage,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> Result<()> {
+    ) -> Result<(), WalIngestError> {
         let MultiXactZeroPage {
             slru_kind,
             segno,
@@ -1097,7 +1169,7 @@ impl WalIngest {
         update: RelmapUpdate,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> Result<()> {
+    ) -> Result<(), WalIngestError> {
         let RelmapUpdate { update, buf } = update;
 
         modification
@@ -1110,7 +1182,7 @@ impl WalIngest {
         raw_record: RawXlogRecord,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> Result<()> {
+    ) -> Result<(), WalIngestError> {
         let RawXlogRecord { info, lsn, mut buf } = raw_record;
         let pg_version = modification.tline.pg_version;
 
@@ -1143,16 +1215,14 @@ impl WalIngest {
                 let xlog_checkpoint = pgv::CheckPoint::decode(&checkpoint_bytes)?;
                 trace!(
                     "xlog_checkpoint.oldestXid={}, checkpoint.oldestXid={}",
-                    xlog_checkpoint.oldestXid,
-                    cp.oldestXid
+                    xlog_checkpoint.oldestXid, cp.oldestXid
                 );
                 if (cp.oldestXid.wrapping_sub(xlog_checkpoint.oldestXid) as i32) < 0 {
                     cp.oldestXid = xlog_checkpoint.oldestXid;
                 }
                 trace!(
                     "xlog_checkpoint.oldestActiveXid={}, checkpoint.oldestActiveXid={}",
-                    xlog_checkpoint.oldestActiveXid,
-                    cp.oldestActiveXid
+                    xlog_checkpoint.oldestActiveXid, cp.oldestActiveXid
                 );
 
                 // A shutdown checkpoint has `oldestActiveXid == InvalidTransactionid`,
@@ -1193,6 +1263,50 @@ impl WalIngest {
                 } else {
                     cp.oldestActiveXid = xlog_checkpoint.oldestActiveXid;
                 }
+                // NB: We abuse the Checkpoint.redo field:
+                //
+                // - In PostgreSQL, the Checkpoint struct doesn't store the information
+                //   of whether this is an online checkpoint or a shutdown checkpoint. It's
+                //   stored in the XLOG info field of the WAL record, shutdown checkpoints
+                //   use record type XLOG_CHECKPOINT_SHUTDOWN and online checkpoints use
+                //   XLOG_CHECKPOINT_ONLINE. We don't store the original WAL record headers
+                //   in the pageserver, however.
+                //
+                // - In PostgreSQL, the Checkpoint.redo field stores the *start* of the
+                //   checkpoint record, if it's a shutdown checkpoint. But when we are
+                //   starting from a shutdown checkpoint, the basebackup LSN is the *end*
+                //   of the shutdown checkpoint WAL record. That makes it difficult to
+                //   correctly detect whether we're starting from a shutdown record or
+                //   not.
+                //
+                // To address both of those issues, we store 0 in the redo field if it's
+                // an online checkpoint record, and the record's *end* LSN if it's a
+                // shutdown checkpoint. We don't need the original redo pointer in neon,
+                // because we don't perform WAL replay at startup anyway, so we can get
+                // away with abusing the redo field like this.
+                //
+                // XXX: Ideally, we would persist the extra information in a more
+                // explicit format, rather than repurpose the fields of the Postgres
+                // struct like this. However, we already have persisted data like this,
+                // so we need to maintain backwards compatibility.
+                //
+                // NB: We didn't originally have this convention, so there are still old
+                // persisted records that didn't do this. Before, we didn't update the
+                // persisted redo field at all. That means that old records have a bogus
+                // redo pointer that points to some old value, from the checkpoint record
+                // that was originally imported from the data directory. If it was a
+                // project created in Neon, that means it points to the first checkpoint
+                // after initdb. That's OK for our purposes: all such old checkpoints are
+                // treated as old online checkpoints when the basebackup is created.
+                cp.redo = if info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN {
+                    // Store the *end* LSN of the checkpoint record. Or to be precise,
+                    // the start LSN of the *next* record, i.e. if the record ends
+                    // exactly at page boundary, the redo LSN points to just after the
+                    // page header on the next page.
+                    lsn.into()
+                } else {
+                    Lsn::INVALID.into()
+                };
 
                 // Write a new checkpoint key-value pair on every checkpoint record, even
                 // if nothing really changed. Not strictly required, but it seems nice to
@@ -1210,12 +1324,12 @@ impl WalIngest {
         put: PutLogicalMessage,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> Result<()> {
+    ) -> Result<(), WalIngestError> {
         let PutLogicalMessage { path, buf } = put;
         modification.put_file(path.as_str(), &buf, ctx).await
     }
 
-    fn ingest_standby_record(&mut self, record: StandbyRecord) -> Result<()> {
+    fn ingest_standby_record(&mut self, record: StandbyRecord) -> Result<(), WalIngestError> {
         match record {
             StandbyRecord::RunningXacts(running_xacts) => {
                 enum_pgversion_dispatch!(&mut self.checkpoint, CheckPoint, cp, {
@@ -1233,7 +1347,7 @@ impl WalIngest {
         &mut self,
         record: ReploriginRecord,
         modification: &mut DatadirModification<'_>,
-    ) -> Result<()> {
+    ) -> Result<(), WalIngestError> {
         match record {
             ReploriginRecord::Set(set) => {
                 modification
@@ -1253,7 +1367,7 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         rel: RelTag,
         ctx: &RequestContext,
-    ) -> Result<()> {
+    ) -> Result<(), WalIngestError> {
         modification.put_rel_creation(rel, 0, ctx).await?;
         Ok(())
     }
@@ -1266,7 +1380,7 @@ impl WalIngest {
         blknum: BlockNumber,
         img: Bytes,
         ctx: &RequestContext,
-    ) -> Result<(), PageReconstructError> {
+    ) -> Result<(), WalIngestError> {
         self.handle_rel_extend(modification, rel, blknum, ctx)
             .await?;
         modification.put_rel_page_image(rel, blknum, img)?;
@@ -1280,7 +1394,7 @@ impl WalIngest {
         blknum: BlockNumber,
         rec: NeonWalRecord,
         ctx: &RequestContext,
-    ) -> Result<()> {
+    ) -> Result<(), WalIngestError> {
         self.handle_rel_extend(modification, rel, blknum, ctx)
             .await?;
         modification.put_rel_wal_record(rel, blknum, rec)?;
@@ -1293,7 +1407,7 @@ impl WalIngest {
         rel: RelTag,
         nblocks: BlockNumber,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         modification.put_rel_truncation(rel, nblocks, ctx).await?;
         Ok(())
     }
@@ -1304,7 +1418,7 @@ impl WalIngest {
         rel: RelTag,
         blknum: BlockNumber,
         ctx: &RequestContext,
-    ) -> Result<(), PageReconstructError> {
+    ) -> Result<(), WalIngestError> {
         let new_nblocks = blknum + 1;
         // Check if the relation exists. We implicitly create relations on first
         // record.
@@ -1337,8 +1451,9 @@ impl WalIngest {
             // with zero pages. Logging is rate limited per pg version to
             // avoid skewing.
             if gap_blocks_filled > 0 {
-                use once_cell::sync::Lazy;
                 use std::sync::Mutex;
+
+                use once_cell::sync::Lazy;
                 use utils::rate_limit::RateLimit;
 
                 struct RateLimitPerPgVersion {
@@ -1397,7 +1512,7 @@ impl WalIngest {
         blknum: BlockNumber,
         img: Bytes,
         ctx: &RequestContext,
-    ) -> Result<()> {
+    ) -> Result<(), WalIngestError> {
         if !self.shard.is_shard_zero() {
             return Ok(());
         }
@@ -1415,7 +1530,7 @@ impl WalIngest {
         segno: u32,
         blknum: BlockNumber,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         // we don't use a cache for this like we do for relations. SLRUS are explcitly
         // extended with ZEROPAGE records, not with commit records, so it happens
         // a lot less frequently.
@@ -1444,10 +1559,7 @@ impl WalIngest {
         if new_nblocks > old_nblocks {
             trace!(
                 "extending SLRU {:?} seg {} from {} to {} blocks",
-                kind,
-                segno,
-                old_nblocks,
-                new_nblocks
+                kind, segno, old_nblocks, new_nblocks
             );
             modification.put_slru_extend(kind, segno, new_nblocks)?;
 
@@ -1486,12 +1598,14 @@ async fn get_relsize(
 #[allow(clippy::bool_assert_comparison)]
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::tenant::harness::*;
-    use crate::tenant::remote_timeline_client::{remote_initdb_archive_path, INITDB_PATH};
+    use anyhow::Result;
     use postgres_ffi::RELSEG_SIZE;
 
+    use super::*;
     use crate::DEFAULT_PG_VERSION;
+    use crate::tenant::harness::*;
+    use crate::tenant::remote_timeline_client::{INITDB_PATH, remote_initdb_archive_path};
+    use crate::tenant::storage_layer::IoConcurrency;
 
     /// Arbitrary relation tag, for testing.
     const TESTREL_A: RelTag = RelTag {
@@ -1506,7 +1620,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_zeroed_checkpoint_decodes_correctly() -> Result<()> {
+    async fn test_zeroed_checkpoint_decodes_correctly() -> Result<(), anyhow::Error> {
         for i in 14..=16 {
             dispatch_pgversion!(i, {
                 pgv::CheckPoint::decode(&pgv::ZERO_CHECKPOINT)?;
@@ -1532,6 +1646,7 @@ mod tests {
     #[tokio::test]
     async fn test_relsize() -> Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_relsize").await?.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -1573,10 +1688,12 @@ mod tests {
                 .await?,
             false
         );
-        assert!(tline
-            .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x10)), &ctx)
-            .await
-            .is_err());
+        assert!(
+            tline
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x10)), &ctx)
+                .await
+                .is_err()
+        );
         assert_eq!(
             tline
                 .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x20)), &ctx)
@@ -1599,7 +1716,13 @@ mod tests {
         // Check page contents at each LSN
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x20)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x20)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 2")
@@ -1607,7 +1730,13 @@ mod tests {
 
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x30)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x30)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 3")
@@ -1615,14 +1744,26 @@ mod tests {
 
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x40)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x40)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x40)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    1,
+                    Version::Lsn(Lsn(0x40)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1 at 4")
@@ -1630,21 +1771,39 @@ mod tests {
 
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x50)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x50)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x50)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    1,
+                    Version::Lsn(Lsn(0x50)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1 at 4")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 2, Version::Lsn(Lsn(0x50)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    2,
+                    Version::Lsn(Lsn(0x50)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 2 at 5")
@@ -1667,14 +1826,26 @@ mod tests {
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x60)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x60)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x60)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    1,
+                    Version::Lsn(Lsn(0x60)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1 at 4")
@@ -1689,7 +1860,13 @@ mod tests {
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 2, Version::Lsn(Lsn(0x50)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    2,
+                    Version::Lsn(Lsn(0x50)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 2 at 5")
@@ -1722,14 +1899,26 @@ mod tests {
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x70)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    0,
+                    Version::Lsn(Lsn(0x70)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             ZERO_PAGE
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x70)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    1,
+                    Version::Lsn(Lsn(0x70)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1")
@@ -1750,7 +1939,13 @@ mod tests {
         for blk in 2..1500 {
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blk, Version::Lsn(Lsn(0x80)), &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blk,
+                        Version::Lsn(Lsn(0x80)),
+                        &ctx,
+                        io_concurrency.clone()
+                    )
                     .instrument(test_span.clone())
                     .await?,
                 ZERO_PAGE
@@ -1758,7 +1953,13 @@ mod tests {
         }
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1500, Version::Lsn(Lsn(0x80)), &ctx)
+                .get_rel_page_at_lsn(
+                    TESTREL_A,
+                    1500,
+                    Version::Lsn(Lsn(0x80)),
+                    &ctx,
+                    io_concurrency.clone()
+                )
                 .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1500")
@@ -1851,6 +2052,7 @@ mod tests {
             .await?
             .load()
             .await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -1879,10 +2081,12 @@ mod tests {
                 .await?,
             false
         );
-        assert!(tline
-            .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x10)), &ctx)
-            .await
-            .is_err());
+        assert!(
+            tline
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x10)), &ctx)
+                .await
+                .is_err()
+        );
 
         assert_eq!(
             tline
@@ -1903,7 +2107,13 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(lsn), &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blkno,
+                        Version::Lsn(lsn),
+                        &ctx,
+                        io_concurrency.clone()
+                    )
                     .instrument(test_span.clone())
                     .await?,
                 test_img(&data)
@@ -1931,7 +2141,13 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x60)), &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blkno,
+                        Version::Lsn(Lsn(0x60)),
+                        &ctx,
+                        io_concurrency.clone()
+                    )
                     .instrument(test_span.clone())
                     .await?,
                 test_img(&data)
@@ -1950,7 +2166,13 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x50)), &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blkno,
+                        Version::Lsn(Lsn(0x50)),
+                        &ctx,
+                        io_concurrency.clone()
+                    )
                     .instrument(test_span.clone())
                     .await?,
                 test_img(&data)
@@ -1987,7 +2209,13 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x80)), &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blkno,
+                        Version::Lsn(Lsn(0x80)),
+                        &ctx,
+                        io_concurrency.clone()
+                    )
                     .instrument(test_span.clone())
                     .await?,
                 test_img(&data)
@@ -2088,9 +2316,10 @@ mod tests {
     /// without waiting for unrelated steps.
     #[tokio::test]
     async fn test_ingest_real_wal() {
-        use crate::tenant::harness::*;
-        use postgres_ffi::waldecoder::WalStreamDecoder;
         use postgres_ffi::WAL_SEGMENT_SIZE;
+        use postgres_ffi::waldecoder::WalStreamDecoder;
+
+        use crate::tenant::harness::*;
 
         // Define test data path and constants.
         //
@@ -2163,10 +2392,12 @@ mod tests {
             while let Some((lsn, recdata)) = decoder.poll_decode().unwrap() {
                 let interpreted = InterpretedWalRecord::from_bytes_filtered(
                     recdata,
-                    modification.tline.get_shard_identity(),
+                    &[*modification.tline.get_shard_identity()],
                     lsn,
                     modification.tline.pg_version,
                 )
+                .unwrap()
+                .remove(modification.tline.get_shard_identity())
                 .unwrap();
 
                 walingest

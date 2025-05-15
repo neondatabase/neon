@@ -2,13 +2,35 @@
 ### The image itself is mainly used as a container for the binaries and for starting e2e tests with custom parameters.
 ### By default, the binaries inside the image have some mock parameters and can start, but are not intended to be used
 ### inside this image in the real deployments.
-ARG REPOSITORY=neondatabase
+ARG REPOSITORY=ghcr.io/neondatabase
 ARG IMAGE=build-tools
 ARG TAG=pinned
 ARG DEFAULT_PG_VERSION=17
 ARG STABLE_PG_VERSION=16
 ARG DEBIAN_VERSION=bookworm
 ARG DEBIAN_FLAVOR=${DEBIAN_VERSION}-slim
+
+# Here are the INDEX DIGESTS for the images we use.
+# You can get them following next steps for now:
+# 1. Get an authentication token from DockerHub:
+#    TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/debian:pull" | jq -r .token)
+# 2. Using that token, query index for the given tag:
+#    curl -s -H "Authorization: Bearer $TOKEN" \
+#       -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+#       "https://registry.hub.docker.com/v2/library/debian/manifests/bullseye-slim" \
+#       -I | grep -i docker-content-digest
+# 3. As a next step, TODO(fedordikarev): create script and schedule workflow to run these checks
+#    and updates on regular bases and in automated way.
+ARG BOOKWORM_SLIM_SHA=sha256:40b107342c492725bc7aacbe93a49945445191ae364184a6d24fedb28172f6f7
+ARG BULLSEYE_SLIM_SHA=sha256:e831d9a884d63734fe3dd9c491ed9a5a3d4c6a6d32c5b14f2067357c49b0b7e1
+
+# Here we use ${var/search/replace} syntax, to check
+# if base image is one of the images, we pin image index for.
+# If var will match one the known images, we will replace it with the known sha.
+# If no match, than value will be unaffected, and will process with no-pinned image.
+ARG BASE_IMAGE_SHA=debian:${DEBIAN_FLAVOR}
+ARG BASE_IMAGE_SHA=${BASE_IMAGE_SHA/debian:bookworm-slim/debian@$BOOKWORM_SLIM_SHA}
+ARG BASE_IMAGE_SHA=${BASE_IMAGE_SHA/debian:bullseye-slim/debian@$BULLSEYE_SLIM_SHA}
 
 # Build Postgres
 FROM $REPOSITORY/$IMAGE:$TAG AS pg-build
@@ -28,6 +50,14 @@ RUN set -e \
     && rm -rf pg_install/build \
     && tar -C pg_install -czf /home/nonroot/postgres_install.tar.gz .
 
+# Prepare cargo-chef recipe
+FROM $REPOSITORY/$IMAGE:$TAG AS plan
+WORKDIR /home/nonroot
+
+COPY --chown=nonroot . .
+
+RUN cargo chef prepare --recipe-path recipe.json
+
 # Build neon binaries
 FROM $REPOSITORY/$IMAGE:$TAG AS build
 WORKDIR /home/nonroot
@@ -41,11 +71,17 @@ COPY --from=pg-build /home/nonroot/pg_install/v16/include/postgresql/server pg_i
 COPY --from=pg-build /home/nonroot/pg_install/v17/include/postgresql/server pg_install/v17/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v16/lib                       pg_install/v16/lib
 COPY --from=pg-build /home/nonroot/pg_install/v17/lib                       pg_install/v17/lib
+COPY --from=plan     /home/nonroot/recipe.json                              recipe.json
+
+ARG ADDITIONAL_RUSTFLAGS=""
+
+RUN set -e \
+    && RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment -Cforce-frame-pointers=yes ${ADDITIONAL_RUSTFLAGS}" cargo chef cook --locked --release --recipe-path recipe.json
+
 COPY --chown=nonroot . .
 
-ARG ADDITIONAL_RUSTFLAGS
 RUN set -e \
-    && PQ_LIB_DIR=$(pwd)/pg_install/v${STABLE_PG_VERSION}/lib RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment ${ADDITIONAL_RUSTFLAGS}" cargo build \
+    && RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment -Cforce-frame-pointers=yes ${ADDITIONAL_RUSTFLAGS}" cargo build \
       --bin pg_sni_router  \
       --bin pageserver  \
       --bin pagectl  \
@@ -53,22 +89,28 @@ RUN set -e \
       --bin storage_broker  \
       --bin storage_controller  \
       --bin proxy  \
+      --bin endpoint_storage \
       --bin neon_local \
       --bin storage_scrubber \
       --locked --release
 
 # Build final image
 #
-FROM debian:${DEBIAN_FLAVOR}
+FROM $BASE_IMAGE_SHA
 ARG DEFAULT_PG_VERSION
 WORKDIR /data
 
 RUN set -e \
+    && echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries \
     && apt update \
     && apt install -y \
         libreadline-dev \
         libseccomp-dev \
         ca-certificates \
+	# System postgres for use with client libraries (e.g. in storage controller)
+        postgresql-15 \
+        openssl \
+    && rm -f /etc/apt/apt.conf.d/80-retries \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
     && useradd -d /data neon \
     && chown -R neon:neon /data
@@ -80,6 +122,7 @@ COPY --from=build --chown=neon:neon /home/nonroot/target/release/safekeeper     
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_broker      /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_controller  /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy               /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/endpoint_storage    /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/neon_local          /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_scrubber    /usr/local/bin
 
@@ -101,15 +144,9 @@ RUN mkdir -p /data/.neon/ && \
   > /data/.neon/pageserver.toml && \
   chown -R neon:neon /data/.neon
 
-# When running a binary that links with libpq, default to using our most recent postgres version.  Binaries
-# that want a particular postgres version will select it explicitly: this is just a default.
-ENV LD_LIBRARY_PATH=/usr/local/v${DEFAULT_PG_VERSION}/lib
-
-
 VOLUME ["/data"]
 USER neon
 EXPOSE 6400
 EXPOSE 9898
 
 CMD ["/usr/local/bin/pageserver", "-D", "/data/.neon"]
-

@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import fixtures.utils
 import pytest
@@ -27,15 +28,16 @@ from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
 from fixtures.workload import Workload
 
+if TYPE_CHECKING:
+    from fixtures.compute_reconfigure import ComputeReconfigure
+
 #
 # A test suite that help to prevent unintentionally breaking backward or forward compatibility between Neon releases.
 # - `test_create_snapshot` a script wrapped in a test that creates a data snapshot.
 # - `test_backward_compatibility` checks that the current version of Neon can start/read/interract with a data snapshot created by the previous version.
 #   The path to the snapshot is configured by COMPATIBILITY_SNAPSHOT_DIR environment variable.
-#   If the breakage is intentional, the test can be xfaild with setting ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE=true.
 # - `test_forward_compatibility` checks that a snapshot created by the current version can be started/read/interracted by the previous version of Neon.
 #   Paths to Neon and Postgres are configured by COMPATIBILITY_NEON_BIN and COMPATIBILITY_POSTGRES_DISTRIB_DIR environment variables.
-#   If the breakage is intentional, the test can be xfaild with setting ALLOW_FORWARD_COMPATIBILITY_BREAKAGE=true.
 #
 # The file contains a couple of helper functions:
 # - check_neon_works performs the test itself, feel free to add more checks there.
@@ -44,7 +46,7 @@ from fixtures.workload import Workload
 #
 # How to run `test_backward_compatibility` locally:
 #
-#    export DEFAULT_PG_VERSION=16
+#    export DEFAULT_PG_VERSION=17
 #    export BUILD_TYPE=release
 #    export CHECK_ONDISK_DATA_COMPATIBILITY=true
 #    export COMPATIBILITY_SNAPSHOT_DIR=test_output/compatibility_snapshot_pgv${DEFAULT_PG_VERSION}
@@ -66,7 +68,7 @@ from fixtures.workload import Workload
 #
 # How to run `test_forward_compatibility` locally:
 #
-#    export DEFAULT_PG_VERSION=16
+#    export DEFAULT_PG_VERSION=17
 #    export BUILD_TYPE=release
 #    export CHECK_ONDISK_DATA_COMPATIBILITY=true
 #    export COMPATIBILITY_NEON_BIN=neon_previous/target/${BUILD_TYPE}
@@ -92,12 +94,12 @@ from fixtures.workload import Workload
 #
 # How to run `test_version_mismatch` locally:
 #
-#    export DEFAULT_PG_VERSION=16
+#    export DEFAULT_PG_VERSION=17
 #    export BUILD_TYPE=release
 #    export CHECK_ONDISK_DATA_COMPATIBILITY=true
 #    export COMPATIBILITY_NEON_BIN=neon_previous/target/${BUILD_TYPE}
 #    export COMPATIBILITY_POSTGRES_DISTRIB_DIR=neon_previous/pg_install
-#    export NEON_BIN=target/release
+#    export NEON_BIN=target/${BUILD_TYPE}
 #    export POSTGRES_DISTRIB_DIR=pg_install
 #
 #    # Build previous version of binaries and store them somewhere:
@@ -141,11 +143,18 @@ def test_create_snapshot(
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            # Miniature layers to enable generating non-trivial layer map without writing lots of data.
+            "checkpoint_distance": f"{256 * 1024}",
+            "compaction_threshold": "5",
+            "compaction_target_size": f"{256 * 1024}",
+        }
+    )
     endpoint = env.endpoints.create_start("main")
 
-    pg_bin.run_capture(["pgbench", "--initialize", "--scale=10", endpoint.connstr()])
-    pg_bin.run_capture(["pgbench", "--time=60", "--progress=2", endpoint.connstr()])
+    pg_bin.run_capture(["pgbench", "--initialize", "--scale=1", endpoint.connstr()])
+    pg_bin.run_capture(["pgbench", "--time=30", "--progress=2", endpoint.connstr()])
     pg_bin.run_capture(
         ["pg_dumpall", f"--dbname={endpoint.connstr()}", f"--file={test_output_dir / 'dump.sql'}"]
     )
@@ -157,7 +166,9 @@ def test_create_snapshot(
     pageserver_http = env.pageserver.http_client()
 
     flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id)
-    pageserver_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
+    pageserver_http.timeline_checkpoint(
+        tenant_id, timeline_id, wait_until_uploaded=True, force_image_layer_creation=True
+    )
 
     env.endpoints.stop_all()
     for sk in env.safekeepers:
@@ -195,34 +206,19 @@ def test_backward_compatibility(
     """
     Test that the new binaries can read old data
     """
-    breaking_changes_allowed = (
-        os.environ.get("ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE", "false").lower() == "true"
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.from_repo_dir(compatibility_snapshot_dir / "repo")
+    env.pageserver.allowed_errors.append(ingest_lag_log_line)
+    env.start()
+
+    check_neon_works(
+        env,
+        test_output_dir=test_output_dir,
+        sql_dump_path=compatibility_snapshot_dir / "dump.sql",
+        repo_dir=env.repo_dir,
     )
 
-    try:
-        neon_env_builder.num_safekeepers = 3
-        env = neon_env_builder.from_repo_dir(compatibility_snapshot_dir / "repo")
-        env.pageserver.allowed_errors.append(ingest_lag_log_line)
-        env.start()
-
-        check_neon_works(
-            env,
-            test_output_dir=test_output_dir,
-            sql_dump_path=compatibility_snapshot_dir / "dump.sql",
-            repo_dir=env.repo_dir,
-        )
-
-        env.pageserver.assert_log_contains(ingest_lag_log_line)
-
-    except Exception:
-        if breaking_changes_allowed:
-            pytest.xfail(
-                "Breaking changes are allowed by ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE env var"
-            )
-        else:
-            raise
-
-    assert not breaking_changes_allowed, "Breaking changes are allowed by ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE, but the test has passed without any breakage"
+    env.pageserver.assert_log_contains(ingest_lag_log_line)
 
 
 @check_ondisk_data_compatibility_if_enabled
@@ -234,76 +230,69 @@ def test_forward_compatibility(
     top_output_dir: Path,
     pg_version: PgVersion,
     compatibility_snapshot_dir: Path,
+    compute_reconfigure_listener: ComputeReconfigure,
 ):
     """
     Test that the old binaries can read new data
     """
-    breaking_changes_allowed = (
-        os.environ.get("ALLOW_FORWARD_COMPATIBILITY_BREAKAGE", "false").lower() == "true"
+
+    neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
+    neon_env_builder.test_may_use_compatibility_snapshot_binaries = True
+
+    neon_env_builder.num_safekeepers = 3
+
+    # Use previous version's production binaries (pageserver, safekeeper, pg_distrib_dir, etc.).
+    # But always use the current version's neon_local binary.
+    # This is because we want to test the compatibility of the data format, not the compatibility of the neon_local CLI.
+    assert neon_env_builder.compatibility_neon_binpath is not None, (
+        "the environment variable COMPATIBILITY_NEON_BIN is required"
     )
+    assert neon_env_builder.compatibility_pg_distrib_dir is not None, (
+        "the environment variable COMPATIBILITY_POSTGRES_DISTRIB_DIR is required"
+    )
+    neon_env_builder.neon_binpath = neon_env_builder.compatibility_neon_binpath
+    neon_env_builder.pg_distrib_dir = neon_env_builder.compatibility_pg_distrib_dir
 
-    try:
-        neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.from_repo_dir(
+        compatibility_snapshot_dir / "repo",
+    )
+    # there may be an arbitrary number of unrelated tests run between create_snapshot and here
+    env.pageserver.allowed_errors.append(ingest_lag_log_line)
 
-        # Use previous version's production binaries (pageserver, safekeeper, pg_distrib_dir, etc.).
-        # But always use the current version's neon_local binary.
-        # This is because we want to test the compatibility of the data format, not the compatibility of the neon_local CLI.
-        assert (
-            neon_env_builder.compatibility_neon_binpath is not None
-        ), "the environment variable COMPATIBILITY_NEON_BIN is required"
-        assert (
-            neon_env_builder.compatibility_pg_distrib_dir is not None
-        ), "the environment variable COMPATIBILITY_POSTGRES_DISTRIB_DIR is required"
-        neon_env_builder.neon_binpath = neon_env_builder.compatibility_neon_binpath
-        neon_env_builder.pg_distrib_dir = neon_env_builder.compatibility_pg_distrib_dir
-
-        env = neon_env_builder.from_repo_dir(
-            compatibility_snapshot_dir / "repo",
-        )
-        # there may be an arbitrary number of unrelated tests run between create_snapshot and here
-        env.pageserver.allowed_errors.append(ingest_lag_log_line)
-
-        # not using env.pageserver.version because it was initialized before
-        prev_pageserver_version_str = env.get_binary_version("pageserver")
-        prev_pageserver_version_match = re.search(
-            "Neon page server git(?:-env)?:(.*) failpoints: (.*), features: (.*)",
-            prev_pageserver_version_str,
-        )
-        if prev_pageserver_version_match is not None:
-            prev_pageserver_version = prev_pageserver_version_match.group(1)
-        else:
-            raise AssertionError(
-                "cannot find git hash in the version string: " + prev_pageserver_version_str
-            )
-
-        # does not include logs from previous runs
-        assert not env.pageserver.log_contains(f"git(-env)?:{prev_pageserver_version}")
-
-        env.start()
-
-        # ensure the specified pageserver is running
-        assert env.pageserver.log_contains(f"git(-env)?:{prev_pageserver_version}")
-
-        check_neon_works(
-            env,
-            test_output_dir=test_output_dir,
-            sql_dump_path=compatibility_snapshot_dir / "dump.sql",
-            repo_dir=env.repo_dir,
+    # not using env.pageserver.version because it was initialized before
+    prev_pageserver_version_str = env.get_binary_version("pageserver")
+    prev_pageserver_version_match = re.search(
+        "Neon page server git(?:-env)?:(.*) failpoints: (.*), features: (.*)",
+        prev_pageserver_version_str,
+    )
+    if prev_pageserver_version_match is not None:
+        prev_pageserver_version = prev_pageserver_version_match.group(1)
+    else:
+        raise AssertionError(
+            "cannot find git hash in the version string: " + prev_pageserver_version_str
         )
 
-    except Exception:
-        if breaking_changes_allowed:
-            pytest.xfail(
-                "Breaking changes are allowed by ALLOW_FORWARD_COMPATIBILITY_BREAKAGE env var"
-            )
-        else:
-            raise
+    # does not include logs from previous runs
+    assert not env.pageserver.log_contains(f"git(-env)?:{prev_pageserver_version}")
 
-    assert not breaking_changes_allowed, "Breaking changes are allowed by ALLOW_FORWARD_COMPATIBILITY_BREAKAGE, but the test has passed without any breakage"
+    env.start()
+
+    # ensure the specified pageserver is running
+    assert env.pageserver.log_contains(f"git(-env)?:{prev_pageserver_version}")
+
+    check_neon_works(
+        env,
+        test_output_dir=test_output_dir,
+        sql_dump_path=compatibility_snapshot_dir / "dump.sql",
+        repo_dir=env.repo_dir,
+    )
 
 
 def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, repo_dir: Path):
-    ep = env.endpoints.create_start("main")
+    ep = env.endpoints.create("main")
+    ep_env = {"LD_LIBRARY_PATH": str(env.pg_distrib_dir / f"v{env.pg_version}/lib")}
+    ep.start(env=ep_env)
+
     connstr = ep.connstr()
 
     pg_bin = PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version)
@@ -352,7 +341,7 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
     )
 
     # Timeline exists again: restart the endpoint
-    ep.start()
+    ep.start(env=ep_env)
 
     pg_bin.run_capture(
         ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump-from-wal.sql'}"]
@@ -459,6 +448,21 @@ HISTORIC_DATA_SETS = [
         TenantId("17bf64a53509714687664b3a84e9b3ba"),
         PgVersion.V16,
         "https://neon-github-public-dev.s3.eu-central-1.amazonaws.com/compatibility-data-snapshots/2024-07-18-pgv16.tar.zst",
+    ),
+    # This dataset created on a pageserver running modern code at time of capture, but configured with no generation.  This
+    # is our regression test that we can load data written without generations in layer file names & indices
+    HistoricDataSet(
+        "2025-02-07-nogenerations",
+        TenantId("e1411ca6562d6ff62419f693a5695d67"),
+        PgVersion.V17,
+        "https://neon-github-public-dev.s3.eu-central-1.amazonaws.com/compatibility-data-snapshots/2025-02-07-pgv17-nogenerations.tar.zst",
+    ),
+    # Tenant manifest v1.
+    HistoricDataSet(
+        "2025-04-08-tenant-manifest-v1",
+        TenantId("c547c28588abf1d7b7139ff1f1158345"),
+        PgVersion.V17,
+        "https://neon-github-public-dev.s3.eu-central-1.amazonaws.com/compatibility-data-snapshots/2025-04-08-pgv17-tenant-manifest-v1.tar.zst",
     ),
 ]
 
@@ -570,17 +574,22 @@ def test_historic_storage_formats(
 
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
-@pytest.mark.parametrize(**fixtures.utils.allpairs_versions())
+@pytest.mark.parametrize(
+    **fixtures.utils.allpairs_versions(),
+)
 def test_versions_mismatch(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
     pg_version: PgVersion,
     compatibility_snapshot_dir,
+    compute_reconfigure_listener: ComputeReconfigure,
     combination,
 ):
     """
     Checks compatibility of different combinations of versions of the components
     """
+    neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
+
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.from_repo_dir(
         compatibility_snapshot_dir / "repo",

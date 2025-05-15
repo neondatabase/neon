@@ -1,5 +1,5 @@
-use postgres_client::types::{Kind, Type};
 use postgres_client::Row;
+use postgres_client::types::{Kind, Type};
 use serde_json::{Map, Value};
 
 //
@@ -19,7 +19,7 @@ fn json_value_to_pg_text(value: &Value) -> Option<String> {
         v @ (Value::Bool(_) | Value::Number(_) | Value::Object(_)) => Some(v.to_string()),
 
         // avoid escaping here, as we pass this as a parameter
-        Value::String(s) => Some(s.to_string()),
+        Value::String(s) => Some(s.clone()),
 
         // special care for arrays
         Value::Array(_) => json_array_to_pg_array(value),
@@ -256,7 +256,6 @@ fn pg_array_parse_inner(
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used)]
 mod tests {
     use serde_json::json;
 

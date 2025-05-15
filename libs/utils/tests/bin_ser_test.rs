@@ -1,7 +1,8 @@
+use std::io::Read;
+
 use bytes::{Buf, BytesMut};
 use hex_literal::hex;
 use serde::Deserialize;
-use std::io::Read;
 use utils::bin_ser::LeSer;
 
 #[derive(Debug, PartialEq, Eq, Deserialize)]

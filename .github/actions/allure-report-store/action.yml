@@ -8,7 +8,7 @@ inputs:
   unique-key:
     description: 'string to distinguish different results in the same run'
     required: true
-  aws-oicd-role-arn:
+  aws-oidc-role-arn:
     description: 'OIDC role arn to interract with S3'
     required: true
 
@@ -18,9 +18,11 @@ runs:
   steps:
     - name: Set variables
       shell: bash -euxo pipefail {0}
+      env:
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPORT_DIR: ${{ inputs.report-dir }}
       run: |
-        PR_NUMBER=$(jq --raw-output .pull_request.number "$GITHUB_EVENT_PATH" || true)
-        if [ "${PR_NUMBER}" != "null" ]; then
+        if [ -n "${PR_NUMBER}" ]; then
           BRANCH_OR_PR=pr-${PR_NUMBER}
         elif [ "${GITHUB_REF_NAME}" = "main" ] || [ "${GITHUB_REF_NAME}" = "release" ] || \
              [ "${GITHUB_REF_NAME}" = "release-proxy" ] || [ "${GITHUB_REF_NAME}" = "release-compute" ]; then
@@ -32,14 +34,12 @@ runs:
 
         echo "BRANCH_OR_PR=${BRANCH_OR_PR}" >> $GITHUB_ENV
         echo "REPORT_DIR=${REPORT_DIR}"     >> $GITHUB_ENV
-      env:
-        REPORT_DIR: ${{ inputs.report-dir }}
 
     - uses: aws-actions/configure-aws-credentials@v4
       if: ${{ !cancelled() }}
       with:
         aws-region: eu-central-1
-        role-to-assume: ${{ inputs.aws-oicd-role-arn }}
+        role-to-assume: ${{ inputs.aws-oidc-role-arn }}
         role-duration-seconds: 3600 # 1 hour should be more than enough to upload report
 
     - name: Upload test results

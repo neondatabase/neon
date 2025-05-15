@@ -1,11 +1,19 @@
 use std::collections::{HashMap, HashSet};
+use std::time::SystemTime;
 
+use futures_util::StreamExt;
 use itertools::Itertools;
+use pageserver::tenant::IndexPart;
 use pageserver::tenant::checks::check_valid_layermap;
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver::tenant::remote_timeline_client::manifest::TenantManifest;
+use pageserver::tenant::remote_timeline_client::{
+    parse_remote_index_path, parse_remote_tenant_manifest_path, remote_layer_path,
+};
+use pageserver::tenant::storage_layer::LayerName;
 use pageserver_api::shard::ShardIndex;
+use remote_storage::{DownloadError, GenericRemoteStorage, ListingObject, RemotePath};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use utils::generation::Generation;
@@ -14,14 +22,7 @@ use utils::shard::TenantShardId;
 
 use crate::cloud_admin_api::BranchData;
 use crate::metadata_stream::stream_listing;
-use crate::{download_object_with_retries, RootTarget, TenantShardTimelineId};
-use futures_util::StreamExt;
-use pageserver::tenant::remote_timeline_client::{
-    parse_remote_index_path, parse_remote_tenant_manifest_path, remote_layer_path,
-};
-use pageserver::tenant::storage_layer::LayerName;
-use pageserver::tenant::IndexPart;
-use remote_storage::{GenericRemoteStorage, ListingObject, RemotePath};
+use crate::{RootTarget, TenantShardTimelineId, download_object_with_retries};
 
 pub(crate) struct TimelineAnalysis {
     /// Anomalies detected
@@ -88,9 +89,14 @@ pub(crate) async fn branch_cleanup_and_check_errors(
             match s3_data.blob_data {
                 BlobDataParseResult::Parsed {
                     index_part,
-                    index_part_generation: _index_part_generation,
-                    s3_layers: _s3_layers,
+                    index_part_generation: _,
+                    s3_layers: _,
+                    index_part_last_modified_time,
+                    index_part_snapshot_time,
                 } => {
+                    // Ignore missing file error if index_part downloaded is different from the one when listing the layer files.
+                    let ignore_error = index_part_snapshot_time < index_part_last_modified_time
+                        && !cfg!(debug_assertions);
                     if !IndexPart::KNOWN_VERSIONS.contains(&index_part.version()) {
                         result
                             .errors
@@ -159,22 +165,34 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                                 .head_object(&path, &CancellationToken::new())
                                 .await;
 
-                            if response.is_err() {
-                                // Object is not present.
-                                let is_l0 = LayerMap::is_l0(layer.key_range(), layer.is_delta());
+                            match response {
+                                Ok(_) => {}
+                                Err(DownloadError::NotFound) => {
+                                    // Object is not present.
+                                    let is_l0 =
+                                        LayerMap::is_l0(layer.key_range(), layer.is_delta());
 
-                                let msg = format!(
-                                    "index_part.json contains a layer {}{} (shard {}) that is not present in remote storage (layer_is_l0: {})",
-                                    layer,
-                                    metadata.generation.get_suffix(),
-                                    metadata.shard,
-                                    is_l0,
-                                );
+                                    let msg = format!(
+                                        "index_part.json contains a layer {}{} (shard {}) that is not present in remote storage (layer_is_l0: {})",
+                                        layer,
+                                        metadata.generation.get_suffix(),
+                                        metadata.shard,
+                                        is_l0,
+                                    );
 
-                                if is_l0 {
-                                    result.warnings.push(msg);
-                                } else {
-                                    result.errors.push(msg);
+                                    if is_l0 || ignore_error {
+                                        result.warnings.push(msg);
+                                    } else {
+                                        result.errors.push(msg);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "cannot check if the layer {}{} is present in remote storage (error: {})",
+                                        layer,
+                                        metadata.generation.get_suffix(),
+                                        e,
+                                    );
                                 }
                             }
                         }
@@ -308,6 +326,8 @@ pub(crate) enum BlobDataParseResult {
     Parsed {
         index_part: Box<IndexPart>,
         index_part_generation: Generation,
+        index_part_last_modified_time: SystemTime,
+        index_part_snapshot_time: SystemTime,
         s3_layers: HashSet<(LayerName, Generation)>,
     },
     /// The remains of an uncleanly deleted Timeline or aborted timeline creation(e.g. an initdb archive only, or some layer without an index)
@@ -321,11 +341,11 @@ pub(crate) enum BlobDataParseResult {
 pub(crate) fn parse_layer_object_name(name: &str) -> Result<(LayerName, Generation), String> {
     match name.rsplit_once('-') {
         // FIXME: this is gross, just use a regex?
-        Some((layer_filename, gen)) if gen.len() == 8 => {
+        Some((layer_filename, gen_)) if gen_.len() == 8 => {
             let layer = layer_filename.parse::<LayerName>()?;
-            let gen =
-                Generation::parse_suffix(gen).ok_or("Malformed generation suffix".to_string())?;
-            Ok((layer, gen))
+            let gen_ =
+                Generation::parse_suffix(gen_).ok_or("Malformed generation suffix".to_string())?;
+            Ok((layer, gen_))
         }
         _ => Ok((name.parse::<LayerName>()?, Generation::none())),
     }
@@ -346,6 +366,7 @@ pub(crate) async fn list_timeline_blobs(
     match res {
         ListTimelineBlobsResult::Ready(data) => Ok(data),
         ListTimelineBlobsResult::MissingIndexPart(_) => {
+            tracing::warn!("listing raced with removal of an index, retrying");
             // Retry if listing raced with removal of an index
             let data = list_timeline_blobs_impl(remote_client, id, root_target)
                 .await?
@@ -415,9 +436,9 @@ async fn list_timeline_blobs_impl(
                 tracing::info!("initdb archive preserved {key}");
             }
             Some(maybe_layer_name) => match parse_layer_object_name(maybe_layer_name) {
-                Ok((new_layer, gen)) => {
-                    tracing::debug!("Parsed layer key: {new_layer} {gen:?}");
-                    s3_layers.insert((new_layer, gen));
+                Ok((new_layer, gen_)) => {
+                    tracing::debug!("Parsed layer key: {new_layer} {gen_:?}");
+                    s3_layers.insert((new_layer, gen_));
                 }
                 Err(e) => {
                     tracing::info!("Error parsing {maybe_layer_name} as layer name: {e}");
@@ -432,7 +453,7 @@ async fn list_timeline_blobs_impl(
     }
 
     if index_part_keys.is_empty() && s3_layers.is_empty() {
-        tracing::debug!("Timeline is empty: expected post-deletion state.");
+        tracing::info!("Timeline is empty: expected post-deletion state.");
         if initdb_archive {
             tracing::info!("Timeline is post deletion but initdb archive is still present.");
         }
@@ -457,7 +478,7 @@ async fn list_timeline_blobs_impl(
         .max_by_key(|i| i.1)
         .map(|(k, g)| (k.clone(), g))
     {
-        Some((key, gen)) => (Some::<ListingObject>(key.to_owned()), gen),
+        Some((key, gen_)) => (Some::<ListingObject>(key.to_owned()), gen_),
         None => {
             // Legacy/missing case: one or zero index parts, which did not have a generation
             (index_part_keys.pop(), Generation::none())
@@ -484,9 +505,9 @@ async fn list_timeline_blobs_impl(
     }
 
     if let Some(index_part_object_key) = index_part_object.as_ref() {
-        let index_part_bytes =
+        let (index_part_bytes, index_part_last_modified_time) =
             match download_object_with_retries(remote_client, &index_part_object_key.key).await {
-                Ok(index_part_bytes) => index_part_bytes,
+                Ok(data) => data,
                 Err(e) => {
                     // It is possible that the branch gets deleted in-between we list the objects
                     // and we download the index part file.
@@ -500,7 +521,7 @@ async fn list_timeline_blobs_impl(
                     ));
                 }
             };
-
+        let index_part_snapshot_time = index_part_object_key.last_modified;
         match serde_json::from_slice(&index_part_bytes) {
             Ok(index_part) => {
                 return Ok(ListTimelineBlobsResult::Ready(RemoteTimelineBlobData {
@@ -508,10 +529,12 @@ async fn list_timeline_blobs_impl(
                         index_part: Box::new(index_part),
                         index_part_generation,
                         s3_layers,
+                        index_part_last_modified_time,
+                        index_part_snapshot_time,
                     },
                     unused_index_keys: index_part_keys,
                     unknown_keys,
-                }))
+                }));
             }
             Err(index_parse_error) => errors.push(format!(
                 "index_part.json body parsing error: {index_parse_error}"
@@ -621,11 +644,11 @@ pub(crate) async fn list_tenant_manifests(
         .map(|(g, obj)| (*g, obj.clone()))
         .unwrap();
 
-    manifests.retain(|(gen, _obj)| gen != &latest_generation);
+    manifests.retain(|(gen_, _obj)| gen_ != &latest_generation);
 
     let manifest_bytes =
         match download_object_with_retries(remote_client, &latest_listing_object.key).await {
-            Ok(bytes) => bytes,
+            Ok((bytes, _)) => bytes,
             Err(e) => {
                 // It is possible that the tenant gets deleted in-between we list the objects
                 // and we download the manifest file.

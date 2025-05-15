@@ -5,15 +5,16 @@ from typing import TYPE_CHECKING
 
 import pytest
 import requests
-from pytest_httpserver import HTTPServer
 from werkzeug.datastructures import Headers
-from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 from fixtures.log_helper import log
 
 if TYPE_CHECKING:
     from typing import Any
+
+    from pytest_httpserver import HTTPServer
+    from werkzeug.wrappers.request import Request
 
 
 class StorageControllerProxy:

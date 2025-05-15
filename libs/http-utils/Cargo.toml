@@ -1,0 +1,42 @@
+[package]
+name = "http-utils"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+arc-swap.workspace = true
+bytes.workspace = true
+camino.workspace = true
+fail.workspace = true
+futures.workspace = true
+hyper0.workspace = true
+itertools.workspace = true
+jemalloc_pprof.workspace = true
+jsonwebtoken.workspace = true
+once_cell.workspace = true
+pprof.workspace = true
+regex.workspace = true
+routerify.workspace = true
+rustls-pemfile.workspace = true
+rustls.workspace = true
+serde_json.workspace = true
+serde_path_to_error.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio-rustls.workspace = true
+tokio-util.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
+x509-cert.workspace = true
+
+# to use tokio channels as streams, this is faster to compile than async_stream
+# why is it only here? no other crate should use it, streams are rarely needed.
+tokio-stream = { version = "0.1.14" }
+
+metrics.workspace = true
+utils.workspace = true
+workspace_hack = { version = "0.1", path = "../../workspace_hack" }

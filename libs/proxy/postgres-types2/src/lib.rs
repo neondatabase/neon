@@ -4,19 +4,18 @@
 //! unless you want to define your own `ToSql` or `FromSql` definitions.
 #![warn(clippy::all, missing_docs)]
 
-use fallible_iterator::FallibleIterator;
-use postgres_protocol2::types;
 use std::any::type_name;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::type_gen::{Inner, Other};
-
+use bytes::BytesMut;
+use fallible_iterator::FallibleIterator;
 #[doc(inline)]
 pub use postgres_protocol2::Oid;
+use postgres_protocol2::types;
 
-use bytes::BytesMut;
+use crate::type_gen::{Inner, Other};
 
 /// Generates a simple implementation of `ToSql::accepts` which accepts the
 /// types passed to it.
@@ -136,8 +135,8 @@ impl Type {
 pub enum Kind {
     /// A simple type like `VARCHAR` or `INTEGER`.
     Simple,
-    /// An enumerated type along with its variants.
-    Enum(Vec<String>),
+    /// An enumerated type.
+    Enum,
     /// A pseudo-type.
     Pseudo,
     /// An array type along with the type of its elements.
@@ -147,9 +146,9 @@ pub enum Kind {
     /// A multirange type along with the type of its elements.
     Multirange(Type),
     /// A domain type along with its underlying type.
-    Domain(Type),
-    /// A composite type along with information about its fields.
-    Composite(Vec<Field>),
+    Domain(Oid),
+    /// A composite type.
+    Composite(Oid),
 }
 
 /// Information about a field of a composite type.

@@ -15,53 +15,55 @@ mod sql_over_http;
 mod websocket;
 
 use std::net::{IpAddr, SocketAddr};
-use std::pin::{pin, Pin};
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 
 use anyhow::Context;
+use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use atomic_take::AtomicTake;
 use bytes::Bytes;
 pub use conn_pool_lib::GlobalConnPoolOptions;
-use futures::future::{select, Either};
 use futures::TryFutureExt;
+use futures::future::{Either, select};
 use http::{Method, Response, StatusCode};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty};
+use http_utils::error::ApiError;
 use hyper::body::Incoming;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder;
-use rand::rngs::StdRng;
 use rand::SeedableRng;
-use sql_over_http::{uuid_to_header_value, NEON_REQUEST_ID};
+use rand::rngs::StdRng;
+use sql_over_http::{NEON_REQUEST_ID, uuid_to_header_value};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use tracing::{info, warn, Instrument};
-use utils::http::error::ApiError;
+use tracing::{Instrument, info, warn};
 
-use crate::cancellation::CancellationHandlerMain;
+use crate::cancellation::CancellationHandler;
 use crate::config::{ProxyConfig, ProxyProtocolV2};
 use crate::context::RequestContext;
 use crate::ext::TaskExt;
 use crate::metrics::Metrics;
-use crate::protocol2::{read_proxy_protocol, ChainRW, ConnectHeader, ConnectionInfo};
+use crate::protocol2::{ChainRW, ConnectHeader, ConnectionInfo, read_proxy_protocol};
 use crate::proxy::run_until_cancelled;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
 use crate::serverless::http_util::{api_error_into_response, json_response};
 
 pub(crate) const SERVERLESS_DRIVER_SNI: &str = "api";
+pub(crate) const AUTH_BROKER_SNI: &str = "apiauth";
 
 pub async fn task_main(
     config: &'static ProxyConfig,
     auth_backend: &'static crate::auth::Backend<'static, ()>,
     ws_listener: TcpListener,
     cancellation_token: CancellationToken,
-    cancellation_handler: Arc<CancellationHandlerMain>,
+    cancellation_handler: Arc<CancellationHandler>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
@@ -117,18 +119,7 @@ pub async fn task_main(
         auth_backend,
         endpoint_rate_limiter: Arc::clone(&endpoint_rate_limiter),
     });
-    let tls_acceptor: Arc<dyn MaybeTlsAcceptor> = match config.tls_config.as_ref() {
-        Some(config) => {
-            let mut tls_server_config = rustls::ServerConfig::clone(&config.to_server_config());
-            // prefer http2, but support http/1.1
-            tls_server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-            Arc::new(tls_server_config)
-        }
-        None => {
-            warn!("TLS config is missing");
-            Arc::new(NoTls)
-        }
-    };
+    let tls_acceptor: Arc<dyn MaybeTlsAcceptor> = Arc::new(&config.tls_config);
 
     let connections = tokio_util::task::task_tracker::TaskTracker::new();
     connections.close(); // allows `connections.wait to complete`
@@ -216,22 +207,20 @@ pub(crate) type AsyncRW = Pin<Box<dyn AsyncReadWrite>>;
 
 #[async_trait]
 trait MaybeTlsAcceptor: Send + Sync + 'static {
-    async fn accept(self: Arc<Self>, conn: ChainRW<TcpStream>) -> std::io::Result<AsyncRW>;
+    async fn accept(&self, conn: ChainRW<TcpStream>) -> std::io::Result<AsyncRW>;
 }
 
 #[async_trait]
-impl MaybeTlsAcceptor for rustls::ServerConfig {
-    async fn accept(self: Arc<Self>, conn: ChainRW<TcpStream>) -> std::io::Result<AsyncRW> {
-        Ok(Box::pin(TlsAcceptor::from(self).accept(conn).await?))
-    }
-}
-
-struct NoTls;
-
-#[async_trait]
-impl MaybeTlsAcceptor for NoTls {
-    async fn accept(self: Arc<Self>, conn: ChainRW<TcpStream>) -> std::io::Result<AsyncRW> {
-        Ok(Box::pin(conn))
+impl MaybeTlsAcceptor for &'static ArcSwapOption<crate::config::TlsConfig> {
+    async fn accept(&self, conn: ChainRW<TcpStream>) -> std::io::Result<AsyncRW> {
+        match &*self.load() {
+            Some(config) => Ok(Box::pin(
+                TlsAcceptor::from(config.http_config.clone())
+                    .accept(conn)
+                    .await?,
+            )),
+            None => Ok(Box::pin(conn)),
+        }
     }
 }
 
@@ -318,7 +307,7 @@ async fn connection_handler(
     backend: Arc<PoolingBackend>,
     connections: TaskTracker,
     cancellations: TaskTracker,
-    cancellation_handler: Arc<CancellationHandlerMain>,
+    cancellation_handler: Arc<CancellationHandler>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     cancellation_token: CancellationToken,
     conn: AsyncRW,
@@ -412,7 +401,7 @@ async fn request_handler(
     config: &'static ProxyConfig,
     backend: Arc<PoolingBackend>,
     ws_connections: TaskTracker,
-    cancellation_handler: Arc<CancellationHandlerMain>,
+    cancellation_handler: Arc<CancellationHandler>,
     session_id: uuid::Uuid,
     conn_info: ConnectionInfo,
     // used to cancel in-flight HTTP requests. not used to cancel websockets
@@ -436,6 +425,14 @@ async fn request_handler(
             conn_info,
             crate::metrics::Protocol::Ws,
             &config.region,
+        );
+
+        ctx.set_user_agent(
+            request
+                .headers()
+                .get(hyper::header::USER_AGENT)
+                .and_then(|h| h.to_str().ok())
+                .map(Into::into),
         );
 
         let span = ctx.span();
@@ -475,6 +472,17 @@ async fn request_handler(
             &config.region,
         );
         let span = ctx.span();
+
+        let testodrome_id = request
+            .headers()
+            .get("X-Neon-Query-ID")
+            .and_then(|value| value.to_str().ok())
+            .map(|s| s.to_string());
+
+        if let Some(query_id) = testodrome_id {
+            info!(parent: &ctx.span(), "testodrome query ID: {query_id}");
+            ctx.set_testodrome_id(query_id.into());
+        }
 
         sql_over_http::handle(config, ctx, request, backend, http_cancellation_token)
             .instrument(span)

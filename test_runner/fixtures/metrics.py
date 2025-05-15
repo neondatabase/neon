@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from typing import TYPE_CHECKING, Literal
 
 from prometheus_client.parser import text_string_to_metric_families
-from prometheus_client.samples import Sample
 
 from fixtures.log_helper import log
+
+if TYPE_CHECKING:
+    from prometheus_client.samples import Sample
 
 
 class Metrics:
@@ -43,14 +46,26 @@ class MetricsGetter:
     def get_metrics(self) -> Metrics:
         raise NotImplementedError()
 
-    def get_metric_value(self, name: str, filter: dict[str, str] | None = None) -> float | None:
+    def get_metric_value(
+        self,
+        name: str,
+        filter: dict[str, str] | None = None,
+        aggregate: Literal["sum"] | None = None,
+    ) -> float | None:
         metrics = self.get_metrics()
         results = metrics.query_all(name, filter=filter)
         if not results:
             log.info(f'could not find metric "{name}"')
             return None
-        assert len(results) == 1, f"metric {name} with given filters is not unique, got: {results}"
-        return results[0].value
+        if aggregate is None:
+            assert len(results) == 1, (
+                f"metric {name} with given filters is not unique, got: {results}"
+            )
+            return results[0].value
+        elif aggregate == "sum":
+            return sum(sample.value for sample in results)
+        else:
+            raise RuntimeError(f"unknown aggregate function {aggregate}")
 
     def get_metrics_values(
         self, names: list[str], filter: dict[str, str] | None = None, absence_ok: bool = False
@@ -126,15 +141,10 @@ PAGESERVER_GLOBAL_METRICS: tuple[str, ...] = (
     "pageserver_page_cache_read_accesses_total",
     "pageserver_page_cache_size_current_bytes",
     "pageserver_page_cache_size_max_bytes",
-    "pageserver_getpage_reconstruct_seconds_bucket",
-    "pageserver_getpage_reconstruct_seconds_count",
-    "pageserver_getpage_reconstruct_seconds_sum",
     *[f"pageserver_basebackup_query_seconds_{x}" for x in ["bucket", "count", "sum"]],
     *histogram("pageserver_smgr_query_seconds_global"),
-    *histogram("pageserver_layers_visited_per_read_global"),
-    *histogram("pageserver_getpage_get_reconstruct_data_seconds"),
     *histogram("pageserver_wait_lsn_seconds"),
-    *histogram("pageserver_remote_operation_seconds"),
+    *histogram("pageserver_remote_timeline_client_seconds_global"),
     *histogram("pageserver_io_operations_seconds"),
     "pageserver_smgr_query_started_global_count_total",
     "pageserver_tenant_states_count",
@@ -145,6 +155,7 @@ PAGESERVER_GLOBAL_METRICS: tuple[str, ...] = (
     counter("pageserver_tenant_throttling_wait_usecs_sum_global"),
     counter("pageserver_tenant_throttling_count_global"),
     *histogram("pageserver_tokio_epoll_uring_slots_submission_queue_depth"),
+    *histogram("pageserver_wait_ondemand_download_seconds_global"),
 )
 
 PAGESERVER_PER_TENANT_METRICS: tuple[str, ...] = (
@@ -163,6 +174,9 @@ PAGESERVER_PER_TENANT_METRICS: tuple[str, ...] = (
     "pageserver_pitr_history_size",
     "pageserver_layer_bytes",
     "pageserver_layer_count",
+    "pageserver_layers_per_read_bucket",
+    "pageserver_layers_per_read_count",
+    "pageserver_layers_per_read_sum",
     "pageserver_visible_physical_size",
     "pageserver_storage_operations_seconds_count_total",
     "pageserver_storage_operations_seconds_sum_total",
@@ -176,6 +190,11 @@ PAGESERVER_PER_TENANT_METRICS: tuple[str, ...] = (
     counter("pageserver_tenant_throttling_count"),
     counter("pageserver_timeline_wal_records_received"),
     counter("pageserver_page_service_pagestream_flush_in_progress_micros"),
+    counter("pageserver_wait_lsn_in_progress_micros"),
+    counter("pageserver_wait_lsn_started_count"),
+    counter("pageserver_wait_lsn_finished_count"),
+    counter("pageserver_wait_ondemand_download_seconds_sum"),
+    counter("pageserver_page_service_batch_break_reason"),
     *histogram("pageserver_page_service_batch_size"),
     *histogram("pageserver_page_service_pagestream_batch_wait_time_seconds"),
     *PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,

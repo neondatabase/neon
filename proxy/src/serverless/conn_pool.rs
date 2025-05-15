@@ -1,17 +1,17 @@
 use std::fmt;
 use std::pin::pin;
 use std::sync::{Arc, Weak};
-use std::task::{ready, Poll};
+use std::task::{Poll, ready};
 
-use futures::future::poll_fn;
 use futures::Future;
-use postgres_client::tls::NoTlsStream;
+use futures::future::poll_fn;
 use postgres_client::AsyncMessage;
+use postgres_client::tls::MakeTlsConnect;
 use smallvec::SmallVec;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{Instrument, error, info, info_span, warn};
 #[cfg(test)]
 use {
     super::conn_pool_lib::GlobalConnPoolOptions,
@@ -26,6 +26,9 @@ use super::conn_pool_lib::{
 use crate::context::RequestContext;
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::metrics::Metrics;
+use crate::tls::postgres_rustls::MakeRustlsConnect;
+
+type TlsStream = <MakeRustlsConnect as MakeTlsConnect<TcpStream>>::Stream;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ConnInfoWithAuth {
@@ -58,7 +61,7 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
     ctx: &RequestContext,
     conn_info: ConnInfo,
     client: C,
-    mut connection: postgres_client::Connection<TcpStream, NoTlsStream>,
+    mut connection: postgres_client::Connection<TcpStream, TlsStream>,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
 ) -> Client<C> {
@@ -186,7 +189,6 @@ impl ClientDataRemote {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used)]
 mod tests {
     use std::sync::atomic::AtomicBool;
 
@@ -221,6 +223,7 @@ mod tests {
                 endpoint_id: (&EndpointId::from("endpoint")).into(),
                 project_id: (&ProjectId::from("project")).into(),
                 branch_id: (&BranchId::from("branch")).into(),
+                compute_id: "compute".into(),
                 cold_start_info: crate::control_plane::messages::ColdStartInfo::Warm,
             },
             conn_id: uuid::Uuid::new_v4(),

@@ -1,15 +1,16 @@
-use crate::tenant::mgr::TenantManager;
-use crate::{context::RequestContext, tenant::timeline::logical_size::CurrentLogicalSize};
+use std::sync::Arc;
+use std::time::SystemTime;
+
 use chrono::{DateTime, Utc};
 use consumption_metrics::EventType;
 use futures::stream::StreamExt;
-use std::{sync::Arc, time::SystemTime};
-use utils::{
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
+use utils::id::{TenantId, TimelineId};
+use utils::lsn::Lsn;
 
 use super::{Cache, NewRawMetric};
+use crate::context::RequestContext;
+use crate::tenant::mgr::TenantManager;
+use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 
 /// Name of the metric, used by `MetricsKey` factory methods and `deserialize_cached_events`
 /// instead of static str.
@@ -29,9 +30,6 @@ pub(super) enum Name {
     /// Tenant remote size
     #[serde(rename = "remote_storage_size")]
     RemoteSize,
-    /// Tenant resident size
-    #[serde(rename = "resident_size")]
-    ResidentSize,
     /// Tenant synthetic size
     #[serde(rename = "synthetic_storage_size")]
     SyntheticSize,
@@ -174,9 +172,9 @@ impl MetricsKey {
         .absolute_values()
     }
 
-    /// [`Tenant::remote_size`]
+    /// [`TenantShard::remote_size`]
     ///
-    /// [`Tenant::remote_size`]: crate::tenant::Tenant::remote_size
+    /// [`TenantShard::remote_size`]: crate::tenant::TenantShard::remote_size
     const fn remote_storage_size(tenant_id: TenantId) -> AbsoluteValueFactory {
         MetricsKey {
             tenant_id,
@@ -186,21 +184,9 @@ impl MetricsKey {
         .absolute_values()
     }
 
-    /// Sum of [`Timeline::resident_physical_size`] for each `Tenant`.
+    /// [`TenantShard::cached_synthetic_size`] as refreshed by [`calculate_synthetic_size_worker`].
     ///
-    /// [`Timeline::resident_physical_size`]: crate::tenant::Timeline::resident_physical_size
-    const fn resident_size(tenant_id: TenantId) -> AbsoluteValueFactory {
-        MetricsKey {
-            tenant_id,
-            timeline_id: None,
-            metric: Name::ResidentSize,
-        }
-        .absolute_values()
-    }
-
-    /// [`Tenant::cached_synthetic_size`] as refreshed by [`calculate_synthetic_size_worker`].
-    ///
-    /// [`Tenant::cached_synthetic_size`]: crate::tenant::Tenant::cached_synthetic_size
+    /// [`TenantShard::cached_synthetic_size`]: crate::tenant::TenantShard::cached_synthetic_size
     /// [`calculate_synthetic_size_worker`]: super::calculate_synthetic_size_worker
     const fn synthetic_size(tenant_id: TenantId) -> AbsoluteValueFactory {
         MetricsKey {
@@ -253,16 +239,15 @@ pub(super) async fn collect_all_metrics(
 
 async fn collect<S>(tenants: S, cache: &Cache, ctx: &RequestContext) -> Vec<NewRawMetric>
 where
-    S: futures::stream::Stream<Item = (TenantId, Arc<crate::tenant::Tenant>)>,
+    S: futures::stream::Stream<Item = (TenantId, Arc<crate::tenant::TenantShard>)>,
 {
     let mut current_metrics: Vec<NewRawMetric> = Vec::new();
 
     let mut tenants = std::pin::pin!(tenants);
 
     while let Some((tenant_id, tenant)) = tenants.next().await {
-        let mut tenant_resident_size = 0;
-
-        for timeline in tenant.list_timelines() {
+        let timelines = tenant.list_timelines();
+        for timeline in timelines {
             let timeline_id = timeline.timeline_id;
 
             match TimelineSnapshot::collect(&timeline, ctx) {
@@ -284,11 +269,9 @@ where
                     continue;
                 }
             }
-
-            tenant_resident_size += timeline.resident_physical_size();
         }
 
-        let snap = TenantSnapshot::collect(&tenant, tenant_resident_size);
+        let snap = TenantSnapshot::collect(&tenant);
         snap.to_metrics(tenant_id, Utc::now(), cache, &mut current_metrics);
     }
 
@@ -297,19 +280,14 @@ where
 
 /// In-between abstraction to allow testing metrics without actual Tenants.
 struct TenantSnapshot {
-    resident_size: u64,
     remote_size: u64,
     synthetic_size: u64,
 }
 
 impl TenantSnapshot {
     /// Collect tenant status to have metrics created out of it.
-    ///
-    /// `resident_size` is calculated of the timelines we had access to for other metrics, so we
-    /// cannot just list timelines here.
-    fn collect(t: &Arc<crate::tenant::Tenant>, resident_size: u64) -> Self {
+    fn collect(t: &Arc<crate::tenant::TenantShard>) -> Self {
         TenantSnapshot {
-            resident_size,
             remote_size: t.remote_size(),
             // Note that this metric is calculated in a separate bgworker
             // Here we only use cached value, which may lag behind the real latest one
@@ -325,8 +303,6 @@ impl TenantSnapshot {
         metrics: &mut Vec<NewRawMetric>,
     ) {
         let remote_size = MetricsKey::remote_storage_size(tenant_id).at(now, self.remote_size);
-
-        let resident_size = MetricsKey::resident_size(tenant_id).at(now, self.resident_size);
 
         let synthetic_size = {
             let factory = MetricsKey::synthetic_size(tenant_id);
@@ -347,11 +323,7 @@ impl TenantSnapshot {
             }
         };
 
-        metrics.extend(
-            [Some(remote_size), Some(resident_size), synthetic_size]
-                .into_iter()
-                .flatten(),
-        );
+        metrics.extend([Some(remote_size), synthetic_size].into_iter().flatten());
     }
 }
 

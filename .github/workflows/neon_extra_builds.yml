@@ -31,132 +31,70 @@ jobs:
     uses: ./.github/workflows/build-build-tools-image.yml
     secrets: inherit
 
-  check-macos-build:
-    needs: [ check-permissions ]
-    if: |
-      contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
-      contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
-      github.ref_name == 'main'
-    timeout-minutes: 90
-    runs-on: macos-15
-
-    env:
-      # Use release build only, to have less debug info around
-      # Hence keeping target/ (and general cache size) smaller
-      BUILD_TYPE: release
+  files-changed:
+    name: Detect what files changed
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3
+    outputs:
+      v17: ${{ steps.files_changed.outputs.v17 }}
+      postgres_changes: ${{ steps.postgres_changes.outputs.changes }}
+      rebuild_rust_code: ${{ steps.files_changed.outputs.rust_code }}
+      rebuild_everything: ${{ steps.files_changed.outputs.rebuild_neon_extra || steps.files_changed.outputs.rebuild_macos }}
 
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: true
 
-      - name: Install macOS postgres dependencies
-        run: brew install flex bison openssl protobuf icu4c
-
-      - name: Set pg 14 revision for caching
-        id: pg_v14_rev
-        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v14) >> $GITHUB_OUTPUT
-
-      - name: Set pg 15 revision for caching
-        id: pg_v15_rev
-        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v15) >> $GITHUB_OUTPUT
-
-      - name: Set pg 16 revision for caching
-        id: pg_v16_rev
-        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v16) >> $GITHUB_OUTPUT
-
-      - name: Set pg 17 revision for caching
-        id: pg_v17_rev
-        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v17) >> $GITHUB_OUTPUT
-
-      - name: Cache postgres v14 build
-        id: cache_pg_14
-        uses: actions/cache@v4
+      - name: Check for Postgres changes
+        uses: step-security/paths-filter@v3
+        id: files_changed
         with:
-          path: pg_install/v14
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+          token: ${{ github.token }}
+          filters: .github/file-filters.yaml
+          base: ${{ github.event_name != 'pull_request' && (github.event.merge_group.base_ref || github.ref_name) || '' }}
+          ref: ${{ github.event_name != 'pull_request' && (github.event.merge_group.head_ref || github.ref) || '' }}
 
-      - name: Cache postgres v15 build
-        id: cache_pg_15
-        uses: actions/cache@v4
-        with:
-          path: pg_install/v15
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
-
-      - name: Cache postgres v16 build
-        id: cache_pg_16
-        uses: actions/cache@v4
-        with:
-          path: pg_install/v16
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
-
-      - name: Cache postgres v17 build
-        id: cache_pg_17
-        uses: actions/cache@v4
-        with:
-          path: pg_install/v17
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v17_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
-
-      - name: Set extra env for macOS
+      - name: Filter out only v-string for build matrix
+        id: postgres_changes
+        env:
+          CHANGES: ${{ steps.files_changed.outputs.changes }}
         run: |
-          echo 'LDFLAGS=-L/usr/local/opt/openssl@3/lib' >> $GITHUB_ENV
-          echo 'CPPFLAGS=-I/usr/local/opt/openssl@3/include' >> $GITHUB_ENV
+          v_strings_only_as_json_array=$(echo ${CHANGES} | jq '.[]|select(test("v\\d+"))' | jq --slurp -c)
+          echo "changes=${v_strings_only_as_json_array}" | tee -a "${GITHUB_OUTPUT}"
 
-      - name: Cache cargo deps
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            !~/.cargo/registry/src
-            ~/.cargo/git
-            target
-          key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
-
-      - name: Build postgres v14
-        if: steps.cache_pg_14.outputs.cache-hit != 'true'
-        run: make postgres-v14 -j$(sysctl -n hw.ncpu)
-
-      - name: Build postgres v15
-        if: steps.cache_pg_15.outputs.cache-hit != 'true'
-        run: make postgres-v15 -j$(sysctl -n hw.ncpu)
-
-      - name: Build postgres v16
-        if: steps.cache_pg_16.outputs.cache-hit != 'true'
-        run: make postgres-v16 -j$(sysctl -n hw.ncpu)
-
-      - name: Build postgres v17
-        if: steps.cache_pg_17.outputs.cache-hit != 'true'
-        run: make postgres-v17 -j$(sysctl -n hw.ncpu)
-
-      - name: Build neon extensions
-        run: make neon-pg-ext -j$(sysctl -n hw.ncpu)
-
-      - name: Build walproposer-lib
-        run: make walproposer-lib -j$(sysctl -n hw.ncpu)
-
-      - name: Run cargo build
-        run: PQ_LIB_DIR=$(pwd)/pg_install/v16/lib cargo build --all --release
-
-      - name: Check that no warnings are produced
-        run: ./run_clippy.sh
+  check-macos-build:
+    needs: [ check-permissions, files-changed ]
+    uses: ./.github/workflows/build-macos.yml
+    with:
+      pg_versions: ${{ needs.files-changed.outputs.postgres_changes }}
+      rebuild_rust_code: ${{ fromJSON(needs.files-changed.outputs.rebuild_rust_code) }}
+      rebuild_everything: ${{ fromJSON(needs.files-changed.outputs.rebuild_everything) }}
 
   gather-rust-build-stats:
-    needs: [ check-permissions, build-build-tools-image ]
+    needs: [ check-permissions, build-build-tools-image, files-changed ]
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
       statuses: write
       contents: write
     if: |
-      contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats') ||
-      contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
-      github.ref_name == 'main'
+      (needs.files-changed.outputs.v17 == 'true' || needs.files-changed.outputs.rebuild_everything == 'true') && (
+        contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats') ||
+        contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
+        github.ref_name == 'main'
+      )
     runs-on: [ self-hosted, large ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init
 
     env:
@@ -166,8 +104,13 @@ jobs:
       CARGO_INCREMENTAL: 0
 
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: true
 
@@ -179,10 +122,10 @@ jobs:
         run: make walproposer-lib -j$(nproc)
 
       - name: Produce the build stats
-        run: PQ_LIB_DIR=$(pwd)/pg_install/v17/lib cargo build --all --release --timings -j$(nproc)
+        run: cargo build --all --release --timings -j$(nproc)
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
           aws-region: eu-central-1
           role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
@@ -199,7 +142,7 @@ jobs:
           echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
 
       - name: Publish build stats report
-        uses: actions/github-script@v7
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         env:
           REPORT_URL: ${{ steps.upload-stats.outputs.report-url }}
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}

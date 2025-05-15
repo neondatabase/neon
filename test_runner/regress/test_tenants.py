@@ -8,6 +8,7 @@ from contextlib import closing
 from datetime import datetime
 from itertools import chain
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 import requests
@@ -29,7 +30,9 @@ from fixtures.pageserver.utils import timeline_delete_wait_completed, wait_until
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind
 from fixtures.utils import wait_until
-from prometheus_client.samples import Sample
+
+if TYPE_CHECKING:
+    from prometheus_client.samples import Sample
 
 
 def test_tenant_creation_fails(neon_simple_env: NeonEnv):
@@ -194,7 +197,7 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
         io_metrics = query_all_safekeepers(
             "safekeeper_pg_io_bytes_total",
             {
-                "app_name": "pageserver",
+                "app_name": f"pageserver-{env.pageserver.id}",
                 "client_az": "test_ps_az",
                 "dir": io_direction,
                 "same_az": "false",
@@ -313,9 +316,9 @@ def test_pageserver_with_empty_tenants(neon_env_builder: NeonEnvBuilder):
     files_in_timelines_dir = sum(
         1 for _p in Path.iterdir(env.pageserver.timeline_dir(tenant_with_empty_timelines))
     )
-    assert (
-        files_in_timelines_dir == 0
-    ), f"Tenant {tenant_with_empty_timelines} should have an empty timelines/ directory"
+    assert files_in_timelines_dir == 0, (
+        f"Tenant {tenant_with_empty_timelines} should have an empty timelines/ directory"
+    )
 
     # Trigger timeline re-initialization after pageserver restart
     env.endpoints.stop_all()
@@ -335,14 +338,14 @@ def test_pageserver_with_empty_tenants(neon_env_builder: NeonEnvBuilder):
     tenants = client.tenant_list()
 
     [loaded_tenant] = [t for t in tenants if t["id"] == str(tenant_with_empty_timelines)]
-    assert (
-        loaded_tenant["state"]["slug"] == "Active"
-    ), "Tenant {tenant_with_empty_timelines} with empty timelines dir should be active and ready for timeline creation"
+    assert loaded_tenant["state"]["slug"] == "Active", (
+        "Tenant {tenant_with_empty_timelines} with empty timelines dir should be active and ready for timeline creation"
+    )
 
     loaded_tenant_status = client.tenant_status(tenant_with_empty_timelines)
-    assert (
-        loaded_tenant_status["state"]["slug"] == "Active"
-    ), f"Tenant {tenant_with_empty_timelines} without timelines dir should be active"
+    assert loaded_tenant_status["state"]["slug"] == "Active", (
+        f"Tenant {tenant_with_empty_timelines} without timelines dir should be active"
+    )
 
     time.sleep(1)  # to allow metrics propagation
 
@@ -357,9 +360,9 @@ def test_pageserver_with_empty_tenants(neon_env_builder: NeonEnvBuilder):
         ).value
     )
 
-    assert (
-        tenant_active_count == 1
-    ), f"Tenant {tenant_with_empty_timelines} should have metric as active"
+    assert tenant_active_count == 1, (
+        f"Tenant {tenant_with_empty_timelines} should have metric as active"
+    )
 
 
 def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
@@ -387,6 +390,7 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
     # Tenant creation requests which arrive out of order will generate complaints about
     # generation nubmers out of order.
     env.pageserver.allowed_errors.append(".*Generation .+ is less than existing .+")
+    env.storage_controller.allowed_errors.append(".*due to stale generation.*")
 
     # Timeline::flush_and_shutdown cannot tell if it is hitting a failure because of
     # an incomplete attach, or some other problem.  In the field this should be rare,
@@ -481,7 +485,8 @@ def test_pageserver_metrics_many_relations(neon_env_builder: NeonEnvBuilder):
     counts = timeline_detail["directory_entries_counts"]
     assert counts
     log.info(f"directory counts: {counts}")
-    assert counts[2] > COUNT_AT_LEAST_EXPECTED
+    # We need to add up reldir v1 + v2 counts
+    assert counts[2] + counts[7] > COUNT_AT_LEAST_EXPECTED
 
 
 def test_timelines_parallel_endpoints(neon_simple_env: NeonEnv):

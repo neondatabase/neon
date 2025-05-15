@@ -30,6 +30,7 @@ mod pg_helpers_tests {
             r#"fsync = off
 wal_level = logical
 hot_standby = on
+prewarm_lfc_on_startup = off
 neon.safekeepers = '127.0.0.1:6502,127.0.0.1:6503,127.0.0.1:6501'
 wal_log_hints = on
 log_connections = on
@@ -59,6 +60,24 @@ test.escaping = 'here''s a backslash \\ and a quote '' and a double-quote " hoor
         let ident: PgIdent = PgIdent::from("\"name\";\\n select 1;");
 
         assert_eq!(ident.pg_quote(), "\"\"\"name\"\";\\n select 1;\"");
+    }
+
+    #[test]
+    fn ident_pg_quote_dollar() {
+        let test_cases = vec![
+            ("name", ("$x$name$x$", "xx")),
+            ("name$", ("$x$name$$x$", "xx")),
+            ("name$$", ("$x$name$$$x$", "xx")),
+            ("name$$$", ("$x$name$$$$x$", "xx")),
+            ("name$$$$", ("$x$name$$$$$x$", "xx")),
+            ("name$x$", ("$xx$name$x$$xx$", "xxx")),
+        ];
+
+        for (input, expected) in test_cases {
+            let (escaped, tag) = PgIdent::from(input).pg_quote_dollar();
+            assert_eq!(escaped, expected.0);
+            assert_eq!(tag, expected.1);
+        }
     }
 
     #[test]

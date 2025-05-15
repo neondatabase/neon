@@ -7,9 +7,10 @@
 //! Note that the [`Value`] type is used for the permananent storage format, so any
 //! changes to it must be backwards compatible.
 
-use crate::record::NeonWalRecord;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+
+use crate::record::NeonWalRecord;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Value {
@@ -33,6 +34,24 @@ impl Value {
         match self {
             Value::Image(_) => true,
             Value::WalRecord(rec) => rec.will_init(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn estimated_size(&self) -> usize {
+        match self {
+            Value::Image(image) => image.len(),
+            Value::WalRecord(NeonWalRecord::AuxFile {
+                content: Some(content),
+                ..
+            }) => content.len(),
+            Value::WalRecord(NeonWalRecord::Postgres { rec, .. }) => rec.len(),
+            Value::WalRecord(NeonWalRecord::ClogSetAborted { xids }) => xids.len() * 4,
+            Value::WalRecord(NeonWalRecord::ClogSetCommitted { xids, .. }) => xids.len() * 4,
+            Value::WalRecord(NeonWalRecord::MultixactMembersCreate { members, .. }) => {
+                members.len() * 8
+            }
+            _ => 8192, /* use image size as the estimation */
         }
     }
 }
@@ -83,10 +102,10 @@ impl ValueBytes {
 
 #[cfg(test)]
 mod test {
-    use super::*;
-
     use bytes::Bytes;
     use utils::bin_ser::BeSer;
+
+    use super::*;
 
     macro_rules! roundtrip {
         ($orig:expr, $expected:expr) => {{

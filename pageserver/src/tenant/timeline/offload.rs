@@ -1,9 +1,15 @@
 use std::sync::Arc;
 
-use super::delete::{delete_local_timeline_directory, DeleteTimelineFlow, DeletionGuard};
+use pageserver_api::models::{TenantState, TimelineState};
+
 use super::Timeline;
+use super::delete::{DeletionGuard, delete_local_timeline_directory};
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
-use crate::tenant::{OffloadedTimeline, Tenant, TenantManifestError, TimelineOrOffloaded};
+use crate::tenant::remote_timeline_client::ShutdownIfArchivedError;
+use crate::tenant::timeline::delete::{TimelineDeleteGuardKind, make_timeline_delete_guard};
+use crate::tenant::{
+    DeleteTimelineError, OffloadedTimeline, TenantManifestError, TenantShard, TimelineOrOffloaded,
+};
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum OffloadError {
@@ -27,35 +33,46 @@ impl From<TenantManifestError> for OffloadError {
 }
 
 pub(crate) async fn offload_timeline(
-    tenant: &Tenant,
+    tenant: &TenantShard,
     timeline: &Arc<Timeline>,
 ) -> Result<(), OffloadError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
     tracing::info!("offloading archived timeline");
 
-    let allow_offloaded_children = true;
+    let delete_guard_res = make_timeline_delete_guard(
+        tenant,
+        timeline.timeline_id,
+        TimelineDeleteGuardKind::Offload,
+    );
+    if let Err(DeleteTimelineError::HasChildren(children)) = delete_guard_res {
+        let is_archived = timeline.is_archived();
+        if is_archived == Some(true) {
+            tracing::error!("timeline is archived but has non-archived children: {children:?}");
+            return Err(OffloadError::NotArchived);
+        }
+        tracing::info!(
+            ?is_archived,
+            "timeline is not archived and has unarchived children"
+        );
+        return Err(OffloadError::NotArchived);
+    };
     let (timeline, guard) =
-        DeleteTimelineFlow::prepare(tenant, timeline.timeline_id, allow_offloaded_children)
-            .map_err(|e| OffloadError::Other(anyhow::anyhow!(e)))?;
+        delete_guard_res.map_err(|e| OffloadError::Other(anyhow::anyhow!(e)))?;
 
     let TimelineOrOffloaded::Timeline(timeline) = timeline else {
         tracing::error!("timeline already offloaded, but given timeline object");
         return Ok(());
     };
 
-    let is_archived = timeline.is_archived();
-    match is_archived {
-        Some(true) => (),
-        Some(false) => {
-            tracing::warn!("tried offloading a non-archived timeline");
-            return Err(OffloadError::NotArchived);
+    match timeline.remote_client.shutdown_if_archived().await {
+        Ok(()) => {}
+        Err(ShutdownIfArchivedError::NotInitialized(_)) => {
+            // Either the timeline is being deleted, the operation is being retried, or we are shutting down.
+            // Don't return cancelled here to keep it idempotent.
         }
-        None => {
-            // This is legal: calls to this function can race with the timeline shutting down
-            tracing::info!("tried offloading a timeline whose remote storage is not initialized");
-            return Err(OffloadError::Cancelled);
-        }
+        Err(ShutdownIfArchivedError::NotArchived) => return Err(OffloadError::NotArchived),
     }
+    timeline.set_state(TimelineState::Stopping);
 
     // Now that the Timeline is in Stopping state, request all the related tasks to shut down.
     timeline.shutdown(super::ShutdownMode::Reload).await;
@@ -70,6 +87,15 @@ pub(crate) async fn offload_timeline(
 
     {
         let mut offloaded_timelines = tenant.timelines_offloaded.lock().unwrap();
+        if matches!(
+            tenant.current_state(),
+            TenantState::Stopping { .. } | TenantState::Broken { .. }
+        ) {
+            // Cancel the operation if the tenant is shutting down. Do this while the
+            // timelines_offloaded lock is held to prevent a race with Tenant::shutdown
+            // for defusing the lock
+            return Err(OffloadError::Cancelled);
+        }
         offloaded_timelines.insert(
             timeline.timeline_id,
             Arc::new(
@@ -85,7 +111,7 @@ pub(crate) async fn offload_timeline(
     // at the next restart attach it again.
     // For that to happen, we'd need to make the manifest reflect our *intended* state,
     // not our actual state of offloaded timelines.
-    tenant.store_tenant_manifest().await?;
+    tenant.maybe_upload_tenant_manifest().await?;
 
     tracing::info!("Timeline offload complete (remaining arc refcount: {remaining_refcount})");
 
@@ -93,11 +119,11 @@ pub(crate) async fn offload_timeline(
 }
 
 /// It is important that this gets called when DeletionGuard is being held.
-/// For more context see comments in [`DeleteTimelineFlow::prepare`]
+/// For more context see comments in [`make_timeline_delete_guard`]
 ///
 /// Returns the strong count of the timeline `Arc`
 fn remove_timeline_from_tenant(
-    tenant: &Tenant,
+    tenant: &TenantShard,
     timeline: &Timeline,
     _: &DeletionGuard, // using it as a witness
 ) -> usize {
@@ -116,6 +142,13 @@ fn remove_timeline_from_tenant(
     let timeline = timelines
         .remove(&timeline.timeline_id)
         .expect("timeline that we were deleting was concurrently removed from 'timelines' map");
+
+    // Clear the compaction queue for this timeline
+    tenant
+        .scheduled_compaction_tasks
+        .lock()
+        .unwrap()
+        .remove(&timeline.timeline_id);
 
     Arc::strong_count(&timeline)
 }

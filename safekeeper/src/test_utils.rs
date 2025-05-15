@@ -1,16 +1,25 @@
+use std::ffi::CStr;
 use std::sync::Arc;
 
-use crate::rate_limit::RateLimiter;
-use crate::safekeeper::{ProposerAcceptorMessage, ProposerElected, SafeKeeper, TermHistory};
-use crate::state::{TimelinePersistentState, TimelineState};
-use crate::timeline::{get_timeline_dir, SharedState, StateSK, Timeline};
-use crate::timelines_set::TimelinesSet;
-use crate::wal_backup::{remote_timeline_path, WalBackup};
-use crate::{control_file, wal_storage, SafeKeeperConf};
 use camino_tempfile::Utf8TempDir;
+use postgres_ffi::v17::wal_generator::{LogicalMessageGenerator, WalGenerator};
+use safekeeper_api::membership::SafekeeperGeneration as Generation;
 use tokio::fs::create_dir_all;
 use utils::id::{NodeId, TenantTimelineId};
 use utils::lsn::Lsn;
+
+use crate::rate_limit::RateLimiter;
+use crate::receive_wal::WalAcceptor;
+use crate::safekeeper::{
+    AcceptorProposerMessage, AppendRequest, AppendRequestHeader, ProposerAcceptorMessage,
+    ProposerElected, SafeKeeper, TermHistory,
+};
+use crate::send_wal::EndWatch;
+use crate::state::{TimelinePersistentState, TimelineState};
+use crate::timeline::{SharedState, StateSK, Timeline, get_timeline_dir};
+use crate::timelines_set::TimelinesSet;
+use crate::wal_backup::{WalBackup, remote_timeline_path};
+use crate::{SafeKeeperConf, control_file, receive_wal, wal_storage};
 
 /// A Safekeeper testing or benchmarking environment. Uses a tempdir for storage, removed on drop.
 pub struct Env {
@@ -67,10 +76,10 @@ impl Env {
         // Emulate an initial election.
         safekeeper
             .process_msg(&ProposerAcceptorMessage::Elected(ProposerElected {
+                generation: Generation::new(0),
                 term: 1,
                 start_streaming_at: start_lsn,
                 term_history: TermHistory(vec![(1, start_lsn).into()]),
-                timeline_start_lsn: start_lsn,
             }))
             .await?;
 
@@ -110,5 +119,63 @@ impl Env {
             wal_backup,
         );
         Ok(timeline)
+    }
+
+    // This will be dead code when building a non-benchmark target with the
+    // benchmarking feature enabled.
+    #[allow(dead_code)]
+    pub(crate) async fn write_wal(
+        tli: Arc<Timeline>,
+        start_lsn: Lsn,
+        msg_size: usize,
+        msg_count: usize,
+        prefix: &CStr,
+        mut next_record_lsns: Option<&mut Vec<Lsn>>,
+    ) -> anyhow::Result<EndWatch> {
+        let (msg_tx, msg_rx) = tokio::sync::mpsc::channel(receive_wal::MSG_QUEUE_SIZE);
+        let (reply_tx, mut reply_rx) = tokio::sync::mpsc::channel(receive_wal::REPLY_QUEUE_SIZE);
+
+        let end_watch = EndWatch::Commit(tli.get_commit_lsn_watch_rx());
+
+        WalAcceptor::spawn(tli.wal_residence_guard().await?, msg_rx, reply_tx, Some(0));
+
+        let prefixlen = prefix.to_bytes_with_nul().len();
+        assert!(msg_size >= prefixlen);
+        let message = vec![0; msg_size - prefixlen];
+
+        let walgen =
+            &mut WalGenerator::new(LogicalMessageGenerator::new(prefix, &message), start_lsn);
+        for _ in 0..msg_count {
+            let (lsn, record) = walgen.next().unwrap();
+            if let Some(ref mut lsns) = next_record_lsns {
+                lsns.push(lsn);
+            }
+
+            let req = AppendRequest {
+                h: AppendRequestHeader {
+                    generation: Generation::new(0),
+                    term: 1,
+                    begin_lsn: lsn,
+                    end_lsn: lsn + record.len() as u64,
+                    commit_lsn: lsn,
+                    truncate_lsn: Lsn(0),
+                },
+                wal_data: record,
+            };
+
+            let end_lsn = req.h.end_lsn;
+
+            let msg = ProposerAcceptorMessage::AppendRequest(req);
+            msg_tx.send(msg).await?;
+            while let Some(reply) = reply_rx.recv().await {
+                if let AcceptorProposerMessage::AppendResponse(resp) = reply {
+                    if resp.flush_lsn >= end_lsn {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(end_watch)
     }
 }

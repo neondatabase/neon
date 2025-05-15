@@ -1,14 +1,15 @@
 //! This module provides a wrapper around a real RemoteStorage implementation that
 //! causes the first N attempts at each upload or download operatio to fail. For
 //! testing purposes.
-use bytes::Bytes;
-use futures::stream::Stream;
-use futures::StreamExt;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::num::NonZeroU32;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
-use std::{collections::hash_map::Entry, sync::Arc};
+
+use bytes::Bytes;
+use futures::StreamExt;
+use futures::stream::Stream;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -136,6 +137,20 @@ impl RemoteStorage for UnreliableWrapper {
         self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))
             .map_err(DownloadError::Other)?;
         self.inner.list(prefix, mode, max_keys, cancel).await
+    }
+
+    async fn list_versions(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> Result<crate::VersionListing, DownloadError> {
+        self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))
+            .map_err(DownloadError::Other)?;
+        self.inner
+            .list_versions(prefix, mode, max_keys, cancel)
+            .await
     }
 
     async fn head_object(

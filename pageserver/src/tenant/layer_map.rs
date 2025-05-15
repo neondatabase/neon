@@ -46,28 +46,27 @@
 mod historic_layer_coverage;
 mod layer_coverage;
 
-use crate::context::RequestContext;
-use crate::keyspace::KeyPartitioning;
-use crate::tenant::storage_layer::InMemoryLayer;
-use anyhow::Result;
-use pageserver_api::key::Key;
-use pageserver_api::keyspace::{KeySpace, KeySpaceAccum};
-use range_set_blaze::{CheckSortedDisjoint, RangeSetBlaze};
 use std::collections::{HashMap, VecDeque};
 use std::iter::Peekable;
 use std::ops::Range;
 use std::sync::Arc;
-use utils::lsn::Lsn;
 
+use anyhow::Result;
 use historic_layer_coverage::BufferedHistoricLayerCoverage;
 pub use historic_layer_coverage::LayerKey;
+use pageserver_api::key::Key;
+use pageserver_api::keyspace::{KeySpace, KeySpaceAccum};
+use range_set_blaze::{CheckSortedDisjoint, RangeSetBlaze};
+use tokio::sync::watch;
+use utils::lsn::Lsn;
 
 use super::storage_layer::{LayerVisibilityHint, PersistentLayerDesc};
+use crate::context::RequestContext;
+use crate::tenant::storage_layer::{InMemoryLayer, ReadableLayerWeak};
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
 ///
-#[derive(Default)]
 pub struct LayerMap {
     //
     // 'open_layer' holds the current InMemoryLayer that is accepting new
@@ -93,7 +92,25 @@ pub struct LayerMap {
 
     /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
     /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
+    ///
+    /// NB: make sure to notify `watch_l0_deltas` on changes.
     l0_delta_layers: Vec<Arc<PersistentLayerDesc>>,
+
+    /// Notifies about L0 delta layer changes, sending the current number of L0 layers.
+    watch_l0_deltas: watch::Sender<usize>,
+}
+
+impl Default for LayerMap {
+    fn default() -> Self {
+        Self {
+            open_layer: Default::default(),
+            next_open_layer_at: Default::default(),
+            frozen_layers: Default::default(),
+            historic: Default::default(),
+            l0_delta_layers: Default::default(),
+            watch_l0_deltas: watch::channel(0).0,
+        }
+    }
 }
 
 /// The primary update API for the layer map.
@@ -149,7 +166,7 @@ impl Drop for BatchedUpdates<'_> {
 /// Return value of LayerMap::search
 #[derive(Eq, PartialEq, Debug, Hash)]
 pub struct SearchResult {
-    pub layer: Arc<PersistentLayerDesc>,
+    pub layer: ReadableLayerWeak,
     pub lsn_floor: Lsn,
 }
 
@@ -157,19 +174,37 @@ pub struct SearchResult {
 ///
 /// Contains a mapping from a layer description to a keyspace
 /// accumulator that contains all the keys which intersect the layer
-/// from the original search space. Keys that were not found are accumulated
-/// in a separate key space accumulator.
+/// from the original search space.
 #[derive(Debug)]
 pub struct RangeSearchResult {
     pub found: HashMap<SearchResult, KeySpaceAccum>,
-    pub not_found: KeySpaceAccum,
 }
 
 impl RangeSearchResult {
     fn new() -> Self {
         Self {
             found: HashMap::new(),
-            not_found: KeySpaceAccum::new(),
+        }
+    }
+
+    fn map_to_in_memory_layer(
+        in_memory_layer: Option<InMemoryLayerDesc>,
+        range: Range<Key>,
+    ) -> RangeSearchResult {
+        match in_memory_layer {
+            Some(inmem) => {
+                let search_result = SearchResult {
+                    lsn_floor: inmem.get_lsn_range().start,
+                    layer: ReadableLayerWeak::InMemoryLayer(inmem),
+                };
+
+                let mut accum = KeySpaceAccum::new();
+                accum.add_range(range);
+                RangeSearchResult {
+                    found: HashMap::from([(search_result, accum)]),
+                }
+            }
+            None => RangeSearchResult::new(),
         }
     }
 }
@@ -181,6 +216,7 @@ struct RangeSearchCollector<Iter>
 where
     Iter: Iterator<Item = (i128, Option<Arc<PersistentLayerDesc>>)>,
 {
+    in_memory_layer: Option<InMemoryLayerDesc>,
     delta_coverage: Peekable<Iter>,
     image_coverage: Peekable<Iter>,
     key_range: Range<Key>,
@@ -216,10 +252,12 @@ where
     fn new(
         key_range: Range<Key>,
         end_lsn: Lsn,
+        in_memory_layer: Option<InMemoryLayerDesc>,
         delta_coverage: Iter,
         image_coverage: Iter,
     ) -> Self {
         Self {
+            in_memory_layer,
             delta_coverage: delta_coverage.peekable(),
             image_coverage: image_coverage.peekable(),
             key_range,
@@ -248,8 +286,7 @@ where
                 return self.result;
             }
             Some(layer_type) => {
-                // Changes for the range exist. Record anything before the first
-                // coverage change as not found.
+                // Changes for the range exist.
                 let coverage_start = layer_type.next_change_at_key();
                 let range_before = self.key_range.start..coverage_start;
                 self.pad_range(range_before);
@@ -279,10 +316,22 @@ where
         self.result
     }
 
-    /// Mark a range as not found (i.e. no layers intersect it)
+    /// Map a range which does not intersect any persistent layers to
+    /// the in-memory layer candidate.
     fn pad_range(&mut self, key_range: Range<Key>) {
         if !key_range.is_empty() {
-            self.result.not_found.add_range(key_range);
+            if let Some(ref inmem) = self.in_memory_layer {
+                let search_result = SearchResult {
+                    layer: ReadableLayerWeak::InMemoryLayer(inmem.clone()),
+                    lsn_floor: inmem.get_lsn_range().start,
+                };
+
+                self.result
+                    .found
+                    .entry(search_result)
+                    .or_default()
+                    .add_range(key_range);
+            }
         }
     }
 
@@ -292,6 +341,7 @@ where
         let selected = LayerMap::select_layer(
             self.current_delta.clone(),
             self.current_image.clone(),
+            self.in_memory_layer.clone(),
             self.end_lsn,
         );
 
@@ -347,6 +397,24 @@ where
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+pub struct InMemoryLayerDesc {
+    handle: InMemoryLayerHandle,
+    lsn_range: Range<Lsn>,
+}
+
+impl InMemoryLayerDesc {
+    pub(crate) fn get_lsn_range(&self) -> Range<Lsn> {
+        self.lsn_range.clone()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+enum InMemoryLayerHandle {
+    Open,
+    Frozen(usize),
+}
+
 impl LayerMap {
     ///
     /// Find the latest layer (by lsn.end) that covers the given
@@ -376,69 +444,161 @@ impl LayerMap {
     /// layer result, or simplify the api to `get_latest_image` and
     /// `get_latest_delta`, and only call `get_latest_image` once.
     ///
-    /// NOTE: This only searches the 'historic' layers, *not* the
-    /// 'open' and 'frozen' layers!
-    ///
     pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult> {
-        let version = self.historic.get().unwrap().get_version(end_lsn.0 - 1)?;
+        let in_memory_layer = self.search_in_memory_layer(end_lsn);
+
+        let version = match self.historic.get().unwrap().get_version(end_lsn.0 - 1) {
+            Some(version) => version,
+            None => {
+                return in_memory_layer.map(|desc| SearchResult {
+                    lsn_floor: desc.get_lsn_range().start,
+                    layer: ReadableLayerWeak::InMemoryLayer(desc),
+                });
+            }
+        };
+
         let latest_delta = version.delta_coverage.query(key.to_i128());
         let latest_image = version.image_coverage.query(key.to_i128());
 
-        Self::select_layer(latest_delta, latest_image, end_lsn)
+        Self::select_layer(latest_delta, latest_image, in_memory_layer, end_lsn)
     }
 
+    /// Select a layer from three potential candidates (in-memory, delta and image layer).
+    /// The candidates represent the first layer of each type which intersect a key range.
+    ///
+    /// Layer types have an in implicit priority (image > delta > in-memory). For instance,
+    /// if we have the option of reading an LSN range from both an image and a delta, we
+    /// should read from the image.
     fn select_layer(
         delta_layer: Option<Arc<PersistentLayerDesc>>,
         image_layer: Option<Arc<PersistentLayerDesc>>,
+        in_memory_layer: Option<InMemoryLayerDesc>,
         end_lsn: Lsn,
     ) -> Option<SearchResult> {
         assert!(delta_layer.as_ref().is_none_or(|l| l.is_delta()));
         assert!(image_layer.as_ref().is_none_or(|l| !l.is_delta()));
 
-        match (delta_layer, image_layer) {
-            (None, None) => None,
-            (None, Some(image)) => {
+        match (delta_layer, image_layer, in_memory_layer) {
+            (None, None, None) => None,
+            (None, Some(image), None) => {
                 let lsn_floor = image.get_lsn_range().start;
                 Some(SearchResult {
-                    layer: image,
+                    layer: ReadableLayerWeak::PersistentLayer(image),
                     lsn_floor,
                 })
             }
-            (Some(delta), None) => {
+            (Some(delta), None, None) => {
                 let lsn_floor = delta.get_lsn_range().start;
                 Some(SearchResult {
-                    layer: delta,
+                    layer: ReadableLayerWeak::PersistentLayer(delta),
                     lsn_floor,
                 })
             }
-            (Some(delta), Some(image)) => {
+            (Some(delta), Some(image), None) => {
                 let img_lsn = image.get_lsn_range().start;
                 let image_is_newer = image.get_lsn_range().end >= delta.get_lsn_range().end;
                 let image_exact_match = img_lsn + 1 == end_lsn;
                 if image_is_newer || image_exact_match {
                     Some(SearchResult {
-                        layer: image,
+                        layer: ReadableLayerWeak::PersistentLayer(image),
+                        lsn_floor: img_lsn,
+                    })
+                } else {
+                    // If the delta overlaps with the image in the LSN dimension, do a partial
+                    // up to the image layer.
+                    let lsn_floor =
+                        std::cmp::max(delta.get_lsn_range().start, image.get_lsn_range().start + 1);
+                    Some(SearchResult {
+                        layer: ReadableLayerWeak::PersistentLayer(delta),
+                        lsn_floor,
+                    })
+                }
+            }
+            (None, None, Some(inmem)) => {
+                let lsn_floor = inmem.get_lsn_range().start;
+                Some(SearchResult {
+                    layer: ReadableLayerWeak::InMemoryLayer(inmem),
+                    lsn_floor,
+                })
+            }
+            (None, Some(image), Some(inmem)) => {
+                // If the in-memory layer overlaps with the image in the LSN dimension, do a partial
+                // up to the image layer.
+                let img_lsn = image.get_lsn_range().start;
+                let image_is_newer = image.get_lsn_range().end >= inmem.get_lsn_range().end;
+                let image_exact_match = img_lsn + 1 == end_lsn;
+                if image_is_newer || image_exact_match {
+                    Some(SearchResult {
+                        layer: ReadableLayerWeak::PersistentLayer(image),
                         lsn_floor: img_lsn,
                     })
                 } else {
                     let lsn_floor =
-                        std::cmp::max(delta.get_lsn_range().start, image.get_lsn_range().start + 1);
+                        std::cmp::max(inmem.get_lsn_range().start, image.get_lsn_range().start + 1);
                     Some(SearchResult {
-                        layer: delta,
+                        layer: ReadableLayerWeak::InMemoryLayer(inmem),
                         lsn_floor,
                     })
                 }
+            }
+            (Some(delta), None, Some(inmem)) => {
+                // Overlaps between delta and in-memory layers are not a valid
+                // state, but we handle them here for completeness.
+                let delta_end = delta.get_lsn_range().end;
+                let delta_is_newer = delta_end >= inmem.get_lsn_range().end;
+                let delta_exact_match = delta_end == end_lsn;
+                if delta_is_newer || delta_exact_match {
+                    Some(SearchResult {
+                        lsn_floor: delta.get_lsn_range().start,
+                        layer: ReadableLayerWeak::PersistentLayer(delta),
+                    })
+                } else {
+                    // If the in-memory layer overlaps with the delta in the LSN dimension, do a partial
+                    // up to the delta layer.
+                    let lsn_floor =
+                        std::cmp::max(inmem.get_lsn_range().start, delta.get_lsn_range().end);
+                    Some(SearchResult {
+                        layer: ReadableLayerWeak::InMemoryLayer(inmem),
+                        lsn_floor,
+                    })
+                }
+            }
+            (Some(delta), Some(image), Some(inmem)) => {
+                // Determine the preferred persistent layer without taking the in-memory layer
+                // into consideration.
+                let persistent_res =
+                    Self::select_layer(Some(delta.clone()), Some(image.clone()), None, end_lsn)
+                        .unwrap();
+                let persistent_l = match persistent_res.layer {
+                    ReadableLayerWeak::PersistentLayer(l) => l,
+                    ReadableLayerWeak::InMemoryLayer(_) => unreachable!(),
+                };
+
+                // Now handle the in-memory layer overlaps.
+                let inmem_res = if persistent_l.is_delta() {
+                    Self::select_layer(Some(persistent_l), None, Some(inmem.clone()), end_lsn)
+                        .unwrap()
+                } else {
+                    Self::select_layer(None, Some(persistent_l), Some(inmem.clone()), end_lsn)
+                        .unwrap()
+                };
+
+                Some(SearchResult {
+                    layer: inmem_res.layer,
+                    // Use the more restrictive LSN floor
+                    lsn_floor: std::cmp::max(persistent_res.lsn_floor, inmem_res.lsn_floor),
+                })
             }
         }
     }
 
     pub fn range_search(&self, key_range: Range<Key>, end_lsn: Lsn) -> RangeSearchResult {
+        let in_memory_layer = self.search_in_memory_layer(end_lsn);
+
         let version = match self.historic.get().unwrap().get_version(end_lsn.0 - 1) {
             Some(version) => version,
             None => {
-                let mut result = RangeSearchResult::new();
-                result.not_found.add_range(key_range);
-                return result;
+                return RangeSearchResult::map_to_in_memory_layer(in_memory_layer, key_range);
             }
         };
 
@@ -446,7 +606,13 @@ impl LayerMap {
         let delta_changes = version.delta_coverage.range_overlaps(&raw_range);
         let image_changes = version.image_coverage.range_overlaps(&raw_range);
 
-        let collector = RangeSearchCollector::new(key_range, end_lsn, delta_changes, image_changes);
+        let collector = RangeSearchCollector::new(
+            key_range,
+            end_lsn,
+            in_memory_layer,
+            delta_changes,
+            image_changes,
+        );
         collector.collect()
     }
 
@@ -466,6 +632,8 @@ impl LayerMap {
 
         if Self::is_l0(&layer_desc.key_range, layer_desc.is_delta) {
             self.l0_delta_layers.push(layer_desc.clone().into());
+            self.watch_l0_deltas
+                .send_replace(self.l0_delta_layers.len());
         }
 
         self.historic.insert(
@@ -488,6 +656,8 @@ impl LayerMap {
             let mut l0_delta_layers = std::mem::take(&mut self.l0_delta_layers);
             l0_delta_layers.retain(|other| other.key() != layer_key);
             self.l0_delta_layers = l0_delta_layers;
+            self.watch_l0_deltas
+                .send_replace(self.l0_delta_layers.len());
             // this assertion is related to use of Arc::ptr_eq in Self::compare_arced_layers,
             // there's a chance that the comparison fails at runtime due to it comparing (pointer,
             // vtable) pairs.
@@ -544,22 +714,41 @@ impl LayerMap {
         true
     }
 
-    pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<PersistentLayerDesc>> {
+    pub fn iter_historic_layers(&self) -> impl ExactSizeIterator<Item = Arc<PersistentLayerDesc>> {
         self.historic.iter()
     }
 
     /// Get a ref counted pointer for the first in memory layer that matches the provided predicate.
-    pub fn find_in_memory_layer<Pred>(&self, mut pred: Pred) -> Option<Arc<InMemoryLayer>>
-    where
-        Pred: FnMut(&Arc<InMemoryLayer>) -> bool,
-    {
+    pub(crate) fn search_in_memory_layer(&self, below: Lsn) -> Option<InMemoryLayerDesc> {
+        let is_below = |l: &Arc<InMemoryLayer>| {
+            let start_lsn = l.get_lsn_range().start;
+            below > start_lsn
+        };
+
         if let Some(open) = &self.open_layer {
-            if pred(open) {
-                return Some(open.clone());
+            if is_below(open) {
+                return Some(InMemoryLayerDesc {
+                    handle: InMemoryLayerHandle::Open,
+                    lsn_range: open.get_lsn_range(),
+                });
             }
         }
 
-        self.frozen_layers.iter().rfind(|l| pred(l)).cloned()
+        self.frozen_layers
+            .iter()
+            .enumerate()
+            .rfind(|(_idx, l)| is_below(l))
+            .map(|(idx, l)| InMemoryLayerDesc {
+                handle: InMemoryLayerHandle::Frozen(idx),
+                lsn_range: l.get_lsn_range(),
+            })
+    }
+
+    pub(crate) fn in_memory_layer(&self, desc: &InMemoryLayerDesc) -> Arc<InMemoryLayer> {
+        match desc.handle {
+            InMemoryLayerHandle::Open => self.open_layer.as_ref().unwrap().clone(),
+            InMemoryLayerHandle::Frozen(idx) => self.frozen_layers[idx].clone(),
+        }
     }
 
     ///
@@ -715,139 +904,14 @@ impl LayerMap {
         max_stacked_deltas
     }
 
-    /// Count how many reimage-worthy layers we need to visit for given key-lsn pair.
-    ///
-    /// The `partition_range` argument is used as context for the reimage-worthiness decision.
-    ///
-    /// Used as a helper for correctness checks only. Performance not critical.
-    pub fn get_difficulty(&self, lsn: Lsn, key: Key, partition_range: &Range<Key>) -> usize {
-        match self.search(key, lsn) {
-            Some(search_result) => {
-                if search_result.layer.is_incremental() {
-                    (Self::is_reimage_worthy(&search_result.layer, partition_range) as usize)
-                        + self.get_difficulty(search_result.lsn_floor, key, partition_range)
-                } else {
-                    0
-                }
-            }
-            None => 0,
-        }
-    }
-
-    /// Used for correctness checking. Results are expected to be identical to
-    /// self.get_difficulty_map. Assumes self.search is correct.
-    pub fn get_difficulty_map_bruteforce(
-        &self,
-        lsn: Lsn,
-        partitioning: &KeyPartitioning,
-    ) -> Vec<usize> {
-        // Looking at the difficulty as a function of key, it could only increase
-        // when a delta layer starts or an image layer ends. Therefore it's sufficient
-        // to check the difficulties at:
-        // - the key.start for each non-empty part range
-        // - the key.start for each delta
-        // - the key.end for each image
-        let keys_iter: Box<dyn Iterator<Item = Key>> = {
-            let mut keys: Vec<Key> = self
-                .iter_historic_layers()
-                .map(|layer| {
-                    if layer.is_incremental() {
-                        layer.get_key_range().start
-                    } else {
-                        layer.get_key_range().end
-                    }
-                })
-                .collect();
-            keys.sort();
-            Box::new(keys.into_iter())
-        };
-        let mut keys_iter = keys_iter.peekable();
-
-        // Iter the partition and keys together and query all the necessary
-        // keys, computing the max difficulty for each part.
-        partitioning
-            .parts
-            .iter()
-            .map(|part| {
-                let mut difficulty = 0;
-                // Partition ranges are assumed to be sorted and disjoint
-                // TODO assert it
-                for range in &part.ranges {
-                    if !range.is_empty() {
-                        difficulty =
-                            std::cmp::max(difficulty, self.get_difficulty(lsn, range.start, range));
-                    }
-                    while let Some(key) = keys_iter.peek() {
-                        if key >= &range.end {
-                            break;
-                        }
-                        let key = keys_iter.next().unwrap();
-                        if key < range.start {
-                            continue;
-                        }
-                        difficulty =
-                            std::cmp::max(difficulty, self.get_difficulty(lsn, key, range));
-                    }
-                }
-                difficulty
-            })
-            .collect()
-    }
-
-    /// For each part of a keyspace partitioning, return the maximum number of layers
-    /// that would be needed for page reconstruction in that part at the given LSN.
-    ///
-    /// If `limit` is provided we don't try to count above that number.
-    ///
-    /// This method is used to decide where to create new image layers. Computing the
-    /// result for the entire partitioning at once allows this function to be more
-    /// efficient, and further optimization is possible by using iterators instead,
-    /// to allow early return.
-    ///
-    /// TODO actually use this method instead of count_deltas. Currently we only use
-    ///      it for benchmarks.
-    pub fn get_difficulty_map(
-        &self,
-        lsn: Lsn,
-        partitioning: &KeyPartitioning,
-        limit: Option<usize>,
-    ) -> Vec<usize> {
-        // TODO This is a naive implementation. Perf improvements to do:
-        // 1. Instead of calling self.image_coverage and self.count_deltas,
-        //    iterate the image and delta coverage only once.
-        partitioning
-            .parts
-            .iter()
-            .map(|part| {
-                let mut difficulty = 0;
-                for range in &part.ranges {
-                    if limit == Some(difficulty) {
-                        break;
-                    }
-                    for (img_range, last_img) in self.image_coverage(range, lsn) {
-                        if limit == Some(difficulty) {
-                            break;
-                        }
-                        let img_lsn = if let Some(last_img) = last_img {
-                            last_img.get_lsn_range().end
-                        } else {
-                            Lsn(0)
-                        };
-
-                        if img_lsn < lsn {
-                            let num_deltas = self.count_deltas(&img_range, &(img_lsn..lsn), limit);
-                            difficulty = std::cmp::max(difficulty, num_deltas);
-                        }
-                    }
-                }
-                difficulty
-            })
-            .collect()
-    }
-
     /// Return all L0 delta layers
     pub fn level0_deltas(&self) -> &Vec<Arc<PersistentLayerDesc>> {
         &self.l0_delta_layers
+    }
+
+    /// Subscribes to L0 delta layer changes, sending the current number of L0 delta layers.
+    pub fn watch_level0_deltas(&self) -> watch::Receiver<usize> {
+        self.watch_l0_deltas.subscribe()
     }
 
     /// debugging function to print out the contents of the layer map
@@ -1039,18 +1103,21 @@ impl LayerMap {
 
 #[cfg(test)]
 mod tests {
-    use crate::tenant::{storage_layer::LayerName, IndexPart};
-    use pageserver_api::{
-        key::DBDIR_KEY,
-        keyspace::{KeySpace, KeySpaceRandomAccum},
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use crate::{
+        DEFAULT_PG_VERSION,
+        tenant::{harness::TenantHarness, storage_layer::LayerName},
     };
-    use std::{collections::HashMap, path::PathBuf};
-    use utils::{
-        id::{TenantId, TimelineId},
-        shard::TenantShardId,
-    };
+    use pageserver_api::key::DBDIR_KEY;
+    use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
+    use tokio_util::sync::CancellationToken;
+    use utils::id::{TenantId, TimelineId};
+    use utils::shard::TenantShardId;
 
     use super::*;
+    use crate::tenant::IndexPart;
 
     #[derive(Clone)]
     struct LayerDesc {
@@ -1075,7 +1142,6 @@ mod tests {
     }
 
     fn assert_range_search_result_eq(lhs: RangeSearchResult, rhs: RangeSearchResult) {
-        assert_eq!(lhs.not_found.to_keyspace(), rhs.not_found.to_keyspace());
         let lhs: HashMap<SearchResult, KeySpace> = lhs
             .found
             .into_iter()
@@ -1101,17 +1167,12 @@ mod tests {
         let mut key = key_range.start;
         while key != key_range.end {
             let res = layer_map.search(key, end_lsn);
-            match res {
-                Some(res) => {
-                    range_search_result
-                        .found
-                        .entry(res)
-                        .or_default()
-                        .add_key(key);
-                }
-                None => {
-                    range_search_result.not_found.add_key(key);
-                }
+            if let Some(res) = res {
+                range_search_result
+                    .found
+                    .entry(res)
+                    .or_default()
+                    .add_key(key);
             }
 
             key = key.next();
@@ -1126,20 +1187,51 @@ mod tests {
         let range = Key::from_i128(100)..Key::from_i128(200);
 
         let res = layer_map.range_search(range.clone(), Lsn(100));
-        assert_eq!(
-            res.not_found.to_keyspace(),
-            KeySpace {
-                ranges: vec![range]
-            }
-        );
+        assert_range_search_result_eq(res, RangeSearchResult::new());
     }
 
-    #[test]
-    fn ranged_search() {
+    #[tokio::test]
+    async fn ranged_search() {
+        let harness = TenantHarness::create("ranged_search").await.unwrap();
+        let (tenant, ctx) = harness.load().await;
+        let cancel = CancellationToken::new();
+        let timeline_id = TimelineId::generate();
+        // Create the timeline such that the in-memory layers can be written
+        // to the timeline directory.
+        tenant
+            .create_test_timeline(timeline_id, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await
+            .unwrap();
+
+        let gate = utils::sync::gate::Gate::default();
+        let add_in_memory_layer = async |layer_map: &mut LayerMap, lsn_range: Range<Lsn>| {
+            let layer = InMemoryLayer::create(
+                harness.conf,
+                timeline_id,
+                harness.tenant_shard_id,
+                lsn_range.start,
+                &gate,
+                &cancel,
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+            layer.freeze(lsn_range.end).await;
+
+            layer_map.frozen_layers.push_back(Arc::new(layer));
+        };
+
+        let in_memory_layer_configurations = [
+            vec![],
+            // Overlaps with the top-most image
+            vec![Lsn(35)..Lsn(50)],
+        ];
+
         let layers = vec![
             LayerDesc {
                 key_range: Key::from_i128(15)..Key::from_i128(50),
-                lsn_range: Lsn(0)..Lsn(5),
+                lsn_range: Lsn(5)..Lsn(6),
                 is_delta: false,
             },
             LayerDesc {
@@ -1159,19 +1251,27 @@ mod tests {
             },
             LayerDesc {
                 key_range: Key::from_i128(35)..Key::from_i128(40),
-                lsn_range: Lsn(35)..Lsn(40),
+                lsn_range: Lsn(40)..Lsn(41),
                 is_delta: false,
             },
         ];
 
-        let layer_map = create_layer_map(layers.clone());
-        for start in 0..60 {
-            for end in (start + 1)..60 {
-                let range = Key::from_i128(start)..Key::from_i128(end);
-                let result = layer_map.range_search(range.clone(), Lsn(100));
-                let expected = brute_force_range_search(&layer_map, range, Lsn(100));
+        let mut layer_map = create_layer_map(layers.clone());
+        for in_memory_layers in in_memory_layer_configurations {
+            for in_mem_layer_range in in_memory_layers {
+                add_in_memory_layer(&mut layer_map, in_mem_layer_range).await;
+            }
 
-                assert_range_search_result_eq(result, expected);
+            for start in 0..60 {
+                for end in (start + 1)..60 {
+                    let range = Key::from_i128(start)..Key::from_i128(end);
+                    let result = layer_map.range_search(range.clone(), Lsn(100));
+                    let expected = brute_force_range_search(&layer_map, range, Lsn(100));
+
+                    eprintln!("{start}..{end}: {result:?}");
+
+                    assert_range_search_result_eq(result, expected);
+                }
             }
         }
     }
@@ -1390,9 +1490,11 @@ mod tests {
         assert!(!shadow.ranges.is_empty());
 
         // At least some layers should be marked covered
-        assert!(layer_visibilities
-            .iter()
-            .any(|i| matches!(i.1, LayerVisibilityHint::Covered)));
+        assert!(
+            layer_visibilities
+                .iter()
+                .any(|i| matches!(i.1, LayerVisibilityHint::Covered))
+        );
 
         let layer_visibilities = layer_visibilities.into_iter().collect::<HashMap<_, _>>();
 
@@ -1462,12 +1564,348 @@ mod tests {
 
         // Sanity: the layer that holds latest data for the DBDIR key should always be visible
         // (just using this key as a key that will always exist for any layermap fixture)
-        let dbdir_layer = layer_map
-            .search(DBDIR_KEY, index.metadata.disk_consistent_lsn())
-            .unwrap();
+        let dbdir_layer = {
+            let readable_layer = layer_map
+                .search(DBDIR_KEY, index.metadata.disk_consistent_lsn())
+                .unwrap();
+
+            match readable_layer.layer {
+                ReadableLayerWeak::PersistentLayer(desc) => desc,
+                ReadableLayerWeak::InMemoryLayer(_) => unreachable!(""),
+            }
+        };
         assert!(matches!(
-            layer_visibilities.get(&dbdir_layer.layer).unwrap(),
+            layer_visibilities.get(&dbdir_layer).unwrap(),
             LayerVisibilityHint::Visible
         ));
+    }
+}
+
+#[cfg(test)]
+mod select_layer_tests {
+    use super::*;
+
+    fn create_persistent_layer(
+        start_lsn: u64,
+        end_lsn: u64,
+        is_delta: bool,
+    ) -> Arc<PersistentLayerDesc> {
+        if !is_delta {
+            assert_eq!(end_lsn, start_lsn + 1);
+        }
+
+        Arc::new(PersistentLayerDesc::new_test(
+            Key::MIN..Key::MAX,
+            Lsn(start_lsn)..Lsn(end_lsn),
+            is_delta,
+        ))
+    }
+
+    fn create_inmem_layer(start_lsn: u64, end_lsn: u64) -> InMemoryLayerDesc {
+        InMemoryLayerDesc {
+            handle: InMemoryLayerHandle::Open,
+            lsn_range: Lsn(start_lsn)..Lsn(end_lsn),
+        }
+    }
+
+    #[test]
+    fn test_select_layer_empty() {
+        assert!(LayerMap::select_layer(None, None, None, Lsn(100)).is_none());
+    }
+
+    #[test]
+    fn test_select_layer_only_delta() {
+        let delta = create_persistent_layer(10, 20, true);
+        let result = LayerMap::select_layer(Some(delta.clone()), None, None, Lsn(100)).unwrap();
+
+        assert_eq!(result.lsn_floor, Lsn(10));
+        assert!(
+            matches!(result.layer, ReadableLayerWeak::PersistentLayer(l) if Arc::ptr_eq(&l, &delta))
+        );
+    }
+
+    #[test]
+    fn test_select_layer_only_image() {
+        let image = create_persistent_layer(10, 11, false);
+        let result = LayerMap::select_layer(None, Some(image.clone()), None, Lsn(100)).unwrap();
+
+        assert_eq!(result.lsn_floor, Lsn(10));
+        assert!(
+            matches!(result.layer, ReadableLayerWeak::PersistentLayer(l) if Arc::ptr_eq(&l, &image))
+        );
+    }
+
+    #[test]
+    fn test_select_layer_only_inmem() {
+        let inmem = create_inmem_layer(10, 20);
+        let result = LayerMap::select_layer(None, None, Some(inmem.clone()), Lsn(100)).unwrap();
+
+        assert_eq!(result.lsn_floor, Lsn(10));
+        assert!(matches!(result.layer, ReadableLayerWeak::InMemoryLayer(l) if l == inmem));
+    }
+
+    #[test]
+    fn test_select_layer_image_inside_delta() {
+        let delta = create_persistent_layer(10, 20, true);
+        let image = create_persistent_layer(15, 16, false);
+
+        let result =
+            LayerMap::select_layer(Some(delta.clone()), Some(image.clone()), None, Lsn(100))
+                .unwrap();
+
+        assert_eq!(result.lsn_floor, Lsn(16));
+        assert!(
+            matches!(result.layer, ReadableLayerWeak::PersistentLayer(l) if Arc::ptr_eq(&l, &delta))
+        );
+
+        let result = LayerMap::select_layer(
+            Some(delta.clone()),
+            Some(image.clone()),
+            None,
+            result.lsn_floor,
+        )
+        .unwrap();
+
+        assert_eq!(result.lsn_floor, Lsn(15));
+        assert!(
+            matches!(result.layer, ReadableLayerWeak::PersistentLayer(l) if Arc::ptr_eq(&l, &image))
+        );
+    }
+
+    #[test]
+    fn test_select_layer_newer_image() {
+        let delta = create_persistent_layer(10, 20, true);
+        let image = create_persistent_layer(25, 26, false);
+
+        let result =
+            LayerMap::select_layer(Some(delta.clone()), Some(image.clone()), None, Lsn(30))
+                .unwrap();
+
+        assert_eq!(result.lsn_floor, Lsn(25));
+        assert!(
+            matches!(result.layer, ReadableLayerWeak::PersistentLayer(l) if Arc::ptr_eq(&l, &image))
+        );
+
+        let result =
+            LayerMap::select_layer(Some(delta.clone()), None, None, result.lsn_floor).unwrap();
+
+        assert_eq!(result.lsn_floor, Lsn(10));
+        assert!(
+            matches!(result.layer, ReadableLayerWeak::PersistentLayer(l) if Arc::ptr_eq(&l, &delta))
+        );
+    }
+
+    #[test]
+    fn test_select_layer_delta_with_older_image() {
+        let delta = create_persistent_layer(15, 25, true);
+        let image = create_persistent_layer(10, 11, false);
+
+        let result =
+            LayerMap::select_layer(Some(delta.clone()), Some(image.clone()), None, Lsn(30))
+                .unwrap();
+
+        assert_eq!(result.lsn_floor, Lsn(15));
+        assert!(
+            matches!(result.layer, ReadableLayerWeak::PersistentLayer(l) if Arc::ptr_eq(&l, &delta))
+        );
+
+        let result =
+            LayerMap::select_layer(None, Some(image.clone()), None, result.lsn_floor).unwrap();
+
+        assert_eq!(result.lsn_floor, Lsn(10));
+        assert!(
+            matches!(result.layer, ReadableLayerWeak::PersistentLayer(l) if Arc::ptr_eq(&l, &image))
+        );
+    }
+
+    #[test]
+    fn test_select_layer_image_inside_inmem() {
+        let image = create_persistent_layer(15, 16, false);
+        let inmem = create_inmem_layer(10, 25);
+
+        let result =
+            LayerMap::select_layer(None, Some(image.clone()), Some(inmem.clone()), Lsn(30))
+                .unwrap();
+
+        assert_eq!(result.lsn_floor, Lsn(16));
+        assert!(matches!(result.layer, ReadableLayerWeak::InMemoryLayer(l) if l == inmem));
+
+        let result = LayerMap::select_layer(
+            None,
+            Some(image.clone()),
+            Some(inmem.clone()),
+            result.lsn_floor,
+        )
+        .unwrap();
+
+        assert_eq!(result.lsn_floor, Lsn(15));
+        assert!(
+            matches!(result.layer, ReadableLayerWeak::PersistentLayer(l) if Arc::ptr_eq(&l, &image))
+        );
+
+        let result =
+            LayerMap::select_layer(None, None, Some(inmem.clone()), result.lsn_floor).unwrap();
+        assert_eq!(result.lsn_floor, Lsn(10));
+        assert!(matches!(result.layer, ReadableLayerWeak::InMemoryLayer(l) if l == inmem));
+    }
+
+    #[test]
+    fn test_select_layer_delta_inside_inmem() {
+        let delta_top = create_persistent_layer(15, 20, true);
+        let delta_bottom = create_persistent_layer(10, 15, true);
+        let inmem = create_inmem_layer(15, 25);
+
+        let result =
+            LayerMap::select_layer(Some(delta_top.clone()), None, Some(inmem.clone()), Lsn(30))
+                .unwrap();
+
+        assert_eq!(result.lsn_floor, Lsn(20));
+        assert!(matches!(result.layer, ReadableLayerWeak::InMemoryLayer(l) if l == inmem));
+
+        let result = LayerMap::select_layer(
+            Some(delta_top.clone()),
+            None,
+            Some(inmem.clone()),
+            result.lsn_floor,
+        )
+        .unwrap();
+
+        assert_eq!(result.lsn_floor, Lsn(15));
+        assert!(
+            matches!(result.layer, ReadableLayerWeak::PersistentLayer(l) if Arc::ptr_eq(&l, &delta_top))
+        );
+
+        let result = LayerMap::select_layer(
+            Some(delta_bottom.clone()),
+            None,
+            Some(inmem.clone()),
+            result.lsn_floor,
+        )
+        .unwrap();
+        assert_eq!(result.lsn_floor, Lsn(10));
+        assert!(
+            matches!(result.layer, ReadableLayerWeak::PersistentLayer(l) if Arc::ptr_eq(&l, &delta_bottom))
+        );
+    }
+
+    #[test]
+    fn test_select_layer_all_overlap_1() {
+        let inmem = create_inmem_layer(10, 30);
+        let delta = create_persistent_layer(15, 25, true);
+        let image = create_persistent_layer(20, 21, false);
+
+        let result = LayerMap::select_layer(
+            Some(delta.clone()),
+            Some(image.clone()),
+            Some(inmem.clone()),
+            Lsn(50),
+        )
+        .unwrap();
+
+        assert_eq!(result.lsn_floor, Lsn(25));
+        assert!(matches!(result.layer, ReadableLayerWeak::InMemoryLayer(l) if l == inmem));
+
+        let result = LayerMap::select_layer(
+            Some(delta.clone()),
+            Some(image.clone()),
+            Some(inmem.clone()),
+            result.lsn_floor,
+        )
+        .unwrap();
+
+        assert_eq!(result.lsn_floor, Lsn(21));
+        assert!(
+            matches!(result.layer, ReadableLayerWeak::PersistentLayer(l) if Arc::ptr_eq(&l, &delta))
+        );
+
+        let result = LayerMap::select_layer(
+            Some(delta.clone()),
+            Some(image.clone()),
+            Some(inmem.clone()),
+            result.lsn_floor,
+        )
+        .unwrap();
+
+        assert_eq!(result.lsn_floor, Lsn(20));
+        assert!(
+            matches!(result.layer, ReadableLayerWeak::PersistentLayer(l) if Arc::ptr_eq(&l, &image))
+        );
+    }
+
+    #[test]
+    fn test_select_layer_all_overlap_2() {
+        let inmem = create_inmem_layer(20, 30);
+        let delta = create_persistent_layer(10, 40, true);
+        let image = create_persistent_layer(25, 26, false);
+
+        let result = LayerMap::select_layer(
+            Some(delta.clone()),
+            Some(image.clone()),
+            Some(inmem.clone()),
+            Lsn(50),
+        )
+        .unwrap();
+
+        assert_eq!(result.lsn_floor, Lsn(26));
+        assert!(
+            matches!(result.layer, ReadableLayerWeak::PersistentLayer(l) if Arc::ptr_eq(&l, &delta))
+        );
+
+        let result = LayerMap::select_layer(
+            Some(delta.clone()),
+            Some(image.clone()),
+            Some(inmem.clone()),
+            result.lsn_floor,
+        )
+        .unwrap();
+
+        assert_eq!(result.lsn_floor, Lsn(25));
+        assert!(
+            matches!(result.layer, ReadableLayerWeak::PersistentLayer(l) if Arc::ptr_eq(&l, &image))
+        );
+    }
+
+    #[test]
+    fn test_select_layer_all_overlap_3() {
+        let inmem = create_inmem_layer(30, 40);
+        let delta = create_persistent_layer(10, 30, true);
+        let image = create_persistent_layer(20, 21, false);
+
+        let result = LayerMap::select_layer(
+            Some(delta.clone()),
+            Some(image.clone()),
+            Some(inmem.clone()),
+            Lsn(50),
+        )
+        .unwrap();
+
+        assert_eq!(result.lsn_floor, Lsn(30));
+        assert!(matches!(result.layer, ReadableLayerWeak::InMemoryLayer(l) if l == inmem));
+
+        let result = LayerMap::select_layer(
+            Some(delta.clone()),
+            Some(image.clone()),
+            None,
+            result.lsn_floor,
+        )
+        .unwrap();
+
+        assert_eq!(result.lsn_floor, Lsn(21));
+        assert!(
+            matches!(result.layer, ReadableLayerWeak::PersistentLayer(l) if Arc::ptr_eq(&l, &delta))
+        );
+
+        let result = LayerMap::select_layer(
+            Some(delta.clone()),
+            Some(image.clone()),
+            None,
+            result.lsn_floor,
+        )
+        .unwrap();
+
+        assert_eq!(result.lsn_floor, Lsn(20));
+        assert!(
+            matches!(result.layer, ReadableLayerWeak::PersistentLayer(l) if Arc::ptr_eq(&l, &image))
+        );
     }
 }

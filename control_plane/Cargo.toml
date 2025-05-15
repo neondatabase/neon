@@ -6,13 +6,16 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 camino.workspace = true
 clap.workspace = true
 comfy-table.workspace = true
 futures.workspace = true
 humantime.workspace = true
+jsonwebtoken.workspace = true
 nix.workspace = true
 once_cell.workspace = true
+pem.workspace = true
 humantime-serde.workspace = true
 hyper0.workspace = true
 regex.workspace = true
@@ -20,6 +23,8 @@ reqwest = { workspace = true, features = ["blocking", "json"] }
 scopeguard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+spki.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
@@ -33,9 +38,10 @@ postgres_backend.workspace = true
 safekeeper_api.workspace = true
 postgres_connection.workspace = true
 storage_broker.workspace = true
+http-utils.workspace = true
 utils.workspace = true
 whoami.workspace = true
-
+endpoint_storage.workspace = true
 compute_api.workspace = true
 workspace_hack.workspace = true
 tracing.workspace = true
