@@ -3982,7 +3982,7 @@ impl Service {
                     "Rejecting import progress update from stale generation"
                 );
 
-                return Err(ApiError::BadRequest(anyhow::anyhow!("Invalid generation")));
+                return Err(ApiError::PreconditionFailed("Invalid generation".into()));
             }
         }
 
