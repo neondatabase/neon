@@ -5,7 +5,7 @@ use http_utils::error::ApiError;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 
-use pageserver_api::models::ShardImportStatus;
+use pageserver_api::models::{ShardImportProgress, ShardImportStatus};
 use tokio_util::sync::CancellationToken;
 use utils::{
     id::{TenantId, TimelineId},
@@ -28,7 +28,12 @@ impl ShardImportStatuses {
         ShardImportStatuses(
             shards
                 .into_iter()
-                .map(|ts_id| (ts_id, ShardImportStatus::InProgress(None)))
+                .map(|ts_id| {
+                    (
+                        ts_id,
+                        ShardImportStatus::InProgress(None::<ShardImportProgress>),
+                    )
+                })
                 .collect(),
         )
     }
