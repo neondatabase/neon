@@ -178,8 +178,11 @@ enum GetPageStatus {
   GET_PAGE_STATUS_NOT_FOUND = 2;
   // The request was invalid.
   GET_PAGE_STATUS_INVALID = 3;
-  // The client is rate limited. Slow down and retry later.
+  // The tenant is rate limited. Slow down and retry later.
   GET_PAGE_STATUS_SLOW_DOWN = 4;
+  // TODO: consider adding a GET_PAGE_STATUS_LAYER_DOWNLOAD in the case of a
+  // layer download. This could free up the server task to process other
+  // requests while the layer download is in progress.
 }
 
 // Fetches the size of a relation at a given LSN, as # of blocks. This is only
