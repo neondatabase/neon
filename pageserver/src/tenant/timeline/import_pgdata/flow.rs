@@ -122,6 +122,8 @@ struct Planner {
 #[derive(Hash)]
 struct Plan {
     jobs: Vec<ChunkProcessingJob>,
+    // Included here such that it ends up in the hash for the plan
+    shard: ShardIdentity,
 }
 
 impl Planner {
@@ -225,7 +227,10 @@ impl Planner {
             pgdata_lsn,
         ));
 
-        Ok(Plan { jobs })
+        Ok(Plan {
+            jobs,
+            shard: self.shard,
+        })
     }
 
     #[instrument(level = tracing::Level::DEBUG, skip_all, fields(dboid=%db.dboid, tablespace=%db.spcnode, path=%db.path))]
@@ -405,6 +410,8 @@ impl Plan {
                 maybe_complete_job_idx = work.next() => {
                     match maybe_complete_job_idx {
                         Some(Ok((job_idx, res))) => {
+                            assert!(last_completed_job_idx.checked_add(1).unwrap() == job_idx);
+
                             res?;
                             last_completed_job_idx = job_idx;
 
