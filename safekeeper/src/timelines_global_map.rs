@@ -224,6 +224,10 @@ impl GlobalTimelines {
         self.state.lock().unwrap().broker_active_set.clone()
     }
 
+    pub fn get_wal_backup(&self) -> Arc<WalBackup> {
+        self.state.lock().unwrap().wal_backup.clone()
+    }
+
     /// Create a new timeline with the given id. If the timeline already exists, returns
     /// an existing timeline.
     pub(crate) async fn create(

@@ -35,7 +35,6 @@ use utils::lsn::Lsn;
 use crate::debug_dump::TimelineDigestRequest;
 use crate::safekeeper::TermLsn;
 use crate::timelines_global_map::DeleteOrExclude;
-use crate::wal_backup::WalBackup;
 use crate::{
     GlobalTimelines, SafeKeeperConf, copy_timeline, debug_dump, patch_control_file, pull_timeline,
 };
@@ -58,13 +57,6 @@ fn get_conf(request: &Request<Body>) -> &SafeKeeperConf {
 fn get_global_timelines(request: &Request<Body>) -> Arc<GlobalTimelines> {
     request
         .data::<Arc<GlobalTimelines>>()
-        .expect("unknown state type")
-        .clone()
-}
-
-fn get_wal_back(request: &Request<Body>) -> Arc<WalBackup> {
-    request
-        .data::<Arc<WalBackup>>()
         .expect("unknown state type")
         .clone()
 }
@@ -266,8 +258,7 @@ async fn timeline_snapshot_handler(request: Request<Body>) -> Result<Response<Bo
 
     let global_timelines = get_global_timelines(&request);
     let tli = global_timelines.get(ttid).map_err(ApiError::from)?;
-    let wal_backup = get_wal_back(&request);
-    let storage = wal_backup.get_storage();
+    let storage = global_timelines.get_wal_backup().get_storage();
 
     // To stream the body use wrap_stream which wants Stream of Result<Bytes>,
     // so create the chan and write to it in another task.
@@ -401,7 +392,7 @@ async fn timeline_copy_handler(mut request: Request<Body>) -> Result<Response<Bo
     );
 
     let global_timelines = get_global_timelines(&request);
-    let wal_backup = get_wal_back(&request);
+    let wal_backup = global_timelines.get_wal_backup();
     let storage = wal_backup
         .get_storage()
         .ok_or(ApiError::BadRequest(anyhow::anyhow!(
@@ -690,7 +681,6 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
 pub fn make_router(
     conf: Arc<SafeKeeperConf>,
     global_timelines: Arc<GlobalTimelines>,
-    wal_backup: Arc<WalBackup>,
 ) -> RouterBuilder<hyper::Body, ApiError> {
     let mut router = endpoint::make_router();
     if conf.http_auth.is_some() {
@@ -715,7 +705,6 @@ pub fn make_router(
     router
         .data(conf)
         .data(global_timelines)
-        .data(wal_backup)
         .data(auth)
         .get("/metrics", |r| request_span(r, prometheus_metrics_handler))
         .get("/profile/cpu", |r| request_span(r, profile_cpu_handler))

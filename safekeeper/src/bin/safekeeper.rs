@@ -598,7 +598,6 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
             conf.clone(),
             http_listener,
             global_timelines.clone(),
-            wal_backup.clone(),
         ))
         .map(|res| ("HTTP service main".to_owned(), res));
     tasks_handles.push(Box::pin(http_handle));
@@ -612,7 +611,6 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
                 https_listener,
                 tls_server_config.expect("tls_server_config is set earlier if https is enabled"),
                 global_timelines.clone(),
-                wal_backup.clone(),
             ))
             .map(|res| ("HTTPS service main".to_owned(), res));
         tasks_handles.push(Box::pin(https_handle));
