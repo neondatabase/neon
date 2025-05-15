@@ -126,6 +126,9 @@ async fn prepare_import(
     // Wipe the slate clean before starting the import as a precaution.
     // This method is only called when there's no recorded checkpoint for the import
     // in the storage controller.
+    //
+    // Note that this is split-brain safe (two imports for same timeline shards running in
+    // different generations) because we go through the usual deletion path, including deletion queue.
     info!("wipe the slate clean");
     {
         // TODO: do we need to hold GC lock for this?
