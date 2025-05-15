@@ -20,7 +20,7 @@ use tokio::task::{JoinError, JoinHandle};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info, info_span, instrument, warn};
-use utils::lsn::Lsn;
+use utils::lsn::{Lsn, SegmentSize};
 
 use crate::SafeKeeperConf;
 use crate::control_file::{FileStorage, Storage};
@@ -198,7 +198,7 @@ pub(crate) struct Manager {
     // configuration & dependencies
     pub(crate) tli: ManagerTimeline,
     pub(crate) conf: SafeKeeperConf,
-    pub(crate) wal_seg_size: usize,
+    pub(crate) wal_seg_size: SegmentSize,
     pub(crate) walsenders: Arc<WalSenders>,
 
     // current state

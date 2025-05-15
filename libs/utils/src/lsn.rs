@@ -17,6 +17,9 @@ pub const XLOG_BLCKSZ: u32 = 8192;
 #[derive(Clone, Copy, Default, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub struct Lsn(pub u64);
 
+/// Size of a Postgres WAL segment.  These are always small enough to fit in a u32.
+pub type SegmentSize = u32;
+
 impl Serialize for Lsn {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -163,19 +166,19 @@ impl Lsn {
 
     /// Compute the offset into a segment
     #[inline]
-    pub fn segment_offset(self, seg_sz: usize) -> usize {
-        (self.0 % seg_sz as u64) as usize
+    pub fn segment_offset(self, seg_sz: SegmentSize) -> SegmentSize {
+        (self.0 % seg_sz as u64) as SegmentSize
     }
 
     /// Compute LSN of the segment start.
     #[inline]
-    pub fn segment_lsn(self, seg_sz: usize) -> Lsn {
+    pub fn segment_lsn(self, seg_sz: SegmentSize) -> Lsn {
         Lsn(self.0 - (self.0 % seg_sz as u64))
     }
 
     /// Compute the segment number
     #[inline]
-    pub fn segment_number(self, seg_sz: usize) -> u64 {
+    pub fn segment_number(self, seg_sz: SegmentSize) -> u64 {
         self.0 / seg_sz as u64
     }
 
@@ -196,7 +199,7 @@ impl Lsn {
     /// Compute the block offset of the first byte of this Lsn within this
     /// segment
     #[inline]
-    pub fn page_offset_in_segment(self, seg_sz: usize) -> u64 {
+    pub fn page_offset_in_segment(self, seg_sz: SegmentSize) -> u64 {
         (self.0 - self.block_offset()) - self.segment_lsn(seg_sz).0
     }
 
@@ -463,7 +466,7 @@ mod tests {
         assert_eq!(Lsn(u64::MAX).widening_sub(0u64), i128::from(u64::MAX));
         assert_eq!(Lsn(0).widening_sub(u64::MAX), -i128::from(u64::MAX));
 
-        let seg_sz: usize = 16 * 1024 * 1024;
+        let seg_sz: SegmentSize = 16 * 1024 * 1024;
         assert_eq!(Lsn(0x1000007).segment_offset(seg_sz), 7);
         assert_eq!(Lsn(0x1000007).segment_number(seg_sz), 1u64);
 

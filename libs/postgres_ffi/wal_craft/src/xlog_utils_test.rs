@@ -81,10 +81,10 @@ fn test_end_of_wal<C: crate::Crafter>(test_name: &str) {
                 continue;
             }
             let mut f = File::options().write(true).open(file.path()).unwrap();
-            static ZEROS: [u8; WAL_SEGMENT_SIZE] = [0u8; WAL_SEGMENT_SIZE];
+            static ZEROS: [u8; WAL_SEGMENT_SIZE as usize] = [0u8; WAL_SEGMENT_SIZE as usize];
             f.write_all(
                 &ZEROS[0..min(
-                    WAL_SEGMENT_SIZE,
+                    WAL_SEGMENT_SIZE as usize,
                     (u64::from(*start_lsn) - seg_start_lsn) as usize,
                 )],
             )

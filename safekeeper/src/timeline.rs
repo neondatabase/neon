@@ -23,7 +23,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::id::{NodeId, TenantId, TenantTimelineId};
-use utils::lsn::Lsn;
+use utils::lsn::{Lsn, SegmentSize};
 use utils::sync::gate::Gate;
 
 use crate::metrics::{FullTimelineInfo, MISC_OPERATION_SECONDS, WalStorageMetrics};
@@ -337,8 +337,8 @@ impl SharedState {
         Ok(Self::new(sk))
     }
 
-    pub(crate) fn get_wal_seg_size(&self) -> usize {
-        self.sk.state().server.wal_seg_size as usize
+    pub(crate) fn get_wal_seg_size(&self) -> SegmentSize {
+        self.sk.state().server.wal_seg_size
     }
 
     fn get_safekeeper_info(
@@ -726,7 +726,7 @@ impl Timeline {
     }
 
     /// Returns wal_seg_size.
-    pub async fn get_wal_seg_size(&self) -> usize {
+    pub async fn get_wal_seg_size(&self) -> SegmentSize {
         self.read_shared_state().await.get_wal_seg_size()
     }
 

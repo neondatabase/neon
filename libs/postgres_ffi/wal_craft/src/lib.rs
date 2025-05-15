@@ -393,7 +393,7 @@ impl Crafter for LastWalRecordXlogSwitchEndsOnPageBoundary {
             let xlog_switch_record_end: PgLsn =
                 client.query_one("SELECT pg_switch_wal()", &[])?.get(0);
 
-            if u64::from(xlog_switch_record_end) as usize % XLOG_BLCKSZ
+            if (u64::from(xlog_switch_record_end) % XLOG_BLCKSZ as u64) as u32
                 != XLOG_SIZE_OF_XLOG_SHORT_PHD
             {
                 warn!(

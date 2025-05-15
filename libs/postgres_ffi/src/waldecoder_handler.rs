@@ -108,7 +108,7 @@ impl WalStreamDecoderHandler for WalStreamDecoder {
                     if self.lsn.segment_offset(WAL_SEGMENT_SIZE) == 0 {
                         // parse long header
 
-                        if self.inputbuf.remaining() < XLOG_SIZE_OF_XLOG_LONG_PHD {
+                        if self.inputbuf.remaining() < XLOG_SIZE_OF_XLOG_LONG_PHD as usize{
                             return Ok(None);
                         }
 
@@ -123,7 +123,7 @@ impl WalStreamDecoderHandler for WalStreamDecoder {
 
                         self.lsn += XLOG_SIZE_OF_XLOG_LONG_PHD as u64;
                     } else if self.lsn.block_offset() == 0 {
-                        if self.inputbuf.remaining() < XLOG_SIZE_OF_XLOG_SHORT_PHD {
+                        if self.inputbuf.remaining() < XLOG_SIZE_OF_XLOG_SHORT_PHD as usize{
                             return Ok(None);
                         }
 
@@ -153,7 +153,7 @@ impl WalStreamDecoderHandler for WalStreamDecoder {
                     // peek xl_tot_len at the beginning of the record.
                     // FIXME: assumes little-endian
                     let xl_tot_len = (&self.inputbuf[0..4]).get_u32_le();
-                    if (xl_tot_len as usize) < XLOG_SIZE_OF_XLOG_RECORD {
+                    if xl_tot_len < XLOG_SIZE_OF_XLOG_RECORD {
                         return Err(WalDecodeError {
                             msg: format!("invalid xl_tot_len {}", xl_tot_len),
                             lsn: self.lsn,
@@ -216,7 +216,7 @@ impl WalStreamDecoderHandler for WalStreamDecoder {
     fn complete_record(&mut self, recordbuf: Bytes) -> Result<(Lsn, Bytes), WalDecodeError> {
         // We now have a record in the 'recordbuf' local variable.
         let xlogrec =
-            XLogRecord::from_slice(&recordbuf[0..XLOG_SIZE_OF_XLOG_RECORD]).map_err(|e| {
+            XLogRecord::from_slice(&recordbuf[0..XLOG_SIZE_OF_XLOG_RECORD as usize]).map_err(|e| {
                 WalDecodeError {
                     msg: format!("xlog record deserialization failed {}", e),
                     lsn: self.lsn,

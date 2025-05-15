@@ -269,7 +269,7 @@ pub fn decode_wal_record(
         xlogrec.xl_info
     );
 
-    let remaining: usize = xlogrec.xl_tot_len as usize - XLOG_SIZE_OF_XLOG_RECORD;
+    let remaining: usize = (xlogrec.xl_tot_len - XLOG_SIZE_OF_XLOG_RECORD) as usize;
 
     if buf.remaining() != remaining {
         //TODO error

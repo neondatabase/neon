@@ -29,7 +29,7 @@ use tokio::io;
 use tokio::io::AsyncWrite;
 use tokio_tar::{Builder, EntryType, Header};
 use tracing::*;
-use utils::lsn::Lsn;
+use utils::lsn::{Lsn, SegmentSize};
 
 use crate::context::RequestContext;
 use crate::pgdatadir_mapping::Version;
@@ -754,7 +754,7 @@ where
             self.lsn,
         )
         .map_err(|e| anyhow!(e).context("Failed generating wal segment"))?;
-        if wal_seg.len() != WAL_SEGMENT_SIZE {
+        if SegmentSize::try_from(wal_seg.len()) != Ok(WAL_SEGMENT_SIZE) {
             return Err(BasebackupError::Server(anyhow!(
                 "wal_seg.len() != WAL_SEGMENT_SIZE, wal_seg.len()={}",
                 wal_seg.len()

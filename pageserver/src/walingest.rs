@@ -2377,17 +2377,17 @@ mod tests {
         let started_at = std::time::Instant::now();
 
         // Initialize walingest
-        let xlogoff: usize = startpoint.segment_offset(WAL_SEGMENT_SIZE);
+        let xlogoff = startpoint.segment_offset(WAL_SEGMENT_SIZE);
         let mut decoder = WalStreamDecoder::new(startpoint, pg_version);
         let mut walingest = WalIngest::new(tline.as_ref(), startpoint, &ctx)
             .await
             .unwrap();
         let mut modification = tline.begin_modification(startpoint);
-        println!("decoding {} bytes", bytes.len() - xlogoff);
+        println!("decoding {} bytes", bytes.len() - xlogoff as usize);
 
         // Decode and ingest wal. We process the wal in chunks because
         // that's what happens when we get bytes from safekeepers.
-        for chunk in bytes[xlogoff..].chunks(50) {
+        for chunk in bytes[xlogoff as usize..].chunks(50) {
             decoder.feed_bytes(chunk);
             while let Some((lsn, recdata)) = decoder.poll_decode().unwrap() {
                 let interpreted = InterpretedWalRecord::from_bytes_filtered(
