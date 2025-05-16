@@ -140,7 +140,7 @@ jobs:
         cd $BACKUP_DIR
         mkdir parts
         cd parts
-        PART=${aws s3api list-objects-v2 --bucket $S3_BUCKET --prefix performance/pagebench/ | jq -r '.Contents[]?.Key' | grep "shared-snapshots\-\d\d\d\d\-\d\d\-\d\d" | sort  | tail -1}
+        PART=$(aws s3api list-objects-v2 --bucket $S3_BUCKET --prefix performance/pagebench/ | jq -r '.Contents[]?.Key' | grep "shared-snapshots\-\d\d\d\d\-\d\d\-\d\d" | sort  | tail -1)
         S3_KEY=$(dirname $PART)
         time aws s3 cp --only-show-errors --recursive s3://${S3_BUCKET}/$S3_KEY/ .
         cd $TEST_OUTPUT
