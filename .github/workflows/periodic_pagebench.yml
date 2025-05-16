@@ -16,6 +16,11 @@ on:
         description: 'The long neon repo commit hash for the system under test (pageserver) to be tested.'
         required: false
         default: ''
+      recreate_snapshots:
+        type: boolean
+        description: 'We should only recreate snapshots if the previous ones are no longer compatible'
+        required: false
+        default: false
 
 defaults:
   run:
@@ -45,6 +50,16 @@ jobs:
     timeout-minutes: 360  # Set the timeout to 6 hours
     env:
       RUN_ID: ${{ github.run_id }}
+      DEFAULT_PG_VERSION: 16
+      BUILD_TYPE: release
+      RUST_BACKTRACE: 1
+      NEON_ENV_BUILDER_USE_OVERLAYFS_FOR_SNAPSHOTS: 1
+      NEON_DIR: /tmp/neon
+      BACKUP_DIR: /tmp/instance_store/saved_snapshots
+      TEST_OUTPUT: /tmp/neon/test_output
+      S3_BUCKET: neon-github-public-dev
+      ALLURE_DIR: /tmp/neon/test_output/allure-results
+      ALLURE_RESULTS_DIR: /tmp/neon/test_output/allure-results/results
     steps:
     # we don't need the neon source code because we run everything remotely
     # however we still need the local github actions to run the allure step below
@@ -80,7 +95,7 @@ jobs:
       shell: bash -euxo pipefail {0}
       env:
         ARCHIVE: /tmp/downloads/neon-${{ runner.os }}-${{ runner.arch }}-release-artifact.tar.zst
-        TARGET: /tmp/neon
+        TARGET: ${{ env.NEON_DIR }}
         COMMIT_HASH: ${{ env.COMMIT_HASH }}
         COMMIT_HASH_TYPE: ${{ env.COMMIT_HASH_TYPE }}
       run: |
@@ -89,7 +104,7 @@ jobs:
 
         while [ $attempt -lt $max_attempts ]; do
           set +e # the following command will fail until the artifacts are available
-          S3_KEY=$(aws s3api list-objects-v2 --bucket neon-github-public-dev --prefix artifacts/$COMMIT_HASH/ | jq -r '.Contents[]?.Key' | grep neon-${{ runner.os }}-${{ runner.arch }}-release-artifact.tar.zst | sort --version-sort | tail -1)
+          S3_KEY=$(aws s3api list-objects-v2 --bucket $S3_BUCKET --prefix artifacts/$COMMIT_HASH/ | jq -r '.Contents[]?.Key' | grep neon-${{ runner.os }}-${{ runner.arch }}-release-artifact.tar.zst | sort --version-sort | tail -1)
           set -e
 
           if [ ! -z "$S3_KEY" ]; then
@@ -100,20 +115,45 @@ jobs:
           
           # Increment attempt counter and sleep for 5 minutes
           attempt=$((attempt + 1))
-          echo "Attempt $attempt of $max_attempts to find artifacts in S3 bucket s3://neon-github-public-dev/artifacts/$COMMIT_HASH failed. Retrying in 5 minutes..."
+          echo "Attempt $attempt of $max_attempts to find artifacts in S3 bucket s3://$S3_BUCKET/artifacts/$COMMIT_HASH failed. Retrying in 5 minutes..."
           sleep 300 # Sleep for 5 minutes
         done
 
         if [ -z "$S3_KEY" ]; then
-          echo "Error: artifact not found in S3 bucket s3://neon-github-public-dev/artifacts/$COMMIT_HASH" after 2 hours
+          echo "Error: artifact not found in S3 bucket s3://$S3_BUCKET/artifacts/$COMMIT_HASH" after 2 hours
         else
           mkdir -p $(dirname $ARCHIVE)
-          time aws s3 cp --only-show-errors s3://neon-github-public-dev/${S3_KEY} ${ARCHIVE}
+          time aws s3 cp --only-show-errors s3://$S3_BUCKET/${S3_KEY} ${ARCHIVE}
           mkdir -p ${TARGET}
           time tar -xf ${ARCHIVE} -C ${TARGET}
           rm -f ${ARCHIVE}
         fi
-       
+
+    - name: Download snapshots from S3
+      if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.recreate_snapshots == 'false' || github.event.inputs.recreate_snapshots == '' }}
+      id: download_snapshots
+      shell: bash -euxo pipefail {0}
+      run: |
+        # Download the snapshots from S3
+        mkdir -p ${TEST_OUTPUT}
+        mkdir -p $BACKUP_DIR
+        cd $BACKUP_DIR
+        mkdir parts
+        cd parts
+        PART=${aws s3api list-objects-v2 --bucket $S3_BUCKET --prefix performance/pagebench/ | jq -r '.Contents[]?.Key' | grep "shared-snapshots\-\d\d\d\d\-\d\d\-\d\d" | sort  | tail -1}
+        S3_KEY=$(dirname $PART)
+        time aws s3 cp --only-show-errors --recursive s3://${S3_BUCKET}/$S3_KEY/ .
+        cd $TEST_OUTPUT
+        time cat $BACKUP_DIR/parts/* | zstdcat | tar --extract --preserve-permissions
+
+    - name: Adjust postgres user and collation to current environment
+      shell: bash -euxo pipefail {0}
+      run: |
+        # Adjust postgres user and collation to current environment
+        cd $TEST_OUTPUT
+        time sed -i "s/--user=postgres/--user=$USER/g" pagebench.sh
+        time sed -i "s/--collation=pg_catalog.default/--collation=pg_catalog.default/g" pagebench.sh
+
     - name: Cleanup Test Resources
       if: always()
       shell: bash -euxo pipefail {0}
@@ -122,6 +162,12 @@ jobs:
         TARGET: /tmp/neon
       run: |
         # Cleanup the test resources
+        if [ -d "${BACKUP_DIR}" ]; then
+          rm -rf ${BACKUP_DIR}
+        fi
+        if [ -d "${TEST_OUTPUT}" ]; then
+          rm -rf ${TEST_OUTPUT}
+        fi
         if [ -d "${TARGET}" ]; then
           rm -rf ${TARGET}
         fi
