@@ -86,7 +86,7 @@ InitBufferTag(BufferTag *tag, const RelFileNode *rnode,
 
 #define InvalidRelFileNumber InvalidOid
 
-#define SMgrRelGetRelInfo(reln) \
+#define SMgrRelGetRelInfo(reln)				\
 	(reln->smgr_rnode.node)
 
 #define DropRelationAllLocalBuffers DropRelFileNodeAllLocalBuffers
@@ -147,6 +147,12 @@ InitBufferTag(BufferTag *tag, const RelFileNode *rnode,
 
 #define DropRelationAllLocalBuffers DropRelationAllLocalBuffers
 #endif
+
+#define NRelFileInfoInvalidate(rinfo) do { \
+		NInfoGetSpcOid(rinfo) = InvalidOid; \
+		NInfoGetDbOid(rinfo) = InvalidOid; \
+		NInfoGetRelNumber(rinfo) = InvalidRelFileNumber; \
+	} while (0)
 
 #if PG_MAJORVERSION_NUM < 17
 #define ProcNumber BackendId
