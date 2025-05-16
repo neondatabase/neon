@@ -115,6 +115,7 @@ $(POSTGRES_INSTALL_DIR)/build/%/config.status:
 		echo "'git submodule update --init --recursive --depth 2 --progress .' in project root.\n"; \
 		exit 1; }
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/$*
+	sed -E 's/existing_buf_id = (BufTableLookup)/existing_buf_id = -1; \/\/\1/' -i $(ROOT_PROJECT_DIR)/vendor/postgres-$*/src/backend/storage/buffer/bufmgr.c
 
 	VERSION=$*; \
 	EXTRA_VERSION=$$(cd $(ROOT_PROJECT_DIR)/vendor/postgres-$$VERSION && git rev-parse HEAD); \
