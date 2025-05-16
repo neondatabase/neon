@@ -106,7 +106,7 @@ jobs:
     # does not reuse ./.github/actions/download because we need to download the artifact for the given commit hash
     # example artifact
     # s3://neon-github-public-dev/artifacts/48b870bc078bd2c450eb7b468e743b9c118549bf/15036827400/1/neon-Linux-X64-release-artifact.tar.zst /instance_store/artifacts/neon-Linux-release-artifact.tar.zst
-    - name: Determine artifact S3_KEY for commit hash ${COMMIT_HASH} and download and extract artifact
+    - name: Determine artifact S3_KEY for given commit hash and download and extract artifact
       id: artifact_prefix
       shell: bash -euxo pipefail {0}
       env:
@@ -189,7 +189,6 @@ jobs:
     - name: Run pagebench testcase
       shell: bash -euxo pipefail {0}
       run: |
-        cd ${NEON_DIR}
         export PLATFORM=$(hostname)-${COMMIT_HASH_TYPE}
         # report the commit hash of the neon repository in the revision of the test results
         export GITHUB_SHA=${COMMIT_HASH}
