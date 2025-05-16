@@ -380,12 +380,13 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     .or_else(|e| stream.throw_error(e, Some(ctx)))
     .await?;
 
-    let cancellation_handler_clone = Arc::clone(&cancellation_handler);
-    let session = cancellation_handler_clone.get_key();
-
-    session.write_cancel_key(node.cancel_closure.clone())?;
+    let session = cancellation_handler.get_key();
 
     prepare_client_connection(&node, *session.key(), &mut stream).await?;
+
+    let cancel_closure = node.cancel_closure.clone();
+    let cancel = tokio::spawn(async move { session.maintain_cancel_key(cancel_closure).await })
+        .abort_handle();
 
     // Before proxy passing, forward to compute whatever data is left in the
     // PqStream input buffer. Normally there is none, but our serverless npm
@@ -406,7 +407,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         private_link_id,
         compute: node,
         session_id: ctx.session_id(),
-        cancel: session,
+        cancel,
         _req: request_gauge,
         _conn: conn_gauge,
     }))
