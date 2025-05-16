@@ -99,7 +99,7 @@ impl ShmemHandle {
 
         // Reserve address space for it with mmap
         //
-        // TODO: Use MAP_HUGELB if possible
+        // TODO: Use MAP_HUGETLB if possible
         let start_ptr = unsafe {
             nix_mmap(
                 None,
