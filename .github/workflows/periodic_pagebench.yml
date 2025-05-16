@@ -140,19 +140,20 @@ jobs:
         cd $BACKUP_DIR
         mkdir parts
         cd parts
-        PART=$(aws s3api list-objects-v2 --bucket $S3_BUCKET --prefix performance/pagebench/ | jq -r '.Contents[]?.Key' | grep "shared-snapshots\-\d\d\d\d\-\d\d\-\d\d" | sort  | tail -1)
+        PART=$(aws s3api list-objects-v2 --bucket $S3_BUCKET --prefix performance/pagebench/ \
+          | jq -r '.Contents[]?.Key' \
+          | grep -E 'shared-snapshots-[0-9]{4}-[0-9]{2}-[0-9]{2}' \
+          | sort \
+          | tail -1)
+        echo "Latest PART: $PART"
+        if [[ -z "$PART" ]]; then
+          echo "ERROR: No matching S3 key found" >&2
+          exit 1
+        fi
         S3_KEY=$(dirname $PART)
         time aws s3 cp --only-show-errors --recursive s3://${S3_BUCKET}/$S3_KEY/ .
         cd $TEST_OUTPUT
         time cat $BACKUP_DIR/parts/* | zstdcat | tar --extract --preserve-permissions
-
-    - name: Adjust postgres user and collation to current environment
-      shell: bash -euxo pipefail {0}
-      run: |
-        # Adjust postgres user and collation to current environment
-        cd $TEST_OUTPUT
-        time sed -i "s/--user=postgres/--user=$USER/g" pagebench.sh
-        time sed -i "s/--collation=pg_catalog.default/--collation=pg_catalog.default/g" pagebench.sh
 
     - name: Cleanup Test Resources
       if: always()
