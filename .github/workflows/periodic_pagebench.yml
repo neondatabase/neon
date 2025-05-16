@@ -53,7 +53,7 @@ jobs:
       DEFAULT_PG_VERSION: 16
       BUILD_TYPE: release
       RUST_BACKTRACE: 1
-      NEON_ENV_BUILDER_USE_OVERLAYFS_FOR_SNAPSHOTS: 1
+      # NEON_ENV_BUILDER_USE_OVERLAYFS_FOR_SNAPSHOTS: 1 - doesn't work without root in container
       S3_BUCKET: neon-github-public-dev
       PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
     steps:
