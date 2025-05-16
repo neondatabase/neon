@@ -144,6 +144,7 @@ RUN set -e \
         openssh-client \
         parallel \
         pkg-config \
+        sudo \
         unzip \
         wget \
         xz-utils \
