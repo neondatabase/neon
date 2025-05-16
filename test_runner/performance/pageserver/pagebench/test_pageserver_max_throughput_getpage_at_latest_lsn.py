@@ -14,7 +14,7 @@ from fixtures.neon_fixtures import (
     PgBin,
     wait_for_last_flush_lsn,
 )
-from fixtures.utils import get_scale_for_db, humantime_to_ms, skip_on_ci
+from fixtures.utils import get_scale_for_db, humantime_to_ms
 
 from performance.pageserver.util import setup_pageserver_with_tenants
 
