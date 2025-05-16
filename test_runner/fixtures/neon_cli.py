@@ -557,7 +557,7 @@ class NeonLocalCli(AbstractNeonCli):
         endpoint_id: str,
         safekeepers_generation: int | None = None,
         safekeepers: list[int] | None = None,
-        remote_ext_base_url: str | None = None,
+        remote_ext_config: str | None = None,
         pageserver_id: int | None = None,
         allow_multiple: bool = False,
         create_test_user: bool = False,
@@ -572,8 +572,8 @@ class NeonLocalCli(AbstractNeonCli):
         extra_env_vars = env or {}
         if basebackup_request_tries is not None:
             extra_env_vars["NEON_COMPUTE_TESTING_BASEBACKUP_TRIES"] = str(basebackup_request_tries)
-        if remote_ext_base_url is not None:
-            args.extend(["--remote-ext-base-url", remote_ext_base_url])
+        if remote_ext_config is not None:
+            args.extend(["--remote-ext-config", remote_ext_config])
 
         if safekeepers_generation is not None:
             args.extend(["--safekeepers-generation", str(safekeepers_generation)])

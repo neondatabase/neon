@@ -644,10 +644,9 @@ struct EndpointStartCmdArgs {
 
     #[clap(
         long,
-        help = "Configure the remote extensions storage proxy gateway URL to request for extensions.",
-        alias = "remote-ext-config"
+        help = "Configure the remote extensions storage proxy gateway to request for extensions."
     )]
-    remote_ext_base_url: Option<String>,
+    remote_ext_config: Option<String>,
 
     #[clap(
         long,
@@ -1415,7 +1414,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
         EndpointCmd::Start(args) => {
             let endpoint_id = &args.endpoint_id;
             let pageserver_id = args.endpoint_pageserver_id;
-            let remote_ext_base_url = &args.remote_ext_base_url;
+            let remote_ext_config = &args.remote_ext_config;
 
             let default_generation = env
                 .storage_controller
@@ -1518,7 +1517,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                     safekeepers_generation,
                     safekeepers,
                     pageservers,
-                    remote_ext_base_url.as_ref(),
+                    remote_ext_config.as_ref(),
                     stripe_size.0 as usize,
                     args.create_test_user,
                     args.start_timeout,
