@@ -43,11 +43,12 @@ project_build_tag!(BUILD_TAG);
 use clap::{Parser, ValueEnum};
 
 #[derive(Clone, Debug, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
 enum AuthBackendType {
-    #[value(name("cplane-v1"), alias("control-plane"))]
-    ControlPlaneV1,
+    #[clap(alias("cplane-v1"))]
+    ControlPlane,
 
-    #[value(name("link"), alias("control-redirect"))]
+    #[clap(alias("link"))]
     ConsoleRedirect,
 
     #[cfg(any(test, feature = "testing"))]
@@ -707,7 +708,7 @@ fn build_auth_backend(
     args: &ProxyCliArgs,
 ) -> anyhow::Result<Either<&'static auth::Backend<'static, ()>, &'static ConsoleRedirectBackend>> {
     match &args.auth_backend {
-        AuthBackendType::ControlPlaneV1 => {
+        AuthBackendType::ControlPlane => {
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
             let project_info_cache_config: ProjectInfoCacheOptions =
                 args.project_info_cache.parse()?;
