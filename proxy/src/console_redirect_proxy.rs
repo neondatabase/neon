@@ -232,13 +232,14 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     .or_else(|e| async { Err(stream.throw_error(e, Some(ctx)).await) })
     .await?;
 
-    let cancellation_handler_clone = Arc::clone(&cancellation_handler);
-    let session = cancellation_handler_clone.get_key();
-
-    session.write_cancel_key(node.cancel_closure.clone())?;
+    let session = cancellation_handler.get_key();
 
     prepare_client_connection(&node, *session.key(), &mut stream);
     let stream = stream.flush_and_into_inner().await?;
+
+    let cancel_closure = node.cancel_closure.clone();
+    let (cancel_on_shutdown, cancel) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move { session.maintain_cancel_key(cancel, &cancel_closure).await });
 
     Ok(Some(ProxyPassthrough {
         client: stream,
@@ -246,7 +247,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         private_link_id: None,
         compute: node,
         session_id: ctx.session_id(),
-        cancel: session,
+        _cancel_on_shutdown: cancel_on_shutdown,
         _req: request_gauge,
         _conn: conn_gauge,
     }))

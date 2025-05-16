@@ -17,7 +17,7 @@ pub struct CancelToken {
 
 /// The capability to request cancellation of in-progress queries on a
 /// connection.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawCancelToken {
     pub ssl_mode: SslMode,
     pub process_id: i32,
