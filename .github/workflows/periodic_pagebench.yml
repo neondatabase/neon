@@ -190,7 +190,7 @@ jobs:
       shell: bash -euxo pipefail {0}
       run: |
         cd ${NEON_DIR}
-        export PLATFORM=$(hostname)-${COMMIT_TYPE}
+        export PLATFORM=$(hostname)-${COMMIT_HASH_TYPE}
         # report the commit hash of the neon repository in the revision of the test results
         export GITHUB_SHA=${COMMIT_HASH}
         rm -rf ${PERF_REPORT_DIR}
