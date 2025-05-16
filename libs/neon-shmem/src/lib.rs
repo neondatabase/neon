@@ -224,15 +224,18 @@ impl Drop for ShmemHandle {
     }
 }
 
+/// Create a "backing file" for the shared memory area. On Linux, use memfd_create(), to create an
+/// anonymous in-memory file. One macos, fall back to a regular file. That's good enough for
+/// development and testing, but in production we want the file to stay in memory.
+///
+/// disable 'unused_variables' warnings, because in the macos path, 'name' is unused.
+#[allow(unused_variables)]
 fn create_backing_file(name: &str) -> Result<OwnedFd, Error> {
-    // Use memfd_create() to create the backing anonymous file.
     #[cfg(not(target_os = "macos"))]
     {
         nix::sys::memfd::memfd_create(name, nix::sys::memfd::MFdFlags::empty())
             .map_err(|e| Error::new("memfd_create failed: {e}", e))
     }
-    // macos doesn't have memfd_create(). We care less about performance macos, as long
-    // as it works, so as a fallback, create a regular file instead.
     #[cfg(target_os = "macos")]
     {
         let file = tempfile::tempfile().map_err(|e| {
