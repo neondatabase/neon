@@ -35,7 +35,7 @@ jobs:
       matrix:
         pg-version: [16, 17]
 
-    runs-on: [ self-hosted, small ]
+    runs-on: us-east-2
     container:
       # We use the neon-test-extensions image here as it contains the source code for the extensions.
       image: ghcr.io/neondatabase/neon-test-extensions-v${{ matrix.pg-version }}:latest
@@ -71,20 +71,7 @@ jobs:
           region_id: ${{ inputs.region_id || 'aws-us-east-2' }}
           postgres_version: ${{ matrix.pg-version }}
           project_settings: ${{ steps.project-settings.outputs.settings }}
-          # We need these settings to get the expected output results.
-          # We cannot use the environment variables e.g. PGTZ due to
-          # https://github.com/neondatabase/neon/issues/1287
-          default_endpoint_settings: >
-            {
-              "pg_settings": {
-                "DateStyle": "Postgres,MDY",
-                "TimeZone": "America/Los_Angeles",
-                "compute_query_id": "off",
-                "neon.allow_unstable_extensions": "on"
-              }
-            }
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-          admin_api_key: ${{ secrets.NEON_STAGING_ADMIN_API_KEY }}
 
       - name: Run the regression tests
         run: /run-tests.sh -r /ext-src

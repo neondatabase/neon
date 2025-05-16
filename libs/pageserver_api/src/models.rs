@@ -336,14 +336,30 @@ impl TimelineCreateRequest {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ShardImportStatus {
-    InProgress,
+    InProgress(Option<ShardImportProgress>),
     Done,
     Error(String),
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ShardImportProgress {
+    V1(ShardImportProgressV1),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ShardImportProgressV1 {
+    /// Total number of jobs in the import plan
+    pub jobs: usize,
+    /// Number of jobs completed
+    pub completed: usize,
+    /// Hash of the plan
+    pub import_plan_hash: u64,
+}
+
 impl ShardImportStatus {
     pub fn is_terminal(&self) -> bool {
         match self {
-            ShardImportStatus::InProgress => false,
+            ShardImportStatus::InProgress(_) => false,
             ShardImportStatus::Done | ShardImportStatus::Error(_) => true,
         }
     }
@@ -1803,7 +1819,6 @@ pub struct TopTenantShardsResponse {
 }
 
 pub mod virtual_file {
-    use std::sync::LazyLock;
 
     #[derive(
         Copy,
@@ -1851,15 +1866,7 @@ pub mod virtual_file {
 
     impl IoMode {
         pub fn preferred() -> Self {
-            // The default behavior when running Rust unit tests without any further
-            // flags is to use the newest behavior (DirectRw).
-            // The CI uses the environment variable to unit tests for all different modes.
-            // NB: the Python regression & perf tests have their own defaults management
-            // that writes pageserver.toml; they do not use this variable.
-            static ENV_OVERRIDE: LazyLock<Option<IoMode>> = LazyLock::new(|| {
-                utils::env::var_serde_json_string("NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IO_MODE")
-            });
-            ENV_OVERRIDE.unwrap_or(IoMode::DirectRw)
+            IoMode::DirectRw
         }
     }
 
