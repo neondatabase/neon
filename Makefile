@@ -1,5 +1,3 @@
-# FIXME: dummy change to force macos build
-
 ROOT_PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 # Where to install Postgres, default is ./pg_install, maybe useful for package managers
