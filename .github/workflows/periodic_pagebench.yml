@@ -203,7 +203,7 @@ jobs:
         mkdir -p ${PERF_REPORT_DIR}
         mkdir -p ${ALLURE_RESULTS_DIR}
         PARAMS="--alluredir=${ALLURE_RESULTS_DIR} --tb=short --verbose -rA"
-        EXTRA_PARAMS="--out-dir ${PERF_REPORT_DIR} --durations-path $TEST_OUTPUT/benchmark_durations.json --preserve-database-files"
+        EXTRA_PARAMS="--out-dir ${PERF_REPORT_DIR} --durations-path $TEST_OUTPUT/benchmark_durations.json"
         # run only two selected tests
         # environment set by parent:
         # RUST_BACKTRACE=1 DEFAULT_PG_VERSION=16 BUILD_TYPE=release
