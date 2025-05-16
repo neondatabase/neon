@@ -1,3 +1,5 @@
+use std::convert::Infallible;
+
 use futures::FutureExt;
 use smol_str::SmolStr;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -5,7 +7,6 @@ use tracing::debug;
 use utils::measured_stream::MeasuredStream;
 
 use super::copy_bidirectional::ErrorSource;
-use crate::cancellation;
 use crate::compute::PostgresConnection;
 use crate::config::ComputeConfig;
 use crate::control_plane::messages::MetricsAuxInfo;
@@ -68,7 +69,8 @@ pub(crate) struct ProxyPassthrough<S> {
     pub(crate) aux: MetricsAuxInfo,
     pub(crate) session_id: uuid::Uuid,
     pub(crate) private_link_id: Option<SmolStr>,
-    pub(crate) cancel: cancellation::Session,
+
+    pub(crate) _cancel_on_shutdown: tokio::sync::oneshot::Sender<Infallible>,
 
     pub(crate) _req: NumConnectionRequestsGuard<'static>,
     pub(crate) _conn: NumClientConnectionsGuard<'static>,
@@ -95,8 +97,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
         {
             tracing::warn!(session_id = ?self.session_id, ?err, "could not cancel the query in the database");
         }
-
-        drop(self.cancel.remove_cancel_key()); // we don't need a result. If the queue is full, we just log the error
 
         res
     }
