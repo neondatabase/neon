@@ -205,7 +205,7 @@ jobs:
         EXTRA_PARAMS="--out-dir ${PERF_REPORT_DIR} --durations-path $TEST_OUTPUT/benchmark_durations.json --preserve-database-files"
         # run only two selected tests
         # environment set by parent:
-        # RUST_BACKTRACE=1 NEON_ENV_BUILDER_USE_OVERLAYFS_FOR_SNAPSHOTS=1 DEFAULT_PG_VERSION=16 BUILD_TYPE=release
+        # RUST_BACKTRACE=1 DEFAULT_PG_VERSION=16 BUILD_TYPE=release
         ./scripts/pytest ${PARAMS} test_runner/performance/pageserver/pagebench/test_pageserver_max_throughput_getpage_at_latest_lsn.py::test_pageserver_characterize_throughput_with_n_tenants ${EXTRA_PARAMS}
         ./scripts/pytest ${PARAMS} test_runner/performance/pageserver/pagebench/test_pageserver_max_throughput_getpage_at_latest_lsn.py::test_pageserver_characterize_latencies_with_1_client_and_throughput_with_many_clients_one_tenant ${EXTRA_PARAMS}
 
