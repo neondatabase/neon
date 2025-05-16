@@ -172,6 +172,7 @@ jobs:
         time aws s3 cp --only-show-errors --recursive s3://${S3_BUCKET}/$S3_KEY/ .
         cd $TEST_OUTPUT
         time cat $BACKUP_DIR/parts/* | zstdcat | tar --extract --preserve-permissions
+        rm -rf ${BACKUP_DIR}
 
     - name: Cache poetry deps
       uses: actions/cache@v4
