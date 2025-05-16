@@ -70,6 +70,9 @@ jobs:
       run: |
         # Set up the environment variables
         echo "NEON_DIR=${RUNNER_TEMP}/neon" >> $GITHUB_ENV
+        echo "NEON_BIN=${RUNNER_TEMP}/neon/bin" >> $GITHUB_ENV
+        echo "POSTGRES_DISTRIB_DIR=${RUNNER_TEMP}/neon/pg_install" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=${RUNNER_TEMP}/neon/pg_install/v${DEFAULT_PG_VERSION}/lib" >> $GITHUB_ENV
         echo "BACKUP_DIR=${RUNNER_TEMP}/instance_store/saved_snapshots" >> $GITHUB_ENV
         echo "TEST_OUTPUT=${RUNNER_TEMP}/neon/test_output" >> $GITHUB_ENV
         echo "PERF_REPORT_DIR=${RUNNER_TEMP}/neon/test_output/perf-report-local" >> $GITHUB_ENV
