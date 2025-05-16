@@ -862,7 +862,7 @@ async fn configure_redis(
         ("irsa", _) => match (&args.redis_host, args.redis_port) {
             (Some(host), Some(port)) => Some(
                 ConnectionWithCredentialsProvider::new_with_credentials_provider(
-                    host.to_string(),
+                    host.clone(),
                     port,
                     elasticache::CredentialsProvider::new(
                         args.aws_region.clone(),
