@@ -100,8 +100,8 @@ jobs:
         fi
     - name: Checkout the neon repository at given commit hash
       uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      with:
-        ref: ${{ steps.commit_hash.outputs.commit_hash }}
+      # with:
+      #  ref: ${{ steps.commit_hash.outputs.commit_hash }}
 
     # does not reuse ./.github/actions/download because we need to download the artifact for the given commit hash
     # example artifact
