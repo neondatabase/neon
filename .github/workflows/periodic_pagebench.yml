@@ -18,7 +18,7 @@ on:
         default: ''
       recreate_snapshots:
         type: boolean
-        description: 'We should only recreate snapshots if the previous ones are no longer compatible'
+        description: 'Recreate snapshots - !!!WARNING!!! We should only recreate snapshots if the previous ones are no longer compatible. Otherwise benchmarking results are not comparable across runs.'
         required: false
         default: false
 
