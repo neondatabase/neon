@@ -78,7 +78,7 @@ struct RequestContextInner {
 
 #[derive(Clone, Debug)]
 pub(crate) enum AuthMethod {
-    // aka passwordless, fka link
+    // aka link
     ConsoleRedirect,
     ScramSha256,
     ScramSha256Plus,
