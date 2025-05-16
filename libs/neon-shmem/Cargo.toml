@@ -9,5 +9,5 @@ thiserror.workspace = true
 nix.workspace=true
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }
 
-[target.'cfg(macos)'.dependencies]
+[target.'cfg(target_os = "macos")'.dependencies]
 tempfile = "3.14.0"
