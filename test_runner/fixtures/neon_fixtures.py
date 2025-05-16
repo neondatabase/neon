@@ -682,7 +682,7 @@ class NeonEnvBuilder:
                 log.info(
                     f"Copying pageserver tenants directory {tenants_from_dir} to {tenants_to_dir}"
                 )
-                shutil.copytree(tenants_from_dir, tenants_to_dir)
+                subprocess.run(["cp", "-a", tenants_from_dir, tenants_to_dir], check=True)
             else:
                 log.info(
                     f"Creating overlayfs mount of pageserver tenants directory {tenants_from_dir} to {tenants_to_dir}"
