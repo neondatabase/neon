@@ -611,7 +611,7 @@ WORKDIR /ext-src/online_advisor-src
 RUN if [ -d online_advisor-src ]; then \
         make -j $(getconf _NPROCESSORS_ONLN) && \
         make -j $(getconf _NPROCESSORS_ONLN) install && \
-        echo 'trusted = true' >> /usr/local/pgsql/share/extension/online_advisor.control
+        echo 'trusted = true' >> /usr/local/pgsql/share/extension/online_advisor.control \
     fi
 
 #########################################################################################
