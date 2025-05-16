@@ -804,7 +804,7 @@ mod test {
             _tenant_shard_id: TenantShardId,
             _timeline_id: TimelineId,
             _generation: Generation,
-        ) -> Result<Option<ShardImportStatus>, RetryForeverError> {
+        ) -> Result<ShardImportStatus, RetryForeverError> {
             unimplemented!()
         }
     }

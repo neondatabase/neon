@@ -1312,7 +1312,7 @@ dependencies = [
  "itertools 0.10.5",
  "jsonwebtoken",
  "metrics",
- "nix 0.27.1",
+ "nix 0.30.1",
  "notify",
  "num_cpus",
  "once_cell",
@@ -1435,7 +1435,7 @@ dependencies = [
  "humantime-serde",
  "hyper 0.14.30",
  "jsonwebtoken",
- "nix 0.27.1",
+ "nix 0.30.1",
  "once_cell",
  "pageserver_api",
  "pageserver_client",
@@ -3837,12 +3837,13 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.27.1"
+version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2eb04e9c688eff1c89d72b407f168cf79bb9e867a9d3323ed6c01519eb9cc053"
+checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
 dependencies = [
  "bitflags 2.8.0",
  "cfg-if",
+ "cfg_aliases",
  "libc",
  "memoffset 0.9.0",
 ]
@@ -4308,7 +4309,7 @@ dependencies = [
  "jsonwebtoken",
  "md5",
  "metrics",
- "nix 0.27.1",
+ "nix 0.30.1",
  "num-traits",
  "num_cpus",
  "once_cell",
@@ -4359,6 +4360,7 @@ dependencies = [
  "toml_edit",
  "tracing",
  "tracing-utils",
+ "twox-hash",
  "url",
  "utils",
  "uuid",
@@ -4383,7 +4385,7 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "itertools 0.10.5",
- "nix 0.27.1",
+ "nix 0.30.1",
  "once_cell",
  "postgres_backend",
  "postgres_ffi",
@@ -7926,7 +7928,7 @@ dependencies = [
  "humantime",
  "jsonwebtoken",
  "metrics",
- "nix 0.27.1",
+ "nix 0.30.1",
  "once_cell",
  "pem",
  "pin-project-lite",
