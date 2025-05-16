@@ -37,7 +37,6 @@ const CANCEL_KEY_REFRESH: std::time::Duration = std::time::Duration::from_secs(5
 pub enum CancelKeyOp {
     StoreCancelKey {
         key: String,
-        field: String,
         value: String,
         expire: std::time::Duration,
     },
@@ -100,13 +99,8 @@ impl CancelKeyOp {
     fn register(&self, pipe: &mut Pipeline) {
         #[allow(clippy::used_underscore_binding)]
         match self {
-            CancelKeyOp::StoreCancelKey {
-                key,
-                field,
-                value,
-                expire,
-            } => {
-                pipe.add_command_with_reply(Cmd::hset(key, field, value));
+            CancelKeyOp::StoreCancelKey { key, value, expire } => {
+                pipe.add_command_with_reply(Cmd::hset(key, "data", value));
                 pipe.add_command_no_reply(Cmd::expire(key, expire.as_secs() as i64));
             }
             CancelKeyOp::GetCancelData { key } => {
@@ -468,7 +462,6 @@ impl Session {
                 .guard(RedisMsgKind::HSet);
             let op = CancelKeyOp::StoreCancelKey {
                 key: self.redis_key.clone(),
-                field: "data".to_string(),
                 value: closure_json.clone(),
                 expire: CANCEL_KEY_TTL,
             };
