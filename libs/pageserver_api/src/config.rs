@@ -322,6 +322,7 @@ impl From<OtelExporterProtocol> for tracing_utils::Protocol {
 pub struct TimelineImportConfig {
     pub import_job_concurrency: NonZeroUsize,
     pub import_job_soft_size_limit: NonZeroUsize,
+    pub import_job_checkpoint_threshold: NonZeroUsize,
 }
 
 pub mod statvfs {
@@ -656,23 +657,15 @@ impl Default for ConfigToml {
             tenant_config: TenantConfigToml::default(),
             no_sync: None,
             wal_receiver_protocol: DEFAULT_WAL_RECEIVER_PROTOCOL,
-            page_service_pipelining: if !cfg!(test) {
-                PageServicePipeliningConfig::Serial
-            } else {
-                // Do not turn this into the default until scattered reads have been
-                // validated and rolled-out fully.
-                PageServicePipeliningConfig::Pipelined(PageServicePipeliningConfigPipelined {
+            page_service_pipelining: PageServicePipeliningConfig::Pipelined(
+                PageServicePipeliningConfigPipelined {
                     max_batch_size: NonZeroUsize::new(32).unwrap(),
                     execution: PageServiceProtocolPipelinedExecutionStrategy::ConcurrentFutures,
                     batching: PageServiceProtocolPipelinedBatchingStrategy::ScatteredLsn,
-                })
-            },
-            get_vectored_concurrent_io: if !cfg!(test) {
-                GetVectoredConcurrentIo::Sequential
-            } else {
-                GetVectoredConcurrentIo::SidecarTask
-            },
-            enable_read_path_debugging: if cfg!(test) || cfg!(feature = "testing") {
+                },
+            ),
+            get_vectored_concurrent_io: GetVectoredConcurrentIo::SidecarTask,
+            enable_read_path_debugging: if cfg!(feature = "testing") {
                 Some(true)
             } else {
                 None
@@ -686,6 +679,7 @@ impl Default for ConfigToml {
             timeline_import_config: TimelineImportConfig {
                 import_job_concurrency: NonZeroUsize::new(128).unwrap(),
                 import_job_soft_size_limit: NonZeroUsize::new(1024 * 1024 * 1024).unwrap(),
+                import_job_checkpoint_threshold: NonZeroUsize::new(128).unwrap(),
             },
             posthog_config: None,
         }

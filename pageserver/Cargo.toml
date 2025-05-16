@@ -96,6 +96,8 @@ utils.workspace = true
 wal_decoder.workspace = true
 walkdir.workspace = true
 workspace_hack.workspace = true
+smallvec.workspace = true
+twox-hash.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 procfs.workspace = true

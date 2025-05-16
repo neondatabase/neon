@@ -1255,6 +1255,12 @@ class NeonEnv:
                 "no_sync": True,
                 # Look for gaps in WAL received from safekeepeers
                 "validate_wal_contiguity": True,
+                # TODO(vlad): make these configurable through the builder
+                "timeline_import_config": {
+                    "import_job_concurrency": 4,
+                    "import_job_soft_size_limit": 512 * 1024,
+                    "import_job_checkpoint_threshold": 4,
+                },
             }
 
             # Batching (https://github.com/neondatabase/neon/issues/9377):
@@ -1371,7 +1377,11 @@ class NeonEnv:
             force=config.config_init_force,
         )
 
-    def start(self, timeout_in_seconds: int | None = None):
+    def start(
+        self,
+        timeout_in_seconds: int | None = None,
+        extra_ps_env_vars: dict[str, str] | None = None,
+    ):
         # Storage controller starts first, so that pageserver /re-attach calls don't
         # bounce through retries on startup
         self.storage_controller.start(timeout_in_seconds=timeout_in_seconds)
@@ -1390,7 +1400,10 @@ class NeonEnv:
             for pageserver in self.pageservers:
                 futs.append(
                     executor.submit(
-                        lambda ps=pageserver: ps.start(timeout_in_seconds=timeout_in_seconds)  # type: ignore[misc]
+                        lambda ps=pageserver: ps.start(  # type: ignore[misc]
+                            extra_env_vars=extra_ps_env_vars or {},
+                            timeout_in_seconds=timeout_in_seconds,
+                        ),
                     )
                 )
 
