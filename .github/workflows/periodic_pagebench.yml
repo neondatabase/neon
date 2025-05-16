@@ -191,6 +191,8 @@ jobs:
 
     - name: Run pagebench testcase
       shell: bash -euxo pipefail {0}
+      env:
+        CI: false  # need to override this env variable set by github to enforce using snapshots
       run: |
         export PLATFORM=$(hostname)-${COMMIT_HASH_TYPE}
         # report the commit hash of the neon repository in the revision of the test results
