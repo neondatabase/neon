@@ -1,6 +1,6 @@
 //! A module to create and read lock files.
 //!
-//! File locking is done using [`fcntl::Flock`] exclusive locks.
+//! File locking is done using [`nix::fcntl::Flock`] exclusive locks.
 //! The only consumer of this module is currently
 //! [`pid_file`](crate::pid_file). See the module-level comment
 //! there for potential pitfalls with lock files that are used
