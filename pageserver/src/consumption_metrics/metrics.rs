@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Utc};
 use consumption_metrics::EventType;
@@ -24,6 +24,12 @@ pub(super) enum Name {
     /// Timeline last_record_lsn, incremental
     #[serde(rename = "written_data_bytes_delta")]
     WrittenSizeDelta,
+    /// Timeline's PITR cutoff LSN (now - pitr_interval). If PITR is disabled
+    /// (pitr_interval = 0), this will equal WrittenSize.
+    ///
+    /// Updated periodically during GC. Does not regress.
+    #[serde(rename = "pitr_cutoff")]
+    PitrCutoff,
     /// Timeline logical size
     #[serde(rename = "timeline_logical_size")]
     LogicalSize,
@@ -155,6 +161,18 @@ impl MetricsKey {
             metric: Name::WrittenSizeDelta,
         }
         .incremental_values()
+    }
+
+    /// [`GcCutoffs::time`] (i.e. `now` - `pitr_interval`)
+    ///
+    /// [`GcCutoffs::time`]: crate::tenant::timeline::GcCutoffs::time
+    const fn pitr_cutoff(tenant_id: TenantId, timeline_id: TimelineId) -> AbsoluteValueFactory {
+        MetricsKey {
+            tenant_id,
+            timeline_id: Some(timeline_id),
+            metric: Name::PitrCutoff,
+        }
+        .absolute_values()
     }
 
     /// Exact [`Timeline::get_current_logical_size`].
@@ -335,6 +353,8 @@ struct TimelineSnapshot {
     loaded_at: (Lsn, SystemTime),
     last_record_lsn: Lsn,
     current_exact_logical_size: Option<u64>,
+    /// The PITR cutoff LSN. None if PITR is disabled.
+    pitr_cutoff: Option<Lsn>,
 }
 
 impl TimelineSnapshot {
@@ -354,6 +374,8 @@ impl TimelineSnapshot {
         } else {
             let loaded_at = t.loaded_at;
             let last_record_lsn = t.get_last_record_lsn();
+            let pitr_cutoff = (t.get_pitr_interval() != Duration::ZERO)
+                .then(|| t.gc_info.read().unwrap().cutoffs.time);
 
             let current_exact_logical_size = {
                 let span = tracing::info_span!("collect_metrics_iteration", tenant_id = %t.tenant_shard_id.tenant_id, timeline_id = %t.timeline_id);
@@ -374,6 +396,7 @@ impl TimelineSnapshot {
                 loaded_at,
                 last_record_lsn,
                 current_exact_logical_size,
+                pitr_cutoff,
             }))
         }
     }
@@ -440,6 +463,25 @@ impl TimelineSnapshot {
                 value: prev.1,
             });
         }
+
+        // Compute the PITR cutoff. We have to make sure this doesn't regress:
+        // on restart, GC may not run for a while, and the PITR cutoff will be
+        // reported as 0 (which would bill the user for the entire history from
+        // 0 to last_record_lsn). We therefore clamp this to the cached value
+        // (which persists across restarts).
+        //
+        // If pitr_interval is disabled (pitr_cutoff is None), the cutoff is the
+        // last record LSN, by definition. We don't use the written_size
+        // clamping from above, because our own caching should result in
+        // equivalent clamping.
+        let pitr_cutoff_key = MetricsKey::pitr_cutoff(tenant_id, timeline_id);
+        let mut pitr_cutoff = self
+            .pitr_cutoff
+            .unwrap_or(self.last_record_lsn /* PITR disabled */);
+        if let Some(prev) = cache.get(pitr_cutoff_key.key()) {
+            pitr_cutoff = pitr_cutoff.max(Lsn(prev.value)); // don't regress
+        }
+        metrics.push(pitr_cutoff_key.at(now, pitr_cutoff.into()));
 
         {
             let factory = MetricsKey::timeline_logical_size(tenant_id, timeline_id);

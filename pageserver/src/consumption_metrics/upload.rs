@@ -515,6 +515,10 @@ mod tests {
             ),
             (
                 line!(),
+                r#"{"type":"absolute","time":"2023-09-15T00:00:00.123456789Z","metric":"pitr_cutoff","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":0,"tenant_id":"00000000000000000000000000000000","timeline_id":"ffffffffffffffffffffffffffffffff"}"#,
+            ),
+            (
+                line!(),
                 r#"{"type":"absolute","time":"2023-09-15T00:00:00.123456789Z","metric":"timeline_logical_size","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":0,"tenant_id":"00000000000000000000000000000000","timeline_id":"ffffffffffffffffffffffffffffffff"}"#,
             ),
             (
@@ -560,7 +564,7 @@ mod tests {
         assert_eq!(upgraded_samples, new_samples);
     }
 
-    fn metric_samples_old() -> [RawMetric; 5] {
+    fn metric_samples_old() -> [RawMetric; 6] {
         let tenant_id = TenantId::from_array([0; 16]);
         let timeline_id = TimelineId::from_array([0xff; 16]);
 
@@ -572,7 +576,7 @@ mod tests {
         super::super::metrics::metric_examples_old(tenant_id, timeline_id, now, before)
     }
 
-    fn metric_samples() -> [NewRawMetric; 5] {
+    fn metric_samples() -> [NewRawMetric; 6] {
         let tenant_id = TenantId::from_array([0; 16]);
         let timeline_id = TimelineId::from_array([0xff; 16]);
 

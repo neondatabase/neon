@@ -508,6 +508,7 @@ PER_METRIC_VERIFIERS = {
     "remote_storage_size": CannotVerifyAnything,
     "written_size": WrittenDataVerifier,
     "written_data_bytes_delta": WrittenDataDeltaVerifier,
+    "pitr_cutoff": CannotVerifyAnything,
     "timeline_logical_size": CannotVerifyAnything,
     "synthetic_storage_size": SyntheticSizeVerifier,
 }
