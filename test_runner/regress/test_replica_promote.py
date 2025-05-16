@@ -5,6 +5,7 @@ This far, only contains a test that we don't break and that the data is persiste
 """
 
 import psycopg2
+import time
 from fixtures.neon_fixtures import Endpoint, NeonEnv, wait_replica_caughtup
 from fixtures.pg_version import PgVersion
 from pytest import raises
