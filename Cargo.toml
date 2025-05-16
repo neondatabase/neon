@@ -26,6 +26,7 @@ members = [
     "libs/utils",
     "libs/consumption_metrics",
     "libs/postgres_backend",
+    "libs/posthog_client_lite",
     "libs/pq_proto",
     "libs/tenant_size_model",
     "libs/metrics",

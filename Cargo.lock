@@ -1303,6 +1303,7 @@ dependencies = [
  "futures",
  "http 1.1.0",
  "indexmap 2.0.1",
+ "itertools 0.10.5",
  "jsonwebtoken",
  "metrics",
  "nix 0.27.1",
@@ -4330,6 +4331,7 @@ dependencies = [
  "toml_edit",
  "tracing",
  "tracing-utils",
+ "twox-hash",
  "url",
  "utils",
  "uuid",
@@ -4844,6 +4846,19 @@ dependencies = [
  "camino",
  "thiserror 1.0.69",
  "tokio",
+ "workspace_hack",
+]
+
+[[package]]
+name = "posthog_client_lite"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
  "workspace_hack",
 ]
 
@@ -8438,8 +8453,10 @@ dependencies = [
  "fail",
  "form_urlencoded",
  "futures-channel",
+ "futures-core",
  "futures-executor",
  "futures-io",
+ "futures-task",
  "futures-util",
  "generic-array",
  "getrandom 0.2.11",
@@ -8469,6 +8486,7 @@ dependencies = [
  "once_cell",
  "p256 0.13.2",
  "parquet",
+ "percent-encoding",
  "prettyplease",
  "proc-macro2",
  "prost 0.13.3",
