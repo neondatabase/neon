@@ -55,6 +55,7 @@ jobs:
       RUST_BACKTRACE: 1
       NEON_ENV_BUILDER_USE_OVERLAYFS_FOR_SNAPSHOTS: 1
       S3_BUCKET: neon-github-public-dev
+      PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
     steps:
     # we don't need the neon source code because we run everything remotely
     # however we still need the local github actions to run the allure step below
@@ -71,10 +72,10 @@ jobs:
         echo "NEON_DIR=${RUNNER_TEMP}/neon" >> $GITHUB_ENV
         echo "BACKUP_DIR=${RUNNER_TEMP}/instance_store/saved_snapshots" >> $GITHUB_ENV
         echo "TEST_OUTPUT=${RUNNER_TEMP}/neon/test_output" >> $GITHUB_ENV
+        echo "PERF_REPORT_DIR=${RUNNER_TEMP}/neon/test_output/perf-report-local" >> $GITHUB_ENV
         echo "ALLURE_DIR=${RUNNER_TEMP}/neon/test_output/allure-results" >> $GITHUB_ENV
         echo "ALLURE_RESULTS_DIR=${RUNNER_TEMP}/neon/test_output/allure-results/results" >> $GITHUB_ENV
-
-    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        echo "allure_results_dir=${RUNNER_TEMP}/neon/test_output/allure-results/results" >> "$GITHUB_OUTPUT"
 
     - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
       with:
@@ -82,16 +83,24 @@ jobs:
         role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         role-duration-seconds: 18000 # max 5 hours (needed in case commit hash is still being built)
     - name: Determine commit hash
+      id: commit_hash
       env:
         INPUT_COMMIT_HASH: ${{ github.event.inputs.commit_hash }}
       run: |
         if [ -z "$INPUT_COMMIT_HASH" ]; then
           echo "COMMIT_HASH=$(curl -s https://api.github.com/repos/neondatabase/neon/commits/main | jq -r '.sha')" >> $GITHUB_ENV
+          echo "commit_hash=$COMMIT_HASH" >> "$GITHUB_OUTPUT"
           echo "COMMIT_HASH_TYPE=latest" >> $GITHUB_ENV
         else
           echo "COMMIT_HASH=$INPUT_COMMIT_HASH" >> $GITHUB_ENV
+          echo "commit_hash=$COMMIT_HASH" >> "$GITHUB_OUTPUT"
           echo "COMMIT_HASH_TYPE=manual" >> $GITHUB_ENV
         fi
+
+    - name: Checkout the neon repository at given commit hash
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        ref: ${{ steps.commit_hash.outputs.commit_hash }}
 
     # does not reuse ./.github/actions/download because we need to download the artifact for the given commit hash
     # example artifact
@@ -160,6 +169,86 @@ jobs:
         cd $TEST_OUTPUT
         time cat $BACKUP_DIR/parts/* | zstdcat | tar --extract --preserve-permissions
 
+    - name: Cache poetry deps
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pypoetry/virtualenvs
+        key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-bookworm-${{ hashFiles('poetry.lock') }}
+
+    - name: Install Python deps
+      shell: bash -euxo pipefail {0}
+      run: ./scripts/pysync
+
+    # we need high number of open files for pagebench
+    - name: show ulimits
+      shell: bash -euxo pipefail {0}
+      run: |
+        ulimit -a
+
+    - name: Run pagebench testcase
+      shell: bash -euxo pipefail {0}
+      run: |
+        cd ${NEON_DIR}
+        export PLATFORM=$(hostname)-${COMMIT_TYPE}
+        # report the commit hash of the neon repository in the revision of the test results
+        export GITHUB_SHA=${COMMIT_HASH}
+        rm -rf ${PERF_REPORT_DIR}
+        rm -rf ${ALLURE_RESULTS_DIR}
+        mkdir -p ${PERF_REPORT_DIR}
+        mkdir -p ${ALLURE_RESULTS_DIR}
+        PARAMS="--alluredir=${ALLURE_RESULTS_DIR} --tb=short --verbose -rA"
+        EXTRA_PARAMS="--out-dir ${PERF_REPORT_DIR} --durations-path $TEST_OUTPUT/benchmark_durations.json --preserve-database-files"
+        # run only two selected tests
+        # environment set by parent:
+        # RUST_BACKTRACE=1 NEON_ENV_BUILDER_USE_OVERLAYFS_FOR_SNAPSHOTS=1 DEFAULT_PG_VERSION=16 BUILD_TYPE=release
+        ./scripts/pytest ${PARAMS} test_runner/performance/pageserver/pagebench/test_pageserver_max_throughput_getpage_at_latest_lsn.py::test_pageserver_characterize_throughput_with_n_tenants ${EXTRA_PARAMS}
+        ./scripts/pytest ${PARAMS} test_runner/performance/pageserver/pagebench/test_pageserver_max_throughput_getpage_at_latest_lsn.py::test_pageserver_characterize_latencies_with_1_client_and_throughput_with_many_clients_one_tenant ${EXTRA_PARAMS}
+
+    - name: upload the performance metrics to the Neon performance database which is used by grafana dashboards to display the results
+      shell: bash -euxo pipefail {0}
+      run: |
+        export REPORT_FROM="$PERF_REPORT_DIR"
+        export GITHUB_SHA=${COMMIT_HASH}
+        time ./scripts/generate_and_push_perf_report.sh
+
+    - name: Upload test results
+      if: ${{ !cancelled() }}
+      uses: ./.github/actions/allure-report-store
+      with:
+        report-dir:  ${{ steps.set-env.outputs.allure_results_dir }}
+        unique-key: ${{ env.BUILD_TYPE }}-${{ env.DEFAULT_PG_VERSION }}-${{ runner.arch }}
+        aws-oidc-role-arn:  ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+
+    - name: Create Allure report
+      id: create-allure-report
+      if: ${{ !cancelled() }}
+      uses: ./.github/actions/allure-report-generate
+      with:
+        aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+
+    - name: Upload snapshots
+      if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.recreate_snapshots != 'false' && github.event.inputs.recreate_snapshots != '' }}
+      id: upload_snapshots
+      shell: bash -euxo pipefail {0}
+      run: |
+        mkdir -p $BACKUP_DIR
+        cd $TEST_OUTPUT
+        tar --create --preserve-permissions --file - shared-snapshots | zstd -o $BACKUP_DIR/shared_snapshots.tar.zst
+        cd $BACKUP_DIR
+        mkdir parts
+        split -b 1G shared_snapshots.tar.zst ./parts/shared_snapshots.tar.zst.part.
+        SNAPSHOT_DATE=$(date +%F)  # YYYY-MM-DD
+        time aws s3 cp --recursive . s3://${S3_BUCKET}/performance/pagebench/shared-snapshots-${SNAPSHOT_DATE}/
+
+    - name: Post to a Slack channel
+      if: ${{ github.event.schedule && failure() }}
+      uses: slackapi/slack-github-action@fcfb566f8b0aab22203f066d80ca1d7e4b5d05b3 # v1.27.1
+      with:
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
+        slack-message: "Periodic pagebench testing on dedicated hardware: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      env:
+        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        
     - name: Cleanup Test Resources
       if: always()
       shell: bash -euxo pipefail {0}
