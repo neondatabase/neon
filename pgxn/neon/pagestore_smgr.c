@@ -912,6 +912,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	{
 		case 0:
 			neon_log(ERROR, "cannot call smgrextend() on rel with unknown persistence");
+			break;
 
 		case RELPERSISTENCE_PERMANENT:
 			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
@@ -1005,6 +1006,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 	{
 		case 0:
 			neon_log(ERROR, "cannot call smgrextend() on rel with unknown persistence");
+			break;
 
 		case RELPERSISTENCE_PERMANENT:
 			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
@@ -1386,6 +1388,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 	{
 		case 0:
 			neon_log(ERROR, "cannot call smgrread() on rel with unknown persistence");
+			break;
 
 		case RELPERSISTENCE_PERMANENT:
 			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
@@ -1478,6 +1481,7 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	{
 		case 0:
 			neon_log(ERROR, "cannot call smgrread() on rel with unknown persistence");
+			break;
 
 		case RELPERSISTENCE_PERMANENT:
 			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
