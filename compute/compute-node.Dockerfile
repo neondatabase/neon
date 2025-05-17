@@ -584,6 +584,38 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) && \
 
 #########################################################################################
 #
+# Layer "online_advisor-build"
+# compile online_advisor extension
+#
+#########################################################################################
+FROM build-deps AS online_advisor-src
+ARG PG_VERSION
+
+# online_advisor supports all Postgres version starting from PG14, but prior to PG17 has to be included in preload_shared_libraries
+# last release 1.0 - May 15, 2025
+WORKDIR /ext-src
+RUN case "${PG_VERSION:?}" in \
+    "v17") \
+        ;; \
+    *) \
+        echo "skipping the version of online_advistor for $PG_VERSION" && exit 0 \
+        ;; \
+    esac && \
+	wget https://github.com/knizhnik/online_advisor/archive/refs/tags/1.0.tar.gz -O online_advisor.tar.gz && \
+    echo "059b7d9e5a90013a58bdd22e9505b88406ce05790675eb2d8434e5b215652d54 online_advisor.tar.gz" | sha256sum --check && \
+    mkdir online_advisor-src && cd online_advisor-src && tar xzf ../online_advisor.tar.gz --strip-components=1 -C .
+
+FROM pg-build AS online_advisor-build
+COPY --from=online_advisor-src /ext-src/ /ext-src/
+WORKDIR /ext-src/
+RUN if [ -d online_advisor-src ]; then \
+	    cd online_advisor-src && \
+        make -j install && \
+        echo 'trusted = true' >> /usr/local/pgsql/share/extension/online_advisor.control; \
+    fi
+
+#########################################################################################
+#
 # Layer "pg_hashids-build"
 # compile pg_hashids extension
 #
@@ -1648,6 +1680,7 @@ COPY --from=pg_jsonschema-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_graphql-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_tiktoken-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=hypopg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=online_advisor-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_hashids-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=rum-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgtap-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -1823,6 +1856,7 @@ COPY --from=pgjwt-src /ext-src/ /ext-src/
 COPY --from=pg_graphql-src /ext-src/ /ext-src/
 #COPY --from=pg_tiktoken-src /ext-src/ /ext-src/
 COPY --from=hypopg-src /ext-src/ /ext-src/
+COPY --from=online_advisor-src /ext-src/ /ext-src/
 COPY --from=pg_hashids-src /ext-src/ /ext-src/
 COPY --from=rum-src /ext-src/ /ext-src/
 COPY --from=pgtap-src /ext-src/ /ext-src/
