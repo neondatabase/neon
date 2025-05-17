@@ -699,13 +699,8 @@ class NeonEnvBuilder:
         if self.test_overlay_dir is None:
             log.info("Copying local_fs_remote_storage directory from snapshot")
             subprocess.run(
-                [
-                    "cp",
-                    "-a",
-                    f"{repo_dir / 'local_fs_remote_storage'}",
-                    f"{self.repo_dir}"
-                ],
-                check=True
+                ["cp", "-a", f"{repo_dir / 'local_fs_remote_storage'}", f"{self.repo_dir}"],
+                check=True,
             )
         else:
             log.info("Creating overlayfs mount of local_fs_remote_storage directory from snapshot")
