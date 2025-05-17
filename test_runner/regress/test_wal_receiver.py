@@ -16,6 +16,13 @@ if TYPE_CHECKING:
 # Checks that pageserver's walreceiver state is printed in the logs during WAL wait timeout.
 # Ensures that walreceiver does not run without any data inserted and only starts after the insertion.
 def test_pageserver_lsn_wait_error_start(neon_env_builder: NeonEnvBuilder):
+    # we assert below that the walreceiver is not active before data writes.
+    # with manually created timelines, it is active.
+    # FIXME: remove this test once we remove timelines_onto_safekeepers
+    neon_env_builder.storage_controller_config = {
+        "timelines_onto_safekeepers": False,
+    }
+
     # Trigger WAL wait timeout faster
     neon_env_builder.pageserver_config_override = "wait_lsn_timeout = '1s'"
     env = neon_env_builder.init_start()

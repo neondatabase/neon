@@ -18,15 +18,17 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
+    Safekeeper,
     flush_ep_to_pageserver,
 )
-from fixtures.pageserver.http import PageserverApiException
+from fixtures.pageserver.http import PageserverApiException, TimelineCreateRequest
 from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
 )
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
 from fixtures.workload import Workload
+from fixtures.safekeeper.http import MembershipConfiguration
 
 if TYPE_CHECKING:
     from fixtures.compute_reconfigure import ComputeReconfigure
@@ -339,6 +341,17 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
         new_timeline_id=timeline_id,
         existing_initdb_timeline_id=timeline_id,
     )
+
+    members_sks = [env.safekeepers[0]]
+
+    mconf = MembershipConfiguration(
+        generation=1,
+        members=Safekeeper.sks_to_safekeeper_ids(members_sks),
+        new_members=None,
+    )
+    members_sks = Safekeeper.mconf_sks(env, mconf)
+
+    Safekeeper.create_timeline(tenant_id, timeline_id, env.pageservers[0], mconf, members_sks)
 
     # Timeline exists again: restart the endpoint
     ep.start(env=ep_env)

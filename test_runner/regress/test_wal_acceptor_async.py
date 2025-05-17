@@ -591,6 +591,13 @@ async def run_wal_truncation(env: NeonEnv, safekeeper_proto_version: int):
 @pytest.mark.parametrize("safekeeper_proto_version", [2, 3])
 def test_wal_truncation(neon_env_builder: NeonEnvBuilder, safekeeper_proto_version: int):
     neon_env_builder.num_safekeepers = 3
+    if safekeeper_proto_version == 2:
+        # On the legacy protocol, we don't support generations, which are part of
+        # `timelines_onto_safekeepers`
+        neon_env_builder.storage_controller_config = {
+            "timelines_onto_safekeepers": False,
+        }
+
     env = neon_env_builder.init_start()
 
     asyncio.run(run_wal_truncation(env, safekeeper_proto_version))
