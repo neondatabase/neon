@@ -714,6 +714,9 @@ typedef struct WalProposerConfig
 	 */
 	char	   *safekeepers_list;
 
+	/* libpq connection info options. */
+	char	   *safekeeper_conninfo_options;
+
 	/*
 	 * WalProposer reconnects to offline safekeepers once in this interval.
 	 * Time is in milliseconds.
