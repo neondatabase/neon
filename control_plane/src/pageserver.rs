@@ -546,6 +546,11 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("Falied to parse 'sampling_ratio'")?,
+            relsize_snapshot_cache_capacity: settings
+                .remove("relsize snapshot cache capacity")
+                .map(|x| x.parse::<usize>())
+                .transpose()
+                .context("Falied to parse 'relsize_snapshot_cache_capacity' as integer")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
