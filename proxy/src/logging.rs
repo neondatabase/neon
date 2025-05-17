@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::{array, env, fmt, io};
 
 use chrono::{DateTime, Utc};
-use indexmap::IndexSet;
+use lasso::ThreadedRodeo;
 use opentelemetry::trace::TraceContextExt;
 use scopeguard::defer;
 use serde::ser::{SerializeMap, Serializer};
@@ -197,25 +197,30 @@ thread_local! {
 
 /// Implements tracing layer to handle events specific to logging.
 struct JsonLoggingLayer<C: Clock, W: MakeWriter, const F: usize> {
+    // Using MiniSpur only supports 65534 field names.
+    // This does not feel like a limitation to me.
+    spans: ThreadedRodeo<lasso::MiniSpur, FieldNameHasher>,
     clock: C,
     skipped_field_indices:
         papaya::HashMap<callsite::Identifier, SkippedFieldIndices, FieldNameHasher>,
     callsite_ids: papaya::HashMap<callsite::Identifier, CallsiteId, FieldNameHasher>,
     writer: W,
     // We use a const generic and arrays to bypass one heap allocation.
-    extract_fields: IndexSet<&'static str, FieldNameHasher>,
-    _marker: std::marker::PhantomData<[&'static str; F]>,
+    extract_fields: [lasso::MiniSpur; F],
 }
 
 impl<C: Clock, W: MakeWriter, const F: usize> JsonLoggingLayer<C, W, F> {
     fn new(clock: C, writer: W, extract_fields: [&'static str; F]) -> Self {
+        let spans = ThreadedRodeo::with_hasher(FieldNameHasher::default());
+        let extract_fields = extract_fields.map(|field| spans.get_or_intern_static(field));
+
         JsonLoggingLayer {
+            spans,
             clock,
             skipped_field_indices: papaya::HashMap::default(),
             callsite_ids: papaya::HashMap::default(),
             writer,
-            extract_fields: IndexSet::from_iter(extract_fields),
-            _marker: std::marker::PhantomData,
+            extract_fields,
         }
     }
 
@@ -250,6 +255,7 @@ where
                     &self.skipped_field_indices,
                     &self.callsite_ids,
                     &self.extract_fields,
+                    &self.spans,
                 )?;
                 self.writer.make_writer().write_all(formatter.buffer())
             } else {
@@ -265,6 +271,7 @@ where
                         &self.skipped_field_indices,
                         &self.callsite_ids,
                         &self.extract_fields,
+                        &self.spans,
                     )?;
                     self.writer.make_writer().write_all(formatter.buffer())
                 })
@@ -291,7 +298,7 @@ where
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
         let span = ctx.span(id).expect("span must exist");
         let mut fields = SpanFields::default();
-        fields.record_fields(attrs.values().len(), attrs);
+        fields.record_fields(attrs.values().len(), attrs, &self.spans);
 
         // This could deadlock when there's a panic somewhere in the tracing
         // event handling and a read or write guard is still held. This includes
@@ -305,7 +312,7 @@ where
         let span = ctx.span(id).expect("span must exist");
         let mut ext = span.extensions_mut();
         if let Some(data) = ext.get_mut::<SpanFields>() {
-            data.record_fields(values.len(), values);
+            data.record_fields(values.len(), values, &self.spans);
         }
     }
 
@@ -371,87 +378,116 @@ impl fmt::Display for CallsiteId {
 #[derive(Default)]
 struct SpanFields {
     // TODO: Switch to custom enum with lasso::Spur for Strings?
-    fields: HashMap<&'static str, serde_json::Value, FieldNameHasher>,
+    fields: HashMap<lasso::MiniSpur, serde_json::Value, FieldNameHasher>,
 }
 
 impl SpanFields {
     #[inline]
-    fn record_fields<R: tracing_subscriber::field::RecordFields>(&mut self, len: usize, fields: R) {
+    fn record_fields<R: tracing_subscriber::field::RecordFields>(
+        &mut self,
+        len: usize,
+        fields: R,
+        lasso: &ThreadedRodeo<lasso::MiniSpur, FieldNameHasher>,
+    ) {
         self.fields.reserve(len);
         fields.record(&mut SpanFieldsRecorder {
+            spans: lasso,
             fields: &mut self.fields,
         });
     }
 }
 
 /// Implements a tracing field visitor to convert and store values.
-struct SpanFieldsRecorder<'m, S> {
-    fields: &'m mut HashMap<&'static str, serde_json::Value, S>,
+struct SpanFieldsRecorder<'r, 'm, S> {
+    spans: &'r ThreadedRodeo<lasso::MiniSpur, FieldNameHasher>,
+    fields: &'m mut HashMap<lasso::MiniSpur, serde_json::Value, S>,
 }
 
-impl<S: BuildHasher> tracing::field::Visit for SpanFieldsRecorder<'_, S> {
+impl<S: BuildHasher> tracing::field::Visit for SpanFieldsRecorder<'_, '_, S> {
     #[inline]
     fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
-        self.fields
-            .insert(field.name(), serde_json::Value::from(value));
+        self.fields.insert(
+            self.spans.get_or_intern_static(field.name()),
+            serde_json::Value::from(value),
+        );
     }
 
     #[inline]
     fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
-        self.fields
-            .insert(field.name(), serde_json::Value::from(value));
+        self.fields.insert(
+            self.spans.get_or_intern_static(field.name()),
+            serde_json::Value::from(value),
+        );
     }
 
     #[inline]
     fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
-        self.fields
-            .insert(field.name(), serde_json::Value::from(value));
+        self.fields.insert(
+            self.spans.get_or_intern_static(field.name()),
+            serde_json::Value::from(value),
+        );
     }
 
     #[inline]
     fn record_i128(&mut self, field: &tracing::field::Field, value: i128) {
         if let Ok(value) = i64::try_from(value) {
-            self.fields
-                .insert(field.name(), serde_json::Value::from(value));
+            self.fields.insert(
+                self.spans.get_or_intern_static(field.name()),
+                serde_json::Value::from(value),
+            );
         } else {
-            self.fields
-                .insert(field.name(), serde_json::Value::from(format!("{value}")));
+            self.fields.insert(
+                self.spans.get_or_intern_static(field.name()),
+                serde_json::Value::from(format!("{value}")),
+            );
         }
     }
 
     #[inline]
     fn record_u128(&mut self, field: &tracing::field::Field, value: u128) {
         if let Ok(value) = u64::try_from(value) {
-            self.fields
-                .insert(field.name(), serde_json::Value::from(value));
+            self.fields.insert(
+                self.spans.get_or_intern_static(field.name()),
+                serde_json::Value::from(value),
+            );
         } else {
-            self.fields
-                .insert(field.name(), serde_json::Value::from(format!("{value}")));
+            self.fields.insert(
+                self.spans.get_or_intern_static(field.name()),
+                serde_json::Value::from(format!("{value}")),
+            );
         }
     }
 
     #[inline]
     fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
-        self.fields
-            .insert(field.name(), serde_json::Value::from(value));
+        self.fields.insert(
+            self.spans.get_or_intern_static(field.name()),
+            serde_json::Value::from(value),
+        );
     }
 
     #[inline]
     fn record_bytes(&mut self, field: &tracing::field::Field, value: &[u8]) {
-        self.fields
-            .insert(field.name(), serde_json::Value::from(value));
+        self.fields.insert(
+            self.spans.get_or_intern_static(field.name()),
+            serde_json::Value::from(value),
+        );
     }
 
     #[inline]
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        self.fields
-            .insert(field.name(), serde_json::Value::from(value));
+        self.fields.insert(
+            self.spans.get_or_intern_static(field.name()),
+            serde_json::Value::from(value),
+        );
     }
 
     #[inline]
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        self.fields
-            .insert(field.name(), serde_json::Value::from(format!("{value:?}")));
+        self.fields.insert(
+            self.spans.get_or_intern_static(field.name()),
+            serde_json::Value::from(format!("{value:?}")),
+        );
     }
 
     #[inline]
@@ -460,8 +496,10 @@ impl<S: BuildHasher> tracing::field::Visit for SpanFieldsRecorder<'_, S> {
         field: &tracing::field::Field,
         value: &(dyn std::error::Error + 'static),
     ) {
-        self.fields
-            .insert(field.name(), serde_json::Value::from(format!("{value}")));
+        self.fields.insert(
+            self.spans.get_or_intern_static(field.name()),
+            serde_json::Value::from(format!("{value}")),
+        );
     }
 }
 
@@ -530,7 +568,8 @@ impl EventFormatter {
             FieldNameHasher,
         >,
         callsite_ids: &papaya::HashMap<callsite::Identifier, CallsiteId, FieldNameHasher>,
-        extract_fields: &IndexSet<&'static str, FieldNameHasher>,
+        extract_fields: &[lasso::MiniSpur; F],
+        spans: &ThreadedRodeo<lasso::MiniSpur, FieldNameHasher>,
     ) -> io::Result<()>
     where
         S: Subscriber + for<'a> LookupSpan<'a>,
@@ -575,7 +614,7 @@ impl EventFormatter {
             let spans = SerializableSpans {
                 ctx,
                 callsite_ids,
-                extract: ExtractedSpanFields::<'_, F>::new(extract_fields),
+                extract: ExtractedSpanFields::<F>::new(extract_fields, spans),
             };
             serializer.serialize_entry("spans", &spans)?;
 
@@ -913,16 +952,16 @@ impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageFieldSkipper<
 /// with the span names as keys. To prevent collision we append a numberic value
 /// to the name. Also, collects any span fields we're interested in. Last one
 /// wins.
-struct SerializableSpans<'a, 'ctx, Span, const F: usize>
+struct SerializableSpans<'a, 'ctx, 'r, Span, const F: usize>
 where
     Span: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
     ctx: &'a Context<'ctx, Span>,
     callsite_ids: &'a papaya::HashMap<callsite::Identifier, CallsiteId, FieldNameHasher>,
-    extract: ExtractedSpanFields<'a, F>,
+    extract: ExtractedSpanFields<'a, 'r, F>,
 }
 
-impl<Span, const F: usize> serde::ser::Serialize for SerializableSpans<'_, '_, Span, F>
+impl<Span, const F: usize> serde::ser::Serialize for SerializableSpans<'_, '_, '_, Span, F>
 where
     Span: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
@@ -958,15 +997,15 @@ where
 }
 
 /// Serializes the span fields as object.
-struct SerializableSpanFields<'a, 'span, Span, const F: usize>
+struct SerializableSpanFields<'a, 'span, 'r, Span, const F: usize>
 where
     Span: for<'lookup> LookupSpan<'lookup>,
 {
     span: &'a SpanRef<'span, Span>,
-    extract: &'a ExtractedSpanFields<'a, F>,
+    extract: &'a ExtractedSpanFields<'a, 'r, F>,
 }
 
-impl<Span, const F: usize> serde::ser::Serialize for SerializableSpanFields<'_, '_, Span, F>
+impl<Span, const F: usize> serde::ser::Serialize for SerializableSpanFields<'_, '_, '_, Span, F>
 where
     Span: for<'lookup> LookupSpan<'lookup>,
 {
@@ -979,9 +1018,9 @@ where
         let ext = self.span.extensions();
         if let Some(data) = ext.get::<SpanFields>() {
             for (name, value) in &data.fields {
-                serializer.serialize_entry(name, value)?;
+                serializer.serialize_entry(self.extract.spans.resolve(name), value)?;
                 // TODO: replace clone with reference, if possible.
-                self.extract.set(name, value.clone());
+                self.extract.set(*name, value.clone());
             }
         }
 
@@ -989,24 +1028,30 @@ where
     }
 }
 
-struct ExtractedSpanFields<'a, const F: usize> {
-    names: &'a IndexSet<&'static str, FieldNameHasher>,
+struct ExtractedSpanFields<'a, 'r, const F: usize> {
+    spans: &'r ThreadedRodeo<lasso::MiniSpur, FieldNameHasher>,
+    names: &'a [lasso::MiniSpur; F],
     // TODO: replace TryLock with something local thread and interior mutability.
     //       serde API doesn't let us use `mut`.
     values: TryLock<([Option<serde_json::Value>; F], bool)>,
 }
 
-impl<'a, const F: usize> ExtractedSpanFields<'a, F> {
-    fn new(names: &'a IndexSet<&'static str, FieldNameHasher>) -> Self {
+impl<'a, 'r, const F: usize> ExtractedSpanFields<'a, 'r, F> {
+    fn new(
+        names: &'a [lasso::MiniSpur; F],
+        spans: &'r ThreadedRodeo<lasso::MiniSpur, FieldNameHasher>,
+    ) -> Self {
         ExtractedSpanFields {
+            spans,
             names,
             values: TryLock::new((array::from_fn(|_| Option::default()), false)),
         }
     }
 
     #[inline]
-    fn set(&self, name: &'static str, value: serde_json::Value) {
-        if let Some((index, _)) = self.names.get_full(name) {
+    fn set(&self, name: lasso::MiniSpur, value: serde_json::Value) {
+        // expectation: this list is small.
+        if let Some(index) = self.names.iter().position(|x| *x == name) {
             let mut fields = self.values.try_lock().expect("thread-local use");
             fields.0[index] = Some(value);
             fields.1 = true;
@@ -1019,7 +1064,7 @@ impl<'a, const F: usize> ExtractedSpanFields<'a, F> {
     }
 }
 
-impl<const F: usize> serde::ser::Serialize for ExtractedSpanFields<'_, F> {
+impl<const F: usize> serde::ser::Serialize for ExtractedSpanFields<'_, '_, F> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::ser::Serializer,
@@ -1030,7 +1075,7 @@ impl<const F: usize> serde::ser::Serialize for ExtractedSpanFields<'_, F> {
         for (i, value) in values.0.iter().enumerate() {
             if let Some(value) = value {
                 let key = self.names[i];
-                serializer.serialize_entry(key, value)?;
+                serializer.serialize_entry(self.spans.resolve(&key), value)?;
             }
         }
 
@@ -1040,7 +1085,6 @@ impl<const F: usize> serde::ser::Serialize for ExtractedSpanFields<'_, F> {
 
 #[cfg(test)]
 mod tests {
-    use std::marker::PhantomData;
     use std::sync::{Arc, Mutex, MutexGuard};
 
     use assert_json_diff::assert_json_eq;
@@ -1086,13 +1130,15 @@ mod tests {
             current_time: Mutex::new(Utc::now()),
         });
         let buffer = Arc::new(Mutex::new(Vec::new()));
+        let spans = ThreadedRodeo::with_hasher(FieldNameHasher::default());
+        let field_x = spans.get_or_intern_static("x");
         let log_layer = JsonLoggingLayer {
+            spans,
             clock: clock.clone(),
             skipped_field_indices: papaya::HashMap::default(),
             callsite_ids: papaya::HashMap::default(),
             writer: buffer.clone(),
-            extract_fields: IndexSet::from_iter(["x"]),
-            _marker: PhantomData::<[&'static str; 1]>,
+            extract_fields: [field_x],
         };
 
         let registry = tracing_subscriber::Registry::default().with(log_layer);
