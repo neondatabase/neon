@@ -70,6 +70,14 @@ enum Command {
         /// and maintenance_work_mem.
         #[clap(long, env = "NEON_IMPORTER_MEMORY_MB")]
         memory_mb: Option<usize>,
+
+        /// List of schemas to dump.
+        #[clap(long)]
+        schemas: Vec<String>,
+
+        /// List of extensions to dump.
+        #[clap(long)]
+        extensions: Vec<String>,
     },
 
     /// Runs pg_dump-pg_restore from source to destination without running local postgres.
@@ -82,6 +90,12 @@ enum Command {
         /// real scenario uses encrypted connection string in spec.json from s3.
         #[clap(long)]
         destination_connection_string: Option<String>,
+        /// List of schemas to dump.
+        #[clap(long)]
+        schemas: Vec<String>,
+        /// List of extensions to dump.
+        #[clap(long)]
+        extensions: Vec<String>,
     },
 }
 
@@ -117,6 +131,8 @@ struct Spec {
     source_connstring_ciphertext_base64: Vec<u8>,
     #[serde_as(as = "Option<serde_with::base64::Base64>")]
     destination_connstring_ciphertext_base64: Option<Vec<u8>>,
+    // schemas: Vec<String>,
+    // extensions: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -337,6 +353,8 @@ async fn run_dump_restore(
     pg_lib_dir: Utf8PathBuf,
     source_connstring: String,
     destination_connstring: String,
+    schemas: Vec<String>,
+    extensions: Vec<String>,
 ) -> Result<(), anyhow::Error> {
     let dumpdir = workdir.join("dumpdir");
 
@@ -349,6 +367,7 @@ async fn run_dump_restore(
         "--no-subscriptions".to_string(),
         "--no-tablespaces".to_string(),
         "--no-event-triggers".to_string(),
+        "--enable-row-security".to_string(),
         // format
         "--format".to_string(),
         "directory".to_string(),
@@ -359,10 +378,31 @@ async fn run_dump_restore(
         "--verbose".to_string(),
     ];
 
+    let mut pg_dump_args = vec![
+        // always include public schema by default
+        "--schema".to_string(),
+        "public".to_string(),
+        // this makes sure any unsupported extensions are not included in the dump
+        // even if we don't specify supported extensions explicitly
+        "--extension".to_string(),
+        "plpgsql".to_string(),
+    ];
+
+    for schema in &schemas {
+        pg_dump_args.push("--schema".to_string());
+        pg_dump_args.push(schema.clone());
+    }
+
+    for extension in &extensions {
+        pg_dump_args.push("--extension".to_string());
+        pg_dump_args.push(extension.clone());
+    }
+
     info!("dump into the working directory");
     {
         let mut pg_dump = tokio::process::Command::new(pg_bin_dir.join("pg_dump"))
             .args(&common_args)
+            .args(&pg_dump_args)
             .arg("-f")
             .arg(&dumpdir)
             .arg("--no-sync")
@@ -453,6 +493,8 @@ async fn cmd_pgdata(
     maybe_s3_prefix: Option<s3_uri::S3Uri>,
     maybe_spec: Option<Spec>,
     source_connection_string: Option<String>,
+    schemas: Vec<String>,
+    extensions: Vec<String>,
     interactive: bool,
     pg_port: u16,
     workdir: Utf8PathBuf,
@@ -502,6 +544,8 @@ async fn cmd_pgdata(
         pg_lib_dir,
         source_connection_string,
         destination_connstring,
+        schemas,
+        extensions,
     )
     .await?;
 
@@ -549,6 +593,8 @@ async fn cmd_dumprestore(
     maybe_spec: Option<Spec>,
     source_connection_string: Option<String>,
     destination_connection_string: Option<String>,
+    schemas: Vec<String>,
+    extensions: Vec<String>,
     workdir: Utf8PathBuf,
     pg_bin_dir: Utf8PathBuf,
     pg_lib_dir: Utf8PathBuf,
@@ -596,6 +642,8 @@ async fn cmd_dumprestore(
         pg_lib_dir,
         source_connstring,
         destination_connstring,
+        schemas,
+        extensions,
     )
     .await
 }
@@ -677,6 +725,8 @@ pub(crate) async fn main() -> anyhow::Result<()> {
                 pg_port,
                 num_cpus,
                 memory_mb,
+                schemas,
+                extensions,
             } => {
                 cmd_pgdata(
                     s3_client.as_ref(),
@@ -684,6 +734,8 @@ pub(crate) async fn main() -> anyhow::Result<()> {
                     args.s3_prefix.clone(),
                     spec,
                     source_connection_string,
+                    schemas,
+                    extensions,
                     interactive,
                     pg_port,
                     args.working_directory.clone(),
@@ -697,12 +749,16 @@ pub(crate) async fn main() -> anyhow::Result<()> {
             Command::DumpRestore {
                 source_connection_string,
                 destination_connection_string,
+                schemas,
+                extensions,
             } => {
                 cmd_dumprestore(
                     kms_client,
                     spec,
                     source_connection_string,
                     destination_connection_string,
+                    schemas,
+                    extensions,
                     args.working_directory.clone(),
                     args.pg_bin_dir,
                     args.pg_lib_dir,
