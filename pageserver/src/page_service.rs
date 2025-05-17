@@ -642,7 +642,7 @@ impl std::fmt::Display for BatchedPageStreamError {
 struct BatchedGetPageRequest {
     req: PagestreamGetPageRequest,
     timer: SmgrOpTimer,
-    lsns: LsnRange,
+    lsn_range: LsnRange,
     ctx: RequestContext,
 }
 
@@ -764,11 +764,12 @@ impl BatchedFeMessage {
                 match batching_strategy {
                     PageServiceProtocolPipelinedBatchingStrategy::UniformLsn => {
                         if let Some(last_in_batch) = accum_pages.last() {
-                            if last_in_batch.lsns.effective_lsn != this_pages[0].lsns.effective_lsn
+                            if last_in_batch.lsn_range.effective_lsn
+                                != this_pages[0].lsn_range.effective_lsn
                             {
                                 trace!(
-                                    accum_lsn = %last_in_batch.lsns.effective_lsn,
-                                    this_lsn = %this_pages[0].lsns.effective_lsn,
+                                    accum_lsn = %last_in_batch.lsn_range.effective_lsn,
+                                    this_lsn = %this_pages[0].lsn_range.effective_lsn,
                                     "stopping batching because LSN changed"
                                 );
 
@@ -783,14 +784,15 @@ impl BatchedFeMessage {
                         let same_page_different_lsn = accum_pages.iter().any(|batched| {
                             batched.req.rel == this_pages[0].req.rel
                                 && batched.req.blkno == this_pages[0].req.blkno
-                                && batched.lsns.effective_lsn != this_pages[0].lsns.effective_lsn
+                                && batched.lsn_range.effective_lsn
+                                    != this_pages[0].lsn_range.effective_lsn
                         });
 
                         if same_page_different_lsn {
                             trace!(
                                 rel=%this_pages[0].req.rel,
                                 blkno=%this_pages[0].req.blkno,
-                                lsn=%this_pages[0].lsns.effective_lsn,
+                                lsn=%this_pages[0].lsn_range.effective_lsn,
                                 "stopping batching because same page was requested at different LSNs"
                             );
 
@@ -1175,7 +1177,7 @@ impl PageServerHandler {
                     pages: smallvec::smallvec![BatchedGetPageRequest {
                         req,
                         timer,
-                        lsns: LsnRange {
+                        lsn_range: LsnRange {
                             effective_lsn,
                             request_lsn: req.hdr.request_lsn
                         },
@@ -2130,7 +2132,7 @@ impl PageServerHandler {
         let exists = timeline
             .get_rel_exists(
                 req.rel,
-                Version::Lsns(LsnRange {
+                Version::LsnRange(LsnRange {
                     effective_lsn: lsn,
                     request_lsn: req.hdr.request_lsn,
                 }),
@@ -2164,7 +2166,7 @@ impl PageServerHandler {
         let n_blocks = timeline
             .get_rel_size(
                 req.rel,
-                Version::Lsns(LsnRange {
+                Version::LsnRange(LsnRange {
                     effective_lsn: lsn,
                     request_lsn: req.hdr.request_lsn,
                 }),
@@ -2199,7 +2201,7 @@ impl PageServerHandler {
             .get_db_size(
                 DEFAULTTABLESPACE_OID,
                 req.dbnode,
-                Version::Lsns(LsnRange {
+                Version::LsnRange(LsnRange {
                     effective_lsn: lsn,
                     request_lsn: req.hdr.request_lsn,
                 }),
@@ -2237,7 +2239,7 @@ impl PageServerHandler {
                 // Ignore error (trace buffer may be full or tracer may have disconnected).
                 _ = page_trace.try_send(PageTraceEvent {
                     key,
-                    effective_lsn: batch.lsns.effective_lsn,
+                    effective_lsn: batch.lsn_range.effective_lsn,
                     time,
                 });
             }
@@ -2252,7 +2254,7 @@ impl PageServerHandler {
                     perf_instrument = true;
                 }
 
-                req.lsns.effective_lsn
+                req.lsn_range.effective_lsn
             })
             .max()
             .expect("batch is never empty");
@@ -2302,9 +2304,14 @@ impl PageServerHandler {
 
         let results = timeline
             .get_rel_page_at_lsn_batched(
-                requests
-                    .iter()
-                    .map(|p| (&p.req.rel, &p.req.blkno, p.lsns, p.ctx.attached_child())),
+                requests.iter().map(|p| {
+                    (
+                        &p.req.rel,
+                        &p.req.blkno,
+                        p.lsn_range,
+                        p.ctx.attached_child(),
+                    )
+                }),
                 io_concurrency,
                 &ctx,
             )

@@ -491,7 +491,7 @@ pub struct TenantConfigToml {
     /// Tenant level performance sampling ratio override. Controls the ratio of get page requests
     /// that will get perf sampling for the tenant.
     pub sampling_ratio: Option<Ratio>,
-    /// Capacity of relsize PITR cache
+    /// Capacity of relsize snapshot cache (used by replicas).
     pub relsize_snapshot_cache_capacity: usize,
 }
 

@@ -92,6 +92,10 @@ pub enum LsnForTimestamp {
     NoData(Lsn),
 }
 
+/// Each request to page server contains LSN range: `not_modified_since..request_lsn`.
+/// See comments libs/pageserver_api/src/models.rs.
+/// Based on this range and `last_record_lsn` PS calculates `effective_lsn`.
+/// But to distinguish requests from primary and replicas we need also to pass `request_lsn`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LsnRange {
     pub effective_lsn: Lsn,
@@ -222,7 +226,7 @@ impl Timeline {
         io_concurrency: IoConcurrency,
     ) -> Result<Bytes, PageReconstructError> {
         match version {
-            Version::Lsns(lsns) => {
+            Version::LsnRange(lsns) => {
                 let pages: smallvec::SmallVec<[_; 1]> = smallvec::smallvec![(tag, blknum)];
                 let res = self
                     .get_rel_page_at_lsn_batched(
@@ -309,7 +313,7 @@ impl Timeline {
                     .attached_child();
 
                 match self
-                    .get_rel_size(*tag, Version::Lsns(lsns), &ctx)
+                    .get_rel_size(*tag, Version::LsnRange(lsns), &ctx)
                     .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                     .await
                 {
@@ -1349,7 +1353,9 @@ impl Timeline {
         Ok((dense_keyspace, sparse_keyspace))
     }
 
-    /// Get cached size of relation if it not updated after specified LSN
+    /// Get cached size of relation. There are two caches: one for primary updates, it captures the latest state of
+    /// of the timeline and snapshot cache, which key includes LSN and so can be used by replicas to get relation size
+    /// at the particular LSN (snapshot).
     pub fn get_cached_rel_size(&self, tag: &RelTag, version: Version<'_>) -> Option<BlockNumber> {
         let lsn = version.get_lsn();
         let rel_size_cache = self.rel_size_latest_cache.read().unwrap();
@@ -2700,7 +2706,7 @@ pub struct DatadirModificationStats {
 /// timeline to not miss the latest updates.
 #[derive(Clone, Copy)]
 pub enum Version<'a> {
-    Lsns(LsnRange),
+    LsnRange(LsnRange),
     Modified(&'a DatadirModification<'a>),
 }
 
@@ -2712,7 +2718,7 @@ impl Version<'_> {
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         match self {
-            Version::Lsns(lsns) => timeline.get(key, lsns.effective_lsn, ctx).await,
+            Version::LsnRange(lsns) => timeline.get(key, lsns.effective_lsn, ctx).await,
             Version::Modified(modification) => modification.get(key, ctx).await,
         }
     }
@@ -2736,20 +2742,20 @@ impl Version<'_> {
 
     pub fn is_latest(&self) -> bool {
         match self {
-            Version::Lsns(lsns) => lsns.is_latest(),
+            Version::LsnRange(lsns) => lsns.is_latest(),
             Version::Modified(_) => true,
         }
     }
 
     pub fn get_lsn(&self) -> Lsn {
         match self {
-            Version::Lsns(lsns) => lsns.effective_lsn,
+            Version::LsnRange(lsns) => lsns.effective_lsn,
             Version::Modified(modification) => modification.lsn,
         }
     }
 
     pub fn at(lsn: Lsn) -> Self {
-        Version::Lsns(LsnRange {
+        Version::LsnRange(LsnRange {
             effective_lsn: lsn,
             request_lsn: lsn,
         })
