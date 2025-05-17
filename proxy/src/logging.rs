@@ -197,14 +197,21 @@ thread_local! {
 
 /// Implements tracing layer to handle events specific to logging.
 struct JsonLoggingLayer<C: Clock, W: MakeWriter, const F: usize> {
+    clock: C,
+    writer: W,
+    state: JsonLoggingState<F>,
+}
+
+struct JsonLoggingState<const F: usize> {
     // Using MiniSpur only supports 65534 field names.
     // This does not feel like a limitation to me.
     spans: ThreadedRodeo<lasso::MiniSpur, FieldNameHasher>,
-    clock: C,
+    /// tracks which fields of each **event** are duplicates
     skipped_field_indices:
         papaya::HashMap<callsite::Identifier, SkippedFieldIndices, FieldNameHasher>,
+    /// tracks the fixed "callsite ID" for each span.
+    /// note: this is not stable between runs.
     callsite_ids: papaya::HashMap<callsite::Identifier, CallsiteId, FieldNameHasher>,
-    writer: W,
     // We use a const generic and arrays to bypass one heap allocation.
     extract_fields: [lasso::MiniSpur; F],
 }
@@ -215,21 +222,15 @@ impl<C: Clock, W: MakeWriter, const F: usize> JsonLoggingLayer<C, W, F> {
         let extract_fields = extract_fields.map(|field| spans.get_or_intern_static(field));
 
         JsonLoggingLayer {
-            spans,
             clock,
-            skipped_field_indices: papaya::HashMap::default(),
-            callsite_ids: papaya::HashMap::default(),
             writer,
-            extract_fields,
+            state: JsonLoggingState {
+                spans,
+                skipped_field_indices: papaya::HashMap::default(),
+                callsite_ids: papaya::HashMap::default(),
+                extract_fields,
+            },
         }
-    }
-
-    #[inline]
-    fn callsite_id(&self, cs: callsite::Identifier) -> CallsiteId {
-        *self
-            .callsite_ids
-            .pin()
-            .get_or_insert_with(cs, CallsiteId::next)
     }
 }
 
@@ -248,15 +249,7 @@ where
         let res: io::Result<()> = REENTRANCY_GUARD.with(move |entered| {
             if entered.get() {
                 let mut formatter = EventFormatter::new();
-                formatter.format::<S, F>(
-                    now,
-                    event,
-                    &ctx,
-                    &self.skipped_field_indices,
-                    &self.callsite_ids,
-                    &self.extract_fields,
-                    &self.spans,
-                )?;
+                formatter.format(now, event, &ctx, &self.state)?;
                 self.writer.make_writer().write_all(formatter.buffer())
             } else {
                 entered.set(true);
@@ -264,15 +257,7 @@ where
 
                 EVENT_FORMATTER.with_borrow_mut(move |formatter| {
                     formatter.reset();
-                    formatter.format::<S, F>(
-                        now,
-                        event,
-                        &ctx,
-                        &self.skipped_field_indices,
-                        &self.callsite_ids,
-                        &self.extract_fields,
-                        &self.spans,
-                    )?;
+                    formatter.format(now, event, &ctx, &self.state)?;
                     self.writer.make_writer().write_all(formatter.buffer())
                 })
             }
@@ -298,21 +283,19 @@ where
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
         let span = ctx.span(id).expect("span must exist");
         let mut fields = SpanFields::default();
-        fields.record_fields(attrs.values().len(), attrs, &self.spans);
+        fields.record_fields(attrs.values().len(), attrs, &self.state.spans);
 
-        // This could deadlock when there's a panic somewhere in the tracing
-        // event handling and a read or write guard is still held. This includes
-        // the OTel subscriber.
-        let mut exts = span.extensions_mut();
-
-        exts.insert(fields);
+        span.extensions_mut().insert(fields);
     }
 
     fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
         let span = ctx.span(id).expect("span must exist");
-        let mut ext = span.extensions_mut();
-        if let Some(data) = ext.get_mut::<SpanFields>() {
-            data.record_fields(values.len(), values, &self.spans);
+
+        // assumption: `on_record` is rarely called.
+        // assumption: a span being updated by one thread,
+        //             and formatted by another thread is even rarer.
+        if let Some(data) = span.extensions_mut().get_mut::<SpanFields>() {
+            data.record_fields(values.len(), values, &self.state.spans);
         }
     }
 
@@ -321,7 +304,11 @@ where
     /// wins.
     fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
         if !metadata.is_event() {
-            self.callsite_id(metadata.callsite());
+            self.state
+                .callsite_ids
+                .pin()
+                .get_or_insert_with(metadata.callsite(), CallsiteId::next);
+
             // Must not be never because we wouldn't get trace and span data.
             return Interest::always();
         }
@@ -345,7 +332,8 @@ where
         }
 
         if !field_indices.is_empty() {
-            self.skipped_field_indices
+            self.state
+                .skipped_field_indices
                 .pin()
                 .insert(metadata.callsite(), field_indices);
         }
@@ -377,7 +365,7 @@ impl fmt::Display for CallsiteId {
 /// Stores span field values recorded during the spans lifetime.
 #[derive(Default)]
 struct SpanFields {
-    // TODO: Switch to custom enum with lasso::Spur for Strings?
+    // TODO: Switch to custom json enum?
     fields: HashMap<lasso::MiniSpur, serde_json::Value, FieldNameHasher>,
 }
 
@@ -385,11 +373,11 @@ impl SpanFields {
     #[inline]
     fn record_fields<R: tracing_subscriber::field::RecordFields>(
         &mut self,
-        len: usize,
+        reserve: usize,
         fields: R,
         lasso: &ThreadedRodeo<lasso::MiniSpur, FieldNameHasher>,
     ) {
-        self.fields.reserve(len);
+        self.fields.reserve(reserve);
         fields.record(&mut SpanFieldsRecorder {
             spans: lasso,
             fields: &mut self.fields,
@@ -403,91 +391,66 @@ struct SpanFieldsRecorder<'r, 'm, S> {
     fields: &'m mut HashMap<lasso::MiniSpur, serde_json::Value, S>,
 }
 
+impl<S: BuildHasher> SpanFieldsRecorder<'_, '_, S> {
+    #[inline]
+    fn record_value(&mut self, field: &tracing::field::Field, value: serde_json::Value) {
+        let name = self.spans.get_or_intern_static(field.name());
+        self.fields.insert(name, value);
+    }
+}
+
 impl<S: BuildHasher> tracing::field::Visit for SpanFieldsRecorder<'_, '_, S> {
     #[inline]
     fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
-        self.fields.insert(
-            self.spans.get_or_intern_static(field.name()),
-            serde_json::Value::from(value),
-        );
+        self.record_value(field, serde_json::Value::from(value));
     }
 
     #[inline]
     fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
-        self.fields.insert(
-            self.spans.get_or_intern_static(field.name()),
-            serde_json::Value::from(value),
-        );
+        self.record_value(field, serde_json::Value::from(value));
     }
 
     #[inline]
     fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
-        self.fields.insert(
-            self.spans.get_or_intern_static(field.name()),
-            serde_json::Value::from(value),
-        );
+        self.record_value(field, serde_json::Value::from(value));
     }
 
     #[inline]
     fn record_i128(&mut self, field: &tracing::field::Field, value: i128) {
         if let Ok(value) = i64::try_from(value) {
-            self.fields.insert(
-                self.spans.get_or_intern_static(field.name()),
-                serde_json::Value::from(value),
-            );
+            self.record_value(field, serde_json::Value::from(value));
         } else {
-            self.fields.insert(
-                self.spans.get_or_intern_static(field.name()),
-                serde_json::Value::from(format!("{value}")),
-            );
+            self.record_value(field, serde_json::Value::from(format!("{value}")));
         }
     }
 
     #[inline]
     fn record_u128(&mut self, field: &tracing::field::Field, value: u128) {
         if let Ok(value) = u64::try_from(value) {
-            self.fields.insert(
-                self.spans.get_or_intern_static(field.name()),
-                serde_json::Value::from(value),
-            );
+            self.record_value(field, serde_json::Value::from(value));
         } else {
-            self.fields.insert(
-                self.spans.get_or_intern_static(field.name()),
-                serde_json::Value::from(format!("{value}")),
-            );
+            self.record_value(field, serde_json::Value::from(format!("{value}")));
         }
     }
 
     #[inline]
     fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
-        self.fields.insert(
-            self.spans.get_or_intern_static(field.name()),
-            serde_json::Value::from(value),
-        );
+        self.record_value(field, serde_json::Value::from(value));
     }
 
     #[inline]
     fn record_bytes(&mut self, field: &tracing::field::Field, value: &[u8]) {
-        self.fields.insert(
-            self.spans.get_or_intern_static(field.name()),
-            serde_json::Value::from(value),
-        );
+        self.record_value(field, serde_json::Value::from(value));
     }
 
     #[inline]
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        self.fields.insert(
-            self.spans.get_or_intern_static(field.name()),
-            serde_json::Value::from(value),
-        );
+        self.record_value(field, serde_json::Value::from(value));
     }
 
     #[inline]
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        self.fields.insert(
-            self.spans.get_or_intern_static(field.name()),
-            serde_json::Value::from(format!("{value:?}")),
-        );
+        self.record_value(field, serde_json::Value::from(format!("{value:?}")));
     }
 
     #[inline]
@@ -496,23 +459,22 @@ impl<S: BuildHasher> tracing::field::Visit for SpanFieldsRecorder<'_, '_, S> {
         field: &tracing::field::Field,
         value: &(dyn std::error::Error + 'static),
     ) {
-        self.fields.insert(
-            self.spans.get_or_intern_static(field.name()),
-            serde_json::Value::from(format!("{value}")),
-        );
+        self.record_value(field, serde_json::Value::from(format!("{value}")));
     }
 }
 
 /// List of field indices skipped during logging. Can list duplicate fields or
 /// metafields not meant to be logged.
-#[derive(Clone, Default)]
+#[derive(Copy, Clone, Default)]
 struct SkippedFieldIndices {
+    // this assumes that no span/event will have more than 64 fields.
+    // this is guaranteed for now as tracing will error if >32 fields are set.
     bits: u64,
 }
 
 impl SkippedFieldIndices {
     #[inline]
-    fn is_empty(&self) -> bool {
+    fn is_empty(self) -> bool {
         self.bits == 0
     }
 
@@ -524,7 +486,7 @@ impl SkippedFieldIndices {
     }
 
     #[inline]
-    fn contains(&self, index: usize) -> bool {
+    fn contains(self, index: usize) -> bool {
         self.bits
             & 1u64
                 .checked_shl(index as u32)
@@ -562,14 +524,7 @@ impl EventFormatter {
         now: DateTime<Utc>,
         event: &Event<'_>,
         ctx: &Context<'_, S>,
-        skipped_field_indices: &papaya::HashMap<
-            callsite::Identifier,
-            SkippedFieldIndices,
-            FieldNameHasher,
-        >,
-        callsite_ids: &papaya::HashMap<callsite::Identifier, CallsiteId, FieldNameHasher>,
-        extract_fields: &[lasso::MiniSpur; F],
-        spans: &ThreadedRodeo<lasso::MiniSpur, FieldNameHasher>,
+        state: &JsonLoggingState<F>,
     ) -> io::Result<()>
     where
         S: Subscriber + for<'a> LookupSpan<'a>,
@@ -580,8 +535,13 @@ impl EventFormatter {
         let normalized_meta = event.normalized_metadata();
         let meta = normalized_meta.as_ref().unwrap_or_else(|| event.metadata());
 
-        let skipped_field_indices = skipped_field_indices.pin();
-        let skipped_field_indices = skipped_field_indices.get(&meta.callsite());
+        let skipped_field_indices = state
+            .skipped_field_indices
+            .pin()
+            .get(&meta.callsite())
+            .copied()
+            // default SkippedFieldIndices represents no skipped fields.
+            .unwrap_or_default();
 
         let mut serialize = || {
             let mut serializer = serde_json::Serializer::new(&mut self.logline_buffer);
@@ -613,8 +573,7 @@ impl EventFormatter {
 
             let spans = SerializableSpans {
                 ctx,
-                callsite_ids,
-                extract: ExtractedSpanFields::<F>::new(extract_fields, spans),
+                extract: ExtractedSpanFields::new(state),
             };
             serializer.serialize_entry("spans", &spans)?;
 
@@ -682,15 +641,15 @@ impl EventFormatter {
 }
 
 /// Extracts the message field that's mixed will other fields.
-struct MessageFieldExtractor<'a, S: serde::ser::SerializeMap> {
+struct MessageFieldExtractor<S: serde::ser::SerializeMap> {
     serializer: S,
-    skipped_field_indices: Option<&'a SkippedFieldIndices>,
+    skipped_field_indices: SkippedFieldIndices,
     state: Option<Result<(), S::Error>>,
 }
 
-impl<'a, S: serde::ser::SerializeMap> MessageFieldExtractor<'a, S> {
+impl<S: serde::ser::SerializeMap> MessageFieldExtractor<S> {
     #[inline]
-    fn new(serializer: S, skipped_field_indices: Option<&'a SkippedFieldIndices>) -> Self {
+    fn new(serializer: S, skipped_field_indices: SkippedFieldIndices) -> Self {
         Self {
             serializer,
             skipped_field_indices,
@@ -712,13 +671,11 @@ impl<'a, S: serde::ser::SerializeMap> MessageFieldExtractor<'a, S> {
     fn accept_field(&self, field: &tracing::field::Field) -> bool {
         self.state.is_none()
             && field.name() == MESSAGE_FIELD
-            && !self
-                .skipped_field_indices
-                .is_some_and(|i| i.contains(field.index()))
+            && !self.skipped_field_indices.contains(field.index())
     }
 }
 
-impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageFieldExtractor<'_, S> {
+impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageFieldExtractor<S> {
     #[inline]
     fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
         if self.accept_field(field) {
@@ -798,14 +755,14 @@ impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageFieldExtracto
 /// can be skipped.
 // This is entirely optional and only cosmetic, though maybe helps a
 // bit during log parsing in dashboards when there's no field with empty object.
-struct FieldsPresent<'a>(pub bool, Option<&'a SkippedFieldIndices>);
+struct FieldsPresent(pub bool, SkippedFieldIndices);
 
 // Even though some methods have an overhead (error, bytes) it is assumed the
 // compiler won't include this since we ignore the value entirely.
-impl tracing::field::Visit for FieldsPresent<'_> {
+impl tracing::field::Visit for FieldsPresent {
     #[inline]
     fn record_debug(&mut self, field: &tracing::field::Field, _: &dyn std::fmt::Debug) {
-        if !self.1.is_some_and(|i| i.contains(field.index()))
+        if !self.1.contains(field.index())
             && field.name() != MESSAGE_FIELD
             && !field.name().starts_with("log.")
         {
@@ -815,10 +772,7 @@ impl tracing::field::Visit for FieldsPresent<'_> {
 }
 
 /// Serializes the fields directly supplied with a log event.
-struct SerializableEventFields<'a, 'event>(
-    &'a tracing::Event<'event>,
-    Option<&'a SkippedFieldIndices>,
-);
+struct SerializableEventFields<'a, 'event>(&'a tracing::Event<'event>, SkippedFieldIndices);
 
 impl serde::ser::Serialize for SerializableEventFields<'_, '_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -835,15 +789,15 @@ impl serde::ser::Serialize for SerializableEventFields<'_, '_> {
 }
 
 /// A tracing field visitor that skips the message field.
-struct MessageFieldSkipper<'a, S: serde::ser::SerializeMap> {
+struct MessageFieldSkipper<S: serde::ser::SerializeMap> {
     serializer: S,
-    skipped_field_indices: Option<&'a SkippedFieldIndices>,
+    skipped_field_indices: SkippedFieldIndices,
     state: Result<(), S::Error>,
 }
 
-impl<'a, S: serde::ser::SerializeMap> MessageFieldSkipper<'a, S> {
+impl<S: serde::ser::SerializeMap> MessageFieldSkipper<S> {
     #[inline]
-    fn new(serializer: S, skipped_field_indices: Option<&'a SkippedFieldIndices>) -> Self {
+    fn new(serializer: S, skipped_field_indices: SkippedFieldIndices) -> Self {
         Self {
             serializer,
             skipped_field_indices,
@@ -856,9 +810,7 @@ impl<'a, S: serde::ser::SerializeMap> MessageFieldSkipper<'a, S> {
         self.state.is_ok()
             && field.name() != MESSAGE_FIELD
             && !field.name().starts_with("log.")
-            && !self
-                .skipped_field_indices
-                .is_some_and(|i| i.contains(field.index()))
+            && !self.skipped_field_indices.contains(field.index())
     }
 
     #[inline]
@@ -868,7 +820,7 @@ impl<'a, S: serde::ser::SerializeMap> MessageFieldSkipper<'a, S> {
     }
 }
 
-impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageFieldSkipper<'_, S> {
+impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageFieldSkipper<S> {
     #[inline]
     fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
         if self.accept_field(field) {
@@ -952,16 +904,15 @@ impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageFieldSkipper<
 /// with the span names as keys. To prevent collision we append a numberic value
 /// to the name. Also, collects any span fields we're interested in. Last one
 /// wins.
-struct SerializableSpans<'a, 'ctx, 'r, Span, const F: usize>
+struct SerializableSpans<'a, 'ctx, Span, const F: usize>
 where
     Span: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
     ctx: &'a Context<'ctx, Span>,
-    callsite_ids: &'a papaya::HashMap<callsite::Identifier, CallsiteId, FieldNameHasher>,
-    extract: ExtractedSpanFields<'a, 'r, F>,
+    extract: ExtractedSpanFields<'a, F>,
 }
 
-impl<Span, const F: usize> serde::ser::Serialize for SerializableSpans<'_, '_, '_, Span, F>
+impl<Span, const F: usize> serde::ser::Serialize for SerializableSpans<'_, '_, Span, F>
 where
     Span: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
@@ -976,6 +927,8 @@ where
                 // Append a numeric callsite ID to the span name to keep the name unique
                 // in the JSON object.
                 let cid = self
+                    .extract
+                    .state
                     .callsite_ids
                     .pin()
                     .get(&span.metadata().callsite())
@@ -997,15 +950,15 @@ where
 }
 
 /// Serializes the span fields as object.
-struct SerializableSpanFields<'a, 'span, 'r, Span, const F: usize>
+struct SerializableSpanFields<'a, 'span, Span, const F: usize>
 where
     Span: for<'lookup> LookupSpan<'lookup>,
 {
     span: &'a SpanRef<'span, Span>,
-    extract: &'a ExtractedSpanFields<'a, 'r, F>,
+    extract: &'a ExtractedSpanFields<'a, F>,
 }
 
-impl<Span, const F: usize> serde::ser::Serialize for SerializableSpanFields<'_, '_, '_, Span, F>
+impl<Span, const F: usize> serde::ser::Serialize for SerializableSpanFields<'_, '_, Span, F>
 where
     Span: for<'lookup> LookupSpan<'lookup>,
 {
@@ -1018,9 +971,8 @@ where
         let ext = self.span.extensions();
         if let Some(data) = ext.get::<SpanFields>() {
             for (name, value) in &data.fields {
-                serializer.serialize_entry(self.extract.spans.resolve(name), value)?;
-                // TODO: replace clone with reference, if possible.
-                self.extract.set(*name, value.clone());
+                serializer.serialize_entry(self.extract.state.spans.resolve(name), value)?;
+                self.extract.set(*name, value);
             }
         }
 
@@ -1028,32 +980,28 @@ where
     }
 }
 
-struct ExtractedSpanFields<'a, 'r, const F: usize> {
-    spans: &'r ThreadedRodeo<lasso::MiniSpur, FieldNameHasher>,
-    names: &'a [lasso::MiniSpur; F],
+struct ExtractedSpanFields<'a, const F: usize> {
+    state: &'a JsonLoggingState<F>,
     // TODO: replace TryLock with something local thread and interior mutability.
     //       serde API doesn't let us use `mut`.
     values: TryLock<([Option<serde_json::Value>; F], bool)>,
 }
 
-impl<'a, 'r, const F: usize> ExtractedSpanFields<'a, 'r, F> {
-    fn new(
-        names: &'a [lasso::MiniSpur; F],
-        spans: &'r ThreadedRodeo<lasso::MiniSpur, FieldNameHasher>,
-    ) -> Self {
+impl<'a, const F: usize> ExtractedSpanFields<'a, F> {
+    fn new(state: &'a JsonLoggingState<F>) -> Self {
         ExtractedSpanFields {
-            spans,
-            names,
+            state,
             values: TryLock::new((array::from_fn(|_| Option::default()), false)),
         }
     }
 
     #[inline]
-    fn set(&self, name: lasso::MiniSpur, value: serde_json::Value) {
-        // expectation: this list is small.
-        if let Some(index) = self.names.iter().position(|x| *x == name) {
+    fn set(&self, name: lasso::MiniSpur, value: &serde_json::Value) {
+        // expectation: this list is small, so a linear search is fast.
+        if let Some(index) = self.state.extract_fields.iter().position(|x| *x == name) {
             let mut fields = self.values.try_lock().expect("thread-local use");
-            fields.0[index] = Some(value);
+            // TODO: replace clone with reference, if possible.
+            fields.0[index] = Some(value.clone());
             fields.1 = true;
         }
     }
@@ -1064,7 +1012,7 @@ impl<'a, 'r, const F: usize> ExtractedSpanFields<'a, 'r, F> {
     }
 }
 
-impl<const F: usize> serde::ser::Serialize for ExtractedSpanFields<'_, '_, F> {
+impl<const F: usize> serde::ser::Serialize for ExtractedSpanFields<'_, F> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::ser::Serializer,
@@ -1074,8 +1022,8 @@ impl<const F: usize> serde::ser::Serialize for ExtractedSpanFields<'_, '_, F> {
         let values = self.values.try_lock().expect("thread-local use");
         for (i, value) in values.0.iter().enumerate() {
             if let Some(value) = value {
-                let key = self.names[i];
-                serializer.serialize_entry(self.spans.resolve(&key), value)?;
+                let key = self.state.extract_fields[i];
+                serializer.serialize_entry(self.state.spans.resolve(&key), value)?;
             }
         }
 
@@ -1133,12 +1081,14 @@ mod tests {
         let spans = ThreadedRodeo::with_hasher(FieldNameHasher::default());
         let field_x = spans.get_or_intern_static("x");
         let log_layer = JsonLoggingLayer {
-            spans,
             clock: clock.clone(),
-            skipped_field_indices: papaya::HashMap::default(),
-            callsite_ids: papaya::HashMap::default(),
             writer: buffer.clone(),
-            extract_fields: [field_x],
+            state: JsonLoggingState {
+                spans,
+                skipped_field_indices: papaya::HashMap::default(),
+                callsite_ids: papaya::HashMap::default(),
+                extract_fields: [field_x],
+            },
         };
 
         let registry = tracing_subscriber::Registry::default().with(log_layer);
