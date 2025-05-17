@@ -21,6 +21,8 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::{LookupSpan, SpanRef};
 use try_lock::TryLock;
 
+type FieldNameHasher = std::hash::BuildHasherDefault<rustc_hash::FxHasher>;
+
 /// Initialize logging and OpenTelemetry tracing and exporter.
 ///
 /// Logging can be configured using `RUST_LOG` environment variable.
@@ -196,11 +198,12 @@ thread_local! {
 /// Implements tracing layer to handle events specific to logging.
 struct JsonLoggingLayer<C: Clock, W: MakeWriter, const F: usize> {
     clock: C,
-    skipped_field_indices: papaya::HashMap<callsite::Identifier, SkippedFieldIndices>,
-    callsite_ids: papaya::HashMap<callsite::Identifier, CallsiteId>,
+    skipped_field_indices:
+        papaya::HashMap<callsite::Identifier, SkippedFieldIndices, FieldNameHasher>,
+    callsite_ids: papaya::HashMap<callsite::Identifier, CallsiteId, FieldNameHasher>,
     writer: W,
     // We use a const generic and arrays to bypass one heap allocation.
-    extract_fields: IndexSet<&'static str>,
+    extract_fields: IndexSet<&'static str, FieldNameHasher>,
     _marker: std::marker::PhantomData<[&'static str; F]>,
 }
 
@@ -317,7 +320,7 @@ where
         }
 
         let mut field_indices = SkippedFieldIndices::default();
-        let mut seen_fields = HashMap::<&'static str, usize>::new();
+        let mut seen_fields = HashMap::<&'static str, usize, FieldNameHasher>::default();
         for field in metadata.fields() {
             use std::collections::hash_map::Entry;
             match seen_fields.entry(field.name()) {
@@ -368,7 +371,7 @@ impl fmt::Display for CallsiteId {
 #[derive(Default)]
 struct SpanFields {
     // TODO: Switch to custom enum with lasso::Spur for Strings?
-    fields: HashMap<&'static str, serde_json::Value>,
+    fields: HashMap<&'static str, serde_json::Value, FieldNameHasher>,
 }
 
 impl SpanFields {
@@ -521,9 +524,13 @@ impl EventFormatter {
         now: DateTime<Utc>,
         event: &Event<'_>,
         ctx: &Context<'_, S>,
-        skipped_field_indices: &papaya::HashMap<callsite::Identifier, SkippedFieldIndices>,
-        callsite_ids: &papaya::HashMap<callsite::Identifier, CallsiteId>,
-        extract_fields: &IndexSet<&'static str>,
+        skipped_field_indices: &papaya::HashMap<
+            callsite::Identifier,
+            SkippedFieldIndices,
+            FieldNameHasher,
+        >,
+        callsite_ids: &papaya::HashMap<callsite::Identifier, CallsiteId, FieldNameHasher>,
+        extract_fields: &IndexSet<&'static str, FieldNameHasher>,
     ) -> io::Result<()>
     where
         S: Subscriber + for<'a> LookupSpan<'a>,
@@ -911,7 +918,7 @@ where
     Span: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
     ctx: &'a Context<'ctx, Span>,
-    callsite_ids: &'a papaya::HashMap<callsite::Identifier, CallsiteId>,
+    callsite_ids: &'a papaya::HashMap<callsite::Identifier, CallsiteId, FieldNameHasher>,
     extract: ExtractedSpanFields<'a, F>,
 }
 
@@ -983,14 +990,14 @@ where
 }
 
 struct ExtractedSpanFields<'a, const F: usize> {
-    names: &'a IndexSet<&'static str>,
+    names: &'a IndexSet<&'static str, FieldNameHasher>,
     // TODO: replace TryLock with something local thread and interior mutability.
     //       serde API doesn't let us use `mut`.
     values: TryLock<([Option<serde_json::Value>; F], bool)>,
 }
 
 impl<'a, const F: usize> ExtractedSpanFields<'a, F> {
-    fn new(names: &'a IndexSet<&'static str>) -> Self {
+    fn new(names: &'a IndexSet<&'static str, FieldNameHasher>) -> Self {
         ExtractedSpanFields {
             names,
             values: TryLock::new((array::from_fn(|_| Option::default()), false)),
