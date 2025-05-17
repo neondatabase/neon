@@ -384,6 +384,7 @@ typedef struct WalproposerShmemState
 	XLogRecPtr	donor_lsn;
 
 	slock_t		mutex;
+	bool        bgw_started;
 	pg_atomic_uint64 mineLastElectedTerm;
 	pg_atomic_uint64 backpressureThrottlingTime;
 	pg_atomic_uint64 currentClusterSize;
@@ -673,6 +674,12 @@ typedef struct walproposer_api
 	 * LSN on the safekeepers.
 	 */
 	XLogRecPtr	(*get_redo_start_lsn) (WalProposer *wp);
+
+	/*
+	 * Get a basebackup LSN. Used to cross-validate with the latest available
+	 * LSN on the safekeepers.
+	 */
+	void 		(*set_redo_start_lsn) (WalProposer *wp, XLogRecPtr lsn);
 
 	/*
 	 * Finish sync safekeepers with the given LSN. This function should not
