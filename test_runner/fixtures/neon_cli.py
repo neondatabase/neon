@@ -103,7 +103,7 @@ class AbstractNeonCli:
             else:
                 stdout = ""
 
-            log.warn(f"CLI timeout: stderr={stderr}, stdout={stdout}")
+            log.warning(f"CLI timeout: stderr={stderr}, stdout={stdout}")
             raise
 
         indent = "  "
