@@ -607,10 +607,10 @@ RUN case "${PG_VERSION:?}" in \
 
 FROM pg-build AS online_advisor-build
 COPY --from=online_advisor-src /ext-src/ /ext-src/
-WORKDIR /ext-src/online_advisor-src
+WORKDIR /ext-src/
 RUN if [ -d online_advisor-src ]; then \
-        make -j $(getconf _NPROCESSORS_ONLN) && \
-        make -j $(getconf _NPROCESSORS_ONLN) install && \
+	    cd online_advisor-src && \
+        make -j install && \
         echo 'trusted = true' >> /usr/local/pgsql/share/extension/online_advisor.control; \
     fi
 
