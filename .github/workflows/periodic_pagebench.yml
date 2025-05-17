@@ -244,6 +244,7 @@ jobs:
         mkdir parts
         split -b 1G shared_snapshots.tar.zst ./parts/shared_snapshots.tar.zst.part.
         SNAPSHOT_DATE=$(date +%F)  # YYYY-MM-DD
+        cd parts
         time aws s3 cp --recursive . s3://${S3_BUCKET}/performance/pagebench/shared-snapshots-${SNAPSHOT_DATE}/
 
     - name: Post to a Slack channel
