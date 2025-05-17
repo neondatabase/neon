@@ -287,8 +287,8 @@ where
     /// Registers a SpanFields instance as span extension.
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
         let span = ctx.span(id).expect("span must exist");
-        let fields = SpanFields::default();
-        fields.record_fields(attrs);
+        let mut fields = SpanFields::default();
+        fields.record_fields(attrs.values().len(), attrs);
 
         // This could deadlock when there's a panic somewhere in the tracing
         // event handling and a read or write guard is still held. This includes
@@ -300,9 +300,9 @@ where
 
     fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
         let span = ctx.span(id).expect("span must exist");
-        let ext = span.extensions();
-        if let Some(data) = ext.get::<SpanFields>() {
-            data.record_fields(values);
+        let mut ext = span.extensions_mut();
+        if let Some(data) = ext.get_mut::<SpanFields>() {
+            data.record_fields(values.len(), values);
         }
     }
 
@@ -368,24 +368,25 @@ impl fmt::Display for CallsiteId {
 #[derive(Default)]
 struct SpanFields {
     // TODO: Switch to custom enum with lasso::Spur for Strings?
-    fields: papaya::HashMap<&'static str, serde_json::Value>,
+    fields: HashMap<&'static str, serde_json::Value>,
 }
 
 impl SpanFields {
     #[inline]
-    fn record_fields<R: tracing_subscriber::field::RecordFields>(&self, fields: R) {
+    fn record_fields<R: tracing_subscriber::field::RecordFields>(&mut self, len: usize, fields: R) {
+        self.fields.reserve(len);
         fields.record(&mut SpanFieldsRecorder {
-            fields: self.fields.pin(),
+            fields: &mut self.fields,
         });
     }
 }
 
 /// Implements a tracing field visitor to convert and store values.
-struct SpanFieldsRecorder<'m, S, G> {
-    fields: papaya::HashMapRef<'m, &'static str, serde_json::Value, S, G>,
+struct SpanFieldsRecorder<'m, S> {
+    fields: &'m mut HashMap<&'static str, serde_json::Value, S>,
 }
 
-impl<S: BuildHasher, G: papaya::Guard> tracing::field::Visit for SpanFieldsRecorder<'_, S, G> {
+impl<S: BuildHasher> tracing::field::Visit for SpanFieldsRecorder<'_, S> {
     #[inline]
     fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
         self.fields
@@ -970,7 +971,7 @@ where
 
         let ext = self.span.extensions();
         if let Some(data) = ext.get::<SpanFields>() {
-            for (name, value) in &data.fields.pin() {
+            for (name, value) in &data.fields {
                 serializer.serialize_entry(name, value)?;
                 // TODO: replace clone with reference, if possible.
                 self.extract.set(name, value.clone());
