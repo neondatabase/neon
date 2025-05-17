@@ -1814,7 +1814,7 @@ COPY docker-compose/ext-src/ /ext-src/
 COPY --from=pg-build /postgres /postgres
 #COPY --from=postgis-src /ext-src/ /ext-src/
 COPY --from=plv8-src /ext-src/ /ext-src/
-#COPY --from=h3-pg-src /ext-src/ /ext-src/
+COPY --from=h3-pg-src /ext-src/ /ext-src/
 COPY --from=postgresql-unit-src /ext-src/ /ext-src/
 COPY --from=pgvector-src /ext-src/ /ext-src/
 COPY --from=pgjwt-src /ext-src/ /ext-src/
