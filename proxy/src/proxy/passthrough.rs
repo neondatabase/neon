@@ -13,7 +13,7 @@ use crate::stream::Stream;
 use crate::usage_metrics::{Ids, MetricCounterRecorder, USAGE_METRICS};
 
 /// Forward bytes in both directions (client <-> compute).
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(level = "debug", skip_all)]
 pub(crate) async fn proxy_pass(
     client: impl AsyncRead + AsyncWrite + Unpin,
     compute: impl AsyncRead + AsyncWrite + Unpin,
