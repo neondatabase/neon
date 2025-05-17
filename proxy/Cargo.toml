@@ -57,6 +57,7 @@ papaya = "0.2.0"
 parking_lot.workspace = true
 parquet.workspace = true
 parquet_derive.workspace = true
+pin-list = "0.1"
 pin-project-lite.workspace = true
 postgres_backend.workspace = true
 postgres-client = { package = "tokio-postgres2", path = "../libs/proxy/tokio-postgres2" }

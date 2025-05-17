@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::pin::pin;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
@@ -212,7 +212,10 @@ pub async fn run() -> anyhow::Result<()> {
         auth_backend,
         http_listener,
         shutdown.clone(),
-        Arc::new(CancellationHandler::new(&config.connect_to_compute, None)),
+        Arc::new(CancellationHandler::new(
+            &config.connect_to_compute,
+            OnceLock::new(),
+        )),
         endpoint_rate_limiter,
     );
 
