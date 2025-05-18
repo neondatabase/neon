@@ -190,17 +190,26 @@ thread_local! {
     static THREAD_ID: u64 = gettid::gettid();
 }
 
+/// Map for values fixed at callsite registration.
+// We use papaya here because registration rarely happens post-startup.
+// papaya is good for read-heavy workloads.
+//
+// We use rustc_hash here because callsite::Identifier will always be an integer with low-bit entropy,
+// since it's always a pointer to static mutable data. rustc_hash was designed for low-bit entropy.
+type CallsiteMap<T> =
+    papaya::HashMap<callsite::Identifier, T, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
+
 /// Implements tracing layer to handle events specific to logging.
 struct JsonLoggingLayer<C: Clock, W: MakeWriter, const F: usize> {
     clock: C,
     writer: W,
 
     /// tracks which fields of each **event** are duplicates
-    skipped_field_indices: papaya::HashMap<callsite::Identifier, SkippedFieldIndices>,
+    skipped_field_indices: CallsiteMap<SkippedFieldIndices>,
 
     /// tracks the fixed "callsite ID" for each **span**.
     /// note: this is not stable between runs.
-    callsite_ids: papaya::HashMap<callsite::Identifier, CallsiteId>,
+    callsite_ids: CallsiteMap<CallsiteId>,
 
     /// Fields we want to keep track of in a separate json object.
     // We use a const generic and arrays to bypass one heap allocation.
@@ -211,8 +220,8 @@ impl<C: Clock, W: MakeWriter, const F: usize> JsonLoggingLayer<C, W, F> {
     fn new(clock: C, writer: W, extract_fields: [&'static str; F]) -> Self {
         JsonLoggingLayer {
             clock,
-            skipped_field_indices: papaya::HashMap::default(),
-            callsite_ids: papaya::HashMap::default(),
+            skipped_field_indices: CallsiteMap::default(),
+            callsite_ids: CallsiteMap::default(),
             writer,
             extract_fields,
         }
@@ -517,8 +526,8 @@ impl EventFormatter {
         now: DateTime<Utc>,
         event: &Event<'_>,
         ctx: &Context<'_, S>,
-        skipped_field_indices: &papaya::HashMap<callsite::Identifier, SkippedFieldIndices>,
-        callsite_ids: &papaya::HashMap<callsite::Identifier, CallsiteId>,
+        skipped_field_indices: &CallsiteMap<SkippedFieldIndices>,
+        callsite_ids: &CallsiteMap<CallsiteId>,
         extract_fields: &[&'static str; F],
     ) -> io::Result<()>
     where
@@ -903,7 +912,7 @@ where
     Span: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
     ctx: &'a Context<'ctx, Span>,
-    callsite_ids: &'a papaya::HashMap<callsite::Identifier, CallsiteId>,
+    callsite_ids: &'a CallsiteMap<CallsiteId>,
     extract: ExtractedSpanFields<'a, F>,
 }
 
