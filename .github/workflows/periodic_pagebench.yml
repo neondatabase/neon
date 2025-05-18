@@ -1,4 +1,4 @@
-name: Periodic pagebench performance test on dedicated EC2 machine in eu-central-1 region
+name: Periodic pagebench performance test on unit-perf hetzner runner
 
 on:
   schedule:
