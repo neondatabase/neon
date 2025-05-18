@@ -434,6 +434,7 @@ pub fn empty_shmem() -> crate::bindings::WalproposerShmemState {
         donor_conninfo: [0; 1024],
         donor_lsn: 0,
         mutex: 0,
+		bgw_started: false,
         mineLastElectedTerm: crate::bindings::pg_atomic_uint64 { value: 0 },
         backpressureThrottlingTime: crate::bindings::pg_atomic_uint64 { value: 0 },
         currentClusterSize: crate::bindings::pg_atomic_uint64 { value: 0 },

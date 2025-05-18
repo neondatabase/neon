@@ -5,14 +5,12 @@ This far, only contains a test that we don't break and that the data is persiste
 """
 
 import psycopg2
-import pytest
-import time
+
 from fixtures.neon_fixtures import Endpoint, NeonEnv, wait_replica_caughtup
 from fixtures.pg_version import PgVersion
 from fixtures.log_helper import log
 from pytest import raises
 
-@pytest.mark.timeout(6000)
 def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
     """
     Test that a replica safely promotes, and can commit data updates which
@@ -90,12 +88,8 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
 
     new_primary_cur.execute("select count(*) from t")
     assert new_primary_cur.fetchone() == (200,)
-    new_primary_cur.execute("select pg_current_wal_flush_lsn()")
-    lsn = new_primary_cur.fetchall()[0][0]
-    log.info(f"New primary flush LSN={lsn}")
 
     new_primary.stop(mode="immediate")
-    new_primary.hot_standby = False
     new_primary.start()
 
     with new_primary.connect() as new_primary_conn:
