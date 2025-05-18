@@ -676,12 +676,6 @@ typedef struct walproposer_api
 	XLogRecPtr	(*get_redo_start_lsn) (WalProposer *wp);
 
 	/*
-	 * Get a basebackup LSN. Used to cross-validate with the latest available
-	 * LSN on the safekeepers.
-	 */
-	void 		(*set_redo_start_lsn) (WalProposer *wp, XLogRecPtr lsn);
-
-	/*
 	 * Finish sync safekeepers with the given LSN. This function should not
 	 * return and should exit the program.
 	 */

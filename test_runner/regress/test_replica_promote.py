@@ -5,12 +5,14 @@ This far, only contains a test that we don't break and that the data is persiste
 """
 
 import psycopg2
+import pytest
 import time
 from fixtures.neon_fixtures import Endpoint, NeonEnv, wait_replica_caughtup
 from fixtures.pg_version import PgVersion
+from fixtures.log_helper import log
 from pytest import raises
 
-
+@pytest.mark.timeout(6000)
 def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
     """
     Test that a replica safely promotes, and can commit data updates which
@@ -79,18 +81,32 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
     secondary_cur.execute(f"alter system set neon.safekeepers='{safekeepers}'")
     secondary_cur.execute("select pg_reload_conf()");
 
-    new_primary_conn = secondary.connect()
+    new_primary = secondary
+    old_primary = primary
+
+    new_primary_conn = new_primary.connect()
     new_primary_cur = new_primary_conn.cursor()
     new_primary_cur.execute("INSERT INTO t (payload) SELECT generate_series(101, 200)")
 
     new_primary_cur.execute("select count(*) from t")
     assert new_primary_cur.fetchone() == (200,)
+    new_primary_cur.execute("select pg_current_wal_flush_lsn()")
+    lsn = new_primary_cur.fetchall()[0][0]
+    log.info(f"New primary flush LSN={lsn}")
 
-    secondary.stop(mode="immediate")
+    new_primary.stop(mode="immediate")
+    new_primary.hot_standby = False
+    new_primary.start()
 
-    primary.start()
+    with new_primary.connect() as new_primary_conn:
+        new_primary_cur = new_primary_conn.cursor()
+        new_primary_cur.execute("select count(*) from t")
+        assert new_primary_cur.fetchone() == (200,)
 
-    with primary.connect() as primary_conn:
-        primary_cur = primary_conn.cursor()
-        primary_cur.execute("select count(*) from t")
-        assert primary_cur.fetchone() == (200,)
+    new_primary.stop()
+    old_primary.start()
+
+    with old_primary.connect() as old_primary_conn:
+        old_primary_cur = old_primary_conn.cursor()
+        old_primary_cur.execute("select count(*) from t")
+        assert old_primary_cur.fetchone() == (200,)

@@ -2040,13 +2040,6 @@ walprop_pg_get_redo_start_lsn(WalProposer *wp)
 	return GetRedoStartLsn();
 }
 
-static void
-walprop_pg_set_redo_start_lsn(WalProposer *wp, XLogRecPtr lsn)
-{
-#if PG_VERSION_NUM >= 150000
-	SetRedoStartLsn(lsn);
-#endif
-}
 
 static bool
 walprop_pg_strong_random(WalProposer *wp, void *buf, size_t len)
@@ -2103,7 +2096,6 @@ static const walproposer_api walprop_pg = {
 	.wait_event_set = walprop_pg_wait_event_set,
 	.strong_random = walprop_pg_strong_random,
 	.get_redo_start_lsn = walprop_pg_get_redo_start_lsn,
-	.set_redo_start_lsn = walprop_pg_set_redo_start_lsn,
 	.finish_sync_safekeepers = walprop_pg_finish_sync_safekeepers,
 	.process_safekeeper_feedback = walprop_pg_process_safekeeper_feedback,
 	.log_internal = walprop_pg_log_internal,
