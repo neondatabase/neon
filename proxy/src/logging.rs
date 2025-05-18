@@ -260,7 +260,6 @@ where
                 event,
                 &ctx,
                 &self.skipped_field_indices,
-                &self.callsite_ids,
                 &self.extract_fields,
             )?;
             self.writer.make_writer().write_all(formatter.buffer())
@@ -291,8 +290,16 @@ where
             "tracing does not allow spans with more than 32 fields"
         );
 
+        let callsite_id = self
+            .callsite_ids
+            .pin()
+            .get(&span.metadata().callsite())
+            .copied()
+            .unwrap_or_default();
+
         let mut fields = span.fields().iter();
         let mut fields = SpanFields {
+            callsite_id,
             fields: array::from_fn(|_| {
                 let name = fields.next().map_or("", |f| f.name());
                 (name, serde_json::Value::Null)
@@ -369,6 +376,7 @@ impl fmt::Display for CallsiteId {
 struct SpanFields {
     // tracing does not allow any more than 32 fields.
     fields: [(&'static str, serde_json::Value); 32],
+    callsite_id: CallsiteId,
 }
 
 impl SpanFields {
@@ -514,7 +522,6 @@ impl EventFormatter {
         event: &Event<'_>,
         ctx: &Context<'_, S>,
         skipped_field_indices: &CallsiteMap<SkippedFieldIndices>,
-        callsite_ids: &CallsiteMap<CallsiteId>,
         extract_fields: &[&'static str; F],
     ) -> io::Result<()>
     where
@@ -561,8 +568,10 @@ impl EventFormatter {
             }
 
             let spans = SerializableSpans {
-                ctx,
-                callsite_ids,
+                // collect all spans from parent to root.
+                spans: ctx
+                    .event_span(event)
+                    .map_or(vec![], |parent| parent.scope().collect()),
                 extract: ExtractedSpanFields::new(extract_fields),
             };
             serializer.serialize_entry("spans", &spans)?;
@@ -894,18 +903,17 @@ impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageFieldSkipper<
 /// with the span names as keys. To prevent collision we append a numberic value
 /// to the name. Also, collects any span fields we're interested in. Last one
 /// wins.
-struct SerializableSpans<'a, 'ctx, Span, const F: usize>
+struct SerializableSpans<'a, 'ctx, S, const F: usize>
 where
-    Span: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    S: for<'lookup> LookupSpan<'lookup>,
 {
-    ctx: &'a Context<'ctx, Span>,
-    callsite_ids: &'a CallsiteMap<CallsiteId>,
+    spans: Vec<SpanRef<'ctx, S>>,
     extract: ExtractedSpanFields<'a, F>,
 }
 
-impl<Span, const F: usize> serde::ser::Serialize for SerializableSpans<'_, '_, Span, F>
+impl<S, const F: usize> serde::ser::Serialize for SerializableSpans<'_, '_, S, F>
 where
-    Span: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    S: for<'lookup> LookupSpan<'lookup>,
 {
     fn serialize<Ser>(&self, serializer: Ser) -> Result<Ser::Ok, Ser::Error>
     where
@@ -913,25 +921,26 @@ where
     {
         let mut serializer = serializer.serialize_map(None)?;
 
-        if let Some(leaf_span) = self.ctx.lookup_current() {
-            for span in leaf_span.scope().from_root() {
-                // Append a numeric callsite ID to the span name to keep the name unique
-                // in the JSON object.
-                let cid = self
-                    .callsite_ids
-                    .pin()
-                    .get(&span.metadata().callsite())
-                    .copied()
-                    .unwrap_or_default();
+        for span in self.spans.iter().rev() {
+            let ext = span.extensions();
 
-                // Loki turns the # into an underscore during field name concatenation.
-                serializer.serialize_key(&format_args!("{}#{}", span.metadata().name(), &cid))?;
+            // all spans should have this extension.
+            let Some(fields) = ext.get() else { continue };
+            let SpanFields {
+                fields,
+                callsite_id,
+            } = fields;
 
-                serializer.serialize_value(&SerializableSpanFields {
-                    span: &span,
+            // Append a numeric callsite ID to the span name to keep the name unique
+            // in the JSON object.
+            // Loki turns the # into an underscore during field name concatenation.
+            serializer.serialize_entry(
+                &format_args!("{}#{callsite_id}", span.metadata().name()),
+                &SerializableSpanFields {
+                    fields,
                     extract: &self.extract,
-                })?;
-            }
+                },
+            )?;
         }
 
         serializer.end()
@@ -939,34 +948,25 @@ where
 }
 
 /// Serializes the span fields as object.
-struct SerializableSpanFields<'a, 'span, Span, const F: usize>
-where
-    Span: for<'lookup> LookupSpan<'lookup>,
-{
-    span: &'a SpanRef<'span, Span>,
+struct SerializableSpanFields<'a, 'span, const F: usize> {
+    fields: &'span [(&'static str, serde_json::Value); 32],
     extract: &'a ExtractedSpanFields<'a, F>,
 }
 
-impl<Span, const F: usize> serde::ser::Serialize for SerializableSpanFields<'_, '_, Span, F>
-where
-    Span: for<'lookup> LookupSpan<'lookup>,
-{
+impl<const F: usize> serde::ser::Serialize for SerializableSpanFields<'_, '_, F> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::ser::Serializer,
     {
         let mut serializer = serializer.serialize_map(None)?;
 
-        let ext = self.span.extensions();
-        if let Some(data) = ext.get::<SpanFields>() {
-            for (name, value) in &data.fields {
-                if value.is_null() {
-                    continue;
-                }
-                serializer.serialize_entry(name, value)?;
-                // TODO: replace clone with reference, if possible.
-                self.extract.set(name, value.clone());
+        for (name, value) in self.fields {
+            if value.is_null() {
+                continue;
             }
+            serializer.serialize_entry(name, value)?;
+            // TODO: replace clone with reference, if possible.
+            self.extract.set(name, value);
         }
 
         serializer.end()
@@ -987,10 +987,10 @@ impl<'a, const F: usize> ExtractedSpanFields<'a, F> {
     }
 
     #[inline]
-    fn set(&self, name: &'static str, value: serde_json::Value) {
+    fn set(&self, name: &'static str, value: &serde_json::Value) {
         if let Some(index) = self.names.iter().position(|&ex| ex == name) {
             let mut fields = self.values.borrow_mut();
-            fields.0[index] = value;
+            fields.0[index] = value.clone();
             fields.1 = true;
         }
     }
