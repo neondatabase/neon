@@ -68,16 +68,18 @@ jobs:
       id: set-env
       shell: bash -euxo pipefail {0}
       run: |
-        # Set up the environment variables
-        echo "NEON_DIR=${RUNNER_TEMP}/neon" >> $GITHUB_ENV
-        echo "NEON_BIN=${RUNNER_TEMP}/neon/bin" >> $GITHUB_ENV
-        echo "POSTGRES_DISTRIB_DIR=${RUNNER_TEMP}/neon/pg_install" >> $GITHUB_ENV
-        echo "LD_LIBRARY_PATH=${RUNNER_TEMP}/neon/pg_install/v${DEFAULT_PG_VERSION}/lib" >> $GITHUB_ENV
-        echo "BACKUP_DIR=${RUNNER_TEMP}/instance_store/saved_snapshots" >> $GITHUB_ENV
-        echo "TEST_OUTPUT=${RUNNER_TEMP}/neon/test_output" >> $GITHUB_ENV
-        echo "PERF_REPORT_DIR=${RUNNER_TEMP}/neon/test_output/perf-report-local" >> $GITHUB_ENV
-        echo "ALLURE_DIR=${RUNNER_TEMP}/neon/test_output/allure-results" >> $GITHUB_ENV
-        echo "ALLURE_RESULTS_DIR=${RUNNER_TEMP}/neon/test_output/allure-results/results" >> $GITHUB_ENV
+        {
+          echo "NEON_DIR=${RUNNER_TEMP}/neon"
+          echo "NEON_BIN=${RUNNER_TEMP}/neon/bin"
+          echo "POSTGRES_DISTRIB_DIR=${RUNNER_TEMP}/neon/pg_install"
+          echo "LD_LIBRARY_PATH=${RUNNER_TEMP}/neon/pg_install/v${DEFAULT_PG_VERSION}/lib"
+          echo "BACKUP_DIR=${RUNNER_TEMP}/instance_store/saved_snapshots"
+          echo "TEST_OUTPUT=${RUNNER_TEMP}/neon/test_output"
+          echo "PERF_REPORT_DIR=${RUNNER_TEMP}/neon/test_output/perf-report-local"
+          echo "ALLURE_DIR=${RUNNER_TEMP}/neon/test_output/allure-results"
+          echo "ALLURE_RESULTS_DIR=${RUNNER_TEMP}/neon/test_output/allure-results/results"
+        } >> "$GITHUB_ENV"
+
         echo "allure_results_dir=${RUNNER_TEMP}/neon/test_output/allure-results/results" >> "$GITHUB_OUTPUT"
 
     - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
@@ -125,7 +127,7 @@ jobs:
           S3_KEY=$(aws s3api list-objects-v2 --bucket $S3_BUCKET --prefix artifacts/$COMMIT_HASH/ | jq -r '.Contents[]?.Key' | grep neon-${{ runner.os }}-${{ runner.arch }}-release-artifact.tar.zst | sort --version-sort | tail -1)
           set -e
 
-          if [ ! -z "$S3_KEY" ]; then
+          if [ -n "$S3_KEY" ]; then
             echo "Artifact found: $S3_KEY"
             echo "S3_KEY=$S3_KEY" >> $GITHUB_ENV
             break
