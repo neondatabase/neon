@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::{array, env, fmt, io};
 
 use chrono::{DateTime, Utc};
-use indexmap::IndexSet;
 use opentelemetry::trace::TraceContextExt;
 use scopeguard::defer;
 use serde::ser::{SerializeMap, Serializer};
@@ -19,7 +18,6 @@ use tracing_subscriber::fmt::{FormatEvent, FormatFields};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::{LookupSpan, SpanRef};
-use try_lock::TryLock;
 
 /// Initialize logging and OpenTelemetry tracing and exporter.
 ///
@@ -200,8 +198,7 @@ struct JsonLoggingLayer<C: Clock, W: MakeWriter, const F: usize> {
     callsite_ids: papaya::HashMap<callsite::Identifier, CallsiteId>,
     writer: W,
     // We use a const generic and arrays to bypass one heap allocation.
-    extract_fields: IndexSet<&'static str>,
-    _marker: std::marker::PhantomData<[&'static str; F]>,
+    extract_fields: [&'static str; F],
 }
 
 impl<C: Clock, W: MakeWriter, const F: usize> JsonLoggingLayer<C, W, F> {
@@ -211,8 +208,7 @@ impl<C: Clock, W: MakeWriter, const F: usize> JsonLoggingLayer<C, W, F> {
             skipped_field_indices: papaya::HashMap::default(),
             callsite_ids: papaya::HashMap::default(),
             writer,
-            extract_fields: IndexSet::from_iter(extract_fields),
-            _marker: std::marker::PhantomData,
+            extract_fields,
         }
     }
 
@@ -240,7 +236,7 @@ where
         let res: io::Result<()> = REENTRANCY_GUARD.with(move |entered| {
             if entered.get() {
                 let mut formatter = EventFormatter::new();
-                formatter.format::<S, F>(
+                formatter.format(
                     now,
                     event,
                     &ctx,
@@ -255,7 +251,7 @@ where
 
                 EVENT_FORMATTER.with_borrow_mut(move |formatter| {
                     formatter.reset();
-                    formatter.format::<S, F>(
+                    formatter.format(
                         now,
                         event,
                         &ctx,
@@ -522,7 +518,7 @@ impl EventFormatter {
         ctx: &Context<'_, S>,
         skipped_field_indices: &papaya::HashMap<callsite::Identifier, SkippedFieldIndices>,
         callsite_ids: &papaya::HashMap<callsite::Identifier, CallsiteId>,
-        extract_fields: &IndexSet<&'static str>,
+        extract_fields: &[&'static str; F],
     ) -> io::Result<()>
     where
         S: Subscriber + for<'a> LookupSpan<'a>,
@@ -567,7 +563,7 @@ impl EventFormatter {
             let spans = SerializableSpans {
                 ctx,
                 callsite_ids,
-                extract: ExtractedSpanFields::<'_, F>::new(extract_fields),
+                extract: ExtractedSpanFields::new(extract_fields),
             };
             serializer.serialize_entry("spans", &spans)?;
 
@@ -982,32 +978,30 @@ where
 }
 
 struct ExtractedSpanFields<'a, const F: usize> {
-    names: &'a IndexSet<&'static str>,
-    // TODO: replace TryLock with something local thread and interior mutability.
-    //       serde API doesn't let us use `mut`.
-    values: TryLock<([Option<serde_json::Value>; F], bool)>,
+    names: &'a [&'static str; F],
+    values: RefCell<([serde_json::Value; F], bool)>,
 }
 
 impl<'a, const F: usize> ExtractedSpanFields<'a, F> {
-    fn new(names: &'a IndexSet<&'static str>) -> Self {
+    fn new(names: &'a [&'static str; F]) -> Self {
         ExtractedSpanFields {
             names,
-            values: TryLock::new((array::from_fn(|_| Option::default()), false)),
+            values: RefCell::new((array::from_fn(|_| serde_json::Value::Null), false)),
         }
     }
 
     #[inline]
     fn set(&self, name: &'static str, value: serde_json::Value) {
-        if let Some((index, _)) = self.names.get_full(name) {
-            let mut fields = self.values.try_lock().expect("thread-local use");
-            fields.0[index] = Some(value);
+        if let Some(index) = self.names.iter().position(|&ex| ex == name) {
+            let mut fields = self.values.borrow_mut();
+            fields.0[index] = value;
             fields.1 = true;
         }
     }
 
     #[inline]
     fn has_values(&self) -> bool {
-        self.values.try_lock().expect("thread-local use").1
+        self.values.borrow().1
     }
 }
 
@@ -1018,12 +1012,14 @@ impl<const F: usize> serde::ser::Serialize for ExtractedSpanFields<'_, F> {
     {
         let mut serializer = serializer.serialize_map(None)?;
 
-        let values = self.values.try_lock().expect("thread-local use");
+        let values = self.values.borrow();
         for (i, value) in values.0.iter().enumerate() {
-            if let Some(value) = value {
-                let key = self.names[i];
-                serializer.serialize_entry(key, value)?;
+            if value.is_null() {
+                continue;
             }
+
+            let key = self.names[i];
+            serializer.serialize_entry(key, value)?;
         }
 
         serializer.end()
@@ -1032,7 +1028,6 @@ impl<const F: usize> serde::ser::Serialize for ExtractedSpanFields<'_, F> {
 
 #[cfg(test)]
 mod tests {
-    use std::marker::PhantomData;
     use std::sync::{Arc, Mutex, MutexGuard};
 
     use assert_json_diff::assert_json_eq;
@@ -1083,8 +1078,7 @@ mod tests {
             skipped_field_indices: papaya::HashMap::default(),
             callsite_ids: papaya::HashMap::default(),
             writer: buffer.clone(),
-            extract_fields: IndexSet::from_iter(["x"]),
-            _marker: PhantomData::<[&'static str; 1]>,
+            extract_fields: ["x"],
         };
 
         let registry = tracing_subscriber::Registry::default().with(log_layer);
