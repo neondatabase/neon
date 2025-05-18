@@ -5,11 +5,10 @@ This far, only contains a test that we don't break and that the data is persiste
 """
 
 import psycopg2
-
 from fixtures.neon_fixtures import Endpoint, NeonEnv, wait_replica_caughtup
 from fixtures.pg_version import PgVersion
-from fixtures.log_helper import log
 from pytest import raises
+
 
 def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
     """
@@ -77,7 +76,7 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
     secondary_cur = secondary_conn.cursor()
 
     secondary_cur.execute(f"alter system set neon.safekeepers='{safekeepers}'")
-    secondary_cur.execute("select pg_reload_conf()");
+    secondary_cur.execute("select pg_reload_conf()")
 
     new_primary = secondary
     old_primary = primary
