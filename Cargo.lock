@@ -5205,6 +5205,7 @@ dependencies = [
  "rustls 0.23.18",
  "rustls-native-certs 0.8.0",
  "rustls-pemfile 2.1.1",
+ "ryu",
  "scopeguard",
  "serde",
  "serde_json",

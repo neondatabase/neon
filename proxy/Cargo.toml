@@ -73,6 +73,7 @@ rustc-hash.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
 rustls-pemfile.workspace = true
+ryu = "1"
 scopeguard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
