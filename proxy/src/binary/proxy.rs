@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{bail, ensure};
@@ -17,7 +17,8 @@ use utils::{project_build_tag, project_git_version};
 
 use crate::auth::backend::jwt::JwkCache;
 use crate::auth::backend::{AuthRateLimiter, ConsoleRedirectBackend, MaybeOwned};
-use crate::cancellation::{CancellationHandler, handle_cancel_messages};
+use crate::batch::BatchQueue;
+use crate::cancellation::CancellationHandler;
 use crate::config::{
     self, AuthenticationConfig, CacheOptions, ComputeConfig, HttpConfig, ProjectInfoCacheOptions,
     ProxyConfig, ProxyProtocolV2, remote_storage_from_toml,
@@ -393,12 +394,9 @@ pub async fn run() -> anyhow::Result<()> {
         .as_ref()
         .map(|redis_publisher| RedisKVClient::new(redis_publisher.clone(), redis_rps_limit));
 
-    // channel size should be higher than redis client limit to avoid blocking
-    let cancel_ch_size = args.cancellation_ch_size;
-    let (tx_cancel, rx_cancel) = tokio::sync::mpsc::channel(cancel_ch_size);
     let cancellation_handler = Arc::new(CancellationHandler::new(
         &config.connect_to_compute,
-        Some(tx_cancel),
+        OnceLock::new(),
     ));
 
     // bit of a hack - find the min rps and max rps supported and turn it into
@@ -542,9 +540,7 @@ pub async fn run() -> anyhow::Result<()> {
             if let Some(mut redis_kv_client) = redis_kv_client {
                 maintenance_tasks.spawn(async move {
                     redis_kv_client.try_connect().await?;
-                    handle_cancel_messages(&mut redis_kv_client, rx_cancel).await?;
-
-                    drop(redis_kv_client);
+                    cancellation_handler.init_tx(Arc::new(BatchQueue::new(redis_kv_client)));
 
                     // `handle_cancel_messages` was terminated due to the tx_cancel
                     // being dropped. this is not worthy of an error, and this task can only return `Err`,
