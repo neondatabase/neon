@@ -193,9 +193,16 @@ thread_local! {
 /// Implements tracing layer to handle events specific to logging.
 struct JsonLoggingLayer<C: Clock, W: MakeWriter, const F: usize> {
     clock: C,
-    skipped_field_indices: papaya::HashMap<callsite::Identifier, SkippedFieldIndices>,
-    callsite_ids: papaya::HashMap<callsite::Identifier, CallsiteId>,
     writer: W,
+
+    /// tracks which fields of each **event** are duplicates
+    skipped_field_indices: papaya::HashMap<callsite::Identifier, SkippedFieldIndices>,
+
+    /// tracks the fixed "callsite ID" for each **span**.
+    /// note: this is not stable between runs.
+    callsite_ids: papaya::HashMap<callsite::Identifier, CallsiteId>,
+
+    /// Fields we want to keep track of in a separate json object.
     // We use a const generic and arrays to bypass one heap allocation.
     extract_fields: [&'static str; F],
 }
@@ -315,9 +322,8 @@ where
         }
     }
 
-    /// Called (lazily) whenever a new log call is executed. We quickly check
-    /// for duplicate field names and record duplicates as skippable. Last one
-    /// wins.
+    /// Called (lazily) roughly once per event/span instance. We quickly check
+    /// for duplicate field names and record duplicates as skippable. Last field wins.
     fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
         if !metadata.is_event() {
             self.callsite_id(metadata.callsite());
@@ -326,20 +332,10 @@ where
         }
 
         let mut field_indices = SkippedFieldIndices::default();
-        let mut seen_fields = HashMap::<&'static str, usize>::new();
+        let mut seen_fields = HashMap::new();
         for field in metadata.fields() {
-            use std::collections::hash_map::Entry;
-            match seen_fields.entry(field.name()) {
-                Entry::Vacant(entry) => {
-                    // field not seen yet
-                    entry.insert(field.index());
-                }
-                Entry::Occupied(mut entry) => {
-                    // replace currently stored index
-                    let old_index = entry.insert(field.index());
-                    // ... and append it to list of skippable indices
-                    field_indices.push(old_index);
-                }
+            if let Some(old_index) = seen_fields.insert(field.name(), field.index()) {
+                field_indices.set(old_index);
             }
         }
 
@@ -459,31 +455,36 @@ impl tracing::field::Visit for SpanFieldsRecorder<'_> {
 
 /// List of field indices skipped during logging. Can list duplicate fields or
 /// metafields not meant to be logged.
-#[derive(Clone, Default)]
+#[derive(Copy, Clone, Default)]
 struct SkippedFieldIndices {
-    bits: u64,
+    // tracing does not allow more than 32 fields in events or spans.
+    bits: u32,
 }
 
 impl SkippedFieldIndices {
     #[inline]
-    fn is_empty(&self) -> bool {
+    fn is_empty(self) -> bool {
         self.bits == 0
     }
 
     #[inline]
-    fn push(&mut self, index: usize) {
-        self.bits |= 1u64
-            .checked_shl(index as u32)
-            .expect("field index too large");
+    fn set(&mut self, index: usize) {
+        debug_assert!(
+            index <= 32,
+            "tracing does not allow spans with more than 32 fields"
+        );
+
+        self.bits |= 1 << index;
     }
 
     #[inline]
-    fn contains(&self, index: usize) -> bool {
-        self.bits
-            & 1u64
-                .checked_shl(index as u32)
-                .expect("field index too large")
-            != 0
+    fn contains(self, index: usize) -> bool {
+        debug_assert!(
+            index <= 32,
+            "tracing does not allow spans with more than 32 fields"
+        );
+
+        self.bits & (1 << index) != 0
     }
 }
 
@@ -529,8 +530,11 @@ impl EventFormatter {
         let normalized_meta = event.normalized_metadata();
         let meta = normalized_meta.as_ref().unwrap_or_else(|| event.metadata());
 
-        let skipped_field_indices = skipped_field_indices.pin();
-        let skipped_field_indices = skipped_field_indices.get(&meta.callsite());
+        let skipped_field_indices = skipped_field_indices
+            .pin()
+            .get(&meta.callsite())
+            .copied()
+            .unwrap_or_default();
 
         let mut serialize = || {
             let mut serializer = serde_json::Serializer::new(&mut self.logline_buffer);
@@ -631,15 +635,15 @@ impl EventFormatter {
 }
 
 /// Extracts the message field that's mixed will other fields.
-struct MessageFieldExtractor<'a, S: serde::ser::SerializeMap> {
+struct MessageFieldExtractor<S: serde::ser::SerializeMap> {
     serializer: S,
-    skipped_field_indices: Option<&'a SkippedFieldIndices>,
+    skipped_field_indices: SkippedFieldIndices,
     state: Option<Result<(), S::Error>>,
 }
 
-impl<'a, S: serde::ser::SerializeMap> MessageFieldExtractor<'a, S> {
+impl<S: serde::ser::SerializeMap> MessageFieldExtractor<S> {
     #[inline]
-    fn new(serializer: S, skipped_field_indices: Option<&'a SkippedFieldIndices>) -> Self {
+    fn new(serializer: S, skipped_field_indices: SkippedFieldIndices) -> Self {
         Self {
             serializer,
             skipped_field_indices,
@@ -661,13 +665,11 @@ impl<'a, S: serde::ser::SerializeMap> MessageFieldExtractor<'a, S> {
     fn accept_field(&self, field: &tracing::field::Field) -> bool {
         self.state.is_none()
             && field.name() == MESSAGE_FIELD
-            && !self
-                .skipped_field_indices
-                .is_some_and(|i| i.contains(field.index()))
+            && !self.skipped_field_indices.contains(field.index())
     }
 }
 
-impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageFieldExtractor<'_, S> {
+impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageFieldExtractor<S> {
     #[inline]
     fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
         if self.accept_field(field) {
@@ -747,14 +749,14 @@ impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageFieldExtracto
 /// can be skipped.
 // This is entirely optional and only cosmetic, though maybe helps a
 // bit during log parsing in dashboards when there's no field with empty object.
-struct FieldsPresent<'a>(pub bool, Option<&'a SkippedFieldIndices>);
+struct FieldsPresent(pub bool, SkippedFieldIndices);
 
 // Even though some methods have an overhead (error, bytes) it is assumed the
 // compiler won't include this since we ignore the value entirely.
-impl tracing::field::Visit for FieldsPresent<'_> {
+impl tracing::field::Visit for FieldsPresent {
     #[inline]
     fn record_debug(&mut self, field: &tracing::field::Field, _: &dyn std::fmt::Debug) {
-        if !self.1.is_some_and(|i| i.contains(field.index()))
+        if !self.1.contains(field.index())
             && field.name() != MESSAGE_FIELD
             && !field.name().starts_with("log.")
         {
@@ -764,10 +766,7 @@ impl tracing::field::Visit for FieldsPresent<'_> {
 }
 
 /// Serializes the fields directly supplied with a log event.
-struct SerializableEventFields<'a, 'event>(
-    &'a tracing::Event<'event>,
-    Option<&'a SkippedFieldIndices>,
-);
+struct SerializableEventFields<'a, 'event>(&'a tracing::Event<'event>, SkippedFieldIndices);
 
 impl serde::ser::Serialize for SerializableEventFields<'_, '_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -784,15 +783,15 @@ impl serde::ser::Serialize for SerializableEventFields<'_, '_> {
 }
 
 /// A tracing field visitor that skips the message field.
-struct MessageFieldSkipper<'a, S: serde::ser::SerializeMap> {
+struct MessageFieldSkipper<S: serde::ser::SerializeMap> {
     serializer: S,
-    skipped_field_indices: Option<&'a SkippedFieldIndices>,
+    skipped_field_indices: SkippedFieldIndices,
     state: Result<(), S::Error>,
 }
 
-impl<'a, S: serde::ser::SerializeMap> MessageFieldSkipper<'a, S> {
+impl<S: serde::ser::SerializeMap> MessageFieldSkipper<S> {
     #[inline]
-    fn new(serializer: S, skipped_field_indices: Option<&'a SkippedFieldIndices>) -> Self {
+    fn new(serializer: S, skipped_field_indices: SkippedFieldIndices) -> Self {
         Self {
             serializer,
             skipped_field_indices,
@@ -805,9 +804,7 @@ impl<'a, S: serde::ser::SerializeMap> MessageFieldSkipper<'a, S> {
         self.state.is_ok()
             && field.name() != MESSAGE_FIELD
             && !field.name().starts_with("log.")
-            && !self
-                .skipped_field_indices
-                .is_some_and(|i| i.contains(field.index()))
+            && !self.skipped_field_indices.contains(field.index())
     }
 
     #[inline]
@@ -817,7 +814,7 @@ impl<'a, S: serde::ser::SerializeMap> MessageFieldSkipper<'a, S> {
     }
 }
 
-impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageFieldSkipper<'_, S> {
+impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageFieldSkipper<S> {
     #[inline]
     fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
         if self.accept_field(field) {
