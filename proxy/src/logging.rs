@@ -282,12 +282,18 @@ where
     /// Registers a SpanFields instance as span extension.
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
         let span = ctx.span(id).expect("span must exist");
+
+        debug_assert!(
+            span.fields().len() <= 32,
+            "tracing does not allow spans with more than 32 fields"
+        );
+
+        let mut fields = span.fields().iter();
         let mut fields = SpanFields {
-            fields: attrs
-                .fields()
-                .iter()
-                .map(|field| (field.name(), serde_json::Value::Null))
-                .collect(),
+            fields: array::from_fn(|_| {
+                let name = fields.next().map_or("", |f| f.name());
+                (name, serde_json::Value::Null)
+            }),
         };
         fields.record_fields(attrs);
 
@@ -369,7 +375,8 @@ impl fmt::Display for CallsiteId {
 
 /// Stores span field values recorded during the spans lifetime.
 struct SpanFields {
-    fields: Vec<(&'static str, serde_json::Value)>,
+    // tracing does not allow any more than 32 fields.
+    fields: [(&'static str, serde_json::Value); 32],
 }
 
 impl SpanFields {
@@ -383,7 +390,7 @@ impl SpanFields {
 
 /// Implements a tracing field visitor to convert and store values.
 struct SpanFieldsRecorder<'m> {
-    fields: &'m mut [(&'static str, serde_json::Value)],
+    fields: &'m mut [(&'static str, serde_json::Value); 32],
 }
 
 impl tracing::field::Visit for SpanFieldsRecorder<'_> {
