@@ -1,6 +1,5 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::hash::BuildHasher;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::{array, env, fmt, io};
 
@@ -283,21 +282,29 @@ where
     /// Registers a SpanFields instance as span extension.
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
         let span = ctx.span(id).expect("span must exist");
-        let fields = SpanFields::default();
+        let mut fields = SpanFields {
+            fields: attrs
+                .fields()
+                .iter()
+                .map(|field| (field.name(), serde_json::Value::Null))
+                .collect(),
+        };
         fields.record_fields(attrs);
 
-        // This could deadlock when there's a panic somewhere in the tracing
-        // event handling and a read or write guard is still held. This includes
-        // the OTel subscriber.
-        let mut exts = span.extensions_mut();
-
-        exts.insert(fields);
+        // This is a new span: the extensions should not be locked
+        // unless some layer spawned a thread to process this span.
+        // I don't think any layers do that.
+        span.extensions_mut().insert(fields);
     }
 
     fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
         let span = ctx.span(id).expect("span must exist");
-        let ext = span.extensions();
-        if let Some(data) = ext.get::<SpanFields>() {
+
+        // assumption: `on_record` is rarely called.
+        // assumption: a span being updated by one thread,
+        //             and formatted by another thread is even rarer.
+        let mut ext = span.extensions_mut();
+        if let Some(data) = ext.get_mut::<SpanFields>() {
             data.record_fields(values);
         }
     }
@@ -361,89 +368,76 @@ impl fmt::Display for CallsiteId {
 }
 
 /// Stores span field values recorded during the spans lifetime.
-#[derive(Default)]
 struct SpanFields {
-    // TODO: Switch to custom enum with lasso::Spur for Strings?
-    fields: papaya::HashMap<&'static str, serde_json::Value>,
+    fields: Vec<(&'static str, serde_json::Value)>,
 }
 
 impl SpanFields {
     #[inline]
-    fn record_fields<R: tracing_subscriber::field::RecordFields>(&self, fields: R) {
+    fn record_fields<R: tracing_subscriber::field::RecordFields>(&mut self, fields: R) {
         fields.record(&mut SpanFieldsRecorder {
-            fields: self.fields.pin(),
+            fields: &mut self.fields,
         });
     }
 }
 
 /// Implements a tracing field visitor to convert and store values.
-struct SpanFieldsRecorder<'m, S, G> {
-    fields: papaya::HashMapRef<'m, &'static str, serde_json::Value, S, G>,
+struct SpanFieldsRecorder<'m> {
+    fields: &'m mut [(&'static str, serde_json::Value)],
 }
 
-impl<S: BuildHasher, G: papaya::Guard> tracing::field::Visit for SpanFieldsRecorder<'_, S, G> {
+impl tracing::field::Visit for SpanFieldsRecorder<'_> {
     #[inline]
     fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
-        self.fields
-            .insert(field.name(), serde_json::Value::from(value));
+        self.fields[field.index()].1 = serde_json::Value::from(value);
     }
 
     #[inline]
     fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
-        self.fields
-            .insert(field.name(), serde_json::Value::from(value));
+        self.fields[field.index()].1 = serde_json::Value::from(value);
     }
 
     #[inline]
     fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
-        self.fields
-            .insert(field.name(), serde_json::Value::from(value));
+        self.fields[field.index()].1 = serde_json::Value::from(value);
     }
 
     #[inline]
     fn record_i128(&mut self, field: &tracing::field::Field, value: i128) {
         if let Ok(value) = i64::try_from(value) {
-            self.fields
-                .insert(field.name(), serde_json::Value::from(value));
+            self.fields[field.index()].1 = serde_json::Value::from(value);
         } else {
-            self.fields
-                .insert(field.name(), serde_json::Value::from(format!("{value}")));
+            self.fields[field.index()].1 = serde_json::Value::from(format!("{value}"));
         }
     }
 
     #[inline]
     fn record_u128(&mut self, field: &tracing::field::Field, value: u128) {
         if let Ok(value) = u64::try_from(value) {
-            self.fields
-                .insert(field.name(), serde_json::Value::from(value));
+            self.fields[field.index()].1 = serde_json::Value::from(value);
         } else {
-            self.fields
-                .insert(field.name(), serde_json::Value::from(format!("{value}")));
+            self.fields[field.index()].1 = serde_json::Value::from(format!("{value}"));
         }
     }
 
     #[inline]
     fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
-        self.fields
-            .insert(field.name(), serde_json::Value::from(value));
+        self.fields[field.index()].1 = serde_json::Value::from(value);
     }
 
     #[inline]
     fn record_bytes(&mut self, field: &tracing::field::Field, value: &[u8]) {
-        self.fields
-            .insert(field.name(), serde_json::Value::from(value));
+        self.fields[field.index()].1 = serde_json::Value::from(value);
     }
 
     #[inline]
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        self.fields
-            .insert(field.name(), serde_json::Value::from(value));
+        self.fields[field.index()].1 = serde_json::Value::from(value);
     }
 
     #[inline]
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        self.fields
-            .insert(field.name(), serde_json::Value::from(format!("{value:?}")));
+        self.fields[field.index()].1 = serde_json::Value::from(format!("{value:?}"));
     }
 
     #[inline]
@@ -452,8 +446,7 @@ impl<S: BuildHasher, G: papaya::Guard> tracing::field::Visit for SpanFieldsRecor
         field: &tracing::field::Field,
         value: &(dyn std::error::Error + 'static),
     ) {
-        self.fields
-            .insert(field.name(), serde_json::Value::from(format!("{value}")));
+        self.fields[field.index()].1 = serde_json::Value::from(format!("{value}"));
     }
 }
 
@@ -966,7 +959,10 @@ where
 
         let ext = self.span.extensions();
         if let Some(data) = ext.get::<SpanFields>() {
-            for (name, value) in &data.fields.pin() {
+            for (name, value) in &data.fields {
+                if value.is_null() {
+                    continue;
+                }
                 serializer.serialize_entry(name, value)?;
                 // TODO: replace clone with reference, if possible.
                 self.extract.set(name, value.clone());
