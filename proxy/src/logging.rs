@@ -1,11 +1,10 @@
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::{array, env, fmt, io};
 
 use chrono::{DateTime, Utc};
 use opentelemetry::trace::TraceContextExt;
-use scopeguard::defer;
 use serde::ser::{SerializeMap, Serializer};
 use tracing::subscriber::Interest;
 use tracing::{Event, Metadata, Span, Subscriber, callsite, span};
@@ -181,11 +180,8 @@ impl Clock for RealClock {
 const MESSAGE_FIELD: &str = "message";
 
 thread_local! {
-    /// Protects against deadlocks and double panics during log writing.
-    /// The current panic handler will use tracing to log panic information.
-    static REENTRANCY_GUARD: Cell<bool> = const { Cell::new(false) };
     /// Thread-local instance with per-thread buffer for log writing.
-    static EVENT_FORMATTER: RefCell<EventFormatter> = RefCell::new(EventFormatter::new());
+    static EVENT_FORMATTER: RefCell<EventFormatter> = const { RefCell::new(EventFormatter::new()) };
     /// Cached OS thread ID.
     static THREAD_ID: u64 = gettid::gettid();
 }
@@ -248,35 +244,26 @@ where
         //       early, before OTel machinery, and add as event extension.
         let now = self.clock.now();
 
-        let res: io::Result<()> = REENTRANCY_GUARD.with(move |entered| {
-            if entered.get() {
-                let mut formatter = EventFormatter::new();
-                formatter.format(
-                    now,
-                    event,
-                    &ctx,
-                    &self.skipped_field_indices,
-                    &self.callsite_ids,
-                    &self.extract_fields,
-                )?;
-                self.writer.make_writer().write_all(formatter.buffer())
-            } else {
-                entered.set(true);
-                defer!(entered.set(false););
+        let res: io::Result<()> = EVENT_FORMATTER.with(|f| {
+            let mut borrow = f.try_borrow_mut();
+            let formatter = match borrow.as_deref_mut() {
+                Ok(formatter) => formatter,
+                // If the thread local formatter is borrowed,
+                // then we likely hit an edge case were we panicked during formatting.
+                // We allow the logging to proceed with an uncached formatter.
+                Err(_) => &mut EventFormatter::new(),
+            };
 
-                EVENT_FORMATTER.with_borrow_mut(move |formatter| {
-                    formatter.reset();
-                    formatter.format(
-                        now,
-                        event,
-                        &ctx,
-                        &self.skipped_field_indices,
-                        &self.callsite_ids,
-                        &self.extract_fields,
-                    )?;
-                    self.writer.make_writer().write_all(formatter.buffer())
-                })
-            }
+            formatter.reset();
+            formatter.format(
+                now,
+                event,
+                &ctx,
+                &self.skipped_field_indices,
+                &self.callsite_ids,
+                &self.extract_fields,
+            )?;
+            self.writer.make_writer().write_all(formatter.buffer())
         });
 
         // In case logging fails we generate a simpler JSON object.
@@ -505,7 +492,7 @@ struct EventFormatter {
 
 impl EventFormatter {
     #[inline]
-    fn new() -> Self {
+    const fn new() -> Self {
         EventFormatter {
             logline_buffer: Vec::new(),
         }
