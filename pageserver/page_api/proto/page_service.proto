@@ -11,6 +11,19 @@
 // - neon-shard-id: shard ID, as <number><count> in hex ("0b10" = shard 11 of 16, 0-based)
 // - neon-timeline-id: timeline ID ("f08c4e9a2d5f76b1e3a7c2d8910f4b3e")
 //
+// The service can be accessed via e.g. grpcurl:
+//
+//    ```
+//    grpcurl \
+//      -plaintext \
+//      -H "neon-tenant-id: 7c4a1f9e3bd6470c8f3e21a65bd2e980" \
+//      -H "neon-shard-id: 0b10" \
+//      -H "neon-timeline-id: f08c4e9a2d5f76b1e3a7c2d8910f4b3e" \
+//      -H "authorization: Bearer $JWT" \
+//      -d '{"read_lsn": {"request_lsn": 1234567890}, "rel": {"spc_oid": 1663, "db_oid": 1234, "rel_number": 5678, "fork_number": 0}}'
+//      localhost:51051 page_api.PageService/CheckRelExists
+//    ```
+//
 // TODO: consider adding neon-compute-mode ("primary", "static", "replica").
 // However, this will require reconnecting when changing modes.
 //
@@ -20,7 +33,7 @@
 // - Compression
 
 syntax = "proto3";
-package page_service;
+package page_api;
 
 service PageService {
   // Returns whether a relation exists.
