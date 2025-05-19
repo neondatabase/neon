@@ -21,8 +21,6 @@ use utils::shard::ShardIndex;
 
 use std::{fmt::Debug};
 mod client_cache;
-//include info
-use tracing::info;
 
 #[derive(Error, Debug)]
 pub enum PageserverClientError {
