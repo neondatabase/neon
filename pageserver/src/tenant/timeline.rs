@@ -7520,11 +7520,15 @@ fn is_send() {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     use pageserver_api::key::Key;
     use pageserver_api::value::Value;
+    use postgres_ffi::v17::bindings::PageHeaderData;
     use std::iter::Iterator;
+    use tokio_epoll_uring::BoundedBuf;
     use tracing::Instrument;
     use utils::id::TimelineId;
     use utils::lsn::Lsn;
@@ -7835,5 +7839,127 @@ mod tests {
             .expect("must find one layer to evict");
 
         layers.get_from_desc(&desc)
+    }
+
+    fn fixture_path(relative: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
+    }
+
+    use postgres_ffi::ItemIdData;
+    use postgres_ffi::LocationIndex;
+    use postgres_ffi::PageXLogRecPtr;
+    use postgres_ffi::TransactionId;
+    /// We already have a PageHeaderData via bindgen, but it's not serializable and
+    /// contains a non-serializable __IncompleteArrayField.
+    /// FIXME: we should be able to exclude pd_linp from the bindgen, but blocklist_item()
+    /// wasn't working for some reason.
+    use serde::{Deserialize, Serialize};
+
+    #[repr(C)]
+    #[derive(Debug, Default, Serialize, Deserialize)]
+    pub struct SerPageHeaderData {
+        pub pd_lsn: PageXLogRecPtr,
+        pub pd_checksum: postgres_ffi::uint16,
+        pub pd_flags: postgres_ffi::uint16,
+        pub pd_lower: LocationIndex,
+        pub pd_upper: LocationIndex,
+        pub pd_special: LocationIndex,
+        pub pd_pagesize_version: postgres_ffi::uint16,
+        pub pd_prune_xid: TransactionId,
+    }
+
+    #[repr(C)]
+    #[repr(align(4))]
+    #[derive(Debug, Copy, Clone, Deserialize)]
+    pub struct SerItemIdData {
+        pub raw: [u8; 4],
+    }
+
+    /// Postgres HeapTupleHeaderData type is actually some kind of placeholder,
+    /// so we have a hand-rolled struct to describe the actual serialized header of a tuple
+    #[repr(C)]
+    #[derive(Debug, Default, Serialize, Deserialize)]
+    struct SerMinimalTupleData {
+        t_xmin: postgres_ffi::uint32, /* actual length of minimal tuple */
+        t_xmax: postgres_ffi::uint32, /* actual length of minimal tuple */
+        t_cid_or_t_xvac: postgres_ffi::uint32,
+        t_ctid: postgres_ffi::ItemPointerData,
+        t_infomask2: postgres_ffi::uint16, /* number of attributes + various flags */
+        t_infomask: postgres_ffi::uint16,  /* various flag bits, see below */
+
+        t_hoff: postgres_ffi::uint8, /* sizeof header incl. bitmap, padding */
+
+                                     /* ^ - 23 bytes - ^ */
+    }
+
+    #[test]
+    fn decode_tuples() {
+        use utils::bin_ser::LeSer;
+
+        //assert_eq!(std::mem::size_of::<SerMinimalTupleData>(), 23);
+
+        // A simple example with three valid tuples, each tuple is (id, string, string, timestamp)
+        let input_raw = std::fs::read(fixture_path("test_data/example_page.bin")).unwrap();
+        // 00000000  00 00 00 00 a0 3d 53 01  00 00 00 00 24 00 70 1f  |.....=S.....$.p.|
+        // 00000010  00 20 04 20 00 00 00 00  d0 9f 60 00 a0 9f 60 00  |. . ......`...`.|
+        // 00000020  70 9f 60 00 00 00 00 00  00 00 00 00 00 00 00 00  |p.`.............|
+        // 00000030  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  |................|
+        // *
+        // 00001f70  e7 02 00 00 00 00 00 00  00 00 00 00 00 00 00 00  |................|
+        // 00001f80  03 00 04 00 02 08 18 00  03 00 00 00 0b 6b 65 79  |.............key|
+        // 00001f90  31 0f 76 61 6c 75 65 31  9f 2a e0 69 79 d8 02 00  |1.value1.*.iy...|
+        // 00001fa0  e6 02 00 00 00 00 00 00  00 00 00 00 00 00 00 00  |................|
+        // 00001fb0  02 00 04 00 02 08 18 00  02 00 00 00 0b 6b 65 79  |.............key|
+        // 00001fc0  33 0f 76 61 6c 75 65 33  54 b9 a3 69 79 d8 02 00  |3.value3T..iy...|
+        // 00001fd0  e5 02 00 00 00 00 00 00  00 00 00 00 00 00 00 00  |................|
+        // 00001fe0  01 00 04 00 02 08 18 00  01 00 00 00 0b 6b 65 79  |.............key|
+        // 00001ff0  32 0f 76 61 6c 75 65 32  dd 0e 6b 68 79 d8 02 00  |2.value2..khy...|
+        // 00002000
+
+        // The attributes for this example:
+        // attrelid |   attname   | atttypid | attlen | attnum | attcacheoff | atttypmod | attndims | attbyval | attalign | attstorage | attcompression | attnotnull | atthasdef | atthasmissing | attidentity | attgenerated | attisdropped | attislocal | attinhcount | attcollation | attstattarget | attacl | attoptions | attfdwoptions | attmissingval
+        // ----------+-------------+----------+--------+--------+-------------+-----------+----------+----------+----------+------------+----------------+------------+-----------+---------------+-------------+--------------+--------------+------------+-------------+--------------+---------------+--------+------------+---------------+---------------
+        //     16385 | id          |       23 |      4 |      1 |          -1 |        -1 |        0 | t        | i        | p          |                | t          | t         | f             |             |              | f            | t          |           0 |            0 |               |        |            |               |
+        //     16385 | key         |     1043 |     -1 |      2 |          -1 |       259 |        0 | f        | i        | x          |                | f          | f         | f             |             |              | f            | t          |           0 |          100 |               |        |            |               |
+        //     16385 | value       |       25 |     -1 |      3 |          -1 |        -1 |        0 | f        | i        | x          |                | f          | f         | f             |             |              | f            | t          |           0 |          100 |               |        |            |               |
+        //     16385 | modified_at |     1184 |      8 |      4 |          -1 |        -1 |        0 | t        | d        | p          |                | f          | t         | f             |             |              | f            | t          |           0 |            0 |               |        |            |               |
+
+        // TODO: test cases for schema changes:
+        // 1. baseline: data that exactly matches attributes
+        // 2. add one column, write a row, read all rows
+        // 3. drop one column, write a row, read all rows.
+        // 4. vacuum full, write a row, read all rows.
+
+        //        let mut cursor = Cursor::new(input_raw);
+        let header =
+            SerPageHeaderData::des(&input_raw[0..std::mem::size_of::<SerPageHeaderData>()])
+                .unwrap();
+
+        let item_count = (header.pd_lower as usize - std::mem::size_of::<SerPageHeaderData>())
+            / std::mem::size_of::<ItemIdData>();
+
+        assert_eq!(item_count, 3);
+
+        for item_counter in 0..item_count {
+            let item_base = std::mem::size_of::<SerPageHeaderData>()
+                + item_counter * std::mem::size_of::<ItemIdData>();
+            let item = SerItemIdData::des(
+                &input_raw[item_base..item_base + std::mem::size_of::<ItemIdData>()],
+            )
+            .unwrap();
+
+            let item = unsafe { std::mem::transmute::<[u8; 4], ItemIdData>(item.raw) };
+
+            println!("item: {} {}", item.lp_off(), item.lp_len());
+
+            let tuple_header_bytes =
+                &input_raw[item.lp_off() as usize..item.lp_off() as usize + 23];
+            let tuple_header = SerMinimalTupleData::des(tuple_header_bytes).unwrap();
+
+            println!("tuple_header: insert offset {}", tuple_header.t_hoff);
+
+            let tuple_raw = &input_raw[item.lp_off() as usize + tuple_header.t_hoff as usize
+                ..item.lp_off() as usize + item.lp_len() as usize];
+        }
     }
 }

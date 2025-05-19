@@ -223,9 +223,10 @@ pub mod walrecord;
 
 // Export some widely used datatypes that are unlikely to change across Postgres versions
 pub use v14::bindings::{
-    BlockNumber, CheckPoint, ControlFileData, HeapTupleHeaderData, MultiXactId, OffsetNumber, Oid,
-    PageHeaderData, RepOriginId, TimeLineID, TimestampTz, TransactionId, XLogRecPtr, XLogRecord,
-    XLogSegNo, uint32, uint64,
+    BlockNumber, CheckPoint, ControlFileData, HeapTupleHeaderData, ItemIdData, ItemPointerData,
+    LocationIndex, MultiXactId, OffsetNumber, Oid, PageHeaderData, PageXLogRecPtr, RepOriginId,
+    TimeLineID, TimestampTz, TransactionId, XLogRecPtr, XLogRecord, XLogSegNo, uint8, uint16,
+    uint32, uint64,
 };
 // Likewise for these, although the assumption that these don't change is a little more iffy.
 pub use v14::bindings::{MultiXactOffset, MultiXactStatus};
