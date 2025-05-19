@@ -4323,6 +4323,7 @@ dependencies = [
  "pageserver_api",
  "postgres_ffi",
  "remote_storage",
+ "serde",
  "serde_json",
  "svg_fmt",
  "thiserror 1.0.69",
