@@ -70,7 +70,7 @@ impl PageserverClient {
         shard_map: HashMap<ShardIndex, String>,
     ) -> Self {
         let options = ClientCacheOptions {
-            max_consumers: 10,
+            max_consumers: 5000,
             error_threshold: 5,
             connect_timeout: Duration::from_secs(5),
             connect_backoff: Duration::from_secs(1),
