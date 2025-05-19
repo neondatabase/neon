@@ -166,7 +166,7 @@ impl CopyBuffer {
         f: &mut impl for<'a> FnMut(Direction, &'a [u8]),
         mut reader: Pin<&mut R>,
         mut writer: Pin<&mut W>,
-    ) -> Poll<Result<usize, ErrorSource>>
+    ) -> Poll<Result<(), ErrorSource>>
     where
         R: AsyncRead + ?Sized,
         W: AsyncWrite + ?Sized,
@@ -181,7 +181,16 @@ impl CopyBuffer {
                 }
                 Poll::Pending
             }
-            res @ Poll::Ready(_) => res.map_err(|e| ErrorSource::write(me.dir, e)),
+            Poll::Ready(Ok(0)) => {
+                let err = io::Error::new(io::ErrorKind::WriteZero, "write zero byte into writer");
+                Poll::Ready(Err(ErrorSource::write(self.dir, err)))
+            }
+            Poll::Ready(Ok(i)) => {
+                self.pos += i;
+                self.need_flush = true;
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(ErrorSource::write(me.dir, e))),
         }
     }
 
@@ -223,14 +232,7 @@ impl CopyBuffer {
 
             // If our buffer has some data, let's write it out!
             while self.pos < self.cap {
-                let i = ready!(self.poll_write_buf(cx, f, reader.as_mut(), writer.as_mut()))?;
-                if i == 0 {
-                    let err =
-                        io::Error::new(io::ErrorKind::WriteZero, "write zero byte into writer");
-                    return Poll::Ready(Err(ErrorSource::write(self.dir, err)));
-                }
-                self.pos += i;
-                self.need_flush = true;
+                ready!(self.poll_write_buf(cx, f, reader.as_mut(), writer.as_mut()))?;
             }
 
             // If pos larger than cap, this loop will never stop.
@@ -248,9 +250,10 @@ impl CopyBuffer {
             // If we've written all the data and we've seen EOF, flush out the
             // data and finish the transfer.
             if self.read_done {
-                ready!(writer.as_mut().poll_flush(cx))
-                    .map_err(|e| ErrorSource::write(self.dir, e))?;
-                return Poll::Ready(Ok(()));
+                return writer
+                    .as_mut()
+                    .poll_flush(cx)
+                    .map_err(|e| ErrorSource::write(self.dir, e));
             }
         }
     }
