@@ -1352,7 +1352,7 @@ impl Persistence {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-        generation: SafekeeperGeneration,
+        current_generation: SafekeeperGeneration,
         sk_set: &[NodeId],
         new_sk_set: Option<&[NodeId]>,
     ) -> DatabaseResult<()> {

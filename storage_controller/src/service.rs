@@ -4640,20 +4640,19 @@ impl Service {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let generation = if let Some(new_sk_set) = timeline.new_sk_set.as_ref() {
+        let mut generation = SafekeeperGeneration::new(timeline.generation as u32)
+
+        if let Some(new_sk_set) = timeline.new_sk_set.as_ref() {
             // Migration is already in progress
             if desired_sk_ids != to_node_ids(new_sk_set) {
                 return Err(ApiError::Conflict(format!(
-                    "Migration to another sk set has already started: desiired set ({:?}) and timeline.new_sk_set ({:?})",
+                    "Migration to another sk set has already started: desired_sk_set = {:?}, timeline.new_sk_set = ({:?})",
                     request.desired_sk_set, new_sk_set
                 )));
             }
-
-            // Restart current migration.
-            SafekeeperGeneration::new(timeline.generation as u32)
         } else {
-            // 3. increment current conf number n and put desired_set to new_sk_set
-            let generation = SafekeeperGeneration::new(timeline.generation as u32).next();
+            // 3. No active migration yet.
+            // Increment current generation and put desired_set to new_sk_set
 
             self.persistence
                 .update_timeline_membership(
@@ -4665,7 +4664,7 @@ impl Service {
                 )
                 .await?;
 
-            generation
+            generation = generation.next();
         };
 
         let current_memmber_set = membership::MemberSet::new(
@@ -4688,7 +4687,7 @@ impl Service {
         )
         .map_err(|e| {
             ApiError::InternalServerError(anyhow::anyhow!(
-                "Failed to create current member set: {e}"
+                "Failed to create desired member set: {e}"
             ))
         })?;
 
@@ -4698,11 +4697,13 @@ impl Service {
             new_members: Some(desired_member_set.clone()),
         };
 
-        // 3.
-
         // 4. Call PUT configuration on safekeepers from the current set, delivering them joint_conf.
 
         let mut results = Vec::new();
+
+        let mut futures;
+
+        for sk in &desired_safekeepers {}
 
         for sk in safekeepers.values() {
             if joint_config.members.contains(sk.get_id()) {
