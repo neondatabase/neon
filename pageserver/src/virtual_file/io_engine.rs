@@ -124,9 +124,7 @@ pub(super) fn epoll_uring_error_to_std(
 ) -> std::io::Error {
     match e {
         tokio_epoll_uring::Error::Op(e) => e,
-        tokio_epoll_uring::Error::System(system) => {
-            std::io::Error::new(std::io::ErrorKind::Other, system)
-        }
+        tokio_epoll_uring::Error::System(system) => std::io::Error::other(system),
     }
 }
 

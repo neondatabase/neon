@@ -24,6 +24,7 @@ members = [
     "libs/postgres_ffi",
     "libs/safekeeper_api",
     "libs/desim",
+    "libs/neon-shmem",
     "libs/utils",
     "libs/consumption_metrics",
     "libs/postgres_backend",
@@ -128,7 +129,7 @@ md5 = "0.7.0"
 measured = { version = "0.0.22", features=["lasso"] }
 measured-process = { version = "0.0.22" }
 memoffset = "0.9"
-nix = { version = "0.27", features = ["dir", "fs", "process", "socket", "signal", "poll"] }
+nix = { version = "0.30.1", features = ["dir", "fs", "mman", "process", "socket", "signal", "poll"] }
 # Do not update to >= 7.0.0, at least. The update will have a significant impact
 # on compute startup metrics (start_postgres_ms), >= 25% degradation.
 notify = "6.0.0"

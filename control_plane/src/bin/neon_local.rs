@@ -8,7 +8,6 @@
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
-use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::process::exit;
 use std::str::FromStr;
@@ -31,7 +30,7 @@ use control_plane::safekeeper::SafekeeperNode;
 use control_plane::storage_controller::{
     NeonStorageControllerStartArgs, NeonStorageControllerStopArgs, StorageController,
 };
-use nix::fcntl::{FlockArg, flock};
+use nix::fcntl::{Flock, FlockArg};
 use pageserver_api::config::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
@@ -749,16 +748,16 @@ struct TimelineTreeEl {
 
 /// A flock-based guard over the neon_local repository directory
 struct RepoLock {
-    _file: File,
+    _file: Flock<File>,
 }
 
 impl RepoLock {
     fn new() -> Result<Self> {
         let repo_dir = File::open(local_env::base_path())?;
-        let repo_dir_fd = repo_dir.as_raw_fd();
-        flock(repo_dir_fd, FlockArg::LockExclusive)?;
-
-        Ok(Self { _file: repo_dir })
+        match Flock::lock(repo_dir, FlockArg::LockExclusive) {
+            Ok(f) => Ok(Self { _file: f }),
+            Err((_, e)) => Err(e).context("flock error"),
+        }
     }
 }
 

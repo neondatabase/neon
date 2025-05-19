@@ -65,6 +65,9 @@ pub(crate) struct Args {
     #[clap(long, default_value = "1")]
     queue_depth: NonZeroUsize,
 
+    #[clap(long)]
+    only_relnode: Option<u32>,
+
     targets: Option<Vec<TenantTimelineId>>,
 }
 
@@ -206,7 +209,12 @@ async fn main_impl(
                     for r in partitioning.keys.ranges.iter() {
                         let mut i = r.start;
                         while i != r.end {
-                            if i.is_rel_block_key() {
+                            let mut include = true;
+                            include &= i.is_rel_block_key();
+                            if let Some(only_relnode) = args.only_relnode {
+                                include &= i.is_rel_block_of_rel(only_relnode);
+                            }
+                            if include {
                                 filtered.add_key(i);
                             }
                             i = i.next();
