@@ -8596,8 +8596,10 @@ mod tests {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<Option<Bytes>, GetVectoredError> {
-        let io_concurrency =
-            IoConcurrency::spawn_from_conf(tline.conf, tline.gate.enter().unwrap());
+        let io_concurrency = IoConcurrency::spawn_from_conf(
+            tline.conf.get_vectored_concurrent_io,
+            tline.gate.enter().unwrap(),
+        );
         let mut reconstruct_state = ValuesReconstructState::new(io_concurrency);
         let query = VersionedKeySpaceQuery::uniform(KeySpace::single(key..key.next()), lsn);
         let mut res = tline

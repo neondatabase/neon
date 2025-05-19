@@ -18,7 +18,7 @@ use itertools::Itertools;
 use jsonwebtoken::TokenData;
 use once_cell::sync::OnceCell;
 use pageserver_api::config::{
-    PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
+    GetVectoredConcurrentIo, PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
     PageServiceProtocolPipelinedBatchingStrategy, PageServiceProtocolPipelinedExecutionStrategy,
 };
 use pageserver_api::key::rel_block_to_key;
@@ -331,10 +331,10 @@ async fn page_service_conn_main(
     // But it's in a shared crate, so, we store connection_ctx inside PageServerHandler
     // and create the per-query context in process_query ourselves.
     let mut conn_handler = PageServerHandler::new(
-        conf,
         tenant_manager,
         auth,
         pipelining_config,
+        conf.get_vectored_concurrent_io,
         perf_span_fields,
         connection_ctx,
         cancel.clone(),
@@ -371,7 +371,6 @@ async fn page_service_conn_main(
 }
 
 struct PageServerHandler {
-    conf: &'static PageServerConf,
     auth: Option<Arc<SwappableJwtAuth>>,
     claims: Option<Claims>,
 
@@ -389,6 +388,7 @@ struct PageServerHandler {
     timeline_handles: Option<TimelineHandles>,
 
     pipelining_config: PageServicePipeliningConfig,
+    get_vectored_concurrent_io: GetVectoredConcurrentIo,
 
     gate_guard: GateGuard,
 }
@@ -844,17 +844,16 @@ impl BatchedFeMessage {
 impl PageServerHandler {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        conf: &'static PageServerConf,
         tenant_manager: Arc<TenantManager>,
         auth: Option<Arc<SwappableJwtAuth>>,
         pipelining_config: PageServicePipeliningConfig,
+        get_vectored_concurrent_io: GetVectoredConcurrentIo,
         perf_span_fields: ConnectionPerfSpanFields,
         connection_ctx: RequestContext,
         cancel: CancellationToken,
         gate_guard: GateGuard,
     ) -> Self {
         PageServerHandler {
-            conf,
             auth,
             claims: None,
             connection_ctx,
@@ -862,6 +861,7 @@ impl PageServerHandler {
             timeline_handles: Some(TimelineHandles::new(tenant_manager)),
             cancel,
             pipelining_config,
+            get_vectored_concurrent_io,
             gate_guard,
         }
     }
@@ -1623,7 +1623,7 @@ impl PageServerHandler {
         }
 
         let io_concurrency = IoConcurrency::spawn_from_conf(
-            self.conf,
+            self.get_vectored_concurrent_io,
             match self.gate_guard.try_clone() {
                 Ok(guard) => guard,
                 Err(_) => {

@@ -144,7 +144,7 @@ where
         replica,
         ctx,
         io_concurrency: IoConcurrency::spawn_from_conf(
-            timeline.conf,
+            timeline.conf.get_vectored_concurrent_io,
             timeline
                 .gate
                 .enter()
