@@ -19,7 +19,10 @@ use pageserver_page_api::proto;
 use pageserver_page_api::proto::PageServiceClient;
 use utils::shard::ShardIndex;
 
+use std::{fmt::Debug};
 mod client_cache;
+//include info
+use tracing::info;
 
 #[derive(Error, Debug)]
 pub enum PageserverClientError {
@@ -55,6 +58,9 @@ pub struct ClientCacheOptions {
     pub connect_timeout: Duration,
     pub connect_backoff: Duration,
     pub max_idle_duration: Duration,
+    pub max_delay_ms: u64,
+    pub drop_rate: f64,
+    pub hang_rate: f64,
 }
 
 impl PageserverClient {
@@ -71,6 +77,9 @@ impl PageserverClient {
             connect_timeout: Duration::from_secs(5),
             connect_backoff: Duration::from_secs(1),
             max_idle_duration: Duration::from_secs(60),
+            max_delay_ms: 0,
+            drop_rate: 0.0,
+            hang_rate: 0.0,
         };
         Self::new_with_config(
             tenant_id,
@@ -165,6 +174,7 @@ impl PageserverClient {
 
         match response {
             Err(status) => {
+                info!("get_page error: {:?}", status);
                 pooled_client.finish(Err(status.clone())).await; // Pass error to finish
                 return Err(PageserverClientError::RequestError(status));
             }
@@ -297,6 +307,9 @@ impl PageserverClient {
                     self.client_cache_options.connect_timeout,
                     self.client_cache_options.connect_backoff,
                     self.client_cache_options.max_idle_duration,
+                    self.client_cache_options.max_delay_ms,
+                    self.client_cache_options.drop_rate,
+                    self.client_cache_options.hang_rate,
                 );
                 let mut write_pool = self.channels.write().unwrap();
                 write_pool.insert(shard, new_pool.clone());

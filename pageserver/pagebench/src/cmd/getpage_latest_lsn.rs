@@ -88,6 +88,15 @@ pub(crate) struct Args {
     #[clap(long, default_value = "60000")]
     pool_max_idle_duration: NonZeroUsize,
 
+    #[clap(long, default_value = "0")]
+    max_delay_ms: usize,
+
+    #[clap(long, default_value = "0")]
+    percent_drops: usize,
+
+    #[clap(long, default_value = "0")]
+    percent_hangs: usize,
+
     targets: Option<Vec<TenantTimelineId>>,
 
 }
@@ -485,6 +494,9 @@ async fn client_grpc(
         connect_timeout: Duration::from_millis(args.pool_connect_timeout.get() as u64),
         connect_backoff: Duration::from_millis(args.pool_connect_backoff.get() as u64),
         max_idle_duration: Duration::from_millis(args.pool_max_idle_duration.get() as u64),
+        max_delay_ms: args.max_delay_ms as u64,
+        drop_rate: (args.percent_drops as f64)/100.0,
+        hang_rate: (args.percent_hangs as f64)/100.0,
     };
     let client = pageserver_client_grpc::PageserverClient::new_with_config(
         &worker_id.timeline.tenant_id.to_string(),
@@ -553,7 +565,7 @@ async fn client_grpc(
         }
 
         let (start, result) = inflight.next().await.unwrap();
-        result.expect("getpage request should succeed");
+       result.expect("getpage request should succeed");
         let end = Instant::now();
         shared_state.live_stats.request_done();
         ticks_processed += 1;

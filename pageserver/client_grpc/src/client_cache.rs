@@ -10,6 +10,16 @@ use tokio::{
 use tonic::transport::{Channel, Endpoint};
 
 use uuid;
+use std::io::{self, Error, ErrorKind};
+use std::{pin::Pin, task::{Context, Poll}};
+use futures::future;
+use rand::{Rng, rngs::StdRng, SeedableRng};
+use tower::service_fn;
+use http::Uri;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use hyper_util::rt::TokioIo;
+use tokio::net::TcpStream;
+use bytes::BytesMut;
 
 /// A pooled gRPC client with capacity tracking and error handling.
 pub struct ConnectionPool {
@@ -21,6 +31,12 @@ pub struct ConnectionPool {
     error_threshold: usize,
     connect_timeout: Duration,
     connect_backoff: Duration,
+    // add max_delay
+    // The maximum time a connection can be idle before being removed
+    max_delay_ms: u64,
+    drop_rate: f64,
+    hang_rate: f64,
+
     // The maximum duration a connection can be idle before being removed
     max_idle_duration: Duration,
 
@@ -59,6 +75,139 @@ pub struct PooledClient {
     pool: Arc<ConnectionPool>,
     id: uuid::Uuid,
 }
+/// Wraps a `TcpStream`, buffers incoming data, and injects a random delay per fresh read/write.
+pub struct TokioTcp {
+    tcp: TcpStream,
+    /// Maximum randomized delay in milliseconds
+    delay_ms: u64,
+
+    /// Next deadline instant for delay
+    deadline: Instant,
+    /// Internal buffer of previously-read data
+    buffer: BytesMut,
+}
+
+impl TokioTcp {
+    /// Create a new wrapper with given max delay (ms)
+    pub fn new(stream: TcpStream, delay_ms: u64) -> Self {
+        let initial = if delay_ms > 0 {
+            rand::thread_rng().gen_range(0..delay_ms)
+        } else {
+            0
+        };
+        let deadline = Instant::now() + Duration::from_millis(initial);
+        TokioTcp {
+            tcp: stream,
+            delay_ms,
+            deadline,
+            buffer: BytesMut::new(),
+        }
+    }
+}
+
+impl AsyncRead for TokioTcp {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        // Safe because TokioTcp is Unpin
+        let this = self.get_mut();
+
+        // 1) Drain any buffered data
+        if !this.buffer.is_empty() {
+            let to_copy = this.buffer.len().min(buf.remaining());
+            buf.put_slice(&this.buffer.split_to(to_copy));
+            return Poll::Ready(Ok(()));
+        }
+
+        // 2) If we're still before the deadline, schedule a wake and return Pending
+        let now = Instant::now();
+        if this.delay_ms > 0 && now < this.deadline {
+            let waker = cx.waker().clone();
+            let wait = this.deadline - now;
+            tokio::spawn(async move {
+                sleep(wait).await;
+                waker.wake_by_ref();
+            });
+            return Poll::Pending;
+        }
+
+        // 3) Past deadline: compute next random deadline
+        if this.delay_ms > 0 {
+            let next_ms = rand::thread_rng().gen_range(0..=this.delay_ms);
+            this.deadline = Instant::now() + Duration::from_millis(next_ms);
+        }
+
+
+        // 4) Perform actual read into a temporary buffer
+        let mut tmp = [0u8; 4096];
+        let mut rb = ReadBuf::new(&mut tmp);
+        match Pin::new(&mut this.tcp).poll_read(cx, &mut rb) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(())) => {
+                let filled = rb.filled();
+                if filled.is_empty() {
+                    // EOF or zero bytes
+                    Poll::Ready(Ok(()))
+                } else {
+                    this.buffer.extend_from_slice(filled);
+                    let to_copy = this.buffer.len().min(buf.remaining());
+                    buf.put_slice(&this.buffer.split_to(to_copy));
+                    Poll::Ready(Ok(()))
+                }
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+        }
+    }
+}
+
+impl AsyncWrite for TokioTcp {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+
+        // 1) If before deadline, schedule wake and return Pending
+        let now = Instant::now();
+        if this.delay_ms > 0 && now < this.deadline {
+            let waker = cx.waker().clone();
+            let wait = this.deadline - now;
+            tokio::spawn(async move {
+                sleep(wait).await;
+                waker.wake_by_ref();
+            });
+            return Poll::Pending;
+        }
+
+        // 2) Past deadline: compute next random deadline
+        if this.delay_ms > 0 {
+            let next_ms = rand::thread_rng().gen_range(0..=this.delay_ms);
+            this.deadline = Instant::now() + Duration::from_millis(next_ms);
+        }
+
+        // 3) Actual write
+        Pin::new(&mut this.tcp).poll_write(cx, data)
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.tcp).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.tcp).poll_shutdown(cx)
+    }
+}
 
 impl ConnectionPool {
     /// Create a new pool and spawn the background task that handles requests.
@@ -69,6 +218,9 @@ impl ConnectionPool {
         connect_timeout: Duration,
         connect_backoff: Duration,
         max_idle_duration: Duration,
+        max_delay_ms: u64,
+        drop_rate: f64,
+        hang_rate: f64,
     ) -> Arc<Self> {
         let (request_tx, mut request_rx) = mpsc::channel::<mpsc::Sender<PooledClient>>(100);
         let (watch_tx, watch_rx) = watch::channel(false);
@@ -87,6 +239,9 @@ impl ConnectionPool {
             connect_backoff: connect_backoff,
             max_idle_duration: max_idle_duration,
             request_tx: request_tx,
+            max_delay_ms: max_delay_ms,
+            drop_rate: drop_rate,
+            hang_rate: hang_rate,
         });
 
         //
@@ -170,6 +325,58 @@ impl ConnectionPool {
     }
 
     async fn create_connection(&self) -> () {
+
+        let max_delay_ms = self.max_delay_ms;
+        let drop_rate = self.drop_rate;
+        let hang_rate = self.hang_rate;
+
+        // This is a custom connector that inserts delays and errors, for
+        // testing purposes. It would normally be disabled by the config.
+        let connector = service_fn(move |uri: Uri| {
+            let max_delay = max_delay_ms;
+            let drop_rate = drop_rate;
+            let hang_rate = hang_rate;
+            async move {
+                let mut rng = StdRng::from_entropy();
+                // Simulate an indefinite hang
+                if hang_rate > 0.0 && rng.gen_bool(hang_rate) {
+                    // never completes, to test timeout
+                    return future::pending::<Result<TokioIo<TokioTcp>, std::io::Error>>().await;
+                }
+
+                if max_delay > 0 {
+                    // Random delay before connecting
+                    let delay = rng.gen_range(0..max_delay);
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+                // Random drop (connect error)
+                if drop_rate > 0.0 && rng.gen_bool(drop_rate) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "simulated connect drop",
+                    ));
+                }
+
+                // Otherwise perform real TCP connect
+                let addr = match (uri.host(), uri.port()) {
+                    // host + explicit port
+                    (Some(host), Some(port)) => format!("{}:{}", host, port.as_str()),
+                    // host only (no port)
+                    (Some(host), None)      => host.to_string(),
+                    // neither? error out
+                    _ => return Err(Error::new(ErrorKind::InvalidInput, "no host or port")),
+                };
+
+                //let addr = uri.authority().unwrap().as_str();
+                let tcp = TcpStream::connect(addr).await?;
+                let tcpwrapper = TokioTcp::new(
+                    tcp,
+                    max_delay_ms,
+                );
+                Ok(TokioIo::new(tcpwrapper))
+            }
+        });
+
         // Wait to be signalled to create a connection.
         let mut recv = self.cc_watch_tx.subscribe();
         if !*self.cc_watch_rx.borrow() {
@@ -207,13 +414,15 @@ impl ConnectionPool {
                 Endpoint::from_shared(self.endpoint.clone())
                     .expect("invalid endpoint")
                     .timeout(self.connect_timeout)
-                    .connect(),
+                    .connect_with_connector(connector)
             )
             .await;
+
 
             match attempt {
                 Ok(Ok(channel)) => {
                     {
+
                         let mut inner = self.inner.lock().await;
                         let id = uuid::Uuid::new_v4();
                         inner.entries.insert(
