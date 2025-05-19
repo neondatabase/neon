@@ -174,7 +174,6 @@ impl PageserverClient {
 
         match response {
             Err(status) => {
-                info!("get_page error: {:?}", status);
                 pooled_client.finish(Err(status.clone())).await; // Pass error to finish
                 return Err(PageserverClientError::RequestError(status));
             }
