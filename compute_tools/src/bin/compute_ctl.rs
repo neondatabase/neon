@@ -172,21 +172,13 @@ impl Cli {
     }
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let scenario = failpoint_support::init();
 
-    // For historical reasons, the main thread that processes the config and launches postgres
-    // is synchronous, but we always have this tokio runtime available and we "enter" it so
-    // that you can use tokio::spawn() and tokio::runtime::Handle::current().block_on(...)
-    // from all parts of compute_ctl.
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let _rt_guard = runtime.enter();
-
-    runtime.block_on(init())?;
+    init().await?;
 
     // enable core dumping for all child processes
     setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
@@ -218,7 +210,7 @@ fn main() -> Result<()> {
         config,
     )?;
 
-    let exit_code = compute_node.run()?;
+    let exit_code = compute_node.run().await?;
 
     scenario.teardown();
 
