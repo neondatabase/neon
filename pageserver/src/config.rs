@@ -545,7 +545,7 @@ impl PageServerConf {
                 )
             );
 
-            Url::parse(&tracing_config.export_config.endpoint)
+            let url = Url::parse(&tracing_config.export_config.endpoint)
                 .map_err(anyhow::Error::msg)
                 .with_context(|| {
                     format!(
@@ -553,6 +553,14 @@ impl PageServerConf {
                         tracing_config.export_config.endpoint
                     )
                 })?;
+
+            ensure!(
+                url.scheme() == "http" || url.scheme() == "https",
+                format!(
+                    "tracing endpoint URL must start with http:// or https://: {}",
+                    tracing_config.export_config.endpoint
+                )
+            );
         }
 
         IndexEntry::validate_checkpoint_distance(conf.default_tenant_conf.checkpoint_distance)
@@ -668,5 +676,28 @@ mod tests {
         let workdir = Utf8PathBuf::from("/nonexistent");
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
             .expect("parse_and_validate");
+    }
+
+    #[test]
+    fn test_config_tracing_endpoint_is_invalid() {
+        let input = r#"
+            control_plane_api = "http://localhost:6666"
+
+            [tracing]
+
+            [tracing.sampling_ratio]
+            numerator = 1
+            denominator = 10
+
+            [tracing.export_config]
+            endpoint = "localhost:4000"
+            protocol = "http-binary"
+            timeout = "1ms"
+        "#;
+        let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input)
+            .expect("config has valid fields");
+        let workdir = Utf8PathBuf::from("/nonexistent");
+        PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
+            .expect_err("parse_and_validate shall not pass for invalid tracing endpoint");
     }
 }
