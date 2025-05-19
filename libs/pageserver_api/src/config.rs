@@ -43,6 +43,21 @@ pub struct NodeMetadata {
     pub other: HashMap<String, serde_json::Value>,
 }
 
+/// PostHog integration config.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PostHogConfig {
+    /// PostHog project ID
+    pub project_id: String,
+    /// Server-side (private) API key
+    pub server_api_key: String,
+    /// Client-side (public) API key
+    pub client_api_key: String,
+    /// Private API URL
+    pub private_api_url: String,
+    /// Public API URL
+    pub public_api_url: String,
+}
+
 /// `pageserver.toml`
 ///
 /// We use serde derive with `#[serde(default)]` to generate a deserializer
@@ -182,6 +197,8 @@ pub struct ConfigToml {
     pub tracing: Option<Tracing>,
     pub enable_tls_page_service_api: bool,
     pub dev_mode: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub posthog_config: Option<PostHogConfig>,
     pub timeline_import_config: TimelineImportConfig,
 }
 
@@ -664,6 +681,7 @@ impl Default for ConfigToml {
                 import_job_soft_size_limit: NonZeroUsize::new(1024 * 1024 * 1024).unwrap(),
                 import_job_checkpoint_threshold: NonZeroUsize::new(128).unwrap(),
             },
+            posthog_config: None,
         }
     }
 }

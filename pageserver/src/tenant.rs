@@ -83,6 +83,7 @@ use crate::context;
 use crate::context::RequestContextBuilder;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::{DeletionQueueClient, DeletionQueueError};
+use crate::feature_resolver::FeatureResolver;
 use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::{
     BROKEN_TENANTS_SET, CIRCUIT_BREAKERS_BROKEN, CIRCUIT_BREAKERS_UNBROKEN, CONCURRENT_INITDBS,
@@ -157,6 +158,7 @@ pub struct TenantSharedResources {
     pub remote_storage: GenericRemoteStorage,
     pub deletion_queue_client: DeletionQueueClient,
     pub l0_flush_global_state: L0FlushGlobalState,
+    pub feature_resolver: FeatureResolver,
 }
 
 /// A [`TenantShard`] is really an _attached_ tenant.  The configuration
@@ -375,6 +377,8 @@ pub struct TenantShard {
     pub(crate) gc_block: gc_block::GcBlock,
 
     l0_flush_global_state: L0FlushGlobalState,
+
+    feature_resolver: FeatureResolver,
 }
 impl std::fmt::Debug for TenantShard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1286,6 +1290,7 @@ impl TenantShard {
             remote_storage,
             deletion_queue_client,
             l0_flush_global_state,
+            feature_resolver,
         } = resources;
 
         let attach_mode = attached_conf.location.attach_mode;
@@ -1301,6 +1306,7 @@ impl TenantShard {
             remote_storage.clone(),
             deletion_queue_client,
             l0_flush_global_state,
+            feature_resolver,
         ));
 
         // The attach task will carry a GateGuard, so that shutdown() reliably waits for it to drop out if
@@ -3128,11 +3134,18 @@ impl TenantShard {
                         .or_insert_with(|| Arc::new(GcCompactionQueue::new()))
                         .clone()
                 };
+                let gc_compaction_strategy = self
+                    .feature_resolver
+                    .evaluate_multivariate("gc-comapction-strategy", self.tenant_shard_id.tenant_id)
+                    .ok();
+                let span = if let Some(gc_compaction_strategy) = gc_compaction_strategy {
+                    info_span!("gc_compact_timeline", timeline_id = %timeline.timeline_id, strategy = %gc_compaction_strategy)
+                } else {
+                    info_span!("gc_compact_timeline", timeline_id = %timeline.timeline_id)
+                };
                 outcome = queue
                     .iteration(cancel, ctx, &self.gc_block, &timeline)
-                    .instrument(
-                        info_span!("gc_compact_timeline", timeline_id = %timeline.timeline_id),
-                    )
+                    .instrument(span)
                     .await?;
             }
 
@@ -4232,6 +4245,7 @@ impl TenantShard {
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
         l0_flush_global_state: L0FlushGlobalState,
+        feature_resolver: FeatureResolver,
     ) -> TenantShard {
         assert!(!attached_conf.location.generation.is_none());
 
@@ -4335,6 +4349,7 @@ impl TenantShard {
             ongoing_timeline_detach: std::sync::Mutex::default(),
             gc_block: Default::default(),
             l0_flush_global_state,
+            feature_resolver,
         }
     }
 
@@ -5843,6 +5858,7 @@ pub(crate) mod harness {
                 self.deletion_queue.new_client(),
                 // TODO: ideally we should run all unit tests with both configs
                 L0FlushGlobalState::new(L0FlushConfig::default()),
+                FeatureResolver::new_disabled(),
             ));
 
             let preload = tenant
