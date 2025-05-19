@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from fixtures.neon_fixtures import PgProtocol
 
 
-def start_write_workload(pg: PgProtocol, scale: int = 10):
+def start_write_workload(pg: PgProtocol, scale: int = 100):  # 10x increase from 10
     with pg.connect().cursor() as cur:
         cur.execute(f"create table big as select generate_series(1,{scale * 100_000})")
 
