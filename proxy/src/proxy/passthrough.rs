@@ -1,7 +1,6 @@
 use smol_str::SmolStr;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::debug;
-use utils::measured_stream::MeasuredStream;
 
 use super::copy_bidirectional::ErrorSource;
 use crate::cancellation;
@@ -15,7 +14,7 @@ use crate::usage_metrics::{Ids, MetricCounterRecorder, USAGE_METRICS};
 /// Forward bytes in both directions (client <-> compute).
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) async fn proxy_pass(
-    client: impl AsyncRead + AsyncWrite + Unpin,
+    mut client: impl AsyncRead + AsyncWrite + Unpin,
     mut compute: impl AsyncRead + AsyncWrite + Unpin,
     aux: MetricsAuxInfo,
     private_link_id: Option<SmolStr>,
@@ -28,25 +27,26 @@ pub(crate) async fn proxy_pass(
     });
 
     let metrics = &Metrics::get().proxy.io_bytes;
-    let m_sent = metrics.with_labels(Direction::Tx);
-    let m_recv = metrics.with_labels(Direction::Rx);
-    let mut client = MeasuredStream::new(
-        client,
-        |bytes_read| {
-            metrics.get_metric(m_recv).inc_by(bytes_read as u64);
-            usage_tx.record_ingress(bytes_read as u64);
-        },
-        |bytes_flushed| {
-            metrics.get_metric(m_sent).inc_by(bytes_flushed as u64);
-            usage_tx.record_egress(bytes_flushed as u64);
-        },
-    );
+    let m_sent = metrics.with_labels(Direction::ComputeToClient);
+    let m_recv = metrics.with_labels(Direction::ClientToCompute);
+
+    let inspect = |direction, bytes: &[u8]| match direction {
+        Direction::ComputeToClient => {
+            metrics.get_metric(m_sent).inc_by(bytes.len() as u64);
+            usage_tx.record_egress(bytes.len() as u64);
+        }
+        Direction::ClientToCompute => {
+            metrics.get_metric(m_recv).inc_by(bytes.len() as u64);
+            usage_tx.record_ingress(bytes.len() as u64);
+        }
+    };
 
     // Starting from here we only proxy the client's traffic.
     debug!("performing the proxy pass...");
     let _ = crate::proxy::copy_bidirectional::copy_bidirectional_client_compute(
         &mut client,
         &mut compute,
+        inspect,
     )
     .await?;
 

@@ -383,8 +383,12 @@ async fn handle_client(
     info!("performing the proxy pass...");
 
     let res = match client {
-        Connection::Raw(mut c) => copy_bidirectional_client_compute(&mut tls_stream, &mut c).await,
-        Connection::Tls(mut c) => copy_bidirectional_client_compute(&mut tls_stream, &mut c).await,
+        Connection::Raw(mut c) => {
+            copy_bidirectional_client_compute(&mut tls_stream, &mut c, |_, _| {}).await
+        }
+        Connection::Tls(mut c) => {
+            copy_bidirectional_client_compute(&mut tls_stream, &mut c, |_, _| {}).await
+        }
     };
 
     match res {
