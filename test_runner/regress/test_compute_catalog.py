@@ -27,6 +27,8 @@ TEST_ROLE_NAMES = [
     {"name": "xx$"},
     {"name": "$xx"},
     {"name": "$xx$"},
+    # 63 bytes is the limit for role/DB names in Postgres
+    {"name": "x" * 63},
 ]
 
 TEST_DB_NAMES = [
@@ -113,6 +115,11 @@ TEST_DB_NAMES = [
     {
         "name": "$xx$",
         "owner": "$xx$",
+    },
+    # 63 bytes is the limit for role/DB names in Postgres
+    {
+        "name": "x" * 63,
+        "owner": "x" * 63,
     },
 ]
 
