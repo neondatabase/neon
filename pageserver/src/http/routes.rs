@@ -3199,7 +3199,7 @@ async fn list_aux_files(
             .await?;
 
     let io_concurrency = IoConcurrency::spawn_from_conf(
-        state.conf,
+        state.conf.get_vectored_concurrent_io,
         timeline.gate.enter().map_err(|_| ApiError::Cancelled)?,
     );
 

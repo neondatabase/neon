@@ -235,7 +235,7 @@ pub enum PageServiceProtocolPipelinedBatchingStrategy {
     ScatteredLsn,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case")]
 pub enum GetVectoredConcurrentIo {
     /// The read path is fully sequential: layers are visited

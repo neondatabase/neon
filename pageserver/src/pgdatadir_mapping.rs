@@ -586,7 +586,7 @@ impl Timeline {
         // scan directory listing (new), merge with the old results
         let key_range = rel_tag_sparse_key_range(spcnode, dbnode);
         let io_concurrency = IoConcurrency::spawn_from_conf(
-            self.conf,
+            self.conf.get_vectored_concurrent_io,
             self.gate
                 .enter()
                 .map_err(|_| PageReconstructError::Cancelled)?,
@@ -645,7 +645,7 @@ impl Timeline {
         );
 
         let io_concurrency = IoConcurrency::spawn_from_conf(
-            self.conf,
+            self.conf.get_vectored_concurrent_io,
             self.gate
                 .enter()
                 .map_err(|_| PageReconstructError::Cancelled)?,
@@ -885,7 +885,7 @@ impl Timeline {
             );
 
             let io_concurrency = IoConcurrency::spawn_from_conf(
-                self.conf,
+                self.conf.get_vectored_concurrent_io,
                 self.gate
                     .enter()
                     .map_err(|_| PageReconstructError::Cancelled)?,

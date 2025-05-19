@@ -3530,7 +3530,7 @@ impl Timeline {
                 };
 
                 let io_concurrency = IoConcurrency::spawn_from_conf(
-                    self_ref.conf,
+                    self_ref.conf.get_vectored_concurrent_io,
                     self_ref
                         .gate
                         .enter()
@@ -5559,7 +5559,7 @@ impl Timeline {
             });
 
             let io_concurrency = IoConcurrency::spawn_from_conf(
-                self.conf,
+                self.conf.get_vectored_concurrent_io,
                 self.gate
                     .enter()
                     .map_err(|_| CreateImageLayersError::Cancelled)?,
