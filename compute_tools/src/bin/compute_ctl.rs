@@ -145,6 +145,33 @@ impl Cli {
     }
 }
 
+impl Cli {
+    pub fn get_config(&self) -> Result<ComputeConfig> {
+        // First, read the config from the path if provided
+        if let Some(ref config) = self.config {
+            let file = File::open(config)?;
+            return Ok(serde_json::from_reader(&file)?);
+        }
+
+        // If the config wasn't provided in the CLI arguments, then retrieve it from
+        // the control plane
+        match get_config_from_control_plane(
+            self.control_plane_uri.as_ref().unwrap(),
+            &self.compute_id,
+        ) {
+            Ok(config) => Ok(config),
+            Err(e) => {
+                error!(
+                    "cannot get response from control plane: {}\n\
+                    neither spec nor confirmation that compute is in the Empty state was received",
+                    e
+                );
+                Err(e)
+            }
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -166,7 +193,7 @@ fn main() -> Result<()> {
 
     let connstr = Url::parse(&cli.connstr).context("cannot parse connstr as a URL")?;
 
-    let config = get_config(&cli)?;
+    let config = cli.get_config()?;
 
     let compute_node = ComputeNode::new(
         ComputeNodeParams {
@@ -211,28 +238,6 @@ async fn init() -> Result<()> {
     info!("compute build_tag: {}", &BUILD_TAG.to_string());
 
     Ok(())
-}
-
-fn get_config(cli: &Cli) -> Result<ComputeConfig> {
-    // First, read the config from the path if provided
-    if let Some(ref config) = cli.config {
-        let file = File::open(config)?;
-        return Ok(serde_json::from_reader(&file)?);
-    }
-
-    // If the config wasn't provided in the CLI arguments, then retrieve it from
-    // the control plane
-    match get_config_from_control_plane(cli.control_plane_uri.as_ref().unwrap(), &cli.compute_id) {
-        Ok(config) => Ok(config),
-        Err(e) => {
-            error!(
-                "cannot get response from control plane: {}\n\
-                neither spec nor confirmation that compute is in the Empty state was received",
-                e
-            );
-            Err(e)
-        }
-    }
 }
 
 fn deinit_and_exit(exit_code: Option<i32>) -> ! {
