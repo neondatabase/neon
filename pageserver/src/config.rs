@@ -544,6 +544,15 @@ impl PageServerConf {
                     ratio.numerator, ratio.denominator
                 )
             );
+
+            Url::parse(&tracing_config.export_config.endpoint)
+                .map_err(anyhow::Error::msg)
+                .with_context(|| {
+                    format!(
+                        "tracing endpoint URL is invalid : {}",
+                        tracing_config.export_config.endpoint
+                    )
+                })?;
         }
 
         IndexEntry::validate_checkpoint_distance(conf.default_tenant_conf.checkpoint_distance)
