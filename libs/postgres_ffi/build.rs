@@ -29,6 +29,7 @@ impl ParseCallbacks for PostgresFfiCallbacks {
             "CheckPoint",
             "FullTransactionId",
             "ControlFileData",
+            "HeapTupleHeaderData",
         ];
 
         if serde_list.contains(&derive_info.name) {
@@ -125,6 +126,8 @@ fn main() -> anyhow::Result<()> {
             .allowlist_var("PG_CONTROL_FILE_SIZE")
             .allowlist_var("PG_CONTROLFILEDATA_OFFSETOF_CRC")
             .allowlist_type("PageHeaderData")
+            .allowlist_type("HeapTupleHeaderData")
+            .allowlist_type("Datum")
             .allowlist_type("DBState")
             .allowlist_type("RelMapFile")
             .allowlist_type("RepOriginId")

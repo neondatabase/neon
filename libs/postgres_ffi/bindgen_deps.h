@@ -12,3 +12,5 @@
 #include "storage/bufpage.h"
 #include "storage/off.h"
 #include "access/multixact.h"
+#include "postgres.h"
+#include "access/htup.h"
