@@ -690,7 +690,7 @@ mod tests {
             denominator = 10
 
             [tracing.export_config]
-            endpoint = "localhost:4000"
+            endpoint = "localhost:4317"
             protocol = "http-binary"
             timeout = "1ms"
         "#;
