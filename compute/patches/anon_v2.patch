@@ -151,7 +151,7 @@ index 7da6553..7961984 100644
 +
 +SECURITY LABEL FOR anon ON FUNCTION anon.toggle_transparent_dynamic_masking IS 'UNTRUSTED';
 diff --git a/src/guc.rs b/src/guc.rs
-index 74d3822..6dbd0bc 100644
+index 74d3822..7d57125 100644
 --- a/src/guc.rs
 +++ b/src/guc.rs
 @@ -3,7 +3,7 @@
@@ -186,7 +186,7 @@ index 74d3822..6dbd0bc 100644
 +}
 +
 + unsafe extern "C-unwind" fn check_string_guc_hook(
-+    _newval: *mut *mut i8,
++    _newval: *mut *mut libc::c_char,
 +    _extra: *mut *mut c_void,
 +    _source: u32
 + ) -> bool {

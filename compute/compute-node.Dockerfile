@@ -1357,6 +1357,7 @@ RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/2.1.0/postgre
     find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt && \
     sed -i 's/pgrx = "0.14.1"/pgrx = { git = "https:\/\/github.com\/thesuhas\/pgrx.git", branch = "expose_guc_assign_hook", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     sed -i 's/pgrx-tests = "0.14.1"/pgrx-tests = { git = "https:\/\/github.com\/thesuhas\/pgrx.git", branch = "expose_guc_assign_hook" }/g' Cargo.toml && \
+    sed -i '/\[dependencies\]/a libc = "0.2.172"' Cargo.toml && \
     patch -p1 < /ext-src/anon_v2.patch
 
 FROM rust-extensions-build-pgrx14 AS pg-anon-pg-build
