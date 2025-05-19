@@ -30,8 +30,6 @@ use crate::tls::postgres_rustls::MakeRustlsConnect;
 type IpSubnetKey = IpNet;
 
 const CANCEL_KEY_TTL: i64 = 1_209_600; // 2 weeks cancellation key expire time
-const REDIS_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(10);
-const BATCH_SIZE: usize = 8;
 
 // Message types for sending through mpsc channel
 pub enum CancelKeyOp {
@@ -231,12 +229,13 @@ impl CancelReplyOp {
 pub async fn handle_cancel_messages(
     client: &mut RedisKVClient,
     mut rx: mpsc::Receiver<CancelKeyOp>,
+    batch_size: usize,
 ) -> anyhow::Result<()> {
-    let mut batch = Vec::with_capacity(BATCH_SIZE);
-    let mut pipeline = Pipeline::with_capacity(BATCH_SIZE);
+    let mut batch = Vec::with_capacity(batch_size);
+    let mut pipeline = Pipeline::with_capacity(batch_size);
 
     loop {
-        if rx.recv_many(&mut batch, BATCH_SIZE).await == 0 {
+        if rx.recv_many(&mut batch, batch_size).await == 0 {
             warn!("shutting down cancellation queue");
             break Ok(());
         }
@@ -367,8 +366,7 @@ impl CancellationHandler {
             return Err(CancelError::InternalError);
         };
 
-        tx.send_timeout(op, REDIS_SEND_TIMEOUT)
-            .await
+        tx.try_send(op)
             .map_err(|e| {
                 tracing::warn!("failed to send GetCancelData for {key}: {e}");
             })
@@ -570,7 +568,7 @@ impl Session {
     }
 
     // Send the store key op to the cancellation handler and set TTL for the key
-    pub(crate) async fn write_cancel_key(
+    pub(crate) fn write_cancel_key(
         &self,
         cancel_closure: CancelClosure,
     ) -> Result<(), CancelError> {
@@ -596,14 +594,14 @@ impl Session {
             expire: CANCEL_KEY_TTL,
         };
 
-        let _ = tx.send_timeout(op, REDIS_SEND_TIMEOUT).await.map_err(|e| {
+        let _ = tx.try_send(op).map_err(|e| {
             let key = self.key;
             tracing::warn!("failed to send StoreCancelKey for {key}: {e}");
         });
         Ok(())
     }
 
-    pub(crate) async fn remove_cancel_key(&self) -> Result<(), CancelError> {
+    pub(crate) fn remove_cancel_key(&self) -> Result<(), CancelError> {
         let Some(tx) = &self.cancellation_handler.tx else {
             tracing::warn!("cancellation handler is not available");
             return Err(CancelError::InternalError);
@@ -619,7 +617,7 @@ impl Session {
                 .guard(RedisMsgKind::HDel),
         };
 
-        let _ = tx.send_timeout(op, REDIS_SEND_TIMEOUT).await.map_err(|e| {
+        let _ = tx.try_send(op).map_err(|e| {
             let key = self.key;
             tracing::warn!("failed to send RemoveCancelKey for {key}: {e}");
         });
