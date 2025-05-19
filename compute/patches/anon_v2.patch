@@ -1,3 +1,22 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 1037705..9f2ffee 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -24,12 +24,12 @@ fake = { version = "4.3.0", features = ["bigdecimal", "chrono", "http", "rust_de
+ image = "0.25.5"
+ md-5 = "0.10.6"
+ paste = "1.0"
+-pgrx = "0.14.1"
++pgrx = { git = "https://github.com/thesuhas/pgrx.git", branch = "expose_guc_assign_hook" }
+ rand = "0.8.5"
+ regex = "1.10.2"
+ 
+ [dev-dependencies]
+-pgrx-tests = "0.14.1"
++pgrx-tests = { git = "https://github.com/thesuhas/pgrx.git", branch = "expose_guc_assign_hook" }
+ 
+ [profile.dev]
+ panic = "unwind"
 diff --git a/sql/anon.sql b/sql/anon.sql
 index 0cdc769..f6cc950 100644
 --- a/sql/anon.sql
@@ -12,7 +31,7 @@ index 0cdc769..f6cc950 100644
 +GRANT ALL ON SCHEMA anon to neon_superuser;
 +GRANT ALL ON ALL TABLES IN SCHEMA anon TO neon_superuser;
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..9b6164b 100644
+index 7da6553..7961984 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
 @@ -74,50 +74,49 @@ $$
@@ -127,3 +146,190 @@ index 7da6553..9b6164b 100644
    VOLATILE
    PARALLEL UNSAFE -- because init is unsafe
    SECURITY INVOKER
+@@ -264,3 +263,22 @@ $$
+ ;
+ 
+ SECURITY LABEL FOR anon ON FUNCTION anon.unload IS 'UNTRUSTED';
++
++
++CREATE OR REPLACE FUNCTION anon.toggle_transparent_dynamic_masking(
++  dbname TEXT,
++  toggle BOOLEAN DEFAULT TRUE
++)
++RETURNS VOID AS
++$$
++BEGIN
++  EXECUTE format('ALTER DATABASE %I SET anon.transparent_dynamic_masking TO %s', dbname, toggle::TEXT);
++END;
++$$
++  LANGUAGE plpgsql
++  VOLATILE
++  SECURITY DEFINER
++  SET search_path=''
++;
++
++SECURITY LABEL FOR anon ON FUNCTION anon.toggle_transparent_dynamic_masking IS 'UNTRUSTED';
+diff --git a/src/guc.rs b/src/guc.rs
+index 74d3822..6dbd0bc 100644
+--- a/src/guc.rs
++++ b/src/guc.rs
+@@ -3,7 +3,7 @@
+ //----------------------------------------------------------------------------
+ 
+ use pgrx::*;
+-use std::ffi::CStr;
++use std::ffi::{CStr, c_void};
+ 
+ pub static ANON_DUMMY_LOCALE: GucSetting<Option<&'static CStr>> =
+     GucSetting::<Option<&'static CStr>>::new(Some(unsafe {
+@@ -51,6 +51,41 @@ static ANON_MASK_SCHEMA: GucSetting<Option<&'static CStr>> =
+         CStr::from_bytes_with_nul_unchecked(b"mask\0")
+     }));
+ 
++
++unsafe extern "C-unwind" fn check_bool_guc_hook(
++   _newval: *mut bool,
++   _extra: *mut *mut c_void,
++   _source: u32
++) -> bool {
++    unsafe {
++        let oid = pg_sys::GetUserId();
++        let user_name = CStr::from_ptr(pg_sys::GetUserNameFromId(oid, true));
++        // postgres user OID
++        if user_name.to_str().unwrap() != "neon_superuser" || !pg_sys::superuser() {
++            pg_sys::ereport!(PgLogLevel::NOTICE, PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE, "You are not authorized to change this GUC");
++            return false;
++        }
++        return true;
++    }
++}
++
++ unsafe extern "C-unwind" fn check_string_guc_hook(
++    _newval: *mut *mut i8,
++    _extra: *mut *mut c_void,
++    _source: u32
++ ) -> bool {
++     unsafe {
++         let oid = pg_sys::GetUserId();
++         let user_name = CStr::from_ptr(pg_sys::GetUserNameFromId(oid, true));
++         // postgres user OID
++         if user_name.to_str().unwrap() != "neon_superuser" || !pg_sys::superuser() {
++             pg_sys::ereport!(PgLogLevel::NOTICE, PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE, "You are not authorized to change this GUC");
++             return false;
++         }
++         return true;
++     }
++ }
++
+ // Register the GUC parameters for the extension
+ //
+ pub fn register_gucs() {
+@@ -61,6 +96,9 @@ pub fn register_gucs() {
+         &ANON_DUMMY_LOCALE,
+         GucContext::Suset,
+         GucFlags::SUPERUSER_ONLY,
++        Some(check_string_guc_hook),
++        None,
++        None,
+     );
+ 
+     GucRegistry::define_string_guc(
+@@ -70,6 +108,9 @@ pub fn register_gucs() {
+         &ANON_K_ANONYMITY_PROVIDER,
+         GucContext::Suset,
+         GucFlags::SUPERUSER_ONLY,
++        Some(check_string_guc_hook),
++        None,
++        None,
+     );
+ 
+     //
+@@ -87,6 +128,9 @@ pub fn register_gucs() {
+         &ANON_MASKING_POLICIES,
+         GucContext::Suset,
+         GucFlags::SUPERUSER_ONLY, /* | GucFlags::LIST_INPUT */
++        Some(check_string_guc_hook),
++        None,
++        None,
+     );
+ 
+     GucRegistry::define_bool_guc(
+@@ -96,6 +140,9 @@ pub fn register_gucs() {
+         &ANON_PRIVACY_BY_DEFAULT,
+         GucContext::Suset,
+         GucFlags::default(),
++        Some(check_bool_guc_hook),
++        None,
++        None,
+     );
+     GucRegistry::define_bool_guc(
+         "anon.transparent_dynamic_masking",
+@@ -104,6 +151,9 @@ pub fn register_gucs() {
+         &ANON_TRANSPARENT_DYNAMIC_MASKING,
+         GucContext::Suset,
+         GucFlags::default(),
++        None,
++        None,
++        None,
+     );
+ 
+     GucRegistry::define_bool_guc(
+@@ -113,6 +163,9 @@ pub fn register_gucs() {
+         &ANON_RESTRICT_TO_TRUSTED_SCHEMAS,
+         GucContext::Suset,
+         GucFlags::SUPERUSER_ONLY,
++        Some(check_bool_guc_hook),
++        None,
++        None,
+     );
+ 
+     GucRegistry::define_bool_guc(
+@@ -122,6 +175,9 @@ pub fn register_gucs() {
+         &ANON_STRICT_MODE,
+         GucContext::Suset,
+         GucFlags::default(),
++        Some(check_bool_guc_hook),
++        None,
++        None,
+     );
+ 
+     // The GUC vars below are not used in the Rust code
+@@ -134,6 +190,9 @@ pub fn register_gucs() {
+         &ANON_ALGORITHM,
+         GucContext::Suset,
+         GucFlags::SUPERUSER_ONLY,
++        Some(check_string_guc_hook),
++        None,
++        None,
+     );
+ 
+     GucRegistry::define_string_guc(
+@@ -143,6 +202,9 @@ pub fn register_gucs() {
+         &ANON_MASK_SCHEMA,
+         GucContext::Suset,
+         GucFlags::default(),
++        Some(check_string_guc_hook),
++        None,
++        None,
+     );
+ 
+     GucRegistry::define_string_guc(
+@@ -152,6 +214,9 @@ pub fn register_gucs() {
+         &ANON_SALT,
+         GucContext::Suset,
+         GucFlags::SUPERUSER_ONLY,
++        Some(check_string_guc_hook),
++        None,
++        None,
+     );
+ 
+     GucRegistry::define_string_guc(
+@@ -161,5 +226,8 @@ pub fn register_gucs() {
+         &ANON_SOURCE_SCHEMA,
+         GucContext::Suset,
+         GucFlags::default(),
++        Some(check_string_guc_hook),
++        None,
++        None,
+     );
+ }

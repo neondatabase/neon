@@ -1097,7 +1097,7 @@ USER root
 FROM pg-build-nonroot-with-cargo AS rust-extensions-build-pgrx14
 ARG PG_VERSION
 
-RUN cargo install --locked --version 0.14.1 cargo-pgrx && \
+RUN cargo install --locked --git https://github.com/thesuhas/pgrx.git --branch expose_guc_assign_hook cargo-pgrx && \
     /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
 
 USER root
