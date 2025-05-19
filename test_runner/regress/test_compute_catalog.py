@@ -19,6 +19,14 @@ TEST_ROLE_NAMES = [
     {"name": "role$"},
     {"name": "role$$"},
     {"name": "role$x$"},
+    {"name": "x"},
+    {"name": "xx"},
+    {"name": "$x"},
+    {"name": "x$"},
+    {"name": "$x$"},
+    {"name": "xx$"},
+    {"name": "$xx"},
+    {"name": "$xx$"},
 ]
 
 TEST_DB_NAMES = [
@@ -73,6 +81,38 @@ TEST_DB_NAMES = [
     {
         "name": "db name$x$",
         "owner": "role$x$",
+    },
+    {
+        "name": "x",
+        "owner": "x",
+    },
+    {
+        "name": "xx",
+        "owner": "xx",
+    },
+    {
+        "name": "$x",
+        "owner": "$x",
+    },
+    {
+        "name": "x$",
+        "owner": "x$",
+    },
+    {
+        "name": "$x$",
+        "owner": "$x$",
+    },
+    {
+        "name": "xx$",
+        "owner": "xx$",
+    },
+    {
+        "name": "$xx",
+        "owner": "$xx",
+    },
+    {
+        "name": "$xx$",
+        "owner": "$xx$",
     },
 ]
 
@@ -146,6 +186,10 @@ def test_compute_create_drop_dbs_and_roles(neon_simple_env: NeonEnv):
     """
     Test that compute_ctl can create and work with databases and roles
     with special characters (whitespaces, %, tabs, etc.) in the name.
+    Also use `drop_subscriptions_before_start: true`. We do not actually
+    have any subscriptions in this test, so it should be no-op, but it
+    i) simulates the case when we create a second dev branch together with
+    a new project creation, and ii) just generally stresses more code paths.
     """
     env = neon_simple_env
 
@@ -159,6 +203,7 @@ def test_compute_create_drop_dbs_and_roles(neon_simple_env: NeonEnv):
         **{
             "spec": {
                 "skip_pg_catalog_updates": False,
+                "drop_subscriptions_before_start": True,
                 "cluster": {
                     "roles": TEST_ROLE_NAMES,
                     "databases": TEST_DB_NAMES,
@@ -202,6 +247,7 @@ def test_compute_create_drop_dbs_and_roles(neon_simple_env: NeonEnv):
         **{
             "spec": {
                 "skip_pg_catalog_updates": False,
+                "drop_subscriptions_before_start": True,
                 "cluster": {
                     "roles": [],
                     "databases": [],

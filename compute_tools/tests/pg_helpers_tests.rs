@@ -71,6 +71,14 @@ test.escaping = 'here''s a backslash \\ and a quote '' and a double-quote " hoor
             ("name$$$", ("$x$name$$$$x$", "xx")),
             ("name$$$$", ("$x$name$$$$$x$", "xx")),
             ("name$x$", ("$xx$name$x$$xx$", "xxx")),
+            ("x", ("$xx$x$xx$", "xxx")),
+            ("xx", ("$xxx$xx$xxx$", "xxxx")),
+            ("$x", ("$xx$$x$xx$", "xxx")),
+            ("x$", ("$xx$x$$xx$", "xxx")),
+            ("$x$", ("$xx$$x$$xx$", "xxx")),
+            ("xx$", ("$xxx$xx$$xxx$", "xxxx")),
+            ("$xx", ("$xxx$$xx$xxx$", "xxxx")),
+            ("$xx$", ("$xxx$$xx$$xxx$", "xxxx")),
         ];
 
         for (input, expected) in test_cases {
