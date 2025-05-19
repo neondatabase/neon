@@ -565,7 +565,7 @@ async fn client_grpc(
         }
 
         let (start, result) = inflight.next().await.unwrap();
-       result.expect("getpage request should succeed");
+        result.expect("getpage request should succeed");
         let end = Instant::now();
         shared_state.live_stats.request_done();
         ticks_processed += 1;
