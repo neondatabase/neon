@@ -69,6 +69,11 @@ pub struct InMemoryLayer {
     ///
     /// We use a separate lock for the index to reduce the critical section
     /// during which reads cannot be planned.
+    ///
+    /// If you need access to both the index and the underlying file at the same time,
+    /// respect the following locking order to avoid deadlocks:
+    /// 1. [`InMemoryLayer::inner`]
+    /// 2. [`InMemoryLayer::index`]
     index: RwLock<BTreeMap<CompactKey, VecMap<Lsn, IndexEntry>>>,
 
     /// The above fields never change, except for `end_lsn`, which is only set once,
@@ -687,6 +692,18 @@ impl InMemoryLayer {
 
     /// Records the end_lsn for non-dropped layers.
     /// `end_lsn` is exclusive
+    ///
+    /// A note on locking:
+    /// The current API of [`InMemoryLayer`] does not ensure that there's no ongoing
+    /// writes while freezing the layer. This is enforced at a higher level via
+    /// [`crate::tenant::Timeline::write_lock`]. Freeze might be called via two code paths:
+    /// 1. Via the active [`crate::tenant::timeline::TimelineWriter`]. This holds the
+    ///    Timeline::write_lock for its lifetime. The rolling is handled in
+    ///    [`crate::tenant::timeline::TimelineWriter::put_batch`]. It's a &mut self function
+    ///    so can't be called from different threads.
+    /// 2. In the background via [`crate::tenant::Timeline::maybe_freeze_ephemeral_layer`].
+    ///    This only proceeds if try_lock on Timeline::write_lock succeeds (i.e. there's no active writer),
+    ///    hence there can be no concurrent writes
     pub async fn freeze(&self, end_lsn: Lsn) {
         assert!(
             self.start_lsn < end_lsn,
