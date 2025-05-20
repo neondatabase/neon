@@ -218,6 +218,19 @@ impl Planner {
                 checkpoint_buf,
             )));
 
+        // Sort the tasks by the key ranges they handle.
+        // The plan being generated here needs to be stable across invocations
+        // of this method.
+        self.tasks.sort_by_key(|task| match task {
+            AnyImportTask::SingleKey(key) => (key.key, key.key.next()),
+            AnyImportTask::RelBlocks(rel_blocks) => {
+                (rel_blocks.key_range.start, rel_blocks.key_range.end)
+            }
+            AnyImportTask::SlruBlocks(slru_blocks) => {
+                (slru_blocks.key_range.start, slru_blocks.key_range.end)
+            }
+        });
+
         // Assigns parts of key space to later parallel jobs
         let mut last_end_key = Key::MIN;
         let mut current_chunk = Vec::new();
