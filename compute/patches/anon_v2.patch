@@ -151,7 +151,7 @@ index 7da6553..7961984 100644
 +
 +SECURITY LABEL FOR anon ON FUNCTION anon.toggle_transparent_dynamic_masking IS 'UNTRUSTED';
 diff --git a/src/guc.rs b/src/guc.rs
-index 74d3822..2cd52d3 100644
+index 74d3822..72e7f6b 100644
 --- a/src/guc.rs
 +++ b/src/guc.rs
 @@ -3,7 +3,7 @@
@@ -251,7 +251,7 @@ index 74d3822..2cd52d3 100644
          &ANON_TRANSPARENT_DYNAMIC_MASKING,
          GucContext::Suset,
          GucFlags::default(),
-+        None,
++        Some(check_bool_guc_hook),
 +        None,
 +        None,
      );
