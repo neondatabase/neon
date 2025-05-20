@@ -937,7 +937,7 @@ impl ChunkProcessingJob {
                 let guard = timeline.layers.read().await;
                 let existing_layer = guard.try_get_from_key(&desc.key());
                 if let Some(layer) = existing_layer {
-                    if layer.metadata().generation != timeline.generation {
+                    if layer.metadata().generation == timeline.generation {
                         return Err(anyhow::anyhow!(
                             "Import attempted to rewrite layer file in the same generation: {}",
                             layer.local_path()
