@@ -93,6 +93,11 @@ pub async fn doit(
                 );
             }
 
+            timeline
+                .remote_client
+                .schedule_index_upload_for_file_changes()?;
+            timeline.remote_client.wait_completion().await?;
+
             // Communicate that shard is done.
             // Ensure at-least-once delivery of the upcall to storage controller
             // before we mark the task as done and never come here again.

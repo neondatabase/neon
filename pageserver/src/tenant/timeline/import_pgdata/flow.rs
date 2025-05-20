@@ -455,6 +455,9 @@ impl Plan {
                                     import_plan_hash,
                                 };
 
+                                timeline.remote_client.schedule_index_upload_for_file_changes()?;
+                                timeline.remote_client.wait_completion().await?;
+
                                 storcon_client.put_timeline_import_status(
                                     timeline.tenant_shard_id,
                                     timeline.timeline_id,
