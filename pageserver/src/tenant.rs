@@ -855,6 +855,14 @@ impl Debug for SetStoppingError {
     }
 }
 
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum FinalizeTimelineImportError {
+    #[error("Import task not done yet")]
+    ImportTaskStillRunning,
+    #[error("Shutting down")]
+    ShuttingDown,
+}
+
 /// Arguments to [`TenantShard::create_timeline`].
 ///
 /// Not usable as an idempotency key for timeline creation because if [`CreateTimelineParamsBranch::ancestor_start_lsn`]
@@ -2847,13 +2855,13 @@ impl TenantShard {
     pub(crate) async fn finalize_importing_timeline(
         &self,
         timeline_id: TimelineId,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), FinalizeTimelineImportError> {
         let timeline = {
             let locked = self.timelines_importing.lock().unwrap();
             match locked.get(&timeline_id) {
                 Some(importing_timeline) => {
                     if !importing_timeline.import_task_handle.is_finished() {
-                        return Err(anyhow::anyhow!("Import task not done yet"));
+                        return Err(FinalizeTimelineImportError::ImportTaskStillRunning);
                     }
 
                     importing_timeline.timeline.clone()
@@ -2866,8 +2874,13 @@ impl TenantShard {
 
         timeline
             .remote_client
-            .schedule_index_upload_for_import_pgdata_finalize()?;
-        timeline.remote_client.wait_completion().await?;
+            .schedule_index_upload_for_import_pgdata_finalize()
+            .map_err(|_err| FinalizeTimelineImportError::ShuttingDown)?;
+        timeline
+            .remote_client
+            .wait_completion()
+            .await
+            .map_err(|_err| FinalizeTimelineImportError::ShuttingDown)?;
 
         self.timelines_importing
             .lock()
