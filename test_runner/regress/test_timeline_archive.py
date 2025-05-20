@@ -249,7 +249,9 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
     wait_until(leaf_offloaded)
     wait_until(parent_offloaded)
 
-    offloaded_count = ps_http.get_metric_value("pageserver_tenant_offloaded_timelines", {"tenant_id": f"{tenant_id}"})
+    offloaded_count = ps_http.get_metric_value(
+        "pageserver_tenant_offloaded_timelines", {"tenant_id": f"{tenant_id}"}
+    )
     assert offloaded_count == 2
 
     # Offloaded child timelines should still prevent deletion
