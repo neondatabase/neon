@@ -1149,10 +1149,20 @@ impl TenantShard {
             ctx,
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
-        anyhow::ensure!(
-            disk_consistent_lsn.is_valid(),
-            "Timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn"
-        );
+
+        if !disk_consistent_lsn.is_valid() {
+            // As opposed to normal timelines which get initialised with a disk consitent LSN
+            // via initdb, imported timelines start from 0. If the import task stops before
+            // it advances disk consitent LSN, allow it to resume.
+            let in_progress_import = import_pgdata
+                .as_ref()
+                .map(|import| !import.is_done())
+                .unwrap_or(false);
+            if !in_progress_import {
+                anyhow::bail!("Timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn");
+            }
+        }
+
         assert_eq!(
             disk_consistent_lsn,
             metadata.disk_consistent_lsn(),
@@ -1246,20 +1256,25 @@ impl TenantShard {
                     }
                 }
 
-                // Sanity check: a timeline should have some content.
-                anyhow::ensure!(
-                    ancestor.is_some()
-                        || timeline
-                            .layers
-                            .read()
-                            .await
-                            .layer_map()
-                            .expect("currently loading, layer manager cannot be shutdown already")
-                            .iter_historic_layers()
-                            .next()
-                            .is_some(),
-                    "Timeline has no ancestor and no layer files"
-                );
+                if disk_consistent_lsn.is_valid() {
+                    // Sanity check: a timeline should have some content.
+                    // Exception: importing timelines might not yet have any
+                    anyhow::ensure!(
+                        ancestor.is_some()
+                            || timeline
+                                .layers
+                                .read()
+                                .await
+                                .layer_map()
+                                .expect(
+                                    "currently loading, layer manager cannot be shutdown already"
+                                )
+                                .iter_historic_layers()
+                                .next()
+                                .is_some(),
+                        "Timeline has no ancestor and no layer files"
+                    );
+                }
 
                 Ok(TimelineInitAndSyncResult::ReadyToActivate)
             }
