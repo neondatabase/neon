@@ -113,7 +113,7 @@ index 28fefad6fe6..7d7060820e4 100644
  -- WHERE clause
  SELECT c_bigint, c_text FROM T WHERE c_bigint = -1 LIMIT 1;
 diff --git a/src/test/regress/sql/hash_index.sql b/src/test/regress/sql/hash_index.sql
-index fcd5f91a39f..074e1e4e903 100644
+index fcd5f91a39f..6ac90c57730 100644
 --- a/src/test/regress/sql/hash_index.sql
 +++ b/src/test/regress/sql/hash_index.sql
 @@ -220,7 +220,7 @@ SELECT h.seqno AS f20000
@@ -121,7 +121,7 @@ index fcd5f91a39f..074e1e4e903 100644
  INSERT INTO hash_split_heap SELECT 1 FROM generate_series(1, 95 * 500) a;
  CREATE INDEX hash_split_index on hash_split_heap USING HASH (keycol);
 -INSERT INTO hash_split_heap SELECT 1 FROM generate_series(1, 95 * 5000) a;
-+INSERT INTO hash_split_heap SELECT 1 FROM generate_series(1, 0.1 * 95 * 5000) a;
++INSERT INTO hash_split_heap SELECT 1 FROM generate_series(1, POW(95, 0.5) * 5000) a;
  
  -- Let's do a backward scan.
  BEGIN;
@@ -130,7 +130,7 @@ index fcd5f91a39f..074e1e4e903 100644
  -- DELETE, INSERT, VACUUM.
  DELETE FROM hash_split_heap WHERE keycol = 1;
 -INSERT INTO hash_split_heap SELECT a/2 FROM generate_series(1, 95 * 25000) a;
-+INSERT INTO hash_split_heap SELECT a/2 FROM generate_series(1, 0.1 * 95 * 25000) a;
++INSERT INTO hash_split_heap SELECT a/2 FROM generate_series(1, POW(95, 0.5) * 25000) a;
  
  VACUUM hash_split_heap;
  
@@ -187,6 +187,22 @@ index c9fdd126d15..bbbda3d6237 100644
  insert into list_parted (b) values (1);
  select tableoid::regclass::text, a, min(b) as min_b, max(b) as max_b from list_parted group by 1, 2 order by 1;
  
+diff --git a/src/test/regress/sql/join_hash.sql b/src/test/regress/sql/join_hash.sql
+index 47abc031c0f..34c4d8c1312 100644
+--- a/src/test/regress/sql/join_hash.sql
++++ b/src/test/regress/sql/join_hash.sql
+@@ -310,9 +310,9 @@ rollback to settings;
+ -- Exercise rescans.  We'll turn off parallel_leader_participation so
+ -- that we can check that instrumentation comes back correctly.
+ 
+-create table join_foo as select generate_series(1, 95 * 3) as id, 'xxxxx'::text as t;
++create table join_foo as select generate_series(1, POW(95, 0.5) * 3) as id, 'xxxxx'::text as t;
+ alter table join_foo set (parallel_workers = 0);
+-create table join_bar as select generate_series(1, 95 * 10000) as id, 'xxxxx'::text as t;
++create table join_bar as select generate_series(1, POW(95, 0.5) * 10000) as id, 'xxxxx'::text as t;
+ alter table join_bar set (parallel_workers = 2);
+ 
+ -- multi-batch with rescan, parallel-oblivious
 diff --git a/src/test/regress/sql/merge.sql b/src/test/regress/sql/merge.sql
 index b60271d9400..7d89c85179f 100644
 --- a/src/test/regress/sql/merge.sql
@@ -428,9 +444,27 @@ index d39a2b4e8f8..2d862985510 100644
  
  INSERT INTO quad_poly_tbl
 diff --git a/src/test/regress/sql/psql.sql b/src/test/regress/sql/psql.sql
-index 12c40039b18..7d4ae7604dc 100644
+index 12c40039b18..e08b0aee00e 100644
 --- a/src/test/regress/sql/psql.sql
 +++ b/src/test/regress/sql/psql.sql
+@@ -187,7 +187,7 @@ select 'drop table gexec_test', 'select ''2000-01-01''::date as party_over'
+ prepare q as select array_to_string(array_agg(repeat('x',2*n)),E'\n') as "ab
+ 
+ c", array_to_string(array_agg(repeat('y',20-2*n)),E'\n') as "a
+-bc" from generate_series(1, 95 * 10) as n(n) group by n>1 order by n>1;
++bc" from generate_series(1,10) as n(n) group by n>1 order by n>1;
+ 
+ \pset linestyle ascii
+ 
+@@ -304,7 +304,7 @@ execute q;
+ deallocate q;
+ 
+ -- test single-line header and data
+-prepare q as select repeat('x',2*n) as "0123456789abcdef", repeat('y',20-2*n) as "0123456789" from generate_series(1, 95 * 10) as n;
++prepare q as select repeat('x',2*n) as "0123456789abcdef", repeat('y',20-2*n) as "0123456789" from generate_series(1,10) as n;
+ 
+ \pset linestyle ascii
+ 
 @@ -1220,7 +1220,7 @@ create table child_10_20 partition of parent_tab
    for values from (10) to (20);
  create table child_20_30 partition of parent_tab
@@ -441,7 +475,7 @@ index 12c40039b18..7d4ae7604dc 100644
  for values from (30) to (40)
    partition by range(id);
 diff --git a/src/test/regress/sql/rangetypes.sql b/src/test/regress/sql/rangetypes.sql
-index b51d6c405c2..c9bcd7248b6 100644
+index b51d6c405c2..a2d50d7bb43 100644
 --- a/src/test/regress/sql/rangetypes.sql
 +++ b/src/test/regress/sql/rangetypes.sql
 @@ -314,13 +314,13 @@ select count(*) from test_range_gist where ir -|- int4multirange(int4range(100,2
@@ -455,18 +489,18 @@ index b51d6c405c2..c9bcd7248b6 100644
 -insert into test_range_spgist select int4range(NULL,g*10,'(]') from generate_series(1, 95 * 100) g;
 -insert into test_range_spgist select int4range(g*10,NULL,'(]') from generate_series(1, 95 * 100) g;
 -insert into test_range_spgist select int4range(g, g+10) from generate_series(1, 95 * 2000) g;
-+insert into test_range_spgist select int4range(g, g+10) from generate_series(1, (0.1 * 95 * 2000)::int) g;
-+insert into test_range_spgist select 'empty'::int4range from generate_series(1, (0.1 * 95 * 500)::int) g;
-+insert into test_range_spgist select int4range(g, g+10000) from generate_series(1, (0.1 * 95 * 1000)::int) g;
-+insert into test_range_spgist select 'empty'::int4range from generate_series(1, (0.1 * 95 * 500)::int) g;
-+insert into test_range_spgist select int4range(NULL,g*10,'(]') from generate_series(1, (0.1 * 95 * 100)::int) g;
-+insert into test_range_spgist select int4range(g*10,NULL,'(]') from generate_series(1, (0.1 * 95 * 100)::int) g;
-+insert into test_range_spgist select int4range(g, g+10) from generate_series(1, (0.1 * 95 * 2000)::int) g;
++insert into test_range_spgist select int4range(g, g+10) from generate_series(1, POW(95, 0.5)::int * 2000) g;
++insert into test_range_spgist select 'empty'::int4range from generate_series(1, POW(95, 0.5)::int * 500) g;
++insert into test_range_spgist select int4range(g, g+10000) from generate_series(1, POW(95, 0.5)::int * 1000) g;
++insert into test_range_spgist select 'empty'::int4range from generate_series(1, POW(95, 0.5)::int * 500) g;
++insert into test_range_spgist select int4range(NULL,g*10,'(]') from generate_series(1, POW(95, 0.5)::int * 100) g;
++insert into test_range_spgist select int4range(g*10,NULL,'(]') from generate_series(1, POW(95, 0.5)::int * 100) g;
++insert into test_range_spgist select int4range(g, g+10) from generate_series(1, POW(95, 0.5)::int * 2000) g;
  
  -- first, verify non-indexed results
  SET enable_seqscan    = t;
 diff --git a/src/test/regress/sql/spgist.sql b/src/test/regress/sql/spgist.sql
-index 0c4f24e1d49..61e53375539 100644
+index 0c4f24e1d49..ed9f7c45411 100644
 --- a/src/test/regress/sql/spgist.sql
 +++ b/src/test/regress/sql/spgist.sql
 @@ -16,9 +16,9 @@ vacuum spgist_point_tbl;
@@ -474,10 +508,10 @@ index 0c4f24e1d49..61e53375539 100644
  -- Insert more data, to make the index a few levels deep.
  insert into spgist_point_tbl (id, p)
 -select g,      point(g*10, g*10) from generate_series(1, 95 * 10000) g;
-+select g,      point(g*10, g*10) from generate_series(1, 0.1 * 95 * 10000) g;
++select g,      point(g*10, g*10) from generate_series(1, POW(95, 0.5) * 10000) g;
  insert into spgist_point_tbl (id, p)
 -select g+100000, point(g*10+1, g*10+1) from generate_series(1, 95 * 10000) g;
-+select g+100000, point(g*10+1, g*10+1) from generate_series(1, 0.1 * 95 * 10000) g;
++select g+100000, point(g*10+1, g*10+1) from generate_series(1, POW(95, 0.5) * 10000) g;
  
  -- To test vacuum, delete some entries from all over the index.
  delete from spgist_point_tbl where id % 2 = 1;
