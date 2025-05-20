@@ -960,6 +960,7 @@ def get_layer_map(env, tenant_shard_id, timeline_id, ps_id):
             delta_layer_count += 1
     return image_layer_count, delta_layer_count
 
+
 def test_image_layer_creation_time_threshold(neon_env_builder: NeonEnvBuilder):
     """
     Tests that image layers can be created when the time threshold is reached on non-0 shards.

@@ -1673,6 +1673,141 @@ def test_shard_resolve_during_split_abort(neon_env_builder: NeonEnvBuilder):
 # END_HADRON
 
 
+# HADRON
+def test_back_pressure_per_shard(neon_env_builder: NeonEnvBuilder):
+    """
+    Tests back pressure knobs are enforced on the per shard basis instead of at the tenant level.
+    """
+    init_shard_count = 4
+    neon_env_builder.num_pageservers = init_shard_count
+    stripe_size = 1
+
+    env = neon_env_builder.init_start(
+        initial_tenant_shard_count=init_shard_count,
+        initial_tenant_shard_stripe_size=stripe_size,
+        initial_tenant_conf={
+            # disable auto-flush of shards and set max_replication_flush_lag as 15MB.
+            # The backpressure parameters must be enforced at the shard level to avoid stalling PG.
+            "checkpoint_distance": 1 * 1024 * 1024 * 1024,
+            "checkpoint_timeout": "1h",
+        },
+    )
+
+    endpoint = env.endpoints.create(
+        "main",
+        config_lines=[
+            "max_replication_write_lag = 0",
+            "max_replication_apply_lag = 0",
+            "max_replication_flush_lag = 15MB",
+            "neon.max_cluster_size = 10GB",
+        ],
+    )
+    endpoint.respec(skip_pg_catalog_updates=False)  # Needed for databricks_system to get created.
+    endpoint.start()
+
+    # generate 20MB of data
+    endpoint.safe_psql(
+        "CREATE TABLE usertable AS SELECT s AS KEY, repeat('a', 1000) as VALUE from generate_series(1, 20000) s;"
+    )
+    res = endpoint.safe_psql(
+        "SELECT neon.backpressure_throttling_time() as throttling_time", dbname="databricks_system"
+    )[0]
+    assert res[0] == 0, f"throttling_time should be 0, but got {res[0]}"
+
+    endpoint.stop()
+
+
+# HADRON
+def test_shard_split_abort_not_impact_succesful_tenants(neon_env_builder: NeonEnvBuilder):
+    """
+    Tests that shard split abort does not impact other already split tenants
+    """
+    init_shard_count = 2
+    neon_env_builder.num_pageservers = init_shard_count
+    stripe_size = 1
+
+    env = neon_env_builder.init_start(
+        initial_tenant_shard_count=init_shard_count,
+        initial_tenant_shard_stripe_size=stripe_size,
+    )
+
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*Enqueuing background abort.*",
+            ".*failpoint.*",
+        ]
+    )
+
+    endpoint1 = env.endpoints.create_start(branch_name="main")
+
+    # create an extra tenant
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+    env.create_tenant(tenant_id, timeline_id, shard_count=init_shard_count)
+    endpoint2 = env.endpoints.create_start(branch_name="main", tenant_id=tenant_id)
+
+    tenants = env.storage_controller.tenant_list()
+    assert len(tenants) == 2
+
+    # split tenant 1
+    env.storage_controller.tenant_shard_split(env.initial_tenant, shard_count=4)
+
+    # split tenant 2 and abort it
+    env.storage_controller.configure_failpoints(("shard-split-pre-complete-abort", "return(1)"))
+    with pytest.raises(StorageControllerApiException):
+        env.storage_controller.tenant_shard_split(tenant_id, shard_count=4)
+
+    def check_abort_finished():
+        assert env.storage_controller.log_contains(".*Successfully aborted split.*")
+
+    wait_until(check_abort_finished)
+
+    tenants = env.storage_controller.tenant_list()
+    # make sure we still have 2 tenants
+    assert len(tenants) == 2
+    print(tenants)
+
+    assert len(tenants[0]["shards"]) + len(tenants[1]["shards"]) == 6
+
+    endpoint1.stop_and_destroy()
+    endpoint2.stop_and_destroy()
+
+
+# HADRON
+def test_shard_split_page_server_timeout(neon_env_builder: NeonEnvBuilder):
+    """
+    Tests that shard split can correctly handle page server timeouts and abort the split
+    """
+    init_shard_count = 2
+    neon_env_builder.num_pageservers = 1
+    stripe_size = 1
+
+    env = neon_env_builder.init_start(
+        initial_tenant_shard_count=init_shard_count,
+        initial_tenant_shard_stripe_size=stripe_size,
+    )
+
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*Enqueuing background abort.*",
+            ".*failpoint.*",
+            ".*Failed to abort.*",
+            ".*Exclusive lock by ShardSplit was held.*",
+        ]
+    )
+    env.pageserver.allowed_errors.extend([".*request was dropped before completing.*"])
+
+    endpoint1 = env.endpoints.create_start(branch_name="main")
+
+    env.pageserver.http_client().configure_failpoints(("shard-split-post-finish-pause", "pause"))
+
+    with pytest.raises(StorageControllerApiException):
+        env.storage_controller.tenant_shard_split(env.initial_tenant, shard_count=4)
+
+    env.pageserver.http_client().configure_failpoints(("shard-split-post-finish-pause", "off"))
+    endpoint1.stop_and_destroy()
+
+
 def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
     """
     Check a scenario when one of the shards is much slower than others.

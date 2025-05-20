@@ -351,13 +351,6 @@ pub struct Timeline {
     last_image_layer_creation_check_at: AtomicLsn,
     last_image_layer_creation_check_instant: std::sync::Mutex<Option<Instant>>,
 
-    // HADRON
-    /// If a key range has writes with LSN > force_image_creation_lsn, then we should force image layer creation
-    /// on this key range.
-    force_image_creation_lsn: AtomicLsn,
-    /// The last time instant when force_image_creation_lsn is computed.
-    force_image_creation_lsn_computed_at: std::sync::Mutex<Option<Instant>>,
-
     /// Current logical size of the "datadir", at the last LSN.
     current_logical_size: LogicalSize,
 
@@ -3134,9 +3127,7 @@ impl Timeline {
                 repartition_threshold: 0,
                 last_image_layer_creation_check_at: AtomicLsn::new(0),
                 last_image_layer_creation_check_instant: Mutex::new(None),
-                // HADRON
-                force_image_creation_lsn: AtomicLsn::new(0),
-                force_image_creation_lsn_computed_at: std::sync::Mutex::new(None),
+
                 last_received_wal: Mutex::new(None),
                 rel_size_latest_cache: RwLock::new(HashMap::new()),
                 rel_size_snapshot_cache: Mutex::new(LruCache::new(relsize_snapshot_cache_capacity)),

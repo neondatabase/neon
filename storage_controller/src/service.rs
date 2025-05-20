@@ -60,6 +60,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, info_span, instrument, warn};
 use utils::completion::Barrier;
+use utils::env;
 use utils::generation::Generation;
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
@@ -6317,18 +6318,40 @@ impl Service {
         // TODO: issue split calls concurrently (this only matters once we're splitting
         // N>1 shards into M shards -- initially we're usually splitting 1 shard into N).
 
+        // HADRON: set a timeout for splitting individual shards on page servers.
+        // Currently we do not perform any retry because it's not clear if page server can handle
+        // partially split shards correctly.
+        let shard_split_timeout =
+            if let Some(env::DeploymentMode::Local) = env::get_deployment_mode() {
+                Duration::from_secs(30)
+            } else {
+                Duration::from_secs(5 * 60)
+            };
         for target in &targets {
             let ShardSplitTarget {
                 parent_id,
                 node,
                 child_ids,
             } = target;
+
+            let http_client = reqwest::ClientBuilder::new()
+                // .client
+                .timeout(shard_split_timeout)
+                .build()
+                .expect("Failed to construct HTTP client");
+
+            // http_client = http_client.pool_max_idle_per_host(0);
+            // for ssl_ca_cert in &config.ssl_ca_certs {
+            //     http_client = http_client.add_root_certificate(ssl_ca_cert.clone());
+            // }
+
             let client = PageserverClient::new(
                 node.get_id(),
-                self.http_client.clone(),
+                http_client,
                 node.base_url(),
                 self.config.pageserver_jwt_token.as_deref(),
             );
+
             let response = client
                 .tenant_shard_split(
                     *parent_id,

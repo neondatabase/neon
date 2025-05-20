@@ -1678,6 +1678,8 @@ impl TenantManager {
         // Phase 6: Release the InProgress on the parent shard
         drop(parent_slot_guard);
 
+        utils::pausable_failpoint!("shard-split-post-finish-pause");
+
         Ok(child_shards)
     }
 

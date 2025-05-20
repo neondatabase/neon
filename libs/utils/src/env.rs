@@ -47,6 +47,7 @@ where
 
 /* BEGIN_HADRON */
 pub enum DeploymentMode {
+    Local,
     Dev,
     Staging,
     Prod,
