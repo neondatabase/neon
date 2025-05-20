@@ -426,6 +426,8 @@ impl Plan {
                     }));
                 },
                 maybe_complete_job_idx = work.next() => {
+                    pausable_failpoint!("import-task-complete-pausable");
+
                     match maybe_complete_job_idx {
                         Some(Ok((job_idx, res))) => {
                             assert!(last_completed_job_idx.checked_add(1).unwrap() == job_idx);
