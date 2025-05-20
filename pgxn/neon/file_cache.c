@@ -12,6 +12,7 @@
 #include "postgres.h"
 
 #include <sys/file.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 #include <fcntl.h>
 
@@ -51,6 +52,10 @@
 #include "neon_perf_counters.h"
 #include "pagestore_client.h"
 #include "communicator.h"
+
+/* For the kernel module */
+#include "neon_pagecache.h"
+#define CLOCKCACHE_DEV_PATH "/dev/clockcache_dev"
 
 #define CriticalAssert(cond) do if (!(cond)) elog(PANIC, "LFC: assertion %s failed at %s:%d: ", #cond, __FILE__, __LINE__); while (0)
 
@@ -183,6 +188,7 @@ typedef struct FileCacheControl
 static HTAB *lfc_hash;
 static int	lfc_desc = -1;
 static LWLockId lfc_lock;
+
 static int	lfc_max_size;
 static int	lfc_size_limit;
 static int	lfc_prewarm_limit;
@@ -190,6 +196,8 @@ static int	lfc_prewarm_batch;
 static int	lfc_chunk_size_log = MAX_BLOCKS_PER_CHUNK_LOG;
 static int	lfc_blocks_per_chunk = MAX_BLOCKS_PER_CHUNK;
 static char *lfc_path;
+static bool lfc_use_kernel_module;
+
 static uint64 lfc_generation;
 static FileCacheControl *lfc_ctl;
 static bool lfc_do_prewarm;
@@ -202,6 +210,9 @@ bool lfc_store_prefetch_result;
 bool lfc_prewarm_update_ws_estimation;
 
 #define LFC_ENABLED() (lfc_ctl->limit != 0)
+
+static int pread_with_ioctl(void *buffer, uint64 blkno);
+static int pwrite_with_ioctl(const void *buffer, uint64 blkno);
 
 /*
  * Close LFC file if opened.
@@ -251,14 +262,19 @@ lfc_switch_off(void)
 		/*
 		 * We need to use unlink to to avoid races in LFC write, because it is not
 		 * protected by lock
+		 *
+		 * FIXME: how to clean up the kernel module device on trouble?
 		 */
-		unlink(lfc_path);
+		if (!lfc_use_kernel_module)
+		{
+			unlink(lfc_path);
 
-		fd = BasicOpenFile(lfc_path, O_RDWR | O_CREAT | O_TRUNC);
-		if (fd < 0)
-			elog(WARNING, "LFC: failed to recreate local file cache %s: %m", lfc_path);
-		else
-			close(fd);
+			fd = BasicOpenFile(lfc_path, O_RDWR | O_CREAT | O_TRUNC);
+			if (fd < 0)
+				elog(WARNING, "LFC: failed to recreate local file cache %s: %m", lfc_path);
+			else
+				close(fd);
+		}
 
 		/* Wakeup waiting backends */
 		for (int i = 0; i < N_COND_VARS; i++)
@@ -270,7 +286,8 @@ lfc_switch_off(void)
 static void
 lfc_disable(char const *op)
 {
-	elog(WARNING, "LFC: failed to %s local file cache at %s: %m, disabling local file cache", op, lfc_path);
+	elog(WARNING, "LFC: failed to %s local file cache at %s: %m, disabling local file cache",
+		 op, lfc_use_kernel_module ? CLOCKCACHE_DEV_PATH : lfc_path);
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 	lfc_switch_off();
@@ -301,7 +318,9 @@ lfc_ensure_opened(void)
 	/* Open cache file if not done yet */
 	if (lfc_desc < 0)
 	{
-		lfc_desc = BasicOpenFile(lfc_path, O_RDWR);
+		lfc_desc = BasicOpenFile(
+			lfc_use_kernel_module ? CLOCKCACHE_DEV_PATH : lfc_path,
+			O_RDWR);
 
 		if (lfc_desc < 0)
 		{
@@ -351,10 +370,16 @@ lfc_shmem_startup(void)
 		initSHLL(&lfc_ctl->wss_estimation);
 
 		/* Recreate file cache on restart */
-		fd = BasicOpenFile(lfc_path, O_RDWR | O_CREAT | O_TRUNC);
+		if (lfc_use_kernel_module)
+			fd = BasicOpenFile(CLOCKCACHE_DEV_PATH, O_RDWR);
+		else
+			fd = BasicOpenFile(lfc_path, O_RDWR | O_CREAT | O_TRUNC);
 		if (fd < 0)
 		{
-			elog(WARNING, "LFC: failed to create local file cache %s: %m", lfc_path);
+			if (lfc_use_kernel_module)
+				elog(WARNING, "LFC: failed to open " CLOCKCACHE_DEV_PATH ": %m");
+			else
+				elog(WARNING, "LFC: failed to create local file cache %s: %m", lfc_path);
 			lfc_ctl->limit = 0;
 		}
 		else
@@ -612,6 +637,15 @@ lfc_init(void)
 							NULL,
 							NULL,
 							NULL);
+
+	DefineCustomBoolVariable("neon.use_kernel_module",
+							 "Use neon_pagecache kernel module instead of a regular file (EXPERIMENTAL)",
+							 NULL,
+							 &lfc_use_kernel_module,
+							 true,
+							 PGC_POSTMASTER,
+							 0,
+							 NULL, NULL, NULL);
 
 	if (lfc_max_size == 0)
 		return;
@@ -1297,27 +1331,57 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			/* offset of first IOV */
 			first_read_offset += chunk_offs + first_block_in_chunk_read;
 
-			pgstat_report_wait_start(WAIT_EVENT_NEON_LFC_READ);
-
 			/* Read only the blocks we're interested in, limiting */
-			rc = preadv(lfc_desc, &iov[first_block_in_chunk_read],
-						nwrite, first_read_offset * BLCKSZ);
-			pgstat_report_wait_end();
-
-			if (rc != (BLCKSZ * nwrite))
+			if (lfc_use_kernel_module)
 			{
-				lfc_disable("read");
-				return -1;
+				pgstat_report_wait_start(WAIT_EVENT_NEON_LFC_READ);
+				for (int i = first_block_in_chunk_read; i < iov_last_used; i++)
+				{
+					if (!BITMAP_ISSET(chunk_mask, i))
+						continue;
+					Assert(iov[first_block_in_chunk_read + i].iov_len == BLCKSZ);
+					rc = pread_with_ioctl(&iov[first_block_in_chunk_read + i].iov_base, first_read_offset + i);
+					if (rc < 0 && errno == ENOENT)
+					{
+						/* The kernel module evicted the page */
+						elog(DEBUG1, "kernel module had evicted block");
+					}
+					else if (rc < 0)
+					{
+						pgstat_report_wait_end();
+						lfc_disable("ioctl read");
+						return -1;
+					}
+					else
+					{
+						/* success! */
+						BITMAP_SET(mask, buf_offset + i);
+					}
+				}
+				pgstat_report_wait_end();
 			}
-
-			/*
-			 * We successfully read the pages we know were valid when we
-			 * started reading; now mark those pages as read
-			 */
-			for (int i = first_block_in_chunk_read; i < iov_last_used; i++)
+			else
 			{
-				if (BITMAP_ISSET(chunk_mask, i))
-					BITMAP_SET(mask, buf_offset + i);
+				pgstat_report_wait_start(WAIT_EVENT_NEON_LFC_READ);
+				rc = preadv(lfc_desc, &iov[first_block_in_chunk_read],
+							nwrite, first_read_offset * BLCKSZ);
+				pgstat_report_wait_end();
+
+				if (rc != (BLCKSZ * nwrite))
+				{
+					lfc_disable("read");
+					return -1;
+				}
+
+				/*
+				 * We successfully read the pages we know were valid when we
+				 * started reading; now mark those pages as read
+				 */
+				for (int i = first_block_in_chunk_read; i < iov_last_used; i++)
+				{
+					if (BITMAP_ISSET(chunk_mask, i))
+						BITMAP_SET(mask, buf_offset + i);
+				}
 			}
 		}
 
@@ -1362,6 +1426,36 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	}
 
 	return blocks_read;
+}
+
+static int
+pread_with_ioctl(void *buffer, uint64 blkno)
+{
+	struct neon_rw_args args = {
+		.key = {
+			.key_hi = 0,
+			.key_lo = blkno
+		},
+		.offset = 0,
+		.length = POSTGRES_PAGE_SIZE,
+		.buffer = (__u64)(uintptr_t) buffer
+	};
+	return ioctl(lfc_desc, NEON_IOCTL_READ, &args);
+}
+
+static int
+pwrite_with_ioctl(const void *buffer, uint64 blkno)
+{
+	struct neon_rw_args args = {
+		.key = {
+			.key_hi = 0,
+			.key_lo = blkno
+		},
+		.offset = 0,
+		.length = POSTGRES_PAGE_SIZE,
+		.buffer = (__u64)(uintptr_t) buffer
+	};
+	return ioctl(lfc_desc, NEON_IOCTL_READ, &args);
 }
 
 /*
@@ -1484,7 +1578,6 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 {
 	BufferTag	tag;
 	FileCacheEntry *entry;
-	ssize_t		rc;
 	bool		found;
 	uint32		hash;
 	uint64		generation;
@@ -1493,6 +1586,7 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 	ConditionVariable* cv;
 	FileCacheBlockState state;
 	XLogRecPtr lwlsn;
+	bool		success;
 
 	int		chunk_offs = BLOCK_TO_CHUNK_OFF(blkno);
 
@@ -1571,16 +1665,60 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 
 	LWLockRelease(lfc_lock);
 
-	pgstat_report_wait_start(WAIT_EVENT_NEON_LFC_WRITE);
-	INSTR_TIME_SET_CURRENT(io_start);
-	rc = pwrite(lfc_desc, buffer, BLCKSZ,
-				((off_t) entry_offset * lfc_blocks_per_chunk + chunk_offs) * BLCKSZ);
-	INSTR_TIME_SET_CURRENT(io_end);
-	pgstat_report_wait_end();
-
-	if (rc != BLCKSZ)
+	if (lfc_use_kernel_module)
 	{
-		lfc_disable("write");
+		int			rc;
+
+		pgstat_report_wait_start(WAIT_EVENT_NEON_LFC_WRITE);
+		INSTR_TIME_SET_CURRENT(io_start);
+		rc = pwrite_with_ioctl(buffer,
+							   entry_offset * lfc_blocks_per_chunk + chunk_offs);
+		INSTR_TIME_SET_CURRENT(io_end);
+		pgstat_report_wait_end();
+
+		if (rc < 0 && errno == ENOMEM)
+		{
+			/*
+			 * Write was wasted.
+			 *
+			 * FIXME: We could mark the page in the chunk as UNAVAILABLE,
+			 * since we know it was not actually present in the kernel
+			 * cache. Any subsequent read on it will inevitably fail with
+			 * ENOENT. That's not a correctness issue however, assuming that
+			 * the call never returns ENOMEM when the old version of the page
+			 * is still in the cache.
+			 */
+			success = true;
+		}
+		else if (rc < 0)
+		{
+			success = false;
+		}
+		else
+		{
+			/* successful write */
+			success = true;
+		}
+	}
+	else
+	{
+		ssize_t rc;
+
+		pgstat_report_wait_start(WAIT_EVENT_NEON_LFC_WRITE);
+		INSTR_TIME_SET_CURRENT(io_start);
+
+		rc = pwrite(lfc_desc, buffer, BLCKSZ,
+					((off_t) entry_offset * lfc_blocks_per_chunk + chunk_offs) * BLCKSZ);
+
+		INSTR_TIME_SET_CURRENT(io_end);
+		pgstat_report_wait_end();
+
+		success = (rc == BLCKSZ);
+	}
+
+	if (!success)
+	{
+		lfc_disable(lfc_use_kernel_module ? "write ioctl" : "write");
 	}
 	else
 	{
@@ -1756,19 +1894,60 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		}
 		LWLockRelease(lfc_lock);
 
-		pgstat_report_wait_start(WAIT_EVENT_NEON_LFC_WRITE);
-		INSTR_TIME_SET_CURRENT(io_start);
-		rc = pwritev(lfc_desc, iov, blocks_in_chunk,
-					 ((off_t) entry_offset * lfc_blocks_per_chunk + chunk_offs) * BLCKSZ);
-		INSTR_TIME_SET_CURRENT(io_end);
-		pgstat_report_wait_end();
-
-		if (rc != BLCKSZ * blocks_in_chunk)
+		/* Perform the write */
+		if (lfc_use_kernel_module)
 		{
-			lfc_disable("write");
-			return;
+			pgstat_report_wait_start(WAIT_EVENT_NEON_LFC_WRITE);
+			INSTR_TIME_SET_CURRENT(io_start);
+			for (int i = 0; i < blocks_in_chunk; i++)
+			{
+				int			rc;
+
+				rc = pwrite_with_ioctl(
+					iov[i].iov_base,
+					entry_offset * lfc_blocks_per_chunk + chunk_offs
+					);
+				if (rc < 0 && errno == ENOMEM)
+				{
+					/*
+					 * Write was wasted.
+					 *
+					 * FIXME: We could mark the page in the chunk as UNAVAILABLE,
+					 * since we know it was not actually present in the kernel
+					 * cache. Any subsequent read on it will inevitably fail with
+					 * ENOENT. That's not a correctness issue however, assuming that
+					 * the call never returns ENOMEM when the old version of the page
+					 * is still in the cache.
+					 */
+				}
+				else if (rc < 0)
+				{
+					/* other error, not expected */
+					INSTR_TIME_SET_CURRENT(io_end);
+					pgstat_report_wait_end();
+					lfc_disable("write ioctl");
+					return;
+				}
+			}
+			INSTR_TIME_SET_CURRENT(io_end);
+			pgstat_report_wait_end();
 		}
 		else
+		{
+			pgstat_report_wait_start(WAIT_EVENT_NEON_LFC_WRITE);
+			INSTR_TIME_SET_CURRENT(io_start);
+			rc = pwritev(lfc_desc, iov, blocks_in_chunk,
+						 ((off_t) entry_offset * lfc_blocks_per_chunk + chunk_offs) * BLCKSZ);
+			INSTR_TIME_SET_CURRENT(io_end);
+			pgstat_report_wait_end();
+			if (rc != BLCKSZ * blocks_in_chunk)
+			{
+				lfc_disable("write");
+				return;
+			}
+		}
+
+		/* success */
 		{
 			LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
