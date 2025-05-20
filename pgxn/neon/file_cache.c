@@ -164,6 +164,11 @@ typedef struct FileCacheControl
 	uint64		time_write;		/* time spent writing (us) */
 	uint64		resizes;        /* number of LFC resizes   */
 	uint64		evicted_pages;	/* number of evicted pages */
+
+	/* FIXME: should make these atomic, they're not protected by any locks */
+	uint64		kernel_module_read_misses;	/* ENOENT returns from read ioctl */
+	uint64		kernel_module_write_misses;	/* ENOMEM returns from write ioctl */
+
 	dlist_head	lru;			/* double linked list for LRU replacement
 								 * algorithm */
 	dlist_head  holes;          /* double linked list of punched holes */
@@ -1440,7 +1445,12 @@ pread_with_ioctl(void *buffer, uint64 blkno)
 		.length = POSTGRES_PAGE_SIZE,
 		.buffer = (__u64)(uintptr_t) buffer
 	};
-	return ioctl(lfc_desc, NEON_IOCTL_READ, &args);
+	int			rc;
+
+	rc = ioctl(lfc_desc, NEON_IOCTL_READ, &args);
+	if (rc < 0 && errno == ENOENT)
+		lfc_ctl->kernel_module_read_misses++;
+	return rc;
 }
 
 static int
@@ -1455,7 +1465,12 @@ pwrite_with_ioctl(const void *buffer, uint64 blkno)
 		.length = POSTGRES_PAGE_SIZE,
 		.buffer = (__u64)(uintptr_t) buffer
 	};
-	return ioctl(lfc_desc, NEON_IOCTL_WRITE, &args);
+	int			rc;
+
+	rc = ioctl(lfc_desc, NEON_IOCTL_WRITE, &args);
+	if (rc < 0 && errno == ENOMEM)
+		lfc_ctl->kernel_module_write_misses++;
+	return rc;
 }
 
 /*
@@ -2100,6 +2115,16 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
 			key = "file_cache_chunks_pinned";
 			if (lfc_ctl)
 				value = lfc_ctl->pinned;
+			break;
+		case 10:
+			key = "file_cache_kernel_module_read_misses";
+			if (lfc_ctl)
+				value = lfc_ctl->kernel_module_read_misses;
+			break;
+		case 11:
+			key = "file_cache_kernel_module_write_misses";
+			if (lfc_ctl)
+				value = lfc_ctl->kernel_module_write_misses;
 			break;
 		default:
 			SRF_RETURN_DONE(funcctx);
