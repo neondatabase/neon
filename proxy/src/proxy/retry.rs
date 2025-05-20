@@ -58,13 +58,16 @@ impl ShouldRetryWakeCompute for postgres_client::error::DbError {
                 | &SqlState::INVALID_SCHEMA_NAME
                 | &SqlState::INVALID_PARAMETER_VALUE,
         );
+        if non_retriable_pg_errors {
+            return false;
+        }
         // PGBouncer errors that should not trigger a wake_compute retry.
-        if !non_retriable_pg_errors && self.code() == &SqlState::PROTOCOL_VIOLATION {
+        if self.code() == &SqlState::PROTOCOL_VIOLATION {
             return !self
                 .message()
                 .contains("no more connections allowed (max_client_conn)");
         }
-        return !non_retriable_pg_errors;
+        return true;
     }
 }
 
