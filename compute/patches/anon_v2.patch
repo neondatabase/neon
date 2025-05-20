@@ -151,7 +151,7 @@ index 7da6553..7961984 100644
 +
 +SECURITY LABEL FOR anon ON FUNCTION anon.toggle_transparent_dynamic_masking IS 'UNTRUSTED';
 diff --git a/src/guc.rs b/src/guc.rs
-index 74d3822..1680cc5 100644
+index 74d3822..95e9de8 100644
 --- a/src/guc.rs
 +++ b/src/guc.rs
 @@ -3,7 +3,7 @@
@@ -177,7 +177,7 @@ index 74d3822..1680cc5 100644
 +        let oid = pg_sys::GetUserId();
 +        let user_name = CStr::from_ptr(pg_sys::GetUserNameFromId(oid, true));
 +        let user_str = user_name.to_str().unwrap();
-+        // postgres user OID
++        pg_sys::log!("user: {} trying to change boolean guc", user_str);
 +        if pg_sys::superuser() || user_str == "neon_superuser" || user_str == "neondb_owner" {
 +            return true;
 +        }
@@ -195,7 +195,7 @@ index 74d3822..1680cc5 100644
 +        let oid = pg_sys::GetUserId();
 +        let user_name = CStr::from_ptr(pg_sys::GetUserNameFromId(oid, true));
 +        let user_str = user_name.to_str().unwrap();
-+        // postgres user OID
++        pg_sys::log!("user: {} trying to change string guc", user_str);
 +        if pg_sys::superuser() || user_str == "neon_superuser" || user_str == "neondb_owner" {
 +        return true;
 +    }
