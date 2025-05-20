@@ -655,7 +655,11 @@ impl Hash for ImportSingleKeyTask {
         let ImportSingleKeyTask { key, buf } = self;
 
         key.hash(state);
-        buf.hash(state);
+        // The key value might not have a stable binary representation.
+        // For instance, the db directory uses an unstable hash-map.
+        // To work around this we are a bit lax here and only hash the
+        // size of the buffer which must be consistent.
+        buf.len().hash(state);
     }
 }
 
