@@ -8,13 +8,14 @@ use crate::compute::PostgresConnection;
 use crate::config::ComputeConfig;
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::metrics::{Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard};
+use crate::proxy::copy_bidirectional_client_compute;
 use crate::stream::Stream;
 use crate::usage_metrics::{Ids, MetricCounterRecorder, USAGE_METRICS};
 
 /// Forward bytes in both directions (client <-> compute).
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) async fn proxy_pass(
-    mut client: impl AsyncRead + AsyncWrite + Unpin,
+    mut client: Stream<impl AsyncRead + AsyncWrite + Unpin>,
     mut compute: impl AsyncRead + AsyncWrite + Unpin,
     aux: MetricsAuxInfo,
     private_link_id: Option<SmolStr>,
@@ -43,12 +44,16 @@ pub(crate) async fn proxy_pass(
 
     // Starting from here we only proxy the client's traffic.
     debug!("performing the proxy pass...");
-    let _ = crate::proxy::copy_bidirectional::copy_bidirectional_client_compute(
-        &mut client,
-        &mut compute,
-        inspect,
-    )
-    .await?;
+
+    // reduce branching internal to the hot path.
+    match &mut client {
+        Stream::Raw { raw } => {
+            copy_bidirectional_client_compute(raw, &mut compute, inspect).await?
+        }
+        Stream::Tls { tls, .. } => {
+            copy_bidirectional_client_compute(&mut *tls, &mut compute, inspect).await?
+        }
+    };
 
     Ok(())
 }
