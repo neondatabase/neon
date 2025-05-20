@@ -1345,7 +1345,7 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 					if (!BITMAP_ISSET(chunk_mask, i))
 						continue;
 					Assert(iov[first_block_in_chunk_read + i].iov_len == BLCKSZ);
-					rc = pread_with_ioctl(&iov[first_block_in_chunk_read + i].iov_base, first_read_offset + i);
+					rc = pread_with_ioctl(iov[first_block_in_chunk_read + i].iov_base, first_read_offset + i);
 					if (rc < 0 && errno == ENOENT)
 					{
 						/* The kernel module evicted the page */
