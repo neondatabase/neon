@@ -274,7 +274,7 @@ async fn import_wal(
     let mut offset = startpoint.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = startpoint;
 
-    let mut walingest = WalIngest::new(tline, startpoint, ctx).await?;
+    let mut walingest = WalIngest::new(tline, startpoint, None, ctx).await?;
 
     let shard = vec![*tline.get_shard_identity()];
 
@@ -412,7 +412,7 @@ pub async fn import_wal_from_tar(
     let mut segno = start_lsn.segment_number(WAL_SEGMENT_SIZE);
     let mut offset = start_lsn.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = start_lsn;
-    let mut walingest = WalIngest::new(tline, start_lsn, ctx).await?;
+    let mut walingest = WalIngest::new(tline, start_lsn, None, ctx).await?;
     let shard = vec![*tline.get_shard_identity()];
 
     // Ingest wal until end_lsn

@@ -93,7 +93,7 @@ use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
 use super::tasks::log_compaction_error;
 use super::upload_queue::NotInitialized;
 use super::{
-    AttachedTenantConf, GcError, HeatMapTimeline, MaybeOffloaded,
+    AttachedTenantConf, CheckpointShutdownSender, GcError, HeatMapTimeline, MaybeOffloaded,
     debug_assert_current_span_has_tenant_and_timeline_id,
 };
 use crate::aux_file::AuxFileSizeEstimator;
@@ -2088,7 +2088,12 @@ impl Timeline {
             // Logical size is only maintained accurately on shard zero.
             self.spawn_initial_logical_size_computation_task(ctx);
         }
-        self.launch_wal_receiver(ctx, broker_client);
+        // TODO(diko): save it timeline
+        self.launch_wal_receiver(
+            ctx,
+            broker_client,
+            parent.shutdown_checkpoint_sender.clone(),
+        );
         self.set_state(TimelineState::Active);
         self.launch_eviction_task(parent, background_jobs_can_start);
     }
@@ -3115,6 +3120,7 @@ impl Timeline {
         self: &Arc<Self>,
         ctx: &RequestContext,
         broker_client: BrokerClientChannel,
+        shutdown_checkpoint_sender: CheckpointShutdownSender, // TODO(diko): consider moving to Timeline
     ) {
         info!(
             "launching WAL receiver for timeline {} of tenant {}",
@@ -3153,6 +3159,7 @@ impl Timeline {
                 validate_wal_contiguity: self.conf.validate_wal_contiguity,
             },
             broker_client,
+            shutdown_checkpoint_sender,
             ctx,
         ));
     }

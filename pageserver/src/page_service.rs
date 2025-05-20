@@ -2428,6 +2428,12 @@ impl PageServerHandler {
 
         let started = std::time::Instant::now();
 
+        tracing::info!(
+            "XXX handle_basebackup_request({timeline_id:?}, {lsn:?}, {prev_lsn:?}, {gzip}, {replica}"
+        );
+
+        if !full_backup && !replica && gzip && prev_lsn.is_none() {}
+
         let timeline = self
             .timeline_handles
             .as_mut()

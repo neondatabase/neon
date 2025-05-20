@@ -40,7 +40,8 @@ use crate::metrics::{LIVE_CONNECTIONS, WAL_INGEST, WALRECEIVER_STARTED_CONNECTIO
 use crate::pgdatadir_mapping::DatadirModification;
 use crate::task_mgr::{TaskKind, WALRECEIVER_RUNTIME};
 use crate::tenant::{
-    Timeline, WalReceiverInfo, debug_assert_current_span_has_tenant_and_timeline_id,
+    CheckpointShutdownSender, Timeline, WalReceiverInfo,
+    debug_assert_current_span_has_tenant_and_timeline_id,
 };
 use crate::walingest::WalIngest;
 
@@ -124,6 +125,7 @@ pub(super) async fn handle_walreceiver_connection(
     safekeeper_node: NodeId,
     ingest_batch_size: u64,
     validate_wal_contiguity: bool,
+    shutdown_checkpoint_sender: CheckpointShutdownSender,
 ) -> Result<(), WalReceiverError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -277,12 +279,17 @@ pub(super) async fn handle_walreceiver_connection(
 
     let mut waldecoder = WalStreamDecoder::new(startpoint, timeline.pg_version);
 
-    let mut walingest = WalIngest::new(timeline.as_ref(), startpoint, &ctx)
-        .await
-        .map_err(|e| match e.kind {
-            crate::walingest::WalIngestErrorKind::Cancelled => WalReceiverError::Cancelled,
-            _ => WalReceiverError::Other(e.into()),
-        })?;
+    let mut walingest = WalIngest::new(
+        timeline.as_ref(),
+        startpoint,
+        Some(shutdown_checkpoint_sender),
+        &ctx,
+    )
+    .await
+    .map_err(|e| match e.kind {
+        crate::walingest::WalIngestErrorKind::Cancelled => WalReceiverError::Cancelled,
+        _ => WalReceiverError::Other(e.into()),
+    })?;
 
     let shard = vec![*timeline.get_shard_identity()];
 

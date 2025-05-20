@@ -39,6 +39,7 @@ use postgres_ffi::{
 };
 use tracing::*;
 use utils::bin_ser::{DeserializeError, SerializeError};
+use utils::id::TimelineId;
 use utils::lsn::Lsn;
 use utils::rate_limit::RateLimit;
 use utils::{critical, failpoint_support};
@@ -49,7 +50,9 @@ use crate::context::RequestContext;
 use crate::metrics::WAL_INGEST;
 use crate::pgdatadir_mapping::{DatadirModification, Version};
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
-use crate::tenant::{PageReconstructError, Timeline};
+use crate::tenant::{
+    CheckpointShutdownEvent, CheckpointShutdownSender, PageReconstructError, Timeline,
+};
 
 enum_pgversion! {CheckPoint, pgv::CheckPoint}
 
@@ -96,6 +99,8 @@ pub struct WalIngest {
     checkpoint: CheckPoint,
     checkpoint_modified: bool,
     warn_ingest_lag: WarnIngestLag,
+    timeline_id: TimelineId,
+    shutdown_checkpoint_sender: Option<CheckpointShutdownSender>,
 }
 
 struct WarnIngestLag {
@@ -197,6 +202,7 @@ impl WalIngest {
     pub async fn new(
         timeline: &Timeline,
         startpoint: Lsn,
+        shutdown_checkpoint_sender: Option<CheckpointShutdownSender>,
         ctx: &RequestContext,
     ) -> Result<WalIngest, WalIngestError> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
@@ -220,6 +226,8 @@ impl WalIngest {
                 future_lsn_msg_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
                 timestamp_invalid_msg_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
             },
+            timeline_id: timeline.timeline_id,
+            shutdown_checkpoint_sender,
         })
     }
 
@@ -1316,6 +1324,20 @@ impl WalIngest {
             }
         });
 
+        if info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN {
+            if let Some(tx) = self.shutdown_checkpoint_sender.as_ref() {
+                let err = tx.send(CheckpointShutdownEvent {
+                    timeline_id: self.timeline_id,
+                    lsn,
+                });
+
+                // It's not important.
+                if let Err(e) = err {
+                    tracing::info!("Error sending checkpoint shutdown event: {}", e);
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1638,7 +1660,7 @@ mod tests {
         ))?;
         m.put_relmap_file(0, 111, Bytes::from(""), ctx).await?; // dummy relmapper file
         m.commit(ctx).await?;
-        let walingest = WalIngest::new(tline, Lsn(0x10), ctx).await?;
+        let walingest = WalIngest::new(tline, Lsn(0x10), None, ctx).await?;
 
         Ok(walingest)
     }
@@ -2379,7 +2401,7 @@ mod tests {
         // Initialize walingest
         let xlogoff: usize = startpoint.segment_offset(WAL_SEGMENT_SIZE);
         let mut decoder = WalStreamDecoder::new(startpoint, pg_version);
-        let mut walingest = WalIngest::new(tline.as_ref(), startpoint, &ctx)
+        let mut walingest = WalIngest::new(tline.as_ref(), startpoint, None, &ctx)
             .await
             .unwrap();
         let mut modification = tline.begin_modification(startpoint);

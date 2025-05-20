@@ -56,6 +56,7 @@ use timeline::{
     CompactFlags, CompactOptions, CompactionError, PreviousHeatmap, ShutdownMode, import_pgdata,
 };
 use tokio::io::BufReader;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{Notify, Semaphore, watch};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -149,6 +150,12 @@ pub const TENANTS_SEGMENT_NAME: &str = "tenants";
 /// Parts of the `.neon/tenants/<tenant_id>/timelines/<timeline_id>` directory prefix.
 pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 
+pub struct CheckpointShutdownEvent {
+    pub timeline_id: TimelineId,
+    pub lsn: Lsn,
+}
+
+pub type CheckpointShutdownSender = UnboundedSender<CheckpointShutdownEvent>;
 /// References to shared objects that are passed into each tenant, such
 /// as the shared remote storage client and process initialization state.
 #[derive(Clone)]
@@ -157,6 +164,8 @@ pub struct TenantSharedResources {
     pub remote_storage: GenericRemoteStorage,
     pub deletion_queue_client: DeletionQueueClient,
     pub l0_flush_global_state: L0FlushGlobalState,
+    /// A sender TODO(diko)
+    pub shutdown_checkpoint_sender: CheckpointShutdownSender,
 }
 
 /// A [`TenantShard`] is really an _attached_ tenant.  The configuration
@@ -322,6 +331,9 @@ pub struct TenantShard {
 
     // Access to global deletion queue for when this tenant wants to schedule a deletion
     deletion_queue_client: DeletionQueueClient,
+
+    // TODO(diko)
+    shutdown_checkpoint_sender: CheckpointShutdownSender,
 
     /// Cached logical sizes updated updated on each [`TenantShard::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
@@ -1286,6 +1298,7 @@ impl TenantShard {
             remote_storage,
             deletion_queue_client,
             l0_flush_global_state,
+            shutdown_checkpoint_sender, // TODO(diko): where does it go?
         } = resources;
 
         let attach_mode = attached_conf.location.attach_mode;
@@ -1301,6 +1314,7 @@ impl TenantShard {
             remote_storage.clone(),
             deletion_queue_client,
             l0_flush_global_state,
+            shutdown_checkpoint_sender,
         ));
 
         // The attach task will carry a GateGuard, so that shutdown() reliably waits for it to drop out if
@@ -4232,6 +4246,7 @@ impl TenantShard {
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
         l0_flush_global_state: L0FlushGlobalState,
+        shutdown_checkpoint_sender: CheckpointShutdownSender,
     ) -> TenantShard {
         assert!(!attached_conf.location.generation.is_none());
 
@@ -4335,6 +4350,7 @@ impl TenantShard {
             ongoing_timeline_detach: std::sync::Mutex::default(),
             gc_block: Default::default(),
             l0_flush_global_state,
+            shutdown_checkpoint_sender,
         }
     }
 
@@ -5826,6 +5842,9 @@ pub(crate) mod harness {
         ) -> anyhow::Result<Arc<TenantShard>> {
             let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
 
+            // TODO(diko):
+            let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+
             let tenant = Arc::new(TenantShard::new(
                 TenantState::Attaching,
                 self.conf,
@@ -5843,6 +5862,7 @@ pub(crate) mod harness {
                 self.deletion_queue.new_client(),
                 // TODO: ideally we should run all unit tests with both configs
                 L0FlushGlobalState::new(L0FlushConfig::default()),
+                tx,
             ));
 
             let preload = tenant

@@ -16,6 +16,7 @@ use http_utils::tls_certs::ReloadingCertificateResolver;
 use metrics::launch_timestamp::{LaunchTimestamp, set_launch_timestamp_metric};
 use metrics::set_build_info_metric;
 use nix::sys::socket::{setsockopt, sockopt};
+use pageserver::basebackup_cache::BasebackupCache;
 use pageserver::config::{PageServerConf, PageserverIdentity, ignored_fields};
 use pageserver::controller_upcall_client::StorageControllerUpcallClient;
 use pageserver::deletion_queue::DeletionQueue;
@@ -541,6 +542,13 @@ fn start_pageserver(
         pageserver::l0_flush::L0FlushGlobalState::new(conf.l0_flush.clone());
 
     // Scan the local 'tenants/' directory and start loading the tenants
+    let basebackup_cache = BasebackupCache::spawn(
+        "emppty".into(),
+        BACKGROUND_RUNTIME.handle(),
+        shutdown_pageserver.child_token(),
+    )?;
+    let shutdown_checkpoint_sender = basebackup_cache.get_checkpoint_shutdown_sender();
+
     let deletion_queue_client = deletion_queue.new_client();
     let background_purges = mgr::BackgroundPurges::default();
     let tenant_manager = BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
@@ -551,6 +559,7 @@ fn start_pageserver(
             remote_storage: remote_storage.clone(),
             deletion_queue_client,
             l0_flush_global_state,
+            shutdown_checkpoint_sender,
         },
         order,
         shutdown_pageserver.clone(),
