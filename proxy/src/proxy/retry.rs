@@ -63,6 +63,8 @@ impl ShouldRetryWakeCompute for postgres_client::error::DbError {
         }
         // PGBouncer errors that should not trigger a wake_compute retry.
         if self.code() == &SqlState::PROTOCOL_VIOLATION {
+            // Source for the error message:
+            // https://github.com/pgbouncer/pgbouncer/blob/f15997fe3effe3a94ba8bcc1ea562e6117d1a131/src/client.c#L1070
             return !self
                 .message()
                 .contains("no more connections allowed (max_client_conn)");
