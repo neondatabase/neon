@@ -3348,6 +3348,13 @@ impl TenantShard {
                 activated_timelines += 1;
             }
 
+            let tid = self.tenant_shard_id.tenant_id.to_string();
+            let shard_id = self.tenant_shard_id.shard_slug().to_string();
+            let offloaded_timeline_count = timelines_offloaded_accessor.len();
+            TENANT_OFFLOADED_TIMELINES
+                .with_label_values(&[&tid, &shard_id])
+                .set(offloaded_timeline_count as u64);
+
             self.state.send_modify(move |current_state| {
                 assert!(
                     matches!(current_state, TenantState::Activating(_)),
@@ -3371,13 +3378,6 @@ impl TenantShard {
                 );
 
                 TENANT.activation.observe(elapsed.as_secs_f64());
-
-                let tid = self.tenant_shard_id.tenant_id.to_string();
-                let shard_id = self.tenant_shard_id.shard_slug().to_string();
-                let offloaded_timeline_count = timelines_offloaded_accessor.len();
-                TENANT_OFFLOADED_TIMELINES
-                    .with_label_values(&[&tid, &shard_id])
-                    .set(offloaded_timeline_count as u64);
             });
         }
     }
