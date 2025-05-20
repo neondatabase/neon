@@ -73,7 +73,7 @@ where
 
     // initiate shutdown.
     match close_dir {
-        Direction::ComputeToClient => {
+        Direction::ClientToCompute => {
             info!("Client is done, terminate compute");
 
             // we will never write anymore data to the client.
@@ -82,7 +82,7 @@ where
             // make sure to shutdown the client conn.
             compute_to_client.need_flush = true;
         }
-        Direction::ClientToCompute => {
+        Direction::ComputeToClient => {
             info!("Compute is done, terminate client");
 
             // we will never write anymore data to the compute.
