@@ -61,7 +61,6 @@ jobs:
           cd "vendor/postgres-v${PG_VERSION}"
           patch -p1 < "../../compute/patches/cloud_regress_pg${PG_VERSION}.patch"
           patch -p1 < "../../compute/patches/cloud_regress_pg17_ha.patch"
-          patch -p1 < "../../compute/patches/cloud_regress_pg17_ha_plus.patch"
           patch -p1 < "../../compute/patches/cloud_regress_pg17_ha_plus2.patch"
 
       - name: Generate a random password
