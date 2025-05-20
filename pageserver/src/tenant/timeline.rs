@@ -537,29 +537,26 @@ impl GcInfo {
 /// The `GcInfo` component describing which Lsns need to be retained.  Functionally, this
 /// is a single number (the oldest LSN which we must retain), but it internally distinguishes
 /// between time-based and space-based retention for observability and consumption metrics purposes.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct GcCutoffs {
     /// Calculated from the [`pageserver_api::models::TenantConfig::gc_horizon`], this LSN indicates how much
     /// history we must keep to retain a specified number of bytes of WAL.
     pub(crate) space: Lsn,
 
-    /// Calculated from [`pageserver_api::models::TenantConfig::pitr_interval`], this LSN indicates how much
-    /// history we must keep to enable reading back at least the PITR interval duration.
-    pub(crate) time: Lsn,
-}
-
-impl Default for GcCutoffs {
-    fn default() -> Self {
-        Self {
-            space: Lsn::INVALID,
-            time: Lsn::INVALID,
-        }
-    }
+    /// Calculated from [`pageserver_api::models::TenantConfig::pitr_interval`], this LSN indicates
+    /// how much history we must keep to enable reading back at least the PITR interval duration.
+    ///
+    /// None indicates that the PITR cutoff has not been computed. A PITR interval of 0 will yield
+    /// Some(last_record_lsn).
+    pub(crate) time: Option<Lsn>,
 }
 
 impl GcCutoffs {
     fn select_min(&self) -> Lsn {
-        std::cmp::min(self.space, self.time)
+        match self.time {
+            Some(time) => self.space.min(time),
+            None => self.space,
+        }
     }
 }
 
@@ -1096,11 +1093,14 @@ impl Timeline {
     /// Get the bytes written since the PITR cutoff on this branch, and
     /// whether this branch's ancestor_lsn is within its parent's PITR.
     pub(crate) fn get_pitr_history_stats(&self) -> (u64, bool) {
+        // TODO: for backwards compatibility, we return the full history back to 0 when the PITR
+        // cutoff has not yet been initialized. This should return None instead, but this is exposed
+        // in external HTTP APIs and callers may not handle a null value.
         let gc_info = self.gc_info.read().unwrap();
         let history = self
             .get_last_record_lsn()
-            .checked_sub(gc_info.cutoffs.time)
-            .unwrap_or(Lsn(0))
+            .checked_sub(gc_info.cutoffs.time.unwrap_or_default())
+            .unwrap_or_default()
             .0;
         (history, gc_info.within_ancestor_pitr)
     }
@@ -1110,9 +1110,10 @@ impl Timeline {
         self.applied_gc_cutoff_lsn.read()
     }
 
-    /// Read timeline's planned GC cutoff: this is the logical end of history that users
-    /// are allowed to read (based on configured PITR), even if physically we have more history.
-    pub(crate) fn get_gc_cutoff_lsn(&self) -> Lsn {
+    /// Read timeline's planned GC cutoff: this is the logical end of history that users are allowed
+    /// to read (based on configured PITR), even if physically we have more history. Returns None
+    /// if the PITR cutoff has not yet been initialized.
+    pub(crate) fn get_gc_cutoff_lsn(&self) -> Option<Lsn> {
         self.gc_info.read().unwrap().cutoffs.time
     }
 
@@ -6230,14 +6231,12 @@ impl Timeline {
 
         pausable_failpoint!("Timeline::find_gc_cutoffs-pausable");
 
-        if cfg!(test) {
+        if cfg!(test) && pitr == Duration::ZERO {
             // Unit tests which specify zero PITR interval expect to avoid doing any I/O for timestamp lookup
-            if pitr == Duration::ZERO {
-                return Ok(GcCutoffs {
-                    time: self.get_last_record_lsn(),
-                    space: space_cutoff,
-                });
-            }
+            return Ok(GcCutoffs {
+                time: None,
+                space: space_cutoff,
+            });
         }
 
         // Calculate a time-based limit on how much to retain:
@@ -6251,14 +6250,14 @@ impl Timeline {
                 // PITR is not set. Retain the size-based limit, or the default time retention,
                 // whichever requires less data.
                 GcCutoffs {
-                    time: self.get_last_record_lsn(),
+                    time: Some(self.get_last_record_lsn()),
                     space: std::cmp::max(time_cutoff, space_cutoff),
                 }
             }
             (Duration::ZERO, None) => {
                 // PITR is not set, and time lookup failed
                 GcCutoffs {
-                    time: self.get_last_record_lsn(),
+                    time: Some(self.get_last_record_lsn()),
                     space: space_cutoff,
                 }
             }
@@ -6266,7 +6265,7 @@ impl Timeline {
                 // PITR interval is set & we didn't look up a timestamp successfully.  Conservatively assume PITR
                 // cannot advance beyond what was already GC'd, and respect space-based retention
                 GcCutoffs {
-                    time: *self.get_applied_gc_cutoff_lsn(),
+                    time: Some(*self.get_applied_gc_cutoff_lsn()),
                     space: space_cutoff,
                 }
             }
@@ -6274,7 +6273,7 @@ impl Timeline {
                 // PITR interval is set and we looked up timestamp successfully.  Ignore
                 // size based retention and make time cutoff authoritative
                 GcCutoffs {
-                    time: time_cutoff,
+                    time: Some(time_cutoff),
                     space: time_cutoff,
                 }
             }
@@ -6327,7 +6326,7 @@ impl Timeline {
             )
         };
 
-        let mut new_gc_cutoff = Lsn::min(space_cutoff, time_cutoff);
+        let mut new_gc_cutoff = Lsn::min(space_cutoff, time_cutoff.unwrap_or_default());
         let standby_horizon = self.standby_horizon.load();
         // Hold GC for the standby, but as a safety guard do it only within some
         // reasonable lag.
@@ -6376,7 +6375,7 @@ impl Timeline {
     async fn gc_timeline(
         &self,
         space_cutoff: Lsn,
-        time_cutoff: Lsn,
+        time_cutoff: Option<Lsn>, // None if uninitialized
         retain_lsns: Vec<Lsn>,
         max_lsn_with_valid_lease: Option<Lsn>,
         new_gc_cutoff: Lsn,
@@ -6394,6 +6393,12 @@ impl Timeline {
             );
             return Ok(result);
         }
+
+        let Some(time_cutoff) = time_cutoff else {
+            // The GC cutoff should have been computed by now, but let's be defensive.
+            info!("Nothing to GC: time_cutoff not yet computed");
+            return Ok(result);
+        };
 
         // We need to ensure that no one tries to read page versions or create
         // branches at a point before latest_gc_cutoff_lsn. See branch_timeline()

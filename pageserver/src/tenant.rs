@@ -4587,7 +4587,7 @@ impl TenantShard {
 
             target.cutoffs = GcCutoffs {
                 space: space_cutoff,
-                time: Lsn::INVALID,
+                time: None,
             };
         }
     }
@@ -4670,8 +4670,8 @@ impl TenantShard {
                 // Look up parent's PITR cutoff to update the child's knowledge of whether it is within parent's PITR
                 if let Some(ancestor_id) = timeline.get_ancestor_timeline_id() {
                     if let Some(ancestor_gc_cutoffs) = gc_cutoffs.get(&ancestor_id) {
-                        target.within_ancestor_pitr =
-                            timeline.get_ancestor_lsn() >= ancestor_gc_cutoffs.time;
+                        target.within_ancestor_pitr = timeline.get_ancestor_lsn()
+                            >= ancestor_gc_cutoffs.time.unwrap_or_default();
                     }
                 }
 
@@ -4684,13 +4684,15 @@ impl TenantShard {
                     } else {
                         0
                     });
-                timeline.metrics.pitr_history_size.set(
-                    timeline
-                        .get_last_record_lsn()
-                        .checked_sub(target.cutoffs.time)
-                        .unwrap_or(Lsn(0))
-                        .0,
-                );
+                if let Some(time_cutoff) = target.cutoffs.time {
+                    timeline.metrics.pitr_history_size.set(
+                        timeline
+                            .get_last_record_lsn()
+                            .checked_sub(time_cutoff)
+                            .unwrap_or_default()
+                            .0,
+                    );
+                }
 
                 // Apply the cutoffs we found to the Timeline's GcInfo.  Why might we _not_ have cutoffs for a timeline?
                 // - this timeline was created while we were finding cutoffs
@@ -4699,8 +4701,8 @@ impl TenantShard {
                     let original_cutoffs = target.cutoffs.clone();
                     // GC cutoffs should never go back
                     target.cutoffs = GcCutoffs {
-                        space: Lsn(cutoffs.space.0.max(original_cutoffs.space.0)),
-                        time: Lsn(cutoffs.time.0.max(original_cutoffs.time.0)),
+                        space: cutoffs.space.max(original_cutoffs.space),
+                        time: cutoffs.time.max(original_cutoffs.time),
                     }
                 }
             }
@@ -8937,7 +8939,7 @@ mod tests {
                 .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
-            guard.cutoffs.time = Lsn(0x30);
+            guard.cutoffs.time = Some(Lsn(0x30));
             guard.cutoffs.space = Lsn(0x30);
         }
 
@@ -9045,7 +9047,7 @@ mod tests {
                 .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
-            guard.cutoffs.time = Lsn(0x40);
+            guard.cutoffs.time = Some(Lsn(0x40));
             guard.cutoffs.space = Lsn(0x40);
         }
         tline
