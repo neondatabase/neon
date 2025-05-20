@@ -889,13 +889,12 @@ impl ComputeNode {
 
     /// Check that compute node has corresponding feature enabled.
     pub fn has_feature(&self, feature: ComputeFeature) -> bool {
-        let state = self.state.lock().unwrap();
-
-        if let Some(s) = state.pspec.as_ref() {
-            s.spec.features.contains(&feature)
-        } else {
-            false
-        }
+        self.state
+            .lock()
+            .unwrap()
+            .pspec
+            .as_ref()
+            .is_some_and(|s| s.spec.features.contains(&feature))
     }
 
     pub fn set_status(&self, status: ComputeStatus) {
