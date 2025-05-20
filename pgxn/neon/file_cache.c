@@ -166,7 +166,9 @@ typedef struct FileCacheControl
 	uint64		evicted_pages;	/* number of evicted pages */
 
 	/* FIXME: should make these atomic, they're not protected by any locks */
+	uint64		kernel_module_read_hits;	/* success returns from read ioctl */
 	uint64		kernel_module_read_misses;	/* ENOENT returns from read ioctl */
+	uint64		kernel_module_write_hits;	/* success returns from write ioctl */
 	uint64		kernel_module_write_misses;	/* ENOMEM returns from write ioctl */
 
 	dlist_head	lru;			/* double linked list for LRU replacement
@@ -1447,9 +1449,20 @@ pread_with_ioctl(void *buffer, uint64 blkno)
 	};
 	int			rc;
 
+	errno = 0;
+
+	elog(LOG, "calling ioctl read for blk %lu with buffer=%p (shared_buffers is at %p-%p)",
+		 blkno,
+		 buffer,
+		 BufferBlocks,
+		 BufferBlocks + BLCKSZ * NBuffers);
 	rc = ioctl(lfc_desc, NEON_IOCTL_READ, &args);
-	if (rc < 0 && errno == ENOENT)
+	if (rc >= 0)
+		lfc_ctl->kernel_module_read_hits++;
+	else if (rc < 0 && errno == ENOENT)
 		lfc_ctl->kernel_module_read_misses++;
+	else
+		elog(LOG, "ioctl read failed for blk %lu with buffer=%p: %m", blkno, buffer);
 	return rc;
 }
 
@@ -1467,8 +1480,16 @@ pwrite_with_ioctl(const void *buffer, uint64 blkno)
 	};
 	int			rc;
 
+	elog(LOG, "calling ioctl write for blk %lu with buffer=%p (shared_buffers is at %p-%p)",
+		 blkno,
+		 buffer,
+		 BufferBlocks,
+		 BufferBlocks + BLCKSZ * NBuffers);
+	
 	rc = ioctl(lfc_desc, NEON_IOCTL_WRITE, &args);
-	if (rc < 0 && errno == ENOMEM)
+	if (rc >= 0)
+		lfc_ctl->kernel_module_write_hits++;
+	else if (rc < 0 && errno == ENOMEM)
 		lfc_ctl->kernel_module_write_misses++;
 	return rc;
 }
@@ -2117,11 +2138,21 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
 				value = lfc_ctl->pinned;
 			break;
 		case 10:
+			key = "file_cache_kernel_module_read_hits";
+			if (lfc_ctl)
+				value = lfc_ctl->kernel_module_read_hits;
+			break;
+		case 11:
 			key = "file_cache_kernel_module_read_misses";
 			if (lfc_ctl)
 				value = lfc_ctl->kernel_module_read_misses;
 			break;
-		case 11:
+		case 12:
+			key = "file_cache_kernel_module_write_hits";
+			if (lfc_ctl)
+				value = lfc_ctl->kernel_module_write_hits;
+			break;
+		case 13:
 			key = "file_cache_kernel_module_write_misses";
 			if (lfc_ctl)
 				value = lfc_ctl->kernel_module_write_misses;
