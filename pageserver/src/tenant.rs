@@ -3457,8 +3457,9 @@ impl TenantShard {
             let mut timelines_importing = self.timelines_importing.lock().unwrap();
             timelines_importing
                 .drain()
-                .for_each(|(_timeline_id, importing_timeline)| {
-                    importing_timeline.shutdown();
+                .for_each(|(timeline_id, importing_timeline)| {
+                    let span = tracing::info_span!("importing_timeline_shutdown", %timeline_id);
+                    js.spawn(async move { importing_timeline.shutdown().instrument(span).await });
                 });
         }
         // test_long_timeline_create_then_tenant_delete is leaning on this message

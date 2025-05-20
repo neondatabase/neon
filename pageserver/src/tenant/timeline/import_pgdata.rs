@@ -25,8 +25,11 @@ pub(crate) struct ImportingTimeline {
 }
 
 impl ImportingTimeline {
-    pub(crate) fn shutdown(self) {
+    pub(crate) async fn shutdown(self) {
         self.import_task_handle.abort();
+        let _ = self.import_task_handle.await;
+
+        self.timeline.remote_client.shutdown().await;
     }
 }
 
