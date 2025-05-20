@@ -151,7 +151,7 @@ index 7da6553..7961984 100644
 +
 +SECURITY LABEL FOR anon ON FUNCTION anon.toggle_transparent_dynamic_masking IS 'UNTRUSTED';
 diff --git a/src/guc.rs b/src/guc.rs
-index 74d3822..72e7f6b 100644
+index 74d3822..1680cc5 100644
 --- a/src/guc.rs
 +++ b/src/guc.rs
 @@ -3,7 +3,7 @@
@@ -237,9 +237,12 @@ index 74d3822..72e7f6b 100644
      );
  
      GucRegistry::define_bool_guc(
-@@ -96,6 +142,9 @@ pub fn register_gucs() {
+@@ -94,16 +140,22 @@ pub fn register_gucs() {
+         "Mask all columns with NULL (or the default value for NOT NULL columns)",
+         "",
          &ANON_PRIVACY_BY_DEFAULT,
-         GucContext::Suset,
+-        GucContext::Suset,
++        GucContext::Userset,
          GucFlags::default(),
 +        Some(check_bool_guc_hook),
 +        None,
@@ -247,9 +250,11 @@ index 74d3822..72e7f6b 100644
      );
      GucRegistry::define_bool_guc(
          "anon.transparent_dynamic_masking",
-@@ -104,6 +153,9 @@ pub fn register_gucs() {
+         "New masking engine (EXPERIMENTAL)",
+         "",
          &ANON_TRANSPARENT_DYNAMIC_MASKING,
-         GucContext::Suset,
+-        GucContext::Suset,
++        GucContext::Userset,
          GucFlags::default(),
 +        Some(check_bool_guc_hook),
 +        None,
@@ -267,9 +272,12 @@ index 74d3822..72e7f6b 100644
      );
  
      GucRegistry::define_bool_guc(
-@@ -122,6 +177,9 @@ pub fn register_gucs() {
+@@ -120,8 +175,11 @@ pub fn register_gucs() {
+         "A masking rule cannot change a column data type, unless you disable this",
+         "Disabling the mode is not recommended",
          &ANON_STRICT_MODE,
-         GucContext::Suset,
+-        GucContext::Suset,
++        GucContext::Userset,
          GucFlags::default(),
 +        Some(check_bool_guc_hook),
 +        None,
@@ -287,9 +295,12 @@ index 74d3822..72e7f6b 100644
      );
  
      GucRegistry::define_string_guc(
-@@ -143,6 +204,9 @@ pub fn register_gucs() {
+@@ -141,8 +202,11 @@ pub fn register_gucs() {
+         "The schema where the dynamic masking views are stored",
+         "",
          &ANON_MASK_SCHEMA,
-         GucContext::Suset,
+-        GucContext::Suset,
++        GucContext::Userset,
          GucFlags::default(),
 +        Some(check_string_guc_hook),
 +        None,
@@ -307,9 +318,12 @@ index 74d3822..72e7f6b 100644
      );
  
      GucRegistry::define_string_guc(
-@@ -161,5 +228,8 @@ pub fn register_gucs() {
+@@ -159,7 +226,10 @@ pub fn register_gucs() {
+         "The schema where the table are masked by the dynamic masking engine",
+         "",
          &ANON_SOURCE_SCHEMA,
-         GucContext::Suset,
+-        GucContext::Suset,
++        GucContext::Userset,
          GucFlags::default(),
 +        Some(check_string_guc_hook),
 +        None,
