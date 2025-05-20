@@ -393,6 +393,9 @@ async fn handle_client(
 
     match res {
         Ok(_) => Ok(()),
+        Err(ErrorSource::Timeout(_)) => Err(anyhow!(
+            "timed out while gracefully shutting down the connection"
+        )),
         Err(ErrorSource::Client(err)) => Err(err).context("client"),
         Err(ErrorSource::Compute(err)) => Err(err).context("compute"),
     }
