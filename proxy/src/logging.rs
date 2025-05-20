@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::{env, io, usize};
+use std::{env, io};
 
 use chrono::{DateTime, Utc};
 use opentelemetry::trace::TraceContextExt;
@@ -232,7 +232,7 @@ impl<C: Clock, W: MakeWriter> JsonLoggingLayer<C, W> {
         self.span_info
             .pin()
             .get_or_insert_with(metadata.callsite(), || {
-                CallsiteSpanInfo::new(metadata, &self.extract_fields)
+                CallsiteSpanInfo::new(metadata, self.extract_fields)
             })
             .clone()
     }
@@ -479,6 +479,7 @@ impl SkippedFieldIndices {
 
     #[inline]
     fn set(&mut self, index: usize) {
+        debug_assert!(index <= 32, "index out of bounds of 32-bit set");
         self.bits |= 1 << index;
     }
 
