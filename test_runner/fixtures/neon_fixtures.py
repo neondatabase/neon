@@ -404,6 +404,29 @@ class PageserverTracingConfig:
         return ("tracing", value)
 
 
+@dataclass
+class PageserverImportConfig:
+    import_job_concurrency: int
+    import_job_soft_size_limit: int
+    import_job_checkpoint_threshold: int
+
+    @staticmethod
+    def default() -> PageserverImportConfig:
+        return PageserverImportConfig(
+            import_job_concurrency=4,
+            import_job_soft_size_limit=512 * 1024,
+            import_job_checkpoint_threshold=4,
+        )
+
+    def to_config_key_value(self) -> tuple[str, dict[str, Any]]:
+        value = {
+            "import_job_concurrency": self.import_job_concurrency,
+            "import_job_soft_size_limit": self.import_job_soft_size_limit,
+            "import_job_checkpoint_threshold": self.import_job_checkpoint_threshold,
+        }
+        return ("timeline_import_config", value)
+
+
 class NeonEnvBuilder:
     """
     Builder object to create a Neon runtime environment
@@ -454,6 +477,7 @@ class NeonEnvBuilder:
         pageserver_wal_receiver_protocol: PageserverWalReceiverProtocol | None = None,
         pageserver_get_vectored_concurrent_io: str | None = None,
         pageserver_tracing_config: PageserverTracingConfig | None = None,
+        pageserver_import_config: PageserverImportConfig | None = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -511,6 +535,7 @@ class NeonEnvBuilder:
         )
 
         self.pageserver_tracing_config = pageserver_tracing_config
+        self.pageserver_import_config = pageserver_import_config
 
         self.pageserver_default_tenant_config_compaction_algorithm: dict[str, Any] | None = (
             pageserver_default_tenant_config_compaction_algorithm
@@ -1178,6 +1203,10 @@ class NeonEnv:
         self.pageserver_wal_receiver_protocol = config.pageserver_wal_receiver_protocol
         self.pageserver_get_vectored_concurrent_io = config.pageserver_get_vectored_concurrent_io
         self.pageserver_tracing_config = config.pageserver_tracing_config
+        if config.pageserver_import_config is None:
+            self.pageserver_import_config = PageserverImportConfig.default()
+        else:
+            self.pageserver_import_config = config.pageserver_import_config
 
         # Create the neon_local's `NeonLocalInitConf`
         cfg: dict[str, Any] = {
@@ -1255,12 +1284,6 @@ class NeonEnv:
                 "no_sync": True,
                 # Look for gaps in WAL received from safekeepeers
                 "validate_wal_contiguity": True,
-                # TODO(vlad): make these configurable through the builder
-                "timeline_import_config": {
-                    "import_job_concurrency": 4,
-                    "import_job_soft_size_limit": 512 * 1024,
-                    "import_job_checkpoint_threshold": 4,
-                },
             }
 
             # Batching (https://github.com/neondatabase/neon/issues/9377):
@@ -1321,6 +1344,12 @@ class NeonEnv:
                     ps_cfg[key] = value
 
                 ps_cfg[key] = value
+
+            if self.pageserver_import_config is not None:
+                key, value = self.pageserver_import_config.to_config_key_value()
+
+                if key not in ps_cfg:
+                    ps_cfg[key] = value
 
             # Create a corresponding NeonPageserver object
             ps = NeonPageserver(
