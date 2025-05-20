@@ -1358,18 +1358,22 @@ impl Timeline {
     /// at the particular LSN (snapshot).
     pub fn get_cached_rel_size(&self, tag: &RelTag, version: Version<'_>) -> Option<BlockNumber> {
         let lsn = version.get_lsn();
-        let rel_size_cache = self.rel_size_latest_cache.read().unwrap();
-        if let Some((cached_lsn, nblocks)) = rel_size_cache.get(tag) {
-            if lsn >= *cached_lsn {
-                RELSIZE_LATEST_CACHE_HITS.inc();
-                return Some(*nblocks);
+        {
+            let rel_size_cache = self.rel_size_latest_cache.read().unwrap();
+            if let Some((cached_lsn, nblocks)) = rel_size_cache.get(tag) {
+                if lsn >= *cached_lsn {
+                    RELSIZE_LATEST_CACHE_HITS.inc();
+                    return Some(*nblocks);
+                }
+                RELSIZE_CACHE_MISSES_OLD.inc();
             }
-            RELSIZE_CACHE_MISSES_OLD.inc();
         }
-        let mut rel_size_cache = self.rel_size_snapshot_cache.lock().unwrap();
-        if let Some(nblock) = rel_size_cache.get(&(lsn, *tag)) {
-            RELSIZE_SNAPSHOT_CACHE_HITS.inc();
-            return Some(*nblock);
+        {
+            let mut rel_size_cache = self.rel_size_snapshot_cache.lock().unwrap();
+            if let Some(nblock) = rel_size_cache.get(&(lsn, *tag)) {
+                RELSIZE_SNAPSHOT_CACHE_HITS.inc();
+                return Some(*nblock);
+            }
         }
         if version.is_latest() {
             RELSIZE_LATEST_CACHE_MISSES.inc();
