@@ -151,7 +151,7 @@ index 7da6553..7961984 100644
 +
 +SECURITY LABEL FOR anon ON FUNCTION anon.toggle_transparent_dynamic_masking IS 'UNTRUSTED';
 diff --git a/src/guc.rs b/src/guc.rs
-index 74d3822..7d57125 100644
+index 74d3822..2cd52d3 100644
 --- a/src/guc.rs
 +++ b/src/guc.rs
 @@ -3,7 +3,7 @@
@@ -163,7 +163,7 @@ index 74d3822..7d57125 100644
  
  pub static ANON_DUMMY_LOCALE: GucSetting<Option<&'static CStr>> =
      GucSetting::<Option<&'static CStr>>::new(Some(unsafe {
-@@ -51,6 +51,41 @@ static ANON_MASK_SCHEMA: GucSetting<Option<&'static CStr>> =
+@@ -51,6 +51,43 @@ static ANON_MASK_SCHEMA: GucSetting<Option<&'static CStr>> =
          CStr::from_bytes_with_nul_unchecked(b"mask\0")
      }));
  
@@ -176,36 +176,38 @@ index 74d3822..7d57125 100644
 +    unsafe {
 +        let oid = pg_sys::GetUserId();
 +        let user_name = CStr::from_ptr(pg_sys::GetUserNameFromId(oid, true));
++        let user_str = user_name.to_str().unwrap();
 +        // postgres user OID
-+        if user_name.to_str().unwrap() != "neon_superuser" || !pg_sys::superuser() {
-+            pg_sys::ereport!(PgLogLevel::NOTICE, PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE, "You are not authorized to change this GUC");
-+            return false;
++        if pg_sys::superuser() || user_str == "neon_superuser" || user_str == "neondb_owner" {
++            return true;
 +        }
-+        return true;
++        pg_sys::ereport!(PgLogLevel::ERROR, PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE, "You are not authorized to change this GUC");
++        false
 +    }
 +}
 +
-+ unsafe extern "C-unwind" fn check_string_guc_hook(
-+    _newval: *mut *mut libc::c_char,
-+    _extra: *mut *mut c_void,
-+    _source: u32
-+ ) -> bool {
-+     unsafe {
-+         let oid = pg_sys::GetUserId();
-+         let user_name = CStr::from_ptr(pg_sys::GetUserNameFromId(oid, true));
-+         // postgres user OID
-+         if user_name.to_str().unwrap() != "neon_superuser" || !pg_sys::superuser() {
-+             pg_sys::ereport!(PgLogLevel::NOTICE, PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE, "You are not authorized to change this GUC");
-+             return false;
-+         }
-+         return true;
-+     }
-+ }
++unsafe extern "C-unwind" fn check_string_guc_hook(
++_newval: *mut *mut libc::c_char,
++_extra: *mut *mut c_void,
++_source: u32
++) -> bool {
++    unsafe {
++        let oid = pg_sys::GetUserId();
++        let user_name = CStr::from_ptr(pg_sys::GetUserNameFromId(oid, true));
++        let user_str = user_name.to_str().unwrap();
++        // postgres user OID
++        if pg_sys::superuser() || user_str == "neon_superuser" || user_str == "neondb_owner" {
++        return true;
++    }
++    pg_sys::ereport!(PgLogLevel::ERROR, PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE, "You are not authorized to change this GUC");
++    false
++    }
++}
 +
  // Register the GUC parameters for the extension
  //
  pub fn register_gucs() {
-@@ -61,6 +96,9 @@ pub fn register_gucs() {
+@@ -61,6 +98,9 @@ pub fn register_gucs() {
          &ANON_DUMMY_LOCALE,
          GucContext::Suset,
          GucFlags::SUPERUSER_ONLY,
@@ -215,7 +217,7 @@ index 74d3822..7d57125 100644
      );
  
      GucRegistry::define_string_guc(
-@@ -70,6 +108,9 @@ pub fn register_gucs() {
+@@ -70,6 +110,9 @@ pub fn register_gucs() {
          &ANON_K_ANONYMITY_PROVIDER,
          GucContext::Suset,
          GucFlags::SUPERUSER_ONLY,
@@ -225,7 +227,7 @@ index 74d3822..7d57125 100644
      );
  
      //
-@@ -87,6 +128,9 @@ pub fn register_gucs() {
+@@ -87,6 +130,9 @@ pub fn register_gucs() {
          &ANON_MASKING_POLICIES,
          GucContext::Suset,
          GucFlags::SUPERUSER_ONLY, /* | GucFlags::LIST_INPUT */
@@ -235,7 +237,7 @@ index 74d3822..7d57125 100644
      );
  
      GucRegistry::define_bool_guc(
-@@ -96,6 +140,9 @@ pub fn register_gucs() {
+@@ -96,6 +142,9 @@ pub fn register_gucs() {
          &ANON_PRIVACY_BY_DEFAULT,
          GucContext::Suset,
          GucFlags::default(),
@@ -245,7 +247,7 @@ index 74d3822..7d57125 100644
      );
      GucRegistry::define_bool_guc(
          "anon.transparent_dynamic_masking",
-@@ -104,6 +151,9 @@ pub fn register_gucs() {
+@@ -104,6 +153,9 @@ pub fn register_gucs() {
          &ANON_TRANSPARENT_DYNAMIC_MASKING,
          GucContext::Suset,
          GucFlags::default(),
@@ -255,7 +257,7 @@ index 74d3822..7d57125 100644
      );
  
      GucRegistry::define_bool_guc(
-@@ -113,6 +163,9 @@ pub fn register_gucs() {
+@@ -113,6 +165,9 @@ pub fn register_gucs() {
          &ANON_RESTRICT_TO_TRUSTED_SCHEMAS,
          GucContext::Suset,
          GucFlags::SUPERUSER_ONLY,
@@ -265,7 +267,7 @@ index 74d3822..7d57125 100644
      );
  
      GucRegistry::define_bool_guc(
-@@ -122,6 +175,9 @@ pub fn register_gucs() {
+@@ -122,6 +177,9 @@ pub fn register_gucs() {
          &ANON_STRICT_MODE,
          GucContext::Suset,
          GucFlags::default(),
@@ -275,7 +277,7 @@ index 74d3822..7d57125 100644
      );
  
      // The GUC vars below are not used in the Rust code
-@@ -134,6 +190,9 @@ pub fn register_gucs() {
+@@ -134,6 +192,9 @@ pub fn register_gucs() {
          &ANON_ALGORITHM,
          GucContext::Suset,
          GucFlags::SUPERUSER_ONLY,
@@ -285,7 +287,7 @@ index 74d3822..7d57125 100644
      );
  
      GucRegistry::define_string_guc(
-@@ -143,6 +202,9 @@ pub fn register_gucs() {
+@@ -143,6 +204,9 @@ pub fn register_gucs() {
          &ANON_MASK_SCHEMA,
          GucContext::Suset,
          GucFlags::default(),
@@ -295,7 +297,7 @@ index 74d3822..7d57125 100644
      );
  
      GucRegistry::define_string_guc(
-@@ -152,6 +214,9 @@ pub fn register_gucs() {
+@@ -152,6 +216,9 @@ pub fn register_gucs() {
          &ANON_SALT,
          GucContext::Suset,
          GucFlags::SUPERUSER_ONLY,
@@ -305,7 +307,7 @@ index 74d3822..7d57125 100644
      );
  
      GucRegistry::define_string_guc(
-@@ -161,5 +226,8 @@ pub fn register_gucs() {
+@@ -161,5 +228,8 @@ pub fn register_gucs() {
          &ANON_SOURCE_SCHEMA,
          GucContext::Suset,
          GucFlags::default(),
