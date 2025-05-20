@@ -113,13 +113,13 @@ async fn run_v1(
     let plan_hash = hasher.finish();
 
     if let Some(progress) = &import_progress {
-        if plan_hash != progress.import_plan_hash {
-            anyhow::bail!("Import plan does not match storcon metadata");
-        }
-
         // Handle collisions on jobs of unequal length
         if progress.jobs != plan.jobs.len() {
             anyhow::bail!("Import plan job length does not match storcon metadata")
+        }
+
+        if plan_hash != progress.import_plan_hash {
+            anyhow::bail!("Import plan does not match storcon metadata");
         }
     }
 
