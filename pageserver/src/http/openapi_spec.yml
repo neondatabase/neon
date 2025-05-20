@@ -629,6 +629,12 @@ paths:
                 existing_initdb_timeline_id:
                   type: string
                   format: hex
+                template_tenant_id:
+                  type: string
+                  format: hex
+                template_timeline_id:
+                  type: string
+                  format: hex
                 import_pgdata:
                   $ref: "#/components/schemas/TimelineCreateRequestImportPgdata"
       responses:

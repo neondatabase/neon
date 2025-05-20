@@ -107,7 +107,7 @@ use crate::{InitializationOrder, TEMP_FILE_SUFFIX, import_datadir, span, task_mg
 static INIT_DB_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(8));
 use utils::crashsafe;
 use utils::generation::Generation;
-use utils::id::TimelineId;
+use utils::id::{TenantId, TimelineId};
 use utils::lsn::{Lsn, RecordLsn};
 
 pub mod blob_io;
@@ -864,6 +864,7 @@ impl Debug for SetStoppingError {
 #[derive(Debug)]
 pub(crate) enum CreateTimelineParams {
     Bootstrap(CreateTimelineParamsBootstrap),
+    Template(CreateTimelineParamsTemplate),
     Branch(CreateTimelineParamsBranch),
     ImportPgdata(CreateTimelineParamsImportPgdata),
 }
@@ -873,6 +874,13 @@ pub(crate) struct CreateTimelineParamsBootstrap {
     pub(crate) new_timeline_id: TimelineId,
     pub(crate) existing_initdb_timeline_id: Option<TimelineId>,
     pub(crate) pg_version: u32,
+}
+
+#[derive(Debug)]
+pub(crate) struct CreateTimelineParamsTemplate {
+    pub(crate) new_timeline_id: TimelineId,
+    pub(crate) template_tenant_id: TenantId,
+    pub(crate) template_timeline_id: TimelineId,
 }
 
 /// NB: See comment on [`CreateTimelineIdempotency::Branch`] for why there's no `pg_version` here.
@@ -2665,6 +2673,9 @@ impl TenantShard {
             CreateTimelineParams::ImportPgdata(params) => {
                 self.create_timeline_import_pgdata(params, ctx).await?
             }
+            CreateTimelineParams::Template(params) => {
+                self.create_timeline_from_template(params, ctx).await?
+            }
         };
 
         // At this point we have dropped our guard on [`Self::timelines_creating`], and
@@ -2727,6 +2738,19 @@ impl TenantShard {
         };
 
         Ok(activated_timeline)
+    }
+
+    async fn create_timeline_from_template(
+        self: &Arc<Self>,
+        params: CreateTimelineParamsTemplate,
+        ctx: &RequestContext,
+    ) -> Result<CreateTimelineResult, CreateTimelineError> {
+        let CreateTimelineParamsTemplate {
+            new_timeline_id,
+            template_tenant_id,
+            template_timeline_id,
+        } = params;
+        todo!()
     }
 
     /// The returned [`Arc<Timeline>`] is NOT in the [`TenantShard::timelines`] map until the import
@@ -5683,7 +5707,6 @@ pub(crate) mod harness {
     use pageserver_api::models::ShardParameters;
     use pageserver_api::record::NeonWalRecord;
     use pageserver_api::shard::ShardIndex;
-    use utils::id::TenantId;
     use utils::logging;
 
     use super::*;

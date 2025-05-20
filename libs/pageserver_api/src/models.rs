@@ -325,6 +325,7 @@ impl TimelineCreateRequest {
         match &self.mode {
             TimelineCreateRequestMode::Branch { .. } => "branch",
             TimelineCreateRequestMode::ImportPgdata { .. } => "import",
+            TimelineCreateRequestMode::Template { .. } => "template",
             TimelineCreateRequestMode::Bootstrap { .. } => "bootstrap",
         }
     }
@@ -405,6 +406,10 @@ pub enum TimelineCreateRequestMode {
     },
     ImportPgdata {
         import_pgdata: TimelineCreateRequestModeImportPgdata,
+    },
+    Template {
+        template_tenant_id: TenantId,
+        template_timeline_id: TimelineId,
     },
     // NB: Bootstrap is all-optional, and thus the serde(untagged) will cause serde to stop at Bootstrap.
     // (serde picks the first matching enum variant, in declaration order).

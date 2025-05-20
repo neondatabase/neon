@@ -607,6 +607,14 @@ async fn timeline_create_handler(
                 }
             },
         }),
+        TimelineCreateRequestMode::Template {
+            template_tenant_id,
+            template_timeline_id,
+        } => tenant::CreateTimelineParams::Template(tenant::CreateTimelineParamsTemplate {
+            new_timeline_id,
+            template_tenant_id,
+            template_timeline_id,
+        }),
     };
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Error);
