@@ -65,8 +65,8 @@ where
 
         match (copy1, copy2) {
             (Poll::Pending, Poll::Pending) => Poll::Pending,
-            (Poll::Ready(_), _) => Poll::Ready(Ok(client_to_compute.dir)),
-            (_, Poll::Ready(_)) => Poll::Ready(Ok(compute_to_client.dir)),
+            (Poll::Ready(()), _) => Poll::Ready(Ok(client_to_compute.dir)),
+            (_, Poll::Ready(())) => Poll::Ready(Ok(compute_to_client.dir)),
         }
     })
     .await?;
@@ -222,9 +222,7 @@ impl CopyBuffer {
                 Poll::Ready(Ok(false))
             }
             // cannot continue on error.
-            Poll::Ready(Err(e)) => {
-                return Poll::Ready(Err(ErrorSource::read(self.dir, cold(e))));
-            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(ErrorSource::read(self.dir, cold(e)))),
             // No more data to read, and no more data to write.
             Poll::Pending => Poll::Pending,
         }

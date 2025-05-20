@@ -47,15 +47,11 @@ pub(crate) async fn proxy_pass(
 
     // reduce branching internal to the hot path.
     match &mut client {
-        Stream::Raw { raw } => {
-            copy_bidirectional_client_compute(raw, &mut compute, inspect).await?
-        }
+        Stream::Raw { raw } => copy_bidirectional_client_compute(raw, &mut compute, inspect).await,
         Stream::Tls { tls, .. } => {
-            copy_bidirectional_client_compute(&mut *tls, &mut compute, inspect).await?
+            copy_bidirectional_client_compute(&mut *tls, &mut compute, inspect).await
         }
-    };
-
-    Ok(())
+    }
 }
 
 pub(crate) struct ProxyPassthrough<S> {
