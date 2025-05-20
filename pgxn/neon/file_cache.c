@@ -1455,7 +1455,7 @@ pwrite_with_ioctl(const void *buffer, uint64 blkno)
 		.length = POSTGRES_PAGE_SIZE,
 		.buffer = (__u64)(uintptr_t) buffer
 	};
-	return ioctl(lfc_desc, NEON_IOCTL_READ, &args);
+	return ioctl(lfc_desc, NEON_IOCTL_WRITE, &args);
 }
 
 /*
