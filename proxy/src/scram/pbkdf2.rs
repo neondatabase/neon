@@ -14,8 +14,8 @@ pub(crate) struct Pbkdf2 {
 impl Pbkdf2 {
     pub(crate) fn start(str: &[u8], salt: &[u8], iterations: u32) -> Self {
         // key the HMAC and derive the first block in-place
-        let mut hmac = Hmac::<Sha256>::new_from_slice(str)
-            .expect("HMAC is able to accept all key sizes");
+        let mut hmac =
+            Hmac::<Sha256>::new_from_slice(str).expect("HMAC is able to accept all key sizes");
         hmac.update(salt);
         hmac.update(&1u32.to_be_bytes());
         let init_block = hmac.finalize_reset().into_bytes();
@@ -42,7 +42,7 @@ impl Pbkdf2 {
         } = self;
 
         // only do up to 4096 iterations per turn for fairness
-        let n = (*iterations).clamp(0,4096);
+        let n = (*iterations).clamp(0, 4096);
         for _ in 0..n {
             hmac.update(prev);
             let block = hmac.finalize_reset().into_bytes();
