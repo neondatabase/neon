@@ -230,6 +230,8 @@ pub struct PageServerConf {
     /// such as authentication requirements for HTTP and PostgreSQL APIs.
     /// This is insecure and should only be used in development environments.
     pub dev_mode: bool,
+
+    pub timeline_import_config: pageserver_api::config::TimelineImportConfig,
 }
 
 /// Token for authentication to safekeepers
@@ -404,6 +406,7 @@ impl PageServerConf {
             tracing,
             enable_tls_page_service_api,
             dev_mode,
+            timeline_import_config,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -457,6 +460,7 @@ impl PageServerConf {
             tracing,
             enable_tls_page_service_api,
             dev_mode,
+            timeline_import_config,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling

@@ -1278,7 +1278,7 @@ impl PageServerHandler {
     }
 
     #[instrument(level = tracing::Level::DEBUG, skip_all)]
-    async fn pagesteam_handle_batched_message<IO>(
+    async fn pagestream_handle_batched_message<IO>(
         &mut self,
         pgb_writer: &mut PostgresBackend<IO>,
         batch: BatchedFeMessage,
@@ -1733,7 +1733,7 @@ impl PageServerHandler {
             };
 
             let result = self
-                .pagesteam_handle_batched_message(
+                .pagestream_handle_batched_message(
                     pgb_writer,
                     msg,
                     io_concurrency.clone(),
@@ -1909,7 +1909,7 @@ impl PageServerHandler {
                             return Err(e);
                         }
                     };
-                    self.pagesteam_handle_batched_message(
+                    self.pagestream_handle_batched_message(
                         pgb_writer,
                         batch,
                         io_concurrency.clone(),

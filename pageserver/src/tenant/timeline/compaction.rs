@@ -1277,6 +1277,8 @@ impl Timeline {
             return Ok(CompactionOutcome::YieldForL0);
         }
 
+        let gc_cutoff = *self.applied_gc_cutoff_lsn.read();
+
         // 2. Repartition and create image layers if necessary
         match self
             .repartition(
@@ -1287,7 +1289,7 @@ impl Timeline {
             )
             .await
         {
-            Ok(((dense_partitioning, sparse_partitioning), lsn)) => {
+            Ok(((dense_partitioning, sparse_partitioning), lsn)) if lsn >= gc_cutoff => {
                 // Disables access_stats updates, so that the files we read remain candidates for eviction after we're done with them
                 let image_ctx = RequestContextBuilder::from(ctx)
                     .access_stats_behavior(AccessStatsBehavior::Skip)
@@ -1339,6 +1341,10 @@ impl Timeline {
                     );
                     return Ok(CompactionOutcome::YieldForL0);
                 }
+            }
+
+            Ok(_) => {
+                info!("skipping repartitioning due to image compaction LSN being below GC cutoff");
             }
 
             // Suppress errors when cancelled.
@@ -2204,8 +2210,7 @@ impl Timeline {
                     .as_mut()
                     .unwrap()
                     .put_value(key, lsn, value, ctx)
-                    .await
-                    .map_err(CompactionError::Other)?;
+                    .await?;
             } else {
                 let owner = self.shard_identity.get_shard_number(&key);
 
@@ -3430,6 +3435,7 @@ impl Timeline {
 
         // Step 2: Produce images+deltas.
         let mut accumulated_values = Vec::new();
+        let mut accumulated_values_estimated_size = 0;
         let mut last_key: Option<Key> = None;
 
         // Only create image layers when there is no ancestor branches. TODO: create covering image layer
@@ -3606,7 +3612,18 @@ impl Timeline {
                 if last_key.is_none() {
                     last_key = Some(key);
                 }
+                accumulated_values_estimated_size += val.estimated_size();
                 accumulated_values.push((key, lsn, val));
+
+                // Accumulated values should never exceed 512MB.
+                if accumulated_values_estimated_size >= 1024 * 1024 * 512 {
+                    return Err(CompactionError::Other(anyhow!(
+                        "too many values for a single key: {} for key {}, {} items",
+                        accumulated_values_estimated_size,
+                        key,
+                        accumulated_values.len()
+                    )));
+                }
             } else {
                 let last_key: &mut Key = last_key.as_mut().unwrap();
                 stat.on_unique_key_visited(); // TODO: adjust statistics for partial compaction
@@ -3639,6 +3656,7 @@ impl Timeline {
                     .map_err(CompactionError::Other)?;
                 accumulated_values.clear();
                 *last_key = key;
+                accumulated_values_estimated_size = val.estimated_size();
                 accumulated_values.push((key, lsn, val));
             }
         }

@@ -11,6 +11,7 @@ use compute_api::spec::{
 use futures::StreamExt;
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
+use itertools::Itertools;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use once_cell::sync::Lazy;
@@ -18,7 +19,7 @@ use postgres;
 use postgres::NoTls;
 use postgres::error::SqlState;
 use remote_storage::{DownloadError, RemotePath};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
@@ -95,7 +96,7 @@ pub struct ComputeNodeParams {
     pub internal_http_port: u16,
 
     /// the address of extension storage proxy gateway
-    pub ext_remote_storage: Option<String>,
+    pub remote_ext_base_url: Option<String>,
 }
 
 /// Compute node info shared across several `compute_ctl` threads.
@@ -1896,9 +1897,9 @@ LIMIT 100",
         real_ext_name: String,
         ext_path: RemotePath,
     ) -> Result<u64, DownloadError> {
-        let ext_remote_storage =
+        let remote_ext_base_url =
             self.params
-                .ext_remote_storage
+                .remote_ext_base_url
                 .as_ref()
                 .ok_or(DownloadError::BadInput(anyhow::anyhow!(
                     "Remote extensions storage is not configured",
@@ -1960,7 +1961,7 @@ LIMIT 100",
         let download_size = extension_server::download_extension(
             &real_ext_name,
             &ext_path,
-            ext_remote_storage,
+            remote_ext_base_url,
             &self.params.pgbin,
         )
         .await
@@ -1995,23 +1996,40 @@ LIMIT 100",
         tokio::spawn(conn);
 
         // TODO: support other types of grants apart from schemas?
-        let query = format!(
-            "GRANT {} ON SCHEMA {} TO {}",
-            privileges
-                .iter()
-                // should not be quoted as it's part of the command.
-                // is already sanitized so it's ok
-                .map(|p| p.as_str())
-                .collect::<Vec<&'static str>>()
-                .join(", "),
-            // quote the schema and role name as identifiers to sanitize them.
-            schema_name.pg_quote(),
-            role_name.pg_quote(),
-        );
-        db_client
-            .simple_query(&query)
+
+        // check the role grants first - to gracefully handle read-replicas.
+        let select = "SELECT privilege_type
+            FROM pg_namespace
+                JOIN LATERAL (SELECT * FROM aclexplode(nspacl) AS x) acl ON true
+                JOIN pg_user users ON acl.grantee = users.usesysid
+            WHERE users.usename = $1
+                AND nspname = $2";
+        let rows = db_client
+            .query(select, &[role_name, schema_name])
             .await
-            .with_context(|| format!("Failed to execute query: {}", query))?;
+            .with_context(|| format!("Failed to execute query: {select}"))?;
+
+        let already_granted: HashSet<String> = rows.into_iter().map(|row| row.get(0)).collect();
+
+        let grants = privileges
+            .iter()
+            .filter(|p| !already_granted.contains(p.as_str()))
+            // should not be quoted as it's part of the command.
+            // is already sanitized so it's ok
+            .map(|p| p.as_str())
+            .join(", ");
+
+        if !grants.is_empty() {
+            // quote the schema and role name as identifiers to sanitize them.
+            let schema_name = schema_name.pg_quote();
+            let role_name = role_name.pg_quote();
+
+            let query = format!("GRANT {grants} ON SCHEMA {schema_name} TO {role_name}",);
+            db_client
+                .simple_query(&query)
+                .await
+                .with_context(|| format!("Failed to execute query: {}", query))?;
+        }
 
         Ok(())
     }
@@ -2069,7 +2087,7 @@ LIMIT 100",
         &self,
         spec: &ComputeSpec,
     ) -> Result<RemoteExtensionMetrics> {
-        if self.params.ext_remote_storage.is_none() {
+        if self.params.remote_ext_base_url.is_none() {
             return Ok(RemoteExtensionMetrics {
                 num_ext_downloaded: 0,
                 largest_ext_size: 0,

@@ -7,7 +7,9 @@ use bytes::Bytes;
 use camino::Utf8PathBuf;
 use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt, TryStreamExt};
+use http_utils::error::ApiError;
 use postgres_ffi::{PG_TLI, XLogFileName, XLogSegNo};
+use remote_storage::GenericRemoteStorage;
 use reqwest::Certificate;
 use safekeeper_api::Term;
 use safekeeper_api::models::{PullTimelineRequest, PullTimelineResponse, TimelineStatus};
@@ -30,7 +32,7 @@ use utils::pausable_failpoint;
 
 use crate::control_file::CONTROL_FILE_NAME;
 use crate::state::{EvictionState, TimelinePersistentState};
-use crate::timeline::{Timeline, WalResidentTimeline};
+use crate::timeline::{Timeline, TimelineError, WalResidentTimeline};
 use crate::timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline};
 use crate::wal_storage::open_wal_file;
 use crate::{GlobalTimelines, debug_dump, wal_backup};
@@ -42,6 +44,7 @@ pub async fn stream_snapshot(
     source: NodeId,
     destination: NodeId,
     tx: mpsc::Sender<Result<Bytes>>,
+    storage: Option<Arc<GenericRemoteStorage>>,
 ) {
     match tli.try_wal_residence_guard().await {
         Err(e) => {
@@ -52,10 +55,32 @@ pub async fn stream_snapshot(
         Ok(maybe_resident_tli) => {
             if let Err(e) = match maybe_resident_tli {
                 Some(resident_tli) => {
-                    stream_snapshot_resident_guts(resident_tli, source, destination, tx.clone())
-                        .await
+                    stream_snapshot_resident_guts(
+                        resident_tli,
+                        source,
+                        destination,
+                        tx.clone(),
+                        storage,
+                    )
+                    .await
                 }
-                None => stream_snapshot_offloaded_guts(tli, source, destination, tx.clone()).await,
+                None => {
+                    if let Some(storage) = storage {
+                        stream_snapshot_offloaded_guts(
+                            tli,
+                            source,
+                            destination,
+                            tx.clone(),
+                            &storage,
+                        )
+                        .await
+                    } else {
+                        tx.send(Err(anyhow!("remote storage not configured")))
+                            .await
+                            .ok();
+                        return;
+                    }
+                }
             } {
                 // Error type/contents don't matter as they won't can't reach the client
                 // (hyper likely doesn't do anything with it), but http stream will be
@@ -122,10 +147,12 @@ pub(crate) async fn stream_snapshot_offloaded_guts(
     source: NodeId,
     destination: NodeId,
     tx: mpsc::Sender<Result<Bytes>>,
+    storage: &GenericRemoteStorage,
 ) -> Result<()> {
     let mut ar = prepare_tar_stream(tx);
 
-    tli.snapshot_offloaded(&mut ar, source, destination).await?;
+    tli.snapshot_offloaded(&mut ar, source, destination, storage)
+        .await?;
 
     ar.finish().await?;
 
@@ -138,10 +165,13 @@ pub async fn stream_snapshot_resident_guts(
     source: NodeId,
     destination: NodeId,
     tx: mpsc::Sender<Result<Bytes>>,
+    storage: Option<Arc<GenericRemoteStorage>>,
 ) -> Result<()> {
     let mut ar = prepare_tar_stream(tx);
 
-    let bctx = tli.start_snapshot(&mut ar, source, destination).await?;
+    let bctx = tli
+        .start_snapshot(&mut ar, source, destination, storage)
+        .await?;
     pausable_failpoint!("sk-snapshot-after-list-pausable");
 
     let tli_dir = tli.get_timeline_dir();
@@ -181,6 +211,7 @@ impl Timeline {
         ar: &mut tokio_tar::Builder<W>,
         source: NodeId,
         destination: NodeId,
+        storage: &GenericRemoteStorage,
     ) -> Result<()> {
         // Take initial copy of control file, then release state lock
         let mut control_file = {
@@ -215,6 +246,7 @@ impl Timeline {
         // can fail if the timeline was un-evicted and modified in the background.
         let remote_timeline_path = &self.remote_path;
         wal_backup::copy_partial_segment(
+            storage,
             &replace.previous.remote_path(remote_timeline_path),
             &replace.current.remote_path(remote_timeline_path),
         )
@@ -261,6 +293,7 @@ impl WalResidentTimeline {
         ar: &mut tokio_tar::Builder<W>,
         source: NodeId,
         destination: NodeId,
+        storage: Option<Arc<GenericRemoteStorage>>,
     ) -> Result<SnapshotContext> {
         let mut shared_state = self.write_shared_state().await;
         let wal_seg_size = shared_state.get_wal_seg_size();
@@ -282,6 +315,7 @@ impl WalResidentTimeline {
 
             let remote_timeline_path = &self.tli.remote_path;
             wal_backup::copy_partial_segment(
+                &*storage.context("remote storage not configured")?,
                 &replace.previous.remote_path(remote_timeline_path),
                 &replace.current.remote_path(remote_timeline_path),
             )
@@ -395,7 +429,7 @@ pub async fn handle_request(
     sk_auth_token: Option<SecretString>,
     ssl_ca_certs: Vec<Certificate>,
     global_timelines: Arc<GlobalTimelines>,
-) -> Result<PullTimelineResponse> {
+) -> Result<PullTimelineResponse, ApiError> {
     let existing_tli = global_timelines.get(TenantTimelineId::new(
         request.tenant_id,
         request.timeline_id,
@@ -411,7 +445,9 @@ pub async fn handle_request(
     for ssl_ca_cert in ssl_ca_certs {
         http_client = http_client.add_root_certificate(ssl_ca_cert);
     }
-    let http_client = http_client.build()?;
+    let http_client = http_client
+        .build()
+        .map_err(|e| ApiError::InternalServerError(e.into()))?;
 
     let http_hosts = request.http_hosts.clone();
 
@@ -443,10 +479,10 @@ pub async fn handle_request(
     // offline and C comes online. Then we want a pull on C with A and B as hosts to work.
     let min_required_successful = (http_hosts.len() - 1).max(1);
     if statuses.len() < min_required_successful {
-        bail!(
+        return Err(ApiError::InternalServerError(anyhow::anyhow!(
             "only got {} successful status responses. required: {min_required_successful}",
             statuses.len()
-        )
+        )));
     }
 
     // Find the most advanced safekeeper
@@ -465,14 +501,32 @@ pub async fn handle_request(
     assert!(status.tenant_id == request.tenant_id);
     assert!(status.timeline_id == request.timeline_id);
 
-    pull_timeline(
+    let check_tombstone = !request.ignore_tombstone.unwrap_or_default();
+
+    match pull_timeline(
         status,
         safekeeper_host,
         sk_auth_token,
         http_client,
         global_timelines,
+        check_tombstone,
     )
     .await
+    {
+        Ok(resp) => Ok(resp),
+        Err(e) => {
+            match e.downcast_ref::<TimelineError>() {
+                Some(TimelineError::AlreadyExists(_)) => Ok(PullTimelineResponse {
+                    safekeeper_host: None,
+                }),
+                Some(TimelineError::CreationInProgress(_)) => {
+                    // We don't return success here because creation might still fail.
+                    Err(ApiError::Conflict("Creation in progress".to_owned()))
+                }
+                _ => Err(ApiError::InternalServerError(e)),
+            }
+        }
+    }
 }
 
 async fn pull_timeline(
@@ -481,6 +535,7 @@ async fn pull_timeline(
     sk_auth_token: Option<SecretString>,
     http_client: reqwest::Client,
     global_timelines: Arc<GlobalTimelines>,
+    check_tombstone: bool,
 ) -> Result<PullTimelineResponse> {
     let ttid = TenantTimelineId::new(status.tenant_id, status.timeline_id);
     info!(
@@ -552,7 +607,7 @@ async fn pull_timeline(
 
     // Finally, load the timeline.
     let _tli = global_timelines
-        .load_temp_timeline(ttid, &tli_dir_path, false)
+        .load_temp_timeline(ttid, &tli_dir_path, check_tombstone)
         .await?;
 
     Ok(PullTimelineResponse {

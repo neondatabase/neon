@@ -1,8 +1,10 @@
-/// A stand-alone program that routes connections, e.g. from
-/// `aaa--bbb--1234.external.domain` to `aaa.bbb.internal.domain:1234`.
-///
-/// This allows connecting to pods/services running in the same Kubernetes cluster from
-/// the outside. Similar to an ingress controller for HTTPS.
+//! A stand-alone program that routes connections, e.g. from
+//! `aaa--bbb--1234.external.domain` to `aaa.bbb.internal.domain:1234`.
+//!
+//! This allows connecting to pods/services running in the same Kubernetes cluster from
+//! the outside. Similar to an ingress controller for HTTPS.
+
+use std::path::Path;
 use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::{Context, anyhow, bail, ensure};
@@ -86,46 +88,7 @@ pub async fn run() -> anyhow::Result<()> {
         args.get_one::<String>("tls-key"),
         args.get_one::<String>("tls-cert"),
     ) {
-        (Some(key_path), Some(cert_path)) => {
-            let key = {
-                let key_bytes = std::fs::read(key_path).context("TLS key file")?;
-
-                let mut keys =
-                    rustls_pemfile::pkcs8_private_keys(&mut &key_bytes[..]).collect_vec();
-
-                ensure!(keys.len() == 1, "keys.len() = {} (should be 1)", keys.len());
-                PrivateKeyDer::Pkcs8(
-                    keys.pop()
-                        .expect("keys should not be empty")
-                        .context(format!("Failed to read TLS keys at '{key_path}'"))?,
-                )
-            };
-
-            let cert_chain_bytes = std::fs::read(cert_path)
-                .context(format!("Failed to read TLS cert file at '{cert_path}.'"))?;
-
-            let cert_chain: Vec<_> = {
-                rustls_pemfile::certs(&mut &cert_chain_bytes[..])
-                .try_collect()
-                .with_context(|| {
-                    format!("Failed to read TLS certificate chain from bytes from file at '{cert_path}'.")
-                })?
-            };
-
-            // needed for channel bindings
-            let first_cert = cert_chain.first().context("missing certificate")?;
-            let tls_server_end_point = TlsServerEndPoint::new(first_cert)?;
-
-            let tls_config =
-                rustls::ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
-                    .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
-                    .context("ring should support TLS1.2 and TLS1.3")?
-                    .with_no_client_auth()
-                    .with_single_cert(cert_chain, key)?
-                    .into();
-
-            (tls_config, tls_server_end_point)
-        }
+        (Some(key_path), Some(cert_path)) => parse_tls(key_path.as_ref(), cert_path.as_ref())?,
         _ => bail!("tls-key and tls-cert must be specified"),
     };
 
@@ -188,7 +151,58 @@ pub async fn run() -> anyhow::Result<()> {
     match signal {}
 }
 
-async fn task_main(
+pub(super) fn parse_tls(
+    key_path: &Path,
+    cert_path: &Path,
+) -> anyhow::Result<(Arc<rustls::ServerConfig>, TlsServerEndPoint)> {
+    let key = {
+        let key_bytes = std::fs::read(key_path).context("TLS key file")?;
+
+        let mut keys = rustls_pemfile::pkcs8_private_keys(&mut &key_bytes[..]).collect_vec();
+
+        ensure!(keys.len() == 1, "keys.len() = {} (should be 1)", keys.len());
+        PrivateKeyDer::Pkcs8(
+            keys.pop()
+                .expect("keys should not be empty")
+                .context(format!(
+                    "Failed to read TLS keys at '{}'",
+                    key_path.display()
+                ))?,
+        )
+    };
+
+    let cert_chain_bytes = std::fs::read(cert_path).context(format!(
+        "Failed to read TLS cert file at '{}.'",
+        cert_path.display()
+    ))?;
+
+    let cert_chain: Vec<_> = {
+        rustls_pemfile::certs(&mut &cert_chain_bytes[..])
+            .try_collect()
+            .with_context(|| {
+                format!(
+                    "Failed to read TLS certificate chain from bytes from file at '{}'.",
+                    cert_path.display()
+                )
+            })?
+    };
+
+    // needed for channel bindings
+    let first_cert = cert_chain.first().context("missing certificate")?;
+    let tls_server_end_point = TlsServerEndPoint::new(first_cert)?;
+
+    let tls_config =
+        rustls::ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+            .context("ring should support TLS1.2 and TLS1.3")?
+            .with_no_client_auth()
+            .with_single_cert(cert_chain, key)?
+            .into();
+
+    Ok((tls_config, tls_server_end_point))
+}
+
+pub(super) async fn task_main(
     dest_suffix: Arc<String>,
     tls_config: Arc<rustls::ServerConfig>,
     compute_tls_config: Option<Arc<rustls::ClientConfig>>,
@@ -380,6 +394,7 @@ async fn handle_client(
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum Connection {
     Raw(tokio::net::TcpStream),
     Tls(tokio_rustls::client::TlsStream<tokio::net::TcpStream>),
