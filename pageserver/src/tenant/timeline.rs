@@ -6324,7 +6324,7 @@ impl Timeline {
             )
         };
 
-        let mut new_gc_cutoff = Lsn::min(space_cutoff, time_cutoff.unwrap_or_default());
+        let mut new_gc_cutoff = space_cutoff.min(time_cutoff.unwrap_or_default());
         let standby_horizon = self.standby_horizon.load();
         // Hold GC for the standby, but as a safety guard do it only within some
         // reasonable lag.
