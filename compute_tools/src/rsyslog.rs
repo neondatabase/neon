@@ -27,6 +27,23 @@ fn get_rsyslog_pid() -> Option<String> {
     }
 }
 
+fn wait_for_rsyslog_pid() -> Result<String, anyhow::Error> {
+    for attempt in 0..10 {
+        match get_rsyslog_pid() {
+            Some(pid) => return Ok(pid),
+            None => {
+                info!(
+                    "rsyslogd is not running, attempt {}/10. Waiting...",
+                    attempt
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!("rsyslogd did not start after 10 attempts"))
+}
+
 // Restart rsyslogd to apply the new configuration.
 // This is necessary, because there is no other way to reload the rsyslog configuration.
 //
@@ -36,14 +53,14 @@ fn get_rsyslog_pid() -> Option<String> {
 // TODO: test it properly
 //
 fn restart_rsyslog() -> Result<()> {
-    let old_pid = get_rsyslog_pid().context("rsyslogd is not running")?;
-    info!("rsyslogd is running with pid: {}, restart it", old_pid);
+    // ensure rsyslogd is running before restarting it
+    wait_for_rsyslog_pid()?;
 
     // kill it to restart
     let _ = Command::new("pkill")
         .arg("rsyslogd")
         .output()
-        .context("Failed to stop rsyslogd")?;
+        .context("Failed to restart rsyslogd")?;
 
     Ok(())
 }
