@@ -3915,6 +3915,11 @@ impl Service {
         })
     }
 
+    #[instrument(skip_all, fields(
+        tenant_id=%req.tenant_shard_id.tenant_id,
+        shard_id=%req.tenant_shard_id.shard_slug(),
+        timeline_id=%req.timeline_id,
+    ))]
     pub(crate) async fn handle_timeline_shard_import_progress(
         self: &Arc<Self>,
         req: TimelineImportStatusRequest,
@@ -3964,6 +3969,11 @@ impl Service {
             })
     }
 
+    #[instrument(skip_all, fields(
+        tenant_id=%req.tenant_shard_id.tenant_id,
+        shard_id=%req.tenant_shard_id.shard_slug(),
+        timeline_id=%req.timeline_id,
+    ))]
     pub(crate) async fn handle_timeline_shard_import_progress_upcall(
         self: &Arc<Self>,
         req: PutTimelineImportStatusRequest,
