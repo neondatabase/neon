@@ -1066,6 +1066,15 @@ pub(crate) static TENANT_SYNTHETIC_SIZE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|
     .expect("Failed to register pageserver_tenant_synthetic_cached_size_bytes metric")
 });
 
+pub(crate) static TENANT_OFFLOADED_TIMELINES: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_tenant_offloaded_timelines",
+        "Number of offloaded timelines of a tenant",
+        &["tenant_id", "shard_id"]
+    )
+    .expect("Failed to register pageserver_tenant_offloaded_timelines metric")
+});
+
 pub(crate) static EVICTION_ITERATION_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_eviction_iteration_duration_seconds_global",
@@ -3551,11 +3560,14 @@ impl TimelineMetrics {
 }
 
 pub(crate) fn remove_tenant_metrics(tenant_shard_id: &TenantShardId) {
+    let tid = tenant_shard_id.tenant_id.to_string();
+    let shard_id = tenant_shard_id.shard_slug().to_string();
+
     // Only shard zero deals in synthetic sizes
     if tenant_shard_id.is_shard_zero() {
-        let tid = tenant_shard_id.tenant_id.to_string();
         let _ = TENANT_SYNTHETIC_SIZE_METRIC.remove_label_values(&[&tid]);
     }
+    let _ = TENANT_OFFLOADED_TIMELINES.remove_label_values(&[&tid, &shard_id]);
 
     tenant_throttling::remove_tenant_metrics(tenant_shard_id);
 

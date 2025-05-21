@@ -86,8 +86,8 @@ use crate::deletion_queue::{DeletionQueueClient, DeletionQueueError};
 use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::{
     BROKEN_TENANTS_SET, CIRCUIT_BREAKERS_BROKEN, CIRCUIT_BREAKERS_UNBROKEN, CONCURRENT_INITDBS,
-    INITDB_RUN_TIME, INITDB_SEMAPHORE_ACQUISITION_TIME, TENANT, TENANT_STATE_METRIC,
-    TENANT_SYNTHETIC_SIZE_METRIC, remove_tenant_metrics,
+    INITDB_RUN_TIME, INITDB_SEMAPHORE_ACQUISITION_TIME, TENANT, TENANT_OFFLOADED_TIMELINES,
+    TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC, remove_tenant_metrics,
 };
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::LocationMode;
@@ -3348,6 +3348,13 @@ impl TenantShard {
                 activated_timelines += 1;
             }
 
+            let tid = self.tenant_shard_id.tenant_id.to_string();
+            let shard_id = self.tenant_shard_id.shard_slug().to_string();
+            let offloaded_timeline_count = timelines_offloaded_accessor.len();
+            TENANT_OFFLOADED_TIMELINES
+                .with_label_values(&[&tid, &shard_id])
+                .set(offloaded_timeline_count as u64);
+
             self.state.send_modify(move |current_state| {
                 assert!(
                     matches!(current_state, TenantState::Activating(_)),
@@ -5559,6 +5566,14 @@ impl TenantShard {
                 return Ok(());
             }
         }
+
+        // Update metrics
+        let tid = self.tenant_shard_id.to_string();
+        let shard_id = self.tenant_shard_id.shard_slug().to_string();
+        let set_key = &[tid.as_str(), shard_id.as_str()][..];
+        TENANT_OFFLOADED_TIMELINES
+            .with_label_values(set_key)
+            .set(manifest.offloaded_timelines.len() as u64);
 
         // Upload the manifest. Remote storage does no retries internally, so retry here.
         match backoff::retry(
