@@ -86,7 +86,7 @@ pub struct DbError {
 }
 
 impl DbError {
-    pub fn new(code: SqlState, message: String) -> Self {
+    pub fn new_test_error(code: SqlState, message: String) -> Self {
         DbError {
             severity: "ERROR".to_string(),
             parsed_severity: Some(Severity::Error),

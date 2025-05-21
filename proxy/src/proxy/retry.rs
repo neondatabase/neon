@@ -141,7 +141,7 @@ mod tests {
             SqlState::INVALID_PARAMETER_VALUE,
         ];
         for state in non_retry_states {
-            let err = DbError::new(state.clone(), "oops".to_string());
+            let err = DbError::new_test_error(state.clone(), "oops".to_string());
             assert!(
                 !err.should_retry_wake_compute(),
                 "State {:?} unexpectedly retried",
@@ -152,7 +152,7 @@ mod tests {
         // Errors coming from pgbouncer should not trigger a wake_compute retry
         let non_retry_pgbouncer_errors = ["no more connections allowed (max_client_conn)"];
         for error in non_retry_pgbouncer_errors {
-            let err = DbError::new(SqlState::PROTOCOL_VIOLATION, error.to_string());
+            let err = DbError::new_test_error(SqlState::PROTOCOL_VIOLATION, error.to_string());
             assert!(
                 !err.should_retry_wake_compute(),
                 "PGBouncer error {:?} unexpectedly retried",
@@ -168,7 +168,7 @@ mod tests {
             SqlState::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION,
         ];
         for state in retry_states {
-            let err = DbError::new(state.clone(), "oops".to_string());
+            let err = DbError::new_test_error(state.clone(), "oops".to_string());
             assert!(
                 err.should_retry_wake_compute(),
                 "State {:?} unexpectedly skipped retry",

@@ -741,13 +741,15 @@ async fn fail_but_wake_invalidates_cache() {
         ConnectAction::Connect,
     ]);
     let user = helper_create_connect_info(&mech);
-    let cfg  = config();
+    let cfg = config();
 
     connect_to_compute(&ctx, &mech, &user, cfg.retry, &cfg)
         .await
         .unwrap();
 
-    assert!(logs_contain("invalidating stalled compute node info cache entry"));
+    assert!(logs_contain(
+        "invalidating stalled compute node info cache entry"
+    ));
 }
 
 #[tokio::test]
@@ -760,13 +762,15 @@ async fn fail_no_wake_skips_cache_invalidation() {
         ConnectAction::Connect,
     ]);
     let user = helper_create_connect_info(&mech);
-    let cfg  = config();
+    let cfg = config();
 
     connect_to_compute(&ctx, &mech, &user, cfg.retry, &cfg)
         .await
         .unwrap();
 
-    assert!(!logs_contain("invalidating stalled compute node info cache entry"));
+    assert!(!logs_contain(
+        "invalidating stalled compute node info cache entry"
+    ));
 }
 
 #[tokio::test]
@@ -787,7 +791,9 @@ async fn retry_but_wake_invalidates_cache() {
     mechanism.verify();
 
     // Because Retry has wakeable=true, we should see invalidate_cache
-    assert!(logs_contain("invalidating stalled compute node info cache entry"));
+    assert!(logs_contain(
+        "invalidating stalled compute node info cache entry"
+    ));
 }
 
 #[tokio::test]
@@ -808,5 +814,7 @@ async fn retry_no_wake_skips_invalidation() {
     mechanism.verify();
 
     // Because RetryNoWake has wakeable=false, we must NOT see invalidate_cache
-    assert!(!logs_contain("invalidating stalled compute node info cache entry"));
+    assert!(!logs_contain(
+        "invalidating stalled compute node info cache entry"
+    ));
 }
