@@ -34,6 +34,12 @@ impl std::str::FromStr for ApiUrl {
     }
 }
 
+impl std::ops::DerefMut for ApiUrl {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 /// This instance is safe because it doesn't allow us to modify the object.
 impl std::ops::Deref for ApiUrl {
     type Target = url::Url;

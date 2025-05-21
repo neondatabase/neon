@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, ensure};
+#[cfg(any(test, feature = "testing"))]
+use anyhow::Context;
 use arc_swap::ArcSwapOption;
 use futures::future::Either;
 use remote_storage::RemoteStorageConfig;
@@ -35,6 +37,8 @@ use crate::scram::threadpool::ThreadPool;
 use crate::serverless::GlobalConnPoolOptions;
 use crate::serverless::cancel_set::CancelSet;
 use crate::tls::client_config::compute_client_config_with_root_certs;
+#[cfg(any(test, feature = "testing"))]
+use crate::url::ApiUrl;
 use crate::{auth, control_plane, http, serverless, usage_metrics};
 
 project_git_version!(GIT_VERSION);
@@ -86,6 +90,11 @@ struct ProxyCliArgs {
         default_value = "http://localhost:3000/authenticate_proxy_request/"
     )]
     auth_endpoint: String,
+    /// if auth-backend=postgres and this flag is true, then read the password from env var PGPASSWORD
+    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    auth_endpoint_password_from_env: bool,
+    #[clap(long, hide = true, env = "PGPASSWORD")]
+    pgpassword: Option<String>,
     /// JWT used to connect to control plane.
     #[clap(
         long,
@@ -769,7 +778,13 @@ fn build_auth_backend(
 
         #[cfg(any(test, feature = "testing"))]
         AuthBackendType::Postgres => {
-            let url = args.auth_endpoint.parse()?;
+            let mut url: ApiUrl = args.auth_endpoint.parse()?;
+            if args.auth_endpoint_password_from_env {
+                let password = args.pgpassword
+                    .as_ref()
+                    .with_context(|| "Environment variable `PGPASSWORD` is not set")?;
+                url.set_password(Some(password)).expect("Failed to set password");
+            }
             let api = control_plane::client::mock::MockControlPlane::new(
                 url,
                 !args.is_private_access_proxy,
