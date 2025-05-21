@@ -84,7 +84,7 @@ impl std::fmt::Display for Backend<'_, ()> {
                     let url = endpoint.url();
                     match url::Url::parse(url) {
                         Ok(mut url) => {
-                            let _ = url.set_password(None);
+                            let _ = url.set_password(Some("_redacted_"));
                             let url = url.as_str();
                             fmt.debug_tuple("ControlPlane::PostgresMock")
                                 .field(&url)
