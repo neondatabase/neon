@@ -14,6 +14,7 @@ pub mod span;
 pub mod uninit;
 mod walreceiver;
 
+use hashlink::LruCache;
 use std::array;
 use std::cmp::{max, min};
 use std::collections::btree_map::Entry;
@@ -199,16 +200,6 @@ pub struct TimelineResources {
     pub basebackup_prepare_sender: BasebackupPrepareSender,
 }
 
-/// The relation size cache caches relation sizes at the end of the timeline. It speeds up WAL
-/// ingestion considerably, because WAL ingestion needs to check on most records if the record
-/// implicitly extends the relation.  At startup, `complete_as_of` is initialized to the current end
-/// of the timeline (disk_consistent_lsn).  It's used on reads of relation sizes to check if the
-/// value can be used to also update the cache, see [`Timeline::update_cached_rel_size`].
-pub(crate) struct RelSizeCache {
-    pub(crate) complete_as_of: Lsn,
-    pub(crate) map: HashMap<RelTag, (Lsn, BlockNumber)>,
-}
-
 pub struct Timeline {
     pub(crate) conf: &'static PageServerConf,
     tenant_conf: Arc<ArcSwap<AttachedTenantConf>>,
@@ -367,7 +358,8 @@ pub struct Timeline {
     pub walreceiver: Mutex<Option<WalReceiver>>,
 
     /// Relation size cache
-    pub(crate) rel_size_cache: RwLock<RelSizeCache>,
+    pub(crate) rel_size_latest_cache: RwLock<HashMap<RelTag, (Lsn, BlockNumber)>>,
+    pub(crate) rel_size_snapshot_cache: Mutex<LruCache<(Lsn, RelTag), BlockNumber>>,
 
     download_all_remote_layers_task_info: RwLock<Option<DownloadRemoteLayersTaskInfo>>,
 
@@ -2860,6 +2852,13 @@ impl Timeline {
 
             self.remote_client.update_config(&new_conf.location);
 
+            let mut rel_size_cache = self.rel_size_snapshot_cache.lock().unwrap();
+            if let Some(new_capacity) = new_conf.tenant_conf.relsize_snapshot_cache_capacity {
+                if new_capacity != rel_size_cache.capacity() {
+                    rel_size_cache.set_capacity(new_capacity);
+                }
+            }
+
             self.metrics
                 .evictions_with_low_residence_duration
                 .write()
@@ -2917,6 +2916,14 @@ impl Timeline {
             let is_offloaded = MaybeOffloaded::No;
             ancestor_gc_info.insert_child(timeline_id, metadata.ancestor_lsn(), is_offloaded);
         }
+
+        let relsize_snapshot_cache_capacity = {
+            let loaded_tenant_conf = tenant_conf.load();
+            loaded_tenant_conf
+                .tenant_conf
+                .relsize_snapshot_cache_capacity
+                .unwrap_or(conf.default_tenant_conf.relsize_snapshot_cache_capacity)
+        };
 
         Arc::new_cyclic(|myself| {
             let metrics = Arc::new(TimelineMetrics::new(
@@ -3009,10 +3016,8 @@ impl Timeline {
                 last_image_layer_creation_check_instant: Mutex::new(None),
 
                 last_received_wal: Mutex::new(None),
-                rel_size_cache: RwLock::new(RelSizeCache {
-                    complete_as_of: disk_consistent_lsn,
-                    map: HashMap::new(),
-                }),
+                rel_size_latest_cache: RwLock::new(HashMap::new()),
+                rel_size_snapshot_cache: Mutex::new(LruCache::new(relsize_snapshot_cache_capacity)),
 
                 download_all_remote_layers_task_info: RwLock::new(None),
 
