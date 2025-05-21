@@ -197,6 +197,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
             "numerator": 0,
             "denominator": 10,
         },
+        "basebackup_cache_enabled": True,
     }
 
     vps_http = env.storage_controller.pageserver_api()
