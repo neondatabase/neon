@@ -69,7 +69,7 @@ impl ShouldRetryWakeCompute for postgres_client::error::DbError {
                 .message()
                 .contains("no more connections allowed (max_client_conn)");
         }
-        return true;
+        true
     }
 }
 
