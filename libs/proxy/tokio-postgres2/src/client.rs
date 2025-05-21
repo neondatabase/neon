@@ -202,7 +202,13 @@ impl Client {
         I: IntoIterator<Item = Option<S>>,
         I::IntoIter: ExactSizeIterator,
     {
-        query::query_txt(&mut self.inner, statement, params).await
+        query::query_txt(
+            &mut self.inner,
+            &mut self.cached_typeinfo,
+            statement,
+            params,
+        )
+        .await
     }
 
     /// Executes a sequence of SQL statements using the simple query protocol, returning the resulting rows.
@@ -308,11 +314,6 @@ impl Client {
             process_id: self.process_id,
             secret_key: self.secret_key,
         }
-    }
-
-    /// Query for type information
-    pub(crate) async fn get_type_inner(&mut self, oid: Oid) -> Result<Type, Error> {
-        crate::prepare::get_type(&mut self.inner, &mut self.cached_typeinfo, oid).await
     }
 
     /// Determines if the connection to the server has already closed.

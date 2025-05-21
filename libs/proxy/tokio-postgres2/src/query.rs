@@ -7,10 +7,10 @@ use fallible_iterator::FallibleIterator;
 use futures_util::{Stream, ready};
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
-use postgres_types2::{Format, ToSql, Type};
+use postgres_types2::{Format, ToSql};
 use tracing::debug;
 
-use crate::client::{InnerClient, Responses};
+use crate::client::{CachedTypeInfo, InnerClient, Responses};
 use crate::codec::FrontendMessage;
 use crate::types::IsNull;
 use crate::{Column, Error, ReadyForQueryStatus, Row, Statement};
@@ -23,7 +23,9 @@ impl fmt::Debug for BorrowToSqlParamsDebug<'_> {
     }
 }
 
-pub async fn query<'a, I>(
+/// subquery does not send a sync message.
+/// they need to be polled to completion.
+pub async fn sub_query<'a, I>(
     client: &mut InnerClient,
     statement: Statement,
     params: I,
@@ -39,14 +41,15 @@ where
             statement.name(),
             BorrowToSqlParamsDebug(params.as_slice()),
         );
-        encode(client, &statement, params)?
+        encode_subquery(client, &statement, params)?
     } else {
-        encode(client, &statement, params)?
+        encode_subquery(client, &statement, params)?
     };
     let responses = start(client, buf).await?;
     Ok(RowStream {
         responses,
         statement,
+        subquery: true,
         command_tag: None,
         status: ReadyForQueryStatus::Unknown,
         output_format: Format::Binary,
@@ -70,6 +73,7 @@ impl Drop for SyncIfNotDone<'_> {
 
 pub async fn query_txt<'a, S, I>(
     client: &'a mut InnerClient,
+    typecache: &mut CachedTypeInfo,
     query: &str,
     params: I,
 ) -> Result<RowStream<'a>, Error>
@@ -115,6 +119,23 @@ where
         _ => return Err(Error::unexpected_message()),
     };
 
+    let mut parameters = vec![];
+    let mut it = parameter_description.parameters();
+    while let Some(oid) = it.next().map_err(Error::parse)? {
+        let type_ = crate::prepare::get_type(guard.client, typecache, oid).await?;
+        parameters.push(type_);
+    }
+
+    let mut columns = vec![];
+    if let Some(row_description) = row_description {
+        let mut it = row_description.fields();
+        while let Some(field) = it.next().map_err(Error::parse)? {
+            let type_ = crate::prepare::get_type(guard.client, typecache, field.type_oid()).await?;
+            let column = Column::new(field.name().to_string(), type_, field);
+            columns.push(column);
+        }
+    }
+
     let buf = guard.client.with_buf(|buf| {
         // Bind, pass params as text, retrieve as binary
         match frontend::bind(
@@ -156,26 +177,10 @@ where
         _ => return Err(Error::unexpected_message()),
     }
 
-    let mut parameters = vec![];
-    let mut it = parameter_description.parameters();
-    while let Some(oid) = it.next().map_err(Error::parse)? {
-        let type_ = Type::from_oid(oid).unwrap_or(Type::UNKNOWN);
-        parameters.push(type_);
-    }
-
-    let mut columns = vec![];
-    if let Some(row_description) = row_description {
-        let mut it = row_description.fields();
-        while let Some(field) = it.next().map_err(Error::parse)? {
-            let type_ = Type::from_oid(field.type_oid()).unwrap_or(Type::UNKNOWN);
-            let column = Column::new(field.name().to_string(), type_, field);
-            columns.push(column);
-        }
-    }
-
     Ok(RowStream {
         responses,
         statement: Statement::new_anonymous(parameters, columns),
+        subquery: false,
         command_tag: None,
         status: ReadyForQueryStatus::Unknown,
         output_format: Format::Text,
@@ -183,7 +188,7 @@ where
 }
 
 async fn start(client: &mut InnerClient, buf: Bytes) -> Result<&mut Responses, Error> {
-    let responses = client.send(FrontendMessage::Raw(buf))?;
+    let responses = client.send_partial(FrontendMessage::Raw(buf))?;
 
     match responses.next().await? {
         Message::BindComplete => {}
@@ -193,7 +198,7 @@ async fn start(client: &mut InnerClient, buf: Bytes) -> Result<&mut Responses, E
     Ok(responses)
 }
 
-pub fn encode<'a, I>(
+pub fn encode_subquery<'a, I>(
     client: &mut InnerClient,
     statement: &Statement,
     params: I,
@@ -205,7 +210,7 @@ where
     client.with_buf(|buf| {
         encode_bind(statement, params, "", buf)?;
         frontend::execute("", 0, buf).map_err(Error::encode)?;
-        frontend::sync(buf);
+        frontend::flush(buf);
         Ok(buf.split().freeze())
     })
 }
@@ -265,6 +270,7 @@ where
 pub struct RowStream<'a> {
     responses: &'a mut Responses,
     output_format: Format,
+    subquery: bool,
     pub statement: Statement,
     pub command_tag: Option<String>,
     pub status: ReadyForQueryStatus,
@@ -284,10 +290,17 @@ impl Stream for RowStream<'_> {
                         this.output_format,
                     )?)));
                 }
-                Message::EmptyQueryResponse | Message::PortalSuspended => {}
+                Message::EmptyQueryResponse | Message::PortalSuspended => {
+                    if this.subquery {
+                        return Poll::Ready(None);
+                    }
+                }
                 Message::CommandComplete(body) => {
                     if let Ok(tag) = body.tag() {
                         this.command_tag = Some(tag.to_string());
+                    }
+                    if this.subquery {
+                        return Poll::Ready(None);
                     }
                 }
                 Message::ReadyForQuery(status) => {

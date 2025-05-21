@@ -25,7 +25,7 @@ async fn prepare_typecheck(
     types: &[Type],
 ) -> Result<Statement, Error> {
     let buf = encode(client, name, query, types)?;
-    let responses = client.send(FrontendMessage::Raw(buf))?;
+    let responses = client.send_partial(FrontendMessage::Raw(buf))?;
 
     match responses.next().await? {
         Message::ParseComplete => {}
@@ -78,7 +78,7 @@ fn encode(
     client.with_buf(|buf| {
         frontend::parse(name, query, types.iter().map(Type::oid), buf).map_err(Error::encode)?;
         frontend::describe(b'S', name, buf).map_err(Error::encode)?;
-        frontend::sync(buf);
+        frontend::flush(buf);
         Ok(buf.split().freeze())
     })
 }
@@ -105,12 +105,15 @@ pub async fn get_type(
 
         let stmt = typeinfo_statement(client, typecache).await?;
 
-        let mut rows = query::query(client, stmt, slice_iter(&[&oid])).await?;
+        let mut rows = query::sub_query(client, stmt, slice_iter(&[&oid])).await?;
 
         let row = match rows.try_next().await? {
             Some(row) => row,
             None => return Err(Error::unexpected_message()),
         };
+        if rows.try_next().await?.is_some() {
+            return Err(Error::unexpected_message());
+        }
 
         let name: String = row.try_get(0)?;
         let type_: i8 = row.try_get(1)?;

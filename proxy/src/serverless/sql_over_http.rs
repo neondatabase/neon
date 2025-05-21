@@ -1162,13 +1162,7 @@ async fn query_to_json<T: GenericClient>(
             "format": "text",
         }));
 
-        match client.get_type(c.type_oid()).await {
-            Ok(t) => columns.push(t),
-            Err(err) => {
-                tracing::warn!(?err, "unable to query type information");
-                return Err(SqlOverHttpError::InternalPostgres(err));
-            }
-        }
+        columns.push(c.type_().clone());
     }
 
     let array_mode = data.array_mode.unwrap_or(parsed_headers.default_array_mode);
