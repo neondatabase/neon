@@ -9,7 +9,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use utils::{
-    id::{TenantId, TimelineId},
+    id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
     shard::TenantShardId,
 };
@@ -30,15 +30,20 @@ pub struct BasebackupPrepareRequest {
 pub type BasebackupPrepareSender = UnboundedSender<BasebackupPrepareRequest>;
 pub type BasebackupPrepareReceiver = UnboundedReceiver<BasebackupPrepareRequest>;
 
+type BasebackupRemoveEntrySender = UnboundedSender<Utf8PathBuf>;
+type BasebackupRemoveEntryReceiver = UnboundedReceiver<Utf8PathBuf>;
+
 pub struct BasebackupCache {
     data_dir: Utf8PathBuf,
 
-    data_cache: Arc<tokio::sync::Mutex<HashMap<(TenantId, TimelineId), Lsn>>>,
+    entries: tokio::sync::Mutex<HashMap<TenantTimelineId, Lsn>>,
 
     #[allow(dead_code)]
     config: BasebackupCacheConfig,
 
     tenant_manager: Arc<TenantManager>,
+
+    remove_entry_sender: BasebackupRemoveEntrySender,
 
     cancel: CancellationToken,
 }
@@ -53,15 +58,22 @@ impl BasebackupCache {
         tenant_manager: Arc<TenantManager>,
         cancel: CancellationToken,
     ) -> Arc<Self> {
+        let (remove_entry_sender, remove_entry_receiver) = tokio::sync::mpsc::unbounded_channel();
+
         let cache = Arc::new(BasebackupCache {
             data_dir,
-            data_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            entries: tokio::sync::Mutex::new(HashMap::new()),
             config,
             tenant_manager,
+            remove_entry_sender,
             cancel,
         });
 
-        runtime_handle.spawn(cache.clone().background(prepare_receiver));
+        runtime_handle.spawn(
+            cache
+                .clone()
+                .background(prepare_receiver, remove_entry_receiver),
+        );
 
         cache
     }
@@ -73,7 +85,8 @@ impl BasebackupCache {
         timeline_id: TimelineId,
         lsn: Lsn,
     ) -> Option<tokio::fs::File> {
-        if self.data_cache.lock().await.get(&(tenant_id, timeline_id)) != Some(&lsn) {
+        let tti = TenantTimelineId::new(tenant_id, timeline_id);
+        if self.entries.lock().await.get(&tti) != Some(&lsn) {
             return None;
         }
 
@@ -92,57 +105,93 @@ impl BasebackupCache {
 
     fn entry_path(&self, tenant_id: TenantId, timeline_id: TimelineId, lsn: Lsn) -> Utf8PathBuf {
         // Placeholder for actual implementation
-        self.data_dir.join(format!(
-            "basebackup_{tenant_id}_{timeline_id}_{:X}.tar.gz",
-            lsn.0
-        ))
+        self.data_dir.join(format!("basebackup_{tenant_id}_{timeline_id}_{:X}", lsn.0))
+    }
+
+    fn parse_entry_path(filename: &str) -> Option<(TenantId, TimelineId, Lsn)> {
+        let parts: Vec<&str> = filename
+            .strip_prefix("basebackup_")?
+            .strip_suffix(".tar.gz")?
+            .split('_')
+            .collect();
+        if parts.len() != 3 {
+            return None;
+        }
+        let tenant_id = parts[0].parse::<TenantId>().ok()?;
+        let timeline_id = parts[1].parse::<TimelineId>().ok()?;
+        let lsn = Lsn(u64::from_str_radix(parts[2], 16).ok()?);
+
+        Some((tenant_id, timeline_id, lsn))
     }
 
     async fn cleanup(&self) -> anyhow::Result<()> {
-        let mut files_to_remove = Vec::<Utf8PathBuf>::new();
-
-        {
-            let mut new_data_cache = HashMap::new();
-            let mut data_guard = self.data_cache.lock().await;
-            for (tenant_shard_id, tenant_slot) in self.tenant_manager.list() {
-                let tenant_id = tenant_shard_id.tenant_id;
-                if let TenantSlot::Attached(tenant) = tenant_slot {
-                    for timeline in tenant.list_timelines() {
-                        if let Some(lsn) = data_guard.get(&(tenant_id, timeline.timeline_id)) {
-                            if timeline.get_last_record_lsn() == *lsn {
-                                new_data_cache.insert((tenant_id, timeline.timeline_id), *lsn);
-                            }
+        let mut new_data_cache = HashMap::new();
+        let mut data_guard = self.entries.lock().await;
+        for (tenant_shard_id, tenant_slot) in self.tenant_manager.list() {
+            let tenant_id = tenant_shard_id.tenant_id;
+            if let TenantSlot::Attached(tenant) = tenant_slot {
+                for timeline in tenant.list_timelines() {
+                    let tti = TenantTimelineId::new(tenant_id, timeline.timeline_id);
+                    if let Some(lsn) = data_guard.get(&tti) {
+                        if timeline.get_last_record_lsn() == *lsn {
+                            new_data_cache.insert(tti, *lsn);
                         }
                     }
                 }
             }
-
-            for (&(tenant_id, timeline_id), &lsn) in data_guard.iter() {
-                if !new_data_cache.contains_key(&(tenant_id, timeline_id)) {
-                    files_to_remove.push(self.entry_path(tenant_id, timeline_id, lsn));
-                }
-            }
-
-            std::mem::swap(&mut *data_guard, &mut new_data_cache);
         }
 
-        for path in files_to_remove.iter() {
-            tokio::fs::remove_file(path).await?;
+        for (&tti, &lsn) in data_guard.iter() {
+            if !new_data_cache.contains_key(&tti) {
+                self.remove_entry_sender
+                    .send(self.entry_path(tti.tenant_id, tti.timeline_id, lsn))
+                    .unwrap();
+            }
+        }
+
+        std::mem::swap(&mut *data_guard, &mut new_data_cache);
+
+        Ok(())
+    }
+
+    async fn on_startup(&self) -> anyhow::Result<()> {
+        // Ensure the data_dir exists before processing requests
+        tokio::fs::create_dir_all(&self.data_dir)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to create basebackup cache data_dir {:?}: {:?}",
+                    self.data_dir,
+                    e
+                )
+            })?;
+
+        // Read existing entries from the data_dir and add them to the cache
+        let mut dir_entries = tokio::fs::read_dir(&self.data_dir).await?;
+        while let Some(entry) = dir_entries.next_entry().await? {
+            let parsed = Self::parse_entry_path(entry.file_name().to_string_lossy().as_ref());
+            if let Some((tenant_id, timeline_id, lsn)) = parsed {
+                let tti = TenantTimelineId::new(tenant_id, timeline_id);
+                self.entries.lock().await.insert(tti, lsn);
+            } else {
+                tracing::warn!(
+                    "Invalid basebackup cache file name: {:?}",
+                    entry.file_name()
+                );
+            }
         }
 
         Ok(())
     }
 
-    async fn background(self: Arc<Self>, mut prepare_receiver: BasebackupPrepareReceiver) {
-        // Ensure the data_dir exists before processing requests
-        if let Err(e) = tokio::fs::create_dir_all(&self.data_dir).await {
-            tracing::error!(
-                "Failed to create basebackup cache data_dir {:?}: {:?}",
-                self.data_dir,
-                e
-            );
-            return;
-        }
+    async fn background(
+        self: Arc<Self>,
+        mut prepare_receiver: BasebackupPrepareReceiver,
+        mut remove_entry_receiver: BasebackupRemoveEntryReceiver,
+    ) {
+        self.on_startup().await.unwrap_or_else(|e| {
+            tracing::error!("Failed to start basebackup cache: {:?}", e);
+        });
 
         let mut ticker = tokio::time::interval(self.config.background_cleanup_period);
 
@@ -155,9 +204,14 @@ impl BasebackupCache {
                         tracing::info!("Failed to prepare basebackup: {:?}", e);
                     });
                 }
+                Some(req) = remove_entry_receiver.recv() => {
+                    // Handle the remove entry message
+                    if let Err(e) = tokio::fs::remove_file(req).await {
+                        tracing::warn!("Failed to remove basebackup cache file: {:?}", e);
+                    }
+                }
                 // Wait for the ticker to trigger
                 _ = ticker.tick() => {
-                    // TODO(ephemeralsad) Run it in a separate thread
                     // Clean up irrelevant entries
                     self.cleanup().await.unwrap_or_else(|e| {
                         tracing::warn!("Failed to clean up basebackup cache: {:?}", e);
@@ -224,10 +278,12 @@ impl BasebackupCache {
 
         encoder.shutdown().await?;
 
-        self.data_cache
-            .lock()
-            .await
-            .insert((tenant_shard_id.tenant_id, timeline_id), lsn);
+        let tti = TenantTimelineId::new(tenant_shard_id.tenant_id, timeline_id);
+        if let Some(old_value) = self.entries.lock().await.insert(tti, lsn) {
+            self.remove_entry_sender
+                .send(self.entry_path(tenant_shard_id.tenant_id, timeline_id, old_value))
+                .unwrap();
+        }
 
         Ok(())
     }
