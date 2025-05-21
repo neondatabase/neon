@@ -1,6 +1,7 @@
+use json::{ListSer, ObjectSer, ValueSer};
 use postgres_client::Row;
 use postgres_client::types::{Kind, Type};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 //
 // Convert json non-string types to strings, so that they can be passed to Postgres
@@ -74,44 +75,40 @@ pub(crate) enum JsonConversionError {
     UnbalancedString,
 }
 
-enum OutputMode {
-    Array(Vec<Value>),
-    Object(Map<String, Value>),
+enum OutputMode<'a> {
+    Array(ListSer<'a>),
+    Object(ObjectSer<'a>),
 }
 
-impl OutputMode {
-    fn key(&mut self, key: &str) -> &mut Value {
+impl OutputMode<'_> {
+    fn key(&mut self, key: &str) -> ValueSer<'_> {
         match self {
-            OutputMode::Array(values) => push_entry(values, Value::Null),
-            OutputMode::Object(map) => map.entry(key.to_string()).or_insert(Value::Null),
+            OutputMode::Array(values) => values.entry(),
+            OutputMode::Object(map) => map.key(key),
         }
     }
 
-    fn finish(self) -> Value {
+    fn finish(self) {
         match self {
-            OutputMode::Array(values) => Value::Array(values),
-            OutputMode::Object(map) => Value::Object(map),
+            OutputMode::Array(values) => values.finish(),
+            OutputMode::Object(map) => map.finish(),
         }
     }
-}
-
-fn push_entry<T>(arr: &mut Vec<T>, t: T) -> &mut T {
-    arr.push(t);
-    arr.last_mut().expect("a value was just inserted")
 }
 
 //
 // Convert postgres row with text-encoded values to JSON object
 //
 pub(crate) fn pg_text_row_to_json(
+    output: ValueSer,
     row: &Row,
     raw_output: bool,
     array_mode: bool,
-) -> Result<Value, JsonConversionError> {
+) -> Result<(), JsonConversionError> {
     let mut entries = if array_mode {
-        OutputMode::Array(Vec::with_capacity(row.columns().len()))
+        OutputMode::Array(output.list())
     } else {
-        OutputMode::Object(Map::with_capacity(row.columns().len()))
+        OutputMode::Object(output.object())
     };
 
     for (i, column) in row.columns().iter().enumerate() {
@@ -120,53 +117,49 @@ pub(crate) fn pg_text_row_to_json(
         let value = entries.key(column.name());
 
         match pg_value {
-            Some(v) if raw_output => *value = Value::String(v.to_string()),
+            Some(v) if raw_output => value.value(v),
             Some(v) => pg_text_to_json(value, v, column.type_())?,
-            None => *value = Value::Null,
+            None => value.value(json::Null),
         }
     }
 
-    Ok(entries.finish())
+    entries.finish();
+    Ok(())
 }
 
 //
 // Convert postgres text-encoded value to JSON value
 //
-fn pg_text_to_json(
-    output: &mut Value,
-    val: &str,
-    pg_type: &Type,
-) -> Result<(), JsonConversionError> {
+fn pg_text_to_json(output: ValueSer, val: &str, pg_type: &Type) -> Result<(), JsonConversionError> {
     if let Kind::Array(elem_type) = pg_type.kind() {
         // todo: we should fetch this from postgres.
         let delimiter = ',';
 
-        let mut array = vec![];
+        let mut array = output.list();
         pg_array_parse(&mut array, val, elem_type, delimiter)?;
-        *output = Value::Array(array);
+        array.finish();
         return Ok(());
     }
 
     match *pg_type {
-        Type::BOOL => *output = Value::Bool(val == "t"),
+        Type::BOOL => output.value(val == "t"),
         Type::INT2 | Type::INT4 => {
             let val = val.parse::<i32>()?;
-            *output = Value::Number(serde_json::Number::from(val));
+            output.value(val);
         }
         Type::FLOAT4 | Type::FLOAT8 => {
             let fval = val.parse::<f64>()?;
-            let num = serde_json::Number::from_f64(fval);
-            if let Some(num) = num {
-                *output = Value::Number(num);
+            if fval.is_finite() {
+                output.value(fval);
             } else {
                 // Pass Nan, Inf, -Inf as strings
                 // JS JSON.stringify() does converts them to null, but we
                 // want to preserve them, so we pass them as strings
-                *output = Value::String(val.to_string());
+                output.value(val);
             }
         }
-        Type::JSON | Type::JSONB => *output = serde_json::from_str(val)?,
-        _ => *output = Value::String(val.to_string()),
+        Type::JSON | Type::JSONB => output.write_raw_json(val.as_bytes()),
+        _ => output.value(val),
     }
 
     Ok(())
@@ -192,7 +185,7 @@ fn pg_text_to_json(
 /// gets its own level of curly braces, and delimiters must be written between adjacent
 /// curly-braced entities of the same level.
 fn pg_array_parse(
-    elements: &mut Vec<Value>,
+    elements: &mut ListSer,
     mut pg_array: &str,
     elem: &Type,
     delim: char,
@@ -221,7 +214,7 @@ fn pg_array_parse(
 /// reads a single array from the `pg_array` string and pushes each values to `elements`.
 /// returns the rest of the `pg_array` string that was not read.
 fn pg_array_parse_inner<'a>(
-    elements: &mut Vec<Value>,
+    elements: &mut ListSer,
     mut pg_array: &'a str,
     elem: &Type,
     delim: char,
@@ -234,7 +227,7 @@ fn pg_array_parse_inner<'a>(
     let mut q = String::new();
 
     loop {
-        let value = push_entry(elements, Value::Null);
+        let value = elements.entry();
         pg_array = pg_array_parse_item(value, &mut q, pg_array, elem, delim)?;
 
         // check for separator.
@@ -260,7 +253,7 @@ fn pg_array_parse_inner<'a>(
 ///
 /// `quoted` is a scratch allocation that has no defined output.
 fn pg_array_parse_item<'a>(
-    output: &mut Value,
+    output: ValueSer,
     quoted: &mut String,
     mut pg_array: &'a str,
     elem: &Type,
@@ -276,9 +269,9 @@ fn pg_array_parse_item<'a>(
 
     if pg_array.starts_with('{') {
         // nested array.
-        let mut nested = vec![];
+        let mut nested = output.list();
         pg_array = pg_array_parse_inner(&mut nested, pg_array, elem, delim)?;
-        *output = Value::Array(nested);
+        nested.finish();
         return Ok(pg_array);
     }
 
@@ -306,7 +299,7 @@ fn pg_array_parse_item<'a>(
     // we might have an item string:
     // check for null
     if item == "NULL" {
-        *output = Value::Null;
+        output.value(json::Null);
     } else {
         pg_text_to_json(output, item, elem)?;
     }
@@ -440,15 +433,17 @@ mod tests {
     }
 
     fn pg_text_to_json(val: &str, pg_type: &Type) -> Value {
-        let mut v = Value::Null;
-        super::pg_text_to_json(&mut v, val, pg_type).unwrap();
-        v
+        let output = json::value_to_vec!(|output| {
+            super::pg_text_to_json(output, val, pg_type).unwrap();
+        });
+        serde_json::from_slice(&output).unwrap()
     }
 
     fn pg_array_parse(pg_array: &str, pg_type: &Type) -> Value {
-        let mut array = vec![];
-        super::pg_array_parse(&mut array, pg_array, pg_type, ',').unwrap();
-        Value::Array(array)
+        let output = json::value_to_vec!(|list| json::value_as_list!(|list| {
+            super::pg_array_parse(list, pg_array, pg_type, ',').unwrap();
+        }));
+        serde_json::from_slice(&output).unwrap()
     }
 
     #[test]
