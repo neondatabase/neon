@@ -4594,7 +4594,7 @@ impl TenantShard {
 
             target.cutoffs = GcCutoffs {
                 space: space_cutoff,
-                time: Lsn::INVALID,
+                time: None,
             };
         }
     }
@@ -4678,7 +4678,7 @@ impl TenantShard {
                 if let Some(ancestor_id) = timeline.get_ancestor_timeline_id() {
                     if let Some(ancestor_gc_cutoffs) = gc_cutoffs.get(&ancestor_id) {
                         target.within_ancestor_pitr =
-                            timeline.get_ancestor_lsn() >= ancestor_gc_cutoffs.time;
+                            Some(timeline.get_ancestor_lsn()) >= ancestor_gc_cutoffs.time;
                     }
                 }
 
@@ -4691,13 +4691,15 @@ impl TenantShard {
                     } else {
                         0
                     });
-                timeline.metrics.pitr_history_size.set(
-                    timeline
-                        .get_last_record_lsn()
-                        .checked_sub(target.cutoffs.time)
-                        .unwrap_or(Lsn(0))
-                        .0,
-                );
+                if let Some(time_cutoff) = target.cutoffs.time {
+                    timeline.metrics.pitr_history_size.set(
+                        timeline
+                            .get_last_record_lsn()
+                            .checked_sub(time_cutoff)
+                            .unwrap_or_default()
+                            .0,
+                    );
+                }
 
                 // Apply the cutoffs we found to the Timeline's GcInfo.  Why might we _not_ have cutoffs for a timeline?
                 // - this timeline was created while we were finding cutoffs
@@ -4706,8 +4708,8 @@ impl TenantShard {
                     let original_cutoffs = target.cutoffs.clone();
                     // GC cutoffs should never go back
                     target.cutoffs = GcCutoffs {
-                        space: Lsn(cutoffs.space.0.max(original_cutoffs.space.0)),
-                        time: Lsn(cutoffs.time.0.max(original_cutoffs.time.0)),
+                        space: cutoffs.space.max(original_cutoffs.space),
+                        time: cutoffs.time.max(original_cutoffs.time),
                     }
                 }
             }
@@ -8952,7 +8954,7 @@ mod tests {
                 .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
-            guard.cutoffs.time = Lsn(0x30);
+            guard.cutoffs.time = Some(Lsn(0x30));
             guard.cutoffs.space = Lsn(0x30);
         }
 
@@ -9060,7 +9062,7 @@ mod tests {
                 .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
-            guard.cutoffs.time = Lsn(0x40);
+            guard.cutoffs.time = Some(Lsn(0x40));
             guard.cutoffs.space = Lsn(0x40);
         }
         tline
@@ -9478,7 +9480,7 @@ mod tests {
             *guard = GcInfo {
                 retain_lsns: vec![],
                 cutoffs: GcCutoffs {
-                    time: Lsn(0x30),
+                    time: Some(Lsn(0x30)),
                     space: Lsn(0x30),
                 },
                 leases: Default::default(),
@@ -9562,7 +9564,7 @@ mod tests {
                 .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
-            guard.cutoffs.time = Lsn(0x40);
+            guard.cutoffs.time = Some(Lsn(0x40));
             guard.cutoffs.space = Lsn(0x40);
         }
         tline
@@ -10033,7 +10035,7 @@ mod tests {
                     (Lsn(0x20), tline.timeline_id, MaybeOffloaded::No),
                 ],
                 cutoffs: GcCutoffs {
-                    time: Lsn(0x30),
+                    time: Some(Lsn(0x30)),
                     space: Lsn(0x30),
                 },
                 leases: Default::default(),
@@ -10096,7 +10098,7 @@ mod tests {
         let verify_result = || async {
             let gc_horizon = {
                 let gc_info = tline.gc_info.read().unwrap();
-                gc_info.cutoffs.time
+                gc_info.cutoffs.time.unwrap_or_default()
             };
             for idx in 0..10 {
                 assert_eq!(
@@ -10174,7 +10176,7 @@ mod tests {
                 .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
-            guard.cutoffs.time = Lsn(0x38);
+            guard.cutoffs.time = Some(Lsn(0x38));
             guard.cutoffs.space = Lsn(0x38);
         }
         tline
@@ -10282,7 +10284,7 @@ mod tests {
                     (Lsn(0x20), tline.timeline_id, MaybeOffloaded::No),
                 ],
                 cutoffs: GcCutoffs {
-                    time: Lsn(0x30),
+                    time: Some(Lsn(0x30)),
                     space: Lsn(0x30),
                 },
                 leases: Default::default(),
@@ -10345,7 +10347,7 @@ mod tests {
         let verify_result = || async {
             let gc_horizon = {
                 let gc_info = tline.gc_info.read().unwrap();
-                gc_info.cutoffs.time
+                gc_info.cutoffs.time.unwrap_or_default()
             };
             for idx in 0..10 {
                 assert_eq!(
@@ -10531,7 +10533,7 @@ mod tests {
             *guard = GcInfo {
                 retain_lsns: vec![(Lsn(0x18), branch_tline.timeline_id, MaybeOffloaded::No)],
                 cutoffs: GcCutoffs {
-                    time: Lsn(0x10),
+                    time: Some(Lsn(0x10)),
                     space: Lsn(0x10),
                 },
                 leases: Default::default(),
@@ -10551,7 +10553,7 @@ mod tests {
             *guard = GcInfo {
                 retain_lsns: vec![(Lsn(0x40), branch_tline.timeline_id, MaybeOffloaded::No)],
                 cutoffs: GcCutoffs {
-                    time: Lsn(0x50),
+                    time: Some(Lsn(0x50)),
                     space: Lsn(0x50),
                 },
                 leases: Default::default(),
@@ -11272,7 +11274,7 @@ mod tests {
             *guard = GcInfo {
                 retain_lsns: vec![(Lsn(0x20), tline.timeline_id, MaybeOffloaded::No)],
                 cutoffs: GcCutoffs {
-                    time: Lsn(0x30),
+                    time: Some(Lsn(0x30)),
                     space: Lsn(0x30),
                 },
                 leases: Default::default(),
@@ -11661,7 +11663,7 @@ mod tests {
                     (Lsn(0x20), tline.timeline_id, MaybeOffloaded::No),
                 ],
                 cutoffs: GcCutoffs {
-                    time: Lsn(0x30),
+                    time: Some(Lsn(0x30)),
                     space: Lsn(0x30),
                 },
                 leases: Default::default(),
@@ -11724,7 +11726,7 @@ mod tests {
         let verify_result = || async {
             let gc_horizon = {
                 let gc_info = tline.gc_info.read().unwrap();
-                gc_info.cutoffs.time
+                gc_info.cutoffs.time.unwrap_or_default()
             };
             for idx in 0..10 {
                 assert_eq!(
@@ -11913,7 +11915,7 @@ mod tests {
                     (Lsn(0x20), tline.timeline_id, MaybeOffloaded::No),
                 ],
                 cutoffs: GcCutoffs {
-                    time: Lsn(0x30),
+                    time: Some(Lsn(0x30)),
                     space: Lsn(0x30),
                 },
                 leases: Default::default(),
@@ -11976,7 +11978,7 @@ mod tests {
         let verify_result = || async {
             let gc_horizon = {
                 let gc_info = tline.gc_info.read().unwrap();
-                gc_info.cutoffs.time
+                gc_info.cutoffs.time.unwrap_or_default()
             };
             for idx in 0..10 {
                 assert_eq!(
@@ -12239,7 +12241,7 @@ mod tests {
             *guard = GcInfo {
                 retain_lsns: vec![],
                 cutoffs: GcCutoffs {
-                    time: Lsn(0x30),
+                    time: Some(Lsn(0x30)),
                     space: Lsn(0x30),
                 },
                 leases: Default::default(),

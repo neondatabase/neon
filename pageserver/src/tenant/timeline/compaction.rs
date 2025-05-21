@@ -1526,7 +1526,7 @@ impl Timeline {
         info!(
             "starting shard ancestor compaction, rewriting {} layers and dropping {} layers, \
                 checked {layers_checked}/{layers_total} layers \
-                (latest_gc_cutoff={} pitr_cutoff={})",
+                (latest_gc_cutoff={} pitr_cutoff={:?})",
             layers_to_rewrite.len(),
             drop_layers.len(),
             *latest_gc_cutoff,
