@@ -1,9 +1,6 @@
-use std::future::Future;
-use std::pin::Pin;
-
 use bytes::Bytes;
 use fallible_iterator::FallibleIterator;
-use futures_util::{TryStreamExt, pin_mut};
+use futures_util::TryStreamExt;
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
 use tracing::debug;
@@ -86,67 +83,78 @@ fn encode(
     })
 }
 
+enum TypeStack {
+    Array,
+    Range,
+}
+
 pub async fn get_type(
     client: &mut InnerClient,
     typecache: &mut CachedTypeInfo,
-    oid: Oid,
+    mut oid: Oid,
 ) -> Result<Type, Error> {
-    if let Some(type_) = Type::from_oid(oid) {
-        return Ok(type_);
+    let mut stack = vec![];
+    let mut type_ = loop {
+        if let Some(type_) = Type::from_oid(oid) {
+            break type_;
+        }
+
+        if let Some(type_) = typecache.types.get(&oid) {
+            break type_.clone();
+        };
+
+        let stmt = typeinfo_statement(client, typecache).await?;
+
+        let mut rows = query::query(client, stmt, slice_iter(&[&oid])).await?;
+
+        let row = match rows.try_next().await? {
+            Some(row) => row,
+            None => return Err(Error::unexpected_message()),
+        };
+
+        let name: String = row.try_get(0)?;
+        let type_: i8 = row.try_get(1)?;
+        let elem_oid: Oid = row.try_get(2)?;
+        let rngsubtype: Option<Oid> = row.try_get(3)?;
+        let basetype: Oid = row.try_get(4)?;
+        let schema: String = row.try_get(5)?;
+        let relid: Oid = row.try_get(6)?;
+
+        let kind = if type_ == b'e' as i8 {
+            Kind::Enum
+        } else if type_ == b'p' as i8 {
+            Kind::Pseudo
+        } else if basetype != 0 {
+            Kind::Domain(basetype)
+        } else if elem_oid != 0 {
+            stack.push((name, oid, schema, TypeStack::Array));
+            oid = elem_oid;
+            continue;
+        } else if relid != 0 {
+            Kind::Composite(relid)
+        } else if let Some(rngsubtype) = rngsubtype {
+            stack.push((name, oid, schema, TypeStack::Range));
+            oid = rngsubtype;
+            continue;
+        } else {
+            Kind::Simple
+        };
+
+        let type_ = Type::new(name, oid, kind, schema);
+        typecache.types.insert(oid, type_.clone());
+        break type_;
+    };
+
+    while let Some((name, oid, schema, t)) = stack.pop() {
+        let kind = match t {
+            TypeStack::Array => Kind::Array(type_),
+            TypeStack::Range => Kind::Range(type_),
+        };
+        type_ = Type::new(name, oid, kind, schema);
+        typecache.types.insert(oid, type_.clone());
     }
 
-    if let Some(type_) = typecache.types.get(&oid) {
-        return Ok(type_.clone());
-    };
-
-    let stmt = typeinfo_statement(client, typecache).await?;
-
-    let rows = query::query(client, stmt, slice_iter(&[&oid])).await?;
-    pin_mut!(rows);
-
-    let row = match rows.try_next().await? {
-        Some(row) => row,
-        None => return Err(Error::unexpected_message()),
-    };
-
-    let name: String = row.try_get(0)?;
-    let type_: i8 = row.try_get(1)?;
-    let elem_oid: Oid = row.try_get(2)?;
-    let rngsubtype: Option<Oid> = row.try_get(3)?;
-    let basetype: Oid = row.try_get(4)?;
-    let schema: String = row.try_get(5)?;
-    let relid: Oid = row.try_get(6)?;
-
-    let kind = if type_ == b'e' as i8 {
-        Kind::Enum
-    } else if type_ == b'p' as i8 {
-        Kind::Pseudo
-    } else if basetype != 0 {
-        Kind::Domain(basetype)
-    } else if elem_oid != 0 {
-        let type_ = get_type_rec(client, typecache, elem_oid).await?;
-        Kind::Array(type_)
-    } else if relid != 0 {
-        Kind::Composite(relid)
-    } else if let Some(rngsubtype) = rngsubtype {
-        let type_ = get_type_rec(client, typecache, rngsubtype).await?;
-        Kind::Range(type_)
-    } else {
-        Kind::Simple
-    };
-
-    let type_ = Type::new(name, oid, kind, schema);
-    typecache.types.insert(oid, type_.clone());
-
     Ok(type_)
-}
-
-fn get_type_rec<'a>(
-    client: &'a mut InnerClient,
-    typecache: &'a mut CachedTypeInfo,
-    oid: Oid,
-) -> Pin<Box<dyn Future<Output = Result<Type, Error>> + Send + 'a>> {
-    Box::pin(get_type(client, typecache, oid))
 }
 
 async fn typeinfo_statement(
