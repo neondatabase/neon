@@ -18,7 +18,7 @@ use itertools::Itertools;
 use jsonwebtoken::TokenData;
 use once_cell::sync::OnceCell;
 use pageserver_api::config::{
-    PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
+    GetVectoredConcurrentIo, PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
     PageServiceProtocolPipelinedBatchingStrategy, PageServiceProtocolPipelinedExecutionStrategy,
 };
 use pageserver_api::key::rel_block_to_key;
@@ -62,7 +62,7 @@ use crate::metrics::{
     self, COMPUTE_COMMANDS_COUNTERS, ComputeCommandKind, GetPageBatchBreakReason, LIVE_CONNECTIONS,
     SmgrOpTimer, TimelineMetrics,
 };
-use crate::pgdatadir_mapping::Version;
+use crate::pgdatadir_mapping::{LsnRange, Version};
 use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id,
     debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id,
@@ -331,10 +331,10 @@ async fn page_service_conn_main(
     // But it's in a shared crate, so, we store connection_ctx inside PageServerHandler
     // and create the per-query context in process_query ourselves.
     let mut conn_handler = PageServerHandler::new(
-        conf,
         tenant_manager,
         auth,
         pipelining_config,
+        conf.get_vectored_concurrent_io,
         perf_span_fields,
         connection_ctx,
         cancel.clone(),
@@ -371,7 +371,6 @@ async fn page_service_conn_main(
 }
 
 struct PageServerHandler {
-    conf: &'static PageServerConf,
     auth: Option<Arc<SwappableJwtAuth>>,
     claims: Option<Claims>,
 
@@ -389,6 +388,7 @@ struct PageServerHandler {
     timeline_handles: Option<TimelineHandles>,
 
     pipelining_config: PageServicePipeliningConfig,
+    get_vectored_concurrent_io: GetVectoredConcurrentIo,
 
     gate_guard: GateGuard,
 }
@@ -642,7 +642,7 @@ impl std::fmt::Display for BatchedPageStreamError {
 struct BatchedGetPageRequest {
     req: PagestreamGetPageRequest,
     timer: SmgrOpTimer,
-    effective_request_lsn: Lsn,
+    lsn_range: LsnRange,
     ctx: RequestContext,
 }
 
@@ -764,12 +764,12 @@ impl BatchedFeMessage {
                 match batching_strategy {
                     PageServiceProtocolPipelinedBatchingStrategy::UniformLsn => {
                         if let Some(last_in_batch) = accum_pages.last() {
-                            if last_in_batch.effective_request_lsn
-                                != this_pages[0].effective_request_lsn
+                            if last_in_batch.lsn_range.effective_lsn
+                                != this_pages[0].lsn_range.effective_lsn
                             {
                                 trace!(
-                                    accum_lsn = %last_in_batch.effective_request_lsn,
-                                    this_lsn = %this_pages[0].effective_request_lsn,
+                                    accum_lsn = %last_in_batch.lsn_range.effective_lsn,
+                                    this_lsn = %this_pages[0].lsn_range.effective_lsn,
                                     "stopping batching because LSN changed"
                                 );
 
@@ -784,15 +784,15 @@ impl BatchedFeMessage {
                         let same_page_different_lsn = accum_pages.iter().any(|batched| {
                             batched.req.rel == this_pages[0].req.rel
                                 && batched.req.blkno == this_pages[0].req.blkno
-                                && batched.effective_request_lsn
-                                    != this_pages[0].effective_request_lsn
+                                && batched.lsn_range.effective_lsn
+                                    != this_pages[0].lsn_range.effective_lsn
                         });
 
                         if same_page_different_lsn {
                             trace!(
                                 rel=%this_pages[0].req.rel,
                                 blkno=%this_pages[0].req.blkno,
-                                lsn=%this_pages[0].effective_request_lsn,
+                                lsn=%this_pages[0].lsn_range.effective_lsn,
                                 "stopping batching because same page was requested at different LSNs"
                             );
 
@@ -844,17 +844,16 @@ impl BatchedFeMessage {
 impl PageServerHandler {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        conf: &'static PageServerConf,
         tenant_manager: Arc<TenantManager>,
         auth: Option<Arc<SwappableJwtAuth>>,
         pipelining_config: PageServicePipeliningConfig,
+        get_vectored_concurrent_io: GetVectoredConcurrentIo,
         perf_span_fields: ConnectionPerfSpanFields,
         connection_ctx: RequestContext,
         cancel: CancellationToken,
         gate_guard: GateGuard,
     ) -> Self {
         PageServerHandler {
-            conf,
             auth,
             claims: None,
             connection_ctx,
@@ -862,6 +861,7 @@ impl PageServerHandler {
             timeline_handles: Some(TimelineHandles::new(tenant_manager)),
             cancel,
             pipelining_config,
+            get_vectored_concurrent_io,
             gate_guard,
         }
     }
@@ -1038,21 +1038,23 @@ impl PageServerHandler {
                         tracing::info_span!(
                             parent: &parent_span,
                             "handle_get_page_request",
+                            request_id = %req.hdr.reqid,
                             rel = %req.rel,
                             blkno = %req.blkno,
                             req_lsn = %req.hdr.request_lsn,
-                            not_modified_since_lsn = %req.hdr.not_modified_since
+                            not_modified_since_lsn = %req.hdr.not_modified_since,
                         )
                     }};
                     ($shard_id:expr) => {{
                         tracing::info_span!(
                             parent: &parent_span,
                             "handle_get_page_request",
+                            request_id = %req.hdr.reqid,
                             rel = %req.rel,
                             blkno = %req.blkno,
                             req_lsn = %req.hdr.request_lsn,
                             not_modified_since_lsn = %req.hdr.not_modified_since,
-                            shard_id = %$shard_id
+                            shard_id = %$shard_id,
                         )
                     }};
                 }
@@ -1156,7 +1158,7 @@ impl PageServerHandler {
                 .await?;
 
                 // We're holding the Handle
-                let effective_request_lsn = match Self::effective_request_lsn(
+                let effective_lsn = match Self::effective_request_lsn(
                     &shard,
                     shard.get_last_record_lsn(),
                     req.hdr.request_lsn,
@@ -1175,7 +1177,10 @@ impl PageServerHandler {
                     pages: smallvec::smallvec![BatchedGetPageRequest {
                         req,
                         timer,
-                        effective_request_lsn,
+                        lsn_range: LsnRange {
+                            effective_lsn,
+                            request_lsn: req.hdr.request_lsn
+                        },
                         ctx,
                     }],
                     // The executor grabs the batch when it becomes idle.
@@ -1276,7 +1281,7 @@ impl PageServerHandler {
     }
 
     #[instrument(level = tracing::Level::DEBUG, skip_all)]
-    async fn pagesteam_handle_batched_message<IO>(
+    async fn pagestream_handle_batched_message<IO>(
         &mut self,
         pgb_writer: &mut PostgresBackend<IO>,
         batch: BatchedFeMessage,
@@ -1621,7 +1626,7 @@ impl PageServerHandler {
         }
 
         let io_concurrency = IoConcurrency::spawn_from_conf(
-            self.conf,
+            self.get_vectored_concurrent_io,
             match self.gate_guard.try_clone() {
                 Ok(guard) => guard,
                 Err(_) => {
@@ -1731,7 +1736,7 @@ impl PageServerHandler {
             };
 
             let result = self
-                .pagesteam_handle_batched_message(
+                .pagestream_handle_batched_message(
                     pgb_writer,
                     msg,
                     io_concurrency.clone(),
@@ -1907,7 +1912,7 @@ impl PageServerHandler {
                             return Err(e);
                         }
                     };
-                    self.pagesteam_handle_batched_message(
+                    self.pagestream_handle_batched_message(
                         pgb_writer,
                         batch,
                         io_concurrency.clone(),
@@ -2125,7 +2130,14 @@ impl PageServerHandler {
         .await?;
 
         let exists = timeline
-            .get_rel_exists(req.rel, Version::Lsn(lsn), ctx)
+            .get_rel_exists(
+                req.rel,
+                Version::LsnRange(LsnRange {
+                    effective_lsn: lsn,
+                    request_lsn: req.hdr.request_lsn,
+                }),
+                ctx,
+            )
             .await?;
 
         Ok(PagestreamBeMessage::Exists(PagestreamExistsResponse {
@@ -2152,7 +2164,14 @@ impl PageServerHandler {
         .await?;
 
         let n_blocks = timeline
-            .get_rel_size(req.rel, Version::Lsn(lsn), ctx)
+            .get_rel_size(
+                req.rel,
+                Version::LsnRange(LsnRange {
+                    effective_lsn: lsn,
+                    request_lsn: req.hdr.request_lsn,
+                }),
+                ctx,
+            )
             .await?;
 
         Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
@@ -2179,7 +2198,15 @@ impl PageServerHandler {
         .await?;
 
         let total_blocks = timeline
-            .get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, Version::Lsn(lsn), ctx)
+            .get_db_size(
+                DEFAULTTABLESPACE_OID,
+                req.dbnode,
+                Version::LsnRange(LsnRange {
+                    effective_lsn: lsn,
+                    request_lsn: req.hdr.request_lsn,
+                }),
+                ctx,
+            )
             .await?;
         let db_size = total_blocks as i64 * BLCKSZ as i64;
 
@@ -2212,7 +2239,7 @@ impl PageServerHandler {
                 // Ignore error (trace buffer may be full or tracer may have disconnected).
                 _ = page_trace.try_send(PageTraceEvent {
                     key,
-                    effective_lsn: batch.effective_request_lsn,
+                    effective_lsn: batch.lsn_range.effective_lsn,
                     time,
                 });
             }
@@ -2227,7 +2254,7 @@ impl PageServerHandler {
                     perf_instrument = true;
                 }
 
-                req.effective_request_lsn
+                req.lsn_range.effective_lsn
             })
             .max()
             .expect("batch is never empty");
@@ -2281,7 +2308,7 @@ impl PageServerHandler {
                     (
                         &p.req.rel,
                         &p.req.blkno,
-                        p.effective_request_lsn,
+                        p.lsn_range,
                         p.ctx.attached_child(),
                     )
                 }),

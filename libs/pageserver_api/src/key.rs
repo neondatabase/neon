@@ -911,6 +911,11 @@ impl Key {
     }
 
     #[inline(always)]
+    pub fn is_rel_block_of_rel(&self, rel: Oid) -> bool {
+        self.is_rel_block_key() && self.field4 == rel
+    }
+
+    #[inline(always)]
     pub fn is_rel_dir_key(&self) -> bool {
         self.field1 == 0x00
             && self.field2 != 0

@@ -14,6 +14,7 @@ pub mod span;
 pub mod uninit;
 mod walreceiver;
 
+use hashlink::LruCache;
 use std::array;
 use std::cmp::{max, min};
 use std::collections::btree_map::Entry;
@@ -197,16 +198,6 @@ pub struct TimelineResources {
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
 }
 
-/// The relation size cache caches relation sizes at the end of the timeline. It speeds up WAL
-/// ingestion considerably, because WAL ingestion needs to check on most records if the record
-/// implicitly extends the relation.  At startup, `complete_as_of` is initialized to the current end
-/// of the timeline (disk_consistent_lsn).  It's used on reads of relation sizes to check if the
-/// value can be used to also update the cache, see [`Timeline::update_cached_rel_size`].
-pub(crate) struct RelSizeCache {
-    pub(crate) complete_as_of: Lsn,
-    pub(crate) map: HashMap<RelTag, (Lsn, BlockNumber)>,
-}
-
 pub struct Timeline {
     pub(crate) conf: &'static PageServerConf,
     tenant_conf: Arc<ArcSwap<AttachedTenantConf>>,
@@ -365,7 +356,8 @@ pub struct Timeline {
     pub walreceiver: Mutex<Option<WalReceiver>>,
 
     /// Relation size cache
-    pub(crate) rel_size_cache: RwLock<RelSizeCache>,
+    pub(crate) rel_size_latest_cache: RwLock<HashMap<RelTag, (Lsn, BlockNumber)>>,
+    pub(crate) rel_size_snapshot_cache: Mutex<LruCache<(Lsn, RelTag), BlockNumber>>,
 
     download_all_remote_layers_task_info: RwLock<Option<DownloadRemoteLayersTaskInfo>>,
 
@@ -983,6 +975,16 @@ impl From<PageReconstructError> for CreateImageLayersError {
         match e {
             PageReconstructError::Cancelled => CreateImageLayersError::Cancelled,
             _ => CreateImageLayersError::PageReconstructError(e),
+        }
+    }
+}
+
+impl From<super::storage_layer::errors::PutError> for CreateImageLayersError {
+    fn from(e: super::storage_layer::errors::PutError) -> Self {
+        if e.is_cancel() {
+            CreateImageLayersError::Cancelled
+        } else {
+            CreateImageLayersError::Other(e.into_anyhow())
         }
     }
 }
@@ -2117,22 +2119,14 @@ impl Timeline {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
         // Regardless of whether we're going to try_freeze_and_flush
-        // or not, stop ingesting any more data. Walreceiver only provides
-        // cancellation but no "wait until gone", because it uses the Timeline::gate.
-        // So, only after the self.gate.close() below will we know for sure that
-        // no walreceiver tasks are left.
-        // For `try_freeze_and_flush=true`, this means that we might still be ingesting
-        // data during the call to `self.freeze_and_flush()` below.
-        // That's not ideal, but, we don't have the concept of a ChildGuard,
-        // which is what we'd need to properly model early shutdown of the walreceiver
-        // task sub-tree before the other Timeline task sub-trees.
+        // or not, stop ingesting any more data.
         let walreceiver = self.walreceiver.lock().unwrap().take();
         tracing::debug!(
             is_some = walreceiver.is_some(),
             "Waiting for WalReceiverManager..."
         );
         if let Some(walreceiver) = walreceiver {
-            walreceiver.cancel();
+            walreceiver.shutdown().await;
         }
         // ... and inform any waiters for newer LSNs that there won't be any.
         self.last_record_lsn.shutdown();
@@ -2818,6 +2812,13 @@ impl Timeline {
 
             self.remote_client.update_config(&new_conf.location);
 
+            let mut rel_size_cache = self.rel_size_snapshot_cache.lock().unwrap();
+            if let Some(new_capacity) = new_conf.tenant_conf.relsize_snapshot_cache_capacity {
+                if new_capacity != rel_size_cache.capacity() {
+                    rel_size_cache.set_capacity(new_capacity);
+                }
+            }
+
             self.metrics
                 .evictions_with_low_residence_duration
                 .write()
@@ -2875,6 +2876,14 @@ impl Timeline {
             let is_offloaded = MaybeOffloaded::No;
             ancestor_gc_info.insert_child(timeline_id, metadata.ancestor_lsn(), is_offloaded);
         }
+
+        let relsize_snapshot_cache_capacity = {
+            let loaded_tenant_conf = tenant_conf.load();
+            loaded_tenant_conf
+                .tenant_conf
+                .relsize_snapshot_cache_capacity
+                .unwrap_or(conf.default_tenant_conf.relsize_snapshot_cache_capacity)
+        };
 
         Arc::new_cyclic(|myself| {
             let metrics = Arc::new(TimelineMetrics::new(
@@ -2967,10 +2976,8 @@ impl Timeline {
                 last_image_layer_creation_check_instant: Mutex::new(None),
 
                 last_received_wal: Mutex::new(None),
-                rel_size_cache: RwLock::new(RelSizeCache {
-                    complete_as_of: disk_consistent_lsn,
-                    map: HashMap::new(),
-                }),
+                rel_size_latest_cache: RwLock::new(HashMap::new()),
+                rel_size_snapshot_cache: Mutex::new(LruCache::new(relsize_snapshot_cache_capacity)),
 
                 download_all_remote_layers_task_info: RwLock::new(None),
 
@@ -3528,7 +3535,7 @@ impl Timeline {
                 };
 
                 let io_concurrency = IoConcurrency::spawn_from_conf(
-                    self_ref.conf,
+                    self_ref.conf.get_vectored_concurrent_io,
                     self_ref
                         .gate
                         .enter()
@@ -5557,7 +5564,7 @@ impl Timeline {
             });
 
             let io_concurrency = IoConcurrency::spawn_from_conf(
-                self.conf,
+                self.conf.get_vectored_concurrent_io,
                 self.gate
                     .enter()
                     .map_err(|_| CreateImageLayersError::Cancelled)?,
@@ -5920,6 +5927,16 @@ impl From<super::storage_layer::layer::DownloadError> for CompactionError {
 impl From<layer_manager::Shutdown> for CompactionError {
     fn from(_: layer_manager::Shutdown) -> Self {
         CompactionError::ShuttingDown
+    }
+}
+
+impl From<super::storage_layer::errors::PutError> for CompactionError {
+    fn from(e: super::storage_layer::errors::PutError) -> Self {
+        if e.is_cancel() {
+            CompactionError::ShuttingDown
+        } else {
+            CompactionError::Other(e.into_anyhow())
+        }
     }
 }
 

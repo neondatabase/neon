@@ -3,7 +3,7 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail};
-use http_utils::endpoint::{self, request_span};
+use http_utils::endpoint::{self, profile_cpu_handler, profile_heap_handler, request_span};
 use http_utils::error::ApiError;
 use http_utils::json::json_response;
 use http_utils::{RouterBuilder, RouterService};
@@ -33,6 +33,12 @@ fn make_router(metrics: AppMetrics) -> RouterBuilder<hyper0::Body, ApiError> {
             request_span(r, move |b| prometheus_metrics_handler(b, state))
         })
         .get("/v1/status", status_handler)
+        .get("/profile/cpu", move |r| {
+            request_span(r, profile_cpu_handler)
+        })
+        .get("/profile/heap", move |r| {
+            request_span(r, profile_heap_handler)
+        })
 }
 
 pub async fn task_main(

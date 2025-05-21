@@ -47,7 +47,7 @@ impl RedisKVClient {
 
     pub(crate) async fn query<T: FromRedisValue>(
         &mut self,
-        q: impl Queryable,
+        q: &impl Queryable,
     ) -> anyhow::Result<T> {
         if !self.limiter.check() {
             tracing::info!("Rate limit exceeded. Skipping query");

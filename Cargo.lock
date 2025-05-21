@@ -1113,6 +1113,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
+name = "cfg_aliases"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
+
+[[package]]
 name = "cgroups-rs"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1284,6 +1290,7 @@ name = "compute_tools"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-compression",
  "aws-config",
  "aws-sdk-kms",
  "aws-sdk-s3",
@@ -1302,9 +1309,10 @@ dependencies = [
  "futures",
  "http 1.1.0",
  "indexmap 2.0.1",
+ "itertools 0.10.5",
  "jsonwebtoken",
  "metrics",
- "nix 0.27.1",
+ "nix 0.30.1",
  "notify",
  "num_cpus",
  "once_cell",
@@ -1420,13 +1428,14 @@ dependencies = [
  "clap",
  "comfy-table",
  "compute_api",
+ "endpoint_storage",
  "futures",
  "http-utils",
  "humantime",
  "humantime-serde",
  "hyper 0.14.30",
  "jsonwebtoken",
- "nix 0.27.1",
+ "nix 0.30.1",
  "once_cell",
  "pageserver_api",
  "pageserver_client",
@@ -3509,9 +3518,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.169"
+version = "0.2.172"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5aba8db14291edd000dfcc4d620c7ebfb122c613afb886ca8803fa4e128a20a"
+checksum = "d750af042f7ef4f724306de029d18836c26c1765a54a6a3f094cbd23a7267ffa"
 
 [[package]]
 name = "libloading"
@@ -3786,6 +3795,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5ce46fe64a9d73be07dcbe690a38ce1b293be448fd8ce1e6c1b8062c9f72c6a"
 
 [[package]]
+name = "neon-shmem"
+version = "0.1.0"
+dependencies = [
+ "nix 0.30.1",
+ "tempfile",
+ "thiserror 1.0.69",
+ "workspace_hack",
+]
+
+[[package]]
 name = "never-say-never"
 version = "6.6.666"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3818,12 +3837,13 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.27.1"
+version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2eb04e9c688eff1c89d72b407f168cf79bb9e867a9d3323ed6c01519eb9cc053"
+checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
 dependencies = [
  "bitflags 2.8.0",
  "cfg-if",
+ "cfg_aliases",
  "libc",
  "memoffset 0.9.0",
 ]
@@ -4266,6 +4286,7 @@ dependencies = [
  "enumset",
  "fail",
  "futures",
+ "hashlink",
  "hex",
  "hex-literal",
  "http-utils",
@@ -4277,7 +4298,7 @@ dependencies = [
  "jsonwebtoken",
  "md5",
  "metrics",
- "nix 0.27.1",
+ "nix 0.30.1",
  "num-traits",
  "num_cpus",
  "once_cell",
@@ -4328,6 +4349,7 @@ dependencies = [
  "toml_edit",
  "tracing",
  "tracing-utils",
+ "twox-hash",
  "url",
  "utils",
  "uuid",
@@ -4352,7 +4374,7 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "itertools 0.10.5",
- "nix 0.27.1",
+ "nix 0.30.1",
  "once_cell",
  "postgres_backend",
  "postgres_ffi",
@@ -4410,6 +4432,16 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "utils",
+ "workspace_hack",
+]
+
+[[package]]
+name = "pageserver_page_api"
+version = "0.1.0"
+dependencies = [
+ "prost 0.13.3",
+ "tonic",
+ "tonic-build",
  "workspace_hack",
 ]
 
@@ -4842,6 +4874,19 @@ dependencies = [
  "camino",
  "thiserror 1.0.69",
  "tokio",
+ "workspace_hack",
+]
+
+[[package]]
+name = "posthog_client_lite"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
  "workspace_hack",
 ]
 
@@ -7882,7 +7927,7 @@ dependencies = [
  "humantime",
  "jsonwebtoken",
  "metrics",
- "nix 0.27.1",
+ "nix 0.30.1",
  "once_cell",
  "pem",
  "pin-project-lite",
@@ -8436,8 +8481,10 @@ dependencies = [
  "fail",
  "form_urlencoded",
  "futures-channel",
+ "futures-core",
  "futures-executor",
  "futures-io",
+ "futures-task",
  "futures-util",
  "generic-array",
  "getrandom 0.2.11",
@@ -8456,6 +8503,7 @@ dependencies = [
  "log",
  "memchr",
  "nix 0.26.4",
+ "nix 0.30.1",
  "nom",
  "num",
  "num-bigint",
@@ -8467,6 +8515,7 @@ dependencies = [
  "once_cell",
  "p256 0.13.2",
  "parquet",
+ "percent-encoding",
  "prettyplease",
  "proc-macro2",
  "prost 0.13.3",

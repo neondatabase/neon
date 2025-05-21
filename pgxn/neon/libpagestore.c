@@ -26,6 +26,7 @@
 #include "portability/instr_time.h"
 #include "postmaster/interrupt.h"
 #include "storage/buf_internals.h"
+#include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
 #include "storage/pg_shmem.h"
@@ -79,6 +80,7 @@ int         neon_protocol_version = 3;
 static int	neon_compute_mode = 0;
 static int	max_reconnect_attempts = 60;
 static int	stripe_size;
+static int	max_sockets;
 
 static int pageserver_response_log_timeout = 10000;
 /* 2.5 minutes. A bit higher than highest default TCP retransmission timeout */
@@ -336,6 +338,13 @@ load_shard_map(shardno_t shard_no, char *connstr_p, shardno_t *num_shards_p)
 				pageserver_disconnect(i);
 		}
 		pagestore_local_counter = end_update_counter;
+
+        /* Reserve file descriptors for sockets */
+		while (max_sockets < num_shards)
+		{
+			max_sockets += 1;
+			ReserveExternalFD();
+		}
 	}
 
 	if (num_shards_p)
@@ -424,7 +433,6 @@ pageserver_connect(shardno_t shard_no, int elevel)
 
 		now = GetCurrentTimestamp();
 		us_since_last_attempt = (int64) (now - shard->last_reconnect_time);
-		shard->last_reconnect_time = now;
 
 		/*
 		 * Make sure we don't do exponential backoff with a constant multiplier
@@ -438,14 +446,23 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		/*
 		 * If we did other tasks between reconnect attempts, then we won't
 		 * need to wait as long as a full delay.
+		 *
+		 * This is a loop to protect against interrupted sleeps.
 		 */
-		if (us_since_last_attempt < shard->delay_us)
+		while (us_since_last_attempt < shard->delay_us)
 		{
 			pg_usleep(shard->delay_us - us_since_last_attempt);
+
+			/* At least we should handle cancellations here */
+			CHECK_FOR_INTERRUPTS();
+
+			now = GetCurrentTimestamp();
+			us_since_last_attempt = (int64) (now - shard->last_reconnect_time);
 		}
 
 		/* update the delay metric */
 		shard->delay_us = Min(shard->delay_us * 2, MAX_RECONNECT_INTERVAL_USEC);
+		shard->last_reconnect_time = now;
 
 		/*
 		 * Connect using the connection string we got from the

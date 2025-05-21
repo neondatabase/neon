@@ -144,7 +144,7 @@ where
         replica,
         ctx,
         io_concurrency: IoConcurrency::spawn_from_conf(
-            timeline.conf,
+            timeline.conf.get_vectored_concurrent_io,
             timeline
                 .gate
                 .enter()
@@ -343,7 +343,7 @@ where
             // Gather non-relational files from object storage pages.
             let slru_partitions = self
                 .timeline
-                .get_slru_keyspace(Version::Lsn(self.lsn), self.ctx)
+                .get_slru_keyspace(Version::at(self.lsn), self.ctx)
                 .await?
                 .partition(
                     self.timeline.get_shard_identity(),
@@ -378,7 +378,7 @@ where
             // Otherwise only include init forks of unlogged relations.
             let rels = self
                 .timeline
-                .list_rels(spcnode, dbnode, Version::Lsn(self.lsn), self.ctx)
+                .list_rels(spcnode, dbnode, Version::at(self.lsn), self.ctx)
                 .await?;
             for &rel in rels.iter() {
                 // Send init fork as main fork to provide well formed empty
@@ -517,7 +517,7 @@ where
     async fn add_rel(&mut self, src: RelTag, dst: RelTag) -> Result<(), BasebackupError> {
         let nblocks = self
             .timeline
-            .get_rel_size(src, Version::Lsn(self.lsn), self.ctx)
+            .get_rel_size(src, Version::at(self.lsn), self.ctx)
             .await?;
 
         // If the relation is empty, create an empty file
@@ -577,7 +577,7 @@ where
         let relmap_img = if has_relmap_file {
             let img = self
                 .timeline
-                .get_relmap_file(spcnode, dbnode, Version::Lsn(self.lsn), self.ctx)
+                .get_relmap_file(spcnode, dbnode, Version::at(self.lsn), self.ctx)
                 .await?;
 
             if img.len()
@@ -631,7 +631,7 @@ where
             if !has_relmap_file
                 && self
                     .timeline
-                    .list_rels(spcnode, dbnode, Version::Lsn(self.lsn), self.ctx)
+                    .list_rels(spcnode, dbnode, Version::at(self.lsn), self.ctx)
                     .await?
                     .is_empty()
             {

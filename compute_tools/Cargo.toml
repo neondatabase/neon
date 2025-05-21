@@ -10,6 +10,7 @@ default = []
 testing = ["fail/failpoints"]
 
 [dependencies]
+async-compression.workspace = true
 base64.workspace = true
 aws-config.workspace = true
 aws-sdk-s3.workspace = true
@@ -27,6 +28,7 @@ flate2.workspace = true
 futures.workspace = true
 http.workspace = true
 indexmap.workspace = true
+itertools.workspace = true
 jsonwebtoken.workspace = true
 metrics.workspace = true
 nix.workspace = true
