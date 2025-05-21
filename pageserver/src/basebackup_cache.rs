@@ -198,6 +198,8 @@ impl BasebackupCache {
 
         encoder.shutdown().await?;
 
+        self.prepare_ok_count.inc();
+
         Ok(())
     }
 }

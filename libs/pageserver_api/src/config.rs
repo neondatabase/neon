@@ -310,10 +310,20 @@ pub struct TimelineImportConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct BasebackupCacheConfig {
     #[serde(with = "humantime_serde")]
     pub background_cleanup_period: Duration,
     pub max_cache_size_bytes: u64,
+}
+
+impl Default for BasebackupCacheConfig {
+    fn default() -> Self {
+        Self {
+            background_cleanup_period: Duration::from_secs(60),
+            max_cache_size_bytes: 1024 * 1024 * 1024, // 1 GiB
+        }
+    }
 }
 
 pub mod statvfs {
@@ -678,10 +688,7 @@ impl Default for ConfigToml {
                 import_job_soft_size_limit: NonZeroUsize::new(1024 * 1024 * 1024).unwrap(),
                 import_job_checkpoint_threshold: NonZeroUsize::new(128).unwrap(),
             },
-            basebackup_cache_config: BasebackupCacheConfig {
-                background_cleanup_period: Duration::from_secs(60),
-                max_cache_size_bytes: 1024 * 1024 * 1024,
-            },
+            basebackup_cache_config: BasebackupCacheConfig::default(),
         }
     }
 }
