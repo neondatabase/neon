@@ -74,6 +74,13 @@ pub struct InMemoryLayer {
     /// respect the following locking order to avoid deadlocks:
     /// 1. [`InMemoryLayer::inner`]
     /// 2. [`InMemoryLayer::index`]
+    ///
+    /// Note that the file backing [`InMemoryLayer::inner`] is append-only,
+    /// so it is not necessary to hold simultaneous locks on index.
+    /// This avoids holding index locks across IO, and is crucial for avoiding read tail latency.
+    /// In particular:
+    /// 1. It is safe to read and release [`InMemoryLayer::index`] before locking and reading from [`InMemoryLayer::inner`].
+    /// 2. It is safe to write and release [`InMemoryLayer::inner`] before locking and updating [`InMemoryLayer::index`].
     index: RwLock<BTreeMap<CompactKey, VecMap<Lsn, IndexEntry>>>,
 
     /// The above fields never change, except for `end_lsn`, which is only set once,
@@ -748,13 +755,9 @@ impl InMemoryLayer {
     ) -> Result<Option<(PersistentLayerDesc, Utf8PathBuf)>> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this
         // layer is not writeable anymore, no one should be trying to acquire the
-        // write lock on it, so we shouldn't block anyone. There's one exception
-        // though: another thread might have grabbed a reference to this layer
-        // in `get_layer_for_write' just before the checkpointer called
-        // `freeze`, and then `write_to_disk` on it. When the thread gets the
-        // lock, it will see that it's not writeable anymore and retry, but it
-        // would have to wait until we release it. That race condition is very
-        // rare though, so we just accept the potential latency hit for now.
+        // write lock on it, so we shouldn't block anyone. See the comment on
+        // [`InMemoryLayer::freeze`] to understand how locking between the append path
+        // and layer flushing works.
         let inner = self.inner.read().await;
         let index = self.index.read().await;
 
