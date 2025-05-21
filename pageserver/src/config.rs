@@ -685,9 +685,7 @@ mod tests {
 
             [tracing]
 
-            [tracing.sampling_ratio]
-            numerator = 1
-            denominator = 10
+            sampling_ratio = { numerator = 1, denominator = 0 }
 
             [tracing.export_config]
             endpoint = "localhost:4317"
@@ -698,6 +696,6 @@ mod tests {
             .expect("config has valid fields");
         let workdir = Utf8PathBuf::from("/nonexistent");
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
-            .expect_err("parse_and_validate shall not pass for invalid tracing endpoint");
+            .expect_err("parse_and_validate should fail for endpoint without scheme");
     }
 }
