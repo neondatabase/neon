@@ -148,15 +148,8 @@ pub fn configure_postgres_logs_export(conf: PostgresLogsRsyslogConfig) -> Result
         return Ok(());
     }
 
-    // When new config is empty we can simply remove the configuration file.
+    // Nothing to configure
     if new_config.is_empty() {
-        info!("removing rsyslog config file: {}", POSTGRES_LOGS_CONF_PATH);
-        match std::fs::remove_file(POSTGRES_LOGS_CONF_PATH) {
-            Ok(_) => {}
-            Err(err) if err.kind() == ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
-        }
-        restart_rsyslog()?;
         return Ok(());
     }
 
