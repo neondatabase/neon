@@ -408,7 +408,7 @@ pub enum TimelineCreateRequestMode {
         import_pgdata: TimelineCreateRequestModeImportPgdata,
     },
     Template {
-        template_tenant_id: TenantId,
+        template_tenant_id: TenantShardId,
         template_timeline_id: TimelineId,
     },
     // NB: Bootstrap is all-optional, and thus the serde(untagged) will cause serde to stop at Bootstrap.

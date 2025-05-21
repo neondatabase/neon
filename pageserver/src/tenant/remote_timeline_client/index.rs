@@ -12,6 +12,7 @@ use pageserver_api::shard::ShardIndex;
 use serde::{Deserialize, Serialize};
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
+use utils::shard::TenantShardId;
 
 use super::is_same_remote_layer_path;
 use crate::tenant::Generation;
@@ -233,6 +234,10 @@ pub struct LayerFileMetadata {
     #[serde(default = "ShardIndex::unsharded")]
     #[serde(skip_serializing_if = "ShardIndex::is_unsharded")]
     pub shard: ShardIndex,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template_ttid: Option<(TenantShardId, TimelineId)>,
 }
 
 impl LayerFileMetadata {
@@ -241,6 +246,7 @@ impl LayerFileMetadata {
             file_size,
             generation,
             shard,
+            template_ttid: None,
         }
     }
     /// Helper to get both generation and file size in a tuple

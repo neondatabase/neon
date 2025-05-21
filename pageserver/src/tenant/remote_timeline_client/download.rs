@@ -29,7 +29,7 @@ use super::manifest::TenantManifest;
 use super::{
     FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES, INITDB_PATH, parse_remote_index_path,
     parse_remote_tenant_manifest_path, remote_index_path, remote_initdb_archive_path,
-    remote_initdb_preserved_archive_path, remote_tenant_manifest_path,
+    remote_initdb_preserved_archive_path, remote_template_index_path, remote_tenant_manifest_path,
     remote_tenant_manifest_prefix, remote_tenant_path,
 };
 use crate::TEMP_FILE_SUFFIX;
@@ -39,7 +39,9 @@ use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id, debug_assert_current_span_has_tenant_id,
 };
 use crate::tenant::Generation;
-use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
+use crate::tenant::remote_timeline_client::{
+   remote_layer_path_maybe_template, remote_timelines_path,
+};
 use crate::tenant::storage_layer::LayerName;
 use crate::virtual_file;
 use crate::virtual_file::owned_buffers_io::write::FlushTaskError;
@@ -68,12 +70,13 @@ pub async fn download_layer_file<'a>(
 
     let timeline_path = conf.timeline_path(&tenant_shard_id, &timeline_id);
 
-    let remote_path = remote_layer_path(
+    let remote_path = remote_layer_path_maybe_template(
         &tenant_shard_id.tenant_id,
         &timeline_id,
         layer_metadata.shard,
         layer_file_name,
         layer_metadata.generation,
+        layer_metadata.template_ttid,
     );
 
     let (bytes_amount, temp_file) = download_retry(
@@ -545,6 +548,35 @@ pub(crate) async fn download_index_part(
     debug_assert_current_span_has_tenant_and_timeline_id();
 
     let index_prefix = remote_index_path(tenant_shard_id, timeline_id, Generation::none());
+    download_generation_object(
+        storage,
+        tenant_shard_id,
+        Some(timeline_id),
+        my_generation,
+        "index_part",
+        index_prefix,
+        do_download_index_part,
+        parse_remote_index_path,
+        cancel,
+    )
+    .await
+}
+
+/// index_part.json objects are suffixed with a generation number, so we cannot
+/// directly GET the latest index part without doing some probing.
+///
+/// In this function we probe for the most recent index in a generation <= our current generation.
+/// See "Finding the remote indices for timelines" in docs/rfcs/025-generation-numbers.md
+pub(crate) async fn download_template_index_part(
+    storage: &GenericRemoteStorage,
+    tenant_shard_id: &TenantShardId,
+    timeline_id: &TimelineId,
+    my_generation: Generation,
+    cancel: &CancellationToken,
+) -> Result<(IndexPart, Generation, SystemTime), DownloadError> {
+    debug_assert_current_span_has_tenant_and_timeline_id();
+
+    let index_prefix = remote_template_index_path(tenant_shard_id, timeline_id, Generation::none());
     download_generation_object(
         storage,
         tenant_shard_id,

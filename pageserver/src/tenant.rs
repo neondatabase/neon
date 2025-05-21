@@ -49,6 +49,7 @@ use remote_timeline_client::{
 };
 use secondary::heatmap::{HeatMapTenant, HeatMapTimeline};
 use storage_broker::BrokerClientChannel;
+use storage_layer::Layer;
 use timeline::compaction::{CompactionOutcome, GcCompactionQueue};
 use timeline::import_pgdata::ImportingTimeline;
 use timeline::offload::{OffloadError, offload_timeline};
@@ -107,7 +108,7 @@ use crate::{InitializationOrder, TEMP_FILE_SUFFIX, import_datadir, span, task_mg
 static INIT_DB_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(8));
 use utils::crashsafe;
 use utils::generation::Generation;
-use utils::id::{TenantId, TimelineId};
+use utils::id::TimelineId;
 use utils::lsn::{Lsn, RecordLsn};
 
 pub mod blob_io;
@@ -879,7 +880,7 @@ pub(crate) struct CreateTimelineParamsBootstrap {
 #[derive(Debug)]
 pub(crate) struct CreateTimelineParamsTemplate {
     pub(crate) new_timeline_id: TimelineId,
-    pub(crate) template_tenant_id: TenantId,
+    pub(crate) template_tenant_id: TenantShardId,
     pub(crate) template_timeline_id: TimelineId,
 }
 
@@ -929,6 +930,7 @@ pub(crate) enum CreateTimelineIdempotency {
         ancestor_start_lsn: Lsn,
     },
     ImportPgdata(CreatingTimelineIdempotencyImportPgdata),
+    Template(TenantShardId, TimelineId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2750,7 +2752,107 @@ impl TenantShard {
             template_tenant_id,
             template_timeline_id,
         } = params;
-        todo!()
+
+        // 0. create a guard to prevent parallel creation attempts.
+        let timeline_create_guard = match self
+            .start_creating_timeline(
+                new_timeline_id,
+                CreateTimelineIdempotency::Template(template_tenant_id, template_timeline_id),
+            )
+            .await?
+        {
+            StartCreatingTimelineResult::CreateGuard(guard) => guard,
+            StartCreatingTimelineResult::Idempotent(timeline) => {
+                return Ok(CreateTimelineResult::Idempotent(timeline));
+            }
+        };
+
+        // 1. download the index part of the template timeline
+        // TODO can we hardcode the generation here or should we pass it as parameter?
+        let template_generation = Generation::new(1);
+        let (template_index_part, template_generation, _) =
+            remote_timeline_client::download_template_index_part(
+                &self.remote_storage,
+                &template_tenant_id,
+                &template_timeline_id,
+                template_generation,
+                &self.cancel,
+            )
+            .await
+            .unwrap();
+
+        tracing::info!(
+            "downloaded template index_part.json with generation {}",
+            template_generation.get_suffix()
+        );
+
+        // 2. create the timeline, initializing the index part of the new timeline with the layers from the template
+        let template_metadata = &template_index_part.metadata;
+
+        let new_metadata = TimelineMetadata::new(
+            template_metadata.disk_consistent_lsn(),
+            None,
+            None,
+            Lsn(0),
+            template_metadata.latest_gc_cutoff_lsn(),
+            template_metadata.initdb_lsn(),
+            template_metadata.pg_version(),
+        );
+        let (mut raw_timeline, _timeline_ctx) = self
+            .prepare_new_timeline(
+                new_timeline_id,
+                &new_metadata,
+                timeline_create_guard,
+                template_metadata.initdb_lsn(),
+                None,
+                None,
+                ctx,
+            )
+            .await?;
+
+        let _tenant_shard_id = raw_timeline.owning_tenant.tenant_shard_id;
+        raw_timeline
+            .write(|unfinished_timeline| async move {
+                // TODO make this more sophisticated: maybe a variant of load_layer_map?
+
+                let layers = template_index_part
+                    .layer_metadata
+                    .iter()
+                    .map(|(layer_name, metadata)| {
+                        // TODO support local sharing of layers
+                        let mut metadata = metadata.clone();
+                        metadata.template_ttid = Some((template_tenant_id, template_timeline_id));
+                        Layer::for_evicted(
+                            self.conf,
+                            &unfinished_timeline,
+                            layer_name.clone(),
+                            metadata,
+                        )
+                    })
+                    .collect();
+                unfinished_timeline
+                    .layers
+                    .blocking_write()
+                    .open_mut()
+                    .map_err(|_| CreateTimelineError::ShuttingDown)?
+                    .initialize_local_layers(layers, template_metadata.disk_consistent_lsn());
+                fail::fail_point!("before-checkpoint-new-timeline", |_| {
+                    Err(CreateTimelineError::Other(anyhow::anyhow!(
+                        "failpoint before-checkpoint-new-timeline"
+                    )))
+                });
+
+                Ok(())
+            })
+            .await?;
+
+        // All done!
+        let timeline = raw_timeline.finish_creation().await?;
+
+        // Callers are responsible to wait for uploads to complete and for activating the timeline.
+
+        // 4. finish
+        Ok(CreateTimelineResult::Created(timeline))
     }
 
     /// The returned [`Arc<Timeline>`] is NOT in the [`TenantShard::timelines`] map until the import

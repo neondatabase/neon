@@ -189,8 +189,9 @@ use anyhow::Context;
 use camino::Utf8Path;
 use chrono::{NaiveDateTime, Utc};
 pub(crate) use download::{
-    download_index_part, download_initdb_tar_zst, download_tenant_manifest, is_temp_download_file,
-    list_remote_tenant_shards, list_remote_timelines,
+    download_index_part, download_initdb_tar_zst, download_template_index_part,
+    download_tenant_manifest, is_temp_download_file, list_remote_tenant_shards,
+    list_remote_timelines,
 };
 use index::GcCompactionState;
 pub(crate) use index::LayerFileMetadata;
@@ -1768,7 +1769,7 @@ impl RemoteTimelineClient {
         adopted_as: &Layer,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
-        let source_remote_path = remote_layer_path(
+        let source_remote_path = remote_layer_path_maybe_template(
             &self.tenant_shard_id.tenant_id,
             &adopted
                 .get_timeline_id()
@@ -1776,6 +1777,7 @@ impl RemoteTimelineClient {
             adopted.metadata().shard,
             &adopted.layer_desc().layer_name(),
             adopted.metadata().generation,
+            adopted.metadata().template_ttid,
         );
 
         let target_remote_path = remote_layer_path(
@@ -2684,6 +2686,31 @@ pub fn remote_layer_path(
     RemotePath::from_string(&path).expect("Failed to construct path")
 }
 
+pub fn remote_layer_path_maybe_template(
+    tenant_id: &TenantId,
+    timeline_id: &TimelineId,
+    shard: ShardIndex,
+    layer_file_name: &LayerName,
+    generation: Generation,
+    template_ttid: Option<(TenantShardId, TimelineId)>,
+) -> RemotePath {
+    if let Some((template_tenant_shard_id, template_timeline_id)) = template_ttid {
+        let template_tenant_id = template_tenant_shard_id.tenant_id;
+        let template_shard_id = template_tenant_shard_id.to_index();
+        // Generation-aware key format
+        let path = format!(
+            "templates/{template_tenant_id}{0}/{TIMELINES_SEGMENT_NAME}/{template_timeline_id}/{1}{2}",
+            template_shard_id.get_suffix(),
+            layer_file_name,
+            generation.get_suffix()
+        );
+
+        RemotePath::from_string(&path).expect("Failed to construct path")
+    } else {
+        remote_layer_path(tenant_id, timeline_id, shard, layer_file_name, generation)
+    }
+}
+
 /// Returns true if a and b have the same layer path within a tenant/timeline. This is essentially
 /// remote_layer_path(a) == remote_layer_path(b) without the string allocations.
 ///
@@ -2723,6 +2750,19 @@ pub fn remote_index_path(
 ) -> RemotePath {
     RemotePath::from_string(&format!(
         "tenants/{tenant_shard_id}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{0}{1}",
+        IndexPart::FILE_NAME,
+        generation.get_suffix()
+    ))
+    .expect("Failed to construct path")
+}
+
+pub fn remote_template_index_path(
+    tenant_shard_id: &TenantShardId,
+    timeline_id: &TimelineId,
+    generation: Generation,
+) -> RemotePath {
+    RemotePath::from_string(&format!(
+        "templates/{tenant_shard_id}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{0}{1}",
         IndexPart::FILE_NAME,
         generation.get_suffix()
     ))
