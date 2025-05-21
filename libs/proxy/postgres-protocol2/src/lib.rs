@@ -11,7 +11,7 @@
 //! set to `UTF8`. It will most likely not behave properly if that is not the case.
 #![warn(missing_docs, clippy::all)]
 
-use std::io;
+use std::{ffi::CStr, io};
 
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
@@ -36,20 +36,67 @@ pub enum IsNull {
     No,
 }
 
-fn write_nullable<F, E>(serializer: F, buf: &mut BytesMut) -> Result<(), E>
+/// A [`std::ffi::CStr`] but without the null byte.
+#[repr(transparent)]
+#[derive(PartialEq, Eq, Hash, Debug)]
+pub struct CSafeStr([u8]);
+
+impl CSafeStr {
+    /// Create a new `CSafeStr`, erroring if the bytes contains a null.
+    pub fn new(bytes: &[u8]) -> Result<&Self, io::Error> {
+        let nul_pos = memchr::memchr(0, bytes);
+        match nul_pos {
+            Some(nul_pos) => Err(io::Error::other(format!(
+                "unexpected null byte at position {nul_pos}"
+            ))),
+            None => {
+                // Safety: CSafeStr is transparent over [u8].
+                Ok(unsafe { std::mem::transmute(bytes) })
+            }
+        }
+    }
+
+    /// Create a new `CSafeStr` up until the next null.
+    pub fn take<'a>(bytes: &mut &'a [u8]) -> &'a Self {
+        let nul_pos = memchr::memchr(0, bytes).unwrap_or(bytes.len());
+        let bytes = bytes
+            .split_off(..nul_pos)
+            .expect("nul_pos should be in-bounds");
+        // Safety: CSafeStr is transparent over [u8].
+        unsafe { std::mem::transmute(bytes) }
+    }
+
+    /// Get the bytes of this CSafeStr.
+    pub const fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Create a new `CSafeStr`
+    pub const fn from_cstr(s: &CStr) -> &CSafeStr {
+        // Safety: CSafeStr is transparent over [u8].
+        unsafe { std::mem::transmute(s.to_bytes()) }
+    }
+}
+
+impl<'a> From<&'a CStr> for &'a CSafeStr {
+    fn from(s: &'a CStr) -> &'a CSafeStr {
+        CSafeStr::from_cstr(s)
+    }
+}
+
+fn write_nullable<F>(serializer: F, buf: &mut BytesMut)
 where
-    F: FnOnce(&mut BytesMut) -> Result<IsNull, E>,
-    E: From<io::Error>,
+    F: FnOnce(&mut BytesMut) -> IsNull,
 {
     let base = buf.len();
     buf.put_i32(0);
-    let size = match serializer(buf)? {
-        IsNull::No => i32::from_usize(buf.len() - base - 4)?,
+    let size = match serializer(buf) {
+        // this is an unreasonable enough case that I think a panic is acceptable.
+        IsNull::No => i32::from_usize(buf.len() - base - 4)
+            .expect("buffer size should not be larger than i32::MAX"),
         IsNull::Yes => -1,
     };
     BigEndian::write_i32(&mut buf[base..], size);
-
-    Ok(())
 }
 
 trait FromUsize: Sized {

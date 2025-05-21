@@ -1,3 +1,4 @@
+use std::ffi::CStr;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -5,9 +6,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 use fallible_iterator::FallibleIterator;
 use futures_util::{TryStreamExt, pin_mut};
+use postgres_protocol2::CSafeStr;
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
-use tracing::debug;
 
 use crate::client::{CachedTypeInfo, InnerClient};
 use crate::codec::FrontendMessage;
@@ -15,7 +16,7 @@ use crate::connection::RequestMessages;
 use crate::types::{Kind, Oid, Type};
 use crate::{Column, Error, Statement, query, slice_iter};
 
-pub(crate) const TYPEINFO_QUERY: &str = "\
+pub(crate) const TYPEINFO_QUERY: &CStr = c"\
 SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, t.typbasetype, n.nspname, t.typrelid
 FROM pg_catalog.pg_type t
 LEFT OUTER JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid
@@ -25,11 +26,11 @@ WHERE t.oid = $1
 
 async fn prepare_typecheck(
     client: &Arc<InnerClient>,
-    name: &'static str,
-    query: &str,
+    name: &'static CStr,
+    query: &CSafeStr,
     types: &[Type],
 ) -> Result<Statement, Error> {
-    let buf = encode(client, name, query, types)?;
+    let buf = encode(client, name.into(), query, types)?;
     let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
 
     match responses.next().await? {
@@ -68,16 +69,21 @@ async fn prepare_typecheck(
     Ok(Statement::new(client, name, parameters, columns))
 }
 
-fn encode(client: &InnerClient, name: &str, query: &str, types: &[Type]) -> Result<Bytes, Error> {
-    if types.is_empty() {
-        debug!("preparing query {}: {}", name, query);
-    } else {
-        debug!("preparing query {} with types {:?}: {}", name, types, query);
-    }
+fn encode(
+    client: &InnerClient,
+    name: &CSafeStr,
+    query: &CSafeStr,
+    types: &[Type],
+) -> Result<Bytes, Error> {
+    // if types.is_empty() {
+    //     debug!("preparing query {}: {}", name, query);
+    // } else {
+    //     debug!("preparing query {} with types {:?}: {}", name, types, query);
+    // }
 
     client.with_buf(|buf| {
-        frontend::parse(name, query, types.iter().map(Type::oid), buf).map_err(Error::encode)?;
-        frontend::describe(b'S', name, buf).map_err(Error::encode)?;
+        frontend::parse(name, query, types.iter().map(Type::oid), buf);
+        frontend::describe(b'S', name, buf);
         frontend::sync(buf);
         Ok(buf.split().freeze())
     })
@@ -154,8 +160,8 @@ async fn typeinfo_statement(
         return Ok(stmt.clone());
     }
 
-    let typeinfo = "neon_proxy_typeinfo";
-    let stmt = prepare_typecheck(client, typeinfo, TYPEINFO_QUERY, &[]).await?;
+    let typeinfo = c"neon_proxy_typeinfo";
+    let stmt = prepare_typecheck(client, typeinfo, TYPEINFO_QUERY.into(), &[]).await?;
 
     typecache.typeinfo = Some(stmt.clone());
     Ok(stmt)

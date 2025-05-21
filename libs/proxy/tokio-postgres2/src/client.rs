@@ -219,7 +219,7 @@ impl Client {
                 }
 
                 let buf = self.client.inner().with_buf(|buf| {
-                    frontend::query("ROLLBACK", buf).unwrap();
+                    frontend::query(c"ROLLBACK".into(), buf);
                     buf.split().freeze()
                 });
                 let _ = self

@@ -9,7 +9,7 @@ use bytes::{Bytes, BytesMut};
 use fallible_iterator::FallibleIterator;
 use memchr::memchr;
 
-use crate::Oid;
+use crate::{CSafeStr, Oid};
 
 // top-level message tags
 const PARSE_COMPLETE_TAG: u8 = b'1';
@@ -332,25 +332,24 @@ impl AuthenticationSaslBody {
 pub struct SaslMechanisms<'a>(&'a [u8]);
 
 impl<'a> FallibleIterator for SaslMechanisms<'a> {
-    type Item = &'a str;
+    type Item = &'a CSafeStr;
     type Error = io::Error;
 
     #[inline]
-    fn next(&mut self) -> io::Result<Option<&'a str>> {
-        let value_end = find_null(self.0, 0)?;
-        if value_end == 0 {
-            if self.0.len() != 1 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "invalid message length: expected to be at end of iterator for sasl",
-                ));
-            }
-            Ok(None)
-        } else {
-            let value = get_str(&self.0[..value_end])?;
-            self.0 = &self.0[value_end + 1..];
-            Ok(Some(value))
+    fn next(&mut self) -> io::Result<Option<&'a CSafeStr>> {
+        if self.0 == b"0" {
+            return Ok(None);
         }
+
+        let value = CSafeStr::take(&mut self.0);
+        if value.as_bytes().len() == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid message length: expected to be at end of iterator for sasl",
+            ));
+        }
+
+        Ok(Some(value))
     }
 }
 

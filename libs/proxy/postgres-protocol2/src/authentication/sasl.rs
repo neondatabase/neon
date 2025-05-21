@@ -9,12 +9,14 @@ use sha2::digest::FixedOutput;
 use sha2::{Digest, Sha256};
 use tokio::task::yield_now;
 
+use crate::CSafeStr;
+
 const NONCE_LENGTH: usize = 24;
 
 /// The identifier of the SCRAM-SHA-256 SASL authentication mechanism.
-pub const SCRAM_SHA_256: &str = "SCRAM-SHA-256";
+pub const SCRAM_SHA_256: &CSafeStr = CSafeStr::from_cstr(c"SCRAM-SHA-256");
 /// The identifier of the SCRAM-SHA-256-PLUS SASL authentication mechanism.
-pub const SCRAM_SHA_256_PLUS: &str = "SCRAM-SHA-256-PLUS";
+pub const SCRAM_SHA_256_PLUS: &CSafeStr = CSafeStr::from_cstr(c"SCRAM-SHA-256-PLUS");
 
 // since postgres passwords are not required to exclude saslprep-prohibited
 // characters or even be valid UTF8, we run saslprep if possible and otherwise

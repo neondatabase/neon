@@ -7,6 +7,7 @@ use bytes::Bytes;
 use fallible_iterator::FallibleIterator;
 use futures_util::{Stream, ready};
 use pin_project_lite::pin_project;
+use postgres_protocol2::CSafeStr;
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
 use tracing::debug;
@@ -69,8 +70,9 @@ pub async fn batch_execute(
 }
 
 pub(crate) fn encode(client: &InnerClient, query: &str) -> Result<Bytes, Error> {
+    let query = CSafeStr::new(query.as_bytes()).map_err(Error::encode)?;
     client.with_buf(|buf| {
-        frontend::query(query, buf).map_err(Error::encode)?;
+        frontend::query(query, buf);
         Ok(buf.split().freeze())
     })
 }

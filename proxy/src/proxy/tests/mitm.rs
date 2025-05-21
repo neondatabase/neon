@@ -9,7 +9,7 @@ use std::fmt::Debug;
 use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
 use postgres_client::tls::TlsConnect;
-use postgres_protocol::message::frontend;
+use postgres_protocol::{authentication::sasl::SCRAM_SHA_256, message::frontend};
 use tokio::io::{AsyncReadExt, DuplexStream};
 use tokio_util::codec::{Decoder, Encoder};
 
@@ -60,8 +60,7 @@ async fn proxy_mitm(
                 params: startup.params.into(),
             },
             &mut buf,
-        )
-        .unwrap();
+        );
         end_server.send(buf.freeze()).await.unwrap();
 
         // proxy messages between end_client and end_server
@@ -90,7 +89,7 @@ async fn proxy_mitm(
                                 new_message.extend_from_slice(sasl_message.strip_prefix(b"p=tls-server-end-point,,").unwrap());
 
                                 let mut buf = BytesMut::new();
-                                frontend::sasl_initial_response("SCRAM-SHA-256", &new_message, &mut buf).unwrap();
+                                frontend::sasl_initial_response(SCRAM_SHA_256, &new_message, &mut buf);
 
                                 end_server.send(buf.freeze()).await.unwrap();
                                 continue;

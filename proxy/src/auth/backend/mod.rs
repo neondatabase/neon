@@ -536,7 +536,8 @@ mod tests {
     use control_plane::AuthSecret;
     use fallible_iterator::FallibleIterator;
     use once_cell::sync::Lazy;
-    use postgres_protocol::authentication::sasl::{ChannelBinding, ScramSha256};
+    use postgres_protocol::CSafeStr;
+    use postgres_protocol::authentication::sasl::{ChannelBinding, SCRAM_SHA_256, ScramSha256};
     use postgres_protocol::message::backend::Message as PgMessage;
     use postgres_protocol::message::frontend;
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -714,15 +715,15 @@ mod tests {
             // server should offer scram
             match read_message(&mut client, &mut read).await {
                 PgMessage::AuthenticationSasl(a) => {
-                    let options: Vec<&str> = a.mechanisms().collect().unwrap();
-                    assert_eq!(options, ["SCRAM-SHA-256"]);
+                    let options: Vec<&CSafeStr> = a.mechanisms().collect().unwrap();
+                    assert_eq!(options, [SCRAM_SHA_256]);
                 }
                 _ => panic!("wrong message"),
             }
 
             // client sends client-first-message
             let mut write = BytesMut::new();
-            frontend::sasl_initial_response("SCRAM-SHA-256", scram.message(), &mut write).unwrap();
+            frontend::sasl_initial_response(SCRAM_SHA_256, scram.message(), &mut write);
             client.write_all(&write).await.unwrap();
 
             // server response with server-first-message
@@ -735,7 +736,7 @@ mod tests {
 
             // client response with client-final-message
             write.clear();
-            frontend::sasl_response(scram.message(), &mut write).unwrap();
+            frontend::sasl_response(scram.message(), &mut write);
             client.write_all(&write).await.unwrap();
 
             // server response with server-final-message
@@ -800,7 +801,7 @@ mod tests {
 
             // client responds with password
             write.clear();
-            frontend::password_message(b"my-secret-password", &mut write).unwrap();
+            frontend::password_message(c"my-secret-password".into(), &mut write);
             client.write_all(&write).await.unwrap();
         });
         let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new_with_shards(
@@ -853,8 +854,10 @@ mod tests {
 
             // client responds with password
             let mut write = BytesMut::new();
-            frontend::password_message(b"endpoint=my-endpoint;my-secret-password", &mut write)
-                .unwrap();
+            frontend::password_message(
+                c"endpoint=my-endpoint;my-secret-password".into(),
+                &mut write,
+            );
             client.write_all(&write).await.unwrap();
         });
 

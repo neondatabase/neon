@@ -6,6 +6,7 @@ use std::task::{Context, Poll};
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
 use futures_util::{Sink, SinkExt, Stream, TryStreamExt, ready};
+use postgres_protocol2::CSafeStr;
 use postgres_protocol2::authentication::sasl;
 use postgres_protocol2::authentication::sasl::ScramSha256;
 use postgres_protocol2::message::backend::{AuthenticationSaslBody, Message, NoticeResponseBody};
@@ -122,7 +123,7 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     let mut buf = BytesMut::new();
-    frontend::startup_message(&config.server_params, &mut buf).map_err(Error::encode)?;
+    frontend::startup_message(&config.server_params, &mut buf);
 
     stream
         .send(FrontendMessage::Raw(buf.freeze()))
@@ -193,7 +194,7 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     let mut buf = BytesMut::new();
-    frontend::password_message(password, &mut buf).map_err(Error::encode)?;
+    frontend::password_message(CSafeStr::new(password).map_err(Error::encode)?, &mut buf);
 
     stream
         .send(FrontendMessage::Raw(buf.freeze()))
@@ -214,10 +215,10 @@ where
     let mut has_scram_plus = false;
     let mut mechanisms = body.mechanisms();
     while let Some(mechanism) = mechanisms.next().map_err(Error::parse)? {
-        match mechanism {
-            sasl::SCRAM_SHA_256 => has_scram = true,
-            sasl::SCRAM_SHA_256_PLUS => has_scram_plus = true,
-            _ => {}
+        if mechanism == sasl::SCRAM_SHA_256 {
+            has_scram = true;
+        } else if mechanism == sasl::SCRAM_SHA_256_PLUS {
+            has_scram_plus = true;
         }
     }
 
@@ -256,7 +257,7 @@ where
     };
 
     let mut buf = BytesMut::new();
-    frontend::sasl_initial_response(mechanism, scram.message(), &mut buf).map_err(Error::encode)?;
+    frontend::sasl_initial_response(mechanism, scram.message(), &mut buf);
     stream
         .send(FrontendMessage::Raw(buf.freeze()))
         .await
@@ -275,7 +276,7 @@ where
         .map_err(|e| Error::authentication(e.into()))?;
 
     let mut buf = BytesMut::new();
-    frontend::sasl_response(scram.message(), &mut buf).map_err(Error::encode)?;
+    frontend::sasl_response(scram.message(), &mut buf);
     stream
         .send(FrontendMessage::Raw(buf.freeze()))
         .await

@@ -3,7 +3,6 @@
 use std::io;
 use std::sync::Arc;
 
-use postgres_protocol::authentication::sasl::{SCRAM_SHA_256, SCRAM_SHA_256_PLUS};
 use pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
@@ -174,8 +173,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
         }
 
         match sasl.method {
-            SCRAM_SHA_256 => ctx.set_auth_method(crate::context::AuthMethod::ScramSha256),
-            SCRAM_SHA_256_PLUS => ctx.set_auth_method(crate::context::AuthMethod::ScramSha256Plus),
+            scram::SCRAM_SHA_256 => ctx.set_auth_method(crate::context::AuthMethod::ScramSha256),
+            scram::SCRAM_SHA_256_PLUS => {
+                ctx.set_auth_method(crate::context::AuthMethod::ScramSha256Plus)
+            }
             _ => {}
         }
 

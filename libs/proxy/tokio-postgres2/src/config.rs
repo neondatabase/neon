@@ -4,6 +4,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 use std::{fmt, str};
 
+use postgres_protocol2::CSafeStr;
 pub use postgres_protocol2::authentication::sasl::ScramKeys;
 use postgres_protocol2::message::frontend::StartupMessageParams;
 use serde::{Deserialize, Serialize};
@@ -162,7 +163,10 @@ impl Config {
             self.username = true;
         }
 
-        self.server_params.insert(name, value);
+        self.server_params.insert(
+            CSafeStr::new(name.as_bytes()).expect("param name should not contain a null"),
+            CSafeStr::new(value.as_bytes()).expect("param name should not contain a null"),
+        );
         self
     }
 

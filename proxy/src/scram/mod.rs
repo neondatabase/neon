@@ -21,8 +21,8 @@ pub(crate) use key::ScramKey;
 pub(crate) use secret::ServerSecret;
 use sha2::{Digest, Sha256};
 
-const SCRAM_SHA_256: &str = "SCRAM-SHA-256";
-const SCRAM_SHA_256_PLUS: &str = "SCRAM-SHA-256-PLUS";
+pub(crate) const SCRAM_SHA_256: &str = "SCRAM-SHA-256";
+pub(crate) const SCRAM_SHA_256_PLUS: &str = "SCRAM-SHA-256-PLUS";
 
 /// A list of supported SCRAM methods.
 pub(crate) const METHODS: &[&str] = &[SCRAM_SHA_256_PLUS, SCRAM_SHA_256];

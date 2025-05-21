@@ -1,4 +1,4 @@
-use std::fmt;
+use std::iter;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -8,24 +8,15 @@ use bytes::{BufMut, Bytes, BytesMut};
 use fallible_iterator::FallibleIterator;
 use futures_util::{Stream, ready};
 use pin_project_lite::pin_project;
+use postgres_protocol2::CSafeStr;
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
 use postgres_types2::{Format, ToSql, Type};
-use tracing::debug;
 
 use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
-use crate::types::IsNull;
 use crate::{Column, Error, ReadyForQueryStatus, Row, Statement};
-
-struct BorrowToSqlParamsDebug<'a>(&'a [&'a (dyn ToSql + Sync)]);
-
-impl fmt::Debug for BorrowToSqlParamsDebug<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list().entries(self.0.iter()).finish()
-    }
-}
 
 pub async fn query<'a, I>(
     client: &InnerClient,
@@ -34,19 +25,9 @@ pub async fn query<'a, I>(
 ) -> Result<RowStream, Error>
 where
     I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
-    I::IntoIter: ExactSizeIterator,
+    I::IntoIter: ExactSizeIterator + Clone,
 {
-    let buf = if tracing::enabled!(tracing::Level::DEBUG) {
-        let params = params.into_iter().collect::<Vec<_>>();
-        debug!(
-            "executing statement {} with parameters: {:?}",
-            statement.name(),
-            BorrowToSqlParamsDebug(params.as_slice()),
-        );
-        encode(client, &statement, params)?
-    } else {
-        encode(client, &statement, params)?
-    };
+    let buf = encode(client, &statement, params)?;
     let responses = start(client, buf).await?;
     Ok(RowStream {
         statement,
@@ -68,45 +49,45 @@ where
     I: IntoIterator<Item = Option<S>>,
     I::IntoIter: ExactSizeIterator,
 {
+    let query = CSafeStr::new(query.as_bytes()).map_err(Error::encode)?;
     let params = params.into_iter();
+
+    let portal = c"".into(); // unnamed portal
+    let statement = c"".into(); // unnamed prepared statement
 
     let buf = client.with_buf(|buf| {
         frontend::parse(
-            "",                 // unnamed prepared statement
-            query,              // query to parse
-            std::iter::empty(), // give no type info
+            statement,
+            query,         // query to parse
+            iter::empty(), // give no type info
             buf,
-        )
-        .map_err(Error::encode)?;
-        frontend::describe(b'S', "", buf).map_err(Error::encode)?;
-        // Bind, pass params as text, retrieve as binary
-        match frontend::bind(
-            "",                 // empty string selects the unnamed portal
-            "",                 // unnamed prepared statement
-            std::iter::empty(), // all parameters use the default format (text)
+        );
+        frontend::describe(b'S', statement, buf);
+
+        // Bind, pass params as text, retrieve as test
+        frontend::bind(
+            portal,
+            statement,
+            iter::empty(), // all parameters use the default format (text)
             params,
             |param, buf| match param {
                 Some(param) => {
                     buf.put_slice(param.as_ref().as_bytes());
-                    Ok(postgres_protocol2::IsNull::No)
+                    postgres_protocol2::IsNull::No
                 }
-                None => Ok(postgres_protocol2::IsNull::Yes),
+                None => postgres_protocol2::IsNull::Yes,
             },
             Some(0), // all text
             buf,
-        ) {
-            Ok(()) => Ok(()),
-            Err(frontend::BindError::Conversion(e)) => Err(Error::to_sql(e, 0)),
-            Err(frontend::BindError::Serialization(e)) => Err(Error::encode(e)),
-        }?;
+        );
 
         // Execute
-        frontend::execute("", 0, buf).map_err(Error::encode)?;
+        frontend::execute(portal, 0, buf);
         // Sync
         frontend::sync(buf);
 
-        Ok(buf.split().freeze())
-    })?;
+        buf.split().freeze()
+    });
 
     // now read the responses
     let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
@@ -173,11 +154,13 @@ async fn start(client: &InnerClient, buf: Bytes) -> Result<Responses, Error> {
 pub fn encode<'a, I>(client: &InnerClient, statement: &Statement, params: I) -> Result<Bytes, Error>
 where
     I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
-    I::IntoIter: ExactSizeIterator,
+    I::IntoIter: ExactSizeIterator + Clone,
 {
+    let portal = c"".into(); // unnamed portal
+
     client.with_buf(|buf| {
-        encode_bind(statement, params, "", buf)?;
-        frontend::execute("", 0, buf).map_err(Error::encode)?;
+        encode_bind(statement, params, portal, buf)?;
+        frontend::execute(portal, 0, buf);
         frontend::sync(buf);
         Ok(buf.split().freeze())
     })
@@ -186,15 +169,15 @@ where
 pub fn encode_bind<'a, I>(
     statement: &Statement,
     params: I,
-    portal: &str,
+    portal: &CSafeStr,
     buf: &mut BytesMut,
 ) -> Result<(), Error>
 where
     I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
-    I::IntoIter: ExactSizeIterator,
+    I::IntoIter: ExactSizeIterator + Clone,
 {
     let param_types = statement.params();
-    let params = params.into_iter();
+    let params = iter::zip(params.into_iter(), param_types);
 
     assert!(
         param_types.len() == params.len(),
@@ -203,35 +186,24 @@ where
         params.len()
     );
 
-    let (param_formats, params): (Vec<_>, Vec<_>) = params
-        .zip(param_types.iter())
-        .map(|(p, ty)| (p.encode_format(ty) as i16, p))
-        .unzip();
+    // check encodings
+    for (i, (p, ty)) in params.clone().enumerate() {
+        p.check(ty).map_err(|e| Error::to_sql(Box::new(e), i))?
+    }
 
-    let params = params.into_iter();
+    let param_formats = params.clone().map(|(p, ty)| p.encode_format(ty) as i16);
 
-    let mut error_idx = 0;
-    let r = frontend::bind(
+    frontend::bind(
         portal,
         statement.name(),
         param_formats,
-        params.zip(param_types).enumerate(),
-        |(idx, (param, ty)), buf| match param.to_sql_checked(ty, buf) {
-            Ok(IsNull::No) => Ok(postgres_protocol2::IsNull::No),
-            Ok(IsNull::Yes) => Ok(postgres_protocol2::IsNull::Yes),
-            Err(e) => {
-                error_idx = idx;
-                Err(e)
-            }
-        },
+        params,
+        |(param, ty), buf| param.to_sql(ty, buf),
         Some(1),
         buf,
     );
-    match r {
-        Ok(()) => Ok(()),
-        Err(frontend::BindError::Conversion(e)) => Err(Error::to_sql(e, error_idx)),
-        Err(frontend::BindError::Serialization(e)) => Err(Error::encode(e)),
-    }
+
+    Ok(())
 }
 
 pin_project! {

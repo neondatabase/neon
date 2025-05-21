@@ -1,9 +1,10 @@
+use std::ffi::CStr;
 use std::fmt;
 use std::sync::{Arc, Weak};
 
-use postgres_protocol2::Oid;
 use postgres_protocol2::message::backend::Field;
 use postgres_protocol2::message::frontend;
+use postgres_protocol2::{CSafeStr, Oid};
 
 use crate::client::InnerClient;
 use crate::codec::FrontendMessage;
@@ -12,7 +13,7 @@ use crate::types::Type;
 
 struct StatementInner {
     client: Weak<InnerClient>,
-    name: &'static str,
+    name: &'static CStr,
     params: Vec<Type>,
     columns: Vec<Column>,
 }
@@ -21,7 +22,7 @@ impl Drop for StatementInner {
     fn drop(&mut self) {
         if let Some(client) = self.client.upgrade() {
             let buf = client.with_buf(|buf| {
-                frontend::close(b'S', self.name, buf).unwrap();
+                frontend::close(b'S', self.name.into(), buf);
                 frontend::sync(buf);
                 buf.split().freeze()
             });
@@ -39,7 +40,7 @@ pub struct Statement(Arc<StatementInner>);
 impl Statement {
     pub(crate) fn new(
         inner: &Arc<InnerClient>,
-        name: &'static str,
+        name: &'static CStr,
         params: Vec<Type>,
         columns: Vec<Column>,
     ) -> Statement {
@@ -54,14 +55,14 @@ impl Statement {
     pub(crate) fn new_anonymous(params: Vec<Type>, columns: Vec<Column>) -> Statement {
         Statement(Arc::new(StatementInner {
             client: Weak::new(),
-            name: "<anonymous>",
+            name: c"<anonymous>",
             params,
             columns,
         }))
     }
 
-    pub(crate) fn name(&self) -> &str {
-        self.0.name
+    pub(crate) fn name(&self) -> &CSafeStr {
+        self.0.name.into()
     }
 
     /// Returns the expected types of the statement's parameters.
