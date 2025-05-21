@@ -533,7 +533,9 @@ impl PageServerConf {
         // custom validation code that covers more than one field in isolation
         // ------------------------------------------------------------
 
-        if conf.http_auth_type == AuthType::NeonJWT || conf.pg_auth_type == AuthType::NeonJWT {
+        if [conf.http_auth_type, conf.pg_auth_type, conf.grpc_auth_type]
+            .contains(&AuthType::NeonJWT)
+        {
             let auth_validation_public_key_path = conf
                 .auth_validation_public_key_path
                 .get_or_insert_with(|| workdir.join("auth_public_key.pem"));
