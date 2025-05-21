@@ -1,3 +1,5 @@
+#[cfg(any(test, feature = "testing"))]
+use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::pin;
@@ -90,8 +92,6 @@ struct ProxyCliArgs {
         default_value = "http://localhost:3000/authenticate_proxy_request/"
     )]
     auth_endpoint: String,
-    #[clap(long, hide = true, env = "PGPASSWORD")]
-    pgpassword: Option<String>,
     /// JWT used to connect to control plane.
     #[clap(
         long,
@@ -777,11 +777,9 @@ fn build_auth_backend(
         AuthBackendType::Postgres => {
             let mut url: ApiUrl = args.auth_endpoint.parse()?;
             if url.password().is_none() {
-                let password = args
-                    .pgpassword
-                    .as_ref()
+                let password = env::var("PGPASSWORD")
                     .with_context(|| "auth-endpoint does not contain a password and environment variable `PGPASSWORD` is not set")?;
-                url.set_password(Some(password))
+                url.set_password(Some(&password))
                     .expect("Failed to set password");
             }
             let api = control_plane::client::mock::MockControlPlane::new(
