@@ -1,25 +1,35 @@
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
-use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+use camino::Utf8PathBuf;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::sync::CancellationToken;
-use utils::{id::TimelineId, lsn::Lsn};
+use utils::{
+    id::{TenantId, TimelineId},
+    lsn::Lsn,
+};
 
-use crate::tenant::{CheckpointShutdownEvent, CheckpointShutdownSender};
+pub struct BasebackupPrepareRequest {
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
+    pub lsn: Lsn,
+}
+
+pub type BasebackupPrepareSender = UnboundedSender<BasebackupPrepareRequest>;
 
 pub struct BasebackupCache {
-    datadir: PathBuf,
+    datadir: Utf8PathBuf,
 
-    checkpoint_sender: CheckpointShutdownSender,
+    checkpoint_sender: BasebackupPrepareSender,
     cancel: CancellationToken,
 }
 
 impl BasebackupCache {
     // Creates a BasebackupCache and spawns a background task.
     pub fn spawn(
-        datadir: PathBuf,
-        handle: &tokio::runtime::Handle,
+        runtime_handle: &tokio::runtime::Handle,
+        datadir: Utf8PathBuf,
         cancel: CancellationToken,
-    ) -> anyhow::Result<Arc<Self>> {
+    ) -> Arc<Self> {
         let (checkpoint_sender, checkpoint_receiver) = unbounded_channel();
 
         let cache = Arc::new(BasebackupCache {
@@ -28,41 +38,46 @@ impl BasebackupCache {
             cancel,
         });
 
-        handle.spawn(cache.clone().background(checkpoint_receiver));
+        runtime_handle.spawn(cache.clone().background(checkpoint_receiver));
 
-        Ok(cache)
+        cache
     }
 
     // Non-blocking. If an entry exists, opens the archive file and return reader.
     pub async fn get(
         &self,
+        tenant_id: TenantId,
         timeline_id: TimelineId,
         lsn: Lsn,
-    ) -> std::io::Result<Option<tokio::fs::File>> {
-        let path = self.entry_path(timeline_id, lsn);
+    ) -> Option<tokio::fs::File> {
+        // TODO(diko): add a fast check to avoid syscall every on every call.
 
-        let res = match tokio::fs::File::open(path).await {
+        let path = self.entry_path(tenant_id, timeline_id, lsn);
+
+        match tokio::fs::File::open(path).await {
             Ok(file) => Some(file),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e),
-        };
-
-        Ok(res)
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("Unexpected error opening basebackup cache file: {:?}", e);
+                }
+                None
+            }
+        }
     }
 
-    pub fn get_checkpoint_shutdown_sender(&self) -> CheckpointShutdownSender {
+    pub fn get_checkpoint_shutdown_sender(&self) -> BasebackupPrepareSender {
         self.checkpoint_sender.clone()
     }
 
-    fn entry_path(&self, timeline_id: TimelineId, lsn: Lsn) -> PathBuf {
+    fn entry_path(&self, tenant_id: TenantId, timeline_id: TimelineId, lsn: Lsn) -> Utf8PathBuf {
         // Placeholder for actual implementation
         self.datadir
-            .join(format!("basebackup_{}_{}.tar", timeline_id, lsn))
+            .join(format!("basebackup_{tenant_id}_{timeline_id}_{lsn}.tar",))
     }
 
     async fn background(
         self: Arc<Self>,
-        mut cp_receiver: UnboundedReceiver<CheckpointShutdownEvent>,
+        mut cp_receiver: UnboundedReceiver<BasebackupPrepareRequest>,
     ) {
         loop {
             tokio::select! {

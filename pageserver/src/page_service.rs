@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 use std::{io, str};
 
 use crate::PERF_TRACE_TARGET;
+use crate::basebackup_cache::BasebackupCache;
 use anyhow::{Context, bail};
 use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
@@ -107,6 +108,7 @@ pub fn spawn(
     perf_trace_dispatch: Option<Dispatch>,
     tcp_listener: tokio::net::TcpListener,
     tls_config: Option<Arc<rustls::ServerConfig>>,
+    basebackup_cache: Arc<BasebackupCache>,
 ) -> Listener {
     let cancel = CancellationToken::new();
     let libpq_ctx = RequestContext::todo_child(
@@ -128,6 +130,7 @@ pub fn spawn(
             conf.pg_auth_type,
             tls_config,
             conf.page_service_pipelining.clone(),
+            basebackup_cache,
             libpq_ctx,
             cancel.clone(),
         )
@@ -186,6 +189,7 @@ pub async fn libpq_listener_main(
     auth_type: AuthType,
     tls_config: Option<Arc<rustls::ServerConfig>>,
     pipelining_config: PageServicePipeliningConfig,
+    basebackup_cache: Arc<BasebackupCache>,
     listener_ctx: RequestContext,
     listener_cancel: CancellationToken,
 ) -> Connections {
@@ -229,6 +233,7 @@ pub async fn libpq_listener_main(
                     auth_type,
                     tls_config.clone(),
                     pipelining_config.clone(),
+                    Arc::clone(&basebackup_cache),
                     connection_ctx,
                     connections_cancel.child_token(),
                     gate_guard,
@@ -271,6 +276,7 @@ async fn page_service_conn_main(
     auth_type: AuthType,
     tls_config: Option<Arc<rustls::ServerConfig>>,
     pipelining_config: PageServicePipeliningConfig,
+    basebackup_cache: Arc<BasebackupCache>,
     connection_ctx: RequestContext,
     cancel: CancellationToken,
     gate_guard: GateGuard,
@@ -336,6 +342,7 @@ async fn page_service_conn_main(
         pipelining_config,
         conf.get_vectored_concurrent_io,
         perf_span_fields,
+        basebackup_cache,
         connection_ctx,
         cancel.clone(),
         gate_guard,
@@ -389,6 +396,8 @@ struct PageServerHandler {
 
     pipelining_config: PageServicePipeliningConfig,
     get_vectored_concurrent_io: GetVectoredConcurrentIo,
+
+    basebackup_cache: Arc<BasebackupCache>,
 
     gate_guard: GateGuard,
 }
@@ -849,6 +858,7 @@ impl PageServerHandler {
         pipelining_config: PageServicePipeliningConfig,
         get_vectored_concurrent_io: GetVectoredConcurrentIo,
         perf_span_fields: ConnectionPerfSpanFields,
+        basebackup_cache: Arc<BasebackupCache>,
         connection_ctx: RequestContext,
         cancel: CancellationToken,
         gate_guard: GateGuard,
@@ -862,6 +872,7 @@ impl PageServerHandler {
             cancel,
             pipelining_config,
             get_vectored_concurrent_io,
+            basebackup_cache,
             gate_guard,
         }
     }
@@ -2432,8 +2443,6 @@ impl PageServerHandler {
             "XXX handle_basebackup_request({timeline_id:?}, {lsn:?}, {prev_lsn:?}, {gzip}, {replica}"
         );
 
-        if !full_backup && !replica && gzip && prev_lsn.is_none() {}
-
         let timeline = self
             .timeline_handles
             .as_mut()
@@ -2491,7 +2500,27 @@ impl PageServerHandler {
             .map_err(map_basebackup_error)?;
         } else {
             let mut writer = BufWriter::new(pgb.copyout_writer());
-            if gzip {
+
+            let cached = {
+                if gzip && lsn.is_some() && prev_lsn.is_none() {
+                    self.basebackup_cache
+                        .get(tenant_id, timeline_id, lsn.unwrap())
+                        .await
+                } else {
+                    None
+                }
+            };
+
+            if let Some(mut cached) = cached {
+                tokio::io::copy(&mut cached, &mut writer)
+                    .await
+                    .map_err(|e| {
+                        map_basebackup_error(BasebackupError::Client(
+                            e,
+                            "handle_basebackup_request,copy_cached",
+                        ))
+                    })?;
+            } else if gzip {
                 let mut encoder = GzipEncoder::with_quality(
                     &mut writer,
                     // NOTE using fast compression because it's on the critical path

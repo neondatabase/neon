@@ -182,7 +182,6 @@ impl<'t> UninitializedTimeline<'t> {
 
         // All the data has been imported. Insert the Timeline into the tenant's timelines map
         let tl = self.finish_creation().await?;
-        // TODO(diko): store it in timeline.
         tl.activate(tenant, broker_client, None, ctx);
         Ok(tl)
     }

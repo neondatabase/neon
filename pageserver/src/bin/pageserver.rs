@@ -543,11 +543,11 @@ fn start_pageserver(
 
     // Scan the local 'tenants/' directory and start loading the tenants
     let basebackup_cache = BasebackupCache::spawn(
-        "emppty".into(),
         BACKGROUND_RUNTIME.handle(),
+        conf.basebackup_cache_dir(),
         shutdown_pageserver.child_token(),
-    )?;
-    let shutdown_checkpoint_sender = basebackup_cache.get_checkpoint_shutdown_sender();
+    );
+    let basebackup_prepare_sender = basebackup_cache.get_checkpoint_shutdown_sender();
 
     let deletion_queue_client = deletion_queue.new_client();
     let background_purges = mgr::BackgroundPurges::default();
@@ -559,7 +559,7 @@ fn start_pageserver(
             remote_storage: remote_storage.clone(),
             deletion_queue_client,
             l0_flush_global_state,
-            shutdown_checkpoint_sender,
+            basebackup_prepare_sender,
         },
         order,
         shutdown_pageserver.clone(),
@@ -772,6 +772,7 @@ fn start_pageserver(
         } else {
             None
         },
+        basebackup_cache,
     );
 
     // All started up! Now just sit and wait for shutdown signal.

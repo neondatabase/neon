@@ -261,6 +261,10 @@ impl PageServerConf {
         self.workdir.join("metadata.json")
     }
 
+    pub fn basebackup_cache_dir(&self) -> Utf8PathBuf {
+        self.workdir.join("basebackup_cache")
+    }
+
     pub fn deletion_list_path(&self, sequence: u64) -> Utf8PathBuf {
         // Encode a version in the filename, so that if we ever switch away from JSON we can
         // increment this.

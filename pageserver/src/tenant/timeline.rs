@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::PERF_TRACE_TARGET;
+use crate::basebackup_cache::BasebackupPrepareRequest;
 use crate::walredo::RedoAttemptType;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -93,8 +94,8 @@ use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
 use super::tasks::log_compaction_error;
 use super::upload_queue::NotInitialized;
 use super::{
-    AttachedTenantConf, CheckpointShutdownEvent, CheckpointShutdownSender, GcError,
-    HeatMapTimeline, MaybeOffloaded, debug_assert_current_span_has_tenant_and_timeline_id,
+    AttachedTenantConf, BasebackupPrepareSender, GcError, HeatMapTimeline, MaybeOffloaded,
+    debug_assert_current_span_has_tenant_and_timeline_id,
 };
 use crate::aux_file::AuxFileSizeEstimator;
 use crate::config::PageServerConf;
@@ -195,7 +196,7 @@ pub struct TimelineResources {
     pub pagestream_throttle_metrics: Arc<crate::metrics::tenant_throttling::Pagestream>,
     pub l0_compaction_trigger: Arc<Notify>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
-    pub shutdown_checkpoint_sender: CheckpointShutdownSender,
+    pub basebackup_prepare_sender: BasebackupPrepareSender,
 }
 
 /// The relation size cache caches relation sizes at the end of the timeline. It speeds up WAL
@@ -450,7 +451,7 @@ pub struct Timeline {
     wait_lsn_log_slow: tokio::sync::Semaphore,
 
     // TODO(diko)
-    shutdown_checkpoint_sender: CheckpointShutdownSender,
+    basebackup_prepare_sender: BasebackupPrepareSender,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -2473,10 +2474,11 @@ impl Timeline {
         }
     }
 
+    // TODO(diko)
     pub fn prepare_basebackup(&self, lsn: Lsn) {
         let err = self
-            .shutdown_checkpoint_sender
-            .send(CheckpointShutdownEvent {
+            .basebackup_prepare_sender
+            .send(BasebackupPrepareRequest {
                 tenant_id: self.tenant_shard_id.tenant_id,
                 timeline_id: self.timeline_id,
                 lsn,
@@ -3035,7 +3037,7 @@ impl Timeline {
 
                 wait_lsn_log_slow: tokio::sync::Semaphore::new(1),
 
-                shutdown_checkpoint_sender: resources.shutdown_checkpoint_sender,
+                basebackup_prepare_sender: resources.basebackup_prepare_sender,
             };
 
             result.repartition_threshold =

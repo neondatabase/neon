@@ -56,7 +56,6 @@ use timeline::{
     CompactFlags, CompactOptions, CompactionError, PreviousHeatmap, ShutdownMode, import_pgdata,
 };
 use tokio::io::BufReader;
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{Notify, Semaphore, watch};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -79,6 +78,7 @@ use self::timeline::uninit::{TimelineCreateGuard, TimelineExclusionError, Uninit
 use self::timeline::{
     EvictionTaskTenantState, GcCutoffs, TimelineDeleteProgress, TimelineResources, WaitLsnError,
 };
+use crate::basebackup_cache::BasebackupPrepareSender;
 use crate::config::PageServerConf;
 use crate::context;
 use crate::context::RequestContextBuilder;
@@ -108,7 +108,7 @@ use crate::{InitializationOrder, TEMP_FILE_SUFFIX, import_datadir, span, task_mg
 static INIT_DB_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(8));
 use utils::crashsafe;
 use utils::generation::Generation;
-use utils::id::{TenantId, TimelineId};
+use utils::id::TimelineId;
 use utils::lsn::{Lsn, RecordLsn};
 
 pub mod blob_io;
@@ -150,13 +150,6 @@ pub const TENANTS_SEGMENT_NAME: &str = "tenants";
 /// Parts of the `.neon/tenants/<tenant_id>/timelines/<timeline_id>` directory prefix.
 pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 
-pub struct CheckpointShutdownEvent {
-    pub tenant_id: TenantId,
-    pub timeline_id: TimelineId,
-    pub lsn: Lsn,
-}
-
-pub type CheckpointShutdownSender = UnboundedSender<CheckpointShutdownEvent>;
 /// References to shared objects that are passed into each tenant, such
 /// as the shared remote storage client and process initialization state.
 #[derive(Clone)]
@@ -166,7 +159,7 @@ pub struct TenantSharedResources {
     pub deletion_queue_client: DeletionQueueClient,
     pub l0_flush_global_state: L0FlushGlobalState,
     /// A sender TODO(diko)
-    pub shutdown_checkpoint_sender: CheckpointShutdownSender,
+    pub basebackup_prepare_sender: BasebackupPrepareSender,
 }
 
 /// A [`TenantShard`] is really an _attached_ tenant.  The configuration
@@ -334,7 +327,7 @@ pub struct TenantShard {
     deletion_queue_client: DeletionQueueClient,
 
     // TODO(diko)
-    shutdown_checkpoint_sender: CheckpointShutdownSender,
+    basebackup_prepare_sender: BasebackupPrepareSender,
 
     /// Cached logical sizes updated updated on each [`TenantShard::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
@@ -1299,7 +1292,7 @@ impl TenantShard {
             remote_storage,
             deletion_queue_client,
             l0_flush_global_state,
-            shutdown_checkpoint_sender, // TODO(diko): where does it go?
+            basebackup_prepare_sender, // TODO(diko): where does it go?
         } = resources;
 
         let attach_mode = attached_conf.location.attach_mode;
@@ -1315,7 +1308,7 @@ impl TenantShard {
             remote_storage.clone(),
             deletion_queue_client,
             l0_flush_global_state,
-            shutdown_checkpoint_sender,
+            basebackup_prepare_sender,
         ));
 
         // The attach task will carry a GateGuard, so that shutdown() reliably waits for it to drop out if
@@ -4247,7 +4240,7 @@ impl TenantShard {
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
         l0_flush_global_state: L0FlushGlobalState,
-        shutdown_checkpoint_sender: CheckpointShutdownSender,
+        basebackup_prepare_sender: BasebackupPrepareSender,
     ) -> TenantShard {
         assert!(!attached_conf.location.generation.is_none());
 
@@ -4351,7 +4344,7 @@ impl TenantShard {
             ongoing_timeline_detach: std::sync::Mutex::default(),
             gc_block: Default::default(),
             l0_flush_global_state,
-            shutdown_checkpoint_sender,
+            basebackup_prepare_sender,
         }
     }
 
@@ -5269,7 +5262,7 @@ impl TenantShard {
             pagestream_throttle_metrics: self.pagestream_throttle_metrics.clone(),
             l0_compaction_trigger: self.l0_compaction_trigger.clone(),
             l0_flush_global_state: self.l0_flush_global_state.clone(),
-            shutdown_checkpoint_sender: self.shutdown_checkpoint_sender.clone(),
+            basebackup_prepare_sender: self.basebackup_prepare_sender.clone(),
         }
     }
 
