@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_compression::tokio::write::GzipEncoder;
 use camino::Utf8PathBuf;
+use metrics::core::{AtomicU64, GenericCounter};
 use pageserver_api::{config::BasebackupCacheConfig, models::TenantState};
 use tokio::{
     io::{AsyncWriteExt, BufWriter},
@@ -17,6 +18,7 @@ use utils::{
 use crate::{
     basebackup::send_basebackup_tarball,
     context::{DownloadBehavior, RequestContext},
+    metrics::{BASEBACKUP_CACHE_PREPARE, BASEBACKUP_CACHE_READ},
     task_mgr::TaskKind,
     tenant::mgr::TenantManager,
 };
@@ -30,6 +32,7 @@ pub struct BasebackupPrepareRequest {
 pub type BasebackupPrepareSender = UnboundedSender<BasebackupPrepareRequest>;
 pub type BasebackupPrepareReceiver = UnboundedReceiver<BasebackupPrepareRequest>;
 
+#[allow(dead_code)]
 pub struct BasebackupCache {
     datadir: Utf8PathBuf,
     #[allow(dead_code)]
@@ -38,6 +41,14 @@ pub struct BasebackupCache {
     tenant_manager: Arc<TenantManager>,
 
     cancel: CancellationToken,
+
+    read_hit_count: GenericCounter<AtomicU64>,
+    read_miss_count: GenericCounter<AtomicU64>,
+    read_err_count: GenericCounter<AtomicU64>,
+
+    prepare_ok_count: GenericCounter<AtomicU64>,
+    prepare_skip_count: GenericCounter<AtomicU64>,
+    prepare_err_count: GenericCounter<AtomicU64>,
 }
 
 impl BasebackupCache {
@@ -55,6 +66,14 @@ impl BasebackupCache {
             config,
             tenant_manager,
             cancel,
+
+            read_hit_count: BASEBACKUP_CACHE_READ.with_label_values(&["hit"]),
+            read_miss_count: BASEBACKUP_CACHE_READ.with_label_values(&["miss"]),
+            read_err_count: BASEBACKUP_CACHE_READ.with_label_values(&["error"]),
+
+            prepare_ok_count: BASEBACKUP_CACHE_PREPARE.with_label_values(&["ok"]),
+            prepare_skip_count: BASEBACKUP_CACHE_PREPARE.with_label_values(&["skip"]),
+            prepare_err_count: BASEBACKUP_CACHE_PREPARE.with_label_values(&["error"]),
         });
 
         runtime_handle.spawn(cache.clone().background(prepare_receiver));
@@ -74,9 +93,15 @@ impl BasebackupCache {
         let path = self.entry_path(tenant_id, timeline_id, lsn);
 
         match tokio::fs::File::open(path).await {
-            Ok(file) => Some(file),
+            Ok(file) => {
+                self.read_hit_count.inc();
+                Some(file)
+            }
             Err(e) => {
-                if e.kind() != std::io::ErrorKind::NotFound {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    self.read_miss_count.inc();
+                } else {
+                    self.read_err_count.inc();
                     tracing::warn!("Unexpected error opening basebackup cache file: {:?}", e);
                 }
                 None
