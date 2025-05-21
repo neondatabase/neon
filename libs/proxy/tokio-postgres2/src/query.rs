@@ -53,6 +53,21 @@ where
     })
 }
 
+/// we need to send a sync message on error to allow the protocol to reset.
+struct SyncIfNotDone<'a> {
+    client: &'a mut InnerClient,
+}
+
+impl Drop for SyncIfNotDone<'_> {
+    fn drop(&mut self) {
+        let buf = self.client.with_buf(|buf| {
+            frontend::sync(buf);
+            buf.split().freeze()
+        });
+        let _ = self.client.send_partial(FrontendMessage::Raw(buf));
+    }
+}
+
 pub async fn query_txt<'a, S, I>(
     client: &'a mut InnerClient,
     query: &str,
@@ -64,8 +79,10 @@ where
     I::IntoIter: ExactSizeIterator,
 {
     let params = params.into_iter();
+    let guard = SyncIfNotDone { client };
 
-    let buf = client.with_buf(|buf| {
+    // parse the query and get type info
+    let buf = guard.client.with_buf(|buf| {
         frontend::parse(
             "",                 // unnamed prepared statement
             query,              // query to parse
@@ -74,6 +91,31 @@ where
         )
         .map_err(Error::encode)?;
         frontend::describe(b'S', "", buf).map_err(Error::encode)?;
+        frontend::flush(buf);
+
+        Ok(buf.split().freeze())
+    })?;
+
+    // now read the responses
+    let responses = guard.client.send(FrontendMessage::Raw(buf))?;
+
+    match responses.next().await? {
+        Message::ParseComplete => {}
+        _ => return Err(Error::unexpected_message()),
+    }
+
+    let parameter_description = match responses.next().await? {
+        Message::ParameterDescription(body) => body,
+        _ => return Err(Error::unexpected_message()),
+    };
+
+    let row_description = match responses.next().await? {
+        Message::RowDescription(body) => Some(body),
+        Message::NoData => None,
+        _ => return Err(Error::unexpected_message()),
+    };
+
+    let buf = guard.client.with_buf(|buf| {
         // Bind, pass params as text, retrieve as binary
         match frontend::bind(
             "",                 // empty string selects the unnamed portal
@@ -103,24 +145,11 @@ where
         Ok(buf.split().freeze())
     })?;
 
+    // we are sending the sync, so let's close our guard.
+    std::mem::forget(guard);
+
     // now read the responses
-    let responses = client.send(FrontendMessage::Raw(buf))?;
-
-    match responses.next().await? {
-        Message::ParseComplete => {}
-        _ => return Err(Error::unexpected_message()),
-    }
-
-    let parameter_description = match responses.next().await? {
-        Message::ParameterDescription(body) => body,
-        _ => return Err(Error::unexpected_message()),
-    };
-
-    let row_description = match responses.next().await? {
-        Message::RowDescription(body) => Some(body),
-        Message::NoData => None,
-        _ => return Err(Error::unexpected_message()),
-    };
+    let responses = client.send_partial(FrontendMessage::Raw(buf))?;
 
     match responses.next().await? {
         Message::BindComplete => {}

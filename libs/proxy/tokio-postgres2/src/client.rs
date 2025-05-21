@@ -100,6 +100,11 @@ impl InnerClient {
         Ok(&mut self.responses)
     }
 
+    pub fn send_partial(&mut self, messages: FrontendMessage) -> Result<&mut Responses, Error> {
+        self.sender.send(messages).map_err(|_| Error::closed())?;
+        Ok(&mut self.responses)
+    }
+
     /// Call the given function with a buffer to be used when writing out
     /// postgres commands.
     pub fn with_buf<F, R>(&mut self, f: F) -> R

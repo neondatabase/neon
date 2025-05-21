@@ -289,6 +289,12 @@ pub fn sync(buf: &mut BytesMut) {
 }
 
 #[inline]
+pub fn flush(buf: &mut BytesMut) {
+    buf.put_u8(b'H');
+    write_body(buf, |_| Ok::<(), io::Error>(())).unwrap();
+}
+
+#[inline]
 pub fn terminate(buf: &mut BytesMut) {
     buf.put_u8(b'X');
     write_body(buf, |_| Ok::<(), io::Error>(())).unwrap();
