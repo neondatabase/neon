@@ -26,7 +26,7 @@ impl<'buf> ValueSer<'buf> {
 
     /// Borrow the underlying buffer
     pub fn as_buffer(&self) -> &[u8] {
-        &self.buf
+        self.buf
     }
 
     /// Write the raw value to the serializer.
@@ -110,7 +110,7 @@ impl<'buf> ObjectSer<'buf> {
 
     /// Borrow the underlying buffer
     pub fn as_buffer(&self) -> &[u8] {
-        &self.buf
+        self.buf
     }
 
     /// Start a new object entry with the given string key, returning a [`ValueSer`] for the associated value.
@@ -187,7 +187,7 @@ impl<'buf> ListSer<'buf> {
 
     /// Borrow the underlying buffer
     pub fn as_buffer(&self) -> &[u8] {
-        &self.buf
+        self.buf
     }
 
     /// Start a new value entry in this list.
