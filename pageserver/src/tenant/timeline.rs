@@ -6232,7 +6232,7 @@ impl Timeline {
         if cfg!(test) && pitr == Duration::ZERO {
             // Unit tests which specify zero PITR interval expect to avoid doing any I/O for timestamp lookup
             return Ok(GcCutoffs {
-                time: None,
+                time: Some(self.get_last_record_lsn()),
                 space: space_cutoff,
             });
         }
