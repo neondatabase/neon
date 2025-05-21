@@ -144,8 +144,7 @@ mod tests {
             let err = DbError::new_test_error(state.clone(), "oops".to_string());
             assert!(
                 !err.should_retry_wake_compute(),
-                "State {:?} unexpectedly retried",
-                state
+                "State {state:?} unexpectedly retried"
             );
         }
 
@@ -155,8 +154,7 @@ mod tests {
             let err = DbError::new_test_error(SqlState::PROTOCOL_VIOLATION, error.to_string());
             assert!(
                 !err.should_retry_wake_compute(),
-                "PGBouncer error {:?} unexpectedly retried",
-                error
+                "PGBouncer error {error:?} unexpectedly retried"
             );
         }
 
@@ -171,8 +169,7 @@ mod tests {
             let err = DbError::new_test_error(state.clone(), "oops".to_string());
             assert!(
                 err.should_retry_wake_compute(),
-                "State {:?} unexpectedly skipped retry",
-                state
+                "State {state:?} unexpectedly skipped retry"
             );
         }
     }
