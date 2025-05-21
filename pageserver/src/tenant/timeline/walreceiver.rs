@@ -38,11 +38,9 @@ use self::connection_manager::ConnectionManagerStatus;
 use super::Timeline;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{TaskKind, WALRECEIVER_RUNTIME};
+use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::timeline::walreceiver::connection_manager::{
     ConnectionManagerState, connection_manager_loop_step,
-};
-use crate::tenant::{
-    CheckpointShutdownSender, debug_assert_current_span_has_tenant_and_timeline_id,
 };
 
 #[derive(Clone)]
@@ -73,7 +71,6 @@ impl WalReceiver {
         timeline: Arc<Timeline>,
         conf: WalReceiverConf,
         mut broker_client: BrokerClientChannel,
-        shutdown_checkpoint_sender: CheckpointShutdownSender,
         ctx: &RequestContext,
     ) -> Self {
         let tenant_shard_id = timeline.tenant_shard_id;
@@ -96,7 +93,6 @@ impl WalReceiver {
                 let mut connection_manager_state = ConnectionManagerState::new(
                     timeline,
                     conf,
-                    shutdown_checkpoint_sender,
                     cancel.clone(),
                 );
                 while !cancel.is_cancelled() {

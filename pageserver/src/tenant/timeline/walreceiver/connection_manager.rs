@@ -44,9 +44,7 @@ use crate::metrics::{
     WALRECEIVER_CANDIDATES_REMOVED, WALRECEIVER_SWITCHES,
 };
 use crate::task_mgr::TaskKind;
-use crate::tenant::{
-    CheckpointShutdownSender, Timeline, debug_assert_current_span_has_tenant_and_timeline_id,
-};
+use crate::tenant::{Timeline, debug_assert_current_span_has_tenant_and_timeline_id};
 
 pub(crate) struct Cancelled;
 
@@ -375,8 +373,6 @@ pub(super) struct ConnectionManagerState {
     wal_connection_retries: HashMap<NodeId, RetryInfo>,
     /// Data about all timelines, available for connection, fetched from storage broker, grouped by their corresponding safekeeper node id.
     wal_stream_candidates: HashMap<NodeId, BrokerSkTimeline>,
-
-    shutdown_checkpoint_sender: CheckpointShutdownSender,
 }
 
 /// An information about connection manager's current connection and connection candidates.
@@ -495,7 +491,6 @@ impl ConnectionManagerState {
     pub(super) fn new(
         timeline: Arc<Timeline>,
         conf: WalReceiverConf,
-        shutdown_checkpoint_sender: CheckpointShutdownSender,
         cancel: CancellationToken,
     ) -> Self {
         let id = TenantTimelineId {
@@ -510,7 +505,6 @@ impl ConnectionManagerState {
             wal_connection: None,
             wal_stream_candidates: HashMap::new(),
             wal_connection_retries: HashMap::new(),
-            shutdown_checkpoint_sender,
         }
     }
 
@@ -548,7 +542,6 @@ impl ConnectionManagerState {
             TaskKind::WalReceiverConnectionHandler,
             DownloadBehavior::Download,
         );
-        let shutdown_checkpoint_sender = self.shutdown_checkpoint_sender.clone();
 
         let span = info_span!("connection", %node_id);
         let connection_handle = self.spawn(move |events_sender, cancellation| {
@@ -566,7 +559,6 @@ impl ConnectionManagerState {
                     node_id,
                     ingest_batch_size,
                     validate_wal_contiguity,
-                    shutdown_checkpoint_sender,
                 )
                 .await;
 

@@ -108,7 +108,7 @@ use crate::{InitializationOrder, TEMP_FILE_SUFFIX, import_datadir, span, task_mg
 static INIT_DB_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(8));
 use utils::crashsafe;
 use utils::generation::Generation;
-use utils::id::TimelineId;
+use utils::id::{TenantId, TimelineId};
 use utils::lsn::{Lsn, RecordLsn};
 
 pub mod blob_io;
@@ -151,6 +151,7 @@ pub const TENANTS_SEGMENT_NAME: &str = "tenants";
 pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 
 pub struct CheckpointShutdownEvent {
+    pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
     pub lsn: Lsn,
 }
@@ -5268,6 +5269,7 @@ impl TenantShard {
             pagestream_throttle_metrics: self.pagestream_throttle_metrics.clone(),
             l0_compaction_trigger: self.l0_compaction_trigger.clone(),
             l0_flush_global_state: self.l0_flush_global_state.clone(),
+            shutdown_checkpoint_sender: self.shutdown_checkpoint_sender.clone(),
         }
     }
 

@@ -93,8 +93,8 @@ use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
 use super::tasks::log_compaction_error;
 use super::upload_queue::NotInitialized;
 use super::{
-    AttachedTenantConf, CheckpointShutdownSender, GcError, HeatMapTimeline, MaybeOffloaded,
-    debug_assert_current_span_has_tenant_and_timeline_id,
+    AttachedTenantConf, CheckpointShutdownEvent, CheckpointShutdownSender, GcError,
+    HeatMapTimeline, MaybeOffloaded, debug_assert_current_span_has_tenant_and_timeline_id,
 };
 use crate::aux_file::AuxFileSizeEstimator;
 use crate::config::PageServerConf;
@@ -195,6 +195,7 @@ pub struct TimelineResources {
     pub pagestream_throttle_metrics: Arc<crate::metrics::tenant_throttling::Pagestream>,
     pub l0_compaction_trigger: Arc<Notify>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
+    pub shutdown_checkpoint_sender: CheckpointShutdownSender,
 }
 
 /// The relation size cache caches relation sizes at the end of the timeline. It speeds up WAL
@@ -447,6 +448,9 @@ pub struct Timeline {
     pub(crate) rel_size_v2_status: ArcSwapOption<RelSizeMigration>,
 
     wait_lsn_log_slow: tokio::sync::Semaphore,
+
+    // TODO(diko)
+    shutdown_checkpoint_sender: CheckpointShutdownSender,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -2088,12 +2092,7 @@ impl Timeline {
             // Logical size is only maintained accurately on shard zero.
             self.spawn_initial_logical_size_computation_task(ctx);
         }
-        // TODO(diko): save it timeline
-        self.launch_wal_receiver(
-            ctx,
-            broker_client,
-            parent.shutdown_checkpoint_sender.clone(),
-        );
+        self.launch_wal_receiver(ctx, broker_client);
         self.set_state(TimelineState::Active);
         self.launch_eviction_task(parent, background_jobs_can_start);
     }
@@ -2471,6 +2470,19 @@ impl Timeline {
             true
         } else {
             false
+        }
+    }
+
+    pub fn prepare_basebackup(&self, lsn: Lsn) {
+        let err = self
+            .shutdown_checkpoint_sender
+            .send(CheckpointShutdownEvent {
+                tenant_id: self.tenant_shard_id.tenant_id,
+                timeline_id: self.timeline_id,
+                lsn,
+            });
+        if let Err(e) = err {
+            info!("Failed to send shutdown checkpoint: {e:#}");
         }
     }
 }
@@ -3022,6 +3034,8 @@ impl Timeline {
                 rel_size_v2_status: ArcSwapOption::from_pointee(rel_size_v2_status),
 
                 wait_lsn_log_slow: tokio::sync::Semaphore::new(1),
+
+                shutdown_checkpoint_sender: resources.shutdown_checkpoint_sender,
             };
 
             result.repartition_threshold =
@@ -3120,7 +3134,6 @@ impl Timeline {
         self: &Arc<Self>,
         ctx: &RequestContext,
         broker_client: BrokerClientChannel,
-        shutdown_checkpoint_sender: CheckpointShutdownSender, // TODO(diko): consider moving to Timeline
     ) {
         info!(
             "launching WAL receiver for timeline {} of tenant {}",
@@ -3159,7 +3172,6 @@ impl Timeline {
                 validate_wal_contiguity: self.conf.validate_wal_contiguity,
             },
             broker_client,
-            shutdown_checkpoint_sender,
             ctx,
         ));
     }
