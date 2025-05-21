@@ -1,6 +1,5 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use bytes::Bytes;
 use fallible_iterator::FallibleIterator;
@@ -24,7 +23,7 @@ WHERE t.oid = $1
 ";
 
 async fn prepare_typecheck(
-    client: &Arc<InnerClient>,
+    client: &mut InnerClient,
     name: &'static str,
     query: &str,
     types: &[Type],
@@ -68,7 +67,12 @@ async fn prepare_typecheck(
     Ok(Statement::new(name, parameters, columns))
 }
 
-fn encode(client: &InnerClient, name: &str, query: &str, types: &[Type]) -> Result<Bytes, Error> {
+fn encode(
+    client: &mut InnerClient,
+    name: &str,
+    query: &str,
+    types: &[Type],
+) -> Result<Bytes, Error> {
     if types.is_empty() {
         debug!("preparing query {}: {}", name, query);
     } else {
@@ -84,7 +88,7 @@ fn encode(client: &InnerClient, name: &str, query: &str, types: &[Type]) -> Resu
 }
 
 pub async fn get_type(
-    client: &Arc<InnerClient>,
+    client: &mut InnerClient,
     typecache: &mut CachedTypeInfo,
     oid: Oid,
 ) -> Result<Type, Error> {
@@ -139,7 +143,7 @@ pub async fn get_type(
 }
 
 fn get_type_rec<'a>(
-    client: &'a Arc<InnerClient>,
+    client: &'a mut InnerClient,
     typecache: &'a mut CachedTypeInfo,
     oid: Oid,
 ) -> Pin<Box<dyn Future<Output = Result<Type, Error>> + Send + 'a>> {
@@ -147,7 +151,7 @@ fn get_type_rec<'a>(
 }
 
 async fn typeinfo_statement(
-    client: &Arc<InnerClient>,
+    client: &mut InnerClient,
     typecache: &mut CachedTypeInfo,
 ) -> Result<Statement, Error> {
     if let Some(stmt) = &typecache.typeinfo {

@@ -1,7 +1,6 @@
 use std::fmt;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -28,7 +27,7 @@ impl fmt::Debug for BorrowToSqlParamsDebug<'_> {
 }
 
 pub async fn query<'a, I>(
-    client: &InnerClient,
+    client: &mut InnerClient,
     statement: Statement,
     params: I,
 ) -> Result<RowStream, Error>
@@ -59,7 +58,7 @@ where
 }
 
 pub async fn query_txt<S, I>(
-    client: &Arc<InnerClient>,
+    client: &mut InnerClient,
     query: &str,
     params: I,
 ) -> Result<RowStream, Error>
@@ -159,7 +158,7 @@ where
     })
 }
 
-async fn start(client: &InnerClient, buf: Bytes) -> Result<Responses, Error> {
+async fn start(client: &mut InnerClient, buf: Bytes) -> Result<Responses, Error> {
     let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
 
     match responses.next().await? {
@@ -170,7 +169,11 @@ async fn start(client: &InnerClient, buf: Bytes) -> Result<Responses, Error> {
     Ok(responses)
 }
 
-pub fn encode<'a, I>(client: &InnerClient, statement: &Statement, params: I) -> Result<Bytes, Error>
+pub fn encode<'a, I>(
+    client: &mut InnerClient,
+    statement: &Statement,
+    params: I,
+) -> Result<Bytes, Error>
 where
     I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
     I::IntoIter: ExactSizeIterator,

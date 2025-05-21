@@ -1,14 +1,12 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
 use futures_util::{TryStreamExt, future, ready};
-use parking_lot::Mutex;
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
 use serde::{Deserialize, Serialize};
@@ -68,7 +66,7 @@ pub struct InnerClient {
     sender: mpsc::UnboundedSender<Request>,
 
     /// A buffer to use when writing out postgres commands.
-    buffer: Mutex<BytesMut>,
+    buffer: BytesMut,
 }
 
 impl InnerClient {
@@ -85,13 +83,12 @@ impl InnerClient {
 
     /// Call the given function with a buffer to be used when writing out
     /// postgres commands.
-    pub fn with_buf<F, R>(&self, f: F) -> R
+    pub fn with_buf<F, R>(&mut self, f: F) -> R
     where
         F: FnOnce(&mut BytesMut) -> R,
     {
-        let mut buffer = self.buffer.lock();
-        let r = f(&mut buffer);
-        buffer.clear();
+        let r = f(&mut self.buffer);
+        self.buffer.clear();
         r
     }
 }
@@ -109,7 +106,7 @@ pub struct SocketConfig {
 /// The client is one half of what is returned when a connection is established. Users interact with the database
 /// through this client object.
 pub struct Client {
-    inner: Arc<InnerClient>,
+    inner: InnerClient,
     cached_typeinfo: CachedTypeInfo,
 
     socket_config: SocketConfig,
@@ -142,10 +139,10 @@ impl Client {
         secret_key: i32,
     ) -> Client {
         Client {
-            inner: Arc::new(InnerClient {
+            inner: InnerClient {
                 sender,
                 buffer: Default::default(),
-            }),
+            },
             cached_typeinfo: Default::default(),
 
             socket_config,
@@ -160,19 +157,23 @@ impl Client {
         self.process_id
     }
 
-    pub(crate) fn inner(&self) -> &Arc<InnerClient> {
-        &self.inner
+    pub(crate) fn inner(&mut self) -> &mut InnerClient {
+        &mut self.inner
     }
 
     /// Pass text directly to the Postgres backend to allow it to sort out typing itself and
     /// to save a roundtrip
-    pub async fn query_raw_txt<S, I>(&self, statement: &str, params: I) -> Result<RowStream, Error>
+    pub async fn query_raw_txt<S, I>(
+        &mut self,
+        statement: &str,
+        params: I,
+    ) -> Result<RowStream, Error>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = Option<S>>,
         I::IntoIter: ExactSizeIterator,
     {
-        query::query_txt(&self.inner, statement, params).await
+        query::query_txt(&mut self.inner, statement, params).await
     }
 
     /// Executes a sequence of SQL statements using the simple query protocol, returning the resulting rows.
@@ -188,11 +189,14 @@ impl Client {
     /// Prepared statements should be use for any query which contains user-specified data, as they provided the
     /// functionality to safely embed that data in the request. Do not form statements via string concatenation and pass
     /// them to this method!
-    pub async fn simple_query(&self, query: &str) -> Result<Vec<SimpleQueryMessage>, Error> {
+    pub async fn simple_query(&mut self, query: &str) -> Result<Vec<SimpleQueryMessage>, Error> {
         self.simple_query_raw(query).await?.try_collect().await
     }
 
-    pub(crate) async fn simple_query_raw(&self, query: &str) -> Result<SimpleQueryStream, Error> {
+    pub(crate) async fn simple_query_raw(
+        &mut self,
+        query: &str,
+    ) -> Result<SimpleQueryStream, Error> {
         simple_query::simple_query(self.inner(), query).await
     }
 
@@ -206,7 +210,7 @@ impl Client {
     /// Prepared statements should be use for any query which contains user-specified data, as they provided the
     /// functionality to safely embed that data in the request. Do not form statements via string concatenation and pass
     /// them to this method!
-    pub async fn batch_execute(&self, query: &str) -> Result<ReadyForQueryStatus, Error> {
+    pub async fn batch_execute(&mut self, query: &str) -> Result<ReadyForQueryStatus, Error> {
         simple_query::batch_execute(self.inner(), query).await
     }
 
@@ -223,7 +227,7 @@ impl Client {
     /// The transaction will roll back by default - use the `commit` method to commit it.
     pub async fn transaction(&mut self) -> Result<Transaction<'_>, Error> {
         struct RollbackIfNotDone<'me> {
-            client: &'me Client,
+            client: &'me mut Client,
             done: bool,
         }
 
@@ -254,7 +258,7 @@ impl Client {
                 client: self,
                 done: false,
             };
-            self.batch_execute("BEGIN").await?;
+            cleaner.client.batch_execute("BEGIN").await?;
             cleaner.done = true;
         }
 
@@ -282,7 +286,7 @@ impl Client {
 
     /// Query for type information
     pub(crate) async fn get_type_inner(&mut self, oid: Oid) -> Result<Type, Error> {
-        crate::prepare::get_type(&self.inner, &mut self.cached_typeinfo, oid).await
+        crate::prepare::get_type(&mut self.inner, &mut self.cached_typeinfo, oid).await
     }
 
     /// Determines if the connection to the server has already closed.
