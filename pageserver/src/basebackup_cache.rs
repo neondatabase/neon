@@ -105,7 +105,8 @@ impl BasebackupCache {
 
     fn entry_path(&self, tenant_id: TenantId, timeline_id: TimelineId, lsn: Lsn) -> Utf8PathBuf {
         // Placeholder for actual implementation
-        self.data_dir.join(format!("basebackup_{tenant_id}_{timeline_id}_{:X}", lsn.0))
+        self.data_dir
+            .join(format!("basebackup_{tenant_id}_{timeline_id}_{:X}", lsn.0))
     }
 
     fn parse_entry_path(filename: &str) -> Option<(TenantId, TimelineId, Lsn)> {
