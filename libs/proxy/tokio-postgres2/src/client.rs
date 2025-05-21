@@ -14,7 +14,6 @@ use tokio::sync::mpsc;
 
 use crate::codec::{BackendMessages, FrontendMessage};
 use crate::config::{Host, SslMode};
-use crate::connection::{Request, RequestMessages};
 use crate::query::RowStream;
 use crate::simple_query::SimpleQueryStream;
 use crate::types::{Oid, Type};
@@ -24,19 +23,43 @@ use crate::{
 };
 
 pub struct Responses {
+    /// new messages from conn
     receiver: mpsc::Receiver<BackendMessages>,
+    /// current batch of messages
     cur: BackendMessages,
+    /// number of total queries sent.
+    waiting: usize,
+    /// number of ReadyForQuery messages received.
+    received: usize,
 }
 
 impl Responses {
     pub fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Result<Message, Error>> {
         loop {
-            match self.cur.next().map_err(Error::parse)? {
-                Some(Message::ErrorResponse(body)) => return Poll::Ready(Err(Error::db(body))),
-                Some(message) => return Poll::Ready(Ok(message)),
-                None => {}
+            // get the next saved message
+            if let Some(message) = self.cur.next().map_err(Error::parse)? {
+                let received = self.received;
+
+                // increase the query head if this is the last message.
+                if let Message::ReadyForQuery(_) = message {
+                    self.received += 1;
+                }
+
+                // check if the client has skipped this query.
+                if received + 1 < self.waiting {
+                    // grab the next message.
+                    continue;
+                }
+
+                // convenience: turn the error messaage into a proper error.
+                let res = match message {
+                    Message::ErrorResponse(body) => Err(Error::db(body)),
+                    message => Ok(message),
+                };
+                return Poll::Ready(res);
             }
 
+            // get the next back of messages.
             match ready!(self.receiver.poll_recv(cx)) {
                 Some(messages) => self.cur = messages,
                 None => return Poll::Ready(Err(Error::closed())),
@@ -63,22 +86,18 @@ pub(crate) struct CachedTypeInfo {
 }
 
 pub struct InnerClient {
-    sender: mpsc::UnboundedSender<Request>,
+    sender: mpsc::UnboundedSender<FrontendMessage>,
+    responses: Responses,
 
     /// A buffer to use when writing out postgres commands.
     buffer: BytesMut,
 }
 
 impl InnerClient {
-    pub fn send(&self, messages: RequestMessages) -> Result<Responses, Error> {
-        let (sender, receiver) = mpsc::channel(1);
-        let request = Request { messages, sender };
-        self.sender.send(request).map_err(|_| Error::closed())?;
-
-        Ok(Responses {
-            receiver,
-            cur: BackendMessages::empty(),
-        })
+    pub fn send(&mut self, messages: FrontendMessage) -> Result<&mut Responses, Error> {
+        self.sender.send(messages).map_err(|_| Error::closed())?;
+        self.responses.waiting += 1;
+        Ok(&mut self.responses)
     }
 
     /// Call the given function with a buffer to be used when writing out
@@ -123,16 +142,15 @@ impl Drop for Client {
                 frontend::sync(buf);
                 buf.split().freeze()
             });
-            let _ = self
-                .inner
-                .send(RequestMessages::Single(FrontendMessage::Raw(buf)));
+            let _ = self.inner.send(FrontendMessage::Raw(buf));
         }
     }
 }
 
 impl Client {
     pub(crate) fn new(
-        sender: mpsc::UnboundedSender<Request>,
+        sender: mpsc::UnboundedSender<FrontendMessage>,
+        receiver: mpsc::Receiver<BackendMessages>,
         socket_config: SocketConfig,
         ssl_mode: SslMode,
         process_id: i32,
@@ -141,6 +159,12 @@ impl Client {
         Client {
             inner: InnerClient {
                 sender,
+                responses: Responses {
+                    receiver,
+                    cur: BackendMessages::empty(),
+                    waiting: 0,
+                    received: 0,
+                },
                 buffer: Default::default(),
             },
             cached_typeinfo: Default::default(),
@@ -241,10 +265,7 @@ impl Client {
                     frontend::query("ROLLBACK", buf).unwrap();
                     buf.split().freeze()
                 });
-                let _ = self
-                    .client
-                    .inner()
-                    .send(RequestMessages::Single(FrontendMessage::Raw(buf)));
+                let _ = self.client.inner().send(FrontendMessage::Raw(buf));
             }
         }
 

@@ -1,12 +1,10 @@
 use std::fmt;
-use std::marker::PhantomPinned;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use fallible_iterator::FallibleIterator;
 use futures_util::{Stream, ready};
-use pin_project_lite::pin_project;
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
 use postgres_types2::{Format, ToSql, Type};
@@ -14,7 +12,6 @@ use tracing::debug;
 
 use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;
-use crate::connection::RequestMessages;
 use crate::types::IsNull;
 use crate::{Column, Error, ReadyForQueryStatus, Row, Statement};
 
@@ -48,20 +45,19 @@ where
     };
     let responses = start(client, buf).await?;
     Ok(RowStream {
-        statement,
         responses,
+        statement,
         command_tag: None,
         status: ReadyForQueryStatus::Unknown,
         output_format: Format::Binary,
-        _p: PhantomPinned,
     })
 }
 
-pub async fn query_txt<S, I>(
-    client: &mut InnerClient,
+pub async fn query_txt<'a, S, I>(
+    client: &'a mut InnerClient,
     query: &str,
     params: I,
-) -> Result<RowStream, Error>
+) -> Result<RowStream<'a>, Error>
 where
     S: AsRef<str>,
     I: IntoIterator<Item = Option<S>>,
@@ -108,7 +104,7 @@ where
     })?;
 
     // now read the responses
-    let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+    let responses = client.send(FrontendMessage::Raw(buf))?;
 
     match responses.next().await? {
         Message::ParseComplete => {}
@@ -149,17 +145,16 @@ where
     }
 
     Ok(RowStream {
-        statement: Statement::new_anonymous(parameters, columns),
         responses,
+        statement: Statement::new_anonymous(parameters, columns),
         command_tag: None,
         status: ReadyForQueryStatus::Unknown,
         output_format: Format::Text,
-        _p: PhantomPinned,
     })
 }
 
-async fn start(client: &mut InnerClient, buf: Bytes) -> Result<Responses, Error> {
-    let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+async fn start(client: &mut InnerClient, buf: Bytes) -> Result<&mut Responses, Error> {
+    let responses = client.send(FrontendMessage::Raw(buf))?;
 
     match responses.next().await? {
         Message::BindComplete => {}
@@ -237,66 +232,41 @@ where
     }
 }
 
-pin_project! {
-    /// A stream of table rows.
-    pub struct RowStream {
-        statement: Statement,
-        responses: Responses,
-        command_tag: Option<String>,
-        output_format: Format,
-        status: ReadyForQueryStatus,
-        #[pin]
-        _p: PhantomPinned,
-    }
+/// A stream of table rows.
+pub struct RowStream<'a> {
+    responses: &'a mut Responses,
+    output_format: Format,
+    pub statement: Statement,
+    pub command_tag: Option<String>,
+    pub status: ReadyForQueryStatus,
 }
 
-impl Stream for RowStream {
+impl Stream for RowStream<'_> {
     type Item = Result<Row, Error>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.project();
+        let this = self.get_mut();
         loop {
             match ready!(this.responses.poll_next(cx)?) {
                 Message::DataRow(body) => {
                     return Poll::Ready(Some(Ok(Row::new(
                         this.statement.clone(),
                         body,
-                        *this.output_format,
+                        this.output_format,
                     )?)));
                 }
                 Message::EmptyQueryResponse | Message::PortalSuspended => {}
                 Message::CommandComplete(body) => {
                     if let Ok(tag) = body.tag() {
-                        *this.command_tag = Some(tag.to_string());
+                        this.command_tag = Some(tag.to_string());
                     }
                 }
                 Message::ReadyForQuery(status) => {
-                    *this.status = status.into();
+                    this.status = status.into();
                     return Poll::Ready(None);
                 }
                 _ => return Poll::Ready(Some(Err(Error::unexpected_message()))),
             }
         }
-    }
-}
-
-impl RowStream {
-    /// Returns information about the columns of data in the row.
-    pub fn columns(&self) -> &[Column] {
-        self.statement.columns()
-    }
-
-    /// Returns the command tag of this query.
-    ///
-    /// This is only available after the stream has been exhausted.
-    pub fn command_tag(&self) -> Option<String> {
-        self.command_tag.clone()
-    }
-
-    /// Returns if the connection is ready for querying, with the status of the connection.
-    ///
-    /// This might be available only after the stream has been exhausted.
-    pub fn ready_status(&self) -> ReadyForQueryStatus {
-        self.status
     }
 }

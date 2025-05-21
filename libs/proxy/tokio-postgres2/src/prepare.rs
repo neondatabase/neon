@@ -10,7 +10,6 @@ use tracing::debug;
 
 use crate::client::{CachedTypeInfo, InnerClient};
 use crate::codec::FrontendMessage;
-use crate::connection::RequestMessages;
 use crate::types::{Kind, Oid, Type};
 use crate::{Column, Error, Statement, query, slice_iter};
 
@@ -29,7 +28,7 @@ async fn prepare_typecheck(
     types: &[Type],
 ) -> Result<Statement, Error> {
     let buf = encode(client, name, query, types)?;
-    let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+    let responses = client.send(FrontendMessage::Raw(buf))?;
 
     match responses.next().await? {
         Message::ParseComplete => {}

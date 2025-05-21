@@ -14,7 +14,9 @@ use hyper::http::{HeaderName, HeaderValue};
 use hyper::{HeaderMap, Request, Response, StatusCode, header};
 use indexmap::IndexMap;
 use postgres_client::error::{DbError, ErrorPosition, SqlState};
-use postgres_client::{GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, Transaction};
+use postgres_client::{
+    GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, RowStream, Transaction,
+};
 use pq_proto::StartupMessageParamsBuilder;
 use serde::Serialize;
 use serde_json::Value;
@@ -1092,12 +1094,10 @@ async fn query_to_json<T: GenericClient>(
     let query_start = Instant::now();
 
     let query_params = data.params;
-    let mut row_stream = std::pin::pin!(
-        client
-            .query_raw_txt(&data.query, query_params)
-            .await
-            .map_err(SqlOverHttpError::Postgres)?
-    );
+    let mut row_stream = client
+        .query_raw_txt(&data.query, query_params)
+        .await
+        .map_err(SqlOverHttpError::Postgres)?;
     let query_acknowledged = Instant::now();
 
     // Manually drain the stream into a vector to leave row_stream hanging
@@ -1118,10 +1118,15 @@ async fn query_to_json<T: GenericClient>(
     }
 
     let query_resp_end = Instant::now();
-    let ready = row_stream.ready_status();
+    let RowStream {
+        statement,
+        command_tag,
+        status: ready,
+        ..
+    } = row_stream;
 
     // grab the command tag and number of rows affected
-    let command_tag = row_stream.command_tag().unwrap_or_default();
+    let command_tag = command_tag.unwrap_or_default();
     let mut command_tag_split = command_tag.split(' ');
     let command_tag_name = command_tag_split.next().unwrap_or_default();
     let command_tag_count = if command_tag_name == "INSERT" {
@@ -1142,11 +1147,11 @@ async fn query_to_json<T: GenericClient>(
         "finished executing query"
     );
 
-    let columns_len = row_stream.columns().len();
+    let columns_len = statement.columns().len();
     let mut fields = Vec::with_capacity(columns_len);
     let mut columns = Vec::with_capacity(columns_len);
 
-    for c in row_stream.columns() {
+    for c in statement.columns() {
         fields.push(json!({
             "name": c.name().to_owned(),
             "dataTypeID": c.type_().oid(),
