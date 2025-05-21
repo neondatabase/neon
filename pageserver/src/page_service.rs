@@ -9,8 +9,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use std::{io, str};
 
-use crate::PERF_TRACE_TARGET;
-use crate::basebackup_cache::BasebackupCache;
 use anyhow::{Context, bail};
 use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
@@ -53,8 +51,10 @@ use utils::simple_rcu::RcuReadGuard;
 use utils::sync::gate::{Gate, GateGuard};
 use utils::sync::spsc_fold;
 
+use crate::PERF_TRACE_TARGET;
 use crate::auth::check_permission;
 use crate::basebackup::BasebackupError;
+use crate::basebackup_cache::BasebackupCache;
 use crate::config::PageServerConf;
 use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,

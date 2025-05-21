@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_compression::tokio::write::GzipEncoder;
 use camino::Utf8PathBuf;
-use pageserver_api::models::TenantState;
+use pageserver_api::{config::BasebackupCacheConfig, models::TenantState};
 use tokio::{
     io::{AsyncWriteExt, BufWriter},
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
@@ -32,6 +32,8 @@ pub type BasebackupPrepareReceiver = UnboundedReceiver<BasebackupPrepareRequest>
 
 pub struct BasebackupCache {
     datadir: Utf8PathBuf,
+    #[allow(dead_code)]
+    config: BasebackupCacheConfig,
 
     tenant_manager: Arc<TenantManager>,
 
@@ -43,12 +45,14 @@ impl BasebackupCache {
     pub fn spawn(
         runtime_handle: &tokio::runtime::Handle,
         datadir: Utf8PathBuf,
+        config: BasebackupCacheConfig,
         prepare_receiver: BasebackupPrepareReceiver,
         tenant_manager: Arc<TenantManager>,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let cache = Arc::new(BasebackupCache {
             datadir,
+            config,
             tenant_manager,
             cancel,
         });

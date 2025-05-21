@@ -24,9 +24,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::PERF_TRACE_TARGET;
-use crate::basebackup_cache::BasebackupPrepareRequest;
-use crate::walredo::RedoAttemptType;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use bytes::Bytes;
@@ -98,7 +95,9 @@ use super::{
     AttachedTenantConf, BasebackupPrepareSender, GcError, HeatMapTimeline, MaybeOffloaded,
     debug_assert_current_span_has_tenant_and_timeline_id,
 };
+use crate::PERF_TRACE_TARGET;
 use crate::aux_file::AuxFileSizeEstimator;
+use crate::basebackup_cache::BasebackupPrepareRequest;
 use crate::config::PageServerConf;
 use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
@@ -132,6 +131,7 @@ use crate::tenant::tasks::BackgroundLoopKind;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 use crate::walingest::WalLagCooldown;
+use crate::walredo::RedoAttemptType;
 use crate::{ZERO_PAGE, task_mgr, walredo};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -442,7 +442,7 @@ pub struct Timeline {
 
     wait_lsn_log_slow: tokio::sync::Semaphore,
 
-    // TODO(diko)
+    /// A channel to send async requests to prepare a basebackup for the basebackup cache.
     basebackup_prepare_sender: BasebackupPrepareSender,
 }
 

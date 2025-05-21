@@ -158,7 +158,6 @@ pub struct TenantSharedResources {
     pub remote_storage: GenericRemoteStorage,
     pub deletion_queue_client: DeletionQueueClient,
     pub l0_flush_global_state: L0FlushGlobalState,
-    /// A sender TODO(diko)
     pub basebackup_prepare_sender: BasebackupPrepareSender,
 }
 
@@ -320,13 +319,13 @@ pub struct TenantShard {
     gc_cs: tokio::sync::Mutex<()>,
     walredo_mgr: Option<Arc<WalRedoManager>>,
 
-    // provides access to timeline data sitting in the remote storage
+    /// Provides access to timeline data sitting in the remote storage.
     pub(crate) remote_storage: GenericRemoteStorage,
 
-    // Access to global deletion queue for when this tenant wants to schedule a deletion
+    /// Access to global deletion queue for when this tenant wants to schedule a deletion.
     deletion_queue_client: DeletionQueueClient,
 
-    // TODO(diko)
+    /// A channel to send async requests to prepare a basebackup for the basebackup cache.
     basebackup_prepare_sender: BasebackupPrepareSender,
 
     /// Cached logical sizes updated updated on each [`TenantShard::gather_size_inputs`].
@@ -1292,7 +1291,7 @@ impl TenantShard {
             remote_storage,
             deletion_queue_client,
             l0_flush_global_state,
-            basebackup_prepare_sender, // TODO(diko): where does it go?
+            basebackup_prepare_sender,
         } = resources;
 
         let attach_mode = attached_conf.location.attach_mode;
@@ -5852,8 +5851,7 @@ pub(crate) mod harness {
         ) -> anyhow::Result<Arc<TenantShard>> {
             let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
 
-            // TODO(diko):
-            let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+            let (basebackup_requst_sender, _) = tokio::sync::mpsc::unbounded_channel();
 
             let tenant = Arc::new(TenantShard::new(
                 TenantState::Attaching,
@@ -5872,7 +5870,7 @@ pub(crate) mod harness {
                 self.deletion_queue.new_client(),
                 // TODO: ideally we should run all unit tests with both configs
                 L0FlushGlobalState::new(L0FlushConfig::default()),
-                tx,
+                basebackup_requst_sender,
             ));
 
             let preload = tenant
