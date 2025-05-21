@@ -1,33 +1,14 @@
 use std::fmt;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
+use crate::types::Type;
 use postgres_protocol2::Oid;
 use postgres_protocol2::message::backend::Field;
-use postgres_protocol2::message::frontend;
-
-use crate::client::InnerClient;
-use crate::codec::FrontendMessage;
-use crate::connection::RequestMessages;
-use crate::types::Type;
 
 struct StatementInner {
-    client: Weak<InnerClient>,
     name: &'static str,
     params: Vec<Type>,
     columns: Vec<Column>,
-}
-
-impl Drop for StatementInner {
-    fn drop(&mut self) {
-        if let Some(client) = self.client.upgrade() {
-            let buf = client.with_buf(|buf| {
-                frontend::close(b'S', self.name, buf).unwrap();
-                frontend::sync(buf);
-                buf.split().freeze()
-            });
-            let _ = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)));
-        }
-    }
 }
 
 /// A prepared statement.
@@ -37,14 +18,8 @@ impl Drop for StatementInner {
 pub struct Statement(Arc<StatementInner>);
 
 impl Statement {
-    pub(crate) fn new(
-        inner: &Arc<InnerClient>,
-        name: &'static str,
-        params: Vec<Type>,
-        columns: Vec<Column>,
-    ) -> Statement {
+    pub(crate) fn new(name: &'static str, params: Vec<Type>, columns: Vec<Column>) -> Statement {
         Statement(Arc::new(StatementInner {
-            client: Arc::downgrade(inner),
             name,
             params,
             columns,
@@ -53,7 +28,6 @@ impl Statement {
 
     pub(crate) fn new_anonymous(params: Vec<Type>, columns: Vec<Column>) -> Statement {
         Statement(Arc::new(StatementInner {
-            client: Weak::new(),
             name: "<anonymous>",
             params,
             columns,

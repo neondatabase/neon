@@ -65,7 +65,7 @@ async fn prepare_typecheck(
         }
     }
 
-    Ok(Statement::new(client, name, parameters, columns))
+    Ok(Statement::new(name, parameters, columns))
 }
 
 fn encode(client: &InnerClient, name: &str, query: &str, types: &[Type]) -> Result<Bytes, Error> {

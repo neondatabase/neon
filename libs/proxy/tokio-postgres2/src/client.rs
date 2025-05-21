@@ -118,6 +118,21 @@ pub struct Client {
     secret_key: i32,
 }
 
+impl Drop for Client {
+    fn drop(&mut self) {
+        if let Some(stmt) = self.cached_typeinfo.typeinfo.take() {
+            let buf = self.inner.with_buf(|buf| {
+                frontend::close(b'S', stmt.name(), buf).unwrap();
+                frontend::sync(buf);
+                buf.split().freeze()
+            });
+            let _ = self
+                .inner
+                .send(RequestMessages::Single(FrontendMessage::Raw(buf)));
+        }
+    }
+}
+
 impl Client {
     pub(crate) fn new(
         sender: mpsc::UnboundedSender<Request>,
