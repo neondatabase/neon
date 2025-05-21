@@ -1223,6 +1223,7 @@ class NeonEnv:
         # Create config for pageserver
         http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
         pg_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
+        grpc_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
         for ps_id in range(
             self.BASE_PAGESERVER_ID, self.BASE_PAGESERVER_ID + config.num_pageservers
         ):
@@ -1249,6 +1250,7 @@ class NeonEnv:
                 else None,
                 "pg_auth_type": pg_auth_type,
                 "http_auth_type": http_auth_type,
+                "grpc_auth_type": grpc_auth_type,
                 "availability_zone": availability_zone,
                 # Disable pageserver disk syncs in tests: when running tests concurrently, this avoids
                 # the pageserver taking a long time to start up due to syncfs flushing other tests' data
