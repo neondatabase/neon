@@ -2439,10 +2439,6 @@ impl PageServerHandler {
 
         let started = std::time::Instant::now();
 
-        tracing::info!(
-            "XXX handle_basebackup_request({timeline_id:?}, {lsn:?}, {prev_lsn:?}, {gzip}, {replica}"
-        );
-
         let timeline = self
             .timeline_handles
             .as_mut()
@@ -2483,6 +2479,8 @@ impl PageServerHandler {
             .map_err(QueryError::Disconnected)?;
         self.flush_cancellable(pgb, &self.cancel).await?;
 
+        let mut from_cache = false;
+
         // Send a tarball of the latest layer on the timeline. Compress if not
         // fullbackup. TODO Compress in that case too (tests need to be updated)
         if full_backup {
@@ -2502,7 +2500,12 @@ impl PageServerHandler {
             let mut writer = BufWriter::new(pgb.copyout_writer());
 
             let cached = {
-                if gzip && lsn.is_some() && prev_lsn.is_none() {
+                // Basebackup is cached only for this combination of parameters.
+                if timeline.is_basebackup_cache_enabled()
+                    && gzip
+                    && lsn.is_some()
+                    && prev_lsn.is_none()
+                {
                     self.basebackup_cache
                         .get(tenant_id, timeline_id, lsn.unwrap())
                         .await
@@ -2512,13 +2515,13 @@ impl PageServerHandler {
             };
 
             if let Some(mut cached) = cached {
-                tracing::info!("XXX handle_basebackup_request: using cached basebackup");
+                from_cache = true;
                 tokio::io::copy(&mut cached, &mut writer)
                     .await
                     .map_err(|e| {
                         map_basebackup_error(BasebackupError::Client(
                             e,
-                            "handle_basebackup_request,copy_cached",
+                            "handle_basebackup_request,cached,copy",
                         ))
                     })?;
             } else if gzip {
@@ -2580,6 +2583,7 @@ impl PageServerHandler {
         info!(
             lsn_await_millis = lsn_awaited_after.as_millis(),
             basebackup_millis = basebackup_after.as_millis(),
+            %from_cache,
             "basebackup complete"
         );
 

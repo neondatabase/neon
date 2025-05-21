@@ -2474,20 +2474,35 @@ impl Timeline {
         }
     }
 
-    // TODO(diko)
-    pub fn prepare_basebackup(&self, lsn: Lsn) {
-        // We only need to send the prepare request from shard 0.
-        if !self.tenant_shard_id.is_shard_zero() {
+    pub(crate) fn is_basebackup_cache_enabled(&self) -> bool {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .basebackup_cache_enabled
+            .unwrap_or(self.conf.default_tenant_conf.basebackup_cache_enabled)
+    }
+
+    /// Prepare basebackup for the given LSN ans store it in basebackup cache.
+    /// The method is asynchronous and returns immediately.
+    /// The actual basebackup preparation is done in the basebackup cache's background.
+    pub(crate) fn prepare_basebackup(&self, lsn: Lsn) {
+        if !self.is_basebackup_cache_enabled() {
             return;
         }
-        let err = self
+        if !self.tenant_shard_id.is_shard_zero() {
+            // In theory we should never get here, but just in case check it.
+            // Preparing basebackup doesn't make sense for shards other than shard zero.
+            return;
+        }
+
+        let res = self
             .basebackup_prepare_sender
             .send(BasebackupPrepareRequest {
                 tenant_shard_id: self.tenant_shard_id,
                 timeline_id: self.timeline_id,
                 lsn,
             });
-        if let Err(e) = err {
+        if let Err(e) = res {
             info!("Failed to send shutdown checkpoint: {e:#}");
         }
     }

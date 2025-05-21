@@ -546,6 +546,11 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("Falied to parse 'sampling_ratio'")?,
+            basebackup_cache_enabled: settings
+                .remove("basebackup_cache_enabled")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'basebackup_cache_enabled' as bool")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")

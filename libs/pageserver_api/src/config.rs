@@ -183,6 +183,7 @@ pub struct ConfigToml {
     pub enable_tls_page_service_api: bool,
     pub dev_mode: bool,
     pub timeline_import_config: TimelineImportConfig,
+    pub basebackup_cache_config: BasebackupCacheConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -306,6 +307,13 @@ pub struct TimelineImportConfig {
     pub import_job_concurrency: NonZeroUsize,
     pub import_job_soft_size_limit: NonZeroUsize,
     pub import_job_checkpoint_threshold: NonZeroUsize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BasebackupCacheConfig {
+    #[serde(with = "humantime_serde")]
+    pub background_cleanup_period: Duration,
+    pub max_cache_size_bytes: u64,
 }
 
 pub mod statvfs {
@@ -491,6 +499,9 @@ pub struct TenantConfigToml {
     /// Tenant level performance sampling ratio override. Controls the ratio of get page requests
     /// that will get perf sampling for the tenant.
     pub sampling_ratio: Option<Ratio>,
+
+    /// Enable preparing basebackup on XLOG_CHECKPOINT_SHUTDOWN and using it in basebackup requests.
+    pub basebackup_cache_enabled: bool,
 }
 
 pub mod defaults {
@@ -664,6 +675,10 @@ impl Default for ConfigToml {
                 import_job_soft_size_limit: NonZeroUsize::new(1024 * 1024 * 1024).unwrap(),
                 import_job_checkpoint_threshold: NonZeroUsize::new(128).unwrap(),
             },
+            basebackup_cache_config: BasebackupCacheConfig {
+                background_cleanup_period: Duration::from_secs(60),
+                max_cache_size_bytes: 1024 * 1024 * 1024,
+            },
         }
     }
 }
@@ -787,6 +802,7 @@ impl Default for TenantConfigToml {
             gc_compaction_initial_threshold_kb: DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB,
             gc_compaction_ratio_percent: DEFAULT_GC_COMPACTION_RATIO_PERCENT,
             sampling_ratio: None,
+            basebackup_cache_enabled: false,
         }
     }
 }
