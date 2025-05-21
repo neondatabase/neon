@@ -2482,9 +2482,10 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.basebackup_cache_enabled)
     }
 
-    /// Prepare basebackup for the given LSN ans store it in basebackup cache.
+    /// Prepare basebackup for the given LSN and store it in the basebackup cache.
     /// The method is asynchronous and returns immediately.
-    /// The actual basebackup preparation is done in the basebackup cache's background.
+    /// The actual basebackup preparation is performed in the background
+    /// by the basebackup cache on a best-effort basis.
     pub(crate) fn prepare_basebackup(&self, lsn: Lsn) {
         if !self.is_basebackup_cache_enabled() {
             return;
@@ -2503,6 +2504,7 @@ impl Timeline {
                 lsn,
             });
         if let Err(e) = res {
+            // May happen during shutdown, it's not critical.
             info!("Failed to send shutdown checkpoint: {e:#}");
         }
     }
