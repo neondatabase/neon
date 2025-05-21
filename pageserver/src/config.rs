@@ -225,11 +225,9 @@ pub struct PageServerConf {
 
     pub tracing: Option<pageserver_api::config::Tracing>,
 
-    /// Enable TLS in page service API. This applies both to the libpq API and gRPC API.
+    /// Enable TLS in page service API. This applies both to the libpq and gRPC APIs.
     /// Does not force TLS: the client negotiates TLS usage during the handshake.
     /// Uses key and certificate from ssl_key_file/ssl_cert_file.
-    ///
-    /// TODO: consider making this unconditional for gRPC.
     pub enable_tls_page_service_api: bool,
 
     /// Run in development mode, which disables certain safety checks

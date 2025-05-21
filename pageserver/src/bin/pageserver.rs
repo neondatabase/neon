@@ -418,7 +418,6 @@ fn start_pageserver(
         info!("Starting pageserver gRPC handler on {grpc_addr}");
         grpc_listener = Some(tcp_listener::bind(grpc_addr).map_err(|e| anyhow!("{e}"))?);
 
-        // TODO: consider using TLS unconditionally.
         if conf.enable_tls_page_service_api {
             let ssl_cert = std::fs::read_to_string(&conf.ssl_cert_file)?;
             let ssl_key = std::fs::read_to_string(&conf.ssl_key_file)?;

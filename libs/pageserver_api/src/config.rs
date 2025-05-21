@@ -9,7 +9,7 @@ pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN
 pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
 pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
 // TODO: gRPC is disabled by default for now, but the port is used in neon_local.
-pub const DEFAULT_GRPC_LISTEN_PORT: u16 = 51051; // storage-broker uses 51051
+pub const DEFAULT_GRPC_LISTEN_PORT: u16 = 51051; // storage-broker already uses 50051
 
 use std::collections::HashMap;
 use std::num::{NonZeroU64, NonZeroUsize};
