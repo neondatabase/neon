@@ -86,9 +86,14 @@ impl std::fmt::Display for Backend<'_, ()> {
                         Ok(mut url) => {
                             let _ = url.set_password(None);
                             let url = url.as_str();
-                            fmt.debug_tuple("ControlPlane::PostgresMock").field(&url).finish()
+                            fmt.debug_tuple("ControlPlane::PostgresMock")
+                                .field(&url)
+                                .finish()
                         }
-                        Err(_) => fmt.debug_tuple("ControlPlane::PostgresMock").field(&url).finish(),
+                        Err(_) => fmt
+                            .debug_tuple("ControlPlane::PostgresMock")
+                            .field(&url)
+                            .finish(),
                     }
                 }
                 #[cfg(test)]

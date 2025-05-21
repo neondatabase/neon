@@ -4,9 +4,9 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, ensure};
 #[cfg(any(test, feature = "testing"))]
 use anyhow::Context;
+use anyhow::{bail, ensure};
 use arc_swap::ArcSwapOption;
 use futures::future::Either;
 use remote_storage::RemoteStorageConfig;
@@ -780,10 +780,12 @@ fn build_auth_backend(
         AuthBackendType::Postgres => {
             let mut url: ApiUrl = args.auth_endpoint.parse()?;
             if args.auth_endpoint_password_from_env {
-                let password = args.pgpassword
+                let password = args
+                    .pgpassword
                     .as_ref()
                     .with_context(|| "Environment variable `PGPASSWORD` is not set")?;
-                url.set_password(Some(password)).expect("Failed to set password");
+                url.set_password(Some(password))
+                    .expect("Failed to set password");
             }
             let api = control_plane::client::mock::MockControlPlane::new(
                 url,
