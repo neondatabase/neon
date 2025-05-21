@@ -8592,6 +8592,7 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+ "tracing-subscriber",
  "url",
  "uuid",
  "zeroize",
