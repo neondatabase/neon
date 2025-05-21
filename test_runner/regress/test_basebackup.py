@@ -36,13 +36,14 @@ def test_basebackup_cache(neon_env_builder: NeonEnvBuilder):
     
     env = neon_env_builder.init_start()
     ep = env.endpoints.create("main")
-    ps_http = env.pageserver.http_client()
+    ps = env.pageserver
+    ps_http = ps.http_client()
 
     for i in range(3):
         ep.start()
         ep.stop()
 
-        def assert_prepare_count():
+        def check_metrics():
             metrics = ps_http.get_metrics()
             # Never miss.
             # The first time compute_ctl sends `get_basebackup` with lsn=None, we do not cache such requests.
@@ -52,4 +53,13 @@ def test_basebackup_cache(neon_env_builder: NeonEnvBuilder):
             assert metrics.query_one("pageserver_basebackup_cache_read_total", {"result": "hit"}).value == i
             # Every compute shut down should trigger a prepare reuest.
             assert metrics.query_one("pageserver_basebackup_cache_prepare_total", {"result": "ok"}).value == i + 1
-        wait_until(assert_prepare_count)
+
+        wait_until(check_metrics)
+
+    # Check that basebackup cache eventually deletes old backup files.
+    def check_bb_file_count():
+        bb_files = list(ps.workdir.joinpath("basebackup_cache").iterdir())
+        assert len(bb_files) == 1
+
+    wait_until(check_bb_file_count)
+

@@ -214,7 +214,7 @@ impl BasebackupCache {
         mut remove_entry_receiver: BasebackupRemoveEntryReceiver,
     ) {
         self.on_startup().await.unwrap_or_else(|e| {
-            tracing::error!("Failed to start basebackup cache: {:?}", e);
+            tracing::error!("Failed to start basebackup cache: {:#}", e);
         });
 
         let mut ticker = tokio::time::interval(self.config.background_cleanup_period);
@@ -225,20 +225,20 @@ impl BasebackupCache {
                 Some(req) = prepare_receiver.recv() => {
                     // Handle the checkpoint shutdown message
                     self.prepare_basebackup(req.tenant_shard_id, req.timeline_id, req.lsn).await.unwrap_or_else(|e| {
-                        tracing::info!("Failed to prepare basebackup: {:?}", e);
+                        tracing::info!("Failed to prepare basebackup: {:#}", e);
                     });
                 }
                 Some(req) = remove_entry_receiver.recv() => {
                     // Handle the remove entry message
                     if let Err(e) = tokio::fs::remove_file(req).await {
-                        tracing::warn!("Failed to remove basebackup cache file: {:?}", e);
+                        tracing::warn!("Failed to remove basebackup cache file: {:#}", e);
                     }
                 }
                 // Wait for the ticker to trigger
                 _ = ticker.tick() => {
                     // Clean up irrelevant entries
                     self.cleanup().await.unwrap_or_else(|e| {
-                        tracing::warn!("Failed to clean up basebackup cache: {:?}", e);
+                        tracing::warn!("Failed to clean up basebackup cache: {:#}", e);
                     });
                 }
                 // Check for cancellation
