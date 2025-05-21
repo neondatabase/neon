@@ -380,6 +380,9 @@ pub enum TaskKind {
     DetachAncestor,
 
     ImportPgdata,
+
+    /// TODO(diko)
+    BasebackupCache,
 }
 
 #[derive(Default)]

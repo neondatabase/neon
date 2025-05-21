@@ -2476,10 +2476,14 @@ impl Timeline {
 
     // TODO(diko)
     pub fn prepare_basebackup(&self, lsn: Lsn) {
+        // We only need to send the prepare request from shard 0.
+        if !self.tenant_shard_id.is_shard_zero() {
+            return;
+        }
         let err = self
             .basebackup_prepare_sender
             .send(BasebackupPrepareRequest {
-                tenant_id: self.tenant_shard_id.tenant_id,
+                tenant_shard_id: self.tenant_shard_id,
                 timeline_id: self.timeline_id,
                 lsn,
             });

@@ -2512,6 +2512,7 @@ impl PageServerHandler {
             };
 
             if let Some(mut cached) = cached {
+                tracing::info!("XXX handle_basebackup_request: using cached basebackup");
                 tokio::io::copy(&mut cached, &mut writer)
                     .await
                     .map_err(|e| {
