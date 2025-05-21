@@ -151,7 +151,7 @@ index 7da6553..7961984 100644
 +
 +SECURITY LABEL FOR anon ON FUNCTION anon.toggle_transparent_dynamic_masking IS 'UNTRUSTED';
 diff --git a/src/guc.rs b/src/guc.rs
-index 74d3822..95e9de8 100644
+index 74d3822..49f58e8 100644
 --- a/src/guc.rs
 +++ b/src/guc.rs
 @@ -3,7 +3,7 @@
@@ -181,7 +181,7 @@ index 74d3822..95e9de8 100644
 +        if pg_sys::superuser() || user_str == "neon_superuser" || user_str == "neondb_owner" {
 +            return true;
 +        }
-+        pg_sys::ereport!(PgLogLevel::ERROR, PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE, "You are not authorized to change this GUC");
++        pg_sys::ereport!(PgLogLevel::NOTICE, PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE, "You are not authorized to change this GUC");
 +        false
 +    }
 +}
@@ -199,7 +199,7 @@ index 74d3822..95e9de8 100644
 +        if pg_sys::superuser() || user_str == "neon_superuser" || user_str == "neondb_owner" {
 +        return true;
 +    }
-+    pg_sys::ereport!(PgLogLevel::ERROR, PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE, "You are not authorized to change this GUC");
++    pg_sys::ereport!(PgLogLevel::NOTICE, PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE, "You are not authorized to change this GUC");
 +    false
 +    }
 +}
