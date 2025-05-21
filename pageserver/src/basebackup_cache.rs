@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_compression::tokio::write::GzipEncoder;
 use camino::Utf8PathBuf;
-use pageserver_api::models::TenantState;
+use pageserver_api::{key, models::TenantState};
 use tokio::{
     io::{AsyncWriteExt, BufWriter},
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
@@ -18,7 +18,7 @@ use crate::{
     basebackup::send_basebackup_tarball,
     context::{DownloadBehavior, RequestContext},
     task_mgr::TaskKind,
-    tenant::mgr::TenantManager,
+    tenant::mgr::{TenantManager, TenantSlot},
 };
 
 pub struct BasebackupPrepareRequest {
@@ -31,9 +31,13 @@ pub type BasebackupPrepareSender = UnboundedSender<BasebackupPrepareRequest>;
 pub type BasebackupPrepareReceiver = UnboundedReceiver<BasebackupPrepareRequest>;
 
 pub struct BasebackupCache {
-    datadir: Utf8PathBuf,
+    data_dir: Utf8PathBuf,
+
+    data_cache: Arc<tokio::sync::Mutex<HashMap<(TenantId, TimelineId), Lsn>>>,
 
     tenant_manager: Arc<TenantManager>,
+
+    cleanup_interval: Duration,
 
     cancel: CancellationToken,
 }
@@ -42,14 +46,17 @@ impl BasebackupCache {
     // Creates a BasebackupCache and spawns a background task.
     pub fn spawn(
         runtime_handle: &tokio::runtime::Handle,
-        datadir: Utf8PathBuf,
+        data_dir: Utf8PathBuf,
         prepare_receiver: BasebackupPrepareReceiver,
         tenant_manager: Arc<TenantManager>,
+        cleanup_interval: Duration,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let cache = Arc::new(BasebackupCache {
-            datadir,
+            data_dir,
+            data_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             tenant_manager,
+            cleanup_interval,
             cancel,
         });
 
@@ -65,7 +72,11 @@ impl BasebackupCache {
         timeline_id: TimelineId,
         lsn: Lsn,
     ) -> Option<tokio::fs::File> {
-        // TODO(diko): add a fast check to avoid syscall every on every call.
+        let data_guard = self.data_cache.lock().await;
+
+        if data_guard.get(&(tenant_id, timeline_id)) != Some(&lsn) {
+            return None;
+        }
 
         let path = self.entry_path(tenant_id, timeline_id, lsn);
 
@@ -82,22 +93,52 @@ impl BasebackupCache {
 
     fn entry_path(&self, tenant_id: TenantId, timeline_id: TimelineId, lsn: Lsn) -> Utf8PathBuf {
         // Placeholder for actual implementation
-        self.datadir.join(format!(
+        self.data_dir.join(format!(
             "basebackup_{tenant_id}_{timeline_id}_{:X}.tar.gz",
             lsn.0
         ))
     }
 
+    async fn cleanup(&self) -> anyhow::Result<()> {
+        let mut new_data_cache = HashMap::new();
+        let mut data_guard = self.data_cache.lock().await;
+
+        for (tenant_shard_id, tenant_slot) in self.tenant_manager.list() {
+            let tenant_id = tenant_shard_id.tenant_id;
+            if let TenantSlot::Attached(tenant) = tenant_slot {
+                for timeline in tenant.list_timelines() {
+                    if let Some(lsn) = data_guard.get(&(tenant_id, timeline.timeline_id)) {
+                        // TODO(ephemeralsad) Check if LSN is still valid -> if not than remvoe it
+                        new_data_cache.insert((tenant_id, timeline.timeline_id), *lsn);
+                    }
+                }
+            }
+        }
+
+        for (&(tenant_id, timeline_id), &lsn) in data_guard.iter() {
+            if !new_data_cache.contains_key(&(tenant_id, timeline_id)) {
+                let path = self.entry_path(tenant_id, timeline_id, lsn);
+                tokio::fs::remove_file(path).await?;
+            }
+        }
+
+        std::mem::swap(&mut *data_guard, &mut new_data_cache);
+
+        Ok(())
+    }
+
     async fn background(self: Arc<Self>, mut prepare_receiver: BasebackupPrepareReceiver) {
-        // Ensure the datadir exists before processing requests
-        if let Err(e) = tokio::fs::create_dir_all(&self.datadir).await {
+        // Ensure the data_dir exists before processing requests
+        if let Err(e) = tokio::fs::create_dir_all(&self.data_dir).await {
             tracing::error!(
-                "Failed to create basebackup cache datadir {:?}: {:?}",
-                self.datadir,
+                "Failed to create basebackup cache data_dir {:?}: {:?}",
+                self.data_dir,
                 e
             );
             return;
         }
+
+        let mut ticker = tokio::time::interval(self.cleanup_interval);
 
         loop {
             tokio::select! {
@@ -106,6 +147,14 @@ impl BasebackupCache {
                     // Handle the checkpoint shutdown message
                     self.prepare_basebackup(req.tenant_shard_id, req.timeline_id, req.lsn).await.unwrap_or_else(|e| {
                         tracing::info!("Failed to prepare basebackup: {:?}", e);
+                    });
+                }
+                // Wait for the ticker to trigger
+                _ = ticker.tick() => {
+                    // TODO(ephemeralsad) Run it in a separate thread
+                    // Clean up irrelevant entries
+                    self.cleanup().await.unwrap_or_else(|e| {
+                        tracing::warn!("Failed to clean up basebackup cache: {:?}", e);
                     });
                 }
                 // Check for cancellation
@@ -141,7 +190,7 @@ impl BasebackupCache {
                 "Tenant {} is not active, current state: {:?}",
                 tenant_shard_id.tenant_id,
                 tenant_state
-            );
+            )
         }
 
         let timeline = tenant.get_timeline(timeline_id, true)?;
@@ -168,6 +217,11 @@ impl BasebackupCache {
             .await?;
 
         encoder.shutdown().await?;
+
+        self.data_cache
+            .lock()
+            .await
+            .insert((tenant_shard_id.tenant_id, timeline_id), lsn);
 
         Ok(())
     }
