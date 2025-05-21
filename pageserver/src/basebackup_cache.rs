@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_compression::tokio::write::GzipEncoder;
 use camino::Utf8PathBuf;
-use pageserver_api::{key, models::TenantState};
+use pageserver_api::{config::BasebackupCacheConfig, models::TenantState};
 use tokio::{
     io::{AsyncWriteExt, BufWriter},
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
@@ -35,9 +35,10 @@ pub struct BasebackupCache {
 
     data_cache: Arc<tokio::sync::Mutex<HashMap<(TenantId, TimelineId), Lsn>>>,
 
-    tenant_manager: Arc<TenantManager>,
+    #[allow(dead_code)]
+    config: BasebackupCacheConfig,
 
-    cleanup_interval: Duration,
+    tenant_manager: Arc<TenantManager>,
 
     cancel: CancellationToken,
 }
@@ -47,16 +48,16 @@ impl BasebackupCache {
     pub fn spawn(
         runtime_handle: &tokio::runtime::Handle,
         data_dir: Utf8PathBuf,
+        config: BasebackupCacheConfig,
         prepare_receiver: BasebackupPrepareReceiver,
         tenant_manager: Arc<TenantManager>,
-        cleanup_interval: Duration,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let cache = Arc::new(BasebackupCache {
             data_dir,
             data_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            config,
             tenant_manager,
-            cleanup_interval,
             cancel,
         });
 
@@ -72,9 +73,7 @@ impl BasebackupCache {
         timeline_id: TimelineId,
         lsn: Lsn,
     ) -> Option<tokio::fs::File> {
-        let data_guard = self.data_cache.lock().await;
-
-        if data_guard.get(&(tenant_id, timeline_id)) != Some(&lsn) {
+        if self.data_cache.lock().await.get(&(tenant_id, timeline_id)) != Some(&lsn) {
             return None;
         }
 
@@ -100,29 +99,36 @@ impl BasebackupCache {
     }
 
     async fn cleanup(&self) -> anyhow::Result<()> {
-        let mut new_data_cache = HashMap::new();
-        let mut data_guard = self.data_cache.lock().await;
+        let mut files_to_remove = Vec::<Utf8PathBuf>::new();
 
-        for (tenant_shard_id, tenant_slot) in self.tenant_manager.list() {
-            let tenant_id = tenant_shard_id.tenant_id;
-            if let TenantSlot::Attached(tenant) = tenant_slot {
-                for timeline in tenant.list_timelines() {
-                    if let Some(lsn) = data_guard.get(&(tenant_id, timeline.timeline_id)) {
-                        // TODO(ephemeralsad) Check if LSN is still valid -> if not than remvoe it
-                        new_data_cache.insert((tenant_id, timeline.timeline_id), *lsn);
+        {
+            let mut new_data_cache = HashMap::new();
+            let mut data_guard = self.data_cache.lock().await;
+            for (tenant_shard_id, tenant_slot) in self.tenant_manager.list() {
+                let tenant_id = tenant_shard_id.tenant_id;
+                if let TenantSlot::Attached(tenant) = tenant_slot {
+                    for timeline in tenant.list_timelines() {
+                        if let Some(lsn) = data_guard.get(&(tenant_id, timeline.timeline_id)) {
+                            if timeline.get_last_record_lsn() == *lsn {
+                                new_data_cache.insert((tenant_id, timeline.timeline_id), *lsn);
+                            }
+                        }
                     }
                 }
             }
-        }
 
-        for (&(tenant_id, timeline_id), &lsn) in data_guard.iter() {
-            if !new_data_cache.contains_key(&(tenant_id, timeline_id)) {
-                let path = self.entry_path(tenant_id, timeline_id, lsn);
-                tokio::fs::remove_file(path).await?;
+            for (&(tenant_id, timeline_id), &lsn) in data_guard.iter() {
+                if !new_data_cache.contains_key(&(tenant_id, timeline_id)) {
+                    files_to_remove.push(self.entry_path(tenant_id, timeline_id, lsn));
+                }
             }
+
+            std::mem::swap(&mut *data_guard, &mut new_data_cache);
         }
 
-        std::mem::swap(&mut *data_guard, &mut new_data_cache);
+        for path in files_to_remove.iter() {
+            tokio::fs::remove_file(path).await?;
+        }
 
         Ok(())
     }
@@ -138,7 +144,7 @@ impl BasebackupCache {
             return;
         }
 
-        let mut ticker = tokio::time::interval(self.cleanup_interval);
+        let mut ticker = tokio::time::interval(self.config.background_cleanup_period);
 
         loop {
             tokio::select! {

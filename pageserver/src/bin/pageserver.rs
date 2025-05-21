@@ -544,7 +544,6 @@ fn start_pageserver(
     // Scan the local 'tenants/' directory and start loading the tenants
     let (basebackup_prepare_sender, basebackup_prepare_receiver) =
         tokio::sync::mpsc::unbounded_channel();
-
     let deletion_queue_client = deletion_queue.new_client();
     let background_purges = mgr::BackgroundPurges::default();
     let tenant_manager = BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
@@ -565,6 +564,7 @@ fn start_pageserver(
     let basebackup_cache = BasebackupCache::spawn(
         BACKGROUND_RUNTIME.handle(),
         conf.basebackup_cache_dir(),
+        conf.basebackup_cache_config.clone(),
         basebackup_prepare_receiver,
         Arc::clone(&tenant_manager),
         shutdown_pageserver.child_token(),

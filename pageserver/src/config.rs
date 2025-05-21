@@ -232,6 +232,8 @@ pub struct PageServerConf {
     pub dev_mode: bool,
 
     pub timeline_import_config: pageserver_api::config::TimelineImportConfig,
+
+    pub basebackup_cache_config: pageserver_api::config::BasebackupCacheConfig,
 }
 
 /// Token for authentication to safekeepers
@@ -411,6 +413,7 @@ impl PageServerConf {
             enable_tls_page_service_api,
             dev_mode,
             timeline_import_config,
+            basebackup_cache_config,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -465,6 +468,7 @@ impl PageServerConf {
             enable_tls_page_service_api,
             dev_mode,
             timeline_import_config,
+            basebackup_cache_config,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
@@ -546,6 +550,23 @@ impl PageServerConf {
                 format!(
                     "Invalid sampling ratio: {}/{}",
                     ratio.numerator, ratio.denominator
+                )
+            );
+
+            let url = Url::parse(&tracing_config.export_config.endpoint)
+                .map_err(anyhow::Error::msg)
+                .with_context(|| {
+                    format!(
+                        "tracing endpoint URL is invalid : {}",
+                        tracing_config.export_config.endpoint
+                    )
+                })?;
+
+            ensure!(
+                url.scheme() == "http" || url.scheme() == "https",
+                format!(
+                    "tracing endpoint URL must start with http:// or https://: {}",
+                    tracing_config.export_config.endpoint
                 )
             );
         }
@@ -663,5 +684,26 @@ mod tests {
         let workdir = Utf8PathBuf::from("/nonexistent");
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
             .expect("parse_and_validate");
+    }
+
+    #[test]
+    fn test_config_tracing_endpoint_is_invalid() {
+        let input = r#"
+            control_plane_api = "http://localhost:6666"
+
+            [tracing]
+
+            sampling_ratio = { numerator = 1, denominator = 0 }
+
+            [tracing.export_config]
+            endpoint = "localhost:4317"
+            protocol = "http-binary"
+            timeout = "1ms"
+        "#;
+        let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input)
+            .expect("config has valid fields");
+        let workdir = Utf8PathBuf::from("/nonexistent");
+        PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
+            .expect_err("parse_and_validate should fail for endpoint without scheme");
     }
 }
