@@ -459,7 +459,15 @@ impl ReportableError for SqlOverHttpError {
             SqlOverHttpError::ConnInfo(e) => e.get_error_kind(),
             SqlOverHttpError::ResponseTooLarge(_) => ErrorKind::User,
             SqlOverHttpError::InvalidIsolationLevel => ErrorKind::User,
-            SqlOverHttpError::Postgres(p) => p.get_error_kind(),
+            // customer initiated SQL errors.
+            SqlOverHttpError::Postgres(p) => {
+                if p.as_db_error().is_some() {
+                    ErrorKind::User
+                } else {
+                    ErrorKind::Compute
+                }
+            }
+            // proxy initiated SQL errors.
             SqlOverHttpError::InternalPostgres(p) => {
                 if p.as_db_error().is_some() {
                     ErrorKind::Service
@@ -467,6 +475,7 @@ impl ReportableError for SqlOverHttpError {
                     ErrorKind::Compute
                 }
             }
+            // postgres returned a bad row format that we couldn't parse.
             SqlOverHttpError::JsonConversion(_) => ErrorKind::Postgres,
             SqlOverHttpError::Cancelled(c) => c.get_error_kind(),
         }
