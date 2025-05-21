@@ -553,10 +553,8 @@ pub(crate) struct GcCutoffs {
 
 impl GcCutoffs {
     fn select_min(&self) -> Lsn {
-        match self.time {
-            Some(time) => self.space.min(time),
-            None => self.space,
-        }
+        // NB: if we haven't computed the PITR cutoff yet, we can't GC anything.
+        self.space.min(self.time.unwrap_or_default())
     }
 }
 
