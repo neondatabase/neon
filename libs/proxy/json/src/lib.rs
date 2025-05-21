@@ -24,6 +24,11 @@ impl<'buf> ValueSer<'buf> {
         Self { buf }
     }
 
+    /// Borrow the underlying buffer
+    pub fn as_buffer(&self) -> &[u8] {
+        &self.buf
+    }
+
     /// Write the raw value to the serializer.
     #[inline]
     pub fn raw(self, value: &RawValue) {
@@ -103,6 +108,11 @@ impl<'buf> ObjectSer<'buf> {
         }
     }
 
+    /// Borrow the underlying buffer
+    pub fn as_buffer(&self) -> &[u8] {
+        &self.buf
+    }
+
     /// Start a new object entry with the given string key, returning a [`ValueSer`] for the associated value.
     #[inline]
     pub fn entry(&mut self, key: &str) -> ValueSer {
@@ -133,21 +143,26 @@ impl<'buf> ObjectSer<'buf> {
     /// Reset the buffer back to before this object was started.
     #[inline]
     pub fn rollback(self) {
-        // don't trigger the drop handler which pushes a `}`.
-        // this won't cause memory leaks because `ObjectSer` owns no allocations.
-        let Self { buf, start, .. } = &mut *std::mem::ManuallyDrop::new(self);
+        drop(self);
+    }
 
-        // reset the buf back to the start.
-        buf.truncate(*start);
+    /// Finish the object ser.
+    #[inline]
+    pub fn finish(self) {
+        // don't trigger the drop handler which triggers a rollback.
+        // this won't cause memory leaks because `ObjectSer` owns no allocations.
+        let Self { buf, prefix, .. } = &mut *std::mem::ManuallyDrop::new(self);
+
+        if *prefix == b'{' {
+            buf.push(b'{');
+        }
+        buf.push(b'}');
     }
 }
 
 impl Drop for ObjectSer<'_> {
     fn drop(&mut self) {
-        if self.prefix == b'{' {
-            self.buf.push(b'{');
-        }
-        self.buf.push(b'}');
+        self.buf.truncate(self.start);
     }
 }
 
@@ -170,6 +185,11 @@ impl<'buf> ListSer<'buf> {
         }
     }
 
+    /// Borrow the underlying buffer
+    pub fn as_buffer(&self) -> &[u8] {
+        &self.buf
+    }
+
     /// Start a new value entry in this list.
     #[inline]
     pub fn entry(&mut self) -> ValueSer {
@@ -178,24 +198,29 @@ impl<'buf> ListSer<'buf> {
         ValueSer { buf: self.buf }
     }
 
-    /// Reset the buffer back to before this list was started.
+    /// Reset the buffer back to before this object was started.
     #[inline]
     pub fn rollback(self) {
-        // don't trigger the drop handler which pushes a `}`.
-        // this won't cause memory leaks because `ListSer` owns no allocations.
-        let Self { buf, start, .. } = &mut *std::mem::ManuallyDrop::new(self);
+        drop(self);
+    }
 
-        // reset the buf back to the start.
-        buf.truncate(*start);
+    /// Finish the list ser.
+    #[inline]
+    pub fn finish(self) {
+        // don't trigger the drop handler which triggers a rollback.
+        // this won't cause memory leaks because `ListSet` owns no allocations.
+        let Self { buf, prefix, .. } = &mut *std::mem::ManuallyDrop::new(self);
+
+        if *prefix == b'[' {
+            buf.push(b'[');
+        }
+        buf.push(b']');
     }
 }
 
 impl Drop for ListSer<'_> {
     fn drop(&mut self) {
-        if self.prefix == b'[' {
-            self.buf.push(b'[');
-        }
-        self.buf.push(b']');
+        self.buf.truncate(self.start);
     }
 }
 
@@ -217,7 +242,7 @@ impl RawValue {
     ///
     /// This does not cause any unsoundness if used incorrectly.
     /// It will only produce incorrect json.
-    pub const fn new_unchecked(json: &'static [u8]) -> &'static Self {
+    pub const fn new_unchecked(json: &[u8]) -> &Self {
         // Safety: `RawValue` is `repr(transparent)` over `[u8]`.
         // See <https://github.com/serde-rs/json/blob/c1826ebcccb1a520389c6b78ad3da15db279220d/src/raw.rs#L121-L133>
         unsafe { std::mem::transmute::<&[u8], &RawValue>(json) }
