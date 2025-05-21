@@ -1451,11 +1451,15 @@ pread_with_ioctl(void *buffer, uint64 blkno)
 
 	errno = 0;
 
-	elog(LOG, "calling ioctl read for blk %lu with buffer=%p (shared_buffers is at %p-%p)",
+	elog(DEBUG1, "calling ioctl read for blk %lu with buffer=%p (shared_buffers is at %p-%p)",
 		 blkno,
 		 buffer,
 		 BufferBlocks,
 		 BufferBlocks + BLCKSZ * NBuffers);
+	/* FIXME: touch the pages, so that copy_to_user doesn't fail in the kernel module */
+	((char *) buffer)[0] = 'x';
+	((char *) buffer)[4096] = 'x';
+
 	rc = ioctl(lfc_desc, NEON_IOCTL_READ, &args);
 	if (rc >= 0)
 		lfc_ctl->kernel_module_read_hits++;
@@ -1480,7 +1484,7 @@ pwrite_with_ioctl(const void *buffer, uint64 blkno)
 	};
 	int			rc;
 
-	elog(LOG, "calling ioctl write for blk %lu with buffer=%p (shared_buffers is at %p-%p)",
+	elog(DEBUG1, "calling ioctl write for blk %lu with buffer=%p (shared_buffers is at %p-%p)",
 		 blkno,
 		 buffer,
 		 BufferBlocks,
