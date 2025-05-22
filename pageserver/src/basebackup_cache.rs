@@ -191,32 +191,47 @@ impl BasebackupCache {
     }
 
     async fn cleanup(&self) -> anyhow::Result<()> {
-        let mut new_data_cache = HashMap::new();
-        let mut data_guard = self.entries.lock().unwrap();
+        // Cleanup tmp directory.
+        let tmp_dir = self.data_dir.join("tmp");
+        let mut tmp_dir = tokio::fs::read_dir(&tmp_dir).await?;
+        while let Some(dir_entry) = tmp_dir.next_entry().await? {
+            if let Err(e) = tokio::fs::remove_file(dir_entry.path()).await {
+                tracing::warn!("Failed to remove basebackup cache tmp file: {:#}", e);
+            }
+        }
+
+        // Remove outdated entries.
+        let entries_old = self.entries.lock().unwrap().clone();
+        let mut entries_new = HashMap::new();
         for (tenant_shard_id, tenant_slot) in self.tenant_manager.list() {
+            if !tenant_shard_id.is_shard_zero() {
+                continue;
+            }
+            let TenantSlot::Attached(tenant) = tenant_slot else {
+                continue;
+            };
             let tenant_id = tenant_shard_id.tenant_id;
-            if let TenantSlot::Attached(tenant) = tenant_slot {
-                for timeline in tenant.list_timelines() {
-                    let tti = TenantTimelineId::new(tenant_id, timeline.timeline_id);
-                    if let Some(lsn) = data_guard.get(&tti) {
-                        if timeline.get_last_record_lsn() == *lsn {
-                            new_data_cache.insert(tti, *lsn);
-                        }
+
+            for timeline in tenant.list_timelines() {
+                let tti = TenantTimelineId::new(tenant_id, timeline.timeline_id);
+                if let Some(&entry_lsn) = entries_old.get(&tti) {
+                    if timeline.get_last_record_lsn() <= entry_lsn {
+                        entries_new.insert(tti, entry_lsn);
                     }
                 }
             }
         }
 
-        for (&tti, &lsn) in data_guard.iter() {
-            if !new_data_cache.contains_key(&tti) {
+        for (&tti, &lsn) in entries_old.iter() {
+            if !entries_new.contains_key(&tti) {
                 self.remove_entry_sender
                     .send(self.entry_path(tti.tenant_id, tti.timeline_id, lsn))
                     .unwrap();
             }
         }
 
-        std::mem::swap(&mut *data_guard, &mut new_data_cache);
-        BASEBACKUP_CACHE_ENTRIES.set(data_guard.len() as i64);
+        BASEBACKUP_CACHE_ENTRIES.set(entries_new.len() as i64);
+        *self.entries.lock().unwrap() = entries_new;
 
         Ok(())
     }
