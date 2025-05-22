@@ -1,5 +1,5 @@
 diff --git a/sql/anon.sql b/sql/anon.sql
-index 0cdc769..6a0479e 100644
+index 0cdc769..d707a99 100644
 --- a/sql/anon.sql
 +++ b/sql/anon.sql
 @@ -1141,3 +1141,9 @@ $$
@@ -11,7 +11,7 @@ index 0cdc769..6a0479e 100644
 +
 +GRANT ALL ON SCHEMA anon to neon_superuser;
 +GRANT ALL ON ALL TABLES IN SCHEMA anon TO neon_superuser;
-+GRANT SET ON anon.transparent_dynamic_masking TO neon_superuser;
++GRANT SET ON PARAMETER anon.transparent_dynamic_masking TO neon_superuser;
 diff --git a/sql/init.sql b/sql/init.sql
 index 7da6553..7961984 100644
 --- a/sql/init.sql
