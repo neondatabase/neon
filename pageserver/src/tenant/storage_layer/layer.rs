@@ -1780,13 +1780,19 @@ impl DownloadedLayer {
                 "these are the same, just avoiding the upgrade"
             );
 
+            let (ex_tenant_id, ex_timeline_id) =
+                if let Some((tenant_id, timeline_id)) = owner.template_ttid {
+                    (tenant_id.tenant_id, timeline_id)
+                } else {
+                    (owner.desc.tenant_shard_id.tenant_id, owner.desc.timeline_id)
+                };
             let res = if owner.desc.is_delta {
                 let ctx = RequestContextBuilder::from(ctx)
                     .page_content_kind(crate::context::PageContentKind::DeltaLayerSummary)
                     .attached_child();
                 let summary = Some(delta_layer::Summary::expected(
-                    owner.desc.tenant_shard_id.tenant_id,
-                    owner.desc.timeline_id,
+                    ex_tenant_id,
+                    ex_timeline_id,
                     owner.desc.key_range.clone(),
                     owner.desc.lsn_range.clone(),
                 ));
@@ -1804,8 +1810,8 @@ impl DownloadedLayer {
                     .attached_child();
                 let lsn = owner.desc.image_layer_lsn();
                 let summary = Some(image_layer::Summary::expected(
-                    owner.desc.tenant_shard_id.tenant_id,
-                    owner.desc.timeline_id,
+                    ex_tenant_id,
+                    ex_timeline_id,
                     owner.desc.key_range.clone(),
                     lsn,
                 ));
