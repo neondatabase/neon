@@ -18,7 +18,7 @@ use utils::{
 use crate::{
     basebackup::send_basebackup_tarball,
     context::{DownloadBehavior, RequestContext},
-    metrics::{BASEBACKUP_CACHE_PREPARE, BASEBACKUP_CACHE_READ},
+    metrics::{BASEBACKUP_CACHE_ENTRIES, BASEBACKUP_CACHE_PREPARE, BASEBACKUP_CACHE_READ},
     task_mgr::TaskKind,
     tenant::{
         Timeline,
@@ -216,6 +216,7 @@ impl BasebackupCache {
         }
 
         std::mem::swap(&mut *data_guard, &mut new_data_cache);
+        BASEBACKUP_CACHE_ENTRIES.set(data_guard.len() as i64);
 
         Ok(())
     }
@@ -285,6 +286,7 @@ impl BasebackupCache {
             }
         }
 
+        BASEBACKUP_CACHE_ENTRIES.set(entries.len() as i64);
         *self.entries.lock().unwrap() = entries;
 
         Ok(())
@@ -420,12 +422,14 @@ impl BasebackupCache {
         let entry_path = self.entry_path(tenant_shard_id.tenant_id, timeline_id, req_lsn);
         tokio::fs::rename(&entry_tmp_path, &entry_path).await?;
 
-        if let Some(old_lsn) = self.entries.lock().unwrap().insert(tti, req_lsn) {
+        let mut entries = self.entries.lock().unwrap();
+        if let Some(old_lsn) = entries.insert(tti, req_lsn) {
             // Remove the old entry if it exists.
             self.remove_entry_sender
                 .send(self.entry_path(tenant_shard_id.tenant_id, timeline_id, old_lsn))
                 .unwrap();
         }
+        BASEBACKUP_CACHE_ENTRIES.set(entries.len() as i64);
 
         self.prepare_ok_count.inc();
         Ok(())
