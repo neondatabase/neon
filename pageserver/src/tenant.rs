@@ -2779,7 +2779,7 @@ impl TenantShard {
                 &self.cancel,
             )
             .await
-            .unwrap();
+            .map_err(|e| CreateTimelineError::Other(e.into()))?;
 
         tracing::info!(
             "downloaded template index_part.json with generation {}",
@@ -2832,7 +2832,8 @@ impl TenantShard {
                     .collect();
                 unfinished_timeline
                     .layers
-                    .blocking_write()
+                    .write()
+                    .await
                     .open_mut()
                     .map_err(|_| CreateTimelineError::ShuttingDown)?
                     .initialize_local_layers(layers, template_metadata.disk_consistent_lsn());

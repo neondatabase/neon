@@ -396,6 +396,32 @@ async fn do_download_index_part(
     Ok((index_part, index_generation, index_part_mtime))
 }
 
+async fn do_download_template_index_part(
+    storage: &GenericRemoteStorage,
+    tenant_shard_id: &TenantShardId,
+    timeline_id: Option<&TimelineId>,
+    index_generation: Generation,
+    cancel: &CancellationToken,
+) -> Result<(IndexPart, Generation, SystemTime), DownloadError> {
+    let timeline_id =
+        timeline_id.expect("A timeline ID is always provided when downloading an index");
+    let remote_path = remote_template_index_path(tenant_shard_id, timeline_id, index_generation);
+
+    let download_opts = DownloadOpts {
+        kind: DownloadKind::Small,
+        ..Default::default()
+    };
+
+    let (index_part_bytes, index_part_mtime) =
+        do_download_remote_path_retry_forever(storage, &remote_path, download_opts, cancel).await?;
+
+    let index_part: IndexPart = serde_json::from_slice(&index_part_bytes)
+        .with_context(|| format!("deserialize index part file at {remote_path:?}"))
+        .map_err(DownloadError::Other)?;
+
+    Ok((index_part, index_generation, index_part_mtime))
+}
+
 /// Metadata objects are "generationed", meaning that they include a generation suffix.  This
 /// function downloads the object with the highest generation <= `my_generation`.
 ///
@@ -584,7 +610,7 @@ pub(crate) async fn download_template_index_part(
         my_generation,
         "index_part",
         index_prefix,
-        do_download_index_part,
+        do_download_template_index_part,
         parse_remote_index_path,
         cancel,
     )
