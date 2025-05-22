@@ -313,15 +313,18 @@ pub struct TimelineImportConfig {
 #[serde(default)]
 pub struct BasebackupCacheConfig {
     #[serde(with = "humantime_serde")]
-    pub background_cleanup_period: Duration,
-    pub max_cache_size_bytes: u64,
+    pub cleanup_period: Duration,
+    // FIXME: Support max_size_bytes.
+    // pub max_size_bytes: usize,
+    pub max_size_entries: i64,
 }
 
 impl Default for BasebackupCacheConfig {
     fn default() -> Self {
         Self {
-            background_cleanup_period: Duration::from_secs(60),
-            max_cache_size_bytes: 1024 * 1024 * 1024, // 1 GiB
+            cleanup_period: Duration::from_secs(60),
+            // max_size_bytes: 1024 * 1024 * 1024, // 1 GiB
+            max_size_entries: 1000,
         }
     }
 }

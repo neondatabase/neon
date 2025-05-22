@@ -318,7 +318,7 @@ impl BasebackupCache {
             .await
             .expect("Failed to initialize basebackup cache");
 
-        let mut cleanup_ticker = tokio::time::interval(self.config.background_cleanup_period);
+        let mut cleanup_ticker = tokio::time::interval(self.config.cleanup_period);
         cleanup_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
@@ -374,13 +374,26 @@ impl BasebackupCache {
 
         let tti = TenantTimelineId::new(tenant_shard_id.tenant_id, timeline_id);
 
-        if let Some(&entry_lsn) = self.entries.lock().unwrap().get(&tti) {
-            if entry_lsn >= req_lsn {
+        {
+            let entries = self.entries.lock().unwrap();
+            if let Some(&entry_lsn) = entries.get(&tti) {
+                if entry_lsn >= req_lsn {
+                    tracing::info!(
+                        %timeline_id,
+                        %req_lsn,
+                        %entry_lsn,
+                        "Basebackup entry already exists for timeline with higher LSN, skipping basebackup",
+                    );
+                    self.prepare_skip_count.inc();
+                    return Ok(());
+                }
+            }
+
+            if entries.len() as i64 >= self.config.max_size_entries {
                 tracing::info!(
                     %timeline_id,
                     %req_lsn,
-                    %entry_lsn,
-                    "Basebackup entry already exists for timeline with higher LSN, skipping basebackup",
+                    "Basebackup cache is full, skipping basebackup",
                 );
                 self.prepare_skip_count.inc();
                 return Ok(());
