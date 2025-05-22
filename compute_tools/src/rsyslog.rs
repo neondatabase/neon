@@ -28,20 +28,37 @@ fn get_rsyslog_pid() -> Option<String> {
 }
 
 fn wait_for_rsyslog_pid() -> Result<String, anyhow::Error> {
-    for attempt in 1..=50 {
+    const MAX_WAIT: Duration = Duration::from_secs(5);
+    const INITIAL_SLEEP: Duration = Duration::from_millis(2);
+
+    let mut sleep_duration = INITIAL_SLEEP;
+    let start = std::time::Instant::now();
+    let mut attempts = 1;
+
+    for attempt in 1.. {
+        attempts = attempt;
         match get_rsyslog_pid() {
             Some(pid) => return Ok(pid),
             None => {
+                if start.elapsed() >= MAX_WAIT {
+                    break;
+                }
                 info!(
-                    "rsyslogd is not running, attempt {}/50. Waiting...",
-                    attempt
+                    "rsyslogd is not running, attempt {}. Sleeping for {} ms",
+                    attempt,
+                    sleep_duration.as_millis()
                 );
-                std::thread::sleep(std::time::Duration::from_millis(2));
+                std::thread::sleep(sleep_duration);
+                sleep_duration *= 2;
             }
         }
     }
 
-    Err(anyhow::anyhow!("rsyslogd did not start after 50 attempts"))
+    Err(anyhow::anyhow!(
+        "rsyslogd is not running after waiting for {} seconds and {} attempts",
+        attempts,
+        start.elapsed().as_secs()
+    ))
 }
 
 // Restart rsyslogd to apply the new configuration.
