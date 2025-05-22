@@ -28,7 +28,7 @@ fn get_rsyslog_pid() -> Option<String> {
 }
 
 fn wait_for_rsyslog_pid() -> Result<String, anyhow::Error> {
-    for attempt in 0..50 {
+    for attempt in 1..=50 {
         match get_rsyslog_pid() {
             Some(pid) => return Ok(pid),
             None => {
