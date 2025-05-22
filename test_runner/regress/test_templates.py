@@ -138,7 +138,7 @@ def test_template_smoke(neon_env_builder: NeonEnvBuilder):
     log.info("starting timeline creation")
     start = time.monotonic()
 
-    import_branch_name = "imported"
+    branch_name = "on_template"
     env.storage_controller.timeline_create(
         new_tenant_id,
         {
@@ -147,7 +147,7 @@ def test_template_smoke(neon_env_builder: NeonEnvBuilder):
             "template_timeline_id": str(template_timeline_id),
         },
     )
-    env.neon_cli.mappings_map_branch(import_branch_name, new_tenant_id, new_timeline_id)
+    env.neon_cli.mappings_map_branch(branch_name, new_tenant_id, new_timeline_id)
 
     # Get some timeline details for later.
     locations = env.storage_controller.locate(new_tenant_id)
@@ -173,7 +173,7 @@ def test_template_smoke(neon_env_builder: NeonEnvBuilder):
     # Last step: validation
 
     with env.endpoints.create_start(
-        branch_name=import_branch_name,
+        branch_name=branch_name,
         endpoint_id="ro",
         tenant_id=new_tenant_id,
         lsn=last_record_lsn,
@@ -182,15 +182,15 @@ def test_template_smoke(neon_env_builder: NeonEnvBuilder):
 
         # ensure the template survives restarts
         ro_endpoint.stop()
-        #env.pageserver.stop(immediate=True)
-        #env.pageserver.start()
+        env.pageserver.stop(immediate=True)
+        env.pageserver.start()
         ro_endpoint.start()
         validate_data_equivalence(ro_endpoint)
 
     #
     # validate that we can write
     #
-    workload = Workload(env, new_tenant_id, new_timeline_id, branch_name=import_branch_name)
+    workload = Workload(env, new_tenant_id, new_timeline_id, branch_name=branch_name)
     workload.init()
     workload.write_rows(64)
     workload.validate()

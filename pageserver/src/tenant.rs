@@ -2753,7 +2753,7 @@ impl TenantShard {
         } = params;
 
         // 0. create a guard to prevent parallel creation attempts.
-        let timeline_create_guard = match self
+        let _timeline_create_guard = match self
             .start_creating_timeline(
                 new_timeline_id,
                 CreateTimelineIdempotency::Template(template_tenant_id, template_timeline_id),
@@ -2827,7 +2827,7 @@ impl TenantShard {
                 warn!("timeline not available directly after attach");
                 panic!();
             };
-            let mut offloaded_timelines = self.timelines_offloaded.lock().unwrap();
+            let offloaded_timelines = self.timelines_offloaded.lock().unwrap();
             self.initialize_gc_info(&timelines, &offloaded_timelines, Some(new_timeline_id));
 
             Arc::clone(timeline)
