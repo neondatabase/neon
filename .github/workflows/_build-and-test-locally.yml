@@ -349,7 +349,7 @@ jobs:
 
   regress-tests:
     # Don't run regression tests on debug arm64 builds
-    if: inputs.build-type != 'debug' || inputs.arch != 'arm64'
+#    if: inputs.build-type != 'debug' || inputs.arch != 'arm64' || env.FORCE_REGRESS_TESTS == 'true' # Just disable temporarily for testing
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
       contents: read
@@ -379,7 +379,7 @@ jobs:
       - name: Pytest regression tests
         continue-on-error: ${{ matrix.lfc_state == 'with-lfc' && inputs.build-type == 'debug' }}
         uses: ./.github/actions/run-python-test-set
-        timeout-minutes: ${{ inputs.sanitizers != 'enabled' && 75 || 180 }}
+        timeout-minutes: ${{ (inputs.build-type == 'release' && inputs.sanitizers != 'enabled') && 75 || 180 }}
         with:
           build_type: ${{ inputs.build-type }}
           test_selection: regress
