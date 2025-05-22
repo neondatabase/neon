@@ -2852,6 +2852,11 @@ impl TenantShard {
 
         // Callers are responsible to wait for uploads to complete and for activating the timeline.
 
+        timeline
+            .remote_client
+            .schedule_index_upload_for_full_metadata_update(&new_metadata)
+            .context("imported timeline initial metadata upload")?;
+
         // 4. finish
         Ok(CreateTimelineResult::Created(timeline))
     }
