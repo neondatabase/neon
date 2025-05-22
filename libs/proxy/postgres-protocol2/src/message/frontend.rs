@@ -25,6 +25,7 @@ where
     Ok(())
 }
 
+#[derive(Debug)]
 pub enum BindError {
     Conversion(Box<dyn Error + marker::Sync + Send>),
     Serialization(io::Error),

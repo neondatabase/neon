@@ -1,14 +1,16 @@
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use fallible_iterator::FallibleIterator;
-use futures_util::TryStreamExt;
+use postgres_protocol2::IsNull;
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
+use postgres_protocol2::types::oid_to_sql;
+use postgres_types2::Format;
 use tracing::debug;
 
 use crate::client::{CachedTypeInfo, InnerClient};
 use crate::codec::FrontendMessage;
 use crate::types::{Kind, Oid, Type};
-use crate::{Column, Error, Statement, query, slice_iter};
+use crate::{Column, Error, Row, Statement};
 
 pub(crate) const TYPEINFO_QUERY: &str = "\
 SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, t.typbasetype, n.nspname, t.typrelid
@@ -105,15 +107,7 @@ pub async fn get_type(
 
         let stmt = typeinfo_statement(client, typecache).await?;
 
-        let mut rows = query::sub_query(client, stmt, slice_iter(&[&oid])).await?;
-
-        let row = match rows.try_next().await? {
-            Some(row) => row,
-            None => return Err(Error::unexpected_message()),
-        };
-        if rows.try_next().await?.is_some() {
-            return Err(Error::unexpected_message());
-        }
+        let row = exec(client, stmt, oid).await?;
 
         let name: String = row.try_get(0)?;
         let type_: i8 = row.try_get(1)?;
@@ -173,4 +167,56 @@ async fn typeinfo_statement(
 
     typecache.typeinfo = Some(stmt.clone());
     Ok(stmt)
+}
+
+/// exec the typeinfo statement returning one row.
+async fn exec(client: &mut InnerClient, statement: Statement, param: Oid) -> Result<Row, Error> {
+    let buf = encode_subquery(client, &statement, param)?;
+    let responses = client.send_partial(FrontendMessage::Raw(buf))?;
+
+    match responses.next().await? {
+        Message::BindComplete => {}
+        _ => return Err(Error::unexpected_message()),
+    }
+
+    let row = match responses.next().await? {
+        Message::DataRow(body) => Row::new(statement, body, Format::Binary)?,
+        _ => return Err(Error::unexpected_message()),
+    };
+
+    match responses.next().await? {
+        Message::CommandComplete(_) => {}
+        _ => return Err(Error::unexpected_message()),
+    };
+
+    Ok(row)
+}
+
+fn encode_subquery(
+    client: &mut InnerClient,
+    statement: &Statement,
+    param: Oid,
+) -> Result<Bytes, Error> {
+    client.with_buf(|buf| {
+        encode_bind(statement, param, "", buf);
+        frontend::execute("", 0, buf).map_err(Error::encode)?;
+        frontend::flush(buf);
+        Ok(buf.split().freeze())
+    })
+}
+
+fn encode_bind(statement: &Statement, param: Oid, portal: &str, buf: &mut BytesMut) {
+    frontend::bind(
+        portal,
+        statement.name(),
+        [Format::Binary as i16],
+        [param],
+        |param, buf| {
+            oid_to_sql(param, buf);
+            Ok(IsNull::No)
+        },
+        [Format::Binary as i16],
+        buf,
+    )
+    .unwrap();
 }

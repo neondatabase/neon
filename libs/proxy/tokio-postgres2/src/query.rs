@@ -1,60 +1,16 @@
-use std::fmt;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::BufMut;
 use fallible_iterator::FallibleIterator;
 use futures_util::{Stream, ready};
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
-use postgres_types2::{Format, ToSql};
-use tracing::debug;
+use postgres_types2::Format;
 
 use crate::client::{CachedTypeInfo, InnerClient, Responses};
 use crate::codec::FrontendMessage;
-use crate::types::IsNull;
 use crate::{Column, Error, ReadyForQueryStatus, Row, Statement};
-
-struct BorrowToSqlParamsDebug<'a>(&'a [&'a (dyn ToSql + Sync)]);
-
-impl fmt::Debug for BorrowToSqlParamsDebug<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list().entries(self.0.iter()).finish()
-    }
-}
-
-/// subquery does not send a sync message.
-/// they need to be polled to completion.
-pub async fn sub_query<'a, I>(
-    client: &mut InnerClient,
-    statement: Statement,
-    params: I,
-) -> Result<RowStream, Error>
-where
-    I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
-    I::IntoIter: ExactSizeIterator,
-{
-    let buf = if tracing::enabled!(tracing::Level::DEBUG) {
-        let params = params.into_iter().collect::<Vec<_>>();
-        debug!(
-            "executing statement {} with parameters: {:?}",
-            statement.name(),
-            BorrowToSqlParamsDebug(params.as_slice()),
-        );
-        encode_subquery(client, &statement, params)?
-    } else {
-        encode_subquery(client, &statement, params)?
-    };
-    let responses = start(client, buf).await?;
-    Ok(RowStream {
-        responses,
-        statement,
-        subquery: true,
-        command_tag: None,
-        status: ReadyForQueryStatus::Unknown,
-        output_format: Format::Binary,
-    })
-}
 
 /// we need to send a sync message on error to allow the protocol to reset.
 struct SyncIfNotDone<'a> {
@@ -84,6 +40,18 @@ where
 {
     let params = params.into_iter();
     let guard = SyncIfNotDone { client };
+
+    // Flow:
+    // 1. Parse the query
+    // 2. Inspect the row description for OIDs
+    // 3. If there's any OIDs we don't already know about, perform the typeinfo routine
+    // 4. Execute the query
+    // 5. Sync.
+    //
+    // The typeinfo routine:
+    // 1. Parse the typeinfo query
+    // 2. Execute the query on each OID
+    // 3. If the result does not match an OID we know, repeat 2.
 
     // parse the query and get type info
     let buf = guard.client.with_buf(|buf| {
@@ -180,97 +148,16 @@ where
     Ok(RowStream {
         responses,
         statement: Statement::new_anonymous(parameters, columns),
-        subquery: false,
         command_tag: None,
         status: ReadyForQueryStatus::Unknown,
         output_format: Format::Text,
     })
 }
 
-async fn start(client: &mut InnerClient, buf: Bytes) -> Result<&mut Responses, Error> {
-    let responses = client.send_partial(FrontendMessage::Raw(buf))?;
-
-    match responses.next().await? {
-        Message::BindComplete => {}
-        _ => return Err(Error::unexpected_message()),
-    }
-
-    Ok(responses)
-}
-
-pub fn encode_subquery<'a, I>(
-    client: &mut InnerClient,
-    statement: &Statement,
-    params: I,
-) -> Result<Bytes, Error>
-where
-    I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
-    I::IntoIter: ExactSizeIterator,
-{
-    client.with_buf(|buf| {
-        encode_bind(statement, params, "", buf)?;
-        frontend::execute("", 0, buf).map_err(Error::encode)?;
-        frontend::flush(buf);
-        Ok(buf.split().freeze())
-    })
-}
-
-pub fn encode_bind<'a, I>(
-    statement: &Statement,
-    params: I,
-    portal: &str,
-    buf: &mut BytesMut,
-) -> Result<(), Error>
-where
-    I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
-    I::IntoIter: ExactSizeIterator,
-{
-    let param_types = statement.params();
-    let params = params.into_iter();
-
-    assert!(
-        param_types.len() == params.len(),
-        "expected {} parameters but got {}",
-        param_types.len(),
-        params.len()
-    );
-
-    let (param_formats, params): (Vec<_>, Vec<_>) = params
-        .zip(param_types.iter())
-        .map(|(p, ty)| (p.encode_format(ty) as i16, p))
-        .unzip();
-
-    let params = params.into_iter();
-
-    let mut error_idx = 0;
-    let r = frontend::bind(
-        portal,
-        statement.name(),
-        param_formats,
-        params.zip(param_types).enumerate(),
-        |(idx, (param, ty)), buf| match param.to_sql_checked(ty, buf) {
-            Ok(IsNull::No) => Ok(postgres_protocol2::IsNull::No),
-            Ok(IsNull::Yes) => Ok(postgres_protocol2::IsNull::Yes),
-            Err(e) => {
-                error_idx = idx;
-                Err(e)
-            }
-        },
-        Some(1),
-        buf,
-    );
-    match r {
-        Ok(()) => Ok(()),
-        Err(frontend::BindError::Conversion(e)) => Err(Error::to_sql(e, error_idx)),
-        Err(frontend::BindError::Serialization(e)) => Err(Error::encode(e)),
-    }
-}
-
 /// A stream of table rows.
 pub struct RowStream<'a> {
     responses: &'a mut Responses,
     output_format: Format,
-    subquery: bool,
     pub statement: Statement,
     pub command_tag: Option<String>,
     pub status: ReadyForQueryStatus,
@@ -290,17 +177,10 @@ impl Stream for RowStream<'_> {
                         this.output_format,
                     )?)));
                 }
-                Message::EmptyQueryResponse | Message::PortalSuspended => {
-                    if this.subquery {
-                        return Poll::Ready(None);
-                    }
-                }
+                Message::EmptyQueryResponse | Message::PortalSuspended => {}
                 Message::CommandComplete(body) => {
                     if let Ok(tag) = body.tag() {
                         this.command_tag = Some(tag.to_string());
-                    }
-                    if this.subquery {
-                        return Poll::Ready(None);
                     }
                 }
                 Message::ReadyForQuery(status) => {
