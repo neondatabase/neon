@@ -4,7 +4,7 @@
 //!
 //! - Types that are in fact required by the API are not Options. The protobuf "required"
 //!   attribute is deprecated and 'prost' marks a lot of members as optional because of that.
-//!   (See https://github.com/tokio-rs/prost/issues/800 for a gripe on this)
+//!   (See <https://github.com/tokio-rs/prost/issues/800> for a gripe on this)
 //!
 //! - Use more precise datatypes, e.g. Lsn and uints shorter than 32 bits.
 //!
