@@ -72,6 +72,7 @@ def test_template_smoke(neon_env_builder: NeonEnvBuilder):
 
     template_tenant_id = TenantId.generate()
     template_timeline_id = TimelineId.generate()
+    template_tenant_shard_id = TenantShardId(template_tenant_id, 0, 1)
 
     env.create_tenant(shard_count=1, tenant_id=template_tenant_id, timeline_id=template_timeline_id)
 
@@ -117,13 +118,12 @@ def test_template_smoke(neon_env_builder: NeonEnvBuilder):
             (nrows) * (nrows + 1) // 2
         )  # https://stackoverflow.com/questions/43901484/sum-of-the-integers-from-1-to-n
 
-        env.pageserver.http_client().timeline_checkpoint(template_tenant_id, template_timeline_id)
+        env.pageserver.http_client().timeline_checkpoint(template_tenant_shard_id, template_timeline_id)
         wait_for_last_flush_lsn(env, endpoint, template_tenant_id, template_timeline_id)
 
         validate_data_equivalence(endpoint)
 
     # Copy the template to the templates dir and delete the original project
-    template_tenant_shard_id = TenantShardId(template_tenant_id, 0, 1)
     from_dir = env.pageserver_remote_storage.tenant_path(template_tenant_shard_id)
     to_dir = env.pageserver_remote_storage.root / "templates" / str(template_tenant_id)
     shutil.copytree(from_dir, to_dir)
