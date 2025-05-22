@@ -34,8 +34,8 @@ async fn prepare_typecheck(
         _ => return Err(Error::unexpected_message()),
     }
 
-    let parameter_description = match responses.next().await? {
-        Message::ParameterDescription(body) => body,
+    match responses.next().await? {
+        Message::ParameterDescription(_) => {},
         _ => return Err(Error::unexpected_message()),
     };
 
@@ -44,13 +44,6 @@ async fn prepare_typecheck(
         Message::NoData => None,
         _ => return Err(Error::unexpected_message()),
     };
-
-    let mut parameters = vec![];
-    let mut it = parameter_description.parameters();
-    while let Some(oid) = it.next().map_err(Error::parse)? {
-        let type_ = Type::from_oid(oid).ok_or_else(Error::unexpected_message)?;
-        parameters.push(type_);
-    }
 
     let mut columns = vec![];
     if let Some(row_description) = row_description {
@@ -62,7 +55,7 @@ async fn prepare_typecheck(
         }
     }
 
-    Ok(Statement::new(name, parameters, columns))
+    Ok(Statement::new(name, columns))
 }
 
 fn encode(

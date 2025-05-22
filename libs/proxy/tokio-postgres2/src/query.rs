@@ -76,8 +76,8 @@ where
         _ => return Err(Error::unexpected_message()),
     }
 
-    let parameter_description = match responses.next().await? {
-        Message::ParameterDescription(body) => body,
+    match responses.next().await? {
+        Message::ParameterDescription(_) => {},
         _ => return Err(Error::unexpected_message()),
     };
 
@@ -86,13 +86,6 @@ where
         Message::NoData => None,
         _ => return Err(Error::unexpected_message()),
     };
-
-    let mut parameters = vec![];
-    let mut it = parameter_description.parameters();
-    while let Some(oid) = it.next().map_err(Error::parse)? {
-        let type_ = crate::prepare::get_type(guard.client, typecache, oid).await?;
-        parameters.push(type_);
-    }
 
     let mut columns = vec![];
     if let Some(row_description) = row_description {
@@ -147,7 +140,7 @@ where
 
     Ok(RowStream {
         responses,
-        statement: Statement::new_anonymous(parameters, columns),
+        statement: Statement::new_anonymous(columns),
         command_tag: None,
         status: ReadyForQueryStatus::Unknown,
         output_format: Format::Text,

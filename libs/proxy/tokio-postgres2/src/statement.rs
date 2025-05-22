@@ -7,7 +7,6 @@ use postgres_protocol2::message::backend::Field;
 
 struct StatementInner {
     name: &'static str,
-    params: Vec<Type>,
     columns: Vec<Column>,
 }
 
@@ -18,29 +17,19 @@ struct StatementInner {
 pub struct Statement(Arc<StatementInner>);
 
 impl Statement {
-    pub(crate) fn new(name: &'static str, params: Vec<Type>, columns: Vec<Column>) -> Statement {
-        Statement(Arc::new(StatementInner {
-            name,
-            params,
-            columns,
-        }))
+    pub(crate) fn new(name: &'static str, columns: Vec<Column>) -> Statement {
+        Statement(Arc::new(StatementInner { name, columns }))
     }
 
-    pub(crate) fn new_anonymous(params: Vec<Type>, columns: Vec<Column>) -> Statement {
+    pub(crate) fn new_anonymous(columns: Vec<Column>) -> Statement {
         Statement(Arc::new(StatementInner {
             name: "<anonymous>",
-            params,
             columns,
         }))
     }
 
     pub(crate) fn name(&self) -> &str {
         self.0.name
-    }
-
-    /// Returns the expected types of the statement's parameters.
-    pub fn params(&self) -> &[Type] {
-        &self.0.params
     }
 
     /// Returns information about the columns returned when the statement is queried.
