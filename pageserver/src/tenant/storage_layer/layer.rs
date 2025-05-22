@@ -185,6 +185,7 @@ impl Layer {
             None,
             metadata.generation,
             metadata.shard,
+            metadata.template_ttid,
         )));
 
         debug_assert!(owner.0.needs_download_blocking().unwrap().is_some());
@@ -225,6 +226,7 @@ impl Layer {
                 Some(inner),
                 metadata.generation,
                 metadata.shard,
+                metadata.template_ttid,
             )
         }));
 
@@ -273,6 +275,7 @@ impl Layer {
                 Some(inner),
                 timeline.generation,
                 timeline.get_shard_index(),
+                None,
             )
         }));
 
@@ -710,6 +713,8 @@ struct LayerInner {
     /// a shard split since the layer was originally written.
     shard: ShardIndex,
 
+    template_ttid: Option<(TenantShardId, TimelineId)>,
+
     /// When the Layer was last evicted but has not been downloaded since.
     ///
     /// This is used for skipping evicted layers from the previous heatmap (see
@@ -853,6 +858,7 @@ impl LayerInner {
         downloaded: Option<Arc<DownloadedLayer>>,
         generation: Generation,
         shard: ShardIndex,
+        template_ttid: Option<(TenantShardId, TimelineId)>,
     ) -> Self {
         let (inner, version, init_status) = if let Some(inner) = downloaded {
             let version = inner.version;
@@ -888,6 +894,7 @@ impl LayerInner {
             consecutive_failures: AtomicUsize::new(0),
             generation,
             shard,
+            template_ttid,
             last_evicted_at: std::sync::Mutex::default(),
             #[cfg(test)]
             failpoints: Default::default(),
@@ -1623,7 +1630,9 @@ impl LayerInner {
     }
 
     fn metadata(&self) -> LayerFileMetadata {
-        LayerFileMetadata::new(self.desc.file_size, self.generation, self.shard)
+        let mut metadata = LayerFileMetadata::new(self.desc.file_size, self.generation, self.shard);
+        metadata.template_ttid = self.template_ttid;
+        metadata
     }
 
     /// Needed to use entered runtime in tests, but otherwise use BACKGROUND_RUNTIME.
