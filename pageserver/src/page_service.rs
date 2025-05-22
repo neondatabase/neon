@@ -160,13 +160,17 @@ pub fn spawn(
 }
 
 /// Spawns a gRPC server for the page service.
+///
+/// TODO: this doesn't support TLS. We need TLS reloading via ReloadingCertificateResolver, and to
+/// use that we have to reimplement the Tonic gRPC server ourselves. This will give up on a lot of
+/// infrastructure that's currently included with Tonic, and should use Hyper 1.x (alongside Hyper
+/// 0.x which is currently used by the Pageserver).
 pub fn spawn_grpc(
     conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<SwappableJwtAuth>>,
     perf_trace_dispatch: Option<Dispatch>,
     listener: std::net::TcpListener,
-    tls_identity: Option<tonic::transport::Identity>,
 ) -> anyhow::Result<CancellableTask> {
     let cancel = CancellationToken::new();
     let ctx = RequestContextBuilder::new(TaskKind::PageRequestHandler)
@@ -193,12 +197,6 @@ pub fn spawn_grpc(
         .http2_keepalive_interval(Some(GRPC_HTTP2_KEEPALIVE_INTERVAL))
         .http2_keepalive_timeout(Some(GRPC_HTTP2_KEEPALIVE_TIMEOUT))
         .max_concurrent_streams(Some(GRPC_MAX_CONCURRENT_STREAMS));
-    if let Some(identity) = tls_identity {
-        // TODO: unlike the HTTPS server, the gRPC server does not support
-        // certificate reloading. If this is needed, we have to use e.g.
-        // tonic-rustls, but it's unclear if it's mature enough.
-        server = server.tls_config(tonic::transport::ServerTlsConfig::new().identity(identity))?;
-    }
 
     // Main page service.
     let page_service = proto::PageServiceServer::new(PageServerHandler::new(

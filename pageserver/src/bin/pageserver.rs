@@ -413,16 +413,9 @@ fn start_pageserver(
     setsockopt(&pageserver_listener, sockopt::KeepAlive, &true)?;
 
     let mut grpc_listener = None;
-    let mut grpc_tls_identity = None;
     if let Some(grpc_addr) = &conf.listen_grpc_addr {
         info!("Starting pageserver gRPC handler on {grpc_addr}");
         grpc_listener = Some(tcp_listener::bind(grpc_addr).map_err(|e| anyhow!("{e}"))?);
-
-        if conf.enable_tls_page_service_api {
-            let ssl_cert = std::fs::read_to_string(&conf.ssl_cert_file)?;
-            let ssl_key = std::fs::read_to_string(&conf.ssl_key_file)?;
-            grpc_tls_identity = Some(tonic::transport::Identity::from_pem(ssl_cert, ssl_key));
-        }
     }
 
     // Launch broker client
@@ -798,7 +791,6 @@ fn start_pageserver(
             grpc_auth,
             otel_guard.as_ref().map(|g| g.dispatch.clone()),
             grpc_listener,
-            grpc_tls_identity,
         )?);
     }
 
