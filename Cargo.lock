@@ -8545,6 +8545,8 @@ dependencies = [
  "ahash",
  "anstream",
  "anyhow",
+ "axum",
+ "axum-core",
  "base64 0.13.1",
  "base64 0.21.7",
  "base64ct",
