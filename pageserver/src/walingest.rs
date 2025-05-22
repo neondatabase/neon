@@ -1316,7 +1316,9 @@ impl WalIngest {
             }
         });
 
-        if info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN {
+        if modification.tline.is_basebackup_cache_enabled()
+            && info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
+        {
             modification.tline.prepare_basebackup(lsn);
         }
 
