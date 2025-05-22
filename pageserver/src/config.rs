@@ -233,7 +233,7 @@ pub struct PageServerConf {
 
     pub timeline_import_config: pageserver_api::config::TimelineImportConfig,
 
-    pub basebackup_cache_config: pageserver_api::config::BasebackupCacheConfig,
+    pub basebackup_cache_config: Option<pageserver_api::config::BasebackupCacheConfig>,
 }
 
 /// Token for authentication to safekeepers

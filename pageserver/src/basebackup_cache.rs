@@ -77,16 +77,18 @@ impl BasebackupCache {
     pub fn spawn(
         runtime_handle: &tokio::runtime::Handle,
         data_dir: Utf8PathBuf,
-        config: BasebackupCacheConfig,
+        config: Option<BasebackupCacheConfig>,
         prepare_receiver: BasebackupPrepareReceiver,
         tenant_manager: Arc<TenantManager>,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let (remove_entry_sender, remove_entry_receiver) = tokio::sync::mpsc::unbounded_channel();
 
+        let enabled = config.is_some();
+
         let cache = Arc::new(BasebackupCache {
             data_dir,
-            config,
+            config: config.unwrap_or_default(),
             tenant_manager,
             remove_entry_sender,
 
@@ -103,11 +105,13 @@ impl BasebackupCache {
             prepare_err_count: BASEBACKUP_CACHE_PREPARE.with_label_values(&["error"]),
         });
 
-        runtime_handle.spawn(
-            cache
-                .clone()
-                .background(prepare_receiver, remove_entry_receiver),
-        );
+        if enabled {
+            runtime_handle.spawn(
+                cache
+                    .clone()
+                    .background(prepare_receiver, remove_entry_receiver),
+            );
+        }
 
         cache
     }

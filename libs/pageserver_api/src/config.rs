@@ -183,7 +183,8 @@ pub struct ConfigToml {
     pub enable_tls_page_service_api: bool,
     pub dev_mode: bool,
     pub timeline_import_config: TimelineImportConfig,
-    pub basebackup_cache_config: BasebackupCacheConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub basebackup_cache_config: Option<BasebackupCacheConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -517,6 +518,8 @@ pub struct TenantConfigToml {
     pub relsize_snapshot_cache_capacity: usize,
 
     /// Enable preparing basebackup on XLOG_CHECKPOINT_SHUTDOWN and using it in basebackup requests.
+    // FIXME: Remove skip_serializing_if when the feature is stable.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub basebackup_cache_enabled: bool,
 }
 
@@ -691,7 +694,7 @@ impl Default for ConfigToml {
                 import_job_soft_size_limit: NonZeroUsize::new(1024 * 1024 * 1024).unwrap(),
                 import_job_checkpoint_threshold: NonZeroUsize::new(128).unwrap(),
             },
-            basebackup_cache_config: BasebackupCacheConfig::default(),
+            basebackup_cache_config: None,
         }
     }
 }
