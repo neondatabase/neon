@@ -41,7 +41,7 @@ impl Statement {
 /// Information about a column of a query.
 pub struct Column {
     name: String,
-    type_: Type,
+    pub(crate) type_: Type,
 
     // raw fields from RowDescription
     table_oid: Oid,

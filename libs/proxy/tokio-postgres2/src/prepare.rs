@@ -1,7 +1,7 @@
 use bytes::{Bytes, BytesMut};
 use fallible_iterator::FallibleIterator;
 use postgres_protocol2::IsNull;
-use postgres_protocol2::message::backend::Message;
+use postgres_protocol2::message::backend::{Message, RowDescriptionBody};
 use postgres_protocol2::message::frontend;
 use postgres_protocol2::types::oid_to_sql;
 use postgres_types2::Format;
@@ -35,7 +35,7 @@ async fn prepare_typecheck(
     }
 
     match responses.next().await? {
-        Message::ParameterDescription(_) => {},
+        Message::ParameterDescription(_) => {}
         _ => return Err(Error::unexpected_message()),
     };
 
@@ -83,9 +83,58 @@ enum TypeStack {
     Range,
 }
 
-pub async fn get_type(
+fn from_cache(typecache: &CachedTypeInfo, oid: Oid) -> Type {
+    if let Some(type_) = Type::from_oid(oid) {
+        return type_;
+    }
+
+    if let Some(type_) = typecache.types.get(&oid) {
+        return type_.clone();
+    };
+
+    Type::UNKNOWN
+}
+
+pub async fn parse_row_description(
     client: &mut InnerClient,
     typecache: &mut CachedTypeInfo,
+    row_description: Option<RowDescriptionBody>,
+) -> Result<Vec<Column>, Error> {
+    let mut columns = vec![];
+
+    if let Some(row_description) = row_description {
+        let mut it = row_description.fields();
+        while let Some(field) = it.next().map_err(Error::parse)? {
+            let type_ = from_cache(typecache, field.type_oid());
+            let column = Column::new(field.name().to_string(), type_, field);
+            columns.push(column);
+        }
+    }
+
+    let all_known = columns.iter().all(|c| c.type_ != Type::UNKNOWN);
+    if all_known {
+        // all known, return early.
+        return Ok(columns);
+    }
+
+    // get the typeinfo statement.
+    let stmt = typeinfo_statement(client, typecache).await?;
+
+    for column in &mut columns {
+        if column.type_ != Type::UNKNOWN {
+            continue;
+        }
+
+        column.type_ = get_type(client, typecache, &stmt, column.type_.oid()).await?;
+    }
+
+    Ok(columns)
+}
+
+async fn get_type(
+    client: &mut InnerClient,
+    typecache: &mut CachedTypeInfo,
+    stmt: &Statement,
     mut oid: Oid,
 ) -> Result<Type, Error> {
     let mut stack = vec![];
@@ -97,8 +146,6 @@ pub async fn get_type(
         if let Some(type_) = typecache.types.get(&oid) {
             break type_.clone();
         };
-
-        let stmt = typeinfo_statement(client, typecache).await?;
 
         let row = exec(client, stmt, oid).await?;
 
@@ -163,8 +210,8 @@ async fn typeinfo_statement(
 }
 
 /// exec the typeinfo statement returning one row.
-async fn exec(client: &mut InnerClient, statement: Statement, param: Oid) -> Result<Row, Error> {
-    let buf = encode_subquery(client, &statement, param)?;
+async fn exec(client: &mut InnerClient, statement: &Statement, param: Oid) -> Result<Row, Error> {
+    let buf = encode_subquery(client, statement, param)?;
     let responses = client.send_partial(FrontendMessage::Raw(buf))?;
 
     match responses.next().await? {
@@ -173,7 +220,7 @@ async fn exec(client: &mut InnerClient, statement: Statement, param: Oid) -> Res
     }
 
     let row = match responses.next().await? {
-        Message::DataRow(body) => Row::new(statement, body, Format::Binary)?,
+        Message::DataRow(body) => Row::new(statement.clone(), body, Format::Binary)?,
         _ => return Err(Error::unexpected_message()),
     };
 

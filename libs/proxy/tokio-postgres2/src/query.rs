@@ -2,7 +2,6 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use bytes::BufMut;
-use fallible_iterator::FallibleIterator;
 use futures_util::{Stream, ready};
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
@@ -10,7 +9,7 @@ use postgres_types2::Format;
 
 use crate::client::{CachedTypeInfo, InnerClient, Responses};
 use crate::codec::FrontendMessage;
-use crate::{Column, Error, ReadyForQueryStatus, Row, Statement};
+use crate::{Error, ReadyForQueryStatus, Row, Statement};
 
 /// we need to send a sync message on error to allow the protocol to reset.
 struct SyncIfNotDone<'a> {
@@ -77,7 +76,7 @@ where
     }
 
     match responses.next().await? {
-        Message::ParameterDescription(_) => {},
+        Message::ParameterDescription(_) => {}
         _ => return Err(Error::unexpected_message()),
     };
 
@@ -87,18 +86,11 @@ where
         _ => return Err(Error::unexpected_message()),
     };
 
-    let mut columns = vec![];
-    if let Some(row_description) = row_description {
-        let mut it = row_description.fields();
-        while let Some(field) = it.next().map_err(Error::parse)? {
-            let type_ = crate::prepare::get_type(guard.client, typecache, field.type_oid()).await?;
-            let column = Column::new(field.name().to_string(), type_, field);
-            columns.push(column);
-        }
-    }
+    let columns =
+        crate::prepare::parse_row_description(guard.client, typecache, row_description).await?;
 
     let buf = guard.client.with_buf(|buf| {
-        // Bind, pass params as text, retrieve as binary
+        // Bind, pass params as text, retrieve as text
         match frontend::bind(
             "",                 // empty string selects the unnamed portal
             "",                 // unnamed prepared statement
