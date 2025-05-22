@@ -27,6 +27,23 @@ fn get_rsyslog_pid() -> Option<String> {
     }
 }
 
+fn wait_for_rsyslog_pid() -> Result<String, anyhow::Error> {
+    for attempt in 1..=50 {
+        match get_rsyslog_pid() {
+            Some(pid) => return Ok(pid),
+            None => {
+                info!(
+                    "rsyslogd is not running, attempt {}/50. Waiting...",
+                    attempt
+                );
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!("rsyslogd did not start after 50 attempts"))
+}
+
 // Restart rsyslogd to apply the new configuration.
 // This is necessary, because there is no other way to reload the rsyslog configuration.
 //
@@ -36,14 +53,14 @@ fn get_rsyslog_pid() -> Option<String> {
 // TODO: test it properly
 //
 fn restart_rsyslog() -> Result<()> {
-    let old_pid = get_rsyslog_pid().context("rsyslogd is not running")?;
-    info!("rsyslogd is running with pid: {}, restart it", old_pid);
-
     // kill it to restart
     let _ = Command::new("pkill")
         .arg("rsyslogd")
         .output()
-        .context("Failed to stop rsyslogd")?;
+        .context("Failed to restart rsyslogd")?;
+
+    // ensure rsyslogd is running
+    wait_for_rsyslog_pid()?;
 
     Ok(())
 }
@@ -131,15 +148,11 @@ pub fn configure_postgres_logs_export(conf: PostgresLogsRsyslogConfig) -> Result
         return Ok(());
     }
 
-    // When new config is empty we can simply remove the configuration file.
+    // Nothing to configure
     if new_config.is_empty() {
-        info!("removing rsyslog config file: {}", POSTGRES_LOGS_CONF_PATH);
-        match std::fs::remove_file(POSTGRES_LOGS_CONF_PATH) {
-            Ok(_) => {}
-            Err(err) if err.kind() == ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
-        }
-        restart_rsyslog()?;
+        // When the configuration is removed, PostgreSQL will stop sending data
+        // to the files watched by rsyslog, so restarting rsyslog is more effort
+        // than just ignoring this change.
         return Ok(());
     }
 
