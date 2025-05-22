@@ -1276,7 +1276,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "indexmap 2.0.1",
+ "indexmap 2.9.0",
  "jsonwebtoken",
  "regex",
  "remote_storage",
@@ -1308,7 +1308,7 @@ dependencies = [
  "flate2",
  "futures",
  "http 1.1.0",
- "indexmap 2.0.1",
+ "indexmap 2.9.0",
  "itertools 0.10.5",
  "jsonwebtoken",
  "metrics",
@@ -2597,7 +2597,7 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "http 0.2.9",
- "indexmap 2.0.1",
+ "indexmap 2.9.0",
  "slab",
  "tokio",
  "tokio-util",
@@ -2616,7 +2616,7 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "http 1.1.0",
- "indexmap 2.0.1",
+ "indexmap 2.9.0",
  "slab",
  "tokio",
  "tokio-util",
@@ -2863,14 +2863,14 @@ dependencies = [
  "pprof",
  "regex",
  "routerify",
- "rustls 0.23.18",
+ "rustls 0.23.27",
  "rustls-pemfile 2.1.1",
  "serde",
  "serde_json",
  "serde_path_to_error",
  "thiserror 1.0.69",
  "tokio",
- "tokio-rustls 0.26.0",
+ "tokio-rustls 0.26.2",
  "tokio-stream",
  "tokio-util",
  "tracing",
@@ -3200,12 +3200,12 @@ dependencies = [
 
 [[package]]
 name = "indexmap"
-version = "2.0.1"
+version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad227c3af19d4914570ad36d30409928b75967c298feb9ea1969db3a610bb14e"
+checksum = "cea70ddb795996207ad57735b50c5982d8844f38ba9ee5f1aedcfb708a2aa11e"
 dependencies = [
  "equivalent",
- "hashbrown 0.14.5",
+ "hashbrown 0.15.2",
  "serde",
 ]
 
@@ -3228,7 +3228,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "232929e1d75fe899576a3d5c7416ad0d88dbfbb3c3d6aa00873a7408a50ddb88"
 dependencies = [
  "ahash",
- "indexmap 2.0.1",
+ "indexmap 2.9.0",
  "is-terminal",
  "itoa",
  "log",
@@ -3251,7 +3251,7 @@ dependencies = [
  "crossbeam-utils",
  "dashmap 6.1.0",
  "env_logger",
- "indexmap 2.0.1",
+ "indexmap 2.9.0",
  "itoa",
  "log",
  "num-format",
@@ -4112,7 +4112,7 @@ dependencies = [
  "opentelemetry-http",
  "opentelemetry-proto",
  "opentelemetry_sdk",
- "prost 0.13.3",
+ "prost 0.13.5",
  "reqwest",
  "thiserror 1.0.69",
 ]
@@ -4125,8 +4125,8 @@ checksum = "a6e05acbfada5ec79023c85368af14abd0b307c015e9064d249b2a950ef459a6"
 dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
- "prost 0.13.3",
- "tonic",
+ "prost 0.13.5",
+ "tonic 0.12.3",
 ]
 
 [[package]]
@@ -4339,7 +4339,7 @@ dependencies = [
  "reqwest",
  "rpds",
  "rstest",
- "rustls 0.23.18",
+ "rustls 0.23.27",
  "scopeguard",
  "send-future",
  "serde",
@@ -4358,7 +4358,7 @@ dependencies = [
  "tokio-epoll-uring",
  "tokio-io-timeout",
  "tokio-postgres",
- "tokio-rustls 0.26.0",
+ "tokio-rustls 0.26.2",
  "tokio-stream",
  "tokio-tar",
  "tokio-util",
@@ -4455,8 +4455,8 @@ dependencies = [
 name = "pageserver_page_api"
 version = "0.1.0"
 dependencies = [
- "prost 0.13.3",
- "tonic",
+ "prost 0.13.5",
+ "tonic 0.13.1",
  "tonic-build",
  "workspace_hack",
 ]
@@ -4837,14 +4837,14 @@ dependencies = [
  "bytes",
  "once_cell",
  "pq_proto",
- "rustls 0.23.18",
+ "rustls 0.23.27",
  "rustls-pemfile 2.1.1",
  "serde",
  "thiserror 1.0.69",
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
- "tokio-rustls 0.26.0",
+ "tokio-rustls 0.26.2",
  "tokio-util",
  "tracing",
 ]
@@ -4951,7 +4951,7 @@ dependencies = [
  "inferno 0.12.0",
  "num",
  "paste",
- "prost 0.13.3",
+ "prost 0.13.5",
 ]
 
 [[package]]
@@ -5056,12 +5056,12 @@ dependencies = [
 
 [[package]]
 name = "prost"
-version = "0.13.3"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b0487d90e047de87f984913713b85c601c05609aad5b0df4b4573fbf69aa13f"
+checksum = "2796faa41db3ec313a31f7624d9286acf277b52de526150b7e69f3debf891ee5"
 dependencies = [
  "bytes",
- "prost-derive 0.13.3",
+ "prost-derive 0.13.5",
 ]
 
 [[package]]
@@ -5099,7 +5099,7 @@ dependencies = [
  "once_cell",
  "petgraph",
  "prettyplease",
- "prost 0.13.3",
+ "prost 0.13.5",
  "prost-types 0.13.3",
  "regex",
  "syn 2.0.100",
@@ -5121,9 +5121,9 @@ dependencies = [
 
 [[package]]
 name = "prost-derive"
-version = "0.13.3"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9552f850d5f0964a4e4d0bf306459ac29323ddfbae05e35a7c0d35cb0803cc5"
+checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
  "itertools 0.12.1",
@@ -5147,7 +5147,7 @@ version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4759aa0d3a6232fb8dbdb97b61de2c20047c68aca932c7ed76da9d788508d670"
 dependencies = [
- "prost 0.13.3",
+ "prost 0.13.5",
 ]
 
 [[package]]
@@ -5195,7 +5195,7 @@ dependencies = [
  "hyper 0.14.30",
  "hyper 1.4.1",
  "hyper-util",
- "indexmap 2.0.1",
+ "indexmap 2.9.0",
  "ipnet",
  "itertools 0.10.5",
  "itoa",
@@ -5229,7 +5229,7 @@ dependencies = [
  "rsa",
  "rstest",
  "rustc-hash 1.1.0",
- "rustls 0.23.18",
+ "rustls 0.23.27",
  "rustls-native-certs 0.8.0",
  "rustls-pemfile 2.1.1",
  "scopeguard",
@@ -5248,7 +5248,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-postgres2",
- "tokio-rustls 0.26.0",
+ "tokio-rustls 0.26.2",
  "tokio-tungstenite 0.21.0",
  "tokio-util",
  "tracing",
@@ -5472,13 +5472,13 @@ dependencies = [
  "num-bigint",
  "percent-encoding",
  "pin-project-lite",
- "rustls 0.23.18",
+ "rustls 0.23.27",
  "rustls-native-certs 0.8.0",
  "ryu",
  "sha1_smol",
  "socket2",
  "tokio",
- "tokio-rustls 0.26.0",
+ "tokio-rustls 0.26.2",
  "tokio-util",
  "url",
 ]
@@ -5926,15 +5926,15 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.18"
+version = "0.23.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c9cc1d47e243d655ace55ed38201c19ae02c148ae56412ab8750e8f0166ab7f"
+checksum = "730944ca083c1c233a75c09f199e973ca499344a2b7ba9e755c457e86fb4a321"
 dependencies = [
  "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
- "rustls-webpki 0.102.8",
+ "rustls-webpki 0.103.3",
  "subtle",
  "zeroize",
 ]
@@ -6024,6 +6024,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustls-webpki"
+version = "0.103.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4a72fe2bcf7a6ac6fd7d0b9e5cb68aeb7d4c0a0271730218b3e92d43b4eb435"
+dependencies = [
+ "ring",
+ "rustls-pki-types",
+ "untrusted",
+]
+
+[[package]]
 name = "rustversion"
 version = "1.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6074,7 +6085,7 @@ dependencies = [
  "regex",
  "remote_storage",
  "reqwest",
- "rustls 0.23.18",
+ "rustls 0.23.27",
  "safekeeper_api",
  "safekeeper_client",
  "scopeguard",
@@ -6091,7 +6102,7 @@ dependencies = [
  "tokio",
  "tokio-io-timeout",
  "tokio-postgres",
- "tokio-rustls 0.26.0",
+ "tokio-rustls 0.26.2",
  "tokio-stream",
  "tokio-tar",
  "tokio-util",
@@ -6263,7 +6274,7 @@ checksum = "255914a8e53822abd946e2ce8baa41d4cded6b8e938913b7f7b9da5b7ab44335"
 dependencies = [
  "httpdate",
  "reqwest",
- "rustls 0.23.18",
+ "rustls 0.23.27",
  "sentry-backtrace",
  "sentry-contexts",
  "sentry-core",
@@ -6692,11 +6703,11 @@ dependencies = [
  "metrics",
  "once_cell",
  "parking_lot 0.12.1",
- "prost 0.13.3",
- "rustls 0.23.18",
+ "prost 0.13.5",
+ "rustls 0.23.27",
  "tokio",
- "tokio-rustls 0.26.0",
- "tonic",
+ "tokio-rustls 0.26.2",
+ "tonic 0.13.1",
  "tonic-build",
  "tracing",
  "utils",
@@ -6738,7 +6749,7 @@ dependencies = [
  "regex",
  "reqwest",
  "routerify",
- "rustls 0.23.18",
+ "rustls 0.23.27",
  "rustls-native-certs 0.8.0",
  "safekeeper_api",
  "safekeeper_client",
@@ -6753,7 +6764,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
- "tokio-rustls 0.26.0",
+ "tokio-rustls 0.26.2",
  "tokio-util",
  "tracing",
  "utils",
@@ -6791,7 +6802,7 @@ dependencies = [
  "postgres_ffi",
  "remote_storage",
  "reqwest",
- "rustls 0.23.18",
+ "rustls 0.23.27",
  "rustls-native-certs 0.8.0",
  "serde",
  "serde_json",
@@ -7325,10 +7336,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04fb792ccd6bbcd4bba408eb8a292f70fc4a3589e5d793626f45190e6454b6ab"
 dependencies = [
  "ring",
- "rustls 0.23.18",
+ "rustls 0.23.27",
  "tokio",
  "tokio-postgres",
- "tokio-rustls 0.26.0",
+ "tokio-rustls 0.26.2",
  "x509-certificate",
 ]
 
@@ -7372,12 +7383,11 @@ dependencies = [
 
 [[package]]
 name = "tokio-rustls"
-version = "0.26.0"
+version = "0.26.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c7bc40d0e5a97695bb96e27995cd3a08538541b0a846f65bba7a359f36700d4"
+checksum = "8e727b36a1a0e8b74c376ac2211e40c2c8af09fb4013c60d910495810f008e9b"
 dependencies = [
- "rustls 0.23.18",
- "rustls-pki-types",
+ "rustls 0.23.27",
  "tokio",
 ]
 
@@ -7475,7 +7485,7 @@ version = "0.22.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f21c7aaf97f1bd9ca9d4f9e73b0a6c74bd5afef56f2bc931943a6e1c37e04e38"
 dependencies = [
- "indexmap 2.0.1",
+ "indexmap 2.9.0",
  "serde",
  "serde_spanned",
  "toml_datetime",
@@ -7499,11 +7509,11 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
- "prost 0.13.3",
+ "prost 0.13.5",
  "rustls-native-certs 0.8.0",
  "rustls-pemfile 2.1.1",
  "tokio",
- "tokio-rustls 0.26.0",
+ "tokio-rustls 0.26.2",
  "tokio-stream",
  "tower 0.4.13",
  "tower-layer",
@@ -7512,10 +7522,38 @@ dependencies = [
 ]
 
 [[package]]
-name = "tonic-build"
-version = "0.12.3"
+name = "tonic"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9557ce109ea773b399c9b9e5dca39294110b74f1f342cb347a80d1fce8c26a11"
+checksum = "7e581ba15a835f4d9ea06c55ab1bd4dce26fc53752c69a04aac00703bfb49ba9"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "http 1.1.0",
+ "http-body 1.0.0",
+ "http-body-util",
+ "hyper 1.4.1",
+ "hyper-timeout",
+ "hyper-util",
+ "percent-encoding",
+ "pin-project",
+ "prost 0.13.5",
+ "rustls-native-certs 0.8.0",
+ "tokio",
+ "tokio-rustls 0.26.2",
+ "tokio-stream",
+ "tower 0.5.2",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
+name = "tonic-build"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eac6f67be712d12f0b41328db3137e0d0757645d8904b4cb7d51cd9c2279e847"
 dependencies = [
  "prettyplease",
  "proc-macro2",
@@ -7553,9 +7591,12 @@ checksum = "d039ad9159c98b70ecfd540b2573b97f7f52c3e8d9f8ad57a24b916a536975f9"
 dependencies = [
  "futures-core",
  "futures-util",
+ "indexmap 2.9.0",
  "pin-project-lite",
+ "slab",
  "sync_wrapper 1.0.1",
  "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -7883,7 +7924,7 @@ dependencies = [
  "base64 0.22.1",
  "log",
  "once_cell",
- "rustls 0.23.18",
+ "rustls 0.23.27",
  "rustls-pki-types",
  "url",
  "webpki-roots",
@@ -8078,7 +8119,7 @@ dependencies = [
  "pageserver_api",
  "postgres_ffi",
  "pprof",
- "prost 0.13.3",
+ "prost 0.13.5",
  "remote_storage",
  "serde",
  "serde_json",
@@ -8535,7 +8576,7 @@ dependencies = [
  "hyper 1.4.1",
  "hyper-util",
  "indexmap 1.9.3",
- "indexmap 2.0.1",
+ "indexmap 2.9.0",
  "itertools 0.12.1",
  "lazy_static",
  "libc",
@@ -8557,14 +8598,14 @@ dependencies = [
  "percent-encoding",
  "prettyplease",
  "proc-macro2",
- "prost 0.13.3",
+ "prost 0.13.5",
  "quote",
  "rand 0.8.5",
  "regex",
  "regex-automata 0.4.3",
  "regex-syntax 0.8.2",
  "reqwest",
- "rustls 0.23.18",
+ "rustls 0.23.27",
  "rustls-pki-types",
  "rustls-webpki 0.102.8",
  "scopeguard",
@@ -8584,11 +8625,11 @@ dependencies = [
  "time",
  "time-macros",
  "tokio",
- "tokio-rustls 0.26.0",
+ "tokio-rustls 0.26.2",
  "tokio-stream",
  "tokio-util",
  "toml_edit",
- "tonic",
+ "tonic 0.12.3",
  "tower 0.4.13",
  "tracing",
  "tracing-core",
