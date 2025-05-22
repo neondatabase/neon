@@ -232,6 +232,8 @@ pub struct PageServerConf {
     pub dev_mode: bool,
 
     pub timeline_import_config: pageserver_api::config::TimelineImportConfig,
+
+    pub basebackup_cache_config: Option<pageserver_api::config::BasebackupCacheConfig>,
 }
 
 /// Token for authentication to safekeepers
@@ -259,6 +261,10 @@ impl PageServerConf {
 
     pub fn metadata_path(&self) -> Utf8PathBuf {
         self.workdir.join("metadata.json")
+    }
+
+    pub fn basebackup_cache_dir(&self) -> Utf8PathBuf {
+        self.workdir.join("basebackup_cache")
     }
 
     pub fn deletion_list_path(&self, sequence: u64) -> Utf8PathBuf {
@@ -407,6 +413,7 @@ impl PageServerConf {
             enable_tls_page_service_api,
             dev_mode,
             timeline_import_config,
+            basebackup_cache_config,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -461,6 +468,7 @@ impl PageServerConf {
             enable_tls_page_service_api,
             dev_mode,
             timeline_import_config,
+            basebackup_cache_config,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling

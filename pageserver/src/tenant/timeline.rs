@@ -24,8 +24,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::PERF_TRACE_TARGET;
-use crate::walredo::RedoAttemptType;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use bytes::Bytes;
@@ -94,10 +92,12 @@ use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
 use super::tasks::log_compaction_error;
 use super::upload_queue::NotInitialized;
 use super::{
-    AttachedTenantConf, GcError, HeatMapTimeline, MaybeOffloaded,
+    AttachedTenantConf, BasebackupPrepareSender, GcError, HeatMapTimeline, MaybeOffloaded,
     debug_assert_current_span_has_tenant_and_timeline_id,
 };
+use crate::PERF_TRACE_TARGET;
 use crate::aux_file::AuxFileSizeEstimator;
+use crate::basebackup_cache::BasebackupPrepareRequest;
 use crate::config::PageServerConf;
 use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
@@ -131,6 +131,7 @@ use crate::tenant::tasks::BackgroundLoopKind;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 use crate::walingest::WalLagCooldown;
+use crate::walredo::RedoAttemptType;
 use crate::{ZERO_PAGE, task_mgr, walredo};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -196,6 +197,7 @@ pub struct TimelineResources {
     pub pagestream_throttle_metrics: Arc<crate::metrics::tenant_throttling::Pagestream>,
     pub l0_compaction_trigger: Arc<Notify>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
+    pub basebackup_prepare_sender: BasebackupPrepareSender,
 }
 
 pub struct Timeline {
@@ -439,6 +441,9 @@ pub struct Timeline {
     pub(crate) rel_size_v2_status: ArcSwapOption<RelSizeMigration>,
 
     wait_lsn_log_slow: tokio::sync::Semaphore,
+
+    /// A channel to send async requests to prepare a basebackup for the basebackup cache.
+    basebackup_prepare_sender: BasebackupPrepareSender,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -1028,6 +1033,7 @@ pub(crate) enum WaitLsnWaiter<'a> {
     Tenant,
     PageService,
     HttpEndpoint,
+    BaseBackupCache,
 }
 
 /// Argument to [`Timeline::shutdown`].
@@ -1554,7 +1560,8 @@ impl Timeline {
                         }
                         WaitLsnWaiter::Tenant
                         | WaitLsnWaiter::PageService
-                        | WaitLsnWaiter::HttpEndpoint => unreachable!(
+                        | WaitLsnWaiter::HttpEndpoint
+                        | WaitLsnWaiter::BaseBackupCache => unreachable!(
                             "tenant or page_service context are not expected to have task kind {:?}",
                             ctx.task_kind()
                         ),
@@ -2459,6 +2466,41 @@ impl Timeline {
             false
         }
     }
+
+    pub(crate) fn is_basebackup_cache_enabled(&self) -> bool {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .basebackup_cache_enabled
+            .unwrap_or(self.conf.default_tenant_conf.basebackup_cache_enabled)
+    }
+
+    /// Prepare basebackup for the given LSN and store it in the basebackup cache.
+    /// The method is asynchronous and returns immediately.
+    /// The actual basebackup preparation is performed in the background
+    /// by the basebackup cache on a best-effort basis.
+    pub(crate) fn prepare_basebackup(&self, lsn: Lsn) {
+        if !self.is_basebackup_cache_enabled() {
+            return;
+        }
+        if !self.tenant_shard_id.is_shard_zero() {
+            // In theory we should never get here, but just in case check it.
+            // Preparing basebackup doesn't make sense for shards other than shard zero.
+            return;
+        }
+
+        let res = self
+            .basebackup_prepare_sender
+            .send(BasebackupPrepareRequest {
+                tenant_shard_id: self.tenant_shard_id,
+                timeline_id: self.timeline_id,
+                lsn,
+            });
+        if let Err(e) = res {
+            // May happen during shutdown, it's not critical.
+            info!("Failed to send shutdown checkpoint: {e:#}");
+        }
+    }
 }
 
 /// Number of times we will compute partition within a checkpoint distance.
@@ -3028,6 +3070,8 @@ impl Timeline {
                 rel_size_v2_status: ArcSwapOption::from_pointee(rel_size_v2_status),
 
                 wait_lsn_log_slow: tokio::sync::Semaphore::new(1),
+
+                basebackup_prepare_sender: resources.basebackup_prepare_sender,
             };
 
             result.repartition_threshold =

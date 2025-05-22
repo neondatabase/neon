@@ -78,6 +78,7 @@ use self::timeline::uninit::{TimelineCreateGuard, TimelineExclusionError, Uninit
 use self::timeline::{
     EvictionTaskTenantState, GcCutoffs, TimelineDeleteProgress, TimelineResources, WaitLsnError,
 };
+use crate::basebackup_cache::BasebackupPrepareSender;
 use crate::config::PageServerConf;
 use crate::context;
 use crate::context::RequestContextBuilder;
@@ -157,6 +158,7 @@ pub struct TenantSharedResources {
     pub remote_storage: GenericRemoteStorage,
     pub deletion_queue_client: DeletionQueueClient,
     pub l0_flush_global_state: L0FlushGlobalState,
+    pub basebackup_prepare_sender: BasebackupPrepareSender,
 }
 
 /// A [`TenantShard`] is really an _attached_ tenant.  The configuration
@@ -317,11 +319,14 @@ pub struct TenantShard {
     gc_cs: tokio::sync::Mutex<()>,
     walredo_mgr: Option<Arc<WalRedoManager>>,
 
-    // provides access to timeline data sitting in the remote storage
+    /// Provides access to timeline data sitting in the remote storage.
     pub(crate) remote_storage: GenericRemoteStorage,
 
-    // Access to global deletion queue for when this tenant wants to schedule a deletion
+    /// Access to global deletion queue for when this tenant wants to schedule a deletion.
     deletion_queue_client: DeletionQueueClient,
+
+    /// A channel to send async requests to prepare a basebackup for the basebackup cache.
+    basebackup_prepare_sender: BasebackupPrepareSender,
 
     /// Cached logical sizes updated updated on each [`TenantShard::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
@@ -1286,6 +1291,7 @@ impl TenantShard {
             remote_storage,
             deletion_queue_client,
             l0_flush_global_state,
+            basebackup_prepare_sender,
         } = resources;
 
         let attach_mode = attached_conf.location.attach_mode;
@@ -1301,6 +1307,7 @@ impl TenantShard {
             remote_storage.clone(),
             deletion_queue_client,
             l0_flush_global_state,
+            basebackup_prepare_sender,
         ));
 
         // The attach task will carry a GateGuard, so that shutdown() reliably waits for it to drop out if
@@ -4239,6 +4246,7 @@ impl TenantShard {
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
         l0_flush_global_state: L0FlushGlobalState,
+        basebackup_prepare_sender: BasebackupPrepareSender,
     ) -> TenantShard {
         assert!(!attached_conf.location.generation.is_none());
 
@@ -4342,6 +4350,7 @@ impl TenantShard {
             ongoing_timeline_detach: std::sync::Mutex::default(),
             gc_block: Default::default(),
             l0_flush_global_state,
+            basebackup_prepare_sender,
         }
     }
 
@@ -5261,6 +5270,7 @@ impl TenantShard {
             pagestream_throttle_metrics: self.pagestream_throttle_metrics.clone(),
             l0_compaction_trigger: self.l0_compaction_trigger.clone(),
             l0_flush_global_state: self.l0_flush_global_state.clone(),
+            basebackup_prepare_sender: self.basebackup_prepare_sender.clone(),
         }
     }
 
@@ -5843,6 +5853,8 @@ pub(crate) mod harness {
         ) -> anyhow::Result<Arc<TenantShard>> {
             let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
 
+            let (basebackup_requst_sender, _) = tokio::sync::mpsc::unbounded_channel();
+
             let tenant = Arc::new(TenantShard::new(
                 TenantState::Attaching,
                 self.conf,
@@ -5860,6 +5872,7 @@ pub(crate) mod harness {
                 self.deletion_queue.new_client(),
                 // TODO: ideally we should run all unit tests with both configs
                 L0FlushGlobalState::new(L0FlushConfig::default()),
+                basebackup_requst_sender,
             ));
 
             let preload = tenant

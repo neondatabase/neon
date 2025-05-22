@@ -632,6 +632,8 @@ pub struct TenantConfigPatch {
     pub sampling_ratio: FieldPatch<Option<Ratio>>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub relsize_snapshot_cache_capacity: FieldPatch<usize>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub basebackup_cache_enabled: FieldPatch<bool>,
 }
 
 /// Like [`crate::config::TenantConfigToml`], but preserves the information
@@ -764,6 +766,9 @@ pub struct TenantConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relsize_snapshot_cache_capacity: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub basebackup_cache_enabled: Option<bool>,
 }
 
 impl TenantConfig {
@@ -810,6 +815,7 @@ impl TenantConfig {
             mut gc_compaction_ratio_percent,
             mut sampling_ratio,
             mut relsize_snapshot_cache_capacity,
+            mut basebackup_cache_enabled,
         } = self;
 
         patch.checkpoint_distance.apply(&mut checkpoint_distance);
@@ -914,6 +920,9 @@ impl TenantConfig {
         patch
             .relsize_snapshot_cache_capacity
             .apply(&mut relsize_snapshot_cache_capacity);
+        patch
+            .basebackup_cache_enabled
+            .apply(&mut basebackup_cache_enabled);
 
         Ok(Self {
             checkpoint_distance,
@@ -954,6 +963,7 @@ impl TenantConfig {
             gc_compaction_ratio_percent,
             sampling_ratio,
             relsize_snapshot_cache_capacity,
+            basebackup_cache_enabled,
         })
     }
 
@@ -1065,6 +1075,9 @@ impl TenantConfig {
             relsize_snapshot_cache_capacity: self
                 .relsize_snapshot_cache_capacity
                 .unwrap_or(global_conf.relsize_snapshot_cache_capacity),
+            basebackup_cache_enabled: self
+                .basebackup_cache_enabled
+                .unwrap_or(global_conf.basebackup_cache_enabled),
         }
     }
 }
