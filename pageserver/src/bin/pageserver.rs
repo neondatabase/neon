@@ -389,21 +389,28 @@ fn start_pageserver(
 
     // Bind the HTTP, libpq, and gRPC ports early, to error out if they are
     // already in use.
-    let http_addr = &conf.listen_http_addr;
-    info!("Starting pageserver http handler on {http_addr}");
-    let http_listener = tcp_listener::bind(http_addr)?;
+    info!(
+        "Starting pageserver http handler on {} with auth {:#?}",
+        conf.listen_http_addr, conf.http_auth_type
+    );
+    let http_listener = tcp_listener::bind(&conf.listen_http_addr)?;
 
     let https_listener = match conf.listen_https_addr.as_ref() {
         Some(https_addr) => {
-            info!("Starting pageserver https handler on {https_addr}");
+            info!(
+                "Starting pageserver https handler on {https_addr} with auth {:#?}",
+                conf.http_auth_type
+            );
             Some(tcp_listener::bind(https_addr)?)
         }
         None => None,
     };
 
-    let pg_addr = &conf.listen_pg_addr;
-    info!("Starting pageserver pg protocol handler on {pg_addr}");
-    let pageserver_listener = tcp_listener::bind(pg_addr)?;
+    info!(
+        "Starting pageserver pg protocol handler on {} with auth {:#?}",
+        conf.listen_pg_addr, conf.pg_auth_type,
+    );
+    let pageserver_listener = tcp_listener::bind(&conf.listen_pg_addr)?;
 
     // Enable SO_KEEPALIVE on the socket, to detect dead connections faster.
     // These are configured via net.ipv4.tcp_keepalive_* sysctls.
@@ -414,7 +421,10 @@ fn start_pageserver(
 
     let mut grpc_listener = None;
     if let Some(grpc_addr) = &conf.listen_grpc_addr {
-        info!("Starting pageserver gRPC handler on {grpc_addr}");
+        info!(
+            "Starting pageserver gRPC handler on {grpc_addr} with auth {:#?}",
+            conf.grpc_auth_type
+        );
         grpc_listener = Some(tcp_listener::bind(grpc_addr).map_err(|e| anyhow!("{e}"))?);
     }
 
@@ -471,8 +481,6 @@ fn start_pageserver(
         pg_auth = None;
         grpc_auth = None;
     }
-    info!("Using auth for http API: {:#?}", conf.http_auth_type);
-    info!("Using auth for pg connections: {:#?}", conf.pg_auth_type);
 
     let tls_server_config = if conf.listen_https_addr.is_some() || conf.enable_tls_page_service_api
     {
