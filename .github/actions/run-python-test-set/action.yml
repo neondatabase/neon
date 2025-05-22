@@ -203,6 +203,7 @@ runs:
         # -s is not used to prevent pytest from capturing output, because tests are running
         # in parallel and logs are mixed between different tests
         #
+        (cd vendor/postgres-v${DEFAULT_PG_VERSION}; patch -p1 -i ../../xN.patch)
         mkdir -p $TEST_OUTPUT/allure/results
         "${cov_prefix[@]}" ./scripts/pytest \
           --alluredir=$TEST_OUTPUT/allure/results \

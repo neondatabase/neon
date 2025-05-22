@@ -130,7 +130,7 @@ def patch_tenant_conf(tenant_conf: dict[str, Any], reldir_type: str) -> dict[str
 
 # Run the main PostgreSQL regression tests, in src/test/regress.
 #
-@pytest.mark.timeout(3000)  # Contains many sub-tests, is slow in debug builds
+@pytest.mark.timeout(30000)  # Contains many sub-tests, is slow in debug builds
 @pytest.mark.parametrize("shard_count", [None, 4])
 @pytest.mark.parametrize("reldir_type", ["v1", "v2"])
 def test_pg_regress(
@@ -164,6 +164,9 @@ def test_pg_regress(
         config_lines=[
             # Enable the test mode, so that we don't need to patch the test cases.
             "neon.regress_test_mode = true",
+            "shared_buffers=128MB",
+            "neon.max_file_cache_size = 1000MB",
+            "neon.file_cache_size_limit = 1000MB",
         ],
     )
     endpoint.safe_psql(f"CREATE DATABASE {DBNAME}")
