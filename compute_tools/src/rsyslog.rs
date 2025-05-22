@@ -150,6 +150,9 @@ pub fn configure_postgres_logs_export(conf: PostgresLogsRsyslogConfig) -> Result
 
     // Nothing to configure
     if new_config.is_empty() {
+        // When the configuration is removed, PostgreSQL will stop sending data
+        // to the files watched by rsyslog, so restarting rsyslog is more effort
+        // than just ignoring this change.
         return Ok(());
     }
 
