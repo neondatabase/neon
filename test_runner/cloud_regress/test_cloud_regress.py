@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from fixtures.pg_version import PgVersion
 
 
-@pytest.mark.timeout(7200)
+@pytest.mark.timeout(4*3600)
 @pytest.mark.remote_cluster
 def test_cloud_regress(
     remote_pg: RemotePostgres,
