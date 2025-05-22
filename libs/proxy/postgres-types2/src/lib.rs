@@ -107,7 +107,7 @@ pub enum Kind {
     /// An array type along with the type of its elements.
     Array(Type),
     /// A range type along with the type of its elements.
-    Range(Type),
+    Range(Oid),
     /// A multirange type along with the type of its elements.
     Multirange(Type),
     /// A domain type along with its underlying type.

@@ -82,11 +82,6 @@ fn encode(client: &mut InnerClient, name: &str, query: &str) -> Result<Bytes, Er
     })
 }
 
-enum TypeStack {
-    Array,
-    Range,
-}
-
 fn try_from_cache(typecache: &CachedTypeInfo, oid: Oid) -> Option<Type> {
     if let Some(type_) = Type::from_oid(oid) {
         return Some(type_);
@@ -160,6 +155,9 @@ async fn get_type(
         }
 
         let row = exec(client, stmt, oid).await?;
+        if stack.len() > 8 {
+            return Err(Error::unexpected_message());
+        }
 
         let name: String = row.try_get(0)?;
         let type_: i8 = row.try_get(1)?;
@@ -176,15 +174,13 @@ async fn get_type(
         } else if basetype != 0 {
             Kind::Domain(basetype)
         } else if elem_oid != 0 {
-            stack.push((name, oid, schema, TypeStack::Array));
+            stack.push((name, oid, schema));
             oid = elem_oid;
             continue;
         } else if relid != 0 {
             Kind::Composite(relid)
         } else if let Some(rngsubtype) = rngsubtype {
-            stack.push((name, oid, schema, TypeStack::Range));
-            oid = rngsubtype;
-            continue;
+            Kind::Range(rngsubtype)
         } else {
             Kind::Simple
         };
@@ -194,12 +190,8 @@ async fn get_type(
         break type_;
     };
 
-    while let Some((name, oid, schema, t)) = stack.pop() {
-        let kind = match t {
-            TypeStack::Array => Kind::Array(type_),
-            TypeStack::Range => Kind::Range(type_),
-        };
-        type_ = Type::new(name, oid, kind, schema);
+    while let Some((name, oid, schema)) = stack.pop() {
+        type_ = Type::new(name, oid, Kind::Array(type_), schema);
         typecache.types.insert(oid, type_.clone());
     }
 
