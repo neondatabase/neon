@@ -6,7 +6,7 @@
 //!
 //! With modifications by Conrad Ludgate on behalf of Neon.
 
-use std::fmt;
+use std::{fmt, mem::forget};
 
 use str::{format_escaped_fmt, format_escaped_str};
 
@@ -149,14 +149,14 @@ impl<'buf> ObjectSer<'buf> {
     /// Finish the object ser.
     #[inline]
     pub fn finish(self) {
+        if self.prefix == b'{' {
+            self.buf.push(b'{');
+        }
+        self.buf.push(b'}');
+
         // don't trigger the drop handler which triggers a rollback.
         // this won't cause memory leaks because `ObjectSer` owns no allocations.
-        let Self { buf, prefix, .. } = &mut *std::mem::ManuallyDrop::new(self);
-
-        if *prefix == b'{' {
-            buf.push(b'{');
-        }
-        buf.push(b'}');
+        forget(self);
     }
 }
 
@@ -207,14 +207,14 @@ impl<'buf> ListSer<'buf> {
     /// Finish the list ser.
     #[inline]
     pub fn finish(self) {
-        // don't trigger the drop handler which triggers a rollback.
-        // this won't cause memory leaks because `ListSet` owns no allocations.
-        let Self { buf, prefix, .. } = &mut *std::mem::ManuallyDrop::new(self);
-
-        if *prefix == b'[' {
-            buf.push(b'[');
+        if self.prefix == b'[' {
+            self.buf.push(b'[');
         }
-        buf.push(b']');
+        self.buf.push(b']');
+
+        // don't trigger the drop handler which triggers a rollback.
+        // this won't cause memory leaks because `ListSer` owns no allocations.
+        forget(self);
     }
 }
 
@@ -306,4 +306,31 @@ fn write_int(x: impl itoa::Integer, b: &mut Vec<u8>) {
 
 fn write_float(x: impl ryu::Float, b: &mut Vec<u8>) {
     b.extend_from_slice(ryu::Buffer::new().format(x).as_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ValueSer;
+
+    #[test]
+    fn object() {
+        let mut buf = vec![];
+        let mut object = ValueSer::new(&mut buf).object();
+        object.entry("foo").str("bar");
+        object.entry("baz").null();
+        object.finish();
+
+        assert_eq!(buf, br#"{"foo":"bar","baz":null}"#);
+    }
+
+    #[test]
+    fn list() {
+        let mut buf = vec![];
+        let mut list = ValueSer::new(&mut buf).list();
+        list.entry().str("bar");
+        list.entry().null();
+        list.finish();
+
+        assert_eq!(buf, br#"["bar",null]"#);
+    }
 }

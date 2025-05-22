@@ -107,6 +107,11 @@ pub(crate) fn pg_text_row_to_json(
         }
     }
 
+    match entries {
+        Either::Left(output) => output.finish(),
+        Either::Right(output) => output.finish(),
+    }
+
     Ok(())
 }
 
