@@ -12,6 +12,284 @@ use str::{format_escaped_fmt, format_escaped_str};
 
 mod str;
 
+// pub trait KeyEncoder {
+//     fn encode<'a>(&self, obj: &'a mut ObjectSer) -> ValueSer<'a>;
+// }
+
+// impl KeyEncoder for str {
+//     fn encode<'a>(&self, obj: &'a mut ObjectSer) -> ValueSer<'a> {
+//         obj.entry(self)
+//     }
+// }
+
+// impl KeyEncoder for fmt::Arguments<'_> {
+//     fn encode<'a>(&self, obj: &'a mut ObjectSer) -> ValueSer<'a> {
+//         obj.entry_fmt(*self)
+//     }
+// }
+
+pub trait ValueEncoder {
+    fn encode(&self, v: ValueSer);
+}
+
+impl<T: ?Sized + ValueEncoder> ValueEncoder for &T {
+    fn encode(&self, v: ValueSer) {
+        T::encode(self, v);
+    }
+}
+
+impl ValueEncoder for str {
+    fn encode(&self, v: ValueSer) {
+        v.str(self);
+    }
+}
+
+impl ValueEncoder for fmt::Arguments<'_> {
+    fn encode(&self, v: ValueSer) {
+        v.str_fmt(*self);
+    }
+}
+
+macro_rules! int {
+    [$($t:ty),*] => {
+        $(
+            impl ValueEncoder for $t {
+                fn encode(&self, v: ValueSer) {
+                    v.int(*self);
+                }
+            }
+        )*
+    };
+}
+
+int![u8, u16, u32, u64, usize, u128];
+int![i8, i16, i32, i64, isize, i128];
+
+macro_rules! float {
+    [$($t:ty),*] => {
+        $(
+            impl ValueEncoder for $t {
+                fn encode(&self, v: ValueSer) {
+                    v.float(*self);
+                }
+            }
+        )*
+    };
+}
+
+float![f32, f64];
+
+impl ValueEncoder for bool {
+    fn encode(&self, v: ValueSer) {
+        v.bool(*self);
+    }
+}
+
+#[macro_export]
+macro_rules! to_vec {
+    (|$val:ident| $body:expr) => {{
+        let mut buf = vec![];
+        let $val = $crate::ValueSer::new(&mut buf);
+        let _: () = $body;
+        buf
+    }};
+}
+
+#[macro_export]
+macro_rules! to_string {
+    (|$val:ident| $body:expr) => {{
+        ::std::string::String::from_utf8($crate::to_vec!(|$val| $body))
+            .expect("json should be valid utf8")
+    }};
+}
+
+#[macro_export]
+macro_rules! object {
+    ($val:expr, |$obj:ident| $body:expr) => {{
+        let mut obj = $val.object();
+
+        let $obj = &mut obj;
+        let res = $body;
+
+        obj.finish();
+        res
+    }};
+}
+
+#[macro_export]
+macro_rules! list {
+    ($val:expr, |$list:ident| $body:expr) => {{
+        let mut list = $val.list();
+
+        let $list = &mut list;
+        let res = $body;
+
+        list.finish();
+        res
+    }};
+}
+
+#[macro_export]
+macro_rules! json2 {
+    ($val:ident = $($tt:tt)*) => {
+        $crate::json_internal!(@val[$val] $val => $($tt)*)
+    };
+}
+
+#[macro_export]
+macro_rules! json2string {
+    ($($tt:tt)*) => {
+        $crate::to_string!(|val| $crate::json2!(val = $($tt)*))
+    };
+}
+
+#[macro_export]
+macro_rules! json2vec {
+    ($($tt:tt)*) => {
+        $crate::to_vec!(|val| $crate::json2!(val = $($tt)*))
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! json_internal {
+    // === array parsing ===
+    // base case
+    (@array[$val:ident] $list:expr => ) => {};
+    // comma separator
+    (@array[$val:ident] $list:expr => , $($tt:tt)*) => {
+        $crate::json_internal!(@array[$val] $list => $($tt)*);
+    };
+    // array val
+    (@array[$val:ident] $list:expr => $($tt:tt)*) => {
+        let $val: $crate::ValueSer = $list.entry();
+        $crate::json_internal!(@val @array[$val] $list => $($tt)*);
+    };
+
+    // === object parsing ===
+    // base case
+    (@obj[$val:ident] $obj:expr => ) => {};
+    // comma separator
+    (@obj[$val:ident] $obj:expr => , $($tt:tt)*) => {
+        $crate::json_internal!(@obj[$val] $obj => $($tt)*);
+    };
+    // object key
+    (@obj[$val:ident] $obj:expr => $key:literal: $($tt:tt)*) => {
+        let $val: $crate::ValueSer = $obj.entry($key);
+        $crate::json_internal!(@val @obj[$val] $obj => $($tt)*);
+    };
+    // object fmt key
+    (@obj[$val:ident] $obj:expr => [$($fmt:tt)*]: $($tt:tt)*) => {
+        let $val: $crate::ValueSer = $obj.entry_fmt(format_args!($($fmt)*));
+        $crate::json_internal!(@val @obj[$val] $obj => $($tt)*);
+    };
+
+    // === nesting ===
+
+    // nested array
+    (@val @obj[$val:ident] $obj:expr => [$($next:tt)*] $($tt:tt)*) => {
+        $crate::json_internal!(@val[$val] $val => [$($next)*]);
+        $crate::json_internal!(@obj[$val] $obj => $($tt)*);
+    };
+    // nested object
+    (@val @obj[$val:ident] $obj:expr => {$($next:tt)*} $($tt:tt)*) => {
+        $crate::json_internal!(@val[$val] $val => {$($next)*});
+        $crate::json_internal!(@obj[$val] $obj => $($tt)*);
+    };
+    // nested null
+    (@val @obj[$val:ident] $obj:expr => null $($tt:tt)*) => {
+        $crate::json_internal!(@val[$val] $val => null);
+        $crate::json_internal!(@obj[$val] $obj => $($tt)*);
+    };
+    // nested literal
+    (@val @obj[$val:ident] $obj:expr => $lit:literal $($tt:tt)*) => {
+        $crate::json_internal!(@val[$val] $val => $lit);
+        $crate::json_internal!(@obj[$val] $obj => $($tt)*);
+    };
+    // any valueset expr
+    (@val @obj[$val:ident] $obj:expr => |$val2:ident| $next:expr, $($tt:tt)*) => {
+        $crate::json_internal!(@val[$val] $val => |$val2| $next);
+        $crate::json_internal!(@obj[$val] $obj => $($tt)*);
+    };
+    // any valueset expr with nothing else trailing
+    (@val @obj[$val:ident] $obj:expr => |$val2:ident| $next:expr) => {
+        $crate::json_internal!(@val[$val] $val => |$val2| $next);
+    };
+    // any valueset expr
+    (@val @obj[$val:ident] $obj:expr => $next:expr, $($tt:tt)*) => {
+        $crate::json_internal!(@val[$val] $val => $next);
+        $crate::json_internal!(@obj[$val] $obj => $($tt)*);
+    };
+    // any valueset expr with nothing else trailing
+    (@val @obj[$val:ident] $obj:expr => $next:expr) => {
+        $crate::json_internal!(@val[$val] $val => $next);
+    };
+
+    // nested array
+    (@val @array[$val:ident] $list:expr => [$($next:tt)*] $($tt:tt)*) => {
+        $crate::json_internal!(@val[$val] $val => [$($next)*]);
+        $crate::json_internal!(@array[$val] $list => $($tt)*);
+    };
+    // nested object
+    (@val @array[$val:ident] $list:expr => {$($next:tt)*} $($tt:tt)*) => {
+        $crate::json_internal!(@val[$val] $val => {$($next)*});
+        $crate::json_internal!(@array[$val] $list => $($tt)*);
+    };
+    // nested null
+    (@val @array[$val:ident] $list:expr => null $($tt:tt)*) => {
+        $crate::json_internal!(@val[$val] $val => null);
+        $crate::json_internal!(@array[$val] $list => $($tt)*);
+    };
+    // nested literal
+    (@val @array[$val:ident] $list:expr => $lit:literal $($tt:tt)*) => {
+        $crate::json_internal!(@val[$val] $val => $lit);
+        $crate::json_internal!(@array[$val] $list => $($tt)*);
+    };
+    // any valueset func
+    (@val @array[$val:ident] $list:expr => |$val2:ident| $next:expr, $($tt:tt)*) => {
+        $crate::json_internal!(@val[$val] $val => |$val2| $next);
+        $crate::json_internal!(@array[$val] $list => $($tt)*);
+    };
+    // any valueencoder expr
+    (@val @array[$val:ident] $list:expr => $next:expr, $($tt:tt)*) => {
+        $crate::json_internal!(@val[$val] $val => $next);
+        $crate::json_internal!(@array[$val] $list => $($tt)*);
+    };
+    // any valueset func
+    (@val @array[$val:ident] $list:expr => |$val2:ident| $next:expr) => {
+        $crate::json_internal!(@val[$val] $val => |$val2| $next);
+    };
+    // any valueencoder expr
+    (@val @array[$val:ident] $list:expr => $next:expr) => {
+        $crate::json_internal!(@val[$val] $val => $next);
+    };
+
+    // === values ===
+
+    (@val[$val:ident] $value:expr => [$($next:tt)*]) => {{
+        #[allow(unused_mut)]
+        let mut list: $crate::ListSer = $value.list();
+        $crate::json_internal!(@array[$val] list => $($next)*);
+        list.finish();
+    }};
+    (@val[$val:ident] $value:expr => {$($next:tt)*}) => {{
+        #[allow(unused_mut)]
+        let mut object: $crate::ObjectSer = $value.object();
+        $crate::json_internal!(@obj[$val] object => $($next)*);
+        object.finish();
+    }};
+    (@val[$val:ident] $value:expr => null) => {
+        $value.null();
+    };
+    (@val[$val:ident] $value:expr => |$val2:ident| $next:expr) => {{
+        let $val2: $crate::ValueSer = $value;
+        $next
+    }};
+    (@val[$val:ident] $value:expr => $next:expr) => {
+        $crate::ValueEncoder::encode(&$next, $value);
+    };
+}
+
 #[must_use]
 /// Serialize a single json value.
 pub struct ValueSer<'buf> {
@@ -332,5 +610,59 @@ mod tests {
         list.finish();
 
         assert_eq!(buf, br#"["bar",null]"#);
+    }
+
+    #[test]
+    fn object_macro() {
+        let res = crate::to_string!(|val| {
+            crate::object!(val, |obj| {
+                obj.entry("foo").str("bar");
+                obj.entry("baz").null();
+            })
+        });
+
+        assert_eq!(res, r#"{"foo":"bar","baz":null}"#);
+    }
+
+    #[test]
+    fn list_macro() {
+        let res = crate::to_string!(|val| {
+            crate::list!(val, |list| {
+                list.entry().str("bar");
+                list.entry().null();
+            })
+        });
+
+        assert_eq!(res, r#"["bar",null]"#);
+    }
+
+    #[test]
+    fn json2macro() {
+        let key = "key";
+
+        'demo: {
+            let string = crate::json2string!([
+                "bar",
+                null,
+                {
+                    "abc": true,
+                    ["prefix_{key}"]: 1,
+                },
+                [[[[[[]]]]]],
+                {
+                    "foo": |val| {
+                        if false {
+                            break 'demo;
+                        }
+                        val.str("foo");
+                    }
+                }
+            ]);
+
+            assert_eq!(
+                string,
+                r#"["bar",null,{"abc":true,"prefix_key":1},[[[[[[]]]]]],{}]"#
+            );
+        }
     }
 }
