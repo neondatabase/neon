@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from fixtures.log_helper import log
 
 from fixtures.utils import wait_until
 
@@ -60,7 +61,8 @@ def test_basebackup_cache(neon_env_builder: NeonEnvBuilder):
     # Check that basebackup cache eventually deletes old backup files.
     def check_bb_file_count():
         bb_files = list(ps.workdir.joinpath("basebackup_cache").iterdir())
-        assert len(bb_files) == 1
+        # tmp dir + 1 basebackup file.
+        assert len(bb_files) == 2
 
     wait_until(check_bb_file_count)
 

@@ -314,7 +314,7 @@ impl BasebackupCache {
                         req.timeline_id,
                         req.lsn,
                     ).await {
-                        tracing::warn!("Failed to prepare basebackup: {:#}", err);
+                        tracing::info!("Failed to prepare basebackup: {:#}", err);
                         self.prepare_err_count.inc();
                         continue;
                     }
