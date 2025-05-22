@@ -49,7 +49,6 @@ use remote_timeline_client::{
 };
 use secondary::heatmap::{HeatMapTenant, HeatMapTimeline};
 use storage_broker::BrokerClientChannel;
-use storage_layer::Layer;
 use timeline::compaction::{CompactionOutcome, GcCompactionQueue};
 use timeline::import_pgdata::ImportingTimeline;
 use timeline::offload::{OffloadError, offload_timeline};
@@ -2798,57 +2797,41 @@ impl TenantShard {
             template_metadata.initdb_lsn(),
             template_metadata.pg_version(),
         );
-        let (mut raw_timeline, _timeline_ctx) = self
-            .prepare_new_timeline(
+        let mut index_part = IndexPart::empty(new_metadata.clone());
+        index_part.layer_metadata = template_index_part
+            .layer_metadata
+            .iter()
+            .map(|(layer_name, metadata)| {
+                // TODO support local sharing of layers
+                let mut metadata = metadata.clone();
+                metadata.template_ttid = Some((template_tenant_id, template_timeline_id));
+                (layer_name.clone(), metadata)
+            })
+            .collect();
+        let resources = self.build_timeline_resources(new_timeline_id);
+        let _res = self
+            .load_remote_timeline(
                 new_timeline_id,
-                &new_metadata,
-                timeline_create_guard,
-                template_metadata.initdb_lsn(),
+                index_part,
+                new_metadata.clone(),
                 None,
-                None,
+                resources,
+                LoadTimelineCause::Attach,
                 ctx,
             )
             .await?;
 
-        let _tenant_shard_id = raw_timeline.owning_tenant.tenant_shard_id;
-        raw_timeline
-            .write(|unfinished_timeline| async move {
-                // TODO make this more sophisticated: maybe a variant of load_layer_map?
+        let timeline = {
+            let timelines = self.timelines.lock().unwrap();
+            let Some(timeline) = timelines.get(&new_timeline_id) else {
+                warn!("timeline not available directly after attach");
+                panic!();
+            };
+            let mut offloaded_timelines = self.timelines_offloaded.lock().unwrap();
+            self.initialize_gc_info(&timelines, &offloaded_timelines, Some(new_timeline_id));
 
-                let layers = template_index_part
-                    .layer_metadata
-                    .iter()
-                    .map(|(layer_name, metadata)| {
-                        // TODO support local sharing of layers
-                        let mut metadata = metadata.clone();
-                        metadata.template_ttid = Some((template_tenant_id, template_timeline_id));
-                        Layer::for_evicted(
-                            self.conf,
-                            &unfinished_timeline,
-                            layer_name.clone(),
-                            metadata,
-                        )
-                    })
-                    .collect();
-                unfinished_timeline
-                    .layers
-                    .write()
-                    .await
-                    .open_mut()
-                    .map_err(|_| CreateTimelineError::ShuttingDown)?
-                    .initialize_local_layers(layers, template_metadata.disk_consistent_lsn());
-                fail::fail_point!("before-checkpoint-new-timeline", |_| {
-                    Err(CreateTimelineError::Other(anyhow::anyhow!(
-                        "failpoint before-checkpoint-new-timeline"
-                    )))
-                });
-
-                Ok(())
-            })
-            .await?;
-
-        // All done!
-        let timeline = raw_timeline.finish_creation().await?;
+            Arc::clone(timeline)
+        };
 
         // Callers are responsible to wait for uploads to complete and for activating the timeline.
 
