@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_compression::tokio::write::GzipEncoder;
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use metrics::core::{AtomicU64, GenericCounter};
 use pageserver_api::{config::BasebackupCacheConfig, models::TenantState};
 use tokio::{
@@ -20,7 +20,10 @@ use crate::{
     context::{DownloadBehavior, RequestContext},
     metrics::{BASEBACKUP_CACHE_PREPARE, BASEBACKUP_CACHE_READ},
     task_mgr::TaskKind,
-    tenant::mgr::{TenantManager, TenantSlot},
+    tenant::{
+        Timeline,
+        mgr::{TenantManager, TenantSlot},
+    },
 };
 
 pub struct BasebackupPrepareRequest {
@@ -35,16 +38,25 @@ pub type BasebackupPrepareReceiver = UnboundedReceiver<BasebackupPrepareRequest>
 type BasebackupRemoveEntrySender = UnboundedSender<Utf8PathBuf>;
 type BasebackupRemoveEntryReceiver = UnboundedReceiver<Utf8PathBuf>;
 
+/// BasebackupCache stores cached basebackup archives for timelines on local disk.
+///
+/// The main purpose of this cache is to speed up the startup process of compute nodes
+/// after scaling to zero.
+/// Thus, the basebackup is stored only for the latest LSN of the timeline and with
+/// fixed set of parameters (gzip=true, full_backup=false, replica=false, prev_lsn=none).
+///
+/// The cache receives prepare requests through the `BasebackupPrepareSender` channel,
+/// generates a basebackup from the timeline in the background, and stores it on disk.
+///
+/// Basebackup requests are pretty rare. We expect ~thousands of entries in the cache
+/// and ~1 RPS for get requests.
 pub struct BasebackupCache {
     data_dir: Utf8PathBuf,
-
-    entries: tokio::sync::Mutex<HashMap<TenantTimelineId, Lsn>>,
-
     config: BasebackupCacheConfig,
-
     tenant_manager: Arc<TenantManager>,
-
     remove_entry_sender: BasebackupRemoveEntrySender,
+
+    entries: std::sync::Mutex<HashMap<TenantTimelineId, Lsn>>,
 
     cancel: CancellationToken,
 
@@ -58,7 +70,10 @@ pub struct BasebackupCache {
 }
 
 impl BasebackupCache {
-    // Creates a BasebackupCache and spawns a background task.
+    /// Creates a BasebackupCache and spawns the background task.
+    /// The initialization of the cache is performed in the background and does not
+    /// block the caller. The cache will return `None` for any get requests until
+    /// initialization is complete.
     pub fn spawn(
         runtime_handle: &tokio::runtime::Handle,
         data_dir: Utf8PathBuf,
@@ -71,10 +86,12 @@ impl BasebackupCache {
 
         let cache = Arc::new(BasebackupCache {
             data_dir,
-            entries: tokio::sync::Mutex::new(HashMap::new()),
             config,
             tenant_manager,
             remove_entry_sender,
+
+            entries: std::sync::Mutex::new(HashMap::new()),
+
             cancel,
 
             read_hit_count: BASEBACKUP_CACHE_READ.with_label_values(&["hit"]),
@@ -95,15 +112,20 @@ impl BasebackupCache {
         cache
     }
 
-    // Non-blocking. If an entry exists, opens the archive file and return reader.
+    /// Gets a basebackup entry from the cache.
+    /// If the entry is found, opens a file with the basebackup archive and returns it.
+    /// The open file descriptor will prevent the file system from deleting the file
+    /// even if the entry is removed from the cache later.
     pub async fn get(
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         lsn: Lsn,
     ) -> Option<tokio::fs::File> {
+        // Fast path. Check if the entry exists using the in-memory state.
         let tti = TenantTimelineId::new(tenant_id, timeline_id);
-        if self.entries.lock().await.get(&tti) != Some(&lsn) {
+        if self.entries.lock().unwrap().get(&tti) != Some(&lsn) {
+            self.read_miss_count.inc();
             return None;
         }
 
@@ -116,6 +138,7 @@ impl BasebackupCache {
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
+                    // We may end up here if the basebackup was concurrently removed by the cleanup task.
                     self.read_miss_count.inc();
                 } else {
                     self.read_err_count.inc();
@@ -126,13 +149,32 @@ impl BasebackupCache {
         }
     }
 
-    fn entry_path(&self, tenant_id: TenantId, timeline_id: TimelineId, lsn: Lsn) -> Utf8PathBuf {
-        // Placeholder for actual implementation
-        self.data_dir
-            .join(format!("basebackup_{tenant_id}_{timeline_id}_{:X}", lsn.0))
+    // Private methods.
+
+    fn entry_filename(tenant_id: TenantId, timeline_id: TimelineId, lsn: Lsn) -> String {
+        // The default format for LSN is 0/ABCDEF.
+        // The backslash is not filename friendly, so serialize it as plain hex.
+        let lsn = lsn.0;
+        format!("basebackup_{tenant_id}_{timeline_id}_{lsn:016X}.tar.gz")
     }
 
-    fn parse_entry_path(filename: &str) -> Option<(TenantId, TimelineId, Lsn)> {
+    fn entry_path(&self, tenant_id: TenantId, timeline_id: TimelineId, lsn: Lsn) -> Utf8PathBuf {
+        self.data_dir
+            .join(Self::entry_filename(tenant_id, timeline_id, lsn))
+    }
+
+    fn entry_tmp_path(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        lsn: Lsn,
+    ) -> Utf8PathBuf {
+        self.data_dir
+            .join("tmp")
+            .join(Self::entry_filename(tenant_id, timeline_id, lsn))
+    }
+
+    fn parse_entry_filename(filename: &str) -> Option<(TenantId, TimelineId, Lsn)> {
         let parts: Vec<&str> = filename
             .strip_prefix("basebackup_")?
             .strip_suffix(".tar.gz")?
@@ -150,7 +192,7 @@ impl BasebackupCache {
 
     async fn cleanup(&self) -> anyhow::Result<()> {
         let mut new_data_cache = HashMap::new();
-        let mut data_guard = self.entries.lock().await;
+        let mut data_guard = self.entries.lock().unwrap();
         for (tenant_shard_id, tenant_slot) in self.tenant_manager.list() {
             let tenant_id = tenant_shard_id.tenant_id;
             if let TenantSlot::Attached(tenant) = tenant_slot {
@@ -179,8 +221,8 @@ impl BasebackupCache {
     }
 
     async fn on_startup(&self) -> anyhow::Result<()> {
-        // Ensure the data_dir exists before processing requests
-        tokio::fs::create_dir_all(&self.data_dir)
+        // Create data_dir and tmp directory if they do not exist.
+        tokio::fs::create_dir_all(&self.data_dir.join("tmp"))
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -190,20 +232,60 @@ impl BasebackupCache {
                 )
             })?;
 
-        // Read existing entries from the data_dir and add them to the cache
-        let mut dir_entries = tokio::fs::read_dir(&self.data_dir).await?;
-        while let Some(entry) = dir_entries.next_entry().await? {
-            let parsed = Self::parse_entry_path(entry.file_name().to_string_lossy().as_ref());
-            if let Some((tenant_id, timeline_id, lsn)) = parsed {
-                let tti = TenantTimelineId::new(tenant_id, timeline_id);
-                self.entries.lock().await.insert(tti, lsn);
-            } else {
-                tracing::warn!(
-                    "Invalid basebackup cache file name: {:?}",
-                    entry.file_name()
-                );
+        // Read existing entries from the data_dir and add them to in-memory state.
+        let mut entries = HashMap::new();
+        let mut dir = tokio::fs::read_dir(&self.data_dir).await?;
+        while let Some(dir_entry) = dir.next_entry().await? {
+            let filename = dir_entry.file_name();
+
+            if filename == "tmp" {
+                // Skip the tmp directory.
+                continue;
+            }
+
+            let parsed = Self::parse_entry_filename(filename.to_string_lossy().as_ref());
+            let Some((tenant_id, timeline_id, lsn)) = parsed else {
+                tracing::warn!("Invalid basebackup cache file name: {:?}", filename);
+                continue;
+            };
+
+            let tti = TenantTimelineId::new(tenant_id, timeline_id);
+
+            use std::collections::hash_map::Entry::*;
+
+            match entries.entry(tti) {
+                Occupied(mut entry) => {
+                    let entry_lsn = *entry.get();
+                    // Leave only the latest entry, remove the old one.
+                    if lsn < entry_lsn {
+                        self.remove_entry_sender.send(self.entry_path(
+                            tenant_id,
+                            timeline_id,
+                            lsn,
+                        ))?;
+                    } else if lsn > entry_lsn {
+                        self.remove_entry_sender.send(self.entry_path(
+                            tenant_id,
+                            timeline_id,
+                            entry_lsn,
+                        ))?;
+                        entry.insert(lsn);
+                    } else {
+                        // Two different filenames parsed to the same timline_id and LSN.
+                        // Should never happen.
+                        return Err(anyhow::anyhow!(
+                            "Duplicate basebackup cache entry with the same LSN: {:?}",
+                            filename
+                        ));
+                    }
+                }
+                Vacant(entry) => {
+                    entry.insert(lsn);
+                }
             }
         }
+
+        *self.entries.lock().unwrap() = entries;
 
         Ok(())
     }
@@ -213,35 +295,38 @@ impl BasebackupCache {
         mut prepare_receiver: BasebackupPrepareReceiver,
         mut remove_entry_receiver: BasebackupRemoveEntryReceiver,
     ) {
-        self.on_startup().await.unwrap_or_else(|e| {
-            tracing::error!("Failed to start basebackup cache: {:#}", e);
-        });
+        // Panic in the background is a safe fallback.
+        // It will drop receivers and the cache will be effectively disabled.
+        self.on_startup()
+            .await
+            .expect("Failed to initialize basebackup cache");
 
-        let mut ticker = tokio::time::interval(self.config.background_cleanup_period);
+        let mut cleanup_ticker = tokio::time::interval(self.config.background_cleanup_period);
+        cleanup_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
-                // Wait for a checkpoint shutdown message
                 Some(req) = prepare_receiver.recv() => {
-                    // Handle the checkpoint shutdown message
-                    self.prepare_basebackup(req.tenant_shard_id, req.timeline_id, req.lsn).await.unwrap_or_else(|e| {
-                        tracing::info!("Failed to prepare basebackup: {:#}", e);
-                    });
+                    if let Err(err) = self.prepare_basebackup(
+                        req.tenant_shard_id,
+                        req.timeline_id,
+                        req.lsn,
+                    ).await {
+                        tracing::warn!("Failed to prepare basebackup: {:#}", err);
+                        self.prepare_err_count.inc();
+                        continue;
+                    }
                 }
                 Some(req) = remove_entry_receiver.recv() => {
-                    // Handle the remove entry message
                     if let Err(e) = tokio::fs::remove_file(req).await {
                         tracing::warn!("Failed to remove basebackup cache file: {:#}", e);
                     }
                 }
-                // Wait for the ticker to trigger
-                _ = ticker.tick() => {
-                    // Clean up irrelevant entries
+                _ = cleanup_ticker.tick() => {
                     self.cleanup().await.unwrap_or_else(|e| {
                         tracing::warn!("Failed to clean up basebackup cache: {:#}", e);
                     });
                 }
-                // Check for cancellation
                 _ = self.cancel.cancelled() => {
                     tracing::info!("BasebackupCache background task cancelled");
                     break;
@@ -250,19 +335,40 @@ impl BasebackupCache {
         }
     }
 
+    /// Prepare a basebackup for the given timeline.
+    ///
+    /// If the basebackup already exists with a higher LSN or the timeline already
+    /// has a higher last_record_lsn, skip the preparation.
+    ///
+    /// The basebackup is prepared in a temporary directory and then moved to the final
+    /// location to make the operation atomic.
     async fn prepare_basebackup(
         &self,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
-        lsn: Lsn,
+        req_lsn: Lsn,
     ) -> anyhow::Result<()> {
-        // Placeholder for actual implementation
         tracing::info!(
-            "Preparing basebackup for tenant: {:?}, timeline: {:?}, lsn: {:?}",
-            tenant_shard_id.tenant_id,
-            timeline_id,
-            lsn
+            tenant_id = %tenant_shard_id.tenant_id,
+            %timeline_id,
+            %req_lsn,
+            "Preparing basebackup for timeline",
         );
+
+        let tti = TenantTimelineId::new(tenant_shard_id.tenant_id, timeline_id);
+
+        if let Some(&entry_lsn) = self.entries.lock().unwrap().get(&tti) {
+            if entry_lsn >= req_lsn {
+                tracing::info!(
+                    %timeline_id,
+                    %req_lsn,
+                    %entry_lsn,
+                    "Basebackup entry already exists for timeline with higher LSN, skipping basebackup",
+                );
+                self.prepare_skip_count.inc();
+                return Ok(());
+            }
+        }
 
         let tenant = self
             .tenant_manager
@@ -279,37 +385,97 @@ impl BasebackupCache {
 
         let timeline = tenant.get_timeline(timeline_id, true)?;
 
-        // TODO(diko): make it via RequstContextBuilder.
-        let ctx = RequestContext::new(TaskKind::BasebackupCache, DownloadBehavior::Download);
-        let ctx = &ctx.with_scope_timeline(&timeline);
+        let last_record_lsn = timeline.get_last_record_lsn();
+        if last_record_lsn > req_lsn {
+            tracing::info!(
+                %timeline_id,
+                %req_lsn,
+                %last_record_lsn,
+                "Timeline has a higher LSN than the requested one, skipping basebackup",
+            );
+            self.prepare_skip_count.inc();
+            return Ok(());
+        }
 
-        let path = self.entry_path(tenant_shard_id.tenant_id, timeline_id, lsn);
-        let file = tokio::fs::File::create(&path).await?;
-        let mut writer = BufWriter::new(file);
+        let entry_tmp_path = self.entry_tmp_path(tenant_shard_id.tenant_id, timeline_id, req_lsn);
 
-        let mut encoder = GzipEncoder::with_quality(
-            &mut writer,
-            // NOTE using fast compression because it's on the critical path
-            //      for compute startup. For an empty database, we get
-            //      <100KB with this method. The Level::Best compression method
-            //      gives us <20KB, but maybe we should add basebackup caching
-            //      on compute shutdown first.
-            async_compression::Level::Best,
-        );
+        let res = self
+            .prepare_basebackup_tmp(&entry_tmp_path, &timeline, req_lsn)
+            .await;
 
-        send_basebackup_tarball(&mut encoder, &timeline, Some(lsn), None, false, false, ctx)
-            .await?;
+        if let Err(err) = res {
+            tracing::info!("Failed to prepare basebackup tmp file: {:#}", err);
+            // Try to clean up tmp file. If we fail, the background clean up task will take care of it.
+            match tokio::fs::remove_file(&entry_tmp_path).await {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    tracing::info!("Failed to remove basebackup tmp file: {:?}", e);
+                }
+            }
+            return Err(err);
+        }
 
-        encoder.shutdown().await?;
+        // Move the tmp file to the final location atomically.
+        let entry_path = self.entry_path(tenant_shard_id.tenant_id, timeline_id, req_lsn);
+        tokio::fs::rename(&entry_tmp_path, &entry_path).await?;
 
-        let tti = TenantTimelineId::new(tenant_shard_id.tenant_id, timeline_id);
-        if let Some(old_value) = self.entries.lock().await.insert(tti, lsn) {
+        if let Some(old_lsn) = self.entries.lock().unwrap().insert(tti, req_lsn) {
+            // Remove the old entry if it exists.
             self.remove_entry_sender
-                .send(self.entry_path(tenant_shard_id.tenant_id, timeline_id, old_value))
+                .send(self.entry_path(tenant_shard_id.tenant_id, timeline_id, old_lsn))
                 .unwrap();
         }
 
         self.prepare_ok_count.inc();
+        Ok(())
+    }
+
+    /// Prepares a basebackup in a temporary file.
+    async fn prepare_basebackup_tmp(
+        &self,
+        emptry_tmp_path: &Utf8Path,
+        timeline: &Arc<Timeline>,
+        req_lsn: Lsn,
+    ) -> anyhow::Result<()> {
+        let ctx = RequestContext::new(TaskKind::BasebackupCache, DownloadBehavior::Download);
+        let ctx = ctx.with_scope_timeline(timeline);
+
+        let file = tokio::fs::File::create(emptry_tmp_path).await?;
+        let mut writer = BufWriter::new(file);
+
+        let mut encoder = GzipEncoder::with_quality(
+            &mut writer,
+            // Level::Best because compression is not on the hot path of basebackup requests.
+            // The decompression is almost not affected by the compression level.
+            async_compression::Level::Best,
+        );
+
+        // We may receive a request before the WAL record is applied to the timeline.
+        // Wait for the requested LSN to be applied.
+        timeline
+            .wait_lsn(
+                req_lsn,
+                crate::tenant::timeline::WaitLsnWaiter::BaseBackupCache,
+                crate::tenant::timeline::WaitLsnTimeout::Default,
+                &ctx,
+            )
+            .await?;
+
+        send_basebackup_tarball(
+            &mut encoder,
+            timeline,
+            Some(req_lsn),
+            None,
+            false,
+            false,
+            &ctx,
+        )
+        .await?;
+
+        encoder.shutdown().await?;
+        writer.flush().await?;
+        writer.into_inner().sync_all().await?;
 
         Ok(())
     }

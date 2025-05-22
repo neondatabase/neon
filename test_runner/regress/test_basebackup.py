@@ -10,11 +10,12 @@ if TYPE_CHECKING:
     from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
 
 
-def test_basebackup_error(env: NeonEnv):
+def test_basebackup_error(neon_simple_env: NeonEnv):
     """
     Test error handling, if the 'basebackup' command fails in the middle
     of building the tar archive.
     """
+    env  = neon_simple_env
     pageserver_http = env.pageserver.http_client()
 
     # Introduce failpoint

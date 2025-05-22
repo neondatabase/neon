@@ -1038,6 +1038,7 @@ pub(crate) enum WaitLsnWaiter<'a> {
     Tenant,
     PageService,
     HttpEndpoint,
+    BaseBackupCache,
 }
 
 /// Argument to [`Timeline::shutdown`].
@@ -1560,7 +1561,8 @@ impl Timeline {
                         }
                         WaitLsnWaiter::Tenant
                         | WaitLsnWaiter::PageService
-                        | WaitLsnWaiter::HttpEndpoint => unreachable!(
+                        | WaitLsnWaiter::HttpEndpoint
+                        | WaitLsnWaiter::BaseBackupCache => unreachable!(
                             "tenant or page_service context are not expected to have task kind {:?}",
                             ctx.task_kind()
                         ),
