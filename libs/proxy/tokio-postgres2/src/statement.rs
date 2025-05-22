@@ -21,13 +21,6 @@ impl Statement {
         Statement(Arc::new(StatementInner { name, columns }))
     }
 
-    pub(crate) fn new_anonymous(columns: Vec<Column>) -> Statement {
-        Statement(Arc::new(StatementInner {
-            name: "<anonymous>",
-            columns,
-        }))
-    }
-
     pub(crate) fn name(&self) -> &str {
         self.0.name
     }

@@ -132,7 +132,7 @@ where
 
     Ok(RowStream {
         responses,
-        statement: Statement::new_anonymous(columns),
+        statement: Statement::new("", columns),
         command_tag: None,
         status: ReadyForQueryStatus::Unknown,
         output_format: Format::Text,

@@ -5,7 +5,6 @@ use postgres_protocol2::message::backend::{Message, RowDescriptionBody};
 use postgres_protocol2::message::frontend;
 use postgres_protocol2::types::oid_to_sql;
 use postgres_types2::Format;
-use tracing::debug;
 
 use crate::client::{CachedTypeInfo, InnerClient};
 use crate::codec::FrontendMessage;
@@ -20,13 +19,28 @@ INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid
 WHERE t.oid = $1
 ";
 
+/// we need to send a sync message on error to allow the protocol to reset.
+struct CloseStmt<'a> {
+    client: &'a mut InnerClient,
+    name: &'static str,
+}
+
+impl Drop for CloseStmt<'_> {
+    fn drop(&mut self) {
+        let buf = self.client.with_buf(|buf| {
+            frontend::close(b'S', self.name, buf).unwrap();
+            buf.split().freeze()
+        });
+        let _ = self.client.send(FrontendMessage::Raw(buf));
+    }
+}
+
 async fn prepare_typecheck(
     client: &mut InnerClient,
     name: &'static str,
     query: &str,
-    types: &[Type],
 ) -> Result<Statement, Error> {
-    let buf = encode(client, name, query, types)?;
+    let buf = encode(client, name, query)?;
     let responses = client.send_partial(FrontendMessage::Raw(buf))?;
 
     match responses.next().await? {
@@ -58,20 +72,9 @@ async fn prepare_typecheck(
     Ok(Statement::new(name, columns))
 }
 
-fn encode(
-    client: &mut InnerClient,
-    name: &str,
-    query: &str,
-    types: &[Type],
-) -> Result<Bytes, Error> {
-    if types.is_empty() {
-        debug!("preparing query {}: {}", name, query);
-    } else {
-        debug!("preparing query {} with types {:?}: {}", name, types, query);
-    }
-
+fn encode(client: &mut InnerClient, name: &str, query: &str) -> Result<Bytes, Error> {
     client.with_buf(|buf| {
-        frontend::parse(name, query, types.iter().map(Type::oid), buf).map_err(Error::encode)?;
+        frontend::parse(name, query, [], buf).map_err(Error::encode)?;
         frontend::describe(b'S', name, buf).map_err(Error::encode)?;
         frontend::flush(buf);
         Ok(buf.split().freeze())
@@ -117,16 +120,27 @@ pub async fn parse_row_description(
         return Ok(columns);
     }
 
+    let typeinfo = "neon_proxy_typeinfo";
+
+    // make sure to close the typeinfo statement before exiting.
+    let guard = CloseStmt {
+        name: typeinfo,
+        client,
+    };
+
     // get the typeinfo statement.
-    let stmt = typeinfo_statement(client, typecache).await?;
+    let stmt = prepare_typecheck(guard.client, typeinfo, TYPEINFO_QUERY).await?;
 
     for column in &mut columns {
         if column.type_ != Type::UNKNOWN {
             continue;
         }
 
-        column.type_ = get_type(client, typecache, &stmt, column.type_.oid()).await?;
+        column.type_ = get_type(guard.client, typecache, &stmt, column.type_.oid()).await?;
     }
+
+    // we always close it. this ensures that typeinfo still works in pgbouncer.
+    drop(guard);
 
     Ok(columns)
 }
@@ -192,21 +206,6 @@ async fn get_type(
     }
 
     Ok(type_)
-}
-
-async fn typeinfo_statement(
-    client: &mut InnerClient,
-    typecache: &mut CachedTypeInfo,
-) -> Result<Statement, Error> {
-    if let Some(stmt) = &typecache.typeinfo {
-        return Ok(stmt.clone());
-    }
-
-    let typeinfo = "neon_proxy_typeinfo";
-    let stmt = prepare_typecheck(client, typeinfo, TYPEINFO_QUERY, &[]).await?;
-
-    typecache.typeinfo = Some(stmt.clone());
-    Ok(stmt)
 }
 
 /// exec the typeinfo statement returning one row.

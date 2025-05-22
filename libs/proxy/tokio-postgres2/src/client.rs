@@ -18,8 +18,8 @@ use crate::query::RowStream;
 use crate::simple_query::SimpleQueryStream;
 use crate::types::{Oid, Type};
 use crate::{
-    CancelToken, Error, ReadyForQueryStatus, SimpleQueryMessage, Statement, Transaction,
-    TransactionBuilder, query, simple_query,
+    CancelToken, Error, ReadyForQueryStatus, SimpleQueryMessage, Transaction, TransactionBuilder,
+    query, simple_query,
 };
 
 pub struct Responses {
@@ -76,11 +76,6 @@ impl Responses {
 /// (corresponding to the queries in the [crate::prepare] module).
 #[derive(Default)]
 pub(crate) struct CachedTypeInfo {
-    /// A statement for basic information for a type from its
-    /// OID. Corresponds to [TYPEINFO_QUERY](crate::prepare::TYPEINFO_QUERY) (or its
-    /// fallback).
-    pub(crate) typeinfo: Option<Statement>,
-
     /// Cache of types already looked up.
     pub(crate) types: HashMap<Oid, Type>,
 }
@@ -137,19 +132,6 @@ pub struct Client {
     ssl_mode: SslMode,
     process_id: i32,
     secret_key: i32,
-}
-
-impl Drop for Client {
-    fn drop(&mut self) {
-        if let Some(stmt) = self.cached_typeinfo.typeinfo.take() {
-            let buf = self.inner.with_buf(|buf| {
-                frontend::close(b'S', stmt.name(), buf).unwrap();
-                frontend::sync(buf);
-                buf.split().freeze()
-            });
-            let _ = self.inner.send(FrontendMessage::Raw(buf));
-        }
-    }
 }
 
 impl Client {
@@ -250,10 +232,6 @@ impl Client {
     }
 
     pub async fn discard_all(&mut self) -> Result<ReadyForQueryStatus, Error> {
-        // clear the prepared statements that are about to be nuked from the postgres session
-
-        self.cached_typeinfo.typeinfo = None;
-
         self.batch_execute("discard all").await
     }
 
