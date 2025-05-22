@@ -26,7 +26,6 @@ macro_rules! accepts {
     )
 }
 
-
 // mod pg_lsn;
 #[doc(hidden)]
 pub mod private;
