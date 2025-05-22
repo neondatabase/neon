@@ -115,7 +115,7 @@ impl BasebackupCache {
     /// Gets a basebackup entry from the cache.
     /// If the entry is found, opens a file with the basebackup archive and returns it.
     /// The open file descriptor will prevent the file system from deleting the file
-    /// even if the entry is removed from the cache later.
+    /// even if the entry is removed from the cache in the background.
     pub async fn get(
         &self,
         tenant_id: TenantId,

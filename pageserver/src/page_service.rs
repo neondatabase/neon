@@ -2506,16 +2506,6 @@ impl PageServerHandler {
 
         let mut from_cache = false;
 
-        info!(
-            "XXX taking basebackup lsn={:?}, prev_lsn={:?} (full_backup={}, replica={}, gzip={}, cache_enabled={})",
-            lsn,
-            prev_lsn,
-            full_backup,
-            replica,
-            gzip,
-            timeline.is_basebackup_cache_enabled()
-        );
-
         // Send a tarball of the latest layer on the timeline. Compress if not
         // fullbackup. TODO Compress in that case too (tests need to be updated)
         if full_backup {
