@@ -29,9 +29,10 @@ impl Drop for CloseStmt<'_> {
     fn drop(&mut self) {
         let buf = self.client.with_buf(|buf| {
             frontend::close(b'S', self.name, buf).unwrap();
+            frontend::flush(buf);
             buf.split().freeze()
         });
-        let _ = self.client.send(FrontendMessage::Raw(buf));
+        let _ = self.client.send_partial(FrontendMessage::Raw(buf));
     }
 }
 
@@ -86,16 +87,16 @@ enum TypeStack {
     Range,
 }
 
-fn from_cache(typecache: &CachedTypeInfo, oid: Oid) -> Type {
+fn try_from_cache(typecache: &CachedTypeInfo, oid: Oid) -> Option<Type> {
     if let Some(type_) = Type::from_oid(oid) {
-        return type_;
+        return Some(type_);
     }
 
     if let Some(type_) = typecache.types.get(&oid) {
-        return type_.clone();
+        return Some(type_.clone());
     };
 
-    Type::UNKNOWN
+    None
 }
 
 pub async fn parse_row_description(
@@ -108,7 +109,7 @@ pub async fn parse_row_description(
     if let Some(row_description) = row_description {
         let mut it = row_description.fields();
         while let Some(field) = it.next().map_err(Error::parse)? {
-            let type_ = from_cache(typecache, field.type_oid());
+            let type_ = try_from_cache(typecache, field.type_oid()).unwrap_or(Type::UNKNOWN);
             let column = Column::new(field.name().to_string(), type_, field);
             columns.push(column);
         }
@@ -132,15 +133,16 @@ pub async fn parse_row_description(
     let stmt = prepare_typecheck(guard.client, typeinfo, TYPEINFO_QUERY).await?;
 
     for column in &mut columns {
-        if column.type_ != Type::UNKNOWN {
-            continue;
-        }
-
-        column.type_ = get_type(guard.client, typecache, &stmt, column.type_.oid()).await?;
+        column.type_ = get_type(guard.client, typecache, &stmt, column.type_oid()).await?;
     }
 
     // we always close it. this ensures that typeinfo still works in pgbouncer.
     drop(guard);
+
+    match client.responses.next().await? {
+        Message::CloseComplete => {}
+        _ => return Err(Error::unexpected_message()),
+    }
 
     Ok(columns)
 }
@@ -153,13 +155,9 @@ async fn get_type(
 ) -> Result<Type, Error> {
     let mut stack = vec![];
     let mut type_ = loop {
-        if let Some(type_) = Type::from_oid(oid) {
+        if let Some(type_) = try_from_cache(typecache, oid) {
             break type_;
         }
-
-        if let Some(type_) = typecache.types.get(&oid) {
-            break type_.clone();
-        };
 
         let row = exec(client, stmt, oid).await?;
 

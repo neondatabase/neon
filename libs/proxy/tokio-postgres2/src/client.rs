@@ -82,7 +82,7 @@ pub(crate) struct CachedTypeInfo {
 
 pub struct InnerClient {
     sender: mpsc::UnboundedSender<FrontendMessage>,
-    responses: Responses,
+    pub(crate) responses: Responses,
 
     /// A buffer to use when writing out postgres commands.
     buffer: BytesMut,
