@@ -1369,7 +1369,7 @@ impl PageServerHandler {
             let mut flush_timers = Vec::with_capacity(handler_results.len());
             for handler_result in &mut handler_results {
                 let flush_timer = match handler_result {
-                    Ok((_, timer)) => Some(
+                    Ok((_response, timer, _ctx)) => Some(
                         timer
                             .observe_execution_end(flushing_start_time)
                             .expect("we are the first caller"),
@@ -1389,7 +1389,7 @@ impl PageServerHandler {
         // Some handler errors cause exit from pagestream protocol.
         // Other handler errors are sent back as an error message and we stay in pagestream protocol.
         for (handler_result, flushing_timer) in handler_results.into_iter().zip(flush_timers) {
-            let response_msg = match handler_result {
+            let (response_msg, ctx) = match handler_result {
                 Err(e) => match &e.err {
                     PageStreamError::Shutdown => {
                         // If we fail to fulfil a request during shutdown, which may be _because_ of
@@ -1414,14 +1414,29 @@ impl PageServerHandler {
                             error!("error reading relation or page version: {full:#}")
                         });
 
-                        PagestreamBeMessage::Error(PagestreamErrorResponse {
-                            req: e.req,
-                            message: e.err.to_string(),
-                        })
+                        (
+                            PagestreamBeMessage::Error(PagestreamErrorResponse {
+                                req: e.req,
+                                message: e.err.to_string(),
+                            }),
+                            None,
+                        )
                     }
                 },
-                Ok((response_msg, _op_timer_already_observed)) => response_msg,
+                Ok((response_msg, _op_timer_already_observed, ctx)) => (response_msg, Some(ctx)),
             };
+
+            let ctx = ctx.map(|req_ctx| {
+                RequestContextBuilder::from(&req_ctx)
+                    .perf_span(|crnt_perf_span| {
+                        info_span!(
+                            target: PERF_TRACE_TARGET,
+                            parent: crnt_perf_span,
+                            "FLUSH_RESPONSE",
+                        )
+                    })
+                    .attached_child()
+            });
 
             //
             // marshal & transmit response message
@@ -1445,6 +1460,17 @@ impl PageServerHandler {
                 )),
                 None => futures::future::Either::Right(flush_fut),
             };
+
+            let flush_fut = if let Some(req_ctx) = ctx.as_ref() {
+                futures::future::Either::Left(
+                    flush_fut.maybe_perf_instrument(req_ctx, |current_perf_span| {
+                        current_perf_span.clone()
+                    }),
+                )
+            } else {
+                futures::future::Either::Right(flush_fut)
+            };
+
             // do it while respecting cancellation
             let _: () = async move {
                 tokio::select! {
@@ -1474,7 +1500,7 @@ impl PageServerHandler {
         ctx: &RequestContext,
     ) -> Result<
         (
-            Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>>,
+            Vec<Result<(PagestreamBeMessage, SmgrOpTimer, RequestContext), BatchedPageStreamError>>,
             Span,
         ),
         QueryError,
@@ -1501,7 +1527,7 @@ impl PageServerHandler {
                         self.handle_get_rel_exists_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
-                            .map(|msg| (msg, timer))
+                            .map(|msg| (msg, timer, ctx))
                             .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
                     ],
                     span,
@@ -1520,7 +1546,7 @@ impl PageServerHandler {
                         self.handle_get_nblocks_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
-                            .map(|msg| (msg, timer))
+                            .map(|msg| (msg, timer, ctx))
                             .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
                     ],
                     span,
@@ -1567,7 +1593,7 @@ impl PageServerHandler {
                         self.handle_db_size_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
-                            .map(|msg| (msg, timer))
+                            .map(|msg| (msg, timer, ctx))
                             .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
                     ],
                     span,
@@ -1586,7 +1612,7 @@ impl PageServerHandler {
                         self.handle_get_slru_segment_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
-                            .map(|msg| (msg, timer))
+                            .map(|msg| (msg, timer, ctx))
                             .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
                     ],
                     span,
@@ -2269,7 +2295,8 @@ impl PageServerHandler {
         io_concurrency: IoConcurrency,
         batch_break_reason: GetPageBatchBreakReason,
         ctx: &RequestContext,
-    ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>> {
+    ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer, RequestContext), BatchedPageStreamError>>
+    {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
         timeline
@@ -2376,6 +2403,7 @@ impl PageServerHandler {
                                 page,
                             }),
                             req.timer,
+                            req.ctx,
                         )
                     })
                     .map_err(|e| BatchedPageStreamError {
@@ -2420,7 +2448,8 @@ impl PageServerHandler {
         timeline: &Timeline,
         requests: Vec<BatchedTestRequest>,
         _ctx: &RequestContext,
-    ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>> {
+    ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer, RequestContext), BatchedPageStreamError>>
+    {
         // real requests would do something with the timeline
         let mut results = Vec::with_capacity(requests.len());
         for _req in requests.iter() {
@@ -2447,6 +2476,10 @@ impl PageServerHandler {
                                 req: req.req.clone(),
                             }),
                             req.timer,
+                            RequestContext::new(
+                                TaskKind::PageRequestHandler,
+                                DownloadBehavior::Warn,
+                            ),
                         )
                     })
                     .map_err(|e| BatchedPageStreamError {
