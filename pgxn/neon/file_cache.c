@@ -1489,7 +1489,7 @@ pwrite_with_ioctl(const void *buffer, uint64 blkno)
 		 buffer,
 		 BufferBlocks,
 		 BufferBlocks + BLCKSZ * NBuffers);
-	
+
 	rc = ioctl(lfc_desc, NEON_IOCTL_WRITE, &args);
 	if (rc >= 0)
 		lfc_ctl->kernel_module_write_hits++;
