@@ -163,10 +163,8 @@ pub fn spawn(
 
 /// Spawns a gRPC server for the page service.
 ///
-/// TODO: this doesn't support TLS. We need TLS reloading via ReloadingCertificateResolver, and to
-/// use that we have to reimplement the Tonic gRPC server ourselves. This will give up on a lot of
-/// infrastructure that's currently included with Tonic, and should use Hyper 1.x (alongside Hyper
-/// 0.x which is currently used by the Pageserver).
+/// TODO: this doesn't support TLS. We need TLS reloading via ReloadingCertificateResolver, so we
+/// need to reimplement the TCP+TLS accept loop ourselves.
 pub fn spawn_grpc(
     conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
