@@ -54,6 +54,15 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         # It cannot be moved to Dockerfile now because the database directory is created after the start of the container
         echo Adding dummy config
         docker compose exec compute touch /var/db/postgres/compute/compute_ctl_temp_override.conf
+        # Prepare for the PostGIS test
+        docker compose exec compute mkdir -p /tmp/pgis_reg/pgis_reg_tmp
+        TMPDIR=$(mktemp -d)
+        docker compose cp neon-test-extensions:/ext-src/postgis-src/raster/test "${TMPDIR}"
+        docker compose cp neon-test-extensions:/ext-src/postgis-src/regress/00-regress-install "${TMPDIR}"
+        docker compose exec compute mkdir -p /ext-src/postgis-src/raster /ext-src/postgis-src/regress /ext-src/postgis-src/regress/00-regress-install
+        docker compose cp "${TMPDIR}/test" compute:/ext-src/postgis-src/raster/test
+        docker compose cp "${TMPDIR}/00-regress-install" compute:/ext-src/postgis-src/regress
+        rm -rf "${TMPDIR}"
         # The following block copies the files for the pg_hintplan test to the compute node for the extension test in an isolated docker-compose environment
         TMPDIR=$(mktemp -d)
         docker compose cp neon-test-extensions:/ext-src/pg_hint_plan-src/data "${TMPDIR}/data"
@@ -68,7 +77,7 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         docker compose exec -T neon-test-extensions bash -c "(cd /postgres && patch -p1)" <"../compute/patches/contrib_pg${pg_version}.patch"
         # We are running tests now
         rm -f testout.txt testout_contrib.txt
-        docker compose exec -e USE_PGXS=1 -e SKIP=timescaledb-src,rdkit-src,postgis-src,pg_jsonschema-src,kq_imcx-src,wal2json_2_5-src,rag_jina_reranker_v1_tiny_en-src,rag_bge_small_en_v15-src \
+        docker compose exec -e USE_PGXS=1 -e SKIP=timescaledb-src,rdkit-src,pg_jsonschema-src,kq_imcx-src,wal2json_2_5-src,rag_jina_reranker_v1_tiny_en-src,rag_bge_small_en_v15-src \
         neon-test-extensions /run-tests.sh /ext-src | tee testout.txt && EXT_SUCCESS=1 || EXT_SUCCESS=0
         docker compose exec -e SKIP=start-scripts,postgres_fdw,ltree_plpython,jsonb_plpython,jsonb_plperl,hstore_plpython,hstore_plperl,dblink,bool_plperl \
         neon-test-extensions /run-tests.sh /postgres/contrib | tee testout_contrib.txt && CONTRIB_SUCCESS=1 || CONTRIB_SUCCESS=0
