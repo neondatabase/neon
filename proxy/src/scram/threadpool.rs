@@ -30,7 +30,7 @@ pub struct ThreadPool {
 
     // we hash a lot of passwords.
     // we keep a cache with in memory unique salts.
-    pub(super) cache: TimedLru<(EndpointIdInt, RoleNameInt), (ClientSecretEntry, ScramKey)>,
+    pub(super) cache: TimedLru<(EndpointIdInt, RoleNameInt), ClientSecretEntry>,
 }
 
 /// How often to reset the sketch values

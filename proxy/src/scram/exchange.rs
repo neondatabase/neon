@@ -98,12 +98,12 @@ pub(crate) async fn exchange(
     // hot path: let's check the threadpool cache
     if let Some(cached) = pool.cache.get(&(endpoint, role)) {
         // cached key is no longer valid.
-        if secret.is_password_invalid(&cached.1).into() {
+        if secret.is_password_invalid(&cached.client_key).into() {
             debug!("invalidating cached password");
             cached.invalidate();
-        } else if cached.0.verify(password) {
+        } else if let Ok(client_key) = cached.verify(password) {
             trace!("password validated from cache");
-            return Ok(sasl::Outcome::Success(cached.take_value().1.1));
+            return Ok(sasl::Outcome::Success(client_key));
         }
     }
 
@@ -117,7 +117,7 @@ pub(crate) async fn exchange(
         trace!("storing cached password");
         pool.cache.insert_unit(
             (endpoint, role),
-            (ClientSecretEntry::new(password), client_key.clone()),
+            ClientSecretEntry::new(password, client_key.clone()),
         );
 
         Ok(sasl::Outcome::Success(client_key))
@@ -128,6 +128,7 @@ pub(crate) async fn exchange(
 pub struct ClientSecretEntry {
     salt: [u8; 64],
     hash: [u8; 64],
+    client_key: ScramKey,
 }
 
 impl Drop for ClientSecretEntry {
@@ -138,7 +139,7 @@ impl Drop for ClientSecretEntry {
 }
 
 impl ClientSecretEntry {
-    fn new(password: &[u8]) -> Self {
+    fn new(password: &[u8], client_key: ScramKey) -> Self {
         let mut salt = [0; 64];
         rand::thread_rng().fill_bytes(&mut salt);
 
@@ -147,15 +148,20 @@ impl ClientSecretEntry {
         hmac.update(&salt);
         let hash = hmac.finalize().into_bytes().into();
 
-        Self { salt, hash }
+        Self {
+            salt,
+            hash,
+            client_key,
+        }
     }
 
-    fn verify(&self, password: &[u8]) -> bool {
+    fn verify(&self, password: &[u8]) -> Result<ScramKey, hmac::digest::MacError> {
         let mut hmac = hmac::Hmac::<sha2::Sha512>::new_from_slice(password)
             .expect("HMAC is able to accept all key sizes");
         hmac.update(&self.salt);
 
-        hmac.verify_slice(&self.hash).is_ok()
+        hmac.verify_slice(&self.hash)
+            .map(|()| self.client_key.clone())
     }
 }
 
