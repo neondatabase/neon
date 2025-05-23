@@ -2,6 +2,9 @@ use hmac::digest::consts::U32;
 use hmac::digest::generic_array::GenericArray;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use x509_cert::der::zeroize::Zeroize;
+
+use super::ScramKey;
 
 pub(crate) struct Pbkdf2 {
     hmac: Hmac<Sha256>,
@@ -10,7 +13,12 @@ pub(crate) struct Pbkdf2 {
     iterations: u32,
 }
 
-pub type Pbkdf2Output = [u8; 32];
+impl Drop for Pbkdf2 {
+    fn drop(&mut self) {
+        self.prev.zeroize();
+        self.hi.zeroize();
+    }
+}
 
 // inspired from <https://github.com/neondatabase/rust-postgres/blob/20031d7a9ee1addeae6e0968e3899ae6bf01cee2/postgres-protocol/src/authentication/sasl.rs#L36-L61>
 impl Pbkdf2 {
@@ -35,7 +43,7 @@ impl Pbkdf2 {
         (self.iterations).clamp(0, 4096)
     }
 
-    pub(crate) fn turn(&mut self) -> std::task::Poll<Pbkdf2Output> {
+    pub(crate) fn turn(&mut self) -> std::task::Poll<ScramKey> {
         let Self {
             hmac,
             prev,
@@ -58,7 +66,7 @@ impl Pbkdf2 {
 
         *iterations -= n;
         if *iterations == 0 {
-            std::task::Poll::Ready((*hi).into())
+            std::task::Poll::Ready(ScramKey::client_key(&(*hi).into()))
         } else {
             std::task::Poll::Pending
         }
@@ -69,6 +77,8 @@ impl Pbkdf2 {
 mod tests {
     use pbkdf2::pbkdf2_hmac_array;
     use sha2::Sha256;
+
+    use crate::scram::ScramKey;
 
     use super::Pbkdf2;
 
@@ -85,7 +95,7 @@ mod tests {
             break hash;
         };
 
-        let expected = pbkdf2_hmac_array::<Sha256, 32>(pass, salt, 60000);
-        assert_eq!(hash, expected);
+        let expected = ScramKey::client_key(&pbkdf2_hmac_array::<Sha256, 32>(pass, salt, 60000));
+        assert_eq!(hash.as_bytes(), expected.as_bytes());
     }
 }
