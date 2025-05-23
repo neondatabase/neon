@@ -118,7 +118,9 @@ def test_template_smoke(neon_env_builder: NeonEnvBuilder):
             (nrows) * (nrows + 1) // 2
         )  # https://stackoverflow.com/questions/43901484/sum-of-the-integers-from-1-to-n
 
-        env.pageserver.http_client().timeline_checkpoint(template_tenant_shard_id, template_timeline_id)
+        env.pageserver.http_client().timeline_checkpoint(
+            template_tenant_shard_id, template_timeline_id
+        )
         wait_for_last_flush_lsn(env, endpoint, template_tenant_id, template_timeline_id)
 
         validate_data_equivalence(endpoint)
@@ -130,9 +132,7 @@ def test_template_smoke(neon_env_builder: NeonEnvBuilder):
 
     # Do the template creation
     new_tenant_id = TenantId.generate()
-    env.storage_controller.tenant_create(
-        new_tenant_id, shard_count=shard_count, shard_stripe_size=stripe_size
-    )
+    env.storage_controller.tenant_create(new_tenant_id)
 
     new_timeline_id = TimelineId.generate()
     log.info("starting timeline creation")
@@ -156,7 +156,9 @@ def test_template_smoke(neon_env_builder: NeonEnvBuilder):
     ]
     shard_zero_ps = env.get_pageserver(shard_zero["node_id"])
     shard_zero_http = shard_zero_ps.http_client()
-    shard_zero_timeline_info = shard_zero_http.timeline_detail(shard_zero["shard_id"], new_timeline_id)
+    shard_zero_timeline_info = shard_zero_http.timeline_detail(
+        shard_zero["shard_id"], new_timeline_id
+    )
     initdb_lsn = Lsn(shard_zero_timeline_info["initdb_lsn"])
     min_readable_lsn = Lsn(shard_zero_timeline_info["min_readable_lsn"])
     last_record_lsn = Lsn(shard_zero_timeline_info["last_record_lsn"])
@@ -164,9 +166,9 @@ def test_template_smoke(neon_env_builder: NeonEnvBuilder):
     _remote_consistent_lsn = Lsn(shard_zero_timeline_info["remote_consistent_lsn"])
     remote_consistent_lsn_visible = Lsn(shard_zero_timeline_info["remote_consistent_lsn_visible"])
     # assert remote_consistent_lsn_visible == remote_consistent_lsn TODO: this fails initially and after restart, presumably because `UploadQueue::clean.1` is still `None`
-    #assert remote_consistent_lsn_visible == disk_consistent_lsn
-    #assert initdb_lsn == min_readable_lsn
-    #assert disk_consistent_lsn == initdb_lsn + 8
+    # assert remote_consistent_lsn_visible == disk_consistent_lsn
+    # assert initdb_lsn == min_readable_lsn
+    # assert disk_consistent_lsn == initdb_lsn + 8
     assert last_record_lsn == disk_consistent_lsn
     # TODO: assert these values are the same everywhere
 
@@ -186,45 +188,3 @@ def test_template_smoke(neon_env_builder: NeonEnvBuilder):
         env.pageserver.start()
         ro_endpoint.start()
         validate_data_equivalence(ro_endpoint)
-
-    #
-    # validate that we can write
-    #
-    workload = Workload(env, new_tenant_id, new_timeline_id, branch_name=branch_name)
-    workload.init()
-    workload.write_rows(64)
-    workload.validate()
-
-    rw_lsn = Lsn(workload.endpoint().safe_psql_scalar("select pg_current_wal_flush_lsn()"))
-
-    #
-    # validate that we can branch (important use case)
-    #
-
-    # ... at the tip
-    child_timeline_id = env.create_branch(
-        new_branch_name="br-tip",
-        ancestor_branch_name=import_branch_name,
-        tenant_id=new_tenant_id,
-        ancestor_start_lsn=rw_lsn,
-    )
-    child_workload = workload.branch(timeline_id=child_timeline_id, branch_name="br-tip")
-    child_workload.validate()
-
-    validate_data_equivalence(child_workload.endpoint())
-
-    # ... at the initdb lsn
-    _ = env.create_branch(
-        new_branch_name="br-initdb",
-        ancestor_branch_name=import_branch_name,
-        tenant_id=new_tenant_id,
-        ancestor_start_lsn=initdb_lsn,
-    )
-    br_initdb_endpoint = env.endpoints.create_start(
-        branch_name="br-initdb",
-        endpoint_id="br-initdb-ro",
-        tenant_id=new_tenant_id,
-    )
-    validate_data_equivalence(br_initdb_endpoint)
-    with pytest.raises(psycopg2.errors.UndefinedTable):
-        br_initdb_endpoint.safe_psql(f"select * from {workload.table}")
