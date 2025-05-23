@@ -10,6 +10,8 @@ pub(crate) struct Pbkdf2 {
     iterations: u32,
 }
 
+pub type Pbkdf2Output = [u8; 32];
+
 // inspired from <https://github.com/neondatabase/rust-postgres/blob/20031d7a9ee1addeae6e0968e3899ae6bf01cee2/postgres-protocol/src/authentication/sasl.rs#L36-L61>
 impl Pbkdf2 {
     pub(crate) fn start(str: &[u8], salt: &[u8], iterations: u32) -> Self {
@@ -33,7 +35,7 @@ impl Pbkdf2 {
         (self.iterations).clamp(0, 4096)
     }
 
-    pub(crate) fn turn(&mut self) -> std::task::Poll<[u8; 32]> {
+    pub(crate) fn turn(&mut self) -> std::task::Poll<Pbkdf2Output> {
         let Self {
             hmac,
             prev,
