@@ -1278,18 +1278,24 @@ impl Timeline {
         }
 
         let gc_cutoff = *self.applied_gc_cutoff_lsn.read();
+        let mut flags = options.flags;
+        if let LastImageLayerCreationStatus::NeedRepartition =
+            self.last_image_layer_creation_status.load().as_ref()
+        {
+            flags.insert(CompactFlags::ForceRepartition);
+        }
 
         // 2. Repartition and create image layers if necessary
         match self
             .repartition(
                 self.get_last_record_lsn(),
                 self.get_compaction_target_size(),
-                options.flags,
+                flags,
                 ctx,
             )
             .await
         {
-            Ok(((dense_partitioning, sparse_partitioning), lsn)) if lsn >= gc_cutoff => {
+            Ok(((dense_partitioning, sparse_partitioning), lsn)) => {
                 // Disables access_stats updates, so that the files we read remain candidates for eviction after we're done with them
                 let image_ctx = RequestContextBuilder::from(ctx)
                     .access_stats_behavior(AccessStatsBehavior::Skip)
@@ -1301,7 +1307,7 @@ impl Timeline {
                     .extend(sparse_partitioning.into_dense().parts);
 
                 // 3. Create new image layers for partitions that have been modified "enough".
-                let (image_layers, outcome) = self
+                let res = self
                     .create_image_layers(
                         &partitioning,
                         lsn,
@@ -1328,23 +1334,41 @@ impl Timeline {
                         {
                             critical!("missing key during compaction: {err:?}");
                         }
-                    })?;
+                    });
 
-                self.last_image_layer_creation_status
-                    .store(Arc::new(outcome.clone()));
+                match res {
+                    Ok((image_layers, outcome)) => {
+                        self.last_image_layer_creation_status
+                            .store(Arc::new(outcome.clone()));
 
-                self.upload_new_image_layers(image_layers)?;
-                if let LastImageLayerCreationStatus::Incomplete { .. } = outcome {
-                    // Yield and do not do any other kind of compaction.
-                    info!(
-                        "skipping shard ancestor compaction due to pending image layer generation tasks (preempted by L0 compaction)."
-                    );
-                    return Ok(CompactionOutcome::YieldForL0);
-                }
-            }
+                        self.upload_new_image_layers(image_layers)?;
+                        if let LastImageLayerCreationStatus::Incomplete { .. } = outcome {
+                            // Yield and do not do any other kind of compaction.
+                            info!(
+                                "skipping shard ancestor compaction due to pending image layer generation tasks (preempted by L0 compaction)."
+                            );
+                            return Ok(CompactionOutcome::YieldForL0);
+                        }
+                        // Fall through to shard ancestor compaction
+                    }
+                    Err(err) if lsn <= gc_cutoff => {
+                        if let CreateImageLayersError::GetVectoredError(_) = err {
+                            warn!(
+                                "could not create image layers due to {}; this is not critical because the requested image LSN is below the GC curoff",
+                                err
+                            );
+                            self.last_image_layer_creation_status
+                                .store(Arc::new(LastImageLayerCreationStatus::NeedRepartition));
 
-            Ok(_) => {
-                info!("skipping repartitioning due to image compaction LSN being below GC cutoff");
+                            // Fall through to shard ancestor compaction
+                        } else {
+                            return Err(err.into());
+                        }
+                    }
+                    Err(e) => {
+                        return Err(e.into());
+                    }
+                };
             }
 
             // Suppress errors when cancelled.
