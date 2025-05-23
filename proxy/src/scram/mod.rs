@@ -112,23 +112,32 @@ mod tests {
         );
     }
 
-    async fn run_round_trip_test(server_password: &str, client_password: &str) {
-        let pool = ThreadPool::new(1);
-
+    async fn check(
+        pool: &ThreadPool,
+        scram_secret: &ServerSecret,
+        password: &[u8],
+    ) -> Result<(), &'static str> {
         let ep = EndpointId::from("foo");
         let ep = EndpointIdInt::from(ep);
         let role = RoleName::from("user");
         let role = RoleNameInt::from(&role);
 
-        let scram_secret = ServerSecret::build(server_password).await.unwrap();
-        let outcome = super::exchange(&pool, ep, role, &scram_secret, client_password.as_bytes())
+        let outcome = super::exchange(pool, ep, role, scram_secret, password)
             .await
             .unwrap();
 
         match outcome {
-            crate::sasl::Outcome::Success(_) => {}
-            crate::sasl::Outcome::Failure(r) => panic!("{r}"),
+            crate::sasl::Outcome::Success(_) => Ok(()),
+            crate::sasl::Outcome::Failure(r) => Err(r),
         }
+    }
+
+    async fn run_round_trip_test(server_password: &str, client_password: &str) {
+        let pool = ThreadPool::new(1);
+        let scram_secret = ServerSecret::build(server_password).await.unwrap();
+        check(&pool, &scram_secret, client_password.as_bytes())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -140,5 +149,28 @@ mod tests {
     #[should_panic(expected = "password doesn't match")]
     async fn failure() {
         run_round_trip_test("pencil", "eraser").await;
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn password_cache() {
+        let pool = ThreadPool::new(1);
+        let scram_secret = ServerSecret::build("password").await.unwrap();
+
+        // wrong passwords are not added to cache
+        check(&pool, &scram_secret, b"wrong").await.unwrap_err();
+        assert!(!logs_contain("storing cached password"));
+
+        // correct passwords get cached
+        check(&pool, &scram_secret, b"password").await.unwrap();
+        assert!(logs_contain("storing cached password"));
+
+        // wrong passwords do not match the cache
+        check(&pool, &scram_secret, b"wrong").await.unwrap_err();
+        assert!(!logs_contain("password validated from cache"));
+
+        // correct passwords match the cache
+        check(&pool, &scram_secret, b"password").await.unwrap();
+        assert!(logs_contain("password validated from cache"));
     }
 }

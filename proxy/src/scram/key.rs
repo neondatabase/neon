@@ -1,5 +1,6 @@
 //! Tools for client/server/stored key management.
 
+use hmac::Mac;
 use subtle::ConstantTimeEq;
 use x509_cert::der::zeroize::Zeroize;
 
@@ -40,6 +41,14 @@ impl ScramKey {
 
     pub(crate) fn as_bytes(&self) -> [u8; SCRAM_KEY_LEN] {
         self.bytes
+    }
+
+    pub(crate) fn client_key(b: &[u8; 32]) -> Self {
+        let mut hmac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b)
+            .expect("HMAC is able to accept all key sizes");
+        hmac.update(b"Client Key");
+        let client_key: [u8; 32] = hmac.finalize().into_bytes().into();
+        client_key.into()
     }
 }
 
