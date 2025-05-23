@@ -60,9 +60,9 @@ fn sha256<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> [u8; 32] {
 mod tests {
     use super::threadpool::ThreadPool;
     use super::{Exchange, ServerSecret};
-    use crate::intern::EndpointIdInt;
+    use crate::intern::{EndpointIdInt, RoleNameInt};
     use crate::sasl::{Mechanism, Step};
-    use crate::types::EndpointId;
+    use crate::types::{EndpointId, RoleName};
 
     #[test]
     fn snapshot() {
@@ -117,9 +117,11 @@ mod tests {
 
         let ep = EndpointId::from("foo");
         let ep = EndpointIdInt::from(ep);
+        let role = RoleName::from("user");
+        let role = RoleNameInt::from(&role);
 
         let scram_secret = ServerSecret::build(server_password).await.unwrap();
-        let outcome = super::exchange(&pool, ep, &scram_secret, client_password.as_bytes())
+        let outcome = super::exchange(&pool, ep, role, &scram_secret, client_password.as_bytes())
             .await
             .unwrap();
 

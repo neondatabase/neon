@@ -1,6 +1,7 @@
 //! Tools for client/server/stored key management.
 
 use subtle::ConstantTimeEq;
+use x509_cert::der::zeroize::Zeroize;
 
 /// Faithfully taken from PostgreSQL.
 pub(crate) const SCRAM_KEY_LEN: usize = 32;
@@ -12,6 +13,12 @@ pub(crate) const SCRAM_KEY_LEN: usize = 32;
 #[repr(transparent)]
 pub(crate) struct ScramKey {
     bytes: [u8; SCRAM_KEY_LEN],
+}
+
+impl Drop for ScramKey {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
+    }
 }
 
 impl PartialEq for ScramKey {

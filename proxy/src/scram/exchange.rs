@@ -3,7 +3,10 @@
 use std::convert::Infallible;
 
 use hmac::{Hmac, Mac};
+use rand::RngCore;
 use sha2::Sha256;
+use tracing::debug;
+use x509_cert::der::zeroize::Zeroize;
 
 use super::ScramKey;
 use super::messages::{
@@ -13,7 +16,7 @@ use super::pbkdf2::Pbkdf2;
 use super::secret::ServerSecret;
 use super::signature::SignatureBuilder;
 use super::threadpool::ThreadPool;
-use crate::intern::EndpointIdInt;
+use crate::intern::{EndpointIdInt, RoleNameInt};
 use crate::sasl::{self, ChannelBinding, Error as SaslError};
 
 /// The only channel binding mode we currently support.
@@ -87,31 +90,79 @@ async fn derive_client_key(
         .spawn_job(endpoint, Pbkdf2::start(password, salt, iterations))
         .await;
 
-    let make_key = |name| {
-        let key = Hmac::<Sha256>::new_from_slice(&salted_password)
-            .expect("HMAC is able to accept all key sizes")
-            .chain_update(name)
-            .finalize();
+    let mut hmac = Hmac::<Sha256>::new_from_slice(&salted_password)
+        .expect("HMAC is able to accept all key sizes");
+    hmac.update(b"Client Key");
 
-        <[u8; 32]>::from(key.into_bytes())
-    };
-
-    make_key(b"Client Key").into()
+    ScramKey::from(<[u8; 32]>::from(hmac.finalize().into_bytes()))
 }
 
 pub(crate) async fn exchange(
     pool: &ThreadPool,
     endpoint: EndpointIdInt,
+    role: RoleNameInt,
     secret: &ServerSecret,
     password: &[u8],
 ) -> sasl::Result<sasl::Outcome<super::ScramKey>> {
+    // hot path: let's check the threadpool cache
+    if let Some(cached) = pool.cache.get(&(endpoint, role)) {
+        // cached key is no longer valid.
+        if secret.is_password_invalid(&cached.1).into() {
+            debug!("invalidating cached password");
+            cached.invalidate();
+        } else if cached.0.verify(password) {
+            return Ok(sasl::Outcome::Success(cached.take_value().1.1));
+        }
+    }
+
+    // slow path: full password verify.
     let salt = base64::decode(&secret.salt_base64)?;
     let client_key = derive_client_key(pool, endpoint, password, &salt, secret.iterations).await;
 
     if secret.is_password_invalid(&client_key).into() {
         Ok(sasl::Outcome::Failure("password doesn't match"))
     } else {
+        pool.cache.insert_unit(
+            (endpoint, role),
+            (ClientSecretEntry::new(password), client_key.clone()),
+        );
+
         Ok(sasl::Outcome::Success(client_key))
+    }
+}
+
+#[derive(Clone)]
+pub struct ClientSecretEntry {
+    salt: [u8; 64],
+    hash: [u8; 64],
+}
+
+impl Drop for ClientSecretEntry {
+    fn drop(&mut self) {
+        self.salt.zeroize();
+        self.hash.zeroize();
+    }
+}
+
+impl ClientSecretEntry {
+    fn new(password: &[u8]) -> Self {
+        let mut salt = [0; 64];
+        rand::thread_rng().fill_bytes(&mut salt);
+
+        let mut hmac = hmac::Hmac::<sha2::Sha512>::new_from_slice(password)
+            .expect("HMAC is able to accept all key sizes");
+        hmac.update(&salt);
+        let hash = hmac.finalize().into_bytes().into();
+
+        Self { salt, hash }
+    }
+
+    fn verify(&self, password: &[u8]) -> bool {
+        let mut hmac = hmac::Hmac::<sha2::Sha512>::new_from_slice(password)
+            .expect("HMAC is able to accept all key sizes");
+        hmac.update(&self.salt);
+
+        hmac.verify_slice(&self.hash).is_ok()
     }
 }
 

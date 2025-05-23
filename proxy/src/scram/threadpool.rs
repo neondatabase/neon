@@ -10,19 +10,27 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use futures::FutureExt;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 
-use super::pbkdf2::Pbkdf2;
-use crate::intern::EndpointIdInt;
+use super::ScramKey;
+use super::exchange::ClientSecretEntry;
+use super::pbkdf2::{Pbkdf2, Pbkdf2Output};
+use crate::cache::TimedLru;
+use crate::intern::{EndpointIdInt, RoleNameInt};
 use crate::metrics::{ThreadPoolMetrics, ThreadPoolWorkerId};
 use crate::scram::countmin::CountMinSketch;
 
 pub struct ThreadPool {
     runtime: Option<tokio::runtime::Runtime>,
     pub metrics: Arc<ThreadPoolMetrics>,
+
+    // we hash a lot of passwords.
+    // we keep a cache with in memory unique salts.
+    pub(super) cache: TimedLru<(EndpointIdInt, RoleNameInt), (ClientSecretEntry, ScramKey)>,
 }
 
 /// How often to reset the sketch values
@@ -68,6 +76,9 @@ impl ThreadPool {
             Self {
                 runtime: Some(runtime),
                 metrics: Arc::new(ThreadPoolMetrics::new(n_workers as usize)),
+                // only store the most common client_keys for a very short period of time.
+                // only helps reduce the CPU load from the whales.
+                cache: TimedLru::new("pbkdf2 cache", 100, Duration::from_secs(60), true),
             }
         })
     }
@@ -166,10 +177,10 @@ impl Future for JobSpec {
     }
 }
 
-pub(crate) struct JobHandle(tokio::task::JoinHandle<[u8; 32]>);
+pub(crate) struct JobHandle(tokio::task::JoinHandle<Pbkdf2Output>);
 
 impl Future for JobHandle {
-    type Output = [u8; 32];
+    type Output = Pbkdf2Output;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.0.poll_unpin(cx) {
