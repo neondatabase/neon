@@ -293,6 +293,9 @@ impl TryFrom<proto::GetPageRequest> for GetPageRequest {
     type Error = ProtocolError;
 
     fn try_from(pb: proto::GetPageRequest) -> Result<Self, Self::Error> {
+        if pb.block_number.is_empty() {
+            return Err(ProtocolError::Missing("block_number"));
+        }
         Ok(Self {
             request_id: pb.request_id,
             request_class: pb.request_class.into(),
@@ -310,6 +313,9 @@ impl TryFrom<GetPageRequest> for proto::GetPageRequest {
     type Error = ProtocolError;
 
     fn try_from(request: GetPageRequest) -> Result<Self, Self::Error> {
+        if request.block_numbers.is_empty() {
+            return Err(ProtocolError::Missing("block_number"));
+        }
         Ok(Self {
             request_id: request.request_id,
             request_class: request.request_class.into(),
