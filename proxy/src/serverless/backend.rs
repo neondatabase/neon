@@ -443,7 +443,15 @@ impl ReportableError for HttpConnError {
     fn get_error_kind(&self) -> ErrorKind {
         match self {
             HttpConnError::ConnectionClosedAbruptly(_) => ErrorKind::Compute,
-            HttpConnError::PostgresConnectionError(p) => p.get_error_kind(),
+            HttpConnError::PostgresConnectionError(p) => {
+                if p.as_db_error().is_some() {
+                    // postgres rejected the connection
+                    ErrorKind::Postgres
+                } else {
+                    // couldn't even reach postgres
+                    ErrorKind::Compute
+                }
+            }
             HttpConnError::LocalProxyConnectionError(_) => ErrorKind::Compute,
             HttpConnError::ComputeCtl(_) => ErrorKind::Service,
             HttpConnError::JwtPayloadError(_) => ErrorKind::User,
