@@ -17,6 +17,7 @@ rand = "0.8"
 tokio-util = { version = "0.7", features = ["compat"] }
 hyper-util = "0.1.9"
 hyper = "1.6.0"
+metrics.workspace = true
 
 
 pageserver_page_api.workspace = true

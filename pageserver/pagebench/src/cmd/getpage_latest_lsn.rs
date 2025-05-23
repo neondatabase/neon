@@ -23,6 +23,19 @@ use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
 use utils::shard::ShardIndex;
 
+use axum::Router;
+use axum::body::Body;
+use axum::extract::State;
+use axum::response::Response;
+
+
+use http::StatusCode;
+use http::header::CONTENT_TYPE;
+
+use metrics;
+use metrics::proto::MetricFamily;
+use metrics::{Encoder, TextEncoder};
+
 use crate::util::tokio_thread_local_stats::AllThreadLocalStats;
 use crate::util::{request_stats, tokio_thread_local_stats};
 
@@ -157,12 +170,60 @@ pub(crate) fn main(args: Args) -> anyhow::Result<()> {
         main_impl(args, thread_local_stats)
     })
 }
+async fn get_metrics(State(state): State<Arc<pageserver_client_grpc::PageserverClientAggregateMetrics>>) -> Response {
+    use metrics::core::Collector;
+    let metrics = state.collect();
+
+    info!("metrics: {metrics:?}");
+    // When we call TextEncoder::encode() below, it will immediately return an
+    // error if a metric family has no metrics, so we need to preemptively
+    // filter out metric families with no metrics.
+    let metrics = metrics
+        .into_iter()
+        .filter(|m| !m.get_metric().is_empty())
+        .collect::<Vec<MetricFamily>>();
+
+    let encoder = TextEncoder::new();
+    let mut buffer = vec![];
+
+    if let Err(e) = encoder.encode(&metrics, &mut buffer) {
+        Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header(CONTENT_TYPE, "application/text")
+            .body(Body::from(e.to_string()))
+            .unwrap()
+    } else {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, encoder.format_type())
+            .body(Body::from(buffer))
+            .unwrap()
+    }
+}
 
 async fn main_impl(
     args: Args,
     all_thread_local_stats: AllThreadLocalStats<request_stats::Stats>,
 ) -> anyhow::Result<()> {
     let args: &'static Args = Box::leak(Box::new(args));
+
+    // Vector of pageserver clients
+    let client_metrics = Arc::new(pageserver_client_grpc::PageserverClientAggregateMetrics::new());
+
+    use axum::routing::get;
+    let app = Router::new()
+        .route("/metrics", get(get_metrics))
+        .with_state(client_metrics.clone());
+
+    // TODO: make configurable. Or listen on unix domain socket?
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:9090")
+        .await
+        .unwrap();
+
+    tokio::spawn(async {
+        tracing::info!("metrics listener spawned");
+        axum::serve(listener, app).await.unwrap()
+    });
 
     let mgmt_api_client = Arc::new(pageserver_client::mgmt_api::Client::new(
         reqwest::Client::new(), // TODO: support ssl_ca_file for https APIs in pagebench.
@@ -322,6 +383,8 @@ async fn main_impl(
     let rps_period = args
         .per_client_rate
         .map(|rps_limit| Duration::from_secs_f64(1.0 / (rps_limit as f64)));
+    let new_metrics = client_metrics.clone();
+
     let make_worker: &dyn Fn(WorkerId) -> Pin<Box<dyn Send + Future<Output = ()>>> = &|worker_id| {
         let ss = shared_state.clone();
         let cancel = cancel.clone();
@@ -334,11 +397,12 @@ async fn main_impl(
             rand::distributions::weighted::WeightedIndex::new(ranges.iter().map(|v| v.len()))
                 .unwrap();
 
+        let new_value = new_metrics.clone();
         Box::pin(async move {
             if args.grpc_stream {
                 client_grpc_stream(args, worker_id, ss, cancel, rps_period, ranges, weights).await
             } else if args.grpc {
-                client_grpc(args, worker_id, ss, cancel, rps_period, ranges, weights).await
+                client_grpc(args, worker_id, new_value, ss, cancel, rps_period, ranges, weights).await
             } else {
                 client_libpq(args, worker_id, ss, cancel, rps_period, ranges, weights).await
             }
@@ -485,6 +549,7 @@ async fn client_libpq(
 async fn client_grpc(
     args: &Args,
     worker_id: WorkerId,
+    client_metrics: Arc<pageserver_client_grpc::PageserverClientAggregateMetrics>,
     shared_state: Arc<SharedState>,
     cancel: CancellationToken,
     rps_period: Option<Duration>,
@@ -511,8 +576,12 @@ async fn client_grpc(
         &None,
         shard_map,
         options,
+        Some(client_metrics.clone()),
     );
+
     let client = Arc::new(client);
+
+
 
     shared_state.start_work_barrier.wait().await;
     let client_start = Instant::now();

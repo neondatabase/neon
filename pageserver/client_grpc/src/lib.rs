@@ -22,6 +22,8 @@ use utils::shard::ShardIndex;
 use std::fmt::Debug;
 mod client_cache;
 
+use metrics::{IntCounter, IntCounterVec, core::Collector};
+
 #[derive(Error, Debug)]
 pub enum PageserverClientError {
     #[error("could not connect to service: {0}")]
@@ -38,6 +40,42 @@ pub enum PageserverClientError {
     Other(String),
 }
 
+#[derive(Clone, Debug)]
+pub struct PageserverClientAggregateMetrics {
+    pub request_counters: IntCounterVec,
+    pub retry_counters: IntCounterVec,
+}
+impl PageserverClientAggregateMetrics {
+    pub fn new() -> Self {
+
+        let request_counters = IntCounterVec::new(
+            metrics::core::Opts::new(
+                "backend_requests_total",
+                "Number of requests from backends.",
+            ),
+            &["request_kind"],
+        ).unwrap();
+
+        let retry_counters = IntCounterVec::new(
+            metrics::core::Opts::new(
+                "backend_requests_retries_total",
+                "Number of retried requests from backends.",
+            ),
+            &["request_kind"],
+        ).unwrap();
+        Self {
+            request_counters,
+            retry_counters,
+        }
+    }
+
+    pub fn collect (&self) -> Vec<metrics::proto::MetricFamily> {
+        let mut metrics = Vec::new();
+        metrics.append(&mut self.request_counters.collect());
+        metrics.append(&mut self.retry_counters.collect());
+        metrics
+    }
+}
 pub struct PageserverClient {
     _tenant_id: String,
     _timeline_id: String,
@@ -51,6 +89,8 @@ pub struct PageserverClient {
     auth_interceptor: AuthInterceptor,
 
     client_cache_options: ClientCacheOptions,
+
+    aggregate_metrics: Option<Arc<PageserverClientAggregateMetrics>>,
 }
 
 pub struct ClientCacheOptions {
@@ -82,7 +122,7 @@ impl PageserverClient {
             drop_rate: 0.0,
             hang_rate: 0.0,
         };
-        Self::new_with_config(tenant_id, timeline_id, auth_token, shard_map, options)
+        Self::new_with_config(tenant_id, timeline_id, auth_token, shard_map, options, None)
     }
     pub fn new_with_config(
         tenant_id: &str,
@@ -90,7 +130,9 @@ impl PageserverClient {
         auth_token: &Option<String>,
         shard_map: HashMap<ShardIndex, String>,
         options: ClientCacheOptions,
+        metrics: Option<Arc<PageserverClientAggregateMetrics>>,
     ) -> Self {
+
         Self {
             _tenant_id: tenant_id.to_string(),
             _timeline_id: timeline_id.to_string(),
@@ -99,6 +141,7 @@ impl PageserverClient {
             channels: RwLock::new(HashMap::new()),
             auth_interceptor: AuthInterceptor::new(tenant_id, timeline_id, auth_token.as_deref()),
             client_cache_options: options,
+            aggregate_metrics: metrics,
         }
     }
     pub async fn process_check_rel_exists_request(
@@ -184,6 +227,13 @@ impl PageserverClient {
                 "no response received for getpage request".to_string(),
             ));
         };
+
+        match self.aggregate_metrics {
+            Some(ref metrics) => {
+                metrics.request_counters.with_label_values(&["get_page"]).inc();
+            }
+            None => {}
+        }
 
         match response {
             Err(status) => {
@@ -305,7 +355,7 @@ impl PageserverClient {
         let usable_pool: Arc<client_cache::ConnectionPool>;
         match reused_pool {
             Some(pool) => {
-                let pooled_client = pool.get_client().await;
+                let pooled_client = pool.get_client().await.unwrap();
                 return pooled_client;
             }
             None => {
@@ -323,6 +373,7 @@ impl PageserverClient {
                     self.client_cache_options.max_delay_ms,
                     self.client_cache_options.drop_rate,
                     self.client_cache_options.hang_rate,
+                    self.aggregate_metrics.clone(),
                 );
                 let mut write_pool = self.channels.write().unwrap();
                 write_pool.insert(shard, new_pool.clone());
@@ -330,7 +381,7 @@ impl PageserverClient {
             }
         }
 
-        let pooled_client = usable_pool.get_client().await;
+        let pooled_client = usable_pool.get_client().await.unwrap();
         return pooled_client;
     }
 }
