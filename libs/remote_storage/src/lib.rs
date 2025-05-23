@@ -12,6 +12,7 @@
 mod azure_blob;
 mod config;
 mod error;
+mod gcs_bucket;
 mod local_fs;
 mod metrics;
 mod s3_bucket;
@@ -42,6 +43,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 pub use self::azure_blob::AzureBlobStorage;
+pub use self::gcs_bucket::GCSBucket;
 pub use self::local_fs::LocalFs;
 pub use self::s3_bucket::S3Bucket;
 pub use self::simulate_failures::UnreliableWrapper;
@@ -80,7 +82,11 @@ pub const MAX_KEYS_PER_DELETE_S3: usize = 1000;
 /// <https://learn.microsoft.com/en-us/rest/api/storageservices/blob-batch>
 pub const MAX_KEYS_PER_DELETE_AZURE: usize = 256;
 
+pub const MAX_KEYS_PER_DELETE_GCS: usize = 1000;
+
 const REMOTE_STORAGE_PREFIX_SEPARATOR: char = '/';
+
+const GCS_SCOPES: &[&str] = &["https://www.googleapis.com/auth/cloud-platform"];
 
 /// Path on the remote storage, relative to some inner prefix.
 /// The prefix is an implementation detail, that allows representing local paths
@@ -479,6 +485,7 @@ pub enum GenericRemoteStorage<Other: Clone = Arc<UnreliableWrapper>> {
     AwsS3(Arc<S3Bucket>),
     AzureBlob(Arc<AzureBlobStorage>),
     Unreliable(Other),
+    GCS(Arc<GCSBucket>),
 }
 
 impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
@@ -495,6 +502,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::AwsS3(s) => s.list(prefix, mode, max_keys, cancel).await,
             Self::AzureBlob(s) => s.list(prefix, mode, max_keys, cancel).await,
             Self::Unreliable(s) => s.list(prefix, mode, max_keys, cancel).await,
+            Self::GCS(s) => s.list(prefix, mode, max_keys, cancel).await,
         }
     }
 
@@ -512,6 +520,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::AwsS3(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
             Self::AzureBlob(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
             Self::Unreliable(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
+            Self::GCS(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
         }
     }
 
@@ -542,6 +551,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::AwsS3(s) => s.head_object(key, cancel).await,
             Self::AzureBlob(s) => s.head_object(key, cancel).await,
             Self::Unreliable(s) => s.head_object(key, cancel).await,
+            Self::GCS(_) => todo!(),
         }
     }
 
@@ -559,6 +569,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::AwsS3(s) => s.upload(from, data_size_bytes, to, metadata, cancel).await,
             Self::AzureBlob(s) => s.upload(from, data_size_bytes, to, metadata, cancel).await,
             Self::Unreliable(s) => s.upload(from, data_size_bytes, to, metadata, cancel).await,
+            Self::GCS(s) => s.upload(from, data_size_bytes, to, metadata, cancel).await,
         }
     }
 
@@ -574,6 +585,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::AwsS3(s) => s.download(from, opts, cancel).await,
             Self::AzureBlob(s) => s.download(from, opts, cancel).await,
             Self::Unreliable(s) => s.download(from, opts, cancel).await,
+            Self::GCS(s) => s.download(from, opts, cancel).await,
         }
     }
 
@@ -588,6 +600,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::AwsS3(s) => s.delete(path, cancel).await,
             Self::AzureBlob(s) => s.delete(path, cancel).await,
             Self::Unreliable(s) => s.delete(path, cancel).await,
+            Self::GCS(s) => s.delete(path, cancel).await,
         }
     }
 
@@ -602,6 +615,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::AwsS3(s) => s.delete_objects(paths, cancel).await,
             Self::AzureBlob(s) => s.delete_objects(paths, cancel).await,
             Self::Unreliable(s) => s.delete_objects(paths, cancel).await,
+            Self::GCS(s) => s.delete_objects(paths, cancel).await,
         }
     }
 
@@ -612,6 +626,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::AwsS3(s) => s.max_keys_per_delete(),
             Self::AzureBlob(s) => s.max_keys_per_delete(),
             Self::Unreliable(s) => s.max_keys_per_delete(),
+            Self::GCS(s) => s.max_keys_per_delete(),
         }
     }
 
@@ -626,6 +641,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::AwsS3(s) => s.delete_prefix(prefix, cancel).await,
             Self::AzureBlob(s) => s.delete_prefix(prefix, cancel).await,
             Self::Unreliable(s) => s.delete_prefix(prefix, cancel).await,
+            Self::GCS(_) => todo!(),
         }
     }
 
@@ -641,6 +657,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::AwsS3(s) => s.copy(from, to, cancel).await,
             Self::AzureBlob(s) => s.copy(from, to, cancel).await,
             Self::Unreliable(s) => s.copy(from, to, cancel).await,
+            Self::GCS(_) => todo!(),
         }
     }
 
@@ -669,16 +686,24 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
                 s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
                     .await
             }
+            Self::GCS(_) => todo!(),
         }
     }
 }
 
 impl GenericRemoteStorage {
     pub async fn from_config(storage_config: &RemoteStorageConfig) -> anyhow::Result<Self> {
+        info!("RemoteStorageConfig: {:?}", storage_config);
+
         let timeout = storage_config.timeout;
 
-        // If somkeone overrides timeout to be small without adjusting small_timeout, then adjust it automatically
+        // If someone overrides timeout to be small without adjusting small_timeout, then adjust it automatically
         let small_timeout = std::cmp::min(storage_config.small_timeout, timeout);
+
+        info!(
+            "RemoteStorageConfig's storage attribute: {:?}",
+            storage_config.storage
+        );
 
         Ok(match &storage_config.storage {
             RemoteStorageKind::LocalFs { local_path: path } => {
@@ -717,6 +742,16 @@ impl GenericRemoteStorage {
                     small_timeout,
                 )?))
             }
+            RemoteStorageKind::GCS(gcs_config) => {
+                let google_application_credentials =
+                    std::env::var("GOOGLE_APPLICATION_CREDENTIALS")
+                        .unwrap_or_else(|_| "<none>".into());
+                info!(
+                    "Using gcs bucket '{}' as a remote storage, prefix in bucket: '{:?}', GOOGLE_APPLICATION_CREDENTIALS: {google_application_credentials }",
+                    gcs_config.bucket_name, gcs_config.prefix_in_bucket
+                );
+                Self::GCS(Arc::new(GCSBucket::new(gcs_config, timeout).await?))
+            }
         })
     }
 
@@ -746,6 +781,7 @@ impl GenericRemoteStorage {
             Self::AwsS3(s) => Some(s.bucket_name()),
             Self::AzureBlob(s) => Some(s.container_name()),
             Self::Unreliable(_s) => None,
+            Self::GCS(s) => Some(s.bucket_name()),
         }
     }
 }
