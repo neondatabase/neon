@@ -99,6 +99,9 @@ pub(crate) enum GetAuthInfoError {
 
     #[error(transparent)]
     ApiError(ControlPlaneError),
+
+    #[error("No endpoint found in this region")]
+    RegionNotFound,
 }
 
 // This allows more useful interactions than `#[from]`.
@@ -115,6 +118,7 @@ impl UserFacingError for GetAuthInfoError {
             Self::BadSecret => REQUEST_FAILED.to_owned(),
             // However, API might return a meaningful error.
             Self::ApiError(e) => e.to_string_client(),
+            Self::RegionNotFound => "No endpoint found in this region".to_owned(),
         }
     }
 }
@@ -124,6 +128,7 @@ impl ReportableError for GetAuthInfoError {
         match self {
             Self::BadSecret => crate::error::ErrorKind::ControlPlane,
             Self::ApiError(_) => crate::error::ErrorKind::ControlPlane,
+            Self::RegionNotFound => crate::error::ErrorKind::User,
         }
     }
 }

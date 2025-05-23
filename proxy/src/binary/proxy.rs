@@ -27,6 +27,7 @@ use crate::config::{
     ProxyConfig, ProxyProtocolV2, remote_storage_from_toml,
 };
 use crate::context::parquet::ParquetUploadArgs;
+use crate::control_plane::client::cplane_proxy_v1::{GeoProximity, RegionProximityMap};
 use crate::http::health_server::AppMetrics;
 use crate::metrics::Metrics;
 use crate::rate_limiter::{
@@ -766,12 +767,21 @@ fn build_auth_backend(
             let wake_compute_endpoint_rate_limiter =
                 Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
 
+            let geo_map = Box::leak(Box::new(RegionProximityMap::from([(
+                args.region.clone(),
+                GeoProximity {
+                    _weight: 1,
+                    _distance: 0,
+                },
+            )])));
+
             let api = control_plane::client::cplane_proxy_v1::NeonControlPlaneClient::new(
                 endpoint,
                 args.control_plane_token.clone(),
                 caches,
                 locks,
                 wake_compute_endpoint_rate_limiter,
+                geo_map,
             );
 
             let api = control_plane::client::ControlPlaneClient::ProxyV1(api);
@@ -845,6 +855,14 @@ fn build_auth_backend(
             let wake_compute_endpoint_rate_limiter =
                 Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
 
+            let geo_map = Box::leak(Box::new(RegionProximityMap::from([(
+                args.region.clone(),
+                GeoProximity {
+                    _weight: 1,
+                    _distance: 0,
+                },
+            )])));
+
             // Since we use only get_allowed_ips_and_secret() wake_compute_endpoint_rate_limiter
             // and locks are not used in ConsoleRedirectBackend,
             // but they are required by the NeonControlPlaneClient
@@ -854,6 +872,7 @@ fn build_auth_backend(
                 caches,
                 locks,
                 wake_compute_endpoint_rate_limiter,
+                geo_map,
             );
 
             let backend = ConsoleRedirectBackend::new(url, api);

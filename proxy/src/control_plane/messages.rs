@@ -223,6 +223,25 @@ pub(crate) struct UserFacingMessage {
 }
 
 /// Response which holds client's auth secret, e.g. [`crate::scram::ServerSecret`].
+/// Returned by the `/get_endpoint_access_control_replicated` API method.
+#[derive(Deserialize)]
+pub(crate) struct GetEndpointAccessControlReplicated {
+    pub(crate) endpoints: Vec<EndpointAccessControlReplicated>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct EndpointAccessControlReplicated {
+    pub(crate) role_secret: Box<str>,
+    pub(crate) allowed_ips: Option<Vec<IpPattern>>,
+    pub(crate) allowed_vpc_endpoint_ids: Option<Vec<String>>,
+    pub(crate) project_id: Option<ProjectIdInt>,
+    pub(crate) account_id: Option<AccountIdInt>,
+    pub(crate) block_public_connections: Option<bool>,
+    pub(crate) block_vpc_connections: Option<bool>,
+    pub(crate) region_id: Option<String>,
+}
+
+/// Response which holds client's auth secret, e.g. [`crate::scram::ServerSecret`].
 /// Returned by the `/get_endpoint_access_control` API method.
 #[derive(Deserialize)]
 pub(crate) struct GetEndpointAccessControl {

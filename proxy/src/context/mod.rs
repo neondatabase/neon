@@ -296,6 +296,10 @@ impl RequestContext {
             .has_private_peer_addr()
     }
 
+    pub fn is_global(&self) -> bool {
+        self.0.try_lock().expect("should not deadlock").region == "global"
+    }
+
     pub(crate) fn set_error_kind(&self, kind: ErrorKind) {
         let mut this = self.0.try_lock().expect("should not deadlock");
         // Do not record errors from the private address to metrics.
