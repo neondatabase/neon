@@ -19,11 +19,11 @@ impl Drop for Transaction<'_> {
             return;
         }
 
-        let buf = self.client.inner().with_buf(|buf| {
+        let buf = self.client.inner_mut().with_buf(|buf| {
             frontend::query("ROLLBACK", buf).unwrap();
             buf.split().freeze()
         });
-        let _ = self.client.inner().send(FrontendMessage::Raw(buf));
+        let _ = self.client.inner_mut().send(FrontendMessage::Raw(buf));
     }
 }
 

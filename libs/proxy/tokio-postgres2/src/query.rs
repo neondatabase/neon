@@ -26,6 +26,12 @@ impl Drop for SyncIfNotDone<'_> {
     }
 }
 
+impl SyncIfNotDone<'_> {
+    fn release(self) {
+        std::mem::forget(self);
+    }
+}
+
 pub async fn query_txt<'a, S, I>(
     client: &'a mut InnerClient,
     typecache: &mut CachedTypeInfo,
@@ -120,7 +126,7 @@ where
     })?;
 
     // we are sending the sync, so let's close our guard.
-    std::mem::forget(guard);
+    guard.release();
 
     // now read the responses
     let responses = client.send_partial(FrontendMessage::Raw(buf))?;

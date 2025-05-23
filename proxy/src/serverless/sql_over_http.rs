@@ -1140,6 +1140,10 @@ async fn query_to_json<T: GenericClient>(
         let row = pg_text_row_to_json(&row, &types, raw_output, array_mode)?;
         rows.push(row);
 
+        // assumption: parsing pg text and converting to json takes CPU time.
+        // let's assume it is slightly expensive, so we should consume some cooperative budget.
+        // Especially considering that `RowStream::next` might be pulling from a batch
+        // of rows and never hit the tokio mpsc for a long time (although unlikely).
         tokio::task::consume_budget().await;
     }
 

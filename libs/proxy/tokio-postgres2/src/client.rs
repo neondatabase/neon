@@ -59,7 +59,7 @@ impl Responses {
                 return Poll::Ready(res);
             }
 
-            // get the next back of messages.
+            // get the next batch of messages.
             match ready!(self.receiver.poll_recv(cx)) {
                 Some(messages) => self.cur = messages,
                 None => return Poll::Ready(Err(Error::closed())),
@@ -168,7 +168,7 @@ impl Client {
         self.process_id
     }
 
-    pub(crate) fn inner(&mut self) -> &mut InnerClient {
+    pub(crate) fn inner_mut(&mut self) -> &mut InnerClient {
         &mut self.inner
     }
 
@@ -214,7 +214,7 @@ impl Client {
         &mut self,
         query: &str,
     ) -> Result<SimpleQueryStream, Error> {
-        simple_query::simple_query(self.inner(), query).await
+        simple_query::simple_query(self.inner_mut(), query).await
     }
 
     /// Executes a sequence of SQL statements using the simple query protocol.
@@ -228,7 +228,7 @@ impl Client {
     /// functionality to safely embed that data in the request. Do not form statements via string concatenation and pass
     /// them to this method!
     pub async fn batch_execute(&mut self, query: &str) -> Result<ReadyForQueryStatus, Error> {
-        simple_query::batch_execute(self.inner(), query).await
+        simple_query::batch_execute(self.inner_mut(), query).await
     }
 
     pub async fn discard_all(&mut self) -> Result<ReadyForQueryStatus, Error> {
@@ -250,11 +250,11 @@ impl Client {
                     return;
                 }
 
-                let buf = self.client.inner().with_buf(|buf| {
+                let buf = self.client.inner_mut().with_buf(|buf| {
                     frontend::query("ROLLBACK", buf).unwrap();
                     buf.split().freeze()
                 });
-                let _ = self.client.inner().send(FrontendMessage::Raw(buf));
+                let _ = self.client.inner_mut().send(FrontendMessage::Raw(buf));
             }
         }
 
