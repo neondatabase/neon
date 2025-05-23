@@ -3316,7 +3316,7 @@ impl tonic::service::Interceptor for TenantMetadataInterceptor {
         let tenant_id = req
             .metadata()
             .get("neon-tenant-id")
-            .ok_or(tonic::Status::invalid_argument("missing neon-tenant-id"))?
+            .ok_or_else(|| tonic::Status::invalid_argument("missing neon-tenant-id"))?
             .to_str()
             .map_err(|_| tonic::Status::invalid_argument("invalid neon-tenant-id"))?;
         let tenant_id = TenantId::from_str(tenant_id)
@@ -3326,7 +3326,7 @@ impl tonic::service::Interceptor for TenantMetadataInterceptor {
         let timeline_id = req
             .metadata()
             .get("neon-timeline-id")
-            .ok_or(tonic::Status::invalid_argument("missing neon-timeline-id"))?
+            .ok_or_else(|| tonic::Status::invalid_argument("missing neon-timeline-id"))?
             .to_str()
             .map_err(|_| tonic::Status::invalid_argument("invalid neon-timeline-id"))?;
         let timeline_id = TimelineId::from_str(timeline_id)
@@ -3336,7 +3336,7 @@ impl tonic::service::Interceptor for TenantMetadataInterceptor {
         let shard_index = req
             .metadata()
             .get("neon-shard-id")
-            .ok_or(tonic::Status::invalid_argument("missing neon-shard-id"))?
+            .ok_or_else(|| tonic::Status::invalid_argument("missing neon-shard-id"))?
             .to_str()
             .map_err(|_| tonic::Status::invalid_argument("invalid neon-shard-id"))?;
         let shard_index = ShardIndex::from_str(shard_index)
