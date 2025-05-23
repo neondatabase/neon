@@ -235,7 +235,7 @@ pub(super) async fn gather_inputs(
         // than our internal space cutoff.  This means that if someone drops a database and waits for their
         // PITR interval, they will see synthetic size decrease, even if we are still storing data inside
         // the space cutoff.
-        let mut next_pitr_cutoff = gc_info.cutoffs.time;
+        let mut next_pitr_cutoff = gc_info.cutoffs.time.unwrap_or_default(); // TODO: handle None
 
         // If the caller provided a shorter retention period, use that instead of the GC cutoff.
         let retention_param_cutoff = if let Some(max_retention_period) = max_retention_period {

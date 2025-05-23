@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::fs::{self, File};
 use std::io::{self, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::AsFd;
 
 use camino::{Utf8Path, Utf8PathBuf};
 
@@ -210,13 +210,13 @@ pub fn overwrite(
 
 /// Syncs the filesystem for the given file descriptor.
 #[cfg_attr(target_os = "macos", allow(unused_variables))]
-pub fn syncfs(fd: impl AsRawFd) -> anyhow::Result<()> {
+pub fn syncfs(fd: impl AsFd) -> anyhow::Result<()> {
     // Linux guarantees durability for syncfs.
     // POSIX doesn't have syncfs, and further does not actually guarantee durability of sync().
     #[cfg(target_os = "linux")]
     {
         use anyhow::Context;
-        nix::unistd::syncfs(fd.as_raw_fd()).context("syncfs")?;
+        nix::unistd::syncfs(fd).context("syncfs")?;
     }
     #[cfg(target_os = "macos")]
     {
