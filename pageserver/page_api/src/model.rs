@@ -72,10 +72,10 @@ impl ReadLsn {
 impl TryFrom<proto::ReadLsn> for ReadLsn {
     type Error = ProtocolError;
 
-    fn try_from(proto: proto::ReadLsn) -> Result<Self, Self::Error> {
+    fn try_from(pb: proto::ReadLsn) -> Result<Self, Self::Error> {
         let read_lsn = Self {
-            request_lsn: Lsn(proto.request_lsn),
-            not_modified_since_lsn: match proto.not_modified_since_lsn {
+            request_lsn: Lsn(pb.request_lsn),
+            not_modified_since_lsn: match pb.not_modified_since_lsn {
                 0 => None,
                 lsn => Some(Lsn(lsn)),
             },
@@ -103,26 +103,26 @@ pub type RelTag = pageserver_api::reltag::RelTag;
 impl TryFrom<proto::RelTag> for RelTag {
     type Error = ProtocolError;
 
-    fn try_from(proto: proto::RelTag) -> Result<Self, Self::Error> {
+    fn try_from(pb: proto::RelTag) -> Result<Self, Self::Error> {
         Ok(Self {
-            spcnode: proto.spc_oid,
-            dbnode: proto.db_oid,
-            relnode: proto.rel_number,
-            forknum: proto
+            spcnode: pb.spc_oid,
+            dbnode: pb.db_oid,
+            relnode: pb.rel_number,
+            forknum: pb
                 .fork_number
                 .try_into()
-                .map_err(|_| ProtocolError::invalid("fork_number", proto.fork_number))?,
+                .map_err(|_| ProtocolError::invalid("fork_number", pb.fork_number))?,
         })
     }
 }
 
 impl From<RelTag> for proto::RelTag {
-    fn from(rel: RelTag) -> Self {
+    fn from(rel_tag: RelTag) -> Self {
         Self {
-            spc_oid: rel.spcnode,
-            db_oid: rel.dbnode,
-            rel_number: rel.relnode,
-            fork_number: rel.forknum as u32,
+            spc_oid: rel_tag.spcnode,
+            db_oid: rel_tag.dbnode,
+            rel_number: rel_tag.relnode,
+            fork_number: rel_tag.forknum as u32,
         }
     }
 }
@@ -138,22 +138,22 @@ pub struct CheckRelExistsRequest {
 impl TryFrom<proto::CheckRelExistsRequest> for CheckRelExistsRequest {
     type Error = ProtocolError;
 
-    fn try_from(proto: proto::CheckRelExistsRequest) -> Result<Self, Self::Error> {
+    fn try_from(pb: proto::CheckRelExistsRequest) -> Result<Self, Self::Error> {
         Ok(Self {
-            read_lsn: proto
+            read_lsn: pb
                 .read_lsn
                 .ok_or(ProtocolError::Missing("read_lsn"))?
                 .try_into()?,
-            rel: proto.rel.ok_or(ProtocolError::Missing("rel"))?.try_into()?,
+            rel: pb.rel.ok_or(ProtocolError::Missing("rel"))?.try_into()?,
         })
     }
 }
 
-type CheckRelExistsResponse = bool;
+pub type CheckRelExistsResponse = bool;
 
 impl From<proto::CheckRelExistsResponse> for CheckRelExistsResponse {
-    fn from(proto: proto::CheckRelExistsResponse) -> Self {
-        proto.exists
+    fn from(pb: proto::CheckRelExistsResponse) -> Self {
+        pb.exists
     }
 }
 
@@ -175,13 +175,13 @@ pub struct GetBaseBackupRequest {
 impl TryFrom<proto::GetBaseBackupRequest> for GetBaseBackupRequest {
     type Error = ProtocolError;
 
-    fn try_from(proto: proto::GetBaseBackupRequest) -> Result<Self, Self::Error> {
+    fn try_from(pb: proto::GetBaseBackupRequest) -> Result<Self, Self::Error> {
         Ok(Self {
-            read_lsn: proto
+            read_lsn: pb
                 .read_lsn
                 .ok_or(ProtocolError::Missing("read_lsn"))?
                 .try_into()?,
-            replica: proto.replica,
+            replica: pb.replica,
         })
     }
 }
@@ -197,16 +197,16 @@ impl TryFrom<GetBaseBackupRequest> for proto::GetBaseBackupRequest {
     }
 }
 
-type GetBaseBackupResponseChunk = Bytes;
+pub type GetBaseBackupResponseChunk = Bytes;
 
 impl TryFrom<proto::GetBaseBackupResponseChunk> for GetBaseBackupResponseChunk {
     type Error = ProtocolError;
 
-    fn try_from(proto: proto::GetBaseBackupResponseChunk) -> Result<Self, Self::Error> {
-        if proto.chunk.is_empty() {
+    fn try_from(pb: proto::GetBaseBackupResponseChunk) -> Result<Self, Self::Error> {
+        if pb.chunk.is_empty() {
             return Err(ProtocolError::Missing("chunk"));
         }
-        Ok(proto.chunk)
+        Ok(pb.chunk)
     }
 }
 
@@ -232,13 +232,13 @@ pub struct GetDbSizeRequest {
 impl TryFrom<proto::GetDbSizeRequest> for GetDbSizeRequest {
     type Error = ProtocolError;
 
-    fn try_from(proto: proto::GetDbSizeRequest) -> Result<Self, Self::Error> {
+    fn try_from(pb: proto::GetDbSizeRequest) -> Result<Self, Self::Error> {
         Ok(Self {
-            read_lsn: proto
+            read_lsn: pb
                 .read_lsn
                 .ok_or(ProtocolError::Missing("read_lsn"))?
                 .try_into()?,
-            db_oid: proto.db_oid,
+            db_oid: pb.db_oid,
         })
     }
 }
@@ -254,11 +254,11 @@ impl TryFrom<GetDbSizeRequest> for proto::GetDbSizeRequest {
     }
 }
 
-type GetDbSizeResponse = u64;
+pub type GetDbSizeResponse = u64;
 
 impl From<proto::GetDbSizeResponse> for GetDbSizeResponse {
-    fn from(proto: proto::GetDbSizeResponse) -> Self {
-        proto.num_bytes
+    fn from(pb: proto::GetDbSizeResponse) -> Self {
+        pb.num_bytes
     }
 }
 
@@ -292,16 +292,16 @@ pub struct GetPageRequest {
 impl TryFrom<proto::GetPageRequest> for GetPageRequest {
     type Error = ProtocolError;
 
-    fn try_from(proto: proto::GetPageRequest) -> Result<Self, Self::Error> {
+    fn try_from(pb: proto::GetPageRequest) -> Result<Self, Self::Error> {
         Ok(Self {
-            request_id: proto.request_id,
-            request_class: proto.request_class.into(),
-            read_lsn: proto
+            request_id: pb.request_id,
+            request_class: pb.request_class.into(),
+            read_lsn: pb
                 .read_lsn
                 .ok_or(ProtocolError::Missing("read_lsn"))?
                 .try_into()?,
-            rel: proto.rel.ok_or(ProtocolError::Missing("rel"))?.try_into()?,
-            block_numbers: proto.block_number.into(),
+            rel: pb.rel.ok_or(ProtocolError::Missing("rel"))?.try_into()?,
+            block_numbers: pb.block_number.into(),
         })
     }
 }
@@ -321,7 +321,7 @@ impl TryFrom<GetPageRequest> for proto::GetPageRequest {
 }
 
 /// A GetPage request ID.
-type RequestID = u64;
+pub type RequestID = u64;
 
 /// A GetPage request class.
 #[derive(Clone, Copy, Debug)]
@@ -340,8 +340,8 @@ pub enum GetPageClass {
 }
 
 impl From<proto::GetPageClass> for GetPageClass {
-    fn from(class: proto::GetPageClass) -> Self {
-        match class {
+    fn from(pb: proto::GetPageClass) -> Self {
+        match pb {
             proto::GetPageClass::Unknown => Self::Unknown,
             proto::GetPageClass::Normal => Self::Normal,
             proto::GetPageClass::Prefetch => Self::Prefetch,
@@ -394,12 +394,12 @@ pub struct GetPageResponse {
 }
 
 impl From<proto::GetPageResponse> for GetPageResponse {
-    fn from(proto: proto::GetPageResponse) -> Self {
+    fn from(pb: proto::GetPageResponse) -> Self {
         Self {
-            request_id: proto.request_id,
-            status: proto.status.into(),
-            reason: Some(proto.reason).filter(|r| !r.is_empty()),
-            page_images: proto.page_image.into(),
+            request_id: pb.request_id,
+            status: pb.status.into(),
+            reason: Some(pb.reason).filter(|r| !r.is_empty()),
+            page_images: pb.page_image.into(),
         }
     }
 }
@@ -435,8 +435,8 @@ pub enum GetPageStatus {
 }
 
 impl From<proto::GetPageStatus> for GetPageStatus {
-    fn from(status: proto::GetPageStatus) -> Self {
-        match status {
+    fn from(pb: proto::GetPageStatus) -> Self {
+        match pb {
             proto::GetPageStatus::Unknown => Self::Unknown,
             proto::GetPageStatus::Ok => Self::Ok,
             proto::GetPageStatus::NotFound => Self::NotFound,
@@ -528,17 +528,17 @@ pub struct GetSlruSegmentRequest {
 impl TryFrom<proto::GetSlruSegmentRequest> for GetSlruSegmentRequest {
     type Error = ProtocolError;
 
-    fn try_from(proto: proto::GetSlruSegmentRequest) -> Result<Self, Self::Error> {
+    fn try_from(pb: proto::GetSlruSegmentRequest) -> Result<Self, Self::Error> {
         Ok(Self {
-            read_lsn: proto
+            read_lsn: pb
                 .read_lsn
                 .ok_or(ProtocolError::Missing("read_lsn"))?
                 .try_into()?,
-            kind: u8::try_from(proto.kind)
+            kind: u8::try_from(pb.kind)
                 .ok()
                 .and_then(SlruKind::from_repr)
-                .ok_or_else(|| ProtocolError::invalid("slru_kind", proto.kind))?,
-            segno: proto.segno,
+                .ok_or_else(|| ProtocolError::invalid("slru_kind", pb.kind))?,
+            segno: pb.segno,
         })
     }
 }
@@ -560,11 +560,11 @@ pub type GetSlruSegmentResponse = Bytes;
 impl TryFrom<proto::GetSlruSegmentResponse> for GetSlruSegmentResponse {
     type Error = ProtocolError;
 
-    fn try_from(proto: proto::GetSlruSegmentResponse) -> Result<Self, Self::Error> {
-        if proto.segment.is_empty() {
+    fn try_from(pb: proto::GetSlruSegmentResponse) -> Result<Self, Self::Error> {
+        if pb.segment.is_empty() {
             return Err(ProtocolError::Missing("segment"));
         }
-        Ok(proto.segment)
+        Ok(pb.segment)
     }
 }
 
