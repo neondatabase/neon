@@ -9,7 +9,8 @@ use indexmap::IndexMap;
 use regex::Regex;
 use remote_storage::RemotePath;
 use serde::{Deserialize, Serialize};
-use utils::id::{TenantId, TimelineId};
+use url::Host;
+use utils::id::{BranchId, EndpointId, ProjectId, TenantId, TimelineId};
 use utils::lsn::Lsn;
 
 use crate::responses::TlsConfig;
@@ -21,13 +22,77 @@ pub type PgIdent = String;
 /// String type alias representing Postgres extension version
 pub type ExtVersion = String;
 
+/// Pageserver settings.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Pageserver {
+    /// Hostname of the pageserver.
+    pub host: Host,
+
+    /// Port that the safekeeper listens on.
+    pub port: u16,
+}
+
+impl From<&Pageserver> for postgres::Config {
+    fn from(ps: &Pageserver) -> Self {
+        let mut config = postgres::Config::new();
+
+        config.host(&ps.host.to_string());
+        config.port(ps.port);
+
+        config
+    }
+}
+
+impl From<&Pageserver> for tokio_postgres::Config {
+    fn from(ps: &Pageserver) -> Self {
+        let mut config = tokio_postgres::Config::new();
+
+        config.host(&ps.host.to_string());
+        config.port(ps.port);
+
+        config
+    }
+}
+
+/// Safekeeper settings.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Safekeeper {
+    /// Hostname of the safekeeper.
+    pub host: Host,
+
+    /// Port that the safekeeper listens on.
+    pub port: u16,
+}
+
+impl From<&Safekeeper> for postgres::Config {
+    fn from(sk: &Safekeeper) -> Self {
+        let mut config = postgres::Config::new();
+
+        config.host(&sk.host.to_string());
+        config.port(sk.port);
+
+        config
+    }
+}
+
+impl From<&Safekeeper> for tokio_postgres::Config {
+    fn from(sk: &Safekeeper) -> Self {
+        let mut config = tokio_postgres::Config::new();
+
+        config.host(&sk.host.to_string());
+        config.port(sk.port);
+
+        config
+    }
+}
+
 fn default_reconfigure_concurrency() -> usize {
     1
 }
 
 /// Cluster spec or configuration represented as an optional number of
 /// delta operations + final cluster state description.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ComputeSpec {
     pub format_version: f32,
 
@@ -90,25 +155,13 @@ pub struct ComputeSpec {
 
     // Information needed to connect to the storage layer.
     //
-    // `tenant_id`, `timeline_id` and `pageserver_connstring` are always needed.
-    //
     // Depending on `mode`, this can be a primary read-write node, a read-only
     // replica, or a read-only node pinned at an older LSN.
     // `safekeeper_connstrings` must be set for a primary.
-    //
-    // For backwards compatibility, the control plane may leave out all of
-    // these, and instead set the "neon.tenant_id", "neon.timeline_id",
-    // etc. GUCs in cluster.settings. TODO: Once the control plane has been
-    // updated to fill these fields, we can make these non optional.
-    pub tenant_id: Option<TenantId>,
-    pub timeline_id: Option<TimelineId>,
-    pub pageserver_connstring: Option<String>,
+    pub pageservers: Vec<Pageserver>,
 
-    // More neon ids that we expose to the compute_ctl
-    // and to postgres as neon extension GUCs.
-    pub project_id: Option<String>,
-    pub branch_id: Option<String>,
-    pub endpoint_id: Option<String>,
+    #[serde(default)]
+    pub safekeepers_generation: Option<u32>,
 
     /// Safekeeper membership config generation. It is put in
     /// neon.safekeepers GUC and serves two purposes:
@@ -120,9 +173,18 @@ pub struct ComputeSpec {
     /// Note: it could be SafekeeperGeneration, but this needs linking
     /// compute_ctl with postgres_ffi.
     #[serde(default)]
-    pub safekeepers_generation: Option<u32>,
-    #[serde(default)]
-    pub safekeeper_connstrings: Vec<String>,
+    pub safekeepers: Vec<Safekeeper>,
+
+    /// The Neon tenant ID. Exposed to Postgres as `neon.tenant_id`.
+    pub tenant_id: TenantId,
+    /// The Neon timeline ID. Exposed to Postgres as `neon.timeline_id`.
+    pub timeline_id: TimelineId,
+    /// The Neon project ID. Exposed to Postgres as `neon.project_id`.
+    pub project_id: ProjectId,
+    /// The Neon branch ID. Exposed to Postgres as `neon.branch_id`.
+    pub branch_id: BranchId,
+    /// The Neon endpoint ID. Exposed to Postgres as `neon.endpoint_id`.
+    pub endpoint_id: EndpointId,
 
     #[serde(default)]
     pub mode: ComputeMode,

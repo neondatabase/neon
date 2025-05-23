@@ -8,7 +8,7 @@ use http::StatusCode;
 use tokio::task;
 use tracing::info;
 
-use crate::compute::{ComputeNode, ParsedSpec};
+use crate::compute::ComputeNode;
 use crate::http::JsonResponse;
 use crate::http::extract::Json;
 
@@ -22,11 +22,6 @@ pub(in crate::http) async fn configure(
     State(compute): State<Arc<ComputeNode>>,
     request: Json<ConfigurationRequest>,
 ) -> Response {
-    let pspec = match ParsedSpec::try_from(request.0.spec) {
-        Ok(p) => p,
-        Err(e) => return JsonResponse::error(StatusCode::BAD_REQUEST, e),
-    };
-
     // XXX: wrap state update under lock in a code block. Otherwise, we will try
     // to `Send` `mut state` into the spawned thread bellow, which will cause
     // the following rustc error:
@@ -43,7 +38,7 @@ pub(in crate::http) async fn configure(
         // configure request for tracing purposes.
         state.startup_span = Some(tracing::Span::current());
 
-        state.pspec = Some(pspec);
+        state.spec = Some(request.spec.clone());
         state.set_status(ComputeStatus::ConfigurationPending, &compute.state_changed);
         drop(state);
     }

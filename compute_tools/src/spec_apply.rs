@@ -4,7 +4,7 @@ use std::future::Future;
 use std::iter::{empty, once};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use compute_api::responses::ComputeStatus;
 use compute_api::spec::{ComputeAudit, ComputeSpec, Database, PgIdent, Role};
 use futures::future::join_all;
@@ -74,7 +74,7 @@ impl ComputeNode {
             let mut drop_subscriptions_done = false;
 
             if spec.drop_subscriptions_before_start {
-                let timeline_id = self.get_timeline_id().context("timeline_id must be set")?;
+                let timeline_id = self.get_timeline_id();
 
                 info!("Checking if drop subscription operation was already performed for timeline_id: {}", timeline_id);
 

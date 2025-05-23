@@ -1493,7 +1493,10 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 let conf = env.get_pageserver_conf(pageserver_id).unwrap();
                 let parsed = parse_host_port(&conf.listen_pg_addr).expect("Bad config");
                 (
-                    vec![(parsed.0, parsed.1.unwrap_or(5432))],
+                    vec![compute_api::spec::Pageserver {
+                        host: parsed.0,
+                        port: parsed.1.unwrap_or(5432),
+                    }],
                     // If caller is telling us what pageserver to use, this is not a tenant which is
                     // full managed by storage controller, therefore not sharded.
                     DEFAULT_STRIPE_SIZE,
@@ -1516,11 +1519,11 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                                 .await?;
                         }
 
-                        anyhow::Ok((
-                            Host::parse(&shard.listen_pg_addr)
+                        anyhow::Ok(compute_api::spec::Pageserver {
+                            host: Host::parse(&shard.listen_pg_addr)
                                 .expect("Storage controller reported bad hostname"),
-                            shard.listen_pg_port,
-                        ))
+                            port: shard.listen_pg_port,
+                        })
                     }),
                 )
                 .await?;
@@ -1576,10 +1579,10 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
             let pageservers = if let Some(ps_id) = args.endpoint_pageserver_id {
                 let pageserver = PageServerNode::from_env(env, env.get_pageserver_conf(ps_id)?);
-                vec![(
-                    pageserver.pg_connection_config.host().clone(),
-                    pageserver.pg_connection_config.port(),
-                )]
+                vec![compute_api::spec::Pageserver {
+                    host: pageserver.pg_connection_config.host().clone(),
+                    port: pageserver.pg_connection_config.port(),
+                }]
             } else {
                 let storage_controller = StorageController::from_env(env);
                 storage_controller
@@ -1587,12 +1590,10 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                     .await?
                     .shards
                     .into_iter()
-                    .map(|shard| {
-                        (
-                            Host::parse(&shard.listen_pg_addr)
-                                .expect("Storage controller reported malformed host"),
-                            shard.listen_pg_port,
-                        )
+                    .map(|shard| compute_api::spec::Pageserver {
+                        host: Host::parse(&shard.listen_pg_addr)
+                            .expect("Storage controller reported malformed host"),
+                        port: shard.listen_pg_port,
                     })
                     .collect::<Vec<_>>()
             };

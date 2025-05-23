@@ -18,8 +18,8 @@ use crate::compute::ComputeNode;
 pub fn launch_lsn_lease_bg_task_for_static(compute: &Arc<ComputeNode>) {
     let (tenant_id, timeline_id, lsn) = {
         let state = compute.state.lock().unwrap();
-        let spec = state.pspec.as_ref().expect("Spec must be set");
-        match spec.spec.mode {
+        let spec = state.spec.as_ref().expect("Spec must be set");
+        match spec.mode {
             ComputeMode::Static(lsn) => (spec.tenant_id, spec.timeline_id, lsn),
             _ => return,
         }
@@ -58,7 +58,7 @@ fn lsn_lease_bg_task(
             "Request succeeded, sleeping for {} seconds",
             sleep_duration.as_secs()
         );
-        compute.wait_timeout_while_pageserver_connstr_unchanged(sleep_duration);
+        compute.wait_timeout_while_pageservers_unchanged(sleep_duration);
     }
 }
 
@@ -79,18 +79,11 @@ fn acquire_lsn_lease_with_retry(
         let configs = {
             let state = compute.state.lock().unwrap();
 
-            let spec = state.pspec.as_ref().expect("spec must be set");
+            let spec = state.spec.as_ref().expect("spec must be set");
 
-            let conn_strings = spec.pageserver_connstr.split(',');
-
-            conn_strings
-                .map(|connstr| {
-                    let mut config = postgres::Config::from_str(connstr).expect("Invalid connstr");
-                    if let Some(storage_auth_token) = &spec.storage_auth_token {
-                        config.password(storage_auth_token.clone());
-                    }
-                    config
-                })
+            spec.pageservers
+                .iter()
+                .map(|p| postgres::Config::from(p))
                 .collect::<Vec<_>>()
         };
 
@@ -105,7 +98,7 @@ fn acquire_lsn_lease_with_retry(
             Err(e) => {
                 warn!("Failed to acquire lsn lease: {e} (attempt {attempts})");
 
-                compute.wait_timeout_while_pageserver_connstr_unchanged(Duration::from_millis(
+                compute.wait_timeout_while_pageservers_unchanged(Duration::from_millis(
                     retry_period_ms as u64,
                 ));
                 retry_period_ms *= 1.5;

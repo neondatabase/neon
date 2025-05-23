@@ -3,6 +3,7 @@ use anyhow::{Context, Result, bail};
 use async_compression::tokio::bufread::{ZstdDecoder, ZstdEncoder};
 use compute_api::responses::LfcOffloadState;
 use compute_api::responses::LfcPrewarmState;
+use compute_api::spec::ComputeSpec;
 use http::StatusCode;
 use reqwest::Client;
 use std::sync::Arc;
@@ -25,24 +26,30 @@ struct EndpointStoragePair {
 }
 
 const KEY: &str = "lfc_state";
-impl TryFrom<&crate::compute::ParsedSpec> for EndpointStoragePair {
+impl TryFrom<&ComputeSpec> for EndpointStoragePair {
     type Error = anyhow::Error;
-    fn try_from(pspec: &crate::compute::ParsedSpec) -> Result<Self, Self::Error> {
-        let Some(ref endpoint_id) = pspec.spec.endpoint_id else {
-            bail!("pspec.endpoint_id missing")
+    fn try_from(spec: &ComputeSpec) -> Result<Self, Self::Error> {
+        let Some(ref addr) = spec.endpoint_storage_addr else {
+            bail!("spec.endpoint_storage_addr missing")
         };
-        let Some(ref base_uri) = pspec.endpoint_storage_addr else {
-            bail!("pspec.endpoint_storage_addr missing")
-        };
-        let tenant_id = pspec.tenant_id;
-        let timeline_id = pspec.timeline_id;
 
-        let url = format!("http://{base_uri}/{tenant_id}/{timeline_id}/{endpoint_id}/{KEY}");
-        let Some(ref token) = pspec.endpoint_storage_token else {
-            bail!("pspec.endpoint_storage_token missing")
+        let url = format!(
+            "http://{addr}/{tenant_id}/{timeline_id}/{endpoint_id}/{key}",
+            addr = addr,
+            tenant_id = spec.tenant_id,
+            timeline_id = spec.timeline_id,
+            endpoint_id = spec.endpoint_id,
+            key = KEY
+        );
+
+        let Some(ref token) = spec.endpoint_storage_token else {
+            bail!("spec.endpoint_storage_token missing")
         };
-        let token = token.clone();
-        Ok(EndpointStoragePair { url, token })
+
+        Ok(EndpointStoragePair {
+            url,
+            token: token.clone(),
+        })
     }
 }
 
@@ -111,7 +118,7 @@ impl ComputeNode {
 
     fn endpoint_storage_pair(&self) -> Result<EndpointStoragePair> {
         let state = self.state.lock().unwrap();
-        state.pspec.as_ref().unwrap().try_into()
+        state.spec.as_ref().unwrap().try_into()
     }
 
     async fn prewarm_impl(&self) -> Result<()> {

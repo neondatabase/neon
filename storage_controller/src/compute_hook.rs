@@ -428,7 +428,10 @@ impl ComputeHook {
                     .expect("Unknown pageserver");
                 let (pg_host, pg_port) = parse_host_port(&ps_conf.listen_pg_addr)
                     .expect("Unable to parse listen_pg_addr");
-                (pg_host, pg_port.unwrap_or(5432))
+                compute_api::spec::Pageserver {
+                    host: pg_host,
+                    port: pg_port.unwrap_or(5432),
+                }
             })
             .collect::<Vec<_>>();
 

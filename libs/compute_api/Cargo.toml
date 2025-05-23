@@ -9,8 +9,11 @@ anyhow.workspace = true
 chrono.workspace = true
 indexmap.workspace = true
 jsonwebtoken.workspace = true
+postgres.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio-postgres.workspace = true
+url.workspace = true
 regex.workspace = true
 
 utils = { path = "../utils" }

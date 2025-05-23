@@ -37,7 +37,7 @@ pub async fn ping_safekeeper(
 
     // Parse result
     info!("done with {}", id);
-    if let postgres::SimpleQueryMessage::Row(row) = &result[0] {
+    if let tokio_postgres::SimpleQueryMessage::Row(row) = &result[0] {
         use std::str::FromStr;
         let response = TimelineStatusResponse::Ok(TimelineStatusOkResponse {
             flush_lsn: Lsn::from_str(row.get("flush_lsn").unwrap())?,
