@@ -8,29 +8,7 @@ use postgres_protocol2::message::frontend;
 use postgres_types2::Format;
 
 use crate::client::{CachedTypeInfo, InnerClient, Responses};
-use crate::codec::FrontendMessage;
 use crate::{Error, ReadyForQueryStatus, Row, Statement};
-
-/// we need to send a sync message on error to allow the protocol to reset.
-struct SyncIfNotDone<'a> {
-    client: &'a mut InnerClient,
-}
-
-impl Drop for SyncIfNotDone<'_> {
-    fn drop(&mut self) {
-        let buf = self.client.with_buf(|buf| {
-            frontend::sync(buf);
-            buf.split().freeze()
-        });
-        let _ = self.client.send_partial(FrontendMessage::Raw(buf));
-    }
-}
-
-impl SyncIfNotDone<'_> {
-    fn release(self) {
-        std::mem::forget(self);
-    }
-}
 
 pub async fn query_txt<'a, S, I>(
     client: &'a mut InnerClient,
@@ -44,7 +22,7 @@ where
     I::IntoIter: ExactSizeIterator,
 {
     let params = params.into_iter();
-    let guard = SyncIfNotDone { client };
+    let mut client = client.start()?;
 
     // Flow:
     // 1. Parse the query
@@ -59,7 +37,7 @@ where
     // 3. If the result does not match an OID we know, repeat 2.
 
     // parse the query and get type info
-    let buf = guard.client.with_buf(|buf| {
+    let responses = client.send_with_flush(|buf| {
         frontend::parse(
             "",                 // unnamed prepared statement
             query,              // query to parse
@@ -68,13 +46,8 @@ where
         )
         .map_err(Error::encode)?;
         frontend::describe(b'S', "", buf).map_err(Error::encode)?;
-        frontend::flush(buf);
-
-        Ok(buf.split().freeze())
+        Ok(())
     })?;
-
-    // now read the responses
-    let responses = guard.client.send(FrontendMessage::Raw(buf))?;
 
     match responses.next().await? {
         Message::ParseComplete => {}
@@ -93,9 +66,9 @@ where
     };
 
     let columns =
-        crate::prepare::parse_row_description(guard.client, typecache, row_description).await?;
+        crate::prepare::parse_row_description(&mut client, typecache, row_description).await?;
 
-    let buf = guard.client.with_buf(|buf| {
+    let responses = client.send_with_sync(|buf| {
         // Bind, pass params as text, retrieve as text
         match frontend::bind(
             "",                 // empty string selects the unnamed portal
@@ -119,17 +92,9 @@ where
 
         // Execute
         frontend::execute("", 0, buf).map_err(Error::encode)?;
-        // Sync
-        frontend::sync(buf);
 
-        Ok(buf.split().freeze())
+        Ok(())
     })?;
-
-    // we are sending the sync, so let's close our guard.
-    guard.release();
-
-    // now read the responses
-    let responses = client.send_partial(FrontendMessage::Raw(buf))?;
 
     match responses.next().await? {
         Message::BindComplete => {}

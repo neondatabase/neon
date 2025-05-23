@@ -1,6 +1,3 @@
-use postgres_protocol2::message::frontend;
-
-use crate::codec::FrontendMessage;
 use crate::query::RowStream;
 use crate::{CancelToken, Client, Error, ReadyForQueryStatus};
 
@@ -19,11 +16,7 @@ impl Drop for Transaction<'_> {
             return;
         }
 
-        let buf = self.client.inner_mut().with_buf(|buf| {
-            frontend::query("ROLLBACK", buf).unwrap();
-            buf.split().freeze()
-        });
-        let _ = self.client.inner_mut().send(FrontendMessage::Raw(buf));
+        let _ = self.client.inner_mut().send_simple_query("ROLLBACK");
     }
 }
 

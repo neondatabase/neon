@@ -82,33 +82,81 @@ pub(crate) struct CachedTypeInfo {
 
 pub struct InnerClient {
     sender: mpsc::UnboundedSender<FrontendMessage>,
-    pub(crate) responses: Responses,
+    responses: Responses,
 
     /// A buffer to use when writing out postgres commands.
     buffer: BytesMut,
 }
 
 impl InnerClient {
-    pub fn send(&mut self, messages: FrontendMessage) -> Result<&mut Responses, Error> {
-        self.sender.send(messages).map_err(|_| Error::closed())?;
+    pub fn start(&mut self) -> Result<PartialQuery, Error> {
         self.responses.waiting += 1;
-        Ok(&mut self.responses)
+        Ok(PartialQuery(Some(self)))
     }
 
-    pub fn send_partial(&mut self, messages: FrontendMessage) -> Result<&mut Responses, Error> {
+    // pub fn send_with_sync<F>(&mut self, f: F) -> Result<&mut Responses, Error>
+    // where
+    //     F: FnOnce(&mut BytesMut) -> Result<(), Error>,
+    // {
+    //     self.start()?.send_with_sync(f)
+    // }
+
+    pub fn send_simple_query(&mut self, query: &str) -> Result<&mut Responses, Error> {
+        self.responses.waiting += 1;
+
+        self.buffer.clear();
+        // simple queries do not need sync.
+        frontend::query(query, &mut self.buffer).map_err(Error::encode)?;
+        let buf = self.buffer.split().freeze();
+        self.send_message(FrontendMessage::Raw(buf))
+    }
+
+    fn send_message(&mut self, messages: FrontendMessage) -> Result<&mut Responses, Error> {
         self.sender.send(messages).map_err(|_| Error::closed())?;
         Ok(&mut self.responses)
     }
+}
 
-    /// Call the given function with a buffer to be used when writing out
-    /// postgres commands.
-    pub fn with_buf<F, R>(&mut self, f: F) -> R
+pub struct PartialQuery<'a>(Option<&'a mut InnerClient>);
+
+impl Drop for PartialQuery<'_> {
+    fn drop(&mut self) {
+        if let Some(client) = self.0.take() {
+            client.buffer.clear();
+            frontend::sync(&mut client.buffer);
+            let buf = client.buffer.split().freeze();
+            let _ = client.send_message(FrontendMessage::Raw(buf));
+        }
+    }
+}
+
+impl<'a> PartialQuery<'a> {
+    pub fn send_with_flush<F>(&mut self, f: F) -> Result<&mut Responses, Error>
     where
-        F: FnOnce(&mut BytesMut) -> R,
+        F: FnOnce(&mut BytesMut) -> Result<(), Error>,
     {
-        let r = f(&mut self.buffer);
-        self.buffer.clear();
-        r
+        let client = self.0.as_deref_mut().unwrap();
+
+        client.buffer.clear();
+        f(&mut client.buffer)?;
+        frontend::flush(&mut client.buffer);
+        let buf = client.buffer.split().freeze();
+        client.send_message(FrontendMessage::Raw(buf))
+    }
+
+    pub fn send_with_sync<F>(mut self, f: F) -> Result<&'a mut Responses, Error>
+    where
+        F: FnOnce(&mut BytesMut) -> Result<(), Error>,
+    {
+        let client = self.0.as_deref_mut().unwrap();
+
+        client.buffer.clear();
+        f(&mut client.buffer)?;
+        frontend::sync(&mut client.buffer);
+        let buf = client.buffer.split().freeze();
+        let _ = client.send_message(FrontendMessage::Raw(buf));
+
+        Ok(&mut self.0.take().unwrap().responses)
     }
 }
 
@@ -250,11 +298,7 @@ impl Client {
                     return;
                 }
 
-                let buf = self.client.inner_mut().with_buf(|buf| {
-                    frontend::query("ROLLBACK", buf).unwrap();
-                    buf.split().freeze()
-                });
-                let _ = self.client.inner_mut().send(FrontendMessage::Raw(buf));
+                let _ = self.client.inner.send_simple_query("ROLLBACK");
             }
         }
 

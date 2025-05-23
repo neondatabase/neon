@@ -1,4 +1,4 @@
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
 use postgres_protocol2::IsNull;
 use postgres_protocol2::message::backend::{Message, RowDescriptionBody};
@@ -6,8 +6,7 @@ use postgres_protocol2::message::frontend;
 use postgres_protocol2::types::oid_to_sql;
 use postgres_types2::Format;
 
-use crate::client::{CachedTypeInfo, InnerClient};
-use crate::codec::FrontendMessage;
+use crate::client::{CachedTypeInfo, PartialQuery, Responses};
 use crate::types::{Kind, Oid, Type};
 use crate::{Column, Error, Row, Statement};
 
@@ -19,30 +18,43 @@ INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid
 WHERE t.oid = $1
 ";
 
-/// we need to send a sync message on error to allow the protocol to reset.
-struct CloseStmt<'a> {
-    client: &'a mut InnerClient,
+/// we need to make sure we close this prepared statement.
+struct CloseStmt<'a, 'b> {
+    client: Option<&'a mut PartialQuery<'b>>,
     name: &'static str,
 }
 
-impl Drop for CloseStmt<'_> {
+impl<'a> CloseStmt<'a, '_> {
+    fn close(mut self) -> Result<&'a mut Responses, Error> {
+        let client = self.client.take().unwrap();
+        client.send_with_flush(|buf| {
+            frontend::close(b'S', self.name, buf).map_err(Error::encode)?;
+            Ok(())
+        })
+    }
+}
+
+impl Drop for CloseStmt<'_, '_> {
     fn drop(&mut self) {
-        let buf = self.client.with_buf(|buf| {
-            frontend::close(b'S', self.name, buf).unwrap();
-            frontend::flush(buf);
-            buf.split().freeze()
-        });
-        let _ = self.client.send_partial(FrontendMessage::Raw(buf));
+        if let Some(client) = self.client.take() {
+            let _ = client.send_with_flush(|buf| {
+                frontend::close(b'S', self.name, buf).map_err(Error::encode)?;
+                Ok(())
+            });
+        }
     }
 }
 
 async fn prepare_typecheck(
-    client: &mut InnerClient,
+    client: &mut PartialQuery<'_>,
     name: &'static str,
     query: &str,
 ) -> Result<Statement, Error> {
-    let buf = encode(client, name, query)?;
-    let responses = client.send_partial(FrontendMessage::Raw(buf))?;
+    let responses = client.send_with_flush(|buf| {
+        frontend::parse(name, query, [], buf).map_err(Error::encode)?;
+        frontend::describe(b'S', name, buf).map_err(Error::encode)?;
+        Ok(())
+    })?;
 
     match responses.next().await? {
         Message::ParseComplete => {}
@@ -73,15 +85,6 @@ async fn prepare_typecheck(
     Ok(Statement::new(name, columns))
 }
 
-fn encode(client: &mut InnerClient, name: &str, query: &str) -> Result<Bytes, Error> {
-    client.with_buf(|buf| {
-        frontend::parse(name, query, [], buf).map_err(Error::encode)?;
-        frontend::describe(b'S', name, buf).map_err(Error::encode)?;
-        frontend::flush(buf);
-        Ok(buf.split().freeze())
-    })
-}
-
 fn try_from_cache(typecache: &CachedTypeInfo, oid: Oid) -> Option<Type> {
     if let Some(type_) = Type::from_oid(oid) {
         return Some(type_);
@@ -95,7 +98,7 @@ fn try_from_cache(typecache: &CachedTypeInfo, oid: Oid) -> Option<Type> {
 }
 
 pub async fn parse_row_description(
-    client: &mut InnerClient,
+    client: &mut PartialQuery<'_>,
     typecache: &mut CachedTypeInfo,
     row_description: Option<RowDescriptionBody>,
 ) -> Result<Vec<Column>, Error> {
@@ -119,22 +122,23 @@ pub async fn parse_row_description(
     let typeinfo = "neon_proxy_typeinfo";
 
     // make sure to close the typeinfo statement before exiting.
-    let guard = CloseStmt {
+    let mut guard = CloseStmt {
         name: typeinfo,
-        client,
+        client: None,
     };
+    let client = guard.client.insert(client);
 
     // get the typeinfo statement.
-    let stmt = prepare_typecheck(guard.client, typeinfo, TYPEINFO_QUERY).await?;
+    let stmt = prepare_typecheck(client, typeinfo, TYPEINFO_QUERY).await?;
 
     for column in &mut columns {
-        column.type_ = get_type(guard.client, typecache, &stmt, column.type_oid()).await?;
+        column.type_ = get_type(client, typecache, &stmt, column.type_oid()).await?;
     }
 
-    // we always close it. this ensures that typeinfo still works in pgbouncer.
-    drop(guard);
+    // cancel the close guard.
+    let responses = guard.close()?;
 
-    match client.responses.next().await? {
+    match responses.next().await? {
         Message::CloseComplete => {}
         _ => return Err(Error::unexpected_message()),
     }
@@ -143,7 +147,7 @@ pub async fn parse_row_description(
 }
 
 async fn get_type(
-    client: &mut InnerClient,
+    client: &mut PartialQuery<'_>,
     typecache: &mut CachedTypeInfo,
     stmt: &Statement,
     mut oid: Oid,
@@ -199,9 +203,16 @@ async fn get_type(
 }
 
 /// exec the typeinfo statement returning one row.
-async fn exec(client: &mut InnerClient, statement: &Statement, param: Oid) -> Result<Row, Error> {
-    let buf = encode_subquery(client, statement, param)?;
-    let responses = client.send_partial(FrontendMessage::Raw(buf))?;
+async fn exec(
+    client: &mut PartialQuery<'_>,
+    statement: &Statement,
+    param: Oid,
+) -> Result<Row, Error> {
+    let responses = client.send_with_flush(|buf| {
+        encode_bind(statement, param, "", buf);
+        frontend::execute("", 0, buf).map_err(Error::encode)?;
+        Ok(())
+    })?;
 
     match responses.next().await? {
         Message::BindComplete => {}
@@ -219,19 +230,6 @@ async fn exec(client: &mut InnerClient, statement: &Statement, param: Oid) -> Re
     };
 
     Ok(row)
-}
-
-fn encode_subquery(
-    client: &mut InnerClient,
-    statement: &Statement,
-    param: Oid,
-) -> Result<Bytes, Error> {
-    client.with_buf(|buf| {
-        encode_bind(statement, param, "", buf);
-        frontend::execute("", 0, buf).map_err(Error::encode)?;
-        frontend::flush(buf);
-        Ok(buf.split().freeze())
-    })
 }
 
 fn encode_bind(statement: &Statement, param: Oid, portal: &str, buf: &mut BytesMut) {

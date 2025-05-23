@@ -1124,7 +1124,7 @@ async fn query_to_json<T: GenericClient>(
     // Manually drain the stream into a vector to leave row_stream hanging
     // around to get a command tag. Also check that the response is not too
     // big.
-    let mut rows: Vec<_> = Vec::new();
+    let mut rows = Vec::new();
     while let Some(row) = row_stream.next().await {
         let row = row.map_err(SqlOverHttpError::Postgres)?;
         *current_size += row.body_len();

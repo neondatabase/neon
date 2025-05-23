@@ -2,16 +2,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use bytes::Bytes;
 use fallible_iterator::FallibleIterator;
 use futures_util::{Stream, ready};
 use pin_project_lite::pin_project;
 use postgres_protocol2::message::backend::Message;
-use postgres_protocol2::message::frontend;
 use tracing::debug;
 
 use crate::client::{InnerClient, Responses};
-use crate::codec::FrontendMessage;
 use crate::{Error, ReadyForQueryStatus, SimpleQueryMessage, SimpleQueryRow};
 
 /// Information about a column of a single query row.
@@ -37,8 +34,7 @@ pub async fn simple_query<'a>(
 ) -> Result<SimpleQueryStream<'a>, Error> {
     debug!("executing simple query: {}", query);
 
-    let buf = encode(client, query)?;
-    let responses = client.send(FrontendMessage::Raw(buf))?;
+    let responses = client.send_simple_query(query)?;
 
     Ok(SimpleQueryStream {
         responses,
@@ -53,8 +49,7 @@ pub async fn batch_execute(
 ) -> Result<ReadyForQueryStatus, Error> {
     debug!("executing statement batch: {}", query);
 
-    let buf = encode(client, query)?;
-    let responses = client.send(FrontendMessage::Raw(buf))?;
+    let responses = client.send_simple_query(query)?;
 
     loop {
         match responses.next().await? {
@@ -66,13 +61,6 @@ pub async fn batch_execute(
             _ => return Err(Error::unexpected_message()),
         }
     }
-}
-
-pub(crate) fn encode(client: &mut InnerClient, query: &str) -> Result<Bytes, Error> {
-    client.with_buf(|buf| {
-        frontend::query(query, buf).map_err(Error::encode)?;
-        Ok(buf.split().freeze())
-    })
 }
 
 pin_project! {
