@@ -24,6 +24,8 @@ def test_gc_blocking_by_timeline(neon_env_builder: NeonEnvBuilder, sharded: bool
         initial_tenant_conf={"gc_period": "1s", "lsn_lease_length": "0s"},
         initial_tenant_shard_count=2 if sharded else None,
     )
+    for ps in env.pageservers:
+        ps.allowed_errors.append(".*db error: Timeline.*was not found in global map.*")
 
     if sharded:
         http = env.storage_controller.pageserver_api()
