@@ -135,9 +135,7 @@ fn pg_text_to_json(output: ValueSer, val: &str, pg_type: &Type) -> Result<(), Js
         // todo: we should fetch this from postgres.
         let delimiter = ',';
 
-        let mut array = output.list();
-        pg_array_parse(&mut array, val, elem_type, delimiter)?;
-        array.finish();
+        json::value_as_list!(|output| pg_array_parse(output, val, elem_type, delimiter)?);
         return Ok(());
     }
 
@@ -158,6 +156,7 @@ fn pg_text_to_json(output: ValueSer, val: &str, pg_type: &Type) -> Result<(), Js
                 output.value(val);
             }
         }
+        // we assume that the string value is valid json.
         Type::JSON | Type::JSONB => output.write_raw_json(val.as_bytes()),
         _ => output.value(val),
     }
@@ -269,9 +268,8 @@ fn pg_array_parse_item<'a>(
 
     if pg_array.starts_with('{') {
         // nested array.
-        let mut nested = output.list();
-        pg_array = pg_array_parse_inner(&mut nested, pg_array, elem, delim)?;
-        nested.finish();
+        pg_array =
+            json::value_as_list!(|output| pg_array_parse_inner(output, pg_array, elem, delim))?;
         return Ok(pg_array);
     }
 
