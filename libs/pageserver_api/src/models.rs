@@ -402,6 +402,8 @@ pub enum TimelineCreateRequestMode {
         // using a flattened enum, so, it was an accepted field, and
         // we continue to accept it by having it here.
         pg_version: Option<u32>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        read_only: bool,
     },
     ImportPgdata {
         import_pgdata: TimelineCreateRequestModeImportPgdata,
