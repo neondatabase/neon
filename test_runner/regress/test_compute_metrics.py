@@ -217,11 +217,11 @@ if SQL_EXPORTER is None:
             self, logs_dir: Path, config_file: Path, collector_file: Path, port: int
         ) -> None:
             # NOTE: Keep the version the same as in
-            # compute/Dockerfile.compute-node and Dockerfile.build-tools.
+            # compute/compute-node.Dockerfile and build-tools.Dockerfile.
             #
             # The "host" network mode allows sql_exporter to talk to the
             # endpoint which is running on the host.
-            super().__init__("docker.io/burningalchemist/sql_exporter:0.17.0", network_mode="host")
+            super().__init__("docker.io/burningalchemist/sql_exporter:0.17.3", network_mode="host")
 
             self.__logs_dir = logs_dir
             self.__port = port
