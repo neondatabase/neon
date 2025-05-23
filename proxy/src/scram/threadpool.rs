@@ -28,9 +28,8 @@ pub struct ThreadPool {
     pub metrics: Arc<ThreadPoolMetrics>,
 
     // we hash a lot of passwords.
-    // we keep a cache with in memory unique salts.
-    pub(super) cache:
-        moka::sync::Cache<(EndpointIdInt, RoleNameInt), (ClientSecretEntry, ScramKey)>,
+    // we keep a cache of partial hashes for faster validation.
+    pub(super) cache: moka::sync::Cache<(EndpointIdInt, RoleNameInt), ClientSecretEntry>,
 }
 
 /// How often to reset the sketch values
