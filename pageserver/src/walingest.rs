@@ -1316,6 +1316,10 @@ impl WalIngest {
             }
         });
 
+        if info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN {
+            modification.tline.prepare_basebackup(lsn);
+        }
+
         Ok(())
     }
 

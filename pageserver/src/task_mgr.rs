@@ -381,6 +381,10 @@ pub enum TaskKind {
     DetachAncestor,
 
     ImportPgdata,
+
+    /// Background task of [`crate::basebackup_cache::BasebackupCache`].
+    /// Prepares basebackups and clears outdated entries.
+    BasebackupCache,
 }
 
 #[derive(Default)]

@@ -16,6 +16,7 @@ use http_utils::tls_certs::ReloadingCertificateResolver;
 use metrics::launch_timestamp::{LaunchTimestamp, set_launch_timestamp_metric};
 use metrics::set_build_info_metric;
 use nix::sys::socket::{setsockopt, sockopt};
+use pageserver::basebackup_cache::BasebackupCache;
 use pageserver::config::{PageServerConf, PageserverIdentity, ignored_fields};
 use pageserver::controller_upcall_client::StorageControllerUpcallClient;
 use pageserver::deletion_queue::DeletionQueue;
@@ -561,6 +562,8 @@ fn start_pageserver(
         pageserver::l0_flush::L0FlushGlobalState::new(conf.l0_flush.clone());
 
     // Scan the local 'tenants/' directory and start loading the tenants
+    let (basebackup_prepare_sender, basebackup_prepare_receiver) =
+        tokio::sync::mpsc::unbounded_channel();
     let deletion_queue_client = deletion_queue.new_client();
     let background_purges = mgr::BackgroundPurges::default();
     let tenant_manager = BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
@@ -571,11 +574,21 @@ fn start_pageserver(
             remote_storage: remote_storage.clone(),
             deletion_queue_client,
             l0_flush_global_state,
+            basebackup_prepare_sender,
         },
         order,
         shutdown_pageserver.clone(),
     ))?;
     let tenant_manager = Arc::new(tenant_manager);
+
+    let basebackup_cache = BasebackupCache::spawn(
+        BACKGROUND_RUNTIME.handle(),
+        conf.basebackup_cache_dir(),
+        conf.basebackup_cache_config.clone(),
+        basebackup_prepare_receiver,
+        Arc::clone(&tenant_manager),
+        shutdown_pageserver.child_token(),
+    );
 
     BACKGROUND_RUNTIME.spawn({
         let shutdown_pageserver = shutdown_pageserver.clone();
@@ -783,6 +796,7 @@ fn start_pageserver(
         } else {
             None
         },
+        basebackup_cache.clone(),
     );
 
     // Spawn a Pageserver gRPC server task. It will spawn separate tasks for
@@ -799,6 +813,7 @@ fn start_pageserver(
             grpc_auth,
             otel_guard.as_ref().map(|g| g.dispatch.clone()),
             grpc_listener,
+            basebackup_cache,
         )?);
     }
 

@@ -10,7 +10,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use std::{io, str};
 
-use crate::{CancellableTask, PERF_TRACE_TARGET};
 use anyhow::{Context, bail};
 use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
@@ -55,7 +54,8 @@ use utils::sync::gate::{Gate, GateGuard};
 use utils::sync::spsc_fold;
 
 use crate::auth::check_permission;
-use crate::basebackup::BasebackupError;
+use crate::basebackup::{self, BasebackupError};
+use crate::basebackup_cache::BasebackupCache;
 use crate::config::PageServerConf;
 use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
@@ -76,7 +76,7 @@ use crate::tenant::mgr::{
 use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::{self, WaitLsnError};
 use crate::tenant::{GetTimelineError, PageReconstructError, Timeline};
-use crate::{basebackup, timed_after_cancellation};
+use crate::{CancellableTask, PERF_TRACE_TARGET, timed_after_cancellation};
 
 /// How long we may wait for a [`crate::tenant::mgr::TenantSlot::InProgress`]` and/or a [`crate::tenant::TenantShard`] which
 /// is not yet in state [`TenantState::Active`].
@@ -129,6 +129,7 @@ pub fn spawn(
     perf_trace_dispatch: Option<Dispatch>,
     tcp_listener: tokio::net::TcpListener,
     tls_config: Option<Arc<rustls::ServerConfig>>,
+    basebackup_cache: Arc<BasebackupCache>,
 ) -> Listener {
     let cancel = CancellationToken::new();
     let libpq_ctx = RequestContext::todo_child(
@@ -150,6 +151,7 @@ pub fn spawn(
             conf.pg_auth_type,
             tls_config,
             conf.page_service_pipelining.clone(),
+            basebackup_cache,
             libpq_ctx,
             cancel.clone(),
         )
@@ -171,6 +173,7 @@ pub fn spawn_grpc(
     auth: Option<Arc<SwappableJwtAuth>>,
     perf_trace_dispatch: Option<Dispatch>,
     listener: std::net::TcpListener,
+    basebackup_cache: Arc<BasebackupCache>,
 ) -> anyhow::Result<CancellableTask> {
     let cancel = CancellationToken::new();
     let ctx = RequestContextBuilder::new(TaskKind::PageRequestHandler)
@@ -205,6 +208,7 @@ pub fn spawn_grpc(
         PageServicePipeliningConfig::Serial, // TODO: unused with gRPC
         conf.get_vectored_concurrent_io,
         ConnectionPerfSpanFields::default(),
+        basebackup_cache,
         ctx,
         cancel.clone(),
         gate.enter().expect("just created"),
@@ -285,6 +289,7 @@ pub async fn libpq_listener_main(
     auth_type: AuthType,
     tls_config: Option<Arc<rustls::ServerConfig>>,
     pipelining_config: PageServicePipeliningConfig,
+    basebackup_cache: Arc<BasebackupCache>,
     listener_ctx: RequestContext,
     listener_cancel: CancellationToken,
 ) -> Connections {
@@ -328,6 +333,7 @@ pub async fn libpq_listener_main(
                     auth_type,
                     tls_config.clone(),
                     pipelining_config.clone(),
+                    Arc::clone(&basebackup_cache),
                     connection_ctx,
                     connections_cancel.child_token(),
                     gate_guard,
@@ -370,6 +376,7 @@ async fn page_service_conn_main(
     auth_type: AuthType,
     tls_config: Option<Arc<rustls::ServerConfig>>,
     pipelining_config: PageServicePipeliningConfig,
+    basebackup_cache: Arc<BasebackupCache>,
     connection_ctx: RequestContext,
     cancel: CancellationToken,
     gate_guard: GateGuard,
@@ -435,6 +442,7 @@ async fn page_service_conn_main(
         pipelining_config,
         conf.get_vectored_concurrent_io,
         perf_span_fields,
+        basebackup_cache,
         connection_ctx,
         cancel.clone(),
         gate_guard,
@@ -493,6 +501,8 @@ struct PageServerHandler {
 
     pipelining_config: PageServicePipeliningConfig,
     get_vectored_concurrent_io: GetVectoredConcurrentIo,
+
+    basebackup_cache: Arc<BasebackupCache>,
 
     gate_guard: GateGuard,
 }
@@ -1007,6 +1017,7 @@ impl PageServerHandler {
         pipelining_config: PageServicePipeliningConfig,
         get_vectored_concurrent_io: GetVectoredConcurrentIo,
         perf_span_fields: ConnectionPerfSpanFields,
+        basebackup_cache: Arc<BasebackupCache>,
         connection_ctx: RequestContext,
         cancel: CancellationToken,
         gate_guard: GateGuard,
@@ -1020,6 +1031,7 @@ impl PageServerHandler {
             cancel,
             pipelining_config,
             get_vectored_concurrent_io,
+            basebackup_cache,
             gate_guard,
         }
     }
@@ -2651,6 +2663,8 @@ impl PageServerHandler {
             .map_err(QueryError::Disconnected)?;
         self.flush_cancellable(pgb, &self.cancel).await?;
 
+        let mut from_cache = false;
+
         // Send a tarball of the latest layer on the timeline. Compress if not
         // fullbackup. TODO Compress in that case too (tests need to be updated)
         if full_backup {
@@ -2668,7 +2682,33 @@ impl PageServerHandler {
             .map_err(map_basebackup_error)?;
         } else {
             let mut writer = BufWriter::new(pgb.copyout_writer());
-            if gzip {
+
+            let cached = {
+                // Basebackup is cached only for this combination of parameters.
+                if timeline.is_basebackup_cache_enabled()
+                    && gzip
+                    && lsn.is_some()
+                    && prev_lsn.is_none()
+                {
+                    self.basebackup_cache
+                        .get(tenant_id, timeline_id, lsn.unwrap())
+                        .await
+                } else {
+                    None
+                }
+            };
+
+            if let Some(mut cached) = cached {
+                from_cache = true;
+                tokio::io::copy(&mut cached, &mut writer)
+                    .await
+                    .map_err(|e| {
+                        map_basebackup_error(BasebackupError::Client(
+                            e,
+                            "handle_basebackup_request,cached,copy",
+                        ))
+                    })?;
+            } else if gzip {
                 let mut encoder = GzipEncoder::with_quality(
                     &mut writer,
                     // NOTE using fast compression because it's on the critical path
@@ -2727,6 +2767,7 @@ impl PageServerHandler {
         info!(
             lsn_await_millis = lsn_awaited_after.as_millis(),
             basebackup_millis = basebackup_after.as_millis(),
+            %from_cache,
             "basebackup complete"
         );
 
