@@ -3378,18 +3378,12 @@ impl tonic::service::Interceptor for TenantAuthInterceptor {
             .expect("TenantMetadataInterceptor must run before TenantAuthInterceptor");
 
         // Fetch and decode the JWT token.
-        let authorization = req
+        let jwt = req
             .metadata()
             .get("authorization")
             .ok_or(tonic::Status::unauthenticated("no authorization header"))?
             .to_str()
-            .map_err(|_| tonic::Status::invalid_argument("invalid authorization header"))?;
-        if &authorization[0..7] != "Bearer " {
-            return Err(tonic::Status::invalid_argument(
-                "invalid authorization header",
-            ));
-        }
-        let jwt = authorization
+            .map_err(|_| tonic::Status::invalid_argument("invalid authorization header"))?
             .strip_prefix("Bearer")
             .ok_or_else(|| tonic::Status::invalid_argument("invalid authorization header"))?
             .trim();
