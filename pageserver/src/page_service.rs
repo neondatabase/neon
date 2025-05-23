@@ -3389,7 +3389,10 @@ impl tonic::service::Interceptor for TenantAuthInterceptor {
                 "invalid authorization header",
             ));
         }
-        let jwt = &authorization[7..].trim();
+        let jwt = authorization
+            .strip_prefix("Bearer")
+            .ok_or_else(|| tonic::Status::invalid_argument("invalid authorization header"))?
+            .trim();
         let jwtdata: TokenData<Claims> = auth
             .decode(jwt)
             .map_err(|err| tonic::Status::invalid_argument(format!("invalid JWT token: {err}")))?;
