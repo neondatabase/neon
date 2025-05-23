@@ -183,6 +183,8 @@ pub struct ConfigToml {
     pub enable_tls_page_service_api: bool,
     pub dev_mode: bool,
     pub timeline_import_config: TimelineImportConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub basebackup_cache_config: Option<BasebackupCacheConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -235,7 +237,7 @@ pub enum PageServiceProtocolPipelinedBatchingStrategy {
     ScatteredLsn,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case")]
 pub enum GetVectoredConcurrentIo {
     /// The read path is fully sequential: layers are visited
@@ -306,6 +308,26 @@ pub struct TimelineImportConfig {
     pub import_job_concurrency: NonZeroUsize,
     pub import_job_soft_size_limit: NonZeroUsize,
     pub import_job_checkpoint_threshold: NonZeroUsize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct BasebackupCacheConfig {
+    #[serde(with = "humantime_serde")]
+    pub cleanup_period: Duration,
+    // FIXME: Support max_size_bytes.
+    // pub max_size_bytes: usize,
+    pub max_size_entries: i64,
+}
+
+impl Default for BasebackupCacheConfig {
+    fn default() -> Self {
+        Self {
+            cleanup_period: Duration::from_secs(60),
+            // max_size_bytes: 1024 * 1024 * 1024, // 1 GiB
+            max_size_entries: 1000,
+        }
+    }
 }
 
 pub mod statvfs {
@@ -491,6 +513,14 @@ pub struct TenantConfigToml {
     /// Tenant level performance sampling ratio override. Controls the ratio of get page requests
     /// that will get perf sampling for the tenant.
     pub sampling_ratio: Option<Ratio>,
+
+    /// Capacity of relsize snapshot cache (used by replicas).
+    pub relsize_snapshot_cache_capacity: usize,
+
+    /// Enable preparing basebackup on XLOG_CHECKPOINT_SHUTDOWN and using it in basebackup requests.
+    // FIXME: Remove skip_serializing_if when the feature is stable.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub basebackup_cache_enabled: bool,
 }
 
 pub mod defaults {
@@ -664,6 +694,7 @@ impl Default for ConfigToml {
                 import_job_soft_size_limit: NonZeroUsize::new(1024 * 1024 * 1024).unwrap(),
                 import_job_checkpoint_threshold: NonZeroUsize::new(128).unwrap(),
             },
+            basebackup_cache_config: None,
         }
     }
 }
@@ -730,6 +761,7 @@ pub mod tenant_conf_defaults {
     pub const DEFAULT_GC_COMPACTION_VERIFICATION: bool = true;
     pub const DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB: u64 = 5 * 1024 * 1024; // 5GB
     pub const DEFAULT_GC_COMPACTION_RATIO_PERCENT: u64 = 100;
+    pub const DEFAULT_RELSIZE_SNAPSHOT_CACHE_CAPACITY: usize = 1000;
 }
 
 impl Default for TenantConfigToml {
@@ -787,6 +819,8 @@ impl Default for TenantConfigToml {
             gc_compaction_initial_threshold_kb: DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB,
             gc_compaction_ratio_percent: DEFAULT_GC_COMPACTION_RATIO_PERCENT,
             sampling_ratio: None,
+            relsize_snapshot_cache_capacity: DEFAULT_RELSIZE_SNAPSHOT_CACHE_CAPACITY,
+            basebackup_cache_enabled: false,
         }
     }
 }

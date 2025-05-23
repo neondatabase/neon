@@ -86,6 +86,27 @@ pub struct DbError {
 }
 
 impl DbError {
+    pub fn new_test_error(code: SqlState, message: String) -> Self {
+        DbError {
+            severity: "ERROR".to_string(),
+            parsed_severity: Some(Severity::Error),
+            code,
+            message,
+            detail: None,
+            hint: None,
+            position: None,
+            where_: None,
+            schema: None,
+            table: None,
+            column: None,
+            datatype: None,
+            constraint: None,
+            file: None,
+            line: None,
+            routine: None,
+        }
+    }
+
     pub(crate) fn parse(fields: &mut ErrorFields<'_>) -> io::Result<DbError> {
         let mut severity = None;
         let mut parsed_severity = None;

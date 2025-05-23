@@ -13,22 +13,19 @@ pub(crate) struct Pbkdf2 {
 // inspired from <https://github.com/neondatabase/rust-postgres/blob/20031d7a9ee1addeae6e0968e3899ae6bf01cee2/postgres-protocol/src/authentication/sasl.rs#L36-L61>
 impl Pbkdf2 {
     pub(crate) fn start(str: &[u8], salt: &[u8], iterations: u32) -> Self {
-        let hmac =
+        // key the HMAC and derive the first block in-place
+        let mut hmac =
             Hmac::<Sha256>::new_from_slice(str).expect("HMAC is able to accept all key sizes");
-
-        let prev = hmac
-            .clone()
-            .chain_update(salt)
-            .chain_update(1u32.to_be_bytes())
-            .finalize()
-            .into_bytes();
+        hmac.update(salt);
+        hmac.update(&1u32.to_be_bytes());
+        let init_block = hmac.finalize_reset().into_bytes();
 
         Self {
             hmac,
-            // one consumed for the hash above
+            // one iteration spent above
             iterations: iterations - 1,
-            hi: prev,
-            prev,
+            hi: init_block,
+            prev: init_block,
         }
     }
 
@@ -44,14 +41,17 @@ impl Pbkdf2 {
             iterations,
         } = self;
 
-        // only do 4096 iterations per turn before sharing the thread for fairness
+        // only do up to 4096 iterations per turn for fairness
         let n = (*iterations).clamp(0, 4096);
         for _ in 0..n {
-            *prev = hmac.clone().chain_update(*prev).finalize().into_bytes();
+            hmac.update(prev);
+            let block = hmac.finalize_reset().into_bytes();
 
-            for (hi, prev) in hi.iter_mut().zip(*prev) {
-                *hi ^= prev;
+            for (hi_byte, &b) in hi.iter_mut().zip(block.iter()) {
+                *hi_byte ^= b;
             }
+
+            *prev = block;
         }
 
         *iterations -= n;

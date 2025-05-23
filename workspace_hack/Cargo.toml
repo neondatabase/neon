@@ -60,7 +60,8 @@ lazy_static = { version = "1", default-features = false, features = ["spin_no_st
 libc = { version = "0.2", features = ["extra_traits", "use_std"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }
-nix = { version = "0.26" }
+nix-2f80eeee3b1b6c7e = { package = "nix", version = "0.26" }
+nix-fa1f6196edfd7249 = { package = "nix", version = "0.30", features = ["dir", "ioctl", "mman", "poll", "signal", "socket"] }
 nom = { version = "7" }
 num = { version = "0.4" }
 num-bigint = { version = "0.4" }
@@ -106,6 +107,7 @@ tower = { version = "0.4", default-features = false, features = ["balance", "buf
 tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
 tracing-log = { version = "0.2" }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["serde", "v4", "v7"] }
 zeroize = { version = "1", features = ["derive", "serde"] }

@@ -3,6 +3,7 @@
 
 mod auth;
 pub mod basebackup;
+pub mod basebackup_cache;
 pub mod config;
 pub mod consumption_metrics;
 pub mod context;

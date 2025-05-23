@@ -843,23 +843,50 @@ pub(crate) static COMPRESSION_IMAGE_OUTPUT_BYTES: Lazy<IntCounter> = Lazy::new(|
     .expect("failed to define a metric")
 });
 
-pub(crate) static RELSIZE_CACHE_ENTRIES: Lazy<UIntGauge> = Lazy::new(|| {
+pub(crate) static RELSIZE_LATEST_CACHE_ENTRIES: Lazy<UIntGauge> = Lazy::new(|| {
     register_uint_gauge!(
-        "pageserver_relsize_cache_entries",
-        "Number of entries in the relation size cache",
+        "pageserver_relsize_latest_cache_entries",
+        "Number of entries in the latest relation size cache",
     )
     .expect("failed to define a metric")
 });
 
-pub(crate) static RELSIZE_CACHE_HITS: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!("pageserver_relsize_cache_hits", "Relation size cache hits",)
-        .expect("failed to define a metric")
+pub(crate) static RELSIZE_LATEST_CACHE_HITS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_relsize_latest_cache_hits",
+        "Latest relation size cache hits",
+    )
+    .expect("failed to define a metric")
 });
 
-pub(crate) static RELSIZE_CACHE_MISSES: Lazy<IntCounter> = Lazy::new(|| {
+pub(crate) static RELSIZE_LATEST_CACHE_MISSES: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
-        "pageserver_relsize_cache_misses",
-        "Relation size cache misses",
+        "pageserver_relsize_latest_cache_misses",
+        "Relation size latest cache misses",
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static RELSIZE_SNAPSHOT_CACHE_ENTRIES: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_relsize_snapshot_cache_entries",
+        "Number of entries in the pitr relation size cache",
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static RELSIZE_SNAPSHOT_CACHE_HITS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_relsize_snapshot_cache_hits",
+        "Pitr relation size cache hits",
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static RELSIZE_SNAPSHOT_CACHE_MISSES: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_relsize_snapshot_cache_misses",
+        "Relation size snapshot cache misses",
     )
     .expect("failed to define a metric")
 });
@@ -1037,6 +1064,15 @@ pub(crate) static TENANT_SYNTHETIC_SIZE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|
         &["tenant_id"]
     )
     .expect("Failed to register pageserver_tenant_synthetic_cached_size_bytes metric")
+});
+
+pub(crate) static TENANT_OFFLOADED_TIMELINES: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_tenant_offloaded_timelines",
+        "Number of offloaded timelines of a tenant",
+        &["tenant_id", "shard_id"]
+    )
+    .expect("Failed to register pageserver_tenant_offloaded_timelines metric")
 });
 
 pub(crate) static EVICTION_ITERATION_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
@@ -3524,11 +3560,14 @@ impl TimelineMetrics {
 }
 
 pub(crate) fn remove_tenant_metrics(tenant_shard_id: &TenantShardId) {
+    let tid = tenant_shard_id.tenant_id.to_string();
+    let shard_id = tenant_shard_id.shard_slug().to_string();
+
     // Only shard zero deals in synthetic sizes
     if tenant_shard_id.is_shard_zero() {
-        let tid = tenant_shard_id.tenant_id.to_string();
         let _ = TENANT_SYNTHETIC_SIZE_METRIC.remove_label_values(&[&tid]);
     }
+    let _ = TENANT_OFFLOADED_TIMELINES.remove_label_values(&[&tid, &shard_id]);
 
     tenant_throttling::remove_tenant_metrics(tenant_shard_id);
 
@@ -4319,6 +4358,42 @@ pub(crate) fn set_tokio_runtime_setup(setup: &str, num_threads: NonZeroUsize) {
         .unwrap()
         .set(u64::try_from(num_threads.get()).unwrap());
 }
+
+pub(crate) static BASEBACKUP_CACHE_READ: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_basebackup_cache_read_total",
+        "Number of read accesses to the basebackup cache grouped by hit/miss/error",
+        &["result"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static BASEBACKUP_CACHE_PREPARE: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_basebackup_cache_prepare_total",
+        "Number of prepare requests processed by the basebackup cache grouped by ok/skip/error",
+        &["result"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static BASEBACKUP_CACHE_ENTRIES: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "pageserver_basebackup_cache_entries_total",
+        "Number of entries in the basebackup cache"
+    )
+    .expect("failed to define a metric")
+});
+
+// FIXME: Support basebackup cache size metrics.
+#[allow(dead_code)]
+pub(crate) static BASEBACKUP_CACHE_SIZE: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "pageserver_basebackup_cache_size_bytes",
+        "Total size of all basebackup cache entries on disk in bytes"
+    )
+    .expect("failed to define a metric")
+});
 
 static PAGESERVER_CONFIG_IGNORED_ITEMS: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
