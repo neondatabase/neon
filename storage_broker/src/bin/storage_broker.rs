@@ -17,12 +17,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use camino::Utf8PathBuf;
 use clap::{Parser, command};
 use futures::future::OptionFuture;
 use futures_core::Stream;
 use futures_util::StreamExt;
-use http_body_util::Full;
+use http_body_util::combinators::BoxBody;
+use http_body_util::{Empty, Full};
 use http_utils::tls_certs::ReloadingCertificateResolver;
 use hyper::body::Incoming;
 use hyper::header::CONTENT_TYPE;
@@ -46,7 +48,6 @@ use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time;
-use tonic::body::{self, BoxBody, empty_body};
 use tonic::codegen::Service;
 use tonic::{Code, Request, Response, Status};
 use tracing::*;
@@ -634,7 +635,7 @@ impl BrokerService for Broker {
 // We serve only metrics and healthcheck through http1.
 async fn http1_handler(
     req: hyper::Request<Incoming>,
-) -> Result<hyper::Response<BoxBody>, Infallible> {
+) -> Result<hyper::Response<BoxBody<Bytes, Infallible>>, Infallible> {
     let resp = match (req.method(), req.uri().path()) {
         (&Method::GET, "/metrics") => {
             let mut buffer = vec![];
@@ -645,16 +646,16 @@ async fn http1_handler(
             hyper::Response::builder()
                 .status(StatusCode::OK)
                 .header(CONTENT_TYPE, encoder.format_type())
-                .body(body::boxed(Full::new(bytes::Bytes::from(buffer))))
+                .body(BoxBody::new(Full::new(Bytes::from(buffer))))
                 .unwrap()
         }
         (&Method::GET, "/status") => hyper::Response::builder()
             .status(StatusCode::OK)
-            .body(empty_body())
+            .body(BoxBody::new(Empty::new()))
             .unwrap(),
         _ => hyper::Response::builder()
             .status(StatusCode::NOT_FOUND)
-            .body(empty_body())
+            .body(BoxBody::new(Empty::new()))
             .unwrap(),
     };
     Ok(resp)
