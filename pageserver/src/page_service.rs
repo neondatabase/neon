@@ -653,6 +653,9 @@ struct BatchedGetPageRequest {
     timer: SmgrOpTimer,
     lsn_range: LsnRange,
     ctx: RequestContext,
+    // If the request is perf enabled, this contains a context
+    // with a perf span tracking the time spent waiting for the executor.
+    batch_wait_ctx: Option<RequestContext>,
 }
 
 #[cfg(feature = "testing")]
@@ -665,6 +668,7 @@ struct BatchedTestRequest {
 /// so that we don't keep the [`Timeline::gate`] open while the batch
 /// is being built up inside the [`spsc_fold`] (pagestream pipelining).
 #[derive(IntoStaticStr)]
+#[allow(clippy::large_enum_variant)]
 enum BatchedFeMessage {
     Exists {
         span: Span,
@@ -1182,6 +1186,22 @@ impl PageServerHandler {
                     }
                 };
 
+                let batch_wait_ctx = if ctx.has_perf_span() {
+                    Some(
+                        RequestContextBuilder::from(&ctx)
+                            .perf_span(|crnt_perf_span| {
+                                info_span!(
+                                    target: PERF_TRACE_TARGET,
+                                    parent: crnt_perf_span,
+                                    "WAIT_EXECUTOR",
+                                )
+                            })
+                            .attached_child(),
+                    )
+                } else {
+                    None
+                };
+
                 BatchedFeMessage::GetPage {
                     span,
                     shard: shard.downgrade(),
@@ -1193,6 +1213,7 @@ impl PageServerHandler {
                             request_lsn: req.hdr.request_lsn
                         },
                         ctx,
+                        batch_wait_ctx,
                     }],
                     // The executor grabs the batch when it becomes idle.
                     // Hence, [`GetPageBatchBreakReason::ExecutorSteal`] is the
@@ -1917,12 +1938,25 @@ impl PageServerHandler {
                             return Ok(());
                         }
                     };
-                    let batch = match batch {
+                    let mut batch = match batch {
                         Ok(batch) => batch,
                         Err(e) => {
                             return Err(e);
                         }
                     };
+
+                    if let BatchedFeMessage::GetPage {
+                        pages,
+                        span: _,
+                        shard: _,
+                        batch_break_reason: _,
+                    } = &mut batch
+                    {
+                        for req in pages {
+                            req.batch_wait_ctx.take();
+                        }
+                    }
+
                     self.pagestream_handle_batched_message(
                         pgb_writer,
                         batch,
