@@ -63,6 +63,8 @@ pub struct PageServerConf {
     ///
     /// EXPERIMENTAL: this protocol is unstable and under active development.
     pub listen_grpc_addr: Option<String>,
+    /// If true, enable TLS for the gRPC server, using ssl_key_file and ssl_cert_file.
+    pub listen_grpc_tls: bool,
 
     /// Path to a file with certificate's private key for https and gRPC API.
     /// Default: server.key
@@ -228,7 +230,7 @@ pub struct PageServerConf {
 
     pub tracing: Option<pageserver_api::config::Tracing>,
 
-    /// Enable TLS in page service API.
+    /// Enable TLS in the libpq page service API.
     /// Does not force TLS: the client negotiates TLS usage during the handshake.
     /// Uses key and certificate from ssl_key_file/ssl_cert_file.
     pub enable_tls_page_service_api: bool,
@@ -363,6 +365,7 @@ impl PageServerConf {
             listen_http_addr,
             listen_https_addr,
             listen_grpc_addr,
+            listen_grpc_tls,
             ssl_key_file,
             ssl_cert_file,
             ssl_cert_reload_period,
@@ -433,6 +436,7 @@ impl PageServerConf {
             listen_http_addr,
             listen_https_addr,
             listen_grpc_addr,
+            listen_grpc_tls,
             ssl_key_file,
             ssl_cert_file,
             ssl_cert_reload_period,
