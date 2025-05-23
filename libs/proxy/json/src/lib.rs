@@ -71,6 +71,7 @@ pub trait ValueEncoder {
 /// Serialize a json object.
 pub struct ObjectSer<'buf> {
     value: ValueSer<'buf>,
+    start: usize,
 }
 
 impl<'buf> ObjectSer<'buf> {
@@ -78,7 +79,8 @@ impl<'buf> ObjectSer<'buf> {
     #[inline]
     pub fn new(value: ValueSer<'buf>) -> Self {
         value.buf.push(b'{');
-        Self { value }
+        let start = value.buf.len();
+        Self { value, start }
     }
 
     /// Borrow the underlying buffer
@@ -103,7 +105,7 @@ impl<'buf> ObjectSer<'buf> {
         let start = self.value.buf.len();
 
         // push separator if necessary
-        if self.value.buf.len() > self.value.start + 1 {
+        if self.value.buf.len() > self.start {
             self.value.buf.push(b',');
         }
         // push key
@@ -138,6 +140,7 @@ pub trait KeyEncoder {
 /// Serialize a json object.
 pub struct ListSer<'buf> {
     value: ValueSer<'buf>,
+    start: usize,
 }
 
 impl<'buf> ListSer<'buf> {
@@ -145,7 +148,8 @@ impl<'buf> ListSer<'buf> {
     #[inline]
     pub fn new(value: ValueSer<'buf>) -> Self {
         value.buf.push(b'[');
-        Self { value }
+        let start = value.buf.len();
+        Self { value, start }
     }
 
     /// Borrow the underlying buffer
@@ -165,7 +169,7 @@ impl<'buf> ListSer<'buf> {
         let start = self.value.buf.len();
 
         // push separator if necessary
-        if self.value.buf.len() > self.value.start + 1 {
+        if self.value.buf.len() > self.start {
             self.value.buf.push(b',');
         }
 

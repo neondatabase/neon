@@ -1,5 +1,5 @@
 use itertools::Either;
-use json::{ListSer, ValueSer};
+use json::ValueSer;
 use postgres_client::Row;
 use postgres_client::types::{Kind, Type};
 use serde_json::Value;
@@ -117,8 +117,7 @@ pub(crate) fn pg_text_row_to_json(
 //
 fn pg_text_to_json(output: ValueSer, val: &str, pg_type: &Type) -> Result<(), JsonConversionError> {
     if let Kind::Array(elem_type) = pg_type.kind() {
-        json::value_as_list!(|output| pg_array_parse(output, val, elem_type)?);
-        return Ok(());
+        return pg_array_parse(output, val, elem_type);
     }
 
     match *pg_type {
@@ -143,120 +142,145 @@ fn pg_text_to_json(output: ValueSer, val: &str, pg_type: &Type) -> Result<(), Js
     Ok(())
 }
 
-//
-// Parse postgres array into JSON array.
-//
-// This is a bit involved because we need to handle nested arrays and quoted
-// values. Unlike postgres we don't check that all nested arrays have the same
-// dimensions, we just return them as is.
-//
+///
+/// Parse postgres array into JSON array.
+///
+/// This is a bit involved because we need to handle nested arrays and quoted
+/// values. Unlike postgres we don't check that all nested arrays have the same
+/// dimensions, we just return them as is.
+///
+/// <https://www.postgresql.org/docs/current/arrays.html#ARRAYS-IO>
+///
+/// The external text representation of an array value consists of items that are interpreted
+/// according to the I/O conversion rules for the array's element type, plus decoration that
+/// indicates the array structure. The decoration consists of curly braces (`{` and `}`) around
+/// the array value plus delimiter characters between adjacent items. The delimiter character
+/// is usually a comma (,) but can be something else: it is determined by the typdelim setting
+/// for the array's element type. Among the standard data types provided in the PostgreSQL
+/// distribution, all use a comma, except for type box, which uses a semicolon (;).
+///
+/// In a multidimensional array, each dimension (row, plane, cube, etc.)
+/// gets its own level of curly braces, and delimiters must be written between adjacent
+/// curly-braced entities of the same level.
 fn pg_array_parse(
-    output: &mut ListSer,
-    pg_array: &str,
+    output: ValueSer<'_>,
+    mut pg_array: &str,
     elem_type: &Type,
 ) -> Result<(), JsonConversionError> {
-    pg_array_parse_inner(output, pg_array, elem_type, false).map(|_| {})
-}
-
-fn pg_array_parse_inner(
-    output: &mut ListSer,
-    pg_array: &str,
-    elem_type: &Type,
-    nested: bool,
-) -> Result<usize, JsonConversionError> {
-    let mut pg_array_chr = pg_array.char_indices();
-    let mut level = 0;
-    let mut quote = false;
-    let mut entry = String::new();
-
-    // skip bounds decoration
+    // skip bounds decoration, eg
+    // "[1:1][-2:-1][3:5]={{{1,2,3},{4,5,6}}}"
     if let Some('[') = pg_array.chars().next() {
-        for (_, c) in pg_array_chr.by_ref() {
-            if c == '=' {
-                break;
-            }
-        }
+        let Some((_bounds, array)) = pg_array.split_once("]=") else {
+            return Err(JsonConversionError::UnbalancedArray);
+        };
+        pg_array = array;
     }
 
-    fn push_checked(
-        output: &mut ListSer,
-        entry: &mut String,
-        elem_type: &Type,
-    ) -> Result<(), JsonConversionError> {
-        if !entry.is_empty() {
-            let output = output.entry();
-            // While in usual postgres response we get nulls as None and everything else
-            // as Some(&str), in arrays we get NULL as unquoted 'NULL' string (while
-            // string with value 'NULL' will be represented by '"NULL"'). So catch NULLs
-            // here while we have quotation info and convert them to None.
-            if entry == "NULL" {
-                output.value(json::RawValue::NULL);
-            } else {
-                pg_text_to_json(output, entry, elem_type)?;
-            }
-            entry.clear();
-        }
-
-        Ok(())
-    }
-
-    while let Some((mut i, mut c)) = pg_array_chr.next() {
-        let mut escaped = false;
-
-        if c == '\\' {
-            escaped = true;
-            let Some(x) = pg_array_chr.next() else {
-                return Err(JsonConversionError::UnbalancedArray);
-            };
-            (i, c) = x;
-        }
-
-        match c {
-            '{' if !quote => {
-                level += 1;
-                if level > 1 {
-                    let nested = output.entry();
-                    let off = json::value_as_list!(|nested| {
-                        pg_array_parse_inner(nested, &pg_array[i..], elem_type, true)?
-                    });
-
-                    for _ in 0..off - 1 {
-                        pg_array_chr.next();
-                    }
-                }
-            }
-            '}' if !quote => {
-                level -= 1;
-                if level == 0 {
-                    push_checked(output, &mut entry, elem_type)?;
-                    if nested {
-                        return Ok(i);
-                    }
-                }
-            }
-            '"' if !escaped => {
-                if quote {
-                    // end of quoted string, so push it manually without any checks
-                    // for emptiness or nulls
-                    pg_text_to_json(output.entry(), &entry, elem_type)?;
-                    entry.clear();
-                }
-                quote = !quote;
-            }
-            ',' if !quote => {
-                push_checked(output, &mut entry, elem_type)?;
-            }
-            _ => {
-                entry.push(c);
-            }
-        }
-    }
-
-    if level != 0 {
+    pg_array_parse_inner(output, &mut pg_array, elem_type)?;
+    if !pg_array.trim().is_empty() {
         return Err(JsonConversionError::UnbalancedArray);
     }
 
-    Ok(0)
+    Ok(())
+}
+
+// reads a single array from the `pg_array` string.
+// removes the array data from the string.
+fn pg_array_parse_inner(
+    output: ValueSer<'_>,
+    pg_array: &mut &str,
+    elem_type: &Type,
+) -> Result<(), JsonConversionError> {
+    // array should have a `{` prefix.
+    *pg_array = pg_array
+        .strip_prefix('{')
+        .ok_or(JsonConversionError::UnbalancedArray)?;
+
+    let mut quoted_string = String::new();
+
+    json::value_as_list!(|output| {
+        loop {
+            *pg_array = pg_array.trim_start();
+            if pg_array.strip_prefix('{').is_some() {
+                // nested array.
+                pg_array_parse_inner(output.entry(), pg_array, elem_type)?;
+            } else if let Some(quoted) = pg_array.strip_prefix('"') {
+                // The array output routine will put double quotes around element values if they are empty strings,
+                // contain curly braces, delimiter characters, double quotes, backslashes, or white space,
+                // or match the word `NULL`. Double quotes and backslashes embedded in element values will be backslash-escaped.
+                // For numeric data types it is safe to assume that double quotes will never appear,
+                // but for textual data types one should be prepared to cope with either the presence or absence of quotes.
+
+                quoted_string.clear();
+                let mut start = 0;
+                let mut escaped = false;
+                let mut chars = quoted.char_indices();
+                loop {
+                    let Some((i, c)) = chars.next() else {
+                        // missing `"` terminator.
+                        return Err(JsonConversionError::UnbalancedArray);
+                    };
+
+                    match c {
+                        // do not process if the string is escaped.
+                        _ if escaped => escaped = false,
+                        // start the escape sequence.
+                        '\\' => {
+                            // push the string we have parsed so far.
+                            quoted_string.push_str(&quoted[start..i]);
+                            start = i + 1;
+
+                            escaped = true;
+                        }
+                        // finished parsing the quoted string.
+                        '"' => {
+                            quoted_string.push_str(&quoted[start..i]);
+                            (_, *pg_array) = quoted.split_at(i + 1);
+                            break;
+                        }
+                        // treat other characters as raw characters.
+                        _ => {}
+                    }
+                }
+
+                // we have an item string:
+                pg_text_to_json(output.entry(), &quoted_string, elem_type)?;
+            } else {
+                // we need to parse an item. read until we find a `,` or `}`.
+                let index = pg_array
+                    .find([',', '}'])
+                    .ok_or(JsonConversionError::UnbalancedArray)?;
+                let (item, rest) = pg_array.split_at(index);
+                *pg_array = rest;
+
+                // we have an item string:
+                // check for null
+                if item == "NULL" {
+                    output.entry().value(json::RawValue::NULL);
+                } else {
+                    pg_text_to_json(output.entry(), item, elem_type)?;
+                }
+            }
+
+            // check for separator.
+            if let Some(next) = pg_array.trim_start().strip_prefix(',') {
+                // next item.
+                *pg_array = next;
+            } else {
+                break;
+            }
+        }
+
+        let Some(next) = pg_array.trim_start().strip_prefix('}') else {
+            // missing `}` terminator.
+            return Err(JsonConversionError::UnbalancedArray);
+        };
+
+        // end array.
+        *pg_array = next;
+    });
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -326,9 +350,7 @@ mod tests {
     }
 
     fn pg_array_parse(pg_array: &str, pg_type: &Type) -> Value {
-        let buf = json::value_to_vec!(|list| json::value_as_list!(|list| {
-            super::pg_array_parse(list, pg_array, pg_type).unwrap();
-        }));
+        let buf = json::value_to_vec!(|val| super::pg_array_parse(val, pg_array, pg_type).unwrap());
         serde_json::from_slice(&buf).unwrap()
     }
 
