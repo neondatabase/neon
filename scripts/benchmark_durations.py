@@ -32,12 +32,6 @@ BENCHMARKS_DURATION_QUERY = """
 # the total duration varies from 8 to 40 minutes.
 # We use some pre-collected durations as a fallback to have a better distribution.
 FALLBACK_DURATION = {
-    "test_runner/performance/pageserver/pagebench/test_pageserver_max_throughput_getpage_at_latest_lsn.py::test_pageserver_max_throughput_getpage_at_latest_lsn[1-13-30]": 400.15,
-    "test_runner/performance/pageserver/pagebench/test_pageserver_max_throughput_getpage_at_latest_lsn.py::test_pageserver_max_throughput_getpage_at_latest_lsn[1-6-30]": 372.521,
-    "test_runner/performance/pageserver/pagebench/test_pageserver_max_throughput_getpage_at_latest_lsn.py::test_pageserver_max_throughput_getpage_at_latest_lsn[10-13-30]": 420.017,
-    "test_runner/performance/pageserver/pagebench/test_pageserver_max_throughput_getpage_at_latest_lsn.py::test_pageserver_max_throughput_getpage_at_latest_lsn[10-6-30]": 373.769,
-    "test_runner/performance/pageserver/pagebench/test_pageserver_max_throughput_getpage_at_latest_lsn.py::test_pageserver_max_throughput_getpage_at_latest_lsn[100-13-30]": 678.742,
-    "test_runner/performance/pageserver/pagebench/test_pageserver_max_throughput_getpage_at_latest_lsn.py::test_pageserver_max_throughput_getpage_at_latest_lsn[100-6-30]": 512.135,
     "test_runner/performance/test_branch_creation.py::test_branch_creation_heavy_write[20]": 58.036,
     "test_runner/performance/test_branch_creation.py::test_branch_creation_many_relations": 22.104,
     "test_runner/performance/test_branch_creation.py::test_branch_creation_many[1024]": 126.073,
