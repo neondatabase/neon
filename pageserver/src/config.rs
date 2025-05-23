@@ -58,7 +58,10 @@ pub struct PageServerConf {
     pub listen_http_addr: String,
     /// Example: 127.0.0.1:9899
     pub listen_https_addr: Option<String>,
+    /// If set, expose a gRPC API on this address.
     /// Example: 127.0.0.1:51051
+    ///
+    /// EXPERIMENTAL: this protocol is unstable and under active development.
     pub listen_grpc_addr: Option<String>,
 
     /// Path to a file with certificate's private key for https and gRPC API.
