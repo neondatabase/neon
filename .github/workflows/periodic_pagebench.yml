@@ -89,16 +89,17 @@ jobs:
         role-duration-seconds: 18000 # max 5 hours (needed in case commit hash is still being built)
     - name: Determine commit hash
       id: commit_hash
+      shell: bash -euxo pipefail {0}
       env:
         INPUT_COMMIT_HASH: ${{ github.event.inputs.commit_hash }}
       run: |
-        if [ -z "$INPUT_COMMIT_HASH" ]; then
+        if [[ -z "${INPUT_COMMIT_HASH}" ]]; then
           COMMIT_HASH=$(curl -s https://api.github.com/repos/neondatabase/neon/commits/main | jq -r '.sha')
           echo "COMMIT_HASH=$COMMIT_HASH" >> $GITHUB_ENV
           echo "commit_hash=$COMMIT_HASH" >> "$GITHUB_OUTPUT"
           echo "COMMIT_HASH_TYPE=latest" >> $GITHUB_ENV
         else
-          COMMIT_HASH="$INPUT_COMMIT_HASH"
+          COMMIT_HASH="${INPUT_COMMIT_HASH}"
           echo "COMMIT_HASH=$COMMIT_HASH" >> $GITHUB_ENV
           echo "commit_hash=$COMMIT_HASH" >> "$GITHUB_OUTPUT"
           echo "COMMIT_HASH_TYPE=manual" >> $GITHUB_ENV
@@ -122,12 +123,14 @@ jobs:
         attempt=0
         max_attempts=24 # 5 minutes * 24 = 2 hours
 
-        while [ $attempt -lt $max_attempts ]; do
-          set +e # the following command will fail until the artifacts are available
-          S3_KEY=$(aws s3api list-objects-v2 --bucket $S3_BUCKET --prefix artifacts/$COMMIT_HASH/ | jq -r '.Contents[]?.Key' | grep neon-${{ runner.os }}-${{ runner.arch }}-release-artifact.tar.zst | sort --version-sort | tail -1)
-          set -e
-
-          if [ -n "$S3_KEY" ]; then
+        while [[ $attempt -lt $max_attempts ]]; do
+          # the following command will fail until the artifacts are available ...
+          S3_KEY=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "artifacts/$COMMIT_HASH/" \
+            | jq -r '.Contents[]?.Key' \
+            | grep "neon-${{ runner.os }}-${{ runner.arch }}-release-artifact.tar.zst" \
+            | sort --version-sort \
+            | tail -1) || true # ... thus ignore errors from the command
+          if [[ -n "${S3_KEY}" ]]; then
             echo "Artifact found: $S3_KEY"
             echo "S3_KEY=$S3_KEY" >> $GITHUB_ENV
             break
@@ -139,7 +142,7 @@ jobs:
           sleep 300 # Sleep for 5 minutes
         done
 
-        if [ -z "$S3_KEY" ]; then
+        if [[ -z "${S3_KEY}" ]]; then
           echo "Error: artifact not found in S3 bucket s3://$S3_BUCKET/artifacts/$COMMIT_HASH" after 2 hours
         else
           mkdir -p $(dirname $ARCHIVE)
@@ -265,13 +268,13 @@ jobs:
         ARCHIVE: ${{ runner.temp }}/downloads/neon-${{ runner.os }}-${{ runner.arch }}-release-artifact.tar.zst
       run: |
         # Cleanup the test resources
-        if [ -d "${BACKUP_DIR}" ]; then
+        if [[ -d "${BACKUP_DIR}" ]]; then
           rm -rf ${BACKUP_DIR}
         fi
-        if [ -d "${TEST_OUTPUT}" ]; then
+        if [[ -d "${TEST_OUTPUT}" ]]; then
           rm -rf ${TEST_OUTPUT}
         fi
-        if [ -d "${NEON_DIR}" ]; then
+        if [[ -d "${NEON_DIR}" ]]; then
           rm -rf ${NEON_DIR}
         fi
         rm -rf $(dirname $ARCHIVE)
