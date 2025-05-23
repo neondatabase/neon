@@ -483,7 +483,9 @@ fn start_pageserver(
         grpc_auth = None;
     }
 
-    let tls_server_config = if conf.listen_https_addr.is_some() || conf.enable_tls_page_service_api
+    let tls_server_config = if conf.listen_https_addr.is_some()
+        || conf.enable_tls_page_service_api
+        || conf.listen_grpc_tls
     {
         let resolver = BACKGROUND_RUNTIME.block_on(ReloadingCertificateResolver::new(
             "main",
@@ -791,11 +793,9 @@ fn start_pageserver(
             tokio::net::TcpListener::from_std(pageserver_listener)
                 .context("create tokio listener")?
         },
-        if conf.enable_tls_page_service_api {
-            tls_server_config
-        } else {
-            None
-        },
+        conf.enable_tls_page_service_api
+            .then(|| tls_server_config.clone())
+            .flatten(),
         basebackup_cache.clone(),
     );
 
@@ -813,6 +813,9 @@ fn start_pageserver(
             grpc_auth,
             otel_guard.as_ref().map(|g| g.dispatch.clone()),
             grpc_listener,
+            conf.listen_grpc_tls
+                .then(|| tls_server_config.clone())
+                .flatten(),
             basebackup_cache,
         )?);
     }
