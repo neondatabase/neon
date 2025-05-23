@@ -953,60 +953,6 @@ impl BatchedFeMessage {
     }
 }
 
-/// Implements the page service over gRPC.
-///
-/// TODO: not yet implemented, all methods return unimplemented.
-#[tonic::async_trait]
-impl proto::PageService for PageServerHandler {
-    type GetBaseBackupStream = Pin<
-        Box<dyn Stream<Item = Result<proto::GetBaseBackupResponseChunk, tonic::Status>> + Send>,
-    >;
-    type GetPagesStream =
-        Pin<Box<dyn Stream<Item = Result<proto::GetPageResponse, tonic::Status>> + Send>>;
-
-    async fn check_rel_exists(
-        &self,
-        _: tonic::Request<proto::CheckRelExistsRequest>,
-    ) -> Result<tonic::Response<proto::CheckRelExistsResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not implemented"))
-    }
-
-    async fn get_base_backup(
-        &self,
-        _: tonic::Request<proto::GetBaseBackupRequest>,
-    ) -> Result<tonic::Response<Self::GetBaseBackupStream>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not implemented"))
-    }
-
-    async fn get_db_size(
-        &self,
-        _: tonic::Request<proto::GetDbSizeRequest>,
-    ) -> Result<tonic::Response<proto::GetDbSizeResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not implemented"))
-    }
-
-    async fn get_pages(
-        &self,
-        _: tonic::Request<tonic::Streaming<proto::GetPageRequest>>,
-    ) -> Result<tonic::Response<Self::GetPagesStream>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not implemented"))
-    }
-
-    async fn get_rel_size(
-        &self,
-        _: tonic::Request<proto::GetRelSizeRequest>,
-    ) -> Result<tonic::Response<proto::GetRelSizeResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not implemented"))
-    }
-
-    async fn get_slru_segment(
-        &self,
-        _: tonic::Request<proto::GetSlruSegmentRequest>,
-    ) -> Result<tonic::Response<proto::GetSlruSegmentResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not implemented"))
-    }
-}
-
 impl PageServerHandler {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -3271,6 +3217,60 @@ where
         }
 
         Ok(())
+    }
+}
+
+/// Implements the page service over gRPC.
+///
+/// TODO: not yet implemented, all methods return unimplemented.
+#[tonic::async_trait]
+impl proto::PageService for PageServerHandler {
+    type GetBaseBackupStream = Pin<
+        Box<dyn Stream<Item = Result<proto::GetBaseBackupResponseChunk, tonic::Status>> + Send>,
+    >;
+    type GetPagesStream =
+        Pin<Box<dyn Stream<Item = Result<proto::GetPageResponse, tonic::Status>> + Send>>;
+
+    async fn check_rel_exists(
+        &self,
+        _: tonic::Request<proto::CheckRelExistsRequest>,
+    ) -> Result<tonic::Response<proto::CheckRelExistsResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not implemented"))
+    }
+
+    async fn get_base_backup(
+        &self,
+        _: tonic::Request<proto::GetBaseBackupRequest>,
+    ) -> Result<tonic::Response<Self::GetBaseBackupStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not implemented"))
+    }
+
+    async fn get_db_size(
+        &self,
+        _: tonic::Request<proto::GetDbSizeRequest>,
+    ) -> Result<tonic::Response<proto::GetDbSizeResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not implemented"))
+    }
+
+    async fn get_pages(
+        &self,
+        _: tonic::Request<tonic::Streaming<proto::GetPageRequest>>,
+    ) -> Result<tonic::Response<Self::GetPagesStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not implemented"))
+    }
+
+    async fn get_rel_size(
+        &self,
+        _: tonic::Request<proto::GetRelSizeRequest>,
+    ) -> Result<tonic::Response<proto::GetRelSizeResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not implemented"))
+    }
+
+    async fn get_slru_segment(
+        &self,
+        _: tonic::Request<proto::GetSlruSegmentRequest>,
+    ) -> Result<tonic::Response<proto::GetSlruSegmentResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not implemented"))
     }
 }
 
