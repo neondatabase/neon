@@ -4,10 +4,9 @@ use std::convert::Infallible;
 
 use base64::Engine as _;
 use base64::prelude::BASE64_STANDARD;
-use hmac::{Hmac, Mac};
+use hmac::Mac;
 use rand::RngCore;
-use sha2::Sha256;
-use tracing::debug;
+use tracing::{debug, trace};
 use x509_cert::der::zeroize::Zeroize;
 
 use super::ScramKey;
@@ -80,7 +79,6 @@ impl<'a> Exchange<'a> {
     }
 }
 
-// copied from <https://github.com/neondatabase/rust-postgres/blob/20031d7a9ee1addeae6e0968e3899ae6bf01cee2/postgres-protocol/src/authentication/sasl.rs#L236-L248>
 async fn derive_client_key(
     pool: &ThreadPool,
     endpoint: EndpointIdInt,
@@ -88,15 +86,8 @@ async fn derive_client_key(
     salt: &[u8],
     iterations: u32,
 ) -> ScramKey {
-    let salted_password = pool
-        .spawn_job(endpoint, Pbkdf2::start(password, salt, iterations))
-        .await;
-
-    let mut hmac = Hmac::<Sha256>::new_from_slice(&salted_password)
-        .expect("HMAC is able to accept all key sizes");
-    hmac.update(b"Client Key");
-
-    ScramKey::from(<[u8; 32]>::from(hmac.finalize().into_bytes()))
+    pool.spawn_job(endpoint, Pbkdf2::start(password, salt, iterations))
+        .await
 }
 
 pub(crate) async fn exchange(
@@ -113,6 +104,7 @@ pub(crate) async fn exchange(
             debug!("invalidating cached password");
             pool.cache.invalidate(&(endpoint, role));
         } else if entry.verify(password) {
+            trace!("password validated from cache");
             return Ok(sasl::Outcome::Success(keys));
         }
     }
@@ -124,6 +116,7 @@ pub(crate) async fn exchange(
     if secret.is_password_invalid(&client_key).into() {
         Ok(sasl::Outcome::Failure("password doesn't match"))
     } else {
+        trace!("storing cached password");
         pool.cache.insert(
             (endpoint, role),
             (ClientSecretEntry::new(password), client_key.clone()),
