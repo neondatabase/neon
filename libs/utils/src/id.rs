@@ -295,7 +295,11 @@ pub struct TenantId(Id);
 
 id_newtype!(TenantId);
 
-/// If needed, reuse small string from proxy/src/types.rc
+/// Type representing a project ID.
+pub type ProjectId = String;
+/// Type representing a branch ID.
+pub type BranchId = String;
+/// Type representing an endpoint ID.
 pub type EndpointId = String;
 
 // A pair uniquely identifying Neon instance.

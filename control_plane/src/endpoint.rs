@@ -52,8 +52,8 @@ use compute_api::responses::{
     ComputeConfig, ComputeCtlConfig, ComputeStatus, ComputeStatusResponse, TlsConfig,
 };
 use compute_api::spec::{
-    Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PgIdent,
-    RemoteExtSpec, Role,
+    Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, Pageserver, PgIdent,
+    RemoteExtSpec, Role, Safekeeper,
 };
 use jsonwebtoken::jwk::{
     AlgorithmParameters, CommonParameters, EllipticCurve, Jwk, JwkSet, KeyAlgorithm, KeyOperations,
@@ -606,29 +606,25 @@ impl Endpoint {
         }
     }
 
-    fn build_pageserver_connstr(pageservers: &[(Host, u16)]) -> String {
-        pageservers
-            .iter()
-            .map(|(host, port)| format!("postgresql://no_user@{host}:{port}"))
-            .collect::<Vec<_>>()
-            .join(",")
-    }
+    fn safekeepers_from_nodes(&self, ids: Vec<NodeId>) -> Result<Vec<Safekeeper>> {
+        let mut s = Vec::new();
 
-    /// Map safekeepers ids to the actual connection strings.
-    fn build_safekeepers_connstrs(&self, sk_ids: Vec<NodeId>) -> Result<Vec<String>> {
-        let mut safekeeper_connstrings = Vec::new();
         if self.mode == ComputeMode::Primary {
-            for sk_id in sk_ids {
+            for id in ids {
                 let sk = self
                     .env
                     .safekeepers
                     .iter()
-                    .find(|node| node.id == sk_id)
-                    .ok_or_else(|| anyhow!("safekeeper {sk_id} does not exist"))?;
-                safekeeper_connstrings.push(format!("127.0.0.1:{}", sk.get_compute_port()));
+                    .find(|node| node.id == id)
+                    .ok_or_else(|| anyhow!("safekeeper {id} does not exist"))?;
+                s.push(Safekeeper {
+                    host: Host::parse("127.0.0.1")?,
+                    port: sk.get_compute_port(),
+                });
             }
         }
-        Ok(safekeeper_connstrings)
+
+        Ok(s)
     }
 
     /// Generate a JWT with the correct claims.
@@ -654,7 +650,7 @@ impl Endpoint {
         endpoint_storage_addr: String,
         safekeepers_generation: Option<SafekeeperGeneration>,
         safekeepers: Vec<NodeId>,
-        pageservers: Vec<(Host, u16)>,
+        pageservers: Vec<Pageserver>,
         remote_ext_base_url: Option<&String>,
         shard_stripe_size: usize,
         create_test_user: bool,
@@ -671,11 +667,6 @@ impl Endpoint {
         if self.pgdata().exists() {
             std::fs::remove_dir_all(self.pgdata())?;
         }
-
-        let pageserver_connstring = Self::build_pageserver_connstr(&pageservers);
-        assert!(!pageserver_connstring.is_empty());
-
-        let safekeeper_connstrings = self.build_safekeepers_connstrs(safekeepers)?;
 
         // check for file remote_extensions_spec.json
         // if it is present, read it and pass to compute_ctl
@@ -727,15 +718,34 @@ impl Endpoint {
                     postgresql_conf: Some(postgresql_conf.clone()),
                 },
                 delta_operations: None,
-                tenant_id: Some(self.tenant_id),
-                timeline_id: Some(self.timeline_id),
-                project_id: None,
-                branch_id: None,
-                endpoint_id: Some(self.endpoint_id.clone()),
+                tenant_id: self.tenant_id.clone(),
+                timeline_id: self.timeline_id.clone(),
+                project_id: self.tenant_id.to_string(),
+                branch_id: self.timeline_id.to_string(),
+                endpoint_id: self.endpoint_id.clone(),
                 mode: self.mode,
-                pageserver_connstring: Some(pageserver_connstring),
+                pageservers,
+                safekeepers: {
+                    let mut s = Vec::new();
+
+                    if self.mode == ComputeMode::Primary {
+                        for id in safekeepers {
+                            let sk = self
+                                .env
+                                .safekeepers
+                                .iter()
+                                .find(|node| node.id == id)
+                                .ok_or_else(|| anyhow!("safekeeper {id} does not exist"))?;
+                            s.push(Safekeeper {
+                                host: Host::parse("127.0.0.1")?,
+                                port: sk.get_compute_port(),
+                            });
+                        }
+                    }
+
+                    s
+                },
                 safekeepers_generation: safekeepers_generation.map(|g| g.into_inner()),
-                safekeeper_connstrings,
                 storage_auth_token: auth_token.clone(),
                 remote_extensions,
                 pgbouncer_settings: None,
@@ -939,7 +949,7 @@ impl Endpoint {
 
     pub async fn reconfigure(
         &self,
-        mut pageservers: Vec<(Host, u16)>,
+        pageservers: Vec<Pageserver>,
         stripe_size: Option<ShardStripeSize>,
         safekeepers: Option<Vec<NodeId>>,
     ) -> Result<()> {
@@ -958,30 +968,24 @@ impl Endpoint {
         if pageservers.is_empty() {
             let storage_controller = StorageController::from_env(&self.env);
             let locate_result = storage_controller.tenant_locate(self.tenant_id).await?;
-            pageservers = locate_result
+            spec.pageservers = locate_result
                 .shards
                 .into_iter()
-                .map(|shard| {
-                    (
-                        Host::parse(&shard.listen_pg_addr)
-                            .expect("Storage controller reported bad hostname"),
-                        shard.listen_pg_port,
-                    )
+                .map(|shard| Pageserver {
+                    host: Host::parse(&shard.listen_pg_addr)
+                        .expect("Storage controller reported bad hostname"),
+                    port: shard.listen_pg_port,
                 })
                 .collect::<Vec<_>>();
         }
 
-        let pageserver_connstr = Self::build_pageserver_connstr(&pageservers);
-        assert!(!pageserver_connstr.is_empty());
-        spec.pageserver_connstring = Some(pageserver_connstr);
         if stripe_size.is_some() {
             spec.shard_stripe_size = stripe_size.map(|s| s.0 as usize);
         }
 
         // If safekeepers are not specified, don't change them.
         if let Some(safekeepers) = safekeepers {
-            let safekeeper_connstrings = self.build_safekeepers_connstrs(safekeepers)?;
-            spec.safekeeper_connstrings = safekeeper_connstrings;
+            spec.safekeepers = self.safekeepers_from_nodes(safekeepers)?;
         }
 
         let client = reqwest::Client::builder()

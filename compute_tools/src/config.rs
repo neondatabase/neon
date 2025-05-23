@@ -56,13 +56,24 @@ pub fn write_postgres_conf(
 
     // Add options for connecting to storage
     writeln!(file, "# Neon storage settings")?;
-    if let Some(s) = &spec.pageserver_connstring {
-        writeln!(file, "neon.pageserver_connstring={}", escape_conf_value(s))?;
+    if !spec.pageservers.is_empty() {
+        writeln!(
+            file,
+            "neon.pageserver_connstring={}",
+            escape_conf_value(
+                &spec
+                    .pageservers
+                    .iter()
+                    .map(|p| format!("host={} port={}", p.host, p.port))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        )?;
     }
     if let Some(stripe_size) = spec.shard_stripe_size {
         writeln!(file, "neon.stripe_size={stripe_size}")?;
     }
-    if !spec.safekeeper_connstrings.is_empty() {
+    if !spec.safekeepers.is_empty() {
         let mut neon_safekeepers_value = String::new();
         tracing::info!(
             "safekeepers_connstrings is not zero, gen: {:?}",
@@ -72,32 +83,45 @@ pub fn write_postgres_conf(
         if let Some(generation) = spec.safekeepers_generation {
             write!(neon_safekeepers_value, "g#{}:", generation)?;
         }
-        neon_safekeepers_value.push_str(&spec.safekeeper_connstrings.join(","));
+        neon_safekeepers_value.push_str(
+            &spec
+                .safekeepers
+                .iter()
+                .map(|s| format!("{}:{}", s.host.to_string(), s.port))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
         writeln!(
             file,
             "neon.safekeepers={}",
             escape_conf_value(&neon_safekeepers_value)
         )?;
     }
-    if let Some(s) = &spec.tenant_id {
-        writeln!(file, "neon.tenant_id={}", escape_conf_value(&s.to_string()))?;
-    }
-    if let Some(s) = &spec.timeline_id {
-        writeln!(
-            file,
-            "neon.timeline_id={}",
-            escape_conf_value(&s.to_string())
-        )?;
-    }
-    if let Some(s) = &spec.project_id {
-        writeln!(file, "neon.project_id={}", escape_conf_value(s))?;
-    }
-    if let Some(s) = &spec.branch_id {
-        writeln!(file, "neon.branch_id={}", escape_conf_value(s))?;
-    }
-    if let Some(s) = &spec.endpoint_id {
-        writeln!(file, "neon.endpoint_id={}", escape_conf_value(s))?;
-    }
+    writeln!(
+        file,
+        "neon.tenant_id={}",
+        escape_conf_value(&spec.tenant_id.to_string())
+    )?;
+    writeln!(
+        file,
+        "neon.timeline_id={}",
+        escape_conf_value(&spec.timeline_id.to_string())
+    )?;
+    writeln!(
+        file,
+        "neon.project_id={}",
+        escape_conf_value(&spec.project_id)
+    )?;
+    writeln!(
+        file,
+        "neon.branch_id={}",
+        escape_conf_value(&spec.branch_id)
+    )?;
+    writeln!(
+        file,
+        "neon.endpoint_id={}",
+        escape_conf_value(&spec.endpoint_id)
+    )?;
 
     // tls
     if let Some(tls_config) = tls_config {

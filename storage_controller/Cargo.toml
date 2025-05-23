@@ -65,6 +65,7 @@ diesel-async = { version = "0.5.2", features = ["postgres", "bb8", "async-connec
 diesel_migrations = { version = "2.2.0" }
 scoped-futures = "0.1.4"
 
+compute_api = { path = "../libs/compute_api/" }
 http-utils = { path = "../libs/http-utils/" }
 utils = { path = "../libs/utils/" }
 metrics = { path = "../libs/metrics/" }

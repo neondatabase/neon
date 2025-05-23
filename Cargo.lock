@@ -1278,10 +1278,13 @@ dependencies = [
  "chrono",
  "indexmap 2.0.1",
  "jsonwebtoken",
+ "postgres",
  "regex",
  "remote_storage",
  "serde",
  "serde_json",
+ "tokio-postgres",
+ "url",
  "utils",
 ]
 
@@ -6695,6 +6698,7 @@ dependencies = [
  "chrono",
  "clap",
  "clashmap",
+ "compute_api",
  "control_plane",
  "cron",
  "diesel",
