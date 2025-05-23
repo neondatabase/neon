@@ -24,6 +24,10 @@ macro_rules! value_to_string {
 
 /// A helper that ensures the [`ObjectSer::finish`] method is called on completion.
 ///
+/// Consumes `$val` and assigns it as an [`ObjectSer`] serializer.
+/// The serializer is only 'finished' if the body completes.
+/// The serializer is rolled back if `break`/`return` escapes the body.
+///
 /// Implemented as a macro to preserve all control flow.
 #[macro_export]
 macro_rules! value_as_object {
@@ -39,6 +43,10 @@ macro_rules! value_as_object {
 }
 
 /// A helper that ensures the [`ListSer::finish`] method is called on completion.
+///
+/// Consumes `$val` and assigns it as an [`ListSer`] serializer.
+/// The serializer is only 'finished' if the body completes.
+/// The serializer is rolled back if `break`/`return` escapes the body.
 ///
 /// Implemented as a macro to preserve all control flow.
 #[macro_export]

@@ -1,5 +1,3 @@
-use std::iter;
-
 use itertools::Either;
 use json::{ListSer, ValueSer};
 use postgres_client::Row;
@@ -82,7 +80,6 @@ pub(crate) enum JsonConversionError {
 pub(crate) fn pg_text_row_to_json(
     output: ValueSer,
     row: &Row,
-    columns: &[Type],
     raw_output: bool,
     array_mode: bool,
 ) -> Result<(), JsonConversionError> {
@@ -92,7 +89,7 @@ pub(crate) fn pg_text_row_to_json(
         Either::Right(output.object())
     };
 
-    for (i, (column, typ)) in iter::zip(row.columns(), columns).enumerate() {
+    for (i, column) in row.columns().iter().enumerate() {
         let val = match &mut entries {
             Either::Left(list) => list.entry(),
             Either::Right(obj) => obj.key(column.name()),
@@ -103,7 +100,7 @@ pub(crate) fn pg_text_row_to_json(
         match pg_value {
             None => val.value(json::RawValue::NULL),
             Some(v) if raw_output => val.value(v),
-            Some(v) => pg_text_to_json(val, v, typ)?,
+            Some(v) => pg_text_to_json(val, v, column.type_())?,
         }
     }
 

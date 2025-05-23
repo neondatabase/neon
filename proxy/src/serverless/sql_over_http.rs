@@ -15,7 +15,7 @@ use hyper::{HeaderMap, Request, Response, StatusCode, header};
 use indexmap::IndexMap;
 use json::ValueSer;
 use postgres_client::error::{DbError, ErrorPosition, SqlState};
-use postgres_client::{GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, RowStream};
+use postgres_client::{GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, Transaction};
 use pq_proto::StartupMessageParamsBuilder;
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -972,6 +972,7 @@ impl BatchQueryData {
         debug!("starting batch transaction");
         let (inner, mut discard) = client.inner();
         let cancel_token = inner.cancel_token();
+
         let mut builder = inner.build_transaction();
         if let Some(isolation_level) = parsed_headers.txn_isolation_level {
             builder = builder.isolation_level(isolation_level);
@@ -983,7 +984,7 @@ impl BatchQueryData {
             builder = builder.deferrable(true);
         }
 
-        let mut transaction = match builder.start().await {
+        let mut tx = match builder.start().await {
             Ok(tx) => tx,
             Err(e) => {
                 // if we cannot start a transaction, we should return immediately
@@ -993,64 +994,65 @@ impl BatchQueryData {
             }
         };
 
-        let result = 'result: {
-            let json = json::value_to_string!(|val| json::value_as_object!(|val| {
-                let results = val.key("results");
-                json::value_as_list!(|results| {
-                    for stmt in self.queries {
-                        let query = pin!(query_to_json(
-                            config,
-                            &mut transaction,
-                            stmt,
-                            results.entry(),
-                            parsed_headers,
-                        ));
+        let result = self
+            .query_in_tx(config, cancel, &mut tx, parsed_headers)
+            .await;
 
-                        match select(query, pin!(cancel.cancelled())).await {
-                            // TODO: maybe we should check that the transaction bit is set here
-                            Either::Left((Ok(_), _cancelled)) => {}
-                            Either::Left((Err(e), _cancelled)) => break 'result Err(e),
-                            Either::Right((_cancelled, _)) => {
-                                if let Err(err) = cancel_token.cancel_query(NoTls).await {
-                                    tracing::warn!(?err, "could not cancel query");
-                                }
-                                // TODO: after cancelling, wait to see if we can get a status. maybe the connection is still safe.
-                                discard.discard();
-
-                                return Err(SqlOverHttpError::Cancelled(
-                                    SqlOverHttpCancel::Postgres,
-                                ));
-                            }
-                        }
-                    }
-                });
-            }));
-
-            Ok(json)
-        };
-
-        let commit_result = match &result {
-            Ok(_) => {
-                debug!("commiting batch");
-                transaction.commit().await
+        match result {
+            Ok(result) => {
+                debug!("committing batch");
+                discard.commit(tx).await?;
+                Ok(result)
             }
-            Err(_) => {
-                info!("rolling back batch due to error");
-                transaction.rollback().await
-            }
-        };
-
-        match commit_result {
-            Ok(status) => discard.check_idle(status),
-            Err(e) => {
-                // if we cannot commit/rollback - for now don't return connection to pool
-                // TODO: get a query status from the error
+            Err(err @ SqlOverHttpError::Cancelled(_)) => {
+                if let Err(err) = cancel_token.cancel_query(NoTls).await {
+                    tracing::warn!(?err, "could not cancel query");
+                }
+                // TODO: after cancelling, wait to see if we can get a status. maybe the connection is still safe.
                 discard.discard();
-                return Err(SqlOverHttpError::Postgres(e));
+
+                Err(err)
+            }
+            Err(err) => {
+                info!("rolling back batch due to error");
+                discard.rollback(tx).await?;
+                Err(err)
             }
         }
+    }
 
-        result
+    async fn query_in_tx(
+        self,
+        config: &'static HttpConfig,
+        cancel: CancellationToken,
+        transaction: &mut Transaction<'_>,
+        parsed_headers: HttpHeaders,
+    ) -> Result<String, SqlOverHttpError> {
+        let json = json::value_to_string!(|val| json::value_as_object!(|val| {
+            let results = val.key("results");
+            json::value_as_list!(|results| {
+                for stmt in self.queries {
+                    let query = pin!(query_to_json(
+                        config,
+                        transaction,
+                        stmt,
+                        results.entry(),
+                        parsed_headers,
+                    ));
+
+                    match select(query, pin!(cancel.cancelled())).await {
+                        // TODO: maybe we should check that the transaction bit is set here
+                        Either::Left((Ok(_), _cancelled)) => {}
+                        Either::Left((Err(e), _cancelled)) => return Err(e),
+                        Either::Right((_cancelled, _)) => {
+                            return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
+                        }
+                    }
+                }
+            });
+        }));
+
+        Ok(json)
     }
 }
 
@@ -1063,77 +1065,36 @@ async fn query_to_json(
 ) -> Result<ReadyForQueryStatus, SqlOverHttpError> {
     let query_start = Instant::now();
 
-    let ready = json::value_as_object!(|output| {
-        let array_mode = data.array_mode.unwrap_or(parsed_headers.default_array_mode);
-        let raw_output = parsed_headers.raw_output;
+    let array_mode = data.array_mode.unwrap_or(parsed_headers.default_array_mode);
+    let raw_output = parsed_headers.raw_output;
+    let max_bytes = config.max_response_size_bytes;
 
-        output.key("rowAsArray").value(array_mode);
-
-        let query_params = data.params;
-        let mut row_stream = client
-            .query_raw_txt(&data.query, query_params)
+    json::value_as_object!(|output| {
+        let mut rows = client
+            .query_raw_txt(&data.query, data.params)
             .await
             .map_err(SqlOverHttpError::Postgres)?;
         let query_acknowledged = Instant::now();
 
-        let json_fields = output.key("fields");
-        let types = json::value_as_list!(|json_fields| {
-            let mut types = Vec::with_capacity(row_stream.statement.columns().len());
+        output.key("rowAsArray").value(array_mode);
+        write_fields(output.key("fields"), rows.statement.columns());
 
-            for c in row_stream.statement.columns() {
-                let json_field = json_fields.entry();
-                json::value_as_object!(|json_field| {
-                    json_field.entry("name", c.name());
-                    json_field.entry("dataTypeID", c.type_().oid());
-                    json_field.entry("tableID", c.table_oid());
-                    json_field.entry("columnID", c.column_id());
-                    json_field.entry("dataTypeSize", c.type_size());
-                    json_field.entry("dataTypeModifier", c.type_modifier());
-                    json_field.entry("format", "text");
-                });
-
-                types.push(c.type_().clone());
-            }
-
-            types
-        });
-
-        // Manually drain the stream into a vector to leave row_stream hanging
-        // around to get a command tag. Also check that the response is not too big.
-        let json_rows = output.key("rows");
-        let rows = json::value_as_list!(|json_rows| {
-            let mut rows = 0;
-            while let Some(row) = row_stream.next().await {
-                let row = row.map_err(SqlOverHttpError::Postgres)?;
-
-                rows += 1;
-                let v = json_rows.entry();
-                pg_text_row_to_json(v, &row, &types, raw_output, array_mode)?;
-
-                // we don't have a streaming response support yet so this is to prevent OOM
-                // from a malicious query (eg a cross join)
-                if json_rows.as_buffer().len() > config.max_response_size_bytes {
-                    return Err(SqlOverHttpError::ResponseTooLarge(
-                        config.max_response_size_bytes,
-                    ));
-                }
-
-                tokio::task::consume_budget().await;
-            }
-            rows
-        });
+        let row_count = write_json_rows(
+            output.key("rows"),
+            &mut rows,
+            raw_output,
+            array_mode,
+            max_bytes,
+        )
+        .await?;
 
         let query_resp_end = Instant::now();
-        let RowStream {
-            command_tag,
-            status: ready,
-            ..
-        } = row_stream;
 
-        let command_tag = command_tag.unwrap_or_default();
+        let ready = rows.status;
+        let command_tag = rows.command_tag.unwrap_or_default();
 
         info!(
-            rows,
+            rows = row_count,
             ?ready,
             command_tag,
             acknowledgement = ?(query_acknowledged - query_start),
@@ -1142,31 +1103,75 @@ async fn query_to_json(
         );
 
         // grab the command tag and number of rows affected
-        let (command_tag_name, command_tag_rest) = command_tag
-            .split_once(' ')
-            .map_or((&*command_tag, None), |(a, b)| (a, Some(b)));
-
+        let (command_tag_name, command_tag_count) = parse_command_tag(&command_tag);
         output.entry("command", command_tag_name);
-
-        let command_tag_count = command_tag_rest
-            .and_then(|rest| {
-                if command_tag_name == "INSERT" {
-                    // INSERT returns OID first and then number of rows
-                    let (_oid, count) = rest.split_once(' ')?;
-                    Some(count)
-                } else {
-                    // other commands return number of rows (if any)
-                    Some(rest)
-                }
-            })
-            .and_then(|count| count.parse::<i64>().ok());
-
         output.entry("rowCount", command_tag_count);
 
-        ready
-    });
+        Ok(ready)
+    })
+}
 
-    Ok(ready)
+fn write_fields(json_fields: ValueSer<'_>, columns: &[postgres_client::Column]) {
+    json::value_as_list!(|json_fields| {
+        for c in columns {
+            let json_field = json_fields.entry();
+            json::value_as_object!(|json_field| {
+                json_field.entry("name", c.name());
+                json_field.entry("dataTypeID", c.type_().oid());
+                json_field.entry("tableID", c.table_oid());
+                json_field.entry("columnID", c.column_id());
+                json_field.entry("dataTypeSize", c.type_size());
+                json_field.entry("dataTypeModifier", c.type_modifier());
+                json_field.entry("format", "text");
+            });
+        }
+    });
+}
+
+async fn write_json_rows(
+    json_rows: ValueSer<'_>,
+    row_stream: &mut postgres_client::RowStream<'_>,
+    raw_output: bool,
+    array_mode: bool,
+    max: usize,
+) -> Result<usize, SqlOverHttpError> {
+    json::value_as_list!(|json_rows| {
+        let mut rows = 0;
+        while let Some(row) = row_stream.next().await {
+            let row = row.map_err(SqlOverHttpError::Postgres)?;
+
+            pg_text_row_to_json(json_rows.entry(), &row, raw_output, array_mode)?;
+            tokio::task::consume_budget().await;
+
+            // we don't have a streaming response support yet so this is to prevent OOM
+            // from a malicious query (eg a cross join)
+            if json_rows.as_buffer().len() > max {
+                return Err(SqlOverHttpError::ResponseTooLarge(max));
+            }
+
+            rows += 1;
+        }
+
+        Ok(rows)
+    })
+}
+
+fn parse_command_tag(command_tag: &str) -> (&str, Option<i64>) {
+    match command_tag.split_once(' ') {
+        None => (command_tag, None),
+        Some((name @ "INSERT", rest)) => {
+            // INSERT returns OID first and then number of rows
+            let count = rest
+                .split_once(' ')
+                .and_then(|(_oid, count)| count.parse::<i64>().ok());
+            (name, count)
+        }
+        Some((name, count)) => {
+            // other commands return number of rows (if any)
+            let count = count.parse::<i64>().ok();
+            (name, count)
+        }
+    }
 }
 
 enum Client {
@@ -1212,6 +1217,36 @@ impl Discard<'_> {
         match self {
             Discard::Remote(discard) => discard.discard(),
             Discard::Local(discard) => discard.discard(),
+        }
+    }
+
+    async fn commit(&mut self, tx: Transaction<'_>) -> Result<(), SqlOverHttpError> {
+        match tx.commit().await {
+            Ok(status) => {
+                self.check_idle(status);
+                Ok(())
+            }
+            Err(e) => {
+                // if we cannot commit - for now don't return connection to pool
+                // TODO: get a query status from the error
+                self.discard();
+                Err(SqlOverHttpError::Postgres(e))
+            }
+        }
+    }
+
+    async fn rollback(&mut self, tx: Transaction<'_>) -> Result<(), SqlOverHttpError> {
+        match tx.rollback().await {
+            Ok(status) => {
+                self.check_idle(status);
+                Ok(())
+            }
+            Err(e) => {
+                // if we cannot rollback - for now don't return connection to pool
+                // TODO: get a query status from the error
+                self.discard();
+                Err(SqlOverHttpError::Postgres(e))
+            }
         }
     }
 }
