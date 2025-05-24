@@ -167,6 +167,12 @@ pub async fn task_main(
                     let _disconnect = ctx.log_connect();
                     match p.proxy_pass(&config.connect_to_compute).await {
                         Ok(()) => {}
+                        Err(ErrorSource::Timeout(_)) => {
+                            info!(
+                                ?session_id,
+                                "per-client task timed out while gracefully shutting down the connection"
+                            );
+                        }
                         Err(ErrorSource::Client(e)) => {
                             warn!(
                                 ?session_id,
