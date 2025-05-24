@@ -572,6 +572,7 @@ async fn timeline_create_handler(
         TimelineCreateRequestMode::Branch {
             ancestor_timeline_id,
             ancestor_start_lsn,
+            read_only: _,
             pg_version: _,
         } => tenant::CreateTimelineParams::Branch(tenant::CreateTimelineParamsBranch {
             new_timeline_id,

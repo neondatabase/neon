@@ -401,8 +401,18 @@ def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder, snapshots
         "earlier", ancestor_branch_name="main", ancestor_start_lsn=branchpoint_pipe
     )
 
-    snapshot_branchpoint_old = env.create_branch(
-        "snapshot_branchpoint_old", ancestor_branch_name="main", ancestor_start_lsn=branchpoint_y
+    snapshot_branchpoint_old = TimelineId.generate()
+
+    env.storage_controller.timeline_create(
+        env.initial_tenant,
+        {
+            "new_timeline_id": str(snapshot_branchpoint_old),
+            "ancestor_start_lsn": str(branchpoint_y),
+            "ancestor_timeline_id": str(env.initial_timeline),
+        },
+    )
+    env.neon_cli.mappings_map_branch(
+        "snapshot_branchpoint_old", env.initial_tenant, snapshot_branchpoint_old
     )
 
     snapshot_branchpoint = env.create_branch(

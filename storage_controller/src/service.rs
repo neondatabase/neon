@@ -3823,6 +3823,13 @@ impl Service {
         .await;
         failpoint_support::sleep_millis_async!("tenant-create-timeline-shared-lock");
         let is_import = create_req.is_import();
+        let read_only = matches!(
+            create_req.mode,
+            models::TimelineCreateRequestMode::Branch {
+                read_only: true,
+                ..
+            }
+        );
 
         if is_import {
             // Ensure that there is no split on-going.
@@ -3895,13 +3902,13 @@ impl Service {
             }
 
             None
-        } else if safekeepers {
+        } else if safekeepers || read_only {
             // Note that for imported timelines, we do not create the timeline on the safekeepers
             // straight away. Instead, we do it once the import finalized such that we know what
             // start LSN to provide for the safekeepers. This is done in
             // [`Self::finalize_timeline_import`].
             let res = self
-                .tenant_timeline_create_safekeepers(tenant_id, &timeline_info)
+                .tenant_timeline_create_safekeepers(tenant_id, &timeline_info, read_only)
                 .instrument(tracing::info_span!("timeline_create_safekeepers", %tenant_id, timeline_id=%timeline_info.timeline_id))
                 .await?;
             Some(res)

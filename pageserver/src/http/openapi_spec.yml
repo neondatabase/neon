@@ -626,6 +626,8 @@ paths:
                   format: hex
                 pg_version:
                   type: integer
+                read_only:
+                  type: boolean
                 existing_initdb_timeline_id:
                   type: string
                   format: hex
