@@ -207,15 +207,8 @@ async fn authenticate(
     ctx.set_project(db_info.aux.clone());
     info!("woken up a compute node");
 
-    // Backwards compatibility. pg_sni_proxy uses "--" in domain names
-    // while direct connections do not. Once we migrate to pg_sni_proxy
-    // everywhere, we can remove this.
-    if db_info.host.contains("--") {
-        // we need TLS connection with SNI info to properly route it
-        config.ssl_mode(SslMode::Require);
-    } else {
-        config.ssl_mode(SslMode::Disable);
-    }
+    // we need TLS connection with SNI info to properly route it
+    config.ssl_mode(SslMode::Require);
 
     if let Some(password) = db_info.password {
         config.password(password.as_ref());
