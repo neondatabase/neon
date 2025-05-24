@@ -75,22 +75,15 @@ impl Leadership {
         &self,
         current_leader: Option<ControllerPersistence>,
     ) -> Result<()> {
-        if let Some(address_for_peers) = &self.config.address_for_peers {
-            // TODO: `address-for-peers` can become a mandatory cli arg
-            // after we update the k8s setup
-            let proposed_leader = ControllerPersistence {
-                address: address_for_peers.to_string(),
-                started_at: chrono::Utc::now(),
-            };
+        let proposed_leader = ControllerPersistence {
+            address: self.config.address_for_peers.to_string(),
+            started_at: chrono::Utc::now(),
+        };
 
-            self.persistence
-                .update_leader(current_leader, proposed_leader)
-                .await
-                .map_err(Error::Database)
-        } else {
-            tracing::info!("No address-for-peers provided. Skipping leader persistence.");
-            Ok(())
-        }
+        self.persistence
+            .update_leader(current_leader, proposed_leader)
+            .await
+            .map_err(Error::Database)
     }
 
     async fn current_leader(&self) -> DatabaseResult<Option<ControllerPersistence>> {
