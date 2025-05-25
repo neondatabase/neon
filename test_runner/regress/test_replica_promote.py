@@ -4,8 +4,6 @@ File with secondary->primary promotion testing.
 This far, only contains a test that we don't break and that the data is persisted.
 """
 
-import os
-
 import psycopg2
 from fixtures.neon_fixtures import Endpoint, NeonEnv, wait_replica_caughtup
 from fixtures.pg_version import PgVersion
@@ -58,7 +56,8 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
     secondary_cur = secondary_conn.cursor()
 
     if env.pg_version is PgVersion.V14:
-        signalfile = os.path.join(secondary.pgdata_dir, "standby.signal")
+        assert secondary.pgdata_dir
+        signalfile = secondary.pgdata_dir / "standby.signal"
         assert signalfile.exists()
         signalfile.unlink()
 
