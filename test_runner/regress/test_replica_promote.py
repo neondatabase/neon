@@ -89,12 +89,14 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
     assert new_primary_cur.fetchone() == (200,)
 
     new_primary.stop(mode="immediate")
+    new_primary.respec(mode="Primary")
     new_primary.start()
 
     with new_primary.connect() as new_primary_conn:
         new_primary_cur = new_primary_conn.cursor()
         new_primary_cur.execute("select count(*) from t")
         assert new_primary_cur.fetchone() == (200,)
+        new_primary_cur.execute("INSERT INTO t (payload) SELECT generate_series(201, 300)")
 
     new_primary.stop()
     old_primary.start()
@@ -102,4 +104,7 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
     with old_primary.connect() as old_primary_conn:
         old_primary_cur = old_primary_conn.cursor()
         old_primary_cur.execute("select count(*) from t")
-        assert old_primary_cur.fetchone() == (200,)
+        assert old_primary_cur.fetchone() == (300,)
+        old_primary_cur.execute("INSERT INTO t (payload) SELECT generate_series(301, 400)")
+        old_primary_cur.execute("select count(*) from t")
+        assert old_primary_cur.fetchone() == (400,)
