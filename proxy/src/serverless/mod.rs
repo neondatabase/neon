@@ -50,6 +50,7 @@ use crate::context::RequestContext;
 use crate::ext::TaskExt;
 use crate::metrics::Metrics;
 use crate::protocol2::{ChainRW, ConnectHeader, ConnectionInfo, read_proxy_protocol};
+use crate::proxy::conntrack::ConnectionTracking;
 use crate::proxy::run_until_cancelled;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
@@ -125,6 +126,9 @@ pub async fn task_main(
     connections.close(); // allows `connections.wait to complete`
 
     let cancellations = tokio_util::task::task_tracker::TaskTracker::new();
+
+    let conntracking = Arc::new(ConnectionTracking::default());
+
     while let Some(res) = run_until_cancelled(ws_listener.accept(), &cancellation_token).await {
         let (conn, peer_addr) = res.context("could not accept TCP stream")?;
         if let Err(e) = conn.set_nodelay(true) {
@@ -154,6 +158,8 @@ pub async fn task_main(
         let cancellation_handler = cancellation_handler.clone();
         let endpoint_rate_limiter = endpoint_rate_limiter.clone();
         let cancellations = cancellations.clone();
+        let conntracking = Arc::clone(&conntracking);
+
         connections.spawn(
             async move {
                 let conn_token2 = conn_token.clone();
@@ -186,6 +192,7 @@ pub async fn task_main(
                     cancellation_handler,
                     endpoint_rate_limiter,
                     conn_token,
+                    conntracking,
                     conn,
                     conn_info,
                     session_id,
@@ -310,6 +317,7 @@ async fn connection_handler(
     cancellation_handler: Arc<CancellationHandler>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     cancellation_token: CancellationToken,
+    conntracking: Arc<ConnectionTracking>,
     conn: AsyncRW,
     conn_info: ConnectionInfo,
     session_id: uuid::Uuid,
@@ -348,6 +356,7 @@ async fn connection_handler(
             // `request_handler` is not cancel safe. It expects to be cancelled only at specific times.
             // By spawning the future, we ensure it never gets cancelled until it decides to.
             let cancellations = cancellations.clone();
+            let conntracking = Arc::clone(&conntracking);
             let handler = connections.spawn(
                 request_handler(
                     req,
@@ -360,6 +369,7 @@ async fn connection_handler(
                     http_request_token,
                     endpoint_rate_limiter.clone(),
                     cancellations,
+                    conntracking,
                 )
                 .in_current_span()
                 .map_ok_or_else(api_error_into_response, |r| r),
@@ -408,6 +418,7 @@ async fn request_handler(
     http_cancellation_token: CancellationToken,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     cancellations: TaskTracker,
+    conntracking: Arc<ConnectionTracking>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ApiError> {
     let host = request
         .headers()
@@ -453,6 +464,7 @@ async fn request_handler(
                     endpoint_rate_limiter,
                     host,
                     cancellations,
+                    conntracking,
                 )
                 .await
                 {

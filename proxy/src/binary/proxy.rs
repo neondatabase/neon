@@ -29,6 +29,7 @@ use crate::config::{
 use crate::context::parquet::ParquetUploadArgs;
 use crate::http::health_server::AppMetrics;
 use crate::metrics::Metrics;
+use crate::proxy::conntrack::ConnectionTracking;
 use crate::rate_limiter::{
     EndpointRateLimiter, LeakyBucketConfig, RateBucketInfo, WakeComputeRateLimiter,
 };
@@ -429,6 +430,8 @@ pub async fn run() -> anyhow::Result<()> {
         64,
     ));
 
+    let conntracking = Arc::new(ConnectionTracking::default());
+
     // client facing tasks. these will exit on error or on cancellation
     // cancellation returns Ok(())
     let mut client_tasks = JoinSet::new();
@@ -442,6 +445,7 @@ pub async fn run() -> anyhow::Result<()> {
                     cancellation_token.clone(),
                     cancellation_handler.clone(),
                     endpoint_rate_limiter.clone(),
+                    conntracking.clone(),
                 ));
             }
 
@@ -464,6 +468,7 @@ pub async fn run() -> anyhow::Result<()> {
                     proxy_listener,
                     cancellation_token.clone(),
                     cancellation_handler.clone(),
+                    conntracking.clone(),
                 ));
             }
         }
