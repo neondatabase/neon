@@ -77,28 +77,22 @@ pub(crate) enum JsonConversionError {
 //
 pub(crate) fn pg_text_row_to_json(
     row: &Row,
-    columns: &[Type],
     raw_output: bool,
     array_mode: bool,
 ) -> Result<Value, JsonConversionError> {
-    let iter = row
-        .columns()
-        .iter()
-        .zip(columns)
-        .enumerate()
-        .map(|(i, (column, typ))| {
-            let name = column.name();
-            let pg_value = row.as_text(i).map_err(JsonConversionError::AsTextError)?;
-            let json_value = if raw_output {
-                match pg_value {
-                    Some(v) => Value::String(v.to_string()),
-                    None => Value::Null,
-                }
-            } else {
-                pg_text_to_json(pg_value, typ)?
-            };
-            Ok((name.to_string(), json_value))
-        });
+    let iter = row.columns().iter().enumerate().map(|(i, column)| {
+        let name = column.name();
+        let pg_value = row.as_text(i).map_err(JsonConversionError::AsTextError)?;
+        let json_value = if raw_output {
+            match pg_value {
+                Some(v) => Value::String(v.to_string()),
+                None => Value::Null,
+            }
+        } else {
+            pg_text_to_json(pg_value, column.type_())?
+        };
+        Ok((name.to_string(), json_value))
+    });
 
     if array_mode {
         // drop keys and aggregate into array
