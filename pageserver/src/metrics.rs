@@ -2235,7 +2235,9 @@ impl BasebackupQueryTimeOngoingRecording<'_> {
         let metric = match res {
             Ok(_) => &self.parent.ok,
             Err(QueryError::Shutdown) | Err(QueryError::Reconnect) => {
-                // Do not observe ok/err for shutdown/reconnect
+                // Do not observe ok/err for shutdown/reconnect.
+                // Reconnect error might be raised when the operation is waiting for LSN and the tenant shutdown interrupts
+                // the operation. A reconnect error will be issued and the client will retry.
                 return;
             }
             Err(QueryError::Disconnected(ConnectionError::Io(io_error)))
