@@ -40,16 +40,15 @@ impl ProtocolError {
 pub struct ReadLsn {
     /// The request's read LSN.
     pub request_lsn: Lsn,
-    /// If given, the caller guarantees that the page has not been modified since
-    /// this LSN. Must be smaller than or equal to request_lsn. This allows the
-    /// Pageserver to serve an old page without waiting for the request LSN to
-    /// arrive. Valid for all request types.
+    /// If given, the caller guarantees that the page has not been modified since this LSN. Must be
+    /// smaller than or equal to request_lsn. This allows the Pageserver to serve an old page
+    /// without waiting for the request LSN to arrive. Valid for all request types.
     ///
-    /// It is undefined behaviour to make a request such that the page was, in
-    /// fact, modified between request_lsn and not_modified_since_lsn. The
-    /// Pageserver might detect it and return an error, or it might return the old
-    /// page version or the new page version. Setting not_modified_since_lsn equal
-    /// to request_lsn is always safe, but can lead to unnecessary waiting.
+    /// It is undefined behaviour to make a request such that the page was, in fact, modified
+    /// between request_lsn and not_modified_since_lsn. The Pageserver might detect it and return an
+    /// error, or it might return the old page version or the new page version. Setting
+    /// not_modified_since_lsn equal to request_lsn is always safe, but can lead to unnecessary
+    /// waiting.
     pub not_modified_since_lsn: Option<Lsn>,
 }
 
@@ -127,8 +126,7 @@ impl From<RelTag> for proto::RelTag {
     }
 }
 
-/// Checks whether a relation exists, at the given LSN. Only valid on shard 0,
-/// other shards will error.
+/// Checks whether a relation exists, at the given LSN. Only valid on shard 0, other shards error.
 #[derive(Clone, Copy, Debug)]
 pub struct CheckRelExistsRequest {
     pub read_lsn: ReadLsn,
@@ -221,8 +219,7 @@ impl TryFrom<GetBaseBackupResponseChunk> for proto::GetBaseBackupResponseChunk {
     }
 }
 
-/// Requests the size of a database, as # of bytes. Only valid on shard 0, other
-/// shards will error.
+/// Requests the size of a database, as # of bytes. Only valid on shard 0, other shards will error.
 #[derive(Clone, Copy, Debug)]
 pub struct GetDbSizeRequest {
     pub read_lsn: ReadLsn,
@@ -271,8 +268,8 @@ impl From<GetDbSizeResponse> for proto::GetDbSizeResponse {
 /// Requests one or more pages.
 #[derive(Clone, Debug)]
 pub struct GetPageRequest {
-    /// A request ID. Will be included in the response. Should be unique for
-    /// in-flight requests on the stream.
+    /// A request ID. Will be included in the response. Should be unique for in-flight requests on
+    /// the stream.
     pub request_id: RequestID,
     /// The request class.
     pub request_class: GetPageClass,
@@ -282,10 +279,9 @@ pub struct GetPageRequest {
     pub rel: RelTag,
     /// Page numbers to read. Must belong to the remote shard.
     ///
-    /// Multiple pages will be executed as a single batch by the Pageserver,
-    /// amortizing layer access costs and parallelizing them. This may increase the
-    /// latency of any individual request, but improves the overall latency and
-    /// throughput of the batch as a whole.
+    /// Multiple pages will be executed as a single batch by the Pageserver, amortizing layer access
+    /// costs and parallelizing them. This may increase the latency of any individual request, but
+    /// improves the overall latency and throughput of the batch as a whole.
     pub block_numbers: SmallVec<[u32; 1]>,
 }
 
@@ -383,10 +379,10 @@ impl From<GetPageClass> for i32 {
 
 /// A GetPage response.
 ///
-/// A batch response will contain all of the requested pages. We could eagerly
-/// emit individual pages as soon as they are ready, but on a readv() Postgres
-/// holds buffer pool locks on all pages in the batch and we'll only return once
-/// the entire batch is ready, so no one can make use of the individual pages.
+/// A batch response will contain all of the requested pages. We could eagerly emit individual pages
+/// as soon as they are ready, but on a readv() Postgres holds buffer pool locks on all pages in the
+/// batch and we'll only return once the entire batch is ready, so no one can make use of the
+/// individual pages.
 #[derive(Clone, Debug)]
 pub struct GetPageResponse {
     // The original request's ID.
@@ -424,15 +420,15 @@ impl From<GetPageResponse> for proto::GetPageResponse {
 /// A GetPage response status.
 #[derive(Clone, Copy, Debug)]
 pub enum GetPageStatus {
-    // Unknown status. For forwards compatibility: used when the server sends a
-    // status code that the client doesn't know about.
+    // Unknown status. For cross-version compatibility: used when the server sends a status code
+    // that the client doesn't know about.
     //
     // TODO: should we silently map unknown values to Unknown?
     Unknown,
     // The request was successful.
     Ok,
-    // The page did not exist. The tenant/timeline/shard has already been
-    // validated during stream setup.
+    // The page did not exist. The tenant/timeline/shard has already been validated during stream
+    // setup.
     NotFound,
     // The request was invalid.
     Invalid,
@@ -478,8 +474,8 @@ impl From<GetPageStatus> for i32 {
     }
 }
 
-// Fetches the size of a relation at a given LSN, as # of blocks. Only valid on
-// shard 0, other shards will error.
+// Fetches the size of a relation at a given LSN, as # of blocks. Only valid on shard 0, other
+// shards will error.
 pub struct GetRelSizeRequest {
     pub read_lsn: ReadLsn,
     pub rel: RelTag,
