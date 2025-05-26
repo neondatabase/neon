@@ -173,10 +173,8 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 	}
 	wp->quorum = wp->n_safekeepers / 2 + 1;
 
-	if (wp->config->proto_version != 2 && wp->config->proto_version != 3)
+	if (wp->config->proto_version != 3)
 		wp_log(FATAL, "unsupported safekeeper protocol version %d", wp->config->proto_version);
-	if (wp->safekeepers_generation > INVALID_GENERATION && wp->config->proto_version < 3)
-		wp_log(FATAL, "enabling generations requires protocol version 3");
 	wp_log(LOG, "using safekeeper protocol version %d", wp->config->proto_version);
 
 	/* Fill the greeting package */
@@ -2179,183 +2177,79 @@ MembershipConfigurationSerialize(MembershipConfiguration *mconf, StringInfo buf)
 	}
 }
 
-/* Serialize proposer -> acceptor message into buf using specified version */
+/* Serialize proposer -> acceptor message into buf */
 static void
 PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf, int proto_version)
 {
-	/* both version are supported currently until we fully migrate to 3 */
-	Assert(proto_version == 3 || proto_version == 2);
+	/* only version 3 is supported */
+	Assert(proto_version == 3);
 
 	resetStringInfo(buf);
 
-	if (proto_version == 3)
+	/*
+	 * v2 sends structs for some messages as is, so commonly send tag only
+	 * for v3
+	 */
+	pq_sendint8(buf, msg->tag);
+
+	switch (msg->tag)
 	{
-		/*
-		 * v2 sends structs for some messages as is, so commonly send tag only
-		 * for v3
-		 */
-		pq_sendint8(buf, msg->tag);
+		case 'g':
+			{
+				ProposerGreeting *m = (ProposerGreeting *) msg;
 
-		switch (msg->tag)
-		{
-			case 'g':
+				pq_send_ascii_string(buf, m->tenant_id);
+				pq_send_ascii_string(buf, m->timeline_id);
+				MembershipConfigurationSerialize(&m->mconf, buf);
+				pq_sendint32(buf, m->pg_version);
+				pq_sendint64(buf, m->system_id);
+				pq_sendint32(buf, m->wal_seg_size);
+				break;
+			}
+		case 'v':
+			{
+				VoteRequest *m = (VoteRequest *) msg;
+
+				pq_sendint32(buf, m->generation);
+				pq_sendint64(buf, m->term);
+				break;
+
+			}
+		case 'e':
+			{
+				ProposerElected *m = (ProposerElected *) msg;
+
+				pq_sendint32(buf, m->generation);
+				pq_sendint64(buf, m->term);
+				pq_sendint64(buf, m->startStreamingAt);
+				pq_sendint32(buf, m->termHistory->n_entries);
+				for (uint32 i = 0; i < m->termHistory->n_entries; i++)
 				{
-					ProposerGreeting *m = (ProposerGreeting *) msg;
-
-					pq_send_ascii_string(buf, m->tenant_id);
-					pq_send_ascii_string(buf, m->timeline_id);
-					MembershipConfigurationSerialize(&m->mconf, buf);
-					pq_sendint32(buf, m->pg_version);
-					pq_sendint64(buf, m->system_id);
-					pq_sendint32(buf, m->wal_seg_size);
-					break;
+					pq_sendint64(buf, m->termHistory->entries[i].term);
+					pq_sendint64(buf, m->termHistory->entries[i].lsn);
 				}
-			case 'v':
-				{
-					VoteRequest *m = (VoteRequest *) msg;
-
-					pq_sendint32(buf, m->generation);
-					pq_sendint64(buf, m->term);
-					break;
-
-				}
-			case 'e':
-				{
-					ProposerElected *m = (ProposerElected *) msg;
-
-					pq_sendint32(buf, m->generation);
-					pq_sendint64(buf, m->term);
-					pq_sendint64(buf, m->startStreamingAt);
-					pq_sendint32(buf, m->termHistory->n_entries);
-					for (uint32 i = 0; i < m->termHistory->n_entries; i++)
-					{
-						pq_sendint64(buf, m->termHistory->entries[i].term);
-						pq_sendint64(buf, m->termHistory->entries[i].lsn);
-					}
-					break;
-				}
-			case 'a':
-				{
-					/*
-					 * Note: this serializes only AppendRequestHeader, caller
-					 * is expected to append WAL data later.
-					 */
-					AppendRequestHeader *m = (AppendRequestHeader *) msg;
-
-					pq_sendint32(buf, m->generation);
-					pq_sendint64(buf, m->term);
-					pq_sendint64(buf, m->beginLsn);
-					pq_sendint64(buf, m->endLsn);
-					pq_sendint64(buf, m->commitLsn);
-					pq_sendint64(buf, m->truncateLsn);
-					break;
-				}
-			default:
-				wp_log(FATAL, "unexpected message type %c to serialize", msg->tag);
-		}
-		return;
-	}
-
-	if (proto_version == 2)
-	{
-		switch (msg->tag)
-		{
-			case 'g':
-				{
-					/* v2 sent struct as is */
-					ProposerGreeting *m = (ProposerGreeting *) msg;
-					ProposerGreetingV2 greetRequestV2;
-
-					/* Fill also v2 struct. */
-					greetRequestV2.tag = 'g';
-					greetRequestV2.protocolVersion = proto_version;
-					greetRequestV2.pgVersion = m->pg_version;
-
-					/*
-					 * v3 removed this field because it's easier to pass as
-					 * libq or START_WAL_PUSH options
-					 */
-					memset(&greetRequestV2.proposerId, 0, sizeof(greetRequestV2.proposerId));
-					greetRequestV2.systemId = wp->config->systemId;
-					if (*m->timeline_id != '\0' &&
-						!HexDecodeString(greetRequestV2.timeline_id, m->timeline_id, 16))
-						wp_log(FATAL, "could not parse neon.timeline_id, %s", m->timeline_id);
-					if (*m->tenant_id != '\0' &&
-						!HexDecodeString(greetRequestV2.tenant_id, m->tenant_id, 16))
-						wp_log(FATAL, "could not parse neon.tenant_id, %s", m->tenant_id);
-
-					greetRequestV2.timeline = wp->config->pgTimeline;
-					greetRequestV2.walSegSize = wp->config->wal_segment_size;
-
-					pq_sendbytes(buf, (char *) &greetRequestV2, sizeof(greetRequestV2));
-					break;
-				}
-			case 'v':
-				{
-					/* v2 sent struct as is */
-					VoteRequest *m = (VoteRequest *) msg;
-					VoteRequestV2 voteRequestV2;
-
-					voteRequestV2.tag = m->pam.tag;
-					voteRequestV2.term = m->term;
-					/* removed field */
-					memset(&voteRequestV2.proposerId, 0, sizeof(voteRequestV2.proposerId));
-					pq_sendbytes(buf, (char *) &voteRequestV2, sizeof(voteRequestV2));
-					break;
-				}
-			case 'e':
-				{
-					ProposerElected *m = (ProposerElected *) msg;
-
-					pq_sendint64_le(buf, m->apm.tag);
-					pq_sendint64_le(buf, m->term);
-					pq_sendint64_le(buf, m->startStreamingAt);
-					pq_sendint32_le(buf, m->termHistory->n_entries);
-					for (int i = 0; i < m->termHistory->n_entries; i++)
-					{
-						pq_sendint64_le(buf, m->termHistory->entries[i].term);
-						pq_sendint64_le(buf, m->termHistory->entries[i].lsn);
-					}
-
-					/*
-					 * Removed timeline_start_lsn. Still send it as a valid
-					 * value until safekeepers taking it from term history are
-					 * deployed.
-					 */
-					pq_sendint64_le(buf, m->termHistory->entries[0].lsn);
-					break;
-				}
-			case 'a':
-
+				break;
+			}
+		case 'a':
+			{
 				/*
-				 * Note: this serializes only AppendRequestHeader, caller is
-				 * expected to append WAL data later.
-				 */
-				{
-					/* v2 sent struct as is */
-					AppendRequestHeader *m = (AppendRequestHeader *) msg;
-					AppendRequestHeaderV2 appendRequestHeaderV2;
+					* Note: this serializes only AppendRequestHeader, caller
+					* is expected to append WAL data later.
+					*/
+				AppendRequestHeader *m = (AppendRequestHeader *) msg;
 
-					appendRequestHeaderV2.tag = m->apm.tag;
-					appendRequestHeaderV2.term = m->term;
-					appendRequestHeaderV2.epochStartLsn = 0;	/* removed field */
-					appendRequestHeaderV2.beginLsn = m->beginLsn;
-					appendRequestHeaderV2.endLsn = m->endLsn;
-					appendRequestHeaderV2.commitLsn = m->commitLsn;
-					appendRequestHeaderV2.truncateLsn = m->truncateLsn;
-					/* removed field */
-					memset(&appendRequestHeaderV2.proposerId, 0, sizeof(appendRequestHeaderV2.proposerId));
-
-					pq_sendbytes(buf, (char *) &appendRequestHeaderV2, sizeof(appendRequestHeaderV2));
-					break;
-				}
-
-			default:
-				wp_log(FATAL, "unexpected message type %c to serialize", msg->tag);
-		}
-		return;
+				pq_sendint32(buf, m->generation);
+				pq_sendint64(buf, m->term);
+				pq_sendint64(buf, m->beginLsn);
+				pq_sendint64(buf, m->endLsn);
+				pq_sendint64(buf, m->commitLsn);
+				pq_sendint64(buf, m->truncateLsn);
+				break;
+			}
+		default:
+			wp_log(FATAL, "unexpected message type %c to serialize", msg->tag);
 	}
-	wp_log(FATAL, "unexpected proto_version %d", proto_version);
+	return;
 }
 
 /*
@@ -2449,141 +2343,72 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg)
 	s.maxlen = buf_size;
 	s.cursor = 0;
 
-	if (wp->config->proto_version == 3)
+	/* only version 3 is supported */
+	Assert(proto_version == 3);
+
+	tag = pq_getmsgbyte(&s);
+	if (tag != anymsg->tag)
 	{
-		tag = pq_getmsgbyte(&s);
-		if (tag != anymsg->tag)
-		{
-			wp_log(WARNING, "unexpected message tag %c from node %s:%s in state %s", (char) tag, sk->host,
-				   sk->port, FormatSafekeeperState(sk));
-			ResetConnection(sk);
-			return false;
-		}
-		switch (tag)
-		{
-			case 'g':
-				{
-					AcceptorGreeting *msg = (AcceptorGreeting *) anymsg;
-
-					msg->nodeId = pq_getmsgint64(&s);
-					MembershipConfigurationDeserialize(&msg->mconf, &s);
-					msg->term = pq_getmsgint64(&s);
-					pq_getmsgend(&s);
-					return true;
-				}
-			case 'v':
-				{
-					VoteResponse *msg = (VoteResponse *) anymsg;
-
-					msg->generation = pq_getmsgint32(&s);
-					msg->term = pq_getmsgint64(&s);
-					msg->voteGiven = pq_getmsgbyte(&s);
-					msg->flushLsn = pq_getmsgint64(&s);
-					msg->truncateLsn = pq_getmsgint64(&s);
-					msg->termHistory.n_entries = pq_getmsgint32(&s);
-					msg->termHistory.entries = palloc(sizeof(TermSwitchEntry) * msg->termHistory.n_entries);
-					for (uint32 i = 0; i < msg->termHistory.n_entries; i++)
-					{
-						msg->termHistory.entries[i].term = pq_getmsgint64(&s);
-						msg->termHistory.entries[i].lsn = pq_getmsgint64(&s);
-					}
-					pq_getmsgend(&s);
-					return true;
-				}
-			case 'a':
-				{
-					AppendResponse *msg = (AppendResponse *) anymsg;
-
-					msg->generation = pq_getmsgint32(&s);
-					msg->term = pq_getmsgint64(&s);
-					msg->flushLsn = pq_getmsgint64(&s);
-					msg->commitLsn = pq_getmsgint64(&s);
-					msg->hs.ts = pq_getmsgint64(&s);
-					msg->hs.xmin.value = pq_getmsgint64(&s);
-					msg->hs.catalog_xmin.value = pq_getmsgint64(&s);
-					if (s.len > s.cursor)
-						ParsePageserverFeedbackMessage(wp, &s, &msg->ps_feedback);
-					else
-						msg->ps_feedback.present = false;
-					pq_getmsgend(&s);
-					return true;
-				}
-			default:
-				{
-					wp_log(FATAL, "unexpected message tag %c to read", (char) tag);
-					return false;
-				}
-		}
+		wp_log(WARNING, "unexpected message tag %c from node %s:%s in state %s", (char) tag, sk->host,
+				sk->port, FormatSafekeeperState(sk));
+		ResetConnection(sk);
+		return false;
 	}
-	else if (wp->config->proto_version == 2)
+	switch (tag)
 	{
-		tag = pq_getmsgint64_le(&s);
-		if (tag != anymsg->tag)
-		{
-			wp_log(WARNING, "unexpected message tag %c from node %s:%s in state %s", (char) tag, sk->host,
-				   sk->port, FormatSafekeeperState(sk));
-			ResetConnection(sk);
-			return false;
-		}
-		switch (tag)
-		{
-			case 'g':
+		case 'g':
+			{
+				AcceptorGreeting *msg = (AcceptorGreeting *) anymsg;
+
+				msg->nodeId = pq_getmsgint64(&s);
+				MembershipConfigurationDeserialize(&msg->mconf, &s);
+				msg->term = pq_getmsgint64(&s);
+				pq_getmsgend(&s);
+				return true;
+			}
+		case 'v':
+			{
+				VoteResponse *msg = (VoteResponse *) anymsg;
+
+				msg->generation = pq_getmsgint32(&s);
+				msg->term = pq_getmsgint64(&s);
+				msg->voteGiven = pq_getmsgbyte(&s);
+				msg->flushLsn = pq_getmsgint64(&s);
+				msg->truncateLsn = pq_getmsgint64(&s);
+				msg->termHistory.n_entries = pq_getmsgint32(&s);
+				msg->termHistory.entries = palloc(sizeof(TermSwitchEntry) * msg->termHistory.n_entries);
+				for (uint32 i = 0; i < msg->termHistory.n_entries; i++)
 				{
-					AcceptorGreeting *msg = (AcceptorGreeting *) anymsg;
-
-					msg->term = pq_getmsgint64_le(&s);
-					msg->nodeId = pq_getmsgint64_le(&s);
-					pq_getmsgend(&s);
-					return true;
+					msg->termHistory.entries[i].term = pq_getmsgint64(&s);
+					msg->termHistory.entries[i].lsn = pq_getmsgint64(&s);
 				}
+				pq_getmsgend(&s);
+				return true;
+			}
+		case 'a':
+			{
+				AppendResponse *msg = (AppendResponse *) anymsg;
 
-			case 'v':
-				{
-					VoteResponse *msg = (VoteResponse *) anymsg;
-
-					msg->term = pq_getmsgint64_le(&s);
-					msg->voteGiven = pq_getmsgint64_le(&s);
-					msg->flushLsn = pq_getmsgint64_le(&s);
-					msg->truncateLsn = pq_getmsgint64_le(&s);
-					msg->termHistory.n_entries = pq_getmsgint32_le(&s);
-					msg->termHistory.entries = palloc(sizeof(TermSwitchEntry) * msg->termHistory.n_entries);
-					for (int i = 0; i < msg->termHistory.n_entries; i++)
-					{
-						msg->termHistory.entries[i].term = pq_getmsgint64_le(&s);
-						msg->termHistory.entries[i].lsn = pq_getmsgint64_le(&s);
-					}
-					pq_getmsgint64_le(&s);	/* timelineStartLsn */
-					pq_getmsgend(&s);
-					return true;
-				}
-
-			case 'a':
-				{
-					AppendResponse *msg = (AppendResponse *) anymsg;
-
-					msg->term = pq_getmsgint64_le(&s);
-					msg->flushLsn = pq_getmsgint64_le(&s);
-					msg->commitLsn = pq_getmsgint64_le(&s);
-					msg->hs.ts = pq_getmsgint64_le(&s);
-					msg->hs.xmin.value = pq_getmsgint64_le(&s);
-					msg->hs.catalog_xmin.value = pq_getmsgint64_le(&s);
-					if (s.len > s.cursor)
-						ParsePageserverFeedbackMessage(wp, &s, &msg->ps_feedback);
-					else
-						msg->ps_feedback.present = false;
-					pq_getmsgend(&s);
-					return true;
-				}
-
-			default:
-				{
-					wp_log(FATAL, "unexpected message tag %c to read", (char) tag);
-					return false;
-				}
-		}
+				msg->generation = pq_getmsgint32(&s);
+				msg->term = pq_getmsgint64(&s);
+				msg->flushLsn = pq_getmsgint64(&s);
+				msg->commitLsn = pq_getmsgint64(&s);
+				msg->hs.ts = pq_getmsgint64(&s);
+				msg->hs.xmin.value = pq_getmsgint64(&s);
+				msg->hs.catalog_xmin.value = pq_getmsgint64(&s);
+				if (s.len > s.cursor)
+					ParsePageserverFeedbackMessage(wp, &s, &msg->ps_feedback);
+				else
+					msg->ps_feedback.present = false;
+				pq_getmsgend(&s);
+				return true;
+			}
+		default:
+			{
+				wp_log(FATAL, "unexpected message tag %c to read", (char) tag);
+				return false;
+			}
 	}
-	wp_log(FATAL, "unsupported proto_version %d", wp->config->proto_version);
-	return false;				/* keep the compiler quiet */
 }
 
 /*
