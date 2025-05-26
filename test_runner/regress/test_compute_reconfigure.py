@@ -91,8 +91,7 @@ def test_compute_reconfigure(neon_simple_env: NeonEnv):
 
 def test_compute_safekeeper_connstrings_duplicate(neon_simple_env: NeonEnv):
     """
-    Test that we can change postgresql.conf settings even if
-    skip_pg_catalog_updates=True is set.
+    Test that we property catch duplicate entries in neon.safekeepers.
     """
     env = neon_simple_env
 

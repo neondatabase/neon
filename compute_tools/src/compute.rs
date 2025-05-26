@@ -229,7 +229,7 @@ impl ParsedSpec {
             return Err(String::from("safekeeper_connstrings is empty"));
         }
 
-        // check for unicity of the connection strings
+        // check for uniqueness of the connection strings in the set
         let mut connstrings = self.safekeeper_connstrings.clone();
 
         connstrings.sort();
