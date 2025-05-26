@@ -18,6 +18,7 @@ tokio-util = { version = "0.7", features = ["compat"] }
 hyper-util = "0.1.9"
 hyper = "1.6.0"
 metrics.workspace = true
+priority-queue = "2.3.1"
 
 
 pageserver_page_api.workspace = true
