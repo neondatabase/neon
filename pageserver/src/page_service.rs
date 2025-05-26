@@ -3351,8 +3351,7 @@ impl tonic::service::Interceptor for TenantMetadataInterceptor {
     }
 }
 
-/// Authenticates gRPC page service requests, and stores the JWT claims as a request extension. Must
-/// run after TenantMetadataInterceptor.
+/// Authenticates gRPC page service requests. Must run after TenantMetadataInterceptor.
 #[derive(Clone)]
 struct TenantAuthInterceptor {
     auth: Option<Arc<SwappableJwtAuth>>,
@@ -3381,7 +3380,7 @@ impl tonic::service::Interceptor for TenantAuthInterceptor {
         let jwt = req
             .metadata()
             .get("authorization")
-            .ok_or(tonic::Status::unauthenticated("no authorization header"))?
+            .ok_or_else(|| tonic::Status::unauthenticated("no authorization header"))?
             .to_str()
             .map_err(|_| tonic::Status::invalid_argument("invalid authorization header"))?
             .strip_prefix("Bearer ")
