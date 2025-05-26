@@ -4321,6 +4321,7 @@ dependencies = [
  "pageserver_api",
  "pageserver_client",
  "pageserver_compaction",
+ "pageserver_page_api",
  "pem",
  "pin-project-lite",
  "postgres-protocol",
