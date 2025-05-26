@@ -682,7 +682,7 @@ class NeonEnvBuilder:
                 log.info(
                     f"Copying pageserver tenants directory {tenants_from_dir} to {tenants_to_dir}"
                 )
-                shutil.copytree(tenants_from_dir, tenants_to_dir)
+                subprocess.run(["cp", "-a", tenants_from_dir, tenants_to_dir], check=True)
             else:
                 log.info(
                     f"Creating overlayfs mount of pageserver tenants directory {tenants_from_dir} to {tenants_to_dir}"
@@ -698,8 +698,9 @@ class NeonEnvBuilder:
         shutil.rmtree(self.repo_dir / "local_fs_remote_storage", ignore_errors=True)
         if self.test_overlay_dir is None:
             log.info("Copying local_fs_remote_storage directory from snapshot")
-            shutil.copytree(
-                repo_dir / "local_fs_remote_storage", self.repo_dir / "local_fs_remote_storage"
+            subprocess.run(
+                ["cp", "-a", f"{repo_dir / 'local_fs_remote_storage'}", f"{self.repo_dir}"],
+                check=True,
             )
         else:
             log.info("Creating overlayfs mount of local_fs_remote_storage directory from snapshot")
@@ -1223,6 +1224,7 @@ class NeonEnv:
         # Create config for pageserver
         http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
         pg_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
+        grpc_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
         for ps_id in range(
             self.BASE_PAGESERVER_ID, self.BASE_PAGESERVER_ID + config.num_pageservers
         ):
@@ -1249,6 +1251,7 @@ class NeonEnv:
                 else None,
                 "pg_auth_type": pg_auth_type,
                 "http_auth_type": http_auth_type,
+                "grpc_auth_type": grpc_auth_type,
                 "availability_zone": availability_zone,
                 # Disable pageserver disk syncs in tests: when running tests concurrently, this avoids
                 # the pageserver taking a long time to start up due to syncfs flushing other tests' data
