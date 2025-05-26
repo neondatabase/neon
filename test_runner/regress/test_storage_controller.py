@@ -4163,9 +4163,7 @@ def test_storcon_create_delete_sk_down(
         ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
         ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
 
-    with env.endpoints.create(
-        "child_of_main", tenant_id=tenant_id
-    ) as ep:
+    with env.endpoints.create("child_of_main", tenant_id=tenant_id) as ep:
         # endpoint should start.
         ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
         ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
@@ -4251,9 +4249,7 @@ def test_storcon_few_sk(
         ep.start(safekeeper_generation=1, safekeepers=safekeeper_list)
         ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
 
-    with env.endpoints.create(
-        "child_of_main", tenant_id=tenant_id
-    ) as ep:
+    with env.endpoints.create("child_of_main", tenant_id=tenant_id) as ep:
         # endpoint should start.
         ep.start(safekeeper_generation=1, safekeepers=safekeeper_list)
         ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
