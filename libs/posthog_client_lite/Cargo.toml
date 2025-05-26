@@ -6,9 +6,14 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+arc-swap.workspace = true
 reqwest.workspace = true
-serde.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 sha2.workspace = true
-workspace_hack.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time"] }
+tokio-util.workspace = true
+tracing-utils.workspace = true
+tracing.workspace = true
+workspace_hack.workspace = true

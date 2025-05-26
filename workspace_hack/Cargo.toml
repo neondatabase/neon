@@ -41,10 +41,8 @@ env_logger = { version = "0.11" }
 fail = { version = "0.5", default-features = false, features = ["failpoints"] }
 form_urlencoded = { version = "1" }
 futures-channel = { version = "0.3", features = ["sink"] }
-futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }
 futures-io = { version = "0.3" }
-futures-task = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 generic-array = { version = "0.14", default-features = false, features = ["more_lengths", "zeroize"] }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
@@ -74,7 +72,6 @@ num-traits = { version = "0.2", features = ["i128", "libm"] }
 once_cell = { version = "1" }
 p256 = { version = "0.13", features = ["jwk"] }
 parquet = { version = "53", default-features = false, features = ["zstd"] }
-percent-encoding = { version = "2" }
 prost = { version = "0.13", features = ["no-recursion-limit", "prost-derive"] }
 rand = { version = "0.8", features = ["small_rng"] }
 regex = { version = "1" }
