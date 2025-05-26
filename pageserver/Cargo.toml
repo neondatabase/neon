@@ -32,6 +32,7 @@ enum-map.workspace = true
 enumset = { workspace = true, features = ["serde"]}
 fail.workspace = true
 futures.workspace = true
+hashlink.workspace = true
 hex.workspace = true
 http-utils.workspace = true
 humantime-serde.workspace = true
@@ -96,7 +97,6 @@ utils.workspace = true
 wal_decoder.workspace = true
 walkdir.workspace = true
 workspace_hack.workspace = true
-smallvec.workspace = true
 twox-hash.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

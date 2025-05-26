@@ -4,7 +4,6 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use bytes::BytesMut;
-use fallible_iterator::FallibleIterator;
 use futures_util::{Sink, Stream, ready};
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
@@ -19,28 +18,10 @@ use crate::error::DbError;
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::{AsyncMessage, Error, Notification};
 
-pub enum RequestMessages {
-    Single(FrontendMessage),
-}
-
-pub struct Request {
-    pub messages: RequestMessages,
-    pub sender: mpsc::Sender<BackendMessages>,
-}
-
-pub struct Response {
-    sender: PollSender<BackendMessages>,
-}
-
 #[derive(PartialEq, Debug)]
 enum State {
     Active,
     Closing,
-}
-
-enum WriteReady {
-    Terminating,
-    WaitingOnRead,
 }
 
 /// A connection to a PostgreSQL database.
@@ -56,9 +37,11 @@ pub struct Connection<S, T> {
     pub stream: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
     /// HACK: we need this in the Neon Proxy to forward params.
     pub parameters: HashMap<String, String>,
-    receiver: mpsc::UnboundedReceiver<Request>,
+
+    sender: PollSender<BackendMessages>,
+    receiver: mpsc::UnboundedReceiver<FrontendMessage>,
+
     pending_responses: VecDeque<BackendMessage>,
-    responses: VecDeque<Response>,
     state: State,
 }
 
@@ -71,14 +54,15 @@ where
         stream: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
         pending_responses: VecDeque<BackendMessage>,
         parameters: HashMap<String, String>,
-        receiver: mpsc::UnboundedReceiver<Request>,
+        sender: mpsc::Sender<BackendMessages>,
+        receiver: mpsc::UnboundedReceiver<FrontendMessage>,
     ) -> Connection<S, T> {
         Connection {
             stream,
             parameters,
+            sender: PollSender::new(sender),
             receiver,
             pending_responses,
-            responses: VecDeque::new(),
             state: State::Active,
         }
     }
@@ -110,7 +94,7 @@ where
                 }
             };
 
-            let (mut messages, request_complete) = match message {
+            let messages = match message {
                 BackendMessage::Async(Message::NoticeResponse(body)) => {
                     let error = DbError::parse(&mut body.fields()).map_err(Error::parse)?;
                     return Poll::Ready(Ok(AsyncMessage::Notice(error)));
@@ -131,41 +115,19 @@ where
                     continue;
                 }
                 BackendMessage::Async(_) => unreachable!(),
-                BackendMessage::Normal {
-                    messages,
-                    request_complete,
-                } => (messages, request_complete),
+                BackendMessage::Normal { messages } => messages,
             };
 
-            let mut response = match self.responses.pop_front() {
-                Some(response) => response,
-                None => match messages.next().map_err(Error::parse)? {
-                    Some(Message::ErrorResponse(error)) => {
-                        return Poll::Ready(Err(Error::db(error)));
-                    }
-                    _ => return Poll::Ready(Err(Error::unexpected_message())),
-                },
-            };
-
-            match response.sender.poll_reserve(cx) {
+            match self.sender.poll_reserve(cx) {
                 Poll::Ready(Ok(())) => {
-                    let _ = response.sender.send_item(messages);
-                    if !request_complete {
-                        self.responses.push_front(response);
-                    }
+                    let _ = self.sender.send_item(messages);
                 }
                 Poll::Ready(Err(_)) => {
-                    // we need to keep paging through the rest of the messages even if the receiver's hung up
-                    if !request_complete {
-                        self.responses.push_front(response);
-                    }
+                    return Poll::Ready(Err(Error::closed()));
                 }
                 Poll::Pending => {
-                    self.responses.push_front(response);
-                    self.pending_responses.push_back(BackendMessage::Normal {
-                        messages,
-                        request_complete,
-                    });
+                    self.pending_responses
+                        .push_back(BackendMessage::Normal { messages });
                     trace!("poll_read: waiting on sender");
                     return Poll::Pending;
                 }
@@ -174,7 +136,7 @@ where
     }
 
     /// Fetch the next client request and enqueue the response sender.
-    fn poll_request(&mut self, cx: &mut Context<'_>) -> Poll<Option<RequestMessages>> {
+    fn poll_request(&mut self, cx: &mut Context<'_>) -> Poll<Option<FrontendMessage>> {
         if self.receiver.is_closed() {
             return Poll::Ready(None);
         }
@@ -182,10 +144,7 @@ where
         match self.receiver.poll_recv(cx) {
             Poll::Ready(Some(request)) => {
                 trace!("polled new request");
-                self.responses.push_back(Response {
-                    sender: PollSender::new(request.sender),
-                });
-                Poll::Ready(Some(request.messages))
+                Poll::Ready(Some(request))
             }
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
@@ -194,7 +153,7 @@ where
 
     /// Process client requests and write them to the postgres connection, flushing if necessary.
     /// client -> postgres
-    fn poll_write(&mut self, cx: &mut Context<'_>) -> Poll<Result<WriteReady, Error>> {
+    fn poll_write(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
         loop {
             if Pin::new(&mut self.stream)
                 .poll_ready(cx)
@@ -209,14 +168,14 @@ where
 
             match self.poll_request(cx) {
                 // send the message to postgres
-                Poll::Ready(Some(RequestMessages::Single(request))) => {
+                Poll::Ready(Some(request)) => {
                     Pin::new(&mut self.stream)
                         .start_send(request)
                         .map_err(Error::io)?;
                 }
                 // No more messages from the client, and no more responses to wait for.
                 // Send a terminate message to postgres
-                Poll::Ready(None) if self.responses.is_empty() => {
+                Poll::Ready(None) => {
                     trace!("poll_write: at eof, terminating");
                     let mut request = BytesMut::new();
                     frontend::terminate(&mut request);
@@ -228,16 +187,7 @@ where
 
                     trace!("poll_write: sent eof, closing");
                     trace!("poll_write: done");
-                    return Poll::Ready(Ok(WriteReady::Terminating));
-                }
-                // No more messages from the client, but there are still some responses to wait for.
-                Poll::Ready(None) => {
-                    trace!(
-                        "poll_write: at eof, pending responses {}",
-                        self.responses.len()
-                    );
-                    ready!(self.poll_flush(cx))?;
-                    return Poll::Ready(Ok(WriteReady::WaitingOnRead));
+                    return Poll::Ready(Ok(()));
                 }
                 // Still waiting for a message from the client.
                 Poll::Pending => {
@@ -298,7 +248,7 @@ where
             // if the state is still active, try read from and write to postgres.
             let message = self.poll_read(cx)?;
             let closing = self.poll_write(cx)?;
-            if let Poll::Ready(WriteReady::Terminating) = closing {
+            if let Poll::Ready(()) = closing {
                 self.state = State::Closing;
             }
 

@@ -108,7 +108,7 @@ typedef enum
 	UNLOGGED_BUILD_NOT_PERMANENT
 } UnloggedBuildPhase;
 
-static SMgrRelation unlogged_build_rel = NULL;
+static NRelFileInfo unlogged_build_rel_info;
 static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 
 static bool neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id);
@@ -912,16 +912,19 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	{
 		case 0:
 			neon_log(ERROR, "cannot call smgrextend() on rel with unknown persistence");
+			break;
 
 		case RELPERSISTENCE_PERMANENT:
+			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
+			{
+				mdextend(reln, forkNum, blkno, buffer, skipFsync);
+				return;
+			}
 			break;
 
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
 			mdextend(reln, forkNum, blkno, buffer, skipFsync);
-			/* Update LFC in case of unlogged index build */
-			if (reln == unlogged_build_rel && unlogged_build_phase == UNLOGGED_BUILD_PHASE_2)
-				lfc_write(InfoFromSMgrRel(reln), forkNum, blkno, buffer);
 			return;
 
 		default:
@@ -1003,21 +1006,19 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 	{
 		case 0:
 			neon_log(ERROR, "cannot call smgrextend() on rel with unknown persistence");
+			break;
 
 		case RELPERSISTENCE_PERMANENT:
+			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
+			{
+				mdzeroextend(reln, forkNum, blocknum, nblocks, skipFsync);
+				return;
+			}
 			break;
 
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
 			mdzeroextend(reln, forkNum, blocknum, nblocks, skipFsync);
-			/* Update LFC in case of unlogged index build */
-			if (reln == unlogged_build_rel && unlogged_build_phase == UNLOGGED_BUILD_PHASE_2)
-			{
-				for (int i = 0; i < nblocks; i++)
-				{
-					lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, buffer.data);
-				}
-			}
 			return;
 
 		default:
@@ -1387,8 +1388,14 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 	{
 		case 0:
 			neon_log(ERROR, "cannot call smgrread() on rel with unknown persistence");
+			break;
 
 		case RELPERSISTENCE_PERMANENT:
+			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
+			{
+				mdread(reln, forkNum, blkno, buffer);
+				return;
+			}
 			break;
 
 		case RELPERSISTENCE_TEMP:
@@ -1474,8 +1481,14 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	{
 		case 0:
 			neon_log(ERROR, "cannot call smgrread() on rel with unknown persistence");
+			break;
 
 		case RELPERSISTENCE_PERMANENT:
+			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
+			{
+				mdreadv(reln, forknum, blocknum, buffers, nblocks);
+				return;
+			}
 			break;
 
 		case RELPERSISTENCE_TEMP:
@@ -1608,6 +1621,15 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
+			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
+			{
+#if PG_MAJORVERSION_NUM >= 17
+				mdwritev(reln, forknum, blocknum, &buffer, 1, skipFsync);
+#else
+				mdwrite(reln, forknum, blocknum, buffer, skipFsync);
+#endif
+				return;
+			}
 			break;
 
 		case RELPERSISTENCE_TEMP:
@@ -1617,9 +1639,6 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 			#else
 			mdwrite(reln, forknum, blocknum, buffer, skipFsync);
 			#endif
-			/* Update LFC in case of unlogged index build */
-			if (reln == unlogged_build_rel && unlogged_build_phase == UNLOGGED_BUILD_PHASE_2)
-				lfc_write(InfoFromSMgrRel(reln), forknum, blocknum, buffer);
 			return;
 		default:
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
@@ -1680,14 +1699,16 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
+			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
+			{
+				mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
+				return;
+			}
 			break;
 
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
 			mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
-			/* Update LFC in case of unlogged index build */
-			if (reln == unlogged_build_rel && unlogged_build_phase == UNLOGGED_BUILD_PHASE_2)
-				lfc_writev(InfoFromSMgrRel(reln), forknum, blkno, buffers, nblocks);
 			return;
 		default:
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
@@ -1723,6 +1744,10 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
+			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
+			{
+				return mdnblocks(reln, forknum);
+			}
 			break;
 
 		case RELPERSISTENCE_TEMP:
@@ -1792,6 +1817,11 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber old_blocks, Blo
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
+			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
+			{
+				mdtruncate(reln, forknum, old_blocks, nblocks);
+				return;
+			}
 			break;
 
 		case RELPERSISTENCE_TEMP:
@@ -1930,7 +1960,6 @@ neon_start_unlogged_build(SMgrRelation reln)
 	 */
 	if (unlogged_build_phase != UNLOGGED_BUILD_NOT_IN_PROGRESS)
 		neon_log(ERROR, "unlogged relation build is already in progress");
-	Assert(unlogged_build_rel == NULL);
 
 	ereport(SmgrTrace,
 			(errmsg(NEON_TAG "starting unlogged build of relation %u/%u/%u",
@@ -1947,7 +1976,7 @@ neon_start_unlogged_build(SMgrRelation reln)
 
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
-			unlogged_build_rel = reln;
+			unlogged_build_rel_info = InfoFromSMgrRel(reln);
 			unlogged_build_phase = UNLOGGED_BUILD_NOT_PERMANENT;
 #ifdef DEBUG_COMPARE_LOCAL
 			if (!IsParallelWorker())
@@ -1968,11 +1997,8 @@ neon_start_unlogged_build(SMgrRelation reln)
 		neon_log(ERROR, "cannot perform unlogged index build, index is not empty ");
 #endif
 
-	unlogged_build_rel = reln;
+	unlogged_build_rel_info = InfoFromSMgrRel(reln);
 	unlogged_build_phase = UNLOGGED_BUILD_PHASE_1;
-
-	/* Make the relation look like it's unlogged */
-	reln->smgr_relpersistence = RELPERSISTENCE_UNLOGGED;
 
 	/*
 	 * Create the local file. In a parallel build, the leader is expected to
@@ -2000,17 +2026,16 @@ neon_start_unlogged_build(SMgrRelation reln)
 static void
 neon_finish_unlogged_build_phase_1(SMgrRelation reln)
 {
-	Assert(unlogged_build_rel == reln);
+	Assert(RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)));
 
 	ereport(SmgrTrace,
 			(errmsg(NEON_TAG "finishing phase 1 of unlogged build of relation %u/%u/%u",
-					RelFileInfoFmt(InfoFromSMgrRel(reln)))));
+					RelFileInfoFmt((unlogged_build_rel_info)))));
 
 	if (unlogged_build_phase == UNLOGGED_BUILD_NOT_PERMANENT)
 		return;
 
 	Assert(unlogged_build_phase == UNLOGGED_BUILD_PHASE_1);
-	Assert(reln->smgr_relpersistence == RELPERSISTENCE_UNLOGGED);
 
 	/*
 	 * In a parallel build, (only) the leader process performs the 2nd
@@ -2018,7 +2043,7 @@ neon_finish_unlogged_build_phase_1(SMgrRelation reln)
 	 */
 	if (IsParallelWorker())
 	{
-		unlogged_build_rel = NULL;
+		NRelFileInfoInvalidate(unlogged_build_rel_info);
 		unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 	}
 	else
@@ -2039,11 +2064,11 @@ neon_end_unlogged_build(SMgrRelation reln)
 {
 	NRelFileInfoBackend rinfob = InfoBFromSMgrRel(reln);
 
-	Assert(unlogged_build_rel == reln);
+	Assert(RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)));
 
 	ereport(SmgrTrace,
 			(errmsg(NEON_TAG "ending unlogged build of relation %u/%u/%u",
-					RelFileInfoFmt(InfoFromNInfoB(rinfob)))));
+					RelFileInfoFmt(unlogged_build_rel_info))));
 
 	if (unlogged_build_phase != UNLOGGED_BUILD_NOT_PERMANENT)
 	{
@@ -2051,7 +2076,6 @@ neon_end_unlogged_build(SMgrRelation reln)
 		BlockNumber nblocks;
 
 		Assert(unlogged_build_phase == UNLOGGED_BUILD_PHASE_2);
-		Assert(reln->smgr_relpersistence == RELPERSISTENCE_UNLOGGED);
 
 		/*
 		 * Update the last-written LSN cache.
@@ -2072,9 +2096,6 @@ neon_end_unlogged_build(SMgrRelation reln)
 								InfoFromNInfoB(rinfob),
 								MAIN_FORKNUM);
 
-		/* Make the relation look permanent again */
-		reln->smgr_relpersistence = RELPERSISTENCE_PERMANENT;
-
 		/* Remove local copy */
 		for (int forknum = 0; forknum <= MAX_FORKNUM; forknum++)
 		{
@@ -2083,6 +2104,8 @@ neon_end_unlogged_build(SMgrRelation reln)
 				 forknum);
 
 			forget_cached_relsize(InfoFromNInfoB(rinfob), forknum);
+			lfc_invalidate(InfoFromNInfoB(rinfob), forknum, nblocks);
+
 			mdclose(reln, forknum);
 #ifndef DEBUG_COMPARE_LOCAL
 			/* use isRedo == true, so that we drop it immediately */
@@ -2093,7 +2116,7 @@ neon_end_unlogged_build(SMgrRelation reln)
 		mdunlink(rinfob, INIT_FORKNUM, true);
 #endif
 	}
-	unlogged_build_rel = NULL;
+	NRelFileInfoInvalidate(unlogged_build_rel_info);
 	unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 }
 
@@ -2166,7 +2189,7 @@ AtEOXact_neon(XactEvent event, void *arg)
 			 * Forget about any build we might have had in progress. The local
 			 * file will be unlinked by smgrDoPendingDeletes()
 			 */
-			unlogged_build_rel = NULL;
+			NRelFileInfoInvalidate(unlogged_build_rel_info);
 			unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 			break;
 
@@ -2178,7 +2201,7 @@ AtEOXact_neon(XactEvent event, void *arg)
 		case XACT_EVENT_PRE_PREPARE:
 			if (unlogged_build_phase != UNLOGGED_BUILD_NOT_IN_PROGRESS)
 			{
-				unlogged_build_rel = NULL;
+				NRelFileInfoInvalidate(unlogged_build_rel_info);
 				unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 				ereport(ERROR,
 						(errcode(ERRCODE_INTERNAL_ERROR),

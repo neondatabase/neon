@@ -394,6 +394,7 @@ async fn handle_client(
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum Connection {
     Raw(tokio::net::TcpStream),
     Tls(tokio_rustls::client::TlsStream<tokio::net::TcpStream>),

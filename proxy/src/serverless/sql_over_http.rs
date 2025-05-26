@@ -14,7 +14,9 @@ use hyper::http::{HeaderName, HeaderValue};
 use hyper::{HeaderMap, Request, Response, StatusCode, header};
 use indexmap::IndexMap;
 use postgres_client::error::{DbError, ErrorPosition, SqlState};
-use postgres_client::{GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, Transaction};
+use postgres_client::{
+    GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, RowStream, Transaction,
+};
 use pq_proto::StartupMessageParamsBuilder;
 use serde::Serialize;
 use serde_json::Value;
@@ -1092,22 +1094,41 @@ async fn query_to_json<T: GenericClient>(
     let query_start = Instant::now();
 
     let query_params = data.params;
-    let mut row_stream = std::pin::pin!(
-        client
-            .query_raw_txt(&data.query, query_params)
-            .await
-            .map_err(SqlOverHttpError::Postgres)?
-    );
+    let mut row_stream = client
+        .query_raw_txt(&data.query, query_params)
+        .await
+        .map_err(SqlOverHttpError::Postgres)?;
     let query_acknowledged = Instant::now();
+
+    let columns_len = row_stream.statement.columns().len();
+    let mut fields = Vec::with_capacity(columns_len);
+    let mut types = Vec::with_capacity(columns_len);
+
+    for c in row_stream.statement.columns() {
+        fields.push(json!({
+            "name": c.name().to_owned(),
+            "dataTypeID": c.type_().oid(),
+            "tableID": c.table_oid(),
+            "columnID": c.column_id(),
+            "dataTypeSize": c.type_size(),
+            "dataTypeModifier": c.type_modifier(),
+            "format": "text",
+        }));
+
+        types.push(c.type_().clone());
+    }
+
+    let raw_output = parsed_headers.raw_output;
+    let array_mode = data.array_mode.unwrap_or(parsed_headers.default_array_mode);
 
     // Manually drain the stream into a vector to leave row_stream hanging
     // around to get a command tag. Also check that the response is not too
     // big.
-    let mut rows: Vec<postgres_client::Row> = Vec::new();
+    let mut rows = Vec::new();
     while let Some(row) = row_stream.next().await {
         let row = row.map_err(SqlOverHttpError::Postgres)?;
         *current_size += row.body_len();
-        rows.push(row);
+
         // we don't have a streaming response support yet so this is to prevent OOM
         // from a malicious query (eg a cross join)
         if *current_size > config.max_response_size_bytes {
@@ -1115,13 +1136,26 @@ async fn query_to_json<T: GenericClient>(
                 config.max_response_size_bytes,
             ));
         }
+
+        let row = pg_text_row_to_json(&row, &types, raw_output, array_mode)?;
+        rows.push(row);
+
+        // assumption: parsing pg text and converting to json takes CPU time.
+        // let's assume it is slightly expensive, so we should consume some cooperative budget.
+        // Especially considering that `RowStream::next` might be pulling from a batch
+        // of rows and never hit the tokio mpsc for a long time (although unlikely).
+        tokio::task::consume_budget().await;
     }
 
     let query_resp_end = Instant::now();
-    let ready = row_stream.ready_status();
+    let RowStream {
+        command_tag,
+        status: ready,
+        ..
+    } = row_stream;
 
     // grab the command tag and number of rows affected
-    let command_tag = row_stream.command_tag().unwrap_or_default();
+    let command_tag = command_tag.unwrap_or_default();
     let mut command_tag_split = command_tag.split(' ');
     let command_tag_name = command_tag_split.next().unwrap_or_default();
     let command_tag_count = if command_tag_name == "INSERT" {
@@ -1141,38 +1175,6 @@ async fn query_to_json<T: GenericClient>(
         response = ?(query_resp_end - query_start),
         "finished executing query"
     );
-
-    let columns_len = row_stream.columns().len();
-    let mut fields = Vec::with_capacity(columns_len);
-    let mut columns = Vec::with_capacity(columns_len);
-
-    for c in row_stream.columns() {
-        fields.push(json!({
-            "name": c.name().to_owned(),
-            "dataTypeID": c.type_().oid(),
-            "tableID": c.table_oid(),
-            "columnID": c.column_id(),
-            "dataTypeSize": c.type_size(),
-            "dataTypeModifier": c.type_modifier(),
-            "format": "text",
-        }));
-
-        match client.get_type(c.type_oid()).await {
-            Ok(t) => columns.push(t),
-            Err(err) => {
-                tracing::warn!(?err, "unable to query type information");
-                return Err(SqlOverHttpError::InternalPostgres(err));
-            }
-        }
-    }
-
-    let array_mode = data.array_mode.unwrap_or(parsed_headers.default_array_mode);
-
-    // convert rows to JSON
-    let rows = rows
-        .iter()
-        .map(|row| pg_text_row_to_json(row, &columns, parsed_headers.raw_output, array_mode))
-        .collect::<Result<Vec<_>, _>>()?;
 
     // Resulting JSON format is based on the format of node-postgres result.
     let results = json!({

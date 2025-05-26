@@ -449,7 +449,7 @@ async fn build_timeline_info_common(
     // Internally we distinguish between the planned GC cutoff (PITR point) and the "applied" GC cutoff (where we
     // actually trimmed data to), which can pass each other when PITR is changed.
     let min_readable_lsn = std::cmp::max(
-        timeline.get_gc_cutoff_lsn(),
+        timeline.get_gc_cutoff_lsn().unwrap_or_default(),
         *timeline.get_applied_gc_cutoff_lsn(),
     );
 
@@ -3199,7 +3199,7 @@ async fn list_aux_files(
             .await?;
 
     let io_concurrency = IoConcurrency::spawn_from_conf(
-        state.conf,
+        state.conf.get_vectored_concurrent_io,
         timeline.gate.enter().map_err(|_| ApiError::Cancelled)?,
     );
 
