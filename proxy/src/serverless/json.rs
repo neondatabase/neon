@@ -115,11 +115,11 @@ pub(crate) fn pg_text_row_to_json(
 
         let value = entries.key(column.name());
 
-        *value = match pg_value {
-            Some(v) if raw_output => Value::String(v.to_string()),
-            Some(v) => pg_text_to_json(v, column.type_())?,
-            None => Value::Null,
-        };
+        match pg_value {
+            Some(v) if raw_output => *value = Value::String(v.to_string()),
+            Some(v) => pg_text_to_json(value, v, column.type_())?,
+            None => *value = Value::Null,
+        }
     }
 
     Ok(entries.finish())
@@ -128,32 +128,39 @@ pub(crate) fn pg_text_row_to_json(
 //
 // Convert postgres text-encoded value to JSON value
 //
-fn pg_text_to_json(val: &str, pg_type: &Type) -> Result<Value, JsonConversionError> {
+fn pg_text_to_json(
+    output: &mut Value,
+    val: &str,
+    pg_type: &Type,
+) -> Result<(), JsonConversionError> {
     if let Kind::Array(elem_type) = pg_type.kind() {
-        return pg_array_parse(val, elem_type);
+        *output = pg_array_parse(val, elem_type)?;
+        return Ok(());
     }
 
     match *pg_type {
-        Type::BOOL => Ok(Value::Bool(val == "t")),
+        Type::BOOL => *output = Value::Bool(val == "t"),
         Type::INT2 | Type::INT4 => {
             let val = val.parse::<i32>()?;
-            Ok(Value::Number(serde_json::Number::from(val)))
+            *output = Value::Number(serde_json::Number::from(val));
         }
         Type::FLOAT4 | Type::FLOAT8 => {
             let fval = val.parse::<f64>()?;
             let num = serde_json::Number::from_f64(fval);
             if let Some(num) = num {
-                Ok(Value::Number(num))
+                *output = Value::Number(num);
             } else {
                 // Pass Nan, Inf, -Inf as strings
                 // JS JSON.stringify() does converts them to null, but we
                 // want to preserve them, so we pass them as strings
-                Ok(Value::String(val.to_string()))
+                *output = Value::String(val.to_string());
             }
         }
-        Type::JSON | Type::JSONB => Ok(serde_json::from_str(val)?),
-        _ => Ok(Value::String(val.to_string())),
+        Type::JSON | Type::JSONB => *output = serde_json::from_str(val)?,
+        _ => *output = Value::String(val.to_string()),
     }
+
+    Ok(())
 }
 
 //
@@ -200,7 +207,9 @@ fn pg_array_parse_inner(
             if entry == "NULL" {
                 entries.push(Value::Null);
             } else {
-                entries.push(pg_text_to_json(entry, elem_type)?);
+                let mut val = Value::Null;
+                pg_text_to_json(&mut val, entry, elem_type)?;
+                entries.push(val);
             }
             entry.clear();
         }
@@ -243,7 +252,9 @@ fn pg_array_parse_inner(
                 if quote {
                     // end of quoted string, so push it manually without any checks
                     // for emptiness or nulls
-                    entries.push(pg_text_to_json(&entry, elem_type)?);
+                    let mut val = Value::Null;
+                    pg_text_to_json(&mut val, &entry, elem_type)?;
+                    entries.push(val);
                     entry.clear();
                 }
                 quote = !quote;
@@ -325,27 +336,27 @@ mod tests {
         );
     }
 
+    fn pg_text_to_json(val: &str, pg_type: &Type) -> Value {
+        let mut v = Value::Null;
+        super::pg_text_to_json(&mut v, val, pg_type).unwrap();
+        v
+    }
+
     #[test]
     fn test_atomic_types_parse() {
-        assert_eq!(pg_text_to_json("foo", &Type::TEXT).unwrap(), json!("foo"));
-        assert_eq!(pg_text_to_json("42", &Type::INT4).unwrap(), json!(42));
-        assert_eq!(pg_text_to_json("42", &Type::INT2).unwrap(), json!(42));
-        assert_eq!(pg_text_to_json("42", &Type::INT8).unwrap(), json!("42"));
+        assert_eq!(pg_text_to_json("foo", &Type::TEXT), json!("foo"));
+        assert_eq!(pg_text_to_json("42", &Type::INT4), json!(42));
+        assert_eq!(pg_text_to_json("42", &Type::INT2), json!(42));
+        assert_eq!(pg_text_to_json("42", &Type::INT8), json!("42"));
+        assert_eq!(pg_text_to_json("42.42", &Type::FLOAT8), json!(42.42));
+        assert_eq!(pg_text_to_json("42.42", &Type::FLOAT4), json!(42.42));
+        assert_eq!(pg_text_to_json("NaN", &Type::FLOAT4), json!("NaN"));
         assert_eq!(
-            pg_text_to_json("42.42", &Type::FLOAT8).unwrap(),
-            json!(42.42)
-        );
-        assert_eq!(
-            pg_text_to_json("42.42", &Type::FLOAT4).unwrap(),
-            json!(42.42)
-        );
-        assert_eq!(pg_text_to_json("NaN", &Type::FLOAT4).unwrap(), json!("NaN"));
-        assert_eq!(
-            pg_text_to_json("Infinity", &Type::FLOAT4).unwrap(),
+            pg_text_to_json("Infinity", &Type::FLOAT4),
             json!("Infinity")
         );
         assert_eq!(
-            pg_text_to_json("-Infinity", &Type::FLOAT4).unwrap(),
+            pg_text_to_json("-Infinity", &Type::FLOAT4),
             json!("-Infinity")
         );
 
@@ -356,8 +367,7 @@ mod tests {
             pg_text_to_json(
                 r#"{"s":"str","n":42,"f":4.2,"a":[null,3,"a"]}"#,
                 &Type::JSONB
-            )
-            .unwrap(),
+            ),
             json
         );
     }
