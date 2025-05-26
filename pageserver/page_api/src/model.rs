@@ -31,7 +31,7 @@ pub enum ProtocolError {
 impl ProtocolError {
     /// Helper to generate a new ProtocolError::Invalid for the given field and value.
     pub fn invalid(field: &'static str, value: impl std::fmt::Debug) -> Self {
-        Self::Invalid(field, format!("{:?}", value))
+        Self::Invalid(field, format!("{value:?}"))
     }
 }
 
