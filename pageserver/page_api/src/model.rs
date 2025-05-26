@@ -328,8 +328,8 @@ pub type RequestID = u64;
 /// A GetPage request class.
 #[derive(Clone, Copy, Debug)]
 pub enum GetPageClass {
-    /// Unknown status. For backwards compatibility: used when the client sends a class that the
-    /// server doesn't know about.
+    /// Unknown status. For backwards compatibility: used when an older client version sends a class
+    /// that a newer server version has removed.
     Unknown,
     /// A normal request. This is the default.
     Normal,
@@ -418,8 +418,8 @@ impl From<GetPageResponse> for proto::GetPageResponse {
 /// A GetPage response status.
 #[derive(Clone, Copy, Debug)]
 pub enum GetPageStatus {
-    // Unknown status. For forwards compatibility: used when the server sends a status code that the
-    // client doesn't know about.
+    // Unknown status. For forwards compatibility: used when an older client version receives a new
+    // status code from a newer server version.
     Unknown,
     // The request was successful.
     Ok,
