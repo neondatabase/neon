@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::{Context, bail, ensure};
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
-use pageserver_api::config::{DiskUsageEvictionTaskConfig, MaxVectoredReadBytes};
+use pageserver_api::config::{DiskUsageEvictionTaskConfig, MaxVectoredReadBytes, PostHogConfig};
 use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
 use pem::Pem;
@@ -238,6 +238,9 @@ pub struct PageServerConf {
     /// This is insecure and should only be used in development environments.
     pub dev_mode: bool,
 
+    /// PostHog integration config.
+    pub posthog_config: Option<PostHogConfig>,
+
     pub timeline_import_config: pageserver_api::config::TimelineImportConfig,
 
     pub basebackup_cache_config: Option<pageserver_api::config::BasebackupCacheConfig>,
@@ -421,6 +424,7 @@ impl PageServerConf {
             tracing,
             enable_tls_page_service_api,
             dev_mode,
+            posthog_config,
             timeline_import_config,
             basebackup_cache_config,
         } = config_toml;
@@ -536,6 +540,7 @@ impl PageServerConf {
                 }
                 None => Vec::new(),
             },
+            posthog_config,
         };
 
         // ------------------------------------------------------------
