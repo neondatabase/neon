@@ -2234,8 +2234,8 @@ impl BasebackupQueryTimeOngoingRecording<'_> {
         // If you want to change categorize of a specific error, also change it in `log_query_error`.
         let metric = match res {
             Ok(_) => &self.parent.ok,
-            Err(QueryError::Shutdown) => {
-                // Do not observe ok/err for shutdown
+            Err(QueryError::Shutdown) | Err(QueryError::Reconnect) => {
+                // Do not observe ok/err for shutdown/reconnect
                 return;
             }
             Err(QueryError::Disconnected(ConnectionError::Io(io_error)))
