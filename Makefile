@@ -180,6 +180,11 @@ postgres-check-%: postgres-%
 
 .PHONY: neon-pg-ext-%
 neon-pg-ext-%: postgres-%
+	+@echo "Compiling lsm3 $*"
+	mkdir -p $(POSTGRES_INSTALL_DIR)/build/lsm3-$*
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
+		-C $(POSTGRES_INSTALL_DIR)/build/lsm3-$* \
+		-f $(ROOT_PROJECT_DIR)/pgxn/lsm3/Makefile install
 	+@echo "Compiling neon $*"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-$*
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
@@ -208,6 +213,9 @@ neon-pg-ext-%: postgres-%
 
 .PHONY: neon-pg-clean-ext-%
 neon-pg-clean-ext-%:
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config \
+	-C $(POSTGRES_INSTALL_DIR)/build/lsm3-$* \
+	-f $(ROOT_PROJECT_DIR)/pgxn/lsm3/Makefile clean
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config \
 	-C $(POSTGRES_INSTALL_DIR)/build/neon-$* \
 	-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile clean
