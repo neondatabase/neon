@@ -330,8 +330,6 @@ pub type RequestID = u64;
 pub enum GetPageClass {
     /// Unknown status. For backwards compatibility: used when the client sends a class that the
     /// server doesn't know about.
-    //
-    // TODO: should we silently map unknown values to Unknown?
     Unknown,
     /// A normal request. This is the default.
     Normal,
@@ -420,10 +418,8 @@ impl From<GetPageResponse> for proto::GetPageResponse {
 /// A GetPage response status.
 #[derive(Clone, Copy, Debug)]
 pub enum GetPageStatus {
-    // Unknown status. For cross-version compatibility: used when the server sends a status code
-    // that the client doesn't know about.
-    //
-    // TODO: should we silently map unknown values to Unknown?
+    // Unknown status. For forwards compatibility: used when the server sends a status code that the
+    // client doesn't know about.
     Unknown,
     // The request was successful.
     Ok,
