@@ -25,6 +25,7 @@ where
     Ok(())
 }
 
+#[derive(Debug)]
 pub enum BindError {
     Conversion(Box<dyn Error + marker::Sync + Send>),
     Serialization(io::Error),
@@ -285,6 +286,12 @@ impl StartupMessageParams {
 #[inline]
 pub fn sync(buf: &mut BytesMut) {
     buf.put_u8(b'S');
+    write_body(buf, |_| Ok::<(), io::Error>(())).unwrap();
+}
+
+#[inline]
+pub fn flush(buf: &mut BytesMut) {
+    buf.put_u8(b'H');
     write_body(buf, |_| Ok::<(), io::Error>(())).unwrap();
 }
 
