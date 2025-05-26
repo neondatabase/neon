@@ -4,6 +4,7 @@ import datetime
 import enum
 import threading
 import time
+import requests
 from concurrent.futures import ThreadPoolExecutor
 from enum import StrEnum
 from queue import Empty, Queue
@@ -412,6 +413,12 @@ def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder, snapshots
             "read_only": True,
         },
     )
+    sk = env.safekeepers[0]
+    assert sk
+    with pytest.raises(requests.exceptions.HTTPError, match="Not Found") as e:
+        sk.http_client().timeline_status(
+            tenant_id=env.initial_tenant, timeline_id=snapshot_branchpoint_old
+        )
     env.neon_cli.mappings_map_branch(
         "snapshot_branchpoint_old", env.initial_tenant, snapshot_branchpoint_old
     )
