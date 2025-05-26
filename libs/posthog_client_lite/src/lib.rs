@@ -97,6 +97,12 @@ impl FeatureStore {
         }
     }
 
+    pub fn new_with_flags(flags: Vec<LocalEvaluationFlag>) -> Self {
+        let mut store = Self::new();
+        store.set_flags(flags);
+        store
+    }
+
     pub fn set_flags(&mut self, flags: Vec<LocalEvaluationFlag>) {
         self.flags.clear();
         for flag in flags {

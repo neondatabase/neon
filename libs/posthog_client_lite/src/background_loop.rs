@@ -30,12 +30,10 @@ impl FeatureResolverBackgroundLoop {
             tracing::info!("Starting PostHog feature resolver");
             let mut ticker = tokio::time::interval(refresh_period);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            'outer: loop {
+            loop {
                 tokio::select! {
                     _ = ticker.tick() => {}
-                    _ = cancel.cancelled() => {
-                        break 'outer;
-                    }
+                    _ = cancel.cancelled() => break
                 }
                 let resp = match this
                     .posthog_client
@@ -48,8 +46,7 @@ impl FeatureResolverBackgroundLoop {
                         continue;
                     }
                 };
-                let mut feature_store = FeatureStore::new();
-                feature_store.set_flags(resp.flags);
+                let feature_store = FeatureStore::new_with_flags(resp.flags);
                 this.feature_store.store(Arc::new(feature_store));
             }
             tracing::info!("PostHog feature resolver stopped");

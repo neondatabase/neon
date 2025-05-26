@@ -36,6 +36,7 @@ impl FeatureResolver {
                 shutdown_pageserver,
             );
             let inner = Arc::new(inner);
+            // TODO: make this configurable
             inner.clone().spawn(handle, Duration::from_secs(60));
             Ok(FeatureResolver { inner: Some(inner) })
         } else {

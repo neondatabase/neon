@@ -503,11 +503,11 @@ fn start_pageserver(
     // Set up remote storage client
     let remote_storage = BACKGROUND_RUNTIME.block_on(create_remote_storage_client(conf))?;
 
-    let feature_resolver = BACKGROUND_RUNTIME.block_on(create_feature_resolver(
+    let feature_resolver = create_feature_resolver(
         conf,
         shutdown_pageserver.clone(),
         BACKGROUND_RUNTIME.handle(),
-    ))?;
+    )?;
 
     // Set up deletion queue
     let (deletion_queue, deletion_workers) = DeletionQueue::new(
@@ -818,7 +818,7 @@ fn start_pageserver(
     })
 }
 
-async fn create_feature_resolver(
+fn create_feature_resolver(
     conf: &'static PageServerConf,
     shutdown_pageserver: CancellationToken,
     handle: &tokio::runtime::Handle,
