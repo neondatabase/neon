@@ -90,8 +90,10 @@ tokio-stream.workspace = true
 tokio-tar.workspace = true
 tokio-util.workspace = true
 toml_edit = { workspace = true, features = [ "serde" ] }
-tracing-utils.workspace = true
+tonic.workspace = true
+tonic-reflection.workspace = true
 tracing.workspace = true
+tracing-utils.workspace = true
 url.workspace = true
 utils.workspace = true
 wal_decoder.workspace = true
