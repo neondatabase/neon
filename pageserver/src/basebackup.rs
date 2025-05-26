@@ -65,6 +65,30 @@ impl From<GetVectoredError> for BasebackupError {
     }
 }
 
+impl From<BasebackupError> for postgres_backend::QueryError {
+    fn from(err: BasebackupError) -> Self {
+        use postgres_backend::QueryError;
+        use pq_proto::framed::ConnectionError;
+        match err {
+            BasebackupError::Client(err, _) => QueryError::Disconnected(ConnectionError::Io(err)),
+            BasebackupError::Server(err) => QueryError::Other(err),
+            BasebackupError::Shutdown => QueryError::Shutdown,
+        }
+    }
+}
+
+impl From<BasebackupError> for tonic::Status {
+    fn from(err: BasebackupError) -> Self {
+        use tonic::Code;
+        let code = match &err {
+            BasebackupError::Client(_, _) => Code::Cancelled,
+            BasebackupError::Server(_) => Code::Internal,
+            BasebackupError::Shutdown => Code::Unavailable,
+        };
+        tonic::Status::new(code, format!("{err}"))
+    }
+}
+
 /// Create basebackup with non-rel data in it.
 /// Only include relational data if 'full_backup' is true.
 ///
