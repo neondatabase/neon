@@ -35,6 +35,12 @@ impl ProtocolError {
     }
 }
 
+impl From<ProtocolError> for tonic::Status {
+    fn from(err: ProtocolError) -> Self {
+        tonic::Status::invalid_argument(format!("{err}"))
+    }
+}
+
 /// The LSN a request should read at.
 #[derive(Clone, Copy, Debug)]
 pub struct ReadLsn {
@@ -427,7 +433,9 @@ pub enum GetPageStatus {
     /// setup.
     NotFound,
     /// The request was invalid.
-    Invalid,
+    InvalidRequest,
+    /// The request failed due to an internal server error.
+    InternalError,
     /// The tenant is rate limited. Slow down and retry later.
     SlowDown,
 }
@@ -438,7 +446,8 @@ impl From<proto::GetPageStatus> for GetPageStatus {
             proto::GetPageStatus::Unknown => Self::Unknown,
             proto::GetPageStatus::Ok => Self::Ok,
             proto::GetPageStatus::NotFound => Self::NotFound,
-            proto::GetPageStatus::Invalid => Self::Invalid,
+            proto::GetPageStatus::InvalidRequest => Self::InvalidRequest,
+            proto::GetPageStatus::InternalError => Self::InternalError,
             proto::GetPageStatus::SlowDown => Self::SlowDown,
         }
     }
@@ -458,7 +467,8 @@ impl From<GetPageStatus> for proto::GetPageStatus {
             GetPageStatus::Unknown => Self::Unknown,
             GetPageStatus::Ok => Self::Ok,
             GetPageStatus::NotFound => Self::NotFound,
-            GetPageStatus::Invalid => Self::Invalid,
+            GetPageStatus::InvalidRequest => Self::InvalidRequest,
+            GetPageStatus::InternalError => Self::InternalError,
             GetPageStatus::SlowDown => Self::SlowDown,
         }
     }
