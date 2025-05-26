@@ -383,13 +383,13 @@ impl From<GetPageClass> for i32 {
 /// individual pages.
 #[derive(Clone, Debug)]
 pub struct GetPageResponse {
-    // The original request's ID.
+    /// The original request's ID.
     pub request_id: RequestID,
-    // The response status code.
+    /// The response status code.
     pub status: GetPageStatus,
-    // A string describing the status, if any.
+    /// A string describing the status, if any.
     pub reason: Option<String>,
-    // The 8KB page images, in the same order as the request. Empty if status != OK.
+    /// The 8KB page images, in the same order as the request. Empty if status != OK.
     pub page_images: SmallVec<[Bytes; 1]>,
 }
 
@@ -418,17 +418,17 @@ impl From<GetPageResponse> for proto::GetPageResponse {
 /// A GetPage response status.
 #[derive(Clone, Copy, Debug)]
 pub enum GetPageStatus {
-    // Unknown status. For forwards compatibility: used when an older client version receives a new
-    // status code from a newer server version.
+    /// Unknown status. For forwards compatibility: used when an older client version receives a new
+    /// status code from a newer server version.
     Unknown,
-    // The request was successful.
+    /// The request was successful.
     Ok,
-    // The page did not exist. The tenant/timeline/shard has already been validated during stream
-    // setup.
+    /// The page did not exist. The tenant/timeline/shard has already been validated during stream
+    /// setup.
     NotFound,
-    // The request was invalid.
+    /// The request was invalid.
     Invalid,
-    // The tenant is rate limited. Slow down and retry later.
+    /// The tenant is rate limited. Slow down and retry later.
     SlowDown,
 }
 
