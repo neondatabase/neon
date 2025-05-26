@@ -4,6 +4,7 @@
 use std::borrow::Cow;
 use std::num::NonZeroUsize;
 use std::os::fd::AsRawFd;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -12,7 +13,7 @@ use std::{io, str};
 use anyhow::{Context, bail};
 use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
-use futures::FutureExt;
+use futures::{FutureExt, Stream};
 use itertools::Itertools;
 use jsonwebtoken::TokenData;
 use once_cell::sync::OnceCell;
@@ -30,6 +31,7 @@ use pageserver_api::models::{
 };
 use pageserver_api::reltag::SlruKind;
 use pageserver_api::shard::TenantShardId;
+use pageserver_page_api::proto;
 use postgres_backend::{
     AuthType, PostgresBackend, PostgresBackendReader, QueryError, is_expected_io_error,
 };
@@ -51,9 +53,8 @@ use utils::simple_rcu::RcuReadGuard;
 use utils::sync::gate::{Gate, GateGuard};
 use utils::sync::spsc_fold;
 
-use crate::PERF_TRACE_TARGET;
 use crate::auth::check_permission;
-use crate::basebackup::BasebackupError;
+use crate::basebackup::{self, BasebackupError};
 use crate::basebackup_cache::BasebackupCache;
 use crate::config::PageServerConf;
 use crate::context::{
@@ -75,7 +76,7 @@ use crate::tenant::mgr::{
 use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::{self, WaitLsnError};
 use crate::tenant::{GetTimelineError, PageReconstructError, Timeline};
-use crate::{basebackup, timed_after_cancellation};
+use crate::{CancellableTask, PERF_TRACE_TARGET, timed_after_cancellation};
 
 /// How long we may wait for a [`crate::tenant::mgr::TenantSlot::InProgress`]` and/or a [`crate::tenant::TenantShard`] which
 /// is not yet in state [`TenantState::Active`].
@@ -85,6 +86,26 @@ const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
 
 /// Threshold at which to log slow GetPage requests.
 const LOG_SLOW_GETPAGE_THRESHOLD: Duration = Duration::from_secs(30);
+
+/// The idle time before sending TCP keepalive probes for gRPC connections. The
+/// interval and timeout between each probe is configured via sysctl. This
+/// allows detecting dead connections sooner.
+const GRPC_TCP_KEEPALIVE_TIME: Duration = Duration::from_secs(60);
+
+/// Whether to enable TCP nodelay for gRPC connections. This disables Nagle's
+/// algorithm, which can cause latency spikes for small messages.
+const GRPC_TCP_NODELAY: bool = true;
+
+/// The interval between HTTP2 keepalive pings. This allows shutting down server
+/// tasks when clients are unresponsive.
+const GRPC_HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// The timeout for HTTP2 keepalive pings. Should be <= GRPC_KEEPALIVE_INTERVAL.
+const GRPC_HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Number of concurrent gRPC streams per TCP connection. We expect something
+/// like 8 GetPage streams per connections, plus any unary requests.
+const GRPC_MAX_CONCURRENT_STREAMS: u32 = 256;
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -138,6 +159,83 @@ pub fn spawn(
     ));
 
     Listener { cancel, task }
+}
+
+/// Spawns a gRPC server for the page service.
+///
+/// TODO: this doesn't support TLS. We need TLS reloading via ReloadingCertificateResolver, so we
+/// need to reimplement the TCP+TLS accept loop ourselves.
+pub fn spawn_grpc(
+    conf: &'static PageServerConf,
+    tenant_manager: Arc<TenantManager>,
+    auth: Option<Arc<SwappableJwtAuth>>,
+    perf_trace_dispatch: Option<Dispatch>,
+    listener: std::net::TcpListener,
+    basebackup_cache: Arc<BasebackupCache>,
+) -> anyhow::Result<CancellableTask> {
+    let cancel = CancellationToken::new();
+    let ctx = RequestContextBuilder::new(TaskKind::PageRequestHandler)
+        .download_behavior(DownloadBehavior::Download)
+        .perf_span_dispatch(perf_trace_dispatch)
+        .detached_child();
+    let gate = Gate::default();
+
+    // Set up the TCP socket. We take a preconfigured TcpListener to bind the
+    // port early during startup.
+    let incoming = {
+        let _runtime = COMPUTE_REQUEST_RUNTIME.enter(); // required by TcpListener::from_std
+        listener.set_nonblocking(true)?;
+        tonic::transport::server::TcpIncoming::from(tokio::net::TcpListener::from_std(listener)?)
+            .with_nodelay(Some(GRPC_TCP_NODELAY))
+            .with_keepalive(Some(GRPC_TCP_KEEPALIVE_TIME))
+    };
+
+    // Set up the gRPC server.
+    //
+    // TODO: consider tuning window sizes.
+    // TODO: wire up tracing.
+    let mut server = tonic::transport::Server::builder()
+        .http2_keepalive_interval(Some(GRPC_HTTP2_KEEPALIVE_INTERVAL))
+        .http2_keepalive_timeout(Some(GRPC_HTTP2_KEEPALIVE_TIMEOUT))
+        .max_concurrent_streams(Some(GRPC_MAX_CONCURRENT_STREAMS));
+
+    // Main page service.
+    let page_service = proto::PageServiceServer::new(PageServerHandler::new(
+        tenant_manager,
+        auth,
+        PageServicePipeliningConfig::Serial, // TODO: unused with gRPC
+        conf.get_vectored_concurrent_io,
+        ConnectionPerfSpanFields::default(),
+        basebackup_cache,
+        ctx,
+        cancel.clone(),
+        gate.enter().expect("just created"),
+    ));
+    let server = server.add_service(page_service);
+
+    // Reflection service for use with e.g. grpcurl.
+    let reflection_service = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(proto::FILE_DESCRIPTOR_SET)
+        .build_v1()?;
+    let server = server.add_service(reflection_service);
+
+    // Spawn server task.
+    let task_cancel = cancel.clone();
+    let task = COMPUTE_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
+        "grpc listener",
+        async move {
+            let result = server
+                .serve_with_incoming_shutdown(incoming, task_cancel.cancelled())
+                .await;
+            if result.is_ok() {
+                // TODO: revisit shutdown logic once page service is implemented.
+                gate.close().await;
+            }
+            result
+        },
+    ));
+
+    Ok(CancellableTask { task, cancel })
 }
 
 impl Listener {
@@ -259,7 +357,7 @@ type ConnectionHandlerResult = anyhow::Result<()>;
 
 /// Perf root spans start at the per-request level, after shard routing.
 /// This struct carries connection-level information to the root perf span definition.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct ConnectionPerfSpanFields {
     peer_addr: String,
     application_name: Option<String>,
@@ -377,6 +475,11 @@ async fn page_service_conn_main(
     }
 }
 
+/// Page service connection handler.
+///
+/// TODO: for gRPC, this will be shared by all requests from all connections.
+/// Decompose it into global state and per-connection/request state, and make
+/// libpq-specific options (e.g. pipelining) separate.
 struct PageServerHandler {
     auth: Option<Arc<SwappableJwtAuth>>,
     claims: Option<Claims>,
@@ -3114,6 +3217,60 @@ where
         }
 
         Ok(())
+    }
+}
+
+/// Implements the page service over gRPC.
+///
+/// TODO: not yet implemented, all methods return unimplemented.
+#[tonic::async_trait]
+impl proto::PageService for PageServerHandler {
+    type GetBaseBackupStream = Pin<
+        Box<dyn Stream<Item = Result<proto::GetBaseBackupResponseChunk, tonic::Status>> + Send>,
+    >;
+    type GetPagesStream =
+        Pin<Box<dyn Stream<Item = Result<proto::GetPageResponse, tonic::Status>> + Send>>;
+
+    async fn check_rel_exists(
+        &self,
+        _: tonic::Request<proto::CheckRelExistsRequest>,
+    ) -> Result<tonic::Response<proto::CheckRelExistsResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not implemented"))
+    }
+
+    async fn get_base_backup(
+        &self,
+        _: tonic::Request<proto::GetBaseBackupRequest>,
+    ) -> Result<tonic::Response<Self::GetBaseBackupStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not implemented"))
+    }
+
+    async fn get_db_size(
+        &self,
+        _: tonic::Request<proto::GetDbSizeRequest>,
+    ) -> Result<tonic::Response<proto::GetDbSizeResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not implemented"))
+    }
+
+    async fn get_pages(
+        &self,
+        _: tonic::Request<tonic::Streaming<proto::GetPageRequest>>,
+    ) -> Result<tonic::Response<Self::GetPagesStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not implemented"))
+    }
+
+    async fn get_rel_size(
+        &self,
+        _: tonic::Request<proto::GetRelSizeRequest>,
+    ) -> Result<tonic::Response<proto::GetRelSizeResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not implemented"))
+    }
+
+    async fn get_slru_segment(
+        &self,
+        _: tonic::Request<proto::GetSlruSegmentRequest>,
+    ) -> Result<tonic::Response<proto::GetSlruSegmentResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not implemented"))
     }
 }
 
