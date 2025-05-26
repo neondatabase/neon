@@ -4,13 +4,13 @@ import datetime
 import enum
 import threading
 import time
-import requests
 from concurrent.futures import ThreadPoolExecutor
 from enum import StrEnum
 from queue import Empty, Queue
 from threading import Barrier
 
 import pytest
+import requests
 from fixtures.common_types import Lsn, TimelineArchivalState, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -415,7 +415,7 @@ def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder, snapshots
     )
     sk = env.safekeepers[0]
     assert sk
-    with pytest.raises(requests.exceptions.HTTPError, match="Not Found") as e:
+    with pytest.raises(requests.exceptions.HTTPError, match="Not Found"):
         sk.http_client().timeline_status(
             tenant_id=env.initial_tenant, timeline_id=snapshot_branchpoint_old
         )
