@@ -3384,7 +3384,7 @@ impl tonic::service::Interceptor for TenantAuthInterceptor {
             .ok_or(tonic::Status::unauthenticated("no authorization header"))?
             .to_str()
             .map_err(|_| tonic::Status::invalid_argument("invalid authorization header"))?
-            .strip_prefix("Bearer")
+            .strip_prefix("Bearer ")
             .ok_or_else(|| tonic::Status::invalid_argument("invalid authorization header"))?
             .trim();
         let jwtdata: TokenData<Claims> = auth
