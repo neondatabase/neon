@@ -150,7 +150,7 @@ pub struct PageServerConf {
     /// not terrible.
     pub background_task_maximum_delay: Duration,
 
-    pub control_plane_api: Option<Url>,
+    pub control_plane_api: Url,
 
     /// JWT token for use with the control plane API.
     pub control_plane_api_token: Option<SecretString>,
@@ -230,6 +230,10 @@ pub struct PageServerConf {
     /// such as authentication requirements for HTTP and PostgreSQL APIs.
     /// This is insecure and should only be used in development environments.
     pub dev_mode: bool,
+
+    pub timeline_import_config: pageserver_api::config::TimelineImportConfig,
+
+    pub basebackup_cache_config: Option<pageserver_api::config::BasebackupCacheConfig>,
 }
 
 /// Token for authentication to safekeepers
@@ -257,6 +261,10 @@ impl PageServerConf {
 
     pub fn metadata_path(&self) -> Utf8PathBuf {
         self.workdir.join("metadata.json")
+    }
+
+    pub fn basebackup_cache_dir(&self) -> Utf8PathBuf {
+        self.workdir.join("basebackup_cache")
     }
 
     pub fn deletion_list_path(&self, sequence: u64) -> Utf8PathBuf {
@@ -404,6 +412,8 @@ impl PageServerConf {
             tracing,
             enable_tls_page_service_api,
             dev_mode,
+            timeline_import_config,
+            basebackup_cache_config,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -438,7 +448,8 @@ impl PageServerConf {
             test_remote_failures,
             ondemand_download_behavior_treat_error_as_warn,
             background_task_maximum_delay,
-            control_plane_api,
+            control_plane_api: control_plane_api
+                .ok_or_else(|| anyhow::anyhow!("`control_plane_api` must be set"))?,
             control_plane_emergency_mode,
             heatmap_upload_concurrency,
             secondary_download_concurrency,
@@ -456,6 +467,8 @@ impl PageServerConf {
             tracing,
             enable_tls_page_service_api,
             dev_mode,
+            timeline_import_config,
+            basebackup_cache_config,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
@@ -539,6 +552,23 @@ impl PageServerConf {
                     ratio.numerator, ratio.denominator
                 )
             );
+
+            let url = Url::parse(&tracing_config.export_config.endpoint)
+                .map_err(anyhow::Error::msg)
+                .with_context(|| {
+                    format!(
+                        "tracing endpoint URL is invalid : {}",
+                        tracing_config.export_config.endpoint
+                    )
+                })?;
+
+            ensure!(
+                url.scheme() == "http" || url.scheme() == "https",
+                format!(
+                    "tracing endpoint URL must start with http:// or https://: {}",
+                    tracing_config.export_config.endpoint
+                )
+            );
         }
 
         IndexEntry::validate_checkpoint_distance(conf.default_tenant_conf.checkpoint_distance)
@@ -573,6 +603,7 @@ impl PageServerConf {
             background_task_maximum_delay: Duration::ZERO,
             load_previous_heatmap: Some(true),
             generate_unarchival_heatmap: Some(true),
+            control_plane_api: Some(Url::parse("http://localhost:6666").unwrap()),
             ..Default::default()
         };
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &repo_dir).unwrap()
@@ -641,14 +672,38 @@ mod tests {
     use super::PageServerConf;
 
     #[test]
-    fn test_empty_config_toml_is_valid() {
-        // we use Default impl of everything in this situation
+    fn test_minimal_config_toml_is_valid() {
+        // The minimal valid config for running a pageserver:
+        // - control_plane_api is mandatory, as pageservers cannot run in isolation
+        // - we use Default impl of everything else in this situation
         let input = r#"
+            control_plane_api = "http://localhost:6666"
         "#;
         let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input)
             .expect("empty config is valid");
         let workdir = Utf8PathBuf::from("/nonexistent");
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
             .expect("parse_and_validate");
+    }
+
+    #[test]
+    fn test_config_tracing_endpoint_is_invalid() {
+        let input = r#"
+            control_plane_api = "http://localhost:6666"
+
+            [tracing]
+
+            sampling_ratio = { numerator = 1, denominator = 0 }
+
+            [tracing.export_config]
+            endpoint = "localhost:4317"
+            protocol = "http-binary"
+            timeout = "1ms"
+        "#;
+        let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input)
+            .expect("config has valid fields");
+        let workdir = Utf8PathBuf::from("/nonexistent");
+        PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
+            .expect_err("parse_and_validate should fail for endpoint without scheme");
     }
 }

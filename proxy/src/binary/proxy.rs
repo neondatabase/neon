@@ -1,9 +1,14 @@
+#[cfg(any(test, feature = "testing"))]
+use std::env;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::bail;
+#[cfg(any(test, feature = "testing"))]
+use anyhow::Context;
+use anyhow::{bail, ensure};
 use arc_swap::ArcSwapOption;
 use futures::future::Either;
 use remote_storage::RemoteStorageConfig;
@@ -34,6 +39,8 @@ use crate::scram::threadpool::ThreadPool;
 use crate::serverless::GlobalConnPoolOptions;
 use crate::serverless::cancel_set::CancelSet;
 use crate::tls::client_config::compute_client_config_with_root_certs;
+#[cfg(any(test, feature = "testing"))]
+use crate::url::ApiUrl;
 use crate::{auth, control_plane, http, serverless, usage_metrics};
 
 project_git_version!(GIT_VERSION);
@@ -42,11 +49,12 @@ project_build_tag!(BUILD_TAG);
 use clap::{Parser, ValueEnum};
 
 #[derive(Clone, Debug, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
 enum AuthBackendType {
-    #[value(name("cplane-v1"), alias("control-plane"))]
-    ControlPlaneV1,
+    #[clap(alias("cplane-v1"))]
+    ControlPlane,
 
-    #[value(name("link"), alias("control-redirect"))]
+    #[clap(alias("link"))]
     ConsoleRedirect,
 
     #[cfg(any(test, feature = "testing"))]
@@ -62,18 +70,18 @@ struct ProxyCliArgs {
     region: String,
     /// listen for incoming client connections on ip:port
     #[clap(short, long, default_value = "127.0.0.1:4432")]
-    proxy: String,
+    proxy: SocketAddr,
     #[clap(value_enum, long, default_value_t = AuthBackendType::ConsoleRedirect)]
     auth_backend: AuthBackendType,
     /// listen for management callback connection on ip:port
     #[clap(short, long, default_value = "127.0.0.1:7000")]
-    mgmt: String,
+    mgmt: SocketAddr,
     /// listen for incoming http connections (metrics, etc) on ip:port
     #[clap(long, default_value = "127.0.0.1:7001")]
-    http: String,
+    http: SocketAddr,
     /// listen for incoming wss connections on ip:port
     #[clap(long)]
-    wss: Option<String>,
+    wss: Option<SocketAddr>,
     /// redirect unauthenticated users to the given uri in case of console redirect auth
     #[clap(short, long, default_value = "http://localhost:3000/psql_session/")]
     uri: String,
@@ -99,18 +107,18 @@ struct ProxyCliArgs {
     ///
     /// tls-key and tls-cert are for backwards compatibility, we can put all certs in one dir
     #[clap(short = 'k', long, alias = "ssl-key")]
-    tls_key: Option<String>,
+    tls_key: Option<PathBuf>,
     /// path to TLS cert for client postgres connections
     ///
     /// tls-key and tls-cert are for backwards compatibility, we can put all certs in one dir
     #[clap(short = 'c', long, alias = "ssl-cert")]
-    tls_cert: Option<String>,
+    tls_cert: Option<PathBuf>,
     /// Allow writing TLS session keys to the given file pointed to by the environment variable `SSLKEYLOGFILE`.
     #[clap(long, alias = "allow-ssl-keylogfile")]
     allow_tls_keylogfile: bool,
     /// path to directory with TLS certificates for client postgres connections
     #[clap(long)]
-    certs_dir: Option<String>,
+    certs_dir: Option<PathBuf>,
     /// timeout for the TLS handshake
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     handshake_timeout: tokio::time::Duration,
@@ -159,8 +167,11 @@ struct ProxyCliArgs {
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_REDIS_SET)]
     redis_rps_limit: Vec<RateBucketInfo>,
     /// Cancellation channel size (max queue size for redis kv client)
-    #[clap(long, default_value = "1024")]
+    #[clap(long, default_value_t = 1024)]
     cancellation_ch_size: usize,
+    /// Cancellation ops batch size for redis
+    #[clap(long, default_value_t = 8)]
+    cancellation_batch_size: usize,
     /// cache for `allowed_ips` (use `size=0` to disable)
     #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
     allowed_ips_cache: String,
@@ -229,6 +240,9 @@ struct ProxyCliArgs {
     // TODO: rename to `console_redirect_confirmation_timeout`.
     #[clap(long, default_value = "2m", value_parser = humantime::parse_duration)]
     webauth_confirmation_timeout: std::time::Duration,
+
+    #[clap(flatten)]
+    pg_sni_router: PgSniRouterArgs,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -277,6 +291,25 @@ struct SqlOverHttpArgs {
     sql_over_http_max_response_size_bytes: usize,
 }
 
+#[derive(clap::Args, Clone, Debug)]
+struct PgSniRouterArgs {
+    /// listen for incoming client connections on ip:port
+    #[clap(id = "sni-router-listen", long, default_value = "127.0.0.1:4432")]
+    listen: SocketAddr,
+    /// listen for incoming client connections on ip:port, requiring TLS to compute
+    #[clap(id = "sni-router-listen-tls", long, default_value = "127.0.0.1:4433")]
+    listen_tls: SocketAddr,
+    /// path to TLS key for client postgres connections
+    #[clap(id = "sni-router-tls-key", long)]
+    tls_key: Option<PathBuf>,
+    /// path to TLS cert for client postgres connections
+    #[clap(id = "sni-router-tls-cert", long)]
+    tls_cert: Option<PathBuf>,
+    /// append this domain zone to the SNI hostname to get the destination address
+    #[clap(id = "sni-router-destination", long)]
+    dest: Option<String>,
+}
+
 pub async fn run() -> anyhow::Result<()> {
     let _logging_guard = crate::logging::init().await?;
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
@@ -307,73 +340,51 @@ pub async fn run() -> anyhow::Result<()> {
         Either::Right(auth_backend) => info!("Authentication backend: {auth_backend:?}"),
     }
     info!("Using region: {}", args.aws_region);
-
-    // TODO: untangle the config args
-    let regional_redis_client = match (args.redis_auth_type.as_str(), &args.redis_notifications) {
-        ("plain", redis_url) => match redis_url {
-            None => {
-                bail!("plain auth requires redis_notifications to be set");
-            }
-            Some(url) => {
-                Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url.clone()))
-            }
-        },
-        ("irsa", _) => match (&args.redis_host, args.redis_port) {
-            (Some(host), Some(port)) => Some(
-                ConnectionWithCredentialsProvider::new_with_credentials_provider(
-                    host.to_string(),
-                    port,
-                    elasticache::CredentialsProvider::new(
-                        args.aws_region,
-                        args.redis_cluster_name,
-                        args.redis_user_id,
-                    )
-                    .await,
-                ),
-            ),
-            (None, None) => {
-                warn!(
-                    "irsa auth requires redis-host and redis-port to be set, continuing without regional_redis_client"
-                );
-                None
-            }
-            _ => {
-                bail!("redis-host and redis-port must be specified together");
-            }
-        },
-        _ => {
-            bail!("unknown auth type given");
-        }
-    };
-
-    let redis_notifications_client = if let Some(url) = args.redis_notifications {
-        Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url))
-    } else {
-        regional_redis_client.clone()
-    };
+    let (regional_redis_client, redis_notifications_client) = configure_redis(&args).await?;
 
     // Check that we can bind to address before further initialization
-    let http_address: SocketAddr = args.http.parse()?;
-    info!("Starting http on {http_address}");
-    let http_listener = TcpListener::bind(http_address).await?.into_std()?;
+    info!("Starting http on {}", args.http);
+    let http_listener = TcpListener::bind(args.http).await?.into_std()?;
 
-    let mgmt_address: SocketAddr = args.mgmt.parse()?;
-    info!("Starting mgmt on {mgmt_address}");
-    let mgmt_listener = TcpListener::bind(mgmt_address).await?;
+    info!("Starting mgmt on {}", args.mgmt);
+    let mgmt_listener = TcpListener::bind(args.mgmt).await?;
 
     let proxy_listener = if args.is_auth_broker {
         None
     } else {
-        let proxy_address: SocketAddr = args.proxy.parse()?;
-        info!("Starting proxy on {proxy_address}");
+        info!("Starting proxy on {}", args.proxy);
+        Some(TcpListener::bind(args.proxy).await?)
+    };
 
-        Some(TcpListener::bind(proxy_address).await?)
+    let sni_router_listeners = {
+        let args = &args.pg_sni_router;
+        if args.dest.is_some() {
+            ensure!(
+                args.tls_key.is_some(),
+                "sni-router-tls-key must be provided"
+            );
+            ensure!(
+                args.tls_cert.is_some(),
+                "sni-router-tls-cert must be provided"
+            );
+
+            info!(
+                "Starting pg-sni-router on {} and {}",
+                args.listen, args.listen_tls
+            );
+
+            Some((
+                TcpListener::bind(args.listen).await?,
+                TcpListener::bind(args.listen_tls).await?,
+            ))
+        } else {
+            None
+        }
     };
 
     // TODO: rename the argument to something like serverless.
     // It now covers more than just websockets, it also covers SQL over HTTP.
     let serverless_listener = if let Some(serverless_address) = args.wss {
-        let serverless_address: SocketAddr = serverless_address.parse()?;
         info!("Starting wss on {serverless_address}");
         Some(TcpListener::bind(serverless_address).await?)
     } else if args.is_auth_broker {
@@ -458,6 +469,37 @@ pub async fn run() -> anyhow::Result<()> {
         }
     }
 
+    // spawn pg-sni-router mode.
+    if let Some((listen, listen_tls)) = sni_router_listeners {
+        let args = args.pg_sni_router;
+        let dest = args.dest.expect("already asserted it is set");
+        let key_path = args.tls_key.expect("already asserted it is set");
+        let cert_path = args.tls_cert.expect("already asserted it is set");
+
+        let (tls_config, tls_server_end_point) =
+            super::pg_sni_router::parse_tls(&key_path, &cert_path)?;
+
+        let dest = Arc::new(dest);
+
+        client_tasks.spawn(super::pg_sni_router::task_main(
+            dest.clone(),
+            tls_config.clone(),
+            None,
+            tls_server_end_point,
+            listen,
+            cancellation_token.clone(),
+        ));
+
+        client_tasks.spawn(super::pg_sni_router::task_main(
+            dest,
+            tls_config,
+            Some(config.connect_to_compute.tls.clone()),
+            tls_server_end_point,
+            listen_tls,
+            cancellation_token.clone(),
+        ));
+    }
+
     client_tasks.spawn(crate::context::parquet::worker(
         cancellation_token.clone(),
         args.parquet_upload,
@@ -509,7 +551,12 @@ pub async fn run() -> anyhow::Result<()> {
             if let Some(mut redis_kv_client) = redis_kv_client {
                 maintenance_tasks.spawn(async move {
                     redis_kv_client.try_connect().await?;
-                    handle_cancel_messages(&mut redis_kv_client, rx_cancel).await?;
+                    handle_cancel_messages(
+                        &mut redis_kv_client,
+                        rx_cancel,
+                        args.cancellation_batch_size,
+                    )
+                    .await?;
 
                     drop(redis_kv_client);
 
@@ -565,7 +612,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         (Some(key_path), Some(cert_path)) => Some(config::configure_tls(
             key_path,
             cert_path,
-            args.certs_dir.as_ref(),
+            args.certs_dir.as_deref(),
             args.allow_tls_keylogfile,
         )?),
         (None, None) => None,
@@ -675,7 +722,7 @@ fn build_auth_backend(
     args: &ProxyCliArgs,
 ) -> anyhow::Result<Either<&'static auth::Backend<'static, ()>, &'static ConsoleRedirectBackend>> {
     match &args.auth_backend {
-        AuthBackendType::ControlPlaneV1 => {
+        AuthBackendType::ControlPlane => {
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
             let project_info_cache_config: ProjectInfoCacheOptions =
                 args.project_info_cache.parse()?;
@@ -736,7 +783,13 @@ fn build_auth_backend(
 
         #[cfg(any(test, feature = "testing"))]
         AuthBackendType::Postgres => {
-            let url = args.auth_endpoint.parse()?;
+            let mut url: ApiUrl = args.auth_endpoint.parse()?;
+            if url.password().is_none() {
+                let password = env::var("PGPASSWORD")
+                    .with_context(|| "auth-endpoint does not contain a password and environment variable `PGPASSWORD` is not set")?;
+                url.set_password(Some(&password))
+                    .expect("Failed to set password");
+            }
             let api = control_plane::client::mock::MockControlPlane::new(
                 url,
                 !args.is_private_access_proxy,
@@ -809,6 +862,60 @@ fn build_auth_backend(
             Ok(Either::Right(config))
         }
     }
+}
+
+async fn configure_redis(
+    args: &ProxyCliArgs,
+) -> anyhow::Result<(
+    Option<ConnectionWithCredentialsProvider>,
+    Option<ConnectionWithCredentialsProvider>,
+)> {
+    // TODO: untangle the config args
+    let regional_redis_client = match (args.redis_auth_type.as_str(), &args.redis_notifications) {
+        ("plain", redis_url) => match redis_url {
+            None => {
+                bail!("plain auth requires redis_notifications to be set");
+            }
+            Some(url) => {
+                Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url.clone()))
+            }
+        },
+        ("irsa", _) => match (&args.redis_host, args.redis_port) {
+            (Some(host), Some(port)) => Some(
+                ConnectionWithCredentialsProvider::new_with_credentials_provider(
+                    host.clone(),
+                    port,
+                    elasticache::CredentialsProvider::new(
+                        args.aws_region.clone(),
+                        args.redis_cluster_name.clone(),
+                        args.redis_user_id.clone(),
+                    )
+                    .await,
+                ),
+            ),
+            (None, None) => {
+                // todo: upgrade to error?
+                warn!(
+                    "irsa auth requires redis-host and redis-port to be set, continuing without regional_redis_client"
+                );
+                None
+            }
+            _ => {
+                bail!("redis-host and redis-port must be specified together");
+            }
+        },
+        _ => {
+            bail!("unknown auth type given");
+        }
+    };
+
+    let redis_notifications_client = if let Some(url) = &args.redis_notifications {
+        Some(ConnectionWithCredentialsProvider::new_with_static_credentials(&**url))
+    } else {
+        regional_redis_client.clone()
+    };
+
+    Ok((regional_redis_client, redis_notifications_client))
 }
 
 #[cfg(test)]

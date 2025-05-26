@@ -10,6 +10,7 @@ use crate::persistence::{
     DatabaseError, SafekeeperTimelineOpKind, TimelinePendingOpPersistence, TimelinePersistence,
 };
 use crate::safekeeper::Safekeeper;
+use crate::timeline_import::TimelineImportFinalizeError;
 use anyhow::Context;
 use http_utils::error::ApiError;
 use pageserver_api::controller_api::{
@@ -321,6 +322,42 @@ impl Service {
             tenant_id,
             timeline_id,
         })
+    }
+
+    pub(crate) async fn tenant_timeline_create_safekeepers_until_success(
+        self: &Arc<Self>,
+        tenant_id: TenantId,
+        timeline_info: TimelineInfo,
+    ) -> Result<(), TimelineImportFinalizeError> {
+        const BACKOFF: Duration = Duration::from_secs(5);
+
+        loop {
+            if self.cancel.is_cancelled() {
+                return Err(TimelineImportFinalizeError::ShuttingDown);
+            }
+
+            let res = self
+                .tenant_timeline_create_safekeepers(tenant_id, &timeline_info)
+                .await;
+
+            match res {
+                Ok(_) => {
+                    tracing::info!("Timeline created on safekeepers");
+                    break;
+                }
+                Err(err) => {
+                    tracing::error!("Failed to create timeline on safekeepers: {err}");
+                    tokio::select! {
+                        _ = self.cancel.cancelled() => {
+                            return Err(TimelineImportFinalizeError::ShuttingDown);
+                        },
+                        _ = tokio::time::sleep(BACKOFF) => {}
+                    };
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Directly insert the timeline into the database without reconciling it with safekeepers.

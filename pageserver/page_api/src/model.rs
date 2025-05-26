@@ -13,13 +13,12 @@
 //! instead of being cast into internal mirror types.
 
 use bytes::Bytes;
-use smallvec::{SmallVec, smallvec};
 use utils::lsn::Lsn;
 
 use crate::proto;
 
 #[derive(Clone, Debug)]
-pub struct RequestCommon {
+pub struct ReadLsn {
     pub request_lsn: Lsn,
     pub not_modified_since_lsn: Lsn,
 }
@@ -33,45 +32,44 @@ pub struct RelTag {
 }
 
 #[derive(Clone, Debug)]
-pub struct RelExistsRequest {
-    pub common: RequestCommon,
+pub struct CheckRelExistsRequest {
+    pub read_lsn: ReadLsn,
     pub rel: RelTag,
 }
 
 #[derive(Clone, Debug)]
-pub struct RelSizeRequest {
-    pub common: RequestCommon,
+pub struct GetRelSizeRequest {
+    pub read_lsn: ReadLsn,
     pub rel: RelTag,
 }
 
 #[derive(Clone, Debug)]
-pub struct RelSizeResponse {
+pub struct GetRelSizeResponse {
     pub num_blocks: u32,
 }
 
 #[derive(Clone, Debug)]
 pub struct GetPageRequest {
-    pub id: u64,
-    pub common: RequestCommon,
+    pub request_id: u64,
+    pub request_class: GetPageClass,
+    pub read_lsn: ReadLsn,
     pub rel: RelTag,
-    pub block_number: u32,
-    pub class: GetPageClass,
+    pub block_number: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum GetPageClass {
     Normal,
     Prefetch,
+    Background,
 }
-
-pub type GetPageRequestBatch = SmallVec<[GetPageRequest; 8]>;
 
 #[derive(Clone, Debug)]
 pub struct GetPageResponse {
-    pub id: u64,
+    pub request_id: u64,
     pub status: GetPageStatus,
-    pub reason: Option<String>,
-    pub page_image: Bytes,
+    pub reason: String,
+    pub page_image: Vec<Bytes>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -83,25 +81,25 @@ pub enum GetPageStatus {
 }
 
 #[derive(Clone, Debug)]
-pub struct DbSizeRequest {
-    pub common: RequestCommon,
+pub struct GetDbSizeRequest {
+    pub read_lsn: ReadLsn,
     pub db_oid: u32,
 }
 
 #[derive(Clone, Debug)]
-pub struct DbSizeResponse {
+pub struct GetDbSizeResponse {
     pub num_bytes: u64,
 }
 
 #[derive(Clone, Debug)]
 pub struct GetBaseBackupRequest {
-    pub common: RequestCommon,
+    pub read_lsn: ReadLsn,
     pub replica: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct GetSlruSegmentRequest {
-    pub common: RequestCommon,
+    pub read_lsn: ReadLsn,
     pub kind: u8, // TODO: SlruKind
     pub segno: u32,
 }
@@ -123,28 +121,6 @@ impl From<ProtocolError> for tonic::Status {
         match e {
             ProtocolError::InvalidValue(_field) => tonic::Status::invalid_argument(e.to_string()),
             ProtocolError::Missing(_field) => tonic::Status::invalid_argument(e.to_string()),
-        }
-    }
-}
-
-impl From<GetPageRequestBatch> for proto::GetPageRequestBatch {
-    fn from(value: GetPageRequestBatch) -> proto::GetPageRequestBatch {
-        proto::GetPageRequestBatch {
-            requests: value.iter().map(|r| r.into()).collect(),
-        }
-    }
-}
-
-impl From<GetPageRequest> for GetPageRequestBatch {
-    fn from(value: GetPageRequest) -> GetPageRequestBatch {
-        smallvec![value]
-    }
-}
-
-impl From<GetPageRequest> for proto::GetPageRequestBatch {
-    fn from(value: GetPageRequest) -> proto::GetPageRequestBatch {
-        proto::GetPageRequestBatch {
-            requests: vec![(&value).into()],
         }
     }
 }
@@ -175,56 +151,58 @@ impl TryFrom<&proto::RelTag> for RelTag {
     }
 }
 
-impl From<&RequestCommon> for proto::RequestCommon {
-    fn from(value: &RequestCommon) -> proto::RequestCommon {
-        proto::RequestCommon {
+impl From<&ReadLsn> for proto::ReadLsn {
+    fn from(value: &ReadLsn) -> proto::ReadLsn {
+        proto::ReadLsn {
             request_lsn: value.request_lsn.into(),
             not_modified_since_lsn: value.not_modified_since_lsn.into(),
         }
     }
 }
-impl From<&proto::RequestCommon> for RequestCommon {
-    fn from(value: &proto::RequestCommon) -> RequestCommon {
-        RequestCommon {
+impl From<&proto::ReadLsn> for ReadLsn {
+    fn from(value: &proto::ReadLsn) -> ReadLsn {
+        ReadLsn {
             request_lsn: value.request_lsn.into(),
             not_modified_since_lsn: value.not_modified_since_lsn.into(),
         }
     }
 }
 
-impl From<&RelExistsRequest> for proto::RelExistsRequest {
-    fn from(value: &RelExistsRequest) -> proto::RelExistsRequest {
-        proto::RelExistsRequest {
-            common: Some((&value.common).into()),
+impl From<&CheckRelExistsRequest> for proto::CheckRelExistsRequest {
+    fn from(value: &CheckRelExistsRequest) -> proto::CheckRelExistsRequest {
+        proto::CheckRelExistsRequest {
+            read_lsn: Some((&value.read_lsn).into()),
             rel: Some((&value.rel).into()),
         }
     }
 }
-impl TryFrom<&proto::RelExistsRequest> for RelExistsRequest {
+impl TryFrom<&proto::CheckRelExistsRequest> for CheckRelExistsRequest {
     type Error = ProtocolError;
 
-    fn try_from(value: &proto::RelExistsRequest) -> Result<RelExistsRequest, ProtocolError> {
-        Ok(RelExistsRequest {
-            common: (&value.common.ok_or(ProtocolError::Missing("common"))?).into(),
+    fn try_from(
+        value: &proto::CheckRelExistsRequest,
+    ) -> Result<CheckRelExistsRequest, ProtocolError> {
+        Ok(CheckRelExistsRequest {
+            read_lsn: (&value.read_lsn.ok_or(ProtocolError::Missing("read_lsn"))?).into(),
             rel: (&value.rel.ok_or(ProtocolError::Missing("rel"))?).try_into()?,
         })
     }
 }
 
-impl From<&RelSizeRequest> for proto::RelSizeRequest {
-    fn from(value: &RelSizeRequest) -> proto::RelSizeRequest {
-        proto::RelSizeRequest {
-            common: Some((&value.common).into()),
+impl From<&GetRelSizeRequest> for proto::GetRelSizeRequest {
+    fn from(value: &GetRelSizeRequest) -> proto::GetRelSizeRequest {
+        proto::GetRelSizeRequest {
+            read_lsn: Some((&value.read_lsn).into()),
             rel: Some((&value.rel).into()),
         }
     }
 }
-impl TryFrom<&proto::RelSizeRequest> for RelSizeRequest {
+impl TryFrom<&proto::GetRelSizeRequest> for GetRelSizeRequest {
     type Error = ProtocolError;
 
-    fn try_from(value: &proto::RelSizeRequest) -> Result<RelSizeRequest, ProtocolError> {
-        Ok(RelSizeRequest {
-            common: (&value.common.ok_or(ProtocolError::Missing("common"))?).into(),
+    fn try_from(value: &proto::GetRelSizeRequest) -> Result<GetRelSizeRequest, ProtocolError> {
+        Ok(GetRelSizeRequest {
+            read_lsn: (&value.read_lsn.ok_or(ProtocolError::Missing("read_lsn"))?).into(),
             rel: (&value.rel.ok_or(ProtocolError::Missing("rel"))?).try_into()?,
         })
     }
@@ -233,14 +211,15 @@ impl TryFrom<&proto::RelSizeRequest> for RelSizeRequest {
 impl From<&GetPageRequest> for proto::GetPageRequest {
     fn from(value: &GetPageRequest) -> proto::GetPageRequest {
         proto::GetPageRequest {
-            id: value.id,
-            class: match value.class {
+            request_id: value.request_id,
+            request_class: match value.request_class {
                 GetPageClass::Normal => proto::GetPageClass::Normal as i32,
                 GetPageClass::Prefetch => proto::GetPageClass::Prefetch as i32,
+                GetPageClass::Background => proto::GetPageClass::Background as i32,
             },
-            common: Some((&value.common).into()),
+            read_lsn: Some((&value.read_lsn).into()),
             rel: Some((&value.rel).into()),
-            block_number: value.block_number,
+            block_number: value.block_number.clone(),
         }
     }
 }
@@ -249,11 +228,11 @@ impl TryFrom<&proto::GetPageRequest> for GetPageRequest {
 
     fn try_from(value: &proto::GetPageRequest) -> Result<GetPageRequest, ProtocolError> {
         Ok(GetPageRequest {
-            id: value.id,
-            common: (&value.common.ok_or(ProtocolError::Missing("common"))?).into(),
+            request_id: value.request_id,
+            read_lsn: (&value.read_lsn.ok_or(ProtocolError::Missing("read_lsn"))?).into(),
             rel: (&value.rel.ok_or(ProtocolError::Missing("rel"))?).try_into()?,
-            block_number: value.block_number,
-            class: proto::GetPageClass::try_from(value.class)
+            block_number: value.block_number.clone(),
+            request_class: proto::GetPageClass::try_from(value.request_class)
                 .unwrap_or(proto::GetPageClass::Unknown)
                 .try_into()?,
         })
@@ -268,6 +247,7 @@ impl TryFrom<proto::GetPageClass> for GetPageClass {
             proto::GetPageClass::Unknown => Err(ProtocolError::InvalidValue("class")),
             proto::GetPageClass::Normal => Ok(GetPageClass::Normal),
             proto::GetPageClass::Prefetch => Ok(GetPageClass::Prefetch),
+            proto::GetPageClass::Background => Ok(GetPageClass::Background),
         }
     }
 }
@@ -277,6 +257,7 @@ impl From<GetPageClass> for proto::GetPageClass {
         match value {
             GetPageClass::Normal => proto::GetPageClass::Normal,
             GetPageClass::Prefetch => proto::GetPageClass::Prefetch,
+            GetPageClass::Background => proto::GetPageClass::Background,
         }
     }
 }
@@ -286,7 +267,7 @@ impl TryFrom<proto::GetPageResponse> for GetPageResponse {
 
     fn try_from(value: proto::GetPageResponse) -> Result<GetPageResponse, ProtocolError> {
         Ok(GetPageResponse {
-            id: value.id,
+            request_id: value.request_id,
             status: proto::GetPageStatus::try_from(value.status)
                 .unwrap_or(proto::GetPageStatus::Unknown)
                 .try_into()?,
@@ -325,21 +306,21 @@ impl From<GetPageStatus> for proto::GetPageStatus {
     }
 }
 
-impl From<&DbSizeRequest> for proto::DbSizeRequest {
-    fn from(value: &DbSizeRequest) -> proto::DbSizeRequest {
-        proto::DbSizeRequest {
-            common: Some((&value.common).into()),
+impl From<&GetDbSizeRequest> for proto::GetDbSizeRequest {
+    fn from(value: &GetDbSizeRequest) -> proto::GetDbSizeRequest {
+        proto::GetDbSizeRequest {
+            read_lsn: Some((&value.read_lsn).into()),
             db_oid: value.db_oid,
         }
     }
 }
 
-impl TryFrom<&proto::DbSizeRequest> for DbSizeRequest {
+impl TryFrom<&proto::GetDbSizeRequest> for GetDbSizeRequest {
     type Error = ProtocolError;
 
-    fn try_from(value: &proto::DbSizeRequest) -> Result<DbSizeRequest, ProtocolError> {
-        Ok(DbSizeRequest {
-            common: (&value.common.ok_or(ProtocolError::Missing("common"))?).into(),
+    fn try_from(value: &proto::GetDbSizeRequest) -> Result<GetDbSizeRequest, ProtocolError> {
+        Ok(GetDbSizeRequest {
+            read_lsn: (&value.read_lsn.ok_or(ProtocolError::Missing("read_lsn"))?).into(),
             db_oid: value.db_oid,
         })
     }
@@ -348,7 +329,7 @@ impl TryFrom<&proto::DbSizeRequest> for DbSizeRequest {
 impl From<&GetBaseBackupRequest> for proto::GetBaseBackupRequest {
     fn from(value: &GetBaseBackupRequest) -> proto::GetBaseBackupRequest {
         proto::GetBaseBackupRequest {
-            common: Some((&value.common).into()),
+            read_lsn: Some((&value.read_lsn).into()),
             replica: value.replica,
         }
     }
@@ -361,7 +342,7 @@ impl TryFrom<&proto::GetBaseBackupRequest> for GetBaseBackupRequest {
         value: &proto::GetBaseBackupRequest,
     ) -> Result<GetBaseBackupRequest, ProtocolError> {
         Ok(GetBaseBackupRequest {
-            common: (&value.common.ok_or(ProtocolError::Missing("common"))?).into(),
+            read_lsn: (&value.read_lsn.ok_or(ProtocolError::Missing("read_lsn"))?).into(),
             replica: value.replica,
         })
     }
@@ -372,7 +353,7 @@ impl TryFrom<&proto::GetSlruSegmentRequest> for GetSlruSegmentRequest {
 
     fn try_from(value: &proto::GetSlruSegmentRequest) -> Result<Self, Self::Error> {
         Ok(GetSlruSegmentRequest {
-            common: (&value.common.ok_or(ProtocolError::Missing("common"))?).into(),
+            read_lsn: (&value.read_lsn.ok_or(ProtocolError::Missing("read_lsn"))?).into(),
             kind: value
                 .kind
                 .try_into()

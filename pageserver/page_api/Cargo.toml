@@ -1,20 +1,17 @@
 [package]
 name = "pageserver_page_api"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
-
-# For Lsn.
-#
-# TODO: move Lsn to separate crate? This draws in a lot more dependencies
-utils.workspace = true
-
 bytes.workspace = true
 prost.workspace = true
-smallvec.workspace = true
 thiserror.workspace = true
 tonic.workspace = true
+
+utils.workspace = true
+workspace_hack.workspace = true
 
 [build-dependencies]
 tonic-build.workspace = true

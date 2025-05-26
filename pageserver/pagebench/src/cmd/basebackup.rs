@@ -9,7 +9,7 @@ use anyhow::Context;
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api::ForceAwaitLogicalSize;
 use pageserver_client::page_service::BasebackupRequest;
-use pageserver_page_api::model::{GetBaseBackupRequest, RequestCommon};
+use pageserver_page_api::model::{GetBaseBackupRequest, ReadLsn};
 
 use rand::prelude::*;
 use tokio::sync::Barrier;
@@ -320,7 +320,7 @@ async fn client_grpc(
         let mut basebackup_stream = client
             .get_base_backup(
                 &GetBaseBackupRequest {
-                    common: RequestCommon {
+                    read_lsn: ReadLsn {
                         request_lsn: lsn,
                         not_modified_since_lsn: lsn,
                     },

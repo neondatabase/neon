@@ -1,0 +1,12 @@
+name: Create compute release PR
+
+on:
+  schedule:
+    - cron: '0 7 * * FRI'
+
+jobs:
+  create-release-pr:
+    uses: ./.github/workflows/release.yml
+    with:
+      component: compute
+    secrets: inherit

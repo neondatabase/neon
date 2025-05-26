@@ -12,9 +12,9 @@ use tracing::{debug, warn};
 use crate::auth::password_hack::parse_endpoint_param;
 use crate::context::RequestContext;
 use crate::error::{ReportableError, UserFacingError};
-use crate::metrics::{Metrics, SniKind};
+use crate::metrics::{Metrics, SniGroup, SniKind};
 use crate::proxy::NeonOptions;
-use crate::serverless::SERVERLESS_DRIVER_SNI;
+use crate::serverless::{AUTH_BROKER_SNI, SERVERLESS_DRIVER_SNI};
 use crate::types::{EndpointId, RoleName};
 
 #[derive(Debug, Error, PartialEq, Eq, Clone)]
@@ -31,12 +31,6 @@ pub(crate) enum ComputeUserInfoParseError {
         domain: EndpointId,
         option: EndpointId,
     },
-
-    #[error(
-        "Common name inferred from SNI ('{}') is not known",
-        .cn,
-    )]
-    UnknownCommonName { cn: String },
 
     #[error("Project name ('{0}') must contain only alphanumeric characters and hyphen.")]
     MalformedProjectName(EndpointId),
@@ -66,22 +60,15 @@ impl ComputeUserInfoMaybeEndpoint {
     }
 }
 
-pub(crate) fn endpoint_sni(
-    sni: &str,
-    common_names: &HashSet<String>,
-) -> Result<Option<EndpointId>, ComputeUserInfoParseError> {
-    let Some((subdomain, common_name)) = sni.split_once('.') else {
-        return Err(ComputeUserInfoParseError::UnknownCommonName { cn: sni.into() });
-    };
+pub(crate) fn endpoint_sni(sni: &str, common_names: &HashSet<String>) -> Option<EndpointId> {
+    let (subdomain, common_name) = sni.split_once('.')?;
     if !common_names.contains(common_name) {
-        return Err(ComputeUserInfoParseError::UnknownCommonName {
-            cn: common_name.into(),
-        });
+        return None;
     }
-    if subdomain == SERVERLESS_DRIVER_SNI {
-        return Ok(None);
+    if subdomain == SERVERLESS_DRIVER_SNI || subdomain == AUTH_BROKER_SNI {
+        return None;
     }
-    Ok(Some(EndpointId::from(subdomain)))
+    Some(EndpointId::from(subdomain))
 }
 
 impl ComputeUserInfoMaybeEndpoint {
@@ -113,15 +100,8 @@ impl ComputeUserInfoMaybeEndpoint {
             })
             .map(|name| name.into());
 
-        let endpoint_from_domain = if let Some(sni_str) = sni {
-            if let Some(cn) = common_names {
-                endpoint_sni(sni_str, cn)?
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let endpoint_from_domain =
+            sni.and_then(|sni_str| common_names.and_then(|cn| endpoint_sni(sni_str, cn)));
 
         let endpoint = match (endpoint_option, endpoint_from_domain) {
             // Invariant: if we have both project name variants, they should match.
@@ -148,22 +128,23 @@ impl ComputeUserInfoMaybeEndpoint {
 
         let metrics = Metrics::get();
         debug!(%user, "credentials");
-        if sni.is_some() {
+
+        let protocol = ctx.protocol();
+        let kind = if sni.is_some() {
             debug!("Connection with sni");
-            metrics.proxy.accepted_connections_by_sni.inc(SniKind::Sni);
+            SniKind::Sni
         } else if endpoint.is_some() {
-            metrics
-                .proxy
-                .accepted_connections_by_sni
-                .inc(SniKind::NoSni);
             debug!("Connection without sni");
+            SniKind::NoSni
         } else {
-            metrics
-                .proxy
-                .accepted_connections_by_sni
-                .inc(SniKind::PasswordHack);
             debug!("Connection with password hack");
-        }
+            SniKind::PasswordHack
+        };
+
+        metrics
+            .proxy
+            .accepted_connections_by_sni
+            .inc(SniGroup { protocol, kind });
 
         let options = NeonOptions::parse_params(params);
 
@@ -424,21 +405,34 @@ mod tests {
     }
 
     #[test]
-    fn parse_inconsistent_sni() {
+    fn parse_unknown_sni() {
         let options = StartupMessageParams::new([("user", "john_doe")]);
 
         let sni = Some("project.localhost");
         let common_names = Some(["example.com".into()].into());
 
         let ctx = RequestContext::test();
-        let err = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())
-            .expect_err("should fail");
-        match err {
-            UnknownCommonName { cn } => {
-                assert_eq!(cn, "localhost");
-            }
-            _ => panic!("bad error: {err:?}"),
-        }
+        let info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())
+            .unwrap();
+
+        assert!(info.endpoint_id.is_none());
+    }
+
+    #[test]
+    fn parse_unknown_sni_with_options() {
+        let options = StartupMessageParams::new([
+            ("user", "john_doe"),
+            ("options", "endpoint=foo-bar-baz-1234"),
+        ]);
+
+        let sni = Some("project.localhost");
+        let common_names = Some(["example.com".into()].into());
+
+        let ctx = RequestContext::test();
+        let info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())
+            .unwrap();
+
+        assert_eq!(info.endpoint_id.as_deref(), Some("foo-bar-baz-1234"));
     }
 
     #[test]

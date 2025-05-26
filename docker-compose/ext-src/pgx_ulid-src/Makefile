@@ -20,5 +20,6 @@ installcheck: regression-test
 regression-test:
 	dropdb --if-exists contrib_regression
 	createdb contrib_regression
+	../alter_db.sh
 	psql -d contrib_regression -c "CREATE EXTENSION $(EXTNAME)"
 	$(PG_REGRESS) --inputdir=. --outputdir=. --use-existing --dbname=contrib_regression $(REGRESS)

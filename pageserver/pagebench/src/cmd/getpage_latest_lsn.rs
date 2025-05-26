@@ -69,6 +69,9 @@ pub(crate) struct Args {
     #[clap(long)]
     set_io_mode: Option<pageserver_api::models::virtual_file::IoMode>,
 
+    #[clap(long)]
+    only_relnode: Option<u32>,
+
     /// Queue depth generated in each client.
     #[clap(long, default_value = "1")]
     queue_depth: NonZeroUsize,
@@ -98,7 +101,6 @@ pub(crate) struct Args {
     percent_hangs: usize,
 
     targets: Option<Vec<TenantTimelineId>>,
-
 }
 
 /// State shared by all clients
@@ -239,7 +241,12 @@ async fn main_impl(
                     for r in partitioning.keys.ranges.iter() {
                         let mut i = r.start;
                         while i != r.end {
-                            if i.is_rel_block_key() {
+                            let mut include = true;
+                            include &= i.is_rel_block_key();
+                            if let Some(only_relnode) = args.only_relnode {
+                                include &= i.is_rel_block_of_rel(only_relnode);
+                            }
+                            if include {
                                 filtered.add_key(i);
                             }
                             i = i.next();
@@ -495,8 +502,8 @@ async fn client_grpc(
         connect_backoff: Duration::from_millis(args.pool_connect_backoff.get() as u64),
         max_idle_duration: Duration::from_millis(args.pool_max_idle_duration.get() as u64),
         max_delay_ms: args.max_delay_ms as u64,
-        drop_rate: (args.percent_drops as f64)/100.0,
-        hang_rate: (args.percent_hangs as f64)/100.0,
+        drop_rate: (args.percent_drops as f64) / 100.0,
+        hang_rate: (args.percent_hangs as f64) / 100.0,
     };
     let client = pageserver_client_grpc::PageserverClient::new_with_config(
         &worker_id.timeline.tenant_id.to_string(),
@@ -537,8 +544,9 @@ async fn client_grpc(
                     .to_rel_block()
                     .expect("we filter non-rel-block keys out above");
                 pageserver_page_api::model::GetPageRequest {
-                    id: 0, // TODO
-                    common: pageserver_page_api::model::RequestCommon {
+                    request_id: 0, // TODO
+                    request_class: GetPageClass::Normal,
+                    read_lsn: pageserver_page_api::model::ReadLsn {
                         request_lsn: if rng.gen_bool(args.req_latest_probability) {
                             Lsn::MAX
                         } else {
@@ -552,8 +560,7 @@ async fn client_grpc(
                         rel_number: rel_tag.relnode,
                         fork_number: rel_tag.forknum,
                     },
-                    block_number: block_no,
-                    class: GetPageClass::Normal,
+                    block_number: vec![block_no],
                 }
             };
             let client_clone = client.clone();
@@ -645,8 +652,9 @@ async fn client_grpc_stream(
                     .to_rel_block()
                     .expect("we filter non-rel-block keys out above");
                 pageserver_page_api::model::GetPageRequest {
-                    id: 0, // TODO
-                    common: pageserver_page_api::model::RequestCommon {
+                    request_id: 0, // TODO
+                    request_class: GetPageClass::Normal,
+                    read_lsn: pageserver_page_api::model::ReadLsn {
                         request_lsn: if rng.gen_bool(args.req_latest_probability) {
                             Lsn::MAX
                         } else {
@@ -660,11 +668,10 @@ async fn client_grpc_stream(
                         rel_number: rel_tag.relnode,
                         fork_number: rel_tag.forknum,
                     },
-                    block_number: block_no,
-                    class: GetPageClass::Normal,
+                    block_number: vec![block_no],
                 }
             };
-            request_tx.send(req.into()).await.unwrap();
+            request_tx.send((&req).into()).await.unwrap();
             inflight.push_back(start);
         }
 

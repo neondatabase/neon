@@ -1,6 +1,8 @@
 //! This code runs in each backend process. That means that launching Rust threads, panicking
 //! etc. is forbidden!
 
+use std::os::fd::OwnedFd;
+
 use crate::backend_comms::NeonIOHandle;
 use crate::init::CommunicatorInitStruct;
 use crate::integrated_cache::{BackendCacheReadOp, IntegratedCacheReadAccess};
@@ -17,7 +19,7 @@ pub struct CommunicatorBackendStruct<'t> {
 
     neon_request_slots: &'t [NeonIOHandle],
 
-    submission_pipe_write_fd: std::ffi::c_int,
+    submission_pipe_write_fd: OwnedFd,
 
     pending_cache_read_op: Option<BackendCacheReadOp<'t>>,
 
@@ -169,7 +171,8 @@ impl<'t> CommunicatorBackendStruct<'t> {
         //
         // If it does block very briefly, that's not too serious.
         let idxbuf = request_idx.to_ne_bytes();
-        let _res = nix::unistd::write(self.submission_pipe_write_fd, &idxbuf);
+
+        let _res = nix::unistd::write(&self.submission_pipe_write_fd, &idxbuf);
         // FIXME: check result, return any errors
     }
 

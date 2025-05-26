@@ -1,7 +1,6 @@
 //
 // Main entry point for the safekeeper executable
 //
-use std::env::{VarError, var};
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::str::FromStr;
@@ -23,9 +22,10 @@ use safekeeper::defaults::{
     DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR, DEFAULT_SSL_CERT_FILE,
     DEFAULT_SSL_CERT_RELOAD_PERIOD, DEFAULT_SSL_KEY_FILE,
 };
+use safekeeper::wal_backup::WalBackup;
 use safekeeper::{
     BACKGROUND_RUNTIME, BROKER_RUNTIME, GlobalTimelines, HTTP_RUNTIME, SafeKeeperConf,
-    WAL_SERVICE_RUNTIME, broker, control_file, http, wal_backup, wal_service,
+    WAL_SERVICE_RUNTIME, broker, control_file, http, wal_service,
 };
 use sd_notify::NotifyState;
 use storage_broker::{DEFAULT_ENDPOINT, Uri};
@@ -354,29 +354,13 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Load JWT auth token to connect to other safekeepers for pull_timeline.
-    // First check if the env var is present, then check the arg with the path.
-    // We want to deprecate and remove the env var method in the future.
-    let sk_auth_token = match var("SAFEKEEPER_AUTH_TOKEN") {
-        Ok(v) => {
-            info!("loaded JWT token for authentication with safekeepers");
-            Some(SecretString::from(v))
-        }
-        Err(VarError::NotPresent) => {
-            if let Some(auth_token_path) = args.auth_token_path.as_ref() {
-                info!(
-                    "loading JWT token for authentication with safekeepers from {auth_token_path}"
-                );
-                let auth_token = tokio::fs::read_to_string(auth_token_path).await?;
-                Some(SecretString::from(auth_token.trim().to_owned()))
-            } else {
-                info!("no JWT token for authentication with safekeepers detected");
-                None
-            }
-        }
-        Err(_) => {
-            warn!("JWT token for authentication with safekeepers is not unicode");
-            None
-        }
+    let sk_auth_token = if let Some(auth_token_path) = args.auth_token_path.as_ref() {
+        info!("loading JWT token for authentication with safekeepers from {auth_token_path}");
+        let auth_token = tokio::fs::read_to_string(auth_token_path).await?;
+        Some(SecretString::from(auth_token.trim().to_owned()))
+    } else {
+        info!("no JWT token for authentication with safekeepers detected");
+        None
     };
 
     let ssl_ca_certs = match args.ssl_ca_file.as_ref() {
@@ -501,14 +485,14 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
         None => None,
     };
 
-    let global_timelines = Arc::new(GlobalTimelines::new(conf.clone()));
+    let wal_backup = Arc::new(WalBackup::new(&conf).await?);
+
+    let global_timelines = Arc::new(GlobalTimelines::new(conf.clone(), wal_backup.clone()));
 
     // Register metrics collector for active timelines. It's important to do this
     // after daemonizing, otherwise process collector will be upset.
     let timeline_collector = safekeeper::metrics::TimelineCollector::new(global_timelines.clone());
     metrics::register_internal(Box::new(timeline_collector))?;
-
-    wal_backup::init_remote_storage(&conf).await;
 
     // Keep handles to main tasks to die if any of them disappears.
     let mut tasks_handles: FuturesUnordered<BoxFuture<(String, JoinTaskRes)>> =

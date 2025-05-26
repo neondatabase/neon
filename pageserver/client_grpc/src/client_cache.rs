@@ -9,17 +9,20 @@ use tokio::{
 };
 use tonic::transport::{Channel, Endpoint};
 
-use uuid;
-use std::io::{self, Error, ErrorKind};
-use std::{pin::Pin, task::{Context, Poll}};
-use futures::future;
-use rand::{Rng, rngs::StdRng, SeedableRng};
-use tower::service_fn;
-use http::Uri;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use hyper_util::rt::TokioIo;
-use tokio::net::TcpStream;
 use bytes::BytesMut;
+use futures::future;
+use http::Uri;
+use hyper_util::rt::TokioIo;
+use rand::{Rng, SeedableRng, rngs::StdRng};
+use std::io::{self, Error, ErrorKind};
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::TcpStream;
+use tower::service_fn;
+use uuid;
 
 /// A pooled gRPC client with capacity tracking and error handling.
 pub struct ConnectionPool {
@@ -139,7 +142,6 @@ impl AsyncRead for TokioTcp {
             this.deadline = Instant::now() + Duration::from_millis(next_ms);
         }
 
-
         // 4) Perform actual read into a temporary buffer
         let mut tmp = [0u8; 4096];
         let mut rb = ReadBuf::new(&mut tmp);
@@ -192,18 +194,12 @@ impl AsyncWrite for TokioTcp {
         Pin::new(&mut this.tcp).poll_write(cx, data)
     }
 
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         Pin::new(&mut this.tcp).poll_flush(cx)
     }
 
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         Pin::new(&mut this.tcp).poll_shutdown(cx)
     }
@@ -288,14 +284,15 @@ impl ConnectionPool {
         let mut inner = self.inner.lock().await;
         let now = Instant::now();
         inner.entries.retain(|_id, entry| {
-            if entry.active_consumers == 0 && now.duration_since(entry.last_used) > self.max_idle_duration {
+            if entry.active_consumers == 0
+                && now.duration_since(entry.last_used) > self.max_idle_duration
+            {
                 // Remove idle connection
                 return false;
             }
             true
         });
     }
-
 
     async fn acquire_connection(&self) -> (uuid::Uuid, Channel) {
         loop {
@@ -325,7 +322,6 @@ impl ConnectionPool {
     }
 
     async fn create_connection(&self) -> () {
-
         let max_delay_ms = self.max_delay_ms;
         let drop_rate = self.drop_rate;
         let hang_rate = self.hang_rate;
@@ -362,17 +358,14 @@ impl ConnectionPool {
                     // host + explicit port
                     (Some(host), Some(port)) => format!("{}:{}", host, port.as_str()),
                     // host only (no port)
-                    (Some(host), None)      => host.to_string(),
+                    (Some(host), None) => host.to_string(),
                     // neither? error out
                     _ => return Err(Error::new(ErrorKind::InvalidInput, "no host or port")),
                 };
 
                 //let addr = uri.authority().unwrap().as_str();
                 let tcp = TcpStream::connect(addr).await?;
-                let tcpwrapper = TokioTcp::new(
-                    tcp,
-                    max_delay_ms,
-                );
+                let tcpwrapper = TokioTcp::new(tcp, max_delay_ms);
                 Ok(TokioIo::new(tcpwrapper))
             }
         });
@@ -398,7 +391,7 @@ impl ConnectionPool {
                 } {
                     sleep(delay).await;
                 } else {
-                    break   // No delay, so we can create a connection
+                    break; // No delay, so we can create a connection
                 }
             }
 
@@ -414,15 +407,13 @@ impl ConnectionPool {
                 Endpoint::from_shared(self.endpoint.clone())
                     .expect("invalid endpoint")
                     .timeout(self.connect_timeout)
-                    .connect_with_connector(connector)
+                    .connect_with_connector(connector),
             )
             .await;
-
 
             match attempt {
                 Ok(Ok(channel)) => {
                     {
-
                         let mut inner = self.inner.lock().await;
                         let id = uuid::Uuid::new_v4();
                         inner.entries.insert(

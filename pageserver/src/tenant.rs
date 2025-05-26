@@ -50,6 +50,7 @@ use remote_timeline_client::{
 use secondary::heatmap::{HeatMapTenant, HeatMapTimeline};
 use storage_broker::BrokerClientChannel;
 use timeline::compaction::{CompactionOutcome, GcCompactionQueue};
+use timeline::import_pgdata::ImportingTimeline;
 use timeline::offload::{OffloadError, offload_timeline};
 use timeline::{
     CompactFlags, CompactOptions, CompactionError, PreviousHeatmap, ShutdownMode, import_pgdata,
@@ -77,6 +78,7 @@ use self::timeline::uninit::{TimelineCreateGuard, TimelineExclusionError, Uninit
 use self::timeline::{
     EvictionTaskTenantState, GcCutoffs, TimelineDeleteProgress, TimelineResources, WaitLsnError,
 };
+use crate::basebackup_cache::BasebackupPrepareSender;
 use crate::config::PageServerConf;
 use crate::context;
 use crate::context::RequestContextBuilder;
@@ -85,8 +87,8 @@ use crate::deletion_queue::{DeletionQueueClient, DeletionQueueError};
 use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::{
     BROKEN_TENANTS_SET, CIRCUIT_BREAKERS_BROKEN, CIRCUIT_BREAKERS_UNBROKEN, CONCURRENT_INITDBS,
-    INITDB_RUN_TIME, INITDB_SEMAPHORE_ACQUISITION_TIME, TENANT, TENANT_STATE_METRIC,
-    TENANT_SYNTHETIC_SIZE_METRIC, remove_tenant_metrics,
+    INITDB_RUN_TIME, INITDB_SEMAPHORE_ACQUISITION_TIME, TENANT, TENANT_OFFLOADED_TIMELINES,
+    TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC, remove_tenant_metrics,
 };
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::LocationMode;
@@ -156,6 +158,7 @@ pub struct TenantSharedResources {
     pub remote_storage: GenericRemoteStorage,
     pub deletion_queue_client: DeletionQueueClient,
     pub l0_flush_global_state: L0FlushGlobalState,
+    pub basebackup_prepare_sender: BasebackupPrepareSender,
 }
 
 /// A [`TenantShard`] is really an _attached_ tenant.  The configuration
@@ -284,6 +287,19 @@ pub struct TenantShard {
     /// **Lock order**: if acquiring all (or a subset), acquire them in order `timelines`, `timelines_offloaded`, `timelines_creating`
     timelines_offloaded: Mutex<HashMap<TimelineId, Arc<OffloadedTimeline>>>,
 
+    /// Tracks the timelines that are currently importing into this tenant shard.
+    ///
+    /// Note that importing timelines are also present in [`Self::timelines_creating`].
+    /// Keep this in mind when ordering lock acquisition.
+    ///
+    /// Lifetime:
+    /// * An imported timeline is created while scanning the bucket on tenant attach
+    ///   if the index part contains an `import_pgdata` entry and said field marks the import
+    ///   as in progress.
+    /// * Imported timelines are removed when the storage controller calls the post timeline
+    ///   import activation endpoint.
+    timelines_importing: std::sync::Mutex<HashMap<TimelineId, ImportingTimeline>>,
+
     /// The last tenant manifest known to be in remote storage. None if the manifest has not yet
     /// been either downloaded or uploaded. Always Some after tenant attach.
     ///
@@ -303,11 +319,14 @@ pub struct TenantShard {
     gc_cs: tokio::sync::Mutex<()>,
     walredo_mgr: Option<Arc<WalRedoManager>>,
 
-    // provides access to timeline data sitting in the remote storage
+    /// Provides access to timeline data sitting in the remote storage.
     pub(crate) remote_storage: GenericRemoteStorage,
 
-    // Access to global deletion queue for when this tenant wants to schedule a deletion
+    /// Access to global deletion queue for when this tenant wants to schedule a deletion.
     deletion_queue_client: DeletionQueueClient,
+
+    /// A channel to send async requests to prepare a basebackup for the basebackup cache.
+    basebackup_prepare_sender: BasebackupPrepareSender,
 
     /// Cached logical sizes updated updated on each [`TenantShard::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
@@ -923,17 +942,8 @@ enum StartCreatingTimelineResult {
 
 #[allow(clippy::large_enum_variant, reason = "TODO")]
 enum TimelineInitAndSyncResult {
-    ReadyToActivate(Arc<Timeline>),
+    ReadyToActivate,
     NeedsSpawnImportPgdata(TimelineInitAndSyncNeedsSpawnImportPgdata),
-}
-
-impl TimelineInitAndSyncResult {
-    fn ready_to_activate(self) -> Option<Arc<Timeline>> {
-        match self {
-            Self::ReadyToActivate(timeline) => Some(timeline),
-            _ => None,
-        }
-    }
 }
 
 #[must_use]
@@ -1012,10 +1022,6 @@ enum CreateTimelineCause {
 enum LoadTimelineCause {
     Attach,
     Unoffload,
-    ImportPgdata {
-        create_guard: TimelineCreateGuard,
-        activate: ActivateTimelineArgs,
-    },
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -1097,7 +1103,7 @@ impl TenantShard {
         self: &Arc<Self>,
         timeline_id: TimelineId,
         resources: TimelineResources,
-        mut index_part: IndexPart,
+        index_part: IndexPart,
         metadata: TimelineMetadata,
         previous_heatmap: Option<PreviousHeatmap>,
         ancestor: Option<Arc<Timeline>>,
@@ -1106,7 +1112,7 @@ impl TenantShard {
     ) -> anyhow::Result<TimelineInitAndSyncResult> {
         let tenant_id = self.tenant_shard_id;
 
-        let import_pgdata = index_part.import_pgdata.take();
+        let import_pgdata = index_part.import_pgdata.clone();
         let idempotency = match &import_pgdata {
             Some(import_pgdata) => {
                 CreateTimelineIdempotency::ImportPgdata(CreatingTimelineIdempotencyImportPgdata {
@@ -1127,7 +1133,7 @@ impl TenantShard {
             }
         };
 
-        let (timeline, timeline_ctx) = self.create_timeline_struct(
+        let (timeline, _timeline_ctx) = self.create_timeline_struct(
             timeline_id,
             &metadata,
             previous_heatmap,
@@ -1197,14 +1203,6 @@ impl TenantShard {
 
         match import_pgdata {
             Some(import_pgdata) if !import_pgdata.is_done() => {
-                match cause {
-                    LoadTimelineCause::Attach | LoadTimelineCause::Unoffload => (),
-                    LoadTimelineCause::ImportPgdata { .. } => {
-                        unreachable!(
-                            "ImportPgdata should not be reloading timeline import is done and persisted as such in s3"
-                        )
-                    }
-                }
                 let mut guard = self.timelines_creating.lock().unwrap();
                 if !guard.insert(timeline_id) {
                     // We should never try and load the same timeline twice during startup
@@ -1260,26 +1258,7 @@ impl TenantShard {
                     "Timeline has no ancestor and no layer files"
                 );
 
-                match cause {
-                    LoadTimelineCause::Attach | LoadTimelineCause::Unoffload => (),
-                    LoadTimelineCause::ImportPgdata {
-                        create_guard,
-                        activate,
-                    } => {
-                        // TODO: see the comment in the task code above how I'm not so certain
-                        // it is safe to activate here because of concurrent shutdowns.
-                        match activate {
-                            ActivateTimelineArgs::Yes { broker_client } => {
-                                info!("activating timeline after reload from pgdata import task");
-                                timeline.activate(self.clone(), broker_client, None, &timeline_ctx);
-                            }
-                            ActivateTimelineArgs::No => (),
-                        }
-                        drop(create_guard);
-                    }
-                }
-
-                Ok(TimelineInitAndSyncResult::ReadyToActivate(timeline))
+                Ok(TimelineInitAndSyncResult::ReadyToActivate)
             }
         }
     }
@@ -1312,6 +1291,7 @@ impl TenantShard {
             remote_storage,
             deletion_queue_client,
             l0_flush_global_state,
+            basebackup_prepare_sender,
         } = resources;
 
         let attach_mode = attached_conf.location.attach_mode;
@@ -1327,6 +1307,7 @@ impl TenantShard {
             remote_storage.clone(),
             deletion_queue_client,
             l0_flush_global_state,
+            basebackup_prepare_sender,
         ));
 
         // The attach task will carry a GateGuard, so that shutdown() reliably waits for it to drop out if
@@ -1768,7 +1749,7 @@ impl TenantShard {
                 })?;
 
             match effect {
-                TimelineInitAndSyncResult::ReadyToActivate(_) => {
+                TimelineInitAndSyncResult::ReadyToActivate => {
                     // activation happens later, on Tenant::activate
                 }
                 TimelineInitAndSyncResult::NeedsSpawnImportPgdata(
@@ -1778,13 +1759,24 @@ impl TenantShard {
                         guard,
                     },
                 ) => {
-                    tokio::task::spawn(self.clone().create_timeline_import_pgdata_task(
-                        timeline,
-                        import_pgdata,
-                        ActivateTimelineArgs::No,
-                        guard,
-                        ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn),
-                    ));
+                    let timeline_id = timeline.timeline_id;
+                    let import_task_handle =
+                        tokio::task::spawn(self.clone().create_timeline_import_pgdata_task(
+                            timeline.clone(),
+                            import_pgdata,
+                            guard,
+                            ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn),
+                        ));
+
+                    let prev = self.timelines_importing.lock().unwrap().insert(
+                        timeline_id,
+                        ImportingTimeline {
+                            timeline: timeline.clone(),
+                            import_task_handle,
+                        },
+                    );
+
+                    assert!(prev.is_none());
                 }
             }
         }
@@ -2678,14 +2670,7 @@ impl TenantShard {
                     .await?
             }
             CreateTimelineParams::ImportPgdata(params) => {
-                self.create_timeline_import_pgdata(
-                    params,
-                    ActivateTimelineArgs::Yes {
-                        broker_client: broker_client.clone(),
-                    },
-                    ctx,
-                )
-                .await?
+                self.create_timeline_import_pgdata(params, ctx).await?
             }
         };
 
@@ -2759,7 +2744,6 @@ impl TenantShard {
     async fn create_timeline_import_pgdata(
         self: &Arc<Self>,
         params: CreateTimelineParamsImportPgdata,
-        activate: ActivateTimelineArgs,
         ctx: &RequestContext,
     ) -> Result<CreateTimelineResult, CreateTimelineError> {
         let CreateTimelineParamsImportPgdata {
@@ -2840,16 +2824,64 @@ impl TenantShard {
 
         let (timeline, timeline_create_guard) = uninit_timeline.finish_creation_myself();
 
-        tokio::spawn(self.clone().create_timeline_import_pgdata_task(
+        let import_task_handle = tokio::spawn(self.clone().create_timeline_import_pgdata_task(
             timeline.clone(),
             index_part,
-            activate,
             timeline_create_guard,
             timeline_ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn),
         ));
 
+        let prev = self.timelines_importing.lock().unwrap().insert(
+            timeline.timeline_id,
+            ImportingTimeline {
+                timeline: timeline.clone(),
+                import_task_handle,
+            },
+        );
+
+        // Idempotency is enforced higher up the stack
+        assert!(prev.is_none());
+
         // NB: the timeline doesn't exist in self.timelines at this point
         Ok(CreateTimelineResult::ImportSpawned(timeline))
+    }
+
+    /// Finalize the import of a timeline on this shard by marking it complete in
+    /// the index part. If the import task hasn't finished yet, returns an error.
+    ///
+    /// This method is idempotent. If the import was finalized once, the next call
+    /// will be a no-op.
+    pub(crate) async fn finalize_importing_timeline(
+        &self,
+        timeline_id: TimelineId,
+    ) -> anyhow::Result<()> {
+        let timeline = {
+            let locked = self.timelines_importing.lock().unwrap();
+            match locked.get(&timeline_id) {
+                Some(importing_timeline) => {
+                    if !importing_timeline.import_task_handle.is_finished() {
+                        return Err(anyhow::anyhow!("Import task not done yet"));
+                    }
+
+                    importing_timeline.timeline.clone()
+                }
+                None => {
+                    return Ok(());
+                }
+            }
+        };
+
+        timeline
+            .remote_client
+            .schedule_index_upload_for_import_pgdata_finalize()?;
+        timeline.remote_client.wait_completion().await?;
+
+        self.timelines_importing
+            .lock()
+            .unwrap()
+            .remove(&timeline_id);
+
+        Ok(())
     }
 
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%timeline.timeline_id))]
@@ -2857,7 +2889,6 @@ impl TenantShard {
         self: Arc<TenantShard>,
         timeline: Arc<Timeline>,
         index_part: import_pgdata::index_part_format::Root,
-        activate: ActivateTimelineArgs,
         timeline_create_guard: TimelineCreateGuard,
         ctx: RequestContext,
     ) {
@@ -2869,7 +2900,6 @@ impl TenantShard {
             .create_timeline_import_pgdata_task_impl(
                 timeline,
                 index_part,
-                activate,
                 timeline_create_guard,
                 ctx,
             )
@@ -2885,60 +2915,15 @@ impl TenantShard {
         self: Arc<TenantShard>,
         timeline: Arc<Timeline>,
         index_part: import_pgdata::index_part_format::Root,
-        activate: ActivateTimelineArgs,
-        timeline_create_guard: TimelineCreateGuard,
+        _timeline_create_guard: TimelineCreateGuard,
         ctx: RequestContext,
     ) -> Result<(), anyhow::Error> {
         info!("importing pgdata");
+        let ctx = ctx.with_scope_timeline(&timeline);
         import_pgdata::doit(&timeline, index_part, &ctx, self.cancel.clone())
             .await
             .context("import")?;
-        info!("import done");
-
-        //
-        // Reload timeline from remote.
-        // This proves that the remote state is attachable, and it reuses the code.
-        //
-        // TODO: think about whether this is safe to do with concurrent TenantShard::shutdown.
-        // timeline_create_guard hols the tenant gate open, so, shutdown cannot _complete_ until we exit.
-        // But our activate() call might launch new background tasks after TenantShard::shutdown
-        // already went past shutting down the TenantShard::timelines, which this timeline here is no part of.
-        // I think the same problem exists with the bootstrap & branch mgmt API tasks (tenant shutting
-        // down while bootstrapping/branching + activating), but, the race condition is much more likely
-        // to manifest because of the long runtime of this import task.
-
-        //        in theory this shouldn't even .await anything except for coop yield
-        info!("shutting down timeline");
-        timeline.shutdown(ShutdownMode::Hard).await;
-        info!("timeline shut down, reloading from remote");
-        // TODO: we can't do the following check because create_timeline_import_pgdata must return an Arc<Timeline>
-        // let Some(timeline) = Arc::into_inner(timeline) else {
-        //     anyhow::bail!("implementation error: timeline that we shut down was still referenced from somewhere");
-        // };
-        let timeline_id = timeline.timeline_id;
-
-        // load from object storage like TenantShard::attach does
-        let resources = self.build_timeline_resources(timeline_id);
-        let index_part = resources
-            .remote_client
-            .download_index_file(&self.cancel)
-            .await?;
-        let index_part = match index_part {
-            MaybeDeletedIndexPart::Deleted(_) => {
-                // likely concurrent delete call, cplane should prevent this
-                anyhow::bail!(
-                    "index part says deleted but we are not done creating yet, this should not happen but"
-                )
-            }
-            MaybeDeletedIndexPart::IndexPart(p) => p,
-        };
-        let metadata = index_part.metadata.clone();
-        self
-            .load_remote_timeline(timeline_id, index_part, metadata, None, resources, LoadTimelineCause::ImportPgdata{
-                create_guard: timeline_create_guard, activate, }, &ctx)
-            .await?
-            .ready_to_activate()
-            .context("implementation error: reloaded timeline still needs import after import reported success")?;
+        info!("import done - waiting for activation");
 
         anyhow::Ok(())
     }
@@ -3370,6 +3355,13 @@ impl TenantShard {
                 activated_timelines += 1;
             }
 
+            let tid = self.tenant_shard_id.tenant_id.to_string();
+            let shard_id = self.tenant_shard_id.shard_slug().to_string();
+            let offloaded_timeline_count = timelines_offloaded_accessor.len();
+            TENANT_OFFLOADED_TIMELINES
+                .with_label_values(&[&tid, &shard_id])
+                .set(offloaded_timeline_count as u64);
+
             self.state.send_modify(move |current_state| {
                 assert!(
                     matches!(current_state, TenantState::Activating(_)),
@@ -3474,6 +3466,14 @@ impl TenantShard {
             timelines_offloaded.values().for_each(|timeline| {
                 timeline.defuse_for_tenant_drop();
             });
+        }
+        {
+            let mut timelines_importing = self.timelines_importing.lock().unwrap();
+            timelines_importing
+                .drain()
+                .for_each(|(_timeline_id, importing_timeline)| {
+                    importing_timeline.shutdown();
+                });
         }
         // test_long_timeline_create_then_tenant_delete is leaning on this message
         tracing::info!("Waiting for timelines...");
@@ -3949,13 +3949,6 @@ where
     Ok(result)
 }
 
-enum ActivateTimelineArgs {
-    Yes {
-        broker_client: storage_broker::BrokerClientChannel,
-    },
-    No,
-}
-
 impl TenantShard {
     pub fn tenant_specific_overrides(&self) -> pageserver_api::models::TenantConfig {
         self.tenant_conf.load().tenant_conf.clone()
@@ -4253,10 +4246,9 @@ impl TenantShard {
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
         l0_flush_global_state: L0FlushGlobalState,
+        basebackup_prepare_sender: BasebackupPrepareSender,
     ) -> TenantShard {
-        debug_assert!(
-            !attached_conf.location.generation.is_none() || conf.control_plane_api.is_none()
-        );
+        assert!(!attached_conf.location.generation.is_none());
 
         let (state, mut rx) = watch::channel(state);
 
@@ -4324,6 +4316,7 @@ impl TenantShard {
             timelines: Mutex::new(HashMap::new()),
             timelines_creating: Mutex::new(HashSet::new()),
             timelines_offloaded: Mutex::new(HashMap::new()),
+            timelines_importing: Mutex::new(HashMap::new()),
             remote_tenant_manifest: Default::default(),
             gc_cs: tokio::sync::Mutex::new(()),
             walredo_mgr,
@@ -4357,6 +4350,7 @@ impl TenantShard {
             ongoing_timeline_detach: std::sync::Mutex::default(),
             gc_block: Default::default(),
             l0_flush_global_state,
+            basebackup_prepare_sender,
         }
     }
 
@@ -4609,7 +4603,7 @@ impl TenantShard {
 
             target.cutoffs = GcCutoffs {
                 space: space_cutoff,
-                time: Lsn::INVALID,
+                time: None,
             };
         }
     }
@@ -4693,7 +4687,7 @@ impl TenantShard {
                 if let Some(ancestor_id) = timeline.get_ancestor_timeline_id() {
                     if let Some(ancestor_gc_cutoffs) = gc_cutoffs.get(&ancestor_id) {
                         target.within_ancestor_pitr =
-                            timeline.get_ancestor_lsn() >= ancestor_gc_cutoffs.time;
+                            Some(timeline.get_ancestor_lsn()) >= ancestor_gc_cutoffs.time;
                     }
                 }
 
@@ -4706,13 +4700,15 @@ impl TenantShard {
                     } else {
                         0
                     });
-                timeline.metrics.pitr_history_size.set(
-                    timeline
-                        .get_last_record_lsn()
-                        .checked_sub(target.cutoffs.time)
-                        .unwrap_or(Lsn(0))
-                        .0,
-                );
+                if let Some(time_cutoff) = target.cutoffs.time {
+                    timeline.metrics.pitr_history_size.set(
+                        timeline
+                            .get_last_record_lsn()
+                            .checked_sub(time_cutoff)
+                            .unwrap_or_default()
+                            .0,
+                    );
+                }
 
                 // Apply the cutoffs we found to the Timeline's GcInfo.  Why might we _not_ have cutoffs for a timeline?
                 // - this timeline was created while we were finding cutoffs
@@ -4721,8 +4717,8 @@ impl TenantShard {
                     let original_cutoffs = target.cutoffs.clone();
                     // GC cutoffs should never go back
                     target.cutoffs = GcCutoffs {
-                        space: Lsn(cutoffs.space.0.max(original_cutoffs.space.0)),
-                        time: Lsn(cutoffs.time.0.max(original_cutoffs.time.0)),
+                        space: cutoffs.space.max(original_cutoffs.space),
+                        time: cutoffs.time.max(original_cutoffs.time),
                     }
                 }
             }
@@ -5274,6 +5270,7 @@ impl TenantShard {
             pagestream_throttle_metrics: self.pagestream_throttle_metrics.clone(),
             l0_compaction_trigger: self.l0_compaction_trigger.clone(),
             l0_flush_global_state: self.l0_flush_global_state.clone(),
+            basebackup_prepare_sender: self.basebackup_prepare_sender.clone(),
         }
     }
 
@@ -5582,6 +5579,14 @@ impl TenantShard {
             }
         }
 
+        // Update metrics
+        let tid = self.tenant_shard_id.to_string();
+        let shard_id = self.tenant_shard_id.shard_slug().to_string();
+        let set_key = &[tid.as_str(), shard_id.as_str()][..];
+        TENANT_OFFLOADED_TIMELINES
+            .with_label_values(set_key)
+            .set(manifest.offloaded_timelines.len() as u64);
+
         // Upload the manifest. Remote storage does no retries internally, so retry here.
         match backoff::retry(
             || async {
@@ -5848,6 +5853,8 @@ pub(crate) mod harness {
         ) -> anyhow::Result<Arc<TenantShard>> {
             let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
 
+            let (basebackup_requst_sender, _) = tokio::sync::mpsc::unbounded_channel();
+
             let tenant = Arc::new(TenantShard::new(
                 TenantState::Attaching,
                 self.conf,
@@ -5865,6 +5872,7 @@ pub(crate) mod harness {
                 self.deletion_queue.new_client(),
                 // TODO: ideally we should run all unit tests with both configs
                 L0FlushGlobalState::new(L0FlushConfig::default()),
+                basebackup_requst_sender,
             ));
 
             let preload = tenant
@@ -5949,7 +5957,9 @@ mod tests {
     use itertools::Itertools;
     #[cfg(feature = "testing")]
     use models::CompactLsnRange;
-    use pageserver_api::key::{AUX_KEY_PREFIX, Key, NON_INHERITED_RANGE, RELATION_SIZE_PREFIX};
+    use pageserver_api::key::{
+        AUX_KEY_PREFIX, Key, NON_INHERITED_RANGE, RELATION_SIZE_PREFIX, repl_origin_key,
+    };
     use pageserver_api::keyspace::KeySpace;
     #[cfg(feature = "testing")]
     use pageserver_api::keyspace::KeySpaceRandomAccum;
@@ -8186,6 +8196,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_repl_origin_tombstones() {
+        let harness = TenantHarness::create("test_repl_origin_tombstones")
+            .await
+            .unwrap();
+
+        let (tenant, ctx) = harness.load().await;
+        let io_concurrency = IoConcurrency::spawn_for_test();
+
+        let mut lsn = Lsn(0x08);
+
+        let tline: Arc<Timeline> = tenant
+            .create_test_timeline(TIMELINE_ID, lsn, DEFAULT_PG_VERSION, &ctx)
+            .await
+            .unwrap();
+
+        let repl_lsn = Lsn(0x10);
+        {
+            lsn += 8;
+            let mut modification = tline.begin_modification(lsn);
+            modification.put_for_unit_test(repl_origin_key(2), Value::Image(Bytes::new()));
+            modification.set_replorigin(1, repl_lsn).await.unwrap();
+            modification.commit(&ctx).await.unwrap();
+        }
+
+        // we can read everything from the storage
+        let repl_origins = tline
+            .get_replorigins(lsn, &ctx, io_concurrency.clone())
+            .await
+            .unwrap();
+        assert_eq!(repl_origins.len(), 1);
+        assert_eq!(repl_origins[&1], lsn);
+
+        {
+            lsn += 8;
+            let mut modification = tline.begin_modification(lsn);
+            modification.put_for_unit_test(
+                repl_origin_key(3),
+                Value::Image(Bytes::copy_from_slice(b"cannot_decode_this")),
+            );
+            modification.commit(&ctx).await.unwrap();
+        }
+        let result = tline
+            .get_replorigins(lsn, &ctx, io_concurrency.clone())
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
     async fn test_metadata_image_creation() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_metadata_image_creation").await?;
         let (tenant, ctx) = harness.load().await;
@@ -8568,8 +8626,10 @@ mod tests {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<Option<Bytes>, GetVectoredError> {
-        let io_concurrency =
-            IoConcurrency::spawn_from_conf(tline.conf, tline.gate.enter().unwrap());
+        let io_concurrency = IoConcurrency::spawn_from_conf(
+            tline.conf.get_vectored_concurrent_io,
+            tline.gate.enter().unwrap(),
+        );
         let mut reconstruct_state = ValuesReconstructState::new(io_concurrency);
         let query = VersionedKeySpaceQuery::uniform(KeySpace::single(key..key.next()), lsn);
         let mut res = tline
@@ -8907,7 +8967,7 @@ mod tests {
                 .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
-            guard.cutoffs.time = Lsn(0x30);
+            guard.cutoffs.time = Some(Lsn(0x30));
             guard.cutoffs.space = Lsn(0x30);
         }
 
@@ -9015,7 +9075,7 @@ mod tests {
                 .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
-            guard.cutoffs.time = Lsn(0x40);
+            guard.cutoffs.time = Some(Lsn(0x40));
             guard.cutoffs.space = Lsn(0x40);
         }
         tline
@@ -9433,7 +9493,7 @@ mod tests {
             *guard = GcInfo {
                 retain_lsns: vec![],
                 cutoffs: GcCutoffs {
-                    time: Lsn(0x30),
+                    time: Some(Lsn(0x30)),
                     space: Lsn(0x30),
                 },
                 leases: Default::default(),
@@ -9517,7 +9577,7 @@ mod tests {
                 .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
-            guard.cutoffs.time = Lsn(0x40);
+            guard.cutoffs.time = Some(Lsn(0x40));
             guard.cutoffs.space = Lsn(0x40);
         }
         tline
@@ -9988,7 +10048,7 @@ mod tests {
                     (Lsn(0x20), tline.timeline_id, MaybeOffloaded::No),
                 ],
                 cutoffs: GcCutoffs {
-                    time: Lsn(0x30),
+                    time: Some(Lsn(0x30)),
                     space: Lsn(0x30),
                 },
                 leases: Default::default(),
@@ -10051,7 +10111,7 @@ mod tests {
         let verify_result = || async {
             let gc_horizon = {
                 let gc_info = tline.gc_info.read().unwrap();
-                gc_info.cutoffs.time
+                gc_info.cutoffs.time.unwrap_or_default()
             };
             for idx in 0..10 {
                 assert_eq!(
@@ -10129,7 +10189,7 @@ mod tests {
                 .await;
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
-            guard.cutoffs.time = Lsn(0x38);
+            guard.cutoffs.time = Some(Lsn(0x38));
             guard.cutoffs.space = Lsn(0x38);
         }
         tline
@@ -10237,7 +10297,7 @@ mod tests {
                     (Lsn(0x20), tline.timeline_id, MaybeOffloaded::No),
                 ],
                 cutoffs: GcCutoffs {
-                    time: Lsn(0x30),
+                    time: Some(Lsn(0x30)),
                     space: Lsn(0x30),
                 },
                 leases: Default::default(),
@@ -10300,7 +10360,7 @@ mod tests {
         let verify_result = || async {
             let gc_horizon = {
                 let gc_info = tline.gc_info.read().unwrap();
-                gc_info.cutoffs.time
+                gc_info.cutoffs.time.unwrap_or_default()
             };
             for idx in 0..10 {
                 assert_eq!(
@@ -10486,7 +10546,7 @@ mod tests {
             *guard = GcInfo {
                 retain_lsns: vec![(Lsn(0x18), branch_tline.timeline_id, MaybeOffloaded::No)],
                 cutoffs: GcCutoffs {
-                    time: Lsn(0x10),
+                    time: Some(Lsn(0x10)),
                     space: Lsn(0x10),
                 },
                 leases: Default::default(),
@@ -10506,7 +10566,7 @@ mod tests {
             *guard = GcInfo {
                 retain_lsns: vec![(Lsn(0x40), branch_tline.timeline_id, MaybeOffloaded::No)],
                 cutoffs: GcCutoffs {
-                    time: Lsn(0x50),
+                    time: Some(Lsn(0x50)),
                     space: Lsn(0x50),
                 },
                 leases: Default::default(),
@@ -11227,7 +11287,7 @@ mod tests {
             *guard = GcInfo {
                 retain_lsns: vec![(Lsn(0x20), tline.timeline_id, MaybeOffloaded::No)],
                 cutoffs: GcCutoffs {
-                    time: Lsn(0x30),
+                    time: Some(Lsn(0x30)),
                     space: Lsn(0x30),
                 },
                 leases: Default::default(),
@@ -11616,7 +11676,7 @@ mod tests {
                     (Lsn(0x20), tline.timeline_id, MaybeOffloaded::No),
                 ],
                 cutoffs: GcCutoffs {
-                    time: Lsn(0x30),
+                    time: Some(Lsn(0x30)),
                     space: Lsn(0x30),
                 },
                 leases: Default::default(),
@@ -11679,7 +11739,7 @@ mod tests {
         let verify_result = || async {
             let gc_horizon = {
                 let gc_info = tline.gc_info.read().unwrap();
-                gc_info.cutoffs.time
+                gc_info.cutoffs.time.unwrap_or_default()
             };
             for idx in 0..10 {
                 assert_eq!(
@@ -11868,7 +11928,7 @@ mod tests {
                     (Lsn(0x20), tline.timeline_id, MaybeOffloaded::No),
                 ],
                 cutoffs: GcCutoffs {
-                    time: Lsn(0x30),
+                    time: Some(Lsn(0x30)),
                     space: Lsn(0x30),
                 },
                 leases: Default::default(),
@@ -11931,7 +11991,7 @@ mod tests {
         let verify_result = || async {
             let gc_horizon = {
                 let gc_info = tline.gc_info.read().unwrap();
-                gc_info.cutoffs.time
+                gc_info.cutoffs.time.unwrap_or_default()
             };
             for idx in 0..10 {
                 assert_eq!(
@@ -12194,7 +12254,7 @@ mod tests {
             *guard = GcInfo {
                 retain_lsns: vec![],
                 cutoffs: GcCutoffs {
-                    time: Lsn(0x30),
+                    time: Some(Lsn(0x30)),
                     space: Lsn(0x30),
                 },
                 leases: Default::default(),

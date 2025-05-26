@@ -21,6 +21,7 @@
 use std::ffi::c_int;
 use std::mem;
 use std::mem::MaybeUninit;
+use std::os::fd::OwnedFd;
 
 use neonart::allocator::r#static::alloc_array_from_slice;
 
@@ -36,8 +37,8 @@ pub struct CommunicatorInitStruct {
     #[allow(dead_code)]
     pub max_procs: u32,
 
-    pub submission_pipe_read_fd: std::ffi::c_int,
-    pub submission_pipe_write_fd: std::ffi::c_int,
+    pub submission_pipe_read_fd: OwnedFd,
+    pub submission_pipe_write_fd: OwnedFd,
 
     // Shared memory data structures
     pub num_neon_request_slots_per_backend: u32,
@@ -110,6 +111,14 @@ pub extern "C" fn rcommunicator_shmem_init(
     // Give the rest of the area to the integrated cache
     let integrated_cache_init_struct =
         IntegratedCacheInitStruct::shmem_init(max_procs, remaining_area);
+
+    let (submission_pipe_read_fd, submission_pipe_write_fd) = unsafe {
+        use std::os::fd::FromRawFd;
+        (
+            OwnedFd::from_raw_fd(submission_pipe_read_fd),
+            OwnedFd::from_raw_fd(submission_pipe_write_fd),
+        )
+    };
 
     let cis: &'static mut CommunicatorInitStruct = Box::leak(Box::new(CommunicatorInitStruct {
         max_procs,

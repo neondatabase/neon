@@ -299,11 +299,13 @@ pub struct PullTimelineRequest {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
     pub http_hosts: Vec<String>,
+    pub ignore_tombstone: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PullTimelineResponse {
-    // Donor safekeeper host
-    pub safekeeper_host: String,
+    /// Donor safekeeper host.
+    /// None if no pull happened because the timeline already exists.
+    pub safekeeper_host: Option<String>,
     // TODO: add more fields?
 }

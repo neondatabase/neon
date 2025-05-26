@@ -1,4 +1,5 @@
 import math  # Add this import
+import os
 import time
 import traceback
 from pathlib import Path
@@ -87,7 +88,10 @@ def test_cumulative_statistics_persistence(
     - insert additional tuples that by itself are not enough to trigger auto-vacuum but in combination with the previous tuples are
     - verify that autovacuum is triggered by the combination of tuples inserted before and after endpoint suspension
     """
-    project = neon_api.create_project(pg_version)
+    project = neon_api.create_project(
+        pg_version,
+        f"Test cumulative statistics persistence, GITHUB_RUN_ID={os.getenv('GITHUB_RUN_ID')}",
+    )
     project_id = project["project"]["id"]
     neon_api.wait_for_operation_to_finish(project_id)
     endpoint_id = project["endpoints"][0]["id"]

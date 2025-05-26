@@ -149,16 +149,16 @@ impl PageService for PageServiceService {
     type GetPagesStream =
         Pin<Box<dyn Stream<Item = Result<proto::GetPageResponse, tonic::Status>> + Send>>;
 
-    async fn rel_exists(
+    async fn check_rel_exists(
         &self,
-        request: tonic::Request<proto::RelExistsRequest>,
-    ) -> std::result::Result<tonic::Response<proto::RelExistsResponse>, tonic::Status> {
+        request: tonic::Request<proto::CheckRelExistsRequest>,
+    ) -> std::result::Result<tonic::Response<proto::CheckRelExistsResponse>, tonic::Status> {
         let ttid = self.extract_ttid(request.metadata())?;
         let shard = self.extract_shard(request.metadata())?;
-        let req: model::RelExistsRequest = request.get_ref().try_into()?;
+        let req: model::CheckRelExistsRequest = request.get_ref().try_into()?;
 
         let rel = convert_reltag(&req.rel);
-        let span = tracing::info_span!("rel_exists", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, rel = %rel, req_lsn = %req.common.request_lsn);
+        let span = tracing::info_span!("check_rel_exists", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, rel = %rel, req_lsn = %req.read_lsn.request_lsn);
 
         async {
             let timeline = self.get_timeline(ttid, shard).await?;
@@ -166,34 +166,34 @@ impl PageService for PageServiceService {
             let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
             let lsn = Self::wait_or_get_last_lsn(
                 &timeline,
-                req.common.request_lsn,
-                req.common.not_modified_since_lsn,
+                req.read_lsn.request_lsn,
+                req.read_lsn.not_modified_since_lsn,
                 &latest_gc_cutoff_lsn,
                 &ctx,
             )
             .await?;
 
-            let exists = timeline
-                .get_rel_exists(rel, Version::Lsn(lsn), &ctx)
-                .await?;
+            let exists = timeline.get_rel_exists(rel, Version::at(lsn), &ctx).await?;
 
-            Ok(tonic::Response::new(proto::RelExistsResponse { exists }))
+            Ok(tonic::Response::new(proto::CheckRelExistsResponse {
+                exists,
+            }))
         }
         .instrument(span)
         .await
     }
 
     /// Returns size of a relation, as # of blocks
-    async fn rel_size(
+    async fn get_rel_size(
         &self,
-        request: tonic::Request<proto::RelSizeRequest>,
-    ) -> std::result::Result<tonic::Response<proto::RelSizeResponse>, tonic::Status> {
+        request: tonic::Request<proto::GetRelSizeRequest>,
+    ) -> std::result::Result<tonic::Response<proto::GetRelSizeResponse>, tonic::Status> {
         let ttid = self.extract_ttid(request.metadata())?;
         let shard = self.extract_shard(request.metadata())?;
-        let req: model::RelSizeRequest = request.get_ref().try_into()?;
+        let req: model::GetRelSizeRequest = request.get_ref().try_into()?;
         let rel = convert_reltag(&req.rel);
 
-        let span = tracing::info_span!("rel_size", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, rel = %rel, req_lsn = %req.common.request_lsn);
+        let span = tracing::info_span!("get_rel_size", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, rel = %rel, req_lsn = %req.read_lsn.request_lsn);
 
         async {
             let timeline = self.get_timeline(ttid, shard).await?;
@@ -201,71 +201,17 @@ impl PageService for PageServiceService {
             let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
             let lsn = Self::wait_or_get_last_lsn(
                 &timeline,
-                req.common.request_lsn,
-                req.common.not_modified_since_lsn,
+                req.read_lsn.request_lsn,
+                req.read_lsn.not_modified_since_lsn,
                 &latest_gc_cutoff_lsn,
                 &ctx,
             )
             .await?;
 
-            let num_blocks = timeline.get_rel_size(rel, Version::Lsn(lsn), &ctx).await?;
+            let num_blocks = timeline.get_rel_size(rel, Version::at(lsn), &ctx).await?;
 
-            Ok(tonic::Response::new(proto::RelSizeResponse { num_blocks }))
-        }
-        .instrument(span)
-        .await
-    }
-
-    async fn get_page(
-        &self,
-        request: tonic::Request<proto::GetPageRequest>,
-    ) -> std::result::Result<tonic::Response<proto::GetPageResponse>, tonic::Status> {
-        let ttid = self.extract_ttid(request.metadata())?;
-        let shard = self.extract_shard(request.metadata())?;
-        let req: model::GetPageRequest = request.get_ref().try_into()?;
-
-        let rel = convert_reltag(&req.rel);
-        let timeline = self.get_timeline(ttid, shard).await?;
-
-        let ctx = self.ctx.with_scope_timeline(&timeline);
-        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(
-            &timeline,
-            req.common.request_lsn,
-            req.common.not_modified_since_lsn,
-            &latest_gc_cutoff_lsn,
-            &ctx,
-        )
-        .await?;
-
-        let shard_id = timeline.tenant_shard_id.shard_number;
-        let span = tracing::info_span!("get_page", tenant_id = %ttid.tenant_id, shard_id = %shard_id, timeline_id = %ttid.timeline_id, rel = %rel, block_number = %req.block_number, req_lsn = %req.common.request_lsn);
-
-        async {
-            let gate_guard = match timeline.gate.enter() {
-                Ok(guard) => guard,
-                Err(_) => {
-                    return Err(tonic::Status::unavailable("timeline is shutting down"));
-                }
-            };
-
-            let io_concurrency = IoConcurrency::spawn_from_conf(self.conf, gate_guard);
-
-            let page_image = timeline
-                .get_rel_page_at_lsn(
-                    rel,
-                    req.block_number,
-                    Version::Lsn(lsn),
-                    &ctx,
-                    io_concurrency,
-                )
-                .await?;
-
-            Ok(tonic::Response::new(proto::GetPageResponse {
-                id: req.id,
-                status: proto::GetPageStatus::Ok as i32,
-                reason: None,
-                page_image,
+            Ok(tonic::Response::new(proto::GetRelSizeResponse {
+                num_blocks,
             }))
         }
         .instrument(span)
@@ -275,7 +221,7 @@ impl PageService for PageServiceService {
     // TODO: take and emit model types
     async fn get_pages(
         &self,
-        request: tonic::Request<tonic::Streaming<proto::GetPageRequestBatch>>,
+        request: tonic::Request<tonic::Streaming<proto::GetPageRequest>>,
     ) -> Result<tonic::Response<Self::GetPagesStream>, tonic::Status> {
         let ttid = self.extract_ttid(request.metadata())?;
         let shard = self.extract_shard(request.metadata())?;
@@ -286,44 +232,56 @@ impl PageService for PageServiceService {
         let mut request_stream = request.into_inner();
 
         let response_stream = try_stream! {
-            while let Some(batch) = request_stream.message().await? {
+            while let Some(request) = request_stream.message().await? {
 
-                // TODO: implement batching
-                for request in batch.requests {
-                    let guard = timeline
+                let guard = timeline
                     .gate
                     .enter()
                     .or(Err(tonic::Status::unavailable("timeline is shutting down")))?;
 
-                    let request: model::GetPageRequest = (&request).try_into()?;
-                    let rel = convert_reltag(&request.rel);
+                let request: model::GetPageRequest = (&request).try_into()?;
+                let rel = convert_reltag(&request.rel);
+
+                let span = tracing::info_span!("get_pages", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, shard_id = %shard, rel = %rel, req_lsn = %request.read_lsn.request_lsn);
+                let result: Result<Vec<bytes::Bytes>, tonic::Status> = async {
                     let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
                     let lsn = Self::wait_or_get_last_lsn(
                         &timeline,
-                        request.common.request_lsn,
-                        request.common.not_modified_since_lsn,
+                        request.read_lsn.request_lsn,
+                        request.read_lsn.not_modified_since_lsn,
                         &latest_gc_cutoff_lsn,
                         &ctx,
                     )
-                    .await?;
-
-                    let page_image = timeline
-                        .get_rel_page_at_lsn(
-                            rel,
-                            request.block_number,
-                            Version::Lsn(lsn),
-                            &ctx,
-                            IoConcurrency::spawn_from_conf(conf, guard),
-                        )
                         .await?;
 
-                    yield proto::GetPageResponse {
-                        id: request.id,
-                        status: proto::GetPageStatus::Ok as i32,
-                        reason: None,
-                        page_image,
-                    };
+                    let io_concurrency = IoConcurrency::spawn_from_conf(conf.get_vectored_concurrent_io, guard);
+
+                    // TODO: use get_rel_page_at_lsn_batched
+                    let mut page_images = Vec::with_capacity(request.block_number.len());
+                    for blkno in request.block_number {
+                        let page_image = timeline
+                            .get_rel_page_at_lsn(
+                                rel,
+                                blkno,
+                                Version::at(lsn),
+                                &ctx,
+                                io_concurrency.clone(),
+                            )
+                            .await?;
+
+                        page_images.push(page_image);
+                    }
+                    Ok(page_images)
                 }
+                .instrument(span)
+                    .await;
+                let page_images = result?;
+                yield proto::GetPageResponse {
+                    request_id: request.request_id,
+                    status: proto::GetPageStatus::Ok as i32,
+                    reason: "".to_string(),
+                    page_image: page_images,
+                };
             }
         };
 
@@ -332,15 +290,15 @@ impl PageService for PageServiceService {
         ))
     }
 
-    async fn db_size(
+    async fn get_db_size(
         &self,
-        request: tonic::Request<proto::DbSizeRequest>,
-    ) -> Result<tonic::Response<proto::DbSizeResponse>, tonic::Status> {
+        request: tonic::Request<proto::GetDbSizeRequest>,
+    ) -> Result<tonic::Response<proto::GetDbSizeResponse>, tonic::Status> {
         let ttid = self.extract_ttid(request.metadata())?;
         let shard = self.extract_shard(request.metadata())?;
-        let req: model::DbSizeRequest = request.get_ref().try_into()?;
+        let req: model::GetDbSizeRequest = request.get_ref().try_into()?;
 
-        let span = tracing::info_span!("get_page", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, db_oid = %req.db_oid, req_lsn = %req.common.request_lsn);
+        let span = tracing::info_span!("get_db_size", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, db_oid = %req.db_oid, req_lsn = %req.read_lsn.request_lsn);
 
         async {
             let timeline = self.get_timeline(ttid, shard).await?;
@@ -348,18 +306,18 @@ impl PageService for PageServiceService {
             let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
             let lsn = Self::wait_or_get_last_lsn(
                 &timeline,
-                req.common.request_lsn,
-                req.common.not_modified_since_lsn,
+                req.read_lsn.request_lsn,
+                req.read_lsn.not_modified_since_lsn,
                 &latest_gc_cutoff_lsn,
                 &ctx,
             )
             .await?;
 
             let total_blocks = timeline
-                .get_db_size(DEFAULTTABLESPACE_OID, req.db_oid, Version::Lsn(lsn), &ctx)
+                .get_db_size(DEFAULTTABLESPACE_OID, req.db_oid, Version::at(lsn), &ctx)
                 .await?;
 
-            Ok(tonic::Response::new(proto::DbSizeResponse {
+            Ok(tonic::Response::new(proto::GetDbSizeResponse {
                 num_bytes: total_blocks as u64 * BLCKSZ as u64,
             }))
         }
@@ -381,14 +339,14 @@ impl PageService for PageServiceService {
         let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             &timeline,
-            req.common.request_lsn,
-            req.common.not_modified_since_lsn,
+            req.read_lsn.request_lsn,
+            req.read_lsn.not_modified_since_lsn,
             &latest_gc_cutoff_lsn,
             &ctx,
         )
         .await?;
 
-        let span = tracing::info_span!("get_base_backup", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, req_lsn = %req.common.request_lsn);
+        let span = tracing::info_span!("get_base_backup", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, req_lsn = %req.read_lsn.request_lsn);
 
         tracing::info!("starting basebackup");
 
@@ -515,7 +473,7 @@ impl PageService for PageServiceService {
         let shard = self.extract_shard(request.metadata())?;
         let req: model::GetSlruSegmentRequest = request.get_ref().try_into()?;
 
-        let span = tracing::info_span!("get_slru_segment", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, kind = %req.kind, segno = %req.segno, req_lsn = %req.common.request_lsn);
+        let span = tracing::info_span!("get_slru_segment", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, kind = %req.kind, segno = %req.segno, req_lsn = %req.read_lsn.request_lsn);
 
         async {
             let timeline = self.get_timeline(ttid, shard).await?;
@@ -523,8 +481,8 @@ impl PageService for PageServiceService {
             let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
             let lsn = Self::wait_or_get_last_lsn(
                 &timeline,
-                req.common.request_lsn,
-                req.common.not_modified_since_lsn,
+                req.read_lsn.request_lsn,
+                req.read_lsn.not_modified_since_lsn,
                 &latest_gc_cutoff_lsn,
                 &ctx,
             )

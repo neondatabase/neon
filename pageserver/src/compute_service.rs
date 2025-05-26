@@ -29,6 +29,7 @@ use tracing::*;
 use utils::auth::SwappableJwtAuth;
 use utils::sync::gate::{Gate, GateGuard};
 
+use crate::basebackup_cache::BasebackupCache;
 use crate::compute_service_grpc::launch_compute_service_grpc_server;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
@@ -83,6 +84,7 @@ pub fn spawn(
     perf_trace_dispatch: Option<Dispatch>,
     tcp_listener: tokio::net::TcpListener,
     tls_config: Option<Arc<rustls::ServerConfig>>,
+    basebackup_cache: Arc<BasebackupCache>,
 ) -> Listener {
     let cancel = CancellationToken::new();
     let libpq_ctx = RequestContext::todo_child(
@@ -105,6 +107,7 @@ pub fn spawn(
             conf.pg_auth_type,
             tls_config,
             conf.page_service_pipelining.clone(),
+            basebackup_cache,
             libpq_ctx,
             cancel.clone(),
         )
@@ -139,6 +142,7 @@ pub async fn compute_connection_listener_main(
     auth_type: AuthType,
     tls_config: Option<Arc<rustls::ServerConfig>>,
     pipelining_config: PageServicePipeliningConfig,
+    basebackup_cache: Arc<BasebackupCache>,
     listener_ctx: RequestContext,
     listener_cancel: CancellationToken,
 ) -> Connections {
@@ -199,6 +203,7 @@ pub async fn compute_connection_listener_main(
                     auth_type,
                     tls_config.clone(),
                     pipelining_config.clone(),
+                    Arc::clone(&basebackup_cache),
                     connection_ctx,
                     connections_cancel.child_token(),
                     gate_guard,
@@ -235,6 +240,7 @@ pub async fn page_service_conn_main(
     auth_type: AuthType,
     tls_config: Option<Arc<rustls::ServerConfig>>,
     pipelining_config: PageServicePipeliningConfig,
+    basebackup_cache: Arc<BasebackupCache>,
     connection_ctx: RequestContext,
     cancel: CancellationToken,
     gate_guard: GateGuard,
@@ -277,6 +283,7 @@ pub async fn page_service_conn_main(
             auth_type,
             tls_config,
             pipelining_config,
+            basebackup_cache,
             connection_ctx,
             cancel,
             gate_guard,

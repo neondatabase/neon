@@ -191,31 +191,6 @@ impl RemoteStorageWrapper {
     }
 
     #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
-    pub async fn put_json<T>(&self, path: &RemotePath, value: &T) -> anyhow::Result<()>
-    where
-        T: serde::Serialize,
-    {
-        let buf = serde_json::to_vec(value)?;
-        let bytes = Bytes::from(buf);
-        utils::backoff::retry(
-            || async {
-                let size = bytes.len();
-                let bytes = futures::stream::once(futures::future::ready(Ok(bytes.clone())));
-                self.storage
-                    .upload_storage_object(bytes, size, path, &self.cancel)
-                    .await
-            },
-            remote_storage::TimeoutOrCancel::caused_by_cancel,
-            1,
-            u32::MAX,
-            &format!("put json {path}"),
-            &self.cancel,
-        )
-        .await
-        .expect("practically infinite retries")
-    }
-
-    #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
     pub async fn get_range(
         &self,
         path: &RemotePath,

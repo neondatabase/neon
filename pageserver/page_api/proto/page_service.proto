@@ -3,11 +3,29 @@
 // This is the compute read path. It primarily serves page versions at given
 // LSNs, but also base backups, SLRU segments, and relation metadata.
 //
-// Request metadata:
+// EXPERIMENTAL: this is still under development and subject to change.
+//
+// Request metadata headers:
 // - authorization: JWT token ("Bearer <token>"), if auth is enabled
 // - neon-tenant-id: tenant ID ("7c4a1f9e3bd6470c8f3e21a65bd2e980")
 // - neon-shard-id: shard ID, as <number><count> in hex ("0b10" = shard 11 of 16, 0-based)
 // - neon-timeline-id: timeline ID ("f08c4e9a2d5f76b1e3a7c2d8910f4b3e")
+//
+// The service can be accessed via e.g. grpcurl:
+//
+//    ```
+//    grpcurl \
+//      -plaintext \
+//      -H "neon-tenant-id: 7c4a1f9e3bd6470c8f3e21a65bd2e980" \
+//      -H "neon-shard-id: 0b10" \
+//      -H "neon-timeline-id: f08c4e9a2d5f76b1e3a7c2d8910f4b3e" \
+//      -H "authorization: Bearer $JWT" \
+//      -d '{"read_lsn": {"request_lsn": 1234567890}, "rel": {"spc_oid": 1663, "db_oid": 1234, "rel_number": 5678, "fork_number": 0}}'
+//      localhost:51051 page_api.PageService/CheckRelExists
+//    ```
+//
+// TODO: consider adding neon-compute-mode ("primary", "static", "replica").
+// However, this will require reconnecting when changing modes.
 //
 // TODO: write implementation guidance on
 // - Health checks
@@ -15,18 +33,17 @@
 // - Compression
 
 syntax = "proto3";
-package page_service;
+package page_api;
 
 service PageService {
-  // Returns the total size of a database, as # of bytes.
-  rpc DbSize (DbSizeRequest) returns (DbSizeResponse);
+  // Returns whether a relation exists.
+  rpc CheckRelExists(CheckRelExistsRequest) returns (CheckRelExistsResponse);
 
   // Fetches a base backup.
   rpc GetBaseBackup (GetBaseBackupRequest) returns (stream GetBaseBackupResponseChunk);
 
-  // Fetches a page.
-  // TODO: remove this and use GetPages. Kept for benchmarks.
-  rpc GetPage (GetPageRequest) returns (GetPageResponse);
+  // Returns the total size of a database, as # of bytes.
+  rpc GetDbSize (GetDbSizeRequest) returns (GetDbSizeResponse);
 
   // Fetches pages.
   //
@@ -34,34 +51,35 @@ service PageService {
   // requests incur costs for e.g. HTTP/2 stream setup, header parsing,
   // authentication, and so on -- with streaming, we only pay these costs during
   // the initial stream setup. This ~doubles throughput in benchmarks. Other
-  // requests use regular unary requests, since they are not as frequent and
+  // RPCs use regular unary requests, since they are not as frequent and
   // performance-critical, and this simplifies implementation.
   //
   // NB: a status response (e.g. errors) will terminate the stream. The stream
   // may be shared by e.g. multiple Postgres backends, so we should avoid this.
   // Most errors are therefore sent as GetPageResponse.status instead.
-  rpc GetPages (stream GetPageRequestBatch) returns (stream GetPageResponse);
-
-  // Fetches an SLRU segment.
-  //
-  // TODO: can these be significantly larger than 256 KB (8 pages)? If so,
-  // consider streaming the response instead.
-  rpc GetSlruSegment (GetSlruSegmentRequest) returns (GetSlruSegmentResponse);
-
-  // Returns whether a relation exists.
-  rpc RelExists(RelExistsRequest) returns (RelExistsResponse);
+  rpc GetPages (stream GetPageRequest) returns (stream GetPageResponse);
 
   // Returns the size of a relation, as # of blocks.
-  rpc RelSize (RelSizeRequest) returns (RelSizeResponse);
+  rpc GetRelSize (GetRelSizeRequest) returns (GetRelSizeResponse);
 
+  // Fetches an SLRU segment.
+  rpc GetSlruSegment (GetSlruSegmentRequest) returns (GetSlruSegmentResponse);
 }
 
-// Common request fields.
-message RequestCommon {
-  // The LSN to read at.
+// The LSN a request should read at.
+message ReadLsn {
+  // The request's read LSN. Required.
   uint64 request_lsn = 1;
-  // If given, the caller guarantees that the page has not been modified
-  // since this LSN.
+  // If given, the caller guarantees that the page has not been modified since
+  // this LSN. Must be smaller than or equal to request_lsn. This allows the
+  // Pageserver to serve an old page without waiting for the request LSN to
+  // arrive. Valid for all request types.
+  //
+  // It is undefined behaviour to make a request such that the page was, in
+  // fact, modified between request_lsn and not_modified_since_lsn. The
+  // Pageserver might detect it and return an error, or it might return the old
+  // page version or the new page version. Setting not_modified_since_lsn equal
+  // to request_lsn is always safe, but can lead to unnecessary waiting.
   uint64 not_modified_since_lsn = 2;
 }
 
@@ -73,22 +91,21 @@ message RelTag {
     uint32 fork_number = 4;
 }
 
-// Requests the size of a database, as # of bytes. This is only accurate on
-// shard 0; other shards will return their view of the database according to
-// which pages they have.
-message DbSizeRequest {
-  RequestCommon common = 1;
-  uint32 db_oid = 2;
+// Checks whether a relation exists, at the given LSN. Only valid on shard 0,
+// other shards will error.
+message CheckRelExistsRequest {
+  ReadLsn read_lsn = 1;
+  RelTag rel = 2;
 }
 
-message DbSizeResponse {
-  uint64 num_bytes = 1;
+message CheckRelExistsResponse {
+  bool exists = 1;
 }
 
 // Requests a base backup at a given LSN.
 message GetBaseBackupRequest {
   // The LSN to fetch a base backup at.
-  RequestCommon common = 1;
+  ReadLsn read_lsn = 1;
   // If true, logical replication slots will not be created.
   bool replica = 2;
 }
@@ -100,19 +117,43 @@ message GetBaseBackupResponseChunk {
   bytes chunk = 1;
 }
 
-// Requests a single page.
+// Requests the size of a database, as # of bytes. Only valid on shard 0, other
+// shards will error.
+message GetDbSizeRequest {
+  ReadLsn read_lsn = 1;
+  uint32 db_oid = 2;
+}
+
+message GetDbSizeResponse {
+  uint64 num_bytes = 1;
+}
+
+// Requests one or more pages.
 message GetPageRequest {
   // A request ID. Will be included in the response. Should be unique for
   // in-flight requests on the stream.
-  uint64 id = 1;
-  // The LSN to read at.
-  RequestCommon common = 2;
-  // The relation to read from.
-  RelTag rel = 3;
-  // The page number to read. Must belong to the remote shard.
-  uint32 block_number = 4;
+  uint64 request_id = 1;
   // The request class.
-  GetPageClass class = 5;
+  GetPageClass request_class = 2;
+  // The LSN to read at.
+  ReadLsn read_lsn = 3;
+  // The relation to read from.
+  RelTag rel = 4;
+  // Page numbers to read. Must belong to the remote shard.
+  //
+  // Multiple pages will be executed as a single batch by the Pageserver,
+  // amortizing layer access costs and parallelizing them. This may increase the
+  // latency of any individual request, but improves the overall latency and
+  // throughput of the batch as a whole.
+  //
+  // TODO: this causes an allocation in the common single-block case. The sender
+  // can use a SmallVec to stack-allocate it, but Prost will always deserialize
+  // into a heap-allocated Vec. Consider optimizing this.
+  //
+  // TODO: we might be able to avoid a sort or something if we mandate that these
+  // are always in order. But we can't currenly rely on this on the server, because
+  // of compatibility with the libpq protocol handler.
+  repeated uint32 block_number = 5;
 }
 
 // A GetPageRequest class. Primarily intended for observability, but may also be
@@ -123,31 +164,27 @@ enum GetPageClass {
   GET_PAGE_CLASS_UNKNOWN = 0;
   // A normal request. This is the default.
   GET_PAGE_CLASS_NORMAL = 1;
-  // A prefetch request.
+  // A prefetch request. NB: can only be classified on pg < 18.
   GET_PAGE_CLASS_PREFETCH = 2;
+  // A background request (e.g. vacuum).
+  GET_PAGE_CLASS_BACKGROUND = 3;
 }
 
-// A batch of GetPage requests. These will be executed as a single batch by the
-// Pageserver, amortizing layer access costs and parallelizing them. This may
-// increase the latency of any individual request, but improves the overall
-// latency and throughput of the batch as a whole.
+// A GetPage response.
 //
-// Responses will be emitted individually, as soon as they are ready. They may
-// be emitted in a different order than the requests.
-message GetPageRequestBatch {
-  repeated GetPageRequest requests = 1;
-}
-
-// A GetPage response. May be emitted out of order.
+// A batch response will contain all of the requested pages. We could eagerly
+// emit individual pages as soon as they are ready, but on a readv() Postgres
+// holds buffer pool locks on all pages in the batch and we'll only return once
+// the entire batch is ready, so no one can make use of the individual pages.
 message GetPageResponse {
   // The original request's ID.
-  uint64 id = 1;
+  uint64 request_id = 1;
   // The response status code.
   GetPageStatus status = 2;
   // A string describing the status, if any.
-  optional string reason = 3;
-  // The 8KB page image. Empty if status != OK.
-  bytes page_image = 4;
+  string reason = 3;
+  // The 8KB page images, in the same order as the request. Empty if status != OK.
+  repeated bytes page_image = 4;
 }
 
 // A GetPageResponse status code. Since we use a bidirectional stream, we don't
@@ -163,46 +200,34 @@ enum GetPageStatus {
   GET_PAGE_STATUS_NOT_FOUND = 2;
   // The request was invalid.
   GET_PAGE_STATUS_INVALID = 3;
-  // The client is rate limited. Slow down and retry later.
-  // TODO: should we use this?
+  // The tenant is rate limited. Slow down and retry later.
   GET_PAGE_STATUS_SLOW_DOWN = 4;
+  // TODO: consider adding a GET_PAGE_STATUS_LAYER_DOWNLOAD in the case of a
+  // layer download. This could free up the server task to process other
+  // requests while the layer download is in progress.
 }
 
-// Requests an SLRU segment.
+// Fetches the size of a relation at a given LSN, as # of blocks. Only valid on
+// shard 0, other shards will error.
+message GetRelSizeRequest {
+  ReadLsn read_lsn = 1;
+  RelTag rel = 2;
+}
+
+message GetRelSizeResponse {
+  uint32 num_blocks = 1;
+}
+
+// Requests an SLRU segment. Only valid on shard 0, other shards will error.
 message GetSlruSegmentRequest {
-  RequestCommon common = 1;
+  ReadLsn read_lsn = 1;
   uint32 kind = 2;
   uint32 segno = 3;
 }
 
 // Returns an SLRU segment.
 //
-// TODO: can these be significantly larger than 256 KB (8 pages)? If so,
-// consider chunking and streaming the response instead.
+// These are up 32 pages (256 KB), so we can send them as a single response.
 message GetSlruSegmentResponse {
   bytes segment = 1;
-}
-
-// Checks whether a relation exists, at the given LSN. This is only accurate on
-// shard 0; other shards will return their view of the relation according to
-// which pages they have.
-message RelExistsRequest {
-  RequestCommon common = 1;
-  RelTag rel = 2;
-}
-
-message RelExistsResponse {
-  bool exists = 1;
-}
-
-// Fetches the size of a relation at a given LSN, as # of blocks. This is only
-// accurate on shard 0; other shards will return their view of the relation
-// according to which pages they have.
-message RelSizeRequest {
-  RequestCommon common = 1;
-  RelTag rel = 2;
-}
-
-message RelSizeResponse {
-  uint32 num_blocks = 1;
 }

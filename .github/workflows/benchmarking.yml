@@ -53,6 +53,77 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  cleanup:
+    runs-on: [ self-hosted, us-east-2, x64 ]
+    container:
+      image: ghcr.io/neondatabase/build-tools:pinned-bookworm
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --init
+    env:
+      ORG_ID: org-solitary-dew-09443886
+      LIMIT: 100
+      SEARCH: "GITHUB_RUN_ID="
+      BASE_URL: https://console-stage.neon.build/api/v2
+      DRY_RUN: "false"  # Set to "true" to just test out the workflow
+
+    steps:
+    - name: Harden the runner (Audit all outbound calls)
+      uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+      with:
+        egress-policy: audit
+
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+    - name: Cleanup inactive Neon projects left over from prior runs
+      env:
+        API_KEY: ${{ secrets.NEON_STAGING_API_KEY }}
+      run: |
+        set -euo pipefail
+
+        NOW=$(date -u +%s)
+        DAYS_AGO=$((NOW - 5 * 86400))
+
+        REQUEST_URL="$BASE_URL/projects?limit=$LIMIT&search=$(printf '%s' "$SEARCH" | jq -sRr @uri)&org_id=$ORG_ID"
+
+        echo "Requesting project list from:"
+        echo "$REQUEST_URL"
+
+        response=$(curl -s -X GET "$REQUEST_URL" \
+          --header "Accept: application/json" \
+          --header "Content-Type: application/json" \
+          --header "Authorization: Bearer ${API_KEY}" )
+
+        echo "Response:"
+        echo "$response" | jq .
+
+        projects_to_delete=$(echo "$response" | jq --argjson cutoff "$DAYS_AGO" '
+          .projects[]
+          | select(.compute_last_active_at != null)
+          | select((.compute_last_active_at | fromdateiso8601) < $cutoff)
+          | {id, name, compute_last_active_at}
+        ')
+
+        if [ -z "$projects_to_delete" ]; then
+          echo "No projects eligible for deletion."
+          exit 0
+        fi
+
+        echo "Projects that will be deleted:"
+        echo "$projects_to_delete" | jq -r '.id'
+
+        if [ "$DRY_RUN" = "false" ]; then
+          echo "$projects_to_delete" | jq -r '.id' | while read -r project_id; do
+            echo "Deleting project: $project_id"
+            curl -s -X DELETE "$BASE_URL/projects/$project_id" \
+              --header "Accept: application/json" \
+              --header "Content-Type: application/json" \
+              --header "Authorization: Bearer ${API_KEY}" 
+          done
+        else
+          echo "Dry run enabled — no projects were deleted."
+        fi
   bench:
     if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
     permissions:

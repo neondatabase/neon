@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::os::fd::AsRawFd;
+use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -31,7 +33,7 @@ pub struct CommunicatorWorkerProcessStruct<'a> {
 
     pub(crate) cache: IntegratedCacheWriteAccess<'a>,
 
-    submission_pipe_read_raw_fd: i32,
+    submission_pipe_read_fd: OwnedFd,
 
     next_request_id: AtomicU64,
 
@@ -139,7 +141,7 @@ pub(super) async fn init(
         neon_request_slots: cis.neon_request_slots,
         pageserver_client,
         cache,
-        submission_pipe_read_raw_fd: cis.submission_pipe_read_fd,
+        submission_pipe_read_fd: cis.submission_pipe_read_fd,
         next_request_id: AtomicU64::new(1),
         in_progress_table: RequestInProgressTable::new(),
 
@@ -173,8 +175,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         let mut idxbuf: [u8; 4] = [0; 4];
 
         let mut submission_pipe_read =
-            PipeRead::from_raw_fd_checked(self.submission_pipe_read_raw_fd)
-                .expect("invalid pipe fd");
+            PipeRead::try_from(self.submission_pipe_read_fd.as_raw_fd()).expect("invalid pipe fd");
 
         loop {
             // Wait for a backend to ring the doorbell
@@ -218,8 +219,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         }
     }
 
-    fn request_common(&self, not_modified_since_lsn: Lsn) -> model::RequestCommon {
-        model::RequestCommon {
+    fn request_lsns(&self, not_modified_since_lsn: Lsn) -> model::ReadLsn {
+        model::ReadLsn {
             request_lsn: get_request_lsn(),
             not_modified_since_lsn,
         }
@@ -246,8 +247,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
 
                 match self
                     .pageserver_client
-                    .process_rel_exists_request(&model::RelExistsRequest {
-                        common: self.request_common(not_modified_since),
+                    .process_check_rel_exists_request(&model::CheckRelExistsRequest {
+                        read_lsn: self.request_lsns(not_modified_since),
                         rel,
                     })
                     .await
@@ -277,11 +278,11 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     CacheResult::NotFound(lsn) => lsn,
                 };
 
-                let common = self.request_common(not_modified_since);
+                let read_lsn = self.request_lsns(not_modified_since);
                 match self
                     .pageserver_client
-                    .process_rel_size_request(&model::RelSizeRequest {
-                        common: common.clone(),
+                    .process_get_rel_size_request(&model::GetRelSizeRequest {
+                        read_lsn,
                         rel: rel.clone(),
                     })
                     .await
@@ -333,8 +334,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
 
                 match self
                     .pageserver_client
-                    .process_dbsize_request(&model::DbSizeRequest {
-                        common: self.request_common(not_modified_since),
+                    .process_get_dbsize_request(&model::GetDbSizeRequest {
+                        read_lsn: self.request_lsns(not_modified_since),
                         db_oid: req.db_oid,
                     })
                     .await
@@ -457,17 +458,19 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             match self
                 .pageserver_client
                 .get_page(&model::GetPageRequest {
-                    id: self.next_request_id.fetch_add(1, Ordering::Relaxed),
-                    common: self.request_common(not_modified_since),
+                    request_id: self.next_request_id.fetch_add(1, Ordering::Relaxed),
+                    request_class: model::GetPageClass::Normal,
+                    read_lsn: self.request_lsns(not_modified_since),
                     rel: rel.clone(),
-                    block_number: *blkno,
-                    class: model::GetPageClass::Normal,
+                    block_number: vec![*blkno],
                 })
                 .await
             {
-                Ok(page_image) => {
+                Ok(page_images) => {
                     // Write the received page image directly to the shared memory location
                     // that the backend requested.
+                    assert!(page_images.len() == 1);
+                    let page_image = page_images[0].clone();
                     let src: &[u8] = page_image.as_ref();
                     let len = std::cmp::min(src.len(), dest.bytes_total() as usize);
                     unsafe {
@@ -533,19 +536,21 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             match self
                 .pageserver_client
                 .get_page(&model::GetPageRequest {
-                    id: self.next_request_id.fetch_add(1, Ordering::Relaxed),
-                    common: self.request_common(not_modified_since),
+                    request_id: self.next_request_id.fetch_add(1, Ordering::Relaxed),
+                    request_class: model::GetPageClass::Prefetch,
+                    read_lsn: self.request_lsns(not_modified_since),
                     rel: rel.clone(),
-                    block_number: *blkno,
-                    class: model::GetPageClass::Prefetch,
+                    block_number: vec![*blkno],
                 })
                 .await
             {
-                Ok(page_image) => {
+                Ok(page_images) => {
                     trace!(
                         "prefetch completed, remembering blk {} in rel {:?} in LFC",
                         *blkno, rel
                     );
+                    assert!(page_images.len() == 1);
+                    let page_image = page_images[0].clone();
                     self.cache
                         .remember_page(&rel, *blkno, page_image, not_modified_since, false)
                         .await;

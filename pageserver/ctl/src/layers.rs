@@ -10,6 +10,7 @@ use pageserver::tenant::storage_layer::{DeltaLayer, ImageLayer, delta_layer, ima
 use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use pageserver::virtual_file::api::IoMode;
 use pageserver::{page_cache, virtual_file};
+use pageserver_api::key::Key;
 use utils::id::{TenantId, TimelineId};
 
 use crate::layer_map_analyzer::parse_filename;
@@ -27,6 +28,7 @@ pub(crate) enum LayerCmd {
         path: PathBuf,
         tenant: String,
         timeline: String,
+        key: Option<Key>,
     },
     /// Dump all information of a layer file
     DumpLayer {
@@ -100,6 +102,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             path,
             tenant,
             timeline,
+            key,
         } => {
             let timeline_path = path
                 .join(TENANTS_SEGMENT_NAME)
@@ -107,20 +110,36 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                 .join(TIMELINES_SEGMENT_NAME)
                 .join(timeline);
             let mut idx = 0;
+            let mut to_print = Vec::default();
             for layer in fs::read_dir(timeline_path)? {
                 let layer = layer?;
                 if let Ok(layer_file) = parse_filename(&layer.file_name().into_string().unwrap()) {
-                    println!(
-                        "[{:3}]  key:{}-{}\n       lsn:{}-{}\n       delta:{}",
-                        idx,
-                        layer_file.key_range.start,
-                        layer_file.key_range.end,
-                        layer_file.lsn_range.start,
-                        layer_file.lsn_range.end,
-                        layer_file.is_delta,
-                    );
+                    if let Some(key) = key {
+                        if layer_file.key_range.start <= *key && *key < layer_file.key_range.end {
+                            to_print.push((idx, layer_file));
+                        }
+                    } else {
+                        to_print.push((idx, layer_file));
+                    }
                     idx += 1;
                 }
+            }
+
+            if key.is_some() {
+                to_print
+                    .sort_by_key(|(_idx, layer_file)| std::cmp::Reverse(layer_file.lsn_range.end));
+            }
+
+            for (idx, layer_file) in to_print {
+                println!(
+                    "[{:3}]  key:{}-{}\n       lsn:{}-{}\n       delta:{}",
+                    idx,
+                    layer_file.key_range.start,
+                    layer_file.key_range.end,
+                    layer_file.lsn_range.start,
+                    layer_file.lsn_range.end,
+                    layer_file.is_delta,
+                );
             }
             Ok(())
         }
