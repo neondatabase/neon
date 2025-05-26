@@ -1103,7 +1103,6 @@ async fn query_to_json<T: GenericClient>(
 
     let columns_len = row_stream.statement.columns().len();
     let mut fields = Vec::with_capacity(columns_len);
-    let mut types = Vec::with_capacity(columns_len);
 
     for c in row_stream.statement.columns() {
         fields.push(json!({
@@ -1115,8 +1114,6 @@ async fn query_to_json<T: GenericClient>(
             "dataTypeModifier": c.type_modifier(),
             "format": "text",
         }));
-
-        types.push(c.type_().clone());
     }
 
     let raw_output = parsed_headers.raw_output;
@@ -1138,7 +1135,7 @@ async fn query_to_json<T: GenericClient>(
             ));
         }
 
-        let row = pg_text_row_to_json(&row, &types, raw_output, array_mode)?;
+        let row = pg_text_row_to_json(&row, raw_output, array_mode)?;
         rows.push(row);
 
         // assumption: parsing pg text and converting to json takes CPU time.
