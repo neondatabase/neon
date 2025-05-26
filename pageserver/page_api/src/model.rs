@@ -584,6 +584,7 @@ impl TryFrom<GetSlruSegmentResponse> for proto::GetSlruSegmentResponse {
     type Error = ProtocolError;
 
     fn try_from(segment: GetSlruSegmentResponse) -> Result<Self, Self::Error> {
+        // TODO: can a segment legitimately be empty?
         if segment.is_empty() {
             return Err(ProtocolError::Missing("segment"));
         }

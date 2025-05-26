@@ -950,6 +950,18 @@ pub(crate) enum WaitLsnError {
     Timeout(String),
 }
 
+impl From<WaitLsnError> for tonic::Status {
+    fn from(err: WaitLsnError) -> Self {
+        use tonic::Code;
+        let code = match &err {
+            WaitLsnError::Timeout(_) => Code::Internal,
+            WaitLsnError::BadState(_) => Code::Internal,
+            WaitLsnError::Shutdown => Code::Unavailable,
+        };
+        tonic::Status::new(code, format!("{err}"))
+    }
+}
+
 // The impls below achieve cancellation mapping for errors.
 // Perhaps there's a way of achieving this with less cruft.
 
