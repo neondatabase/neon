@@ -134,7 +134,9 @@ fn pg_text_to_json(
     pg_type: &Type,
 ) -> Result<(), JsonConversionError> {
     if let Kind::Array(elem_type) = pg_type.kind() {
-        *output = pg_array_parse(val, elem_type)?;
+        let mut array = vec![];
+        pg_array_parse(&mut array, val, elem_type)?;
+        *output = Value::Array(array);
         return Ok(());
     }
 
@@ -170,19 +172,23 @@ fn pg_text_to_json(
 // values. Unlike postgres we don't check that all nested arrays have the same
 // dimensions, we just return them as is.
 //
-fn pg_array_parse(pg_array: &str, elem_type: &Type) -> Result<Value, JsonConversionError> {
-    pg_array_parse_inner(pg_array, elem_type, false).map(|(v, _)| v)
+fn pg_array_parse(
+    entries: &mut Vec<Value>,
+    pg_array: &str,
+    elem_type: &Type,
+) -> Result<(), JsonConversionError> {
+    pg_array_parse_inner(entries, pg_array, elem_type, false).map(|_| ())
 }
 
 fn pg_array_parse_inner(
+    entries: &mut Vec<Value>,
     pg_array: &str,
     elem_type: &Type,
     nested: bool,
-) -> Result<(Value, usize), JsonConversionError> {
+) -> Result<usize, JsonConversionError> {
     let mut pg_array_chr = pg_array.char_indices();
     let mut level = 0;
     let mut quote = false;
-    let mut entries: Vec<Value> = Vec::new();
     let mut entry = String::new();
 
     // skip bounds decoration
@@ -232,8 +238,9 @@ fn pg_array_parse_inner(
             '{' if !quote => {
                 level += 1;
                 if level > 1 {
-                    let (res, off) = pg_array_parse_inner(&pg_array[i..], elem_type, true)?;
-                    entries.push(res);
+                    let mut array = vec![];
+                    let off = pg_array_parse_inner(&mut array, &pg_array[i..], elem_type, true)?;
+                    entries.push(Value::Array(array));
                     for _ in 0..off - 1 {
                         pg_array_chr.next();
                     }
@@ -242,9 +249,9 @@ fn pg_array_parse_inner(
             '}' if !quote => {
                 level -= 1;
                 if level == 0 {
-                    push_checked(&mut entry, &mut entries, elem_type)?;
+                    push_checked(&mut entry, entries, elem_type)?;
                     if nested {
-                        return Ok((Value::Array(entries), i));
+                        return Ok(i);
                     }
                 }
             }
@@ -260,7 +267,7 @@ fn pg_array_parse_inner(
                 quote = !quote;
             }
             ',' if !quote => {
-                push_checked(&mut entry, &mut entries, elem_type)?;
+                push_checked(&mut entry, entries, elem_type)?;
             }
             _ => {
                 entry.push(c);
@@ -272,7 +279,7 @@ fn pg_array_parse_inner(
         return Err(JsonConversionError::UnbalancedArray);
     }
 
-    Ok((Value::Array(entries), 0))
+    Ok(0)
 }
 
 #[cfg(test)]
@@ -342,6 +349,12 @@ mod tests {
         v
     }
 
+    fn pg_array_parse(pg_array: &str, pg_type: &Type) -> Value {
+        let mut array = vec![];
+        super::pg_array_parse(&mut array, pg_array, pg_type).unwrap();
+        Value::Array(array)
+    }
+
     #[test]
     fn test_atomic_types_parse() {
         assert_eq!(pg_text_to_json("foo", &Type::TEXT), json!("foo"));
@@ -375,7 +388,7 @@ mod tests {
     #[test]
     fn test_pg_array_parse_text() {
         fn pt(pg_arr: &str) -> Value {
-            pg_array_parse(pg_arr, &Type::TEXT).unwrap()
+            pg_array_parse(pg_arr, &Type::TEXT)
         }
         assert_eq!(
             pt(r#"{"aa\"\\\,a",cha,"bbbb"}"#),
@@ -398,7 +411,7 @@ mod tests {
     #[test]
     fn test_pg_array_parse_bool() {
         fn pb(pg_arr: &str) -> Value {
-            pg_array_parse(pg_arr, &Type::BOOL).unwrap()
+            pg_array_parse(pg_arr, &Type::BOOL)
         }
         assert_eq!(pb(r#"{t,f,t}"#), json!([true, false, true]));
         assert_eq!(pb(r#"{{t,f,t}}"#), json!([[true, false, true]]));
@@ -415,7 +428,7 @@ mod tests {
     #[test]
     fn test_pg_array_parse_numbers() {
         fn pn(pg_arr: &str, ty: &Type) -> Value {
-            pg_array_parse(pg_arr, ty).unwrap()
+            pg_array_parse(pg_arr, ty)
         }
         assert_eq!(pn(r#"{1,2,3}"#, &Type::INT4), json!([1, 2, 3]));
         assert_eq!(pn(r#"{1,2,3}"#, &Type::INT2), json!([1, 2, 3]));
@@ -443,7 +456,7 @@ mod tests {
     #[test]
     fn test_pg_array_with_decoration() {
         fn p(pg_arr: &str) -> Value {
-            pg_array_parse(pg_arr, &Type::INT2).unwrap()
+            pg_array_parse(pg_arr, &Type::INT2)
         }
         assert_eq!(
             p(r#"[1:1][-2:-1][3:5]={{{1,2,3},{4,5,6}}}"#),
@@ -454,7 +467,7 @@ mod tests {
     #[test]
     fn test_pg_array_parse_json() {
         fn pt(pg_arr: &str) -> Value {
-            pg_array_parse(pg_arr, &Type::JSONB).unwrap()
+            pg_array_parse(pg_arr, &Type::JSONB)
         }
         assert_eq!(pt(r#"{"{}"}"#), json!([{}]));
         assert_eq!(
