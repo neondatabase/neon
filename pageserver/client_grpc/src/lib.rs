@@ -22,7 +22,7 @@ use utils::shard::ShardIndex;
 use std::fmt::Debug;
 mod client_cache;
 
-use metrics::{IntCounter, IntCounterVec, core::Collector};
+use metrics::{IntCounterVec, core::Collector};
 
 #[derive(Error, Debug)]
 pub enum PageserverClientError {

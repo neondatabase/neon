@@ -1,8 +1,7 @@
 use std::{
-    collections::{BinaryHeap, HashMap},
+    collections::{HashMap},
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
     io::{self, Error, ErrorKind},
@@ -11,7 +10,7 @@ use std::{
 use priority_queue::PriorityQueue;
 
 use tokio::{
-    sync::{Mutex, mpsc, watch, Semaphore, OwnedSemaphorePermit},
+    sync::{Mutex, Semaphore, OwnedSemaphorePermit},
     time::sleep,
     net::TcpStream,
     io::{AsyncRead, AsyncWrite, ReadBuf},
@@ -32,31 +31,10 @@ use rand::{
     SeedableRng
 };
 
-use tower::service_fn;
 use http::Uri;
 use hyper_util::rt::TokioIo;
 use bytes::BytesMut;
-use futures::future;
-use http::Uri;
-use hyper_util::rt::TokioIo;
-use rand::{Rng, SeedableRng, rngs::StdRng};
-use std::io::{self, Error, ErrorKind};
-use std::{
-    pin::Pin,
-    task::{Context, Poll},
-};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::TcpStream;
 use tower::service_fn;
-use uuid;
-
-use metrics::{
-    {Encoder, TextEncoder},
-    proto::MetricFamily,
-};
-
-// use info
-use tracing::info;
 
 use tokio_util::sync::CancellationToken;
 
@@ -240,7 +218,6 @@ pub struct PooledClient {
     pool: Arc<ConnectionPool>,
     id: uuid::Uuid,
     permit: OwnedSemaphorePermit,
-    is_ok: bool,
 }
 
 impl ConnectionPool {
@@ -356,7 +333,7 @@ impl ConnectionPool {
 
         // Pop the highest-active-consumers connection. There are no connections
         // in the heap that have more than max_consumers active consumers.
-        if let Some((id, cons)) = inner.pq.pop() {
+        if let Some((id, _cons)) = inner.pq.pop() {
             let entry = inner.entries.get_mut(&id)
                 .expect("pq and entries got out of sync");
 
@@ -369,7 +346,6 @@ impl ConnectionPool {
                 pool: Arc::clone(&self),
                 id,
                 permit: permit,
-                is_ok: true,
             };
 
             // re‐insert with updated priority
@@ -437,7 +413,6 @@ impl ConnectionPool {
                         let mut inner = self_clone.inner.lock().await;
                         inner.waiters += 1;
                         if inner.waiters >= (inner.in_progress * self_clone.max_consumers) {
-                            semaphore = Arc::clone(&self_clone.channel_semaphore);
                             let self_clone_spawn = Arc::clone(&self_clone);
                             tokio::task::spawn(async move {
                                 self_clone_spawn.create_connection().await;

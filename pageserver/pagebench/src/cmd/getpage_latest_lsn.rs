@@ -171,7 +171,7 @@ pub(crate) fn main(args: Args) -> anyhow::Result<()> {
     })
 }
 async fn get_metrics(State(state): State<Arc<pageserver_client_grpc::PageserverClientAggregateMetrics>>) -> Response {
-    use metrics::core::Collector;
+
     let metrics = state.collect();
 
     info!("metrics: {metrics:?}");
