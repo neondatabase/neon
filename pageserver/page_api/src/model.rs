@@ -22,9 +22,9 @@ use crate::proto;
 /// A protocol error. Typically returned via try_from() or try_into().
 #[derive(thiserror::Error, Debug)]
 pub enum ProtocolError {
-    #[error("field `{0}` has invalid value `{1}`")]
+    #[error("field '{0}' has invalid value '{1}'")]
     Invalid(&'static str, String),
-    #[error("required field `{0}` is missing")]
+    #[error("required field '{0}' is missing")]
     Missing(&'static str),
 }
 
