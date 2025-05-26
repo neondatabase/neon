@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -ex
 cd "$(dirname "${0}")"
 PG_REGRESS=$(dirname "$(pg_config --pgxs)")/../test/regress/pg_regress
