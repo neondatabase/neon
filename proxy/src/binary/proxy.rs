@@ -546,12 +546,10 @@ pub async fn run() -> anyhow::Result<()> {
             if let Some(mut redis_kv_client) = redis_kv_client {
                 maintenance_tasks.spawn(async move {
                     redis_kv_client.try_connect().await?;
-                    cancellation_handler.init_tx(Arc::new(BatchQueue::new(
-                        CancellationProcessor {
-                            client: redis_kv_client,
-                            batch_size: args.cancellation_batch_size,
-                        },
-                    )));
+                    cancellation_handler.init_tx(BatchQueue::new(CancellationProcessor {
+                        client: redis_kv_client,
+                        batch_size: args.cancellation_batch_size,
+                    }));
 
                     // `handle_cancel_messages` was terminated due to the tx_cancel
                     // being dropped. this is not worthy of an error, and this task can only return `Err`,

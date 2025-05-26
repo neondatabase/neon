@@ -146,7 +146,7 @@ pub struct CancellationHandler {
     compute_config: &'static ComputeConfig,
     // rate limiter of cancellation requests
     limiter: Arc<std::sync::Mutex<LeakyBucketRateLimiter<IpSubnetKey>>>,
-    tx: OnceLock<Arc<BatchQueue<CancellationProcessor>>>, // send messages to the redis KV client task
+    tx: OnceLock<BatchQueue<CancellationProcessor>>, // send messages to the redis KV client task
 }
 
 #[derive(Debug, Error)]
@@ -208,7 +208,7 @@ impl CancellationHandler {
         }
     }
 
-    pub fn init_tx(&self, queue: Arc<BatchQueue<CancellationProcessor>>) {
+    pub fn init_tx(&self, queue: BatchQueue<CancellationProcessor>) {
         self.tx
             .set(queue)
             .map_err(|_| {})
