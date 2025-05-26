@@ -409,6 +409,7 @@ def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder, snapshots
             "new_timeline_id": str(snapshot_branchpoint_old),
             "ancestor_start_lsn": str(branchpoint_y),
             "ancestor_timeline_id": str(env.initial_timeline),
+            "read_only": True,
         },
     )
     env.neon_cli.mappings_map_branch(
