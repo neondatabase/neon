@@ -490,7 +490,6 @@ pub struct Service {
     config: Config,
     persistence: Arc<Persistence>,
     compute_hook: Arc<ComputeHook>,
-    sk_ps_disovery: Arc<sk_ps_discovery::ActorClient>,
     result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResultRequest>,
 
     heartbeater_ps: Heartbeater<Node, PageserverState>,
@@ -1762,8 +1761,6 @@ impl Service {
             cancel.clone(),
         );
 
-        let sk_ps_discovery = sk_ps_discovery::spawn(persistence.clone());
-
         let initial_leadership_status = if config.start_as_candidate {
             LeadershipStatus::Candidate
         } else {
@@ -1783,7 +1780,6 @@ impl Service {
             config: config.clone(),
             persistence,
             compute_hook: Arc::new(ComputeHook::new(config.clone())?),
-            sk_ps_disovery,
             result_tx,
             heartbeater_ps,
             heartbeater_sk,
