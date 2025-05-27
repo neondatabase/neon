@@ -54,24 +54,8 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
 
     secondary_conn = secondary.connect()
     secondary_cur = secondary_conn.cursor()
-
-    if env.pg_version is PgVersion.V14:
-        assert secondary.pgdata_dir
-        signalfile = secondary.pgdata_dir / "standby.signal"
-        assert signalfile.exists()
-        signalfile.unlink()
-
-        promoted = False
-        while not promoted:
-            with secondary.connect() as try_it:
-                try_cursor = try_it.cursor()
-                try_cursor.execute(
-                    "SELECT setting FROM pg_settings WHERE name = 'transaction_read_only'"
-                )
-                promoted = ("off",) == try_cursor.fetchone()
-    else:
-        secondary_cur.execute("SELECT * FROM pg_promote()")
-        assert secondary_cur.fetchone() == (True,)
+    secondary_cur.execute("SELECT * FROM pg_promote()")
+    assert secondary_cur.fetchone() == (True,)
 
     secondary_conn = secondary.connect()
     secondary_cur = secondary_conn.cursor()
