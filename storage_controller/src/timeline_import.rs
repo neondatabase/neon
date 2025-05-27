@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use pageserver_api::models::{ShardImportProgress, ShardImportStatus};
 use tokio_util::sync::CancellationToken;
+use utils::sync::gate::Gate;
 use utils::{
     id::{TenantId, TimelineId},
     shard::ShardIndex,
@@ -55,6 +56,8 @@ pub(crate) enum TimelineImportUpdateFollowUp {
 pub(crate) enum TimelineImportFinalizeError {
     #[error("Shut down interrupted import finalize")]
     ShuttingDown,
+    #[error("Import finalization was cancelled")]
+    Cancelled,
     #[error("Mismatched shard detected during import finalize: {0}")]
     MismatchedShards(ShardIndex),
 }
@@ -162,6 +165,11 @@ impl TimelineImport {
             Some(serde_json::to_string(&shard_errors).unwrap())
         }
     }
+}
+
+pub(crate) struct FinalizingImport {
+    pub(crate) gate: Gate,
+    pub(crate) cancel: CancellationToken,
 }
 
 pub(crate) type ImportResult = Result<(), String>;
