@@ -6,6 +6,7 @@ use anyhow::{Context, Ok, bail, ensure};
 use arc_swap::ArcSwapOption;
 use clap::ValueEnum;
 use remote_storage::RemoteStorageConfig;
+use tokio_metrics::TaskMonitor;
 
 use crate::auth::backend::AuthRateLimiter;
 use crate::auth::backend::jwt::JwkCache;
@@ -28,6 +29,7 @@ pub struct ProxyConfig {
     pub wake_compute_retry_config: RetryConfig,
     pub connect_compute_locks: ApiLocks<Host>,
     pub connect_to_compute: ComputeConfig,
+    pub passthrough_task_monitor: TaskMonitor,
 }
 
 pub struct ComputeConfig {
