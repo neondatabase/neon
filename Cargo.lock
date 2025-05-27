@@ -5268,6 +5268,7 @@ dependencies = [
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
  "tokio",
+ "tokio-metrics",
  "tokio-postgres",
  "tokio-postgres2",
  "tokio-rustls 0.26.2",
@@ -7324,6 +7325,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.100",
+]
+
+[[package]]
+name = "tokio-metrics"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7817b32d36c9b94744d7aa3f8fc13526aa0f5112009d7045f3c659413a6e44ac"
+dependencies = [
+ "futures-util",
+ "pin-project-lite",
+ "tokio",
+ "tokio-stream",
 ]
 
 [[package]]

@@ -167,7 +167,12 @@ pub async fn task_main(
                 Ok(Some(p)) => {
                     ctx.set_success();
                     let _disconnect = ctx.log_connect();
-                    match p.proxy_pass(&config.connect_to_compute).await {
+                    match tokio_metrics::TaskMonitor::instrument(
+                        &config.passthrough_task_monitor,
+                        p.proxy_pass(&config.connect_to_compute),
+                    )
+                    .await
+                    {
                         Ok(()) => {}
                         Err(ErrorSource::Client(e)) => {
                             warn!(

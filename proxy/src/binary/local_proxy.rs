@@ -14,6 +14,7 @@ use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
+use tokio_metrics::TaskMonitor;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use utils::sentry_init::init_sentry;
@@ -112,7 +113,7 @@ pub async fn run() -> anyhow::Result<()> {
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
-    Metrics::install(Arc::new(ThreadPoolMetrics::new(0)));
+    Metrics::install(Arc::new(ThreadPoolMetrics::new(0)), vec![]);
 
     // TODO: refactor these to use labels
     debug!("Version: {GIT_VERSION}");
@@ -283,6 +284,7 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
         wake_compute_retry_config: RetryConfig::parse(RetryConfig::WAKE_COMPUTE_DEFAULT_VALUES)?,
         connect_compute_locks,
         connect_to_compute: compute_config,
+        passthrough_task_monitor: TaskMonitor::new(),
     })))
 }
 
