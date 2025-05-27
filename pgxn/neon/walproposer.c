@@ -155,8 +155,9 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 			int			written = 0;
 
 			written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
-							   "host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
-							   sk->host, sk->port, wp->config->neon_timeline, wp->config->neon_tenant);
+							   "%s host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
+							   wp->config->safekeeper_conninfo_options, sk->host, sk->port,
+							   wp->config->neon_timeline, wp->config->neon_tenant);
 			if (written > MAXCONNINFO || written < 0)
 				wp_log(FATAL, "could not create connection string for safekeeper %s:%s", sk->host, sk->port);
 		}
