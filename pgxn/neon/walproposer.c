@@ -2344,7 +2344,7 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg)
 	s.cursor = 0;
 
 	/* only version 3 is supported */
-	Assert(proto_version == 3);
+	Assert(wp->config->proto_version == 3);
 
 	tag = pq_getmsgbyte(&s);
 	if (tag != anymsg->tag)
