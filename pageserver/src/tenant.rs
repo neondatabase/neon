@@ -300,7 +300,7 @@ pub struct TenantShard {
     ///   as in progress.
     /// * Imported timelines are removed when the storage controller calls the post timeline
     ///   import activation endpoint.
-    timelines_importing: std::sync::Mutex<HashMap<TimelineId, ImportingTimeline>>,
+    timelines_importing: std::sync::Mutex<HashMap<TimelineId, Arc<ImportingTimeline>>>,
 
     /// The last tenant manifest known to be in remote storage. None if the manifest has not yet
     /// been either downloaded or uploaded. Always Some after tenant attach.
@@ -672,6 +672,7 @@ pub enum MaybeOffloaded {
 pub enum TimelineOrOffloaded {
     Timeline(Arc<Timeline>),
     Offloaded(Arc<OffloadedTimeline>),
+    Importing(Arc<ImportingTimeline>),
 }
 
 impl TimelineOrOffloaded {
@@ -682,6 +683,9 @@ impl TimelineOrOffloaded {
             }
             TimelineOrOffloaded::Offloaded(offloaded) => {
                 TimelineOrOffloadedArcRef::Offloaded(offloaded)
+            }
+            TimelineOrOffloaded::Importing(importing) => {
+                TimelineOrOffloadedArcRef::Importing(importing)
             }
         }
     }
@@ -695,12 +699,16 @@ impl TimelineOrOffloaded {
         match self {
             TimelineOrOffloaded::Timeline(timeline) => &timeline.delete_progress,
             TimelineOrOffloaded::Offloaded(offloaded) => &offloaded.delete_progress,
+            TimelineOrOffloaded::Importing(importing) => &importing.delete_progress,
         }
     }
     fn maybe_remote_client(&self) -> Option<Arc<RemoteTimelineClient>> {
         match self {
             TimelineOrOffloaded::Timeline(timeline) => Some(timeline.remote_client.clone()),
             TimelineOrOffloaded::Offloaded(_offloaded) => None,
+            TimelineOrOffloaded::Importing(importing) => {
+                Some(importing.timeline.remote_client.clone())
+            }
         }
     }
 }
@@ -708,6 +716,7 @@ impl TimelineOrOffloaded {
 pub enum TimelineOrOffloadedArcRef<'a> {
     Timeline(&'a Arc<Timeline>),
     Offloaded(&'a Arc<OffloadedTimeline>),
+    Importing(&'a Arc<ImportingTimeline>),
 }
 
 impl TimelineOrOffloadedArcRef<'_> {
@@ -715,12 +724,14 @@ impl TimelineOrOffloadedArcRef<'_> {
         match self {
             TimelineOrOffloadedArcRef::Timeline(timeline) => timeline.tenant_shard_id,
             TimelineOrOffloadedArcRef::Offloaded(offloaded) => offloaded.tenant_shard_id,
+            TimelineOrOffloadedArcRef::Importing(importing) => importing.timeline.tenant_shard_id,
         }
     }
     pub fn timeline_id(&self) -> TimelineId {
         match self {
             TimelineOrOffloadedArcRef::Timeline(timeline) => timeline.timeline_id,
             TimelineOrOffloadedArcRef::Offloaded(offloaded) => offloaded.timeline_id,
+            TimelineOrOffloadedArcRef::Importing(importing) => importing.timeline.timeline_id,
         }
     }
 }
@@ -734,6 +745,12 @@ impl<'a> From<&'a Arc<Timeline>> for TimelineOrOffloadedArcRef<'a> {
 impl<'a> From<&'a Arc<OffloadedTimeline>> for TimelineOrOffloadedArcRef<'a> {
     fn from(timeline: &'a Arc<OffloadedTimeline>) -> Self {
         Self::Offloaded(timeline)
+    }
+}
+
+impl<'a> From<&'a Arc<ImportingTimeline>> for TimelineOrOffloadedArcRef<'a> {
+    fn from(timeline: &'a Arc<ImportingTimeline>) -> Self {
+        Self::Importing(timeline)
     }
 }
 
@@ -1802,11 +1819,12 @@ impl TenantShard {
 
                     let prev = self.timelines_importing.lock().unwrap().insert(
                         timeline_id,
-                        ImportingTimeline {
+                        Arc::new(ImportingTimeline {
                             timeline: timeline.clone(),
                             import_task_handle,
                             import_task_gate,
-                        },
+                            delete_progress: TimelineDeleteProgress::default(),
+                        }),
                     );
 
                     assert!(prev.is_none());
@@ -2870,11 +2888,12 @@ impl TenantShard {
 
         let prev = self.timelines_importing.lock().unwrap().insert(
             timeline.timeline_id,
-            ImportingTimeline {
+            Arc::new(ImportingTimeline {
                 timeline: timeline.clone(),
                 import_task_handle,
                 import_task_gate,
-            },
+                delete_progress: TimelineDeleteProgress::default(),
+            }),
         );
 
         // Idempotency is enforced higher up the stack
@@ -3844,6 +3863,9 @@ impl TenantShard {
                     let remote_client = self
                         .build_timeline_client(offloaded.timeline_id, self.remote_storage.clone());
                     Arc::new(remote_client)
+                }
+                TimelineOrOffloadedArcRef::Importing(_) => {
+                    unreachable!("Importing timelines are not included in the iterator")
                 }
             };
 
@@ -5053,6 +5075,14 @@ impl TenantShard {
             }) => {
                 info!("timeline already exists but is offloaded");
                 Err(CreateTimelineError::Conflict)
+            }
+            Err(TimelineExclusionError::AlreadyExists {
+                existing: TimelineOrOffloaded::Importing(_existing),
+                ..
+            }) => {
+                // If there's a timeline already importing, then we would hit
+                // the [`TimelineExclusionError::AlreadyCreating`] branch above.
+                unreachable!("Importing timelines hold the creation guard")
             }
             Err(TimelineExclusionError::AlreadyExists {
                 existing: TimelineOrOffloaded::Timeline(existing),
