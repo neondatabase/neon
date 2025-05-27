@@ -1384,7 +1384,8 @@ impl Timeline {
             }
 
             Ok(_) => {
-                info!("skipping repartitioning due to image compaction LSN being below GC cutoff");
+                // This happens very frequently so we don't want to log it.
+                debug!("skipping repartitioning due to image compaction LSN being below GC cutoff");
             }
 
             // Suppress errors when cancelled.
