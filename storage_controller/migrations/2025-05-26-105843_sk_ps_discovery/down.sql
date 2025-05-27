@@ -1,0 +1,6 @@
+DROP TRIGGER on_sk_timeline_update_enqueue_sk_ps_discovery;
+DROP TRIGGER on_ps_tenant_shard_change_enqueue_sk_ps_discovery;
+DROP FUNCTION sk_ps_discovery_enqueue_tenant;
+DROP TABLE "sk_ps_discovery";
+
+
