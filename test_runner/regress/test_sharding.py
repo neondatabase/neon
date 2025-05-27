@@ -1836,3 +1836,86 @@ def test_sharding_gc(
         shard_gc_cutoff_lsn = Lsn(shard_index["metadata_bytes"]["latest_gc_cutoff_lsn"])
         log.info(f"Shard {shard_number} cutoff LSN: {shard_gc_cutoff_lsn}")
         assert shard_gc_cutoff_lsn == shard_0_gc_cutoff_lsn
+
+
+def test_split_ps_delete_old_shard_after_commit(neon_env_builder: NeonEnvBuilder):
+    """
+    Check that PageServer only deletes old shards after the split is committed such that it doesn't
+    have to download a lot of files during abort.
+    """
+    DBNAME = "regression"
+
+    init_shard_count = 4
+    neon_env_builder.num_pageservers = init_shard_count
+    stripe_size = 32
+
+    env = neon_env_builder.init_start(
+        initial_tenant_shard_count=init_shard_count, initial_tenant_shard_stripe_size=stripe_size
+    )
+
+    env.storage_controller.allowed_errors.extend(
+        [
+            # All split failures log a warning when then enqueue the abort operation
+            ".*Enqueuing background abort.*",
+            # Tolerate any error lots that mention a failpoint
+            ".*failpoint.*",
+        ]
+    )
+
+    endpoint = env.endpoints.create("main")
+    endpoint.respec(skip_pg_catalog_updates=False)
+    endpoint.start()
+    endpoint.safe_psql(f"CREATE DATABASE {DBNAME}")
+    endpoint.safe_psql("CREATE TABLE usertable ( YCSB_KEY INT, FIELD0 TEXT);")
+
+    # write some data
+    for _i in range(1000):
+        endpoint.safe_psql(
+            "INSERT INTO usertable SELECT random(), repeat('a', 1000);", log_query=False
+        )
+
+    def collect_downloaded_bytes() -> list[float | None]:
+        downloaded_bytes = []
+        for page_server in env.pageservers:
+            metric = page_server.http_client().get_metric_value(
+                "pageserver_remote_ondemand_downloaded_bytes_total"
+            )
+            downloaded_bytes.append(metric)
+        return downloaded_bytes
+
+    downloaded_bytes_before = collect_downloaded_bytes()
+    env.storage_controller.configure_failpoints(("shard-split-pre-complete", "return(1)"))
+    # split the tenant
+    with pytest.raises(StorageControllerApiException):
+        env.storage_controller.tenant_shard_split(env.initial_tenant, shard_count=16)
+
+    # wait until split is aborted
+    def check_split_is_aborted():
+        tenants = env.storage_controller.tenant_list()
+        assert len(tenants) == 1
+        shards = tenants[0]["shards"]
+        assert len(shards) == 4
+        for shard in shards:
+            assert not shard["is_splitting"]
+            assert not shard["is_reconciling"]
+
+        # make sure all new shards have been deleted
+        valid_shards = 0
+        for ps in env.pageservers:
+            for tenant_dir in os.listdir(ps.workdir / "tenants"):
+                try:
+                    tenant_shard_id = TenantShardId.parse(tenant_dir)
+                    valid_shards += 1
+                    assert tenant_shard_id.shard_count == 4
+                except ValueError:
+                    log.info(f"{tenant_dir} is not valid tenant shard id")
+        assert valid_shards >= 4
+
+    wait_until(check_split_is_aborted)
+
+    endpoint.safe_psql("SELECT count(*) from usertable;", log_query=False)
+
+    downloaded_bytes_after = collect_downloaded_bytes()
+
+    assert downloaded_bytes_before == downloaded_bytes_after
+    endpoint.stop_and_destroy()

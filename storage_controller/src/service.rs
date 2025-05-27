@@ -6143,6 +6143,15 @@ impl Service {
         let (response, child_locations, waiters) =
             self.tenant_shard_split_commit_inmem(tenant_id, new_shard_count, new_stripe_size);
 
+        // Notify all page servers to detach and clean up the old shards because they will no longer
+        // be needed. This is best-effort: if it fails, it will be cleaned up by subsequent startup
+        // reconciliations.
+        let shards_to_cleanup = targets
+            .iter()
+            .map(|target| (target.parent_id, target.node.get_id()))
+            .collect();
+        self.cleanup_locations(shards_to_cleanup).await;
+
         // Send compute notifications for all the new shards
         let mut failed_notifications = Vec::new();
         for (child_id, child_ps, stripe_size) in child_locations {

@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Deref;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1671,7 +1672,12 @@ impl TenantManager {
             }
         }
 
-        // Phase 5: Shut down the parent shard, and erase it from disk
+        // Phase 5: Shut down the parent shard. We leave it on disk in case the split fails and we
+        // have to roll back to the parent shard, avoiding a cold start. It will be cleaned up once
+        // the storage controller has committed the split.
+        //
+        // TODO: We don't flush the ephemeral layer here, because the split is likely to succeed and
+        // catching up the parent should be reasonably quick. Consider using FreezeAndFlush instead.
         let (_guard, progress) = completion::channel();
         match parent.shutdown(progress, ShutdownMode::Hard).await {
             Ok(()) => {}
@@ -1679,11 +1685,6 @@ impl TenantManager {
                 other.wait().await;
             }
         }
-        let local_tenant_directory = self.conf.tenant_path(&tenant_shard_id);
-        let tmp_path = safe_rename_tenant_dir(&local_tenant_directory)
-            .await
-            .with_context(|| format!("local tenant directory {local_tenant_directory:?} rename"))?;
-        self.background_purges.spawn(tmp_path);
 
         fail::fail_point!("shard-split-pre-finish", |_| Err(anyhow::anyhow!(
             "failpoint"
@@ -1852,27 +1853,36 @@ impl TenantManager {
         tenant_shard_id: TenantShardId,
         deletion_queue_client: &DeletionQueueClient,
     ) -> Result<(), TenantStateError> {
-        let tmp_path = self
+        if let Some(tmp_path) = self
             .detach_tenant0(conf, tenant_shard_id, deletion_queue_client)
-            .await?;
-        self.background_purges.spawn(tmp_path);
+            .await?
+        {
+            self.background_purges.spawn(tmp_path);
+        }
 
         Ok(())
     }
 
+    /// Detaches a tenant. This renames the tenant directory to a temporary path and returns it,
+    /// allowing the caller to delete it asynchronously. Returns None if the dir is already removed.
     async fn detach_tenant0(
         &self,
         conf: &'static PageServerConf,
         tenant_shard_id: TenantShardId,
         deletion_queue_client: &DeletionQueueClient,
-    ) -> Result<Utf8PathBuf, TenantStateError> {
+    ) -> Result<Option<Utf8PathBuf>, TenantStateError> {
         let tenant_dir_rename_operation = |tenant_id_to_clean: TenantShardId| async move {
             let local_tenant_directory = conf.tenant_path(&tenant_id_to_clean);
+            if !Path::new(&local_tenant_directory).exists() {
+                // If the tenant directory doesn't exist, it's already cleaned up.
+                return Ok(None);
+            }
             safe_rename_tenant_dir(&local_tenant_directory)
                 .await
                 .with_context(|| {
                     format!("local tenant directory {local_tenant_directory:?} rename")
                 })
+                .map(Some)
         };
 
         let removal_result = remove_tenant_from_memory(
@@ -2765,8 +2775,24 @@ async fn remove_tenant_from_memory<V, F>(
 where
     F: std::future::Future<Output = anyhow::Result<V>>,
 {
-    let mut slot_guard =
-        tenant_map_acquire_slot_impl(&tenant_shard_id, tenants, TenantSlotAcquireMode::MustExist)?;
+    // Always run tenant_cleanup even if the tenant shard is not found in the map. For example,
+    // during tenant split, we shut down and remove the tenant shard, but leave the tenant directory
+    // on disk in case we have to roll back the split.
+    //
+    // TODO: either move this out to the caller, or document that it's idempotent.
+    let mut slot_guard = match tenant_map_acquire_slot_impl(
+        &tenant_shard_id,
+        tenants,
+        TenantSlotAcquireMode::MustExist,
+    ) {
+        Ok(slot_guard) => slot_guard,
+        Err(TenantSlotError::NotFound(_)) => {
+            // If the tenant is not found in the slot map, run the cleanup anyway to make sure we
+            // don't leak any resources.
+            return tenant_cleanup.await.map_err(TenantStateError::Other);
+        }
+        Err(err) => return Err(TenantStateError::SlotError(err)),
+    };
 
     // allow pageserver shutdown to await for our completion
     let (_guard, progress) = completion::channel();
