@@ -234,7 +234,7 @@ struct ProxyCliArgs {
     pg_sni_router: PgSniRouterArgs,
 
     /// Collect performance stats of passthrough tasks and export metrics.
-    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    #[clap(long, default_value_t = tracing::level_enabled!(tracing::Level::DEBUG), value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     enable_passthrough_task_metrics: bool,
 }
 
