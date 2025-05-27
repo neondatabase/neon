@@ -2,6 +2,7 @@ pub mod chaos_injector;
 mod context_iterator;
 pub(crate) mod safekeeper_reconciler;
 mod safekeeper_service;
+mod sk_ps_discovery;
 
 use std::borrow::Cow;
 use std::cmp::Ordering;

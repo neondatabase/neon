@@ -40,6 +40,7 @@ use crate::metrics::{
     DatabaseQueryErrorLabelGroup, DatabaseQueryLatencyLabelGroup, METRICS_REGISTRY,
 };
 use crate::node::Node;
+use crate::schema::sk_ps_discovery;
 use crate::timeline_import::{
     TimelineImport, TimelineImportUpdateError, TimelineImportUpdateFollowUp,
 };
