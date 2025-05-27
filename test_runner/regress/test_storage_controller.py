@@ -4158,17 +4158,12 @@ def test_storcon_create_delete_sk_down(
         env.storage_controller.stop()
         env.storage_controller.start()
 
-    config_lines = [
-        "neon.safekeeper_proto_version = 3",
-    ]
-    with env.endpoints.create("main", tenant_id=tenant_id, config_lines=config_lines) as ep:
+    with env.endpoints.create("main", tenant_id=tenant_id) as ep:
         # endpoint should start.
         ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
         ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
 
-    with env.endpoints.create(
-        "child_of_main", tenant_id=tenant_id, config_lines=config_lines
-    ) as ep:
+    with env.endpoints.create("child_of_main", tenant_id=tenant_id) as ep:
         # endpoint should start.
         ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
         ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
@@ -4249,17 +4244,12 @@ def test_storcon_few_sk(
 
     env.safekeepers[0].assert_log_contains(f"creating new timeline {tenant_id}/{timeline_id}")
 
-    config_lines = [
-        "neon.safekeeper_proto_version = 3",
-    ]
-    with env.endpoints.create("main", tenant_id=tenant_id, config_lines=config_lines) as ep:
+    with env.endpoints.create("main", tenant_id=tenant_id) as ep:
         # endpoint should start.
         ep.start(safekeeper_generation=1, safekeepers=safekeeper_list)
         ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
 
-    with env.endpoints.create(
-        "child_of_main", tenant_id=tenant_id, config_lines=config_lines
-    ) as ep:
+    with env.endpoints.create("child_of_main", tenant_id=tenant_id) as ep:
         # endpoint should start.
         ep.start(safekeeper_generation=1, safekeepers=safekeeper_list)
         ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
