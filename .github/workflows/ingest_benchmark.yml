@@ -115,6 +115,9 @@ jobs:
         stripe_size: ${{ matrix.stripe_size }}
         disable_sharding: ${{ matrix.disable_sharding }}
 
+    - name: Sleep for 10 minutes
+      run: sleep 600
+
     - name: Initialize Neon project
       if: ${{ startsWith(matrix.target_project, 'new_empty_project') }}
       env:
