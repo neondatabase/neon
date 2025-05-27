@@ -384,7 +384,6 @@ typedef struct WalproposerShmemState
 	XLogRecPtr	donor_lsn;
 
 	slock_t		mutex;
-	bool        bgw_started;
 	pg_atomic_uint64 mineLastElectedTerm;
 	pg_atomic_uint64 backpressureThrottlingTime;
 	pg_atomic_uint64 currentClusterSize;
