@@ -1278,11 +1278,50 @@ impl Timeline {
         }
 
         let gc_cutoff = *self.applied_gc_cutoff_lsn.read();
+        let l0_l1_boundary_lsn = {
+            // We do the repartition on the L0-L1 boundary. All data below the boundary
+            // are compacted by L0 with low read amplification, thus making the `repartition`
+            // function run fast.
+            let guard = self.layers.read().await;
+            guard
+                .all_persistent_layers()
+                .iter()
+                .map(|x| x.lsn_range.end)
+                .max()
+        };
+
+        let (partition_mode, partition_lsn) = if cfg!(test)
+            || cfg!(feature = "testing")
+            || self
+                .feature_resolver
+                .evaluate_multivariate("image-compaction-boundary", self.tenant_shard_id.tenant_id)
+                .ok()
+                == Some("yes".to_string())
+        // TODO: support evaluate_boolean
+        {
+            let last_repartition_lsn = self.partitioning.read().1;
+            let lsn = match l0_l1_boundary_lsn {
+                Some(boundary) => gc_cutoff
+                    .max(boundary)
+                    .max(last_repartition_lsn)
+                    .max(self.initdb_lsn)
+                    .max(self.ancestor_lsn),
+                None => self.get_last_record_lsn(),
+            };
+            if lsn <= self.initdb_lsn || lsn <= self.ancestor_lsn {
+                // Do not attempt to create image layers below the initdb or ancestor LSN -- no data below it
+                ("l0_l1_boundary", self.get_last_record_lsn())
+            } else {
+                ("l0_l1_boundary", lsn)
+            }
+        } else {
+            ("latest_record", self.get_last_record_lsn())
+        };
 
         // 2. Repartition and create image layers if necessary
         match self
             .repartition(
-                self.get_last_record_lsn(),
+                partition_lsn,
                 self.get_compaction_target_size(),
                 options.flags,
                 ctx,
@@ -1319,6 +1358,7 @@ impl Timeline {
                             .as_ref()
                             .clone(),
                         options.flags.contains(CompactFlags::YieldForL0),
+                        partition_mode,
                     )
                     .await
                     .inspect_err(|err| {
