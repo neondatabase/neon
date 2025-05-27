@@ -734,32 +734,33 @@ where
             .iter()
             .map(|(name, monitor)| (TokioTaskMonitorName(name), monitor.cumulative()))
             .collect::<Vec<_>>();
+        let snapshots = snapshots.as_slice();
 
         // instrumented/dropped
         TokioTaskCounterMetric {
-            snapshots: snapshots.as_slice(),
+            snapshots,
             help: "The number of tasks instrumented.",
-            getter: |metrics| metrics.instrumented_count,
+            get_value: |m| m.instrumented_count,
         }
         .collect_family_into(MetricName::from_str("instrumented_count"), enc)?;
         TokioTaskCounterMetric {
-            snapshots: snapshots.as_slice(),
+            snapshots,
             help: "The number of tasks dropped.",
-            getter: |metrics| metrics.dropped_count,
+            get_value: |m| m.dropped_count,
         }
         .collect_family_into(MetricName::from_str("dropped_count"), enc)?;
 
         // first_poll
         TokioTaskCounterMetric {
-            snapshots: snapshots.as_slice(),
+            snapshots,
             help: "The number of tasks polled for the first time.",
-            getter: |metrics| metrics.first_poll_count,
+            get_value: |m| m.first_poll_count,
         }
         .collect_family_into(MetricName::from_str("first_poll_count"), enc)?;
         TokioTaskFloatGaugeMetric {
-            snapshots: snapshots.as_slice(),
+            snapshots,
             help: "The total duration elapsed between the instant tasks are instrumented, and the instant they are first polled.",
-            getter: |metrics| metrics.total_first_poll_delay.as_secs_f64(),
+            get_value: |m| m.total_first_poll_delay.as_secs_f64(),
         }
         .collect_family_into(
             MetricName::from_str("total_first_poll_delay"),
@@ -768,102 +769,102 @@ where
 
         // idle
         TokioTaskCounterMetric {
-            snapshots: snapshots.as_slice(),
+            snapshots,
             help: "The total number of times that tasks idled, waiting to be awoken.",
-            getter: |metrics| metrics.total_idled_count,
+            get_value: |m| m.total_idled_count,
         }
         .collect_family_into(MetricName::from_str("total_idled_count"), enc)?;
         TokioTaskFloatGaugeMetric {
-            snapshots: snapshots.as_slice(),
+            snapshots,
             help: "The total duration that tasks idled.",
-            getter: |metrics| metrics.total_idle_duration.as_secs_f64(),
+            get_value: |m| m.total_idle_duration.as_secs_f64(),
         }
         .collect_family_into(MetricName::from_str("total_idle_duration"), enc)?;
 
         // poll
         TokioTaskCounterMetric {
-            snapshots: snapshots.as_slice(),
+            snapshots,
             help: "The total number of times that tasks were polled.",
-            getter: |metrics| metrics.total_poll_count,
+            get_value: |m| m.total_poll_count,
         }
         .collect_family_into(MetricName::from_str("total_poll_count"), enc)?;
         TokioTaskFloatGaugeMetric {
-            snapshots: snapshots.as_slice(),
+            snapshots,
             help: "The total duration elapsed during polls.",
-            getter: |metrics| metrics.total_poll_duration.as_secs_f64(),
+            get_value: |m| m.total_poll_duration.as_secs_f64(),
         }
         .collect_family_into(MetricName::from_str("total_poll_duration"), enc)?;
 
         // scheduled
         TokioTaskCounterMetric {
-            snapshots: snapshots.as_slice(),
+            snapshots,
             help:  "The total number of times that tasks were awoken (and then, presumably, scheduled for execution).",
-            getter: |metrics| metrics.total_scheduled_count,
+            get_value: |m| m.total_scheduled_count,
         }
         .collect_family_into(
             MetricName::from_str("total_scheduled_count"),
             enc,
         )?;
         TokioTaskFloatGaugeMetric {
-            snapshots: snapshots.as_slice(),
+            snapshots,
             help: "The total duration that tasks spent waiting to be polled after awakening.",
-            getter: |metrics| metrics.total_scheduled_duration.as_secs_f64(),
+            get_value: |m| m.total_scheduled_duration.as_secs_f64(),
         }
         .collect_family_into(MetricName::from_str("total_scheduled_duration"), enc)?;
 
         // fast_poll
         TokioTaskCounterMetric {
-            snapshots: snapshots.as_slice(),
+            snapshots,
             help: "The total number of times that polling tasks completed swiftly.",
-            getter: |metrics| metrics.total_fast_poll_count,
+            get_value: |m| m.total_fast_poll_count,
         }
         .collect_family_into(MetricName::from_str("total_fast_poll_count"), enc)?;
         TokioTaskFloatGaugeMetric {
-            snapshots: snapshots.as_slice(),
+            snapshots,
             help: "The total duration of fast polls.",
-            getter: |metrics| metrics.total_fast_poll_duration.as_secs_f64(),
+            get_value: |m| m.total_fast_poll_duration.as_secs_f64(),
         }
         .collect_family_into(MetricName::from_str("total_fast_poll_duration"), enc)?;
 
         // slow_poll
         TokioTaskCounterMetric {
-            snapshots: snapshots.as_slice(),
+            snapshots,
             help: "The total number of times that polling tasks completed slowly.",
-            getter: |metrics| metrics.total_slow_poll_count,
+            get_value: |m| m.total_slow_poll_count,
         }
         .collect_family_into(MetricName::from_str("total_slow_poll_count"), enc)?;
         TokioTaskFloatGaugeMetric {
-            snapshots: snapshots.as_slice(),
+            snapshots,
             help: "The total duration of slow polls.",
-            getter: |metrics| metrics.total_slow_poll_duration.as_secs_f64(),
+            get_value: |m| m.total_slow_poll_duration.as_secs_f64(),
         }
         .collect_family_into(MetricName::from_str("total_slow_poll_duration"), enc)?;
 
         // short_delay
         TokioTaskCounterMetric {
-            snapshots: snapshots.as_slice(),
+            snapshots,
             help: "The total count of tasks with short scheduling delays.",
-            getter: |metrics| metrics.total_short_delay_count,
+            get_value: |m| m.total_short_delay_count,
         }
         .collect_family_into(MetricName::from_str("total_short_delay_count"), enc)?;
         TokioTaskFloatGaugeMetric {
-            snapshots: snapshots.as_slice(),
+            snapshots,
             help: "The total duration of tasks with short scheduling delays.",
-            getter: |metrics| metrics.total_short_delay_duration.as_secs_f64(),
+            get_value: |m| m.total_short_delay_duration.as_secs_f64(),
         }
         .collect_family_into(MetricName::from_str("total_short_delay_duration"), enc)?;
 
         // long_delay
         TokioTaskCounterMetric {
-            snapshots: snapshots.as_slice(),
+            snapshots,
             help: "The total count of tasks with long scheduling delays.",
-            getter: |metrics| metrics.total_long_delay_count,
+            get_value: |m| m.total_long_delay_count,
         }
         .collect_family_into(MetricName::from_str("total_long_delay_count"), enc)?;
         TokioTaskFloatGaugeMetric {
-            snapshots: snapshots.as_slice(),
+            snapshots,
             help: "The total number of times that a task had a long scheduling duration.",
-            getter: |metrics| metrics.total_long_delay_duration.as_secs_f64(),
+            get_value: |m| m.total_long_delay_duration.as_secs_f64(),
         }
         .collect_family_into(MetricName::from_str("total_long_delay_duration"), enc)?;
 
@@ -891,7 +892,7 @@ where
 {
     snapshots: &'a [(TokioTaskMonitorName<'a>, tokio_metrics::TaskMetrics)],
     help: &'a str,
-    getter: F,
+    get_value: F,
 }
 
 impl<E: Encoding, F> MetricFamilyEncoding<E> for TokioTaskCounterMetric<'_, F>
@@ -909,7 +910,7 @@ where
         CounterState::write_type(metric_name, enc)?;
 
         for (monitor_name, snapshot) in self.snapshots {
-            let value = (self.getter)(snapshot);
+            let value = (self.get_value)(snapshot);
             CounterState {
                 count: AtomicU64::new(value),
             }
@@ -925,7 +926,7 @@ where
 {
     snapshots: &'a [(TokioTaskMonitorName<'a>, tokio_metrics::TaskMetrics)],
     help: &'a str,
-    getter: F,
+    get_value: F,
 }
 
 impl<E: Encoding, F> MetricFamilyEncoding<E> for TokioTaskFloatGaugeMetric<'_, F>
@@ -943,7 +944,7 @@ where
         FloatGaugeState::write_type(metric_name, enc)?;
 
         for (monitor_name, snapshot) in self.snapshots {
-            let value = (self.getter)(snapshot);
+            let value = (self.get_value)(snapshot);
             FloatGaugeState {
                 count: AtomicF64::new(value),
             }
