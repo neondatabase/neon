@@ -113,13 +113,13 @@ async fn run_v1(
     let plan_hash = hasher.finish();
 
     if let Some(progress) = &import_progress {
-        if plan_hash != progress.import_plan_hash {
-            anyhow::bail!("Import plan does not match storcon metadata");
-        }
-
         // Handle collisions on jobs of unequal length
         if progress.jobs != plan.jobs.len() {
             anyhow::bail!("Import plan job length does not match storcon metadata")
+        }
+
+        if plan_hash != progress.import_plan_hash {
+            anyhow::bail!("Import plan does not match storcon metadata");
         }
     }
 
@@ -217,6 +217,19 @@ impl Planner {
                 CHECKPOINT_KEY,
                 checkpoint_buf,
             )));
+
+        // Sort the tasks by the key ranges they handle.
+        // The plan being generated here needs to be stable across invocations
+        // of this method.
+        self.tasks.sort_by_key(|task| match task {
+            AnyImportTask::SingleKey(key) => (key.key, key.key.next()),
+            AnyImportTask::RelBlocks(rel_blocks) => {
+                (rel_blocks.key_range.start, rel_blocks.key_range.end)
+            }
+            AnyImportTask::SlruBlocks(slru_blocks) => {
+                (slru_blocks.key_range.start, slru_blocks.key_range.end)
+            }
+        });
 
         // Assigns parts of key space to later parallel jobs
         let mut last_end_key = Key::MIN;
@@ -426,6 +439,8 @@ impl Plan {
                     }));
                 },
                 maybe_complete_job_idx = work.next() => {
+                    pausable_failpoint!("import-task-complete-pausable");
+
                     match maybe_complete_job_idx {
                         Some(Ok((job_idx, res))) => {
                             assert!(last_completed_job_idx.checked_add(1).unwrap() == job_idx);
@@ -439,6 +454,9 @@ impl Plan {
                                     completed: last_completed_job_idx,
                                     import_plan_hash,
                                 };
+
+                                timeline.remote_client.schedule_index_upload_for_file_changes()?;
+                                timeline.remote_client.wait_completion().await?;
 
                                 storcon_client.put_timeline_import_status(
                                     timeline.tenant_shard_id,
@@ -640,7 +658,11 @@ impl Hash for ImportSingleKeyTask {
         let ImportSingleKeyTask { key, buf } = self;
 
         key.hash(state);
-        buf.hash(state);
+        // The key value might not have a stable binary representation.
+        // For instance, the db directory uses an unstable hash-map.
+        // To work around this we are a bit lax here and only hash the
+        // size of the buffer which must be consistent.
+        buf.len().hash(state);
     }
 }
 
@@ -915,7 +937,7 @@ impl ChunkProcessingJob {
                 let guard = timeline.layers.read().await;
                 let existing_layer = guard.try_get_from_key(&desc.key());
                 if let Some(layer) = existing_layer {
-                    if layer.metadata().generation != timeline.generation {
+                    if layer.metadata().generation == timeline.generation {
                         return Err(anyhow::anyhow!(
                             "Import attempted to rewrite layer file in the same generation: {}",
                             layer.local_path()
