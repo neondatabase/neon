@@ -35,6 +35,12 @@ impl ProtocolError {
     }
 }
 
+impl From<ProtocolError> for tonic::Status {
+    fn from(err: ProtocolError) -> Self {
+        tonic::Status::invalid_argument(format!("{err}"))
+    }
+}
+
 /// The LSN a request should read at.
 #[derive(Clone, Copy, Debug)]
 pub struct ReadLsn {
@@ -328,7 +334,7 @@ pub type RequestID = u64;
 /// A GetPage request class.
 #[derive(Clone, Copy, Debug)]
 pub enum GetPageClass {
-    /// Unknown status. For backwards compatibility: used when an older client version sends a class
+    /// Unknown class. For backwards compatibility: used when an older client version sends a class
     /// that a newer server version has removed.
     Unknown,
     /// A normal request. This is the default.
@@ -386,7 +392,7 @@ pub struct GetPageResponse {
     /// The original request's ID.
     pub request_id: RequestID,
     /// The response status code.
-    pub status: GetPageStatus,
+    pub status_code: GetPageStatusCode,
     /// A string describing the status, if any.
     pub reason: Option<String>,
     /// The 8KB page images, in the same order as the request. Empty if status != OK.
@@ -397,7 +403,7 @@ impl From<proto::GetPageResponse> for GetPageResponse {
     fn from(pb: proto::GetPageResponse) -> Self {
         Self {
             request_id: pb.request_id,
-            status: pb.status.into(),
+            status_code: pb.status_code.into(),
             reason: Some(pb.reason).filter(|r| !r.is_empty()),
             page_images: pb.page_image.into(),
         }
@@ -408,16 +414,20 @@ impl From<GetPageResponse> for proto::GetPageResponse {
     fn from(response: GetPageResponse) -> Self {
         Self {
             request_id: response.request_id,
-            status: response.status.into(),
+            status_code: response.status_code.into(),
             reason: response.reason.unwrap_or_default(),
             page_image: response.page_images.into_vec(),
         }
     }
 }
 
-/// A GetPage response status.
+/// A GetPage response status code.
+///
+/// These are effectively equivalent to gRPC statuses. However, we use a bidirectional stream
+/// (potentially shared by many backends), and a gRPC status response would terminate the stream so
+/// we send GetPageResponse messages with these codes instead.
 #[derive(Clone, Copy, Debug)]
-pub enum GetPageStatus {
+pub enum GetPageStatusCode {
     /// Unknown status. For forwards compatibility: used when an older client version receives a new
     /// status code from a newer server version.
     Unknown,
@@ -427,46 +437,50 @@ pub enum GetPageStatus {
     /// setup.
     NotFound,
     /// The request was invalid.
-    Invalid,
+    InvalidRequest,
+    /// The request failed due to an internal server error.
+    InternalError,
     /// The tenant is rate limited. Slow down and retry later.
     SlowDown,
 }
 
-impl From<proto::GetPageStatus> for GetPageStatus {
-    fn from(pb: proto::GetPageStatus) -> Self {
+impl From<proto::GetPageStatusCode> for GetPageStatusCode {
+    fn from(pb: proto::GetPageStatusCode) -> Self {
         match pb {
-            proto::GetPageStatus::Unknown => Self::Unknown,
-            proto::GetPageStatus::Ok => Self::Ok,
-            proto::GetPageStatus::NotFound => Self::NotFound,
-            proto::GetPageStatus::Invalid => Self::Invalid,
-            proto::GetPageStatus::SlowDown => Self::SlowDown,
+            proto::GetPageStatusCode::Unknown => Self::Unknown,
+            proto::GetPageStatusCode::Ok => Self::Ok,
+            proto::GetPageStatusCode::NotFound => Self::NotFound,
+            proto::GetPageStatusCode::InvalidRequest => Self::InvalidRequest,
+            proto::GetPageStatusCode::InternalError => Self::InternalError,
+            proto::GetPageStatusCode::SlowDown => Self::SlowDown,
         }
     }
 }
 
-impl From<i32> for GetPageStatus {
-    fn from(status: i32) -> Self {
-        proto::GetPageStatus::try_from(status)
-            .unwrap_or(proto::GetPageStatus::Unknown)
+impl From<i32> for GetPageStatusCode {
+    fn from(status_code: i32) -> Self {
+        proto::GetPageStatusCode::try_from(status_code)
+            .unwrap_or(proto::GetPageStatusCode::Unknown)
             .into()
     }
 }
 
-impl From<GetPageStatus> for proto::GetPageStatus {
-    fn from(status: GetPageStatus) -> Self {
-        match status {
-            GetPageStatus::Unknown => Self::Unknown,
-            GetPageStatus::Ok => Self::Ok,
-            GetPageStatus::NotFound => Self::NotFound,
-            GetPageStatus::Invalid => Self::Invalid,
-            GetPageStatus::SlowDown => Self::SlowDown,
+impl From<GetPageStatusCode> for proto::GetPageStatusCode {
+    fn from(status_code: GetPageStatusCode) -> Self {
+        match status_code {
+            GetPageStatusCode::Unknown => Self::Unknown,
+            GetPageStatusCode::Ok => Self::Ok,
+            GetPageStatusCode::NotFound => Self::NotFound,
+            GetPageStatusCode::InvalidRequest => Self::InvalidRequest,
+            GetPageStatusCode::InternalError => Self::InternalError,
+            GetPageStatusCode::SlowDown => Self::SlowDown,
         }
     }
 }
 
-impl From<GetPageStatus> for i32 {
-    fn from(status: GetPageStatus) -> Self {
-        proto::GetPageStatus::from(status).into()
+impl From<GetPageStatusCode> for i32 {
+    fn from(status_code: GetPageStatusCode) -> Self {
+        proto::GetPageStatusCode::from(status_code).into()
     }
 }
 
