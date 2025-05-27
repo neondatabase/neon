@@ -510,6 +510,33 @@ pub async fn handle_request(
 
     let check_tombstone = !request.ignore_tombstone.unwrap_or_default();
 
+    if status.timeline_start_lsn == Lsn(0) || status.timeline_start_lsn == status.commit_lsn {
+        // The timeline has had no writes yet, even on the most advanced safeekeeper.
+        // Create it locally, as snapshots of timelines without writes are not supported.
+
+        let ttid = TenantTimelineId {
+            tenant_id: request.tenant_id,
+            timeline_id: request.timeline_id,
+        };
+
+        info!("creating timeline {ttid} as it is empty on most advanced {safekeeper_host}");
+
+        global_timelines
+            .create(
+                ttid,
+                status.mconf,
+                status.pg_info,
+                status.timeline_start_lsn,
+                status.timeline_start_lsn,
+            )
+            .await
+            .map_err(ApiError::InternalServerError)?;
+
+        return Ok(PullTimelineResponse {
+            safekeeper_host: Some(safekeeper_host),
+        });
+    }
+
     match pull_timeline(
         status,
         safekeeper_host,
