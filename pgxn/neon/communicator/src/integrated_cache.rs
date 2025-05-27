@@ -18,7 +18,7 @@
 // - blocks in the file cache's file. If the file grows too large, need to evict something.
 //   Also if the cache is resized
 //
-// - entries in the cache tree. If we run out of memory in the shmem area, need to evict
+// - entries in the cache map. If we run out of memory in the shmem area, need to evict
 //   something
 //
 
@@ -33,90 +33,67 @@ use crate::file_cache::INVALID_CACHE_BLOCK;
 use crate::file_cache::{CacheBlock, FileCache};
 use pageserver_page_api::model::RelTag;
 
-use metrics::{IntCounter, IntGauge, IntGaugeVec};
+use metrics::{IntCounter, IntGauge};
 
-use neonart;
-use neonart::TreeInitStruct;
-use neonart::TreeIterator;
-use neonart::UpdateAction;
+use neon_shmem::hash::HashMapInit;
+use neon_shmem::hash::UpdateAction;
+use neon_shmem::shmem::ShmemHandle;
 
 const CACHE_AREA_SIZE: usize = 10 * 1024 * 1024;
 
-type IntegratedCacheTreeInitStruct<'t> =
-    TreeInitStruct<'t, TreeKey, TreeEntry, neonart::ArtMultiSlabAllocator<'t, TreeEntry>>;
+type IntegratedCacheMapInitStruct<'t> = HashMapInit<'t, MapKey, MapEntry>;
 
 /// This struct is initialized at postmaster startup, and passed to all the processes via fork().
 pub struct IntegratedCacheInitStruct<'t> {
-    allocator: &'t neonart::ArtMultiSlabAllocator<'t, TreeEntry>,
-    handle: IntegratedCacheTreeInitStruct<'t>,
+    map_handle: IntegratedCacheMapInitStruct<'t>,
 }
 
 /// Represents write-access to the integrated cache. This is used by the communicator process.
 pub struct IntegratedCacheWriteAccess<'t> {
-    cache_tree: neonart::TreeWriteAccess<
-        't,
-        TreeKey,
-        TreeEntry,
-        neonart::ArtMultiSlabAllocator<'t, TreeEntry>,
-    >,
+    cache_map: neon_shmem::hash::HashMapAccess<'t, MapKey, MapEntry>,
 
     global_lw_lsn: AtomicU64,
 
     pub(crate) file_cache: Option<FileCache>,
 
     // Fields for eviction
-    clock_hand: std::sync::Mutex<TreeIterator<TreeKey>>,
+    clock_hand: std::sync::Mutex<usize>,
 
     // Metrics
     page_evictions_counter: IntCounter,
     clock_iterations_counter: IntCounter,
 
-    nodes_total: IntGaugeVec,
-    nodes_leaf_total: IntGauge,
-    nodes_internal4_total: IntGauge,
-    nodes_internal16_total: IntGauge,
-    nodes_internal48_total: IntGauge,
-    nodes_internal256_total: IntGauge,
-
-    nodes_memory_bytes: IntGaugeVec,
-    nodes_memory_leaf_bytes: IntGauge,
-    nodes_memory_internal4_bytes: IntGauge,
-    nodes_memory_internal16_bytes: IntGauge,
-    nodes_memory_internal48_bytes: IntGauge,
-    nodes_memory_internal256_bytes: IntGauge,
-
-    // metrics from the art tree
-    cache_memory_size_bytes: IntGauge,
-    cache_memory_used_bytes: IntGauge,
-    cache_tree_epoch: IntGauge,
-    cache_tree_oldest_epoch: IntGauge,
-    cache_tree_garbage_total: IntGauge,
+    // metrics from the hash map
+    cache_map_num_buckets: IntGauge,
+    cache_map_num_buckets_in_use: IntGauge,
 }
 
 /// Represents read-only access to the integrated cache. Backend processes have this.
 pub struct IntegratedCacheReadAccess<'t> {
-    cache_tree: neonart::TreeReadAccess<'t, TreeKey, TreeEntry>,
+    cache_map: neon_shmem::hash::HashMapAccess<'t, MapKey, MapEntry>,
 }
 
 impl<'t> IntegratedCacheInitStruct<'t> {
     /// Return the desired size in bytes of the shared memory area to reserve for the integrated
     /// cache.
     pub fn shmem_size(_max_procs: u32) -> usize {
-        CACHE_AREA_SIZE
+        // FIXME: the map uses its own ShmemHandle now. This is just for fixed-size allocations
+        // in the general Postgres shared memory segment.
+        0
     }
 
     /// Initialize the shared memory segment. This runs once in postmaster. Returns a struct which
     /// will be inherited by all processes through fork.
     pub fn shmem_init(
         _max_procs: u32,
-        shmem_area: &'t mut [MaybeUninit<u8>],
+        _shmem_area: &'t mut [MaybeUninit<u8>],
     ) -> IntegratedCacheInitStruct<'t> {
-        let allocator = neonart::ArtMultiSlabAllocator::new(shmem_area);
-
-        let handle = IntegratedCacheTreeInitStruct::new(allocator);
+        let shmem_handle = ShmemHandle::new("integrated cache", 0, CACHE_AREA_SIZE).unwrap();
 
         // Initialize the shared memory area
-        IntegratedCacheInitStruct { allocator, handle }
+        let map_handle =
+            neon_shmem::hash::HashMapInit::init_in_shmem(shmem_handle, CACHE_AREA_SIZE);
+        IntegratedCacheInitStruct { map_handle }
     }
 
     pub fn worker_process_init(
@@ -124,42 +101,14 @@ impl<'t> IntegratedCacheInitStruct<'t> {
         lsn: Lsn,
         file_cache: Option<FileCache>,
     ) -> IntegratedCacheWriteAccess<'t> {
-        let IntegratedCacheInitStruct {
-            allocator: _allocator,
-            handle,
-        } = self;
-        let tree_writer = handle.attach_writer();
-
-        let nodes_total = IntGaugeVec::new(
-            metrics::core::Opts::new("nodes_total", "Number of nodes in cache tree."),
-            &["node_kind"],
-        )
-        .unwrap();
-        let nodes_leaf_total = nodes_total.with_label_values(&["leaf"]);
-        let nodes_internal4_total = nodes_total.with_label_values(&["internal4"]);
-        let nodes_internal16_total = nodes_total.with_label_values(&["internal16"]);
-        let nodes_internal48_total = nodes_total.with_label_values(&["internal48"]);
-        let nodes_internal256_total = nodes_total.with_label_values(&["internal256"]);
-
-        let nodes_memory_bytes = IntGaugeVec::new(
-            metrics::core::Opts::new(
-                "nodes_memory_bytes",
-                "Memory reserved for nodes in cache tree.",
-            ),
-            &["node_kind"],
-        )
-        .unwrap();
-        let nodes_memory_leaf_bytes = nodes_memory_bytes.with_label_values(&["leaf"]);
-        let nodes_memory_internal4_bytes = nodes_memory_bytes.with_label_values(&["internal4"]);
-        let nodes_memory_internal16_bytes = nodes_memory_bytes.with_label_values(&["internal16"]);
-        let nodes_memory_internal48_bytes = nodes_memory_bytes.with_label_values(&["internal48"]);
-        let nodes_memory_internal256_bytes = nodes_memory_bytes.with_label_values(&["internal256"]);
+        let IntegratedCacheInitStruct { map_handle } = self;
+        let map_writer = map_handle.attach_writer();
 
         IntegratedCacheWriteAccess {
-            cache_tree: tree_writer,
+            cache_map: map_writer,
             global_lw_lsn: AtomicU64::new(lsn.0),
             file_cache,
-            clock_hand: std::sync::Mutex::new(TreeIterator::new_wrapping()),
+            clock_hand: std::sync::Mutex::new(0),
 
             page_evictions_counter: metrics::IntCounter::new(
                 "integrated_cache_evictions",
@@ -173,64 +122,31 @@ impl<'t> IntegratedCacheInitStruct<'t> {
             )
             .unwrap(),
 
-            nodes_total,
-            nodes_leaf_total,
-            nodes_internal4_total,
-            nodes_internal16_total,
-            nodes_internal48_total,
-            nodes_internal256_total,
-
-            nodes_memory_bytes,
-            nodes_memory_leaf_bytes,
-            nodes_memory_internal4_bytes,
-            nodes_memory_internal16_bytes,
-            nodes_memory_internal48_bytes,
-            nodes_memory_internal256_bytes,
-
-            cache_memory_size_bytes: metrics::IntGauge::new(
-                "cache_memory_size_bytes",
-                "Memory reserved for cache metadata",
+            cache_map_num_buckets: metrics::IntGauge::new(
+                "cache_num_map_buckets",
+                "Allocated size of the cache hash map",
             )
             .unwrap(),
-            cache_memory_used_bytes: metrics::IntGauge::new(
-                "cache_memory_size_bytes",
-                "Memory used for cache metadata",
-            )
-            .unwrap(),
-
-            cache_tree_epoch: metrics::IntGauge::new(
-                "cache_tree_epoch",
-                "Current epoch of the cache tree",
-            )
-            .unwrap(),
-            cache_tree_oldest_epoch: metrics::IntGauge::new(
-                "cache_tree_oldest_epoch",
-                "Oldest active epoch of the cache tree",
-            )
-            .unwrap(),
-            cache_tree_garbage_total: metrics::IntGauge::new(
-                "cache_tree_garbage_total",
-                "Number of obsoleted nodes in cache tree pending GC",
+            cache_map_num_buckets_in_use: metrics::IntGauge::new(
+                "cache_num_map_buckets_in_use",
+                "Number of buckets in use in the cache hash map",
             )
             .unwrap(),
         }
     }
 
     pub fn backend_init(self) -> IntegratedCacheReadAccess<'t> {
-        let IntegratedCacheInitStruct {
-            allocator: _allocator,
-            handle,
-        } = self;
+        let IntegratedCacheInitStruct { map_handle } = self;
 
-        let tree_reader = handle.attach_reader();
+        let map_reader = map_handle.attach_reader();
 
         IntegratedCacheReadAccess {
-            cache_tree: tree_reader,
+            cache_map: map_reader,
         }
     }
 }
 
-enum TreeEntry {
+enum MapEntry {
     Rel(RelEntry),
     Block(BlockEntry),
 }
@@ -239,7 +155,7 @@ struct BlockEntry {
     lw_lsn: AtomicLsn,
     cache_block: AtomicU64,
 
-    pinned: AtomicBool,
+    pinned: AtomicU64,
 
     // 'referenced' bit for the clock algorithm
     referenced: AtomicBool,
@@ -251,14 +167,14 @@ struct RelEntry {
     nblocks: AtomicU32,
 }
 
-impl std::fmt::Debug for TreeEntry {
+impl std::fmt::Debug for MapEntry {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         match self {
-            TreeEntry::Rel(e) => fmt
+            MapEntry::Rel(e) => fmt
                 .debug_struct("Rel")
                 .field("nblocks", &e.nblocks.load(Ordering::Relaxed))
                 .finish(),
-            TreeEntry::Block(e) => fmt
+            MapEntry::Block(e) => fmt
                 .debug_struct("Block")
                 .field("lw_lsn", &e.lw_lsn.load())
                 .field("cache_block", &e.cache_block.load(Ordering::Relaxed))
@@ -275,37 +191,42 @@ impl std::fmt::Debug for TreeEntry {
     PartialEq,
     PartialOrd,
     Eq,
+    Hash,
     Ord,
     zerocopy_derive::IntoBytes,
     zerocopy_derive::Immutable,
     zerocopy_derive::FromBytes,
 )]
 #[repr(packed)]
-// Note: the fields are stored in big-endian order, to make the radix tree more
-// efficient, and to make scans over ranges of blocks work correctly.
-struct TreeKey {
+// Note: the fields are stored in big-endian order. If we used the keys in a radix tree, that would
+// make pack the tree more tightly, and would make scans over ranges of blocks work correctly,
+// i.e. return the entries in block number order. XXX: We currently use a hash map though, so it
+// doesn't matter.
+struct MapKey {
     spc_oid_be: u32,
     db_oid_be: u32,
     rel_number_be: u32,
     fork_number: u8,
     block_number_be: u32,
 }
-impl<'a> From<&'a [u8]> for TreeKey {
+impl<'a> From<&'a [u8]> for MapKey {
     fn from(bytes: &'a [u8]) -> Self {
         Self::read_from_bytes(bytes).expect("invalid key length")
     }
 }
 
-fn key_range_for_rel_blocks(rel: &RelTag) -> Range<TreeKey> {
+// fixme: currently unused
+#[allow(dead_code)]
+fn key_range_for_rel_blocks(rel: &RelTag) -> Range<MapKey> {
     Range {
-        start: TreeKey::from((rel, 0)),
-        end: TreeKey::from((rel, u32::MAX)),
+        start: MapKey::from((rel, 0)),
+        end: MapKey::from((rel, u32::MAX)),
     }
 }
 
-impl From<&RelTag> for TreeKey {
-    fn from(val: &RelTag) -> TreeKey {
-        TreeKey {
+impl From<&RelTag> for MapKey {
+    fn from(val: &RelTag) -> MapKey {
+        MapKey {
             spc_oid_be: val.spc_oid.to_be(),
             db_oid_be: val.db_oid.to_be(),
             rel_number_be: val.rel_number.to_be(),
@@ -315,9 +236,9 @@ impl From<&RelTag> for TreeKey {
     }
 }
 
-impl From<(&RelTag, u32)> for TreeKey {
-    fn from(val: (&RelTag, u32)) -> TreeKey {
-        TreeKey {
+impl From<(&RelTag, u32)> for MapKey {
+    fn from(val: (&RelTag, u32)) -> MapKey {
+        MapKey {
             spc_oid_be: val.0.spc_oid.to_be(),
             db_oid_be: val.0.db_oid.to_be(),
             rel_number_be: val.0.rel_number.to_be(),
@@ -327,7 +248,7 @@ impl From<(&RelTag, u32)> for TreeKey {
     }
 }
 
-impl neonart::Key for TreeKey {
+impl neon_shmem::hash::Key for MapKey {
     const KEY_LEN: usize = 4 + 4 + 4 + 1 + 4;
 
     fn as_bytes(&self) -> &[u8] {
@@ -335,7 +256,7 @@ impl neonart::Key for TreeKey {
     }
 }
 
-impl neonart::Value for TreeEntry {}
+impl neon_shmem::hash::Value for MapEntry {}
 
 /// Return type used in the cache's get_*() functions. 'Found' means that the page, or other
 /// information that was enqueried, exists in the cache. '
@@ -351,8 +272,7 @@ pub enum CacheResult<V> {
 
 impl<'t> IntegratedCacheWriteAccess<'t> {
     pub fn get_rel_size(&'t self, rel: &RelTag) -> CacheResult<u32> {
-        let r = self.cache_tree.start_read();
-        if let Some(nblocks) = get_rel_size(&r, rel) {
+        if let Some(nblocks) = get_rel_size(&self.cache_map, rel) {
             CacheResult::Found(nblocks)
         } else {
             let lsn = Lsn(self.global_lw_lsn.load(Ordering::Relaxed));
@@ -366,31 +286,39 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         block_number: u32,
         dst: impl uring_common::buf::IoBufMut + Send + Sync,
     ) -> Result<CacheResult<()>, std::io::Error> {
-        let r = self.cache_tree.start_read();
-        if let Some(block_tree_entry) = r.get(&TreeKey::from((rel, block_number))) {
-            let block_entry = if let TreeEntry::Block(e) = block_tree_entry {
+        let x = if let Some(entry) =
+            self.cache_map.get(&MapKey::from((rel, block_number)))
+        {
+            let block_entry = if let MapEntry::Block(e) = &*entry {
                 e
             } else {
-                panic!("unexpected tree entry type for block key");
+                panic!("unexpected map entry type for block key");
             };
             block_entry.referenced.store(true, Ordering::Relaxed);
 
             let cache_block = block_entry.cache_block.load(Ordering::Relaxed);
             if cache_block != INVALID_CACHE_BLOCK {
-                self.file_cache
-                    .as_ref()
-                    .unwrap()
-                    .read_block(cache_block, dst)
-                    .await?;
+                // pin it and release lock
+                block_entry.pinned.fetch_add(1, Ordering::Relaxed);
 
-                Ok(CacheResult::Found(()))
+                (cache_block, DeferredUnpin(block_entry.pinned.as_ptr()))
             } else {
-                Ok(CacheResult::NotFound(block_entry.lw_lsn.load()))
+                return Ok(CacheResult::NotFound(block_entry.lw_lsn.load()));
             }
         } else {
             let lsn = Lsn(self.global_lw_lsn.load(Ordering::Relaxed));
-            Ok(CacheResult::NotFound(lsn))
-        }
+            return Ok(CacheResult::NotFound(lsn));
+        };
+
+        let (cache_block, _deferred_pin) = x;
+        self.file_cache
+            .as_ref()
+            .unwrap()
+            .read_block(cache_block, dst)
+            .await?;
+
+        // unpin the entry (by implicitly dropping deferred_pin)
+        Ok(CacheResult::Found(()))
     }
 
     pub async fn page_is_cached(
@@ -398,12 +326,11 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         rel: &RelTag,
         block_number: u32,
     ) -> Result<CacheResult<()>, std::io::Error> {
-        let r = self.cache_tree.start_read();
-        if let Some(block_tree_entry) = r.get(&TreeKey::from((rel, block_number))) {
-            let block_entry = if let TreeEntry::Block(e) = block_tree_entry {
+        if let Some(entry) = self.cache_map.get(&MapKey::from((rel, block_number))) {
+            let block_entry = if let MapEntry::Block(e) = &*entry {
                 e
             } else {
-                panic!("unexpected tree entry type for block key");
+                panic!("unexpected map entry type for block key");
             };
 
             // This is used for prefetch requests. Treat the probe as an 'access', to keep it
@@ -427,8 +354,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
     /// information, i.e. we don't know if the relation exists or not.
     pub fn get_rel_exists(&'t self, rel: &RelTag) -> CacheResult<bool> {
         // we don't currently cache negative entries, so if the relation is in the cache, it exists
-        let r = self.cache_tree.start_read();
-        if let Some(_rel_entry) = r.get(&TreeKey::from(rel)) {
+        if let Some(_rel_entry) = self.cache_map.get(&MapKey::from(rel)) {
             CacheResult::Found(true)
         } else {
             let lsn = Lsn(self.global_lw_lsn.load(Ordering::Relaxed));
@@ -447,21 +373,22 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
     }
 
     pub fn remember_rel_size(&'t self, rel: &RelTag, nblocks: u32) {
-        let w = self.cache_tree.start_write();
-        let result = w.update_with_fn(&TreeKey::from(rel), |existing| match existing {
-            None => {
-                tracing::info!("inserting rel entry for {rel:?}, {nblocks} blocks");
-                UpdateAction::Insert(TreeEntry::Rel(RelEntry {
-                    nblocks: AtomicU32::new(nblocks),
-                }))
-            }
-            Some(TreeEntry::Block(_)) => panic!("unexpected tree entry type for rel key"),
-            Some(TreeEntry::Rel(e)) => {
-                tracing::info!("updating rel entry for {rel:?}, {nblocks} blocks");
-                e.nblocks.store(nblocks, Ordering::Relaxed);
-                UpdateAction::Nothing
-            }
-        });
+        let result = self
+            .cache_map
+            .update_with_fn(&MapKey::from(rel), |existing| match existing {
+                None => {
+                    tracing::info!("inserting rel entry for {rel:?}, {nblocks} blocks");
+                    UpdateAction::Insert(MapEntry::Rel(RelEntry {
+                        nblocks: AtomicU32::new(nblocks),
+                    }))
+                }
+                Some(MapEntry::Block(_)) => panic!("unexpected map entry type for rel key"),
+                Some(MapEntry::Rel(e)) => {
+                    tracing::info!("updating rel entry for {rel:?}, {nblocks} blocks");
+                    e.nblocks.store(nblocks, Ordering::Relaxed);
+                    UpdateAction::Nothing
+                }
+            });
 
         // FIXME: what to do if we run out of memory? Evict other relation entries? Remove
         // block entries first?
@@ -477,7 +404,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         lw_lsn: Lsn,
         is_write: bool,
     ) {
-        let key = TreeKey::from((rel, block_number));
+        let key = MapKey::from((rel, block_number));
 
         // FIXME: make this work when file cache is disabled. Or make it mandatory
         let file_cache = self.file_cache.as_ref().unwrap();
@@ -488,26 +415,26 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
             // regular POSIX filesystem read() and write()
 
             // First check if we have a block in cache already
-            let w = self.cache_tree.start_write();
-
             let mut old_cache_block = None;
             let mut found_existing = false;
 
-            let res = w.update_with_fn(&key, |existing| {
+            let res = self.cache_map.update_with_fn(&key, |existing| {
                 if let Some(existing) = existing {
-                    let block_entry = if let TreeEntry::Block(e) = existing {
+                    let block_entry = if let MapEntry::Block(e) = existing {
                         e
                     } else {
-                        panic!("unexpected tree entry type for block key");
+                        panic!("unexpected map entry type for block key");
                     };
 
                     found_existing = true;
 
                     // Prevent this entry from being evicted
-                    let was_pinned = block_entry.pinned.swap(true, Ordering::Relaxed);
-                    if was_pinned {
+                    let pin_count = block_entry.pinned.fetch_add(1, Ordering::Relaxed);
+                    if pin_count > 0 {
                         // this is unexpected, because the caller has obtained the io-in-progress lock,
                         // so no one else should try to modify the page at the same time.
+                        // XXX: and I think a read should not be happening either, because the postgres
+                        // buffer is held locked. TODO: check these conditions and tidy this up a little. Seems fragile to just panic.
                         panic!("block entry was unexpectedly pinned");
                     }
 
@@ -547,14 +474,13 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
             // FIXME: unpin the block entry on error
 
             // Update the block entry
-            let w = self.cache_tree.start_write();
-            let res = w.update_with_fn(&key, |existing| {
+            let res = self.cache_map.update_with_fn(&key, |existing| {
                 assert_eq!(found_existing, existing.is_some());
                 if let Some(existing) = existing {
-                    let block_entry = if let TreeEntry::Block(e) = existing {
+                    let block_entry = if let MapEntry::Block(e) = existing {
                         e
                     } else {
-                        panic!("unexpected tree entry type for block key");
+                        panic!("unexpected map entry type for block key");
                     };
 
                     // Update the cache block
@@ -570,14 +496,14 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 
                     block_entry.referenced.store(true, Ordering::Relaxed);
 
-                    let was_pinned = block_entry.pinned.swap(false, Ordering::Relaxed);
-                    assert!(was_pinned);
+                    let pin_count = block_entry.pinned.fetch_sub(1, Ordering::Relaxed);
+                    assert!(pin_count > 0);
                     UpdateAction::Nothing
                 } else {
-                    UpdateAction::Insert(TreeEntry::Block(BlockEntry {
+                    UpdateAction::Insert(MapEntry::Block(BlockEntry {
                         lw_lsn: AtomicLsn::new(lw_lsn.0),
                         cache_block: AtomicU64::new(cache_block),
-                        pinned: AtomicBool::new(false),
+                        pinned: AtomicU64::new(0),
                         referenced: AtomicBool::new(true),
                     }))
                 }
@@ -612,17 +538,16 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                 .expect("error writing to cache");
             // FIXME: handle errors gracefully.
 
-            let w = self.cache_tree.start_write();
-
-            let res = w.update_with_fn(&key, |existing| {
+            let res = self.cache_map.update_with_fn(&key, |existing| {
                 if let Some(existing) = existing {
-                    let block_entry = if let TreeEntry::Block(e) = existing {
+                    let block_entry = if let MapEntry::Block(e) = existing {
                         e
                     } else {
-                        panic!("unexpected tree entry type for block key");
+                        panic!("unexpected map entry type for block key");
                     };
 
-                    assert!(!block_entry.pinned.load(Ordering::Relaxed));
+                    // FIXME: could there be concurrent readers?
+                    assert!(block_entry.pinned.load(Ordering::Relaxed) == 0);
 
                     let old_cache_block = block_entry.cache_block.swap(cache_block, Ordering::Relaxed);
                     if old_cache_block != INVALID_CACHE_BLOCK {
@@ -630,10 +555,10 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                     }
                     UpdateAction::Nothing
                 } else {
-                    UpdateAction::Insert(TreeEntry::Block(BlockEntry {
+                    UpdateAction::Insert(MapEntry::Block(BlockEntry {
                         lw_lsn: AtomicLsn::new(lw_lsn.0),
                         cache_block: AtomicU64::new(cache_block),
-                        pinned: AtomicBool::new(false),
+                        pinned: AtomicU64::new(0),
                         referenced: AtomicBool::new(true),
                     }))
                 }
@@ -648,47 +573,50 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
     /// Forget information about given relation in the cache. (For DROP TABLE and such)
     pub fn forget_rel(&'t self, rel: &RelTag) {
         tracing::info!("forgetting rel entry for {rel:?}");
-        let w = self.cache_tree.start_write();
-        w.remove(&TreeKey::from(rel));
+        self.cache_map.remove(&MapKey::from(rel));
 
         // also forget all cached blocks for the relation
-        let mut iter = TreeIterator::new(&key_range_for_rel_blocks(rel));
-        let r = self.cache_tree.start_read();
-        while let Some((k, _v)) = iter.next(&r) {
-            let w = self.cache_tree.start_write();
+        // FIXME
+        /*
+            let mut iter = MapIterator::new(&key_range_for_rel_blocks(rel));
+            let r = self.cache_tree.start_read();
+            while let Some((k, _v)) = iter.next(&r) {
+                let w = self.cache_tree.start_write();
 
-            let mut evicted_cache_block = None;
+                let mut evicted_cache_block = None;
 
-            let res = w.update_with_fn(&k, |e| {
-                if let Some(e) = e {
-                    let block_entry = if let TreeEntry::Block(e) = e {
-                        e
+                let res = w.update_with_fn(&k, |e| {
+                    if let Some(e) = e {
+                        let block_entry = if let MapEntry::Block(e) = e {
+                            e
+                        } else {
+                            panic!("unexpected map entry type for block key");
+                        };
+                        let cache_block = block_entry
+                            .cache_block
+                            .swap(INVALID_CACHE_BLOCK, Ordering::Relaxed);
+                        if cache_block != INVALID_CACHE_BLOCK {
+                            evicted_cache_block = Some(cache_block);
+                        }
+                        UpdateAction::Remove
                     } else {
-                        panic!("unexpected tree entry type for block key");
-                    };
-                    let cache_block = block_entry
-                        .cache_block
-                        .swap(INVALID_CACHE_BLOCK, Ordering::Relaxed);
-                    if cache_block != INVALID_CACHE_BLOCK {
-                        evicted_cache_block = Some(cache_block);
+                        UpdateAction::Nothing
                     }
-                    UpdateAction::Remove
-                } else {
-                    UpdateAction::Nothing
+                });
+
+                // FIXME: It's pretty surprising to run out of memory while removing. But
+                // maybe it can happen because of trying to shrink a node?
+                res.expect("out of memory");
+
+                if let Some(evicted_cache_block) = evicted_cache_block {
+                    self.file_cache
+                        .as_ref()
+                        .unwrap()
+                        .dealloc_block(evicted_cache_block);
                 }
-            });
-
-            // FIXME: It's pretty surprising to run out of memory while removing. But
-            // maybe it can happen because of trying to shrink a node?
-            res.expect("out of memory");
-
-            if let Some(evicted_cache_block) = evicted_cache_block {
-                self.file_cache
-                    .as_ref()
-                    .unwrap()
-                    .dealloc_block(evicted_cache_block);
-            }
         }
+
+            */
     }
 
     // Maintenance routines
@@ -699,65 +627,73 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
     pub fn try_evict_one_cache_block(&self) -> Option<CacheBlock> {
         let mut clock_hand = self.clock_hand.lock().unwrap();
         for _ in 0..100 {
-            let r = self.cache_tree.start_read();
-
             self.clock_iterations_counter.inc();
 
-            match clock_hand.next(&r) {
+            (*clock_hand) += 1;
+
+            let mut evict_this = false;
+            let num_buckets = self.cache_map.get_num_buckets();
+            match self
+                .cache_map
+                .get_bucket((*clock_hand) % num_buckets)
+                .as_deref()
+            {
                 None => {
-                    // The cache is completely empty. Pretty unexpected that this function
-                    // was called then..
-                    break;
+                    // This bucket was unused
                 }
-                Some((_k, TreeEntry::Rel(_))) => {
+                Some(MapEntry::Rel(_)) => {
                     // ignore rel entries for now.
                     // TODO: They stick in the cache forever
                 }
-                Some((k, TreeEntry::Block(blk_entry))) => {
+                Some(MapEntry::Block(blk_entry)) => {
                     if !blk_entry.referenced.swap(false, Ordering::Relaxed) {
                         // Evict this. Maybe.
-                        let w = self.cache_tree.start_write();
-
-                        let mut evicted_cache_block = None;
-                        let res = w.update_with_fn(&k, |old| {
-                            match old {
-                                None => UpdateAction::Nothing,
-                                Some(TreeEntry::Rel(_)) => panic!("unexpected Rel entry"),
-                                Some(TreeEntry::Block(old)) => {
-                                    // note: all the accesses to 'pinned' currently happen
-                                    // within update_with_fn(), which protects from concurrent
-                                    // updates. Otherwise, another thread could set the 'pinned'
-                                    // flag just after we have checked it here.
-                                    if blk_entry.pinned.load(Ordering::Relaxed) {
-                                        return UpdateAction::Nothing;
-                                    }
-
-                                    let _ = self
-                                        .global_lw_lsn
-                                        .fetch_max(old.lw_lsn.load().0, Ordering::Relaxed);
-                                    let cache_block = old
-                                        .cache_block
-                                        .swap(INVALID_CACHE_BLOCK, Ordering::Relaxed);
-                                    if cache_block != INVALID_CACHE_BLOCK {
-                                        evicted_cache_block = Some(cache_block);
-                                    }
-                                    // TODO: we don't evict the entry, just the block. Does it make
-                                    // sense to keep the entry?
-                                    UpdateAction::Nothing
-                                }
-                            }
-                        });
-
-                        // FIXME: what to do if we run out of memory? Evict other relation entries? Remove
-                        // block entries first? It probably shouldn't happen here, as we're not
-                        // actually updating the tree.
-                        res.expect("out of memory");
-
-                        if evicted_cache_block.is_some() {
-                            self.page_evictions_counter.inc();
-                            return evicted_cache_block;
-                        }
+                        evict_this = true;
                     }
+                }
+            };
+
+            if evict_this {
+                // grab the write lock
+                let mut evicted_cache_block = None;
+                let res =
+                    self.cache_map
+                    .update_with_fn_at_bucket(*clock_hand % num_buckets, |old| {
+                        match old {
+                            None => UpdateAction::Nothing,
+                            Some(MapEntry::Rel(_)) => panic!("unexpected Rel entry"),
+                            Some(MapEntry::Block(old)) => {
+                                // note: all the accesses to 'pinned' currently happen
+                                // within update_with_fn(), or while holding ValueReadGuard, which protects from concurrent
+                                // updates. Otherwise, another thread could set the 'pinned'
+                                // flag just after we have checked it here.
+                                if old.pinned.load(Ordering::Relaxed) != 0 {
+                                    return UpdateAction::Nothing;
+                                }
+
+                                let _ = self
+                                    .global_lw_lsn
+                                    .fetch_max(old.lw_lsn.load().0, Ordering::Relaxed);
+                                let cache_block = old
+                                    .cache_block
+                                    .swap(INVALID_CACHE_BLOCK, Ordering::Relaxed);
+                                if cache_block != INVALID_CACHE_BLOCK {
+                                    evicted_cache_block = Some(cache_block);
+                                }
+                                // TODO: we don't evict the entry, just the block. Does it make
+                                // sense to keep the entry?
+                                UpdateAction::Nothing
+                            }
+                        }
+                    });
+
+                // Out of memory should not happen here, as we're only updating existing values,
+                // not inserting new entries to the map.
+                res.expect("out of memory");
+
+                if evicted_cache_block.is_some() {
+                    self.page_evictions_counter.inc();
+                    return evicted_cache_block;
                 }
             }
         }
@@ -765,81 +701,35 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         None
     }
 
-    pub fn dump_tree(&self, dst: &mut dyn std::io::Write) {
-        self.cache_tree.start_read().dump(dst);
+    pub fn dump_map(&self, _dst: &mut dyn std::io::Write) {
+        //FIXME self.cache_map.start_read().dump(dst);
     }
 }
 
 impl metrics::core::Collector for IntegratedCacheWriteAccess<'_> {
     fn desc(&self) -> Vec<&metrics::core::Desc> {
         let mut descs = Vec::new();
-        descs.append(&mut self.nodes_total.desc());
-        descs.append(&mut self.nodes_memory_bytes.desc());
         descs.append(&mut self.page_evictions_counter.desc());
         descs.append(&mut self.clock_iterations_counter.desc());
 
-        descs.append(&mut self.cache_memory_size_bytes.desc());
-        descs.append(&mut self.cache_memory_used_bytes.desc());
-
-        descs.append(&mut self.cache_tree_epoch.desc());
-        descs.append(&mut self.cache_tree_oldest_epoch.desc());
-        descs.append(&mut self.cache_tree_garbage_total.desc());
+        descs.append(&mut self.cache_map_num_buckets.desc());
+        descs.append(&mut self.cache_map_num_buckets_in_use.desc());
 
         descs
     }
     fn collect(&self) -> Vec<metrics::proto::MetricFamily> {
-        const ALLOC_BLOCK_SIZE: i64 = neonart::allocator::block::BLOCK_SIZE as i64;
-
         // Update gauges
-        let art_statistics = self.cache_tree.get_statistics();
-        self.nodes_leaf_total
-            .set(art_statistics.slabs.num_leaf as i64);
-        self.nodes_internal4_total
-            .set(art_statistics.slabs.num_internal4 as i64);
-        self.nodes_internal16_total
-            .set(art_statistics.slabs.num_internal16 as i64);
-        self.nodes_internal48_total
-            .set(art_statistics.slabs.num_internal48 as i64);
-        self.nodes_internal256_total
-            .set(art_statistics.slabs.num_internal256 as i64);
-
-        self.nodes_memory_leaf_bytes
-            .set(art_statistics.slabs.num_blocks_leaf as i64 * ALLOC_BLOCK_SIZE);
-        self.nodes_memory_internal4_bytes
-            .set(art_statistics.slabs.num_blocks_internal4 as i64 * ALLOC_BLOCK_SIZE);
-        self.nodes_memory_internal16_bytes
-            .set(art_statistics.slabs.num_blocks_internal16 as i64 * ALLOC_BLOCK_SIZE);
-        self.nodes_memory_internal48_bytes
-            .set(art_statistics.slabs.num_blocks_internal48 as i64 * ALLOC_BLOCK_SIZE);
-        self.nodes_memory_internal256_bytes
-            .set(art_statistics.slabs.num_blocks_internal256 as i64 * ALLOC_BLOCK_SIZE);
-
-        let block_statistics = &art_statistics.blocks;
-        self.cache_memory_size_bytes
-            .set(block_statistics.num_blocks as i64 * ALLOC_BLOCK_SIZE as i64);
-        self.cache_memory_used_bytes.set(
-            (block_statistics.num_initialized as i64 - block_statistics.num_free_blocks as i64)
-                * ALLOC_BLOCK_SIZE as i64,
-        );
-
-        self.cache_tree_epoch.set(art_statistics.epoch as i64);
-        self.cache_tree_oldest_epoch
-            .set(art_statistics.oldest_epoch as i64);
-        self.cache_tree_garbage_total
-            .set(art_statistics.num_garbage as i64);
+        self.cache_map_num_buckets
+            .set(self.cache_map.get_num_buckets() as i64);
+        self.cache_map_num_buckets_in_use
+            .set(self.cache_map.get_num_buckets_in_use() as i64);
 
         let mut values = Vec::new();
-        values.append(&mut self.nodes_total.collect());
-        values.append(&mut self.nodes_memory_bytes.collect());
         values.append(&mut self.page_evictions_counter.collect());
         values.append(&mut self.clock_iterations_counter.collect());
 
-        values.append(&mut self.cache_memory_size_bytes.collect());
-        values.append(&mut self.cache_memory_used_bytes.collect());
-
-        values.append(&mut self.cache_tree_epoch.collect());
-        values.append(&mut self.cache_tree_oldest_epoch.collect());
-        values.append(&mut self.cache_tree_garbage_total.collect());
+        values.append(&mut self.cache_map_num_buckets.collect());
+        values.append(&mut self.cache_map_num_buckets_in_use.collect());
 
         values
     }
@@ -849,12 +739,15 @@ impl metrics::core::Collector for IntegratedCacheWriteAccess<'_> {
 ///
 /// This is in a separate function so that it can be shared by
 /// IntegratedCacheReadAccess::get_rel_size() and IntegratedCacheWriteAccess::get_rel_size()
-fn get_rel_size<'t>(r: &neonart::TreeReadGuard<TreeKey, TreeEntry>, rel: &RelTag) -> Option<u32> {
-    if let Some(existing) = r.get(&TreeKey::from(rel)) {
-        let rel_entry = if let TreeEntry::Rel(e) = existing {
+fn get_rel_size<'t>(
+    r: &neon_shmem::hash::HashMapAccess<MapKey, MapEntry>,
+    rel: &RelTag,
+) -> Option<u32> {
+    if let Some(existing) = r.get(&MapKey::from(rel)) {
+        let rel_entry = if let MapEntry::Rel(ref e) = *existing {
             e
         } else {
-            panic!("unexpected tree entry type for rel key");
+            panic!("unexpected map entry type for rel key");
         };
 
         let nblocks = rel_entry.nblocks.load(Ordering::Relaxed);
@@ -874,17 +767,20 @@ fn get_rel_size<'t>(r: &neonart::TreeReadGuard<TreeKey, TreeEntry>, rel: &RelTag
 /// request to the communicator process.
 impl<'t> IntegratedCacheReadAccess<'t> {
     pub fn get_rel_size(&'t self, rel: &RelTag) -> Option<u32> {
-        get_rel_size(&self.cache_tree.start_read(), rel)
+        get_rel_size(&self.cache_map, rel)
     }
 
     pub fn start_read_op(&'t self) -> BackendCacheReadOp<'t> {
-        let r = self.cache_tree.start_read();
-        BackendCacheReadOp { read_guard: r }
+        BackendCacheReadOp {
+            read_guards: Vec::new(),
+            map_access: self,
+        }
     }
 }
 
 pub struct BackendCacheReadOp<'t> {
-    read_guard: neonart::TreeReadGuard<'t, TreeKey, TreeEntry>,
+    read_guards: Vec<DeferredUnpin>,
+    map_access: &'t IntegratedCacheReadAccess<'t>,
 }
 
 impl<'e> BackendCacheReadOp<'e> {
@@ -896,17 +792,24 @@ impl<'e> BackendCacheReadOp<'e> {
     /// read. It's possible that while you are performing the read, the cache block is invalidated.
     /// After you have completed the read, call BackendCacheReadResult::finish() to check if the
     /// read was in fact valid or not. If it was concurrently invalidated, you need to retry.
-    pub fn get_page(&self, rel: &RelTag, block_number: u32) -> Option<u64> {
-        if let Some(block_tree_entry) = self.read_guard.get(&TreeKey::from((rel, block_number))) {
-            let block_entry = if let TreeEntry::Block(e) = block_tree_entry {
+    pub fn get_page(&mut self, rel: &RelTag, block_number: u32) -> Option<u64> {
+        if let Some(entry) = self
+            .map_access
+            .cache_map
+            .get(&MapKey::from((rel, block_number)))
+        {
+            let block_entry = if let MapEntry::Block(ref e) = *entry {
                 e
             } else {
-                panic!("unexpected tree entry type for block key");
+                panic!("unexpected map entry type for block key");
             };
             block_entry.referenced.store(true, Ordering::Relaxed);
 
             let cache_block = block_entry.cache_block.load(Ordering::Relaxed);
             if cache_block != INVALID_CACHE_BLOCK {
+                block_entry.pinned.fetch_add(1, Ordering::Relaxed);
+                self.read_guards
+                    .push(DeferredUnpin(block_entry.pinned.as_ptr()));
                 Some(cache_block)
             } else {
                 None
@@ -917,10 +820,27 @@ impl<'e> BackendCacheReadOp<'e> {
     }
 
     pub fn finish(self) -> bool {
-        // TODO: currently, we use a spinlock to protect the in-memory tree, so concurrent
-        // invalidations are not possible. But the plan is to switch to optimistic locking,
-        // and once we do that, this would return 'false' if the optimistic locking failed and
-        // you need to retry.
+        // TODO: currently, we hold a pin on the in-memory map, so concurrent invalidations are not
+        // possible. But if we switch to optimistic locking, this would return 'false' if the
+        // optimistic locking failed and you need to retry.
         true
+    }
+}
+
+/// A hack to decrement an AtomicU64 on drop. This is used to decrement the pin count
+/// of a BlockEntry. The safety depends on the fact that the BlockEntry is not evicted
+/// or moved while it's pinned.
+struct DeferredUnpin(*mut u64);
+
+unsafe impl Sync for DeferredUnpin {}
+unsafe impl Send for DeferredUnpin {}
+
+impl Drop for DeferredUnpin {
+    fn drop(&mut self) {
+        // unpin it
+        unsafe {
+            let pin_ref = AtomicU64::from_ptr(self.0);
+            pin_ref.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }

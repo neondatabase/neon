@@ -1359,7 +1359,7 @@ dependencies = [
  "http 1.1.0",
  "libc",
  "metrics",
- "neonart",
+ "neon-shmem",
  "nix 0.30.1",
  "pageserver_client_grpc",
  "pageserver_page_api",
@@ -3930,6 +3930,9 @@ name = "neon-shmem"
 version = "0.1.0"
 dependencies = [
  "nix 0.30.1",
+ "rand 0.9.1",
+ "rand_distr 0.5.1",
+ "spin",
  "tempfile",
  "thiserror 1.0.69",
  "workspace_hack",
@@ -4378,12 +4381,15 @@ name = "pagebench"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum 0.8.1",
  "camino",
  "clap",
  "futures",
  "hdrhistogram",
+ "http 1.1.0",
  "humantime",
  "humantime-serde",
+ "metrics",
  "pageserver_api",
  "pageserver_client",
  "pageserver_client_grpc",
@@ -4586,7 +4592,9 @@ dependencies = [
  "http 1.1.0",
  "hyper 1.6.0",
  "hyper-util",
+ "metrics",
  "pageserver_page_api",
+ "priority-queue",
  "rand 0.8.5",
  "thiserror 1.0.69",
  "tokio",
@@ -5173,6 +5181,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "353e1ca18966c16d9deb1c69278edbc5f194139612772bd9537af60ac231e1e6"
 dependencies = [
  "elliptic-curve 0.13.8",
+]
+
+[[package]]
+name = "priority-queue"
+version = "2.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef08705fa1589a1a59aa924ad77d14722cb0cd97b67dd5004ed5f4a4873fce8d"
+dependencies = [
+ "autocfg",
+ "equivalent",
+ "indexmap 2.9.0",
 ]
 
 [[package]]

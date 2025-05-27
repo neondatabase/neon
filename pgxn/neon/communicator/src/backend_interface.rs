@@ -98,7 +98,7 @@ pub extern "C" fn bcomm_start_get_page_v_request<'t>(
 
     // Check if the request can be satisfied from the cache first
     let mut all_cached = true;
-    let read_op = bs.integrated_cache.start_read_op();
+    let mut read_op = bs.integrated_cache.start_read_op();
     for i in 0..get_pagev_request.nblocks {
         if let Some(cache_block) = read_op.get_page(
             &get_pagev_request.reltag(),

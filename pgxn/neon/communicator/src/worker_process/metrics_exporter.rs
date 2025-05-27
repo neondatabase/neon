@@ -19,7 +19,7 @@ impl<'a> CommunicatorWorkerProcessStruct<'a> {
         use axum::routing::get;
         let app = Router::new()
             .route("/metrics", get(get_metrics))
-            .route("/dump_cache_tree", get(dump_cache_tree))
+            .route("/dump_cache_map", get(dump_cache_map))
             .with_state(self);
 
         // TODO: make configurable. Or listen on unix domain socket?
@@ -34,11 +34,11 @@ impl<'a> CommunicatorWorkerProcessStruct<'a> {
     }
 }
 
-async fn dump_cache_tree(
+async fn dump_cache_map(
     State(state): State<&CommunicatorWorkerProcessStruct<'static>>,
 ) -> Response {
     let mut buf: Vec<u8> = Vec::new();
-    state.cache.dump_tree(&mut buf);
+    state.cache.dump_map(&mut buf);
 
     Response::builder()
         .status(StatusCode::OK)

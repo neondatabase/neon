@@ -258,6 +258,7 @@ endpoint_storage = { version = "0.0.1", path = "./endpoint_storage/" }
 http-utils = { version = "0.1", path = "./libs/http-utils/" }
 metrics = { version = "0.1", path = "./libs/metrics/" }
 neonart = { version = "0.1", path = "./libs/neonart/" }
+neon-shmem = { version = "0.1", path = "./libs/neon-shmem/" }
 pageserver = { path = "./pageserver" }
 pageserver_api = { version = "0.1", path = "./libs/pageserver_api/" }
 pageserver_client = { path = "./pageserver/client" }

@@ -31,7 +31,7 @@ uring-common = { workspace = true, features = ["bytes"] }
 pageserver_client_grpc.workspace = true
 pageserver_page_api.workspace = true
 
-neonart.workspace = true
+neon-shmem.workspace = true
 utils.workspace = true
 
 [build-dependencies]
