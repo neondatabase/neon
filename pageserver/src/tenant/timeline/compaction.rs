@@ -1286,7 +1286,14 @@ impl Timeline {
             guard
                 .all_persistent_layers()
                 .iter()
-                .map(|x| x.lsn_range.end)
+                .map(|x| {
+                    // Use the end LSN of delta layers OR the start LSN of image layers.
+                    if x.is_delta {
+                        x.lsn_range.end
+                    } else {
+                        x.lsn_range.start
+                    }
+                })
                 .max()
         };
 

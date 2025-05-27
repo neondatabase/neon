@@ -8374,8 +8374,10 @@ mod tests {
                 .await?;
 
             if iter % 5 == 0 {
+                let scan_lsn = Lsn(lsn.0 + 1);
+                info!("scanning at {}", scan_lsn);
                 let (_, before_delta_file_accessed) =
-                    scan_with_statistics(&tline, &keyspace, lsn, &ctx, io_concurrency.clone())
+                    scan_with_statistics(&tline, &keyspace, scan_lsn, &ctx, io_concurrency.clone())
                         .await?;
                 tline
                     .compact(
@@ -8391,7 +8393,7 @@ mod tests {
                     )
                     .await?;
                 let (_, after_delta_file_accessed) =
-                    scan_with_statistics(&tline, &keyspace, lsn, &ctx, io_concurrency.clone())
+                    scan_with_statistics(&tline, &keyspace, scan_lsn, &ctx, io_concurrency.clone())
                         .await?;
                 assert!(
                     after_delta_file_accessed < before_delta_file_accessed,
