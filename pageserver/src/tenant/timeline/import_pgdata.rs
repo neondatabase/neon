@@ -8,6 +8,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use utils::lsn::Lsn;
+use utils::sync::gate::Gate;
 
 use super::Timeline;
 use crate::context::RequestContext;
@@ -21,13 +22,14 @@ pub(crate) mod index_part_format;
 
 pub(crate) struct ImportingTimeline {
     pub import_task_handle: JoinHandle<()>,
+    pub import_task_gate: Gate,
     pub timeline: Arc<Timeline>,
 }
 
 impl ImportingTimeline {
-    pub(crate) async fn shutdown(self) {
+    pub(crate) async fn shutdown(&self) {
         self.import_task_handle.abort();
-        let _ = self.import_task_handle.await;
+        self.import_task_gate.close().await;
 
         self.timeline.remote_client.shutdown().await;
     }

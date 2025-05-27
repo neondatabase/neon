@@ -1789,11 +1789,14 @@ impl TenantShard {
                     },
                 ) => {
                     let timeline_id = timeline.timeline_id;
+                    let import_task_gate = Gate::default();
+                    let import_task_guard = import_task_gate.enter().unwrap();
                     let import_task_handle =
                         tokio::task::spawn(self.clone().create_timeline_import_pgdata_task(
                             timeline.clone(),
                             import_pgdata,
                             guard,
+                            import_task_guard,
                             ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn),
                         ));
 
@@ -1802,6 +1805,7 @@ impl TenantShard {
                         ImportingTimeline {
                             timeline: timeline.clone(),
                             import_task_handle,
+                            import_task_gate,
                         },
                     );
 
@@ -2853,10 +2857,14 @@ impl TenantShard {
 
         let (timeline, timeline_create_guard) = uninit_timeline.finish_creation_myself();
 
+        let import_task_gate = Gate::default();
+        let import_task_guard = import_task_gate.enter().unwrap();
+
         let import_task_handle = tokio::spawn(self.clone().create_timeline_import_pgdata_task(
             timeline.clone(),
             index_part,
             timeline_create_guard,
+            import_task_guard,
             timeline_ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn),
         ));
 
@@ -2865,6 +2873,7 @@ impl TenantShard {
             ImportingTimeline {
                 timeline: timeline.clone(),
                 import_task_handle,
+                import_task_gate,
             },
         );
 
@@ -2924,6 +2933,7 @@ impl TenantShard {
         timeline: Arc<Timeline>,
         index_part: import_pgdata::index_part_format::Root,
         timeline_create_guard: TimelineCreateGuard,
+        _import_task_guard: GateGuard,
         ctx: RequestContext,
     ) {
         debug_assert_current_span_has_tenant_and_timeline_id();
