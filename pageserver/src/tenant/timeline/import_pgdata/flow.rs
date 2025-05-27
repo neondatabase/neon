@@ -30,6 +30,7 @@
 
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
+use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -100,8 +101,24 @@ async fn run_v1(
         tasks: Vec::default(),
     };
 
-    let import_config = &timeline.conf.timeline_import_config;
-    let plan = planner.plan(import_config).await?;
+    // Use the job size limit encoded in the progress if we are resuming an import.
+    // This ensures that imports have stable plans even if the pageserver config changes.
+    let import_config = {
+        match &import_progress {
+            Some(progress) => {
+                let base = &timeline.conf.timeline_import_config;
+                TimelineImportConfig {
+                    import_job_soft_size_limit: NonZeroUsize::new(progress.job_soft_size_limit)
+                        .unwrap(),
+                    import_job_concurrency: base.import_job_concurrency,
+                    import_job_checkpoint_threshold: base.import_job_checkpoint_threshold,
+                }
+            }
+            None => timeline.conf.timeline_import_config.clone(),
+        }
+    };
+
+    let plan = planner.plan(&import_config).await?;
 
     // Hash the plan and compare with the hash of the plan we got back from the storage controller.
     // If the two match, it means that the planning stage had the same output.
@@ -126,7 +143,7 @@ async fn run_v1(
     pausable_failpoint!("import-timeline-pre-execute-pausable");
 
     let start_from_job_idx = import_progress.map(|progress| progress.completed);
-    plan.execute(timeline, start_from_job_idx, plan_hash, import_config, ctx)
+    plan.execute(timeline, start_from_job_idx, plan_hash, &import_config, ctx)
         .await
 }
 
@@ -453,6 +470,7 @@ impl Plan {
                                     jobs: jobs_in_plan,
                                     completed: last_completed_job_idx,
                                     import_plan_hash,
+                                    job_soft_size_limit: import_config.import_job_soft_size_limit.into(),
                                 };
 
                                 timeline.remote_client.schedule_index_upload_for_file_changes()?;
