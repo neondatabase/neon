@@ -161,6 +161,8 @@ WalProposerMain(Datum main_arg)
 {
 	WalProposer *wp;
 
+	walprop_shared->bgw_started = true;
+
 	while (*wal_acceptors_list == '\0')
 	{
 		/* Wait until wal acceptors list GUC changes are propagated */
