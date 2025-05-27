@@ -1,6 +1,7 @@
 pub(crate) mod split_state;
 use std::collections::HashMap;
 use std::io::Write;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,8 +16,8 @@ use diesel_async::pooled_connection::bb8::Pool;
 use diesel_async::pooled_connection::{AsyncDieselConnectionManager, ManagerConfig};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use diesel_migrations::{EmbeddedMigrations, embed_migrations};
-use futures::FutureExt;
 use futures::future::BoxFuture;
+use futures::{FutureExt, StreamExt};
 use itertools::Itertools;
 use pageserver_api::controller_api::{
     AvailabilityZone, MetadataHealthRecord, NodeSchedulingPolicy, PlacementPolicy,
@@ -31,6 +32,7 @@ use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::ring;
 use scoped_futures::ScopedBoxFuture;
 use serde::{Deserialize, Serialize};
+use tracing::info;
 use utils::generation::Generation;
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
@@ -40,7 +42,6 @@ use crate::metrics::{
     DatabaseQueryErrorLabelGroup, DatabaseQueryLatencyLabelGroup, METRICS_REGISTRY,
 };
 use crate::node::Node;
-use crate::schema::sk_ps_discovery;
 use crate::timeline_import::{
     TimelineImport, TimelineImportUpdateError, TimelineImportUpdateFollowUp,
 };
@@ -75,6 +76,8 @@ const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations");
 /// we can UPDATE a node's scheduling mode reasonably quickly to mark a bad node offline.
 pub struct Persistence {
     connection_pool: Pool<AsyncPgConnection>,
+    connect_tokio_postgres:
+        Box<dyn Sync + Send + 'static + Fn() -> BoxFuture<'static, TokioPostgresConnectResult>>,
 }
 
 /// Legacy format, for use in JSON compat objects in test environment
@@ -178,10 +181,11 @@ impl Persistence {
 
     pub async fn new(database_url: String) -> Self {
         let mut mgr_config = ManagerConfig::default();
-        mgr_config.custom_setup = Box::new(establish_connection_rustls);
+        mgr_config.custom_setup =
+            Box::new(|config| establish_connection_rustls_diesel(config.to_owned()));
 
         let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new_with_config(
-            database_url,
+            database_url.clone(),
             mgr_config,
         );
 
@@ -198,20 +202,25 @@ impl Persistence {
             .await
             .expect("Could not build connection pool");
 
-        Self { connection_pool }
+        Self {
+            connection_pool,
+            connect_tokio_postgres: Box::new(move || {
+                establish_connection_rustls_tokio_postgres(database_url.clone())
+            }),
+        }
     }
 
     /// A helper for use during startup, where we would like to tolerate concurrent restarts of the
     /// database and the storage controller, therefore the database might not be available right away
     pub async fn await_connection(
-        database_url: &str,
+        database_url: String,
         timeout: Duration,
     ) -> Result<(), diesel::ConnectionError> {
         let started_at = Instant::now();
-        log_postgres_connstr_info(database_url)
+        log_postgres_connstr_info(&database_url)
             .map_err(|e| diesel::ConnectionError::InvalidConnectionUrl(e.to_string()))?;
         loop {
-            match establish_connection_rustls(database_url).await {
+            match establish_connection_rustls_diesel(database_url.clone()).await {
                 Ok(_) => {
                     tracing::info!("Connected to database.");
                     return Ok(());
@@ -1822,6 +1831,60 @@ impl Persistence {
         })
         .await
     }
+
+    pub(crate) async fn listen_sk_ps_discovery(
+        &self,
+    ) -> DatabaseResult<
+        Pin<Box<dyn Send + 'static + futures::Stream<Item = Result<TenantId, serde_json::Error>>>>,
+    > {
+        let (client, mut conn) = (&self.connect_tokio_postgres)().await?;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tokio::spawn(async move {
+            let mut stream = futures::stream::poll_fn(move |cx| conn.poll_message(cx));
+            while let Some(msg) = stream.next().await {
+                info!(?msg, "async message");
+                match msg {
+                    Ok(tokio_postgres::AsyncMessage::Notification(notification))
+                        if notification.channel() == "sk_ps_discovery" =>
+                    {
+                        let Ok(()) = tx.send(notification).await else {
+                            tracing::info!(
+                                "sk_ps_discovery notification rx dropped, stopping async notification processing"
+                            );
+                            break;
+                        };
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        tracing::error!(?err, "tokio_postgres poll_message error");
+                        break;
+                    }
+                }
+            }
+            tracing::info!("sk_ps_discovery notification stream returned None, exiting");
+        });
+
+        client
+            .batch_execute("LISTEN sk_ps_discovery;")
+            .await
+            .expect("TODO");
+
+        #[derive(serde::Deserialize)]
+        struct Notification {
+            tenant_id: TenantId,
+        }
+        Ok(Box::pin(async_stream::stream! {
+            while let Some(msg) = rx.recv().await {
+                let msg: Result<Notification, _> = serde_json::from_str(msg.payload());
+                let msg = msg.map(|Notification { tenant_id }| tenant_id );
+                yield msg;
+            }
+            tracing::info!("sk_ps_discovery channel closed, stopping stream");
+             // keep client alive inside the returned sream object, othrwise `conn` ends as soon as we return from this function
+            drop(client);
+        }))
+    }
 }
 
 pub(crate) fn load_certs() -> anyhow::Result<Arc<rustls::RootCertStore>> {
@@ -1910,19 +1973,38 @@ fn client_config_with_root_certs() -> anyhow::Result<rustls::ClientConfig> {
     })
 }
 
-fn establish_connection_rustls(config: &str) -> BoxFuture<ConnectionResult<AsyncPgConnection>> {
-    let fut = async {
+type TokioPostgresConnectResult = ConnectionResult<(
+    tokio_postgres::Client,
+    tokio_postgres::Connection<
+        tokio_postgres::Socket,
+        tokio_postgres_rustls::RustlsStream<tokio_postgres::Socket>,
+    >,
+)>;
+
+fn establish_connection_rustls_tokio_postgres(
+    config: String,
+) -> BoxFuture<'static, TokioPostgresConnectResult> {
+    let fut = async move {
         // We first set up the way we want rustls to work.
         let rustls_config = client_config_with_root_certs()
             .map_err(|err| ConnectionError::BadConnection(format!("{err:?}")))?;
         let tls = tokio_postgres_rustls::MakeRustlsConnect::new(rustls_config);
-        let (client, conn) = tokio_postgres::connect(config, tls)
+        let (client, conn) = tokio_postgres::connect(&config, tls)
             .await
             .map_err(|e| ConnectionError::BadConnection(e.to_string()))?;
-
-        AsyncPgConnection::try_from_client_and_connection(client, conn).await
+        Ok((client, conn))
     };
     fut.boxed()
+}
+
+fn establish_connection_rustls_diesel(
+    config: String,
+) -> BoxFuture<'static, ConnectionResult<AsyncPgConnection>> {
+    async {
+        let (client, conn) = establish_connection_rustls_tokio_postgres(config).await?;
+        AsyncPgConnection::try_from_client_and_connection(client, conn).await
+    }
+    .boxed()
 }
 
 #[cfg_attr(test, test)]

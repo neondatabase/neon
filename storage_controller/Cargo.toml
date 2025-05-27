@@ -15,6 +15,7 @@ testing = []
 
 [dependencies]
 anyhow.workspace = true
+async-stream.workspace = true
 bytes.workspace = true
 camino.workspace = true
 chrono.workspace = true

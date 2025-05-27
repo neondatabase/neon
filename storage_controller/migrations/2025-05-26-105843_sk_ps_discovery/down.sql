@@ -1,5 +1,9 @@
-DROP TRIGGER on_sk_timeline_update_enqueue_sk_ps_discovery;
-DROP TRIGGER on_ps_tenant_shard_change_enqueue_sk_ps_discovery;
+DROP TRIGGER on_ps_tenant_shard_UPDATE_enqueue_sk_ps_discovery on "tenant_shards";
+DROP FUNCTION on_ps_tenant_shard_UPDATE_enqueue_sk_ps_discovery_triggerfn;
+DROP TRIGGER on_ps_tenant_shard_DELETE_enqueue_sk_ps_discovery on "tenant_shards";
+DROP FUNCTION on_ps_tenant_shard_DELETE_enqueue_sk_ps_discovery_triggerfn;
+DROP TRIGGER on_ps_tenant_shard_INSERT_enqueue_sk_ps_discovery on "tenant_shards";
+DROP FUNCTION on_ps_tenant_shard_INSERT_enqueue_sk_ps_discovery_triggerfn;
 DROP FUNCTION sk_ps_discovery_enqueue_tenant;
 DROP TABLE "sk_ps_discovery";
 

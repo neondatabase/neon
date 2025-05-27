@@ -489,6 +489,7 @@ pub struct Service {
     inner: Arc<std::sync::RwLock<ServiceState>>,
     config: Config,
     persistence: Arc<Persistence>,
+    sk_ps_discovery: sk_ps_discovery::ActorClient,
     compute_hook: Arc<ComputeHook>,
     result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResultRequest>,
 
@@ -1767,6 +1768,8 @@ impl Service {
             LeadershipStatus::Leader
         };
 
+        let sk_ps_discovery = sk_ps_discovery::spawn(persistence.clone());
+
         let this = Arc::new(Self {
             inner: Arc::new(std::sync::RwLock::new(ServiceState::new(
                 nodes,
@@ -1779,6 +1782,7 @@ impl Service {
             ))),
             config: config.clone(),
             persistence,
+            sk_ps_discovery,
             compute_hook: Arc::new(ComputeHook::new(config.clone())?),
             result_tx,
             heartbeater_ps,

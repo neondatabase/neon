@@ -6690,6 +6690,7 @@ name = "storage_controller"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "bytes",
  "camino",
  "chrono",

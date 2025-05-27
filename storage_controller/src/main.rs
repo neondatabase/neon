@@ -436,7 +436,7 @@ async fn async_main() -> anyhow::Result<()> {
     };
 
     // Validate that we can connect to the database
-    Persistence::await_connection(&secrets.database_url, args.db_connect_timeout.into()).await?;
+    Persistence::await_connection(secrets.database_url.clone(), args.db_connect_timeout.into()).await?;
 
     let persistence = Arc::new(Persistence::new(secrets.database_url).await);
 
