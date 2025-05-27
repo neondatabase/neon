@@ -656,6 +656,25 @@ impl Persistence {
                         .get_result(conn)
                         .await?;
 
+                    let sk_ps_discovery_update_query = diesel::sql_query(r#"
+                        INSERT INTO sk_ps_discovery (tenant_id, shard_number, shard_count, ps_generation, sk_id, ps_id,created_at, last_attmpt_at)
+                        SELECT (
+                            WITH sk_timeline_attachments AS (
+                                SELECT DISTINCT tenant_id,timeline_id,unnest(array_cat(sk_set, new_sk_set)) as sk_id FROM timelines
+                                WHERE tenant_id = $1
+                            )
+                            SELECT $1, $2, $3, tenant_shards.generation, sk_timeline_attachments.sk_id, tenant_shards.generation_pageserver, $4, NULL
+                            FROM tenant_shards
+                            INNER JOIN sk_timeline_attachments ON tenant_shards.tenant_id = sk_timeline_attachments.tenant_id
+                        )
+                    "#);
+                    sk_ps_discovery_update_query.bind::<diesel::sql_types::VarChar, _>(tenant_shard_id.tenant_id.to_string())
+                        .bind::<diesel::sql_types::Integer, _>(tenant_shard_id.shard_number.0 as i32)
+                        .bind::<diesel::sql_types::Integer, _>(tenant_shard_id.shard_count.literal() as i32)
+                        .bind::<diesel::sql_types::Timestamptz, _>(chrono::Utc::now())
+                        .execute(conn)
+                        .await?;
+
                     Ok(updated)
                 })
             })
@@ -964,6 +983,8 @@ impl Persistence {
                         .execute(conn).await?;
                 }
             }
+
+            // TODO: schedule sk_to_ps_discovery
 
             Ok(())
         })
@@ -1326,6 +1347,8 @@ impl Persistence {
                     .do_nothing()
                     .execute(conn)
                     .await?;
+
+                // TODO
 
                 match inserted_updated {
                     0 => Ok(false),
@@ -2386,4 +2409,17 @@ pub(crate) struct TimelineImportPersistence {
     pub(crate) tenant_id: String,
     pub(crate) timeline_id: String,
     pub(crate) shard_statuses: serde_json::Value,
+}
+
+#[derive(Insertable, AsChangeset, Clone)]
+#[diesel(table_name = crate::schema::sk_ps_discovery)]
+pub(crate) struct SkPsDiscoveryPersistence {
+    pub(crate) tenant_id: String,
+    pub(crate) shard_number: i32,
+    pub(crate) shard_count: i32,
+    pub(crate) ps_generation: i32,
+    pub(crate) sk_id: i64,
+    pub(crate) ps_id: i64,
+    pub(crate) created_at: chrono::DateTime<chrono::Utc>,
+    pub(crate) last_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
 }
