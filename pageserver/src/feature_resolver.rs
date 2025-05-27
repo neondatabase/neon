@@ -45,6 +45,10 @@ impl FeatureResolver {
     }
 
     /// Evaluate a multivariate feature flag. Currently, we do not support any properties.
+    ///
+    /// Error handling: the caller should inspect the error and decide the behavior when a feature flag
+    /// cannot be evaluated (i.e., default to false if it cannot be resolved). The error should *not* be
+    /// propagated beyond where the feature flag gets resolved.
     pub fn evaluate_multivariate(
         &self,
         flag_key: &str,
@@ -52,6 +56,31 @@ impl FeatureResolver {
     ) -> Result<String, PostHogEvaluationError> {
         if let Some(inner) = &self.inner {
             inner.feature_store().evaluate_multivariate(
+                flag_key,
+                &tenant_id.to_string(),
+                &HashMap::new(),
+            )
+        } else {
+            Err(PostHogEvaluationError::NotAvailable(
+                "PostHog integration is not enabled".to_string(),
+            ))
+        }
+    }
+
+    /// Evaluate a boolean feature flag. Currently, we do not support any properties.
+    ///
+    /// Returns `Ok(())` if the flag is evaluated to true, otherwise returns an error.
+    ///
+    /// Error handling: the caller should inspect the error and decide the behavior when a feature flag
+    /// cannot be evaluated (i.e., default to false if it cannot be resolved). The error should *not* be
+    /// propagated beyond where the feature flag gets resolved.
+    pub fn evaluate_boolean(
+        &self,
+        flag_key: &str,
+        tenant_id: TenantId,
+    ) -> Result<(), PostHogEvaluationError> {
+        if let Some(inner) = &self.inner {
+            inner.feature_store().evaluate_boolean(
                 flag_key,
                 &tenant_id.to_string(),
                 &HashMap::new(),
