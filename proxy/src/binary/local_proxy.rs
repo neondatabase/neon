@@ -14,7 +14,6 @@ use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
-use tokio_metrics::TaskMonitor;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use utils::sentry_init::init_sentry;
@@ -284,7 +283,7 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
         wake_compute_retry_config: RetryConfig::parse(RetryConfig::WAKE_COMPUTE_DEFAULT_VALUES)?,
         connect_compute_locks,
         connect_to_compute: compute_config,
-        passthrough_task_monitor: TaskMonitor::new(),
+        passthrough_task_monitor: None,
     })))
 }
 

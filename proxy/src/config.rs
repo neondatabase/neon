@@ -28,7 +28,7 @@ pub struct ProxyConfig {
     pub wake_compute_retry_config: RetryConfig,
     pub connect_compute_locks: ApiLocks<Host>,
     pub connect_to_compute: ComputeConfig,
-    pub passthrough_task_monitor: TaskMonitor,
+    pub passthrough_task_monitor: Option<TaskMonitor>,
 }
 
 pub struct ComputeConfig {
