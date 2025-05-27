@@ -86,7 +86,7 @@ static void nwp_prepare_shmem(void);
 static uint64 backpressure_lag_impl(void);
 static uint64 startup_backpressure_wrap(void);
 static bool backpressure_throttling_impl(void);
-static void walprop_register_bgworker(bool dynamic);
+static void walprop_register_bgworker(void);
 
 static void walprop_pg_init_standalone_sync_safekeepers(void);
 static void walprop_pg_init_walsender(void);
@@ -161,13 +161,9 @@ WalProposerMain(Datum main_arg)
 {
 	WalProposer *wp;
 
-	walprop_shared->bgw_started = true;
-
-	while (*wal_acceptors_list == '\0')
+	if (*wal_acceptors_list == '\0')
 	{
-		/* Wait until wal acceptors list GUC changes are propagated */
-		pg_usleep(GUC_POLL_DELAY);
-		CHECK_FOR_INTERRUPTS();
+		elog(PANIC, "Safekeepers list is empty");
 	}
 
 	init_walprop_config(false);
@@ -199,9 +195,7 @@ pg_init_walproposer(void)
 	PrevProcessInterruptsCallback = ProcessInterruptsCallback;
 	ProcessInterruptsCallback = backpressure_throttling_impl;
 
-	/* If no wal acceptors are specified, don't start the background worker. */
-	if (*wal_acceptors_list != '\0')
-		walprop_register_bgworker(false);
+	walprop_register_bgworker();
 }
 
 static void
@@ -319,28 +313,11 @@ safekeepers_cmp(char *old, char *new)
 	return true;
 }
 
-/*
- * GUC assign_hook for neon.safekeepers. Restarts walproposer through FATAL if
- * the list changed.
- */
 static void
 assign_neon_safekeepers(const char *newval, void *extra)
 {
 	char	   *newval_copy;
 	char	   *oldval;
-
-	/* Promotion of replica */
-	if (*wal_acceptors_list == '\0' && *newval != '\0' && walprop_shared && IsUnderPostmaster)
-	{
-		SpinLockAcquire(&walprop_shared->mutex);
-		if (!walprop_shared->bgw_started)
-		{
-			walprop_shared->bgw_started = true;
-			walprop_register_bgworker(true);
-		}
-		SpinLockRelease(&walprop_shared->mutex);
-		return;
-	}
 
 	if (!am_walproposer)
 		return;
@@ -534,13 +511,13 @@ BackpressureThrottlingTime(void)
  * Register a background worker proposing WAL to wal acceptors.
  */
 static void
-walprop_register_bgworker(bool dynamic)
+walprop_register_bgworker(void)
 {
 	BackgroundWorker bgw;
 
 	memset(&bgw, 0, sizeof(bgw));
 	bgw.bgw_flags = BGWORKER_SHMEM_ACCESS;
-	bgw.bgw_start_time = dynamic ? BgWorkerStart_ConsistentState : BgWorkerStart_RecoveryFinished;
+	bgw.bgw_start_time = BgWorkerStart_RecoveryFinished;
 	snprintf(bgw.bgw_library_name, BGW_MAXLEN, "neon");
 	snprintf(bgw.bgw_function_name, BGW_MAXLEN, "WalProposerMain");
 	snprintf(bgw.bgw_name, BGW_MAXLEN, "WAL proposer");
@@ -548,19 +525,7 @@ walprop_register_bgworker(bool dynamic)
 	bgw.bgw_restart_time = 1;
 	bgw.bgw_notify_pid = 0;
 	bgw.bgw_main_arg = (Datum) 0;
-
-	if (dynamic)
-	{
-		BackgroundWorkerHandle* handle;
-		if (!RegisterDynamicBackgroundWorker(&bgw, &handle))
-		{
-			elog(FATAL, "Failed to start walproposer");
-		}
-	}
-	else
-	{
-		RegisterBackgroundWorker(&bgw);
-	}
+	RegisterBackgroundWorker(&bgw);
 }
 
 /* shmem handling */

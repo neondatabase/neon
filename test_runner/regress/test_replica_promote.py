@@ -54,14 +54,12 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
 
     secondary_conn = secondary.connect()
     secondary_cur = secondary_conn.cursor()
-    secondary_cur.execute("SELECT * FROM pg_promote()")
-    assert secondary_cur.fetchone() == (True,)
-
-    secondary_conn = secondary.connect()
-    secondary_cur = secondary_conn.cursor()
 
     secondary_cur.execute(f"alter system set neon.safekeepers='{safekeepers}'")
     secondary_cur.execute("select pg_reload_conf()")
+
+    secondary_cur.execute("SELECT * FROM pg_promote()")
+    assert secondary_cur.fetchone() == (True,)
 
     new_primary = secondary
     old_primary = primary
