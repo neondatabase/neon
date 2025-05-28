@@ -99,27 +99,23 @@ impl PoolingBackend {
             return Err(AuthError::NetworkNotAllowed);
         }
 
-        if !self
-            .endpoint_rate_limiter
-            .check(user_info.endpoint.clone().into(), 1)
-        {
+        let ep = EndpointIdInt::from(&user_info.endpoint);
+        let rate_limit_config = None;
+        if !self.endpoint_rate_limiter.check(ep, rate_limit_config, 1) {
             return Err(AuthError::too_many_connections());
         }
         let cached_secret = backend.get_role_secret(ctx).await?;
         let secret = match cached_secret.value.clone() {
-            Some(secret) => self.config.authentication_config.check_rate_limit(
-                ctx,
-                secret,
-                &user_info.endpoint,
-                true,
-            )?,
+            Some(secret) => self
+                .config
+                .authentication_config
+                .check_rate_limit(ctx, secret, ep, true)?,
             None => {
                 // If we don't have an authentication secret, for the http flow we can just return an error.
                 info!("authentication info not found");
                 return Err(AuthError::password_failed(&*user_info.user));
             }
         };
-        let ep = EndpointIdInt::from(&user_info.endpoint);
         let auth_outcome = crate::auth::validate_password_and_exchange(
             &self.config.authentication_config.thread_pool,
             ep,
