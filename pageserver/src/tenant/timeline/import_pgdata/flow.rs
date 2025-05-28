@@ -232,14 +232,17 @@ impl Planner {
         });
 
         // Assigns parts of key space to later parallel jobs
+        // Note: The image layers produced here may have gaps.
+        //       Normally this is not allowed, but these image layers are the baseline
+        //       and the read path can handle them.
         let mut last_end_key = Key::MIN;
         let mut current_chunk = Vec::new();
         let mut current_chunk_size: usize = 0;
         let mut jobs = Vec::new();
         for task in std::mem::take(&mut self.tasks).into_iter() {
-            if current_chunk_size + task.total_size()
-                > import_config.import_job_soft_size_limit.into()
-            {
+            let task_size = task.total_size();
+            let projected_chunk_size = current_chunk_size.saturating_add(task_size);
+            if projected_chunk_size > import_config.import_job_soft_size_limit.into() {
                 let key_range = last_end_key..task.key_range().start;
                 jobs.push(ChunkProcessingJob::new(
                     key_range.clone(),
@@ -249,7 +252,7 @@ impl Planner {
                 last_end_key = key_range.end;
                 current_chunk_size = 0;
             }
-            current_chunk_size += task.total_size();
+            current_chunk_size = current_chunk_size.saturating_add(task_size);
             current_chunk.push(task);
         }
         jobs.push(ChunkProcessingJob::new(
@@ -633,7 +636,9 @@ trait ImportTask {
     fn key_range(&self) -> Range<Key>;
 
     fn total_size(&self) -> usize {
-        // TODO: revisit this
+        // Tasks should operate on contiguous ranges. It is unexpected for
+        // ranges to violate this assumption. Calling code handles this by mapping
+        // any task on a non contiguous range to its own image layer.
         if is_contiguous_range(&self.key_range()) {
             contiguous_range_len(&self.key_range()) as usize * 8192
         } else {
@@ -830,6 +835,9 @@ impl ImportTask for ImportSlruBlocksTask {
         debug!("Importing SLRU segment file {}", self.path);
         let buf = self.storage.get(&self.path).await?;
 
+        // TODO(vlad): Does timestamp to LSN work for imported timelines?
+        // Probably not since we don't append the `xact_time` to it as in
+        // [`WalIngest::ingest_xact_record`].
         let (kind, segno, start_blk) = self.key_range.start.to_slru_block()?;
         let (_kind, _segno, end_blk) = self.key_range.end.to_slru_block()?;
         let mut blknum = start_blk;
