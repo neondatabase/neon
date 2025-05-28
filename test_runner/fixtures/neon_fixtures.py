@@ -2829,6 +2829,11 @@ class NeonPageserver(PgProtocol, LogUtils):
         if self.running:
             self.http_client().configure_failpoints([(name, action)])
 
+    def clear_persistent_failpoint(self, name: str):
+        del self._persistent_failpoints[name]
+        if self.running:
+            self.http_client().configure_failpoints([(name, "off")])
+
     def timeline_dir(
         self,
         tenant_shard_id: TenantId | TenantShardId,

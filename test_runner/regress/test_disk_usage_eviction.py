@@ -1,31 +1,41 @@
 from __future__ import annotations
 
 import enum
+import json
 import time
 from collections import Counter
 from dataclasses import dataclass
 from enum import StrEnum
+from threading import Event
 from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
+from fixtures.fast_import import mock_import_bucket, populate_vanilla_pg
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     NeonPageserver,
     PgBin,
+    VanillaPostgres,
     wait_for_last_flush_lsn,
+)
+from fixtures.pageserver.http import (
+    ImportPgdataIdemptencyKey,
 )
 from fixtures.pageserver.utils import wait_for_upload_queue_empty
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.utils import human_bytes, wait_until
+from fixtures.utils import human_bytes, run_only_on_default_postgres, wait_until
+from werkzeug.wrappers.response import Response
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from typing import Any
 
     from fixtures.pageserver.http import PageserverHttpClient
+    from pytest_httpserver import HTTPServer
+    from werkzeug.wrappers.request import Request
 
 
 GLOBAL_LRU_LOG_LINE = "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy"
@@ -164,6 +174,7 @@ class EvictionEnv:
         min_avail_bytes,
         mock_behavior,
         eviction_order: EvictionOrder,
+        wait_logical_size: bool = True,
     ):
         """
         Starts pageserver up with mocked statvfs setup. The startup is
@@ -201,11 +212,12 @@ class EvictionEnv:
         pageserver.start()
 
         # we now do initial logical size calculation on startup, which on debug builds can fight with disk usage based eviction
-        for tenant_id, timeline_id in self.timelines:
-            tenant_ps = self.neon_env.get_tenant_pageserver(tenant_id)
-            # Pageserver may be none if we are currently not attached anywhere, e.g. during secondary eviction test
-            if tenant_ps is not None:
-                tenant_ps.http_client().timeline_wait_logical_size(tenant_id, timeline_id)
+        if wait_logical_size:
+            for tenant_id, timeline_id in self.timelines:
+                tenant_ps = self.neon_env.get_tenant_pageserver(tenant_id)
+                # Pageserver may be none if we are currently not attached anywhere, e.g. during secondary eviction test
+                if tenant_ps is not None:
+                    tenant_ps.http_client().timeline_wait_logical_size(tenant_id, timeline_id)
 
         def statvfs_called():
             pageserver.assert_log_contains(".*running mocked statvfs.*")
@@ -882,3 +894,125 @@ def test_secondary_mode_eviction(eviction_env_ha: EvictionEnv):
     assert total_size - post_eviction_total_size >= evict_bytes, (
         "we requested at least evict_bytes worth of free space"
     )
+
+
+@run_only_on_default_postgres(reason="PG version is irrelevant here")
+def test_import_timeline_disk_pressure_eviction(
+    neon_env_builder: NeonEnvBuilder,
+    vanilla_pg: VanillaPostgres,
+    make_httpserver: HTTPServer,
+    pg_bin: PgBin,
+):
+    """
+    TODO
+    """
+    # Set up mock control plane HTTP server to listen for import completions
+    import_completion_signaled = Event()
+
+    def handler(request: Request) -> Response:
+        log.info(f"control plane /import_complete request: {request.json}")
+        import_completion_signaled.set()
+        return Response(json.dumps({}), status=200)
+
+    cplane_mgmt_api_server = make_httpserver
+    cplane_mgmt_api_server.expect_request(
+        "/storage/api/v1/import_complete", method="PUT"
+    ).respond_with_handler(handler)
+
+    # Plug the cplane mock in
+    neon_env_builder.control_plane_hooks_api = (
+        f"http://{cplane_mgmt_api_server.host}:{cplane_mgmt_api_server.port}/storage/api/v1/"
+    )
+
+    # The import will specifiy a local filesystem path mocking remote storage
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+
+    vanilla_pg.start()
+    target_relblock_size = 1024 * 1024 * 128
+    populate_vanilla_pg(vanilla_pg, target_relblock_size)
+    vanilla_pg.stop()
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    importbucket_path = neon_env_builder.repo_dir / "test_import_completion_bucket"
+    mock_import_bucket(vanilla_pg, importbucket_path)
+
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+    idempotency = ImportPgdataIdemptencyKey.random()
+
+    env = EvictionEnv(
+        timelines=[(tenant_id, timeline_id)],
+        neon_env=env,
+        pageserver_http=env.pageserver.http_client(),
+        layer_size=5 * 1024 * 1024,  # Doesn't apply here
+        pg_bin=pg_bin,  # Not used here
+        pgbench_init_lsns={},  # Not used here
+    )
+
+    # Pause before delivering the final notification to storcon.
+    # This keeps the import in progress.
+    failpoint_name = "import-timeline-pre-success-notify-pausable"
+    env.pageserver.add_persistent_failpoint(failpoint_name, "pause")
+
+    env.neon_env.storage_controller.tenant_create(tenant_id)
+    env.neon_env.storage_controller.timeline_create(
+        tenant_id,
+        {
+            "new_timeline_id": str(timeline_id),
+            "import_pgdata": {
+                "idempotency_key": str(idempotency),
+                "location": {"LocalFs": {"path": str(importbucket_path.absolute())}},
+            },
+        },
+    )
+
+    def hit_failpoint():
+        log.info("Checking log for pattern...")
+        try:
+            assert env.pageserver.log_contains(f".*at failpoint {failpoint_name}.*")
+        except Exception:
+            log.exception("Failed to find pattern in log")
+            raise
+
+    wait_until(hit_failpoint)
+    assert not import_completion_signaled.is_set()
+
+    env.pageserver.stop()
+
+    total_size, _, _ = env.timelines_du(env.pageserver)
+    blocksize = 512
+    total_blocks = (total_size + (blocksize - 1)) // blocksize
+
+    env.pageserver_start_with_disk_usage_eviction(
+        env.pageserver,
+        period="1s",
+        max_usage_pct=33,
+        min_avail_bytes=0,
+        mock_behavior={
+            "type": "Success",
+            "blocksize": blocksize,
+            "total_blocks": total_blocks,
+            # Only count layer files towards used bytes in the mock_statvfs.
+            # This avoids accounting for metadata files & tenant conf in the tests.
+            "name_filter": ".*__.*",
+        },
+        eviction_order=EvictionOrder.RELATIVE_ORDER_SPARE,
+        wait_logical_size=False,
+    )
+
+    wait_until(
+        lambda: env.neon_env.pageserver.assert_log_contains(".*disk usage pressure relieved")
+    )
+
+    env.neon_env.pageserver.clear_persistent_failpoint(failpoint_name)
+
+    def cplane_notified():
+        assert import_completion_signaled.is_set()
+
+    wait_until(cplane_notified)
+
+    # We might re-write a layer in a different generation if the import
+    # needs to redo some of the progress since not each job is checkpointed.
+    env.pageserver.allowed_errors.extend(".*was unlinked but was not dangling.*")
