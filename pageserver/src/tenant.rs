@@ -383,7 +383,7 @@ pub struct TenantShard {
 
     l0_flush_global_state: L0FlushGlobalState,
 
-    feature_resolver: FeatureResolver,
+    pub(crate) feature_resolver: FeatureResolver,
 }
 impl std::fmt::Debug for TenantShard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

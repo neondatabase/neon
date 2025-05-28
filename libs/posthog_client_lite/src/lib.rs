@@ -528,7 +528,15 @@ impl PostHogClient {
             .bearer_auth(&self.config.server_api_key)
             .send()
             .await?;
+        let status = response.status();
         let body = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "Failed to get feature flags: {}, {}",
+                status,
+                body
+            ));
+        }
         Ok(serde_json::from_str(&body)?)
     }
 
