@@ -735,6 +735,8 @@ impl ImportTask for ImportRelBlocksTask {
         layer_writer: &mut ImageLayerWriter,
         ctx: &RequestContext,
     ) -> anyhow::Result<usize> {
+        const MAX_BYTE_RANGE_SIZE: usize = 128 * 1024 * 1024;
+
         debug!("Importing relation file");
 
         let (rel_tag, start_blk) = self.key_range.start.to_rel_block()?;
@@ -759,7 +761,7 @@ impl ImportTask for ImportRelBlocksTask {
                 assert_eq!(key.len(), 1);
                 assert!(!acc.is_empty());
                 assert!(acc_end > acc_start);
-                if acc_end == start /* TODO additional max range check here, to limit memory consumption per task to X */ {
+                if acc_end == start && end - acc_start <= MAX_BYTE_RANGE_SIZE {
                     acc.push(key.pop().unwrap());
                     Ok((acc, acc_start, end))
                 } else {
@@ -774,8 +776,8 @@ impl ImportTask for ImportRelBlocksTask {
                 .get_range(&self.path, range_start.into_u64(), range_end.into_u64())
                 .await?;
             let mut buf = Bytes::from(range_buf);
-            // TODO: batched writes
             for key in keys {
+                // The writer buffers writes internally
                 let image = buf.split_to(8192);
                 layer_writer.put_image(key, image, ctx).await?;
                 nimages += 1;
