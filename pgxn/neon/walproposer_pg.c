@@ -74,6 +74,7 @@ static XLogRecPtr sentPtr = InvalidXLogRecPtr;
 static const walproposer_api walprop_pg;
 static volatile sig_atomic_t got_SIGUSR2 = false;
 static bool reported_sigusr2 = false;
+static bool start_as_replica = false;
 
 static XLogRecPtr standby_flush_lsn = InvalidXLogRecPtr;
 static XLogRecPtr standby_apply_lsn = InvalidXLogRecPtr;
@@ -125,6 +126,7 @@ init_walprop_config(bool syncSafekeepers)
 	walprop_config.safekeeper_connection_timeout = wal_acceptor_connection_timeout;
 	walprop_config.wal_segment_size = wal_segment_size;
 	walprop_config.syncSafekeepers = syncSafekeepers;
+	walprop_config.replicaPromote = start_as_replica;
 	if (!syncSafekeepers)
 		walprop_config.systemId = GetSystemIdentifier();
 	else
@@ -318,6 +320,9 @@ assign_neon_safekeepers(const char *newval, void *extra)
 {
 	char	   *newval_copy;
 	char	   *oldval;
+
+	if (newval && *newval == '\0')
+		start_as_replica = true;
 
 	if (!am_walproposer)
 		return;

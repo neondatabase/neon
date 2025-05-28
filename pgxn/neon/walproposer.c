@@ -1380,7 +1380,7 @@ ProcessPropStartPos(WalProposer *wp)
 	 * we must bail out, as clog and other non rel data is inconsistent.
 	 */
 	walprop_shared = wp->api.get_shmem_state(wp);
-	if (!wp->config->syncSafekeepers)
+	if (!wp->config->syncSafekeepers && !wp->config->replicaPromote)
 	{
 		/*
 		 * Basebackup LSN always points to the beginning of the record (not
@@ -1407,8 +1407,8 @@ ProcessPropStartPos(WalProposer *wp)
 				 * However, don't dump core as this is kinda expected
 				 * scenario.
 				 */
-				//disable_core_dump();
-				wp_log(LOG,
+				disable_core_dump();
+				wp_log(PANIC,
 					   "collected propTermStartLsn %X/%X, but basebackup LSN %X/%X",
 					   LSN_FORMAT_ARGS(wp->propTermStartLsn),
 					   LSN_FORMAT_ARGS(wp->api.get_redo_start_lsn(wp)));

@@ -742,6 +742,11 @@ typedef struct WalProposerConfig
 	 */
 	bool		syncSafekeepers;
 
+	/*
+	 * Replica is promoted to primary
+	 */
+	bool		replicaPromote;
+
 	/* Will be passed to safekeepers in greet request. */
 	uint64		systemId;
 
