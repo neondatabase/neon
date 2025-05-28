@@ -602,7 +602,7 @@ RUN case "${PG_VERSION:?}" in \
         ;; \
     esac && \
 	wget https://github.com/knizhnik/online_advisor/archive/refs/tags/1.0.tar.gz -O online_advisor.tar.gz && \
-    echo "059b7d9e5a90013a58bdd22e9505b88406ce05790675eb2d8434e5b215652d54 online_advisor.tar.gz" | sha256sum --check && \
+    echo "5677d68f1b0c0604d156dfdb550268631865cdb77db49ccc815cbed5bb198d27 online_advisor.tar.gz" | sha256sum --check && \
     mkdir online_advisor-src && cd online_advisor-src && tar xzf ../online_advisor.tar.gz --strip-components=1 -C .
 
 FROM pg-build AS online_advisor-build
