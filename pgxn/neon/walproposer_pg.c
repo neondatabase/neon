@@ -165,7 +165,8 @@ WalProposerMain(Datum main_arg)
 
 	if (*wal_acceptors_list == '\0')
 	{
-		elog(PANIC, "Safekeepers list is empty");
+		wpg_log(WARNING, "Safekeepers list is empty");
+		return;
 	}
 
 	init_walprop_config(false);
