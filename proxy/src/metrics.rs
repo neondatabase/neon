@@ -134,6 +134,9 @@ pub struct ProxyMetrics {
     /// Number of TLS handshake failures
     pub tls_handshake_failures: Counter,
 
+    /// Number of SHA 256 rounds executed.
+    pub sha_rounds: Counter,
+
     /// HLL approximate cardinality of endpoints that are connecting
     pub connecting_endpoints: HyperLogLogVec<StaticLabelSet<Protocol>, 32>,
 

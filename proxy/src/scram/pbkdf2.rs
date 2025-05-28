@@ -7,6 +7,8 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use x509_cert::der::zeroize::Zeroize;
 
+use crate::metrics::Metrics;
+
 type Prf = Hmac<Sha256>;
 pub(crate) type Block = GenericArray<u8, U32>;
 
@@ -39,6 +41,10 @@ impl Pbkdf2 {
         hmac.update(&1u32.to_be_bytes());
         let init_block = hmac.finalize_reset().into_bytes();
 
+        // Hmac::new_from_slice will run 2 sha256 rounds.
+        // Our update + finalize run 2 sha256 rounds for each pbkdf2 round.
+        Metrics::get().proxy.sha_rounds.inc_by(4);
+
         Self {
             hmac,
             // one iteration spent above
@@ -69,6 +75,9 @@ impl Pbkdf2 {
             xor(hi, &next);
             *prev = next;
         }
+
+        // Our update + finalize run 2 sha256 rounds for each pbkdf2 round.
+        Metrics::get().proxy.sha_rounds.inc_by(2 * n as u64);
 
         *iterations -= n;
         if *iterations == 0 {
