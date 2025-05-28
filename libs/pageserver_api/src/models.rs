@@ -354,6 +354,9 @@ pub struct ShardImportProgressV1 {
     pub completed: usize,
     /// Hash of the plan
     pub import_plan_hash: u64,
+    /// Soft limit for the job size
+    /// This needs to remain constant throughout the import
+    pub job_soft_size_limit: usize,
 }
 
 impl ShardImportStatus {
