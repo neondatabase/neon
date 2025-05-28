@@ -97,6 +97,9 @@ pub struct ComputeNodeParams {
 
     /// the address of extension storage proxy gateway
     pub remote_ext_base_url: Option<String>,
+
+    /// Interval for installed extensions collection
+    pub installed_extensions_collection_interval: u64,
 }
 
 /// Compute node info shared across several `compute_ctl` threads.
@@ -742,17 +745,7 @@ impl ComputeNode {
 
             let conf = self.get_tokio_conn_conf(None);
             tokio::task::spawn(async {
-                let res = get_installed_extensions(conf).await;
-                match res {
-                    Ok(extensions) => {
-                        info!(
-                            "[NEON_EXT_STAT] {}",
-                            serde_json::to_string(&extensions)
-                                .expect("failed to serialize extensions list")
-                        );
-                    }
-                    Err(err) => error!("could not get installed extensions: {err:?}"),
-                }
+                let _ = installed_extensions(conf).await;
             });
         }
 
@@ -781,6 +774,9 @@ impl ComputeNode {
 
         // Log metrics so that we can search for slow operations in logs
         info!(?metrics, postmaster_pid = %postmaster_pid, "compute start finished");
+
+        // Spawn the extension stats background task
+        self.spawn_extension_stats_task();
 
         if pspec.spec.prewarm_lfc_on_startup {
             self.prewarm_lfc();
@@ -2192,6 +2188,41 @@ LIMIT 100",
             info!("Pageserver config changed");
         }
     }
+
+    pub fn spawn_extension_stats_task(&self) {
+        let conf = self.tokio_conn_conf.clone();
+        let installed_extensions_collection_interval =
+            self.params.installed_extensions_collection_interval;
+        tokio::spawn(async move {
+            // An initial sleep is added to ensure that two collections don't happen at the same time.
+            // The first collection happens during compute startup.
+            tokio::time::sleep(tokio::time::Duration::from_secs(
+                installed_extensions_collection_interval,
+            ))
+            .await;
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+                installed_extensions_collection_interval,
+            ));
+            loop {
+                interval.tick().await;
+                let _ = installed_extensions(conf.clone()).await;
+            }
+        });
+    }
+}
+
+pub async fn installed_extensions(conf: tokio_postgres::Config) -> Result<()> {
+    let res = get_installed_extensions(conf).await;
+    match res {
+        Ok(extensions) => {
+            info!(
+                "[NEON_EXT_STAT] {}",
+                serde_json::to_string(&extensions).expect("failed to serialize extensions list")
+            );
+        }
+        Err(err) => error!("could not get installed extensions: {err:?}"),
+    }
+    Ok(())
 }
 
 pub fn forward_termination_signal() {
