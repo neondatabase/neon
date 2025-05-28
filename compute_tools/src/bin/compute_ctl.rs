@@ -136,6 +136,10 @@ struct Cli {
         requires = "compute-id"
     )]
     pub control_plane_uri: Option<String>,
+
+    /// Interval in seconds for collecting installed extensions statistics
+    #[arg(long, default_value = "3600")]
+    pub installed_extensions_collection_interval: u64,
 }
 
 fn main() -> Result<()> {
@@ -179,6 +183,7 @@ fn main() -> Result<()> {
             cgroup: cli.cgroup,
             #[cfg(target_os = "linux")]
             vm_monitor_addr: cli.vm_monitor_addr,
+            installed_extensions_collection_interval: cli.installed_extensions_collection_interval,
         },
         config,
     )?;
