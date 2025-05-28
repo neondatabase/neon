@@ -8,4 +8,4 @@ pub(crate) use limit_algorithm::aimd::Aimd;
 pub(crate) use limit_algorithm::{
     DynamicLimiter, Outcome, RateLimitAlgorithm, RateLimiterConfig, Token,
 };
-pub use limiter::{BucketRateLimiter, GlobalRateLimiter, RateBucketInfo, WakeComputeRateLimiter};
+pub use limiter::{GlobalRateLimiter, RateBucketInfo, WakeComputeRateLimiter};

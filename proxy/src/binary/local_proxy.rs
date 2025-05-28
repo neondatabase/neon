@@ -32,9 +32,7 @@ use crate::ext::TaskExt;
 use crate::http::health_server::AppMetrics;
 use crate::intern::RoleNameInt;
 use crate::metrics::{Metrics, ThreadPoolMetrics};
-use crate::rate_limiter::{
-    BucketRateLimiter, EndpointRateLimiter, LeakyBucketConfig, RateBucketInfo,
-};
+use crate::rate_limiter::{EndpointRateLimiter, LeakyBucketConfig, RateBucketInfo};
 use crate::scram::threadpool::ThreadPool;
 use crate::serverless::cancel_set::CancelSet;
 use crate::serverless::{self, GlobalConnPoolOptions};
@@ -69,15 +67,6 @@ struct LocalProxyCliArgs {
     /// Can be given multiple times for different bucket sizes.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_ENDPOINT_SET)]
     user_rps_limit: Vec<RateBucketInfo>,
-    /// Whether the auth rate limiter actually takes effect (for testing)
-    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
-    auth_rate_limit_enabled: bool,
-    /// Authentication rate limiter max number of hashes per second.
-    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_AUTH_SET)]
-    auth_rate_limit: Vec<RateBucketInfo>,
-    /// The IP subnet to use when considering whether two IP addresses are considered the same.
-    #[clap(long, default_value_t = 64)]
-    auth_rate_limit_ip_subnet: u8,
     /// Whether to retry the connection to the compute node
     #[clap(long, default_value = config::RetryConfig::CONNECT_TO_COMPUTE_DEFAULT_VALUES)]
     connect_to_compute_retry: String,
@@ -282,9 +271,6 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
             jwks_cache: JwkCache::default(),
             thread_pool: ThreadPool::new(0),
             scram_protocol_timeout: Duration::from_secs(10),
-            rate_limiter_enabled: false,
-            rate_limiter: BucketRateLimiter::new(vec![]),
-            rate_limit_ip_subnet: 64,
             ip_allowlist_check_enabled: true,
             is_vpc_acccess_proxy: false,
             is_auth_broker: false,
