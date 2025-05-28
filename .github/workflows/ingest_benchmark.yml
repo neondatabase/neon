@@ -32,31 +32,31 @@ jobs:
       fail-fast: false # allow other variants to continue even if one fails
       matrix:
         include:
-          - target_project: new_empty_project_stripe_size_2048
-            stripe_size: 2048 # 16 MiB
-            postgres_version: 16
-            disable_sharding: false
-          - target_project: new_empty_project_stripe_size_32768
-            stripe_size: 32768 # 256 MiB # note that this is different from null because using null will shard_split the project only if it reaches the threshold
-                               # while here it is sharded from the beginning with a shard size of 256 MiB
-            disable_sharding: false
-            postgres_version: 16
-          - target_project: new_empty_project
-            stripe_size: null # run with neon defaults which will shard split only when reaching the threshold
-            disable_sharding: false
-            postgres_version: 16
+          # - target_project: new_empty_project_stripe_size_2048
+          #   stripe_size: 2048 # 16 MiB
+          #   postgres_version: 16
+          #   disable_sharding: false
+          # - target_project: new_empty_project_stripe_size_32768
+          #   stripe_size: 32768 # 256 MiB # note that this is different from null because using null will shard_split the project only if it reaches the threshold
+          #                      # while here it is sharded from the beginning with a shard size of 256 MiB
+          #   disable_sharding: false
+          #   postgres_version: 16
+          # - target_project: new_empty_project
+          #   stripe_size: null # run with neon defaults which will shard split only when reaching the threshold
+          #   disable_sharding: false
+          #   postgres_version: 16
           - target_project: new_empty_project
             stripe_size: null # run with neon defaults which will shard split only when reaching the threshold
             disable_sharding: false
             postgres_version: 17
-          - target_project: large_existing_project
-            stripe_size: null # cannot re-shared or choose different stripe size for existing, already sharded project
-            disable_sharding: false
-            postgres_version: 16
-          - target_project: new_empty_project_unsharded
-            stripe_size: null # run with neon defaults which will shard split only when reaching the threshold
-            disable_sharding: true
-            postgres_version: 16
+          # - target_project: large_existing_project
+          #   stripe_size: null # cannot re-shared or choose different stripe size for existing, already sharded project
+          #   disable_sharding: false
+          #   postgres_version: 16
+          # - target_project: new_empty_project_unsharded
+          #   stripe_size: null # run with neon defaults which will shard split only when reaching the threshold
+          #   disable_sharding: true
+          #   postgres_version: 16
       max-parallel: 1 # we want to run each stripe size sequentially to be able to compare the results
     permissions:
       contents: write
