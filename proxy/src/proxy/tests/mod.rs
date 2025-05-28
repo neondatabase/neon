@@ -26,9 +26,7 @@ use crate::auth::backend::{
 use crate::config::{ComputeConfig, RetryConfig};
 use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
-use crate::control_plane::{
-    self, CachedAllowedIps, CachedAllowedVpcEndpointIds, CachedNodeInfo, NodeInfo, NodeInfoCache,
-};
+use crate::control_plane::{self, CachedNodeInfo, NodeInfo, NodeInfoCache};
 use crate::error::ErrorKind;
 use crate::tls::client_config::compute_client_config_with_certs;
 use crate::tls::postgres_rustls::MakeRustlsConnect;
@@ -547,20 +545,9 @@ impl TestControlPlaneClient for TestConnectMechanism {
         }
     }
 
-    fn get_allowed_ips(&self) -> Result<CachedAllowedIps, control_plane::errors::GetAuthInfoError> {
-        unimplemented!("not used in tests")
-    }
-
-    fn get_allowed_vpc_endpoint_ids(
+    fn get_access_control(
         &self,
-    ) -> Result<CachedAllowedVpcEndpointIds, control_plane::errors::GetAuthInfoError> {
-        unimplemented!("not used in tests")
-    }
-
-    fn get_block_public_or_vpc_access(
-        &self,
-    ) -> Result<control_plane::CachedAccessBlockerFlags, control_plane::errors::GetAuthInfoError>
-    {
+    ) -> Result<control_plane::EndpointAccessControl, control_plane::errors::GetAuthInfoError> {
         unimplemented!("not used in tests")
     }
 

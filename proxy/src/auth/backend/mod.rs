@@ -14,22 +14,18 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info};
 
-use crate::auth::credentials::check_peer_addr_is_in_list;
-use crate::auth::{
-    self, AuthError, ComputeUserInfoMaybeEndpoint, IpPattern, validate_password_and_exchange,
-};
+use crate::auth::{self, AuthError, ComputeUserInfoMaybeEndpoint, validate_password_and_exchange};
 use crate::cache::Cached;
 use crate::config::AuthenticationConfig;
 use crate::context::RequestContext;
 use crate::control_plane::client::ControlPlaneClient;
 use crate::control_plane::errors::GetAuthInfoError;
 use crate::control_plane::{
-    self, AccessBlockerFlags, AuthSecret, CachedAccessBlockerFlags, CachedAllowedIps,
-    CachedAllowedVpcEndpointIds, CachedNodeInfo, CachedRoleSecret, ControlPlaneApi,
+    self, AccessBlockerFlags, AuthSecret, CachedNodeInfo, ControlPlaneApi, EndpointAccessControl,
+    RoleAccessControl,
 };
 use crate::intern::EndpointIdInt;
 use crate::pqproto::BeMessage;
-use crate::protocol2::ConnectionInfoExtra;
 use crate::proxy::NeonOptions;
 use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::rate_limiter::EndpointRateLimiter;
@@ -210,7 +206,7 @@ async fn auth_quirks(
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-) -> auth::Result<(ComputeCredentials, Option<Vec<IpPattern>>)> {
+) -> auth::Result<(ComputeCredentials, EndpointAccessControl)> {
     // If there's no project so far, that entails that client doesn't
     // support SNI or other means of passing the endpoint (project) name.
     // We now expect to see a very specific payload in the place of password.
@@ -226,51 +222,26 @@ async fn auth_quirks(
 
     debug!("fetching authentication info and allowlists");
 
-    // check allowed list
-    let allowed_ips = if config.ip_allowlist_check_enabled {
-        let allowed_ips = api.get_allowed_ips(ctx, &info).await?;
-        if !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips) {
-            return Err(auth::AuthError::ip_address_not_allowed(ctx.peer_addr()));
-        }
-        allowed_ips
-    } else {
-        Cached::new_uncached(Arc::new(vec![]))
-    };
+    let access_controls = api
+        .get_endpoint_access_control(ctx, &info.endpoint, &info.user)
+        .await?;
 
-    // check if a VPC endpoint ID is coming in and if yes, if it's allowed
-    let access_blocks = api.get_block_public_or_vpc_access(ctx, &info).await?;
-    if config.is_vpc_acccess_proxy {
-        if access_blocks.vpc_access_blocked {
-            return Err(AuthError::NetworkNotAllowed);
-        }
-
-        let incoming_vpc_endpoint_id = match ctx.extra() {
-            None => return Err(AuthError::MissingEndpointName),
-            Some(ConnectionInfoExtra::Aws { vpce_id }) => vpce_id.to_string(),
-            Some(ConnectionInfoExtra::Azure { link_id }) => link_id.to_string(),
-        };
-        let allowed_vpc_endpoint_ids = api.get_allowed_vpc_endpoint_ids(ctx, &info).await?;
-        // TODO: For now an empty VPC endpoint ID list means all are allowed. We should replace that.
-        if !allowed_vpc_endpoint_ids.is_empty()
-            && !allowed_vpc_endpoint_ids.contains(&incoming_vpc_endpoint_id)
-        {
-            return Err(AuthError::vpc_endpoint_id_not_allowed(
-                incoming_vpc_endpoint_id,
-            ));
-        }
-    } else if access_blocks.public_access_blocked {
-        return Err(AuthError::NetworkNotAllowed);
-    }
+    access_controls.check(
+        ctx,
+        config.ip_allowlist_check_enabled,
+        config.is_vpc_acccess_proxy,
+    )?;
 
     let endpoint = EndpointIdInt::from(&info.endpoint);
     let rate_limit_config = None;
     if !endpoint_rate_limiter.check(endpoint, rate_limit_config, 1) {
         return Err(AuthError::too_many_connections());
     }
-    let cached_secret = api.get_role_secret(ctx, &info).await?;
-    let (cached_entry, secret) = cached_secret.take_value();
+    let role_access = api
+        .get_role_access_control(ctx, &info.endpoint, &info.user)
+        .await?;
 
-    let secret = if let Some(secret) = secret {
+    let secret = if let Some(secret) = role_access.secret {
         secret
     } else {
         // If we don't have an authentication secret, we mock one to
@@ -291,11 +262,13 @@ async fn auth_quirks(
     )
     .await
     {
-        Ok(keys) => Ok((keys, Some(allowed_ips.as_ref().clone()))),
+        Ok(keys) => Ok((keys, access_controls)),
         Err(e) => {
             if e.is_password_failed() {
                 // The password could have been changed, so we invalidate the cache.
-                cached_entry.invalidate();
+                // We should only invalidate the cache if the TTL might have expired.
+
+                // TODO: cached_entry.invalidate();
             }
             Err(e)
         }
@@ -361,7 +334,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
         allow_cleartext: bool,
         config: &'static AuthenticationConfig,
         endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-    ) -> auth::Result<(Backend<'a, ComputeCredentials>, Option<Vec<IpPattern>>)> {
+    ) -> auth::Result<(Backend<'a, ComputeCredentials>, EndpointAccessControl)> {
         let res = match self {
             Self::ControlPlane(api, user_info) => {
                 debug!(
@@ -370,17 +343,37 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
                     "performing authentication using the console"
                 );
 
-                let (credentials, ip_allowlist) = auth_quirks(
+                let auth_res = auth_quirks(
                     ctx,
                     &*api,
-                    user_info,
+                    user_info.clone(),
                     client,
                     allow_cleartext,
                     config,
                     endpoint_rate_limiter,
                 )
-                .await?;
-                Ok((Backend::ControlPlane(api, credentials), ip_allowlist))
+                .await;
+                match auth_res {
+                    Ok((credentials, ip_allowlist)) => {
+                        Ok((Backend::ControlPlane(api, credentials), ip_allowlist))
+                    }
+                    Err(e) => {
+                        // The password could have been changed, so we invalidate the cache.
+                        // We should only invalidate the cache if the TTL might have expired.
+                        if e.is_password_failed() {
+                            #[allow(irrefutable_let_patterns)]
+                            if let ControlPlaneClient::ProxyV1(api) = &*api {
+                                if let Some(ep) = &user_info.endpoint_id {
+                                    api.caches
+                                        .project_info
+                                        .maybe_invalidate_role_secret(ep, &user_info.user);
+                                }
+                            }
+                        }
+
+                        Err(e)
+                    }
+                }
             }
             Self::Local(_) => {
                 return Err(auth::AuthError::bad_auth_method("invalid for local proxy"));
@@ -397,44 +390,30 @@ impl Backend<'_, ComputeUserInfo> {
     pub(crate) async fn get_role_secret(
         &self,
         ctx: &RequestContext,
-    ) -> Result<CachedRoleSecret, GetAuthInfoError> {
-        match self {
-            Self::ControlPlane(api, user_info) => api.get_role_secret(ctx, user_info).await,
-            Self::Local(_) => Ok(Cached::new_uncached(None)),
-        }
-    }
-
-    pub(crate) async fn get_allowed_ips(
-        &self,
-        ctx: &RequestContext,
-    ) -> Result<CachedAllowedIps, GetAuthInfoError> {
-        match self {
-            Self::ControlPlane(api, user_info) => api.get_allowed_ips(ctx, user_info).await,
-            Self::Local(_) => Ok(Cached::new_uncached(Arc::new(vec![]))),
-        }
-    }
-
-    pub(crate) async fn get_allowed_vpc_endpoint_ids(
-        &self,
-        ctx: &RequestContext,
-    ) -> Result<CachedAllowedVpcEndpointIds, GetAuthInfoError> {
+    ) -> Result<RoleAccessControl, GetAuthInfoError> {
         match self {
             Self::ControlPlane(api, user_info) => {
-                api.get_allowed_vpc_endpoint_ids(ctx, user_info).await
+                api.get_role_access_control(ctx, &user_info.endpoint, &user_info.user)
+                    .await
             }
-            Self::Local(_) => Ok(Cached::new_uncached(Arc::new(vec![]))),
+            Self::Local(_) => Ok(RoleAccessControl { secret: None }),
         }
     }
 
-    pub(crate) async fn get_block_public_or_vpc_access(
+    pub(crate) async fn get_endpoint_access_control(
         &self,
         ctx: &RequestContext,
-    ) -> Result<CachedAccessBlockerFlags, GetAuthInfoError> {
+    ) -> Result<EndpointAccessControl, GetAuthInfoError> {
         match self {
             Self::ControlPlane(api, user_info) => {
-                api.get_block_public_or_vpc_access(ctx, user_info).await
+                api.get_endpoint_access_control(ctx, &user_info.endpoint, &user_info.user)
+                    .await
             }
-            Self::Local(_) => Ok(Cached::new_uncached(AccessBlockerFlags::default())),
+            Self::Local(_) => Ok(EndpointAccessControl {
+                allowed_ips: Arc::new(vec![]),
+                allowed_vpce: Arc::new(vec![]),
+                flags: AccessBlockerFlags::default(),
+            }),
         }
     }
 }
@@ -480,8 +459,7 @@ mod tests {
     use crate::config::AuthenticationConfig;
     use crate::context::RequestContext;
     use crate::control_plane::{
-        self, AccessBlockerFlags, CachedAccessBlockerFlags, CachedAllowedIps,
-        CachedAllowedVpcEndpointIds, CachedNodeInfo, CachedRoleSecret,
+        self, AccessBlockerFlags, CachedNodeInfo, EndpointAccessControl, RoleAccessControl,
     };
     use crate::proxy::NeonOptions;
     use crate::rate_limiter::EndpointRateLimiter;
@@ -497,46 +475,34 @@ mod tests {
     }
 
     impl control_plane::ControlPlaneApi for Auth {
-        async fn get_role_secret(
+        async fn get_role_access_control(
             &self,
             _ctx: &RequestContext,
-            _user_info: &super::ComputeUserInfo,
-        ) -> Result<CachedRoleSecret, control_plane::errors::GetAuthInfoError> {
-            Ok(CachedRoleSecret::new_uncached(Some(self.secret.clone())))
+            _endpoint: &crate::types::EndpointId,
+            _role: &crate::types::RoleName,
+        ) -> Result<RoleAccessControl, control_plane::errors::GetAuthInfoError> {
+            Ok(RoleAccessControl {
+                secret: Some(self.secret.clone()),
+            })
         }
 
-        async fn get_allowed_ips(
+        async fn get_endpoint_access_control(
             &self,
             _ctx: &RequestContext,
-            _user_info: &super::ComputeUserInfo,
-        ) -> Result<CachedAllowedIps, control_plane::errors::GetAuthInfoError> {
-            Ok(CachedAllowedIps::new_uncached(Arc::new(self.ips.clone())))
-        }
-
-        async fn get_allowed_vpc_endpoint_ids(
-            &self,
-            _ctx: &RequestContext,
-            _user_info: &super::ComputeUserInfo,
-        ) -> Result<CachedAllowedVpcEndpointIds, control_plane::errors::GetAuthInfoError> {
-            Ok(CachedAllowedVpcEndpointIds::new_uncached(Arc::new(
-                self.vpc_endpoint_ids.clone(),
-            )))
-        }
-
-        async fn get_block_public_or_vpc_access(
-            &self,
-            _ctx: &RequestContext,
-            _user_info: &super::ComputeUserInfo,
-        ) -> Result<CachedAccessBlockerFlags, control_plane::errors::GetAuthInfoError> {
-            Ok(CachedAccessBlockerFlags::new_uncached(
-                self.access_blocker_flags.clone(),
-            ))
+            _endpoint: &crate::types::EndpointId,
+            _role: &crate::types::RoleName,
+        ) -> Result<EndpointAccessControl, control_plane::errors::GetAuthInfoError> {
+            Ok(EndpointAccessControl {
+                allowed_ips: Arc::new(self.ips.clone()),
+                allowed_vpce: Arc::new(self.vpc_endpoint_ids.clone()),
+                flags: self.access_blocker_flags,
+            })
         }
 
         async fn get_endpoint_jwks(
             &self,
             _ctx: &RequestContext,
-            _endpoint: crate::types::EndpointId,
+            _endpoint: &crate::types::EndpointId,
         ) -> Result<Vec<super::jwt::AuthRule>, control_plane::errors::GetEndpointJwksError>
         {
             unimplemented!()

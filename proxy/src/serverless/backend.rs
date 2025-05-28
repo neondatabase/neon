@@ -22,7 +22,7 @@ use super::http_conn_pool::{self, HttpConnPool, Send, poll_http2_client};
 use super::local_conn_pool::{self, EXT_NAME, EXT_SCHEMA, EXT_VERSION, LocalConnPool};
 use crate::auth::backend::local::StaticAuthRules;
 use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
-use crate::auth::{self, AuthError, check_peer_addr_is_in_list};
+use crate::auth::{self, AuthError};
 use crate::compute;
 use crate::compute_ctl::{
     ComputeCtlError, ExtensionInstallRequest, Privilege, SetRoleGrantsRequest,
@@ -35,7 +35,6 @@ use crate::control_plane::errors::{GetAuthInfoError, WakeComputeError};
 use crate::control_plane::locks::ApiLocks;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::intern::EndpointIdInt;
-use crate::protocol2::ConnectionInfoExtra;
 use crate::proxy::connect_compute::ConnectMechanism;
 use crate::proxy::retry::{CouldRetry, ShouldRetryWakeCompute};
 use crate::rate_limiter::EndpointRateLimiter;
@@ -63,49 +62,20 @@ impl PoolingBackend {
 
         let user_info = user_info.clone();
         let backend = self.auth_backend.as_ref().map(|()| user_info.clone());
-        let allowed_ips = backend.get_allowed_ips(ctx).await?;
-
-        if self.config.authentication_config.ip_allowlist_check_enabled
-            && !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips)
-        {
-            return Err(AuthError::ip_address_not_allowed(ctx.peer_addr()));
-        }
-
-        let access_blocker_flags = backend.get_block_public_or_vpc_access(ctx).await?;
-        if self.config.authentication_config.is_vpc_acccess_proxy {
-            if access_blocker_flags.vpc_access_blocked {
-                return Err(AuthError::NetworkNotAllowed);
-            }
-
-            let extra = ctx.extra();
-            let incoming_endpoint_id = match extra {
-                None => String::new(),
-                Some(ConnectionInfoExtra::Aws { vpce_id }) => vpce_id.to_string(),
-                Some(ConnectionInfoExtra::Azure { link_id }) => link_id.to_string(),
-            };
-
-            if incoming_endpoint_id.is_empty() {
-                return Err(AuthError::MissingVPCEndpointId);
-            }
-
-            let allowed_vpc_endpoint_ids = backend.get_allowed_vpc_endpoint_ids(ctx).await?;
-            // TODO: For now an empty VPC endpoint ID list means all are allowed. We should replace that.
-            if !allowed_vpc_endpoint_ids.is_empty()
-                && !allowed_vpc_endpoint_ids.contains(&incoming_endpoint_id)
-            {
-                return Err(AuthError::vpc_endpoint_id_not_allowed(incoming_endpoint_id));
-            }
-        } else if access_blocker_flags.public_access_blocked {
-            return Err(AuthError::NetworkNotAllowed);
-        }
+        let access_control = backend.get_endpoint_access_control(ctx).await?;
+        access_control.check(
+            ctx,
+            self.config.authentication_config.ip_allowlist_check_enabled,
+            self.config.authentication_config.is_vpc_acccess_proxy,
+        )?;
 
         let ep = EndpointIdInt::from(&user_info.endpoint);
         let rate_limit_config = None;
         if !self.endpoint_rate_limiter.check(ep, rate_limit_config, 1) {
             return Err(AuthError::too_many_connections());
         }
-        let cached_secret = backend.get_role_secret(ctx).await?;
-        let Some(secret) = cached_secret.value.clone() else {
+        let role_access = backend.get_role_secret(ctx).await?;
+        let Some(secret) = role_access.secret else {
             // If we don't have an authentication secret, for the http flow we can just return an error.
             info!("authentication info not found");
             return Err(AuthError::password_failed(&*user_info.user));
