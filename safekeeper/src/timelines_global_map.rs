@@ -83,7 +83,7 @@ impl GlobalTimelinesState {
     }
 
     fn has_tombstone(&self, ttid: &TenantTimelineId) -> bool {
-        self.tombstones.contains_key(&ttid) || self.tenant_tombstones.contains_key(&ttid.tenant_id)
+        self.tombstones.contains_key(ttid) || self.tenant_tombstones.contains_key(&ttid.tenant_id)
     }
 
     /// Removes all blocking tombstones for the given timeline ID.
