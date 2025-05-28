@@ -38,9 +38,6 @@ pub enum PageserverClientError {
 }
 
 pub struct PageserverClient {
-    _tenant_id: String,
-    _timeline_id: String,
-    _auth_token: Option<String>,
     shard_map: HashMap<ShardIndex, String>,
     channels: tokio::sync::RwLock<HashMap<ShardIndex, Channel>>,
     auth_interceptor: AuthInterceptor,
@@ -49,18 +46,13 @@ pub struct PageserverClient {
 impl PageserverClient {
     /// TODO: this doesn't currently react to changes in the shard map.
     pub fn new(
-        tenant_id: &str,
-        timeline_id: &str,
-        auth_token: &Option<String>,
+        auth_interceptor: AuthInterceptor,
         shard_map: HashMap<ShardIndex, String>,
     ) -> Self {
         Self {
-            _tenant_id: tenant_id.to_string(),
-            _timeline_id: timeline_id.to_string(),
-            _auth_token: auth_token.clone(),
             shard_map,
             channels: RwLock::new(HashMap::new()),
-            auth_interceptor: AuthInterceptor::new(tenant_id, timeline_id, auth_token.as_deref()),
+            auth_interceptor: auth_interceptor,
         }
     }
     //
@@ -147,11 +139,14 @@ struct AuthInterceptor {
 }
 
 impl AuthInterceptor {
-    fn new(tenant_id: &str, timeline_id: &str, auth_token: Option<&str>) -> Self {
+    fn new(tenant_id: AsciiMetadataValue,
+           timeline_id: AsciiMetadataValue,
+           auth_token: Option<String>) -> Self {
+
         Self {
-            tenant_id: tenant_id.parse().expect("could not parse tenant id"),
+            tenant_id: tenant_id,
             shard_id: None,
-            timeline_id: timeline_id.parse().expect("could not parse timeline id"),
+            timeline_id: timeline_id,
             auth_header: auth_token
                 .map(|t| format!("Bearer {t}"))
                 .map(|t| t.parse().expect("could not parse auth token")),
