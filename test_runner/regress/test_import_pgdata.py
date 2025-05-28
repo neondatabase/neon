@@ -12,10 +12,14 @@ import psycopg2
 import psycopg2.errors
 import pytest
 from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
-from fixtures.fast_import import FastImport
+from fixtures.fast_import import (
+    FastImport,
+    mock_import_bucket,
+    populate_vanilla_pg,
+    validate_import_from_vanilla_pg,
+)
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
-    Endpoint,
     NeonEnvBuilder,
     PageserverImportConfig,
     PgBin,
@@ -59,60 +63,6 @@ smoke_params = [
     # many shards, small stripe size to speed up test
     *[(8, 1024, s) for s in RelBlockSize],
 ]
-
-
-def mock_import_bucket(vanilla_pg: VanillaPostgres, path: Path):
-    """
-    Mock the import S3 bucket into a local directory for a provided vanilla PG instance.
-    """
-    assert not vanilla_pg.is_running()
-
-    path.mkdir()
-    # what cplane writes before scheduling fast_import
-    specpath = path / "spec.json"
-    specpath.write_text(json.dumps({"branch_id": "somebranch", "project_id": "someproject"}))
-    # what fast_import writes
-    vanilla_pg.pgdatadir.rename(path / "pgdata")
-    statusdir = path / "status"
-    statusdir.mkdir()
-    (statusdir / "pgdata").write_text(json.dumps({"done": True}))
-    (statusdir / "fast_import").write_text(json.dumps({"command": "pgdata", "done": True}))
-
-
-def populate_vanilla_pg(vanilla_pg: VanillaPostgres, target_relblock_size: int) -> int:
-    assert vanilla_pg.is_running()
-
-    vanilla_pg.safe_psql("create user cloud_admin with password 'postgres' superuser")
-    # fillfactor so we don't need to produce that much data
-    # 900 byte per row is > 10% => 1 row per page
-    vanilla_pg.safe_psql("""create table t (data char(900)) with (fillfactor = 10)""")
-
-    nrows = 0
-    while True:
-        relblock_size = vanilla_pg.safe_psql_scalar("select pg_relation_size('t')")
-        log.info(
-            f"relblock size: {relblock_size / 8192} pages (target: {target_relblock_size // 8192}) pages"
-        )
-        if relblock_size >= target_relblock_size:
-            break
-        addrows = int((target_relblock_size - relblock_size) // 8192)
-        assert addrows >= 1, "forward progress"
-        vanilla_pg.safe_psql(
-            f"insert into t select generate_series({nrows + 1}, {nrows + addrows})"
-        )
-        nrows += addrows
-
-    return nrows
-
-
-def validate_import_from_vanilla_pg(endpoint: Endpoint, nrows: int):
-    assert endpoint.safe_psql_many(
-        [
-            "set effective_io_concurrency=32;",
-            "SET statement_timeout='300s';",
-            "select count(*), sum(data::bigint)::bigint from t",
-        ]
-    ) == [[], [], [(nrows, nrows * (nrows + 1) // 2)]]
 
 
 @skip_in_debug_build("MULTIPLE_RELATION_SEGMENTS has non trivial amount of data")
