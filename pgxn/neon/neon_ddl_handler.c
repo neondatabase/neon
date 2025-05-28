@@ -833,17 +833,33 @@ static void
 neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 {
     if (event == FHET_START
-		&& !neon_enable_event_triggers_for_superuser /* by default execution of event triggers is prohoboted for superuser */
-		&& !RegressTestMode /* still enable it to pass pg_regress tests */
-		&& GetSessionUserIsSuperuser() /* disable execution of security definer functions as well */
-		&& (flinfo->fn_oid == InvalidOid || get_func_rettype(flinfo->fn_oid) == EVENT_TRIGGEROID))
-		/* It can be other needs_fmgr_hook which cause our hook to be invoked for non-trigger function,
-		 * so recheck that is is trigger function */
+
+		/* by default execution of event triggers is prohibited for superuser */
+		&& !neon_enable_event_triggers_for_superuser
+
+		/* still enable it to pass pg_regress tests */
+		&& !RegressTestMode
+
+		/* disable execution of security definer functions as well */
+		&& GetSessionUserIsSuperuser()
+
+		/*
+		 * It can be other needs_fmgr_hook which cause our hook to be invoked
+		 * for non-trigger function, so recheck that is is trigger function.
+		 */
+		&& (flinfo->fn_oid == InvalidOid ||
+			get_func_rettype(flinfo->fn_oid) == EVENT_TRIGGEROID))
+
 	{
 		elog(WARNING, "Skipping event trigger for superuser");
-		/* we can't skip execution directly inside the fmgr_hook so instead we change the event trigger function to a noop function */
+
+		/*
+		 * we can't skip execution directly inside the fmgr_hook so instead we
+		 * change the event trigger function to a noop function.
+		 */
 		force_noop(flinfo);
 	}
+
 	if (next_fmgr_hook)
 		(*next_fmgr_hook) (event, flinfo, private);
 }
@@ -932,7 +948,7 @@ NeonProcessUtility(
 		case T_AlterEventTrigStmt:
 			if (IsTransactionState() && is_neon_superuser())
 			{
-				/* Allow neon_superuser to drop event trigger. */
+				/* Allow neon_superuser to create/alter event trigger. */
 				sudo = switch_to_superuser();
 			}
 			break;
@@ -944,11 +960,16 @@ NeonProcessUtility(
 				{
 					/*
 					 * Allow neon_superuser to drop event trigger.
-					 * FIXME: now neon_superuser is also ab;e to drop event triggers created by superuser.
-					 * We now do not use such triggers, but in future it can be changed.
-					 * The problem is that event triggers are created by neon_superuser by switching
-					 * to superuser role, so it is not possible to distinguish event triggers
-					 * created by superuser from ones created by neon_superuser.
+					 *
+					 * FIXME: now neon_superuser is also able to drop event
+					 * triggers created by superuser.
+					 *
+					 * We now do not use such triggers, but in future it can
+					 * be changed. The problem is that event triggers are
+					 * created by neon_superuser by switching to superuser
+					 * role, so it is not possible to distinguish event
+					 * triggers created by superuser from ones created by
+					 * neon_superuser.
 					 */
 					sudo = switch_to_superuser();
 				}
@@ -1010,7 +1031,7 @@ InitDDLHandler()
 
 	DefineCustomBoolVariable(
 							 "neon.enable_event_triggers_for_superuser",
-							 "Enable firing of not owned event triggers for superuser",
+							 "Enable firing of event triggers for superuser",
 							 NULL,
 							 &neon_enable_event_triggers_for_superuser,
 							 false,
