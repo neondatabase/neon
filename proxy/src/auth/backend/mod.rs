@@ -4,17 +4,15 @@ mod hacks;
 pub mod jwt;
 pub mod local;
 
-use std::net::IpAddr;
 use std::sync::Arc;
 
 pub use console_redirect::ConsoleRedirectBackend;
 pub(crate) use console_redirect::ConsoleRedirectError;
-use ipnet::{Ipv4Net, Ipv6Net};
 use local::LocalBackend;
 use postgres_client::config::AuthKeys;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::auth::credentials::check_peer_addr_is_in_list;
 use crate::auth::{
@@ -30,12 +28,11 @@ use crate::control_plane::{
     CachedAllowedVpcEndpointIds, CachedNodeInfo, CachedRoleSecret, ControlPlaneApi,
 };
 use crate::intern::EndpointIdInt;
-use crate::metrics::Metrics;
 use crate::pqproto::BeMessage;
 use crate::protocol2::ConnectionInfoExtra;
 use crate::proxy::NeonOptions;
 use crate::proxy::connect_compute::ComputeConnectBackend;
-use crate::rate_limiter::{BucketRateLimiter, EndpointRateLimiter};
+use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::Stream;
 use crate::types::{EndpointCacheKey, EndpointId, RoleName};
 use crate::{scram, stream};
@@ -201,75 +198,6 @@ impl TryFrom<ComputeUserInfoMaybeEndpoint> for ComputeUserInfo {
     }
 }
 
-#[derive(PartialEq, PartialOrd, Hash, Eq, Ord, Debug, Copy, Clone)]
-pub struct MaskedIp(IpAddr);
-
-impl MaskedIp {
-    fn new(value: IpAddr, prefix: u8) -> Self {
-        match value {
-            IpAddr::V4(v4) => Self(IpAddr::V4(
-                Ipv4Net::new(v4, prefix).map_or(v4, |x| x.trunc().addr()),
-            )),
-            IpAddr::V6(v6) => Self(IpAddr::V6(
-                Ipv6Net::new(v6, prefix).map_or(v6, |x| x.trunc().addr()),
-            )),
-        }
-    }
-}
-
-// This can't be just per IP because that would limit some PaaS that share IP addresses
-pub type AuthRateLimiter = BucketRateLimiter<(EndpointIdInt, MaskedIp)>;
-
-impl AuthenticationConfig {
-    pub(crate) fn check_rate_limit(
-        &self,
-        ctx: &RequestContext,
-        secret: AuthSecret,
-        endpoint: EndpointIdInt,
-        is_cleartext: bool,
-    ) -> auth::Result<AuthSecret> {
-        // only count the full hash count if password hack or websocket flow.
-        // in other words, if proxy needs to run the hashing
-        let password_weight = if is_cleartext {
-            match &secret {
-                #[cfg(any(test, feature = "testing"))]
-                AuthSecret::Md5(_) => 1,
-                AuthSecret::Scram(s) => s.iterations + 1,
-            }
-        } else {
-            // validating scram takes just 1 hmac_sha_256 operation.
-            1
-        };
-
-        let limit_not_exceeded = self.rate_limiter.check(
-            (
-                endpoint,
-                MaskedIp::new(ctx.peer_addr(), self.rate_limit_ip_subnet),
-            ),
-            password_weight,
-        );
-
-        if !limit_not_exceeded {
-            warn!(
-                enabled = self.rate_limiter_enabled,
-                "rate limiting authentication"
-            );
-            Metrics::get().proxy.requests_auth_rate_limits_total.inc();
-            Metrics::get()
-                .proxy
-                .endpoints_auth_rate_limits
-                .get_metric()
-                .measure(endpoint.as_str());
-
-            if self.rate_limiter_enabled {
-                return Err(auth::AuthError::too_many_connections());
-            }
-        }
-
-        Ok(secret)
-    }
-}
-
 /// True to its name, this function encapsulates our current auth trade-offs.
 /// Here, we choose the appropriate auth flow based on circumstances.
 ///
@@ -343,12 +271,7 @@ async fn auth_quirks(
     let (cached_entry, secret) = cached_secret.take_value();
 
     let secret = if let Some(secret) = secret {
-        config.check_rate_limit(
-            ctx,
-            secret,
-            endpoint,
-            unauthenticated_password.is_some() || allow_cleartext,
-        )?
+        secret
     } else {
         // If we don't have an authentication secret, we mock one to
         // prevent malicious probing (possible due to missing protocol steps).
@@ -540,9 +463,7 @@ impl ComputeConnectBackend for Backend<'_, ComputeCredentials> {
 mod tests {
     #![allow(clippy::unimplemented, clippy::unwrap_used)]
 
-    use std::net::IpAddr;
     use std::sync::Arc;
-    use std::time::Duration;
 
     use bytes::BytesMut;
     use control_plane::AuthSecret;
@@ -553,9 +474,8 @@ mod tests {
     use postgres_protocol::message::frontend;
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
+    use super::auth_quirks;
     use super::jwt::JwkCache;
-    use super::{AuthRateLimiter, auth_quirks};
-    use crate::auth::backend::MaskedIp;
     use crate::auth::{ComputeUserInfoMaybeEndpoint, IpPattern};
     use crate::config::AuthenticationConfig;
     use crate::context::RequestContext;
@@ -564,7 +484,7 @@ mod tests {
         CachedAllowedVpcEndpointIds, CachedNodeInfo, CachedRoleSecret,
     };
     use crate::proxy::NeonOptions;
-    use crate::rate_limiter::{EndpointRateLimiter, RateBucketInfo};
+    use crate::rate_limiter::EndpointRateLimiter;
     use crate::scram::ServerSecret;
     use crate::scram::threadpool::ThreadPool;
     use crate::stream::{PqStream, Stream};
@@ -635,9 +555,6 @@ mod tests {
         jwks_cache: JwkCache::default(),
         thread_pool: ThreadPool::new(1),
         scram_protocol_timeout: std::time::Duration::from_secs(5),
-        rate_limiter_enabled: true,
-        rate_limiter: AuthRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET),
-        rate_limit_ip_subnet: 64,
         ip_allowlist_check_enabled: true,
         is_vpc_acccess_proxy: false,
         is_auth_broker: false,
@@ -651,51 +568,6 @@ mod tests {
             if let Some(m) = PgMessage::parse(&mut *b).unwrap() {
                 break m;
             }
-        }
-    }
-
-    #[test]
-    fn masked_ip() {
-        let ip_a = IpAddr::V4([127, 0, 0, 1].into());
-        let ip_b = IpAddr::V4([127, 0, 0, 2].into());
-        let ip_c = IpAddr::V4([192, 168, 1, 101].into());
-        let ip_d = IpAddr::V4([192, 168, 1, 102].into());
-        let ip_e = IpAddr::V6("abcd:abcd:abcd:abcd:abcd:abcd:abcd:abcd".parse().unwrap());
-        let ip_f = IpAddr::V6("abcd:abcd:abcd:abcd:1234:abcd:abcd:abcd".parse().unwrap());
-
-        assert_ne!(MaskedIp::new(ip_a, 64), MaskedIp::new(ip_b, 64));
-        assert_ne!(MaskedIp::new(ip_a, 32), MaskedIp::new(ip_b, 32));
-        assert_eq!(MaskedIp::new(ip_a, 30), MaskedIp::new(ip_b, 30));
-        assert_eq!(MaskedIp::new(ip_c, 30), MaskedIp::new(ip_d, 30));
-
-        assert_ne!(MaskedIp::new(ip_e, 128), MaskedIp::new(ip_f, 128));
-        assert_eq!(MaskedIp::new(ip_e, 64), MaskedIp::new(ip_f, 64));
-    }
-
-    #[test]
-    fn test_default_auth_rate_limit_set() {
-        // these values used to exceed u32::MAX
-        assert_eq!(
-            RateBucketInfo::DEFAULT_AUTH_SET,
-            [
-                RateBucketInfo {
-                    interval: Duration::from_secs(1),
-                    max_rpi: 1000 * 4096,
-                },
-                RateBucketInfo {
-                    interval: Duration::from_secs(60),
-                    max_rpi: 600 * 4096 * 60,
-                },
-                RateBucketInfo {
-                    interval: Duration::from_secs(600),
-                    max_rpi: 300 * 4096 * 600,
-                }
-            ]
-        );
-
-        for x in RateBucketInfo::DEFAULT_AUTH_SET {
-            let y = x.to_string().parse().unwrap();
-            assert_eq!(x, y);
         }
     }
 
