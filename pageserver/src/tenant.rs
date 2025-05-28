@@ -5315,6 +5315,7 @@ impl TenantShard {
             l0_compaction_trigger: self.l0_compaction_trigger.clone(),
             l0_flush_global_state: self.l0_flush_global_state.clone(),
             basebackup_prepare_sender: self.basebackup_prepare_sender.clone(),
+            feature_resolver: self.feature_resolver.clone(),
         }
     }
 
@@ -8359,10 +8360,24 @@ mod tests {
             }
 
             tline.freeze_and_flush().await?;
+            // Force layers to L1
+            tline
+                .compact(
+                    &cancel,
+                    {
+                        let mut flags = EnumSet::new();
+                        flags.insert(CompactFlags::ForceL0Compaction);
+                        flags
+                    },
+                    &ctx,
+                )
+                .await?;
 
             if iter % 5 == 0 {
+                let scan_lsn = Lsn(lsn.0 + 1);
+                info!("scanning at {}", scan_lsn);
                 let (_, before_delta_file_accessed) =
-                    scan_with_statistics(&tline, &keyspace, lsn, &ctx, io_concurrency.clone())
+                    scan_with_statistics(&tline, &keyspace, scan_lsn, &ctx, io_concurrency.clone())
                         .await?;
                 tline
                     .compact(
@@ -8371,13 +8386,14 @@ mod tests {
                             let mut flags = EnumSet::new();
                             flags.insert(CompactFlags::ForceImageLayerCreation);
                             flags.insert(CompactFlags::ForceRepartition);
+                            flags.insert(CompactFlags::ForceL0Compaction);
                             flags
                         },
                         &ctx,
                     )
                     .await?;
                 let (_, after_delta_file_accessed) =
-                    scan_with_statistics(&tline, &keyspace, lsn, &ctx, io_concurrency.clone())
+                    scan_with_statistics(&tline, &keyspace, scan_lsn, &ctx, io_concurrency.clone())
                         .await?;
                 assert!(
                     after_delta_file_accessed < before_delta_file_accessed,
@@ -8818,6 +8834,8 @@ mod tests {
 
         let cancel = CancellationToken::new();
 
+        // Image layer creation happens on the disk_consistent_lsn so we need to force set it now.
+        tline.force_set_disk_consistent_lsn(Lsn(0x40));
         tline
             .compact(
                 &cancel,
@@ -8831,8 +8849,7 @@ mod tests {
             )
             .await
             .unwrap();
-
-        // Image layers are created at last_record_lsn
+        // Image layers are created at repartition LSN
         let images = tline
             .inspect_image_layers(Lsn(0x40), &ctx, io_concurrency.clone())
             .await
