@@ -26,7 +26,6 @@ use std::fmt::Debug;
 use tracing::error;
 
 use tokio::sync::RwLock;
-use tracing::info;
 
 
 use tonic::transport::{Channel, Endpoint};
@@ -142,7 +141,6 @@ impl PageserverClient {
 
         let request_stream = futures::stream::once(std::future::ready(request));
 
-        info!("Sending get_page request: ");
         let mut response_stream = client
             .get_pages(tonic::Request::new(request_stream))
             .await?
@@ -153,16 +151,13 @@ impl PageserverClient {
                 "no response received for getpage request".to_string(),
             ));
         };
-        info!("Received get_page response: ");
 
         match response {
             Err(status) => {
-                info!("Received err response for get_page: ");
                 return Err(PageserverClientError::RequestError(status));
             }
             Ok(resp) => {
                 let response: GetPageResponse = resp.try_into().unwrap();
-                info!("Received response for get_page: {response:?}");
                 return Ok(response.page_images.to_vec());
             }
         }
