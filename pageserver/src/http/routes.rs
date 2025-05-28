@@ -3682,12 +3682,12 @@ async fn tenant_evaluate_feature_flag(
         if as_type == "boolean" {
             let result = tenant.feature_resolver.evaluate_boolean(&flag, tenant_shard_id.tenant_id);
             let result = result.map(|_| true).map_err(|e| e.to_string());
-            return json_response(StatusCode::OK, result);
+            json_response(StatusCode::OK, result)
         } else if as_type == "multivariate" {
             let result = tenant.feature_resolver.evaluate_multivariate(&flag, tenant_shard_id.tenant_id).map_err(|e| e.to_string());
-            return json_response(StatusCode::OK, result);
+            json_response(StatusCode::OK, result)
         } else {
-            return Err(ApiError::BadRequest(anyhow::anyhow!("Invalid as type: {}", as_type)));
+            Err(ApiError::BadRequest(anyhow::anyhow!("Invalid as type: {}", as_type)))
         }
     }
     .instrument(info_span!("tenant_evaluate_feature_flag", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
