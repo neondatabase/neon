@@ -8,11 +8,12 @@ use std::error::Error as _;
 use http_utils::error::HttpErrorBody;
 use reqwest::{IntoUrl, Method, StatusCode};
 use safekeeper_api::models::{
-    self, PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization, TimelineCreateRequest,
-    TimelineStatus,
+    self, PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization,
+    TenantShardPageserverAttachments, TimelineCreateRequest, TimelineStatus,
 };
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::logging::SecretString;
+use utils::shard::TenantShardId;
 
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -186,6 +187,19 @@ impl Client {
     pub async fn utilization(&self) -> Result<SafekeeperUtilization> {
         let uri = format!("{}/v1/utilization", self.mgmt_api_endpoint);
         let resp = self.get(&uri).await?;
+        resp.json().await.map_err(Error::ReceiveBody)
+    }
+
+    pub async fn put_tenant_shard_pageserver_attachments(
+        &self,
+        tenant_shard_id: TenantShardId,
+        attachments: TenantShardPageserverAttachments,
+    ) -> Result<()> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_shard_id}/pageserver_attachments",
+            self.mgmt_api_endpoint
+        );
+        let resp = self.put(uri, attachments).await?;
         resp.json().await.map_err(Error::ReceiveBody)
     }
 

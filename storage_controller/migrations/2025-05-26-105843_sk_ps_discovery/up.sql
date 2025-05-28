@@ -6,7 +6,8 @@ CREATE TABLE "sk_ps_discovery"(
 	"sk_id" INT8 NOT NULL REFERENCES "safekeepers"("id") ON DELETE CASCADE, -- more efficient that trigger on "safekeepers"
 	"ps_id" INT8 NOT NULL REFERENCES "nodes"("node_id") ON DELETE CASCADE, -- more efficient that trigger on "nodes"
 	"created_at" TIMESTAMPTZ NOT NULL,
-	"last_attempt_at" TIMESTAMPTZ,
+	"retries" INT4 NOT NULL DEFAULT 0,
+	"last_retry_at" TIMESTAMPTZ,
 	PRIMARY KEY("tenant_id", "shard_number", "shard_count", "ps_generation", "sk_id")
 );
 
@@ -17,7 +18,7 @@ BEGIN
 	DELETE FROM sk_ps_discovery
 	WHERE tenant_id = ARG_TENANT_ID;
 
-	INSERT INTO sk_ps_discovery (tenant_id, shard_number, shard_count, ps_generation, sk_id, ps_id,created_at,last_attempt_at)
+	INSERT INTO sk_ps_discovery (tenant_id, shard_number, shard_count, ps_generation, sk_id, ps_id,created_at)
 		WITH sk_timeline_attachments AS (
 			SELECT DISTINCT tenant_id,unnest(array_cat(sk_set, new_sk_set)) as sk_id FROM timelines
 			WHERE
@@ -25,7 +26,7 @@ BEGIN
 				AND
 				timelines.deleted_at IS NULL
 		)
-		SELECT tenant_shards.tenant_id, tenant_shards.shard_number, tenant_shards.shard_count, tenant_shards.generation, sk_timeline_attachments.sk_id, tenant_shards.generation_pageserver, NOW(), NULL
+		SELECT tenant_shards.tenant_id, tenant_shards.shard_number, tenant_shards.shard_count, tenant_shards.generation, sk_timeline_attachments.sk_id, tenant_shards.generation_pageserver, NOW()
 		FROM tenant_shards
 		INNER JOIN sk_timeline_attachments ON tenant_shards.tenant_id = sk_timeline_attachments.tenant_id;
 

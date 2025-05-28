@@ -61,12 +61,25 @@ diesel::table! {
 }
 
 diesel::table! {
+    sk_ps_discovery (tenant_id, shard_number, shard_count, ps_generation, sk_id) {
+        tenant_id -> Varchar,
+        shard_number -> Int4,
+        shard_count -> Int4,
+        ps_generation -> Int4,
+        sk_id -> Int8,
+        ps_id -> Int8,
+        created_at -> Timestamptz,
+        retries -> Int4,
+        last_retry_at -> Nullable<Timestamptz>,
+    }
+}
+
+diesel::table! {
     tenant_shards (tenant_id, shard_number, shard_count) {
         tenant_id -> Varchar,
         shard_number -> Int4,
         shard_count -> Int4,
         shard_stripe_size -> Int4,
-        // pageserver generation
         generation -> Nullable<Int4>,
         generation_pageserver -> Nullable<Int8>,
         placement_policy -> Varchar,
@@ -93,7 +106,6 @@ diesel::table! {
         tenant_id -> Varchar,
         timeline_id -> Varchar,
         start_lsn -> PgLsn,
-        // sk config generation
         generation -> Int4,
         sk_set -> Array<Nullable<Int8>>,
         new_sk_set -> Nullable<Array<Nullable<Int8>>>,
@@ -102,24 +114,8 @@ diesel::table! {
     }
 }
 
-// Operational table that contains pending notifications for Safekeepers
-// about tenant shard pageserver-side attachments.
-// Rows are removed when the notification was acknowledged by the Safekeeper.
-diesel::table! {
-    use diesel::sql_types::*;
-    sk_ps_discovery(tenant_id, shard_number, shard_count, ps_generation, sk_id) {
-        tenant_id -> Varchar,
-        shard_number -> Int4,
-        shard_count -> Int4,
-        ps_generation -> Int4,
-        sk_id -> Int8,
-        // payload
-        ps_id -> Int8,
-        // tracking of reliable delivery
-        created_at -> Timestamptz,
-        last_attempt_at -> Nullable<Timestamptz>,
-    }
-}
+diesel::joinable!(sk_ps_discovery -> nodes (ps_id));
+diesel::joinable!(sk_ps_discovery -> safekeepers (sk_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     controllers,
@@ -127,8 +123,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     nodes,
     safekeeper_timeline_pending_ops,
     safekeepers,
+    sk_ps_discovery,
     tenant_shards,
     timeline_imports,
     timelines,
-    sk_ps_discovery,
 );

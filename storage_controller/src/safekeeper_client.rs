@@ -1,9 +1,11 @@
 use safekeeper_api::models::{
-    self, PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization, TimelineCreateRequest,
+    self, PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization,
+    TenantShardPageserverAttachments, TimelineCreateRequest,
 };
 use safekeeper_client::mgmt_api::{Client, Result};
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::logging::SecretString;
+use utils::shard::TenantShardId;
 
 use crate::metrics::PageserverRequestLabelGroup;
 
@@ -162,6 +164,21 @@ impl SafekeeperClient {
             crate::metrics::Method::Get,
             &self.node_id_label,
             self.inner.utilization().await
+        )
+    }
+
+    pub async fn put_tenant_shard_pageserver_attachments(
+        &self,
+        tenant_shard_id: TenantShardId,
+        attachments: TenantShardPageserverAttachments,
+    ) -> Result<()> {
+        measured_request!(
+            "put_tenant_shard_pageserver_attachments",
+            crate::metrics::Method::Put,
+            &self.node_id_label,
+            self.inner
+                .put_tenant_shard_pageserver_attachments(tenant_shard_id, attachments)
+                .await
         )
     }
 }

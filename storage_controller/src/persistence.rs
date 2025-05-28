@@ -1,6 +1,7 @@
 pub(crate) mod split_state;
 use std::collections::HashMap;
 use std::io::Write;
+use std::ops::Add;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -139,6 +140,8 @@ pub(crate) enum DatabaseOperation {
     DeleteTimelineImport,
     ListTimelineImports,
     IsTenantImportingTimeline,
+    ListSkPsDiscovery,
+    UpdateSkPsDiscoveryAttempt,
 }
 
 #[must_use]
@@ -1885,6 +1888,76 @@ impl Persistence {
             drop(client);
         }))
     }
+
+    pub(crate) async fn get_all_sk_ps_discovery_work(
+        &self,
+    ) -> DatabaseResult<Vec<SkPsDiscoveryPersistence>> {
+        use crate::schema::sk_ps_discovery::dsl;
+        self.with_measured_conn(DatabaseOperation::ListSkPsDiscovery, move |conn| {
+            Box::pin(async move {
+                let vec: Vec<SkPsDiscoveryPersistence> = dsl::sk_ps_discovery.load(conn).await?;
+                Ok(vec)
+            })
+        })
+        .await
+    }
+
+    pub(crate) async fn update_sk_ps_discovery_attempt(
+        &self,
+        pk: SkPsDiscoveryPersistencePk,
+        update: Result<(), ()>,
+    ) -> DatabaseResult<()> {
+        use crate::schema::sk_ps_discovery::dsl;
+
+        self.with_measured_conn(DatabaseOperation::UpdateSkPsDiscoveryAttempt, move |conn| {
+            let pk = pk.clone();
+            Box::pin(async move {
+                match update {
+                    Ok(()) => {
+                        let SkPsDiscoveryPersistencePk {
+                            tenant_id,
+                            shard_number,
+                            shard_count,
+                            ps_generation,
+                            sk_id,
+                        } = pk;
+                        diesel::delete(dsl::sk_ps_discovery)
+                            .filter(dsl::tenant_id.eq(tenant_id))
+                            .filter(dsl::shard_number.eq(shard_number))
+                            .filter(dsl::shard_count.eq(shard_count))
+                            .filter(dsl::ps_generation.eq(ps_generation))
+                            .filter(dsl::sk_id.eq(sk_id))
+                            .execute(conn) // TODO: check update count?
+                            .await?;
+                    }
+                    Err(_) => {
+                        let SkPsDiscoveryPersistencePk {
+                            tenant_id,
+                            shard_number,
+                            shard_count,
+                            ps_generation,
+                            sk_id,
+                        } = pk;
+
+                        diesel::update(dsl::sk_ps_discovery)
+                            .filter(dsl::tenant_id.eq(tenant_id))
+                            .filter(dsl::shard_number.eq(shard_number))
+                            .filter(dsl::shard_count.eq(shard_count))
+                            .filter(dsl::ps_generation.eq(ps_generation))
+                            .filter(dsl::sk_id.eq(sk_id))
+                            .set((
+                                dsl::retries.eq(dsl::retries.add(1)), // XXX: in split-brain situation we would bump twice...
+                                dsl::last_retry_at.eq(diesel::dsl::now),
+                            ))
+                            .execute(conn) // TODO: check update count?
+                            .await?;
+                    }
+                }
+                Ok(())
+            })
+        })
+        .await
+    }
 }
 
 pub(crate) fn load_certs() -> anyhow::Result<Arc<rustls::RootCertStore>> {
@@ -2468,4 +2541,38 @@ pub(crate) struct TimelineImportPersistence {
     pub(crate) tenant_id: String,
     pub(crate) timeline_id: String,
     pub(crate) shard_statuses: serde_json::Value,
+}
+
+#[derive(Insertable, AsChangeset, Selectable, Clone)]
+#[diesel(table_name = crate::schema::sk_ps_discovery)]
+pub(crate) struct SkPsDiscoveryPersistencePk {
+    pub(crate) tenant_id: String,
+    pub(crate) shard_number: i32,
+    pub(crate) shard_count: i32,
+    pub(crate) ps_generation: i32,
+    pub(crate) sk_id: i64,
+}
+
+#[derive(Queryable, Selectable, Clone, PartialEq, Eq)]
+#[diesel(table_name = crate::schema::sk_ps_discovery)]
+pub(crate) struct SkPsDiscoveryPersistence {
+    pub(crate) tenant_id: String,
+    pub(crate) shard_number: i32,
+    pub(crate) shard_count: i32,
+    pub(crate) ps_generation: i32,
+    pub(crate) sk_id: i64,
+    pub(crate) ps_id: i64,
+    pub(crate) created_at: chrono::DateTime<chrono::Utc>,
+    pub(crate) retries: i32,
+    pub(crate) last_retry_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl SkPsDiscoveryPersistence {
+    pub(crate) fn tenant_shard_id(&self) -> Result<TenantShardId, hex::FromHexError> {
+        Ok(TenantShardId {
+            tenant_id: TenantId::from_str(self.tenant_id.as_str())?,
+            shard_number: ShardNumber(self.shard_number as u8),
+            shard_count: ShardCount::new(self.shard_count as u8),
+        })
+    }
 }

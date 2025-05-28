@@ -489,7 +489,6 @@ pub struct Service {
     inner: Arc<std::sync::RwLock<ServiceState>>,
     config: Config,
     persistence: Arc<Persistence>,
-    sk_ps_discovery: sk_ps_discovery::ActorClient,
     compute_hook: Arc<ComputeHook>,
     result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResultRequest>,
 
@@ -1194,6 +1193,16 @@ impl Service {
             }
         }
     }
+
+    #[instrument(skip_all)]
+    async fn run_sk_ps_discovery(self: &Arc<Self>) {
+        self.startup_complete.clone().wait().await;
+        sk_ps_discovery::run(
+            self.clone(),
+            self.http_client.clone(), /* TODO this client is configured to openf resh TCP connection each time, very inefficient */
+        ).await;
+    }
+
     /// Heartbeat all storage nodes once in a while.
     #[instrument(skip_all)]
     async fn spawn_heartbeat_driver(&self) {
@@ -1768,8 +1777,6 @@ impl Service {
             LeadershipStatus::Leader
         };
 
-        let sk_ps_discovery = sk_ps_discovery::spawn(persistence.clone());
-
         let this = Arc::new(Self {
             inner: Arc::new(std::sync::RwLock::new(ServiceState::new(
                 nodes,
@@ -1782,7 +1789,6 @@ impl Service {
             ))),
             config: config.clone(),
             persistence,
-            sk_ps_discovery,
             compute_hook: Arc::new(ComputeHook::new(config.clone())?),
             result_tx,
             heartbeater_ps,
@@ -1802,7 +1808,7 @@ impl Service {
             reconcilers_gate: Gate::default(),
             tenant_op_locks: Default::default(),
             node_op_locks: Default::default(),
-            http_client,
+            http_client: http_client.clone(),
             step_down_barrier: Default::default(),
         });
 
@@ -1867,6 +1873,15 @@ impl Service {
             async move {
                 startup_complete.wait().await;
                 this.background_reconcile().await;
+            }
+        });
+
+        tokio::task::spawn({
+            let this = this.clone();
+            let startup_complete = startup_complete.clone();
+            async move {
+                startup_complete.wait().await;
+                this.run_sk_ps_discovery().await
             }
         });
 

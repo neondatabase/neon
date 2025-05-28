@@ -6,6 +6,7 @@ use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::TimestampTz;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
+use utils::generation::Generation;
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
 use utils::pageserver_feedback::PageserverFeedback;
@@ -308,4 +309,15 @@ pub struct PullTimelineResponse {
     /// None if no pull happened because the timeline already exists.
     pub safekeeper_host: Option<String>,
     // TODO: add more fields?
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TenantShardPageserverAttachments {
+    pub attachments: Vec<TenantShardPageserverAttachment>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TenantShardPageserverAttachment {
+    pub ps_id: NodeId,
+    pub generation: Generation,
 }

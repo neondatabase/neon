@@ -1,32 +1,43 @@
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, hash_map},
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::Context;
-use futures::StreamExt;
-use tracing::info;
-use utils::id::TenantId;
+use futures::{StreamExt, stream::FuturesUnordered};
+use safekeeper_api::models::{TenantShardPageserverAttachment, TenantShardPageserverAttachments};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+use tracing::{Instrument, Span, error, info, info_span};
+use utils::{
+    generation::Generation,
+    id::{NodeId, TenantId},
+    logging::SecretString,
+    shard::TenantShardId,
+};
 
-use crate::persistence::Persistence;
+use crate::{
+    heartbeater::SafekeeperState,
+    persistence::{Persistence, SkPsDiscoveryPersistence, SkPsDiscoveryPersistencePk},
+};
 
-pub struct ActorClient {
-    tx: tokio::sync::mpsc::UnboundedSender<Message>,
-}
+use super::Service;
 
 struct Actor {
+    service: Arc<Service>,
     persistence: Arc<Persistence>,
-    rx: tokio::sync::mpsc::UnboundedReceiver<Message>,
+    http_client: reqwest::Client,
 }
 
-#[derive(Debug)]
-enum Message {}
-
-pub fn spawn(persistence: Arc<Persistence>) -> ActorClient {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let actor = Actor { persistence, rx };
-    tokio::spawn(actor.run());
-    ActorClient { tx }
+pub async fn run(service: Arc<Service>, http_client: reqwest::Client) {
+    let actor = Actor {
+        persistence: service.persistence.clone(),
+        service,
+        http_client, // XXX: build our own client instead of getting Service's client; we probably want idle conn to each sk
+    };
+    actor.run().await;
 }
-
-impl ActorClient {}
 
 impl Actor {
     async fn run(mut self) {
@@ -55,8 +66,37 @@ impl Actor {
             .await
             .context("listen to sk_ps_discovery")?;
 
+        let mut sync_full_ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+
+        #[derive(PartialEq, Eq, Hash, Debug)]
+        struct TaskKey {
+            tenant_shard_id: TenantShardId,
+            ps_generation: Generation,
+            sk_id: NodeId,
+        }
+        struct Task {
+            work: SkPsDiscoveryPersistence,
+            cancel: CancellationToken,
+            join_handle: Option<JoinHandle<()>>,
+        }
+        impl<'a> TryFrom<&'a SkPsDiscoveryPersistence> for TaskKey {
+            type Error = hex::FromHexError;
+            fn try_from(value: &'a SkPsDiscoveryPersistence) -> Result<Self, Self::Error> {
+                Ok(Self {
+                    tenant_shard_id: value.tenant_shard_id()?,
+                    ps_generation: Generation::new(value.ps_generation as u32),
+                    sk_id: NodeId(value.sk_id as u64),
+                })
+            }
+        }
+        let mut tasks = HashMap::new();
+
         loop {
             tokio::select! {
+                biased; // control messages have higher priority, the periodic full tick, then subscriptions.
+                _ = sync_full_ticker.tick() => {
+                    info!("rebuild");
+                }
                 maybe_res = subscription.next() => {
                     match maybe_res {
                         None => {
@@ -65,6 +105,7 @@ impl Actor {
                         Some(Ok(tenant_id)) => {
                             let tenant_id: TenantId = tenant_id;
                             info!(?tenant_id, "notify for tenant_id");
+                            // for now, just also rebuild everything
                         }
                         Some(Err(err)) => {
                             let err: serde_json::Error = err;
@@ -72,10 +113,169 @@ impl Actor {
                         }
                     }
                 }
-                msg = self.rx.recv() => {
-                    todo!("{msg:?}");
+            }
+
+            // get list of tasks from database
+            let mut new_tasks = self
+                .persistence
+                .get_all_sk_ps_discovery_work()
+                .await
+                .context("get_all_sk_ps_discovery_work")?
+                .into_iter()
+                .map(|work: SkPsDiscoveryPersistence| {
+                    anyhow::Ok((
+                        TaskKey::try_from(&work)?,
+                        Task {
+                            work,
+                            cancel: CancellationToken::new(),
+                            join_handle: None,
+                        },
+                    ))
+                })
+                .collect::<Result<HashMap<_, _>, _>>()?;
+
+            // Carry over ongoing tasks
+            let mut ongoing_wait = FuturesUnordered::new();
+            for (
+                task_key,
+                Task {
+                    work: ongoing_persistence,
+                    cancel,
+                    join_handle,
+                },
+            ) in tasks.drain()
+            {
+                match new_tasks.entry(task_key) {
+                    hash_map::Entry::Occupied(mut planned) => {
+                        let Task {
+                            work: planned_persistence,
+                            cancel: planned_cancel,
+                            join_handle: planned_jh,
+                        } = planned.get_mut();
+                        assert!(planned_jh.is_none());
+                        if *planned_persistence == ongoing_persistence {
+                            *planned_jh = join_handle;
+                            *planned_cancel = cancel;
+                        } else {
+                            match join_handle {
+                                Some(jh) => {
+                                    cancel.cancel();
+                                    ongoing_wait.push(jh);
+                                }
+                                None => (),
+                            }
+                        }
+                    }
+                    hash_map::Entry::Vacant(_) => match join_handle {
+                        Some(jh) => {
+                            cancel.cancel();
+                            ongoing_wait.push(jh);
+                        }
+                        None => (),
+                    },
+                }
+            }
+            while let Some(_) = ongoing_wait.next().await {}
+            tasks = new_tasks;
+
+            // Kick off new tasks
+            for (key, task) in tasks.iter_mut() {
+                if task.join_handle.is_none() {
+                    task.join_handle = Some(tokio::spawn(
+                        DeliveryAttempt {
+                            cancel: task.cancel.clone(),
+                            persistence: self.persistence.clone(),
+                            service: self.service.clone(),
+                            http_client: self.http_client.clone(),
+                            work: task.work.clone(),
+                        }
+                        .run()
+                        .instrument({
+                            let span = info_span!(parent: None, "sk_ps_discovery_delivery", ?key);
+                            span.follows_from(Span::current());
+                            span
+                        }),
+                    ))
                 }
             }
         }
+    }
+}
+
+struct DeliveryAttempt {
+    cancel: CancellationToken,
+    persistence: Arc<Persistence>,
+    service: Arc<super::Service>,
+    http_client: reqwest::Client,
+    work: SkPsDiscoveryPersistence,
+}
+
+impl DeliveryAttempt {
+    pub async fn run(self) {
+        let res = self.run0().await;
+        if self.cancel.is_cancelled() {
+            return;
+        }
+        if let Err(ref err) = res {
+            error!(?err, "attempt failed");
+        }
+        let res = self
+            .persistence
+            .update_sk_ps_discovery_attempt(
+                SkPsDiscoveryPersistencePk {
+                    tenant_id: self.work.tenant_id,
+                    shard_number: self.work.shard_number,
+                    shard_count: self.work.shard_count,
+                    ps_generation: self.work.ps_generation,
+                    sk_id: self.work.sk_id,
+                },
+                res.map_err(|_| ()),
+            )
+            .await;
+        if let Err(ref err) = res {
+            error!(?err, "persistence of attempt result failed");
+        }
+    }
+    async fn run0(&self) -> anyhow::Result<()> {
+        let Some(sk) = self.service.get_safekeeper_object(self.work.sk_id) else {
+            anyhow::bail!("safekeeper object does not exist");
+        };
+
+        match sk.availability() {
+            SafekeeperState::Available { .. } => (),
+            SafekeeperState::Offline => {
+                anyhow::bail!("safekeeper is offline");
+            }
+        }
+        let tenant_shard_id = self.work.tenant_shard_id()?;
+        sk.with_client_retries(
+            |client| async move {
+                client
+                    .put_tenant_shard_pageserver_attachments(
+                        tenant_shard_id,
+                        TenantShardPageserverAttachments {
+                            attachments: vec![TenantShardPageserverAttachment {
+                                ps_id: NodeId(self.work.ps_id as u64),
+                                generation: Generation::new(self.work.ps_generation as u32),
+                            }],
+                        },
+                    )
+                    .await
+            },
+            &self.http_client,
+            &self
+                .service
+                .config
+                .safekeeper_jwt_token
+                .clone()
+                .map(SecretString::from),
+            1,
+            3,
+            Duration::from_secs(1),
+            &self.cancel,
+        )
+        .await?;
+
+        Ok(())
     }
 }

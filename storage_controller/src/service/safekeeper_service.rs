@@ -647,6 +647,11 @@ impl Service {
         sk.describe_response()
     }
 
+    pub(crate) fn get_safekeeper_object(&self, node_id: i64) -> Option<Safekeeper> {
+        let locked = self.inner.read().unwrap();
+        locked.safekeepers.get(&NodeId(node_id as u64)).cloned()
+    }
+
     pub(crate) async fn upsert_safekeeper(
         self: &Arc<Service>,
         record: crate::persistence::SafekeeperUpsert,
