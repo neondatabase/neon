@@ -84,6 +84,7 @@ use crate::context;
 use crate::context::RequestContextBuilder;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::{DeletionQueueClient, DeletionQueueError};
+use crate::feature_resolver::FeatureResolver;
 use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::{
     BROKEN_TENANTS_SET, CIRCUIT_BREAKERS_BROKEN, CIRCUIT_BREAKERS_UNBROKEN, CONCURRENT_INITDBS,
@@ -159,6 +160,7 @@ pub struct TenantSharedResources {
     pub deletion_queue_client: DeletionQueueClient,
     pub l0_flush_global_state: L0FlushGlobalState,
     pub basebackup_prepare_sender: BasebackupPrepareSender,
+    pub feature_resolver: FeatureResolver,
 }
 
 /// A [`TenantShard`] is really an _attached_ tenant.  The configuration
@@ -380,6 +382,8 @@ pub struct TenantShard {
     pub(crate) gc_block: gc_block::GcBlock,
 
     l0_flush_global_state: L0FlushGlobalState,
+
+    feature_resolver: FeatureResolver,
 }
 impl std::fmt::Debug for TenantShard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -860,6 +864,14 @@ impl Debug for SetStoppingError {
     }
 }
 
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum FinalizeTimelineImportError {
+    #[error("Import task not done yet")]
+    ImportTaskStillRunning,
+    #[error("Shutting down")]
+    ShuttingDown,
+}
+
 /// Arguments to [`TenantShard::create_timeline`].
 ///
 /// Not usable as an idempotency key for timeline creation because if [`CreateTimelineParamsBranch::ancestor_start_lsn`]
@@ -1146,10 +1158,20 @@ impl TenantShard {
             ctx,
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
-        anyhow::ensure!(
-            disk_consistent_lsn.is_valid(),
-            "Timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn"
-        );
+
+        if !disk_consistent_lsn.is_valid() {
+            // As opposed to normal timelines which get initialised with a disk consitent LSN
+            // via initdb, imported timelines start from 0. If the import task stops before
+            // it advances disk consitent LSN, allow it to resume.
+            let in_progress_import = import_pgdata
+                .as_ref()
+                .map(|import| !import.is_done())
+                .unwrap_or(false);
+            if !in_progress_import {
+                anyhow::bail!("Timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn");
+            }
+        }
+
         assert_eq!(
             disk_consistent_lsn,
             metadata.disk_consistent_lsn(),
@@ -1243,20 +1265,25 @@ impl TenantShard {
                     }
                 }
 
-                // Sanity check: a timeline should have some content.
-                anyhow::ensure!(
-                    ancestor.is_some()
-                        || timeline
-                            .layers
-                            .read()
-                            .await
-                            .layer_map()
-                            .expect("currently loading, layer manager cannot be shutdown already")
-                            .iter_historic_layers()
-                            .next()
-                            .is_some(),
-                    "Timeline has no ancestor and no layer files"
-                );
+                if disk_consistent_lsn.is_valid() {
+                    // Sanity check: a timeline should have some content.
+                    // Exception: importing timelines might not yet have any
+                    anyhow::ensure!(
+                        ancestor.is_some()
+                            || timeline
+                                .layers
+                                .read()
+                                .await
+                                .layer_map()
+                                .expect(
+                                    "currently loading, layer manager cannot be shutdown already"
+                                )
+                                .iter_historic_layers()
+                                .next()
+                                .is_some(),
+                        "Timeline has no ancestor and no layer files"
+                    );
+                }
 
                 Ok(TimelineInitAndSyncResult::ReadyToActivate)
             }
@@ -1292,6 +1319,7 @@ impl TenantShard {
             deletion_queue_client,
             l0_flush_global_state,
             basebackup_prepare_sender,
+            feature_resolver,
         } = resources;
 
         let attach_mode = attached_conf.location.attach_mode;
@@ -1308,6 +1336,7 @@ impl TenantShard {
             deletion_queue_client,
             l0_flush_global_state,
             basebackup_prepare_sender,
+            feature_resolver,
         ));
 
         // The attach task will carry a GateGuard, so that shutdown() reliably waits for it to drop out if
@@ -2854,13 +2883,13 @@ impl TenantShard {
     pub(crate) async fn finalize_importing_timeline(
         &self,
         timeline_id: TimelineId,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), FinalizeTimelineImportError> {
         let timeline = {
             let locked = self.timelines_importing.lock().unwrap();
             match locked.get(&timeline_id) {
                 Some(importing_timeline) => {
                     if !importing_timeline.import_task_handle.is_finished() {
-                        return Err(anyhow::anyhow!("Import task not done yet"));
+                        return Err(FinalizeTimelineImportError::ImportTaskStillRunning);
                     }
 
                     importing_timeline.timeline.clone()
@@ -2873,8 +2902,13 @@ impl TenantShard {
 
         timeline
             .remote_client
-            .schedule_index_upload_for_import_pgdata_finalize()?;
-        timeline.remote_client.wait_completion().await?;
+            .schedule_index_upload_for_import_pgdata_finalize()
+            .map_err(|_err| FinalizeTimelineImportError::ShuttingDown)?;
+        timeline
+            .remote_client
+            .wait_completion()
+            .await
+            .map_err(|_err| FinalizeTimelineImportError::ShuttingDown)?;
 
         self.timelines_importing
             .lock()
@@ -3135,11 +3169,18 @@ impl TenantShard {
                         .or_insert_with(|| Arc::new(GcCompactionQueue::new()))
                         .clone()
                 };
+                let gc_compaction_strategy = self
+                    .feature_resolver
+                    .evaluate_multivariate("gc-comapction-strategy", self.tenant_shard_id.tenant_id)
+                    .ok();
+                let span = if let Some(gc_compaction_strategy) = gc_compaction_strategy {
+                    info_span!("gc_compact_timeline", timeline_id = %timeline.timeline_id, strategy = %gc_compaction_strategy)
+                } else {
+                    info_span!("gc_compact_timeline", timeline_id = %timeline.timeline_id)
+                };
                 outcome = queue
                     .iteration(cancel, ctx, &self.gc_block, &timeline)
-                    .instrument(
-                        info_span!("gc_compact_timeline", timeline_id = %timeline.timeline_id),
-                    )
+                    .instrument(span)
                     .await?;
             }
 
@@ -3471,8 +3512,9 @@ impl TenantShard {
             let mut timelines_importing = self.timelines_importing.lock().unwrap();
             timelines_importing
                 .drain()
-                .for_each(|(_timeline_id, importing_timeline)| {
-                    importing_timeline.shutdown();
+                .for_each(|(timeline_id, importing_timeline)| {
+                    let span = tracing::info_span!("importing_timeline_shutdown", %timeline_id);
+                    js.spawn(async move { importing_timeline.shutdown().instrument(span).await });
                 });
         }
         // test_long_timeline_create_then_tenant_delete is leaning on this message
@@ -4247,6 +4289,7 @@ impl TenantShard {
         deletion_queue_client: DeletionQueueClient,
         l0_flush_global_state: L0FlushGlobalState,
         basebackup_prepare_sender: BasebackupPrepareSender,
+        feature_resolver: FeatureResolver,
     ) -> TenantShard {
         assert!(!attached_conf.location.generation.is_none());
 
@@ -4351,6 +4394,7 @@ impl TenantShard {
             gc_block: Default::default(),
             l0_flush_global_state,
             basebackup_prepare_sender,
+            feature_resolver,
         }
     }
 
@@ -5271,6 +5315,7 @@ impl TenantShard {
             l0_compaction_trigger: self.l0_compaction_trigger.clone(),
             l0_flush_global_state: self.l0_flush_global_state.clone(),
             basebackup_prepare_sender: self.basebackup_prepare_sender.clone(),
+            feature_resolver: self.feature_resolver.clone(),
         }
     }
 
@@ -5873,6 +5918,7 @@ pub(crate) mod harness {
                 // TODO: ideally we should run all unit tests with both configs
                 L0FlushGlobalState::new(L0FlushConfig::default()),
                 basebackup_requst_sender,
+                FeatureResolver::new_disabled(),
             ));
 
             let preload = tenant
@@ -8314,10 +8360,24 @@ mod tests {
             }
 
             tline.freeze_and_flush().await?;
+            // Force layers to L1
+            tline
+                .compact(
+                    &cancel,
+                    {
+                        let mut flags = EnumSet::new();
+                        flags.insert(CompactFlags::ForceL0Compaction);
+                        flags
+                    },
+                    &ctx,
+                )
+                .await?;
 
             if iter % 5 == 0 {
+                let scan_lsn = Lsn(lsn.0 + 1);
+                info!("scanning at {}", scan_lsn);
                 let (_, before_delta_file_accessed) =
-                    scan_with_statistics(&tline, &keyspace, lsn, &ctx, io_concurrency.clone())
+                    scan_with_statistics(&tline, &keyspace, scan_lsn, &ctx, io_concurrency.clone())
                         .await?;
                 tline
                     .compact(
@@ -8326,13 +8386,14 @@ mod tests {
                             let mut flags = EnumSet::new();
                             flags.insert(CompactFlags::ForceImageLayerCreation);
                             flags.insert(CompactFlags::ForceRepartition);
+                            flags.insert(CompactFlags::ForceL0Compaction);
                             flags
                         },
                         &ctx,
                     )
                     .await?;
                 let (_, after_delta_file_accessed) =
-                    scan_with_statistics(&tline, &keyspace, lsn, &ctx, io_concurrency.clone())
+                    scan_with_statistics(&tline, &keyspace, scan_lsn, &ctx, io_concurrency.clone())
                         .await?;
                 assert!(
                     after_delta_file_accessed < before_delta_file_accessed,
@@ -8773,6 +8834,8 @@ mod tests {
 
         let cancel = CancellationToken::new();
 
+        // Image layer creation happens on the disk_consistent_lsn so we need to force set it now.
+        tline.force_set_disk_consistent_lsn(Lsn(0x40));
         tline
             .compact(
                 &cancel,
@@ -8786,8 +8849,7 @@ mod tests {
             )
             .await
             .unwrap();
-
-        // Image layers are created at last_record_lsn
+        // Image layers are created at repartition LSN
         let images = tline
             .inspect_image_layers(Lsn(0x40), &ctx, io_concurrency.clone())
             .await

@@ -370,6 +370,18 @@ impl From<crate::tenant::secondary::SecondaryTenantError> for ApiError {
     }
 }
 
+impl From<crate::tenant::FinalizeTimelineImportError> for ApiError {
+    fn from(err: crate::tenant::FinalizeTimelineImportError) -> ApiError {
+        use crate::tenant::FinalizeTimelineImportError::*;
+        match err {
+            ImportTaskStillRunning => {
+                ApiError::ResourceUnavailable("Import task still running".into())
+            }
+            ShuttingDown => ApiError::ShuttingDown,
+        }
+    }
+}
+
 // Helper function to construct a TimelineInfo struct for a timeline
 async fn build_timeline_info(
     timeline: &Arc<Timeline>,
@@ -572,6 +584,7 @@ async fn timeline_create_handler(
         TimelineCreateRequestMode::Branch {
             ancestor_timeline_id,
             ancestor_start_lsn,
+            read_only: _,
             pg_version: _,
         } => tenant::CreateTimelineParams::Branch(tenant::CreateTimelineParamsBranch {
             new_timeline_id,
@@ -3532,10 +3545,7 @@ async fn activate_post_import_handler(
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
-        tenant
-            .finalize_importing_timeline(timeline_id)
-            .await
-            .map_err(ApiError::InternalServerError)?;
+        tenant.finalize_importing_timeline(timeline_id).await?;
 
         match tenant.get_timeline(timeline_id, false) {
             Ok(_timeline) => {

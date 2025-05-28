@@ -21,6 +21,7 @@ use pageserver::config::{PageServerConf, PageserverIdentity, ignored_fields};
 use pageserver::controller_upcall_client::StorageControllerUpcallClient;
 use pageserver::deletion_queue::DeletionQueue;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
+use pageserver::feature_resolver::FeatureResolver;
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::{
     BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
@@ -388,23 +389,30 @@ fn start_pageserver(
     // We need to release the lock file only when the process exits.
     std::mem::forget(lock_file);
 
-    // Bind the HTTP and libpq ports early, so that if they are in use by some other
-    // process, we error out early.
-    let http_addr = &conf.listen_http_addr;
-    info!("Starting pageserver http handler on {http_addr}");
-    let http_listener = tcp_listener::bind(http_addr)?;
+    // Bind the HTTP, libpq, and gRPC ports early, to error out if they are
+    // already in use.
+    info!(
+        "Starting pageserver http handler on {} with auth {:#?}",
+        conf.listen_http_addr, conf.http_auth_type
+    );
+    let http_listener = tcp_listener::bind(&conf.listen_http_addr)?;
 
     let https_listener = match conf.listen_https_addr.as_ref() {
         Some(https_addr) => {
-            info!("Starting pageserver https handler on {https_addr}");
+            info!(
+                "Starting pageserver https handler on {https_addr} with auth {:#?}",
+                conf.http_auth_type
+            );
             Some(tcp_listener::bind(https_addr)?)
         }
         None => None,
     };
 
-    let pg_addr = &conf.listen_pg_addr;
-    info!("Starting pageserver pg protocol handler on {pg_addr}");
-    let pageserver_listener = tcp_listener::bind(pg_addr)?;
+    info!(
+        "Starting pageserver pg protocol handler on {} with auth {:#?}",
+        conf.listen_pg_addr, conf.pg_auth_type,
+    );
+    let pageserver_listener = tcp_listener::bind(&conf.listen_pg_addr)?;
 
     // Enable SO_KEEPALIVE on the socket, to detect dead connections faster.
     // These are configured via net.ipv4.tcp_keepalive_* sysctls.
@@ -412,6 +420,15 @@ fn start_pageserver(
     // TODO: also set this on the walreceiver socket, but tokio-postgres doesn't
     // support enabling keepalives while using the default OS sysctls.
     setsockopt(&pageserver_listener, sockopt::KeepAlive, &true)?;
+
+    let mut grpc_listener = None;
+    if let Some(grpc_addr) = &conf.listen_grpc_addr {
+        info!(
+            "Starting pageserver gRPC handler on {grpc_addr} with auth {:#?}",
+            conf.grpc_auth_type
+        );
+        grpc_listener = Some(tcp_listener::bind(grpc_addr).map_err(|e| anyhow!("{e}"))?);
+    }
 
     // Launch broker client
     // The storage_broker::connect call needs to happen inside a tokio runtime thread.
@@ -440,7 +457,8 @@ fn start_pageserver(
     // Initialize authentication for incoming connections
     let http_auth;
     let pg_auth;
-    if conf.http_auth_type == AuthType::NeonJWT || conf.pg_auth_type == AuthType::NeonJWT {
+    let grpc_auth;
+    if [conf.http_auth_type, conf.pg_auth_type, conf.grpc_auth_type].contains(&AuthType::NeonJWT) {
         // unwrap is ok because check is performed when creating config, so path is set and exists
         let key_path = conf.auth_validation_public_key_path.as_ref().unwrap();
         info!("Loading public key(s) for verifying JWT tokens from {key_path:?}");
@@ -448,20 +466,23 @@ fn start_pageserver(
         let jwt_auth = JwtAuth::from_key_path(key_path)?;
         let auth: Arc<SwappableJwtAuth> = Arc::new(SwappableJwtAuth::new(jwt_auth));
 
-        http_auth = match &conf.http_auth_type {
+        http_auth = match conf.http_auth_type {
             AuthType::Trust => None,
             AuthType::NeonJWT => Some(auth.clone()),
         };
-        pg_auth = match &conf.pg_auth_type {
+        pg_auth = match conf.pg_auth_type {
+            AuthType::Trust => None,
+            AuthType::NeonJWT => Some(auth.clone()),
+        };
+        grpc_auth = match conf.grpc_auth_type {
             AuthType::Trust => None,
             AuthType::NeonJWT => Some(auth),
         };
     } else {
         http_auth = None;
         pg_auth = None;
+        grpc_auth = None;
     }
-    info!("Using auth for http API: {:#?}", conf.http_auth_type);
-    info!("Using auth for pg connections: {:#?}", conf.pg_auth_type);
 
     let tls_server_config = if conf.listen_https_addr.is_some() || conf.enable_tls_page_service_api
     {
@@ -501,6 +522,12 @@ fn start_pageserver(
 
     // Set up remote storage client
     let remote_storage = BACKGROUND_RUNTIME.block_on(create_remote_storage_client(conf))?;
+
+    let feature_resolver = create_feature_resolver(
+        conf,
+        shutdown_pageserver.clone(),
+        BACKGROUND_RUNTIME.handle(),
+    )?;
 
     // Set up deletion queue
     let (deletion_queue, deletion_workers) = DeletionQueue::new(
@@ -555,6 +582,7 @@ fn start_pageserver(
             deletion_queue_client,
             l0_flush_global_state,
             basebackup_prepare_sender,
+            feature_resolver,
         },
         order,
         shutdown_pageserver.clone(),
@@ -776,8 +804,26 @@ fn start_pageserver(
         } else {
             None
         },
-        basebackup_cache,
+        basebackup_cache.clone(),
     );
+
+    // Spawn a Pageserver gRPC server task. It will spawn separate tasks for
+    // each stream/request.
+    //
+    // TODO: this uses a separate Tokio runtime for the page service. If we want
+    // other gRPC services, they will need their own port and runtime. Is this
+    // necessary?
+    let mut page_service_grpc = None;
+    if let Some(grpc_listener) = grpc_listener {
+        page_service_grpc = Some(page_service::spawn_grpc(
+            conf,
+            tenant_manager.clone(),
+            grpc_auth,
+            otel_guard.as_ref().map(|g| g.dispatch.clone()),
+            grpc_listener,
+            basebackup_cache,
+        )?);
+    }
 
     // All started up! Now just sit and wait for shutdown signal.
     BACKGROUND_RUNTIME.block_on(async move {
@@ -797,6 +843,7 @@ fn start_pageserver(
             http_endpoint_listener,
             https_endpoint_listener,
             page_service,
+            page_service_grpc,
             consumption_metrics_tasks,
             disk_usage_eviction_task,
             &tenant_manager,
@@ -808,6 +855,14 @@ fn start_pageserver(
         .await;
         unreachable!();
     })
+}
+
+fn create_feature_resolver(
+    conf: &'static PageServerConf,
+    shutdown_pageserver: CancellationToken,
+    handle: &tokio::runtime::Handle,
+) -> anyhow::Result<FeatureResolver> {
+    FeatureResolver::spawn(conf, shutdown_pageserver, handle)
 }
 
 async fn create_remote_storage_client(

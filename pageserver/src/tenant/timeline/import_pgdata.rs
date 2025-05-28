@@ -25,8 +25,11 @@ pub(crate) struct ImportingTimeline {
 }
 
 impl ImportingTimeline {
-    pub(crate) fn shutdown(self) {
+    pub(crate) async fn shutdown(self) {
         self.import_task_handle.abort();
+        let _ = self.import_task_handle.await;
+
+        self.timeline.remote_client.shutdown().await;
     }
 }
 
@@ -92,6 +95,11 @@ pub async fn doit(
                     terminate_flow_with_error(timeline, err, &storcon_client, &cancel).await,
                 );
             }
+
+            timeline
+                .remote_client
+                .schedule_index_upload_for_file_changes()?;
+            timeline.remote_client.wait_completion().await?;
 
             // Communicate that shard is done.
             // Ensure at-least-once delivery of the upcall to storage controller

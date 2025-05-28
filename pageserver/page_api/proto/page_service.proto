@@ -54,9 +54,9 @@ service PageService {
   // RPCs use regular unary requests, since they are not as frequent and
   // performance-critical, and this simplifies implementation.
   //
-  // NB: a status response (e.g. errors) will terminate the stream. The stream
-  // may be shared by e.g. multiple Postgres backends, so we should avoid this.
-  // Most errors are therefore sent as GetPageResponse.status instead.
+  // NB: a gRPC status response (e.g. errors) will terminate the stream. The
+  // stream may be shared by multiple Postgres backends, so we avoid this by
+  // sending them as GetPageResponse.status_code instead.
   rpc GetPages (stream GetPageRequest) returns (stream GetPageResponse);
 
   // Returns the size of a relation, as # of blocks.
@@ -159,8 +159,8 @@ message GetPageRequest {
 // A GetPageRequest class. Primarily intended for observability, but may also be
 // used for prioritization in the future.
 enum GetPageClass {
-  // Unknown class. For forwards compatibility: used when the client sends a
-  // class that the server doesn't know about.
+  // Unknown class. For backwards compatibility: used when an older client version sends a class
+  // that a newer server version has removed.
   GET_PAGE_CLASS_UNKNOWN = 0;
   // A normal request. This is the default.
   GET_PAGE_CLASS_NORMAL = 1;
@@ -180,31 +180,37 @@ message GetPageResponse {
   // The original request's ID.
   uint64 request_id = 1;
   // The response status code.
-  GetPageStatus status = 2;
+  GetPageStatusCode status_code = 2;
   // A string describing the status, if any.
   string reason = 3;
-  // The 8KB page images, in the same order as the request. Empty if status != OK.
+  // The 8KB page images, in the same order as the request. Empty if status_code != OK.
   repeated bytes page_image = 4;
 }
 
-// A GetPageResponse status code. Since we use a bidirectional stream, we don't
-// want to send errors as gRPC statuses, since this would terminate the stream.
-enum GetPageStatus {
-  // Unknown status. For forwards compatibility: used when the server sends a
-  // status code that the client doesn't know about.
-  GET_PAGE_STATUS_UNKNOWN = 0;
+// A GetPageResponse status code.
+//
+// These are effectively equivalent to gRPC statuses. However, we use a bidirectional stream
+// (potentially shared by many backends), and a gRPC status response would terminate the stream so
+// we send GetPageResponse messages with these codes instead.
+enum GetPageStatusCode {
+  // Unknown status. For forwards compatibility: used when an older client version receives a new
+  // status code from a newer server version.
+  GET_PAGE_STATUS_CODE_UNKNOWN = 0;
   // The request was successful.
-  GET_PAGE_STATUS_OK = 1;
+  GET_PAGE_STATUS_CODE_OK = 1;
   // The page did not exist. The tenant/timeline/shard has already been
   // validated during stream setup.
-  GET_PAGE_STATUS_NOT_FOUND = 2;
+  GET_PAGE_STATUS_CODE_NOT_FOUND = 2;
   // The request was invalid.
-  GET_PAGE_STATUS_INVALID = 3;
+  GET_PAGE_STATUS_CODE_INVALID_REQUEST = 3;
+  // The request failed due to an internal server error.
+  GET_PAGE_STATUS_CODE_INTERNAL_ERROR = 4;
   // The tenant is rate limited. Slow down and retry later.
-  GET_PAGE_STATUS_SLOW_DOWN = 4;
-  // TODO: consider adding a GET_PAGE_STATUS_LAYER_DOWNLOAD in the case of a
-  // layer download. This could free up the server task to process other
-  // requests while the layer download is in progress.
+  GET_PAGE_STATUS_CODE_SLOW_DOWN = 5;
+  // NB: shutdown errors are emitted as a gRPC Unavailable status.
+  //
+  // TODO: consider adding a GET_PAGE_STATUS_CODE_LAYER_DOWNLOAD in the case of a layer download.
+  // This could free up the server task to process other requests while the download is in progress.
 }
 
 // Fetches the size of a relation at a given LSN, as # of blocks. Only valid on
