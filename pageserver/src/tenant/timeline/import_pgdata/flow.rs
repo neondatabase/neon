@@ -12,7 +12,6 @@
 //!
 //! TODOs before productionization:
 //! - ChunkProcessingJob should cut up an ImportJob to hit exactly target image layer size.
-//! - asserts / unwraps need to be replaced with errors
 //!
 //! An incomplete set of TODOs from the Hackathon:
 //! - version-specific CheckPointData (=> pgv abstraction, already exists for regular walingest)
@@ -139,6 +138,7 @@ impl Planner {
     /// This function is and must remain pure: given the same input, it will generate the same import plan.
     async fn plan(mut self, import_config: &TimelineImportConfig) -> anyhow::Result<Plan> {
         let pgdata_lsn = Lsn(self.control_file.control_file_data().checkPoint).align();
+        anyhow::ensure!(pgdata_lsn.is_valid());
 
         let datadir = PgDataDir::new(&self.storage).await?;
 
@@ -578,18 +578,18 @@ impl PgDataDirDb {
                 };
 
                 let path = datadir_path.join(rel_tag.to_segfile_name(segno));
-                assert!(filesize % BLCKSZ as usize == 0); // TODO: this should result in an error
+                anyhow::ensure!(filesize % BLCKSZ as usize == 0);
                 let nblocks = filesize / BLCKSZ as usize;
 
-                PgDataDirDbFile {
+                Ok(PgDataDirDbFile {
                     path,
                     filesize,
                     rel_tag,
                     segno,
                     nblocks: Some(nblocks), // first non-cummulative sizes
-                }
+                })
             })
-            .collect();
+            .collect::<anyhow::Result<_, _>>()?;
 
         // Set cummulative sizes. Do all of that math here, so that later we could easier
         // parallelize over segments and know with which segments we need to write relsize
