@@ -500,7 +500,8 @@ impl GlobalTimelines {
         let tli_res = {
             let state = self.state.lock().unwrap();
 
-            if state.has_tombstone(ttid) {
+            // Do NOT check tenant tombstones here: those were set earlier
+            if state.tombstones.contains_key(ttid) {
                 // Presence of a tombstone guarantees that a previous deletion has completed and there is no work to do.
                 info!("Timeline {ttid} was already deleted");
                 return Ok(TimelineDeleteResult { dir_existed: false });
@@ -575,11 +576,13 @@ impl GlobalTimelines {
         action: DeleteOrExclude,
     ) -> Result<HashMap<TenantTimelineId, TimelineDeleteResult>> {
         info!("deleting all timelines for tenant {}", tenant_id);
+
+        // Adding a tombstone before getting the timelines to prevent new timeline additions
+        self.state.lock().unwrap().add_tenant_tombstone(*tenant_id);
+
         let to_delete = self.get_all_for_tenant(*tenant_id);
 
         let mut err = None;
-
-        self.state.lock().unwrap().add_tenant_tombstone(*tenant_id);
 
         let mut deleted = HashMap::new();
         for tli in &to_delete {
