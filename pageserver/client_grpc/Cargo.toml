@@ -1,7 +1,8 @@
 [package]
 name = "pageserver_client_grpc"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
 bytes.workspace = true
@@ -13,4 +14,3 @@ tracing.workspace = true
 pageserver_page_api.workspace = true
 utils.workspace = true
 tokio.workspace = true
-tokio-util = { version = "0.7", features = ["compat"] }
