@@ -102,7 +102,6 @@ impl TryFrom<ReadLsn> for proto::ReadLsn {
     }
 }
 
-
 // RelTag is defined in pageserver_api::reltag.
 pub type RelTag = pageserver_api::reltag::RelTag;
 
