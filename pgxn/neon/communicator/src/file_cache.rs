@@ -33,6 +33,8 @@ pub struct FileCache {
 }
 
 // TODO: We keep track of all free blocks in this vec. That doesn't really scale.
+// Idea: when free_blocks fills up with more than 1024 entries, write them all to
+// one block on disk.
 struct FreeList {
     next_free_block: CacheBlock,
     max_blocks: u64,

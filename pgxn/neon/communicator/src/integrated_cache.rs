@@ -216,15 +216,7 @@ impl std::fmt::Debug for BlockEntry {
     }
 }
 
-#[derive(
-    Clone,
-    Debug,
-    PartialEq,
-    PartialOrd,
-    Eq,
-    Hash,
-    Ord,
-)]
+#[derive(Clone, Debug, PartialEq, PartialOrd, Eq, Hash, Ord)]
 struct RelKey(RelTag);
 
 impl From<&RelTag> for RelKey {

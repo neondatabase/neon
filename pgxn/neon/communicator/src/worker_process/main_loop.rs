@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::backend_comms::NeonIOHandle;
 use crate::file_cache::FileCache;
+use crate::global_allocator::MyAllocatorCollector;
 use crate::init::CommunicatorInitStruct;
 use crate::integrated_cache::{CacheResult, IntegratedCacheWriteAccess};
 use crate::neon_request::{CGetPageVRequest, CPrefetchVRequest};
@@ -60,6 +61,8 @@ pub struct CommunicatorWorkerProcessStruct<'a> {
     request_get_pagev_nblocks_counter: IntCounter,
     request_prefetchv_nblocks_counter: IntCounter,
     request_rel_zero_extend_nblocks_counter: IntCounter,
+
+    allocator_metrics: MyAllocatorCollector,
 }
 
 pub(super) async fn init(
@@ -166,6 +169,8 @@ pub(super) async fn init(
         request_get_pagev_nblocks_counter,
         request_prefetchv_nblocks_counter,
         request_rel_zero_extend_nblocks_counter,
+
+        allocator_metrics: MyAllocatorCollector::new(),
     }
 }
 
@@ -578,6 +583,7 @@ impl<'t> metrics::core::Collector for CommunicatorWorkerProcessStruct<'t> {
             descs.append(&mut file_cache.desc());
         }
         descs.append(&mut self.cache.desc());
+        descs.append(&mut self.allocator_metrics.desc());
 
         descs
     }
@@ -593,6 +599,7 @@ impl<'t> metrics::core::Collector for CommunicatorWorkerProcessStruct<'t> {
             values.append(&mut file_cache.collect());
         }
         values.append(&mut self.cache.collect());
+        values.append(&mut self.allocator_metrics.collect());
 
         values
     }

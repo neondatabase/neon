@@ -21,5 +21,7 @@ mod integrated_cache;
 mod neon_request;
 mod worker_process;
 
+mod global_allocator;
+
 // FIXME get this from postgres headers somehow
 pub const BLCKSZ: usize = 8192;
