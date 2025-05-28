@@ -810,6 +810,8 @@ typedef struct WalProposer
 
 	/* WAL has been generated up to this point */
 	XLogRecPtr	availableLsn;
+	/* Current local TimeLineId in use */
+	TimeLineID	localTimeLineID;
 
 	/* cached GetAcknowledgedByQuorumWALPosition result */
 	XLogRecPtr	commitLsn;
