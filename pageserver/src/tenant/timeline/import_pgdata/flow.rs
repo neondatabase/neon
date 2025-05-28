@@ -982,6 +982,13 @@ impl ChunkProcessingJob {
             .cloned();
         match existing_layer {
             Some(existing) => {
+                // Schedule the deletion of the remote layer before removing it from the layer map.
+                // When `existing_layer` drops [`LayerInner::drop`] will schedule its deletion from
+                // remote storage, but that assumes that the layer was unlinked from the index first.
+                timeline
+                    .remote_client
+                    .schedule_layer_file_deletion(&[existing.layer_desc().layer_name()])?;
+
                 guard.open_mut()?.rewrite_layers(
                     &[(existing.clone(), resident_layer.clone())],
                     &[],
