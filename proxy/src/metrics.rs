@@ -139,6 +139,9 @@ pub struct ProxyMetrics {
     /// Number of TLS handshake failures
     pub tls_handshake_failures: Counter,
 
+    /// Number of SHA 256 rounds executed.
+    pub sha_rounds: Counter,
+
     /// Number of connection requests affected by authentication rate limits
     pub requests_auth_rate_limits_total: Counter,
 

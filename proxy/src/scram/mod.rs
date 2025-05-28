@@ -16,10 +16,8 @@ mod signature;
 pub mod threadpool;
 
 pub(crate) use exchange::{Exchange, exchange};
-use hmac::{Hmac, Mac};
 pub(crate) use key::ScramKey;
 pub(crate) use secret::ServerSecret;
-use sha2::{Digest, Sha256};
 
 const SCRAM_SHA_256: &str = "SCRAM-SHA-256";
 const SCRAM_SHA_256_PLUS: &str = "SCRAM-SHA-256-PLUS";
@@ -38,22 +36,6 @@ fn base64_decode_array<const N: usize>(input: impl AsRef<[u8]>) -> Option<[u8; N
     }
 
     Some(bytes)
-}
-
-/// This function essentially is `Hmac(sha256, key, input)`.
-/// Further reading: <https://datatracker.ietf.org/doc/html/rfc2104>.
-fn hmac_sha256<'a>(key: &[u8], parts: impl IntoIterator<Item = &'a [u8]>) -> [u8; 32] {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("bad key size");
-    parts.into_iter().for_each(|s| mac.update(s));
-
-    mac.finalize().into_bytes().into()
-}
-
-fn sha256<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    parts.into_iter().for_each(|s| hasher.update(s));
-
-    hasher.finalize().into()
 }
 
 #[cfg(test)]
