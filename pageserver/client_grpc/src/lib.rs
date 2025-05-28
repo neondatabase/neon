@@ -73,7 +73,7 @@ impl PageserverClient {
     pub async fn get_page(
         &self,
         shard: ShardIndex,
-        request: &GetPageRequest,
+        request: GetPageRequest,
     ) -> Result<Vec<Bytes>, PageserverClientError> {
         // FIXME: calculate the shard number correctly
         let chan = self.get_client(shard).await?;
@@ -81,7 +81,7 @@ impl PageserverClient {
         let mut client =
             PageServiceClient::with_interceptor(chan, self.auth_interceptor.for_shard(shard));
 
-        let request = proto::GetPageRequest::from(request);
+        let request = proto::GetPageRequest::try_from(request)?;
         let request_stream = futures::stream::once(std::future::ready(request));
 
         let mut response_stream = client

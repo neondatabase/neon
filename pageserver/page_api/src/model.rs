@@ -102,14 +102,6 @@ impl TryFrom<ReadLsn> for proto::ReadLsn {
     }
 }
 
-impl From<&ReadLsn> for proto::ReadLsn {
-    fn from(value: &ReadLsn) -> proto::ReadLsn {
-        proto::ReadLsn {
-            request_lsn: value.request_lsn.into(),
-            not_modified_since_lsn: value.not_modified_since_lsn.unwrap_or_default().0,
-        }
-    }
-}
 
 // RelTag is defined in pageserver_api::reltag.
 pub type RelTag = pageserver_api::reltag::RelTag;
@@ -141,16 +133,6 @@ impl From<RelTag> for proto::RelTag {
     }
 }
 
-impl From<&RelTag> for proto::RelTag {
-    fn from(value: &RelTag) -> proto::RelTag {
-        proto::RelTag {
-            spc_oid: value.spcnode,
-            db_oid: value.dbnode,
-            rel_number: value.relnode,
-            fork_number: value.forknum as u32,
-        }
-    }
-}
 /// Checks whether a relation exists, at the given LSN. Only valid on shard 0, other shards error.
 #[derive(Clone, Copy, Debug)]
 pub struct CheckRelExistsRequest {
@@ -330,17 +312,6 @@ impl TryFrom<proto::GetPageRequest> for GetPageRequest {
     }
 }
 
-impl From<&GetPageRequest> for proto::GetPageRequest {
-    fn from(request: &GetPageRequest) -> proto::GetPageRequest {
-        proto::GetPageRequest {
-            request_id: request.request_id,
-            request_class: request.request_class.into(),
-            read_lsn: Some(request.read_lsn.try_into().unwrap()),
-            rel: Some(request.rel.into()),
-            block_number: request.block_numbers.clone().into_vec(),
-        }
-    }
-}
 impl TryFrom<GetPageRequest> for proto::GetPageRequest {
     type Error = ProtocolError;
 
