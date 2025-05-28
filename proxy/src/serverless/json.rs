@@ -431,17 +431,15 @@ mod tests {
     }
 
     fn pg_text_to_json(val: &str, pg_type: &Type) -> Value {
-        let output = json::value_to_vec!(|output| {
-            super::pg_text_to_json(output, val, pg_type).unwrap();
-        });
-        serde_json::from_slice(&output).unwrap()
+        let output = json::value_to_string!(|v| super::pg_text_to_json(v, val, pg_type).unwrap());
+        serde_json::from_str(&output).unwrap()
     }
 
     fn pg_array_parse(pg_array: &str, pg_type: &Type) -> Value {
-        let output = json::value_to_vec!(|list| json::value_as_list!(|list| {
-            super::pg_array_parse(list, pg_array, pg_type, ',').unwrap();
+        let output = json::value_to_string!(|v| json::value_as_list!(|v| {
+            super::pg_array_parse(v, pg_array, pg_type, ',').unwrap();
         }));
-        serde_json::from_slice(&output).unwrap()
+        serde_json::from_str(&output).unwrap()
     }
 
     #[test]
