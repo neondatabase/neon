@@ -1345,26 +1345,27 @@ impl Timeline {
                     .extend(sparse_partitioning.into_dense().parts);
 
                 // 3. Create new image layers for partitions that have been modified "enough".
+                let mode = if options
+                    .flags
+                    .contains(CompactFlags::ForceImageLayerCreation)
+                {
+                    ImageLayerCreationMode::Force
+                } else {
+                    ImageLayerCreationMode::Try
+                };
                 let (image_layers, outcome) = self
                     .create_image_layers(
                         &partitioning,
                         lsn,
-                        if options
-                            .flags
-                            .contains(CompactFlags::ForceImageLayerCreation)
-                        {
-                            ImageLayerCreationMode::Force
-                        } else {
-                            ImageLayerCreationMode::Try
-                        },
+                        mode,
                         &image_ctx,
                         self.last_image_layer_creation_status
                             .load()
                             .as_ref()
                             .clone(),
                         options.flags.contains(CompactFlags::YieldForL0),
-                        partition_mode,
                     )
+                    .instrument(info_span!("create_image_layers", mode = %mode, partition_mode = %partition_mode, lsn = %lsn))
                     .await
                     .inspect_err(|err| {
                         if let CreateImageLayersError::GetVectoredError(

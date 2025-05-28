@@ -4911,8 +4911,8 @@ impl Timeline {
                     ctx,
                     LastImageLayerCreationStatus::Initial,
                     false, // don't yield for L0, we're flushing L0
-                    "initial",
                 )
+                .instrument(info_span!("create_image_layers", mode = %ImageLayerCreationMode::Initial, partition_mode = "initial", lsn = %self.initdb_lsn))
                 .await?;
             debug_assert!(
                 matches!(is_complete, LastImageLayerCreationStatus::Complete),
@@ -5471,8 +5471,6 @@ impl Timeline {
     /// true = we have generate all image layers, false = we preempt the process for L0 compaction.
     ///
     /// `partition_mode` is only for logging purpose and is not used anywhere in this function.
-    #[allow(clippy::too_many_arguments)]
-    #[tracing::instrument(skip_all, fields(%lsn, %mode, %partition_mode))]
     async fn create_image_layers(
         self: &Arc<Timeline>,
         partitioning: &KeyPartitioning,
@@ -5481,7 +5479,6 @@ impl Timeline {
         ctx: &RequestContext,
         last_status: LastImageLayerCreationStatus,
         yield_for_l0: bool,
-        partition_mode: &'static str,
     ) -> Result<(Vec<ResidentLayer>, LastImageLayerCreationStatus), CreateImageLayersError> {
         let timer = self.metrics.create_images_time_histo.start_timer();
 
