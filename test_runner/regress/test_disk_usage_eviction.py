@@ -942,7 +942,7 @@ def test_import_timeline_disk_pressure_eviction(
     timeline_id = TimelineId.generate()
     idempotency = ImportPgdataIdemptencyKey.random()
 
-    env = EvictionEnv(
+    eviction_env = EvictionEnv(
         timelines=[(tenant_id, timeline_id)],
         neon_env=env,
         pageserver_http=env.pageserver.http_client(),
@@ -956,8 +956,8 @@ def test_import_timeline_disk_pressure_eviction(
     failpoint_name = "import-timeline-pre-success-notify-pausable"
     env.pageserver.add_persistent_failpoint(failpoint_name, "pause")
 
-    env.neon_env.storage_controller.tenant_create(tenant_id)
-    env.neon_env.storage_controller.timeline_create(
+    env.storage_controller.tenant_create(tenant_id)
+    env.storage_controller.timeline_create(
         tenant_id,
         {
             "new_timeline_id": str(timeline_id),
@@ -981,11 +981,11 @@ def test_import_timeline_disk_pressure_eviction(
 
     env.pageserver.stop()
 
-    total_size, _, _ = env.timelines_du(env.pageserver)
+    total_size, _, _ = eviction_env.timelines_du(env.pageserver)
     blocksize = 512
     total_blocks = (total_size + (blocksize - 1)) // blocksize
 
-    env.pageserver_start_with_disk_usage_eviction(
+    eviction_env.pageserver_start_with_disk_usage_eviction(
         env.pageserver,
         period="1s",
         max_usage_pct=33,
@@ -1002,11 +1002,9 @@ def test_import_timeline_disk_pressure_eviction(
         wait_logical_size=False,
     )
 
-    wait_until(
-        lambda: env.neon_env.pageserver.assert_log_contains(".*disk usage pressure relieved")
-    )
+    wait_until(lambda: env.pageserver.assert_log_contains(".*disk usage pressure relieved"))
 
-    env.neon_env.pageserver.clear_persistent_failpoint(failpoint_name)
+    env.pageserver.clear_persistent_failpoint(failpoint_name)
 
     def cplane_notified():
         assert import_completion_signaled.is_set()
