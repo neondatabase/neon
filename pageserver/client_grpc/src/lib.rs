@@ -13,7 +13,6 @@ use bytes::Bytes;
 use futures::{StreamExt};
 use thiserror::Error;
 use tonic::metadata::AsciiMetadataValue;
-use pageserver_page_api::model::*;
 use pageserver_page_api::proto;
 use pageserver_page_api::proto::PageServiceClient;
 use utils::shard::ShardIndex;
@@ -29,7 +28,7 @@ pub enum PageserverClientError {
     #[error("could not perform request: {0}`")]
     RequestError(#[from] tonic::Status),
     #[error("protocol error: {0}")]
-    ProtocolError(#[from] ProtocolError),
+    ProtocolError(#[from] pageserver_page_api::ProtocolError),
     #[error("could not perform request: {0}`")]
     InvalidUri(#[from] http::uri::InvalidUri),
     #[error("could not perform request: {0}`")]
@@ -73,7 +72,7 @@ impl PageserverClient {
     pub async fn get_page(
         &self,
         shard: ShardIndex,
-        request: GetPageRequest,
+        request: pageserver_page_api::GetPageRequest,
     ) -> Result<Vec<Bytes>, PageserverClientError> {
         // FIXME: calculate the shard number correctly
         let chan = self.get_client(shard).await?;
@@ -100,7 +99,7 @@ impl PageserverClient {
                 return Err(PageserverClientError::RequestError(status));
             }
             Ok(resp) => {
-                let response: GetPageResponse = resp.try_into().unwrap();
+                let response: pageserver_page_api::GetPageResponse = resp.try_into().unwrap();
                 return Ok(response.page_images.to_vec());
             }
         }
