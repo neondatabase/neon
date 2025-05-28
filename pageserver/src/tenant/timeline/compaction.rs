@@ -1301,10 +1301,8 @@ impl Timeline {
             || cfg!(feature = "testing")
             || self
                 .feature_resolver
-                .evaluate_multivariate("image-compaction-boundary", self.tenant_shard_id.tenant_id)
-                .ok()
-                == Some("yes".to_string())
-        // TODO: support evaluate_boolean
+                .evaluate_boolean("image-compaction-boundary", self.tenant_shard_id.tenant_id)
+                .is_ok()
         {
             let last_repartition_lsn = self.partitioning.read().1;
             let lsn = match l0_l1_boundary_lsn {
