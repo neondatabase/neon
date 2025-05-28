@@ -1,20 +1,18 @@
 //! Simple hash table with chaining
 
-use std::hash::{DefaultHasher, Hasher};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::mem::MaybeUninit;
-
-use crate::hash::Key;
 
 const INVALID_POS: u32 = u32::MAX;
 
 // Bucket
-struct Bucket<K: Key, V> {
+struct Bucket<K, V> {
     hash: u64,
     next: u32,
     inner: Option<(K, V)>,
 }
 
-pub(crate) struct CoreHashMap<'a, K: Key, V> {
+pub(crate) struct CoreHashMap<'a, K, V> {
     dictionary: &'a mut [u32],
     buckets: &'a mut [Bucket<K, V>],
     free_head: u32,
@@ -25,28 +23,35 @@ pub(crate) struct CoreHashMap<'a, K: Key, V> {
 
 pub struct FullError();
 
-impl<'a, K: Key, V> CoreHashMap<'a, K, V> {
-    const FILL_FACTOR: f32 = 0.5;
+impl<'a, K, V> CoreHashMap<'a, K, V>
+    where K: Clone + Hash + Eq,
+{
+    const FILL_FACTOR: f32 = 0.60;
 
-    pub fn new(area: &'a mut [u8]) -> CoreHashMap<'a, K, V> {
+    pub fn estimate_size(num_buckets: u32) -> usize{
+        let mut size = 0;
+
+        // buckets
+        size += size_of::<Bucket<K, V>>() * num_buckets as usize;
+
+        // dictionary
+        size += (f32::ceil(
+            (size_of::<u32>() * num_buckets as usize) as f32 / Self::FILL_FACTOR)
+        ) as usize;
+
+        size
+    }
+
+    pub fn new(num_buckets: u32, area: &'a mut [u8]) -> CoreHashMap<'a, K, V> {
         let len = area.len();
 
         let mut ptr: *mut u8 = area.as_mut_ptr();
         let end_ptr: *mut u8 = unsafe { area.as_mut_ptr().add(len) };
 
-        // How much space is left?
-        let size_remain = unsafe { end_ptr.byte_offset_from(ptr) };
-
-        let num_buckets = f32::floor(
-            size_remain as f32
-                / (size_of::<Bucket<K, V>>() as f32
-                    + size_of::<u32>() as f32 * 1.0 / Self::FILL_FACTOR),
-        ) as usize;
-
         // carve out the buckets
         ptr = unsafe { ptr.byte_add(ptr.align_offset(align_of::<Bucket<K, V>>())) };
         let buckets_ptr = ptr;
-        ptr = unsafe { ptr.add(size_of::<Bucket<K, V>>() * num_buckets) };
+        ptr = unsafe { ptr.add(size_of::<Bucket<K, V>>() * num_buckets as usize) };
 
         // use remaining space for the dictionary
         ptr = unsafe { ptr.byte_add(ptr.align_offset(align_of::<u32>())) };
@@ -59,7 +64,7 @@ impl<'a, K: Key, V> CoreHashMap<'a, K, V> {
         // Initialize the buckets
         let buckets = {
             let buckets_ptr: *mut MaybeUninit<Bucket<K, V>> = buckets_ptr.cast();
-            let buckets = unsafe { std::slice::from_raw_parts_mut(buckets_ptr, num_buckets) };
+            let buckets = unsafe { std::slice::from_raw_parts_mut(buckets_ptr, num_buckets as usize) };
             for i in 0..buckets.len() {
                 buckets[i].write(Bucket {
                     hash: 0,
@@ -72,7 +77,7 @@ impl<'a, K: Key, V> CoreHashMap<'a, K, V> {
                 });
             }
             // TODO: use std::slice::assume_init_mut() once it stabilizes
-            unsafe { std::slice::from_raw_parts_mut(buckets_ptr.cast(), num_buckets) }
+            unsafe { std::slice::from_raw_parts_mut(buckets_ptr.cast(), num_buckets as usize) }
         };
 
         // Initialize the dictionary

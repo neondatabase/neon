@@ -7,9 +7,9 @@
 //! [ ] Scalable to lots of concurrent accesses (currently uses a single spinlock)
 //! [ ] Resizable
 
-use std::cmp::Eq;
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::mem::MaybeUninit;
 use std::ops::Deref;
 
 use crate::shmem::ShmemHandle;
@@ -23,16 +23,6 @@ mod tests;
 
 use core::CoreHashMap;
 
-/// Fixed-length key type
-pub trait Key: Clone + Debug + Hash + Eq {
-    const KEY_LEN: usize;
-
-    fn as_bytes(&self) -> &[u8];
-}
-
-/// Values stored in the hash table
-pub trait Value {}
-
 pub enum UpdateAction<V> {
     Nothing,
     Insert(V),
@@ -43,23 +33,21 @@ pub enum UpdateAction<V> {
 pub struct OutOfMemoryError();
 
 pub struct HashMapInit<'a, K, V>
-where
-    K: Key,
-    V: Value,
 {
-    shmem: ShmemHandle,
+    // Hash table can be allocated in a fixed memory area, or in a resizeable ShmemHandle.
+    shmem: Option<ShmemHandle>,
     shared_ptr: *mut HashMapShared<'a, K, V>,
 }
 
-pub struct HashMapAccess<'a, K: Key, V: Value> {
-    _shmem: ShmemHandle,
+pub struct HashMapAccess<'a, K, V> {
+    _shmem: Option<ShmemHandle>,
     shared_ptr: *mut HashMapShared<'a, K, V>,
 }
 
-unsafe impl<'a, K: Key + Sync, V: Value + Sync> Sync for HashMapAccess<'a, K, V> {}
-unsafe impl<'a, K: Key + Send, V: Value + Send> Send for HashMapAccess<'a, K, V> {}
+unsafe impl<'a, K: Sync, V: Sync> Sync for HashMapAccess<'a, K, V> {}
+unsafe impl<'a, K: Send, V: Send> Send for HashMapAccess<'a, K, V> {}
 
-impl<'a, K: Key, V: Value> HashMapInit<'a, K, V> {
+impl<'a, K, V> HashMapInit<'a, K, V> {
     pub fn attach_writer(self) -> HashMapAccess<'a, K, V> {
         HashMapAccess {
             _shmem: self.shmem,
@@ -75,23 +63,37 @@ impl<'a, K: Key, V: Value> HashMapInit<'a, K, V> {
 
 // This is stored in the shared memory area
 struct HashMapShared<'a, K, V>
-where
-    K: Key,
-    V: Value,
 {
     inner: spin::RwLock<CoreHashMap<'a, K, V>>,
 }
 
-impl<'a, K: Key, V: Value> HashMapInit<'a, K, V> {
+impl<'a, K, V> HashMapInit<'a, K, V>
+where K: Clone + Hash + Eq,
+{
+    pub fn estimate_size(num_buckets: u32) -> usize {
+        // add some margin to cover alignment etc.
+        CoreHashMap::<K, V>::estimate_size(num_buckets) + size_of::<HashMapShared<K, V>>() + 1000
+    }
+    
+    pub fn init_in_fixed_area(num_buckets: u32, area: &'a mut [MaybeUninit<u8>]) -> HashMapInit<'a, K, V> {
+        Self::init_common(num_buckets, None, area.as_mut_ptr().cast(), area.len())
+    }
+
     /// Initialize a new hash map in the given shared memory area
-    pub fn init_in_shmem(mut shmem: ShmemHandle, size: usize) -> HashMapInit<'a, K, V> {
+    pub fn init_in_shmem(num_buckets: u32, mut shmem: ShmemHandle) -> HashMapInit<'a, K, V> {
+        let size = Self::estimate_size(num_buckets);
         shmem
             .set_size(size)
             .expect("could not resize shared memory area");
 
-        // carve out HashMapShared from the struct. This does not include the hashmap's dictionary
+        let ptr = unsafe { shmem.data_ptr.as_mut() };
+        Self::init_common(num_buckets, Some(shmem), ptr, size)
+    }
+
+    fn init_common(num_buckets: u32, shmem_handle: Option<ShmemHandle>, area_ptr: *mut u8, area_len: usize) -> HashMapInit<'a, K, V> {
+        // carve out HashMapShared from the area. This does not include the hashmap's dictionary
         // and buckets.
-        let mut ptr: *mut u8 = unsafe { shmem.data_ptr.as_mut() };
+        let mut ptr: *mut u8 = area_ptr;
         ptr = unsafe { ptr.add(ptr.align_offset(align_of::<HashMapShared<K, V>>())) };
         let shared_ptr: *mut HashMapShared<K, V> = ptr.cast();
         ptr = unsafe { ptr.add(size_of::<HashMapShared<K, V>>()) };
@@ -100,11 +102,11 @@ impl<'a, K: Key, V: Value> HashMapInit<'a, K, V> {
         let remaining_area = unsafe {
             std::slice::from_raw_parts_mut(
                 ptr,
-                size - ptr.offset_from(shmem.data_ptr.as_mut()) as usize,
+                area_len - ptr.offset_from(area_ptr) as usize,
             )
         };
 
-        let hashmap = CoreHashMap::new(remaining_area);
+        let hashmap = CoreHashMap::new(num_buckets, remaining_area);
         unsafe {
             std::ptr::write(
                 shared_ptr,
@@ -114,11 +116,17 @@ impl<'a, K: Key, V: Value> HashMapInit<'a, K, V> {
             );
         }
 
-        HashMapInit { shmem, shared_ptr }
+        HashMapInit {
+            shmem: shmem_handle,
+            shared_ptr,
+        }
     }
+    
 }
 
-impl<'a, K: Key, V: Value> HashMapAccess<'a, K, V> {
+impl<'a, K, V> HashMapAccess<'a, K, V>
+    where K: Clone + Hash + Eq,
+{
     pub fn get<'e>(&'e self, key: &K) -> Option<ValueReadGuard<'e, K, V>> {
         let map = unsafe { self.shared_ptr.as_ref() }.unwrap();
         let lock_guard = map.inner.read();
@@ -248,12 +256,12 @@ impl<'a, K: Key, V: Value> HashMapAccess<'a, K, V> {
     }
 }
 
-pub struct ValueReadGuard<'a, K: Key, V: Value> {
+pub struct ValueReadGuard<'a, K, V> {
     _lock_guard: spin::RwLockReadGuard<'a, CoreHashMap<'a, K, V>>,
     value: *const V,
 }
 
-impl<'a, K: Key, V: Value> Deref for ValueReadGuard<'a, K, V> {
+impl<'a, K, V> Deref for ValueReadGuard<'a, K, V> {
     type Target = V;
 
     fn deref(&self) -> &Self::Target {

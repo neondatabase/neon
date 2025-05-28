@@ -1373,8 +1373,6 @@ dependencies = [
  "tracing-subscriber",
  "uring-common",
  "utils",
- "zerocopy 0.8.24",
- "zerocopy-derive 0.8.24",
 ]
 
 [[package]]
