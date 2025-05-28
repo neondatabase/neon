@@ -225,12 +225,9 @@ impl AuthenticationConfig {
         &self,
         ctx: &RequestContext,
         secret: AuthSecret,
-        endpoint: &EndpointId,
+        endpoint: EndpointIdInt,
         is_cleartext: bool,
     ) -> auth::Result<AuthSecret> {
-        // we have validated the endpoint exists, so let's intern it.
-        let endpoint_int = EndpointIdInt::from(endpoint.normalize());
-
         // only count the full hash count if password hack or websocket flow.
         // in other words, if proxy needs to run the hashing
         let password_weight = if is_cleartext {
@@ -246,7 +243,7 @@ impl AuthenticationConfig {
 
         let limit_not_exceeded = self.rate_limiter.check(
             (
-                endpoint_int,
+                endpoint,
                 MaskedIp::new(ctx.peer_addr(), self.rate_limit_ip_subnet),
             ),
             password_weight,
@@ -262,7 +259,7 @@ impl AuthenticationConfig {
                 .proxy
                 .endpoints_auth_rate_limits
                 .get_metric()
-                .measure(endpoint);
+                .measure(endpoint.as_str());
 
             if self.rate_limiter_enabled {
                 return Err(auth::AuthError::too_many_connections());
@@ -337,7 +334,9 @@ async fn auth_quirks(
         return Err(AuthError::NetworkNotAllowed);
     }
 
-    if !endpoint_rate_limiter.check(info.endpoint.clone().into(), 1) {
+    let endpoint = EndpointIdInt::from(&info.endpoint);
+    let rate_limit_config = None;
+    if !endpoint_rate_limiter.check(endpoint, rate_limit_config, 1) {
         return Err(AuthError::too_many_connections());
     }
     let cached_secret = api.get_role_secret(ctx, &info).await?;
@@ -347,7 +346,7 @@ async fn auth_quirks(
         config.check_rate_limit(
             ctx,
             secret,
-            &info.endpoint,
+            endpoint,
             unauthenticated_password.is_some() || allow_cleartext,
         )?
     } else {

@@ -422,7 +422,13 @@ impl CancellationHandler {
             IpAddr::V4(ip) => IpNet::V4(Ipv4Net::new_assert(ip, 24).trunc()), // use defaut mask here
             IpAddr::V6(ip) => IpNet::V6(Ipv6Net::new_assert(ip, 64).trunc()),
         };
-        if !self.limiter.lock_propagate_poison().check(subnet_key, 1) {
+
+        let allowed = {
+            let rate_limit_config = None;
+            let limiter = self.limiter.lock_propagate_poison();
+            limiter.check(subnet_key, rate_limit_config, 1)
+        };
+        if !allowed {
             // log only the subnet part of the IP address to know which subnet is rate limited
             tracing::warn!("Rate limit exceeded. Skipping cancellation message, {subnet_key}");
             Metrics::get()
