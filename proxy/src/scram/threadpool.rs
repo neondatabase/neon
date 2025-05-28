@@ -16,8 +16,8 @@ use futures::FutureExt;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 
-use super::ScramKey;
-use super::exchange::ClientSecretEntry;
+use super::exchange::Pbkdf2CacheEntry;
+use super::pbkdf2;
 use super::pbkdf2::Pbkdf2;
 use crate::cache::TimedLru;
 use crate::intern::{EndpointIdInt, RoleNameInt};
@@ -30,7 +30,7 @@ pub struct ThreadPool {
 
     // we hash a lot of passwords.
     // we keep a cache with in memory unique salts.
-    pub(super) cache: TimedLru<(EndpointIdInt, RoleNameInt), ClientSecretEntry>,
+    pub(super) cache: TimedLru<(EndpointIdInt, RoleNameInt), Pbkdf2CacheEntry>,
 }
 
 /// How often to reset the sketch values
@@ -141,7 +141,7 @@ struct JobSpec {
 }
 
 impl Future for JobSpec {
-    type Output = ScramKey;
+    type Output = pbkdf2::Block;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         STATE.with_borrow_mut(|state| {
@@ -177,10 +177,10 @@ impl Future for JobSpec {
     }
 }
 
-pub(crate) struct JobHandle(tokio::task::JoinHandle<ScramKey>);
+pub(crate) struct JobHandle(tokio::task::JoinHandle<pbkdf2::Block>);
 
 impl Future for JobHandle {
-    type Output = ScramKey;
+    type Output = pbkdf2::Block;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.0.poll_unpin(cx) {
@@ -214,10 +214,10 @@ mod tests {
             .spawn_job(ep, Pbkdf2::start(b"password", &salt, 4096))
             .await;
 
-        let expected = ScramKey::client_key(&[
+        let expected = &[
             10, 114, 73, 188, 140, 222, 196, 156, 214, 184, 79, 157, 119, 242, 16, 31, 53, 242,
             178, 43, 95, 8, 225, 182, 122, 40, 219, 21, 89, 147, 64, 140,
-        ]);
-        assert_eq!(actual.as_bytes(), expected.as_bytes());
+        ];
+        assert_eq!(actual.as_slice(), expected.as_slice());
     }
 }
