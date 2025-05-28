@@ -11,19 +11,8 @@
 //! - => S3 as the source for the PGDATA instead of local filesystem
 //!
 //! TODOs before productionization:
-//! - ChunkProcessingJob size / ImportJob::total_size does not account for sharding.
-//!   => produced image layers likely too small.
 //! - ChunkProcessingJob should cut up an ImportJob to hit exactly target image layer size.
 //! - asserts / unwraps need to be replaced with errors
-//! - don't trust remote objects will be small (=prevent OOMs in those cases)
-//!     - limit all in-memory buffers in size, or download to disk and read from there
-//! - limit task concurrency
-//! - generally play nice with other tenants in the system
-//!   - importbucket is different bucket than main pageserver storage, so, should be fine wrt S3 rate limits
-//!   - but concerns like network bandwidth, local disk write bandwidth, local disk capacity, etc
-//! - integrate with layer eviction system
-//! - audit for Tenant::cancel nor Timeline::cancel responsivity
-//! - audit for Tenant/Timeline gate holding (we spawn tokio tasks during this flow!)
 //!
 //! An incomplete set of TODOs from the Hackathon:
 //! - version-specific CheckPointData (=> pgv abstraction, already exists for regular walingest)
@@ -43,7 +32,7 @@ use pageserver_api::key::{
     rel_dir_to_key, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
     slru_segment_size_to_key,
 };
-use pageserver_api::keyspace::{contiguous_range_len, is_contiguous_range, singleton_range};
+use pageserver_api::keyspace::{singleton_range, ShardedRange};
 use pageserver_api::models::{ShardImportProgress, ShardImportProgressV1, ShardImportStatus};
 use pageserver_api::reltag::{RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
@@ -240,7 +229,7 @@ impl Planner {
         let mut current_chunk_size: usize = 0;
         let mut jobs = Vec::new();
         for task in std::mem::take(&mut self.tasks).into_iter() {
-            let task_size = task.total_size();
+            let task_size = task.total_size(&self.shard);
             let projected_chunk_size = current_chunk_size.saturating_add(task_size);
             if projected_chunk_size > import_config.import_job_soft_size_limit.into() {
                 let key_range = last_end_key..task.key_range().start;
@@ -635,14 +624,16 @@ impl PgDataDirDb {
 trait ImportTask {
     fn key_range(&self) -> Range<Key>;
 
-    fn total_size(&self) -> usize {
-        // Tasks should operate on contiguous ranges. It is unexpected for
-        // ranges to violate this assumption. Calling code handles this by mapping
-        // any task on a non contiguous range to its own image layer.
-        if is_contiguous_range(&self.key_range()) {
-            contiguous_range_len(&self.key_range()) as usize * 8192
+    fn total_size(&self, shard_identity: &ShardIdentity) -> usize {
+        let range = ShardedRange::new(self.key_range(), shard_identity);
+        let page_count = range.page_count();
+        if page_count == u32::MAX {
+            // Tasks should operate on contiguous ranges. It is unexpected for
+            // ranges to violate this assumption. Calling code handles this by mapping
+            // any task on a non contiguous range to its own image layer.
+            usize::MAX
         } else {
-            u32::MAX as usize
+            page_count as usize * 8192
         }
     }
 
