@@ -23,6 +23,7 @@ serde_json.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+async-trait = "0.1"
 
 pageserver_client.workspace = true
 pageserver_client_grpc.workspace = true

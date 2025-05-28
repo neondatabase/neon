@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use bytes::Bytes;
-use futures::{Stream, StreamExt};
+use futures::{StreamExt};
 use thiserror::Error;
 use tonic::metadata::AsciiMetadataValue;
 
@@ -27,7 +27,6 @@ use tracing::error;
 
 use tokio::sync::RwLock;
 
-
 use tonic::transport::{Channel, Endpoint};
 #[derive(Error, Debug)]
 pub enum PageserverClientError {
@@ -37,10 +36,8 @@ pub enum PageserverClientError {
     RequestError(#[from] tonic::Status),
     #[error("protocol error: {0}")]
     ProtocolError(#[from] ProtocolError),
-
     #[error("could not perform request: {0}`")]
     InvalidUri(#[from] http::uri::InvalidUri),
-
     #[error("could not perform request: {0}`")]
     Other(String),
 }
@@ -48,13 +45,9 @@ pub enum PageserverClientError {
 pub struct PageserverClient {
     _tenant_id: String,
     _timeline_id: String,
-
     _auth_token: Option<String>,
-
     shard_map: HashMap<ShardIndex, String>,
-
     channels: tokio::sync::RwLock<HashMap<ShardIndex, Channel>>,
-
     auth_interceptor: AuthInterceptor,
 }
 
@@ -75,54 +68,6 @@ impl PageserverClient {
             auth_interceptor: AuthInterceptor::new(tenant_id, timeline_id, auth_token.as_deref()),
         }
     }
-    pub async fn process_check_rel_exists_request(
-        &self,
-        request: &CheckRelExistsRequest,
-    ) -> Result<bool, PageserverClientError> {
-        // Current sharding model assumes that all metadata is present only at shard 0.
-        let shard = ShardIndex::unsharded();
-        let chan = self.get_client(shard).await;
-
-        let mut client =
-            PageServiceClient::with_interceptor(chan, self.auth_interceptor.for_shard(shard));
-
-        let request = proto::CheckRelExistsRequest::from(request);
-        let response = client.check_rel_exists(tonic::Request::new(request)).await;
-
-        match response {
-            Err(status) => {
-                return Err(PageserverClientError::RequestError(status));
-            }
-            Ok(resp) => {
-                return Ok(resp.get_ref().exists);
-            }
-        }
-    }
-
-    pub async fn process_get_rel_size_request(
-        &self,
-        request: &GetRelSizeRequest,
-    ) -> Result<u32, PageserverClientError> {
-        // Current sharding model assumes that all metadata is present only at shard 0.
-        let shard = ShardIndex::unsharded();
-        let chan = self.get_client(shard).await;
-
-        let mut client =
-            PageServiceClient::with_interceptor(chan, self.auth_interceptor.for_shard(shard));
-
-        let request = proto::GetRelSizeRequest::from(request);
-        let response = client.get_rel_size(tonic::Request::new(request)).await;
-
-        match response {
-            Err(status) => {
-                return Err(PageserverClientError::RequestError(status));
-            }
-            Ok(resp) => {
-                return Ok(resp.get_ref().num_blocks);
-            }
-        }
-    }
-
     //
     // TODO: This opens a new gRPC stream for every request, which is extremely inefficient
     pub async fn get_page(
@@ -133,12 +78,10 @@ impl PageserverClient {
         let shard = ShardIndex::unsharded();
         let chan = self.get_client(shard).await;
 
-
         let mut client =
             PageServiceClient::with_interceptor(chan, self.auth_interceptor.for_shard(shard));
 
         let request = proto::GetPageRequest::from(request);
-
         let request_stream = futures::stream::once(std::future::ready(request));
 
         let mut response_stream = client
@@ -163,92 +106,7 @@ impl PageserverClient {
         }
     }
 
-    // Open a stream for requesting pages
-    //
-    // TODO: This is a pretty low level interface, the caller should not need to be concerned
-    // with streams. But 'get_page' is currently very naive and inefficient.
-    pub async fn get_pages(
-        &self,
-        requests: impl Stream<Item = proto::GetPageRequest> + Send + 'static,
-    ) -> std::result::Result<
-        tonic::Response<tonic::codec::Streaming<proto::GetPageResponse>>,
-        PageserverClientError,
-    > {
-        // FIXME: calculate the shard number correctly
-        let shard = ShardIndex::unsharded();
-        let chan = self.get_client(shard).await;
 
-        let mut client =
-            PageServiceClient::with_interceptor(chan, self.auth_interceptor.for_shard(shard));
-
-        let response = client.get_pages(tonic::Request::new(requests)).await;
-
-        match response {
-            Err(status) => {
-                return Err(PageserverClientError::RequestError(status));
-            }
-            Ok(resp) => {
-                return Ok(resp);
-            }
-        }
-    }
-
-    /// Process a request to get the size of a database.
-    pub async fn process_get_dbsize_request(
-        &self,
-        request: &GetDbSizeRequest,
-    ) -> Result<u64, PageserverClientError> {
-        // Current sharding model assumes that all metadata is present only at shard 0.
-        let shard = ShardIndex::unsharded();
-        let chan = self.get_client(shard).await;
-
-        let mut client =
-            PageServiceClient::with_interceptor(chan, self.auth_interceptor.for_shard(shard));
-
-        let request = proto::GetDbSizeRequest::from(request);
-        let response = client.get_db_size(tonic::Request::new(request)).await;
-
-        match response {
-            Err(status) => {
-                return Err(PageserverClientError::RequestError(status));
-            }
-            Ok(resp) => {
-                return Ok(resp.get_ref().num_bytes);
-            }
-        }
-    }
-    /// Process a request to get the size of a database.
-    pub async fn get_base_backup(
-        &self,
-        request: &GetBaseBackupRequest,
-        gzip: bool,
-    ) -> std::result::Result<
-        tonic::Response<tonic::codec::Streaming<proto::GetBaseBackupResponseChunk>>,
-        PageserverClientError,
-    > {
-        // Current sharding model assumes that all metadata is present only at shard 0.
-        let shard = ShardIndex::unsharded();
-        let chan = self.get_client(shard).await;
-
-        let mut client =
-            PageServiceClient::with_interceptor(chan, self.auth_interceptor.for_shard(shard));
-
-        if gzip {
-            client = client.accept_compressed(tonic::codec::CompressionEncoding::Gzip);
-        }
-
-        let request = proto::GetBaseBackupRequest::from(request);
-        let response = client.get_base_backup(tonic::Request::new(request)).await;
-
-        match response {
-            Err(status) => {
-                return Err(PageserverClientError::RequestError(status));
-            }
-            Ok(resp) => {
-                return Ok(resp);
-            }
-        }
-    }
     //
     // TODO: this should use a connection pool with concurrency limits,
     // not a single connection to the shard.
@@ -267,7 +125,8 @@ impl PageserverClient {
 
         let attempt = Endpoint::from_shared(shard_url.clone())
             .expect("invalid endpoint")
-            .connect().await;
+            .connect()
+            .await;
 
         match attempt {
             Ok(channel) => {
@@ -276,6 +135,7 @@ impl PageserverClient {
                 channel.clone()
             }
             Err(e) => {
+                // TODO: handle this more gracefully, e.g. with a connection pool retry
                 panic!("Failed to connect to shard {shard}: {e}");
             }
         }
@@ -288,7 +148,6 @@ struct AuthInterceptor {
     tenant_id: AsciiMetadataValue,
     shard_id: Option<AsciiMetadataValue>,
     timeline_id: AsciiMetadataValue,
-
     auth_header: Option<AsciiMetadataValue>, // including "Bearer " prefix
 }
 
@@ -329,7 +188,6 @@ impl tonic::service::Interceptor for AuthInterceptor {
             req.metadata_mut()
                 .insert("authorization", auth_header.clone());
         }
-
         Ok(req)
     }
 }

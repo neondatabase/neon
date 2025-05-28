@@ -172,14 +172,6 @@ impl TryFrom<proto::CheckRelExistsRequest> for CheckRelExistsRequest {
     }
 }
 
-impl From<&CheckRelExistsRequest> for proto::CheckRelExistsRequest {
-    fn from(value: &CheckRelExistsRequest) -> proto::CheckRelExistsRequest {
-        proto::CheckRelExistsRequest {
-            read_lsn: Some((&value.read_lsn).into()),
-            rel: Some((&value.rel).into()),
-        }
-    }
-}
 pub type CheckRelExistsResponse = bool;
 
 impl From<proto::CheckRelExistsResponse> for CheckRelExistsResponse {
@@ -214,15 +206,6 @@ impl TryFrom<proto::GetBaseBackupRequest> for GetBaseBackupRequest {
                 .try_into()?,
             replica: pb.replica,
         })
-    }
-}
-
-impl From<&GetBaseBackupRequest> for proto::GetBaseBackupRequest {
-    fn from(value: &GetBaseBackupRequest) -> proto::GetBaseBackupRequest {
-        proto::GetBaseBackupRequest {
-            read_lsn: Some((&value.read_lsn).into()),
-            replica: value.replica,
-        }
     }
 }
 
@@ -282,14 +265,6 @@ impl TryFrom<proto::GetDbSizeRequest> for GetDbSizeRequest {
     }
 }
 
-impl From<&GetDbSizeRequest> for proto::GetDbSizeRequest {
-    fn from(value: &GetDbSizeRequest) -> proto::GetDbSizeRequest {
-        proto::GetDbSizeRequest {
-            read_lsn: Some((&value.read_lsn).into()),
-            db_oid: value.db_oid,
-        }
-    }
-}
 impl TryFrom<GetDbSizeRequest> for proto::GetDbSizeRequest {
     type Error = ProtocolError;
 
@@ -560,14 +535,6 @@ impl TryFrom<proto::GetRelSizeRequest> for GetRelSizeRequest {
     }
 }
 
-impl From<&GetRelSizeRequest> for proto::GetRelSizeRequest {
-    fn from(value: &GetRelSizeRequest) -> proto::GetRelSizeRequest {
-        proto::GetRelSizeRequest {
-            read_lsn: Some((&value.read_lsn).into()),
-            rel: Some((&value.rel).into()),
-        }
-    }
-}
 impl TryFrom<GetRelSizeRequest> for proto::GetRelSizeRequest {
     type Error = ProtocolError;
 
