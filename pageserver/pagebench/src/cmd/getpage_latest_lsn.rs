@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -11,13 +11,22 @@ use camino::Utf8PathBuf;
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::KeySpaceAccum;
 use pageserver_api::models::{PagestreamGetPageRequest, PagestreamRequest};
+use pageserver_page_api::model::{GetPageClass};
+use pageserver_client::page_service::PagestreamClient;
 use pageserver_api::shard::TenantShardId;
 use rand::prelude::*;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use utils::id::TenantTimelineId;
+use utils::id::TenantId;
+use utils::id::TimelineId;
 use utils::lsn::Lsn;
+
+
+
+use utils::shard::ShardIndex;
+use futures::{future::BoxFuture, stream::FuturesOrdered, FutureExt, StreamExt};
 
 use crate::util::tokio_thread_local_stats::AllThreadLocalStats;
 use crate::util::{request_stats, tokio_thread_local_stats};
@@ -25,6 +34,9 @@ use crate::util::{request_stats, tokio_thread_local_stats};
 /// GetPage@LatestLSN, uniformly distributed across the compute-accessible keyspace.
 #[derive(clap::Parser)]
 pub(crate) struct Args {
+
+    #[clap(long, default_value = "false")]
+    grpc: bool,
     #[clap(long, default_value = "http://localhost:9898")]
     mgmt_api_endpoint: String,
     #[clap(long, default_value = "postgres://postgres@localhost:64000")]
@@ -116,6 +128,24 @@ struct WorkerId {
 #[derive(serde::Serialize)]
 struct Output {
     total: request_stats::Output,
+}
+
+
+enum ProtocolType {
+    Pg(PgProtocol),
+    Grpc(GrpcProtocol),
+}
+
+struct PgProtocol {
+    libpq_pagestream: PagestreamClient,
+    libpq_vector: VecDeque<Instant>,
+}
+type GetPageFut = BoxFuture<'static, (Instant, Option<pageserver_client_grpc::PageserverClientError>)>;
+
+struct GrpcProtocol {
+    // mutex
+    grpc_page_client : Arc<pageserver_client_grpc::PageserverClient>,
+    grpc_vector: FuturesOrdered<GetPageFut>,
 }
 
 tokio_thread_local_stats::declare!(STATS: request_stats::Stats);
@@ -303,7 +333,22 @@ async fn main_impl(
                 .unwrap();
 
         Box::pin(async move {
-            client_libpq(args, worker_id, ss, cancel, rps_period, ranges, weights).await
+            let protocol : ProtocolType;
+            if args.grpc {
+                let grpc = GrpcProtocol::new(
+                    args.page_service_connstring.clone(),
+                    worker_id.timeline.tenant_id,
+                    worker_id.timeline.timeline_id).await;
+                protocol = ProtocolType::Grpc(grpc);
+            } else {
+                let pg =  PgProtocol::new(
+                    args.page_service_connstring.clone(),
+                    worker_id.timeline.tenant_id,
+                    worker_id.timeline.timeline_id).await;
+                protocol = ProtocolType::Pg(pg);
+            }
+
+            client_proto(args, protocol, worker_id, ss, cancel, rps_period, ranges, weights).await
         })
     };
 
@@ -355,8 +400,168 @@ async fn main_impl(
     anyhow::Ok(())
 }
 
-async fn client_libpq(
+impl PgProtocol {
+    async fn new(
+        conn_string: String,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Self {
+        let client = pageserver_client::page_service::Client::new(conn_string)
+            .await
+            .unwrap();
+        let client = client
+            .pagestream(tenant_id, timeline_id)
+            .await
+            .unwrap();
+        Self {
+            libpq_pagestream: client,
+            libpq_vector: VecDeque::new(),
+        }
+    }
+}
+
+impl GrpcProtocol {
+    async fn new(
+        conn_string: String,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Self {
+        let shard_map = HashMap::from([(
+            ShardIndex::unsharded(),
+            conn_string.clone(),
+        )]);
+        let client = pageserver_client_grpc::PageserverClient::new(
+           &tenant_id.to_string(),
+           &timeline_id.to_string(),
+           &None,
+           shard_map,
+        );
+        Self {
+            grpc_page_client: Arc::new(client),
+            grpc_vector: FuturesOrdered::new(),
+        }
+    }
+}
+impl ProtocolType {
+
+    async fn add_to_inflight(
+        &mut self,
+        start: Instant,
+        args: &Args,
+        ranges: Vec<KeyRange>,
+        weights: rand::distributions::weighted::WeightedIndex<i128>,
+    ) -> () {
+        match self {
+            ProtocolType::Grpc(g) => {
+                let req = {
+                    let mut rng = rand::thread_rng();
+                    let r = &ranges[weights.sample(&mut rng)];
+                    let key: i128 = rng.gen_range(r.start..r.end);
+                    let key = Key::from_i128(key);
+                    assert!(key.is_rel_block_key());
+                    let (rel_tag, block_no) = key
+                        .to_rel_block()
+                        .expect("we filter non-rel-block keys out above");
+                    pageserver_page_api::model::GetPageRequest {
+                        request_id: 0, // TODO
+                        request_class: GetPageClass::Normal,
+                        read_lsn: pageserver_page_api::model::ReadLsn {
+                            request_lsn: if rng.gen_bool(args.req_latest_probability) {
+                                Lsn::MAX
+                            } else {
+                                r.timeline_lsn
+                            },
+                            not_modified_since_lsn: Some(r.timeline_lsn),
+                        },
+                        rel: pageserver_page_api::model::RelTag {
+                            spcnode: rel_tag.spcnode,
+                            dbnode: rel_tag.dbnode,
+                            relnode: rel_tag.relnode,
+                            forknum: rel_tag.forknum,
+                        },
+                        block_numbers: vec![block_no].into(),
+                    }
+                };
+                let client_clone = g.grpc_page_client.clone();
+                let getpage_fut : GetPageFut = async move {
+                    let result = client_clone.get_page(&req).await;
+                    match result {
+                        Ok(_) => {
+                            (start, None)
+                        }
+                        Err(e) => {
+                            (start, Some(e))
+                        }
+                    }
+                }.boxed();
+                g.grpc_vector.push_back(getpage_fut);
+
+            }
+            ProtocolType::Pg(p) => {
+
+                let req = {
+                    let mut rng = rand::thread_rng();
+                    let r = &ranges[weights.sample(&mut rng)];
+                    let key: i128 = rng.gen_range(r.start..r.end);
+                    let key = Key::from_i128(key);
+                    assert!(key.is_rel_block_key());
+                    let (rel_tag, block_no) = key
+                        .to_rel_block()
+                        .expect("we filter non-rel-block keys out above");
+                    PagestreamGetPageRequest {
+                        hdr: PagestreamRequest {
+                            reqid: 0,
+                            request_lsn: if rng.gen_bool(args.req_latest_probability) {
+                                Lsn::MAX
+                            } else {
+                                r.timeline_lsn
+                            },
+                            not_modified_since: r.timeline_lsn,
+                        },
+                        rel: rel_tag,
+                        blkno: block_no,
+                    }
+                };
+                let _ = p.libpq_pagestream.getpage_send(req).await;
+                p.libpq_vector.push_back(start);
+            }
+        }
+    }
+
+    async fn get_start_time(&mut self) -> Instant {
+        match self {
+            ProtocolType::Grpc(g) => {
+                // Logic to get start time for grpc
+                let (start, result) = g.grpc_vector.next().await.unwrap();
+                match result {
+                    None => {
+                        // Request succeeded
+                    }
+                    Some(e) => {
+                        tracing::error!("getpage request failed: {e}");
+                    }
+                }
+
+                start
+            }
+            ProtocolType::Pg(p) => {
+                // Logic to get start time for pgstream
+                let start = p.libpq_vector.pop_front().unwrap();
+                let _ = p.libpq_pagestream.getpage_recv().await;
+                start
+            }
+        }
+    }
+    pub fn len(&self) -> usize {
+        match self {
+            ProtocolType::Grpc(g) => g.grpc_vector.len(),
+            ProtocolType::Pg(p) => p.libpq_vector.len(),
+        }
+    }
+}
+async fn client_proto(
     args: &Args,
+    mut protocol: ProtocolType,
     worker_id: WorkerId,
     shared_state: Arc<SharedState>,
     cancel: CancellationToken,
@@ -364,18 +569,11 @@ async fn client_libpq(
     ranges: Vec<KeyRange>,
     weights: rand::distributions::weighted::WeightedIndex<i128>,
 ) {
-    let client = pageserver_client::page_service::Client::new(args.page_service_connstring.clone())
-        .await
-        .unwrap();
-    let mut client = client
-        .pagestream(worker_id.timeline.tenant_id, worker_id.timeline.timeline_id)
-        .await
-        .unwrap();
+
 
     shared_state.start_work_barrier.wait().await;
     let client_start = Instant::now();
     let mut ticks_processed = 0;
-    let mut inflight = VecDeque::new();
     while !cancel.is_cancelled() {
         // Detect if a request took longer than the RPS rate
         if let Some(period) = &rps_period {
@@ -390,37 +588,12 @@ async fn client_libpq(
             ticks_processed = periods_passed_until_now;
         }
 
-        while inflight.len() < args.queue_depth.get() {
+        while protocol.len() < args.queue_depth.get() {
             let start = Instant::now();
-            let req = {
-                let mut rng = rand::thread_rng();
-                let r = &ranges[weights.sample(&mut rng)];
-                let key: i128 = rng.gen_range(r.start..r.end);
-                let key = Key::from_i128(key);
-                assert!(key.is_rel_block_key());
-                let (rel_tag, block_no) = key
-                    .to_rel_block()
-                    .expect("we filter non-rel-block keys out above");
-                PagestreamGetPageRequest {
-                    hdr: PagestreamRequest {
-                        reqid: 0,
-                        request_lsn: if rng.gen_bool(args.req_latest_probability) {
-                            Lsn::MAX
-                        } else {
-                            r.timeline_lsn
-                        },
-                        not_modified_since: r.timeline_lsn,
-                    },
-                    rel: rel_tag,
-                    blkno: block_no,
-                }
-            };
-            client.getpage_send(req).await.unwrap();
-            inflight.push_back(start);
+            protocol.add_to_inflight(start, args, ranges.clone(), weights.clone()).await;
         }
 
-        let start = inflight.pop_front().unwrap();
-        client.getpage_recv().await.unwrap();
+        let start = protocol.get_start_time().await;
         let end = Instant::now();
         shared_state.live_stats.request_done();
         ticks_processed += 1;
