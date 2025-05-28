@@ -229,7 +229,7 @@ pub enum PageServicePipeliningConfig {
 }
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PageServicePipeliningConfigPipelined {
-    /// Causes runtime errors if larger than max get_vectored batch size.
+    /// Failed config parsing and validation if larger than `Timeline::MAX_GET_VECTORED_KEYS`.
     pub max_batch_size: NonZeroUsize,
     pub execution: PageServiceProtocolPipelinedExecutionStrategy,
     // The default below is such that new versions of the software can start
