@@ -99,6 +99,10 @@ pub(crate) enum GetAuthInfoError {
 
     #[error(transparent)]
     ApiError(ControlPlaneError),
+
+    /// Proxy does not know about the endpoint in advanced
+    #[error("endpoint not found in endpoint cache")]
+    UnknownEndpoint,
 }
 
 // This allows more useful interactions than `#[from]`.
@@ -115,6 +119,8 @@ impl UserFacingError for GetAuthInfoError {
             Self::BadSecret => REQUEST_FAILED.to_owned(),
             // However, API might return a meaningful error.
             Self::ApiError(e) => e.to_string_client(),
+            // pretend like control plane returned an error.
+            Self::UnknownEndpoint => REQUEST_FAILED.to_owned(),
         }
     }
 }
@@ -124,6 +130,8 @@ impl ReportableError for GetAuthInfoError {
         match self {
             Self::BadSecret => crate::error::ErrorKind::ControlPlane,
             Self::ApiError(_) => crate::error::ErrorKind::ControlPlane,
+            // we only apply endpoint filtering if control plane is under high load.
+            Self::UnknownEndpoint => crate::error::ErrorKind::ServiceRateLimit,
         }
     }
 }
