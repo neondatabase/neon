@@ -12,6 +12,5 @@ tonic.workspace = true
 tracing.workspace = true
 pageserver_page_api.workspace = true
 utils.workspace = true
-tokio = { version = "1.43.1", features = ["full", "macros", "net", "io-util", "rt", "rt-multi-thread"] }
-rand = "0.8"
+tokio.workspace = true
 tokio-util = { version = "0.7", features = ["compat"] }

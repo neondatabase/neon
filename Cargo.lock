@@ -4440,7 +4440,6 @@ dependencies = [
  "futures",
  "http 1.1.0",
  "pageserver_page_api",
- "rand 0.8.5",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
