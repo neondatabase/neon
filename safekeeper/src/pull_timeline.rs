@@ -8,6 +8,7 @@ use bytes::Bytes;
 use camino::Utf8PathBuf;
 use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt, TryStreamExt};
+use http::StatusCode;
 use http_utils::error::ApiError;
 use postgres_ffi::{PG_TLI, XLogFileName, XLogSegNo};
 use remote_storage::GenericRemoteStorage;
@@ -21,10 +22,11 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncWrite;
 use tokio::sync::mpsc;
 use tokio::task;
+use tokio::time::sleep;
 use tokio_tar::{Archive, Builder, Header};
 use tokio_util::io::{CopyToBytes, SinkWriter};
 use tokio_util::sync::PollSender;
-use tracing::{error, info, instrument};
+use tracing::{error, info, instrument, warn};
 use utils::crashsafe::fsync_async_opt;
 use utils::id::{NodeId, TenantTimelineId};
 use utils::logging::SecretString;
@@ -472,37 +474,100 @@ pub async fn handle_request(
     let http_hosts = request.http_hosts.clone();
 
     // Figure out statuses of potential donors.
-    let responses: Vec<Result<TimelineStatus, mgmt_api::Error>> =
-        futures::future::join_all(http_hosts.iter().map(|url| async {
-            let cclient = Client::new(http_client.clone(), url.clone(), sk_auth_token.clone());
-            let info = cclient
-                .timeline_status(request.tenant_id, request.timeline_id)
-                .await?;
-            Ok(info)
-        }))
-        .await;
-
     let mut statuses = Vec::new();
-    for (i, response) in responses.into_iter().enumerate() {
-        match response {
-            Ok(status) => {
-                statuses.push((status, i));
-            }
-            Err(e) => {
-                info!("error fetching status from {}: {e}", http_hosts[i]);
+    if true {
+        let responses: Vec<Result<TimelineStatus, mgmt_api::Error>> =
+            futures::future::join_all(http_hosts.iter().map(|url| async {
+                let cclient = Client::new(http_client.clone(), url.clone(), sk_auth_token.clone());
+                let resp = cclient
+                    .timeline_status(request.tenant_id, request.timeline_id)
+                    .await?;
+                let info: TimelineStatus = resp
+                    .json()
+                    .await
+                    .context("Failed to deserialize timeline status")
+                    .map_err(|e| mgmt_api::Error::ReceiveErrorBody(e.to_string()))?;
+                Ok(info)
+            }))
+            .await;
+
+        for (i, response) in responses.into_iter().enumerate() {
+            match response {
+                Ok(status) => {
+                    statuses.push((status, i));
+                }
+                Err(e) => {
+                    info!("error fetching status from {}: {e}", http_hosts[i]);
+                }
             }
         }
-    }
 
-    // Allow missing responses from up to one safekeeper (say due to downtime)
-    // e.g. if we created a timeline on PS A and B, with C being offline. Then B goes
-    // offline and C comes online. Then we want a pull on C with A and B as hosts to work.
-    let min_required_successful = (http_hosts.len() - 1).max(1);
-    if statuses.len() < min_required_successful {
-        return Err(ApiError::InternalServerError(anyhow::anyhow!(
-            "only got {} successful status responses. required: {min_required_successful}",
-            statuses.len()
-        )));
+        // Allow missing responses from up to one safekeeper (say due to downtime)
+        // e.g. if we created a timeline on PS A and B, with C being offline. Then B goes
+        // offline and C comes online. Then we want a pull on C with A and B as hosts to work.
+        let min_required_successful = (http_hosts.len() - 1).max(1);
+        if statuses.len() < min_required_successful {
+            return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                "only got {} successful status responses. required: {min_required_successful}",
+                statuses.len()
+            )));
+        }
+    } else {
+        let mut retry = true;
+        // We must get status from all other peers.
+        // Otherwise, we may run into split-brain scenario.
+        while retry {
+            statuses.clear();
+            retry = false;
+            for (i, url) in http_hosts.iter().enumerate() {
+                let cclient = Client::new(http_client.clone(), url.clone(), sk_auth_token.clone());
+                match cclient
+                    .timeline_status(request.tenant_id, request.timeline_id)
+                    .await
+                {
+                    Ok(resp) => {
+                        if resp.status() == StatusCode::NOT_FOUND {
+                            warn!(
+                                "Timeline {} not found on peer SK {}, no need to pull it",
+                                TenantTimelineId::new(request.tenant_id, request.timeline_id),
+                                url
+                            );
+                            return Ok(PullTimelineResponse {
+                                safekeeper_host: None,
+                            });
+                        }
+                        let info: TimelineStatus = resp
+                            .json()
+                            .await
+                            .context("Failed to deserialize timeline status")
+                            .map_err(ApiError::InternalServerError)?;
+                        statuses.push((info, i));
+                    }
+                    Err(e) => {
+                        match e {
+                            // If we get a 404, it means the timeline doesn't exist on this safekeeper.
+                            // We can ignore this error.
+                            mgmt_api::Error::ApiError(status, _)
+                                if status == StatusCode::NOT_FOUND =>
+                            {
+                                warn!(
+                                    "Timeline {} not found on peer SK {}, no need to pull it",
+                                    TenantTimelineId::new(request.tenant_id, request.timeline_id),
+                                    url
+                                );
+                                return Ok(PullTimelineResponse {
+                                    safekeeper_host: None,
+                                });
+                            }
+                            _ => {}
+                        }
+                        retry = true;
+                        error!("Failed to get timeline status from {}: {:#}", url, e);
+                    }
+                }
+            }
+            sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
 
     // Find the most advanced safekeeper
@@ -511,6 +576,12 @@ pub async fn handle_request(
         .max_by_key(|(status, _)| {
             (
                 status.acceptor_state.epoch,
+                /* BEGIN_HADRON */
+                // We need to pull from the SK with the highest term.
+                // This is because another compute may come online and vote the same highest term again on the other two SKs.
+                // Then, there will be 2 computes running on the same term.
+                status.acceptor_state.term,
+                /* END_HADRON */
                 status.flush_lsn,
                 status.commit_lsn,
             )

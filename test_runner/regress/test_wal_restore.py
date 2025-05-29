@@ -202,6 +202,7 @@ def test_wal_restore_http(neon_env_builder: NeonEnvBuilder, broken_tenant: bool)
 
 
 # BEGIN_HADRON
+# TODO: re-enable once CM python is integreated.
 # def clear_directory(directory):
 #     for item in os.listdir(directory):
 #         item_path = os.path.join(directory, item)
@@ -213,7 +214,6 @@ def test_wal_restore_http(neon_env_builder: NeonEnvBuilder, broken_tenant: bool)
 #             os.remove(item_path)
 
 
-# @pytest.mark.skip(reason="SK pull timeline does not work.")
 # def test_sk_pull_timelines(
 #     neon_env_builder: NeonEnvBuilder,
 # ):
@@ -226,33 +226,58 @@ def test_wal_restore_http(neon_env_builder: NeonEnvBuilder, broken_tenant: bool)
 
 #     env = neon_env_builder.init_start(initial_tenant_shard_count=4)
 
-#     # Create an endpoint that populates the metapg. It does NOT create PG.
-#     test_metastore_id = uuid4()
-#     test_endpoint_id = uuid4()
-#     response = env.storage_controller.hcc_create_endpoint(
-#         f"{test_metastore_id}",
-#         f"{test_endpoint_id}",
-#         env.initial_tenant,
-#         env.initial_timeline,
-#         config={
-#             "resources": {"requests": {"cpu": "1000m", "memory": "256Mi"}},
-#             "extra_pg_conf": "shared_buffers = 500MB\nmax_connections = 100",
-#         },
-#     )
-#     log.info(f"Tenant: {env.initial_tenant} Timeline: {env.initial_timeline}")
-#     log.info(f"Created endpoint: {response}")
+#     env.compute_manager.start(base_port=env.compute_manager_port)
 
-#     # Create a few more endpoints with random timeline ids.
-#     # These timelines do NOT exist on the SKs so that pull timeline will fail.
-#     for _i in range(10):
-#         response = env.storage_controller.hcc_create_endpoint(
-#             f"{test_metastore_id}",
-#             f"{test_endpoint_id}",
-#             config={
-#                 "resources": {"requests": {"cpu": "1000m", "memory": "256Mi"}},
-#                 "extra_pg_conf": "shared_buffers = 500MB\nmax_connections = 100",
-#             },
-#         )
+#     test_creator = "test_creator"
+#     test_metastore_id = uuid4()
+#     test_account_id = uuid4()
+#     test_workspace_id = 1
+#     test_workspace_url = "http://test_workspace_url"
+#     test_metadata_version = 1
+#     test_metadata = {
+#         "state": "INSTANCE_PROVISIONING",
+#         "admin_rolename": "admin",
+#         "admin_password_scram": "abc123456",
+#     }
+
+#     test_instance_name_1 = "test_instance_1"
+#     test_instance_read_write_compute_pool_1 = {
+#         "instance_name": test_instance_name_1,
+#         "compute_pool_name": "compute_pool_1",
+#         "creator": test_creator,
+#         "capacity": 2.0,
+#         "node_count": 1,
+#         "metadata_version": 0,
+#         "metadata": {
+#             "state": "INSTANCE_PROVISIONING",
+#         },
+#     }
+
+#     test_instance_1_readable_secondaries_enabled = False
+
+#     # Test creation
+#     create_instance_with_retries(
+#         env,
+#         test_instance_name_1,
+#         test_creator,
+#         test_metastore_id,
+#         test_account_id,
+#         test_workspace_id,
+#         test_workspace_url,
+#         test_instance_read_write_compute_pool_1,
+#         test_metadata_version,
+#         test_metadata,
+#         test_instance_1_readable_secondaries_enabled,
+#     )
+#     instance = env.compute_manager.get_instance_by_name(test_instance_name_1, test_workspace_id)
+#     log.info(f"haoyu Instance created: {instance}")
+#     assert instance["instance_name"] == test_instance_name_1
+#     test_instance_id = instance["instance_id"]
+#     instance_detail = env.compute_manager.describe_instance(test_instance_id)
+#     log.info(f"haoyu Instance detail: {instance_detail}")
+
+#     env.initial_tenant = instance_detail[0]["tenant_id"]
+#     env.initial_timeline = instance_detail[0]["timeline_id"]
 
 #     # Connect to postgres and create a database called "regression".
 #     endpoint = env.endpoints.create_start("main")
@@ -284,6 +309,5 @@ def test_wal_restore_http(neon_env_builder: NeonEnvBuilder, broken_tenant: bool)
 #     tuples = endpoint.safe_psql("SELECT COUNT(*) FROM usertable;")
 #     assert tuples[0][0] == num_rows
 #     endpoint.stop_and_destroy()
-
 
 # END_HADRON

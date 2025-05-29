@@ -559,6 +559,19 @@ pub struct TimelineSafekeeperPeer {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SCSafekeeperTimeline {
+    // SC does not know the tenant id.
+    pub timeline_id: TimelineId,
+    pub peers: Vec<NodeId>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SCSafekeeperTimelinesResponse {
+    pub timelines: Vec<SCSafekeeperTimeline>,
+    pub safekeeper_peers: Vec<TimelineSafekeeperPeer>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SafekeeperTimeline {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,

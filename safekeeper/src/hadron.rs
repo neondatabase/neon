@@ -1,8 +1,7 @@
 use std::{collections::HashMap, env::VarError, net::IpAddr, sync::Arc};
 
 use anyhow::Result;
-use http_utils::error::ApiError;
-use pageserver_api::controller_api::{AvailabilityZone, NodeRegisterRequest};
+use pageserver_api::controller_api::{AvailabilityZone, NodeRegisterRequest, SafekeeperTimeline};
 use pem::Pem;
 use safekeeper_api::models::PullTimelineRequest;
 use tokio_util::sync::CancellationToken;
@@ -10,7 +9,13 @@ use url::Url;
 use utils::{backoff, id::TenantTimelineId, ip_address};
 
 use crate::{
-    GlobalTimelines, SafeKeeperConf, pull_timeline, timelines_global_map::DeleteOrExclude,
+    GlobalTimelines, SafeKeeperConf,
+    metrics::{
+        SK_RECOVERY_PULL_TIMELINE_ERRORS, SK_RECOVERY_PULL_TIMELINE_OKS,
+        SK_RECOVERY_PULL_TIMELINE_SECONDS, SK_RECOVERY_PULL_TIMELINES_SECONDS,
+    },
+    pull_timeline,
+    timelines_global_map::DeleteOrExclude,
 };
 
 // Extract information in the SafeKeeperConf to build a NodeRegisterRequest used to register the safekeeper with the HCC.
@@ -169,10 +174,132 @@ async fn safekeeper_list_timelines_request(
     Ok(response)
 }
 
+// Returns true on success, false otherwise.
+pub async fn hcc_pull_timeline(
+    timeline: SafekeeperTimeline,
+    conf: &SafeKeeperConf,
+    global_timelines: Arc<GlobalTimelines>,
+    nodeid_http: &HashMap<u64, String>,
+) -> bool {
+    let mut request = PullTimelineRequest {
+        tenant_id: timeline.tenant_id,
+        timeline_id: timeline.timeline_id,
+        http_hosts: Vec::new(),
+        ignore_tombstone: None,
+    };
+    for host in timeline.peers {
+        if host.0 == conf.my_id.0 {
+            continue;
+        }
+        if let Some(http_host) = nodeid_http.get(&host.0) {
+            request.http_hosts.push(http_host.clone());
+        }
+    }
+
+    let ca_certs = match conf
+        .ssl_ca_certs
+        .iter()
+        .map(Pem::contents)
+        .map(reqwest::Certificate::from_der)
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(result) => result,
+        Err(_) => {
+            return false;
+        }
+    };
+    match pull_timeline::handle_request(
+        request,
+        conf.sk_auth_token.clone(),
+        ca_certs,
+        global_timelines.clone(),
+    )
+    .await
+    {
+        Ok(resp) => {
+            tracing::info!(
+                "Completed pulling tenant {} timeline {} from SK {:?}",
+                timeline.tenant_id,
+                timeline.timeline_id,
+                resp.safekeeper_host
+            );
+            return true;
+        }
+        Err(e) => {
+            tracing::error!(
+                "Failed to pull tenant {} timeline {} from SK {}",
+                timeline.tenant_id,
+                timeline.timeline_id,
+                e
+            );
+
+            let ttid = TenantTimelineId {
+                tenant_id: timeline.tenant_id,
+                timeline_id: timeline.timeline_id,
+            };
+            // Revert the failed timeline pull.
+            // Notice that not found timeline returns OK also.
+            match global_timelines
+                .delete_or_exclude(&ttid, DeleteOrExclude::DeleteLocal)
+                .await
+            {
+                Ok(dr) => {
+                    tracing::info!(
+                        "Deleted tenant {} timeline {} DirExists: {}",
+                        timeline.tenant_id,
+                        timeline.timeline_id,
+                        dr.dir_existed,
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to delete tenant {} timeline {} from global_timelines: {}",
+                        timeline.tenant_id,
+                        timeline.timeline_id,
+                        e
+                    );
+                }
+            }
+        }
+    }
+    false
+}
+
+pub async fn hcc_pull_timeline_till_success(
+    timeline: SafekeeperTimeline,
+    conf: &SafeKeeperConf,
+    global_timelines: Arc<GlobalTimelines>,
+    nodeid_http: &HashMap<u64, String>,
+) {
+    const MAX_PULL_TIMELINE_RETRIES: u64 = 100;
+    for i in 0..MAX_PULL_TIMELINE_RETRIES {
+        if hcc_pull_timeline(
+            timeline.clone(),
+            conf,
+            global_timelines.clone(),
+            nodeid_http,
+        )
+        .await
+        {
+            SK_RECOVERY_PULL_TIMELINE_OKS.inc();
+            return;
+        }
+        tracing::error!(
+            "Failed to pull timeline {} from SK peers, retrying {}/{}",
+            timeline.timeline_id,
+            i + 1,
+            MAX_PULL_TIMELINE_RETRIES
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    SK_RECOVERY_PULL_TIMELINE_ERRORS.inc();
+}
+
 pub async fn hcc_pull_timelines(
     conf: &SafeKeeperConf,
     global_timelines: Arc<GlobalTimelines>,
 ) -> Result<()> {
+    let _timer = SK_RECOVERY_PULL_TIMELINES_SECONDS.start_timer();
     tracing::info!("Start pulling timelines from SK peers");
     let timelines = safekeeper_list_timelines_request(conf).await?;
     let mut nodeid_http = HashMap::new();
@@ -182,87 +309,17 @@ pub async fn hcc_pull_timelines(
             format!("http://{}:{}", sk.listen_http_addr, sk.http_port),
         );
     }
-
     tracing::info!("Received {} timelines from HCC", timelines.timelines.len());
-
-    let ca_certs = conf
-        .ssl_ca_certs
-        .iter()
-        .map(Pem::contents)
-        .map(reqwest::Certificate::from_der)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| {
-            ApiError::InternalServerError(anyhow::anyhow!("failed to parse CA certs: {e}"))
-        })?;
-
     for timeline in timelines.timelines {
-        let mut request: PullTimelineRequest = PullTimelineRequest {
-            tenant_id: timeline.tenant_id,
-            timeline_id: timeline.timeline_id,
-            http_hosts: Vec::new(),
-            ignore_tombstone: None,
-        };
-        for host in timeline.peers {
-            if host.0 == conf.my_id.0 {
-                continue;
-            }
-            if let Some(http_host) = nodeid_http.get(&host.0) {
-                request.http_hosts.push(http_host.clone());
-            }
-        }
-        match pull_timeline::handle_request(
-            request,
-            conf.sk_auth_token.clone(),
-            ca_certs.clone(),
-            global_timelines.clone(),
-        )
-        .await
-        {
-            Ok(resp) => {
-                tracing::info!(
-                    "Completed pulling tenant {} timeline {} from SK {:?}",
-                    timeline.tenant_id,
-                    timeline.timeline_id,
-                    resp.safekeeper_host
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to pull tenant {} timeline {} from SK {}",
-                    timeline.tenant_id,
-                    timeline.timeline_id,
-                    e
-                );
-                let ttid = TenantTimelineId {
-                    tenant_id: timeline.tenant_id,
-                    timeline_id: timeline.timeline_id,
-                };
-                // Revert the failed timeline pull.
-                match global_timelines
-                    .delete_or_exclude(&ttid, DeleteOrExclude::DeleteLocal)
-                    .await
-                {
-                    Ok(dr) => {
-                        tracing::info!(
-                            "Deleted tenant {} timeline {} DirExists: {}",
-                            timeline.tenant_id,
-                            timeline.timeline_id,
-                            dr.dir_existed,
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to delete tenant {} timeline {} from global_timelines: {}",
-                            timeline.tenant_id,
-                            timeline.timeline_id,
-                            e
-                        );
-                    }
-                }
-            }
-        }
+        let _timer = SK_RECOVERY_PULL_TIMELINE_SECONDS
+            .with_label_values(&[
+                &timeline.tenant_id.to_string(),
+                &timeline.timeline_id.to_string(),
+            ])
+            .start_timer();
+        hcc_pull_timeline_till_success(timeline, conf, global_timelines.clone(), &nodeid_http)
+            .await;
     }
-
     Ok(())
 }
 
