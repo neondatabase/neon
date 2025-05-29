@@ -544,6 +544,16 @@ impl SafekeeperReconcilerInner {
                             req.generation,
                         )
                         .await;
+
+                    let complete_counter = &METRICS_REGISTRY
+                        .metrics_group
+                        .storage_controller_safkeeper_reconciles_complete;
+                    complete_counter.inc(SafekeeperReconcilerLabelGroup {
+                        sk_az: &req.safekeeper.skp.availability_zone_id,
+                        sk_node_id: &req.safekeeper.get_id().to_string(),
+                        sk_hostname: &req.safekeeper.skp.host,
+                    });
+
                     if let Err(err) = res {
                         tracing::info!(
                             "couldn't remove reconciliation request onto {} from persistence: {err:?}",
