@@ -31,7 +31,7 @@ use pageserver_api::key::{
     rel_dir_to_key, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
     slru_segment_size_to_key,
 };
-use pageserver_api::keyspace::{singleton_range, ShardedRange};
+use pageserver_api::keyspace::{ShardedRange, singleton_range};
 use pageserver_api::models::{ShardImportProgress, ShardImportProgressV1, ShardImportStatus};
 use pageserver_api::reltag::{RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
