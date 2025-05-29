@@ -26,6 +26,7 @@ typedef struct FileCacheState
 
 /* GUCs */
 extern bool lfc_store_prefetch_result;
+extern int	lfc_max_size;
 extern int	lfc_size_limit;
 extern char *lfc_path;
 

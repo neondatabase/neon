@@ -71,13 +71,13 @@ pub(super) async fn init(
     timeline_id: String,
     auth_token: Option<String>,
     shard_map: HashMap<utils::shard::ShardIndex, String>,
-    file_cache_size: u64,
+    initial_file_cache_size: u64,
     file_cache_path: Option<PathBuf>,
 ) -> CommunicatorWorkerProcessStruct<'static> {
     let last_lsn = get_request_lsn();
 
     let file_cache = if let Some(path) = file_cache_path {
-        Some(FileCache::new(&path, file_cache_size).expect("could not create cache file"))
+        Some(FileCache::new(&path, initial_file_cache_size).expect("could not create cache file"))
     } else {
         // FIXME: temporarily for testing, use LFC even if disabled
         Some(

@@ -37,14 +37,6 @@ use neon_shmem::hash::HashMapInit;
 use neon_shmem::hash::UpdateAction;
 use neon_shmem::shmem::ShmemHandle;
 
-/// in bytes
-/// FIXME: calculate some reasonable upper bound
-const MAX_BLOCK_MAP_SIZE: usize = 1024*1024*1024;
-
-/// # of entries in the block mapping
-/// FIXME: make it resizable.
-const BLOCK_MAP_SIZE: u32 = 1000;
-
 // in # of entries
 const RELSIZE_CACHE_SIZE: u32 = 64 * 1024;
 
@@ -84,12 +76,12 @@ pub struct IntegratedCacheReadAccess<'t> {
     block_map: neon_shmem::hash::HashMapAccess<'t, BlockKey, BlockEntry>,
 }
 
-
-
 impl<'t> IntegratedCacheInitStruct<'t> {
     /// Return the desired size in bytes of the fixed-size shared memory area to reserve for the
     /// integrated cache.
     pub fn shmem_size(_max_procs: u32) -> usize {
+        // The relsize cache is fixed-size. The block map is allocated in a separate resizable
+        // area.
         HashMapInit::<RelKey, RelEntry>::estimate_size(RELSIZE_CACHE_SIZE)
     }
 
@@ -98,21 +90,30 @@ impl<'t> IntegratedCacheInitStruct<'t> {
     pub fn shmem_init(
         _max_procs: u32,
         shmem_area: &'t mut [MaybeUninit<u8>],
+        initial_file_cache_size: u64,
+        max_file_cache_size: u64,
     ) -> IntegratedCacheInitStruct<'t> {
-        // Initialize the hash map
+        // Initialize the relsize cache in the fixed-size area
         let relsize_cache_handle =
             neon_shmem::hash::HashMapInit::init_in_fixed_area(RELSIZE_CACHE_SIZE, shmem_area);
 
-        let shmem_handle = ShmemHandle::new("block mapping", 0, MAX_BLOCK_MAP_SIZE).unwrap();
+        let max_bytes =
+            HashMapInit::<BlockKey, BlockEntry>::estimate_size(max_file_cache_size as u32);
 
-        let block_map_handle =
-            neon_shmem::hash::HashMapInit::init_in_shmem(BLOCK_MAP_SIZE, shmem_handle);
+        // Initialize the block map in a separate resizable shared memory area
+        let shmem_handle = ShmemHandle::new("block mapping", 0, max_bytes).unwrap();
+
+        let block_map_handle = neon_shmem::hash::HashMapInit::init_in_shmem(
+            initial_file_cache_size as u32,
+            shmem_handle,
+        );
         IntegratedCacheInitStruct {
             relsize_cache_handle,
             block_map_handle,
         }
     }
 
+    /// Initialize access to the integrated cache for the communicator worker process
     pub fn worker_process_init(
         self,
         lsn: Lsn,
@@ -165,6 +166,7 @@ impl<'t> IntegratedCacheInitStruct<'t> {
         }
     }
 
+    /// Initialize access to the integrated cache for a backend process
     pub fn backend_init(self) -> IntegratedCacheReadAccess<'t> {
         let IntegratedCacheInitStruct {
             relsize_cache_handle,
@@ -198,16 +200,14 @@ struct RelEntry {
 
 impl std::fmt::Debug for RelEntry {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        fmt
-            .debug_struct("Rel")
+        fmt.debug_struct("Rel")
             .field("nblocks", &self.nblocks.load(Ordering::Relaxed))
             .finish()
     }
 }
 impl std::fmt::Debug for BlockEntry {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        fmt
-            .debug_struct("Block")
+        fmt.debug_struct("Block")
             .field("lw_lsn", &self.lw_lsn.load())
             .field("cache_block", &self.cache_block.load(Ordering::Relaxed))
             .field("pinned", &self.pinned.load(Ordering::Relaxed))
@@ -268,8 +268,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         block_number: u32,
         dst: impl uring_common::buf::IoBufMut + Send + Sync,
     ) -> Result<CacheResult<()>, std::io::Error> {
-        let x = if let Some(block_entry) =
-            self.block_map.get(&BlockKey::from((rel, block_number)))
+        let x = if let Some(block_entry) = self.block_map.get(&BlockKey::from((rel, block_number)))
         {
             block_entry.referenced.store(true, Ordering::Relaxed);
 
@@ -344,24 +343,23 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
     }
 
     pub fn remember_rel_size(&'t self, rel: &RelTag, nblocks: u32) {
-        let result = self
-            .relsize_cache
-            .update_with_fn(&RelKey::from(rel), |existing| match existing {
-                None => {
-                    tracing::info!("inserting rel entry for {rel:?}, {nblocks} blocks");
-                    UpdateAction::Insert(RelEntry {
-                        nblocks: AtomicU32::new(nblocks),
-                    })
-                }
-                Some(e) => {
-                    tracing::info!("updating rel entry for {rel:?}, {nblocks} blocks");
-                    e.nblocks.store(nblocks, Ordering::Relaxed);
-                    UpdateAction::Nothing
-                }
-            });
+        let result =
+            self.relsize_cache
+                .update_with_fn(&RelKey::from(rel), |existing| match existing {
+                    None => {
+                        tracing::info!("inserting rel entry for {rel:?}, {nblocks} blocks");
+                        UpdateAction::Insert(RelEntry {
+                            nblocks: AtomicU32::new(nblocks),
+                        })
+                    }
+                    Some(e) => {
+                        tracing::info!("updating rel entry for {rel:?}, {nblocks} blocks");
+                        e.nblocks.store(nblocks, Ordering::Relaxed);
+                        UpdateAction::Nothing
+                    }
+                });
 
-        // FIXME: what to do if we run out of memory? Evict other relation entries? Remove
-        // block entries first?
+        // FIXME: what to do if we run out of memory? Evict other relation entries?
         result.expect("out of memory");
     }
 
@@ -606,31 +604,31 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                 let mut evicted_cache_block = None;
                 let res =
                     self.block_map
-                    .update_with_fn_at_bucket(*clock_hand % num_buckets, |old| {
-                        match old {
-                            None => UpdateAction::Nothing,
-                            Some(old) => {
-                                // note: all the accesses to 'pinned' currently happen
-                                // within update_with_fn(), or while holding ValueReadGuard, which protects from concurrent
-                                // updates. Otherwise, another thread could set the 'pinned'
-                                // flag just after we have checked it here.
-                                if old.pinned.load(Ordering::Relaxed) != 0 {
-                                    return UpdateAction::Nothing;
-                                }
+                        .update_with_fn_at_bucket(*clock_hand % num_buckets, |old| {
+                            match old {
+                                None => UpdateAction::Nothing,
+                                Some(old) => {
+                                    // note: all the accesses to 'pinned' currently happen
+                                    // within update_with_fn(), or while holding ValueReadGuard, which protects from concurrent
+                                    // updates. Otherwise, another thread could set the 'pinned'
+                                    // flag just after we have checked it here.
+                                    if old.pinned.load(Ordering::Relaxed) != 0 {
+                                        return UpdateAction::Nothing;
+                                    }
 
-                                let _ = self
-                                    .global_lw_lsn
-                                    .fetch_max(old.lw_lsn.load().0, Ordering::Relaxed);
-                                let cache_block = old
-                                    .cache_block
-                                    .swap(INVALID_CACHE_BLOCK, Ordering::Relaxed);
-                                if cache_block != INVALID_CACHE_BLOCK {
-                                    evicted_cache_block = Some(cache_block);
+                                    let _ = self
+                                        .global_lw_lsn
+                                        .fetch_max(old.lw_lsn.load().0, Ordering::Relaxed);
+                                    let cache_block = old
+                                        .cache_block
+                                        .swap(INVALID_CACHE_BLOCK, Ordering::Relaxed);
+                                    if cache_block != INVALID_CACHE_BLOCK {
+                                        evicted_cache_block = Some(cache_block);
+                                    }
+                                    UpdateAction::Remove
                                 }
-                                UpdateAction::Remove
                             }
-                        }
-                    });
+                        });
 
                 // Out of memory should not happen here, as we're only updating existing values,
                 // not inserting new entries to the map.
@@ -644,6 +642,21 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         }
         // Give up if we didn't find anything
         None
+    }
+
+    pub fn resize_file_cache(&self, num_blocks: u32) {
+        let old_num_blocks = self.block_map.get_num_buckets() as u32;
+
+        if old_num_blocks < num_blocks {
+            if let Err(err) = self.block_map.grow(num_blocks) {
+                tracing::warn!(
+                    "could not grow file cache to {} blocks (old size {}): {}",
+                    num_blocks,
+                    old_num_blocks,
+                    err
+                );
+            }
+        }
     }
 
     pub fn dump_map(&self, _dst: &mut dyn std::io::Write) {

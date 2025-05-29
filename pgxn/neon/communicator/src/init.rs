@@ -83,6 +83,8 @@ pub extern "C" fn rcommunicator_shmem_init(
     max_procs: u32,
     shmem_area_ptr: *mut MaybeUninit<u8>,
     shmem_area_len: u64,
+    initial_file_cache_size: u64,
+    max_file_cache_size: u64,
 ) -> &'static mut CommunicatorInitStruct {
     let shmem_area: &'static mut [MaybeUninit<u8>] =
         unsafe { std::slice::from_raw_parts_mut(shmem_area_ptr, shmem_area_len as usize) };
@@ -107,8 +109,12 @@ pub extern "C" fn rcommunicator_shmem_init(
     };
 
     // Give the rest of the area to the integrated cache
-    let integrated_cache_init_struct =
-        IntegratedCacheInitStruct::shmem_init(max_procs, remaining_area);
+    let integrated_cache_init_struct = IntegratedCacheInitStruct::shmem_init(
+        max_procs,
+        remaining_area,
+        initial_file_cache_size,
+        max_file_cache_size,
+    );
 
     let (submission_pipe_read_fd, submission_pipe_write_fd) = unsafe {
         use std::os::fd::FromRawFd;

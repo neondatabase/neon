@@ -1,21 +1,24 @@
 //! Simple hash table with chaining
+//!
+//! # Resizing
+//!
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::mem::MaybeUninit;
 
-const INVALID_POS: u32 = u32::MAX;
+pub(crate) const INVALID_POS: u32 = u32::MAX;
 
 // Bucket
-struct Bucket<K, V> {
-    hash: u64,
-    next: u32,
-    inner: Option<(K, V)>,
+pub(crate) struct Bucket<K, V> {
+    pub(crate) hash: u64,
+    pub(crate) next: u32,
+    pub(crate) inner: Option<(K, V)>,
 }
 
 pub(crate) struct CoreHashMap<'a, K, V> {
-    dictionary: &'a mut [u32],
-    buckets: &'a mut [Bucket<K, V>],
-    free_head: u32,
+    pub(crate) dictionary: &'a mut [u32],
+    pub(crate) buckets: &'a mut [Bucket<K, V>],
+    pub(crate) free_head: u32,
 
     // metrics
     pub(crate) buckets_in_use: u32,
@@ -24,20 +27,20 @@ pub(crate) struct CoreHashMap<'a, K, V> {
 pub struct FullError();
 
 impl<'a, K, V> CoreHashMap<'a, K, V>
-    where K: Clone + Hash + Eq,
+where
+    K: Clone + Hash + Eq,
 {
     const FILL_FACTOR: f32 = 0.60;
 
-    pub fn estimate_size(num_buckets: u32) -> usize{
+    pub fn estimate_size(num_buckets: u32) -> usize {
         let mut size = 0;
 
         // buckets
         size += size_of::<Bucket<K, V>>() * num_buckets as usize;
 
         // dictionary
-        size += (f32::ceil(
-            (size_of::<u32>() * num_buckets as usize) as f32 / Self::FILL_FACTOR)
-        ) as usize;
+        size += (f32::ceil((size_of::<u32>() * num_buckets as usize) as f32 / Self::FILL_FACTOR))
+            as usize;
 
         size
     }
@@ -64,7 +67,8 @@ impl<'a, K, V> CoreHashMap<'a, K, V>
         // Initialize the buckets
         let buckets = {
             let buckets_ptr: *mut MaybeUninit<Bucket<K, V>> = buckets_ptr.cast();
-            let buckets = unsafe { std::slice::from_raw_parts_mut(buckets_ptr, num_buckets as usize) };
+            let buckets =
+                unsafe { std::slice::from_raw_parts_mut(buckets_ptr, num_buckets as usize) };
             for i in 0..buckets.len() {
                 buckets[i].write(Bucket {
                     hash: 0,

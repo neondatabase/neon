@@ -8,6 +8,7 @@ use tracing::error;
 
 use crate::init::CommunicatorInitStruct;
 use crate::worker_process::main_loop;
+use crate::worker_process::main_loop::CommunicatorWorkerProcessStruct;
 
 /// Launch the communicator's tokio tasks, which do most of the work.
 ///
@@ -24,8 +25,8 @@ pub extern "C" fn communicator_worker_process_launch(
     shard_map: *mut *mut c_char,
     nshards: u32,
     file_cache_path: *const c_char,
-    file_cache_size: u64,
-) {
+    initial_file_cache_size: u64,
+) -> &'static CommunicatorWorkerProcessStruct<'static> {
     // Convert the arguments into more convenient Rust types
     let tenant_id = unsafe { CStr::from_ptr(tenant_id) }.to_str().unwrap();
     let timeline_id = unsafe { CStr::from_ptr(timeline_id) }.to_str().unwrap();
@@ -53,7 +54,7 @@ pub extern "C" fn communicator_worker_process_launch(
         timeline_id.to_string(),
         auth_token,
         shard_map,
-        file_cache_size,
+        initial_file_cache_size,
         file_cache_path,
     ));
     let worker_struct = Box::leak(Box::new(worker_struct));
@@ -69,6 +70,8 @@ pub extern "C" fn communicator_worker_process_launch(
 
     // keep the runtime running after we exit this function
     Box::leak(Box::new(runtime));
+
+    worker_struct
 }
 
 /// Convert the "shard map" from an array of C strings, indexed by shard no to a rust HashMap
@@ -97,4 +100,13 @@ fn parse_shard_map(
         result.insert(k, s.into());
     }
     result
+}
+
+/// Inform the rust code about a configuration change
+#[unsafe(no_mangle)]
+pub extern "C" fn communicator_worker_config_reload(
+    proc_handle: &'static CommunicatorWorkerProcessStruct<'static>,
+    file_cache_size: u64,
+) {
+    proc_handle.cache.resize_file_cache(file_cache_size as u32);
 }

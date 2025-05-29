@@ -1,19 +1,17 @@
 use std::{
-    collections::{HashMap},
-    sync::{
-        Arc,
-    },
-    time::{Duration, Instant},
+    collections::HashMap,
     io::{self, Error, ErrorKind},
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
 use priority_queue::PriorityQueue;
 
 use tokio::{
-    sync::{Mutex, Semaphore, OwnedSemaphorePermit},
-    time::sleep,
-    net::TcpStream,
     io::{AsyncRead, AsyncWrite, ReadBuf},
+    net::TcpStream,
+    sync::{Mutex, OwnedSemaphorePermit, Semaphore},
+    time::sleep,
 };
 use tonic::transport::{Channel, Endpoint};
 
@@ -21,23 +19,18 @@ use uuid;
 
 use std::{
     pin::Pin,
-    task::{Context, Poll}
+    task::{Context, Poll},
 };
 
 use futures::future;
-use rand::{
-    Rng,
-    rngs::StdRng,
-    SeedableRng
-};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 
+use bytes::BytesMut;
 use http::Uri;
 use hyper_util::rt::TokioIo;
-use bytes::BytesMut;
 use tower::service_fn;
 
 use tokio_util::sync::CancellationToken;
-
 
 //
 // The "TokioTcp" is flakey TCP network for testing purposes, in order
@@ -233,7 +226,6 @@ impl ConnectionPool {
         hang_rate: f64,
         aggregate_metrics: Option<Arc<crate::PageserverClientAggregateMetrics>>,
     ) -> Arc<Self> {
-
         let shutdown_token = CancellationToken::new();
         let pool = Arc::new(Self {
             inner: Mutex::new(Inner {
@@ -310,7 +302,10 @@ impl ConnectionPool {
                     // metric
                     match self.aggregate_metrics {
                         Some(ref metrics) => {
-                            metrics.retry_counters.with_label_values(&["connection_swept"]).inc();
+                            metrics
+                                .retry_counters
+                                .with_label_values(&["connection_swept"])
+                                .inc();
                         }
                         None => {}
                     }
@@ -327,21 +322,25 @@ impl ConnectionPool {
     }
 
     // If we have a permit already, get a connection out of the heap
-    async fn get_conn_with_permit(self: Arc<Self>, permit: OwnedSemaphorePermit)
-        -> Option<PooledClient> {
+    async fn get_conn_with_permit(
+        self: Arc<Self>,
+        permit: OwnedSemaphorePermit,
+    ) -> Option<PooledClient> {
         let mut inner = self.inner.lock().await;
 
         // Pop the highest-active-consumers connection. There are no connections
         // in the heap that have more than max_consumers active consumers.
         if let Some((id, _cons)) = inner.pq.pop() {
-            let entry = inner.entries.get_mut(&id)
+            let entry = inner
+                .entries
+                .get_mut(&id)
                 .expect("pq and entries got out of sync");
 
             let mut active_consumers = entry.active_consumers;
             entry.active_consumers += 1;
             entry.last_used = Instant::now();
 
-            let client =  PooledClient {
+            let client = PooledClient {
                 channel: entry.channel.clone(),
                 pool: Arc::clone(&self),
                 id,
@@ -367,7 +366,6 @@ impl ConnectionPool {
     }
 
     pub async fn get_client(self: Arc<Self>) -> Result<PooledClient, tonic::Status> {
-
         // The pool is shutting down. Don't accept new connections.
         if self.shutdown_token.is_cancelled() {
             return Err(tonic::Status::unavailable("Pool is shutting down"));
@@ -395,10 +393,12 @@ impl ConnectionPool {
                     }
                 }
                 Err(_) => {
-
                     match self_clone.aggregate_metrics {
                         Some(ref metrics) => {
-                            metrics.retry_counters.with_label_values(&["sema_acquire_failed"]).inc();
+                            metrics
+                                .retry_counters
+                                .with_label_values(&["sema_acquire_failed"])
+                                .inc();
                         }
                         None => {}
                     }
@@ -490,10 +490,13 @@ impl ConnectionPool {
         // Generate a random backoff to add some jitter so that connections
         // don't all retry at the same time.
         let mut backoff_delay = Duration::from_millis(
-            rand::thread_rng().gen_range(0..=self.connect_backoff.as_millis() as u64));
+            rand::thread_rng().gen_range(0..=self.connect_backoff.as_millis() as u64),
+        );
 
         loop {
-            if self.shutdown_token.is_cancelled() { return; }
+            if self.shutdown_token.is_cancelled() {
+                return;
+            }
 
             // Back off.
             // Loop because failure can occur while we are sleeping, so wait
@@ -504,8 +507,7 @@ impl ConnectionPool {
                 if let Some(delay) = {
                     let inner = self.inner.lock().await;
                     inner.last_connect_failure.and_then(|at| {
-                        (at.elapsed() < backoff_delay)
-                            .then(|| backoff_delay - at.elapsed())
+                        (at.elapsed() < backoff_delay).then(|| backoff_delay - at.elapsed())
                     })
                 } {
                     sleep(delay).await;
@@ -523,7 +525,10 @@ impl ConnectionPool {
             //
             match self.aggregate_metrics {
                 Some(ref metrics) => {
-                    metrics.retry_counters.with_label_values(&["connection_attempt"]).inc();
+                    metrics
+                        .retry_counters
+                        .with_label_values(&["connection_attempt"])
+                        .inc();
                 }
                 None => {}
             }
@@ -543,7 +548,10 @@ impl ConnectionPool {
                     {
                         match self.aggregate_metrics {
                             Some(ref metrics) => {
-                                metrics.retry_counters.with_label_values(&["connection_success"]).inc();
+                                metrics
+                                    .retry_counters
+                                    .with_label_values(&["connection_success"])
+                                    .inc();
                             }
                             None => {}
                         }
@@ -568,7 +576,10 @@ impl ConnectionPool {
                 Ok(Err(_)) | Err(_) => {
                     match self.aggregate_metrics {
                         Some(ref metrics) => {
-                            metrics.retry_counters.with_label_values(&["connect_failed"]).inc();
+                            metrics
+                                .retry_counters
+                                .with_label_values(&["connect_failed"])
+                                .inc();
                         }
                         None => {}
                     }
@@ -576,7 +587,8 @@ impl ConnectionPool {
                     inner.last_connect_failure = Some(Instant::now());
                     // Add some jitter so that every connection doesn't retry at once
                     let jitter = rand::thread_rng().gen_range(0..=backoff_delay.as_millis() as u64);
-                    backoff_delay = Duration::from_millis(backoff_delay.as_millis() as u64 + jitter);
+                    backoff_delay =
+                        Duration::from_millis(backoff_delay.as_millis() as u64 + jitter);
 
                     // Do not backoff longer than one minute
                     if backoff_delay > Duration::from_secs(60) {
@@ -587,7 +599,6 @@ impl ConnectionPool {
             }
         }
     }
-
 
     /// Return client to the pool, indicating success or error.
     pub async fn return_client(&self, id: uuid::Uuid, success: bool, permit: OwnedSemaphorePermit) {
@@ -607,7 +618,10 @@ impl ConnectionPool {
                 if entry.consecutive_errors == self.error_threshold {
                     match self.aggregate_metrics {
                         Some(ref metrics) => {
-                            metrics.retry_counters.with_label_values(&["connection_dropped"]).inc();
+                            metrics
+                                .retry_counters
+                                .with_label_values(&["connection_dropped"])
+                                .inc();
                         }
                         None => {}
                     }
@@ -657,6 +671,8 @@ impl PooledClient {
     }
 
     pub async fn finish(self, result: Result<(), tonic::Status>) {
-        self.pool.return_client(self.id, result.is_ok(), self.permit).await;
+        self.pool
+            .return_client(self.id, result.is_ok(), self.permit)
+            .await;
     }
 }

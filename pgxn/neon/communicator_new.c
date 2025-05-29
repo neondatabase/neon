@@ -46,6 +46,7 @@
  * here. This code shouldn't be using the C file cache for anything else than
  * the GUCs.
  */
+extern int	lfc_max_size;
 extern int	lfc_size_limit;
 extern char *lfc_path;
 
@@ -171,6 +172,8 @@ communicator_new_shmem_startup(void)
 	size_t		communicator_size;
 	size_t		shmem_size;
 	void	   *shmem_ptr;
+	uint64		initial_file_cache_size;
+	uint64		max_file_cache_size;
 
 	rc = pipe(pipefd);
 	if (rc != 0)
@@ -197,8 +200,17 @@ communicator_new_shmem_startup(void)
 	for (int i = 0; i < MaxProcs; i++)
 		InitSharedLatch(&communicator_shmem_ptr->backends[i].io_completion_latch);
 
+	/* lfc_size_limit is in MBs */
+	initial_file_cache_size = lfc_size_limit * (1024 * 1024 / BLCKSZ);
+	max_file_cache_size = lfc_max_size * (1024 * 1024 / BLCKSZ);
+	if (initial_file_cache_size < 100)
+		initial_file_cache_size = 100;
+	if (max_file_cache_size < 100)
+		max_file_cache_size = 100;
+
 	/* Initialize the rust-managed parts */
-	cis = rcommunicator_shmem_init(pipefd[0], pipefd[1], MaxProcs, shmem_ptr, shmem_size);
+	cis = rcommunicator_shmem_init(pipefd[0], pipefd[1], MaxProcs, shmem_ptr, shmem_size,
+								   initial_file_cache_size, max_file_cache_size);
 }
 
 /**** Worker process functions. These run in the communicator worker process ****/
@@ -212,7 +224,8 @@ communicator_new_bgworker_main(Datum main_arg)
 	struct LoggingState *logging;
 	char		errbuf[1000];
 	int			elevel;
-	uint64		initial_file_cache_size;
+	uint64		file_cache_size;
+	const struct CommunicatorWorkerProcessStruct *proc_handle;
 
 	/*
 	 * Pretend that this process is a WAL sender. That affects the shutdown
@@ -222,7 +235,9 @@ communicator_new_bgworker_main(Datum main_arg)
 	MarkPostmasterChildWalSender();
 
 	/* lfc_size_limit is in MBs */
-	initial_file_cache_size = lfc_size_limit * (1024 * 1024 / BLCKSZ);
+	file_cache_size = lfc_size_limit * (1024 * 1024 / BLCKSZ);
+	if (file_cache_size < 100)
+		file_cache_size = 100;
 
 	/* Establish signal handlers. */
 	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
@@ -240,7 +255,7 @@ communicator_new_bgworker_main(Datum main_arg)
 
 	logging = configure_logging();
 
-	communicator_worker_process_launch(
+	proc_handle = communicator_worker_process_launch(
 									   cis,
 									   neon_tenant,
 									   neon_timeline,
@@ -248,7 +263,7 @@ communicator_new_bgworker_main(Datum main_arg)
 									   connstrs,
 									   num_shards,
 									   lfc_path,
-									   initial_file_cache_size);
+									   file_cache_size);
 	cis = NULL;
 
 	elog(LOG, "communicator threads started");
@@ -257,6 +272,18 @@ communicator_new_bgworker_main(Datum main_arg)
 		int32		rc;
 
 		CHECK_FOR_INTERRUPTS();
+
+		if (ConfigReloadPending)
+		{
+			ConfigReloadPending = false;
+			ProcessConfigFile(PGC_SIGHUP);
+
+			/* lfc_size_limit is in MBs */
+			file_cache_size = lfc_size_limit * (1024 * 1024 / BLCKSZ);
+			if (file_cache_size < 100)
+				file_cache_size = 100;
+			communicator_worker_config_reload(proc_handle, file_cache_size);
+		}
 
 		for (;;)
 		{

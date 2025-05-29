@@ -62,22 +62,15 @@ pub struct MyAllocatorCollector {
 impl MyAllocatorCollector {
     pub fn new() -> MyAllocatorCollector {
         MyAllocatorCollector {
-            allocations: IntGauge::new(
-                "allocations_total",
-                "Number of allocations in Rust code",
-            ).unwrap(),
+            allocations: IntGauge::new("allocations_total", "Number of allocations in Rust code")
+                .unwrap(),
             deallocations: IntGauge::new(
                 "deallocations_total",
                 "Number of deallocations in Rust code",
-            ).unwrap(),
-            allocated: IntGauge::new(
-                "allocated_total",
-                "Bytes currently allocated",
-            ).unwrap(),
-            high: IntGauge::new(
-                "allocated_high",
-                "High watermark of allocated bytes",
-            ).unwrap(),
+            )
+            .unwrap(),
+            allocated: IntGauge::new("allocated_total", "Bytes currently allocated").unwrap(),
+            high: IntGauge::new("allocated_high", "High watermark of allocated bytes").unwrap(),
         }
     }
 }
@@ -98,9 +91,12 @@ impl metrics::core::Collector for MyAllocatorCollector {
         let mut values = Vec::new();
 
         // update the gauges
-        self.allocations.set(GLOBAL.allocations.load(Ordering::Relaxed) as i64);
-        self.deallocations.set(GLOBAL.allocations.load(Ordering::Relaxed) as i64);
-        self.allocated.set(GLOBAL.allocated.load(Ordering::Relaxed) as i64);
+        self.allocations
+            .set(GLOBAL.allocations.load(Ordering::Relaxed) as i64);
+        self.deallocations
+            .set(GLOBAL.allocations.load(Ordering::Relaxed) as i64);
+        self.allocated
+            .set(GLOBAL.allocated.load(Ordering::Relaxed) as i64);
         self.high.set(GLOBAL.high.load(Ordering::Relaxed) as i64);
 
         values.append(&mut self.allocations.collect());

@@ -28,7 +28,6 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::response::Response;
 
-
 use http::StatusCode;
 use http::header::CONTENT_TYPE;
 
@@ -170,8 +169,9 @@ pub(crate) fn main(args: Args) -> anyhow::Result<()> {
         main_impl(args, thread_local_stats)
     })
 }
-async fn get_metrics(State(state): State<Arc<pageserver_client_grpc::PageserverClientAggregateMetrics>>) -> Response {
-
+async fn get_metrics(
+    State(state): State<Arc<pageserver_client_grpc::PageserverClientAggregateMetrics>>,
+) -> Response {
     let metrics = state.collect();
 
     info!("metrics: {metrics:?}");
@@ -402,7 +402,10 @@ async fn main_impl(
             if args.grpc_stream {
                 client_grpc_stream(args, worker_id, ss, cancel, rps_period, ranges, weights).await
             } else if args.grpc {
-                client_grpc(args, worker_id, new_value, ss, cancel, rps_period, ranges, weights).await
+                client_grpc(
+                    args, worker_id, new_value, ss, cancel, rps_period, ranges, weights,
+                )
+                .await
             } else {
                 client_libpq(args, worker_id, ss, cancel, rps_period, ranges, weights).await
             }
@@ -580,8 +583,6 @@ async fn client_grpc(
     );
 
     let client = Arc::new(client);
-
-
 
     shared_state.start_work_barrier.wait().await;
     let client_start = Instant::now();

@@ -47,14 +47,14 @@ pub struct PageserverClientAggregateMetrics {
 }
 impl PageserverClientAggregateMetrics {
     pub fn new() -> Self {
-
         let request_counters = IntCounterVec::new(
             metrics::core::Opts::new(
                 "backend_requests_total",
                 "Number of requests from backends.",
             ),
             &["request_kind"],
-        ).unwrap();
+        )
+        .unwrap();
 
         let retry_counters = IntCounterVec::new(
             metrics::core::Opts::new(
@@ -62,14 +62,15 @@ impl PageserverClientAggregateMetrics {
                 "Number of retried requests from backends.",
             ),
             &["request_kind"],
-        ).unwrap();
+        )
+        .unwrap();
         Self {
             request_counters,
             retry_counters,
         }
     }
 
-    pub fn collect (&self) -> Vec<metrics::proto::MetricFamily> {
+    pub fn collect(&self) -> Vec<metrics::proto::MetricFamily> {
         let mut metrics = Vec::new();
         metrics.append(&mut self.request_counters.collect());
         metrics.append(&mut self.retry_counters.collect());
@@ -132,7 +133,6 @@ impl PageserverClient {
         options: ClientCacheOptions,
         metrics: Option<Arc<PageserverClientAggregateMetrics>>,
     ) -> Self {
-
         Self {
             _tenant_id: tenant_id.to_string(),
             _timeline_id: timeline_id.to_string(),
@@ -230,7 +230,10 @@ impl PageserverClient {
 
         match self.aggregate_metrics {
             Some(ref metrics) => {
-                metrics.request_counters.with_label_values(&["get_page"]).inc();
+                metrics
+                    .request_counters
+                    .with_label_values(&["get_page"])
+                    .inc();
             }
             None => {}
         }

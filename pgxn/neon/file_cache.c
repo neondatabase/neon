@@ -183,7 +183,7 @@ typedef struct FileCacheControl
 static HTAB *lfc_hash;
 static int	lfc_desc = -1;
 static LWLockId lfc_lock;
-static int	lfc_max_size;
+int	lfc_max_size;
 int	lfc_size_limit;
 static int	lfc_prewarm_limit;
 static int	lfc_prewarm_batch;

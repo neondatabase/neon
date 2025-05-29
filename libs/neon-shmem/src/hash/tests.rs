@@ -6,24 +6,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::hash::HashMapAccess;
 use crate::hash::HashMapInit;
 use crate::hash::UpdateAction;
-use crate::hash::{Key, Value};
 use crate::shmem::ShmemHandle;
 
-use rand::Rng;
 use rand::seq::SliceRandom;
+use rand::{Rng, RngCore};
 use rand_distr::Zipf;
 
 const TEST_KEY_LEN: usize = 16;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct TestKey([u8; TEST_KEY_LEN]);
-
-impl Key for TestKey {
-    const KEY_LEN: usize = TEST_KEY_LEN;
-    fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
 
 impl From<&TestKey> for u128 {
     fn from(val: &TestKey) -> u128 {
@@ -43,14 +35,12 @@ impl<'a> From<&'a [u8]> for TestKey {
     }
 }
 
-impl Value for usize {}
-
 fn test_inserts<K: Into<TestKey> + Copy>(keys: &[K]) {
-    const MEM_SIZE: usize = 10000000;
-    let shmem = ShmemHandle::new("test_inserts", 0, MEM_SIZE).unwrap();
+    const MAX_MEM_SIZE: usize = 10000000;
+    let shmem = ShmemHandle::new("test_inserts", 0, MAX_MEM_SIZE).unwrap();
 
-    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(shmem, MEM_SIZE);
-    let mut w = init_struct.attach_writer();
+    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(100000, shmem);
+    let w = init_struct.attach_writer();
 
     for (idx, k) in keys.iter().enumerate() {
         let res = w.insert(&(*k).into(), idx);
@@ -114,8 +104,6 @@ impl TestValue {
     }
 }
 
-impl Value for TestValue {}
-
 impl Clone for TestValue {
     fn clone(&self) -> TestValue {
         TestValue::new(self.load())
@@ -164,10 +152,10 @@ fn apply_op(
 
 #[test]
 fn random_ops() {
-    const MEM_SIZE: usize = 10000000;
-    let shmem = ShmemHandle::new("test_inserts", 0, MEM_SIZE).unwrap();
+    const MAX_MEM_SIZE: usize = 10000000;
+    let shmem = ShmemHandle::new("test_inserts", 0, MAX_MEM_SIZE).unwrap();
 
-    let init_struct = HashMapInit::<TestKey, TestValue>::init_in_shmem(shmem, MEM_SIZE);
+    let init_struct = HashMapInit::<TestKey, TestValue>::init_in_shmem(100000, shmem);
     let writer = init_struct.attach_writer();
 
     let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();
@@ -175,11 +163,49 @@ fn random_ops() {
     let distribution = Zipf::new(u128::MAX as f64, 1.1).unwrap();
     let mut rng = rand::rng();
     for i in 0..100000 {
-        let mut key: TestKey = (rng.sample(distribution) as u128).into();
+        let key: TestKey = (rng.sample(distribution) as u128).into();
 
-        if rng.random_bool(0.10) {
-            key = TestKey::from(u128::from(&key) | 0xffffffff);
+        let op = TestOp(key, if rng.random_bool(0.75) { Some(i) } else { None });
+
+        apply_op(&op, &writer, &mut shadow);
+
+        if i % 1000 == 0 {
+            eprintln!("{i} ops processed");
+            //eprintln!("stats: {:?}", tree_writer.get_statistics());
+            //test_iter(&tree_writer, &shadow);
         }
+    }
+}
+
+#[test]
+fn test_grow() {
+    const MEM_SIZE: usize = 10000000;
+    let shmem = ShmemHandle::new("test_grow", 0, MEM_SIZE).unwrap();
+
+    let init_struct = HashMapInit::<TestKey, TestValue>::init_in_shmem(1000, shmem);
+    let writer = init_struct.attach_writer();
+
+    let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();
+
+    let mut rng = rand::rng();
+    for i in 0..10000 {
+        let key: TestKey = ((rng.next_u32() % 1000) as u128).into();
+
+        let op = TestOp(key, if rng.random_bool(0.75) { Some(i) } else { None });
+
+        apply_op(&op, &writer, &mut shadow);
+
+        if i % 1000 == 0 {
+            eprintln!("{i} ops processed");
+            //eprintln!("stats: {:?}", tree_writer.get_statistics());
+            //test_iter(&tree_writer, &shadow);
+        }
+    }
+
+    writer.grow(1500).unwrap();
+
+    for i in 0..10000 {
+        let key: TestKey = ((rng.next_u32() % 1500) as u128).into();
 
         let op = TestOp(key, if rng.random_bool(0.75) { Some(i) } else { None });
 
