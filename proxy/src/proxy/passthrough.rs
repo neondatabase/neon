@@ -65,7 +65,6 @@ pub(crate) async fn proxy_pass(
 pub(crate) struct ProxyPassthrough<S> {
     pub(crate) client: Stream<S>,
     pub(crate) compute: PostgresConnection,
-    pub(crate) aux: MetricsAuxInfo,
     pub(crate) session_id: uuid::Uuid,
     pub(crate) private_link_id: Option<SmolStr>,
     pub(crate) cancel: cancellation::Session,
@@ -84,7 +83,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
         let res = proxy_pass(
             self.client,
             self.compute.stream,
-            self.aux,
+            self.compute.aux,
             self.private_link_id,
         )
         .await;
