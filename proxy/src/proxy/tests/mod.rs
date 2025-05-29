@@ -15,6 +15,7 @@ use rstest::rstest;
 use rustls::crypto::ring;
 use rustls::pki_types;
 use tokio::io::DuplexStream;
+use tokio_util::task::TaskTracker;
 use tracing_test::traced_test;
 
 use super::connect_compute::ConnectMechanism;
@@ -178,10 +179,12 @@ async fn dummy_proxy(
     auth: impl TestAuth + Send,
 ) -> anyhow::Result<()> {
     let (client, _) = read_proxy_protocol(client).await?;
-    let mut stream = match handshake(&RequestContext::test(), client, tls.as_ref(), false).await? {
-        HandshakeData::Startup(stream, _) => stream,
-        HandshakeData::Cancel(_) => bail!("cancellation not supported"),
-    };
+    let t = TaskTracker::new().token();
+    let mut stream =
+        match handshake(&RequestContext::test(), client, t, tls.as_ref(), false).await? {
+            HandshakeData::Startup(stream, _) => stream,
+            HandshakeData::Cancel(_, _) => bail!("cancellation not supported"),
+        };
 
     auth.authenticate(&mut stream).await?;
 

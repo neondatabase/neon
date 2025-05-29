@@ -547,6 +547,7 @@ mod tests {
     use postgres_protocol::message::backend::Message as PgMessage;
     use postgres_protocol::message::frontend;
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+    use tokio_util::task::TaskTracker;
 
     use super::jwt::JwkCache;
     use super::{AuthRateLimiter, auth_quirks};
@@ -697,7 +698,7 @@ mod tests {
     #[tokio::test]
     async fn auth_quirks_scram() {
         let (mut client, server) = tokio::io::duplex(1024);
-        let mut stream = PqStream::new(Stream::from_raw(server));
+        let mut stream = PqStream::new(Stream::from_raw(server), TaskTracker::new().token());
 
         let ctx = RequestContext::test();
         let api = Auth {
@@ -779,7 +780,7 @@ mod tests {
     #[tokio::test]
     async fn auth_quirks_cleartext() {
         let (mut client, server) = tokio::io::duplex(1024);
-        let mut stream = PqStream::new(Stream::from_raw(server));
+        let mut stream = PqStream::new(Stream::from_raw(server), TaskTracker::new().token());
 
         let ctx = RequestContext::test();
         let api = Auth {
@@ -833,7 +834,7 @@ mod tests {
     #[tokio::test]
     async fn auth_quirks_password_hack() {
         let (mut client, server) = tokio::io::duplex(1024);
-        let mut stream = PqStream::new(Stream::from_raw(server));
+        let mut stream = PqStream::new(Stream::from_raw(server), TaskTracker::new().token());
 
         let ctx = RequestContext::test();
         let api = Auth {

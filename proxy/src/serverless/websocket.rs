@@ -10,6 +10,7 @@ use hyper::upgrade::OnUpgrade;
 use hyper_util::rt::TokioIo;
 use pin_project_lite::pin_project;
 use tokio::io::{self, AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
+use tokio_util::task::task_tracker::TaskTrackerToken;
 use tracing::warn;
 
 use crate::cancellation::CancellationHandler;
@@ -132,7 +133,7 @@ pub(crate) async fn serve_websocket(
     cancellation_handler: Arc<CancellationHandler>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     hostname: Option<String>,
-    cancellations: tokio_util::task::task_tracker::TaskTracker,
+    tracker: TaskTrackerToken,
 ) -> anyhow::Result<()> {
     let websocket = websocket.await?;
     let websocket = WebSocketServer::after_handshake(TokioIo::new(websocket));
@@ -151,7 +152,7 @@ pub(crate) async fn serve_websocket(
         ClientMode::Websockets { hostname },
         endpoint_rate_limiter,
         conn_gauge,
-        cancellations,
+        tracker,
     ))
     .await;
 

@@ -18,6 +18,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsConnector;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::task_tracker::TaskTrackerToken;
 use tracing::{Instrument, error, info};
 use utils::project_git_version;
 use utils::sentry_init::init_sentry;
@@ -226,7 +227,8 @@ pub(super) async fn task_main(
         let dest_suffix = Arc::clone(&dest_suffix);
         let compute_tls_config = compute_tls_config.clone();
 
-        connections.spawn(
+        let tracker = connections.token();
+        tokio::spawn(
             async move {
                 socket
                     .set_nodelay(true)
@@ -249,6 +251,7 @@ pub(super) async fn task_main(
                     compute_tls_config,
                     tls_server_end_point,
                     socket,
+                    tracker,
                 )
                 .await
             }
@@ -274,10 +277,11 @@ const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmod
 async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     ctx: &RequestContext,
     raw_stream: S,
+    tracker: TaskTrackerToken,
     tls_config: Arc<rustls::ServerConfig>,
     tls_server_end_point: TlsServerEndPoint,
-) -> anyhow::Result<Stream<S>> {
-    let mut stream = PqStream::new(Stream::from_raw(raw_stream));
+) -> anyhow::Result<(Stream<S>, TaskTrackerToken)> {
+    let mut stream = PqStream::new(Stream::from_raw(raw_stream), tracker);
 
     let msg = stream.read_startup_packet().await?;
     use pq_proto::FeStartupPacket::SslRequest;
@@ -291,7 +295,7 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
             // Upgrade raw stream into a secure TLS-backed stream.
             // NOTE: We've consumed `tls`; this fact will be used later.
 
-            let (raw, read_buf) = stream.into_inner();
+            let (raw, read_buf, tracker) = stream.into_inner();
             // TODO: Normally, client doesn't send any data before
             // server says TLS handshake is ok and read_buf is empty.
             // However, you could imagine pipelining of postgres
@@ -302,13 +306,16 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 bail!("data is sent before server replied with EncryptionResponse");
             }
 
-            Ok(Stream::Tls {
-                tls: Box::new(
-                    raw.upgrade(tls_config, !ctx.has_private_peer_addr())
-                        .await?,
-                ),
-                tls_server_end_point,
-            })
+            Ok((
+                Stream::Tls {
+                    tls: Box::new(
+                        raw.upgrade(tls_config, !ctx.has_private_peer_addr())
+                            .await?,
+                    ),
+                    tls_server_end_point,
+                },
+                tracker,
+            ))
         }
         unexpected => {
             info!(
@@ -329,8 +336,10 @@ async fn handle_client(
     compute_tls_config: Option<Arc<rustls::ClientConfig>>,
     tls_server_end_point: TlsServerEndPoint,
     stream: impl AsyncRead + AsyncWrite + Unpin,
+    tracker: TaskTrackerToken,
 ) -> anyhow::Result<()> {
-    let mut tls_stream = ssl_handshake(&ctx, stream, tls_config, tls_server_end_point).await?;
+    let (mut tls_stream, _tracker) =
+        ssl_handshake(&ctx, stream, tracker, tls_config, tls_server_end_point).await?;
 
     // Cut off first part of the SNI domain
     // We receive required destination details in the format of

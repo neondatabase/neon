@@ -1,5 +1,6 @@
 use smol_str::SmolStr;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_util::task::task_tracker::TaskTrackerToken;
 use tracing::debug;
 use utils::measured_stream::MeasuredStream;
 
@@ -71,6 +72,8 @@ pub(crate) struct ProxyPassthrough<S> {
 
     pub(crate) _req: NumConnectionRequestsGuard<'static>,
     pub(crate) _conn: NumClientConnectionsGuard<'static>,
+    /// ensures proxy stays online while this is set.
+    pub(crate) _tracker: TaskTrackerToken,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {

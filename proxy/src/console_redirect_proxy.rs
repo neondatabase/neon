@@ -3,6 +3,7 @@ use std::sync::Arc;
 use futures::{FutureExt, TryFutureExt};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::task_tracker::TaskTrackerToken;
 use tracing::{Instrument, debug, error, info};
 
 use crate::auth::backend::ConsoleRedirectBackend;
@@ -35,7 +36,6 @@ pub async fn task_main(
     socket2::SockRef::from(&listener).set_keepalive(true)?;
 
     let connections = tokio_util::task::task_tracker::TaskTracker::new();
-    let cancellations = tokio_util::task::task_tracker::TaskTracker::new();
 
     while let Some(accept_result) =
         run_until_cancelled(listener.accept(), &cancellation_token).await
@@ -49,11 +49,11 @@ pub async fn task_main(
 
         let session_id = uuid::Uuid::new_v4();
         let cancellation_handler = Arc::clone(&cancellation_handler);
-        let cancellations = cancellations.clone();
 
         debug!(protocol = "tcp", %session_id, "accepted new TCP connection");
 
-        connections.spawn(async move {
+        let tracker = connections.token();
+        tokio::spawn(async move {
             let (socket, peer_addr) = match read_proxy_protocol(socket).await {
                 Err(e) => {
                     error!("per-client task finished with an error: {e:#}");
@@ -110,7 +110,7 @@ pub async fn task_main(
                 cancellation_handler,
                 socket,
                 conn_gauge,
-                cancellations,
+                tracker,
             )
             .instrument(ctx.span())
             .boxed()
@@ -148,12 +148,10 @@ pub async fn task_main(
     }
 
     connections.close();
-    cancellations.close();
     drop(listener);
 
     // Drain connections
     connections.wait().await;
-    cancellations.wait().await;
 
     Ok(())
 }
@@ -166,7 +164,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     cancellation_handler: Arc<CancellationHandler>,
     stream: S,
     conn_gauge: NumClientConnectionsGuard<'static>,
-    cancellations: tokio_util::task::task_tracker::TaskTracker,
+    tracker: TaskTrackerToken,
 ) -> Result<Option<ProxyPassthrough<S>>, ClientRequestError> {
     debug!(
         protocol = %ctx.protocol(),
@@ -182,20 +180,21 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     let record_handshake_error = !ctx.has_private_peer_addr();
     let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
-    let do_handshake = handshake(ctx, stream, tls, record_handshake_error);
+    let do_handshake = handshake(ctx, stream, tracker, tls, record_handshake_error);
 
     let (mut stream, params) = match tokio::time::timeout(config.handshake_timeout, do_handshake)
         .await??
     {
         HandshakeData::Startup(stream, params) => (stream, params),
-        HandshakeData::Cancel(cancel_key_data) => {
+        HandshakeData::Cancel(cancel_key_data, tracker) => {
             // spawn a task to cancel the session, but don't wait for it
-            cancellations.spawn({
-                let cancellation_handler_clone  = Arc::clone(&cancellation_handler);
+            tokio::spawn({
+                let cancellation_handler_clone = Arc::clone(&cancellation_handler);
                 let ctx = ctx.clone();
                 let cancel_span = tracing::span!(parent: None, tracing::Level::INFO, "cancel_session", session_id = ?ctx.session_id());
                 cancel_span.follows_from(tracing::Span::current());
                 async move {
+                    let _tracker = tracker;
                     cancellation_handler_clone
                         .cancel_session(
                             cancel_key_data,
@@ -205,8 +204,10 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
                             backend.get_api(),
                         )
                         .await
-                        .inspect_err(|e | debug!(error = ?e, "cancel_session failed")).ok();
-                }.instrument(cancel_span)
+                        .inspect_err(|e| debug!(error = ?e, "cancel_session failed"))
+                        .ok();
+                }
+                .instrument(cancel_span)
             });
 
             return Ok(None);
@@ -252,7 +253,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     // PqStream input buffer. Normally there is none, but our serverless npm
     // driver in pipeline mode sends startup, password and first query
     // immediately after opening the connection.
-    let (stream, read_buf) = stream.into_inner();
+    let (stream, read_buf, tracker) = stream.into_inner();
     node.stream.write_all(&read_buf).await?;
 
     Ok(Some(ProxyPassthrough {
@@ -264,5 +265,6 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         cancel: session,
         _req: request_gauge,
         _conn: conn_gauge,
+        _tracker: tracker,
     }))
 }
