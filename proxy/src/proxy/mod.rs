@@ -385,36 +385,47 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let compute_creds = auth_result?;
 
-    let compute_user_info = compute_creds.info.clone();
-    let params_compat = compute_user_info
-        .options
-        .get(NeonOptions::PARAMS_COMPAT)
-        .is_some();
+    let connect_result: Result<_, ClientRequestError> = async {
+        let compute_user_info = compute_creds.info.clone();
+        let params_compat = compute_user_info
+            .options
+            .get(NeonOptions::PARAMS_COMPAT)
+            .is_some();
 
-    let mut node = connect_to_compute(
-        ctx,
-        &TcpMechanism {
-            user_info: compute_user_info,
-            params_compat,
-            params: &params,
-            locks: &config.connect_compute_locks,
-        },
-        &auth::Backend::ControlPlane(auth::backend::MaybeOwned::Borrowed(cplane), compute_creds),
-        config.wake_compute_retry_config,
-        &config.connect_to_compute,
-    )
-    .or_else(|e| stream.throw_error(e, Some(ctx)))
-    .await?;
+        let mut node = connect_to_compute(
+            ctx,
+            &TcpMechanism {
+                user_info: compute_user_info,
+                params_compat,
+                params: &params,
+                locks: &config.connect_compute_locks,
+            },
+            &auth::Backend::ControlPlane(
+                auth::backend::MaybeOwned::Borrowed(cplane),
+                compute_creds,
+            ),
+            config.wake_compute_retry_config,
+            &config.connect_to_compute,
+        )
+        .or_else(|e| stream.throw_error(e, Some(ctx)))
+        .await?;
 
-    session.write_cancel_key(node.cancel_closure.clone())?;
-    prepare_client_connection(&node, *session.key(), &mut stream).await?;
+        session.write_cancel_key(node.cancel_closure.clone())?;
+        prepare_client_connection(&node, *session.key(), &mut stream).await?;
 
-    // Before proxy passing, forward to compute whatever data is left in the
-    // PqStream input buffer. Normally there is none, but our serverless npm
-    // driver in pipeline mode sends startup, password and first query
-    // immediately after opening the connection.
-    let (stream, read_buf, tracker) = stream.into_inner();
-    node.stream.write_all(&read_buf).await?;
+        // Before proxy passing, forward to compute whatever data is left in the
+        // PqStream input buffer. Normally there is none, but our serverless npm
+        // driver in pipeline mode sends startup, password and first query
+        // immediately after opening the connection.
+        let (stream, read_buf, tracker) = stream.into_inner();
+        node.stream.write_all(&read_buf).await?;
+
+        Ok((node, stream, tracker))
+    }
+    .boxed()
+    .await;
+
+    let (node, stream, tracker) = connect_result?;
 
     let private_link_id = match ctx.extra() {
         Some(ConnectionInfoExtra::Aws { vpce_id }) => Some(vpce_id.clone()),
