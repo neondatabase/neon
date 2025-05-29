@@ -152,7 +152,7 @@ index 7da6553..7961984 100644
 +
 +SECURITY LABEL FOR anon ON FUNCTION anon.toggle_transparent_dynamic_masking IS 'UNTRUSTED';
 diff --git a/src/guc.rs b/src/guc.rs
-index 74d3822..cb31bb8 100644
+index 74d3822..8b500ce 100644
 --- a/src/guc.rs
 +++ b/src/guc.rs
 @@ -3,7 +3,7 @@
@@ -164,7 +164,7 @@ index 74d3822..cb31bb8 100644
  
  pub static ANON_DUMMY_LOCALE: GucSetting<Option<&'static CStr>> =
      GucSetting::<Option<&'static CStr>>::new(Some(unsafe {
-@@ -51,6 +51,55 @@ static ANON_MASK_SCHEMA: GucSetting<Option<&'static CStr>> =
+@@ -51,25 +51,97 @@ static ANON_MASK_SCHEMA: GucSetting<Option<&'static CStr>> =
          CStr::from_bytes_with_nul_unchecked(b"mask\0")
      }));
  
@@ -175,9 +175,18 @@ index 74d3822..cb31bb8 100644
 +   source: u32
 +) -> bool {
 +    unsafe {
-+        // This is the default boot up source (PGC_S_DEFAULT), most likely a new session or server. Allow
-+        // user to load GUC
-+        if source == 0 {
++        // The sources that we allow are:
++        // 1. PGC_S_DEFAULT (0) -> for default boot up source, likely new session or server.
++        // 2. PGC_S_DATABASE (6) -> a GUC set for a particular database
++        // 3. PGC_S_USER (7) -> a GUC set for a particular role
++        // 4. PGC_S_DATABASE_USER (8) -> a GUC set for a particular role in a particular database
++        // This check only allows sources that load a variable, not ones that try to alter it.
++        // Sources that try to alter it are:
++        // 1. PGC_S_FILE (3) -> ALTER SYSTEM
++        // 2. PGC_S_TEST (12) -> ALTER ROLE/DATABASE
++        // 3. PGC_S_SESSION (13) -> SET ...
++        // TODO (thesuhas): Does PGC_S_GLOBAL need to be added to whitelisted sources?
++        if source == 0 || source == 6 || source == 7 || source == 8 {
 +            return true;
 +        }
 +        let oid = pg_sys::GetUserId();
@@ -199,9 +208,17 @@ index 74d3822..cb31bb8 100644
 +source: u32
 +) -> bool {
 +    unsafe {
-+        // This is the default boot up source (PGC_S_DEFAULT), most likely a new session or server. Allow
-+        // user to load GUC
-+        if source == 0 {
++        // The sources that we allow are:
++        // 1. PGC_S_DEFAULT (0) -> for default boot up source, likely new session or server.
++        // 2. PGC_S_DATABASE (6) -> a GUC set for a particular database
++        // 3. PGC_S_USER (7) -> a GUC set for a particular role
++        // 4. PGC_S_DATABASE_USER (8) -> a GUC set for a particular role in a particular database
++        // This check only allows sources that load a variable, not ones that try to alter it.
++        // Sources that try to alter it are:
++        // 1. PGC_S_FILE (3) -> ALTER SYSTEM
++        // 2. PGC_S_TEST (12) -> ALTER ROLE/DATABASE
++        // 3. PGC_S_SESSION (13) -> SET ...
++        if source == 0 || source == 6 || source == 7 || source == 8 {
 +            return true;
 +        }
 +        let oid = pg_sys::GetUserId();
@@ -220,7 +237,11 @@ index 74d3822..cb31bb8 100644
  // Register the GUC parameters for the extension
  //
  pub fn register_gucs() {
-@@ -61,6 +110,9 @@ pub fn register_gucs() {
+-    GucRegistry::define_string_guc(
++    GucRegistry::define_string_guc_with_hooks(
+         "anon.dummy_locale",
+         "The default locale for the dummy data functions",
+         "",
          &ANON_DUMMY_LOCALE,
          GucContext::Suset,
          GucFlags::SUPERUSER_ONLY,
@@ -229,8 +250,11 @@ index 74d3822..cb31bb8 100644
 +        None,
      );
  
-     GucRegistry::define_string_guc(
-@@ -70,6 +122,9 @@ pub fn register_gucs() {
+-    GucRegistry::define_string_guc(
++    GucRegistry::define_string_guc_with_hooks(
+         "anon.k_anonymity_provider",
+         "The security label provider used for k-anonymity",
+         "",
          &ANON_K_ANONYMITY_PROVIDER,
          GucContext::Suset,
          GucFlags::SUPERUSER_ONLY,
@@ -240,7 +264,15 @@ index 74d3822..cb31bb8 100644
      );
  
      //
-@@ -87,6 +142,9 @@ pub fn register_gucs() {
+@@ -80,86 +152,113 @@ pub fn register_gucs() {
+     //
+     // https://github.com/pgcentralfoundation/pgrx/commit/d096efe6fb2d86e87d117b520b9ccd2f90b2e0d1
+     //
+-    GucRegistry::define_string_guc(
++    GucRegistry::define_string_guc_with_hooks(
+         "anon.masking_policies",
+         "Define additional masking policies (the 'anon' policy is already defined)",
+         "",
          &ANON_MASKING_POLICIES,
          GucContext::Suset,
          GucFlags::SUPERUSER_ONLY, /* | GucFlags::LIST_INPUT */
@@ -249,8 +281,9 @@ index 74d3822..cb31bb8 100644
 +        None,
      );
  
-     GucRegistry::define_bool_guc(
-@@ -94,16 +152,22 @@ pub fn register_gucs() {
+-    GucRegistry::define_bool_guc(
++    GucRegistry::define_bool_guc_with_hooks(
+         "anon.privacy_by_default",
          "Mask all columns with NULL (or the default value for NOT NULL columns)",
          "",
          &ANON_PRIVACY_BY_DEFAULT,
@@ -261,7 +294,8 @@ index 74d3822..cb31bb8 100644
 +        None,
 +        None,
      );
-     GucRegistry::define_bool_guc(
+-    GucRegistry::define_bool_guc(
++    GucRegistry::define_bool_guc_with_hooks(
          "anon.transparent_dynamic_masking",
          "New masking engine (EXPERIMENTAL)",
          "",
@@ -274,8 +308,11 @@ index 74d3822..cb31bb8 100644
 +        None,
      );
  
-     GucRegistry::define_bool_guc(
-@@ -113,6 +177,9 @@ pub fn register_gucs() {
+-    GucRegistry::define_bool_guc(
++    GucRegistry::define_bool_guc_with_hooks(
+         "anon.restrict_to_trusted_schemas",
+         "Masking filters must be in a trusted schema",
+         "Activate this option to prevent non-superuser from using their own masking filters",
          &ANON_RESTRICT_TO_TRUSTED_SCHEMAS,
          GucContext::Suset,
          GucFlags::SUPERUSER_ONLY,
@@ -284,8 +321,9 @@ index 74d3822..cb31bb8 100644
 +        None,
      );
  
-     GucRegistry::define_bool_guc(
-@@ -120,8 +187,11 @@ pub fn register_gucs() {
+-    GucRegistry::define_bool_guc(
++    GucRegistry::define_bool_guc_with_hooks(
+         "anon.strict_mode",
          "A masking rule cannot change a column data type, unless you disable this",
          "Disabling the mode is not recommended",
          &ANON_STRICT_MODE,
@@ -298,7 +336,13 @@ index 74d3822..cb31bb8 100644
      );
  
      // The GUC vars below are not used in the Rust code
-@@ -134,6 +204,9 @@ pub fn register_gucs() {
+     // but they are used in the plpgsql code
+ 
+-    GucRegistry::define_string_guc(
++    GucRegistry::define_string_guc_with_hooks(
+         "anon.algorithm",
+         "The hash method used for pseudonymizing functions",
+         "",
          &ANON_ALGORITHM,
          GucContext::Suset,
          GucFlags::SUPERUSER_ONLY,
@@ -307,8 +351,9 @@ index 74d3822..cb31bb8 100644
 +        None,
      );
  
-     GucRegistry::define_string_guc(
-@@ -141,8 +214,11 @@ pub fn register_gucs() {
+-    GucRegistry::define_string_guc(
++    GucRegistry::define_string_guc_with_hooks(
+         "anon.maskschema",
          "The schema where the dynamic masking views are stored",
          "",
          &ANON_MASK_SCHEMA,
@@ -320,8 +365,11 @@ index 74d3822..cb31bb8 100644
 +        None,
      );
  
-     GucRegistry::define_string_guc(
-@@ -152,6 +228,9 @@ pub fn register_gucs() {
+-    GucRegistry::define_string_guc(
++    GucRegistry::define_string_guc_with_hooks(
+         "anon.salt",
+         "The salt value used for the pseudonymizing functions",
+         "",
          &ANON_SALT,
          GucContext::Suset,
          GucFlags::SUPERUSER_ONLY,
@@ -330,8 +378,9 @@ index 74d3822..cb31bb8 100644
 +        None,
      );
  
-     GucRegistry::define_string_guc(
-@@ -159,7 +238,10 @@ pub fn register_gucs() {
+-    GucRegistry::define_string_guc(
++    GucRegistry::define_string_guc_with_hooks(
+         "anon.sourceschema",
          "The schema where the table are masked by the dynamic masking engine",
          "",
          &ANON_SOURCE_SCHEMA,
