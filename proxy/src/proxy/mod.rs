@@ -154,34 +154,42 @@ pub async fn task_main(
             .boxed()
             .await;
 
-            match res {
+            let passthrough = match res {
                 Err(e) => {
                     ctx.set_error_kind(e.get_error_kind());
                     warn!(parent: &ctx.span(), "per-client task finished with an error: {e:#}");
+                    return;
                 }
                 Ok(None) => {
                     ctx.set_success();
+                    return;
                 }
                 Ok(Some(p)) => {
                     ctx.set_success();
-                    let _disconnect = ctx.log_connect();
-                    match p.proxy_pass(&config.connect_to_compute).await {
-                        Ok(()) => {}
-                        Err(ErrorSource::Client(e)) => {
-                            warn!(
-                                ?session_id,
-                                "per-client task finished with an IO error from the client: {e:#}"
-                            );
-                        }
-                        Err(ErrorSource::Compute(e)) => {
-                            error!(
-                                ?session_id,
-                                "per-client task finished with an IO error from the compute: {e:#}"
-                            );
-                        }
+                    p
+                }
+            };
+
+            // spawn passthrough as a new task.
+            // holds a task tracker token to prevent the proxy shutting down early.
+            tokio::spawn(async move {
+                let _disconnect = ctx.log_connect();
+                match passthrough.proxy_pass(&config.connect_to_compute).await {
+                    Ok(()) => {}
+                    Err(ErrorSource::Client(e)) => {
+                        warn!(
+                            ?session_id,
+                            "per-client task finished with an IO error from the client: {e:#}"
+                        );
+                    }
+                    Err(ErrorSource::Compute(e)) => {
+                        error!(
+                            ?session_id,
+                            "per-client task finished with an IO error from the compute: {e:#}"
+                        );
                     }
                 }
-            }
+            });
         });
     }
 
