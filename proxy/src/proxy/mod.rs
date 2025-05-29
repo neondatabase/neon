@@ -13,10 +13,11 @@ pub use copy_bidirectional::{ErrorSource, copy_bidirectional_client_compute};
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
+use passthrough::passthrough;
 use pq_proto::{BeMessage as Be, CancelKeyData, StartupMessageParams};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use smol_str::{SmolStr, ToSmolStr, format_smolstr};
+use smol_str::{SmolStr, format_smolstr};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
@@ -24,13 +25,12 @@ use tokio_util::task::task_tracker::TaskTrackerToken;
 use tracing::{Instrument, debug, error, info, warn};
 
 use self::connect_compute::{TcpMechanism, connect_to_compute};
-use self::passthrough::ProxyPassthrough;
 use crate::cancellation::{self, CancellationHandler};
 use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
 use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
-use crate::protocol2::{ConnectHeader, ConnectionInfo, ConnectionInfoExtra, read_proxy_protocol};
+use crate::protocol2::{ConnectHeader, ConnectionInfo, read_proxy_protocol};
 use crate::proxy::handshake::{HandshakeData, handshake};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::{PqStream, Stream};
@@ -412,23 +412,16 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send + 'st
     let ctx = ctx_slot.take().expect("context must be set");
     ctx.set_success();
 
-    let private_link_id = match ctx.extra() {
-        Some(ConnectionInfoExtra::Aws { vpce_id }) => Some(vpce_id.clone()),
-        Some(ConnectionInfoExtra::Azure { link_id }) => Some(link_id.to_smolstr()),
-        None => None,
-    };
-
-    let p = ProxyPassthrough {
-        client: stream,
-        private_link_id,
-        compute: node,
-        session_id: ctx.session_id(),
-        cancel: session,
-        _req: request_gauge,
-        _conn: conn_gauge,
-        _tracker: tracker,
-    };
-    tokio::spawn(p.proxy_pass(ctx, &config.connect_to_compute));
+    tokio::spawn(passthrough(
+        ctx,
+        &config.connect_to_compute,
+        stream,
+        node,
+        session,
+        request_gauge,
+        conn_gauge,
+        tracker,
+    ));
 
     Ok(())
 }
