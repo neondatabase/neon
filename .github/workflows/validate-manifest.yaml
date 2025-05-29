@@ -1,0 +1,24 @@
+name: Validate Manifest Schema
+
+on:
+  pull_request:
+    paths:
+      - 'compute/manifest.yaml'
+      - 'compute/manifest.schema.json'
+
+jobs:
+  validate:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install jsonschema
+        run: npm install -g @sourcemeta/jsonschema
+
+      - name: Validate manifest against schema
+        run: jsonschema validate -d https://json-schema.org/draft/2020-12/schema compute/manifest.schema.json compute/manifest.yaml 
