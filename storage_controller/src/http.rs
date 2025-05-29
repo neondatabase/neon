@@ -482,6 +482,10 @@ async fn handle_tenant_timeline_delete(
         ForwardOutcome::NotForwarded(_req) => {}
     };
 
+    service
+        .maybe_delete_timeline_import(tenant_id, timeline_id)
+        .await?;
+
     // For timeline deletions, which both implement an "initially return 202, then 404 once
     // we're done" semantic, we wrap with a retry loop to expose a simpler API upstream.
     async fn deletion_wrapper<R, F>(service: Arc<Service>, f: F) -> Result<Response<Body>, ApiError>

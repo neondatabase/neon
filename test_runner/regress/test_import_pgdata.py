@@ -19,6 +19,7 @@ from fixtures.neon_fixtures import (
     PageserverImportConfig,
     PgBin,
     PgProtocol,
+    StorageControllerApiException,
     StorageControllerMigrationConfig,
     VanillaPostgres,
 )
@@ -423,8 +424,12 @@ def test_import_completion_on_restart(
 
 
 @run_only_on_default_postgres(reason="PG version is irrelevant here")
-def test_import_respects_tenant_shutdown(
-    neon_env_builder: NeonEnvBuilder, vanilla_pg: VanillaPostgres, make_httpserver: HTTPServer
+@pytest.mark.parametrize("action", ["restart", "delete"])
+def test_import_respects_timeline_lifecycle(
+    neon_env_builder: NeonEnvBuilder,
+    vanilla_pg: VanillaPostgres,
+    make_httpserver: HTTPServer,
+    action: str,
 ):
     """
     Validate that importing timelines respect the usual timeline life cycle:
@@ -492,16 +497,33 @@ def test_import_respects_tenant_shutdown(
     wait_until(hit_failpoint)
     assert not import_completion_signaled.is_set()
 
-    # Restart the pageserver while an import job is in progress.
-    # This clears the failpoint and we expect that the import starts up afresh
-    # after the restart and eventually completes.
-    env.pageserver.stop()
-    env.pageserver.start()
+    if action == "restart":
+        # Restart the pageserver while an import job is in progress.
+        # This clears the failpoint and we expect that the import starts up afresh
+        # after the restart and eventually completes.
+        env.pageserver.stop()
+        env.pageserver.start()
 
-    def cplane_notified():
-        assert import_completion_signaled.is_set()
+        def cplane_notified():
+            assert import_completion_signaled.is_set()
 
-    wait_until(cplane_notified)
+        wait_until(cplane_notified)
+    elif action == "delete":
+        status = env.storage_controller.pageserver_api().timeline_delete(tenant_id, timeline_id)
+        assert status == 200
+
+        timeline_path = env.pageserver.timeline_dir(tenant_id, timeline_id)
+        assert not timeline_path.exists(), "Timeline dir exists after deletion"
+
+        shard_zero = TenantShardId(tenant_id, 0, 0)
+        location = env.storage_controller.inspect(shard_zero)
+        assert location is not None
+        generation = location[0]
+
+        with pytest.raises(StorageControllerApiException, match="not found"):
+            env.storage_controller.import_status(shard_zero, timeline_id, generation)
+    else:
+        raise RuntimeError(f"{action} param not recognized")
 
 
 @skip_in_debug_build("Validation query takes too long in debug builds")

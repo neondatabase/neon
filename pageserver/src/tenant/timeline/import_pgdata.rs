@@ -8,8 +8,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use utils::lsn::Lsn;
+use utils::sync::gate::Gate;
 
-use super::Timeline;
+use super::{Timeline, TimelineDeleteProgress};
 use crate::context::RequestContext;
 use crate::controller_upcall_client::{StorageControllerUpcallApi, StorageControllerUpcallClient};
 use crate::tenant::metadata::TimelineMetadata;
@@ -19,15 +20,23 @@ mod importbucket_client;
 mod importbucket_format;
 pub(crate) mod index_part_format;
 
-pub(crate) struct ImportingTimeline {
+pub struct ImportingTimeline {
     pub import_task_handle: JoinHandle<()>,
+    pub import_task_gate: Gate,
     pub timeline: Arc<Timeline>,
+    pub delete_progress: TimelineDeleteProgress,
+}
+
+impl std::fmt::Debug for ImportingTimeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ImportingTimeline<{}>", self.timeline.timeline_id)
+    }
 }
 
 impl ImportingTimeline {
-    pub(crate) async fn shutdown(self) {
+    pub async fn shutdown(&self) {
         self.import_task_handle.abort();
-        let _ = self.import_task_handle.await;
+        self.import_task_gate.close().await;
 
         self.timeline.remote_client.shutdown().await;
     }
