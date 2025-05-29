@@ -1404,9 +1404,12 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .await?;
                 let span = tracing::info_span!(parent: &parent_span, "handle_test_request", shard_id = %shard.tenant_shard_id.shard_slug());
-                let timer =
-                    record_op_start_and_throttle(&shard, metrics::SmgrQueryType::Test, received_at)
-                        .await?;
+                let timer = Self::record_op_start_and_throttle(
+                    &shard,
+                    metrics::SmgrQueryType::Test,
+                    received_at,
+                )
+                .await?;
                 BatchedFeMessage::Test {
                     span,
                     shard: shard.downgrade(),
