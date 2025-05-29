@@ -1011,6 +1011,4 @@ def test_import_timeline_disk_pressure_eviction(
 
     wait_until(cplane_notified)
 
-    # We might re-write a layer in a different generation if the import
-    # needs to redo some of the progress since not each job is checkpointed.
-    env.pageserver.allowed_errors.extend(".*was unlinked but was not dangling.*")
+    env.pageserver.allowed_errors.append(r".* running disk usage based eviction due to pressure.*")
