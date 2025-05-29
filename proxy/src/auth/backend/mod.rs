@@ -135,16 +135,6 @@ impl<'a, T> Backend<'a, T> {
         }
     }
 }
-impl<'a, T, E> Backend<'a, Result<T, E>> {
-    /// Very similar to [`std::option::Option::transpose`].
-    /// This is most useful for error handling.
-    pub(crate) fn transpose(self) -> Result<Backend<'a, T>, E> {
-        match self {
-            Self::ControlPlane(c, x) => x.map(|x| Backend::ControlPlane(c, x)),
-            Self::Local(l) => Ok(Backend::Local(l)),
-        }
-    }
-}
 
 pub(crate) struct ComputeCredentials {
     pub(crate) info: ComputeUserInfo,
@@ -415,53 +405,39 @@ async fn authenticate_with_secret(
     classic::authenticate(ctx, info, client, config, secret).await
 }
 
-impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
-    /// Get username from the credentials.
-    pub(crate) fn get_user(&self) -> &str {
-        match self {
-            Self::ControlPlane(_, user_info) => &user_info.user,
-            Self::Local(_) => "local",
-        }
-    }
-
+impl ControlPlaneClient {
     /// Authenticate the client via the requested backend, possibly using credentials.
     #[tracing::instrument(fields(allow_cleartext = allow_cleartext), skip_all)]
     pub(crate) async fn authenticate(
-        self,
+        &self,
         ctx: &RequestContext,
         client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
+        user_info: ComputeUserInfoMaybeEndpoint,
         allow_cleartext: bool,
         config: &'static AuthenticationConfig,
         endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-    ) -> auth::Result<Backend<'a, ComputeCredentials>> {
-        let res = match self {
-            Self::ControlPlane(api, user_info) => {
-                debug!(
-                    user = &*user_info.user,
-                    project = user_info.endpoint(),
-                    "performing authentication using the console"
-                );
+    ) -> auth::Result<ComputeCredentials> {
+        debug!(
+            user = &*user_info.user,
+            project = user_info.endpoint(),
+            "performing authentication using the console"
+        );
 
-                let credentials = auth_quirks(
-                    ctx,
-                    &*api,
-                    user_info,
-                    client,
-                    allow_cleartext,
-                    config,
-                    endpoint_rate_limiter,
-                )
-                .await?;
-                Ok(Backend::ControlPlane(api, credentials))
-            }
-            Self::Local(_) => {
-                return Err(auth::AuthError::bad_auth_method("invalid for local proxy"));
-            }
-        };
+        let credentials = auth_quirks(
+            ctx,
+            self,
+            user_info,
+            client,
+            allow_cleartext,
+            config,
+            endpoint_rate_limiter,
+        )
+        .await?;
 
         // TODO: replace with some metric
         info!("user successfully authenticated");
-        res
+
+        Ok(credentials)
     }
 }
 

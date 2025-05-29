@@ -275,6 +275,11 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     conn_gauge: NumClientConnectionsGuard<'static>,
     tracker: TaskTrackerToken,
 ) -> Result<Option<ProxyPassthrough<S>>, ClientRequestError> {
+    let cplane = match auth_backend {
+        auth::Backend::ControlPlane(cplane, ()) => &**cplane,
+        auth::Backend::Local(_) => unreachable!("local proxy does not run tcp proxy service"),
+    };
+
     debug!(
         protocol = %ctx.protocol(),
         "handling interactive connection from client"
@@ -346,21 +351,18 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let common_names = tls.map(|tls| &tls.common_names);
 
     // Extract credentials which we're going to use for auth.
-    let result = auth_backend
-        .as_ref()
-        .map(|()| auth::ComputeUserInfoMaybeEndpoint::parse(ctx, &params, hostname, common_names))
-        .transpose();
-
+    let result = auth::ComputeUserInfoMaybeEndpoint::parse(ctx, &params, hostname, common_names);
     let user_info = match result {
         Ok(user_info) => user_info,
         Err(e) => stream.throw_error(e, Some(ctx)).await?,
     };
 
-    let user = user_info.get_user().to_owned();
-    let user_info = match user_info
+    let user = user_info.user.clone();
+    let compute_creds = match cplane
         .authenticate(
             ctx,
             &mut stream,
+            user_info,
             mode.allow_cleartext(),
             &config.authentication_config,
             endpoint_rate_limiter,
@@ -380,10 +382,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         }
     };
 
-    let compute_user_info = match &user_info {
-        auth::Backend::ControlPlane(_, info) => &info.info,
-        auth::Backend::Local(_) => unreachable!("local proxy does not run tcp proxy service"),
-    };
+    let compute_user_info = compute_creds.info.clone();
     let params_compat = compute_user_info
         .options
         .get(NeonOptions::PARAMS_COMPAT)
@@ -392,12 +391,12 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let mut node = connect_to_compute(
         ctx,
         &TcpMechanism {
-            user_info: compute_user_info.clone(),
+            user_info: compute_user_info,
             params_compat,
             params: &params,
             locks: &config.connect_compute_locks,
         },
-        &user_info,
+        &auth::Backend::ControlPlane(auth::backend::MaybeOwned::Borrowed(cplane), compute_creds),
         config.wake_compute_retry_config,
         &config.connect_to_compute,
     )
