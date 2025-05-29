@@ -67,7 +67,6 @@ where
     }
 }
 
-#[tracing::instrument(skip_all)]
 pub async fn copy_bidirectional_client_compute<Client, Compute>(
     client: &mut Client,
     compute: &mut Compute,
