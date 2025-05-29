@@ -8538,8 +8538,9 @@ impl Service {
         Some(ShardCount(new_shard_count))
     }
 
-    /// Fetches the top tenant shards from every node, in descending order of
-    /// max logical size. Any node errors will be logged and ignored.
+    /// Fetches the top tenant shards from every available node, in descending order of
+    /// max logical size. Offline nodes are skipped, and any errors from available nodes
+    /// will be logged and ignored.
     async fn get_top_tenant_shards(
         &self,
         request: &TopTenantShardsRequest,
@@ -8550,6 +8551,7 @@ impl Service {
             .unwrap()
             .nodes
             .values()
+            .filter(|node| node.is_available())
             .cloned()
             .collect_vec();
 
