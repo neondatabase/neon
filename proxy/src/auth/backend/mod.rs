@@ -17,9 +17,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, warn};
 
 use crate::auth::credentials::check_peer_addr_is_in_list;
-use crate::auth::{
-    self, AuthError, ComputeUserInfoMaybeEndpoint, IpPattern, validate_password_and_exchange,
-};
+use crate::auth::{self, AuthError, ComputeUserInfoMaybeEndpoint, validate_password_and_exchange};
 use crate::cache::Cached;
 use crate::config::AuthenticationConfig;
 use crate::context::RequestContext;
@@ -284,7 +282,7 @@ async fn auth_quirks(
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-) -> auth::Result<(ComputeCredentials, Option<Vec<IpPattern>>)> {
+) -> auth::Result<ComputeCredentials> {
     // If there's no project so far, that entails that client doesn't
     // support SNI or other means of passing the endpoint (project) name.
     // We now expect to see a very specific payload in the place of password.
@@ -301,15 +299,12 @@ async fn auth_quirks(
     debug!("fetching authentication info and allowlists");
 
     // check allowed list
-    let allowed_ips = if config.ip_allowlist_check_enabled {
+    if config.ip_allowlist_check_enabled {
         let allowed_ips = api.get_allowed_ips(ctx, &info).await?;
         if !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips) {
             return Err(auth::AuthError::ip_address_not_allowed(ctx.peer_addr()));
         }
-        allowed_ips
-    } else {
-        Cached::new_uncached(Arc::new(vec![]))
-    };
+    }
 
     // check if a VPC endpoint ID is coming in and if yes, if it's allowed
     let access_blocks = api.get_block_public_or_vpc_access(ctx, &info).await?;
@@ -368,7 +363,7 @@ async fn auth_quirks(
     )
     .await
     {
-        Ok(keys) => Ok((keys, Some(allowed_ips.as_ref().clone()))),
+        Ok(keys) => Ok(keys),
         Err(e) => {
             if e.is_password_failed() {
                 // The password could have been changed, so we invalidate the cache.
@@ -438,7 +433,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
         allow_cleartext: bool,
         config: &'static AuthenticationConfig,
         endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-    ) -> auth::Result<(Backend<'a, ComputeCredentials>, Option<Vec<IpPattern>>)> {
+    ) -> auth::Result<Backend<'a, ComputeCredentials>> {
         let res = match self {
             Self::ControlPlane(api, user_info) => {
                 debug!(
@@ -447,7 +442,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
                     "performing authentication using the console"
                 );
 
-                let (credentials, ip_allowlist) = auth_quirks(
+                let credentials = auth_quirks(
                     ctx,
                     &*api,
                     user_info,
@@ -457,7 +452,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
                     endpoint_rate_limiter,
                 )
                 .await?;
-                Ok((Backend::ControlPlane(api, credentials), ip_allowlist))
+                Ok(Backend::ControlPlane(api, credentials))
             }
             Self::Local(_) => {
                 return Err(auth::AuthError::bad_auth_method("invalid for local proxy"));
@@ -887,7 +882,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(creds.0.info.endpoint, "my-endpoint");
+        assert_eq!(creds.info.endpoint, "my-endpoint");
 
         handle.await.unwrap();
     }
