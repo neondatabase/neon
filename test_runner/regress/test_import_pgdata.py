@@ -340,6 +340,17 @@ def test_pgdata_import_smoke(
     with pytest.raises(psycopg2.errors.UndefinedTable):
         br_initdb_endpoint.safe_psql(f"select * from {workload.table}")
 
+    # The storage controller might be overly eager and attempt to finalize
+    # the import before the task got a chance to exit.
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*Call to node.*management API.*failed.*Import task still running.*",
+        ]
+    )
+
+    for ps in env.pageservers:
+        ps.allowed_errors.extend([".*Error processing HTTP request.*Import task not done yet.*"])
+
 
 @run_only_on_default_postgres(reason="PG version is irrelevant here")
 def test_import_completion_on_restart(
@@ -502,6 +513,17 @@ def test_import_respects_tenant_shutdown(
         assert import_completion_signaled.is_set()
 
     wait_until(cplane_notified)
+
+    # The storage controller might be overly eager and attempt to finalize
+    # the import before the task got a chance to exit.
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*Call to node.*management API.*failed.*Import task still running.*",
+        ]
+    )
+
+    for ps in env.pageservers:
+        ps.allowed_errors.extend([".*Error processing HTTP request.*Import task not done yet.*"])
 
 
 @skip_in_debug_build("Validation query takes too long in debug builds")
