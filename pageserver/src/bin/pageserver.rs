@@ -917,11 +917,6 @@ async fn create_remote_storage_client(
     // If `test_remote_failures` is non-zero, wrap the client with a
     // wrapper that simulates failures.
     if conf.test_remote_failures > 0 {
-        if !cfg!(feature = "testing") {
-            anyhow::bail!(
-                "test_remote_failures option is not available because pageserver was compiled without the 'testing' feature"
-            );
-        }
         info!(
             "Simulating remote failures for first {} attempts of each op",
             conf.test_remote_failures
