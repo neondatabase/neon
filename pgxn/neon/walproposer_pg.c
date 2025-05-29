@@ -35,6 +35,7 @@
 #include "storage/proc.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
+#include "storage/pg_shmem.h"
 #include "storage/shmem.h"
 #include "storage/spin.h"
 #include "tcop/tcopprot.h"
@@ -318,7 +319,7 @@ assign_neon_safekeepers(const char *newval, void *extra)
 	char	   *newval_copy;
 	char	   *oldval;
 
-	if (newval && *newval != '\0' && walprop_shared && RecoveryInProgress())
+	if (newval && *newval != '\0' && UsedShmemSegAddr && walprop_shared && RecoveryInProgress())
 		walprop_shared->replica_promote = true;
 
 	if (!am_walproposer)
