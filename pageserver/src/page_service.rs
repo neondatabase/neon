@@ -11,9 +11,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use std::{io, str};
 
-use anyhow::{Context, bail};
+use anyhow::{Context, anyhow, bail};
 use async_compression::tokio::write::GzipEncoder;
-use bytes::Buf;
+use bytes::{Buf, BytesMut};
 use futures::{FutureExt, Stream};
 use itertools::Itertools;
 use jsonwebtoken::TokenData;
@@ -43,7 +43,7 @@ use pq_proto::framed::ConnectionError;
 use pq_proto::{BeMessage, FeMessage, FeStartupPacket, RowDescriptor};
 use smallvec::{SmallVec, smallvec};
 use strum_macros::IntoStaticStr;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufWriter};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tonic::service::Interceptor as _;
@@ -80,7 +80,7 @@ use crate::tenant::mgr::{
 };
 use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::handle::{HandleUpgradeError, WeakHandle};
-use crate::tenant::timeline::{self, WaitLsnError};
+use crate::tenant::timeline::{self, WaitLsnError, WaitLsnTimeout, WaitLsnWaiter};
 use crate::tenant::{GetTimelineError, PageReconstructError, Timeline};
 use crate::{CancellableTask, PERF_TRACE_TARGET, timed_after_cancellation};
 
@@ -2706,15 +2706,6 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
-        fn map_basebackup_error(err: BasebackupError) -> QueryError {
-            match err {
-                // TODO: passthrough the error site to the final error message?
-                BasebackupError::Client(e, _) => QueryError::Disconnected(ConnectionError::Io(e)),
-                BasebackupError::Server(e) => QueryError::Other(e),
-                BasebackupError::Shutdown => QueryError::Shutdown,
-            }
-        }
-
         let started = std::time::Instant::now();
 
         let timeline = self
@@ -2772,8 +2763,7 @@ impl PageServerHandler {
                 replica,
                 &ctx,
             )
-            .await
-            .map_err(map_basebackup_error)?;
+            .await?;
         } else {
             let mut writer = BufWriter::new(pgb.copyout_writer());
 
@@ -2796,11 +2786,8 @@ impl PageServerHandler {
                 from_cache = true;
                 tokio::io::copy(&mut cached, &mut writer)
                     .await
-                    .map_err(|e| {
-                        map_basebackup_error(BasebackupError::Client(
-                            e,
-                            "handle_basebackup_request,cached,copy",
-                        ))
+                    .map_err(|err| {
+                        BasebackupError::Client(err, "handle_basebackup_request,cached,copy")
                     })?;
             } else if gzip {
                 let mut encoder = GzipEncoder::with_quality(
@@ -2821,8 +2808,7 @@ impl PageServerHandler {
                     replica,
                     &ctx,
                 )
-                .await
-                .map_err(map_basebackup_error)?;
+                .await?;
                 // shutdown the encoder to ensure the gzip footer is written
                 encoder
                     .shutdown()
@@ -2838,15 +2824,12 @@ impl PageServerHandler {
                     replica,
                     &ctx,
                 )
-                .await
-                .map_err(map_basebackup_error)?;
+                .await?;
             }
-            writer.flush().await.map_err(|e| {
-                map_basebackup_error(BasebackupError::Client(
-                    e,
-                    "handle_basebackup_request,flush",
-                ))
-            })?;
+            writer
+                .flush()
+                .await
+                .map_err(|err| BasebackupError::Client(err, "handle_basebackup_request,flush"))?;
         }
 
         pgb.write_message_noflush(&BeMessage::CopyDone)
@@ -3581,11 +3564,87 @@ impl proto::PageService for GrpcPageServiceHandler {
         Ok(tonic::Response::new(resp.into()))
     }
 
+    // TODO: ensure clients use gzip compression for the stream.
     async fn get_base_backup(
         &self,
-        _: tonic::Request<proto::GetBaseBackupRequest>,
+        req: tonic::Request<proto::GetBaseBackupRequest>,
     ) -> Result<tonic::Response<Self::GetBaseBackupStream>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not implemented")) // TODO
+        // Send 64 KB chunks to avoid large memory allocations.
+        const CHUNK_SIZE: usize = 64 * 1024;
+
+        let timeline = self.get_request_timeline(&req).await?;
+        let ctx = self.ctx.with_scope_timeline(&timeline);
+
+        if timeline.is_archived() == Some(true) {
+            return Err(tonic::Status::failed_precondition("timeline is archived"));
+        }
+
+        // Validate the request and wait for the LSN to arrive.
+        //
+        // TODO: this requires a read LSN, is that ok?
+        let req: page_api::GetBaseBackupRequest = req.into_inner().try_into()?;
+
+        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
+        timeline
+            .wait_lsn(
+                req.read_lsn.request_lsn,
+                WaitLsnWaiter::BaseBackupCache,
+                WaitLsnTimeout::Default,
+                &ctx,
+            )
+            .await?;
+        timeline
+            .check_lsn_is_in_scope(req.read_lsn.request_lsn, &latest_gc_cutoff_lsn)
+            .map_err(|err| {
+                tonic::Status::invalid_argument(format!("invalid basebackup LSN: {err}"))
+            })?;
+
+        // Spawn a task to run the basebackup.
+        //
+        // TODO: do we need to support full base backups, for debugging?
+        // TODO: cancellation.
+        let (mut simplex_read, mut simplex_write) = tokio::io::simplex(CHUNK_SIZE);
+        let jh = tokio::spawn(async move {
+            let result = basebackup::send_basebackup_tarball(
+                &mut simplex_write,
+                &timeline,
+                Some(req.read_lsn.request_lsn),
+                None,
+                false,
+                req.replica,
+                &ctx,
+            )
+            .await;
+            simplex_write.shutdown().await.map_err(|err| {
+                BasebackupError::Server(anyhow!("simplex shutdown failed: {err}"))
+            })?;
+            result
+        });
+
+        // Emit chunks of size CHUNK_SIZE.
+        let chunks = async_stream::try_stream! {
+            let mut chunk = BytesMut::with_capacity(CHUNK_SIZE);
+            loop {
+                let n = simplex_read.read_buf(&mut chunk).await.map_err(|err| {
+                    tonic::Status::internal(format!("failed to read basebackup chunk: {err}"))
+                })?;
+
+                // If we read 0 bytes, either the chunk is full or the stream is closed.
+                if n == 0 {
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    yield proto::GetBaseBackupResponseChunk::try_from(chunk.clone().freeze())?;
+                    chunk.clear();
+                }
+            }
+            // Wait for the basebackup task to exit and check for errors.
+            jh.await.map_err(|err| {
+                tonic::Status::internal(format!("basebackup failed: {err}"))
+            })??;
+        };
+
+        Ok(tonic::Response::new(Box::pin(chunks)))
     }
 
     async fn get_db_size(
