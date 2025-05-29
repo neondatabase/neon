@@ -507,6 +507,25 @@ impl ComputeConnectBackend for Backend<'_, ComputeCredentials> {
     }
 }
 
+pub struct ControlPlaneWakeCompute<'a> {
+    pub cplane: &'a ControlPlaneClient,
+    pub creds: ComputeCredentials,
+}
+
+#[async_trait::async_trait]
+impl ComputeConnectBackend for ControlPlaneWakeCompute<'_> {
+    async fn wake_compute(
+        &self,
+        ctx: &RequestContext,
+    ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
+        self.cplane.wake_compute(ctx, &self.creds.info).await
+    }
+
+    fn get_keys(&self) -> &ComputeCredentialKeys {
+        &self.creds.keys
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unimplemented, clippy::unwrap_used)]

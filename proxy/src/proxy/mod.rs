@@ -394,16 +394,16 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
         let mut node = connect_to_compute(
             ctx,
-            &TcpMechanism {
+            TcpMechanism {
                 user_info: compute_user_info,
                 params_compat,
                 params: &params,
                 locks: &config.connect_compute_locks,
             },
-            &auth::Backend::ControlPlane(
-                auth::backend::MaybeOwned::Borrowed(cplane),
-                compute_creds,
-            ),
+            auth::ControlPlaneWakeCompute {
+                cplane,
+                creds: compute_creds,
+            },
             config.wake_compute_retry_config,
             &config.connect_to_compute,
         )

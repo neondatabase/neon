@@ -224,13 +224,13 @@ impl PoolingBackend {
         let backend = self.auth_backend.as_ref().map(|()| keys);
         crate::proxy::connect_compute::connect_to_compute(
             ctx,
-            &TokioMechanism {
+            TokioMechanism {
                 conn_id,
                 conn_info,
                 pool: self.pool.clone(),
                 locks: &self.config.connect_compute_locks,
             },
-            &backend,
+            backend,
             self.config.wake_compute_retry_config,
             &self.config.connect_to_compute,
         )
@@ -268,13 +268,13 @@ impl PoolingBackend {
         });
         crate::proxy::connect_compute::connect_to_compute(
             ctx,
-            &HyperMechanism {
+            HyperMechanism {
                 conn_id,
                 conn_info,
                 pool: self.http_conn_pool.clone(),
                 locks: &self.config.connect_compute_locks,
             },
-            &backend,
+            backend,
             self.config.wake_compute_retry_config,
             &self.config.connect_to_compute,
         )

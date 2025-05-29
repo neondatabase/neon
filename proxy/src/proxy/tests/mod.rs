@@ -625,7 +625,7 @@ async fn connect_to_compute_success() {
     let mechanism = TestConnectMechanism::new(vec![Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
     let config = config();
-    connect_to_compute(&ctx, &mechanism, &user_info, config.retry, &config)
+    connect_to_compute(&ctx, &mechanism, user_info, config.retry, &config)
         .await
         .unwrap();
     mechanism.verify();
@@ -639,7 +639,7 @@ async fn connect_to_compute_retry() {
     let mechanism = TestConnectMechanism::new(vec![Wake, Retry, Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
     let config = config();
-    connect_to_compute(&ctx, &mechanism, &user_info, config.retry, &config)
+    connect_to_compute(&ctx, &mechanism, user_info, config.retry, &config)
         .await
         .unwrap();
     mechanism.verify();
@@ -654,7 +654,7 @@ async fn connect_to_compute_non_retry_1() {
     let mechanism = TestConnectMechanism::new(vec![Wake, Retry, Wake, Fail]);
     let user_info = helper_create_connect_info(&mechanism);
     let config = config();
-    connect_to_compute(&ctx, &mechanism, &user_info, config.retry, &config)
+    connect_to_compute(&ctx, &mechanism, user_info, config.retry, &config)
         .await
         .unwrap_err();
     mechanism.verify();
@@ -669,7 +669,7 @@ async fn connect_to_compute_non_retry_2() {
     let mechanism = TestConnectMechanism::new(vec![Wake, Fail, Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
     let config = config();
-    connect_to_compute(&ctx, &mechanism, &user_info, config.retry, &config)
+    connect_to_compute(&ctx, &mechanism, user_info, config.retry, &config)
         .await
         .unwrap();
     mechanism.verify();
@@ -694,7 +694,7 @@ async fn connect_to_compute_non_retry_3() {
     connect_to_compute(
         &ctx,
         &mechanism,
-        &user_info,
+        user_info,
         wake_compute_retry_config,
         &config,
     )
@@ -712,7 +712,7 @@ async fn wake_retry() {
     let mechanism = TestConnectMechanism::new(vec![WakeRetry, Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
     let config = config();
-    connect_to_compute(&ctx, &mechanism, &user_info, config.retry, &config)
+    connect_to_compute(&ctx, &mechanism, user_info, config.retry, &config)
         .await
         .unwrap();
     mechanism.verify();
@@ -727,7 +727,7 @@ async fn wake_non_retry() {
     let mechanism = TestConnectMechanism::new(vec![WakeRetry, WakeFail]);
     let user_info = helper_create_connect_info(&mechanism);
     let config = config();
-    connect_to_compute(&ctx, &mechanism, &user_info, config.retry, &config)
+    connect_to_compute(&ctx, &mechanism, user_info, config.retry, &config)
         .await
         .unwrap_err();
     mechanism.verify();
@@ -746,7 +746,7 @@ async fn fail_but_wake_invalidates_cache() {
     let user = helper_create_connect_info(&mech);
     let cfg = config();
 
-    connect_to_compute(&ctx, &mech, &user, cfg.retry, &cfg)
+    connect_to_compute(&ctx, &mech, user, cfg.retry, &cfg)
         .await
         .unwrap();
 
@@ -767,7 +767,7 @@ async fn fail_no_wake_skips_cache_invalidation() {
     let user = helper_create_connect_info(&mech);
     let cfg = config();
 
-    connect_to_compute(&ctx, &mech, &user, cfg.retry, &cfg)
+    connect_to_compute(&ctx, &mech, user, cfg.retry, &cfg)
         .await
         .unwrap();
 
@@ -788,7 +788,7 @@ async fn retry_but_wake_invalidates_cache() {
     let user_info = helper_create_connect_info(&mechanism);
     let cfg = config();
 
-    connect_to_compute(&ctx, &mechanism, &user_info, cfg.retry, &cfg)
+    connect_to_compute(&ctx, &mechanism, user_info, cfg.retry, &cfg)
         .await
         .unwrap();
     mechanism.verify();
@@ -811,7 +811,7 @@ async fn retry_no_wake_skips_invalidation() {
     let user_info = helper_create_connect_info(&mechanism);
     let cfg = config();
 
-    connect_to_compute(&ctx, &mechanism, &user_info, cfg.retry, &cfg)
+    connect_to_compute(&ctx, &mechanism, user_info, cfg.retry, &cfg)
         .await
         .unwrap_err();
     mechanism.verify();
