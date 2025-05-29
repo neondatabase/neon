@@ -233,7 +233,7 @@ struct ServiceState {
     /// Queue of tenants who are waiting for concurrency limits to permit them to reconcile
     delayed_reconcile_rx: tokio::sync::mpsc::Receiver<TenantShardId>,
 
-    /// Tracks timeline imports that are finalizing
+    /// Tracks ongoing timeline import finalization tasks
     imports_finalizing: BTreeMap<(TenantId, TimelineId), FinalizingImport>,
 }
 
@@ -4101,6 +4101,11 @@ impl Service {
     ///
     /// If this method gets pre-empted by shut down, it will be called again at start-up (on-going
     /// imports are stored in the database).
+    ///
+    /// # Cancel-Safety
+    /// Not cancel safe.
+    /// If the caller stops polling, the import will not be removed from
+    /// [`ServiceState::imports_finalizing`].
     #[instrument(skip_all, fields(
         tenant_id=%import.tenant_id,
         timeline_id=%import.timeline_id,
