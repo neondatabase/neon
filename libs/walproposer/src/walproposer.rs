@@ -220,7 +220,6 @@ impl Wrapper {
             safekeeper_connection_timeout: config.safekeeper_connection_timeout,
             wal_segment_size: WAL_SEGMENT_SIZE as i32, // default 16MB
             syncSafekeepers: config.sync_safekeepers,
-            replicaPromote: false,
             systemId: 0,
             pgTimeline: 1,
             proto_version: 3,

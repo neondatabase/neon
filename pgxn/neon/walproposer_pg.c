@@ -74,7 +74,6 @@ static XLogRecPtr sentPtr = InvalidXLogRecPtr;
 static const walproposer_api walprop_pg;
 static volatile sig_atomic_t got_SIGUSR2 = false;
 static bool reported_sigusr2 = false;
-static bool start_as_replica = false;
 
 static XLogRecPtr standby_flush_lsn = InvalidXLogRecPtr;
 static XLogRecPtr standby_apply_lsn = InvalidXLogRecPtr;
@@ -126,7 +125,6 @@ init_walprop_config(bool syncSafekeepers)
 	walprop_config.safekeeper_connection_timeout = wal_acceptor_connection_timeout;
 	walprop_config.wal_segment_size = wal_segment_size;
 	walprop_config.syncSafekeepers = syncSafekeepers;
-	walprop_config.replicaPromote = start_as_replica;
 	if (!syncSafekeepers)
 		walprop_config.systemId = GetSystemIdentifier();
 	else
@@ -152,8 +150,6 @@ WalProposerSync(int argc, char *argv[])
 
 	WalProposerStart(wp);
 }
-
-#define GUC_POLL_DELAY 100000L // 0.1 sec
 
 /*
  * WAL proposer bgworker entry point.
@@ -322,8 +318,8 @@ assign_neon_safekeepers(const char *newval, void *extra)
 	char	   *newval_copy;
 	char	   *oldval;
 
-	if (newval && *newval == '\0')
-		start_as_replica = true;
+	if (newval && *newval != '\0' && walprop_shared && RecoveryInProgress())
+		walprop_shared->replica_promote = true;
 
 	if (!am_walproposer)
 		return;
@@ -531,6 +527,7 @@ walprop_register_bgworker(void)
 	bgw.bgw_restart_time = 1;
 	bgw.bgw_notify_pid = 0;
 	bgw.bgw_main_arg = (Datum) 0;
+
 	RegisterBackgroundWorker(&bgw);
 }
 
@@ -2024,7 +2021,6 @@ walprop_pg_get_redo_start_lsn(WalProposer *wp)
 {
 	return GetRedoStartLsn();
 }
-
 
 static bool
 walprop_pg_strong_random(WalProposer *wp, void *buf, size_t len)

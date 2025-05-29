@@ -1380,7 +1380,7 @@ ProcessPropStartPos(WalProposer *wp)
 	 * we must bail out, as clog and other non rel data is inconsistent.
 	 */
 	walprop_shared = wp->api.get_shmem_state(wp);
-	if (!wp->config->syncSafekeepers && !wp->config->replicaPromote)
+	if (!wp->config->syncSafekeepers && !walprop_shared->replica_promote)
 	{
 		/*
 		 * Basebackup LSN always points to the beginning of the record (not
