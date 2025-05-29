@@ -391,6 +391,7 @@ typedef struct WalproposerShmemState
 	/* last feedback from each shard */
 	PageserverFeedback shard_ps_feedback[MAX_SHARDS];
 	int			num_shards;
+	bool		replica_promote;
 
 	/* aggregated feedback with min LSNs across shards */
 	PageserverFeedback min_ps_feedback;
@@ -738,11 +739,6 @@ typedef struct WalProposerConfig
 	 * the latest available LSN.
 	 */
 	bool		syncSafekeepers;
-
-	/*
-	 * Replica is promoted to primary
-	 */
-	bool		replicaPromote;
 
 	/* Will be passed to safekeepers in greet request. */
 	uint64		systemId;
