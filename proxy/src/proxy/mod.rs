@@ -354,30 +354,36 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         return Ok(None);
     };
 
-    let user = user_info.user.clone();
-    let compute_creds = match cplane
-        .authenticate(
-            ctx,
-            &mut stream,
-            user_info,
-            mode.allow_cleartext(),
-            &config.authentication_config,
-            endpoint_rate_limiter,
-        )
-        .await
-    {
-        Ok(auth_result) => auth_result,
-        Err(e) => {
-            let db = params.get("database");
-            let app = params.get("application_name");
-            let params_span = tracing::info_span!("", ?user, ?db, ?app);
+    let auth_result: Result<_, ClientRequestError> = async {
+        let user = user_info.user.clone();
 
-            return stream
-                .throw_error(e, Some(ctx))
-                .instrument(params_span)
-                .await?;
+        match cplane
+            .authenticate(
+                ctx,
+                &mut stream,
+                user_info,
+                mode.allow_cleartext(),
+                &config.authentication_config,
+                endpoint_rate_limiter,
+            )
+            .await
+        {
+            Ok(auth_result) => Ok(auth_result),
+            Err(e) => {
+                let db = params.get("database");
+                let app = params.get("application_name");
+                let params_span = tracing::info_span!("", ?user, ?db, ?app);
+                stream
+                    .throw_error(e, Some(ctx))
+                    .instrument(params_span)
+                    .await?
+            }
         }
-    };
+    }
+    .boxed()
+    .await;
+
+    let compute_creds = auth_result?;
 
     let compute_user_info = compute_creds.info.clone();
     let params_compat = compute_user_info
