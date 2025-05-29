@@ -52,7 +52,7 @@ permissions:
 
 jobs:
   build-neon:
-    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large-debug-seccomp')) }}
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
       contents: read
