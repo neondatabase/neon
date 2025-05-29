@@ -20,7 +20,9 @@ use utils::{
 };
 
 use crate::{
-    persistence::SafekeeperTimelineOpKind, safekeeper::Safekeeper,
+    metrics::{METRICS_REGISTRY, SafekeeperReconcilerLabelGroup},
+    persistence::SafekeeperTimelineOpKind,
+    safekeeper::Safekeeper,
     safekeeper_client::SafekeeperClient,
 };
 
@@ -218,7 +220,26 @@ impl ReconcilerHandle {
     fn schedule_reconcile(&self, req: ScheduleRequest) {
         let (cancel, token_id) = self.new_token_slot(req.tenant_id, req.timeline_id);
         let hostname = req.safekeeper.skp.host.clone();
+        let sk_az = req.safekeeper.skp.availability_zone_id.clone();
+        let sk_node_id = req.safekeeper.get_id().to_string();
+
+        // We don't have direct access to the queue depth here, so increase it blindly by 1.
+        // We know that putting into the queue increases the queue depth. The receiver will
+        // update with the correct value once it processes the next item. To avoid races where we
+        // reduce before we increase, leaving the gauge with a 1 value for a long time, we
+        // increase it before putting into the queue.
+        let queued_gauge = &METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_safkeeper_reconciles_queued;
+        let label_group = SafekeeperReconcilerLabelGroup {
+            sk_az: &sk_az,
+            sk_node_id: &sk_node_id,
+            sk_hostname: &hostname,
+        };
+        queued_gauge.inc(label_group.clone());
+
         if let Err(err) = self.tx.send((req, cancel, token_id)) {
+            queued_gauge.set(label_group, 0);
             tracing::info!("scheduling request onto {hostname} returned error: {err}");
         }
     }
@@ -282,6 +303,18 @@ impl SafekeeperReconciler {
             if req_cancel.is_cancelled() {
                 continue;
             }
+
+            let queued_gauge = &METRICS_REGISTRY
+                .metrics_group
+                .storage_controller_safkeeper_reconciles_queued;
+            queued_gauge.set(
+                SafekeeperReconcilerLabelGroup {
+                    sk_az: &req.safekeeper.skp.availability_zone_id,
+                    sk_node_id: &req.safekeeper.get_id().to_string(),
+                    sk_hostname: &req.safekeeper.skp.host,
+                },
+                self.rx.len() as i64,
+            );
 
             tokio::task::spawn(async move {
                 let kind = req.kind;
@@ -511,6 +544,16 @@ impl SafekeeperReconcilerInner {
                             req.generation,
                         )
                         .await;
+
+                    let complete_counter = &METRICS_REGISTRY
+                        .metrics_group
+                        .storage_controller_safkeeper_reconciles_complete;
+                    complete_counter.inc(SafekeeperReconcilerLabelGroup {
+                        sk_az: &req.safekeeper.skp.availability_zone_id,
+                        sk_node_id: &req.safekeeper.get_id().to_string(),
+                        sk_hostname: &req.safekeeper.skp.host,
+                    });
+
                     if let Err(err) = res {
                         tracing::info!(
                             "couldn't remove reconciliation request onto {} from persistence: {err:?}",
