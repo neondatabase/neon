@@ -141,30 +141,28 @@ pub(crate) async fn serve_websocket(
         .client_connections
         .guard(crate::metrics::Protocol::Ws);
 
-    let res = Box::pin(handle_client(
+    let mut ctx_slot = Some(ctx);
+    let res = handle_client(
         config,
         auth_backend,
-        &ctx,
+        &mut ctx_slot,
         cancellation_handler,
         WebSocketRw::new(websocket),
         ClientMode::Websockets { hostname },
         endpoint_rate_limiter,
         conn_gauge,
         tracker,
-    ))
+    )
     .await;
 
-    match res {
-        Err(e) => {
+    match (ctx_slot, res) {
+        (None, _) => {}
+        (Some(ctx), Err(e)) => {
             ctx.set_error_kind(e.get_error_kind());
             tracing::warn!(parent: &ctx.span(), "per-client task finished with an error: {e:#}");
         }
-        Ok(None) => {
+        (Some(ctx), Ok(())) => {
             ctx.set_success();
-        }
-        Ok(Some(p)) => {
-            ctx.set_success();
-            tokio::spawn(p.proxy_pass(ctx, &config.connect_to_compute));
         }
     }
 }
