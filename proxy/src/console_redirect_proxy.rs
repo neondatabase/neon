@@ -16,9 +16,7 @@ use crate::protocol2::{ConnectHeader, ConnectionInfo, read_proxy_protocol};
 use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
 use crate::proxy::handshake::{HandshakeData, handshake};
 use crate::proxy::passthrough::ProxyPassthrough;
-use crate::proxy::{
-    ClientRequestError, ErrorSource, prepare_client_connection, run_until_cancelled,
-};
+use crate::proxy::{ClientRequestError, prepare_client_connection, run_until_cancelled};
 
 pub async fn task_main(
     config: &'static ProxyConfig,
@@ -126,22 +124,7 @@ pub async fn task_main(
                 }
                 Ok(Some(p)) => {
                     ctx.set_success();
-                    let _disconnect = ctx.log_connect();
-                    match p.proxy_pass(&config.connect_to_compute).await {
-                        Ok(()) => {}
-                        Err(ErrorSource::Client(e)) => {
-                            error!(
-                                ?session_id,
-                                "per-client task finished with an IO error from the client: {e:#}"
-                            );
-                        }
-                        Err(ErrorSource::Compute(e)) => {
-                            error!(
-                                ?session_id,
-                                "per-client task finished with an IO error from the compute: {e:#}"
-                            );
-                        }
-                    }
+                    tokio::spawn(p.proxy_pass(ctx, &config.connect_to_compute));
                 }
             }
         });

@@ -8,6 +8,7 @@ use super::copy_bidirectional::ErrorSource;
 use crate::cancellation;
 use crate::compute::PostgresConnection;
 use crate::config::ComputeConfig;
+use crate::context::RequestContext;
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::metrics::{Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard};
 use crate::stream::Stream;
@@ -75,11 +76,13 @@ pub(crate) struct ProxyPassthrough<S> {
     pub(crate) _tracker: TaskTrackerToken,
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
+impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> ProxyPassthrough<S> {
     pub(crate) async fn proxy_pass(
         self,
-        compute_config: &ComputeConfig,
-    ) -> Result<(), ErrorSource> {
+        ctx: RequestContext,
+        compute_config: &'static ComputeConfig,
+    ) {
+        let _disconnect = ctx.log_connect();
         let res = proxy_pass(
             self.client,
             self.compute.stream,
@@ -87,6 +90,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
             self.private_link_id,
         )
         .await;
+
+        match res {
+            Ok(()) => {}
+            Err(ErrorSource::Client(e)) => {
+                tracing::warn!(
+                    session_id = ?self.session_id,
+                    "per-client task finished with an IO error from the client: {e:#}"
+                );
+            }
+            Err(ErrorSource::Compute(e)) => {
+                tracing::error!(
+                    session_id = ?self.session_id,
+                    "per-client task finished with an IO error from the compute: {e:#}"
+                );
+            }
+        }
+
         if let Err(err) = self
             .compute
             .cancel_closure
@@ -96,8 +116,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
             tracing::warn!(session_id = ?self.session_id, ?err, "could not cancel the query in the database");
         }
 
-        drop(self.cancel.remove_cancel_key()); // we don't need a result. If the queue is full, we just log the error
-
-        res
+        // we don't need a result. If the queue is full, we just log the error
+        drop(self.cancel.remove_cancel_key());
     }
 }

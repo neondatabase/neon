@@ -437,7 +437,15 @@ async fn request_handler(
 
         tokio::spawn(
             async move {
-                if let Err(e) = websocket::serve_websocket(
+                let websocket = match websocket.await {
+                    Err(e) => {
+                        warn!("could not upgrade websocket connection: {e:#}");
+                        return;
+                    }
+                    Ok(websocket) => websocket,
+                };
+
+                websocket::serve_websocket(
                     config,
                     backend.auth_backend,
                     ctx,
@@ -447,10 +455,7 @@ async fn request_handler(
                     host,
                     tracker,
                 )
-                .await
-                {
-                    warn!("error in websocket connection: {e:#}");
-                }
+                .await;
             }
             .instrument(span),
         );
