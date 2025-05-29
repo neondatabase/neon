@@ -8,6 +8,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use utils::lsn::Lsn;
+use utils::pausable_failpoint;
 use utils::sync::gate::Gate;
 
 use super::{Timeline, TimelineDeleteProgress};
@@ -109,6 +110,8 @@ pub async fn doit(
                 .remote_client
                 .schedule_index_upload_for_file_changes()?;
             timeline.remote_client.wait_completion().await?;
+
+            pausable_failpoint!("import-timeline-pre-success-notify-pausable");
 
             // Communicate that shard is done.
             // Ensure at-least-once delivery of the upcall to storage controller

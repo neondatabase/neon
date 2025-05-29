@@ -2442,6 +2442,17 @@ impl TenantShard {
             .collect()
     }
 
+    /// Lists timelines the tenant contains.
+    /// It's up to callers to omit certain timelines that are not considered ready for use.
+    pub fn list_importing_timelines(&self) -> Vec<Arc<ImportingTimeline>> {
+        self.timelines_importing
+            .lock()
+            .unwrap()
+            .values()
+            .map(Arc::clone)
+            .collect()
+    }
+
     /// Lists timelines the tenant manages, including offloaded ones.
     ///
     /// It's up to callers to omit certain timelines that are not considered ready for use.
