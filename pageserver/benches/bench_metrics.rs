@@ -274,7 +274,7 @@ mod histograms {
     pub fn bench_bucket_scalability(c: &mut Criterion) {
         let mut g = c.benchmark_group("bucket_scalability");
 
-        for n in [1, 4, 8, 16, 32, 64] {
+        for n in [1, 4, 8, 16, 32, 64, 128, 256] {
             g.bench_with_input(BenchmarkId::new("nbuckets", n), &n, |b, n| {
                 b.iter_custom(|iters| {
                     let buckets: Vec<f64> = (0..*n).map(|i| i as f64 * 100.0).collect();
@@ -390,6 +390,14 @@ propagation_of_cached_label_value__naive/nthreads/8     time:   [434.87 ns 456.4
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/1     time:   [3.3767 ns 3.3974 ns 3.4220 ns]
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/4     time:   [3.6105 ns 4.2355 ns 5.1463 ns]
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/8     time:   [4.0889 ns 4.9714 ns 6.0779 ns]
+bucket_scalability/nbuckets/1     time:   [4.8455 ns 4.8542 ns 4.8646 ns]
+bucket_scalability/nbuckets/4     time:   [4.5663 ns 4.5722 ns 4.5787 ns]
+bucket_scalability/nbuckets/8     time:   [4.5531 ns 4.5670 ns 4.5842 ns]
+bucket_scalability/nbuckets/16      time:   [4.6392 ns 4.6524 ns 4.6685 ns]
+bucket_scalability/nbuckets/32      time:   [6.0302 ns 6.0439 ns 6.0589 ns]
+bucket_scalability/nbuckets/64      time:   [10.608 ns 10.644 ns 10.691 ns]
+bucket_scalability/nbuckets/128     time:   [22.178 ns 22.316 ns 22.483 ns]
+bucket_scalability/nbuckets/256     time:   [42.190 ns 42.328 ns 42.492 ns]
 
 Results on a Hetzner AX102 AMD Ryzen 9 7950X3D 16-Core Processor
 
