@@ -56,7 +56,6 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
         assert secondary_cur.fetchone() == (100,)
 
     primary.stop_and_destroy(mode="immediate")
-    primary = None
 
     # Reconnect to the secondary to make sure we get a read-write connection
     with secondary.connect() as promo_conn:
