@@ -1905,12 +1905,14 @@ impl Persistence {
     pub(crate) async fn update_sk_ps_discovery_attempt(
         &self,
         pk: SkPsDiscoveryPersistencePk,
+        intent_state: String,
         update: Result<(), ()>,
     ) -> DatabaseResult<()> {
         use crate::schema::sk_ps_discovery::dsl;
 
         self.with_measured_conn(DatabaseOperation::UpdateSkPsDiscoveryAttempt, move |conn| {
             let pk = pk.clone();
+            let intent_state = intent_state.clone();
             Box::pin(async move {
                 match update {
                     Ok(()) => {
@@ -1921,14 +1923,23 @@ impl Persistence {
                             ps_generation,
                             sk_id,
                         } = pk;
-                        diesel::delete(dsl::sk_ps_discovery)
+                        let nrows = diesel::delete(dsl::sk_ps_discovery)
+                            // primary key
                             .filter(dsl::tenant_id.eq(tenant_id))
                             .filter(dsl::shard_number.eq(shard_number))
                             .filter(dsl::shard_count.eq(shard_count))
                             .filter(dsl::ps_generation.eq(ps_generation))
                             .filter(dsl::sk_id.eq(sk_id))
-                            .execute(conn) // TODO: check update count?
+                            // intent_state could have changed beneath us (split brain or concurrent state gc)
+                            // TODO: this could also just be a globally monotonic sequence number, maybe easier to reason about?
+                            .filter(dsl::intent_state.eq(intent_state))
+                            .execute(conn)
                             .await?;
+                        if nrows != 1 {
+                            return Err(DatabaseError::Logical(format!(
+                                "unexpected number of deletes: {nrows}"
+                            )));
+                        }
                     }
                     Err(_) => {
                         let SkPsDiscoveryPersistencePk {
@@ -1939,18 +1950,28 @@ impl Persistence {
                             sk_id,
                         } = pk;
 
-                        diesel::update(dsl::sk_ps_discovery)
+                        let nrows = diesel::update(dsl::sk_ps_discovery)
+                            // primary key
                             .filter(dsl::tenant_id.eq(tenant_id))
                             .filter(dsl::shard_number.eq(shard_number))
                             .filter(dsl::shard_count.eq(shard_count))
                             .filter(dsl::ps_generation.eq(ps_generation))
                             .filter(dsl::sk_id.eq(sk_id))
+                            // intent_state could have changed beneath us (split brain or concurrent state gc)
+                            // TODO: this could also just be a globally monotonic sequence number, maybe easier to reason about?
+                            .filter(dsl::intent_state.eq(intent_state))
+                            // action:
                             .set((
                                 dsl::retries.eq(dsl::retries.add(1)), // XXX: in split-brain situation we would bump twice...
                                 dsl::last_retry_at.eq(diesel::dsl::now),
                             ))
                             .execute(conn) // TODO: check update count?
                             .await?;
+                        if nrows != 1 {
+                            return Err(DatabaseError::Logical(format!(
+                                "unexpected number of updates: {nrows}"
+                            )));
+                        }
                     }
                 }
                 Ok(())
@@ -2543,7 +2564,7 @@ pub(crate) struct TimelineImportPersistence {
     pub(crate) shard_statuses: serde_json::Value,
 }
 
-#[derive(Insertable, AsChangeset, Selectable, Clone)]
+#[derive(Insertable, AsChangeset, Selectable, Clone, PartialEq, Eq, Hash, Debug)]
 #[diesel(table_name = crate::schema::sk_ps_discovery)]
 pub(crate) struct SkPsDiscoveryPersistencePk {
     pub(crate) tenant_id: String,
@@ -2561,10 +2582,12 @@ pub(crate) struct SkPsDiscoveryPersistence {
     pub(crate) shard_count: i32,
     pub(crate) ps_generation: i32,
     pub(crate) sk_id: i64,
+    pub(crate) intent_state: String,
     pub(crate) ps_id: i64,
     pub(crate) created_at: chrono::DateTime<chrono::Utc>,
     pub(crate) retries: i32,
     pub(crate) last_retry_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) acknowledged_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl SkPsDiscoveryPersistence {
@@ -2574,5 +2597,27 @@ impl SkPsDiscoveryPersistence {
             shard_number: ShardNumber(self.shard_number as u8),
             shard_count: ShardCount::new(self.shard_count as u8),
         })
+    }
+    pub(crate) fn primary_key(&self) -> SkPsDiscoveryPersistencePk {
+        let SkPsDiscoveryPersistence {
+            tenant_id,
+            shard_number,
+            shard_count,
+            ps_generation,
+            sk_id,
+            intent_state: _,
+            ps_id: _,
+            created_at: _,
+            retries: _,
+            last_retry_at: _,
+            acknowledged_at: _,
+        } = self;
+        SkPsDiscoveryPersistencePk {
+            tenant_id: tenant_id.clone(),
+            shard_number: *shard_number,
+            shard_count: *shard_count,
+            ps_generation: *ps_generation,
+            sk_id: *sk_id,
+        }
     }
 }

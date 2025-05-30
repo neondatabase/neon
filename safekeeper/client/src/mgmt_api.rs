@@ -9,7 +9,7 @@ use http_utils::error::HttpErrorBody;
 use reqwest::{IntoUrl, Method, StatusCode};
 use safekeeper_api::models::{
     self, PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization,
-    TenantShardPageserverAttachments, TimelineCreateRequest, TimelineStatus,
+    TenantShardPageserverAttachmentChange, TimelineCreateRequest, TimelineStatus,
 };
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::logging::SecretString;
@@ -190,16 +190,16 @@ impl Client {
         resp.json().await.map_err(Error::ReceiveBody)
     }
 
-    pub async fn put_tenant_shard_pageserver_attachments(
+    pub async fn post_tenant_shard_pageserver_attachments(
         &self,
         tenant_shard_id: TenantShardId,
-        attachments: TenantShardPageserverAttachments,
+        body: TenantShardPageserverAttachmentChange,
     ) -> Result<()> {
         let uri = format!(
             "{}/v1/tenant/{tenant_shard_id}/pageserver_attachments",
             self.mgmt_api_endpoint
         );
-        let resp = self.put(uri, attachments).await?;
+        let resp = self.post(uri, body).await?;
         resp.json().await.map_err(Error::ReceiveBody)
     }
 

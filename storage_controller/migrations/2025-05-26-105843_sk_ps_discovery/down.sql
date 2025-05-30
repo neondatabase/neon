@@ -10,7 +10,7 @@ DROP TRIGGER on_ps_tenant_shard_DELETE_enqueue_sk_ps_discovery on "tenant_shards
 DROP FUNCTION on_ps_tenant_shard_DELETE_enqueue_sk_ps_discovery_triggerfn;
 DROP TRIGGER on_ps_tenant_shard_INSERT_enqueue_sk_ps_discovery on "tenant_shards";
 DROP FUNCTION on_ps_tenant_shard_INSERT_enqueue_sk_ps_discovery_triggerfn;
-DROP FUNCTION sk_ps_discovery_enqueue_tenant;
+DROP FUNCTION IF EXISTS sk_ps_discovery_enqueue_attachment_create;
 DROP TABLE "sk_ps_discovery";
 
 

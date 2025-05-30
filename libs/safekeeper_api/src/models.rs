@@ -311,12 +311,14 @@ pub struct PullTimelineResponse {
     // TODO: add more fields?
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TenantShardPageserverAttachments {
-    pub attachments: Vec<TenantShardPageserverAttachment>,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "action")]
+pub enum TenantShardPageserverAttachmentChange {
+    Attach(TenantShardPageserverAttachment),
+    Detach(TenantShardPageserverAttachment),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TenantShardPageserverAttachment {
     pub ps_id: NodeId,
     pub generation: Generation,

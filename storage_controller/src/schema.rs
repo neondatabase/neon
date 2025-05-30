@@ -67,10 +67,12 @@ diesel::table! {
         shard_count -> Int4,
         ps_generation -> Int4,
         sk_id -> Int8,
+        intent_state -> Varchar,
         ps_id -> Int8,
         created_at -> Timestamptz,
         retries -> Int4,
         last_retry_at -> Nullable<Timestamptz>,
+        acknowledged_at -> Nullable<Timestamptz>,
     }
 }
 
