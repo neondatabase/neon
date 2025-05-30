@@ -709,7 +709,7 @@ struct EndpointGenerateJwtCmdArgs {
     endpoint_id: String,
 
     #[clap(short = 's', long, help = "Scope to generate the JWT with", value_parser = ComputeClaimsScope::from_str)]
-    scope: Option<ComputeClaimsScope>,
+    scope: Vec<ComputeClaimsScope>,
 }
 
 #[derive(clap::Subcommand)]
@@ -1580,7 +1580,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                     .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?
             };
 
-            let jwt = endpoint.generate_jwt(args.scope)?;
+            let jwt = endpoint.generate_jwt(Some(args.scope.clone()))?;
 
             print!("{jwt}");
         }
