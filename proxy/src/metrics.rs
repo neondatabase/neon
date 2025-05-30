@@ -7,7 +7,7 @@ use measured::label::{
     LabelVisitor, StaticLabelSet,
 };
 use measured::metric::counter::CounterState;
-use measured::metric::gauge::{AtomicF64, FloatGaugeState, GaugeState};
+use measured::metric::gauge::{AtomicF64, FloatGaugeState};
 use measured::metric::group::Encoding;
 use measured::metric::histogram::Thresholds;
 use measured::metric::name::{MetricName, MetricNameEncoder};
@@ -725,10 +725,15 @@ impl TokioTaskMetrics {
 impl<E: Encoding> MetricGroup<E> for TokioTaskMetrics
 where
     CounterState: MetricEncoding<E>,
-    GaugeState: MetricEncoding<E>,
     FloatGaugeState: MetricEncoding<E>,
 {
     fn collect_group_into(&self, enc: &mut E) -> Result<(), <E as Encoding>::Err> {
+        if self.task_monitors.is_empty() {
+            return Ok(());
+        }
+
+        // TODO: pre-allocated thread-local Vec for snapshots?
+        //       Or stack allocated with const N: usize generic?
         let snapshots = self
             .task_monitors
             .iter()
