@@ -522,12 +522,13 @@ pub async fn handle_request(
         info!("creating timeline {ttid} as it is empty on most advanced {safekeeper_host}");
 
         global_timelines
-            .create(
+            .create_maybe_check_tombstone(
                 ttid,
                 status.mconf,
                 status.pg_info,
                 status.timeline_start_lsn,
                 status.timeline_start_lsn,
+                check_tombstone,
             )
             .await
             .map_err(ApiError::InternalServerError)?;
