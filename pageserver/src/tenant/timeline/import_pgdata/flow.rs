@@ -221,9 +221,14 @@ impl Planner {
         });
 
         // Assigns parts of key space to later parallel jobs
-        // Note: The image layers produced here may have gaps.
-        //       Normally this is not allowed, but these image layers are the baseline
-        //       and the read path can handle them.
+        // Note: The image layers produced here may have gaps, meaning,
+        //       there is not an image for each key in the layer's key range.
+        //       The read path stops traversal at the first image layer, regardless
+        //       of whether a base image has been found for a key or not.
+        //       (Concept of sparse image layers doesn't exist.)
+        //       This behavior is exactly right for the base image layers we're producing here.
+        //       But, since no other place in the code currently produces image layers with gaps,
+        //       it seems noteworthy.
         let mut last_end_key = Key::MIN;
         let mut current_chunk = Vec::new();
         let mut current_chunk_size: usize = 0;
@@ -628,6 +633,12 @@ trait ImportTask {
         let range = ShardedRange::new(self.key_range(), shard_identity);
         let page_count = range.page_count();
         if page_count == u32::MAX {
+            tracing::warn!(
+                "Import task has non contiguous key range: {}..{}",
+                self.key_range().start,
+                self.key_range().end
+            );
+
             // Tasks should operate on contiguous ranges. It is unexpected for
             // ranges to violate this assumption. Calling code handles this by mapping
             // any task on a non contiguous range to its own image layer.
