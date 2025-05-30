@@ -38,6 +38,7 @@ async fn proxy_mitm(
         let (end_client, startup) = match handshake(
             &RequestContext::test(),
             client1,
+            TaskTracker::new().token(),
             Some(&server_config1),
             false,
         )
@@ -45,7 +46,7 @@ async fn proxy_mitm(
         .unwrap()
         {
             HandshakeData::Startup(stream, params) => (stream, params),
-            HandshakeData::Cancel(_) => panic!("cancellation not supported"),
+            HandshakeData::Cancel(_, _) => panic!("cancellation not supported"),
         };
 
         let mut end_server = tokio_util::codec::Framed::new(end_server, PgFrame);

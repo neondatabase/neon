@@ -38,7 +38,7 @@ pub struct RequestContext(
     /// I would typically use a RefCell but that would break the `Send` requirements
     /// so we need something with thread-safety. `TryLock` is a cheap alternative
     /// that offers similar semantics to a `RefCell` but with synchronisation.
-    TryLock<RequestContextInner>,
+    TryLock<Box<RequestContextInner>>,
 );
 
 struct RequestContextInner {
@@ -89,7 +89,7 @@ pub(crate) enum AuthMethod {
 impl Clone for RequestContext {
     fn clone(&self) -> Self {
         let inner = self.0.try_lock().expect("should not deadlock");
-        let new = RequestContextInner {
+        let new = Box::new(RequestContextInner {
             conn_info: inner.conn_info.clone(),
             session_id: inner.session_id,
             protocol: inner.protocol,
@@ -117,7 +117,7 @@ impl Clone for RequestContext {
             disconnect_sender: None,
             latency_timer: LatencyTimer::noop(inner.protocol),
             disconnect_timestamp: inner.disconnect_timestamp,
-        };
+        });
 
         Self(TryLock::new(new))
     }
@@ -140,7 +140,7 @@ impl RequestContext {
             role = tracing::field::Empty,
         );
 
-        let inner = RequestContextInner {
+        let inner = Box::new(RequestContextInner {
             conn_info,
             session_id,
             protocol,
@@ -168,7 +168,7 @@ impl RequestContext {
             disconnect_sender: LOG_CHAN_DISCONNECT.get().and_then(|tx| tx.upgrade()),
             latency_timer: LatencyTimer::new(protocol),
             disconnect_timestamp: None,
-        };
+        });
 
         Self(TryLock::new(inner))
     }
@@ -522,7 +522,7 @@ impl Drop for RequestContextInner {
     }
 }
 
-pub struct DisconnectLogger(RequestContextInner);
+pub struct DisconnectLogger(Box<RequestContextInner>);
 
 impl Drop for DisconnectLogger {
     fn drop(&mut self) {

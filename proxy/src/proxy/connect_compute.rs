@@ -54,6 +54,25 @@ pub(crate) trait ConnectMechanism {
 }
 
 #[async_trait]
+impl<T: ConnectMechanism + Sync> ConnectMechanism for &T {
+    type Connection = T::Connection;
+    type ConnectError = T::ConnectError;
+    type Error = T::Error;
+    async fn connect_once(
+        &self,
+        ctx: &RequestContext,
+        node_info: &control_plane::CachedNodeInfo,
+        config: &ComputeConfig,
+    ) -> Result<Self::Connection, Self::ConnectError> {
+        T::connect_once(self, ctx, node_info, config).await
+    }
+
+    fn update_connect_config(&self, conf: &mut compute::ConnCfg) {
+        T::update_connect_config(self, conf);
+    }
+}
+
+#[async_trait]
 pub(crate) trait ComputeConnectBackend {
     async fn wake_compute(
         &self,
@@ -105,8 +124,8 @@ impl ConnectMechanism for TcpMechanism<'_> {
 #[tracing::instrument(skip_all)]
 pub(crate) async fn connect_to_compute<M: ConnectMechanism, B: ComputeConnectBackend>(
     ctx: &RequestContext,
-    mechanism: &M,
-    user_info: &B,
+    mechanism: M,
+    backend: B,
     wake_compute_retry_config: RetryConfig,
     compute: &ComputeConfig,
 ) -> Result<M::Connection, M::Error>
@@ -116,9 +135,9 @@ where
 {
     let mut num_retries = 0;
     let mut node_info =
-        wake_compute(&mut num_retries, ctx, user_info, wake_compute_retry_config).await?;
+        wake_compute(&mut num_retries, ctx, &backend, wake_compute_retry_config).await?;
 
-    node_info.set_keys(user_info.get_keys());
+    node_info.set_keys(backend.get_keys());
     mechanism.update_connect_config(&mut node_info.config);
 
     // try once
@@ -159,7 +178,7 @@ where
         let old_node_info = invalidate_cache(node_info);
         // TODO: increment num_retries?
         let mut node_info =
-            wake_compute(&mut num_retries, ctx, user_info, wake_compute_retry_config).await?;
+            wake_compute(&mut num_retries, ctx, &backend, wake_compute_retry_config).await?;
         node_info.reuse_settings(old_node_info);
 
         mechanism.update_connect_config(&mut node_info.config);

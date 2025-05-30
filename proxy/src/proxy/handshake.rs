@@ -5,6 +5,7 @@ use pq_proto::{
 };
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_util::task::task_tracker::TaskTrackerToken;
 use tracing::{debug, info, warn};
 
 use crate::auth::endpoint_sni;
@@ -51,7 +52,7 @@ impl ReportableError for HandshakeError {
 
 pub(crate) enum HandshakeData<S> {
     Startup(PqStream<Stream<S>>, StartupMessageParams),
-    Cancel(CancelKeyData),
+    Cancel(CancelKeyData, TaskTrackerToken),
 }
 
 /// Establish a (most probably, secure) connection with the client.
@@ -62,6 +63,7 @@ pub(crate) enum HandshakeData<S> {
 pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     ctx: &RequestContext,
     stream: S,
+    tracker: TaskTrackerToken,
     mut tls: Option<&TlsConfig>,
     record_handshake_error: bool,
 ) -> Result<HandshakeData<S>, HandshakeError> {
@@ -71,7 +73,7 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     const PG_PROTOCOL_EARLIEST: ProtocolVersion = ProtocolVersion::new(3, 0);
     const PG_PROTOCOL_LATEST: ProtocolVersion = ProtocolVersion::new(3, 0);
 
-    let mut stream = PqStream::new(Stream::from_raw(stream));
+    let mut stream = PqStream::new(Stream::from_raw(stream), tracker);
     loop {
         let msg = stream.read_startup_packet().await?;
         match msg {
@@ -157,15 +159,13 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                         let (_, tls_server_end_point) =
                             tls.cert_resolver.resolve(conn_info.server_name());
 
-                        stream = PqStream {
-                            framed: Framed {
-                                stream: Stream::Tls {
-                                    tls: Box::new(tls_stream),
-                                    tls_server_end_point,
-                                },
-                                read_buf,
-                                write_buf,
+                        stream.framed = Framed {
+                            stream: Stream::Tls {
+                                tls: Box::new(tls_stream),
+                                tls_server_end_point,
                             },
+                            read_buf,
+                            write_buf,
                         };
                     }
                 }
@@ -248,7 +248,7 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
             }
             FeStartupPacket::CancelRequest(cancel_key_data) => {
                 info!(session_type = "cancellation", "successful handshake");
-                break Ok(HandshakeData::Cancel(cancel_key_data));
+                break Ok(HandshakeData::Cancel(cancel_key_data, stream.tracker));
             }
         }
     }

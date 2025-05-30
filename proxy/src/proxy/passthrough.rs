@@ -1,5 +1,6 @@
-use smol_str::SmolStr;
+use smol_str::{SmolStr, ToSmolStr};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_util::task::task_tracker::TaskTrackerToken;
 use tracing::debug;
 use utils::measured_stream::MeasuredStream;
 
@@ -7,13 +8,14 @@ use super::copy_bidirectional::ErrorSource;
 use crate::cancellation;
 use crate::compute::PostgresConnection;
 use crate::config::ComputeConfig;
+use crate::context::RequestContext;
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::metrics::{Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard};
+use crate::protocol2::ConnectionInfoExtra;
 use crate::stream::Stream;
 use crate::usage_metrics::{Ids, MetricCounterRecorder, USAGE_METRICS};
 
 /// Forward bytes in both directions (client <-> compute).
-#[tracing::instrument(skip_all)]
 pub(crate) async fn proxy_pass(
     client: impl AsyncRead + AsyncWrite + Unpin,
     compute: impl AsyncRead + AsyncWrite + Unpin,
@@ -61,41 +63,53 @@ pub(crate) async fn proxy_pass(
     Ok(())
 }
 
-pub(crate) struct ProxyPassthrough<S> {
-    pub(crate) client: Stream<S>,
-    pub(crate) compute: PostgresConnection,
-    pub(crate) aux: MetricsAuxInfo,
-    pub(crate) session_id: uuid::Uuid,
-    pub(crate) private_link_id: Option<SmolStr>,
-    pub(crate) cancel: cancellation::Session,
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn passthrough<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    ctx: RequestContext,
+    compute_config: &'static ComputeConfig,
 
-    pub(crate) _req: NumConnectionRequestsGuard<'static>,
-    pub(crate) _conn: NumClientConnectionsGuard<'static>,
-}
+    client: Stream<S>,
+    compute: PostgresConnection,
+    cancel: cancellation::Session,
 
-impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
-    pub(crate) async fn proxy_pass(
-        self,
-        compute_config: &ComputeConfig,
-    ) -> Result<(), ErrorSource> {
-        let res = proxy_pass(
-            self.client,
-            self.compute.stream,
-            self.aux,
-            self.private_link_id,
-        )
-        .await;
-        if let Err(err) = self
-            .compute
-            .cancel_closure
-            .try_cancel_query(compute_config)
-            .await
-        {
-            tracing::warn!(session_id = ?self.session_id, ?err, "could not cancel the query in the database");
+    _req: NumConnectionRequestsGuard<'static>,
+    _conn: NumClientConnectionsGuard<'static>,
+    _tracker: TaskTrackerToken,
+) {
+    let session_id = ctx.session_id();
+    let private_link_id = match ctx.extra() {
+        Some(ConnectionInfoExtra::Aws { vpce_id }) => Some(vpce_id.clone()),
+        Some(ConnectionInfoExtra::Azure { link_id }) => Some(link_id.to_smolstr()),
+        None => None,
+    };
+
+    let _disconnect = ctx.log_connect();
+    let res = proxy_pass(client, compute.stream, compute.aux, private_link_id).await;
+
+    match res {
+        Ok(()) => {}
+        Err(ErrorSource::Client(e)) => {
+            tracing::warn!(
+                session_id = ?session_id,
+                "per-client task finished with an IO error from the client: {e:#}"
+            );
         }
-
-        drop(self.cancel.remove_cancel_key()); // we don't need a result. If the queue is full, we just log the error
-
-        res
+        Err(ErrorSource::Compute(e)) => {
+            tracing::error!(
+                session_id = ?session_id,
+                "per-client task finished with an IO error from the compute: {e:#}"
+            );
+        }
     }
+
+    if let Err(err) = compute
+        .cancel_closure
+        .try_cancel_query(compute_config)
+        .await
+    {
+        tracing::warn!(session_id = ?session_id, ?err, "could not cancel the query in the database");
+    }
+
+    // we don't need a result. If the queue is full, we just log the error
+    drop(cancel.remove_cancel_key());
 }

@@ -41,7 +41,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
+use tokio_util::task::task_tracker::TaskTrackerToken;
 use tracing::{Instrument, info, warn};
 
 use crate::cancellation::CancellationHandler;
@@ -124,7 +124,6 @@ pub async fn task_main(
     let connections = tokio_util::task::task_tracker::TaskTracker::new();
     connections.close(); // allows `connections.wait to complete`
 
-    let cancellations = tokio_util::task::task_tracker::TaskTracker::new();
     while let Some(res) = run_until_cancelled(ws_listener.accept(), &cancellation_token).await {
         let (conn, peer_addr) = res.context("could not accept TCP stream")?;
         if let Err(e) = conn.set_nodelay(true) {
@@ -150,11 +149,11 @@ pub async fn task_main(
         let conn_token = cancellation_token.child_token();
         let tls_acceptor = tls_acceptor.clone();
         let backend = backend.clone();
-        let connections2 = connections.clone();
         let cancellation_handler = cancellation_handler.clone();
         let endpoint_rate_limiter = endpoint_rate_limiter.clone();
-        let cancellations = cancellations.clone();
-        connections.spawn(
+
+        let tracker = connections.token();
+        tokio::spawn(
             async move {
                 let conn_token2 = conn_token.clone();
                 let _cancel_guard = config.http_config.cancel_set.insert(conn_id, conn_token2);
@@ -181,8 +180,7 @@ pub async fn task_main(
                 Box::pin(connection_handler(
                     config,
                     backend,
-                    connections2,
-                    cancellations,
+                    tracker,
                     cancellation_handler,
                     endpoint_rate_limiter,
                     conn_token,
@@ -305,8 +303,7 @@ async fn connection_startup(
 async fn connection_handler(
     config: &'static ProxyConfig,
     backend: Arc<PoolingBackend>,
-    connections: TaskTracker,
-    cancellations: TaskTracker,
+    tracker: TaskTrackerToken,
     cancellation_handler: Arc<CancellationHandler>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     cancellation_token: CancellationToken,
@@ -347,19 +344,17 @@ async fn connection_handler(
 
             // `request_handler` is not cancel safe. It expects to be cancelled only at specific times.
             // By spawning the future, we ensure it never gets cancelled until it decides to.
-            let cancellations = cancellations.clone();
-            let handler = connections.spawn(
+            let handler = tokio::spawn(
                 request_handler(
                     req,
                     config,
                     backend.clone(),
-                    connections.clone(),
+                    tracker.clone(),
                     cancellation_handler.clone(),
                     session_id,
                     conn_info2.clone(),
                     http_request_token,
                     endpoint_rate_limiter.clone(),
-                    cancellations,
                 )
                 .in_current_span()
                 .map_ok_or_else(api_error_into_response, |r| r),
@@ -400,14 +395,13 @@ async fn request_handler(
     mut request: hyper::Request<Incoming>,
     config: &'static ProxyConfig,
     backend: Arc<PoolingBackend>,
-    ws_connections: TaskTracker,
+    tracker: TaskTrackerToken,
     cancellation_handler: Arc<CancellationHandler>,
     session_id: uuid::Uuid,
     conn_info: ConnectionInfo,
     // used to cancel in-flight HTTP requests. not used to cancel websockets
     http_cancellation_token: CancellationToken,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-    cancellations: TaskTracker,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ApiError> {
     let host = request
         .headers()
@@ -441,10 +435,17 @@ async fn request_handler(
         let (response, websocket) = framed_websockets::upgrade::upgrade(&mut request)
             .map_err(|e| ApiError::BadRequest(e.into()))?;
 
-        let cancellations = cancellations.clone();
-        ws_connections.spawn(
+        tokio::spawn(
             async move {
-                if let Err(e) = websocket::serve_websocket(
+                let websocket = match websocket.await {
+                    Err(e) => {
+                        warn!("could not upgrade websocket connection: {e:#}");
+                        return;
+                    }
+                    Ok(websocket) => websocket,
+                };
+
+                websocket::serve_websocket(
                     config,
                     backend.auth_backend,
                     ctx,
@@ -452,12 +453,9 @@ async fn request_handler(
                     cancellation_handler,
                     endpoint_rate_limiter,
                     host,
-                    cancellations,
+                    tracker,
                 )
-                .await
-                {
-                    warn!("error in websocket connection: {e:#}");
-                }
+                .await;
             }
             .instrument(span),
         );

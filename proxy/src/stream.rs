@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_rustls::server::TlsStream;
+use tokio_util::task::task_tracker::TaskTrackerToken;
 use tracing::debug;
 
 use crate::control_plane::messages::ColdStartInfo;
@@ -24,19 +25,22 @@ use crate::tls::TlsServerEndPoint;
 /// to pass random malformed bytes through the connection).
 pub struct PqStream<S> {
     pub(crate) framed: Framed<S>,
+    pub(crate) tracker: TaskTrackerToken,
 }
 
 impl<S> PqStream<S> {
     /// Construct a new libpq protocol wrapper.
-    pub fn new(stream: S) -> Self {
+    pub fn new(stream: S, tracker: TaskTrackerToken) -> Self {
         Self {
             framed: Framed::new(stream),
+            tracker,
         }
     }
 
     /// Extract the underlying stream and read buffer.
-    pub fn into_inner(self) -> (S, BytesMut) {
-        self.framed.into_inner()
+    pub fn into_inner(self) -> (S, BytesMut, TaskTrackerToken) {
+        let (stream, read) = self.framed.into_inner();
+        (stream, read, self.tracker)
     }
 
     /// Get a shared reference to the underlying stream.

@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
-use futures::{FutureExt, TryFutureExt};
+use futures::TryFutureExt;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::task_tracker::TaskTrackerToken;
 use tracing::{Instrument, debug, error, info};
 
 use crate::auth::backend::ConsoleRedirectBackend;
@@ -14,10 +15,8 @@ use crate::metrics::{Metrics, NumClientConnectionsGuard};
 use crate::protocol2::{ConnectHeader, ConnectionInfo, read_proxy_protocol};
 use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
 use crate::proxy::handshake::{HandshakeData, handshake};
-use crate::proxy::passthrough::ProxyPassthrough;
-use crate::proxy::{
-    ClientRequestError, ErrorSource, prepare_client_connection, run_until_cancelled,
-};
+use crate::proxy::passthrough::passthrough;
+use crate::proxy::{ClientRequestError, prepare_client_connection, run_until_cancelled};
 
 pub async fn task_main(
     config: &'static ProxyConfig,
@@ -35,7 +34,6 @@ pub async fn task_main(
     socket2::SockRef::from(&listener).set_keepalive(true)?;
 
     let connections = tokio_util::task::task_tracker::TaskTracker::new();
-    let cancellations = tokio_util::task::task_tracker::TaskTracker::new();
 
     while let Some(accept_result) =
         run_until_cancelled(listener.accept(), &cancellation_token).await
@@ -49,11 +47,11 @@ pub async fn task_main(
 
         let session_id = uuid::Uuid::new_v4();
         let cancellation_handler = Arc::clone(&cancellation_handler);
-        let cancellations = cancellations.clone();
 
         debug!(protocol = "tcp", %session_id, "accepted new TCP connection");
 
-        connections.spawn(async move {
+        let tracker = connections.token();
+        tokio::spawn(async move {
             let (socket, peer_addr) = match read_proxy_protocol(socket).await {
                 Err(e) => {
                     error!("per-client task finished with an error: {e:#}");
@@ -103,99 +101,80 @@ pub async fn task_main(
                 &config.region,
             );
 
+            let span = ctx.span();
+            let mut slot = Some(ctx);
             let res = handle_client(
                 config,
                 backend,
-                &ctx,
+                &mut slot,
                 cancellation_handler,
                 socket,
                 conn_gauge,
-                cancellations,
+                tracker,
             )
-            .instrument(ctx.span())
-            .boxed()
+            .instrument(span)
             .await;
 
-            match res {
-                Err(e) => {
+            match (slot, res) {
+                (None, _) => {}
+                (Some(ctx), Ok(())) => {
+                    ctx.success();
+                }
+                (Some(ctx), Err(e)) => {
                     ctx.set_error_kind(e.get_error_kind());
-                    error!(parent: &ctx.span(), "per-client task finished with an error: {e:#}");
-                }
-                Ok(None) => {
-                    ctx.set_success();
-                }
-                Ok(Some(p)) => {
-                    ctx.set_success();
-                    let _disconnect = ctx.log_connect();
-                    match p.proxy_pass(&config.connect_to_compute).await {
-                        Ok(()) => {}
-                        Err(ErrorSource::Client(e)) => {
-                            error!(
-                                ?session_id,
-                                "per-client task finished with an IO error from the client: {e:#}"
-                            );
-                        }
-                        Err(ErrorSource::Compute(e)) => {
-                            error!(
-                                ?session_id,
-                                "per-client task finished with an IO error from the compute: {e:#}"
-                            );
-                        }
-                    }
+                    tracing::warn!(parent: &ctx.span(), "per-client task finished with an error: {e:#}");
                 }
             }
         });
     }
 
     connections.close();
-    cancellations.close();
     drop(listener);
 
     // Drain connections
     connections.wait().await;
-    cancellations.wait().await;
 
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
+pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     config: &'static ProxyConfig,
     backend: &'static ConsoleRedirectBackend,
-    ctx: &RequestContext,
+    ctx_slot: &mut Option<RequestContext>,
     cancellation_handler: Arc<CancellationHandler>,
     stream: S,
     conn_gauge: NumClientConnectionsGuard<'static>,
-    cancellations: tokio_util::task::task_tracker::TaskTracker,
-) -> Result<Option<ProxyPassthrough<S>>, ClientRequestError> {
-    debug!(
-        protocol = %ctx.protocol(),
-        "handling interactive connection from client"
-    );
+    tracker: TaskTrackerToken,
+) -> Result<(), ClientRequestError> {
+    let protocol = ctx_slot.as_ref().expect("context must be set").protocol();
+    debug!(%protocol, "handling interactive connection from client");
 
     let metrics = &Metrics::get().proxy;
-    let proto = ctx.protocol();
-    let request_gauge = metrics.connection_requests.guard(proto);
+    let request_gauge = metrics.connection_requests.guard(protocol);
 
     let tls = config.tls_config.load();
     let tls = tls.as_deref();
 
-    let record_handshake_error = !ctx.has_private_peer_addr();
-    let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
-    let do_handshake = handshake(ctx, stream, tls, record_handshake_error);
+    let data = {
+        let ctx = ctx_slot.as_ref().expect("context must be set");
+        let record_handshake_error = !ctx.has_private_peer_addr();
+        let _pause = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
+        let do_handshake = handshake(ctx, stream, tracker, tls, record_handshake_error);
+        tokio::time::timeout(config.handshake_timeout, do_handshake).await??
+    };
 
-    let (mut stream, params) = match tokio::time::timeout(config.handshake_timeout, do_handshake)
-        .await??
-    {
+    let (mut stream, params) = match data {
         HandshakeData::Startup(stream, params) => (stream, params),
-        HandshakeData::Cancel(cancel_key_data) => {
+        HandshakeData::Cancel(cancel_key_data, tracker) => {
             // spawn a task to cancel the session, but don't wait for it
-            cancellations.spawn({
-                let cancellation_handler_clone  = Arc::clone(&cancellation_handler);
-                let ctx = ctx.clone();
+            tokio::spawn({
+                let cancellation_handler_clone = Arc::clone(&cancellation_handler);
+                let ctx = ctx_slot.take().expect("context must be set");
                 let cancel_span = tracing::span!(parent: None, tracing::Level::INFO, "cancel_session", session_id = ?ctx.session_id());
                 cancel_span.follows_from(tracing::Span::current());
                 async move {
+                    let _tracker = tracker;
                     cancellation_handler_clone
                         .cancel_session(
                             cancel_key_data,
@@ -205,15 +184,17 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
                             backend.get_api(),
                         )
                         .await
-                        .inspect_err(|e | debug!(error = ?e, "cancel_session failed")).ok();
-                }.instrument(cancel_span)
+                        .inspect_err(|e| debug!(error = ?e, "cancel_session failed"))
+                        .ok();
+                }
+                .instrument(cancel_span)
             });
 
-            return Ok(None);
+            return Ok(());
         }
     };
-    drop(pause);
 
+    let ctx = ctx_slot.as_ref().expect("context must be set");
     ctx.set_db_options(params.clone());
 
     let (node_info, user_info, _ip_allowlist) = match backend
@@ -228,13 +209,13 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     let mut node = connect_to_compute(
         ctx,
-        &TcpMechanism {
+        TcpMechanism {
             user_info,
             params_compat: true,
             params: &params,
             locks: &config.connect_compute_locks,
         },
-        &node_info,
+        node_info,
         config.wake_compute_retry_config,
         &config.connect_to_compute,
     )
@@ -252,17 +233,22 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     // PqStream input buffer. Normally there is none, but our serverless npm
     // driver in pipeline mode sends startup, password and first query
     // immediately after opening the connection.
-    let (stream, read_buf) = stream.into_inner();
+    let (stream, read_buf, tracker) = stream.into_inner();
     node.stream.write_all(&read_buf).await?;
 
-    Ok(Some(ProxyPassthrough {
-        client: stream,
-        aux: node.aux.clone(),
-        private_link_id: None,
-        compute: node,
-        session_id: ctx.session_id(),
-        cancel: session,
-        _req: request_gauge,
-        _conn: conn_gauge,
-    }))
+    let ctx = ctx_slot.take().expect("context must be set");
+    ctx.set_success();
+
+    tokio::spawn(passthrough(
+        ctx,
+        &config.connect_to_compute,
+        stream,
+        node,
+        session,
+        request_gauge,
+        conn_gauge,
+        tracker,
+    ));
+
+    Ok(())
 }

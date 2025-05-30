@@ -323,7 +323,7 @@ impl CancellationHandler {
         }
     }
 
-    pub(crate) fn get_key(self: &Arc<Self>) -> Session {
+    pub(crate) fn get_key(self: Arc<Self>) -> Session {
         // we intentionally generate a random "backend pid" and "secret key" here.
         // we use the corresponding u64 as an identifier for the
         // actual endpoint+pid+secret for postgres/pgbouncer.
@@ -340,7 +340,7 @@ impl CancellationHandler {
         Session {
             key,
             redis_key,
-            cancellation_handler: Arc::clone(self),
+            cancellation_handler: self,
         }
     }
 

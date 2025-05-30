@@ -2,14 +2,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 
-use anyhow::Context as _;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use framed_websockets::{Frame, OpCode, WebSocketServer};
 use futures::{Sink, Stream};
-use hyper::upgrade::OnUpgrade;
+use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use pin_project_lite::pin_project;
 use tokio::io::{self, AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
+use tokio_util::task::task_tracker::TaskTrackerToken;
 use tracing::warn;
 
 use crate::cancellation::CancellationHandler;
@@ -17,7 +17,7 @@ use crate::config::ProxyConfig;
 use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::Metrics;
-use crate::proxy::{ClientMode, ErrorSource, handle_client};
+use crate::proxy::{ClientMode, handle_client};
 use crate::rate_limiter::EndpointRateLimiter;
 
 pin_project! {
@@ -128,13 +128,12 @@ pub(crate) async fn serve_websocket(
     config: &'static ProxyConfig,
     auth_backend: &'static crate::auth::Backend<'static, ()>,
     ctx: RequestContext,
-    websocket: OnUpgrade,
+    websocket: Upgraded,
     cancellation_handler: Arc<CancellationHandler>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     hostname: Option<String>,
-    cancellations: tokio_util::task::task_tracker::TaskTracker,
-) -> anyhow::Result<()> {
-    let websocket = websocket.await?;
+    tracker: TaskTrackerToken,
+) {
     let websocket = WebSocketServer::after_handshake(TokioIo::new(websocket));
 
     let conn_gauge = Metrics::get()
@@ -142,36 +141,28 @@ pub(crate) async fn serve_websocket(
         .client_connections
         .guard(crate::metrics::Protocol::Ws);
 
-    let res = Box::pin(handle_client(
+    let mut ctx_slot = Some(ctx);
+    let res = handle_client(
         config,
         auth_backend,
-        &ctx,
+        &mut ctx_slot,
         cancellation_handler,
         WebSocketRw::new(websocket),
         ClientMode::Websockets { hostname },
         endpoint_rate_limiter,
         conn_gauge,
-        cancellations,
-    ))
+        tracker,
+    )
     .await;
 
-    match res {
-        Err(e) => {
+    match (ctx_slot, res) {
+        (None, _) => {}
+        (Some(ctx), Err(e)) => {
             ctx.set_error_kind(e.get_error_kind());
-            Err(e.into())
+            tracing::warn!(parent: &ctx.span(), "per-client task finished with an error: {e:#}");
         }
-        Ok(None) => {
+        (Some(ctx), Ok(())) => {
             ctx.set_success();
-            Ok(())
-        }
-        Ok(Some(p)) => {
-            ctx.set_success();
-            ctx.log_connect();
-            match p.proxy_pass(&config.connect_to_compute).await {
-                Ok(()) => Ok(()),
-                Err(ErrorSource::Client(err)) => Err(err).context("client"),
-                Err(ErrorSource::Compute(err)) => Err(err).context("compute"),
-            }
         }
     }
 }

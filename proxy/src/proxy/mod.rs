@@ -10,26 +10,27 @@ pub(crate) mod wake_compute;
 use std::sync::Arc;
 
 pub use copy_bidirectional::{ErrorSource, copy_bidirectional_client_compute};
-use futures::{FutureExt, TryFutureExt};
+use futures::TryFutureExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
+use passthrough::passthrough;
 use pq_proto::{BeMessage as Be, CancelKeyData, StartupMessageParams};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use smol_str::{SmolStr, ToSmolStr, format_smolstr};
+use smol_str::{SmolStr, format_smolstr};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::task_tracker::TaskTrackerToken;
 use tracing::{Instrument, debug, error, info, warn};
 
 use self::connect_compute::{TcpMechanism, connect_to_compute};
-use self::passthrough::ProxyPassthrough;
 use crate::cancellation::{self, CancellationHandler};
 use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
 use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
-use crate::protocol2::{ConnectHeader, ConnectionInfo, ConnectionInfoExtra, read_proxy_protocol};
+use crate::protocol2::{ConnectHeader, ConnectionInfo, read_proxy_protocol};
 use crate::proxy::handshake::{HandshakeData, handshake};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::{PqStream, Stream};
@@ -70,7 +71,6 @@ pub async fn task_main(
     socket2::SockRef::from(&listener).set_keepalive(true)?;
 
     let connections = tokio_util::task::task_tracker::TaskTracker::new();
-    let cancellations = tokio_util::task::task_tracker::TaskTracker::new();
 
     while let Some(accept_result) =
         run_until_cancelled(listener.accept(), &cancellation_token).await
@@ -84,12 +84,12 @@ pub async fn task_main(
 
         let session_id = uuid::Uuid::new_v4();
         let cancellation_handler = Arc::clone(&cancellation_handler);
-        let cancellations = cancellations.clone();
 
         debug!(protocol = "tcp", %session_id, "accepted new TCP connection");
         let endpoint_rate_limiter2 = endpoint_rate_limiter.clone();
 
-        connections.spawn(async move {
+        let tracker = connections.token();
+        tokio::spawn(async move {
             let (socket, conn_info) = match read_proxy_protocol(socket).await {
                 Err(e) => {
                     warn!("per-client task finished with an error: {e:#}");
@@ -138,60 +138,41 @@ pub async fn task_main(
                 crate::metrics::Protocol::Tcp,
                 &config.region,
             );
+            let span = ctx.span();
+            let mut ctx = Some(ctx);
 
             let res = handle_client(
                 config,
                 auth_backend,
-                &ctx,
+                &mut ctx,
                 cancellation_handler,
                 socket,
                 ClientMode::Tcp,
                 endpoint_rate_limiter2,
                 conn_gauge,
-                cancellations,
+                tracker,
             )
-            .instrument(ctx.span())
-            .boxed()
+            .instrument(span)
             .await;
 
-            match res {
-                Err(e) => {
+            match (ctx, res) {
+                (None, _) => {}
+                (Some(ctx), Ok(())) => {
+                    ctx.success();
+                }
+                (Some(ctx), Err(e)) => {
                     ctx.set_error_kind(e.get_error_kind());
                     warn!(parent: &ctx.span(), "per-client task finished with an error: {e:#}");
-                }
-                Ok(None) => {
-                    ctx.set_success();
-                }
-                Ok(Some(p)) => {
-                    ctx.set_success();
-                    let _disconnect = ctx.log_connect();
-                    match p.proxy_pass(&config.connect_to_compute).await {
-                        Ok(()) => {}
-                        Err(ErrorSource::Client(e)) => {
-                            warn!(
-                                ?session_id,
-                                "per-client task finished with an IO error from the client: {e:#}"
-                            );
-                        }
-                        Err(ErrorSource::Compute(e)) => {
-                            error!(
-                                ?session_id,
-                                "per-client task finished with an IO error from the compute: {e:#}"
-                            );
-                        }
-                    }
                 }
             }
         });
     }
 
     connections.close();
-    cancellations.close();
     drop(listener);
 
     // Drain connections
     connections.wait().await;
-    cancellations.wait().await;
 
     Ok(())
 }
@@ -258,46 +239,79 @@ impl ReportableError for ClientRequestError {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
+pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     config: &'static ProxyConfig,
     auth_backend: &'static auth::Backend<'static, ()>,
-    ctx: &RequestContext,
+    ctx_slot: &mut Option<RequestContext>,
     cancellation_handler: Arc<CancellationHandler>,
     stream: S,
     mode: ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     conn_gauge: NumClientConnectionsGuard<'static>,
-    cancellations: tokio_util::task::task_tracker::TaskTracker,
-) -> Result<Option<ProxyPassthrough<S>>, ClientRequestError> {
-    debug!(
-        protocol = %ctx.protocol(),
-        "handling interactive connection from client"
-    );
+    tracker: TaskTrackerToken,
+) -> Result<(), ClientRequestError> {
+    let cplane = match auth_backend {
+        auth::Backend::ControlPlane(cplane, ()) => &**cplane,
+        auth::Backend::Local(_) => unreachable!("local proxy does not run tcp proxy service"),
+    };
+
+    let protocol = ctx_slot.as_ref().expect("context must be set").protocol();
+    debug!(%protocol, "handling interactive connection from client");
 
     let metrics = &Metrics::get().proxy;
-    let proto = ctx.protocol();
-    let request_gauge = metrics.connection_requests.guard(proto);
+    let request_gauge = metrics.connection_requests.guard(protocol);
 
-    let tls = config.tls_config.load();
-    let tls = tls.as_deref();
+    let handshake_result: Result<_, ClientRequestError> = async {
+        let tls = config.tls_config.load();
+        let tls = tls.as_deref();
 
-    let record_handshake_error = !ctx.has_private_peer_addr();
-    let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
-    let do_handshake = handshake(ctx, stream, mode.handshake_tls(tls), record_handshake_error);
+        let ctx = ctx_slot.as_ref().expect("context must be set");
+        let record_handshake_error = !ctx.has_private_peer_addr();
+        let data = {
+            let _pause = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
+            tokio::time::timeout(
+                config.handshake_timeout,
+                handshake(
+                    ctx,
+                    stream,
+                    tracker,
+                    mode.handshake_tls(tls),
+                    record_handshake_error,
+                ),
+            )
+            .await??
+        };
 
-    let (mut stream, params) = match tokio::time::timeout(config.handshake_timeout, do_handshake)
-        .await??
-    {
-        HandshakeData::Startup(stream, params) => (stream, params),
-        HandshakeData::Cancel(cancel_key_data) => {
-            // spawn a task to cancel the session, but don't wait for it
-            cancellations.spawn({
-                let cancellation_handler_clone = Arc::clone(&cancellation_handler);
-                let ctx = ctx.clone();
-                let cancel_span = tracing::span!(parent: None, tracing::Level::INFO, "cancel_session", session_id = ?ctx.session_id());
+        match data {
+            HandshakeData::Startup(mut stream, params) => {
+                ctx.set_db_options(params.clone());
+
+                let host = mode.hostname(stream.get_ref());
+                let cn = tls.map(|tls| &tls.common_names);
+
+                // Extract credentials which we're going to use for auth.
+                let result = auth::ComputeUserInfoMaybeEndpoint::parse(ctx, &params, host, cn);
+                let user_info = match result {
+                    Ok(user_info) => user_info,
+                    Err(e) => stream.throw_error(e, Some(ctx)).await?,
+                };
+
+                let session = cancellation_handler.get_key();
+                Ok(Some((stream, params, session, user_info)))
+            }
+            HandshakeData::Cancel(cancel_key_data, tracker) => {
+                let ctx = ctx_slot.take().expect("context must be set");
+                ctx.set_success();
+
+                let cancel_span = tracing::info_span!(parent: None, "cancel_session", session_id = ?ctx.session_id());
                 cancel_span.follows_from(tracing::Span::current());
-                async move {
-                    cancellation_handler_clone
+
+                // spawn a task to cancel the session, but don't wait for it
+                tokio::spawn(async move {
+                    // ensure the proxy doesn't shutdown until we complete this task.
+                    let _tracker = tracker;
+
+                    cancellation_handler
                         .cancel_session(
                             cancel_key_data,
                             ctx,
@@ -305,111 +319,108 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
                             config.authentication_config.is_vpc_acccess_proxy,
                             auth_backend.get_api(),
                         )
+                        .instrument(cancel_span)
                         .await
-                        .inspect_err(|e | debug!(error = ?e, "cancel_session failed")).ok();
-                }.instrument(cancel_span)
-            });
+                        .unwrap_or_else(|e| debug!(error = ?e, "cancel_session failed"));
+                });
 
-            return Ok(None);
+                Ok(None)
+            }
         }
+    }
+    .await;
+
+    let Some((mut stream, params, session, user_info)) = handshake_result? else {
+        return Ok(());
     };
-    drop(pause);
+    let ctx = ctx_slot.as_ref().expect("context must be set");
 
-    ctx.set_db_options(params.clone());
+    let auth_result: Result<_, ClientRequestError> = async {
+        let user = user_info.user.clone();
 
-    let hostname = mode.hostname(stream.get_ref());
+        match cplane
+            .authenticate(
+                ctx,
+                &mut stream,
+                user_info,
+                mode.allow_cleartext(),
+                &config.authentication_config,
+                endpoint_rate_limiter,
+            )
+            .await
+        {
+            Ok(auth_result) => Ok(auth_result),
+            Err(e) => {
+                let db = params.get("database");
+                let app = params.get("application_name");
+                let params_span = tracing::info_span!("", ?user, ?db, ?app);
+                stream
+                    .throw_error(e, Some(ctx))
+                    .instrument(params_span)
+                    .await?
+            }
+        }
+    }
+    .await;
 
-    let common_names = tls.map(|tls| &tls.common_names);
+    let compute_creds = auth_result?;
 
-    // Extract credentials which we're going to use for auth.
-    let result = auth_backend
-        .as_ref()
-        .map(|()| auth::ComputeUserInfoMaybeEndpoint::parse(ctx, &params, hostname, common_names))
-        .transpose();
+    let connect_result: Result<_, ClientRequestError> = async {
+        let compute_user_info = compute_creds.info.clone();
+        let params_compat = compute_user_info
+            .options
+            .get(NeonOptions::PARAMS_COMPAT)
+            .is_some();
 
-    let user_info = match result {
-        Ok(user_info) => user_info,
-        Err(e) => stream.throw_error(e, Some(ctx)).await?,
-    };
-
-    let user = user_info.get_user().to_owned();
-    let (user_info, _ip_allowlist) = match user_info
-        .authenticate(
+        let mut node = connect_to_compute(
             ctx,
-            &mut stream,
-            mode.allow_cleartext(),
-            &config.authentication_config,
-            endpoint_rate_limiter,
+            TcpMechanism {
+                user_info: compute_user_info,
+                params_compat,
+                params: &params,
+                locks: &config.connect_compute_locks,
+            },
+            auth::ControlPlaneWakeCompute {
+                cplane,
+                creds: compute_creds,
+            },
+            config.wake_compute_retry_config,
+            &config.connect_to_compute,
         )
-        .await
-    {
-        Ok(auth_result) => auth_result,
-        Err(e) => {
-            let db = params.get("database");
-            let app = params.get("application_name");
-            let params_span = tracing::info_span!("", ?user, ?db, ?app);
+        .or_else(|e| stream.throw_error(e, Some(ctx)))
+        .await?;
 
-            return stream
-                .throw_error(e, Some(ctx))
-                .instrument(params_span)
-                .await?;
-        }
-    };
+        session.write_cancel_key(node.cancel_closure.clone())?;
+        prepare_client_connection(&node, *session.key(), &mut stream).await?;
 
-    let compute_user_info = match &user_info {
-        auth::Backend::ControlPlane(_, info) => &info.info,
-        auth::Backend::Local(_) => unreachable!("local proxy does not run tcp proxy service"),
-    };
-    let params_compat = compute_user_info
-        .options
-        .get(NeonOptions::PARAMS_COMPAT)
-        .is_some();
+        // Before proxy passing, forward to compute whatever data is left in the
+        // PqStream input buffer. Normally there is none, but our serverless npm
+        // driver in pipeline mode sends startup, password and first query
+        // immediately after opening the connection.
+        let (stream, read_buf, tracker) = stream.into_inner();
+        node.stream.write_all(&read_buf).await?;
 
-    let mut node = connect_to_compute(
+        Ok((node, stream, tracker))
+    }
+    .await;
+
+    let (node, stream, tracker) = connect_result?;
+
+    let ctx = ctx_slot.take().expect("context must be set");
+    ctx.set_success();
+
+    tokio::spawn(passthrough(
         ctx,
-        &TcpMechanism {
-            user_info: compute_user_info.clone(),
-            params_compat,
-            params: &params,
-            locks: &config.connect_compute_locks,
-        },
-        &user_info,
-        config.wake_compute_retry_config,
         &config.connect_to_compute,
-    )
-    .or_else(|e| stream.throw_error(e, Some(ctx)))
-    .await?;
+        stream,
+        node,
+        session,
+        request_gauge,
+        conn_gauge,
+        tracker,
+    ));
 
-    let cancellation_handler_clone = Arc::clone(&cancellation_handler);
-    let session = cancellation_handler_clone.get_key();
-
-    session.write_cancel_key(node.cancel_closure.clone())?;
-
-    prepare_client_connection(&node, *session.key(), &mut stream).await?;
-
-    // Before proxy passing, forward to compute whatever data is left in the
-    // PqStream input buffer. Normally there is none, but our serverless npm
-    // driver in pipeline mode sends startup, password and first query
-    // immediately after opening the connection.
-    let (stream, read_buf) = stream.into_inner();
-    node.stream.write_all(&read_buf).await?;
-
-    let private_link_id = match ctx.extra() {
-        Some(ConnectionInfoExtra::Aws { vpce_id }) => Some(vpce_id.clone()),
-        Some(ConnectionInfoExtra::Azure { link_id }) => Some(link_id.to_smolstr()),
-        None => None,
-    };
-
-    Ok(Some(ProxyPassthrough {
-        client: stream,
-        aux: node.aux.clone(),
-        private_link_id,
-        compute: node,
-        session_id: ctx.session_id(),
-        cancel: session,
-        _req: request_gauge,
-        _conn: conn_gauge,
-    }))
+    Ok(())
 }
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
