@@ -64,9 +64,8 @@ struct Cli {
     pub pgbin: String,
 
     /// The base URL for the remote extension storage proxy gateway.
-    /// Should be in the form of `http(s)://<gateway-hostname>[:<port>]`.
-    #[arg(short = 'r', long, alias = "remote-ext-config")]
-    pub remote_ext_base_url: Option<String>,
+    #[arg(short = 'r', long)]
+    pub remote_ext_base_url: Option<Url>,
 
     /// The port to bind the external listening HTTP server to. Clients running
     /// outside the compute will talk to the compute through this port. Keep

@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 use std::{env, fs};
 use tokio::spawn;
 use tracing::{Instrument, debug, error, info, instrument, warn};
+use url::Url;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 use utils::measured_stream::MeasuredReader;
@@ -96,7 +97,7 @@ pub struct ComputeNodeParams {
     pub internal_http_port: u16,
 
     /// the address of extension storage proxy gateway
-    pub remote_ext_base_url: Option<String>,
+    pub remote_ext_base_url: Option<Url>,
 
     /// Interval for installed extensions collection
     pub installed_extensions_collection_interval: u64,
