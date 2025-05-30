@@ -33,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg-version: [16, 17]
+        pg-version: [17]
 
     runs-on: small
     container:
@@ -72,6 +72,27 @@ jobs:
           postgres_version: ${{ matrix.pg-version }}
           project_settings: ${{ steps.project-settings.outputs.settings }}
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+
+      - name: Update the project settings
+        run: |
+          SETTINGS=$(curl \
+             "https://console-stage.neon.build/regions/aws-us-east-2-cell-1/api/v1/admin/projects/${PROJECT_ID}" \
+             --fail \
+             --header "Accept: application/json" \
+             --header "Content-Type: application/json" \
+             --header "Authorization: Bearer ${ADMIN_API_KEY}" | \
+            jq '.project.settings + {"compute_image":"369495373322.dkr.ecr.us-east-2.amazonaws.com/vm-compute-node-v17:15326350302"}'
+             )
+          curl -X POST --fail \
+             "https://console-stage.neon.build/regions/aws-us-east-2-cell-1/api/v1/admin/projects/${PROJECT_ID}/settings" \
+             --header "Accept: application/json" \
+             --header "Content-Type: application/json" \
+             --header "Authorization: Bearer ${ADMIN_API_KEY}" \
+             --data "${SETTINGS}"
+
+        env:
+          PROJECT_ID: ${{ steps.create-neon-project.outputs.project_id }}
+          ADMIN_API_KEY: ${{ secrets.NEON_STAGING_ADMIN_API_KEY }}
 
       - name: Run the regression tests
         run: /run-tests.sh -r /ext-src
