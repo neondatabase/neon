@@ -12,13 +12,19 @@ import psycopg2
 import psycopg2.errors
 import pytest
 from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
-from fixtures.fast_import import FastImport
+from fixtures.fast_import import (
+    FastImport,
+    mock_import_bucket,
+    populate_vanilla_pg,
+    validate_import_from_vanilla_pg,
+)
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PageserverImportConfig,
     PgBin,
     PgProtocol,
+    StorageControllerApiException,
     StorageControllerMigrationConfig,
     VanillaPostgres,
 )
@@ -57,24 +63,6 @@ smoke_params = [
     # many shards, small stripe size to speed up test
     *[(8, 1024, s) for s in RelBlockSize],
 ]
-
-
-def mock_import_bucket(vanilla_pg: VanillaPostgres, path: Path):
-    """
-    Mock the import S3 bucket into a local directory for a provided vanilla PG instance.
-    """
-    assert not vanilla_pg.is_running()
-
-    path.mkdir()
-    # what cplane writes before scheduling fast_import
-    specpath = path / "spec.json"
-    specpath.write_text(json.dumps({"branch_id": "somebranch", "project_id": "someproject"}))
-    # what fast_import writes
-    vanilla_pg.pgdatadir.rename(path / "pgdata")
-    statusdir = path / "status"
-    statusdir.mkdir()
-    (statusdir / "pgdata").write_text(json.dumps({"done": True}))
-    (statusdir / "fast_import").write_text(json.dumps({"command": "pgdata", "done": True}))
 
 
 @skip_in_debug_build("MULTIPLE_RELATION_SEGMENTS has non trivial amount of data")
@@ -131,10 +119,6 @@ def test_pgdata_import_smoke(
     # Put data in vanilla pg
     #
 
-    vanilla_pg.start()
-    vanilla_pg.safe_psql("create user cloud_admin with password 'postgres' superuser")
-
-    log.info("create relblock data")
     if rel_block_size == RelBlockSize.ONE_STRIPE_SIZE:
         target_relblock_size = stripe_size * 8192
     elif rel_block_size == RelBlockSize.TWO_STRPES_PER_SHARD:
@@ -145,45 +129,8 @@ def test_pgdata_import_smoke(
     else:
         raise ValueError
 
-    # fillfactor so we don't need to produce that much data
-    # 900 byte per row is > 10% => 1 row per page
-    vanilla_pg.safe_psql("""create table t (data char(900)) with (fillfactor = 10)""")
-
-    nrows = 0
-    while True:
-        relblock_size = vanilla_pg.safe_psql_scalar("select pg_relation_size('t')")
-        log.info(
-            f"relblock size: {relblock_size / 8192} pages (target: {target_relblock_size // 8192}) pages"
-        )
-        if relblock_size >= target_relblock_size:
-            break
-        addrows = int((target_relblock_size - relblock_size) // 8192)
-        assert addrows >= 1, "forward progress"
-        vanilla_pg.safe_psql(
-            f"insert into t select generate_series({nrows + 1}, {nrows + addrows})"
-        )
-        nrows += addrows
-    expect_nrows = nrows
-    expect_sum = (
-        (nrows) * (nrows + 1) // 2
-    )  # https://stackoverflow.com/questions/43901484/sum-of-the-integers-from-1-to-n
-
-    def validate_vanilla_equivalence(ep):
-        # TODO: would be nicer to just compare pgdump
-
-        # Enable IO concurrency for batching on large sequential scan, to avoid making
-        # this test unnecessarily onerous on CPU. Especially on debug mode, it's still
-        # pretty onerous though, so increase statement_timeout to avoid timeouts.
-        assert ep.safe_psql_many(
-            [
-                "set effective_io_concurrency=32;",
-                "SET statement_timeout='300s';",
-                "select count(*), sum(data::bigint)::bigint from t",
-            ]
-        ) == [[], [], [(expect_nrows, expect_sum)]]
-
-    validate_vanilla_equivalence(vanilla_pg)
-
+    vanilla_pg.start()
+    rows_inserted = populate_vanilla_pg(vanilla_pg, target_relblock_size)
     vanilla_pg.stop()
 
     #
@@ -274,14 +221,14 @@ def test_pgdata_import_smoke(
         config_lines=ep_config,
     )
 
-    validate_vanilla_equivalence(ro_endpoint)
+    validate_import_from_vanilla_pg(ro_endpoint, rows_inserted)
 
     # ensure the import survives restarts
     ro_endpoint.stop()
     env.pageserver.stop(immediate=True)
     env.pageserver.start()
     ro_endpoint.start()
-    validate_vanilla_equivalence(ro_endpoint)
+    validate_import_from_vanilla_pg(ro_endpoint, rows_inserted)
 
     #
     # validate the layer files in each shard only have the shard-specific data
@@ -321,7 +268,7 @@ def test_pgdata_import_smoke(
     child_workload = workload.branch(timeline_id=child_timeline_id, branch_name="br-tip")
     child_workload.validate()
 
-    validate_vanilla_equivalence(child_workload.endpoint())
+    validate_import_from_vanilla_pg(child_workload.endpoint(), rows_inserted)
 
     # ... at the initdb lsn
     _ = env.create_branch(
@@ -336,7 +283,7 @@ def test_pgdata_import_smoke(
         tenant_id=tenant_id,
         config_lines=ep_config,
     )
-    validate_vanilla_equivalence(br_initdb_endpoint)
+    validate_import_from_vanilla_pg(br_initdb_endpoint, rows_inserted)
     with pytest.raises(psycopg2.errors.UndefinedTable):
         br_initdb_endpoint.safe_psql(f"select * from {workload.table}")
 
@@ -423,8 +370,12 @@ def test_import_completion_on_restart(
 
 
 @run_only_on_default_postgres(reason="PG version is irrelevant here")
-def test_import_respects_tenant_shutdown(
-    neon_env_builder: NeonEnvBuilder, vanilla_pg: VanillaPostgres, make_httpserver: HTTPServer
+@pytest.mark.parametrize("action", ["restart", "delete"])
+def test_import_respects_timeline_lifecycle(
+    neon_env_builder: NeonEnvBuilder,
+    vanilla_pg: VanillaPostgres,
+    make_httpserver: HTTPServer,
+    action: str,
 ):
     """
     Validate that importing timelines respect the usual timeline life cycle:
@@ -492,16 +443,33 @@ def test_import_respects_tenant_shutdown(
     wait_until(hit_failpoint)
     assert not import_completion_signaled.is_set()
 
-    # Restart the pageserver while an import job is in progress.
-    # This clears the failpoint and we expect that the import starts up afresh
-    # after the restart and eventually completes.
-    env.pageserver.stop()
-    env.pageserver.start()
+    if action == "restart":
+        # Restart the pageserver while an import job is in progress.
+        # This clears the failpoint and we expect that the import starts up afresh
+        # after the restart and eventually completes.
+        env.pageserver.stop()
+        env.pageserver.start()
 
-    def cplane_notified():
-        assert import_completion_signaled.is_set()
+        def cplane_notified():
+            assert import_completion_signaled.is_set()
 
-    wait_until(cplane_notified)
+        wait_until(cplane_notified)
+    elif action == "delete":
+        status = env.storage_controller.pageserver_api().timeline_delete(tenant_id, timeline_id)
+        assert status == 200
+
+        timeline_path = env.pageserver.timeline_dir(tenant_id, timeline_id)
+        assert not timeline_path.exists(), "Timeline dir exists after deletion"
+
+        shard_zero = TenantShardId(tenant_id, 0, 0)
+        location = env.storage_controller.inspect(shard_zero)
+        assert location is not None
+        generation = location[0]
+
+        with pytest.raises(StorageControllerApiException, match="not found"):
+            env.storage_controller.import_status(shard_zero, timeline_id, generation)
+    else:
+        raise RuntimeError(f"{action} param not recognized")
 
 
 @skip_in_debug_build("Validation query takes too long in debug builds")
@@ -556,23 +524,8 @@ def test_import_chaos(
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     vanilla_pg.start()
-    vanilla_pg.safe_psql("create user cloud_admin with password 'postgres' superuser")
-    vanilla_pg.safe_psql("""create table t (data char(900)) with (fillfactor = 10)""")
 
-    nrows = 0
-    while True:
-        relblock_size = vanilla_pg.safe_psql_scalar("select pg_relation_size('t')")
-        log.info(
-            f"relblock size: {relblock_size / 8192} pages (target: {TARGET_RELBOCK_SIZE // 8192}) pages"
-        )
-        if relblock_size >= TARGET_RELBOCK_SIZE:
-            break
-        addrows = int((TARGET_RELBOCK_SIZE - relblock_size) // 8192)
-        assert addrows >= 1, "forward progress"
-        vanilla_pg.safe_psql(
-            f"insert into t select generate_series({nrows + 1}, {nrows + addrows})"
-        )
-        nrows += addrows
+    inserted_rows = populate_vanilla_pg(vanilla_pg, TARGET_RELBOCK_SIZE)
 
     vanilla_pg.stop()
 
@@ -740,13 +693,7 @@ def test_import_chaos(
     endpoint = env.endpoints.create_start(branch_name=import_branch_name, tenant_id=tenant_id)
 
     # Validate the imported data is legit
-    assert endpoint.safe_psql_many(
-        [
-            "set effective_io_concurrency=32;",
-            "SET statement_timeout='300s';",
-            "select count(*), sum(data::bigint)::bigint from t",
-        ]
-    ) == [[], [], [(nrows, nrows * (nrows + 1) // 2)]]
+    validate_import_from_vanilla_pg(endpoint, inserted_rows)
 
     endpoint.stop()
 
