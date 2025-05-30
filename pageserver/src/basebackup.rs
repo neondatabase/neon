@@ -347,7 +347,7 @@ where
                 .await?
                 .partition(
                     self.timeline.get_shard_identity(),
-                    self.timeline.conf.max_get_vectored_keys.0.get() as u64 * BLCKSZ as u64,
+                    self.timeline.conf.max_get_vectored_keys.get() as u64 * BLCKSZ as u64,
                 );
 
             let mut slru_builder = SlruSegmentsBuilder::new(&mut self.ar);

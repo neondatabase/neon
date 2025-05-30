@@ -406,7 +406,7 @@ pub struct MaxVectoredReadBytes(pub NonZeroUsize);
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
-pub struct MaxGetVectoredKeys(pub NonZeroUsize);
+pub struct MaxGetVectoredKeys(NonZeroUsize);
 
 impl MaxGetVectoredKeys {
     pub fn get(&self) -> usize {

@@ -1202,10 +1202,10 @@ impl Timeline {
         let total_keyspace = query.total_keyspace();
 
         let key_count = total_keyspace.total_raw_size();
-        if key_count > self.conf.max_get_vectored_keys.0.get() {
+        if key_count > self.conf.max_get_vectored_keys.get() {
             return Err(GetVectoredError::Oversized(
                 key_count as u64,
-                self.conf.max_get_vectored_keys.0.get() as u64,
+                self.conf.max_get_vectored_keys.get() as u64,
             ));
         }
 
