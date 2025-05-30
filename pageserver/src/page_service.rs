@@ -4,16 +4,16 @@
 use std::borrow::Cow;
 use std::num::NonZeroUsize;
 use std::os::fd::AsRawFd;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use std::{io, str};
 
-use crate::PERF_TRACE_TARGET;
 use anyhow::{Context, bail};
 use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
-use futures::FutureExt;
+use futures::{FutureExt, Stream};
 use itertools::Itertools;
 use jsonwebtoken::TokenData;
 use once_cell::sync::OnceCell;
@@ -31,6 +31,7 @@ use pageserver_api::models::{
 };
 use pageserver_api::reltag::SlruKind;
 use pageserver_api::shard::TenantShardId;
+use pageserver_page_api::proto;
 use postgres_backend::{
     AuthType, PostgresBackend, PostgresBackendReader, QueryError, is_expected_io_error,
 };
@@ -42,18 +43,21 @@ use strum_macros::IntoStaticStr;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tonic::service::Interceptor as _;
 use tracing::*;
 use utils::auth::{Claims, Scope, SwappableJwtAuth};
 use utils::failpoint_support;
-use utils::id::{TenantId, TimelineId};
+use utils::id::{TenantId, TenantTimelineId, TimelineId};
 use utils::logging::log_slow;
 use utils::lsn::Lsn;
+use utils::shard::ShardIndex;
 use utils::simple_rcu::RcuReadGuard;
 use utils::sync::gate::{Gate, GateGuard};
 use utils::sync::spsc_fold;
 
 use crate::auth::check_permission;
-use crate::basebackup::BasebackupError;
+use crate::basebackup::{self, BasebackupError};
+use crate::basebackup_cache::BasebackupCache;
 use crate::config::PageServerConf;
 use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
@@ -74,7 +78,7 @@ use crate::tenant::mgr::{
 use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::{self, WaitLsnError};
 use crate::tenant::{GetTimelineError, PageReconstructError, Timeline};
-use crate::{basebackup, timed_after_cancellation};
+use crate::{CancellableTask, PERF_TRACE_TARGET, timed_after_cancellation};
 
 /// How long we may wait for a [`crate::tenant::mgr::TenantSlot::InProgress`]` and/or a [`crate::tenant::TenantShard`] which
 /// is not yet in state [`TenantState::Active`].
@@ -84,6 +88,26 @@ const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
 
 /// Threshold at which to log slow GetPage requests.
 const LOG_SLOW_GETPAGE_THRESHOLD: Duration = Duration::from_secs(30);
+
+/// The idle time before sending TCP keepalive probes for gRPC connections. The
+/// interval and timeout between each probe is configured via sysctl. This
+/// allows detecting dead connections sooner.
+const GRPC_TCP_KEEPALIVE_TIME: Duration = Duration::from_secs(60);
+
+/// Whether to enable TCP nodelay for gRPC connections. This disables Nagle's
+/// algorithm, which can cause latency spikes for small messages.
+const GRPC_TCP_NODELAY: bool = true;
+
+/// The interval between HTTP2 keepalive pings. This allows shutting down server
+/// tasks when clients are unresponsive.
+const GRPC_HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// The timeout for HTTP2 keepalive pings. Should be <= GRPC_KEEPALIVE_INTERVAL.
+const GRPC_HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Number of concurrent gRPC streams per TCP connection. We expect something
+/// like 8 GetPage streams per connections, plus any unary requests.
+const GRPC_MAX_CONCURRENT_STREAMS: u32 = 256;
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -107,6 +131,7 @@ pub fn spawn(
     perf_trace_dispatch: Option<Dispatch>,
     tcp_listener: tokio::net::TcpListener,
     tls_config: Option<Arc<rustls::ServerConfig>>,
+    basebackup_cache: Arc<BasebackupCache>,
 ) -> Listener {
     let cancel = CancellationToken::new();
     let libpq_ctx = RequestContext::todo_child(
@@ -128,6 +153,7 @@ pub fn spawn(
             conf.pg_auth_type,
             tls_config,
             conf.page_service_pipelining.clone(),
+            basebackup_cache,
             libpq_ctx,
             cancel.clone(),
         )
@@ -135,6 +161,94 @@ pub fn spawn(
     ));
 
     Listener { cancel, task }
+}
+
+/// Spawns a gRPC server for the page service.
+///
+/// TODO: this doesn't support TLS. We need TLS reloading via ReloadingCertificateResolver, so we
+/// need to reimplement the TCP+TLS accept loop ourselves.
+pub fn spawn_grpc(
+    conf: &'static PageServerConf,
+    tenant_manager: Arc<TenantManager>,
+    auth: Option<Arc<SwappableJwtAuth>>,
+    perf_trace_dispatch: Option<Dispatch>,
+    listener: std::net::TcpListener,
+    basebackup_cache: Arc<BasebackupCache>,
+) -> anyhow::Result<CancellableTask> {
+    let cancel = CancellationToken::new();
+    let ctx = RequestContextBuilder::new(TaskKind::PageRequestHandler)
+        .download_behavior(DownloadBehavior::Download)
+        .perf_span_dispatch(perf_trace_dispatch)
+        .detached_child();
+    let gate = Gate::default();
+
+    // Set up the TCP socket. We take a preconfigured TcpListener to bind the
+    // port early during startup.
+    let incoming = {
+        let _runtime = COMPUTE_REQUEST_RUNTIME.enter(); // required by TcpListener::from_std
+        listener.set_nonblocking(true)?;
+        tonic::transport::server::TcpIncoming::from(tokio::net::TcpListener::from_std(listener)?)
+            .with_nodelay(Some(GRPC_TCP_NODELAY))
+            .with_keepalive(Some(GRPC_TCP_KEEPALIVE_TIME))
+    };
+
+    // Set up the gRPC server.
+    //
+    // TODO: consider tuning window sizes.
+    // TODO: wire up tracing.
+    let mut server = tonic::transport::Server::builder()
+        .http2_keepalive_interval(Some(GRPC_HTTP2_KEEPALIVE_INTERVAL))
+        .http2_keepalive_timeout(Some(GRPC_HTTP2_KEEPALIVE_TIMEOUT))
+        .max_concurrent_streams(Some(GRPC_MAX_CONCURRENT_STREAMS));
+
+    // Main page service.
+    let page_service_handler = PageServerHandler::new(
+        tenant_manager,
+        auth.clone(),
+        PageServicePipeliningConfig::Serial, // TODO: unused with gRPC
+        conf.get_vectored_concurrent_io,
+        ConnectionPerfSpanFields::default(),
+        basebackup_cache,
+        ctx,
+        cancel.clone(),
+        gate.enter().expect("just created"),
+    );
+
+    let mut tenant_interceptor = TenantMetadataInterceptor;
+    let mut auth_interceptor = TenantAuthInterceptor::new(auth);
+    let interceptors = move |mut req: tonic::Request<()>| {
+        req = tenant_interceptor.call(req)?;
+        req = auth_interceptor.call(req)?;
+        Ok(req)
+    };
+
+    let page_service =
+        proto::PageServiceServer::with_interceptor(page_service_handler, interceptors);
+    let server = server.add_service(page_service);
+
+    // Reflection service for use with e.g. grpcurl.
+    let reflection_service = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(proto::FILE_DESCRIPTOR_SET)
+        .build_v1()?;
+    let server = server.add_service(reflection_service);
+
+    // Spawn server task.
+    let task_cancel = cancel.clone();
+    let task = COMPUTE_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
+        "grpc listener",
+        async move {
+            let result = server
+                .serve_with_incoming_shutdown(incoming, task_cancel.cancelled())
+                .await;
+            if result.is_ok() {
+                // TODO: revisit shutdown logic once page service is implemented.
+                gate.close().await;
+            }
+            result
+        },
+    ));
+
+    Ok(CancellableTask { task, cancel })
 }
 
 impl Listener {
@@ -186,6 +300,7 @@ pub async fn libpq_listener_main(
     auth_type: AuthType,
     tls_config: Option<Arc<rustls::ServerConfig>>,
     pipelining_config: PageServicePipeliningConfig,
+    basebackup_cache: Arc<BasebackupCache>,
     listener_ctx: RequestContext,
     listener_cancel: CancellationToken,
 ) -> Connections {
@@ -229,6 +344,7 @@ pub async fn libpq_listener_main(
                     auth_type,
                     tls_config.clone(),
                     pipelining_config.clone(),
+                    Arc::clone(&basebackup_cache),
                     connection_ctx,
                     connections_cancel.child_token(),
                     gate_guard,
@@ -254,7 +370,7 @@ type ConnectionHandlerResult = anyhow::Result<()>;
 
 /// Perf root spans start at the per-request level, after shard routing.
 /// This struct carries connection-level information to the root perf span definition.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct ConnectionPerfSpanFields {
     peer_addr: String,
     application_name: Option<String>,
@@ -271,6 +387,7 @@ async fn page_service_conn_main(
     auth_type: AuthType,
     tls_config: Option<Arc<rustls::ServerConfig>>,
     pipelining_config: PageServicePipeliningConfig,
+    basebackup_cache: Arc<BasebackupCache>,
     connection_ctx: RequestContext,
     cancel: CancellationToken,
     gate_guard: GateGuard,
@@ -336,6 +453,7 @@ async fn page_service_conn_main(
         pipelining_config,
         conf.get_vectored_concurrent_io,
         perf_span_fields,
+        basebackup_cache,
         connection_ctx,
         cancel.clone(),
         gate_guard,
@@ -370,6 +488,11 @@ async fn page_service_conn_main(
     }
 }
 
+/// Page service connection handler.
+///
+/// TODO: for gRPC, this will be shared by all requests from all connections.
+/// Decompose it into global state and per-connection/request state, and make
+/// libpq-specific options (e.g. pipelining) separate.
 struct PageServerHandler {
     auth: Option<Arc<SwappableJwtAuth>>,
     claims: Option<Claims>,
@@ -389,6 +512,8 @@ struct PageServerHandler {
 
     pipelining_config: PageServicePipeliningConfig,
     get_vectored_concurrent_io: GetVectoredConcurrentIo,
+
+    basebackup_cache: Arc<BasebackupCache>,
 
     gate_guard: GateGuard,
 }
@@ -644,6 +769,9 @@ struct BatchedGetPageRequest {
     timer: SmgrOpTimer,
     lsn_range: LsnRange,
     ctx: RequestContext,
+    // If the request is perf enabled, this contains a context
+    // with a perf span tracking the time spent waiting for the executor.
+    batch_wait_ctx: Option<RequestContext>,
 }
 
 #[cfg(feature = "testing")]
@@ -656,6 +784,7 @@ struct BatchedTestRequest {
 /// so that we don't keep the [`Timeline::gate`] open while the batch
 /// is being built up inside the [`spsc_fold`] (pagestream pipelining).
 #[derive(IntoStaticStr)]
+#[allow(clippy::large_enum_variant)]
 enum BatchedFeMessage {
     Exists {
         span: Span,
@@ -849,6 +978,7 @@ impl PageServerHandler {
         pipelining_config: PageServicePipeliningConfig,
         get_vectored_concurrent_io: GetVectoredConcurrentIo,
         perf_span_fields: ConnectionPerfSpanFields,
+        basebackup_cache: Arc<BasebackupCache>,
         connection_ctx: RequestContext,
         cancel: CancellationToken,
         gate_guard: GateGuard,
@@ -862,6 +992,7 @@ impl PageServerHandler {
             cancel,
             pipelining_config,
             get_vectored_concurrent_io,
+            basebackup_cache,
             gate_guard,
         }
     }
@@ -1171,6 +1302,22 @@ impl PageServerHandler {
                     }
                 };
 
+                let batch_wait_ctx = if ctx.has_perf_span() {
+                    Some(
+                        RequestContextBuilder::from(&ctx)
+                            .perf_span(|crnt_perf_span| {
+                                info_span!(
+                                    target: PERF_TRACE_TARGET,
+                                    parent: crnt_perf_span,
+                                    "WAIT_EXECUTOR",
+                                )
+                            })
+                            .attached_child(),
+                    )
+                } else {
+                    None
+                };
+
                 BatchedFeMessage::GetPage {
                     span,
                     shard: shard.downgrade(),
@@ -1182,6 +1329,7 @@ impl PageServerHandler {
                             request_lsn: req.hdr.request_lsn
                         },
                         ctx,
+                        batch_wait_ctx,
                     }],
                     // The executor grabs the batch when it becomes idle.
                     // Hence, [`GetPageBatchBreakReason::ExecutorSteal`] is the
@@ -1337,7 +1485,7 @@ impl PageServerHandler {
             let mut flush_timers = Vec::with_capacity(handler_results.len());
             for handler_result in &mut handler_results {
                 let flush_timer = match handler_result {
-                    Ok((_, timer)) => Some(
+                    Ok((_response, timer, _ctx)) => Some(
                         timer
                             .observe_execution_end(flushing_start_time)
                             .expect("we are the first caller"),
@@ -1357,7 +1505,7 @@ impl PageServerHandler {
         // Some handler errors cause exit from pagestream protocol.
         // Other handler errors are sent back as an error message and we stay in pagestream protocol.
         for (handler_result, flushing_timer) in handler_results.into_iter().zip(flush_timers) {
-            let response_msg = match handler_result {
+            let (response_msg, ctx) = match handler_result {
                 Err(e) => match &e.err {
                     PageStreamError::Shutdown => {
                         // If we fail to fulfil a request during shutdown, which may be _because_ of
@@ -1382,14 +1530,29 @@ impl PageServerHandler {
                             error!("error reading relation or page version: {full:#}")
                         });
 
-                        PagestreamBeMessage::Error(PagestreamErrorResponse {
-                            req: e.req,
-                            message: e.err.to_string(),
-                        })
+                        (
+                            PagestreamBeMessage::Error(PagestreamErrorResponse {
+                                req: e.req,
+                                message: e.err.to_string(),
+                            }),
+                            None,
+                        )
                     }
                 },
-                Ok((response_msg, _op_timer_already_observed)) => response_msg,
+                Ok((response_msg, _op_timer_already_observed, ctx)) => (response_msg, Some(ctx)),
             };
+
+            let ctx = ctx.map(|req_ctx| {
+                RequestContextBuilder::from(&req_ctx)
+                    .perf_span(|crnt_perf_span| {
+                        info_span!(
+                            target: PERF_TRACE_TARGET,
+                            parent: crnt_perf_span,
+                            "FLUSH_RESPONSE",
+                        )
+                    })
+                    .attached_child()
+            });
 
             //
             // marshal & transmit response message
@@ -1413,6 +1576,17 @@ impl PageServerHandler {
                 )),
                 None => futures::future::Either::Right(flush_fut),
             };
+
+            let flush_fut = if let Some(req_ctx) = ctx.as_ref() {
+                futures::future::Either::Left(
+                    flush_fut.maybe_perf_instrument(req_ctx, |current_perf_span| {
+                        current_perf_span.clone()
+                    }),
+                )
+            } else {
+                futures::future::Either::Right(flush_fut)
+            };
+
             // do it while respecting cancellation
             let _: () = async move {
                 tokio::select! {
@@ -1442,7 +1616,7 @@ impl PageServerHandler {
         ctx: &RequestContext,
     ) -> Result<
         (
-            Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>>,
+            Vec<Result<(PagestreamBeMessage, SmgrOpTimer, RequestContext), BatchedPageStreamError>>,
             Span,
         ),
         QueryError,
@@ -1469,7 +1643,7 @@ impl PageServerHandler {
                         self.handle_get_rel_exists_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
-                            .map(|msg| (msg, timer))
+                            .map(|msg| (msg, timer, ctx))
                             .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
                     ],
                     span,
@@ -1488,7 +1662,7 @@ impl PageServerHandler {
                         self.handle_get_nblocks_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
-                            .map(|msg| (msg, timer))
+                            .map(|msg| (msg, timer, ctx))
                             .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
                     ],
                     span,
@@ -1535,7 +1709,7 @@ impl PageServerHandler {
                         self.handle_db_size_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
-                            .map(|msg| (msg, timer))
+                            .map(|msg| (msg, timer, ctx))
                             .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
                     ],
                     span,
@@ -1554,7 +1728,7 @@ impl PageServerHandler {
                         self.handle_get_slru_segment_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
-                            .map(|msg| (msg, timer))
+                            .map(|msg| (msg, timer, ctx))
                             .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
                     ],
                     span,
@@ -1906,12 +2080,25 @@ impl PageServerHandler {
                             return Ok(());
                         }
                     };
-                    let batch = match batch {
+                    let mut batch = match batch {
                         Ok(batch) => batch,
                         Err(e) => {
                             return Err(e);
                         }
                     };
+
+                    if let BatchedFeMessage::GetPage {
+                        pages,
+                        span: _,
+                        shard: _,
+                        batch_break_reason: _,
+                    } = &mut batch
+                    {
+                        for req in pages {
+                            req.batch_wait_ctx.take();
+                        }
+                    }
+
                     self.pagestream_handle_batched_message(
                         pgb_writer,
                         batch,
@@ -2224,7 +2411,8 @@ impl PageServerHandler {
         io_concurrency: IoConcurrency,
         batch_break_reason: GetPageBatchBreakReason,
         ctx: &RequestContext,
-    ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>> {
+    ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer, RequestContext), BatchedPageStreamError>>
+    {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
         timeline
@@ -2331,6 +2519,7 @@ impl PageServerHandler {
                                 page,
                             }),
                             req.timer,
+                            req.ctx,
                         )
                     })
                     .map_err(|e| BatchedPageStreamError {
@@ -2375,7 +2564,8 @@ impl PageServerHandler {
         timeline: &Timeline,
         requests: Vec<BatchedTestRequest>,
         _ctx: &RequestContext,
-    ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>> {
+    ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer, RequestContext), BatchedPageStreamError>>
+    {
         // real requests would do something with the timeline
         let mut results = Vec::with_capacity(requests.len());
         for _req in requests.iter() {
@@ -2402,6 +2592,10 @@ impl PageServerHandler {
                                 req: req.req.clone(),
                             }),
                             req.timer,
+                            RequestContext::new(
+                                TaskKind::PageRequestHandler,
+                                DownloadBehavior::Warn,
+                            ),
                         )
                     })
                     .map_err(|e| BatchedPageStreamError {
@@ -2493,6 +2687,8 @@ impl PageServerHandler {
             .map_err(QueryError::Disconnected)?;
         self.flush_cancellable(pgb, &self.cancel).await?;
 
+        let mut from_cache = false;
+
         // Send a tarball of the latest layer on the timeline. Compress if not
         // fullbackup. TODO Compress in that case too (tests need to be updated)
         if full_backup {
@@ -2510,7 +2706,33 @@ impl PageServerHandler {
             .map_err(map_basebackup_error)?;
         } else {
             let mut writer = BufWriter::new(pgb.copyout_writer());
-            if gzip {
+
+            let cached = {
+                // Basebackup is cached only for this combination of parameters.
+                if timeline.is_basebackup_cache_enabled()
+                    && gzip
+                    && lsn.is_some()
+                    && prev_lsn.is_none()
+                {
+                    self.basebackup_cache
+                        .get(tenant_id, timeline_id, lsn.unwrap())
+                        .await
+                } else {
+                    None
+                }
+            };
+
+            if let Some(mut cached) = cached {
+                from_cache = true;
+                tokio::io::copy(&mut cached, &mut writer)
+                    .await
+                    .map_err(|e| {
+                        map_basebackup_error(BasebackupError::Client(
+                            e,
+                            "handle_basebackup_request,cached,copy",
+                        ))
+                    })?;
+            } else if gzip {
                 let mut encoder = GzipEncoder::with_quality(
                     &mut writer,
                     // NOTE using fast compression because it's on the critical path
@@ -2569,6 +2791,7 @@ impl PageServerHandler {
         info!(
             lsn_await_millis = lsn_awaited_after.as_millis(),
             basebackup_millis = basebackup_after.as_millis(),
+            %from_cache,
             "basebackup complete"
         );
 
@@ -3077,6 +3300,60 @@ where
     }
 }
 
+/// Implements the page service over gRPC.
+///
+/// TODO: not yet implemented, all methods return unimplemented.
+#[tonic::async_trait]
+impl proto::PageService for PageServerHandler {
+    type GetBaseBackupStream = Pin<
+        Box<dyn Stream<Item = Result<proto::GetBaseBackupResponseChunk, tonic::Status>> + Send>,
+    >;
+    type GetPagesStream =
+        Pin<Box<dyn Stream<Item = Result<proto::GetPageResponse, tonic::Status>> + Send>>;
+
+    async fn check_rel_exists(
+        &self,
+        _: tonic::Request<proto::CheckRelExistsRequest>,
+    ) -> Result<tonic::Response<proto::CheckRelExistsResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not implemented"))
+    }
+
+    async fn get_base_backup(
+        &self,
+        _: tonic::Request<proto::GetBaseBackupRequest>,
+    ) -> Result<tonic::Response<Self::GetBaseBackupStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not implemented"))
+    }
+
+    async fn get_db_size(
+        &self,
+        _: tonic::Request<proto::GetDbSizeRequest>,
+    ) -> Result<tonic::Response<proto::GetDbSizeResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not implemented"))
+    }
+
+    async fn get_pages(
+        &self,
+        _: tonic::Request<tonic::Streaming<proto::GetPageRequest>>,
+    ) -> Result<tonic::Response<Self::GetPagesStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not implemented"))
+    }
+
+    async fn get_rel_size(
+        &self,
+        _: tonic::Request<proto::GetRelSizeRequest>,
+    ) -> Result<tonic::Response<proto::GetRelSizeResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not implemented"))
+    }
+
+    async fn get_slru_segment(
+        &self,
+        _: tonic::Request<proto::GetSlruSegmentRequest>,
+    ) -> Result<tonic::Response<proto::GetSlruSegmentResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not implemented"))
+    }
+}
+
 impl From<GetActiveTenantError> for QueryError {
     fn from(e: GetActiveTenantError) -> Self {
         match e {
@@ -3090,6 +3367,104 @@ impl From<GetActiveTenantError> for QueryError {
             e @ GetActiveTenantError::NotFound(_) => QueryError::NotFound(format!("{e}").into()),
             e => QueryError::Other(anyhow::anyhow!(e)),
         }
+    }
+}
+
+/// gRPC interceptor that decodes tenant metadata and stores it as request extensions of type
+/// TenantTimelineId and ShardIndex.
+///
+/// TODO: consider looking up the timeline handle here and storing it.
+#[derive(Clone)]
+struct TenantMetadataInterceptor;
+
+impl tonic::service::Interceptor for TenantMetadataInterceptor {
+    fn call(&mut self, mut req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
+        // Decode the tenant ID.
+        let tenant_id = req
+            .metadata()
+            .get("neon-tenant-id")
+            .ok_or_else(|| tonic::Status::invalid_argument("missing neon-tenant-id"))?
+            .to_str()
+            .map_err(|_| tonic::Status::invalid_argument("invalid neon-tenant-id"))?;
+        let tenant_id = TenantId::from_str(tenant_id)
+            .map_err(|_| tonic::Status::invalid_argument("invalid neon-tenant-id"))?;
+
+        // Decode the timeline ID.
+        let timeline_id = req
+            .metadata()
+            .get("neon-timeline-id")
+            .ok_or_else(|| tonic::Status::invalid_argument("missing neon-timeline-id"))?
+            .to_str()
+            .map_err(|_| tonic::Status::invalid_argument("invalid neon-timeline-id"))?;
+        let timeline_id = TimelineId::from_str(timeline_id)
+            .map_err(|_| tonic::Status::invalid_argument("invalid neon-timeline-id"))?;
+
+        // Decode the shard ID.
+        let shard_index = req
+            .metadata()
+            .get("neon-shard-id")
+            .ok_or_else(|| tonic::Status::invalid_argument("missing neon-shard-id"))?
+            .to_str()
+            .map_err(|_| tonic::Status::invalid_argument("invalid neon-shard-id"))?;
+        let shard_index = ShardIndex::from_str(shard_index)
+            .map_err(|_| tonic::Status::invalid_argument("invalid neon-shard-id"))?;
+
+        // Stash them in the request.
+        let extensions = req.extensions_mut();
+        extensions.insert(TenantTimelineId::new(tenant_id, timeline_id));
+        extensions.insert(shard_index);
+
+        Ok(req)
+    }
+}
+
+/// Authenticates gRPC page service requests. Must run after TenantMetadataInterceptor.
+#[derive(Clone)]
+struct TenantAuthInterceptor {
+    auth: Option<Arc<SwappableJwtAuth>>,
+}
+
+impl TenantAuthInterceptor {
+    fn new(auth: Option<Arc<SwappableJwtAuth>>) -> Self {
+        Self { auth }
+    }
+}
+
+impl tonic::service::Interceptor for TenantAuthInterceptor {
+    fn call(&mut self, req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
+        // Do nothing if auth is disabled.
+        let Some(auth) = self.auth.as_ref() else {
+            return Ok(req);
+        };
+
+        // Fetch the tenant ID that's been set by TenantMetadataInterceptor.
+        let ttid = req
+            .extensions()
+            .get::<TenantTimelineId>()
+            .expect("TenantMetadataInterceptor must run before TenantAuthInterceptor");
+
+        // Fetch and decode the JWT token.
+        let jwt = req
+            .metadata()
+            .get("authorization")
+            .ok_or_else(|| tonic::Status::unauthenticated("no authorization header"))?
+            .to_str()
+            .map_err(|_| tonic::Status::invalid_argument("invalid authorization header"))?
+            .strip_prefix("Bearer ")
+            .ok_or_else(|| tonic::Status::invalid_argument("invalid authorization header"))?
+            .trim();
+        let jwtdata: TokenData<Claims> = auth
+            .decode(jwt)
+            .map_err(|err| tonic::Status::invalid_argument(format!("invalid JWT token: {err}")))?;
+        let claims = jwtdata.claims;
+
+        // Check if the token is valid for this tenant.
+        check_permission(&claims, Some(ttid.tenant_id))
+            .map_err(|err| tonic::Status::permission_denied(err.to_string()))?;
+
+        // TODO: consider stashing the claims in the request extensions, if needed.
+
+        Ok(req)
     }
 }
 

@@ -2012,10 +2012,7 @@ def test_explicit_timeline_creation(neon_env_builder: NeonEnvBuilder):
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
-    config_lines = [
-        "neon.safekeeper_proto_version = 3",
-    ]
-    ep = env.endpoints.create("main", config_lines=config_lines)
+    ep = env.endpoints.create("main")
 
     # expected to fail because timeline is not created on safekeepers
     with pytest.raises(Exception, match=r".*timed out.*"):
@@ -2043,10 +2040,7 @@ def test_explicit_timeline_creation_storcon(neon_env_builder: NeonEnvBuilder):
     }
     env = neon_env_builder.init_start()
 
-    config_lines = [
-        "neon.safekeeper_proto_version = 3",
-    ]
-    ep = env.endpoints.create("main", config_lines=config_lines)
+    ep = env.endpoints.create("main")
 
     # endpoint should start.
     ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])

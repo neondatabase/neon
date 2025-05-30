@@ -20,7 +20,7 @@ first_path="$(ldconfig --verbose 2>/dev/null \
     | grep --invert-match ^$'\t' \
     | cut --delimiter=: --fields=1 \
     | head --lines=1)"
-test "$first_path" == '/usr/local/lib' || true # Remove the || true in a follow-up PR. Needed for backwards compat.
+test "$first_path" == '/usr/local/lib'
 
 echo "Waiting pageserver become ready."
 while ! nc -z pageserver 6400; do

@@ -201,6 +201,8 @@ static shmem_request_hook_type prev_shmem_request_hook;
 bool lfc_store_prefetch_result;
 bool lfc_prewarm_update_ws_estimation;
 
+bool AmPrewarmWorker;
+
 #define LFC_ENABLED() (lfc_ctl->limit != 0)
 
 /*
@@ -844,6 +846,8 @@ lfc_prewarm_main(Datum main_arg)
 	BufferTag tag;
 	PrewarmWorkerState* ws;
 	uint32 worker_id = DatumGetInt32(main_arg);
+
+	AmPrewarmWorker = true;
 
 	pqsignal(SIGTERM, die);
 	BackgroundWorkerUnblockSignals();

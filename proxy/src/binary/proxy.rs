@@ -1,9 +1,13 @@
+#[cfg(any(test, feature = "testing"))]
+use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(any(test, feature = "testing"))]
+use anyhow::Context;
 use anyhow::{bail, ensure};
 use arc_swap::ArcSwapOption;
 use futures::future::Either;
@@ -35,6 +39,8 @@ use crate::scram::threadpool::ThreadPool;
 use crate::serverless::GlobalConnPoolOptions;
 use crate::serverless::cancel_set::CancelSet;
 use crate::tls::client_config::compute_client_config_with_root_certs;
+#[cfg(any(test, feature = "testing"))]
+use crate::url::ApiUrl;
 use crate::{auth, control_plane, http, serverless, usage_metrics};
 
 project_git_version!(GIT_VERSION);
@@ -777,7 +783,13 @@ fn build_auth_backend(
 
         #[cfg(any(test, feature = "testing"))]
         AuthBackendType::Postgres => {
-            let url = args.auth_endpoint.parse()?;
+            let mut url: ApiUrl = args.auth_endpoint.parse()?;
+            if url.password().is_none() {
+                let password = env::var("PGPASSWORD")
+                    .with_context(|| "auth-endpoint does not contain a password and environment variable `PGPASSWORD` is not set")?;
+                url.set_password(Some(&password))
+                    .expect("Failed to set password");
+            }
             let api = control_plane::client::mock::MockControlPlane::new(
                 url,
                 !args.is_private_access_proxy,
