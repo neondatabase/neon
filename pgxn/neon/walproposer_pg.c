@@ -170,7 +170,11 @@ WalProposerMain(Datum main_arg)
 	walprop_pg_load_libpqwalreceiver();
 
 	wp = WalProposerCreate(&walprop_config, walprop_pg);
+#if PG_MAJORVERSION_NUM < 15
+	wp->localTimeLineID = ThisTimeLineID;
+#else
 	wp->localTimeLineID = GetWALInsertionTimeLine();
+#endif
 	wp->last_reconnect_attempt = walprop_pg_get_current_timestamp(wp);
 
 	walprop_pg_init_walsender();
