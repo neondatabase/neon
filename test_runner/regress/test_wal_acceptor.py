@@ -1450,6 +1450,7 @@ class SafekeeperEnv:
             str(i),
             "--broker-endpoint",
             self.fake_broker_endpoint,
+            "--dev",
         ]
         log.info(f'Running command "{" ".join(cmd)}"')
 
