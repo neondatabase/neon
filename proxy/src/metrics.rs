@@ -1,23 +1,30 @@
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, OnceLock};
 
 use lasso::ThreadedRodeo;
 use measured::label::{
-    FixedCardinalitySet, LabelGroupSet, LabelName, LabelSet, LabelValue, StaticLabelSet,
+    FixedCardinalitySet, LabelGroupSet, LabelGroupVisitor, LabelName, LabelSet, LabelValue,
+    LabelVisitor, StaticLabelSet,
 };
+use measured::metric::counter::CounterState;
+use measured::metric::gauge::{AtomicF64, FloatGaugeState};
+use measured::metric::group::Encoding;
 use measured::metric::histogram::Thresholds;
-use measured::metric::name::MetricName;
+use measured::metric::name::{MetricName, MetricNameEncoder};
+use measured::metric::{MetricEncoding, MetricFamilyEncoding};
 use measured::{
     Counter, CounterVec, FixedCardinalityLabel, Gauge, Histogram, HistogramVec, LabelGroup,
     MetricGroup,
 };
 use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLog, HyperLogLogVec};
 use tokio::time::{self, Instant};
+use tokio_metrics::TaskMonitor;
 
 use crate::control_plane::messages::ColdStartInfo;
 use crate::error::ErrorKind;
 
 #[derive(MetricGroup)]
-#[metric(new(thread_pool: Arc<ThreadPoolMetrics>))]
+#[metric(new(thread_pool: Arc<ThreadPoolMetrics>, task_monitors: Vec<(&'static str, TaskMonitor)>))]
 pub struct Metrics {
     #[metric(namespace = "proxy")]
     #[metric(init = ProxyMetrics::new(thread_pool))]
@@ -25,12 +32,19 @@ pub struct Metrics {
 
     #[metric(namespace = "wake_compute_lock")]
     pub wake_compute_lock: ApiLockMetrics,
+
+    #[metric(namespace = "tokio")]
+    #[metric(init = TokioMetrics::new(task_monitors))]
+    pub tokio: TokioMetrics,
 }
 
 static SELF: OnceLock<Metrics> = OnceLock::new();
 impl Metrics {
-    pub fn install(thread_pool: Arc<ThreadPoolMetrics>) {
-        let mut metrics = Metrics::new(thread_pool);
+    pub fn install(
+        thread_pool: Arc<ThreadPoolMetrics>,
+        task_monitors: Vec<(&'static str, TaskMonitor)>,
+    ) {
+        let mut metrics = Metrics::new(thread_pool, task_monitors);
 
         metrics.proxy.errors_total.init_all_dense();
         metrics.proxy.redis_errors_total.init_all_dense();
@@ -46,7 +60,7 @@ impl Metrics {
 
     pub fn get() -> &'static Self {
         #[cfg(test)]
-        return SELF.get_or_init(|| Metrics::new(Arc::new(ThreadPoolMetrics::new(0))));
+        return SELF.get_or_init(|| Metrics::new(Arc::new(ThreadPoolMetrics::new(0)), vec![]));
 
         #[cfg(not(test))]
         SELF.get()
@@ -688,4 +702,259 @@ pub struct ThreadPoolMetrics {
     pub worker_task_turns_total: CounterVec<ThreadPoolWorkers>,
     #[metric(init = CounterVec::with_label_set(ThreadPoolWorkers(workers)))]
     pub worker_task_skips_total: CounterVec<ThreadPoolWorkers>,
+}
+
+#[derive(MetricGroup)]
+#[metric(new(task_monitors: Vec<(&'static str, TaskMonitor)>))]
+pub struct TokioMetrics {
+    #[metric(namespace = "tasks")]
+    #[metric(init = TokioTaskMetrics::new(task_monitors))]
+    tasks: TokioTaskMetrics,
+}
+
+struct TokioTaskMetrics {
+    task_monitors: Vec<(&'static str, TaskMonitor)>,
+}
+
+impl TokioTaskMetrics {
+    fn new(task_monitors: Vec<(&'static str, TaskMonitor)>) -> Self {
+        TokioTaskMetrics { task_monitors }
+    }
+}
+
+impl<E: Encoding> MetricGroup<E> for TokioTaskMetrics
+where
+    CounterState: MetricEncoding<E>,
+    FloatGaugeState: MetricEncoding<E>,
+{
+    fn collect_group_into(&self, enc: &mut E) -> Result<(), <E as Encoding>::Err> {
+        if self.task_monitors.is_empty() {
+            return Ok(());
+        }
+
+        // TODO: pre-allocated thread-local Vec for snapshots?
+        //       Or stack allocated with const N: usize generic?
+        let snapshots = self
+            .task_monitors
+            .iter()
+            .map(|(name, monitor)| (TokioTaskMonitorName(name), monitor.cumulative()))
+            .collect::<Vec<_>>();
+        let snapshots = snapshots.as_slice();
+
+        // instrumented/dropped
+        TokioTaskCounterMetric {
+            snapshots,
+            help: "The number of tasks instrumented.",
+            get_value: |m| m.instrumented_count,
+        }
+        .collect_family_into(MetricName::from_str("instrumented_count"), enc)?;
+        TokioTaskCounterMetric {
+            snapshots,
+            help: "The number of tasks dropped.",
+            get_value: |m| m.dropped_count,
+        }
+        .collect_family_into(MetricName::from_str("dropped_count"), enc)?;
+
+        // first_poll
+        TokioTaskCounterMetric {
+            snapshots,
+            help: "The number of tasks polled for the first time.",
+            get_value: |m| m.first_poll_count,
+        }
+        .collect_family_into(MetricName::from_str("first_poll_count"), enc)?;
+        TokioTaskFloatGaugeMetric {
+            snapshots,
+            help: "The total duration elapsed between the instant tasks are instrumented, and the instant they are first polled.",
+            get_value: |m| m.total_first_poll_delay.as_secs_f64(),
+        }
+        .collect_family_into(
+            MetricName::from_str("total_first_poll_delay"),
+            enc,
+        )?;
+
+        // idle
+        TokioTaskCounterMetric {
+            snapshots,
+            help: "The total number of times that tasks idled, waiting to be awoken.",
+            get_value: |m| m.total_idled_count,
+        }
+        .collect_family_into(MetricName::from_str("total_idled_count"), enc)?;
+        TokioTaskFloatGaugeMetric {
+            snapshots,
+            help: "The total duration that tasks idled.",
+            get_value: |m| m.total_idle_duration.as_secs_f64(),
+        }
+        .collect_family_into(MetricName::from_str("total_idle_duration"), enc)?;
+
+        // poll
+        TokioTaskCounterMetric {
+            snapshots,
+            help: "The total number of times that tasks were polled.",
+            get_value: |m| m.total_poll_count,
+        }
+        .collect_family_into(MetricName::from_str("total_poll_count"), enc)?;
+        TokioTaskFloatGaugeMetric {
+            snapshots,
+            help: "The total duration elapsed during polls.",
+            get_value: |m| m.total_poll_duration.as_secs_f64(),
+        }
+        .collect_family_into(MetricName::from_str("total_poll_duration"), enc)?;
+
+        // scheduled
+        TokioTaskCounterMetric {
+            snapshots,
+            help:  "The total number of times that tasks were awoken (and then, presumably, scheduled for execution).",
+            get_value: |m| m.total_scheduled_count,
+        }
+        .collect_family_into(
+            MetricName::from_str("total_scheduled_count"),
+            enc,
+        )?;
+        TokioTaskFloatGaugeMetric {
+            snapshots,
+            help: "The total duration that tasks spent waiting to be polled after awakening.",
+            get_value: |m| m.total_scheduled_duration.as_secs_f64(),
+        }
+        .collect_family_into(MetricName::from_str("total_scheduled_duration"), enc)?;
+
+        // fast_poll
+        TokioTaskCounterMetric {
+            snapshots,
+            help: "The total number of times that polling tasks completed swiftly.",
+            get_value: |m| m.total_fast_poll_count,
+        }
+        .collect_family_into(MetricName::from_str("total_fast_poll_count"), enc)?;
+        TokioTaskFloatGaugeMetric {
+            snapshots,
+            help: "The total duration of fast polls.",
+            get_value: |m| m.total_fast_poll_duration.as_secs_f64(),
+        }
+        .collect_family_into(MetricName::from_str("total_fast_poll_duration"), enc)?;
+
+        // slow_poll
+        TokioTaskCounterMetric {
+            snapshots,
+            help: "The total number of times that polling tasks completed slowly.",
+            get_value: |m| m.total_slow_poll_count,
+        }
+        .collect_family_into(MetricName::from_str("total_slow_poll_count"), enc)?;
+        TokioTaskFloatGaugeMetric {
+            snapshots,
+            help: "The total duration of slow polls.",
+            get_value: |m| m.total_slow_poll_duration.as_secs_f64(),
+        }
+        .collect_family_into(MetricName::from_str("total_slow_poll_duration"), enc)?;
+
+        // short_delay
+        TokioTaskCounterMetric {
+            snapshots,
+            help: "The total count of tasks with short scheduling delays.",
+            get_value: |m| m.total_short_delay_count,
+        }
+        .collect_family_into(MetricName::from_str("total_short_delay_count"), enc)?;
+        TokioTaskFloatGaugeMetric {
+            snapshots,
+            help: "The total duration of tasks with short scheduling delays.",
+            get_value: |m| m.total_short_delay_duration.as_secs_f64(),
+        }
+        .collect_family_into(MetricName::from_str("total_short_delay_duration"), enc)?;
+
+        // long_delay
+        TokioTaskCounterMetric {
+            snapshots,
+            help: "The total count of tasks with long scheduling delays.",
+            get_value: |m| m.total_long_delay_count,
+        }
+        .collect_family_into(MetricName::from_str("total_long_delay_count"), enc)?;
+        TokioTaskFloatGaugeMetric {
+            snapshots,
+            help: "The total number of times that a task had a long scheduling duration.",
+            get_value: |m| m.total_long_delay_duration.as_secs_f64(),
+        }
+        .collect_family_into(MetricName::from_str("total_long_delay_duration"), enc)?;
+
+        Ok(())
+    }
+}
+
+struct TokioTaskMonitorName<'a>(&'a str);
+
+impl LabelGroup for TokioTaskMonitorName<'_> {
+    fn visit_values(&self, v: &mut impl LabelGroupVisitor) {
+        struct Str<'a>(&'a str);
+        impl LabelValue for Str<'_> {
+            fn visit<V: LabelVisitor>(&self, v: V) -> V::Output {
+                v.write_str(self.0)
+            }
+        }
+        v.write_value(LabelName::from_str("monitor"), &Str(self.0));
+    }
+}
+
+struct TokioTaskCounterMetric<'a, F>
+where
+    F: Fn(&tokio_metrics::TaskMetrics) -> u64,
+{
+    snapshots: &'a [(TokioTaskMonitorName<'a>, tokio_metrics::TaskMetrics)],
+    help: &'a str,
+    get_value: F,
+}
+
+impl<E: Encoding, F> MetricFamilyEncoding<E> for TokioTaskCounterMetric<'_, F>
+where
+    F: Fn(&tokio_metrics::TaskMetrics) -> u64,
+    CounterState: MetricEncoding<E>,
+{
+    fn collect_family_into(
+        &self,
+        metric_name: impl MetricNameEncoder,
+        enc: &mut E,
+    ) -> Result<(), <E as Encoding>::Err> {
+        let metric_name = metric_name.by_ref();
+        enc.write_help(metric_name, self.help)?;
+        CounterState::write_type(metric_name, enc)?;
+
+        for (monitor_name, snapshot) in self.snapshots {
+            let value = (self.get_value)(snapshot);
+            CounterState {
+                count: AtomicU64::new(value),
+            }
+            .collect_into(&(), monitor_name, metric_name, enc)?;
+        }
+        Ok(())
+    }
+}
+
+struct TokioTaskFloatGaugeMetric<'a, F>
+where
+    F: Fn(&tokio_metrics::TaskMetrics) -> f64,
+{
+    snapshots: &'a [(TokioTaskMonitorName<'a>, tokio_metrics::TaskMetrics)],
+    help: &'a str,
+    get_value: F,
+}
+
+impl<E: Encoding, F> MetricFamilyEncoding<E> for TokioTaskFloatGaugeMetric<'_, F>
+where
+    F: Fn(&tokio_metrics::TaskMetrics) -> f64,
+    FloatGaugeState: MetricEncoding<E>,
+{
+    fn collect_family_into(
+        &self,
+        metric_name: impl MetricNameEncoder,
+        enc: &mut E,
+    ) -> Result<(), <E as Encoding>::Err> {
+        let metric_name = metric_name.by_ref();
+        enc.write_help(metric_name, self.help)?;
+        FloatGaugeState::write_type(metric_name, enc)?;
+
+        for (monitor_name, snapshot) in self.snapshots {
+            let value = (self.get_value)(snapshot);
+            FloatGaugeState {
+                count: AtomicF64::new(value),
+            }
+            .collect_into(&(), monitor_name, metric_name, enc)?;
+        }
+        Ok(())
+    }
 }

@@ -14,6 +14,7 @@ use futures::future::Either;
 use remote_storage::RemoteStorageConfig;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
+use tokio_metrics::TaskMonitor;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info, warn};
 use utils::sentry_init::init_sentry;
@@ -243,6 +244,10 @@ struct ProxyCliArgs {
 
     #[clap(flatten)]
     pg_sni_router: PgSniRouterArgs,
+
+    /// Collect performance stats of passthrough tasks and export metrics.
+    #[clap(long, default_value_t = tracing::level_enabled!(tracing::Level::DEBUG), value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    enable_passthrough_task_metrics: bool,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -606,7 +611,15 @@ pub async fn run() -> anyhow::Result<()> {
 /// ProxyConfig is created at proxy startup, and lives forever.
 fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     let thread_pool = ThreadPool::new(args.scram_thread_pool_size);
-    Metrics::install(thread_pool.metrics.clone());
+    let passthrough_task_monitor = TaskMonitor::new();
+    Metrics::install(
+        thread_pool.metrics.clone(),
+        if args.enable_passthrough_task_metrics {
+            vec![("passthrough", passthrough_task_monitor.clone())]
+        } else {
+            vec![]
+        },
+    );
 
     let tls_config = match (&args.tls_key, &args.tls_cert) {
         (Some(key_path), Some(cert_path)) => Some(config::configure_tls(
@@ -708,6 +721,11 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,
         connect_compute_locks,
         connect_to_compute: compute_config,
+        passthrough_task_monitor: if args.enable_passthrough_task_metrics {
+            Some(passthrough_task_monitor)
+        } else {
+            None
+        },
     };
 
     let config = Box::leak(Box::new(config));
