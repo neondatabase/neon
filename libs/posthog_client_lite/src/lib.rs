@@ -448,6 +448,18 @@ impl FeatureStore {
             )))
         }
     }
+
+    /// Infer whether a feature flag is a boolean flag by checking if it has a multivariate filter.
+    pub fn is_feature_flag_boolean(&self, flag_key: &str) -> Result<bool, PostHogEvaluationError> {
+        if let Some(flag_config) = self.flags.get(flag_key) {
+            Ok(flag_config.filters.multivariate.is_none())
+        } else {
+            Err(PostHogEvaluationError::NotAvailable(format!(
+                "Not found in the local evaluation spec: {}",
+                flag_key
+            )))
+        }
+    }
 }
 
 pub struct PostHogClientConfig {
