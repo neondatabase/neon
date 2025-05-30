@@ -804,7 +804,7 @@ fn start_pageserver(
         } else {
             None
         },
-        basebackup_cache.clone(),
+        basebackup_cache,
     );
 
     // Spawn a Pageserver gRPC server task. It will spawn separate tasks for
@@ -816,12 +816,10 @@ fn start_pageserver(
     let mut page_service_grpc = None;
     if let Some(grpc_listener) = grpc_listener {
         page_service_grpc = Some(page_service::spawn_grpc(
-            conf,
             tenant_manager.clone(),
             grpc_auth,
             otel_guard.as_ref().map(|g| g.dispatch.clone()),
             grpc_listener,
-            basebackup_cache,
         )?);
     }
 
