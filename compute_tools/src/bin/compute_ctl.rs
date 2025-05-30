@@ -57,21 +57,6 @@ use tracing::{error, info};
 use url::Url;
 use utils::failpoint_support;
 
-// Compatibility hack: if the control plane specified any remote-ext-config
-// use the default value for extension storage proxy gateway.
-// Remove this once the control plane is updated to pass the gateway URL
-fn parse_remote_ext_base_url(arg: &str) -> Result<String> {
-    const FALLBACK_PG_EXT_GATEWAY_BASE_URL: &str =
-        "http://pg-ext-s3-gateway.pg-ext-s3-gateway.svc.cluster.local";
-
-    Ok(if arg.starts_with("http") {
-        arg
-    } else {
-        FALLBACK_PG_EXT_GATEWAY_BASE_URL
-    }
-    .to_owned())
-}
-
 #[derive(Parser)]
 #[command(rename_all = "kebab-case")]
 struct Cli {
@@ -80,7 +65,7 @@ struct Cli {
 
     /// The base URL for the remote extension storage proxy gateway.
     /// Should be in the form of `http(s)://<gateway-hostname>[:<port>]`.
-    #[arg(short = 'r', long, value_parser = parse_remote_ext_base_url, alias = "remote-ext-config")]
+    #[arg(short = 'r', long, alias = "remote-ext-config")]
     pub remote_ext_base_url: Option<String>,
 
     /// The port to bind the external listening HTTP server to. Clients running
@@ -275,19 +260,5 @@ mod test {
     #[test]
     fn verify_cli() {
         Cli::command().debug_assert()
-    }
-
-    #[test]
-    fn parse_pg_ext_gateway_base_url() {
-        let arg = "http://pg-ext-s3-gateway2";
-        let result = super::parse_remote_ext_base_url(arg).unwrap();
-        assert_eq!(result, arg);
-
-        let arg = "pg-ext-s3-gateway";
-        let result = super::parse_remote_ext_base_url(arg).unwrap();
-        assert_eq!(
-            result,
-            "http://pg-ext-s3-gateway.pg-ext-s3-gateway.svc.cluster.local"
-        );
     }
 }

@@ -91,4 +91,14 @@ impl FeatureResolver {
             ))
         }
     }
+
+    pub fn is_feature_flag_boolean(&self, flag_key: &str) -> Result<bool, PostHogEvaluationError> {
+        if let Some(inner) = &self.inner {
+            inner.feature_store().is_feature_flag_boolean(flag_key)
+        } else {
+            Err(PostHogEvaluationError::NotAvailable(
+                "PostHog integration is not enabled".to_string(),
+            ))
+        }
+    }
 }
