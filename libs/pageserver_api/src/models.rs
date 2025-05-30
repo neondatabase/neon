@@ -2042,7 +2042,7 @@ pub enum PagestreamProtocolVersion {
 
 pub type RequestId = u64;
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub struct PagestreamRequest {
     pub reqid: RequestId,
     pub request_lsn: Lsn,
@@ -2061,7 +2061,7 @@ pub struct PagestreamNblocksRequest {
     pub rel: RelTag,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub struct PagestreamGetPageRequest {
     pub hdr: PagestreamRequest,
     pub rel: RelTag,
