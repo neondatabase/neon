@@ -75,6 +75,7 @@ jobs:
 
       - name: Update the project settings
         run: |
+          sleep 20
           SETTINGS=$(curl \
              "https://console-stage.neon.build/regions/aws-us-east-2-cell-1/api/v1/admin/projects/${PROJECT_ID}" \
              --fail \
