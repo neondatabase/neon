@@ -181,6 +181,7 @@ pub struct ConfigToml {
     pub virtual_file_io_engine: Option<crate::models::virtual_file::IoEngineKind>,
     pub ingest_batch_size: u64,
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
+    pub max_get_vectored_keys: MaxGetVectoredKeys,
     pub image_compression: ImageCompressionAlgorithm,
     pub timeline_offloading: bool,
     pub ephemeral_bytes_per_memory_kb: usize,
@@ -229,7 +230,7 @@ pub enum PageServicePipeliningConfig {
 }
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PageServicePipeliningConfigPipelined {
-    /// Failed config parsing and validation if larger than `Timeline::MAX_GET_VECTORED_KEYS`.
+    /// Failed config parsing and validation if larger than `max_get_vectored_keys`.
     pub max_batch_size: NonZeroUsize,
     pub execution: PageServiceProtocolPipelinedExecutionStrategy,
     // The default below is such that new versions of the software can start
@@ -402,6 +403,16 @@ impl Default for EvictionOrder {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct MaxVectoredReadBytes(pub NonZeroUsize);
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct MaxGetVectoredKeys(pub NonZeroUsize);
+
+impl MaxGetVectoredKeys {
+    pub fn get(&self) -> usize {
+        self.0.get()
+    }
+}
 
 /// Tenant-level configuration values, used for various purposes.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -587,6 +598,8 @@ pub mod defaults {
     /// That is, slightly above 128 kB.
     pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 130 * 1024; // 130 KiB
 
+    pub const DEFAULT_MAX_GET_VECTORED_KEYS: usize = 32;
+
     pub const DEFAULT_IMAGE_COMPRESSION: ImageCompressionAlgorithm =
         ImageCompressionAlgorithm::Zstd { level: Some(1) };
 
@@ -684,6 +697,9 @@ impl Default for ConfigToml {
 
             max_vectored_read_bytes: (MaxVectoredReadBytes(
                 NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
+            )),
+            max_get_vectored_keys: (MaxGetVectoredKeys(
+                NonZeroUsize::new(DEFAULT_MAX_GET_VECTORED_KEYS).unwrap(),
             )),
             image_compression: (DEFAULT_IMAGE_COMPRESSION),
             timeline_offloading: true,

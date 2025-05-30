@@ -7144,7 +7144,7 @@ mod tests {
             let end = desc
                 .key_range
                 .start
-                .add(Timeline::MAX_GET_VECTORED_KEYS.try_into().unwrap());
+                .add(tenant.conf.max_get_vectored_keys.get() as u32);
             reads.push(KeySpace {
                 ranges: vec![start..end],
             });

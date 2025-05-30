@@ -15,8 +15,8 @@ use anyhow::{Context, bail, ensure};
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
 use pageserver_api::config::{
-    DiskUsageEvictionTaskConfig, MaxVectoredReadBytes, PageServicePipeliningConfig,
-    PageServicePipeliningConfigPipelined, PostHogConfig,
+    DiskUsageEvictionTaskConfig, MaxGetVectoredKeys, MaxVectoredReadBytes,
+    PageServicePipeliningConfig, PageServicePipeliningConfigPipelined, PostHogConfig,
 };
 use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
@@ -30,7 +30,7 @@ use utils::logging::{LogFormat, SecretString};
 use utils::postgres_client::PostgresClientProtocol;
 
 use crate::tenant::storage_layer::inmemory_layer::IndexEntry;
-use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME, Timeline};
+use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use crate::virtual_file::io_engine;
 use crate::{TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME, virtual_file};
 
@@ -187,6 +187,9 @@ pub struct PageServerConf {
     pub virtual_file_io_engine: virtual_file::IoEngineKind,
 
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
+
+    /// Maximum number of keys to be read in a single get_vectored call.
+    pub max_get_vectored_keys: MaxGetVectoredKeys,
 
     pub image_compression: ImageCompressionAlgorithm,
 
@@ -407,6 +410,7 @@ impl PageServerConf {
             secondary_download_concurrency,
             ingest_batch_size,
             max_vectored_read_bytes,
+            max_get_vectored_keys,
             image_compression,
             timeline_offloading,
             ephemeral_bytes_per_memory_kb,
@@ -473,6 +477,7 @@ impl PageServerConf {
             secondary_download_concurrency,
             ingest_batch_size,
             max_vectored_read_bytes,
+            max_get_vectored_keys,
             image_compression,
             timeline_offloading,
             ephemeral_bytes_per_memory_kb,
@@ -606,10 +611,10 @@ impl PageServerConf {
             ..
         }) = conf.page_service_pipelining
         {
-            if max_batch_size.get() as u64 > Timeline::MAX_GET_VECTORED_KEYS {
+            if max_batch_size.get() > conf.max_get_vectored_keys.get() {
                 return Err(anyhow::anyhow!(
                     "`max_batch_size` must be less than or equal to {}",
-                    Timeline::MAX_GET_VECTORED_KEYS,
+                    conf.max_get_vectored_keys.get(),
                 ));
             }
         };
@@ -743,16 +748,21 @@ mod tests {
     }
 
     #[rstest]
-    #[case(64, true)]
-    #[case(128, true)]
-    #[case(129, false)]
-    fn test_config_max_batch_size_is_valid(#[case] max_batch_size: usize, #[case] is_valid: bool) {
+    #[case(32, 32, true)]
+    #[case(64, 32, false)]
+    #[case(64, 64, true)]
+    #[case(128, 128, true)]
+    fn test_config_max_batch_size_is_valid(
+        #[case] max_batch_size: usize,
+        #[case] max_get_vectored_keys: usize,
+        #[case] is_valid: bool,
+    ) {
         let input = format!(
             r#"
             control_plane_api = "http://localhost:6666"
-            page_service_pipelining = {{ mode="pipelined", execution="concurrent-futures", max_batch_size={}, batching="uniform-lsn" }}
+            max_get_vectored_keys = {max_get_vectored_keys}
+            page_service_pipelining = {{ mode="pipelined", execution="concurrent-futures", max_batch_size={max_batch_size}, batching="uniform-lsn" }}
         "#,
-            max_batch_size
         );
         let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
             .expect("config has valid fields");
