@@ -431,7 +431,7 @@ impl Timeline {
                         GetVectoredError::InvalidLsn(e) => {
                             Err(anyhow::anyhow!("invalid LSN: {e:?}").into())
                         }
-                        // NB: this should never happen in practice because we limit MAX_GET_VECTORED_KEYS
+                        // NB: this should never happen in practice because we limit batch size to be smaller than max_get_vectored_keys
                         // TODO: we can prevent this error class by moving this check into the type system
                         GetVectoredError::Oversized(err, max) => {
                             Err(anyhow::anyhow!("batching oversized: {err} > {max}").into())

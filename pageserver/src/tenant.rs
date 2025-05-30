@@ -11136,11 +11136,11 @@ mod tests {
                 let mut keyspaces_at_lsn: HashMap<Lsn, KeySpaceRandomAccum> = HashMap::default();
                 let mut used_keys: HashSet<Key> = HashSet::default();
 
-                while used_keys.len() < Timeline::MAX_GET_VECTORED_KEYS as usize {
+                while used_keys.len() < tenant.conf.max_get_vectored_keys.get() {
                     let selected_lsn = interesting_lsns.choose(&mut random).expect("not empty");
                     let mut selected_key = start_key.add(random.gen_range(0..KEY_DIMENSION_SIZE));
 
-                    while used_keys.len() < Timeline::MAX_GET_VECTORED_KEYS as usize {
+                    while used_keys.len() < tenant.conf.max_get_vectored_keys.get() as usize {
                         if used_keys.contains(&selected_key)
                             || selected_key >= start_key.add(KEY_DIMENSION_SIZE)
                         {
