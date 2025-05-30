@@ -1312,11 +1312,11 @@ impl EvictionsWithLowResidenceDuration {
 //
 // Roughly logarithmic scale.
 const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
-    0.0005,   // 50us
-    0.0006,   // 60us
-    0.0007,   // 70us
-    0.0008,   // 80us
-    0.0009,   // 90us
+    0.00005,  // 50us
+    0.00006,  // 60us
+    0.00007,  // 70us
+    0.00008,  // 80us
+    0.00009,  // 90us
     0.0001,   // 100us
     0.000110, // 110us
     0.000120, // 120us
