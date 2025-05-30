@@ -5,9 +5,8 @@ This far, only contains a test that we don't break and that the data is persiste
 """
 
 import psycopg2
-
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import Endpoint, NeonEnv, wait_replica_caughtup, wait_for_last_flush_lsn
+from fixtures.neon_fixtures import Endpoint, NeonEnv, wait_for_last_flush_lsn, wait_replica_caughtup
 from fixtures.pg_version import PgVersion
 from pytest import raises
 
@@ -80,7 +79,9 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
         new_primary_cur.execute("select count(*) from t")
         assert new_primary_cur.fetchone() == (100,)
 
-        new_primary_cur.execute("INSERT INTO t (payload) SELECT generate_series(101, 200) RETURNING payload")
+        new_primary_cur.execute(
+            "INSERT INTO t (payload) SELECT generate_series(101, 200) RETURNING payload"
+        )
         assert new_primary_cur.fetchall() == [(it,) for it in range(101, 201)]
 
         new_primary_cur = new_primary_conn.cursor()
@@ -97,7 +98,6 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
             """
         )
         log.info(f"Secondary: LSN after workload is {new_primary_cur.fetchone()}")
-
 
     with secondary.connect() as second_viewpoint_conn:
         new_primary_cur = second_viewpoint_conn.cursor()

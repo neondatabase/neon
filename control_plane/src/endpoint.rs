@@ -616,7 +616,8 @@ impl Endpoint {
 
     /// Map safekeepers ids to the actual connection strings.
     fn build_safekeepers_connstrs(&self, sk_ids: Vec<NodeId>) -> Result<Vec<String>> {
-        sk_ids.into_iter()
+        sk_ids
+            .into_iter()
             .map(|node_id| {
                 self.env
                     .safekeepers
