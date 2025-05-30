@@ -64,45 +64,57 @@ impl AsyncAuthorizeRequest<Body> for Authorize {
             };
 
             match data.claims.scope {
-                // TODO: We should validate audience for every token, but
-                // instead of this ad-hoc validation, we should turn
-                // [`Validation::validate_aud`] on. This is merely a stopgap
-                // while we roll out `aud` deployment. We return a 401
-                // Unauthorized because when we eventually do use
-                // [`Validation`], we will hit the above `Err` match arm which
-                // returns 401 Unauthorized.
-                Some(ref scope) if scope.contains(&ComputeClaimsScope::Admin) => {
-                    let Some(ref audience) = data.claims.audience else {
-                        return Err(JsonResponse::error(
-                            StatusCode::UNAUTHORIZED,
-                            "missing audience in authorization token claims",
-                        ));
-                    };
+                // If the scope is not [`ComputeClaimsScope::Admin`], then we
+                // must validate the compute_id
+                Some(ref scope) => {
+                    // TODO: We should validate audience for every token, but
+                    // instead of this ad-hoc validation, we should turn
+                    // [`Validation::validate_aud`] on. This is merely a stopgap
+                    // while we roll out `aud` deployment. We return a 401
+                    // Unauthorized because when we eventually do use
+                    // [`Validation`], we will hit the above `Err` match arm which
+                    // returns 401 Unauthorized.
+                    if scope.contains(&ComputeClaimsScope::Admin) {
+                        let Some(ref audience) = data.claims.audience else {
+                            return Err(JsonResponse::error(
+                                StatusCode::UNAUTHORIZED,
+                                "missing audience in authorization token claims",
+                            ));
+                        };
 
-                    if !audience.iter().any(|a| a == COMPUTE_AUDIENCE) {
+                        if !audience.iter().any(|a| a == COMPUTE_AUDIENCE) {
+                            return Err(JsonResponse::error(
+                                StatusCode::UNAUTHORIZED,
+                                "invalid audience in authorization token claims",
+                            ));
+                        }
+                    } else if scope.contains(&ComputeClaimsScope::ComputeCtlExternalApi) {
+                        let Some(ref claimed_compute_id) = data.claims.compute_id else {
+                            return Err(JsonResponse::error(
+                                StatusCode::FORBIDDEN,
+                                "missing compute_id in authorization token claims",
+                            ));
+                        };
+
+                        if *claimed_compute_id != compute_id {
+                            return Err(JsonResponse::error(
+                                StatusCode::FORBIDDEN,
+                                "invalid compute ID in authorization token claims",
+                            ));
+                        }
+                    } else {
                         return Err(JsonResponse::error(
                             StatusCode::UNAUTHORIZED,
-                            "invalid audience in authorization token claims",
+                            "compute_ctl:external_api scope not included",
                         ));
                     }
                 }
 
-                // If the scope is not [`ComputeClaimsScope::Admin`], then we
-                // must validate the compute_id
-                _ => {
-                    let Some(ref claimed_compute_id) = data.claims.compute_id else {
-                        return Err(JsonResponse::error(
-                            StatusCode::FORBIDDEN,
-                            "missing compute_id in authorization token claims",
-                        ));
-                    };
-
-                    if *claimed_compute_id != compute_id {
-                        return Err(JsonResponse::error(
-                            StatusCode::FORBIDDEN,
-                            "invalid compute ID in authorization token claims",
-                        ));
-                    }
+                None => {
+                    return Err(JsonResponse::error(
+                        StatusCode::UNAUTHORIZED,
+                        "compute_ctl:external_api scope not included",
+                    ));
                 }
             }
 

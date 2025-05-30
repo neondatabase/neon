@@ -25,6 +25,7 @@ The value to place in the `aud` claim.
 @final
 class ComputeClaimsScope(StrEnum):
     ADMIN = "admin"
+    COMPUTE_CTL_EXTERNAL_API = "compute_ctl:external_api"
 
 
 @final

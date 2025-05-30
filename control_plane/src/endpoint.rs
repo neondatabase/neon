@@ -920,7 +920,7 @@ impl Endpoint {
                     self.external_http_address.port()
                 ),
             )
-            .bearer_auth(self.generate_jwt(None::<Vec<ComputeClaimsScope>>)?)
+            .bearer_auth(self.generate_jwt(Some(vec![ComputeClaimsScope::ComputeCtlExternalApi]))?)
             .send()
             .await?;
 
@@ -997,7 +997,7 @@ impl Endpoint {
                 self.external_http_address.port()
             ))
             .header(CONTENT_TYPE.as_str(), "application/json")
-            .bearer_auth(self.generate_jwt(None::<Vec<ComputeClaimsScope>>)?)
+            .bearer_auth(self.generate_jwt(Some(vec![ComputeClaimsScope::ComputeCtlExternalApi]))?)
             .body(
                 serde_json::to_string(&ConfigurationRequest {
                     spec,

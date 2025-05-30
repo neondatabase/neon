@@ -17,6 +17,10 @@ pub enum ComputeClaimsScope {
     /// An admin-scoped token allows access to all of `compute_ctl`'s authorized
     /// facilities.
     Admin,
+
+    /// Scope providing access to the `compute_ctl` external API.
+    #[serde(rename = "compute_ctl:external_api")]
+    ComputeCtlExternalApi,
 }
 
 impl FromStr for ComputeClaimsScope {
@@ -25,6 +29,7 @@ impl FromStr for ComputeClaimsScope {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "admin" => Ok(ComputeClaimsScope::Admin),
+            "compute_ctl:external_api" => Ok(ComputeClaimsScope::ComputeCtlExternalApi),
             _ => Err(anyhow::anyhow!("invalid compute claims scope \"{s}\"")),
         }
     }

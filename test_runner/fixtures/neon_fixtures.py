@@ -4282,7 +4282,7 @@ class Endpoint(PgProtocol, LogUtils):
 
         self.config(config_lines)
 
-        self.__jwt = self.generate_jwt([])
+        self.__jwt = self.generate_jwt([ComputeClaimsScope.COMPUTE_CTL_EXTERNAL_API])
 
         return self
 
