@@ -206,7 +206,7 @@ class NeonProject:
         self.neon_api = neon_api
         self.pg_bin = pg_bin
         proj = self.neon_api.create_project(
-            pg_version, f"Automatic random API test {os.getenv('GITHUB_RUN_ID')}"
+            pg_version, f"Automatic random API test GITHUB_RUN_ID={os.getenv('GITHUB_RUN_ID')}"
         )
         self.id: str = proj["project"]["id"]
         self.name: str = proj["project"]["name"]

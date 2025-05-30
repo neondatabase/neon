@@ -1316,6 +1316,10 @@ impl WalIngest {
             }
         });
 
+        if info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN {
+            modification.tline.prepare_basebackup(lsn);
+        }
+
         Ok(())
     }
 
@@ -1684,31 +1688,31 @@ mod tests {
         // The relation was created at LSN 2, not visible at LSN 1 yet.
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x10)), &ctx)
+                .get_rel_exists(TESTREL_A, Version::at(Lsn(0x10)), &ctx)
                 .await?,
             false
         );
         assert!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x10)), &ctx)
+                .get_rel_size(TESTREL_A, Version::at(Lsn(0x10)), &ctx)
                 .await
                 .is_err()
         );
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x20)), &ctx)
+                .get_rel_exists(TESTREL_A, Version::at(Lsn(0x20)), &ctx)
                 .await?,
             true
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x20)), &ctx)
+                .get_rel_size(TESTREL_A, Version::at(Lsn(0x20)), &ctx)
                 .await?,
             1
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x50)), &ctx)
+                .get_rel_size(TESTREL_A, Version::at(Lsn(0x50)), &ctx)
                 .await?,
             3
         );
@@ -1719,7 +1723,7 @@ mod tests {
                 .get_rel_page_at_lsn(
                     TESTREL_A,
                     0,
-                    Version::Lsn(Lsn(0x20)),
+                    Version::at(Lsn(0x20)),
                     &ctx,
                     io_concurrency.clone()
                 )
@@ -1733,7 +1737,7 @@ mod tests {
                 .get_rel_page_at_lsn(
                     TESTREL_A,
                     0,
-                    Version::Lsn(Lsn(0x30)),
+                    Version::at(Lsn(0x30)),
                     &ctx,
                     io_concurrency.clone()
                 )
@@ -1747,7 +1751,7 @@ mod tests {
                 .get_rel_page_at_lsn(
                     TESTREL_A,
                     0,
-                    Version::Lsn(Lsn(0x40)),
+                    Version::at(Lsn(0x40)),
                     &ctx,
                     io_concurrency.clone()
                 )
@@ -1760,7 +1764,7 @@ mod tests {
                 .get_rel_page_at_lsn(
                     TESTREL_A,
                     1,
-                    Version::Lsn(Lsn(0x40)),
+                    Version::at(Lsn(0x40)),
                     &ctx,
                     io_concurrency.clone()
                 )
@@ -1774,7 +1778,7 @@ mod tests {
                 .get_rel_page_at_lsn(
                     TESTREL_A,
                     0,
-                    Version::Lsn(Lsn(0x50)),
+                    Version::at(Lsn(0x50)),
                     &ctx,
                     io_concurrency.clone()
                 )
@@ -1787,7 +1791,7 @@ mod tests {
                 .get_rel_page_at_lsn(
                     TESTREL_A,
                     1,
-                    Version::Lsn(Lsn(0x50)),
+                    Version::at(Lsn(0x50)),
                     &ctx,
                     io_concurrency.clone()
                 )
@@ -1800,7 +1804,7 @@ mod tests {
                 .get_rel_page_at_lsn(
                     TESTREL_A,
                     2,
-                    Version::Lsn(Lsn(0x50)),
+                    Version::at(Lsn(0x50)),
                     &ctx,
                     io_concurrency.clone()
                 )
@@ -1820,7 +1824,7 @@ mod tests {
         // Check reported size and contents after truncation
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x60)), &ctx)
+                .get_rel_size(TESTREL_A, Version::at(Lsn(0x60)), &ctx)
                 .await?,
             2
         );
@@ -1829,7 +1833,7 @@ mod tests {
                 .get_rel_page_at_lsn(
                     TESTREL_A,
                     0,
-                    Version::Lsn(Lsn(0x60)),
+                    Version::at(Lsn(0x60)),
                     &ctx,
                     io_concurrency.clone()
                 )
@@ -1842,7 +1846,7 @@ mod tests {
                 .get_rel_page_at_lsn(
                     TESTREL_A,
                     1,
-                    Version::Lsn(Lsn(0x60)),
+                    Version::at(Lsn(0x60)),
                     &ctx,
                     io_concurrency.clone()
                 )
@@ -1854,7 +1858,7 @@ mod tests {
         // should still see the truncated block with older LSN
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x50)), &ctx)
+                .get_rel_size(TESTREL_A, Version::at(Lsn(0x50)), &ctx)
                 .await?,
             3
         );
@@ -1863,7 +1867,7 @@ mod tests {
                 .get_rel_page_at_lsn(
                     TESTREL_A,
                     2,
-                    Version::Lsn(Lsn(0x50)),
+                    Version::at(Lsn(0x50)),
                     &ctx,
                     io_concurrency.clone()
                 )
@@ -1880,7 +1884,7 @@ mod tests {
         m.commit(&ctx).await?;
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x68)), &ctx)
+                .get_rel_size(TESTREL_A, Version::at(Lsn(0x68)), &ctx)
                 .await?,
             0
         );
@@ -1893,7 +1897,7 @@ mod tests {
         m.commit(&ctx).await?;
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x70)), &ctx)
+                .get_rel_size(TESTREL_A, Version::at(Lsn(0x70)), &ctx)
                 .await?,
             2
         );
@@ -1902,7 +1906,7 @@ mod tests {
                 .get_rel_page_at_lsn(
                     TESTREL_A,
                     0,
-                    Version::Lsn(Lsn(0x70)),
+                    Version::at(Lsn(0x70)),
                     &ctx,
                     io_concurrency.clone()
                 )
@@ -1915,7 +1919,7 @@ mod tests {
                 .get_rel_page_at_lsn(
                     TESTREL_A,
                     1,
-                    Version::Lsn(Lsn(0x70)),
+                    Version::at(Lsn(0x70)),
                     &ctx,
                     io_concurrency.clone()
                 )
@@ -1932,7 +1936,7 @@ mod tests {
         m.commit(&ctx).await?;
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x80)), &ctx)
+                .get_rel_size(TESTREL_A, Version::at(Lsn(0x80)), &ctx)
                 .await?,
             1501
         );
@@ -1942,7 +1946,7 @@ mod tests {
                     .get_rel_page_at_lsn(
                         TESTREL_A,
                         blk,
-                        Version::Lsn(Lsn(0x80)),
+                        Version::at(Lsn(0x80)),
                         &ctx,
                         io_concurrency.clone()
                     )
@@ -1956,7 +1960,7 @@ mod tests {
                 .get_rel_page_at_lsn(
                     TESTREL_A,
                     1500,
-                    Version::Lsn(Lsn(0x80)),
+                    Version::at(Lsn(0x80)),
                     &ctx,
                     io_concurrency.clone()
                 )
@@ -1990,13 +1994,13 @@ mod tests {
         // Check that rel exists and size is correct
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x20)), &ctx)
+                .get_rel_exists(TESTREL_A, Version::at(Lsn(0x20)), &ctx)
                 .await?,
             true
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x20)), &ctx)
+                .get_rel_size(TESTREL_A, Version::at(Lsn(0x20)), &ctx)
                 .await?,
             1
         );
@@ -2011,7 +2015,7 @@ mod tests {
         // Check that rel is not visible anymore
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x30)), &ctx)
+                .get_rel_exists(TESTREL_A, Version::at(Lsn(0x30)), &ctx)
                 .await?,
             false
         );
@@ -2029,13 +2033,13 @@ mod tests {
         // Check that rel exists and size is correct
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x40)), &ctx)
+                .get_rel_exists(TESTREL_A, Version::at(Lsn(0x40)), &ctx)
                 .await?,
             true
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x40)), &ctx)
+                .get_rel_size(TESTREL_A, Version::at(Lsn(0x40)), &ctx)
                 .await?,
             1
         );
@@ -2077,26 +2081,26 @@ mod tests {
         // The relation was created at LSN 20, not visible at LSN 1 yet.
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x10)), &ctx)
+                .get_rel_exists(TESTREL_A, Version::at(Lsn(0x10)), &ctx)
                 .await?,
             false
         );
         assert!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x10)), &ctx)
+                .get_rel_size(TESTREL_A, Version::at(Lsn(0x10)), &ctx)
                 .await
                 .is_err()
         );
 
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x20)), &ctx)
+                .get_rel_exists(TESTREL_A, Version::at(Lsn(0x20)), &ctx)
                 .await?,
             true
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x20)), &ctx)
+                .get_rel_size(TESTREL_A, Version::at(Lsn(0x20)), &ctx)
                 .await?,
             relsize
         );
@@ -2110,7 +2114,7 @@ mod tests {
                     .get_rel_page_at_lsn(
                         TESTREL_A,
                         blkno,
-                        Version::Lsn(lsn),
+                        Version::at(lsn),
                         &ctx,
                         io_concurrency.clone()
                     )
@@ -2131,7 +2135,7 @@ mod tests {
         // Check reported size and contents after truncation
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x60)), &ctx)
+                .get_rel_size(TESTREL_A, Version::at(Lsn(0x60)), &ctx)
                 .await?,
             1
         );
@@ -2144,7 +2148,7 @@ mod tests {
                     .get_rel_page_at_lsn(
                         TESTREL_A,
                         blkno,
-                        Version::Lsn(Lsn(0x60)),
+                        Version::at(Lsn(0x60)),
                         &ctx,
                         io_concurrency.clone()
                     )
@@ -2157,7 +2161,7 @@ mod tests {
         // should still see all blocks with older LSN
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x50)), &ctx)
+                .get_rel_size(TESTREL_A, Version::at(Lsn(0x50)), &ctx)
                 .await?,
             relsize
         );
@@ -2169,7 +2173,7 @@ mod tests {
                     .get_rel_page_at_lsn(
                         TESTREL_A,
                         blkno,
-                        Version::Lsn(Lsn(0x50)),
+                        Version::at(Lsn(0x50)),
                         &ctx,
                         io_concurrency.clone()
                     )
@@ -2193,13 +2197,13 @@ mod tests {
 
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x80)), &ctx)
+                .get_rel_exists(TESTREL_A, Version::at(Lsn(0x80)), &ctx)
                 .await?,
             true
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x80)), &ctx)
+                .get_rel_size(TESTREL_A, Version::at(Lsn(0x80)), &ctx)
                 .await?,
             relsize
         );
@@ -2212,7 +2216,7 @@ mod tests {
                     .get_rel_page_at_lsn(
                         TESTREL_A,
                         blkno,
-                        Version::Lsn(Lsn(0x80)),
+                        Version::at(Lsn(0x80)),
                         &ctx,
                         io_concurrency.clone()
                     )
@@ -2250,7 +2254,7 @@ mod tests {
 
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(lsn)), &ctx)
+                .get_rel_size(TESTREL_A, Version::at(Lsn(lsn)), &ctx)
                 .await?,
             RELSEG_SIZE + 1
         );
@@ -2264,7 +2268,7 @@ mod tests {
         m.commit(&ctx).await?;
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(lsn)), &ctx)
+                .get_rel_size(TESTREL_A, Version::at(Lsn(lsn)), &ctx)
                 .await?,
             RELSEG_SIZE
         );
@@ -2279,7 +2283,7 @@ mod tests {
         m.commit(&ctx).await?;
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(lsn)), &ctx)
+                .get_rel_size(TESTREL_A, Version::at(Lsn(lsn)), &ctx)
                 .await?,
             RELSEG_SIZE - 1
         );
@@ -2297,7 +2301,7 @@ mod tests {
             m.commit(&ctx).await?;
             assert_eq!(
                 tline
-                    .get_rel_size(TESTREL_A, Version::Lsn(Lsn(lsn)), &ctx)
+                    .get_rel_size(TESTREL_A, Version::at(Lsn(lsn)), &ctx)
                     .await?,
                 size as BlockNumber
             );

@@ -10,6 +10,7 @@ use utils::id::TimelineId;
 use utils::lsn::Lsn;
 use utils::shard::TenantShardId;
 
+use super::errors::PutError;
 use super::layer::S3_UPLOAD_LIMIT;
 use super::{
     DeltaLayerWriter, ImageLayerWriter, PersistentLayerDesc, PersistentLayerKey, ResidentLayer,
@@ -235,7 +236,7 @@ impl<'a> SplitImageLayerWriter<'a> {
         key: Key,
         img: Bytes,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PutError> {
         // The current estimation is an upper bound of the space that the key/image could take
         // because we did not consider compression in this estimation. The resulting image layer
         // could be smaller than the target size.
@@ -253,7 +254,8 @@ impl<'a> SplitImageLayerWriter<'a> {
                 self.cancel.clone(),
                 ctx,
             )
-            .await?;
+            .await
+            .map_err(PutError::Other)?;
             let prev_image_writer = std::mem::replace(&mut self.inner, next_image_writer);
             self.batches.add_unfinished_image_writer(
                 prev_image_writer,
@@ -346,7 +348,7 @@ impl<'a> SplitDeltaLayerWriter<'a> {
         lsn: Lsn,
         val: Value,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PutError> {
         // The current estimation is key size plus LSN size plus value size estimation. This is not an accurate
         // number, and therefore the final layer size could be a little bit larger or smaller than the target.
         //
@@ -366,7 +368,8 @@ impl<'a> SplitDeltaLayerWriter<'a> {
                     self.cancel.clone(),
                     ctx,
                 )
-                .await?,
+                .await
+                .map_err(PutError::Other)?,
             ));
         }
         let (_, inner) = self.inner.as_mut().unwrap();
@@ -386,7 +389,8 @@ impl<'a> SplitDeltaLayerWriter<'a> {
                     self.cancel.clone(),
                     ctx,
                 )
-                .await?;
+                .await
+                .map_err(PutError::Other)?;
                 let (start_key, prev_delta_writer) =
                     self.inner.replace((key, next_delta_writer)).unwrap();
                 self.batches.add_unfinished_delta_writer(
@@ -396,11 +400,11 @@ impl<'a> SplitDeltaLayerWriter<'a> {
                 );
             } else if inner.estimated_size() >= S3_UPLOAD_LIMIT {
                 // We have to produce a very large file b/c a key is updated too often.
-                anyhow::bail!(
+                return Err(PutError::Other(anyhow::anyhow!(
                     "a single key is updated too often: key={}, estimated_size={}, and the layer file cannot be produced",
                     key,
                     inner.estimated_size()
-                );
+                )));
             }
         }
         self.last_key_written = key;

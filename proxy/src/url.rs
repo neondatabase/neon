@@ -43,6 +43,12 @@ impl std::ops::Deref for ApiUrl {
     }
 }
 
+impl std::ops::DerefMut for ApiUrl {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 impl std::fmt::Display for ApiUrl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)

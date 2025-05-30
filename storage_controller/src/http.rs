@@ -31,7 +31,7 @@ use pageserver_api::models::{
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_api::upcall_api::{
-    PutTimelineImportStatusRequest, ReAttachRequest, ValidateRequest,
+    PutTimelineImportStatusRequest, ReAttachRequest, TimelineImportStatusRequest, ValidateRequest,
 };
 use pageserver_client::{BlockUnblock, mgmt_api};
 use routerify::Middleware;
@@ -155,6 +155,29 @@ async fn handle_validate(req: Request<Body>) -> Result<Response<Body>, ApiError>
     let validate_req = json_request::<ValidateRequest>(&mut req).await?;
     let state = get_state(&req);
     json_response(StatusCode::OK, state.service.validate(validate_req).await?)
+}
+
+async fn handle_get_timeline_import_status(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::GenerationsApi)?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let get_req = json_request::<TimelineImportStatusRequest>(&mut req).await?;
+
+    let state = get_state(&req);
+
+    json_response(
+        StatusCode::OK,
+        state
+            .service
+            .handle_timeline_shard_import_progress(get_req)
+            .await?,
+    )
 }
 
 async fn handle_put_timeline_import_status(req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -458,6 +481,10 @@ async fn handle_tenant_timeline_delete(
         }
         ForwardOutcome::NotForwarded(_req) => {}
     };
+
+    service
+        .maybe_delete_timeline_import(tenant_id, timeline_id)
+        .await?;
 
     // For timeline deletions, which both implement an "initially return 202, then 404 once
     // we're done" semantic, we wrap with a retry loop to expose a simpler API upstream.
@@ -2007,6 +2034,13 @@ pub fn make_router(
         })
         .post("/upcall/v1/validate", |r| {
             named_request_span(r, handle_validate, RequestName("upcall_v1_validate"))
+        })
+        .get("/upcall/v1/timeline_import_status", |r| {
+            named_request_span(
+                r,
+                handle_get_timeline_import_status,
+                RequestName("upcall_v1_timeline_import_status"),
+            )
         })
         .post("/upcall/v1/timeline_import_status", |r| {
             named_request_span(

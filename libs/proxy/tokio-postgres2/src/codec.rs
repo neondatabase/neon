@@ -1,21 +1,16 @@
 use std::io;
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use fallible_iterator::FallibleIterator;
 use postgres_protocol2::message::backend;
-use postgres_protocol2::message::frontend::CopyData;
 use tokio_util::codec::{Decoder, Encoder};
 
 pub enum FrontendMessage {
     Raw(Bytes),
-    CopyData(CopyData<Box<dyn Buf + Send>>),
 }
 
 pub enum BackendMessage {
-    Normal {
-        messages: BackendMessages,
-        request_complete: bool,
-    },
+    Normal { messages: BackendMessages },
     Async(backend::Message),
 }
 
@@ -44,7 +39,6 @@ impl Encoder<FrontendMessage> for PostgresCodec {
     fn encode(&mut self, item: FrontendMessage, dst: &mut BytesMut) -> io::Result<()> {
         match item {
             FrontendMessage::Raw(buf) => dst.extend_from_slice(&buf),
-            FrontendMessage::CopyData(data) => data.write(dst),
         }
 
         Ok(())
@@ -57,7 +51,6 @@ impl Decoder for PostgresCodec {
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<BackendMessage>, io::Error> {
         let mut idx = 0;
-        let mut request_complete = false;
 
         while let Some(header) = backend::Header::parse(&src[idx..])? {
             let len = header.len() as usize + 1;
@@ -82,7 +75,6 @@ impl Decoder for PostgresCodec {
             idx += len;
 
             if header.tag() == backend::READY_FOR_QUERY_TAG {
-                request_complete = true;
                 break;
             }
         }
@@ -92,7 +84,6 @@ impl Decoder for PostgresCodec {
         } else {
             Ok(Some(BackendMessage::Normal {
                 messages: BackendMessages(src.split_to(idx)),
-                request_complete,
             }))
         }
     }

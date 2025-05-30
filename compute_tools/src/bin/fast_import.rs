@@ -339,6 +339,8 @@ async fn run_dump_restore(
     destination_connstring: String,
 ) -> Result<(), anyhow::Error> {
     let dumpdir = workdir.join("dumpdir");
+    let num_jobs = num_cpus::get().to_string();
+    info!("using {num_jobs} jobs for dump/restore");
 
     let common_args = [
         // schema mapping (prob suffices to specify them on one side)
@@ -348,12 +350,13 @@ async fn run_dump_restore(
         "--no-security-labels".to_string(),
         "--no-subscriptions".to_string(),
         "--no-tablespaces".to_string(),
+        "--no-event-triggers".to_string(),
         // format
         "--format".to_string(),
         "directory".to_string(),
         // concurrency
         "--jobs".to_string(),
-        num_cpus::get().to_string(),
+        num_jobs,
         // progress updates
         "--verbose".to_string(),
     ];

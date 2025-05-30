@@ -299,6 +299,7 @@ pub struct PullTimelineRequest {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
     pub http_hosts: Vec<String>,
+    pub ignore_tombstone: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

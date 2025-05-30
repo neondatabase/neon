@@ -124,6 +124,7 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 	}
 	else
 	{
+		wp->safekeepers_generation = INVALID_GENERATION;
 		host = wp->config->safekeepers_list;
 	}
 	wp_log(LOG, "safekeepers_generation=%u", wp->safekeepers_generation);
@@ -154,8 +155,9 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 			int			written = 0;
 
 			written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
-							   "host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
-							   sk->host, sk->port, wp->config->neon_timeline, wp->config->neon_tenant);
+							   "%s host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
+							   wp->config->safekeeper_conninfo_options, sk->host, sk->port,
+							   wp->config->neon_timeline, wp->config->neon_tenant);
 			if (written > MAXCONNINFO || written < 0)
 				wp_log(FATAL, "could not create connection string for safekeeper %s:%s", sk->host, sk->port);
 		}
@@ -756,7 +758,7 @@ UpdateMemberSafekeeperPtr(WalProposer *wp, Safekeeper *sk)
 	{
 		SafekeeperId *sk_id = &wp->mconf.members.m[i];
 
-		if (wp->mconf.members.m[i].node_id == sk->greetResponse.nodeId)
+		if (sk_id->node_id == sk->greetResponse.nodeId)
 		{
 			/*
 			 * If mconf or list of safekeepers to connect to changed (the
@@ -781,7 +783,7 @@ UpdateMemberSafekeeperPtr(WalProposer *wp, Safekeeper *sk)
 	{
 		SafekeeperId *sk_id = &wp->mconf.new_members.m[i];
 
-		if (wp->mconf.new_members.m[i].node_id == sk->greetResponse.nodeId)
+		if (sk_id->node_id == sk->greetResponse.nodeId)
 		{
 			if (wp->new_members_safekeepers[i] != NULL && wp->new_members_safekeepers[i] != sk)
 			{
@@ -1071,7 +1073,6 @@ RecvVoteResponse(Safekeeper *sk)
 	/* ready for elected message */
 	sk->state = SS_WAIT_ELECTED;
 
-	wp->n_votes++;
 	/* Are we already elected? */
 	if (wp->state == WPS_CAMPAIGN)
 	{

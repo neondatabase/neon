@@ -25,6 +25,7 @@ use crate::rate_limit::RateLimiter;
 use crate::state::TimelinePersistentState;
 use crate::timeline::{Timeline, TimelineError, delete_dir, get_tenant_dir, get_timeline_dir};
 use crate::timelines_set::TimelinesSet;
+use crate::wal_backup::WalBackup;
 use crate::wal_storage::Storage;
 use crate::{SafeKeeperConf, control_file, wal_storage};
 
@@ -43,19 +44,29 @@ struct GlobalTimelinesState {
     // on-demand timeline creation from recreating deleted timelines.  This is only soft-enforced, as
     // this map is dropped on restart.
     tombstones: HashMap<TenantTimelineId, Instant>,
+    tenant_tombstones: HashMap<TenantId, Instant>,
 
     conf: Arc<SafeKeeperConf>,
     broker_active_set: Arc<TimelinesSet>,
     global_rate_limiter: RateLimiter,
+    wal_backup: Arc<WalBackup>,
 }
 
 impl GlobalTimelinesState {
     /// Get dependencies for a timeline constructor.
-    fn get_dependencies(&self) -> (Arc<SafeKeeperConf>, Arc<TimelinesSet>, RateLimiter) {
+    fn get_dependencies(
+        &self,
+    ) -> (
+        Arc<SafeKeeperConf>,
+        Arc<TimelinesSet>,
+        RateLimiter,
+        Arc<WalBackup>,
+    ) {
         (
             self.conf.clone(),
             self.broker_active_set.clone(),
             self.global_rate_limiter.clone(),
+            self.wal_backup.clone(),
         )
     }
 
@@ -71,9 +82,24 @@ impl GlobalTimelinesState {
         }
     }
 
+    fn has_tombstone(&self, ttid: &TenantTimelineId) -> bool {
+        self.tombstones.contains_key(ttid) || self.tenant_tombstones.contains_key(&ttid.tenant_id)
+    }
+
+    /// Removes all blocking tombstones for the given timeline ID.
+    /// Returns `true` if there have been actual changes.
+    fn remove_tombstone(&mut self, ttid: &TenantTimelineId) -> bool {
+        self.tombstones.remove(ttid).is_some()
+            || self.tenant_tombstones.remove(&ttid.tenant_id).is_some()
+    }
+
     fn delete(&mut self, ttid: TenantTimelineId) {
         self.timelines.remove(&ttid);
         self.tombstones.insert(ttid, Instant::now());
+    }
+
+    fn add_tenant_tombstone(&mut self, tenant_id: TenantId) {
+        self.tenant_tombstones.insert(tenant_id, Instant::now());
     }
 }
 
@@ -84,14 +110,16 @@ pub struct GlobalTimelines {
 
 impl GlobalTimelines {
     /// Create a new instance of the global timelines map.
-    pub fn new(conf: Arc<SafeKeeperConf>) -> Self {
+    pub fn new(conf: Arc<SafeKeeperConf>, wal_backup: Arc<WalBackup>) -> Self {
         Self {
             state: Mutex::new(GlobalTimelinesState {
                 timelines: HashMap::new(),
                 tombstones: HashMap::new(),
+                tenant_tombstones: HashMap::new(),
                 conf,
                 broker_active_set: Arc::new(TimelinesSet::default()),
                 global_rate_limiter: RateLimiter::new(1, 1),
+                wal_backup,
             }),
         }
     }
@@ -147,7 +175,7 @@ impl GlobalTimelines {
     /// just lock and unlock it for each timeline -- this function is called
     /// during init when nothing else is running, so this is fine.
     async fn load_tenant_timelines(&self, tenant_id: TenantId) -> Result<()> {
-        let (conf, broker_active_set, partial_backup_rate_limiter) = {
+        let (conf, broker_active_set, partial_backup_rate_limiter, wal_backup) = {
             let state = self.state.lock().unwrap();
             state.get_dependencies()
         };
@@ -162,7 +190,7 @@ impl GlobalTimelines {
                         TimelineId::from_str(timeline_dir_entry.file_name().to_str().unwrap_or(""))
                     {
                         let ttid = TenantTimelineId::new(tenant_id, timeline_id);
-                        match Timeline::load_timeline(conf.clone(), ttid) {
+                        match Timeline::load_timeline(conf.clone(), ttid, wal_backup.clone()) {
                             Ok(tli) => {
                                 let mut shared_state = tli.write_shared_state().await;
                                 self.state
@@ -175,6 +203,7 @@ impl GlobalTimelines {
                                     &conf,
                                     broker_active_set.clone(),
                                     partial_backup_rate_limiter.clone(),
+                                    wal_backup.clone(),
                                 );
                             }
                             // If we can't load a timeline, it's most likely because of a corrupted
@@ -212,6 +241,10 @@ impl GlobalTimelines {
         self.state.lock().unwrap().broker_active_set.clone()
     }
 
+    pub fn get_wal_backup(&self) -> Arc<WalBackup> {
+        self.state.lock().unwrap().wal_backup.clone()
+    }
+
     /// Create a new timeline with the given id. If the timeline already exists, returns
     /// an existing timeline.
     pub(crate) async fn create(
@@ -222,14 +255,14 @@ impl GlobalTimelines {
         start_lsn: Lsn,
         commit_lsn: Lsn,
     ) -> Result<Arc<Timeline>> {
-        let (conf, _, _) = {
+        let (conf, _, _, _) = {
             let state = self.state.lock().unwrap();
             if let Ok(timeline) = state.get(&ttid) {
                 // Timeline already exists, return it.
                 return Ok(timeline);
             }
 
-            if state.tombstones.contains_key(&ttid) {
+            if state.has_tombstone(&ttid) {
                 anyhow::bail!("Timeline {ttid} is deleted, refusing to recreate");
             }
 
@@ -267,7 +300,7 @@ impl GlobalTimelines {
         check_tombstone: bool,
     ) -> Result<Arc<Timeline>> {
         // Check for existence and mark that we're creating it.
-        let (conf, broker_active_set, partial_backup_rate_limiter) = {
+        let (conf, broker_active_set, partial_backup_rate_limiter, wal_backup) = {
             let mut state = self.state.lock().unwrap();
             match state.timelines.get(&ttid) {
                 Some(GlobalMapTimeline::CreationInProgress) => {
@@ -279,13 +312,14 @@ impl GlobalTimelines {
                 _ => {}
             }
             if check_tombstone {
-                if state.tombstones.contains_key(&ttid) {
+                if state.has_tombstone(&ttid) {
                     anyhow::bail!("timeline {ttid} is deleted, refusing to recreate");
                 }
             } else {
                 // We may be have been asked to load a timeline that was previously deleted (e.g. from `pull_timeline.rs`).  We trust
                 // that the human doing this manual intervention knows what they are doing, and remove its tombstone.
-                if state.tombstones.remove(&ttid).is_some() {
+                // It's also possible that we enter this when the tenant has been deleted, even if the timeline itself has never existed.
+                if state.remove_tombstone(&ttid) {
                     warn!("un-deleted timeline {ttid}");
                 }
             }
@@ -296,7 +330,14 @@ impl GlobalTimelines {
         };
 
         // Do the actual move and reflect the result in the map.
-        match GlobalTimelines::install_temp_timeline(ttid, tmp_path, conf.clone()).await {
+        match GlobalTimelines::install_temp_timeline(
+            ttid,
+            tmp_path,
+            conf.clone(),
+            wal_backup.clone(),
+        )
+        .await
+        {
             Ok(timeline) => {
                 let mut timeline_shared_state = timeline.write_shared_state().await;
                 let mut state = self.state.lock().unwrap();
@@ -314,6 +355,7 @@ impl GlobalTimelines {
                     &conf,
                     broker_active_set,
                     partial_backup_rate_limiter,
+                    wal_backup,
                 );
                 drop(timeline_shared_state);
                 Ok(timeline)
@@ -336,6 +378,7 @@ impl GlobalTimelines {
         ttid: TenantTimelineId,
         tmp_path: &Utf8PathBuf,
         conf: Arc<SafeKeeperConf>,
+        wal_backup: Arc<WalBackup>,
     ) -> Result<Arc<Timeline>> {
         let tenant_path = get_tenant_dir(conf.as_ref(), &ttid.tenant_id);
         let timeline_path = get_timeline_dir(conf.as_ref(), &ttid);
@@ -377,7 +420,7 @@ impl GlobalTimelines {
         // Do the move.
         durable_rename(tmp_path, &timeline_path, !conf.no_sync).await?;
 
-        Timeline::load_timeline(conf, ttid)
+        Timeline::load_timeline(conf, ttid, wal_backup)
     }
 
     /// Get a timeline from the global map. If it's not present, it doesn't exist on disk,
@@ -457,6 +500,7 @@ impl GlobalTimelines {
         let tli_res = {
             let state = self.state.lock().unwrap();
 
+            // Do NOT check tenant tombstones here: those were set earlier
             if state.tombstones.contains_key(ttid) {
                 // Presence of a tombstone guarantees that a previous deletion has completed and there is no work to do.
                 info!("Timeline {ttid} was already deleted");
@@ -532,6 +576,10 @@ impl GlobalTimelines {
         action: DeleteOrExclude,
     ) -> Result<HashMap<TenantTimelineId, TimelineDeleteResult>> {
         info!("deleting all timelines for tenant {}", tenant_id);
+
+        // Adding a tombstone before getting the timelines to prevent new timeline additions
+        self.state.lock().unwrap().add_tenant_tombstone(*tenant_id);
+
         let to_delete = self.get_all_for_tenant(*tenant_id);
 
         let mut err = None;
@@ -574,6 +622,9 @@ impl GlobalTimelines {
         let now = Instant::now();
         state
             .tombstones
+            .retain(|_, v| now.duration_since(*v) < *tombstone_ttl);
+        state
+            .tenant_tombstones
             .retain(|_, v| now.duration_since(*v) < *tombstone_ttl);
     }
 }

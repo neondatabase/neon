@@ -127,3 +127,4 @@ rstest.workspace = true
 walkdir.workspace = true
 rand_distr = "0.4"
 tokio-postgres.workspace = true
+tracing-test = "0.2"

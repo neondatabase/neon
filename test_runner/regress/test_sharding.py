@@ -1334,6 +1334,13 @@ def test_sharding_split_failures(
         tenant_id, timeline_id, shard_count=initial_shard_count, placement_policy='{"Attached":1}'
     )
 
+    # Create bystander tenants with various shard counts. They should not be affected by the aborted
+    # splits. Regression test for https://github.com/neondatabase/cloud/issues/28589.
+    bystanders = {}  # id → shard_count
+    for bystander_shard_count in [1, 2, 4, 8]:
+        id, _ = env.create_tenant(shard_count=bystander_shard_count)
+        bystanders[id] = bystander_shard_count
+
     env.storage_controller.allowed_errors.extend(
         [
             # All split failures log a warning when then enqueue the abort operation
@@ -1394,6 +1401,8 @@ def test_sharding_split_failures(
             locations = ps.http_client().tenant_list_locations()["tenant_shards"]
             for loc in locations:
                 tenant_shard_id = TenantShardId.parse(loc[0])
+                if tenant_shard_id.tenant_id != tenant_id:
+                    continue  # skip bystanders
                 log.info(f"Shard {tenant_shard_id} seen on node {ps.id} in mode {loc[1]['mode']}")
                 assert tenant_shard_id.shard_count == initial_shard_count
                 if loc[1]["mode"] == "Secondary":
@@ -1414,6 +1423,8 @@ def test_sharding_split_failures(
             locations = ps.http_client().tenant_list_locations()["tenant_shards"]
             for loc in locations:
                 tenant_shard_id = TenantShardId.parse(loc[0])
+                if tenant_shard_id.tenant_id != tenant_id:
+                    continue  # skip bystanders
                 log.info(f"Shard {tenant_shard_id} seen on node {ps.id} in mode {loc[1]['mode']}")
                 assert tenant_shard_id.shard_count == split_shard_count
                 if loc[1]["mode"] == "Secondary":
@@ -1495,6 +1506,12 @@ def test_sharding_split_failures(
     # Having completed the split, pump the background reconciles to ensure that
     # the scheduler reaches an idle state
     env.storage_controller.reconcile_until_idle(timeout_secs=30)
+
+    # Check that all bystanders are still around.
+    for bystander_id, bystander_shard_count in bystanders.items():
+        response = env.storage_controller.tenant_describe(bystander_id)
+        assert TenantId(response["tenant_id"]) == bystander_id
+        assert len(response["shards"]) == bystander_shard_count
 
     env.storage_controller.consistency_check()
 

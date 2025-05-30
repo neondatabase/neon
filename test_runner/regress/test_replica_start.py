@@ -27,8 +27,9 @@ from contextlib import closing
 
 import psycopg2
 import pytest
+from fixtures.common_types import Lsn
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, wait_for_last_flush_lsn, wait_replica_caughtup
+from fixtures.neon_fixtures import NeonEnv, PgBin, wait_for_last_flush_lsn, wait_replica_caughtup
 from fixtures.pg_version import PgVersion
 from fixtures.utils import query_scalar, skip_on_postgres, wait_until
 
@@ -695,3 +696,110 @@ def test_replica_start_with_too_many_unused_xids(neon_simple_env: NeonEnv):
     with secondary.cursor() as secondary_cur:
         secondary_cur.execute("select count(*) from t")
         assert secondary_cur.fetchone() == (n_restarts,)
+
+
+def test_ephemeral_endpoints_vacuum(neon_simple_env: NeonEnv, pg_bin: PgBin):
+    env = neon_simple_env
+    endpoint = env.endpoints.create_start("main")
+
+    sql = """
+CREATE TABLE CHAR_TBL(f1 char(4));
+CREATE TABLE FLOAT8_TBL(f1 float8);
+CREATE TABLE INT2_TBL(f1 int2);
+CREATE TABLE INT4_TBL(f1 int4);
+CREATE TABLE INT8_TBL(q1 int8, q2 int8);
+CREATE TABLE POINT_TBL(f1 point);
+CREATE TABLE TEXT_TBL (f1 text);
+CREATE TABLE VARCHAR_TBL(f1 varchar(4));
+CREATE TABLE onek (unique1		int4);
+CREATE TABLE onek2 AS SELECT * FROM onek;
+CREATE TABLE tenk1 (unique1		int4);
+CREATE TABLE tenk2 AS SELECT * FROM tenk1;
+CREATE TABLE person (name text, age int4,location point);
+CREATE TABLE emp (salary int4, manager name) INHERITS (person);
+CREATE TABLE student (gpa float8) INHERITS (person);
+CREATE TABLE stud_emp (	percent 	int4) INHERITS (emp, student);
+CREATE TABLE road (name		text,thepath 	path);
+CREATE TABLE ihighway () INHERITS (road);
+CREATE TABLE shighway(surface		text) INHERITS (road);
+CREATE TABLE BOOLTBL3 (d text, b bool, o int);
+CREATE TABLE booltbl4(isfalse bool, istrue bool, isnul bool);
+DROP TABLE BOOLTBL3;
+DROP TABLE BOOLTBL4;
+CREATE TABLE ceil_floor_round (a numeric);
+DROP TABLE ceil_floor_round;
+CREATE TABLE width_bucket_test (operand_num numeric, operand_f8 float8);
+DROP TABLE width_bucket_test;
+CREATE TABLE num_input_test (n1 numeric);
+CREATE TABLE num_variance (a numeric);
+INSERT INTO num_variance VALUES (0);
+CREATE TABLE snapshot_test (nr	integer, snap	txid_snapshot);
+CREATE TABLE guid1(guid_field UUID, text_field TEXT DEFAULT(now()));
+CREATE TABLE guid2(guid_field UUID, text_field TEXT DEFAULT(now()));
+CREATE INDEX guid1_btree ON guid1 USING BTREE (guid_field);
+CREATE INDEX guid1_hash  ON guid1 USING HASH  (guid_field);
+TRUNCATE guid1;
+DROP TABLE guid1;
+DROP TABLE guid2 CASCADE;
+CREATE TABLE numrange_test (nr NUMRANGE);
+CREATE INDEX numrange_test_btree on numrange_test(nr);
+CREATE TABLE numrange_test2(nr numrange);
+CREATE INDEX numrange_test2_hash_idx on numrange_test2 using hash (nr);
+INSERT INTO numrange_test2 VALUES('[, 5)');
+CREATE TABLE textrange_test (tr text);
+CREATE INDEX textrange_test_btree on textrange_test(tr);
+CREATE TABLE test_range_gist(ir int4range);
+CREATE INDEX test_range_gist_idx on test_range_gist using gist (ir);
+DROP INDEX test_range_gist_idx;
+CREATE INDEX test_range_gist_idx on test_range_gist using gist (ir);
+CREATE TABLE test_range_spgist(ir int4range);
+CREATE INDEX test_range_spgist_idx on test_range_spgist using spgist (ir);
+DROP INDEX test_range_spgist_idx;
+CREATE INDEX test_range_spgist_idx on test_range_spgist using spgist (ir);
+CREATE TABLE test_range_elem(i int4);
+CREATE INDEX test_range_elem_idx on test_range_elem (i);
+CREATE INDEX ON test_range_elem using spgist(int4range(i,i+10));
+DROP TABLE test_range_elem;
+CREATE TABLE test_range_excl(room int4range, speaker int4range, during tsrange, exclude using gist (room with =, during with &&), exclude using gist (speaker with =, during with &&));
+CREATE TABLE f_test(f text, i int);
+CREATE TABLE i8r_array (f1 int, f2 text);
+CREATE TYPE arrayrange as range (subtype=int4[]);
+CREATE TYPE two_ints as (a int, b int);
+DROP TYPE two_ints cascade;
+CREATE TABLE text_support_test (t text);
+CREATE TABLE TEMP_FLOAT (f1 FLOAT8);
+CREATE TABLE TEMP_INT4 (f1 INT4);
+CREATE TABLE TEMP_INT2 (f1 INT2);
+CREATE TABLE TEMP_GROUP (f1 INT4, f2 INT4, f3 FLOAT8);
+CREATE TABLE POLYGON_TBL(f1 polygon);
+CREATE TABLE quad_poly_tbl (id int, p polygon);
+INSERT INTO quad_poly_tbl SELECT (x - 1) * 100 + y, polygon(circle(point(x * 10, y * 10), 1 + (x + y) % 10)) FROM generate_series(1, 200) x, generate_series(1, 100) y;
+CREATE TABLE quad_poly_tbl_ord_seq2 AS SELECT 1 FROM quad_poly_tbl;
+CREATE TABLE quad_poly_tbl_ord_idx2 AS SELECT 1 FROM quad_poly_tbl;
+"""
+
+    with endpoint.cursor() as cur:
+        lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+        env.endpoints.create_start(branch_name="main", lsn=lsn)
+        log.info(f"lsn: {lsn}")
+
+        for line in sql.split("\n"):
+            if len(line.strip()) == 0 or line.startswith("--"):
+                continue
+            cur.execute(line)
+
+        lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+        env.endpoints.create_start(branch_name="main", lsn=lsn)
+        log.info(f"lsn: {lsn}")
+
+        cur.execute("VACUUM FULL pg_class;")
+
+    for ep in env.endpoints.endpoints:
+        log.info(f"{ep.endpoint_id} / {ep.pg_port}")
+        pg_dump_command = ["pg_dumpall", "-f", f"/tmp/dump-{ep.endpoint_id}.sql"]
+        env_vars = {
+            "PGPORT": str(ep.pg_port),
+            "PGUSER": endpoint.default_options["user"],
+            "PGHOST": endpoint.default_options["host"],
+        }
+        pg_bin.run_capture(pg_dump_command, env=env_vars)

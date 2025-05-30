@@ -22,9 +22,10 @@ use safekeeper::defaults::{
     DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR, DEFAULT_SSL_CERT_FILE,
     DEFAULT_SSL_CERT_RELOAD_PERIOD, DEFAULT_SSL_KEY_FILE,
 };
+use safekeeper::wal_backup::WalBackup;
 use safekeeper::{
     BACKGROUND_RUNTIME, BROKER_RUNTIME, GlobalTimelines, HTTP_RUNTIME, SafeKeeperConf,
-    WAL_SERVICE_RUNTIME, broker, control_file, http, wal_backup, wal_service,
+    WAL_SERVICE_RUNTIME, broker, control_file, http, wal_service,
 };
 use sd_notify::NotifyState;
 use storage_broker::{DEFAULT_ENDPOINT, Uri};
@@ -484,14 +485,14 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
         None => None,
     };
 
-    let global_timelines = Arc::new(GlobalTimelines::new(conf.clone()));
+    let wal_backup = Arc::new(WalBackup::new(&conf).await?);
+
+    let global_timelines = Arc::new(GlobalTimelines::new(conf.clone(), wal_backup.clone()));
 
     // Register metrics collector for active timelines. It's important to do this
     // after daemonizing, otherwise process collector will be upset.
     let timeline_collector = safekeeper::metrics::TimelineCollector::new(global_timelines.clone());
     metrics::register_internal(Box::new(timeline_collector))?;
-
-    wal_backup::init_remote_storage(&conf).await;
 
     // Keep handles to main tasks to die if any of them disappears.
     let mut tasks_handles: FuturesUnordered<BoxFuture<(String, JoinTaskRes)>> =

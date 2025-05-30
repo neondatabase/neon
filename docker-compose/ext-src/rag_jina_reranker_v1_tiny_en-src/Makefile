@@ -11,5 +11,6 @@ PG_REGRESS := $(dir $(PGXS))../../src/test/regress/pg_regress
 installcheck:
 	dropdb --if-exists contrib_regression
 	createdb contrib_regression
+	../alter_db.sh
 	psql -d contrib_regression -c "CREATE EXTENSION vector" -c "CREATE EXTENSION rag_jina_reranker_v1_tiny_en"
 	$(PG_REGRESS) --use-existing --dbname=contrib_regression $(REGRESS)

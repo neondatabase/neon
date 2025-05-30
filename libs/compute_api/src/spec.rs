@@ -172,6 +172,15 @@ pub struct ComputeSpec {
     /// Hostname and the port of the otel collector. Leave empty to disable Postgres logs forwarding.
     /// Example: config-shy-breeze-123-collector-monitoring.neon-telemetry.svc.cluster.local:10514
     pub logs_export_host: Option<String>,
+
+    /// Address of endpoint storage service
+    pub endpoint_storage_addr: Option<String>,
+    /// JWT for authorizing requests to endpoint storage service
+    pub endpoint_storage_token: Option<String>,
+
+    /// If true, download LFC state from endpoint_storage and pass it to Postgres on startup
+    #[serde(default)]
+    pub prewarm_lfc_on_startup: bool,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.

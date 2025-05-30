@@ -121,6 +121,20 @@ impl Client {
         resp.json().await.map_err(Error::ReceiveBody)
     }
 
+    pub async fn switch_timeline_membership(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        req: &models::TimelineMembershipSwitchRequest,
+    ) -> Result<models::TimelineMembershipSwitchResponse> {
+        let uri = format!(
+            "{}/v1/tenant/{}/timeline/{}/membership",
+            self.mgmt_api_endpoint, tenant_id, timeline_id
+        );
+        let resp = self.put(&uri, req).await?;
+        resp.json().await.map_err(Error::ReceiveBody)
+    }
+
     pub async fn delete_tenant(&self, tenant_id: TenantId) -> Result<models::TenantDeleteResult> {
         let uri = format!("{}/v1/tenant/{}", self.mgmt_api_endpoint, tenant_id);
         let resp = self

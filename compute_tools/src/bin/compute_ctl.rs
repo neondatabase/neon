@@ -57,25 +57,15 @@ use tracing::{error, info};
 use url::Url;
 use utils::failpoint_support;
 
-// Compatibility hack: if the control plane specified any remote-ext-config
-// use the default value for extension storage proxy gateway.
-// Remove this once the control plane is updated to pass the gateway URL
-fn parse_remote_ext_config(arg: &str) -> Result<String> {
-    if arg.starts_with("http") {
-        Ok(arg.trim_end_matches('/').to_string())
-    } else {
-        Ok("http://pg-ext-s3-gateway".to_string())
-    }
-}
-
 #[derive(Parser)]
 #[command(rename_all = "kebab-case")]
 struct Cli {
     #[arg(short = 'b', long, default_value = "postgres", env = "POSTGRES_PATH")]
     pub pgbin: String,
 
-    #[arg(short = 'r', long, value_parser = parse_remote_ext_config)]
-    pub remote_ext_config: Option<String>,
+    /// The base URL for the remote extension storage proxy gateway.
+    #[arg(short = 'r', long)]
+    pub remote_ext_base_url: Option<Url>,
 
     /// The port to bind the external listening HTTP server to. Clients running
     /// outside the compute will talk to the compute through this port. Keep
@@ -130,6 +120,10 @@ struct Cli {
         requires = "compute-id"
     )]
     pub control_plane_uri: Option<String>,
+
+    /// Interval in seconds for collecting installed extensions statistics
+    #[arg(long, default_value = "3600")]
+    pub installed_extensions_collection_interval: u64,
 }
 
 fn main() -> Result<()> {
@@ -164,7 +158,7 @@ fn main() -> Result<()> {
             pgversion: get_pg_version_string(&cli.pgbin),
             external_http_port: cli.external_http_port,
             internal_http_port: cli.internal_http_port,
-            ext_remote_storage: cli.remote_ext_config.clone(),
+            remote_ext_base_url: cli.remote_ext_base_url.clone(),
             resize_swap_on_bind: cli.resize_swap_on_bind,
             set_disk_quota_for_fs: cli.set_disk_quota_for_fs,
             #[cfg(target_os = "linux")]
@@ -173,6 +167,7 @@ fn main() -> Result<()> {
             cgroup: cli.cgroup,
             #[cfg(target_os = "linux")]
             vm_monitor_addr: cli.vm_monitor_addr,
+            installed_extensions_collection_interval: cli.installed_extensions_collection_interval,
         },
         config,
     )?;

@@ -39,3 +39,10 @@ def test_role_grants(neon_simple_env: NeonEnv):
         res = cur.fetchall()
 
         assert res == [(1,)], "select should not succeed"
+
+    # confirm that replicas can also ensure the grants are correctly set.
+    replica = env.endpoints.new_replica_start(endpoint)
+    replica_client = replica.http_client()
+    replica_client.set_role_grants(
+        "test_role_grants", "test_role", "test_schema", ["CREATE", "USAGE"]
+    )

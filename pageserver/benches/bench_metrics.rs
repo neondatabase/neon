@@ -264,10 +264,56 @@ mod propagation_of_cached_label_value {
     }
 }
 
+criterion_group!(histograms, histograms::bench_bucket_scalability);
+mod histograms {
+    use std::time::Instant;
+
+    use criterion::{BenchmarkId, Criterion};
+    use metrics::core::Collector;
+
+    pub fn bench_bucket_scalability(c: &mut Criterion) {
+        let mut g = c.benchmark_group("bucket_scalability");
+
+        for n in [1, 4, 8, 16, 32, 64, 128, 256] {
+            g.bench_with_input(BenchmarkId::new("nbuckets", n), &n, |b, n| {
+                b.iter_custom(|iters| {
+                    let buckets: Vec<f64> = (0..*n).map(|i| i as f64 * 100.0).collect();
+                    let histo = metrics::Histogram::with_opts(
+                        metrics::prometheus::HistogramOpts::new("name", "help")
+                            .buckets(buckets.clone()),
+                    )
+                    .unwrap();
+                    let start = Instant::now();
+                    for i in 0..usize::try_from(iters).unwrap() {
+                        histo.observe(buckets[i % buckets.len()]);
+                    }
+                    let elapsed = start.elapsed();
+                    // self-test
+                    let mfs = histo.collect();
+                    assert_eq!(mfs.len(), 1);
+                    let metrics = mfs[0].get_metric();
+                    assert_eq!(metrics.len(), 1);
+                    let histo = metrics[0].get_histogram();
+                    let buckets = histo.get_bucket();
+                    assert!(
+                        buckets
+                            .iter()
+                            .enumerate()
+                            .all(|(i, b)| b.get_cumulative_count()
+                                >= i as u64 * (iters / buckets.len() as u64))
+                    );
+                    elapsed
+                })
+            });
+        }
+    }
+}
+
 criterion_main!(
     label_values,
     single_metric_multicore_scalability,
-    propagation_of_cached_label_value
+    propagation_of_cached_label_value,
+    histograms,
 );
 
 /*
@@ -290,6 +336,14 @@ propagation_of_cached_label_value__naive/nthreads/8 time:   [211.50 ns 214.44 ns
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/1 time:   [14.135 ns 14.147 ns 14.160 ns]
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/4 time:   [14.243 ns 14.255 ns 14.268 ns]
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/8 time:   [14.470 ns 14.682 ns 14.895 ns]
+bucket_scalability/nbuckets/1     time:   [30.352 ns 30.353 ns 30.354 ns]
+bucket_scalability/nbuckets/4     time:   [30.464 ns 30.465 ns 30.467 ns]
+bucket_scalability/nbuckets/8     time:   [30.569 ns 30.575 ns 30.584 ns]
+bucket_scalability/nbuckets/16      time:   [30.961 ns 30.965 ns 30.969 ns]
+bucket_scalability/nbuckets/32      time:   [35.691 ns 35.707 ns 35.722 ns]
+bucket_scalability/nbuckets/64      time:   [47.829 ns 47.898 ns 47.974 ns]
+bucket_scalability/nbuckets/128     time:   [73.479 ns 73.512 ns 73.545 ns]
+bucket_scalability/nbuckets/256     time:   [127.92 ns 127.94 ns 127.96 ns]
 
 Results on an i3en.3xlarge instance
 
@@ -344,6 +398,14 @@ propagation_of_cached_label_value__naive/nthreads/8     time:   [434.87 ns 456.4
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/1     time:   [3.3767 ns 3.3974 ns 3.4220 ns]
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/4     time:   [3.6105 ns 4.2355 ns 5.1463 ns]
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/8     time:   [4.0889 ns 4.9714 ns 6.0779 ns]
+bucket_scalability/nbuckets/1     time:   [4.8455 ns 4.8542 ns 4.8646 ns]
+bucket_scalability/nbuckets/4     time:   [4.5663 ns 4.5722 ns 4.5787 ns]
+bucket_scalability/nbuckets/8     time:   [4.5531 ns 4.5670 ns 4.5842 ns]
+bucket_scalability/nbuckets/16      time:   [4.6392 ns 4.6524 ns 4.6685 ns]
+bucket_scalability/nbuckets/32      time:   [6.0302 ns 6.0439 ns 6.0589 ns]
+bucket_scalability/nbuckets/64      time:   [10.608 ns 10.644 ns 10.691 ns]
+bucket_scalability/nbuckets/128     time:   [22.178 ns 22.316 ns 22.483 ns]
+bucket_scalability/nbuckets/256     time:   [42.190 ns 42.328 ns 42.492 ns]
 
 Results on a Hetzner AX102 AMD Ryzen 9 7950X3D 16-Core Processor
 
@@ -362,5 +424,13 @@ propagation_of_cached_label_value__naive/nthreads/8     time:   [164.24 ns 170.1
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/1     time:   [2.2915 ns 2.2960 ns 2.3012 ns]
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/4     time:   [2.5726 ns 2.6158 ns 2.6624 ns]
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/8     time:   [2.7068 ns 2.8243 ns 2.9824 ns]
+bucket_scalability/nbuckets/1     time:   [6.3998 ns 6.4288 ns 6.4684 ns]
+bucket_scalability/nbuckets/4     time:   [6.3603 ns 6.3620 ns 6.3637 ns]
+bucket_scalability/nbuckets/8     time:   [6.1646 ns 6.1654 ns 6.1667 ns]
+bucket_scalability/nbuckets/16      time:   [6.1341 ns 6.1391 ns 6.1454 ns]
+bucket_scalability/nbuckets/32      time:   [8.2206 ns 8.2254 ns 8.2301 ns]
+bucket_scalability/nbuckets/64      time:   [13.988 ns 13.994 ns 14.000 ns]
+bucket_scalability/nbuckets/128     time:   [28.180 ns 28.216 ns 28.251 ns]
+bucket_scalability/nbuckets/256     time:   [54.914 ns 54.931 ns 54.951 ns]
 
 */

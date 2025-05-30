@@ -668,7 +668,9 @@ impl From<DownloadError> for UpdateError {
 
 impl From<std::io::Error> for UpdateError {
     fn from(value: std::io::Error) -> Self {
-        if let Some(nix::errno::Errno::ENOSPC) = value.raw_os_error().map(nix::errno::from_i32) {
+        if let Some(nix::errno::Errno::ENOSPC) =
+            value.raw_os_error().map(nix::errno::Errno::from_raw)
+        {
             UpdateError::NoSpace
         } else if value
             .get_ref()

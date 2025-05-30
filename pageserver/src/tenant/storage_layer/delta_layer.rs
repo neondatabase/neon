@@ -55,6 +55,7 @@ use utils::bin_ser::SerializeError;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
+use super::errors::PutError;
 use super::{
     AsLayerDesc, LayerName, OnDiskValue, OnDiskValueIo, PersistentLayerDesc, ResidentLayer,
     ValuesReconstructState,
@@ -477,12 +478,15 @@ impl DeltaLayerWriterInner {
         lsn: Lsn,
         val: Value,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PutError> {
         let (_, res) = self
             .put_value_bytes(
                 key,
                 lsn,
-                Value::ser(&val)?.slice_len(),
+                Value::ser(&val)
+                    .map_err(anyhow::Error::new)
+                    .map_err(PutError::Other)?
+                    .slice_len(),
                 val.will_init(),
                 ctx,
             )
@@ -497,7 +501,7 @@ impl DeltaLayerWriterInner {
         val: FullSlice<Buf>,
         will_init: bool,
         ctx: &RequestContext,
-    ) -> (FullSlice<Buf>, anyhow::Result<()>)
+    ) -> (FullSlice<Buf>, Result<(), PutError>)
     where
         Buf: IoBuf + Send,
     {
@@ -513,19 +517,24 @@ impl DeltaLayerWriterInner {
             .blob_writer
             .write_blob_maybe_compressed(val, ctx, compression)
             .await;
+        let res = res.map_err(PutError::WriteBlob);
         let off = match res {
             Ok((off, _)) => off,
-            Err(e) => return (val, Err(anyhow::anyhow!(e))),
+            Err(e) => return (val, Err(e)),
         };
 
         let blob_ref = BlobRef::new(off, will_init);
 
         let delta_key = DeltaKey::from_key_lsn(&key, lsn);
-        let res = self.tree.append(&delta_key.0, blob_ref.0);
+        let res = self
+            .tree
+            .append(&delta_key.0, blob_ref.0)
+            .map_err(anyhow::Error::new)
+            .map_err(PutError::Other);
 
         self.num_keys += 1;
 
-        (val, res.map_err(|e| anyhow::anyhow!(e)))
+        (val, res)
     }
 
     fn size(&self) -> u64 {
@@ -694,7 +703,7 @@ impl DeltaLayerWriter {
         lsn: Lsn,
         val: Value,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PutError> {
         self.inner
             .as_mut()
             .unwrap()
@@ -709,7 +718,7 @@ impl DeltaLayerWriter {
         val: FullSlice<Buf>,
         will_init: bool,
         ctx: &RequestContext,
-    ) -> (FullSlice<Buf>, anyhow::Result<()>)
+    ) -> (FullSlice<Buf>, Result<(), PutError>)
     where
         Buf: IoBuf + Send,
     {
@@ -1441,14 +1450,6 @@ impl DeltaLayerInner {
         offset
     }
 
-    pub fn iter<'a>(&'a self, ctx: &'a RequestContext) -> DeltaLayerIterator<'a> {
-        self.iter_with_options(
-            ctx,
-            1024 * 8192, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
-            1024,        // The default value. Unit tests might use a different value
-        )
-    }
-
     pub fn iter_with_options<'a>(
         &'a self,
         ctx: &'a RequestContext,
@@ -1634,7 +1635,6 @@ pub(crate) mod test {
     use crate::tenant::disk_btree::tests::TestDisk;
     use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
     use crate::tenant::storage_layer::{Layer, ResidentLayer};
-    use crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner;
     use crate::tenant::{TenantShard, Timeline};
 
     /// Construct an index for a fictional delta layer and and then
@@ -2311,8 +2311,7 @@ pub(crate) mod test {
             for batch_size in [1, 2, 4, 8, 3, 7, 13] {
                 println!("running with batch_size={batch_size} max_read_size={max_read_size}");
                 // Test if the batch size is correctly determined
-                let mut iter = delta_layer.iter(&ctx);
-                iter.planner = StreamingVectoredReadPlanner::new(max_read_size, batch_size);
+                let mut iter = delta_layer.iter_with_options(&ctx, max_read_size, batch_size);
                 let mut num_items = 0;
                 for _ in 0..3 {
                     iter.next_batch().await.unwrap();
@@ -2329,8 +2328,7 @@ pub(crate) mod test {
                     iter.key_values_batch.clear();
                 }
                 // Test if the result is correct
-                let mut iter = delta_layer.iter(&ctx);
-                iter.planner = StreamingVectoredReadPlanner::new(max_read_size, batch_size);
+                let mut iter = delta_layer.iter_with_options(&ctx, max_read_size, batch_size);
                 assert_delta_iter_equal(&mut iter, &test_deltas).await;
             }
         }

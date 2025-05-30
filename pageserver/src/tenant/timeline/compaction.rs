@@ -206,8 +206,8 @@ pub struct GcCompactionQueue {
 }
 
 static CONCURRENT_GC_COMPACTION_TASKS: Lazy<Arc<Semaphore>> = Lazy::new(|| {
-    // Only allow two timelines on one pageserver to run gc compaction at a time.
-    Arc::new(Semaphore::new(2))
+    // Only allow one timeline on one pageserver to run gc compaction at a time.
+    Arc::new(Semaphore::new(1))
 });
 
 impl GcCompactionQueue {
@@ -1277,17 +1277,63 @@ impl Timeline {
             return Ok(CompactionOutcome::YieldForL0);
         }
 
+        let gc_cutoff = *self.applied_gc_cutoff_lsn.read();
+        let l0_l1_boundary_lsn = {
+            // We do the repartition on the L0-L1 boundary. All data below the boundary
+            // are compacted by L0 with low read amplification, thus making the `repartition`
+            // function run fast.
+            let guard = self.layers.read().await;
+            guard
+                .all_persistent_layers()
+                .iter()
+                .map(|x| {
+                    // Use the end LSN of delta layers OR the start LSN of image layers.
+                    if x.is_delta {
+                        x.lsn_range.end
+                    } else {
+                        x.lsn_range.start
+                    }
+                })
+                .max()
+        };
+
+        let (partition_mode, partition_lsn) = if cfg!(test)
+            || cfg!(feature = "testing")
+            || self
+                .feature_resolver
+                .evaluate_boolean("image-compaction-boundary", self.tenant_shard_id.tenant_id)
+                .is_ok()
+        {
+            let last_repartition_lsn = self.partitioning.read().1;
+            let lsn = match l0_l1_boundary_lsn {
+                Some(boundary) => gc_cutoff
+                    .max(boundary)
+                    .max(last_repartition_lsn)
+                    .max(self.initdb_lsn)
+                    .max(self.ancestor_lsn),
+                None => self.get_last_record_lsn(),
+            };
+            if lsn <= self.initdb_lsn || lsn <= self.ancestor_lsn {
+                // Do not attempt to create image layers below the initdb or ancestor LSN -- no data below it
+                ("l0_l1_boundary", self.get_last_record_lsn())
+            } else {
+                ("l0_l1_boundary", lsn)
+            }
+        } else {
+            ("latest_record", self.get_last_record_lsn())
+        };
+
         // 2. Repartition and create image layers if necessary
         match self
             .repartition(
-                self.get_last_record_lsn(),
+                partition_lsn,
                 self.get_compaction_target_size(),
                 options.flags,
                 ctx,
             )
             .await
         {
-            Ok(((dense_partitioning, sparse_partitioning), lsn)) => {
+            Ok(((dense_partitioning, sparse_partitioning), lsn)) if lsn >= gc_cutoff => {
                 // Disables access_stats updates, so that the files we read remain candidates for eviction after we're done with them
                 let image_ctx = RequestContextBuilder::from(ctx)
                     .access_stats_behavior(AccessStatsBehavior::Skip)
@@ -1299,18 +1345,19 @@ impl Timeline {
                     .extend(sparse_partitioning.into_dense().parts);
 
                 // 3. Create new image layers for partitions that have been modified "enough".
+                let mode = if options
+                    .flags
+                    .contains(CompactFlags::ForceImageLayerCreation)
+                {
+                    ImageLayerCreationMode::Force
+                } else {
+                    ImageLayerCreationMode::Try
+                };
                 let (image_layers, outcome) = self
                     .create_image_layers(
                         &partitioning,
                         lsn,
-                        if options
-                            .flags
-                            .contains(CompactFlags::ForceImageLayerCreation)
-                        {
-                            ImageLayerCreationMode::Force
-                        } else {
-                            ImageLayerCreationMode::Try
-                        },
+                        mode,
                         &image_ctx,
                         self.last_image_layer_creation_status
                             .load()
@@ -1318,6 +1365,7 @@ impl Timeline {
                             .clone(),
                         options.flags.contains(CompactFlags::YieldForL0),
                     )
+                    .instrument(info_span!("create_image_layers", mode = %mode, partition_mode = %partition_mode, lsn = %lsn))
                     .await
                     .inspect_err(|err| {
                         if let CreateImageLayersError::GetVectoredError(
@@ -1339,6 +1387,11 @@ impl Timeline {
                     );
                     return Ok(CompactionOutcome::YieldForL0);
                 }
+            }
+
+            Ok(_) => {
+                // This happens very frequently so we don't want to log it.
+                debug!("skipping repartitioning due to image compaction LSN being below GC cutoff");
             }
 
             // Suppress errors when cancelled.
@@ -1520,7 +1573,7 @@ impl Timeline {
         info!(
             "starting shard ancestor compaction, rewriting {} layers and dropping {} layers, \
                 checked {layers_checked}/{layers_total} layers \
-                (latest_gc_cutoff={} pitr_cutoff={})",
+                (latest_gc_cutoff={} pitr_cutoff={:?})",
             layers_to_rewrite.len(),
             drop_layers.len(),
             *latest_gc_cutoff,
@@ -1994,7 +2047,13 @@ impl Timeline {
                 let l = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
                 deltas.push(l);
             }
-            MergeIterator::create(&deltas, &[], ctx)
+            MergeIterator::create_with_options(
+                &deltas,
+                &[],
+                ctx,
+                1024 * 8192, /* 8 MiB buffer per layer iterator */
+                1024,
+            )
         };
 
         // This iterator walks through all keys and is needed to calculate size used by each key
@@ -2198,8 +2257,7 @@ impl Timeline {
                     .as_mut()
                     .unwrap()
                     .put_value(key, lsn, value, ctx)
-                    .await
-                    .map_err(CompactionError::Other)?;
+                    .await?;
             } else {
                 let owner = self.shard_identity.get_shard_number(&key);
 
@@ -2828,7 +2886,7 @@ impl Timeline {
         Ok(())
     }
 
-    /// Check if the memory usage is within the limit.
+    /// Check to bail out of gc compaction early if it would use too much memory.
     async fn check_memory_usage(
         self: &Arc<Self>,
         layer_selection: &[Layer],
@@ -2841,7 +2899,8 @@ impl Timeline {
             let layer_desc = layer.layer_desc();
             if layer_desc.is_delta() {
                 // Delta layers at most have 1MB buffer; 3x to make it safe (there're deltas as large as 16KB).
-                // Multiply the layer size so that tests can pass.
+                // Scale it by target_layer_size_bytes so that tests can pass (some tests, e.g., `test_pageserver_gc_compaction_preempt
+                // use 3MB layer size and we need to account for that).
                 estimated_memory_usage_mb +=
                     3.0 * (layer_desc.file_size / target_layer_size_bytes) as f64;
                 num_delta_layers += 1;
@@ -3423,6 +3482,7 @@ impl Timeline {
 
         // Step 2: Produce images+deltas.
         let mut accumulated_values = Vec::new();
+        let mut accumulated_values_estimated_size = 0;
         let mut last_key: Option<Key> = None;
 
         // Only create image layers when there is no ancestor branches. TODO: create covering image layer
@@ -3599,7 +3659,18 @@ impl Timeline {
                 if last_key.is_none() {
                     last_key = Some(key);
                 }
+                accumulated_values_estimated_size += val.estimated_size();
                 accumulated_values.push((key, lsn, val));
+
+                // Accumulated values should never exceed 512MB.
+                if accumulated_values_estimated_size >= 1024 * 1024 * 512 {
+                    return Err(CompactionError::Other(anyhow!(
+                        "too many values for a single key: {} for key {}, {} items",
+                        accumulated_values_estimated_size,
+                        key,
+                        accumulated_values.len()
+                    )));
+                }
             } else {
                 let last_key: &mut Key = last_key.as_mut().unwrap();
                 stat.on_unique_key_visited(); // TODO: adjust statistics for partial compaction
@@ -3632,6 +3703,7 @@ impl Timeline {
                     .map_err(CompactionError::Other)?;
                 accumulated_values.clear();
                 *last_key = key;
+                accumulated_values_estimated_size = val.estimated_size();
                 accumulated_values.push((key, lsn, val));
             }
         }

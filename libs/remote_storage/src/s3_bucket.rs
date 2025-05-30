@@ -657,7 +657,14 @@ impl RemoteStorage for S3Bucket {
                     res = request => Ok(res),
                     _ = tokio::time::sleep(self.timeout) => Err(DownloadError::Timeout),
                     _ = cancel.cancelled() => Err(DownloadError::Cancelled),
-                }?;
+                };
+
+                if let Err(DownloadError::Timeout) = &response {
+                    yield Err(DownloadError::Timeout);
+                    continue 'outer;
+                }
+
+                let response = response?; // always yield cancellation errors and stop the stream
 
                 let response = response
                     .context("Failed to list S3 prefixes")

@@ -23,7 +23,7 @@ use super::{
     LayerVisibilityHint, PerfInstrumentFutureExt, PersistentLayerDesc, ValuesReconstructState,
 };
 use crate::config::PageServerConf;
-use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
+use crate::context::{RequestContext, RequestContextBuilder};
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::task_mgr::TaskKind;
 use crate::tenant::Timeline;
@@ -1076,24 +1076,17 @@ impl LayerInner {
             return Err(DownloadError::DownloadRequired);
         }
 
-        let ctx = if ctx.has_perf_span() {
-            let dl_ctx = RequestContextBuilder::from(ctx)
-                .task_kind(TaskKind::LayerDownload)
-                .download_behavior(DownloadBehavior::Download)
-                .root_perf_span(|| {
-                    info_span!(
-                        target: PERF_TRACE_TARGET,
-                        "DOWNLOAD_LAYER",
-                        layer = %self,
-                        reason = %reason
-                    )
-                })
-                .detached_child();
-            ctx.perf_follows_from(&dl_ctx);
-            dl_ctx
-        } else {
-            ctx.attached_child()
-        };
+        let ctx = RequestContextBuilder::from(ctx)
+            .perf_span(|crnt_perf_span| {
+                info_span!(
+                    target: PERF_TRACE_TARGET,
+                    parent: crnt_perf_span,
+                    "DOWNLOAD_LAYER",
+                    layer = %self,
+                    reason = %reason,
+                )
+            })
+            .attached_child();
 
         async move {
             tracing::info!(%reason, "downloading on-demand");
@@ -1101,7 +1094,7 @@ impl LayerInner {
             let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
             let res = self
                 .download_init_and_wait(timeline, permit, ctx.attached_child())
-                .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
+                .maybe_perf_instrument(&ctx, |current_perf_span| current_perf_span.clone())
                 .await?;
 
             scopeguard::ScopeGuard::into_inner(init_cancelled);
@@ -1709,7 +1702,7 @@ impl DownloadError {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Copy, Clone)]
 pub(crate) enum NeedsDownload {
     NotFound,
     NotFile(std::fs::FileType),

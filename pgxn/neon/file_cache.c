@@ -201,6 +201,8 @@ static shmem_request_hook_type prev_shmem_request_hook;
 bool lfc_store_prefetch_result;
 bool lfc_prewarm_update_ws_estimation;
 
+bool AmPrewarmWorker;
+
 #define LFC_ENABLED() (lfc_ctl->limit != 0)
 
 /*
@@ -845,6 +847,8 @@ lfc_prewarm_main(Datum main_arg)
 	PrewarmWorkerState* ws;
 	uint32 worker_id = DatumGetInt32(main_arg);
 
+	AmPrewarmWorker = true;
+
 	pqsignal(SIGTERM, die);
 	BackgroundWorkerUnblockSignals();
 
@@ -936,6 +940,44 @@ lfc_prewarm_main(Datum main_arg)
 	lfc_ctl->prewarm_workers[worker_id].completed = GetCurrentTimestamp();
 }
 
+void
+lfc_invalidate(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber nblocks)
+{
+	BufferTag	tag;
+	FileCacheEntry *entry;
+	uint32		hash;
+
+	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
+		return;
+
+	CopyNRelFileInfoToBufTag(tag, rinfo);
+	tag.forkNum = forkNum;
+
+	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
+
+	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
+	if (LFC_ENABLED())
+	{
+		for (BlockNumber blkno = 0; blkno < nblocks; blkno += lfc_blocks_per_chunk)
+		{
+			tag.blockNum = blkno;
+			hash = get_hash_value(lfc_hash, &tag);
+			entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
+			if (entry != NULL)
+			{
+				for (int i = 0; i < lfc_blocks_per_chunk; i++)
+				{
+					if (GET_STATE(entry, i) == AVAILABLE)
+					{
+						lfc_ctl->used_pages -= 1;
+						SET_STATE(entry, i, UNAVAILABLE);
+					}
+				}
+			}
+		}
+	}
+	LWLockRelease(lfc_lock);
+}
 
 /*
  * Check if page is present in the cache.

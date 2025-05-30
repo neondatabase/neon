@@ -10,6 +10,7 @@ use crate::persistence::{
     DatabaseError, SafekeeperTimelineOpKind, TimelinePendingOpPersistence, TimelinePersistence,
 };
 use crate::safekeeper::Safekeeper;
+use crate::timeline_import::TimelineImportFinalizeError;
 use anyhow::Context;
 use http_utils::error::ApiError;
 use pageserver_api::controller_api::{
@@ -207,6 +208,7 @@ impl Service {
         self: &Arc<Self>,
         tenant_id: TenantId,
         timeline_info: &TimelineInfo,
+        read_only: bool,
     ) -> Result<SafekeepersInfo, ApiError> {
         let timeline_id = timeline_info.timeline_id;
         let pg_version = timeline_info.pg_version * 10000;
@@ -219,7 +221,11 @@ impl Service {
         let start_lsn = timeline_info.last_record_lsn;
 
         // Choose initial set of safekeepers respecting affinity
-        let sks = self.safekeepers_for_new_timeline().await?;
+        let sks = if !read_only {
+            self.safekeepers_for_new_timeline().await?
+        } else {
+            Vec::new()
+        };
         let sks_persistence = sks.iter().map(|sk| sk.id.0 as i64).collect::<Vec<_>>();
         // Add timeline to db
         let mut timeline_persist = TimelinePersistence {
@@ -252,6 +258,16 @@ impl Service {
                 )));
             }
         }
+        let ret = SafekeepersInfo {
+            generation: timeline_persist.generation as u32,
+            safekeepers: sks.clone(),
+            tenant_id,
+            timeline_id,
+        };
+        if read_only {
+            return Ok(ret);
+        }
+
         // Create the timeline on a quorum of safekeepers
         let remaining = self
             .tenant_timeline_create_safekeepers_quorum(
@@ -315,12 +331,45 @@ impl Service {
             }
         }
 
-        Ok(SafekeepersInfo {
-            generation: timeline_persist.generation as u32,
-            safekeepers: sks,
-            tenant_id,
-            timeline_id,
-        })
+        Ok(ret)
+    }
+
+    pub(crate) async fn tenant_timeline_create_safekeepers_until_success(
+        self: &Arc<Self>,
+        tenant_id: TenantId,
+        timeline_info: TimelineInfo,
+    ) -> Result<(), TimelineImportFinalizeError> {
+        const BACKOFF: Duration = Duration::from_secs(5);
+
+        loop {
+            if self.cancel.is_cancelled() {
+                return Err(TimelineImportFinalizeError::ShuttingDown);
+            }
+
+            // This function is only used in non-read-only scenarios
+            let read_only = false;
+            let res = self
+                .tenant_timeline_create_safekeepers(tenant_id, &timeline_info, read_only)
+                .await;
+
+            match res {
+                Ok(_) => {
+                    tracing::info!("Timeline created on safekeepers");
+                    break;
+                }
+                Err(err) => {
+                    tracing::error!("Failed to create timeline on safekeepers: {err}");
+                    tokio::select! {
+                        _ = self.cancel.cancelled() => {
+                            return Err(TimelineImportFinalizeError::ShuttingDown);
+                        },
+                        _ = tokio::time::sleep(BACKOFF) => {}
+                    };
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Directly insert the timeline into the database without reconciling it with safekeepers.
@@ -372,6 +421,18 @@ impl Service {
             .flatten()
             .chain(tl.sk_set.iter())
             .collect::<HashSet<_>>();
+
+        // The timeline has no safekeepers: we need to delete it from the db manually,
+        // as no safekeeper reconciler will get to it
+        if all_sks.is_empty() {
+            if let Err(err) = self
+                .persistence
+                .delete_timeline(tenant_id, timeline_id)
+                .await
+            {
+                tracing::warn!(%tenant_id, %timeline_id, "couldn't delete timeline from db: {err}");
+            }
+        }
 
         // Schedule reconciliations
         for &sk_id in all_sks.iter() {

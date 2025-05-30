@@ -59,9 +59,11 @@ where
         connect_timeout: config.connect_timeout,
     };
 
-    let (sender, receiver) = mpsc::unbounded_channel();
+    let (client_tx, conn_rx) = mpsc::unbounded_channel();
+    let (conn_tx, client_rx) = mpsc::channel(4);
     let client = Client::new(
-        sender,
+        client_tx,
+        client_rx,
         socket_config,
         config.ssl_mode,
         process_id,
@@ -74,7 +76,7 @@ where
         .map(|m| BackendMessage::Async(Message::NoticeResponse(m)))
         .collect();
 
-    let connection = Connection::new(stream, delayed, parameters, receiver);
+    let connection = Connection::new(stream, delayed, parameters, conn_tx, conn_rx);
 
     Ok((client, connection))
 }

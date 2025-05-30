@@ -8,7 +8,6 @@
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
-use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::process::exit;
 use std::str::FromStr;
@@ -16,10 +15,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
+use compute_api::requests::ComputeClaimsScope;
 use compute_api::spec::ComputeMode;
 use control_plane::broker::StorageBroker;
 use control_plane::endpoint::ComputeControlPlane;
-use control_plane::endpoint_storage::{ENDPOINT_STORAGE_DEFAULT_PORT, EndpointStorage};
+use control_plane::endpoint_storage::{ENDPOINT_STORAGE_DEFAULT_ADDR, EndpointStorage};
 use control_plane::local_env;
 use control_plane::local_env::{
     EndpointStorageConf, InitForceMode, LocalEnv, NeonBroker, NeonLocalInitConf,
@@ -30,8 +30,9 @@ use control_plane::safekeeper::SafekeeperNode;
 use control_plane::storage_controller::{
     NeonStorageControllerStartArgs, NeonStorageControllerStopArgs, StorageController,
 };
-use nix::fcntl::{FlockArg, flock};
+use nix::fcntl::{Flock, FlockArg};
 use pageserver_api::config::{
+    DEFAULT_GRPC_LISTEN_PORT as DEFAULT_PAGESERVER_GRPC_PORT,
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
 };
@@ -643,9 +644,10 @@ struct EndpointStartCmdArgs {
 
     #[clap(
         long,
-        help = "Configure the remote extensions storage proxy gateway to request for extensions."
+        help = "Configure the remote extensions storage proxy gateway URL to request for extensions.",
+        alias = "remote-ext-config"
     )]
-    remote_ext_config: Option<String>,
+    remote_ext_base_url: Option<String>,
 
     #[clap(
         long,
@@ -705,6 +707,9 @@ struct EndpointStopCmdArgs {
 struct EndpointGenerateJwtCmdArgs {
     #[clap(help = "Postgres endpoint id")]
     endpoint_id: String,
+
+    #[clap(short = 's', long, help = "Scope to generate the JWT with", value_parser = ComputeClaimsScope::from_str)]
+    scope: Option<ComputeClaimsScope>,
 }
 
 #[derive(clap::Subcommand)]
@@ -744,16 +749,16 @@ struct TimelineTreeEl {
 
 /// A flock-based guard over the neon_local repository directory
 struct RepoLock {
-    _file: File,
+    _file: Flock<File>,
 }
 
 impl RepoLock {
     fn new() -> Result<Self> {
         let repo_dir = File::open(local_env::base_path())?;
-        let repo_dir_fd = repo_dir.as_raw_fd();
-        flock(repo_dir_fd, FlockArg::LockExclusive)?;
-
-        Ok(Self { _file: repo_dir })
+        match Flock::lock(repo_dir, FlockArg::LockExclusive) {
+            Ok(f) => Ok(Self { _file: f }),
+            Err((_, e)) => Err(e).context("flock error"),
+        }
     }
 }
 
@@ -1003,13 +1008,16 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
                     let pageserver_id = NodeId(DEFAULT_PAGESERVER_ID.0 + i as u64);
                     let pg_port = DEFAULT_PAGESERVER_PG_PORT + i;
                     let http_port = DEFAULT_PAGESERVER_HTTP_PORT + i;
+                    let grpc_port = DEFAULT_PAGESERVER_GRPC_PORT + i;
                     NeonLocalInitPageserverConf {
                         id: pageserver_id,
                         listen_pg_addr: format!("127.0.0.1:{pg_port}"),
                         listen_http_addr: format!("127.0.0.1:{http_port}"),
                         listen_https_addr: None,
+                        listen_grpc_addr: Some(format!("127.0.0.1:{grpc_port}")),
                         pg_auth_type: AuthType::Trust,
                         http_auth_type: AuthType::Trust,
+                        grpc_auth_type: AuthType::Trust,
                         other: Default::default(),
                         // Typical developer machines use disks with slow fsync, and we don't care
                         // about data integrity: disable disk syncs.
@@ -1018,7 +1026,7 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
                 })
                 .collect(),
             endpoint_storage: EndpointStorageConf {
-                port: ENDPOINT_STORAGE_DEFAULT_PORT,
+                listen_addr: ENDPOINT_STORAGE_DEFAULT_ADDR,
             },
             pg_distrib_dir: None,
             neon_distrib_dir: None,
@@ -1271,6 +1279,7 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
                 mode: pageserver_api::models::TimelineCreateRequestMode::Branch {
                     ancestor_timeline_id,
                     ancestor_start_lsn: start_lsn,
+                    read_only: false,
                     pg_version: None,
                 },
             };
@@ -1410,9 +1419,16 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
         EndpointCmd::Start(args) => {
             let endpoint_id = &args.endpoint_id;
             let pageserver_id = args.endpoint_pageserver_id;
-            let remote_ext_config = &args.remote_ext_config;
+            let remote_ext_base_url = &args.remote_ext_base_url;
 
-            let safekeepers_generation = args.safekeepers_generation.map(SafekeeperGeneration::new);
+            let default_generation = env
+                .storage_controller
+                .timelines_onto_safekeepers
+                .then_some(1);
+            let safekeepers_generation = args
+                .safekeepers_generation
+                .or(default_generation)
+                .map(SafekeeperGeneration::new);
             // If --safekeepers argument is given, use only the listed
             // safekeeper nodes; otherwise all from the env.
             let safekeepers = if let Some(safekeepers) = parse_safekeepers(&args.safekeepers)? {
@@ -1484,14 +1500,29 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 None
             };
 
+            let exp = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?
+                + Duration::from_secs(86400))
+            .as_secs();
+            let claims = endpoint_storage::claims::EndpointStorageClaims {
+                tenant_id: endpoint.tenant_id,
+                timeline_id: endpoint.timeline_id,
+                endpoint_id: endpoint_id.to_string(),
+                exp,
+            };
+
+            let endpoint_storage_token = env.generate_auth_token(&claims)?;
+            let endpoint_storage_addr = env.endpoint_storage.listen_addr.to_string();
+
             println!("Starting existing endpoint {endpoint_id}...");
             endpoint
                 .start(
                     &auth_token,
+                    endpoint_storage_token,
+                    endpoint_storage_addr,
                     safekeepers_generation,
                     safekeepers,
                     pageservers,
-                    remote_ext_config.as_ref(),
+                    remote_ext_base_url.as_ref(),
                     stripe_size.0 as usize,
                     args.create_test_user,
                     args.start_timeout,
@@ -1540,12 +1571,16 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             endpoint.stop(&args.mode, args.destroy)?;
         }
         EndpointCmd::GenerateJwt(args) => {
-            let endpoint_id = &args.endpoint_id;
-            let endpoint = cplane
-                .endpoints
-                .get(endpoint_id)
-                .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
-            let jwt = endpoint.generate_jwt()?;
+            let endpoint = {
+                let endpoint_id = &args.endpoint_id;
+
+                cplane
+                    .endpoints
+                    .get(endpoint_id)
+                    .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?
+            };
+
+            let jwt = endpoint.generate_jwt(args.scope)?;
 
             print!("{jwt}");
         }

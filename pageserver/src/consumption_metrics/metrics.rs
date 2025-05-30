@@ -18,12 +18,25 @@ use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 // management.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(super) enum Name {
-    /// Timeline last_record_lsn, absolute
+    /// Timeline last_record_lsn, absolute.
     #[serde(rename = "written_size")]
     WrittenSize,
     /// Timeline last_record_lsn, incremental
     #[serde(rename = "written_data_bytes_delta")]
     WrittenSizeDelta,
+    /// Written bytes only on this timeline (not including ancestors):
+    /// written_size - ancestor_lsn
+    ///
+    /// On the root branch, this is equivalent to `written_size`.
+    #[serde(rename = "written_size_since_parent")]
+    WrittenSizeSinceParent,
+    /// PITR history size only on this timeline (not including ancestors):
+    /// last_record_lsn - max(pitr_cutoff, ancestor_lsn).
+    ///
+    /// On the root branch, this is its entire PITR history size. Not emitted if GC hasn't computed
+    /// the PITR cutoff yet. 0 if PITR is disabled.
+    #[serde(rename = "pitr_history_size_since_parent")]
+    PitrHistorySizeSinceParent,
     /// Timeline logical size
     #[serde(rename = "timeline_logical_size")]
     LogicalSize,
@@ -155,6 +168,32 @@ impl MetricsKey {
             metric: Name::WrittenSizeDelta,
         }
         .incremental_values()
+    }
+
+    /// `written_size` - `ancestor_lsn`.
+    const fn written_size_since_parent(
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> AbsoluteValueFactory {
+        MetricsKey {
+            tenant_id,
+            timeline_id: Some(timeline_id),
+            metric: Name::WrittenSizeSinceParent,
+        }
+        .absolute_values()
+    }
+
+    /// `written_size` - max(`pitr_cutoff`, `ancestor_lsn`).
+    const fn pitr_history_size_since_parent(
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> AbsoluteValueFactory {
+        MetricsKey {
+            tenant_id,
+            timeline_id: Some(timeline_id),
+            metric: Name::PitrHistorySizeSinceParent,
+        }
+        .absolute_values()
     }
 
     /// Exact [`Timeline::get_current_logical_size`].
@@ -334,7 +373,13 @@ impl TenantSnapshot {
 struct TimelineSnapshot {
     loaded_at: (Lsn, SystemTime),
     last_record_lsn: Lsn,
+    ancestor_lsn: Lsn,
     current_exact_logical_size: Option<u64>,
+    /// Whether PITR is enabled (pitr_interval > 0).
+    pitr_enabled: bool,
+    /// The PITR cutoff LSN. None if not yet initialized. If PITR is disabled, this is approximately
+    /// Some(last_record_lsn), but may lag behind it since it's computed periodically.
+    pitr_cutoff: Option<Lsn>,
 }
 
 impl TimelineSnapshot {
@@ -354,6 +399,9 @@ impl TimelineSnapshot {
         } else {
             let loaded_at = t.loaded_at;
             let last_record_lsn = t.get_last_record_lsn();
+            let ancestor_lsn = t.get_ancestor_lsn();
+            let pitr_enabled = !t.get_pitr_interval().is_zero();
+            let pitr_cutoff = t.gc_info.read().unwrap().cutoffs.time;
 
             let current_exact_logical_size = {
                 let span = tracing::info_span!("collect_metrics_iteration", tenant_id = %t.tenant_shard_id.tenant_id, timeline_id = %t.timeline_id);
@@ -373,7 +421,10 @@ impl TimelineSnapshot {
             Ok(Some(TimelineSnapshot {
                 loaded_at,
                 last_record_lsn,
+                ancestor_lsn,
                 current_exact_logical_size,
+                pitr_enabled,
+                pitr_cutoff,
             }))
         }
     }
@@ -424,6 +475,8 @@ impl TimelineSnapshot {
 
         let up_to = now;
 
+        let written_size_last = written_size_now.value.max(prev.1); // don't regress
+
         if let Some(delta) = written_size_now.value.checked_sub(prev.1) {
             let key_value = written_size_delta_key.from_until(prev.0, up_to, delta);
             // written_size_delta
@@ -439,6 +492,27 @@ impl TimelineSnapshot {
                 kind: written_size_now.kind,
                 value: prev.1,
             });
+        }
+
+        // Compute the branch-local written size.
+        let written_size_since_parent_key =
+            MetricsKey::written_size_since_parent(tenant_id, timeline_id);
+        metrics.push(
+            written_size_since_parent_key
+                .at(now, written_size_last.saturating_sub(self.ancestor_lsn.0)),
+        );
+
+        // Compute the branch-local PITR history size. Not emitted if GC hasn't yet computed the
+        // PITR cutoff. 0 if PITR is disabled.
+        let pitr_history_size_since_parent_key =
+            MetricsKey::pitr_history_size_since_parent(tenant_id, timeline_id);
+        if !self.pitr_enabled {
+            metrics.push(pitr_history_size_since_parent_key.at(now, 0));
+        } else if let Some(pitr_cutoff) = self.pitr_cutoff {
+            metrics.push(pitr_history_size_since_parent_key.at(
+                now,
+                written_size_last.saturating_sub(pitr_cutoff.max(self.ancestor_lsn).0),
+            ));
         }
 
         {

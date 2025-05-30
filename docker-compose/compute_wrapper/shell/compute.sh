@@ -14,6 +14,14 @@ PG_VERSION=${PG_VERSION:-14}
 CONFIG_FILE_ORG=/var/db/postgres/configs/config.json
 CONFIG_FILE=/tmp/config.json
 
+# Test that the first library path that the dynamic loader looks in is the path
+# that we use for custom compiled software
+first_path="$(ldconfig --verbose 2>/dev/null \
+    | grep --invert-match ^$'\t' \
+    | cut --delimiter=: --fields=1 \
+    | head --lines=1)"
+test "$first_path" == '/usr/local/lib'
+
 echo "Waiting pageserver become ready."
 while ! nc -z pageserver 6400; do
      sleep 1;

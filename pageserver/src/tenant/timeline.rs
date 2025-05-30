@@ -14,6 +14,7 @@ pub mod span;
 pub mod uninit;
 mod walreceiver;
 
+use hashlink::LruCache;
 use std::array;
 use std::cmp::{max, min};
 use std::collections::btree_map::Entry;
@@ -23,8 +24,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::PERF_TRACE_TARGET;
-use crate::walredo::RedoAttemptType;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use bytes::Bytes;
@@ -93,15 +92,18 @@ use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
 use super::tasks::log_compaction_error;
 use super::upload_queue::NotInitialized;
 use super::{
-    AttachedTenantConf, GcError, HeatMapTimeline, MaybeOffloaded,
+    AttachedTenantConf, BasebackupPrepareSender, GcError, HeatMapTimeline, MaybeOffloaded,
     debug_assert_current_span_has_tenant_and_timeline_id,
 };
+use crate::PERF_TRACE_TARGET;
 use crate::aux_file::AuxFileSizeEstimator;
+use crate::basebackup_cache::BasebackupPrepareRequest;
 use crate::config::PageServerConf;
 use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
 };
 use crate::disk_usage_eviction_task::{DiskUsageEvictionInfo, EvictionCandidate, finite_f32};
+use crate::feature_resolver::FeatureResolver;
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::l0_flush::{self, L0FlushGlobalState};
 use crate::metrics::{
@@ -130,6 +132,7 @@ use crate::tenant::tasks::BackgroundLoopKind;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 use crate::walingest::WalLagCooldown;
+use crate::walredo::RedoAttemptType;
 use crate::{ZERO_PAGE, task_mgr, walredo};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -195,16 +198,8 @@ pub struct TimelineResources {
     pub pagestream_throttle_metrics: Arc<crate::metrics::tenant_throttling::Pagestream>,
     pub l0_compaction_trigger: Arc<Notify>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
-}
-
-/// The relation size cache caches relation sizes at the end of the timeline. It speeds up WAL
-/// ingestion considerably, because WAL ingestion needs to check on most records if the record
-/// implicitly extends the relation.  At startup, `complete_as_of` is initialized to the current end
-/// of the timeline (disk_consistent_lsn).  It's used on reads of relation sizes to check if the
-/// value can be used to also update the cache, see [`Timeline::update_cached_rel_size`].
-pub(crate) struct RelSizeCache {
-    pub(crate) complete_as_of: Lsn,
-    pub(crate) map: HashMap<RelTag, (Lsn, BlockNumber)>,
+    pub basebackup_prepare_sender: BasebackupPrepareSender,
+    pub feature_resolver: FeatureResolver,
 }
 
 pub struct Timeline {
@@ -365,7 +360,8 @@ pub struct Timeline {
     pub walreceiver: Mutex<Option<WalReceiver>>,
 
     /// Relation size cache
-    pub(crate) rel_size_cache: RwLock<RelSizeCache>,
+    pub(crate) rel_size_latest_cache: RwLock<HashMap<RelTag, (Lsn, BlockNumber)>>,
+    pub(crate) rel_size_snapshot_cache: Mutex<LruCache<(Lsn, RelTag), BlockNumber>>,
 
     download_all_remote_layers_task_info: RwLock<Option<DownloadRemoteLayersTaskInfo>>,
 
@@ -447,6 +443,11 @@ pub struct Timeline {
     pub(crate) rel_size_v2_status: ArcSwapOption<RelSizeMigration>,
 
     wait_lsn_log_slow: tokio::sync::Semaphore,
+
+    /// A channel to send async requests to prepare a basebackup for the basebackup cache.
+    basebackup_prepare_sender: BasebackupPrepareSender,
+
+    feature_resolver: FeatureResolver,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -537,29 +538,24 @@ impl GcInfo {
 /// The `GcInfo` component describing which Lsns need to be retained.  Functionally, this
 /// is a single number (the oldest LSN which we must retain), but it internally distinguishes
 /// between time-based and space-based retention for observability and consumption metrics purposes.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct GcCutoffs {
     /// Calculated from the [`pageserver_api::models::TenantConfig::gc_horizon`], this LSN indicates how much
     /// history we must keep to retain a specified number of bytes of WAL.
     pub(crate) space: Lsn,
 
-    /// Calculated from [`pageserver_api::models::TenantConfig::pitr_interval`], this LSN indicates how much
-    /// history we must keep to enable reading back at least the PITR interval duration.
-    pub(crate) time: Lsn,
-}
-
-impl Default for GcCutoffs {
-    fn default() -> Self {
-        Self {
-            space: Lsn::INVALID,
-            time: Lsn::INVALID,
-        }
-    }
+    /// Calculated from [`pageserver_api::models::TenantConfig::pitr_interval`], this LSN indicates
+    /// how much history we must keep to enable reading back at least the PITR interval duration.
+    ///
+    /// None indicates that the PITR cutoff has not been computed. A PITR interval of 0 will yield
+    /// Some(last_record_lsn).
+    pub(crate) time: Option<Lsn>,
 }
 
 impl GcCutoffs {
     fn select_min(&self) -> Lsn {
-        std::cmp::min(self.space, self.time)
+        // NB: if we haven't computed the PITR cutoff yet, we can't GC anything.
+        self.space.min(self.time.unwrap_or_default())
     }
 }
 
@@ -987,6 +983,16 @@ impl From<PageReconstructError> for CreateImageLayersError {
     }
 }
 
+impl From<super::storage_layer::errors::PutError> for CreateImageLayersError {
+    fn from(e: super::storage_layer::errors::PutError) -> Self {
+        if e.is_cancel() {
+            CreateImageLayersError::Cancelled
+        } else {
+            CreateImageLayersError::Other(e.into_anyhow())
+        }
+    }
+}
+
 impl From<GetVectoredError> for CreateImageLayersError {
     fn from(e: GetVectoredError) -> Self {
         match e {
@@ -1031,6 +1037,7 @@ pub(crate) enum WaitLsnWaiter<'a> {
     Tenant,
     PageService,
     HttpEndpoint,
+    BaseBackupCache,
 }
 
 /// Argument to [`Timeline::shutdown`].
@@ -1086,11 +1093,14 @@ impl Timeline {
     /// Get the bytes written since the PITR cutoff on this branch, and
     /// whether this branch's ancestor_lsn is within its parent's PITR.
     pub(crate) fn get_pitr_history_stats(&self) -> (u64, bool) {
+        // TODO: for backwards compatibility, we return the full history back to 0 when the PITR
+        // cutoff has not yet been initialized. This should return None instead, but this is exposed
+        // in external HTTP APIs and callers may not handle a null value.
         let gc_info = self.gc_info.read().unwrap();
         let history = self
             .get_last_record_lsn()
-            .checked_sub(gc_info.cutoffs.time)
-            .unwrap_or(Lsn(0))
+            .checked_sub(gc_info.cutoffs.time.unwrap_or_default())
+            .unwrap_or_default()
             .0;
         (history, gc_info.within_ancestor_pitr)
     }
@@ -1100,9 +1110,10 @@ impl Timeline {
         self.applied_gc_cutoff_lsn.read()
     }
 
-    /// Read timeline's planned GC cutoff: this is the logical end of history that users
-    /// are allowed to read (based on configured PITR), even if physically we have more history.
-    pub(crate) fn get_gc_cutoff_lsn(&self) -> Lsn {
+    /// Read timeline's planned GC cutoff: this is the logical end of history that users are allowed
+    /// to read (based on configured PITR), even if physically we have more history. Returns None
+    /// if the PITR cutoff has not yet been initialized.
+    pub(crate) fn get_gc_cutoff_lsn(&self) -> Option<Lsn> {
         self.gc_info.read().unwrap().cutoffs.time
     }
 
@@ -1553,7 +1564,8 @@ impl Timeline {
                         }
                         WaitLsnWaiter::Tenant
                         | WaitLsnWaiter::PageService
-                        | WaitLsnWaiter::HttpEndpoint => unreachable!(
+                        | WaitLsnWaiter::HttpEndpoint
+                        | WaitLsnWaiter::BaseBackupCache => unreachable!(
                             "tenant or page_service context are not expected to have task kind {:?}",
                             ctx.task_kind()
                         ),
@@ -2117,22 +2129,14 @@ impl Timeline {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
         // Regardless of whether we're going to try_freeze_and_flush
-        // or not, stop ingesting any more data. Walreceiver only provides
-        // cancellation but no "wait until gone", because it uses the Timeline::gate.
-        // So, only after the self.gate.close() below will we know for sure that
-        // no walreceiver tasks are left.
-        // For `try_freeze_and_flush=true`, this means that we might still be ingesting
-        // data during the call to `self.freeze_and_flush()` below.
-        // That's not ideal, but, we don't have the concept of a ChildGuard,
-        // which is what we'd need to properly model early shutdown of the walreceiver
-        // task sub-tree before the other Timeline task sub-trees.
+        // or not, stop ingesting any more data.
         let walreceiver = self.walreceiver.lock().unwrap().take();
         tracing::debug!(
             is_some = walreceiver.is_some(),
             "Waiting for WalReceiverManager..."
         );
         if let Some(walreceiver) = walreceiver {
-            walreceiver.cancel();
+            walreceiver.shutdown().await;
         }
         // ... and inform any waiters for newer LSNs that there won't be any.
         self.last_record_lsn.shutdown();
@@ -2466,6 +2470,41 @@ impl Timeline {
             false
         }
     }
+
+    pub(crate) fn is_basebackup_cache_enabled(&self) -> bool {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .basebackup_cache_enabled
+            .unwrap_or(self.conf.default_tenant_conf.basebackup_cache_enabled)
+    }
+
+    /// Prepare basebackup for the given LSN and store it in the basebackup cache.
+    /// The method is asynchronous and returns immediately.
+    /// The actual basebackup preparation is performed in the background
+    /// by the basebackup cache on a best-effort basis.
+    pub(crate) fn prepare_basebackup(&self, lsn: Lsn) {
+        if !self.is_basebackup_cache_enabled() {
+            return;
+        }
+        if !self.tenant_shard_id.is_shard_zero() {
+            // In theory we should never get here, but just in case check it.
+            // Preparing basebackup doesn't make sense for shards other than shard zero.
+            return;
+        }
+
+        let res = self
+            .basebackup_prepare_sender
+            .send(BasebackupPrepareRequest {
+                tenant_shard_id: self.tenant_shard_id,
+                timeline_id: self.timeline_id,
+                lsn,
+            });
+        if let Err(e) = res {
+            // May happen during shutdown, it's not critical.
+            info!("Failed to send shutdown checkpoint: {e:#}");
+        }
+    }
 }
 
 /// Number of times we will compute partition within a checkpoint distance.
@@ -2541,6 +2580,13 @@ impl Timeline {
             .tenant_conf
             .checkpoint_timeout
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_timeout)
+    }
+
+    pub(crate) fn get_pitr_interval(&self) -> Duration {
+        let tenant_conf = &self.tenant_conf.load().tenant_conf;
+        tenant_conf
+            .pitr_interval
+            .unwrap_or(self.conf.default_tenant_conf.pitr_interval)
     }
 
     fn get_compaction_period(&self) -> Duration {
@@ -2818,6 +2864,13 @@ impl Timeline {
 
             self.remote_client.update_config(&new_conf.location);
 
+            let mut rel_size_cache = self.rel_size_snapshot_cache.lock().unwrap();
+            if let Some(new_capacity) = new_conf.tenant_conf.relsize_snapshot_cache_capacity {
+                if new_capacity != rel_size_cache.capacity() {
+                    rel_size_cache.set_capacity(new_capacity);
+                }
+            }
+
             self.metrics
                 .evictions_with_low_residence_duration
                 .write()
@@ -2875,6 +2928,14 @@ impl Timeline {
             let is_offloaded = MaybeOffloaded::No;
             ancestor_gc_info.insert_child(timeline_id, metadata.ancestor_lsn(), is_offloaded);
         }
+
+        let relsize_snapshot_cache_capacity = {
+            let loaded_tenant_conf = tenant_conf.load();
+            loaded_tenant_conf
+                .tenant_conf
+                .relsize_snapshot_cache_capacity
+                .unwrap_or(conf.default_tenant_conf.relsize_snapshot_cache_capacity)
+        };
 
         Arc::new_cyclic(|myself| {
             let metrics = Arc::new(TimelineMetrics::new(
@@ -2967,10 +3028,8 @@ impl Timeline {
                 last_image_layer_creation_check_instant: Mutex::new(None),
 
                 last_received_wal: Mutex::new(None),
-                rel_size_cache: RwLock::new(RelSizeCache {
-                    complete_as_of: disk_consistent_lsn,
-                    map: HashMap::new(),
-                }),
+                rel_size_latest_cache: RwLock::new(HashMap::new()),
+                rel_size_snapshot_cache: Mutex::new(LruCache::new(relsize_snapshot_cache_capacity)),
 
                 download_all_remote_layers_task_info: RwLock::new(None),
 
@@ -3015,6 +3074,10 @@ impl Timeline {
                 rel_size_v2_status: ArcSwapOption::from_pointee(rel_size_v2_status),
 
                 wait_lsn_log_slow: tokio::sync::Semaphore::new(1),
+
+                basebackup_prepare_sender: resources.basebackup_prepare_sender,
+
+                feature_resolver: resources.feature_resolver,
             };
 
             result.repartition_threshold =
@@ -3528,7 +3591,7 @@ impl Timeline {
                 };
 
                 let io_concurrency = IoConcurrency::spawn_from_conf(
-                    self_ref.conf,
+                    self_ref.conf.get_vectored_concurrent_io,
                     self_ref
                         .gate
                         .enter()
@@ -4704,7 +4767,10 @@ impl Timeline {
                     || !flushed_to_lsn.is_valid()
             );
 
-            if flushed_to_lsn < frozen_to_lsn && self.shard_identity.count.count() > 1 {
+            if flushed_to_lsn < frozen_to_lsn
+                && self.shard_identity.count.count() > 1
+                && result.is_ok()
+            {
                 // If our layer flushes didn't carry disk_consistent_lsn up to the `to_lsn` advertised
                 // to us via layer_flush_start_rx, then advance it here.
                 //
@@ -4849,6 +4915,7 @@ impl Timeline {
                     LastImageLayerCreationStatus::Initial,
                     false, // don't yield for L0, we're flushing L0
                 )
+                .instrument(info_span!("create_image_layers", mode = %ImageLayerCreationMode::Initial, partition_mode = "initial", lsn = %self.initdb_lsn))
                 .await?;
             debug_assert!(
                 matches!(is_complete, LastImageLayerCreationStatus::Complete),
@@ -4881,6 +4948,10 @@ impl Timeline {
         if self.cancel.is_cancelled() {
             return Err(FlushLayerError::Cancelled);
         }
+
+        fail_point!("flush-layer-before-update-remote-consistent-lsn", |_| {
+            Err(FlushLayerError::Other(anyhow!("failpoint").into()))
+        });
 
         let disk_consistent_lsn = Lsn(lsn_range.end.0 - 1);
 
@@ -5405,7 +5476,8 @@ impl Timeline {
 
     /// Returns the image layers generated and an enum indicating whether the process is fully completed.
     /// true = we have generate all image layers, false = we preempt the process for L0 compaction.
-    #[tracing::instrument(skip_all, fields(%lsn, %mode))]
+    ///
+    /// `partition_mode` is only for logging purpose and is not used anywhere in this function.
     async fn create_image_layers(
         self: &Arc<Timeline>,
         partitioning: &KeyPartitioning,
@@ -5557,7 +5629,7 @@ impl Timeline {
             });
 
             let io_concurrency = IoConcurrency::spawn_from_conf(
-                self.conf,
+                self.conf.get_vectored_concurrent_io,
                 self.gate
                     .enter()
                     .map_err(|_| CreateImageLayersError::Cancelled)?,
@@ -5923,6 +5995,16 @@ impl From<layer_manager::Shutdown> for CompactionError {
     }
 }
 
+impl From<super::storage_layer::errors::PutError> for CompactionError {
+    fn from(e: super::storage_layer::errors::PutError) -> Self {
+        if e.is_cancel() {
+            CompactionError::ShuttingDown
+        } else {
+            CompactionError::Other(e.into_anyhow())
+        }
+    }
+}
+
 #[serde_as]
 #[derive(serde::Serialize)]
 struct RecordedDuration(#[serde_as(as = "serde_with::DurationMicroSeconds")] Duration);
@@ -6218,14 +6300,12 @@ impl Timeline {
 
         pausable_failpoint!("Timeline::find_gc_cutoffs-pausable");
 
-        if cfg!(test) {
+        if cfg!(test) && pitr == Duration::ZERO {
             // Unit tests which specify zero PITR interval expect to avoid doing any I/O for timestamp lookup
-            if pitr == Duration::ZERO {
-                return Ok(GcCutoffs {
-                    time: self.get_last_record_lsn(),
-                    space: space_cutoff,
-                });
-            }
+            return Ok(GcCutoffs {
+                time: Some(self.get_last_record_lsn()),
+                space: space_cutoff,
+            });
         }
 
         // Calculate a time-based limit on how much to retain:
@@ -6239,14 +6319,14 @@ impl Timeline {
                 // PITR is not set. Retain the size-based limit, or the default time retention,
                 // whichever requires less data.
                 GcCutoffs {
-                    time: self.get_last_record_lsn(),
+                    time: Some(self.get_last_record_lsn()),
                     space: std::cmp::max(time_cutoff, space_cutoff),
                 }
             }
             (Duration::ZERO, None) => {
                 // PITR is not set, and time lookup failed
                 GcCutoffs {
-                    time: self.get_last_record_lsn(),
+                    time: Some(self.get_last_record_lsn()),
                     space: space_cutoff,
                 }
             }
@@ -6254,7 +6334,7 @@ impl Timeline {
                 // PITR interval is set & we didn't look up a timestamp successfully.  Conservatively assume PITR
                 // cannot advance beyond what was already GC'd, and respect space-based retention
                 GcCutoffs {
-                    time: *self.get_applied_gc_cutoff_lsn(),
+                    time: Some(*self.get_applied_gc_cutoff_lsn()),
                     space: space_cutoff,
                 }
             }
@@ -6262,7 +6342,7 @@ impl Timeline {
                 // PITR interval is set and we looked up timestamp successfully.  Ignore
                 // size based retention and make time cutoff authoritative
                 GcCutoffs {
-                    time: time_cutoff,
+                    time: Some(time_cutoff),
                     space: time_cutoff,
                 }
             }
@@ -6315,7 +6395,7 @@ impl Timeline {
             )
         };
 
-        let mut new_gc_cutoff = Lsn::min(space_cutoff, time_cutoff);
+        let mut new_gc_cutoff = space_cutoff.min(time_cutoff.unwrap_or_default());
         let standby_horizon = self.standby_horizon.load();
         // Hold GC for the standby, but as a safety guard do it only within some
         // reasonable lag.
@@ -6364,7 +6444,7 @@ impl Timeline {
     async fn gc_timeline(
         &self,
         space_cutoff: Lsn,
-        time_cutoff: Lsn,
+        time_cutoff: Option<Lsn>, // None if uninitialized
         retain_lsns: Vec<Lsn>,
         max_lsn_with_valid_lease: Option<Lsn>,
         new_gc_cutoff: Lsn,
@@ -6382,6 +6462,12 @@ impl Timeline {
             );
             return Ok(result);
         }
+
+        let Some(time_cutoff) = time_cutoff else {
+            // The GC cutoff should have been computed by now, but let's be defensive.
+            info!("Nothing to GC: time_cutoff not yet computed");
+            return Ok(result);
+        };
 
         // We need to ensure that no one tries to read page versions or create
         // branches at a point before latest_gc_cutoff_lsn. See branch_timeline()
