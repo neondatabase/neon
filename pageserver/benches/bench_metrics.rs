@@ -269,11 +269,12 @@ mod histograms {
     use std::time::Instant;
 
     use criterion::{BenchmarkId, Criterion};
+    use metrics::core::Collector;
 
     pub fn bench_bucket_scalability(c: &mut Criterion) {
         let mut g = c.benchmark_group("bucket_scalability");
 
-        for n in [1, 4, 8, 16, 32] {
+        for n in [1, 4, 8, 16, 32, 64] {
             g.bench_with_input(BenchmarkId::new("nbuckets", n), &n, |b, n| {
                 b.iter_custom(|iters| {
                     let buckets: Vec<f64> = (0..*n).map(|i| i as f64 * 100.0).collect();
@@ -286,7 +287,22 @@ mod histograms {
                     for i in 0..usize::try_from(iters).unwrap() {
                         histo.observe(buckets[i % buckets.len()]);
                     }
-                    start.elapsed()
+                    let elapsed = start.elapsed();
+                    // self-test
+                    let mfs = histo.collect();
+                    assert_eq!(mfs.len(), 1);
+                    let metrics = mfs[0].get_metric();
+                    assert_eq!(metrics.len(), 1);
+                    let histo = metrics[0].get_histogram();
+                    let buckets = histo.get_bucket();
+                    assert!(
+                        buckets
+                            .iter()
+                            .enumerate()
+                            .all(|(i, b)| b.get_cumulative_count()
+                                >= i as u64 * (iters / buckets.len() as u64))
+                    );
+                    elapsed
                 })
             });
         }
