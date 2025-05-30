@@ -613,8 +613,8 @@ impl PageServerConf {
         {
             if max_batch_size.get() > conf.max_get_vectored_keys.get() {
                 return Err(anyhow::anyhow!(
-                    "`max_batch_size` must be less than or equal to {}",
-                    conf.max_get_vectored_keys.get(),
+                    "`max_batch_size` ({max_batch_size}) must be less than or equal to `max_get_vectored_keys` ({})",
+                    conf.max_get_vectored_keys.get()
                 ));
             }
         };
