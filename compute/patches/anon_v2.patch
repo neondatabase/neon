@@ -152,7 +152,7 @@ index 7da6553..7961984 100644
 +
 +SECURITY LABEL FOR anon ON FUNCTION anon.toggle_transparent_dynamic_masking IS 'UNTRUSTED';
 diff --git a/src/guc.rs b/src/guc.rs
-index 74d3822..8b500ce 100644
+index 74d3822..d4121ae 100644
 --- a/src/guc.rs
 +++ b/src/guc.rs
 @@ -3,7 +3,7 @@
@@ -186,13 +186,13 @@ index 74d3822..8b500ce 100644
 +        // 2. PGC_S_TEST (12) -> ALTER ROLE/DATABASE
 +        // 3. PGC_S_SESSION (13) -> SET ...
 +        // TODO (thesuhas): Does PGC_S_GLOBAL need to be added to whitelisted sources?
++        pg_sys::info!("Source: {}", source);
 +        if source == 0 || source == 6 || source == 7 || source == 8 {
 +            return true;
 +        }
 +        let oid = pg_sys::GetUserId();
 +        let user_name = CStr::from_ptr(pg_sys::GetUserNameFromId(oid, true));
 +        let user_str = user_name.to_str().unwrap();
-+        pg_sys::info!("Source: {}", source);
 +        pg_sys::info!("user: {} trying to change boolean guc", user_str);
 +        if pg_sys::superuser() || user_str == "neon_superuser" || user_str == "neondb_owner" {
 +            return true;
@@ -218,13 +218,13 @@ index 74d3822..8b500ce 100644
 +        // 1. PGC_S_FILE (3) -> ALTER SYSTEM
 +        // 2. PGC_S_TEST (12) -> ALTER ROLE/DATABASE
 +        // 3. PGC_S_SESSION (13) -> SET ...
++        pg_sys::info!("Source: {}", source);
 +        if source == 0 || source == 6 || source == 7 || source == 8 {
 +            return true;
 +        }
 +        let oid = pg_sys::GetUserId();
 +        let user_name = CStr::from_ptr(pg_sys::GetUserNameFromId(oid, true));
 +        let user_str = user_name.to_str().unwrap();
-+        pg_sys::info!("Source: {}", source);
 +        pg_sys::info!("user: {} trying to change string guc", user_str);
 +        if pg_sys::superuser() || user_str == "neon_superuser" || user_str == "neondb_owner" {
 +            return true;
