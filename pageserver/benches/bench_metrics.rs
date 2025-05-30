@@ -336,6 +336,14 @@ propagation_of_cached_label_value__naive/nthreads/8 time:   [211.50 ns 214.44 ns
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/1 time:   [14.135 ns 14.147 ns 14.160 ns]
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/4 time:   [14.243 ns 14.255 ns 14.268 ns]
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/8 time:   [14.470 ns 14.682 ns 14.895 ns]
+bucket_scalability/nbuckets/1     time:   [30.352 ns 30.353 ns 30.354 ns]
+bucket_scalability/nbuckets/4     time:   [30.464 ns 30.465 ns 30.467 ns]
+bucket_scalability/nbuckets/8     time:   [30.569 ns 30.575 ns 30.584 ns]
+bucket_scalability/nbuckets/16      time:   [30.961 ns 30.965 ns 30.969 ns]
+bucket_scalability/nbuckets/32      time:   [35.691 ns 35.707 ns 35.722 ns]
+bucket_scalability/nbuckets/64      time:   [47.829 ns 47.898 ns 47.974 ns]
+bucket_scalability/nbuckets/128     time:   [73.479 ns 73.512 ns 73.545 ns]
+bucket_scalability/nbuckets/256     time:   [127.92 ns 127.94 ns 127.96 ns]
 
 Results on an i3en.3xlarge instance
 
