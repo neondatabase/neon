@@ -510,7 +510,13 @@ pub async fn handle_request(
 
     let check_tombstone = !request.ignore_tombstone.unwrap_or_default();
 
-    if status.timeline_start_lsn == Lsn(0) || status.timeline_start_lsn == status.commit_lsn {
+    // Mirrors the code in `WalResidentTimeline::start_snapshot`
+    // Note that we operate on the in-memory status while `start_snapshot` uses
+    // the persisted status. For now, we live with this inconsistency, maybe we
+    // can add some code later on if it bites us (say a param for the status API).
+    let from_lsn = min(status.remote_consistent_lsn, status.backup_lsn);
+
+    if from_lsn == Lsn(0) {
         // The timeline has had no writes yet, even on the most advanced safeekeeper.
         // Create it locally, as snapshots of timelines without writes are not supported.
 
