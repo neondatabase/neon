@@ -10,7 +10,7 @@ pub(crate) mod wake_compute;
 use std::sync::Arc;
 
 pub use copy_bidirectional::{ErrorSource, copy_bidirectional_client_compute};
-use futures::{FutureExt, TryFutureExt};
+use futures::TryFutureExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use passthrough::passthrough;
@@ -328,7 +328,6 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send + 'st
             }
         }
     }
-    .boxed()
     .await;
 
     let Some((mut stream, params, session, user_info)) = handshake_result? else {
@@ -362,7 +361,6 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send + 'st
             }
         }
     }
-    .boxed()
     .await;
 
     let compute_creds = auth_result?;
@@ -404,7 +402,6 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send + 'st
 
         Ok((node, stream, tracker))
     }
-    .boxed()
     .await;
 
     let (node, stream, tracker) = connect_result?;
