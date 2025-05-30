@@ -28,6 +28,7 @@ pub use prometheus::{
 pub mod launch_timestamp;
 mod wrappers;
 pub use wrappers::{CountedReader, CountedWriter};
+pub use prometheus;
 mod hll;
 pub use hll::{HyperLogLog, HyperLogLogState, HyperLogLogVec};
 #[cfg(target_os = "linux")]

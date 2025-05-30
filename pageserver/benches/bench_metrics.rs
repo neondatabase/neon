@@ -264,10 +264,40 @@ mod propagation_of_cached_label_value {
     }
 }
 
+criterion_group!(histograms, histograms::bench_bucket_scalability);
+mod histograms {
+    use std::time::Instant;
+
+    use criterion::{BenchmarkId, Criterion};
+
+    pub fn bench_bucket_scalability(c: &mut Criterion) {
+        let mut g = c.benchmark_group("bucket_scalability");
+
+        for n in [1, 4, 8, 16, 32] {
+            g.bench_with_input(BenchmarkId::new("nbuckets", n), &n, |b, n| {
+                b.iter_custom(|iters| {
+                    let buckets: Vec<f64> = (0..*n).map(|i| i as f64 * 100.0).collect();
+                    let histo = metrics::Histogram::with_opts(
+                        metrics::prometheus::HistogramOpts::new("name", "help")
+                            .buckets(buckets.clone()),
+                    )
+                    .unwrap();
+                    let start = Instant::now();
+                    for i in 0..usize::try_from(iters).unwrap() {
+                        histo.observe(buckets[i % buckets.len()]);
+                    }
+                    start.elapsed()
+                })
+            });
+        }
+    }
+}
+
 criterion_main!(
     label_values,
     single_metric_multicore_scalability,
-    propagation_of_cached_label_value
+    propagation_of_cached_label_value,
+    histograms,
 );
 
 /*
