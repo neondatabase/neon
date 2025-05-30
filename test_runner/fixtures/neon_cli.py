@@ -536,16 +536,14 @@ class NeonLocalCli(AbstractNeonCli):
         res.check_returncode()
         return res
 
-    def endpoint_generate_jwt(
-        self, endpoint_id: str, scope: ComputeClaimsScope | None = None
-    ) -> str:
+    def endpoint_generate_jwt(self, endpoint_id: str, scope: list[ComputeClaimsScope]) -> str:
         """
         Generate a JWT for making requests to the endpoint's external HTTP
         server.
         """
         args = ["endpoint", "generate-jwt", endpoint_id]
-        if scope:
-            args += ["--scope", str(scope)]
+        for s in scope:
+            args += ["--scope", str(s)]
 
         cmd = self.raw_cli(args)
         cmd.check_returncode()
