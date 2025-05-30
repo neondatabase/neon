@@ -11,6 +11,7 @@ pub mod http;
 pub mod logger;
 pub mod catalog;
 pub mod compute;
+pub mod compute_prewarm;
 pub mod disk_quota;
 pub mod extension_server;
 pub mod installed_extensions;

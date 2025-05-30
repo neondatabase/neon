@@ -20,7 +20,9 @@ use utils::auth::encode_from_key_file;
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 
 use crate::broker::StorageBroker;
-use crate::endpoint_storage::{ENDPOINT_STORAGE_REMOTE_STORAGE_DIR, EndpointStorage};
+use crate::endpoint_storage::{
+    ENDPOINT_STORAGE_DEFAULT_ADDR, ENDPOINT_STORAGE_REMOTE_STORAGE_DIR, EndpointStorage,
+};
 use crate::pageserver::{PAGESERVER_REMOTE_STORAGE_DIR, PageServerNode};
 use crate::safekeeper::SafekeeperNode;
 
@@ -151,10 +153,10 @@ pub struct NeonLocalInitConf {
     pub generate_local_ssl_certs: bool,
 }
 
-#[derive(Serialize, Default, Deserialize, PartialEq, Eq, Clone, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(default)]
 pub struct EndpointStorageConf {
-    pub port: u16,
+    pub listen_addr: SocketAddr,
 }
 
 /// Broker config for cluster internal communication.
@@ -241,6 +243,14 @@ impl Default for NeonStorageControllerConf {
     }
 }
 
+impl Default for EndpointStorageConf {
+    fn default() -> Self {
+        Self {
+            listen_addr: ENDPOINT_STORAGE_DEFAULT_ADDR,
+        }
+    }
+}
+
 impl NeonBroker {
     pub fn client_url(&self) -> Url {
         let url = if let Some(addr) = self.listen_https_addr {
@@ -268,8 +278,10 @@ pub struct PageServerConf {
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
     pub listen_https_addr: Option<String>,
+    pub listen_grpc_addr: Option<String>,
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
+    pub grpc_auth_type: AuthType,
     pub no_sync: bool,
 }
 
@@ -280,8 +292,10 @@ impl Default for PageServerConf {
             listen_pg_addr: String::new(),
             listen_http_addr: String::new(),
             listen_https_addr: None,
+            listen_grpc_addr: None,
             pg_auth_type: AuthType::Trust,
             http_auth_type: AuthType::Trust,
+            grpc_auth_type: AuthType::Trust,
             no_sync: false,
         }
     }
@@ -296,8 +310,10 @@ pub struct NeonLocalInitPageserverConf {
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
     pub listen_https_addr: Option<String>,
+    pub listen_grpc_addr: Option<String>,
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
+    pub grpc_auth_type: AuthType,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_sync: bool,
     #[serde(flatten)]
@@ -311,8 +327,10 @@ impl From<&NeonLocalInitPageserverConf> for PageServerConf {
             listen_pg_addr,
             listen_http_addr,
             listen_https_addr,
+            listen_grpc_addr,
             pg_auth_type,
             http_auth_type,
+            grpc_auth_type,
             no_sync,
             other: _,
         } = conf;
@@ -321,7 +339,9 @@ impl From<&NeonLocalInitPageserverConf> for PageServerConf {
             listen_pg_addr: listen_pg_addr.clone(),
             listen_http_addr: listen_http_addr.clone(),
             listen_https_addr: listen_https_addr.clone(),
+            listen_grpc_addr: listen_grpc_addr.clone(),
             pg_auth_type: *pg_auth_type,
+            grpc_auth_type: *grpc_auth_type,
             http_auth_type: *http_auth_type,
             no_sync: *no_sync,
         }
@@ -697,8 +717,10 @@ impl LocalEnv {
                     listen_pg_addr: String,
                     listen_http_addr: String,
                     listen_https_addr: Option<String>,
+                    listen_grpc_addr: Option<String>,
                     pg_auth_type: AuthType,
                     http_auth_type: AuthType,
+                    grpc_auth_type: AuthType,
                     #[serde(default)]
                     no_sync: bool,
                 }
@@ -722,8 +744,10 @@ impl LocalEnv {
                     listen_pg_addr,
                     listen_http_addr,
                     listen_https_addr,
+                    listen_grpc_addr,
                     pg_auth_type,
                     http_auth_type,
+                    grpc_auth_type,
                     no_sync,
                 } = config_toml;
                 let IdentityTomlSubset {
@@ -740,8 +764,10 @@ impl LocalEnv {
                     listen_pg_addr,
                     listen_http_addr,
                     listen_https_addr,
+                    listen_grpc_addr,
                     pg_auth_type,
                     http_auth_type,
+                    grpc_auth_type,
                     no_sync,
                 };
                 pageservers.push(conf);

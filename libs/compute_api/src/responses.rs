@@ -46,6 +46,30 @@ pub struct ExtensionInstallResponse {
     pub version: ExtVersion,
 }
 
+#[derive(Serialize, Default, Debug, Clone)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum LfcPrewarmState {
+    #[default]
+    NotPrewarmed,
+    Prewarming,
+    Completed,
+    Failed {
+        error: String,
+    },
+}
+
+#[derive(Serialize, Default, Debug, Clone)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum LfcOffloadState {
+    #[default]
+    NotOffloaded,
+    Offloading,
+    Completed,
+    Failed {
+        error: String,
+    },
+}
+
 /// Response of the /status API
 #[derive(Serialize, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]

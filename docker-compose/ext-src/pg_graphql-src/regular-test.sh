@@ -18,6 +18,7 @@ TESTS=${TESTS/row_level_security/}
 TESTS=${TESTS/sqli_connection/}
 dropdb --if-exist contrib_regression
 createdb contrib_regression
+. ../alter_db.sh
 psql -v ON_ERROR_STOP=1 -f test/fixtures.sql -d contrib_regression
 ${REGRESS} --use-existing --dbname=contrib_regression --inputdir=${TESTDIR} ${TESTS}
 

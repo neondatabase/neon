@@ -244,9 +244,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let cancellation_handler_clone = Arc::clone(&cancellation_handler);
     let session = cancellation_handler_clone.get_key();
 
-    session
-        .write_cancel_key(node.cancel_closure.clone())
-        .await?;
+    session.write_cancel_key(node.cancel_closure.clone())?;
 
     prepare_client_connection(&node, *session.key(), &mut stream).await?;
 

@@ -221,7 +221,7 @@ def test_remote_extensions(
 
     endpoint.create_remote_extension_spec(spec)
 
-    endpoint.start(remote_ext_config=extensions_endpoint)
+    endpoint.start(remote_ext_base_url=extensions_endpoint)
 
     with endpoint.connect() as conn:
         with conn.cursor() as cur:
@@ -249,7 +249,7 @@ def test_remote_extensions(
     # Remove the extension files to force a redownload of the extension.
     extension.remove(test_output_dir, pg_version)
 
-    endpoint.start(remote_ext_config=extensions_endpoint)
+    endpoint.start(remote_ext_base_url=extensions_endpoint)
 
     # Test that ALTER EXTENSION UPDATE statements also fetch remote extensions.
     with endpoint.connect() as conn:

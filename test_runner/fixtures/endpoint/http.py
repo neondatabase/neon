@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import urllib.parse
+from enum import StrEnum
 from typing import TYPE_CHECKING, final
 
 import requests
@@ -9,9 +10,21 @@ from requests.auth import AuthBase
 from typing_extensions import override
 
 from fixtures.log_helper import log
+from fixtures.utils import wait_until
 
 if TYPE_CHECKING:
     from requests import PreparedRequest
+
+
+COMPUTE_AUDIENCE = "compute"
+"""
+The value to place in the `aud` claim.
+"""
+
+
+@final
+class ComputeClaimsScope(StrEnum):
+    ADMIN = "admin"
 
 
 @final
@@ -49,6 +62,35 @@ class EndpointHttpClient(requests.Session):
         res = self.get(f"http://localhost:{self.external_port}/dbs_and_roles", auth=self.auth)
         res.raise_for_status()
         return res.json()
+
+    def prewarm_lfc_status(self) -> dict[str, str]:
+        res = self.get(f"http://localhost:{self.external_port}/lfc/prewarm")
+        res.raise_for_status()
+        json: dict[str, str] = res.json()
+        return json
+
+    def prewarm_lfc(self):
+        self.post(f"http://localhost:{self.external_port}/lfc/prewarm").raise_for_status()
+
+        def prewarmed():
+            json = self.prewarm_lfc_status()
+            status, err = json["status"], json.get("error")
+            assert status == "completed", f"{status}, error {err}"
+
+        wait_until(prewarmed)
+
+    def offload_lfc(self):
+        url = f"http://localhost:{self.external_port}/lfc/offload"
+        self.post(url).raise_for_status()
+
+        def offloaded():
+            res = self.get(url)
+            res.raise_for_status()
+            json = res.json()
+            status, err = json["status"], json.get("error")
+            assert status == "completed", f"{status}, error {err}"
+
+        wait_until(offloaded)
 
     def database_schema(self, database: str):
         res = self.get(

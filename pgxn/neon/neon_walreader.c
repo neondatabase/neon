@@ -150,7 +150,7 @@ NeonWALReaderFree(NeonWALReader *state)
  * fetched from timeline 'tli'.
  *
  * Returns NEON_WALREAD_SUCCESS if succeeded, NEON_WALREAD_ERROR if an error
- * occurs, in which case 'err' has the desciption. Error always closes remote
+ * occurs, in which case 'err' has the description. Error always closes remote
  * connection, if there was any, so socket subscription should be removed.
  *
  * NEON_WALREAD_WOULDBLOCK means caller should obtain socket to wait for with

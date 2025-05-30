@@ -115,8 +115,8 @@ pub struct ProxyMetrics {
     #[metric(metadata = Thresholds::with_buckets([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 50.0, 100.0]))]
     pub allowed_vpc_endpoint_ids: Histogram<10>,
 
-    /// Number of connections (per sni).
-    pub accepted_connections_by_sni: CounterVec<StaticLabelSet<SniKind>>,
+    /// Number of connections, by the method we used to determine the endpoint.
+    pub accepted_connections_by_sni: CounterVec<SniSet>,
 
     /// Number of connection failures (per kind).
     pub connection_failures_total: CounterVec<StaticLabelSet<ConnectionFailureKind>>,
@@ -342,11 +342,20 @@ pub enum LatencyExclusions {
     ClientCplaneComputeRetry,
 }
 
+#[derive(LabelGroup)]
+#[label(set = SniSet)]
+pub struct SniGroup {
+    pub protocol: Protocol,
+    pub kind: SniKind,
+}
+
 #[derive(FixedCardinalityLabel, Copy, Clone)]
-#[label(singleton = "kind")]
 pub enum SniKind {
+    /// Domain name based routing. SNI for libpq/websockets. Host for HTTP
     Sni,
+    /// Metadata based routing. `options` for libpq/websockets. Header for HTTP
     NoSni,
+    /// Metadata based routing, using the password field.
     PasswordHack,
 }
 

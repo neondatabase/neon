@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use pageserver_api::models::detach_ancestor::AncestorDetached;
 use pageserver_api::models::{
     DetachBehavior, LocationConfig, LocationConfigListResponse, LsnLease, PageserverUtilization,
@@ -212,6 +214,7 @@ impl PageserverClient {
         )
     }
 
+    #[allow(unused)]
     pub(crate) async fn timeline_detail(
         &self,
         tenant_shard_id: TenantShardId,
@@ -355,6 +358,22 @@ impl PageserverClient {
             crate::metrics::Method::Post,
             &self.node_id_label,
             self.inner.wait_lsn(tenant_shard_id, request).await
+        )
+    }
+
+    pub(crate) async fn activate_post_import(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        timeline_activate_timeout: Duration,
+    ) -> Result<TimelineInfo> {
+        measured_request!(
+            "activate_post_import",
+            crate::metrics::Method::Put,
+            &self.node_id_label,
+            self.inner
+                .activate_post_import(tenant_shard_id, timeline_id, timeline_activate_timeout)
+                .await
         )
     }
 }

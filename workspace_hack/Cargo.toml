@@ -18,6 +18,8 @@ license.workspace = true
 ahash = { version = "0.8" }
 anstream = { version = "0.6" }
 anyhow = { version = "1", features = ["backtrace"] }
+axum = { version = "0.8", features = ["ws"] }
+axum-core = { version = "0.5", default-features = false, features = ["tracing"] }
 base64-594e8ee84c453af0 = { package = "base64", version = "0.13", features = ["alloc"] }
 base64-647d43efb71741da = { package = "base64", version = "0.21" }
 base64ct = { version = "1", default-features = false, features = ["std"] }
@@ -50,15 +52,15 @@ hex = { version = "0.4", features = ["serde"] }
 hmac = { version = "0.12", default-features = false, features = ["reset"] }
 hyper-582f2526e08bb6a0 = { package = "hyper", version = "0.14", features = ["client", "http1", "http2", "runtime", "server", "stream"] }
 hyper-dff4ba8e3ae991db = { package = "hyper", version = "1", features = ["full"] }
-hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "server", "service"] }
-indexmap-dff4ba8e3ae991db = { package = "indexmap", version = "1", default-features = false, features = ["std"] }
-indexmap-f595c2ba2a3f28df = { package = "indexmap", version = "2", features = ["serde"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "server-auto", "service"] }
+indexmap = { version = "2", features = ["serde"] }
 itertools = { version = "0.12" }
 lazy_static = { version = "1", default-features = false, features = ["spin_no_std"] }
 libc = { version = "0.2", features = ["extra_traits", "use_std"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }
-nix = { version = "0.26" }
+nix-2f80eeee3b1b6c7e = { package = "nix", version = "0.26" }
+nix-fa1f6196edfd7249 = { package = "nix", version = "0.30", features = ["dir", "ioctl", "mman", "poll", "signal", "socket"] }
 nom = { version = "7" }
 num = { version = "0.4" }
 num-bigint = { version = "0.4" }
@@ -78,7 +80,7 @@ regex-syntax = { version = "0.8" }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "rustls-tls-native-roots", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
-rustls-webpki = { version = "0.102", default-features = false, features = ["ring", "std"] }
+rustls-webpki = { version = "0.103", default-features = false, features = ["ring", "std"] }
 scopeguard = { version = "1" }
 sec1 = { version = "0.7", features = ["pem", "serde", "std", "subtle"] }
 serde = { version = "1", features = ["alloc", "derive"] }
@@ -95,14 +97,14 @@ tikv-jemalloc-sys = { version = "0.6", features = ["profiling", "stats", "unpref
 time = { version = "0.3", features = ["macros", "serde-well-known"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
-tokio-stream = { version = "0.1" }
+tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = { version = "0.7", features = ["codec", "compat", "io", "rt"] }
 toml_edit = { version = "0.22", features = ["serde"] }
-tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "tls-roots"] }
-tower = { version = "0.4", default-features = false, features = ["balance", "buffer", "limit", "util"] }
+tower = { version = "0.5", default-features = false, features = ["balance", "buffer", "limit", "log"] }
 tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
 tracing-log = { version = "0.2" }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["serde", "v4", "v7"] }
 zeroize = { version = "1", features = ["derive", "serde"] }
@@ -120,8 +122,7 @@ either = { version = "1" }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hashbrown = { version = "0.14", features = ["raw"] }
-indexmap-dff4ba8e3ae991db = { package = "indexmap", version = "1", default-features = false, features = ["std"] }
-indexmap-f595c2ba2a3f28df = { package = "indexmap", version = "2", features = ["serde"] }
+indexmap = { version = "2", features = ["serde"] }
 itertools = { version = "0.12" }
 libc = { version = "0.2", features = ["extra_traits", "use_std"] }
 log = { version = "0.4", default-features = false, features = ["std"] }

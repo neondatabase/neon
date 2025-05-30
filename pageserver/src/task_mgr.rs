@@ -276,9 +276,10 @@ pub enum TaskKind {
     // HTTP endpoint listener.
     HttpEndpointListener,
 
-    // Task that handles a single connection. A PageRequestHandler task
-    // starts detached from any particular tenant or timeline, but it can be
-    // associated with one later, after receiving a command from the client.
+    /// Task that handles a single page service connection. A PageRequestHandler
+    /// task starts detached from any particular tenant or timeline, but it can
+    /// be associated with one later, after receiving a command from the client.
+    /// Also used for the gRPC page service API, including the main server task.
     PageRequestHandler,
 
     /// Manages the WAL receiver connection for one timeline.
@@ -380,6 +381,10 @@ pub enum TaskKind {
     DetachAncestor,
 
     ImportPgdata,
+
+    /// Background task of [`crate::basebackup_cache::BasebackupCache`].
+    /// Prepares basebackups and clears outdated entries.
+    BasebackupCache,
 }
 
 #[derive(Default)]

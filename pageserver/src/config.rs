@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::{Context, bail, ensure};
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
-use pageserver_api::config::{DiskUsageEvictionTaskConfig, MaxVectoredReadBytes};
+use pageserver_api::config::{DiskUsageEvictionTaskConfig, MaxVectoredReadBytes, PostHogConfig};
 use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
 use pem::Pem;
@@ -58,11 +58,16 @@ pub struct PageServerConf {
     pub listen_http_addr: String,
     /// Example: 127.0.0.1:9899
     pub listen_https_addr: Option<String>,
+    /// If set, expose a gRPC API on this address.
+    /// Example: 127.0.0.1:51051
+    ///
+    /// EXPERIMENTAL: this protocol is unstable and under active development.
+    pub listen_grpc_addr: Option<String>,
 
-    /// Path to a file with certificate's private key for https API.
+    /// Path to a file with certificate's private key for https and gRPC API.
     /// Default: server.key
     pub ssl_key_file: Utf8PathBuf,
-    /// Path to a file with a X509 certificate for https API.
+    /// Path to a file with a X509 certificate for https and gRPC API.
     /// Default: server.crt
     pub ssl_cert_file: Utf8PathBuf,
     /// Period to reload certificate and private key from files.
@@ -100,6 +105,8 @@ pub struct PageServerConf {
     pub http_auth_type: AuthType,
     /// authentication method for libpq connections from compute
     pub pg_auth_type: AuthType,
+    /// authentication method for gRPC connections from compute
+    pub grpc_auth_type: AuthType,
     /// Path to a file or directory containing public key(s) for verifying JWT tokens.
     /// Used for both mgmt and compute auth, if enabled.
     pub auth_validation_public_key_path: Option<Utf8PathBuf>,
@@ -230,6 +237,13 @@ pub struct PageServerConf {
     /// such as authentication requirements for HTTP and PostgreSQL APIs.
     /// This is insecure and should only be used in development environments.
     pub dev_mode: bool,
+
+    /// PostHog integration config.
+    pub posthog_config: Option<PostHogConfig>,
+
+    pub timeline_import_config: pageserver_api::config::TimelineImportConfig,
+
+    pub basebackup_cache_config: Option<pageserver_api::config::BasebackupCacheConfig>,
 }
 
 /// Token for authentication to safekeepers
@@ -257,6 +271,10 @@ impl PageServerConf {
 
     pub fn metadata_path(&self) -> Utf8PathBuf {
         self.workdir.join("metadata.json")
+    }
+
+    pub fn basebackup_cache_dir(&self) -> Utf8PathBuf {
+        self.workdir.join("basebackup_cache")
     }
 
     pub fn deletion_list_path(&self, sequence: u64) -> Utf8PathBuf {
@@ -347,6 +365,7 @@ impl PageServerConf {
             listen_pg_addr,
             listen_http_addr,
             listen_https_addr,
+            listen_grpc_addr,
             ssl_key_file,
             ssl_cert_file,
             ssl_cert_reload_period,
@@ -361,6 +380,7 @@ impl PageServerConf {
             pg_distrib_dir,
             http_auth_type,
             pg_auth_type,
+            grpc_auth_type,
             auth_validation_public_key_path,
             remote_storage,
             broker_endpoint,
@@ -404,6 +424,9 @@ impl PageServerConf {
             tracing,
             enable_tls_page_service_api,
             dev_mode,
+            posthog_config,
+            timeline_import_config,
+            basebackup_cache_config,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -413,6 +436,7 @@ impl PageServerConf {
             listen_pg_addr,
             listen_http_addr,
             listen_https_addr,
+            listen_grpc_addr,
             ssl_key_file,
             ssl_cert_file,
             ssl_cert_reload_period,
@@ -425,6 +449,7 @@ impl PageServerConf {
             max_file_descriptors,
             http_auth_type,
             pg_auth_type,
+            grpc_auth_type,
             auth_validation_public_key_path,
             remote_storage_config: remote_storage,
             broker_endpoint,
@@ -457,6 +482,8 @@ impl PageServerConf {
             tracing,
             enable_tls_page_service_api,
             dev_mode,
+            timeline_import_config,
+            basebackup_cache_config,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
@@ -513,13 +540,16 @@ impl PageServerConf {
                 }
                 None => Vec::new(),
             },
+            posthog_config,
         };
 
         // ------------------------------------------------------------
         // custom validation code that covers more than one field in isolation
         // ------------------------------------------------------------
 
-        if conf.http_auth_type == AuthType::NeonJWT || conf.pg_auth_type == AuthType::NeonJWT {
+        if [conf.http_auth_type, conf.pg_auth_type, conf.grpc_auth_type]
+            .contains(&AuthType::NeonJWT)
+        {
             let auth_validation_public_key_path = conf
                 .auth_validation_public_key_path
                 .get_or_insert_with(|| workdir.join("auth_public_key.pem"));
@@ -538,6 +568,23 @@ impl PageServerConf {
                 format!(
                     "Invalid sampling ratio: {}/{}",
                     ratio.numerator, ratio.denominator
+                )
+            );
+
+            let url = Url::parse(&tracing_config.export_config.endpoint)
+                .map_err(anyhow::Error::msg)
+                .with_context(|| {
+                    format!(
+                        "tracing endpoint URL is invalid : {}",
+                        tracing_config.export_config.endpoint
+                    )
+                })?;
+
+            ensure!(
+                url.scheme() == "http" || url.scheme() == "https",
+                format!(
+                    "tracing endpoint URL must start with http:// or https://: {}",
+                    tracing_config.export_config.endpoint
                 )
             );
         }
@@ -655,5 +702,26 @@ mod tests {
         let workdir = Utf8PathBuf::from("/nonexistent");
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
             .expect("parse_and_validate");
+    }
+
+    #[test]
+    fn test_config_tracing_endpoint_is_invalid() {
+        let input = r#"
+            control_plane_api = "http://localhost:6666"
+
+            [tracing]
+
+            sampling_ratio = { numerator = 1, denominator = 0 }
+
+            [tracing.export_config]
+            endpoint = "localhost:4317"
+            protocol = "http-binary"
+            timeout = "1ms"
+        "#;
+        let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input)
+            .expect("config has valid fields");
+        let workdir = Utf8PathBuf::from("/nonexistent");
+        PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
+            .expect_err("parse_and_validate should fail for endpoint without scheme");
     }
 }

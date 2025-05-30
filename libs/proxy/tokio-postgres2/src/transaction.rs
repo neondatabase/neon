@@ -1,7 +1,3 @@
-use postgres_protocol2::message::frontend;
-
-use crate::codec::FrontendMessage;
-use crate::connection::RequestMessages;
 use crate::query::RowStream;
 use crate::{CancelToken, Client, Error, ReadyForQueryStatus};
 
@@ -20,14 +16,7 @@ impl Drop for Transaction<'_> {
             return;
         }
 
-        let buf = self.client.inner().with_buf(|buf| {
-            frontend::query("ROLLBACK", buf).unwrap();
-            buf.split().freeze()
-        });
-        let _ = self
-            .client
-            .inner()
-            .send(RequestMessages::Single(FrontendMessage::Raw(buf)));
+        let _ = self.client.inner_mut().send_simple_query("ROLLBACK");
     }
 }
 
@@ -54,7 +43,11 @@ impl<'a> Transaction<'a> {
     }
 
     /// Like `Client::query_raw_txt`.
-    pub async fn query_raw_txt<S, I>(&self, statement: &str, params: I) -> Result<RowStream, Error>
+    pub async fn query_raw_txt<S, I>(
+        &mut self,
+        statement: &str,
+        params: I,
+    ) -> Result<RowStream, Error>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = Option<S>>,

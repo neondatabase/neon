@@ -63,8 +63,10 @@ jobs:
 
       - name: Filter out only v-string for build matrix
         id: postgres_changes
+        env:
+          CHANGES: ${{ steps.files_changed.outputs.changes }}
         run: |
-          v_strings_only_as_json_array=$(echo ${{ steps.files_changed.outputs.chnages }} | jq '.[]|select(test("v\\d+"))' | jq --slurp -c)
+          v_strings_only_as_json_array=$(echo ${CHANGES} | jq '.[]|select(test("v\\d+"))' | jq --slurp -c)
           echo "changes=${v_strings_only_as_json_array}" | tee -a "${GITHUB_OUTPUT}"
 
   check-macos-build:

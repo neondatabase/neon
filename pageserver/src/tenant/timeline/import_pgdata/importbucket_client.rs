@@ -6,7 +6,7 @@ use bytes::Bytes;
 use postgres_ffi::ControlFileData;
 use remote_storage::{
     Download, DownloadError, DownloadKind, DownloadOpts, GenericRemoteStorage, Listing,
-    ListingObject, RemotePath,
+    ListingObject, RemotePath, RemoteStorageConfig,
 };
 use serde::de::DeserializeOwned;
 use tokio_util::sync::CancellationToken;
@@ -22,11 +22,9 @@ pub async fn new(
     location: &index_part_format::Location,
     cancel: CancellationToken,
 ) -> Result<RemoteStorageWrapper, anyhow::Error> {
-    // FIXME: we probably want some timeout, and we might be able to assume the max file
-    // size on S3 is 1GiB (postgres segment size). But the problem is that the individual
-    // downloaders don't know enough about concurrent downloads to make a guess on the
-    // expected bandwidth and resulting best timeout.
-    let timeout = std::time::Duration::from_secs(24 * 60 * 60);
+    // Downloads should be reasonably sized. We do ranged reads for relblock raw data
+    // and full reads for SLRU segments which are bounded by Postgres.
+    let timeout = RemoteStorageConfig::DEFAULT_TIMEOUT;
     let location_storage = match location {
         #[cfg(feature = "testing")]
         index_part_format::Location::LocalFs { path } => {
@@ -50,9 +48,12 @@ pub async fn new(
                             .import_pgdata_aws_endpoint_url
                             .clone()
                             .map(|url| url.to_string()), //  by specifying None here, remote_storage/aws-sdk-rust will infer from env
-                        concurrency_limit: 100.try_into().unwrap(), // TODO: think about this
-                        max_keys_per_list_response: Some(1000),     // TODO: think about this
-                        upload_storage_class: None,                 // irrelevant
+                        // This matches the default import job concurrency. This is managed
+                        // separately from the usual S3 client, but the concern here is bandwidth
+                        // usage.
+                        concurrency_limit: 128.try_into().unwrap(),
+                        max_keys_per_list_response: Some(1000),
+                        upload_storage_class: None, // irrelevant
                     },
                     timeout,
                 )
@@ -188,31 +189,6 @@ impl RemoteStorageWrapper {
             // TODO: own error type
             .map_err(DownloadError::Other)?;
         Ok(Some(res))
-    }
-
-    #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
-    pub async fn put_json<T>(&self, path: &RemotePath, value: &T) -> anyhow::Result<()>
-    where
-        T: serde::Serialize,
-    {
-        let buf = serde_json::to_vec(value)?;
-        let bytes = Bytes::from(buf);
-        utils::backoff::retry(
-            || async {
-                let size = bytes.len();
-                let bytes = futures::stream::once(futures::future::ready(Ok(bytes.clone())));
-                self.storage
-                    .upload_storage_object(bytes, size, path, &self.cancel)
-                    .await
-            },
-            remote_storage::TimeoutOrCancel::caused_by_cancel,
-            1,
-            u32::MAX,
-            &format!("put json {path}"),
-            &self.cancel,
-        )
-        .await
-        .expect("practically infinite retries")
     }
 
     #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]

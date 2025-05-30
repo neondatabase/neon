@@ -129,7 +129,9 @@ impl PageServerNode {
             ));
         }
 
-        if conf.http_auth_type != AuthType::Trust || conf.pg_auth_type != AuthType::Trust {
+        if [conf.http_auth_type, conf.pg_auth_type, conf.grpc_auth_type]
+            .contains(&AuthType::NeonJWT)
+        {
             // Keys are generated in the toplevel repo dir, pageservers' workdirs
             // are one level below that, so refer to keys with ../
             overrides.push("auth_validation_public_key_path='../auth_public_key.pem'".to_owned());
@@ -546,6 +548,16 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("Falied to parse 'sampling_ratio'")?,
+            relsize_snapshot_cache_capacity: settings
+                .remove("relsize snapshot cache capacity")
+                .map(|x| x.parse::<usize>())
+                .transpose()
+                .context("Falied to parse 'relsize_snapshot_cache_capacity' as integer")?,
+            basebackup_cache_enabled: settings
+                .remove("basebackup_cache_enabled")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'basebackup_cache_enabled' as bool")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")

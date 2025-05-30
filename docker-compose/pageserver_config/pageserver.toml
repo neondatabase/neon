@@ -5,3 +5,4 @@ listen_http_addr='0.0.0.0:9898'
 remote_storage={ endpoint='http://minio:9000', bucket_name='neon', bucket_region='eu-north-1', prefix_in_bucket='/pageserver' }
 control_plane_api='http://0.0.0.0:6666' # No storage controller in docker compose, specify a junk address
 control_plane_emergency_mode=true
+virtual_file_io_mode="buffered" # the CI runners where we run the docker compose tests have slow disks

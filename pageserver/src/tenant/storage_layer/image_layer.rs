@@ -53,6 +53,7 @@ use utils::bin_ser::SerializeError;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
+use super::errors::PutError;
 use super::layer_name::ImageLayerName;
 use super::{
     AsLayerDesc, LayerName, OnDiskValue, OnDiskValueIo, PersistentLayerDesc, ResidentLayer,
@@ -684,14 +685,6 @@ impl ImageLayerInner {
         }
     }
 
-    pub(crate) fn iter<'a>(&'a self, ctx: &'a RequestContext) -> ImageLayerIterator<'a> {
-        self.iter_with_options(
-            ctx,
-            1024 * 8192, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
-            1024,        // The default value. Unit tests might use a different value
-        )
-    }
-
     pub(crate) fn iter_with_options<'a>(
         &'a self,
         ctx: &'a RequestContext,
@@ -850,8 +843,14 @@ impl ImageLayerWriterInner {
         key: Key,
         img: Bytes,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        ensure!(self.key_range.contains(&key));
+    ) -> Result<(), PutError> {
+        if !self.key_range.contains(&key) {
+            return Err(PutError::Other(anyhow::anyhow!(
+                "key {:?} not in range {:?}",
+                key,
+                self.key_range
+            )));
+        }
         let compression = self.conf.image_compression;
         let uncompressed_len = img.len() as u64;
         self.uncompressed_bytes += uncompressed_len;
@@ -861,7 +860,7 @@ impl ImageLayerWriterInner {
             .write_blob_maybe_compressed(img.slice_len(), ctx, compression)
             .await;
         // TODO: re-use the buffer for `img` further upstack
-        let (off, compression_info) = res?;
+        let (off, compression_info) = res.map_err(PutError::WriteBlob)?;
         if compression_info.compressed_size.is_some() {
             // The image has been considered for compression at least
             self.uncompressed_bytes_eligible += uncompressed_len;
@@ -873,7 +872,10 @@ impl ImageLayerWriterInner {
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
-        self.tree.append(&keybuf, off)?;
+        self.tree
+            .append(&keybuf, off)
+            .map_err(anyhow::Error::new)
+            .map_err(PutError::Other)?;
 
         #[cfg(feature = "testing")]
         {
@@ -1093,7 +1095,7 @@ impl ImageLayerWriter {
         key: Key,
         img: Bytes,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PutError> {
         self.inner.as_mut().unwrap().put_image(key, img, ctx).await
     }
 
@@ -1240,7 +1242,6 @@ mod test {
     use crate::context::RequestContext;
     use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
     use crate::tenant::storage_layer::{Layer, ResidentLayer};
-    use crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner;
     use crate::tenant::{TenantShard, Timeline};
 
     #[tokio::test]
@@ -1507,8 +1508,7 @@ mod test {
             for batch_size in [1, 2, 4, 8, 3, 7, 13] {
                 println!("running with batch_size={batch_size} max_read_size={max_read_size}");
                 // Test if the batch size is correctly determined
-                let mut iter = img_layer.iter(&ctx);
-                iter.planner = StreamingVectoredReadPlanner::new(max_read_size, batch_size);
+                let mut iter = img_layer.iter_with_options(&ctx, max_read_size, batch_size);
                 let mut num_items = 0;
                 for _ in 0..3 {
                     iter.next_batch().await.unwrap();
@@ -1525,8 +1525,7 @@ mod test {
                     iter.key_values_batch.clear();
                 }
                 // Test if the result is correct
-                let mut iter = img_layer.iter(&ctx);
-                iter.planner = StreamingVectoredReadPlanner::new(max_read_size, batch_size);
+                let mut iter = img_layer.iter_with_options(&ctx, max_read_size, batch_size);
                 assert_img_iter_equal(&mut iter, &test_imgs, Lsn(0x10)).await;
             }
         }

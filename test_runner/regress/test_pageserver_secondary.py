@@ -124,6 +124,9 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
                 ".*downloading failed, possibly for shutdown",
                 # {tenant_id=... timeline_id=...}:handle_pagerequests:handle_get_page_at_lsn_request{rel=1664/0/1260 blkno=0 req_lsn=0/149F0D8}: error reading relation or page version: Not found: will not become active.  Current state: Stopping\n'
                 ".*page_service.*will not become active.*",
+                # the following errors are possible when pageserver tries to ingest wal records despite being in unreadable state
+                ".*wal_connection_manager.*layer file download failed: No file found.*",
+                ".*wal_connection_manager.*could not ingest record.*",
             ]
         )
 
@@ -155,6 +158,45 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
         env.pageservers[1].id: ("Detached", None),
         env.pageservers[2].id: ("Detached", None),
     }
+
+    # Track all the attached locations with mode and generation
+    history: list[tuple[int, str, int | None]] = []
+
+    def may_read(pageserver: NeonPageserver, mode: str, generation: int | None) -> bool:
+        # Rules for when a pageserver may read:
+        # - our generation is higher than any previous
+        # - our generation is equal to previous, but no other pageserver
+        #   in that generation has been AttachedSingle (i.e. allowed to compact/GC)
+        # - our generation is equal to previous, and the previous holder of this
+        #   generation was the same node as we're attaching now.
+        #
+        # If these conditions are not met, then a read _might_ work, but the pageserver might
+        # also hit errors trying to download layers.
+        highest_historic_generation = max([i[2] for i in history if i[2] is not None], default=None)
+
+        if generation is None:
+            # We're not in an attached state, we may not read
+            return False
+        elif highest_historic_generation is not None and generation < highest_historic_generation:
+            # We are in an outdated generation, we may not read
+            return False
+        elif highest_historic_generation is not None and generation == highest_historic_generation:
+            # We are re-using a generation: if any pageserver other than this one
+            # has held AttachedSingle mode, this node may not read (because some other
+            # node may be doing GC/compaction).
+            if any(
+                i[1] == "AttachedSingle"
+                and i[2] == highest_historic_generation
+                and i[0] != pageserver.id
+                for i in history
+            ):
+                log.info(
+                    f"Skipping read on {pageserver.id} because other pageserver has been in AttachedSingle mode in generation {highest_historic_generation}"
+                )
+                return False
+
+        # Fall through: we have passed conditions for readability
+        return True
 
     latest_attached = env.pageservers[0].id
 
@@ -199,9 +241,10 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
                 assert len(tenants) == 1
                 assert tenants[0]["generation"] == new_generation
 
-                log.info("Entering postgres...")
-                workload.churn_rows(rng.randint(128, 256), pageserver.id)
-                workload.validate(pageserver.id)
+                if may_read(pageserver, last_state_ps[0], last_state_ps[1]):
+                    log.info("Entering postgres...")
+                    workload.churn_rows(rng.randint(128, 256), pageserver.id)
+                    workload.validate(pageserver.id)
             elif last_state_ps[0].startswith("Attached"):
                 # The `storage_controller` will only re-attach on startup when a pageserver was the
                 # holder of the latest generation: otherwise the pageserver will revert to detached
@@ -241,18 +284,16 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
             location_conf["generation"] = generation
 
             pageserver.tenant_location_configure(tenant_id, location_conf)
+
             last_state[pageserver.id] = (mode, generation)
 
-            # It's only valid to connect to the last generation. Newer generations may yank layer
-            # files used in older generations.
-            last_generation = max(
-                [s[1] for s in last_state.values() if s[1] is not None], default=None
-            )
+            may_read_this_generation = may_read(pageserver, mode, generation)
+            history.append((pageserver.id, mode, generation))
 
-            if mode.startswith("Attached") and generation == last_generation:
-                # This is a basic test: we are validating that he endpoint works properly _between_
-                # configuration changes.  A stronger test would be to validate that clients see
-                # no errors while we are making the changes.
+            # This is a basic test: we are validating that he endpoint works properly _between_
+            # configuration changes.  A stronger test would be to validate that clients see
+            # no errors while we are making the changes.
+            if may_read_this_generation:
                 workload.churn_rows(
                     rng.randint(128, 256), pageserver.id, upload=mode != "AttachedStale"
                 )
@@ -265,9 +306,16 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
     assert gc_summary["remote_storage_errors"] == 0
     assert gc_summary["indices_deleted"] > 0
 
-    # Attach all pageservers
+    # Attach all pageservers, in a higher generation than any previous.  We will use the same
+    # gen for all, and AttachedMulti mode so that they do not interfere with one another.
+    generation = env.storage_controller.attach_hook_issue(tenant_id, env.pageservers[0].id)
     for ps in env.pageservers:
-        location_conf = {"mode": "AttachedMulti", "secondary_conf": None, "tenant_conf": {}}
+        location_conf = {
+            "mode": "AttachedMulti",
+            "secondary_conf": None,
+            "tenant_conf": {},
+            "generation": generation,
+        }
         ps.tenant_location_configure(tenant_id, location_conf)
 
     # Confirm that all are readable
@@ -510,7 +558,7 @@ def list_elegible_layers(
         except KeyError:
             # Unexpected: tests should call this when pageservers are in a quiet state such that the layer map
             # matches what's on disk.
-            log.warn(f"Lookup {layer_file_name} from {list(visible_map.keys())}")
+            log.warning(f"Lookup {layer_file_name} from {list(visible_map.keys())}")
             raise
 
     return list(c for c in candidates if is_visible(c))
@@ -636,7 +684,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     except:
         # On assertion failures, log some details to help with debugging
         heatmap = env.pageserver_remote_storage.heatmap_content(tenant_id)
-        log.warn(f"heatmap contents: {json.dumps(heatmap, indent=2)}")
+        log.warning(f"heatmap contents: {json.dumps(heatmap, indent=2)}")
         raise
 
     # Scrub the remote storage
