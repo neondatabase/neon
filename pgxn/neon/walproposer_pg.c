@@ -35,6 +35,7 @@
 #include "storage/proc.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
+#include "storage/pg_shmem.h"
 #include "storage/shmem.h"
 #include "storage/spin.h"
 #include "tcop/tcopprot.h"
@@ -159,12 +160,23 @@ WalProposerMain(Datum main_arg)
 {
 	WalProposer *wp;
 
+	if (*wal_acceptors_list == '\0')
+	{
+		wpg_log(WARNING, "Safekeepers list is empty");
+		return;
+	}
+
 	init_walprop_config(false);
 	walprop_pg_init_bgworker();
 	am_walproposer = true;
 	walprop_pg_load_libpqwalreceiver();
 
 	wp = WalProposerCreate(&walprop_config, walprop_pg);
+#if PG_MAJORVERSION_NUM < 15
+	wp->localTimeLineID = ThisTimeLineID;
+#else
+	wp->localTimeLineID = GetWALInsertionTimeLine();
+#endif
 	wp->last_reconnect_attempt = walprop_pg_get_current_timestamp(wp);
 
 	walprop_pg_init_walsender();
@@ -306,15 +318,14 @@ safekeepers_cmp(char *old, char *new)
 	return true;
 }
 
-/*
- * GUC assign_hook for neon.safekeepers. Restarts walproposer through FATAL if
- * the list changed.
- */
 static void
 assign_neon_safekeepers(const char *newval, void *extra)
 {
 	char	   *newval_copy;
 	char	   *oldval;
+
+	if (newval && *newval != '\0' && UsedShmemSegAddr && walprop_shared && RecoveryInProgress())
+		walprop_shared->replica_promote = true;
 
 	if (!am_walproposer)
 		return;
@@ -511,10 +522,6 @@ static void
 walprop_register_bgworker(void)
 {
 	BackgroundWorker bgw;
-
-	/* If no wal acceptors are specified, don't start the background worker. */
-	if (*wal_acceptors_list == '\0')
-		return;
 
 	memset(&bgw, 0, sizeof(bgw));
 	bgw.bgw_flags = BGWORKER_SHMEM_ACCESS;
@@ -1508,7 +1515,10 @@ walprop_pg_wal_reader_allocate(Safekeeper *sk)
 
 	snprintf(log_prefix, sizeof(log_prefix), WP_LOG_PREFIX "sk %s:%s nwr: ", sk->host, sk->port);
 	Assert(!sk->xlogreader);
-	sk->xlogreader = NeonWALReaderAllocate(wal_segment_size, sk->wp->propTermStartLsn, log_prefix);
+	/* note that WalProposer shouldn't access safekeepers when active */
+	sk->xlogreader = NeonWALReaderAllocate(wal_segment_size,
+										   sk->wp->propTermStartLsn, log_prefix,
+										   sk->wp->localTimeLineID);
 	if (sk->xlogreader == NULL)
 		wpg_log(FATAL, "failed to allocate xlog reader");
 }
@@ -1522,7 +1532,7 @@ walprop_pg_wal_read(Safekeeper *sk, char *buf, XLogRecPtr startptr, Size count, 
 					  buf,
 					  startptr,
 					  count,
-					  walprop_pg_get_timeline_id());
+					  sk->wp->localTimeLineID);
 
 	if (res == NEON_WALREAD_SUCCESS)
 	{

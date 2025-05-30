@@ -616,19 +616,17 @@ impl Endpoint {
 
     /// Map safekeepers ids to the actual connection strings.
     fn build_safekeepers_connstrs(&self, sk_ids: Vec<NodeId>) -> Result<Vec<String>> {
-        let mut safekeeper_connstrings = Vec::new();
-        if self.mode == ComputeMode::Primary {
-            for sk_id in sk_ids {
-                let sk = self
-                    .env
+        sk_ids
+            .into_iter()
+            .map(|node_id| {
+                self.env
                     .safekeepers
                     .iter()
-                    .find(|node| node.id == sk_id)
-                    .ok_or_else(|| anyhow!("safekeeper {sk_id} does not exist"))?;
-                safekeeper_connstrings.push(format!("127.0.0.1:{}", sk.get_compute_port()));
-            }
-        }
-        Ok(safekeeper_connstrings)
+                    .find(|node| node.id == node_id)
+                    .map(|node| format!("127.0.0.1:{}", node.get_compute_port()))
+                    .ok_or_else(|| anyhow!("safekeeer {node_id} does not exist"))
+            })
+            .collect::<Result<Vec<String>>>()
     }
 
     /// Generate a JWT with the correct claims.
