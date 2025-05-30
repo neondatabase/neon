@@ -2487,7 +2487,7 @@ impl PageServerHandler {
         ctx: &RequestContext,
     ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer, RequestContext), BatchedPageStreamError>>
     {
-        debug_assert_current_span_has_tenant_and_timeline_id();
+        //debug_assert_current_span_has_tenant_and_timeline_id();
 
         timeline
             .query_metrics

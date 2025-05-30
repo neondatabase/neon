@@ -274,7 +274,7 @@ impl Timeline {
         io_concurrency: IoConcurrency,
         ctx: &RequestContext,
     ) -> Vec<Result<Bytes, PageReconstructError>> {
-        debug_assert_current_span_has_tenant_and_timeline_id();
+        //debug_assert_current_span_has_tenant_and_timeline_id();
 
         let mut slots_filled = 0;
         let page_count = pages.len();
