@@ -206,8 +206,8 @@ pub struct GcCompactionQueue {
 }
 
 static CONCURRENT_GC_COMPACTION_TASKS: Lazy<Arc<Semaphore>> = Lazy::new(|| {
-    // Only allow two timelines on one pageserver to run gc compaction at a time.
-    Arc::new(Semaphore::new(2))
+    // Only allow one timeline on one pageserver to run gc compaction at a time.
+    Arc::new(Semaphore::new(1))
 });
 
 impl GcCompactionQueue {
