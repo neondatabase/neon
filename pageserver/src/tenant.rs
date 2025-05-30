@@ -5881,7 +5881,6 @@ pub(crate) mod harness {
                     &ShardParameters::default(),
                 ))
                 .unwrap(),
-                // This is a legacy/test code path: sharding isn't supported here.
                 self.shard_identity,
                 Some(walredo_mgr),
                 self.tenant_shard_id,
@@ -9386,10 +9385,7 @@ mod tests {
         let flush_res = timeline.freeze_and_flush().await;
         // if flush failed, the disk/remote consistent LSN should not be updated
         assert!(flush_res.is_err());
-        assert_eq!(
-            dbg!(disk_consistent_lsn),
-            timeline.get_disk_consistent_lsn()
-        );
+        assert_eq!(disk_consistent_lsn, timeline.get_disk_consistent_lsn());
         assert_eq!(
             remote_consistent_lsn,
             timeline.get_remote_consistent_lsn_projected()
