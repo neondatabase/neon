@@ -3663,6 +3663,46 @@ async fn read_tar_eof(mut reader: (impl tokio::io::AsyncRead + Unpin)) -> anyhow
     Ok(())
 }
 
+async fn tenant_evaluate_feature_flag(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let flag: String = must_parse_query_param(&request, "flag")?;
+    let as_type: String = must_parse_query_param(&request, "as")?;
+
+    let state = get_state(&request);
+
+    async {
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
+        if as_type == "boolean" {
+            let result = tenant.feature_resolver.evaluate_boolean(&flag, tenant_shard_id.tenant_id);
+            let result = result.map(|_| true).map_err(|e| e.to_string());
+            json_response(StatusCode::OK, result)
+        } else if as_type == "multivariate" {
+            let result = tenant.feature_resolver.evaluate_multivariate(&flag, tenant_shard_id.tenant_id).map_err(|e| e.to_string());
+            json_response(StatusCode::OK, result)
+        } else {
+            // Auto infer the type of the feature flag.
+            let is_boolean = tenant.feature_resolver.is_feature_flag_boolean(&flag).map_err(|e| ApiError::InternalServerError(anyhow::anyhow!("{e}")))?;
+            if is_boolean {
+                let result = tenant.feature_resolver.evaluate_boolean(&flag, tenant_shard_id.tenant_id);
+                let result = result.map(|_| true).map_err(|e| e.to_string());
+                json_response(StatusCode::OK, result)
+            } else {
+                let result = tenant.feature_resolver.evaluate_multivariate(&flag, tenant_shard_id.tenant_id).map_err(|e| e.to_string());
+                json_response(StatusCode::OK, result)
+            }
+        }
+    }
+    .instrument(info_span!("tenant_evaluate_feature_flag", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
+    .await
+}
+
 /// Common functionality of all the HTTP API handlers.
 ///
 /// - Adds a tracing span to each request (by `request_span`)
@@ -4039,5 +4079,8 @@ pub fn make_router(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/activate_post_import",
             |r| api_handler(r, activate_post_import_handler),
         )
+        .get("/v1/tenant/:tenant_shard_id/feature_flag", |r| {
+            api_handler(r, tenant_evaluate_feature_flag)
+        })
         .any(handler_404))
 }

@@ -4,6 +4,7 @@ use std::{sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use tokio_util::sync::CancellationToken;
+use tracing::{Instrument, info_span};
 
 use crate::{FeatureStore, PostHogClient, PostHogClientConfig};
 
@@ -26,31 +27,35 @@ impl FeatureResolverBackgroundLoop {
     pub fn spawn(self: Arc<Self>, handle: &tokio::runtime::Handle, refresh_period: Duration) {
         let this = self.clone();
         let cancel = self.cancel.clone();
-        handle.spawn(async move {
-            tracing::info!("Starting PostHog feature resolver");
-            let mut ticker = tokio::time::interval(refresh_period);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tokio::select! {
-                    _ = ticker.tick() => {}
-                    _ = cancel.cancelled() => break
-                }
-                let resp = match this
-                    .posthog_client
-                    .get_feature_flags_local_evaluation()
-                    .await
-                {
-                    Ok(resp) => resp,
-                    Err(e) => {
-                        tracing::warn!("Cannot get feature flags: {}", e);
-                        continue;
+        handle.spawn(
+            async move {
+                tracing::info!("Starting PostHog feature resolver");
+                let mut ticker = tokio::time::interval(refresh_period);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        _ = ticker.tick() => {}
+                        _ = cancel.cancelled() => break
                     }
-                };
-                let feature_store = FeatureStore::new_with_flags(resp.flags);
-                this.feature_store.store(Arc::new(feature_store));
+                    let resp = match this
+                        .posthog_client
+                        .get_feature_flags_local_evaluation()
+                        .await
+                    {
+                        Ok(resp) => resp,
+                        Err(e) => {
+                            tracing::warn!("Cannot get feature flags: {}", e);
+                            continue;
+                        }
+                    };
+                    let feature_store = FeatureStore::new_with_flags(resp.flags);
+                    this.feature_store.store(Arc::new(feature_store));
+                    tracing::info!("Feature flag updated");
+                }
+                tracing::info!("PostHog feature resolver stopped");
             }
-            tracing::info!("PostHog feature resolver stopped");
-        });
+            .instrument(info_span!("posthog_feature_resolver")),
+        );
     }
 
     pub fn feature_store(&self) -> Arc<FeatureStore> {
