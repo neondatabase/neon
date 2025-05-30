@@ -14,7 +14,7 @@ from fixtures.neon_fixtures import (
     PgBin,
     wait_for_last_flush_lsn,
 )
-from fixtures.utils import get_scale_for_db, humantime_to_ms, skip_on_ci
+from fixtures.utils import get_scale_for_db, humantime_to_ms
 
 from performance.pageserver.util import setup_pageserver_with_tenants
 
@@ -36,9 +36,6 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(200)])
 @pytest.mark.parametrize("n_tenants", [500])
 @pytest.mark.timeout(10000)
-@skip_on_ci(
-    "This test needs lot of resources and should run on dedicated HW, not in github action runners as part of CI"
-)
 def test_pageserver_characterize_throughput_with_n_tenants(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
@@ -63,9 +60,6 @@ def test_pageserver_characterize_throughput_with_n_tenants(
 @pytest.mark.parametrize("n_clients", [1, 64])
 @pytest.mark.parametrize("n_tenants", [1])
 @pytest.mark.timeout(2400)
-@skip_on_ci(
-    "This test needs lot of resources and should run on dedicated HW, not in github action runners as part of CI"
-)
 def test_pageserver_characterize_latencies_with_1_client_and_throughput_with_many_clients_one_tenant(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,

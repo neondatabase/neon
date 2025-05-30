@@ -87,6 +87,7 @@ impl WalProposer {
         let config = Config {
             ttid,
             safekeepers_list: addrs,
+            safekeeper_conninfo_options: String::new(),
             safekeeper_reconnect_timeout: 1000,
             safekeeper_connection_timeout: 5000,
             sync_safekeepers,

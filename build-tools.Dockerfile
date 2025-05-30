@@ -155,7 +155,7 @@ RUN set -e \
 
 # Keep the version the same as in compute/compute-node.Dockerfile and
 # test_runner/regress/test_compute_metrics.py.
-ENV SQL_EXPORTER_VERSION=0.17.0
+ENV SQL_EXPORTER_VERSION=0.17.3
 RUN curl -fsSL \
     "https://github.com/burningalchemist/sql_exporter/releases/download/${SQL_EXPORTER_VERSION}/sql_exporter-${SQL_EXPORTER_VERSION}.linux-$(case "$(uname -m)" in x86_64) echo amd64;; aarch64) echo arm64;; esac).tar.gz" \
     --output sql_exporter.tar.gz \
@@ -292,7 +292,7 @@ WORKDIR /home/nonroot
 
 # Rust
 # Please keep the version of llvm (installed above) in sync with rust llvm (`rustc --version --verbose | grep LLVM`)
-ENV RUSTC_VERSION=1.86.0
+ENV RUSTC_VERSION=1.87.0
 ENV RUSTUP_HOME="/home/nonroot/.rustup"
 ENV PATH="/home/nonroot/.cargo/bin:${PATH}"
 ARG RUSTFILT_VERSION=0.2.1

@@ -3,12 +3,14 @@
 
 mod auth;
 pub mod basebackup;
+pub mod basebackup_cache;
 pub mod config;
 pub mod consumption_metrics;
 pub mod context;
 pub mod controller_upcall_client;
 pub mod deletion_queue;
 pub mod disk_usage_eviction_task;
+pub mod feature_resolver;
 pub mod http;
 pub mod import_datadir;
 pub mod l0_flush;
@@ -83,6 +85,7 @@ pub async fn shutdown_pageserver(
     http_listener: HttpEndpointListener,
     https_listener: Option<HttpsEndpointListener>,
     page_service: page_service::Listener,
+    grpc_task: Option<CancellableTask>,
     consumption_metrics_worker: ConsumptionMetricsTasks,
     disk_usage_eviction_task: Option<DiskUsageEvictionTask>,
     tenant_manager: &TenantManager,
@@ -175,6 +178,16 @@ pub async fn shutdown_pageserver(
         Duration::from_secs(1),
     )
     .await;
+
+    // Shut down the gRPC server task, including request handlers.
+    if let Some(grpc_task) = grpc_task {
+        timed(
+            grpc_task.shutdown(),
+            "shutdown gRPC PageRequestHandler",
+            Duration::from_secs(3),
+        )
+        .await;
+    }
 
     // Shut down all the tenants. This flushes everything to disk and kills
     // the checkpoint and GC tasks.

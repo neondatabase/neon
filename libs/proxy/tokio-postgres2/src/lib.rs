@@ -18,7 +18,6 @@ pub use crate::statement::{Column, Statement};
 pub use crate::tls::NoTls;
 pub use crate::transaction::Transaction;
 pub use crate::transaction_builder::{IsolationLevel, TransactionBuilder};
-use crate::types::ToSql;
 
 /// After executing a query, the connection will be in one of these states
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -119,10 +118,4 @@ pub enum SimpleQueryMessage {
     ///
     /// The number of rows modified or selected is returned.
     CommandComplete(u64),
-}
-
-fn slice_iter<'a>(
-    s: &'a [&'a (dyn ToSql + Sync)],
-) -> impl ExactSizeIterator<Item = &'a (dyn ToSql + Sync)> + 'a {
-    s.iter().map(|s| *s as _)
 }

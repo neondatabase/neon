@@ -1348,6 +1348,21 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    pub(crate) fn schedule_unlinking_of_layers_from_index_part<I>(
+        self: &Arc<Self>,
+        names: I,
+    ) -> Result<(), NotInitialized>
+    where
+        I: IntoIterator<Item = LayerName>,
+    {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+
+        self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names);
+
+        Ok(())
+    }
+
     /// Update the remote index file, removing the to-be-deleted files from the index,
     /// allowing scheduling of actual deletions later.
     fn schedule_unlinking_of_layers_from_index_part0<I>(

@@ -1,6 +1,7 @@
 #![allow(clippy::todo)]
 
 use std::ffi::CString;
+use std::str::FromStr;
 
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use utils::id::TenantTimelineId;
@@ -173,6 +174,8 @@ pub struct Config {
     pub ttid: TenantTimelineId,
     /// List of safekeepers in format `host:port`
     pub safekeepers_list: Vec<String>,
+    /// libpq connection info options
+    pub safekeeper_conninfo_options: String,
     /// Safekeeper reconnect timeout in milliseconds
     pub safekeeper_reconnect_timeout: i32,
     /// Safekeeper connection timeout in milliseconds
@@ -202,6 +205,9 @@ impl Wrapper {
             .into_bytes_with_nul();
         assert!(safekeepers_list_vec.len() == safekeepers_list_vec.capacity());
         let safekeepers_list = safekeepers_list_vec.as_mut_ptr() as *mut std::ffi::c_char;
+        let safekeeper_conninfo_options = CString::from_str(&config.safekeeper_conninfo_options)
+            .unwrap()
+            .into_raw();
 
         let callback_data = Box::into_raw(Box::new(api)) as *mut ::std::os::raw::c_void;
 
@@ -209,6 +215,7 @@ impl Wrapper {
             neon_tenant,
             neon_timeline,
             safekeepers_list,
+            safekeeper_conninfo_options,
             safekeeper_reconnect_timeout: config.safekeeper_reconnect_timeout,
             safekeeper_connection_timeout: config.safekeeper_connection_timeout,
             wal_segment_size: WAL_SEGMENT_SIZE as i32, // default 16MB
@@ -576,6 +583,7 @@ mod tests {
         let config = crate::walproposer::Config {
             ttid,
             safekeepers_list: vec!["localhost:5000".to_string()],
+            safekeeper_conninfo_options: String::new(),
             safekeeper_reconnect_timeout: 1000,
             safekeeper_connection_timeout: 10000,
             sync_safekeepers: true,

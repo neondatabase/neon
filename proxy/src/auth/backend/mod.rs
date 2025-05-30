@@ -80,10 +80,22 @@ impl std::fmt::Display for Backend<'_, ()> {
                     .field(&endpoint.url())
                     .finish(),
                 #[cfg(any(test, feature = "testing"))]
-                ControlPlaneClient::PostgresMock(endpoint) => fmt
-                    .debug_tuple("ControlPlane::PostgresMock")
-                    .field(&endpoint.url())
-                    .finish(),
+                ControlPlaneClient::PostgresMock(endpoint) => {
+                    let url = endpoint.url();
+                    match url::Url::parse(url) {
+                        Ok(mut url) => {
+                            let _ = url.set_password(Some("_redacted_"));
+                            let url = url.as_str();
+                            fmt.debug_tuple("ControlPlane::PostgresMock")
+                                .field(&url)
+                                .finish()
+                        }
+                        Err(_) => fmt
+                            .debug_tuple("ControlPlane::PostgresMock")
+                            .field(&url)
+                            .finish(),
+                    }
+                }
                 #[cfg(test)]
                 ControlPlaneClient::Test(_) => fmt.debug_tuple("ControlPlane::Test").finish(),
             },

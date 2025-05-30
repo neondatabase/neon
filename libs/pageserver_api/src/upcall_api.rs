@@ -4,6 +4,7 @@
 //! See docs/rfcs/025-generation-numbers.md
 
 use serde::{Deserialize, Serialize};
+use utils::generation::Generation;
 use utils::id::{NodeId, TimelineId};
 
 use crate::controller_api::NodeRegisterRequest;
@@ -64,8 +65,16 @@ pub struct ValidateResponseTenant {
 }
 
 #[derive(Serialize, Deserialize)]
+pub struct TimelineImportStatusRequest {
+    pub tenant_shard_id: TenantShardId,
+    pub timeline_id: TimelineId,
+    pub generation: Generation,
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct PutTimelineImportStatusRequest {
     pub tenant_shard_id: TenantShardId,
     pub timeline_id: TimelineId,
     pub status: ShardImportStatus,
+    pub generation: Generation,
 }

@@ -462,6 +462,8 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         if var(REAL_S3_ENV).is_ok() {
             assert!(body.contains("remote_storage_s3_deleted_objects_total"));
         }
+
+        #[cfg(target_os = "linux")]
         assert!(body.contains("process_threads"));
     }
 

@@ -10,6 +10,7 @@ from queue import Empty, Queue
 from threading import Barrier
 
 import pytest
+import requests
 from fixtures.common_types import Lsn, TimelineArchivalState, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -401,8 +402,25 @@ def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder, snapshots
         "earlier", ancestor_branch_name="main", ancestor_start_lsn=branchpoint_pipe
     )
 
-    snapshot_branchpoint_old = env.create_branch(
-        "snapshot_branchpoint_old", ancestor_branch_name="main", ancestor_start_lsn=branchpoint_y
+    snapshot_branchpoint_old = TimelineId.generate()
+
+    env.storage_controller.timeline_create(
+        env.initial_tenant,
+        {
+            "new_timeline_id": str(snapshot_branchpoint_old),
+            "ancestor_start_lsn": str(branchpoint_y),
+            "ancestor_timeline_id": str(env.initial_timeline),
+            "read_only": True,
+        },
+    )
+    sk = env.safekeepers[0]
+    assert sk
+    with pytest.raises(requests.exceptions.HTTPError, match="Not Found"):
+        sk.http_client().timeline_status(
+            tenant_id=env.initial_tenant, timeline_id=snapshot_branchpoint_old
+        )
+    env.neon_cli.mappings_map_branch(
+        "snapshot_branchpoint_old", env.initial_tenant, snapshot_branchpoint_old
     )
 
     snapshot_branchpoint = env.create_branch(

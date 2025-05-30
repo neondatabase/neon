@@ -1,14 +1,12 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
 use futures_util::{TryStreamExt, future, ready};
-use parking_lot::Mutex;
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
 use serde::{Deserialize, Serialize};
@@ -16,29 +14,52 @@ use tokio::sync::mpsc;
 
 use crate::codec::{BackendMessages, FrontendMessage};
 use crate::config::{Host, SslMode};
-use crate::connection::{Request, RequestMessages};
 use crate::query::RowStream;
 use crate::simple_query::SimpleQueryStream;
 use crate::types::{Oid, Type};
 use crate::{
-    CancelToken, Error, ReadyForQueryStatus, SimpleQueryMessage, Statement, Transaction,
-    TransactionBuilder, query, simple_query,
+    CancelToken, Error, ReadyForQueryStatus, SimpleQueryMessage, Transaction, TransactionBuilder,
+    query, simple_query,
 };
 
 pub struct Responses {
+    /// new messages from conn
     receiver: mpsc::Receiver<BackendMessages>,
+    /// current batch of messages
     cur: BackendMessages,
+    /// number of total queries sent.
+    waiting: usize,
+    /// number of ReadyForQuery messages received.
+    received: usize,
 }
 
 impl Responses {
     pub fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Result<Message, Error>> {
         loop {
-            match self.cur.next().map_err(Error::parse)? {
-                Some(Message::ErrorResponse(body)) => return Poll::Ready(Err(Error::db(body))),
-                Some(message) => return Poll::Ready(Ok(message)),
-                None => {}
+            // get the next saved message
+            if let Some(message) = self.cur.next().map_err(Error::parse)? {
+                let received = self.received;
+
+                // increase the query head if this is the last message.
+                if let Message::ReadyForQuery(_) = message {
+                    self.received += 1;
+                }
+
+                // check if the client has skipped this query.
+                if received + 1 < self.waiting {
+                    // grab the next message.
+                    continue;
+                }
+
+                // convenience: turn the error messaage into a proper error.
+                let res = match message {
+                    Message::ErrorResponse(body) => Err(Error::db(body)),
+                    message => Ok(message),
+                };
+                return Poll::Ready(res);
             }
 
+            // get the next batch of messages.
             match ready!(self.receiver.poll_recv(cx)) {
                 Some(messages) => self.cur = messages,
                 None => return Poll::Ready(Err(Error::closed())),
@@ -55,44 +76,87 @@ impl Responses {
 /// (corresponding to the queries in the [crate::prepare] module).
 #[derive(Default)]
 pub(crate) struct CachedTypeInfo {
-    /// A statement for basic information for a type from its
-    /// OID. Corresponds to [TYPEINFO_QUERY](crate::prepare::TYPEINFO_QUERY) (or its
-    /// fallback).
-    pub(crate) typeinfo: Option<Statement>,
-
     /// Cache of types already looked up.
     pub(crate) types: HashMap<Oid, Type>,
 }
 
 pub struct InnerClient {
-    sender: mpsc::UnboundedSender<Request>,
+    sender: mpsc::UnboundedSender<FrontendMessage>,
+    responses: Responses,
 
     /// A buffer to use when writing out postgres commands.
-    buffer: Mutex<BytesMut>,
+    buffer: BytesMut,
 }
 
 impl InnerClient {
-    pub fn send(&self, messages: RequestMessages) -> Result<Responses, Error> {
-        let (sender, receiver) = mpsc::channel(1);
-        let request = Request { messages, sender };
-        self.sender.send(request).map_err(|_| Error::closed())?;
-
-        Ok(Responses {
-            receiver,
-            cur: BackendMessages::empty(),
-        })
+    pub fn start(&mut self) -> Result<PartialQuery, Error> {
+        self.responses.waiting += 1;
+        Ok(PartialQuery(Some(self)))
     }
 
-    /// Call the given function with a buffer to be used when writing out
-    /// postgres commands.
-    pub fn with_buf<F, R>(&self, f: F) -> R
+    // pub fn send_with_sync<F>(&mut self, f: F) -> Result<&mut Responses, Error>
+    // where
+    //     F: FnOnce(&mut BytesMut) -> Result<(), Error>,
+    // {
+    //     self.start()?.send_with_sync(f)
+    // }
+
+    pub fn send_simple_query(&mut self, query: &str) -> Result<&mut Responses, Error> {
+        self.responses.waiting += 1;
+
+        self.buffer.clear();
+        // simple queries do not need sync.
+        frontend::query(query, &mut self.buffer).map_err(Error::encode)?;
+        let buf = self.buffer.split().freeze();
+        self.send_message(FrontendMessage::Raw(buf))
+    }
+
+    fn send_message(&mut self, messages: FrontendMessage) -> Result<&mut Responses, Error> {
+        self.sender.send(messages).map_err(|_| Error::closed())?;
+        Ok(&mut self.responses)
+    }
+}
+
+pub struct PartialQuery<'a>(Option<&'a mut InnerClient>);
+
+impl Drop for PartialQuery<'_> {
+    fn drop(&mut self) {
+        if let Some(client) = self.0.take() {
+            client.buffer.clear();
+            frontend::sync(&mut client.buffer);
+            let buf = client.buffer.split().freeze();
+            let _ = client.send_message(FrontendMessage::Raw(buf));
+        }
+    }
+}
+
+impl<'a> PartialQuery<'a> {
+    pub fn send_with_flush<F>(&mut self, f: F) -> Result<&mut Responses, Error>
     where
-        F: FnOnce(&mut BytesMut) -> R,
+        F: FnOnce(&mut BytesMut) -> Result<(), Error>,
     {
-        let mut buffer = self.buffer.lock();
-        let r = f(&mut buffer);
-        buffer.clear();
-        r
+        let client = self.0.as_deref_mut().unwrap();
+
+        client.buffer.clear();
+        f(&mut client.buffer)?;
+        frontend::flush(&mut client.buffer);
+        let buf = client.buffer.split().freeze();
+        client.send_message(FrontendMessage::Raw(buf))
+    }
+
+    pub fn send_with_sync<F>(mut self, f: F) -> Result<&'a mut Responses, Error>
+    where
+        F: FnOnce(&mut BytesMut) -> Result<(), Error>,
+    {
+        let client = self.0.as_deref_mut().unwrap();
+
+        client.buffer.clear();
+        f(&mut client.buffer)?;
+        frontend::sync(&mut client.buffer);
+        let buf = client.buffer.split().freeze();
+        let _ = client.send_message(FrontendMessage::Raw(buf));
+
+        Ok(&mut self.0.take().unwrap().responses)
     }
 }
 
@@ -109,7 +173,7 @@ pub struct SocketConfig {
 /// The client is one half of what is returned when a connection is established. Users interact with the database
 /// through this client object.
 pub struct Client {
-    inner: Arc<InnerClient>,
+    inner: InnerClient,
     cached_typeinfo: CachedTypeInfo,
 
     socket_config: SocketConfig,
@@ -120,17 +184,24 @@ pub struct Client {
 
 impl Client {
     pub(crate) fn new(
-        sender: mpsc::UnboundedSender<Request>,
+        sender: mpsc::UnboundedSender<FrontendMessage>,
+        receiver: mpsc::Receiver<BackendMessages>,
         socket_config: SocketConfig,
         ssl_mode: SslMode,
         process_id: i32,
         secret_key: i32,
     ) -> Client {
         Client {
-            inner: Arc::new(InnerClient {
+            inner: InnerClient {
                 sender,
+                responses: Responses {
+                    receiver,
+                    cur: BackendMessages::empty(),
+                    waiting: 0,
+                    received: 0,
+                },
                 buffer: Default::default(),
-            }),
+            },
             cached_typeinfo: Default::default(),
 
             socket_config,
@@ -145,19 +216,29 @@ impl Client {
         self.process_id
     }
 
-    pub(crate) fn inner(&self) -> &Arc<InnerClient> {
-        &self.inner
+    pub(crate) fn inner_mut(&mut self) -> &mut InnerClient {
+        &mut self.inner
     }
 
     /// Pass text directly to the Postgres backend to allow it to sort out typing itself and
     /// to save a roundtrip
-    pub async fn query_raw_txt<S, I>(&self, statement: &str, params: I) -> Result<RowStream, Error>
+    pub async fn query_raw_txt<S, I>(
+        &mut self,
+        statement: &str,
+        params: I,
+    ) -> Result<RowStream, Error>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = Option<S>>,
         I::IntoIter: ExactSizeIterator,
     {
-        query::query_txt(&self.inner, statement, params).await
+        query::query_txt(
+            &mut self.inner,
+            &mut self.cached_typeinfo,
+            statement,
+            params,
+        )
+        .await
     }
 
     /// Executes a sequence of SQL statements using the simple query protocol, returning the resulting rows.
@@ -173,12 +254,15 @@ impl Client {
     /// Prepared statements should be use for any query which contains user-specified data, as they provided the
     /// functionality to safely embed that data in the request. Do not form statements via string concatenation and pass
     /// them to this method!
-    pub async fn simple_query(&self, query: &str) -> Result<Vec<SimpleQueryMessage>, Error> {
+    pub async fn simple_query(&mut self, query: &str) -> Result<Vec<SimpleQueryMessage>, Error> {
         self.simple_query_raw(query).await?.try_collect().await
     }
 
-    pub(crate) async fn simple_query_raw(&self, query: &str) -> Result<SimpleQueryStream, Error> {
-        simple_query::simple_query(self.inner(), query).await
+    pub(crate) async fn simple_query_raw(
+        &mut self,
+        query: &str,
+    ) -> Result<SimpleQueryStream, Error> {
+        simple_query::simple_query(self.inner_mut(), query).await
     }
 
     /// Executes a sequence of SQL statements using the simple query protocol.
@@ -191,15 +275,11 @@ impl Client {
     /// Prepared statements should be use for any query which contains user-specified data, as they provided the
     /// functionality to safely embed that data in the request. Do not form statements via string concatenation and pass
     /// them to this method!
-    pub async fn batch_execute(&self, query: &str) -> Result<ReadyForQueryStatus, Error> {
-        simple_query::batch_execute(self.inner(), query).await
+    pub async fn batch_execute(&mut self, query: &str) -> Result<ReadyForQueryStatus, Error> {
+        simple_query::batch_execute(self.inner_mut(), query).await
     }
 
     pub async fn discard_all(&mut self) -> Result<ReadyForQueryStatus, Error> {
-        // clear the prepared statements that are about to be nuked from the postgres session
-
-        self.cached_typeinfo.typeinfo = None;
-
         self.batch_execute("discard all").await
     }
 
@@ -208,7 +288,7 @@ impl Client {
     /// The transaction will roll back by default - use the `commit` method to commit it.
     pub async fn transaction(&mut self) -> Result<Transaction<'_>, Error> {
         struct RollbackIfNotDone<'me> {
-            client: &'me Client,
+            client: &'me mut Client,
             done: bool,
         }
 
@@ -218,14 +298,7 @@ impl Client {
                     return;
                 }
 
-                let buf = self.client.inner().with_buf(|buf| {
-                    frontend::query("ROLLBACK", buf).unwrap();
-                    buf.split().freeze()
-                });
-                let _ = self
-                    .client
-                    .inner()
-                    .send(RequestMessages::Single(FrontendMessage::Raw(buf)));
+                let _ = self.client.inner.send_simple_query("ROLLBACK");
             }
         }
 
@@ -239,7 +312,7 @@ impl Client {
                 client: self,
                 done: false,
             };
-            self.batch_execute("BEGIN").await?;
+            cleaner.client.batch_execute("BEGIN").await?;
             cleaner.done = true;
         }
 
@@ -263,11 +336,6 @@ impl Client {
             process_id: self.process_id,
             secret_key: self.secret_key,
         }
-    }
-
-    /// Query for type information
-    pub(crate) async fn get_type_inner(&mut self, oid: Oid) -> Result<Type, Error> {
-        crate::prepare::get_type(&self.inner, &mut self.cached_typeinfo, oid).await
     }
 
     /// Determines if the connection to the server has already closed.

@@ -184,6 +184,7 @@ PAGESERVER_PER_TENANT_METRICS: tuple[str, ...] = (
     "pageserver_evictions_with_low_residence_duration_total",
     "pageserver_aux_file_estimated_size",
     "pageserver_valid_lsn_lease_count",
+    "pageserver_tenant_offloaded_timelines",
     counter("pageserver_tenant_throttling_count_accounted_start"),
     counter("pageserver_tenant_throttling_count_accounted_finish"),
     counter("pageserver_tenant_throttling_wait_usecs_sum"),

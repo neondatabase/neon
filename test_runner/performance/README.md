@@ -15,7 +15,8 @@ Some handy pytest flags for local development:
 - `-k` selects a test to run
 - `--timeout=0` disables our default timeout of 300s (see `setup.cfg`)
 - `--preserve-database-files` to skip cleanup
-- `--out-dir` to produce a JSON with the recorded test metrics
+- `--out-dir` to produce a JSON with the recorded test metrics.
+  There is a post-processing tool at `test_runner/performance/out_dir_to_csv.py`.
 
 # What performance tests do we have and how we run them
 

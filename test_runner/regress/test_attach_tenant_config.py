@@ -187,6 +187,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
             "args": {"format": "bincode", "compression": {"zstd": {"level": 1}}},
         },
         "rel_size_v2_enabled": True,
+        "relsize_snapshot_cache_capacity": 10000,
         "gc_compaction_enabled": True,
         "gc_compaction_verification": False,
         "gc_compaction_initial_threshold_kb": 1024000,

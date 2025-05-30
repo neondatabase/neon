@@ -628,11 +628,7 @@ impl Scheduler {
             tracing::trace!(%node_id, "attached_shard_count={} shard_count={} expected={}", node.attached_shard_count, node.shard_count, expected_attached_shards_per_node);
         }
 
-        if node.attached_shard_count < expected_attached_shards_per_node {
-            expected_attached_shards_per_node - node.attached_shard_count
-        } else {
-            0
-        }
+        expected_attached_shards_per_node.saturating_sub(node.attached_shard_count)
     }
 
     pub(crate) fn expected_attached_shard_count(&self) -> usize {

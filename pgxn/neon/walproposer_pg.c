@@ -64,6 +64,7 @@ char	   *wal_acceptors_list = "";
 int			wal_acceptor_reconnect_timeout = 1000;
 int			wal_acceptor_connection_timeout = 10000;
 int			safekeeper_proto_version = 3;
+char	   *safekeeper_conninfo_options = "";
 
 /* Set to true in the walproposer bgw. */
 static bool am_walproposer;
@@ -119,6 +120,7 @@ init_walprop_config(bool syncSafekeepers)
 	walprop_config.neon_timeline = neon_timeline;
 	/* WalProposerCreate scribbles directly on it, so pstrdup */
 	walprop_config.safekeepers_list = pstrdup(wal_acceptors_list);
+	walprop_config.safekeeper_conninfo_options = pstrdup(safekeeper_conninfo_options);
 	walprop_config.safekeeper_reconnect_timeout = wal_acceptor_reconnect_timeout;
 	walprop_config.safekeeper_connection_timeout = wal_acceptor_connection_timeout;
 	walprop_config.wal_segment_size = wal_segment_size;
@@ -202,6 +204,16 @@ nwp_register_gucs(void)
 							   GUC_LIST_INPUT,	/* extensions can't use*
 												 * GUC_LIST_QUOTE */
 							   NULL, assign_neon_safekeepers, NULL);
+
+	DefineCustomStringVariable(
+							   "neon.safekeeper_conninfo_options",
+							   "libpq keyword parameters and values to apply to safekeeper connections",
+							   NULL,
+							   &safekeeper_conninfo_options,
+							   "",
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
 
 	DefineCustomIntVariable(
 							"neon.safekeeper_reconnect_timeout",

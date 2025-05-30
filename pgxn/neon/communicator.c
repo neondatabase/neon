@@ -717,7 +717,7 @@ prefetch_read(PrefetchRequest *slot)
 	Assert(slot->status == PRFS_REQUESTED);
 	Assert(slot->response == NULL);
 	Assert(slot->my_ring_index == MyPState->ring_receive);
-	Assert(readpage_reentrant_guard);
+	Assert(readpage_reentrant_guard || AmPrewarmWorker);
 
 	if (slot->status != PRFS_REQUESTED ||
 		slot->response != NULL ||
@@ -800,7 +800,7 @@ communicator_prefetch_receive(BufferTag tag)
 	PrfHashEntry *entry;
 	PrefetchRequest hashkey;
 
-	Assert(readpage_reentrant_guard);
+	Assert(readpage_reentrant_guard || AmPrewarmWorker); /* do not pump prefetch state in prewarm worker */
 	hashkey.buftag = tag;
 	entry = prfh_lookup(MyPState->prf_hash, &hashkey);
 	if (entry != NULL && prefetch_wait_for(entry->slot->my_ring_index))
@@ -2450,6 +2450,7 @@ void
 communicator_reconfigure_timeout_if_needed(void)
 {
 	bool	needs_set = MyPState->ring_receive != MyPState->ring_unused &&
+						!AmPrewarmWorker && /* do not pump prefetch state in prewarm worker */
 						readahead_getpage_pull_timeout_ms > 0;
 
 	if (needs_set != timeout_set)

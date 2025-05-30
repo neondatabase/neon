@@ -7,7 +7,7 @@ index 255e616..1c6edb7 100644
  			 RelationGetRelationName(index));
  
 +#ifdef NEON_SMGR
-+	smgr_start_unlogged_build(index->rd_smgr);
++	smgr_start_unlogged_build(RelationGetSmgr(index));
 +#endif
 +
  	initRumState(&buildstate.rumstate, index);
@@ -18,7 +18,7 @@ index 255e616..1c6edb7 100644
  	rumUpdateStats(index, &buildstate.buildStats, buildstate.rumstate.isBuild);
  
 +#ifdef NEON_SMGR
-+	smgr_finish_unlogged_build_phase_1(index->rd_smgr);
++	smgr_finish_unlogged_build_phase_1(RelationGetSmgr(index));
 +#endif
 +
  	/*
@@ -29,7 +29,7 @@ index 255e616..1c6edb7 100644
  	}
  
 +#ifdef NEON_SMGR
-+	smgr_end_unlogged_build(index->rd_smgr);
++	smgr_end_unlogged_build(RelationGetSmgr(index));
 +#endif
 +
  	/*

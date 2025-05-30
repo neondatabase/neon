@@ -213,8 +213,10 @@ impl Escaping for PgIdent {
 
         // Find the first suitable tag that is not present in the string.
         // Postgres' max role/DB name length is 63 bytes, so even in the
-        // worst case it won't take long.
-        while self.contains(&format!("${tag}$")) || self.contains(&format!("${outer_tag}$")) {
+        // worst case it won't take long. Outer tag is always `tag + "x"`,
+        // so if `tag` is not present in the string, `outer_tag` is not
+        // present in the string either.
+        while self.contains(&tag.to_string()) {
             tag += "x";
             outer_tag = tag.clone() + "x";
         }

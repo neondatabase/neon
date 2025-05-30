@@ -1,19 +1,14 @@
-use std::marker::PhantomPinned;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use bytes::Bytes;
 use fallible_iterator::FallibleIterator;
 use futures_util::{Stream, ready};
 use pin_project_lite::pin_project;
 use postgres_protocol2::message::backend::Message;
-use postgres_protocol2::message::frontend;
 use tracing::debug;
 
 use crate::client::{InnerClient, Responses};
-use crate::codec::FrontendMessage;
-use crate::connection::RequestMessages;
 use crate::{Error, ReadyForQueryStatus, SimpleQueryMessage, SimpleQueryRow};
 
 /// Information about a column of a single query row.
@@ -33,28 +28,28 @@ impl SimpleColumn {
     }
 }
 
-pub async fn simple_query(client: &InnerClient, query: &str) -> Result<SimpleQueryStream, Error> {
+pub async fn simple_query<'a>(
+    client: &'a mut InnerClient,
+    query: &str,
+) -> Result<SimpleQueryStream<'a>, Error> {
     debug!("executing simple query: {}", query);
 
-    let buf = encode(client, query)?;
-    let responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+    let responses = client.send_simple_query(query)?;
 
     Ok(SimpleQueryStream {
         responses,
         columns: None,
         status: ReadyForQueryStatus::Unknown,
-        _p: PhantomPinned,
     })
 }
 
 pub async fn batch_execute(
-    client: &InnerClient,
+    client: &mut InnerClient,
     query: &str,
 ) -> Result<ReadyForQueryStatus, Error> {
     debug!("executing statement batch: {}", query);
 
-    let buf = encode(client, query)?;
-    let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+    let responses = client.send_simple_query(query)?;
 
     loop {
         match responses.next().await? {
@@ -68,25 +63,16 @@ pub async fn batch_execute(
     }
 }
 
-pub(crate) fn encode(client: &InnerClient, query: &str) -> Result<Bytes, Error> {
-    client.with_buf(|buf| {
-        frontend::query(query, buf).map_err(Error::encode)?;
-        Ok(buf.split().freeze())
-    })
-}
-
 pin_project! {
     /// A stream of simple query results.
-    pub struct SimpleQueryStream {
-        responses: Responses,
+    pub struct SimpleQueryStream<'a> {
+        responses: &'a mut Responses,
         columns: Option<Arc<[SimpleColumn]>>,
         status: ReadyForQueryStatus,
-        #[pin]
-        _p: PhantomPinned,
     }
 }
 
-impl SimpleQueryStream {
+impl SimpleQueryStream<'_> {
     /// Returns if the connection is ready for querying, with the status of the connection.
     ///
     /// This might be available only after the stream has been exhausted.
@@ -95,7 +81,7 @@ impl SimpleQueryStream {
     }
 }
 
-impl Stream for SimpleQueryStream {
+impl Stream for SimpleQueryStream<'_> {
     type Item = Result<SimpleQueryMessage, Error>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {

@@ -193,6 +193,11 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
         "test_ancestor_branch_archive_branch1", tenant_id, "test_ancestor_branch_archive_parent"
     )
 
+    offloaded_count = ps_http.get_metric_value(
+        "pageserver_tenant_offloaded_timelines", {"tenant_id": f"{tenant_id}"}
+    )
+    assert offloaded_count == 0
+
     ps_http.timeline_archival_config(
         tenant_id,
         leaf_timeline_id,
@@ -243,6 +248,11 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
 
     wait_until(leaf_offloaded)
     wait_until(parent_offloaded)
+
+    offloaded_count = ps_http.get_metric_value(
+        "pageserver_tenant_offloaded_timelines", {"tenant_id": f"{tenant_id}"}
+    )
+    assert offloaded_count == 2
 
     # Offloaded child timelines should still prevent deletion
     with pytest.raises(

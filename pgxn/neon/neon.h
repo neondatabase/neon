@@ -23,6 +23,8 @@ extern int	wal_acceptor_connection_timeout;
 extern int	readahead_getpage_pull_timeout_ms;
 extern bool	disable_wal_prev_lsn_checks;
 
+extern bool AmPrewarmWorker;
+
 #if PG_MAJORVERSION_NUM >= 17
 extern uint32		WAIT_EVENT_NEON_LFC_MAINTENANCE;
 extern uint32		WAIT_EVENT_NEON_LFC_READ;

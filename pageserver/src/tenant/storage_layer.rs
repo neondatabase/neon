@@ -31,6 +31,7 @@ pub use inmemory_layer::InMemoryLayer;
 pub(crate) use layer::{EvictionError, Layer, ResidentLayer};
 pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
 pub use layer_name::{DeltaLayerName, ImageLayerName, LayerName};
+use pageserver_api::config::GetVectoredConcurrentIo;
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
 use pageserver_api::record::NeonWalRecord;
@@ -43,7 +44,6 @@ use self::inmemory_layer::InMemoryLayerFileId;
 use super::PageReconstructError;
 use super::layer_map::InMemoryLayerDesc;
 use super::timeline::{GetVectoredError, ReadPath};
-use crate::config::PageServerConf;
 use crate::context::{
     AccessStatsBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
 };
@@ -318,11 +318,10 @@ impl IoConcurrency {
     }
 
     pub(crate) fn spawn_from_conf(
-        conf: &'static PageServerConf,
+        conf: GetVectoredConcurrentIo,
         gate_guard: GateGuard,
     ) -> IoConcurrency {
-        use pageserver_api::config::GetVectoredConcurrentIo;
-        let selected = match conf.get_vectored_concurrent_io {
+        let selected = match conf {
             GetVectoredConcurrentIo::Sequential => SelectedIoConcurrency::Sequential,
             GetVectoredConcurrentIo::SidecarTask => SelectedIoConcurrency::SidecarTask(gate_guard),
         };

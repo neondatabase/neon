@@ -637,10 +637,7 @@ async def quorum_sanity_single(
     # create timeline on `members_sks`
     Safekeeper.create_timeline(tenant_id, timeline_id, env.pageservers[0], mconf, members_sks)
 
-    config_lines = [
-        "neon.safekeeper_proto_version = 3",
-    ]
-    ep = env.endpoints.create(branch_name, config_lines=config_lines)
+    ep = env.endpoints.create(branch_name)
     ep.start(safekeeper_generation=1, safekeepers=compute_sks_ids)
     ep.safe_psql("create table t(key int, value text)")
 
