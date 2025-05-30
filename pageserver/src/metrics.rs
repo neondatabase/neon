@@ -15,6 +15,7 @@ use metrics::{
     register_int_gauge, register_int_gauge_vec, register_uint_gauge, register_uint_gauge_vec,
 };
 use once_cell::sync::Lazy;
+use pageserver_api::config::defaults::DEFAULT_MAX_GET_VECTORED_KEYS;
 use pageserver_api::config::{
     PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
     PageServiceProtocolPipelinedBatchingStrategy, PageServiceProtocolPipelinedExecutionStrategy,
@@ -32,7 +33,6 @@ use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext};
 use crate::pgdatadir_mapping::DatadirModificationStats;
 use crate::task_mgr::TaskKind;
-use crate::tenant::Timeline;
 use crate::tenant::layer_map::LayerMap;
 use crate::tenant::mgr::TenantSlot;
 use crate::tenant::storage_layer::{InMemoryLayer, PersistentLayerDesc};
@@ -1939,7 +1939,7 @@ static SMGR_QUERY_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
 });
 
 static PAGE_SERVICE_BATCH_SIZE_BUCKETS_GLOBAL: Lazy<Vec<f64>> = Lazy::new(|| {
-    (1..=u32::try_from(Timeline::MAX_GET_VECTORED_KEYS).unwrap())
+    (1..=u32::try_from(DEFAULT_MAX_GET_VECTORED_KEYS).unwrap())
         .map(|v| v.into())
         .collect()
 });
@@ -1957,7 +1957,7 @@ static PAGE_SERVICE_BATCH_SIZE_BUCKETS_PER_TIMELINE: Lazy<Vec<f64>> = Lazy::new(
     let mut buckets = Vec::new();
     for i in 0.. {
         let bucket = 1 << i;
-        if bucket > u32::try_from(Timeline::MAX_GET_VECTORED_KEYS).unwrap() {
+        if bucket > u32::try_from(DEFAULT_MAX_GET_VECTORED_KEYS).unwrap() {
             break;
         }
         buckets.push(bucket.into());
