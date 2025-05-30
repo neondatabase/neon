@@ -476,8 +476,7 @@ pub async fn run() -> anyhow::Result<()> {
         let key_path = args.tls_key.expect("already asserted it is set");
         let cert_path = args.tls_cert.expect("already asserted it is set");
 
-        let (tls_config, tls_server_end_point) =
-            super::pg_sni_router::parse_tls(&key_path, &cert_path)?;
+        let tls_config = super::pg_sni_router::parse_tls(&key_path, &cert_path)?;
 
         let dest = Arc::new(dest);
 
@@ -485,7 +484,6 @@ pub async fn run() -> anyhow::Result<()> {
             dest.clone(),
             tls_config.clone(),
             None,
-            tls_server_end_point,
             listen,
             cancellation_token.clone(),
         ));
@@ -494,7 +492,6 @@ pub async fn run() -> anyhow::Result<()> {
             dest,
             tls_config,
             Some(config.connect_to_compute.tls.clone()),
-            tls_server_end_point,
             listen_tls,
             cancellation_token.clone(),
         ));
