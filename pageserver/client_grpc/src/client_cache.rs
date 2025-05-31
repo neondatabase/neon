@@ -31,6 +31,9 @@ use hyper_util::rt::TokioIo;
 use tower::service_fn;
 
 use tokio_util::sync::CancellationToken;
+use async_trait::async_trait;
+
+use tracing::info;
 
 //
 // The "TokioTcp" is flakey TCP network for testing purposes, in order
@@ -164,32 +167,131 @@ impl AsyncWrite for TokioTcp {
     }
 }
 
-/// A pooled gRPC client with capacity tracking and error handling.
-pub struct ConnectionPool {
-    inner: Mutex<Inner>,
+#[async_trait]
+pub trait PooledItemFactory<T>: Send + Sync + 'static {
+    /// Create a new pooled item.
+    async fn create(&self, connect_timeout: Duration) ->  Result<Result<T, tonic::Status>, tokio::time::error::Elapsed>;
+}
 
-    // Config options that apply to each connection
+pub struct ChannelFactory {
     endpoint: String,
-    max_consumers: usize,
-    error_threshold: usize,
-    connect_timeout: Duration,
-    connect_backoff: Duration,
-
-    // Parameters for testing
     max_delay_ms: u64,
     drop_rate: f64,
     hang_rate: f64,
+}
 
-    // The maximum duration a connection can be idle before being removed
+
+impl ChannelFactory {
+    pub fn new(
+        endpoint: String,
+        max_delay_ms: u64,
+        drop_rate: f64,
+        hang_rate: f64,
+    ) -> Self {
+        ChannelFactory {
+            endpoint,
+            max_delay_ms,
+            drop_rate,
+            hang_rate,
+        }
+    }
+}
+
+#[async_trait]
+impl PooledItemFactory<Channel> for ChannelFactory {
+    async fn create(&self, connect_timeout: Duration) -> Result<Result<Channel, tonic::Status>, tokio::time::error::Elapsed> {
+        let max_delay_ms = self.max_delay_ms;
+        let drop_rate = self.drop_rate;
+        let hang_rate = self.hang_rate;
+
+        // This is a custom connector that inserts delays and errors, for
+        // testing purposes. It would normally be disabled by the config.
+        let connector = service_fn(move |uri: Uri| {
+            let drop_rate = drop_rate;
+            let hang_rate = hang_rate;
+            async move {
+                let mut rng = StdRng::from_entropy();
+                // Simulate an indefinite hang
+                if hang_rate > 0.0 && rng.gen_bool(hang_rate) {
+                    // never completes, to test timeout
+                    return future::pending::<Result<TokioIo<TokioTcp>, std::io::Error>>().await;
+                }
+
+                // Random drop (connect error)
+                if drop_rate > 0.0 && rng.gen_bool(drop_rate) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "simulated connect drop",
+                    ));
+                }
+
+                // Otherwise perform real TCP connect
+                let addr = match (uri.host(), uri.port()) {
+                    // host + explicit port
+                    (Some(host), Some(port)) => format!("{}:{}", host, port.as_str()),
+                    // host only (no port)
+                    (Some(host), None) => host.to_string(),
+                    // neither? error out
+                    _ => return Err(Error::new(ErrorKind::InvalidInput, "no host or port")),
+                };
+
+                let tcp = TcpStream::connect(addr).await?;
+                let tcpwrapper = TokioTcp::new(tcp, max_delay_ms);
+                Ok(TokioIo::new(tcpwrapper))
+            }
+        });
+
+
+        let attempt = tokio::time::timeout(
+            connect_timeout,
+            Endpoint::from_shared(self.endpoint.clone())
+                .expect("invalid endpoint")
+                .timeout(connect_timeout)
+                .connect_with_connector(connector),
+        )
+            .await;
+        match attempt {
+            Ok(Ok(channel)) => {
+                // Connection succeeded
+                Ok(Ok(channel))
+            }
+            Ok(Err(e)) => {
+                Ok(Err(tonic::Status::new(
+                    tonic::Code::Unavailable,
+                    format!("Failed to connect: {}", e),
+                )))
+            }
+            Err(e) => {
+                Err(e)
+            }
+        }
+    }
+}
+
+
+/// A pooled gRPC client with capacity tracking and error handling.
+pub struct ConnectionPool<T> {
+    inner: Mutex<Inner<T>>,
+
+    fact: Arc<dyn PooledItemFactory<T> + Send + Sync>,
+
+    connect_timeout: Duration,
+    connect_backoff: Duration,
+    /// The maximum number of consumers that can use a single connection.
+    max_consumers: usize,
+    /// The number of consecutive errors before a connection is removed from the pool.
+    error_threshold: usize,
+    /// The maximum duration a connection can be idle before being removed.
     max_idle_duration: Duration,
+
     channel_semaphore: Arc<Semaphore>,
 
     shutdown_token: CancellationToken,
     aggregate_metrics: Option<Arc<crate::PageserverClientAggregateMetrics>>,
 }
 
-struct Inner {
-    entries: HashMap<uuid::Uuid, ConnectionEntry>,
+struct Inner<T> {
+    entries: HashMap<uuid::Uuid, ConnectionEntry<T>>,
     pq: PriorityQueue<uuid::Uuid, usize>,
     // This is updated when a connection is dropped, or we fail
     // to create a new connection.
@@ -197,54 +299,47 @@ struct Inner {
     waiters: usize,
     in_progress: usize,
 }
-
-struct ConnectionEntry {
-    channel: Channel,
+struct ConnectionEntry<T> {
+    channel: T,
     active_consumers: usize,
     consecutive_errors: usize,
     last_used: Instant,
 }
 
 /// A client borrowed from the pool.
-pub struct PooledClient {
-    pub channel: Channel,
-    pool: Arc<ConnectionPool>,
+pub struct PooledClient<T> {
+    pub channel: T,
+    pool: Arc<ConnectionPool<T>>,
     id: uuid::Uuid,
     permit: OwnedSemaphorePermit,
 }
 
-impl ConnectionPool {
+impl<T: Clone + Send + 'static> ConnectionPool<T> {
     pub fn new(
-        endpoint: &String,
-        max_consumers: usize,
-        error_threshold: usize,
+        fact: Arc<dyn PooledItemFactory<T> + Send + Sync>,
         connect_timeout: Duration,
         connect_backoff: Duration,
+        max_consumers: usize,
+        error_threshold: usize,
         max_idle_duration: Duration,
-        max_delay_ms: u64,
-        drop_rate: f64,
-        hang_rate: f64,
         aggregate_metrics: Option<Arc<crate::PageserverClientAggregateMetrics>>,
     ) -> Arc<Self> {
         let shutdown_token = CancellationToken::new();
         let pool = Arc::new(Self {
-            inner: Mutex::new(Inner {
+            inner: Mutex::new(Inner::<T> {
                 entries: HashMap::new(),
                 pq: PriorityQueue::new(),
                 last_connect_failure: None,
                 waiters: 0,
                 in_progress: 0,
             }),
+            fact: Arc::clone(&fact),
+            connect_timeout,
+            connect_backoff,
+            max_consumers,
+            error_threshold,
+            max_idle_duration,
             channel_semaphore: Arc::new(Semaphore::new(0)),
-            endpoint: endpoint.clone(),
-            max_consumers: max_consumers,
-            error_threshold: error_threshold,
-            connect_timeout: connect_timeout,
-            connect_backoff: connect_backoff,
-            max_idle_duration: max_idle_duration,
-            max_delay_ms: max_delay_ms,
-            drop_rate: drop_rate,
-            hang_rate: hang_rate,
             shutdown_token: shutdown_token.clone(),
             aggregate_metrics: aggregate_metrics.clone(),
         });
@@ -325,7 +420,7 @@ impl ConnectionPool {
     async fn get_conn_with_permit(
         self: Arc<Self>,
         permit: OwnedSemaphorePermit,
-    ) -> Option<PooledClient> {
+    ) -> Option<PooledClient<T>> {
         let mut inner = self.inner.lock().await;
 
         // Pop the highest-active-consumers connection. There are no connections
@@ -340,7 +435,7 @@ impl ConnectionPool {
             entry.active_consumers += 1;
             entry.last_used = Instant::now();
 
-            let client = PooledClient {
+            let client = PooledClient::<T> {
                 channel: entry.channel.clone(),
                 pool: Arc::clone(&self),
                 id,
@@ -365,7 +460,8 @@ impl ConnectionPool {
         }
     }
 
-    pub async fn get_client(self: Arc<Self>) -> Result<PooledClient, tonic::Status> {
+    pub async fn get_client(self: Arc<Self>) -> Result<PooledClient<T>, tonic::Status> {
+        info!("GEtting client");
         // The pool is shutting down. Don't accept new connections.
         if self.shutdown_token.is_cancelled() {
             return Err(tonic::Status::unavailable("Pool is shutting down"));
@@ -446,46 +542,6 @@ impl ConnectionPool {
     }
 
     async fn create_connection(&self) -> () {
-        let max_delay_ms = self.max_delay_ms;
-        let drop_rate = self.drop_rate;
-        let hang_rate = self.hang_rate;
-
-        // This is a custom connector that inserts delays and errors, for
-        // testing purposes. It would normally be disabled by the config.
-        let connector = service_fn(move |uri: Uri| {
-            let drop_rate = drop_rate;
-            let hang_rate = hang_rate;
-            async move {
-                let mut rng = StdRng::from_entropy();
-                // Simulate an indefinite hang
-                if hang_rate > 0.0 && rng.gen_bool(hang_rate) {
-                    // never completes, to test timeout
-                    return future::pending::<Result<TokioIo<TokioTcp>, std::io::Error>>().await;
-                }
-
-                // Random drop (connect error)
-                if drop_rate > 0.0 && rng.gen_bool(drop_rate) {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "simulated connect drop",
-                    ));
-                }
-
-                // Otherwise perform real TCP connect
-                let addr = match (uri.host(), uri.port()) {
-                    // host + explicit port
-                    (Some(host), Some(port)) => format!("{}:{}", host, port.as_str()),
-                    // host only (no port)
-                    (Some(host), None) => host.to_string(),
-                    // neither? error out
-                    _ => return Err(Error::new(ErrorKind::InvalidInput, "no host or port")),
-                };
-
-                let tcp = TcpStream::connect(addr).await?;
-                let tcpwrapper = TokioTcp::new(tcp, max_delay_ms);
-                Ok(TokioIo::new(tcpwrapper))
-            }
-        });
 
         // Generate a random backoff to add some jitter so that connections
         // don't all retry at the same time.
@@ -533,14 +589,9 @@ impl ConnectionPool {
                 None => {}
             }
 
-            let attempt = tokio::time::timeout(
-                self.connect_timeout,
-                Endpoint::from_shared(self.endpoint.clone())
-                    .expect("invalid endpoint")
-                    .timeout(self.connect_timeout)
-                    .connect_with_connector(connector),
-            )
-            .await;
+            let attempt = self.fact
+                .create(self.connect_timeout)
+                .await;
 
             match attempt {
                 // Connection succeeded
@@ -559,7 +610,7 @@ impl ConnectionPool {
                         let id = uuid::Uuid::new_v4();
                         inner.entries.insert(
                             id,
-                            ConnectionEntry {
+                            ConnectionEntry::<T> {
                                 channel: channel.clone(),
                                 active_consumers: 0,
                                 consecutive_errors: 0,
@@ -665,8 +716,8 @@ impl ConnectionPool {
     }
 }
 
-impl PooledClient {
-    pub fn channel(&self) -> Channel {
+impl<T: Clone + Send + 'static> PooledClient<T> {
+    pub fn channel(&self) -> T {
         return self.channel.clone();
     }
 

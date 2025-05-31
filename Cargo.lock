@@ -4592,17 +4592,20 @@ dependencies = [
 name = "pageserver_client_grpc"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bytes",
  "futures",
  "http 1.1.0",
  "hyper 1.6.0",
  "hyper-util",
  "metrics",
+ "pageserver_api",
  "pageserver_page_api",
  "priority-queue",
  "rand 0.8.5",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tonic 0.13.1",
  "tower 0.4.13",

@@ -51,6 +51,8 @@ pub(crate) struct Args {
     grpc: bool,
     #[clap(long, default_value = "false")]
     grpc_stream: bool,
+    #[clap(long, default_value = "false")]
+    grpc_rt: bool,
     #[clap(long, default_value = "http://localhost:9898")]
     mgmt_api_endpoint: String,
     #[clap(long, default_value = "postgres://postgres@localhost:64000")]
