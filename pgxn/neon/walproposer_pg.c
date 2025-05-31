@@ -1282,9 +1282,7 @@ StartProposerReplication(WalProposer *wp, StartReplicationCmd *cmd)
 
 #if PG_VERSION_NUM < 150000
 	if (ThisTimeLineID == 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("IDENTIFY_SYSTEM has not been run before START_REPLICATION")));
+		ThisTimeLineID = 1;
 #endif
 
 	/*
