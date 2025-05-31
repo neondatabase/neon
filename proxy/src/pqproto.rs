@@ -1,8 +1,4 @@
 //! Postgres protocol codec
-#![expect(
-    clippy::manual_range_contains,
-    reason = "I don't find range contains to be clearer"
-)]
 
 use std::fmt;
 use std::io::{self, Cursor};
@@ -97,7 +93,8 @@ where
     let len = len.get() as usize;
 
     // TODO: add a histogram for startup packet lengths
-    if len < 8 || len > MAX_STARTUP_PACKET_LENGTH {
+    let valid_lengths = 8..=MAX_STARTUP_PACKET_LENGTH;
+    if !valid_lengths.contains(&len) {
         tracing::warn!("large startup message detected: {len} bytes");
         return Err(io::Error::other(format!(
             "invalid startup message length {len}"
@@ -181,7 +178,8 @@ where
     let Header { tag, len } = read!(stream => Header);
     let len = len.get() as usize;
 
-    if len < 4 || len > max {
+    let valid_lengths = 4..=max;
+    if !valid_lengths.contains(&len) {
         return Err(io::Error::other(format!("invalid message length {len}")));
     }
 
