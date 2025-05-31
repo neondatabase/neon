@@ -297,6 +297,7 @@ pub(super) async fn handle_walreceiver_connection(
     let mut expected_wal_start = startpoint;
     while let Some(replication_message) = {
         select! {
+            biased;
             _ = cancellation.cancelled() => {
                 debug!("walreceiver interrupted");
                 None
