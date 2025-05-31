@@ -170,6 +170,7 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
     /// This is cancel safe.
     pub async fn take_over(mut self) -> io::Result<S> {
         self.stream.write_all_buf(&mut self.write).await?;
+        self.flush().await?;
         Ok(self.stream)
     }
 
