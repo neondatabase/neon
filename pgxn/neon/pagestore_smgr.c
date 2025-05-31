@@ -1604,19 +1604,23 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 #endif
 			{
 				/* It exists locally. Guess it's unlogged then. */
+				if (mdnblocks(reln, forknum) >= blocknum)
+				{
+					/* prevent race condition with unlogged build end which unlinks local files */
 #if PG_MAJORVERSION_NUM >= 17
-				mdwritev(reln, forknum, blocknum, &buffer, 1, skipFsync);
+					mdwritev(reln, forknum, blocknum, &buffer, 1, skipFsync);
 #else
-				mdwrite(reln, forknum, blocknum, buffer, skipFsync);
+					mdwrite(reln, forknum, blocknum, buffer, skipFsync);
 #endif
-				/*
-				 * We could set relpersistence now that we have determined
-				 * that it's local. But we don't dare to do it, because that
-				 * would immediately allow reads as well, which shouldn't
-				 * happen. We could cache it with a different 'relpersistence'
-				 * value, but this isn't performance critical.
-				 */
-				return;
+					/*
+					 * We could set relpersistence now that we have determined
+					 * that it's local. But we don't dare to do it, because that
+					 * would immediately allow reads as well, which shouldn't
+					 * happen. We could cache it with a different 'relpersistence'
+					 * value, but this isn't performance critical.
+					 */
+					return;
+				}
 			}
 			break;
 
@@ -1685,16 +1689,20 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 #endif
 			{
 				/* It exists locally. Guess it's unlogged then. */
-				mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
+				if (mdnblocks(reln, forknum) >= blkno)
+				{
+					/* prevent race condition with unlogged build end which unlinks local files */
+					mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
 
-				/*
-				 * We could set relpersistence now that we have determined
-				 * that it's local. But we don't dare to do it, because that
-				 * would immediately allow reads as well, which shouldn't
-				 * happen. We could cache it with a different 'relpersistence'
-				 * value, but this isn't performance critical.
-				 */
-				return;
+					/*
+					 * We could set relpersistence now that we have determined
+					 * that it's local. But we don't dare to do it, because that
+					 * would immediately allow reads as well, which shouldn't
+					 * happen. We could cache it with a different 'relpersistence'
+					 * value, but this isn't performance critical.
+					 */
+					return;
+				}
 			}
 			break;
 
