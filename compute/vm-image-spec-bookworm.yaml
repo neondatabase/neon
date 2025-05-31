@@ -15,6 +15,10 @@ commands:
     user: root
     sysvInitAction: sysinit
     shell: 'chmod 711 /neonvm/bin/set-disk-quota'
+  - name: chmod-clockcache_dev
+    user: root
+    sysvInitAction: sysinit
+    shell: 'chmod 777 /dev/clockcache_dev' # FIXME: not very secure
   - name: pgbouncer
     user: postgres
     sysvInitAction: respawn
