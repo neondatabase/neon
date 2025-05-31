@@ -1940,6 +1940,7 @@ RUN apt update && \
     apt install --no-install-recommends -y \
         ca-certificates \
         gdb \
+        curl \
         iproute2 \
         libboost-iostreams1.74.0 \
         libboost-regex1.74.0 \
