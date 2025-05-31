@@ -21,8 +21,16 @@ use utils::shard::ShardIndex;
 
 use std::fmt::Debug;
 mod client_cache;
+pub mod request_tracker;
 
 use metrics::{IntCounterVec, core::Collector};
+use crate::client_cache::{ConnectionPool, PooledItemFactory};
+
+use tokio::sync::mpsc;
+use tonic::{transport::{Channel}, Request};
+use async_trait::async_trait;
+
+use tokio_stream::wrappers::ReceiverStream;
 
 #[derive(Error, Debug)]
 pub enum PageserverClientError {
@@ -77,6 +85,80 @@ impl PageserverClientAggregateMetrics {
         metrics
     }
 }
+
+
+pub struct StreamFactory {
+    connection_pool: Arc<client_cache::ConnectionPool<Channel>>,
+    receiver_channel: tokio::sync::mpsc::Sender<proto::GetPageResponse>,
+    auth_interceptor: AuthInterceptor,
+    shard: ShardIndex,
+}
+
+impl StreamFactory {
+    pub fn new(
+        connection_pool: Arc<ConnectionPool<Channel>>,
+        receiver_channel: tokio::sync::mpsc::Sender<proto::GetPageResponse>,
+        auth_interceptor: AuthInterceptor,
+        shard: ShardIndex,
+    ) -> Self {
+        StreamFactory {
+            connection_pool,
+            receiver_channel,
+            auth_interceptor,
+            shard,
+        }
+    }
+}
+
+#[async_trait]
+impl PooledItemFactory<tokio::sync::mpsc::Sender<proto::GetPageRequest>> for StreamFactory {
+    async fn create(&self, _connect_timeout: Duration) -> Result<Result<tokio::sync::mpsc::Sender<proto::GetPageRequest>, tonic::Status>, tokio::time::error::Elapsed> {
+        let pool_clone : Arc<ConnectionPool<Channel>> = Arc::clone(&self.connection_pool);
+        let pooled_client = pool_clone.get_client().await;
+        let channel = pooled_client.unwrap().channel();
+        let mut client =
+            PageServiceClient::with_interceptor(channel, self.auth_interceptor.for_shard(self.shard));
+
+        let (tx, rx) = mpsc::channel::<proto::GetPageRequest>(8);
+        let outbound = ReceiverStream::new(rx);
+
+        let client_resp = client
+            .get_pages(Request::new(outbound))
+            .await;
+        match client_resp {
+            Err(status) => {
+                // TODO: Convert this error correctly
+                Ok(Err(tonic::Status::new(
+                    status.code(),
+                    format!("Failed to connect to pageserver: {}", status.message()),
+                )))
+            }
+            Ok(resp) => {
+                let mut response = resp.into_inner();
+                let receiver_st = self.receiver_channel.clone();
+
+                // Send all the responses to the channel specified
+                let forward_responses = async move {
+                    while let Some(r) = response.next().await {
+                        match r {
+                            Ok(page_response) => {
+                                receiver_st.send(page_response).await.unwrap();
+                            }
+                            Err(status) => {
+                                return Err(PageserverClientError::RequestError(status));
+                            }
+                        }
+                    }
+                    Ok(())
+                };
+
+                // tokio spawn forward_reponses
+                tokio::spawn(forward_responses);
+                Ok(Ok(tx))
+            }
+        }
+    }
+}
 pub struct PageserverClient {
     _tenant_id: String,
     _timeline_id: String,
@@ -85,7 +167,7 @@ pub struct PageserverClient {
 
     shard_map: HashMap<ShardIndex, String>,
 
-    channels: RwLock<HashMap<ShardIndex, Arc<client_cache::ConnectionPool>>>,
+    channels: RwLock<HashMap<ShardIndex, Arc<client_cache::ConnectionPool<Channel>>>>,
 
     auth_interceptor: AuthInterceptor,
 
@@ -93,7 +175,7 @@ pub struct PageserverClient {
 
     aggregate_metrics: Option<Arc<PageserverClientAggregateMetrics>>,
 }
-
+#[derive(Clone)]
 pub struct ClientCacheOptions {
     pub max_consumers: usize,
     pub error_threshold: usize,
@@ -349,13 +431,13 @@ impl PageserverClient {
     ///
     /// Get a client from the pool for this shard, also creating the pool if it doesn't exist.
     ///
-    async fn get_client(&self, shard: ShardIndex) -> client_cache::PooledClient {
-        let reused_pool: Option<Arc<client_cache::ConnectionPool>> = {
+    async fn get_client(&self, shard: ShardIndex) -> client_cache::PooledClient<Channel> {
+        let reused_pool: Option<Arc<client_cache::ConnectionPool<Channel>>> = {
             let channels = self.channels.read().unwrap();
             channels.get(&shard).cloned()
         };
 
-        let usable_pool: Arc<client_cache::ConnectionPool>;
+        let usable_pool: Arc<client_cache::ConnectionPool<Channel>>;
         match reused_pool {
             Some(pool) => {
                 let pooled_client = pool.get_client().await.unwrap();
@@ -365,17 +447,20 @@ impl PageserverClient {
                 // Create a new pool using client_cache_options
                 // declare new_pool
 
-                let new_pool: Arc<client_cache::ConnectionPool>;
-                new_pool = client_cache::ConnectionPool::new(
-                    self.shard_map.get(&shard).unwrap(),
-                    self.client_cache_options.max_consumers,
-                    self.client_cache_options.error_threshold,
-                    self.client_cache_options.connect_timeout,
-                    self.client_cache_options.connect_backoff,
-                    self.client_cache_options.max_idle_duration,
+                let new_pool: Arc<client_cache::ConnectionPool<Channel>>;
+                let channel_fact = Arc::new(client_cache::ChannelFactory::new(
+                    self.shard_map.get(&shard).unwrap().clone(),
                     self.client_cache_options.max_delay_ms,
                     self.client_cache_options.drop_rate,
                     self.client_cache_options.hang_rate,
+                ));
+                new_pool = client_cache::ConnectionPool::new(
+                    channel_fact,
+                    self.client_cache_options.connect_timeout,
+                    self.client_cache_options.connect_backoff,
+                    self.client_cache_options.max_consumers,
+                    self.client_cache_options.error_threshold,
+                    self.client_cache_options.max_idle_duration,
                     self.aggregate_metrics.clone(),
                 );
                 let mut write_pool = self.channels.write().unwrap();
@@ -391,7 +476,7 @@ impl PageserverClient {
 
 /// Inject tenant_id, timeline_id and authentication token to all pageserver requests.
 #[derive(Clone)]
-struct AuthInterceptor {
+pub struct AuthInterceptor {
     tenant_id: AsciiMetadataValue,
     shard_id: Option<AsciiMetadataValue>,
     timeline_id: AsciiMetadataValue,

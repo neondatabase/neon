@@ -45,6 +45,8 @@ pub(crate) struct Args {
     grpc: bool,
     #[clap(long, default_value = "false")]
     grpc_stream: bool,
+    #[clap(long, default_value = "false")]
+    grpc_rt: bool,
     #[clap(long, default_value = "http://localhost:9898")]
     mgmt_api_endpoint: String,
     #[clap(long, default_value = "postgres://postgres@localhost:64000")]
@@ -658,8 +660,124 @@ async fn client_grpc(
         if let Some(period) = &rps_period {
             let next_at = client_start
                 + Duration::from_micros(
-                    (ticks_processed) as u64 * u64::try_from(period.as_micros()).unwrap(),
-                );
+                (ticks_processed) as u64 * u64::try_from(period.as_micros()).unwrap(),
+            );
+            tokio::time::sleep_until(next_at.into()).await;
+        }
+    }
+}
+#[allow(clippy::too_many_arguments)]
+async fn client_rt(
+    args: &Args,
+    worker_id: WorkerId,
+    client_metrics: Arc<pageserver_client_grpc::PageserverClientAggregateMetrics>,
+    shared_state: Arc<SharedState>,
+    cancel: CancellationToken,
+    rps_period: Option<Duration>,
+    ranges: Vec<KeyRange>,
+    weights: rand::distributions::weighted::WeightedIndex<i128>,
+) {
+    let shard_map = HashMap::from([(
+        ShardIndex::unsharded(),
+        args.page_service_connstring.clone(),
+    )]);
+    let options = pageserver_client_grpc::ClientCacheOptions {
+        max_consumers: args.pool_max_consumers.get(),
+        error_threshold: args.pool_error_threshold.get(),
+        connect_timeout: Duration::from_millis(args.pool_connect_timeout.get() as u64),
+        connect_backoff: Duration::from_millis(args.pool_connect_backoff.get() as u64),
+        max_idle_duration: Duration::from_millis(args.pool_max_idle_duration.get() as u64),
+        max_delay_ms: args.max_delay_ms as u64,
+        drop_rate: (args.percent_drops as f64) / 100.0,
+        hang_rate: (args.percent_hangs as f64) / 100.0,
+    };
+    let rt_new = pageserver_client_grpc::request_tracker::RequestTracker::new(
+        options,
+        &worker_id.timeline.tenant_id.to_string(),
+        &worker_id.timeline.timeline_id.to_string(),
+        &None,
+        Arc::clone(&client_metrics),
+        args.page_service_connstring.as_str(),
+    );
+
+    let rt = rt_new;
+
+    shared_state.start_work_barrier.wait().await;
+    let client_start = Instant::now();
+    let mut ticks_processed = 0;
+    let mut inflight = FuturesOrdered::new();
+    while !cancel.is_cancelled() {
+        // Detect if a request took longer than the RPS rate
+        if let Some(period) = &rps_period {
+            let periods_passed_until_now =
+                usize::try_from(client_start.elapsed().as_micros() / period.as_micros()).unwrap();
+
+            if periods_passed_until_now > ticks_processed {
+                shared_state
+                    .live_stats
+                    .missed((periods_passed_until_now - ticks_processed) as u64);
+            }
+            ticks_processed = periods_passed_until_now;
+        }
+
+        while inflight.len() < args.queue_depth.get() {
+            let start = Instant::now();
+            let req = {
+                let mut rng = rand::thread_rng();
+                let r = &ranges[weights.sample(&mut rng)];
+                let key: i128 = rng.gen_range(r.start..r.end);
+                let key = Key::from_i128(key);
+                assert!(key.is_rel_block_key());
+                let (rel_tag, block_no) = key
+                    .to_rel_block()
+                    .expect("we filter non-rel-block keys out above");
+                pageserver_page_api::model::GetPageRequest {
+                    request_id: 0, // TODO
+                    request_class: GetPageClass::Normal,
+                    read_lsn: pageserver_page_api::model::ReadLsn {
+                        request_lsn: if rng.gen_bool(args.req_latest_probability) {
+                            Lsn::MAX
+                        } else {
+                            r.timeline_lsn
+                        },
+                        not_modified_since_lsn: r.timeline_lsn,
+                    },
+                    rel: pageserver_page_api::model::RelTag {
+                        spc_oid: rel_tag.spcnode,
+                        db_oid: rel_tag.dbnode,
+                        rel_number: rel_tag.relnode,
+                        fork_number: rel_tag.forknum,
+                    },
+                    block_number: vec![block_no],
+                }
+            };
+            let mut rt_clone = rt.clone();
+            let getpage_fut = async move {
+                let result = rt_clone.send_request(req).await;
+                (start, result)
+            };
+            inflight.push_back(getpage_fut);
+        }
+
+        let (start, result) = inflight.next().await.unwrap();
+        result.expect("getpage request should succeed");
+        let end = Instant::now();
+        shared_state.live_stats.request_done();
+        ticks_processed += 1;
+        STATS.with(|stats| {
+            stats
+                .borrow()
+                .lock()
+                .unwrap()
+                .observe(end.duration_since(start))
+                .unwrap();
+        });
+
+        if let Some(period) = &rps_period {
+            let next_at = client_start
+                + Duration::from_micros(
+                (ticks_processed) as u64 * u64::try_from(period.as_micros()).unwrap(),
+            );
             tokio::time::sleep_until(next_at.into()).await;
         }
     }
