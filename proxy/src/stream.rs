@@ -174,7 +174,7 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
         Ok(self.stream)
     }
 
-    /// Write the error message using [`Self::write_format_message`], then re-throw it.
+    /// Write the error message to the client, then re-throw it.
     ///
     /// Trait [`UserFacingError`] acts as an allowlist for error types.
     /// If `ctx` is provided and has testodrome_id set, error messages will be prefixed according to error kind.
