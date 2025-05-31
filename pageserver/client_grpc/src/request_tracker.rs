@@ -67,7 +67,6 @@ impl PooledItemFactory<MockStreamReturner> for MockStreamFactory {
 
                 // Break out of the loop with 1% chance
                 if rand::random::<f32>() < 0.1 {
-                    eprintln!("MockStreamReturner: breaking out of the loop");
                     break;
                 }
                 // Generate a random number between 0 and 100
@@ -242,6 +241,16 @@ impl RequestTracker {
                 continue;
             }
 
+            // borrow and check watch
+            let watch = *rx.borrow();
+            if watch {
+                // If the watch channel is closed, we handle it gracefully
+                let mut inner = self.inner.lock().await;
+                inner.request_hashmap.remove(&request_id);
+                drop(inner);
+                stream_returner.finish(Err(Status::new(Code::Unknown, "Failed to send request"))).await;
+                continue;
+            }
             // wait on the response receiver and the tx broadcast at the same time
             select! {
                 response = response_receiver.recv() => {

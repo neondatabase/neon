@@ -39,8 +39,8 @@ async fn main() {
         hang_rate:          0.0,
         connect_timeout:    Duration::from_secs(0),
         connect_backoff:    Duration::from_millis(0),
-        max_consumers:      1,
-        error_threshold:    1,
+        max_consumers:      10,
+        error_threshold:    10,
         max_idle_duration:  Duration::from_secs(60),
     };
 
@@ -59,8 +59,8 @@ async fn main() {
     );
 
     // 4) fire off 10 000 requests in parallel
-    let mut handles = Vec::with_capacity(10000);
-    for i in 0..10000 {
+    let mut handles = Vec::with_capacity(100000);
+    for i in 0..100000 {
 
         // taken mostly from pagebench
         let req = {
@@ -111,5 +111,5 @@ async fn main() {
         h.await.expect("task panicked");
     }
 
-    println!("✅ All 1000 requests completed successfully");
+    println!("✅ All 100000 requests completed successfully");
 }
