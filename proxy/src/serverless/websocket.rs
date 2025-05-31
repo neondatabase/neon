@@ -2,7 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 
-use anyhow::Context as _;
+use anyhow::{Context as _, anyhow};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use framed_websockets::{Frame, OpCode, WebSocketServer};
 use futures::{Sink, Stream};
@@ -169,6 +169,9 @@ pub(crate) async fn serve_websocket(
             ctx.log_connect();
             match p.proxy_pass(&config.connect_to_compute).await {
                 Ok(()) => Ok(()),
+                Err(ErrorSource::Timeout(_)) => Err(anyhow!(
+                    "timed out while gracefully shutting down the connection"
+                )),
                 Err(ErrorSource::Client(err)) => Err(err).context("client"),
                 Err(ErrorSource::Compute(err)) => Err(err).context("compute"),
             }

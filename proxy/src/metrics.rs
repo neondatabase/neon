@@ -200,8 +200,10 @@ pub enum HttpDirection {
 #[derive(FixedCardinalityLabel, Copy, Clone)]
 #[label(singleton = "direction")]
 pub enum Direction {
-    Tx,
-    Rx,
+    #[label(rename = "tx")]
+    ComputeToClient,
+    #[label(rename = "rx")]
+    ClientToCompute,
 }
 
 #[derive(FixedCardinalityLabel, Clone, Copy, Debug)]
