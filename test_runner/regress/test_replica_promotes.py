@@ -6,7 +6,7 @@ This far, only contains a test that we don't break and that the data is persiste
 
 import psycopg2
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import Endpoint, NeonEnv, wait_for_last_flush_lsn, wait_replica_caughtup
+from fixtures.neon_fixtures import Endpoint, NeonEnv, wait_replica_caughtup
 from fixtures.pg_version import PgVersion
 from pytest import raises
 
@@ -68,7 +68,7 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
     promo_cur.execute("SELECT * FROM pg_promote()")
     assert promo_cur.fetchone() == (True,)
     promo_cur.execute(
-            """
+        """
             SELECT pg_current_wal_insert_lsn(),
                    pg_current_wal_lsn(),
                    pg_current_wal_flush_lsn()
