@@ -2,7 +2,6 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use futures::StreamExt;
-use pq_proto::CancelKeyData;
 use redis::aio::PubSub;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -12,6 +11,7 @@ use super::connection_with_credentials_provider::ConnectionWithCredentialsProvid
 use crate::cache::project_info::ProjectInfoCache;
 use crate::intern::{AccountIdInt, ProjectIdInt, RoleNameInt};
 use crate::metrics::{Metrics, RedisErrors, RedisEventsCount};
+use crate::pqproto::CancelKeyData;
 
 const CPLANE_CHANNEL_NAME: &str = "neondb-proxy-ws-updates";
 const RECONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);

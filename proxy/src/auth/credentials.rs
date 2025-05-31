@@ -5,7 +5,6 @@ use std::net::IpAddr;
 use std::str::FromStr;
 
 use itertools::Itertools;
-use pq_proto::StartupMessageParams;
 use thiserror::Error;
 use tracing::{debug, warn};
 
@@ -13,6 +12,7 @@ use crate::auth::password_hack::parse_endpoint_param;
 use crate::context::RequestContext;
 use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, SniGroup, SniKind};
+use crate::pqproto::StartupMessageParams;
 use crate::proxy::NeonOptions;
 use crate::serverless::{AUTH_BROKER_SNI, SERVERLESS_DRIVER_SNI};
 use crate::types::{EndpointId, RoleName};

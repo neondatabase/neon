@@ -24,23 +24,25 @@ pub(crate) async fn authenticate_cleartext(
     debug!("cleartext auth flow override is enabled, proceeding");
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
 
-    // pause the timer while we communicate with the client
-    let paused = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
-
     let ep = EndpointIdInt::from(&info.endpoint);
 
-    let auth_flow = AuthFlow::new(client)
-        .begin(auth::CleartextPassword {
+    let auth_flow = AuthFlow::new(
+        client,
+        auth::CleartextPassword {
             secret,
             endpoint: ep,
             pool: config.thread_pool.clone(),
-        })
-        .await?;
-    drop(paused);
-    // cleartext auth is only allowed to the ws/http protocol.
-    // If we're here, we already received the password in the first message.
-    // Scram protocol will be executed on the proxy side.
-    let auth_outcome = auth_flow.authenticate().await?;
+        },
+    );
+    let auth_outcome = {
+        // pause the timer while we communicate with the client
+        let _paused = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
+
+        // cleartext auth is only allowed to the ws/http protocol.
+        // If we're here, we already received the password in the first message.
+        // Scram protocol will be executed on the proxy side.
+        auth_flow.authenticate().await?
+    };
 
     let keys = match auth_outcome {
         sasl::Outcome::Success(key) => key,
@@ -67,9 +69,7 @@ pub(crate) async fn password_hack_no_authentication(
     // pause the timer while we communicate with the client
     let _paused = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
 
-    let payload = AuthFlow::new(client)
-        .begin(auth::PasswordHack)
-        .await?
+    let payload = AuthFlow::new(client, auth::PasswordHack)
         .get_password()
         .await?;
 

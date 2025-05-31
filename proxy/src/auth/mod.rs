@@ -41,9 +41,6 @@ pub(crate) enum AuthError {
     #[error(transparent)]
     Sasl(#[from] crate::sasl::Error),
 
-    #[error("Unsupported authentication method: {0}")]
-    BadAuthMethod(Box<str>),
-
     #[error("Malformed password message: {0}")]
     MalformedPassword(&'static str),
 
@@ -98,10 +95,6 @@ pub(crate) enum AuthError {
 }
 
 impl AuthError {
-    pub(crate) fn bad_auth_method(name: impl Into<Box<str>>) -> Self {
-        AuthError::BadAuthMethod(name.into())
-    }
-
     pub(crate) fn password_failed(user: impl Into<Box<str>>) -> Self {
         AuthError::PasswordFailed(user.into())
     }
@@ -138,7 +131,6 @@ impl UserFacingError for AuthError {
             Self::GetAuthInfo(e) => e.to_string_client(),
             Self::Sasl(e) => e.to_string_client(),
             Self::PasswordFailed(_) => self.to_string(),
-            Self::BadAuthMethod(_) => self.to_string(),
             Self::MalformedPassword(_) => self.to_string(),
             Self::MissingEndpointName => self.to_string(),
             Self::MissingVPCEndpointId => self.to_string(),
@@ -161,7 +153,6 @@ impl ReportableError for AuthError {
             Self::GetAuthInfo(e) => e.get_error_kind(),
             Self::Sasl(e) => e.get_error_kind(),
             Self::PasswordFailed(_) => crate::error::ErrorKind::User,
-            Self::BadAuthMethod(_) => crate::error::ErrorKind::User,
             Self::MalformedPassword(_) => crate::error::ErrorKind::User,
             Self::MissingEndpointName => crate::error::ErrorKind::User,
             Self::MissingVPCEndpointId => crate::error::ErrorKind::User,

@@ -10,16 +10,14 @@ pub(crate) mod wake_compute;
 use std::sync::Arc;
 
 pub use copy_bidirectional::{ErrorSource, copy_bidirectional_client_compute};
-use futures::TryFutureExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use passthrough::passthrough;
-use pq_proto::{BeMessage as Be, CancelKeyData, StartupMessageParams};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use smol_str::{SmolStr, format_smolstr};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::task_tracker::TaskTrackerToken;
 use tracing::{Instrument, debug, error, info, warn};
@@ -28,8 +26,9 @@ use self::connect_compute::{TcpMechanism, connect_to_compute};
 use crate::cancellation::{self, CancellationHandler};
 use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
 use crate::context::RequestContext;
-use crate::error::ReportableError;
+use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
+use crate::pqproto::{BeMessage, CancelKeyData, StartupMessageParams};
 use crate::protocol2::{ConnectHeader, ConnectionInfo, read_proxy_protocol};
 use crate::proxy::handshake::{HandshakeData, handshake};
 use crate::rate_limiter::EndpointRateLimiter;
@@ -38,6 +37,18 @@ use crate::types::EndpointCacheKey;
 use crate::{auth, compute};
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
+
+#[derive(Error, Debug)]
+#[error("{ERR_INSECURE_CONNECTION}")]
+pub struct TlsRequired;
+
+impl ReportableError for TlsRequired {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
+        crate::error::ErrorKind::User
+    }
+}
+
+impl UserFacingError for TlsRequired {}
 
 pub async fn run_until_cancelled<F: std::future::Future>(
     f: F,
@@ -293,7 +304,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send + 'st
                 let result = auth::ComputeUserInfoMaybeEndpoint::parse(ctx, &params, host, cn);
                 let user_info = match result {
                     Ok(user_info) => user_info,
-                    Err(e) => stream.throw_error(e, Some(ctx)).await?,
+                    Err(e) => Err(stream.throw_error(e, Some(ctx)).await)?,
                 };
 
                 let session = cancellation_handler.get_key();
@@ -354,10 +365,10 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send + 'st
                 let db = params.get("database");
                 let app = params.get("application_name");
                 let params_span = tracing::info_span!("", ?user, ?db, ?app);
-                stream
+                Err(stream
                     .throw_error(e, Some(ctx))
                     .instrument(params_span)
-                    .await?
+                    .await)?
             }
         }
     }
@@ -372,7 +383,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send + 'st
             .get(NeonOptions::PARAMS_COMPAT)
             .is_some();
 
-        let mut node = connect_to_compute(
+        let res = connect_to_compute(
             ctx,
             TcpMechanism {
                 user_info: compute_user_info,
@@ -387,18 +398,16 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send + 'st
             config.wake_compute_retry_config,
             &config.connect_to_compute,
         )
-        .or_else(|e| stream.throw_error(e, Some(ctx)))
-        .await?;
+        .await;
+
+        let node = match res {
+            Ok(node) => node,
+            Err(e) => Err(stream.throw_error(e, Some(ctx)).await)?,
+        };
 
         session.write_cancel_key(node.cancel_closure.clone())?;
-        prepare_client_connection(&node, *session.key(), &mut stream).await?;
-
-        // Before proxy passing, forward to compute whatever data is left in the
-        // PqStream input buffer. Normally there is none, but our serverless npm
-        // driver in pipeline mode sends startup, password and first query
-        // immediately after opening the connection.
-        let (stream, read_buf, tracker) = stream.into_inner();
-        node.stream.write_all(&read_buf).await?;
+        prepare_client_connection(&node, *session.key(), &mut stream);
+        let (stream, tracker) = stream.take_over().await?;
 
         Ok((node, stream, tracker))
     }
@@ -424,31 +433,28 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send + 'st
 }
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
-#[tracing::instrument(skip_all)]
-pub(crate) async fn prepare_client_connection(
+pub(crate) fn prepare_client_connection(
     node: &compute::PostgresConnection,
     cancel_key_data: CancelKeyData,
     stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> Result<(), std::io::Error> {
+) {
     // Forward all deferred notices to the client.
     for notice in &node.delayed_notice {
-        stream.write_message_noflush(&Be::Raw(b'N', notice.as_bytes()))?;
+        stream.write_raw(notice.as_bytes().len(), b'N', |buf| {
+            buf.extend_from_slice(notice.as_bytes());
+        });
     }
 
     // Forward all postgres connection params to the client.
     for (name, value) in &node.params {
-        stream.write_message_noflush(&Be::ParameterStatus {
+        stream.write_message(BeMessage::ParameterStatus {
             name: name.as_bytes(),
             value: value.as_bytes(),
-        })?;
+        });
     }
 
-    stream
-        .write_message_noflush(&Be::BackendKeyData(cancel_key_data))?
-        .write_message(&Be::ReadyForQuery)
-        .await?;
-
-    Ok(())
+    stream.write_message(BeMessage::BackendKeyData(cancel_key_data));
+    stream.write_message(BeMessage::ReadyForQuery);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
