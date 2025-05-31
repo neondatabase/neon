@@ -55,7 +55,7 @@ async fn main() {
         "timeline1",
         &auth_token,
         metrics.clone(),
-        "http://unused-endpoint",
+        "",
     );
 
     // 4) fire off 10 000 requests in parallel
