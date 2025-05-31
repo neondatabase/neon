@@ -1187,7 +1187,7 @@ impl Timeline {
         }
     }
 
-    pub(crate) const MAX_GET_VECTORED_KEYS: u64 = 32;
+    pub(crate) const MAX_GET_VECTORED_KEYS: u64 = 128;
     pub(crate) const LAYERS_VISITED_WARN_THRESHOLD: u32 = 100;
 
     /// Look up multiple page versions at a given LSN
