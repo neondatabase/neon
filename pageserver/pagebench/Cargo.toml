@@ -10,19 +10,24 @@ license.workspace = true
 anyhow.workspace = true
 camino.workspace = true
 clap.workspace = true
+thiserror.workspace = true
 futures.workspace = true
 hdrhistogram.workspace = true
 humantime.workspace = true
 humantime-serde.workspace = true
 rand.workspace = true
 reqwest.workspace=true
+bytes.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+async-trait = "0.1"
 
 pageserver_client.workspace = true
+pageserver_client_grpc.workspace = true
 pageserver_api.workspace = true
+pageserver_page_api.workspace = true
 utils = { path = "../../libs/utils/" }
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }
