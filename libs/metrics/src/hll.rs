@@ -107,7 +107,7 @@ impl<const N: usize> MetricType for HyperLogLogState<N> {
 }
 
 impl<const N: usize> HyperLogLogState<N> {
-    pub fn measure(&self, item: &impl Hash) {
+    pub fn measure(&self, item: &(impl Hash + ?Sized)) {
         // changing the hasher will break compatibility with previous measurements.
         self.record(BuildHasherDefault::<xxh3::Hash64>::default().hash_one(item));
     }

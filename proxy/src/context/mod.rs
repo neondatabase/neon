@@ -370,6 +370,18 @@ impl RequestContext {
         }
     }
 
+    pub(crate) fn latency_timer_pause_at(
+        &self,
+        at: tokio::time::Instant,
+        waiting_for: Waiting,
+    ) -> LatencyTimerPause<'_> {
+        LatencyTimerPause {
+            ctx: self,
+            start: at,
+            waiting_for,
+        }
+    }
+
     pub(crate) fn get_proxy_latency(&self) -> LatencyAccumulated {
         self.0
             .try_lock()

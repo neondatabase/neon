@@ -15,14 +15,14 @@ use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::AuthRule;
 use crate::cache::Cached;
 use crate::context::RequestContext;
-use crate::control_plane::client::{
-    CachedAllowedIps, CachedAllowedVpcEndpointIds, CachedRoleSecret,
-};
 use crate::control_plane::errors::{
     ControlPlaneError, GetAuthInfoError, GetEndpointJwksError, WakeComputeError,
 };
 use crate::control_plane::messages::MetricsAuxInfo;
-use crate::control_plane::{AccessBlockerFlags, AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo};
+use crate::control_plane::{
+    AccessBlockerFlags, AuthInfo, AuthSecret, CachedNodeInfo, EndpointAccessControl, NodeInfo,
+    RoleAccessControl,
+};
 use crate::intern::RoleNameInt;
 use crate::types::{BranchId, EndpointId, ProjectId, RoleName};
 use crate::url::ApiUrl;
@@ -66,7 +66,8 @@ impl MockControlPlane {
 
     async fn do_get_auth_info(
         &self,
-        user_info: &ComputeUserInfo,
+        endpoint: &EndpointId,
+        role: &RoleName,
     ) -> Result<AuthInfo, GetAuthInfoError> {
         let (secret, allowed_ips) = async {
             // Perhaps we could persist this connection, but then we'd have to
@@ -80,7 +81,7 @@ impl MockControlPlane {
             let secret = if let Some(entry) = get_execute_postgres_query(
                 &client,
                 "select rolpassword from pg_catalog.pg_authid where rolname = $1",
-                &[&&*user_info.user],
+                &[&role.as_str()],
                 "rolpassword",
             )
             .await?
@@ -89,7 +90,7 @@ impl MockControlPlane {
                 let secret = scram::ServerSecret::parse(&entry).map(AuthSecret::Scram);
                 secret.or_else(|| parse_md5(&entry).map(AuthSecret::Md5))
             } else {
-                warn!("user '{}' does not exist", user_info.user);
+                warn!("user '{role}' does not exist");
                 None
             };
 
@@ -97,7 +98,7 @@ impl MockControlPlane {
                 match get_execute_postgres_query(
                     &client,
                     "select allowed_ips from neon_control_plane.endpoints where endpoint_id = $1",
-                    &[&user_info.endpoint.as_str()],
+                    &[&endpoint.as_str()],
                     "allowed_ips",
                 )
                 .await?
@@ -133,7 +134,7 @@ impl MockControlPlane {
 
     async fn do_get_endpoint_jwks(
         &self,
-        endpoint: EndpointId,
+        endpoint: &EndpointId,
     ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
         let (client, connection) =
             tokio_postgres::connect(self.endpoint.as_str(), tokio_postgres::NoTls).await?;
@@ -222,53 +223,36 @@ async fn get_execute_postgres_query(
 }
 
 impl super::ControlPlaneApi for MockControlPlane {
-    #[tracing::instrument(skip_all)]
-    async fn get_role_secret(
+    async fn get_endpoint_access_control(
         &self,
         _ctx: &RequestContext,
-        user_info: &ComputeUserInfo,
-    ) -> Result<CachedRoleSecret, GetAuthInfoError> {
-        Ok(CachedRoleSecret::new_uncached(
-            self.do_get_auth_info(user_info).await?.secret,
-        ))
+        endpoint: &EndpointId,
+        role: &RoleName,
+    ) -> Result<EndpointAccessControl, GetAuthInfoError> {
+        let info = self.do_get_auth_info(endpoint, role).await?;
+        Ok(EndpointAccessControl {
+            allowed_ips: Arc::new(info.allowed_ips),
+            allowed_vpce: Arc::new(info.allowed_vpc_endpoint_ids),
+            flags: info.access_blocker_flags,
+        })
     }
 
-    async fn get_allowed_ips(
+    async fn get_role_access_control(
         &self,
         _ctx: &RequestContext,
-        user_info: &ComputeUserInfo,
-    ) -> Result<CachedAllowedIps, GetAuthInfoError> {
-        Ok(Cached::new_uncached(Arc::new(
-            self.do_get_auth_info(user_info).await?.allowed_ips,
-        )))
-    }
-
-    async fn get_allowed_vpc_endpoint_ids(
-        &self,
-        _ctx: &RequestContext,
-        user_info: &ComputeUserInfo,
-    ) -> Result<CachedAllowedVpcEndpointIds, super::errors::GetAuthInfoError> {
-        Ok(Cached::new_uncached(Arc::new(
-            self.do_get_auth_info(user_info)
-                .await?
-                .allowed_vpc_endpoint_ids,
-        )))
-    }
-
-    async fn get_block_public_or_vpc_access(
-        &self,
-        _ctx: &RequestContext,
-        user_info: &ComputeUserInfo,
-    ) -> Result<super::CachedAccessBlockerFlags, super::errors::GetAuthInfoError> {
-        Ok(Cached::new_uncached(
-            self.do_get_auth_info(user_info).await?.access_blocker_flags,
-        ))
+        endpoint: &EndpointId,
+        role: &RoleName,
+    ) -> Result<RoleAccessControl, GetAuthInfoError> {
+        let info = self.do_get_auth_info(endpoint, role).await?;
+        Ok(RoleAccessControl {
+            secret: info.secret,
+        })
     }
 
     async fn get_endpoint_jwks(
         &self,
         _ctx: &RequestContext,
-        endpoint: EndpointId,
+        endpoint: &EndpointId,
     ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
         self.do_get_endpoint_jwks(endpoint).await
     }
