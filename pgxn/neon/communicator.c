@@ -1098,7 +1098,7 @@ prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
 						  BlockNumber nblocks, const bits8 *mask,
 						  bool is_prefetch)
 {
-	uint64		min_ring_index;
+	uint64		ring_index;
 	PrefetchRequest hashkey;
 #ifdef USE_ASSERT_CHECKING
 	bool		any_hits = false;
@@ -1122,13 +1122,12 @@ Retry:
 		MyPState->ring_unused - MyPState->ring_receive;
 	MyNeonCounters->getpage_prefetches_buffered =
 		MyPState->n_responses_buffered;
+	ring_index = UINT64_MAX;
 
-	min_ring_index = UINT64_MAX;
 	for (int i = 0; i < nblocks; i++)
 	{
 		PrefetchRequest *slot = NULL;
 		PrfHashEntry *entry = NULL;
-		uint64		ring_index;
 		neon_request_lsns *lsns;
 
 		if (PointerIsValid(mask) && BITMAP_ISSET(mask, i))
@@ -1194,7 +1193,6 @@ Retry:
 				}
 				else
 				{
-					min_ring_index = Min(min_ring_index, ring_index);
 					/* The buffered request is good enough, return that index */
 					if (is_prefetch)
 						pgBufferUsage.prefetch.duplicates++;
@@ -1301,8 +1299,6 @@ Retry:
 		slot->my_ring_index = ring_index;
 		slot->flags = 0;
 
-		min_ring_index = Min(min_ring_index, ring_index);
-
 		if (is_prefetch)
 			MyNeonCounters->getpage_prefetch_requests_total++;
 		else
@@ -1315,11 +1311,12 @@ Retry:
 		MyPState->ring_unused - MyPState->ring_receive;
 
 	Assert(any_hits);
+	Assert(ring_index != UINT64_MAX);
 
-	Assert(GetPrfSlot(min_ring_index)->status == PRFS_REQUESTED ||
-		   GetPrfSlot(min_ring_index)->status == PRFS_RECEIVED);
-	Assert(MyPState->ring_last <= min_ring_index &&
-		   min_ring_index < MyPState->ring_unused);
+	Assert(GetPrfSlot(ring_index)->status == PRFS_REQUESTED ||
+		   GetPrfSlot(ring_index)->status == PRFS_RECEIVED);
+	Assert(MyPState->ring_last <= ring_index &&
+		   ring_index < MyPState->ring_unused);
 
 	if (flush_every_n_requests > 0 &&
 		MyPState->ring_unused - MyPState->ring_flush >= flush_every_n_requests)
@@ -1335,7 +1332,7 @@ Retry:
 		MyPState->ring_flush = MyPState->ring_unused;
 	}
 
-	return min_ring_index;
+	return ring_index;
 }
 
 static bool
