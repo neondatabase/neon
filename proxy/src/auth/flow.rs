@@ -54,7 +54,7 @@ pub(crate) struct CleartextPassword {
 pub(crate) struct AuthFlow<'a, S, State> {
     /// The underlying stream which implements libpq's protocol.
     stream: &'a mut PqStream<Stream<S>>,
-    /// State might contain ancillary data (see [`Self::begin`]).
+    /// State might contain ancillary data.
     state: State,
     tls_server_end_point: TlsServerEndPoint,
 }
