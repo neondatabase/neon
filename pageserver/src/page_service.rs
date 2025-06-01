@@ -3372,22 +3372,6 @@ impl proto::PageService for PageServerHandler {
     }
 }
 
-impl From<GetActiveTenantError> for QueryError {
-    fn from(e: GetActiveTenantError) -> Self {
-        match e {
-            GetActiveTenantError::WaitForActiveTimeout { .. } => QueryError::Disconnected(
-                ConnectionError::Io(io::Error::new(io::ErrorKind::TimedOut, e.to_string())),
-            ),
-            GetActiveTenantError::Cancelled
-            | GetActiveTenantError::WillNotBecomeActive(TenantState::Stopping { .. }) => {
-                QueryError::Shutdown
-            }
-            e @ GetActiveTenantError::NotFound(_) => QueryError::NotFound(format!("{e}").into()),
-            e => QueryError::Other(anyhow::anyhow!(e)),
-        }
-    }
-}
-
 /// gRPC middleware layer that handles observability concerns:
 ///
 /// * Creates and enters a tracing span.
@@ -3560,6 +3544,22 @@ impl From<GetActiveTimelineError> for QueryError {
             GetActiveTimelineError::Tenant(GetActiveTenantError::Cancelled) => QueryError::Shutdown,
             GetActiveTimelineError::Tenant(e) => e.into(),
             GetActiveTimelineError::Timeline(e) => QueryError::NotFound(format!("{e}").into()),
+        }
+    }
+}
+
+impl From<GetActiveTenantError> for QueryError {
+    fn from(e: GetActiveTenantError) -> Self {
+        match e {
+            GetActiveTenantError::WaitForActiveTimeout { .. } => QueryError::Disconnected(
+                ConnectionError::Io(io::Error::new(io::ErrorKind::TimedOut, e.to_string())),
+            ),
+            GetActiveTenantError::Cancelled
+            | GetActiveTenantError::WillNotBecomeActive(TenantState::Stopping { .. }) => {
+                QueryError::Shutdown
+            }
+            e @ GetActiveTenantError::NotFound(_) => QueryError::NotFound(format!("{e}").into()),
+            e => QueryError::Other(anyhow::anyhow!(e)),
         }
     }
 }
