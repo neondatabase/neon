@@ -3376,20 +3376,12 @@ impl GrpcPageServiceHandler {
     /// relations and their sizes, as well as SLRU segments and other data.
     #[allow(clippy::result_large_err)]
     fn ensure_shard_zero(req: &tonic::Request<impl Any>) -> Result<(), tonic::Status> {
-        match Self::extract::<ShardIndex>(req).shard_number.0 {
+        match extract::<ShardIndex>(req).shard_number.0 {
             0 => Ok(()),
             shard => Err(tonic::Status::invalid_argument(format!(
                 "request must execute on shard zero (is shard {shard})",
             ))),
         }
-    }
-
-    /// Extracts the given type from the request extensions. It must have been set by an
-    /// interceptor.
-    fn extract<T: Send + Sync + 'static>(req: &tonic::Request<impl Any>) -> &T {
-        req.extensions()
-            .get::<T>()
-            .expect("extension should be set by interceptor")
     }
 
     /// Generates a PagestreamRequest header from a ReadLsn and request ID.
@@ -3407,8 +3399,8 @@ impl GrpcPageServiceHandler {
         &self,
         req: &tonic::Request<impl Any>,
     ) -> Result<Handle<TenantManagerTypes>, GetActiveTimelineError> {
-        let ttid = *Self::extract::<TenantTimelineId>(req);
-        let shard_index = *Self::extract::<ShardIndex>(req);
+        let ttid = *extract::<TenantTimelineId>(req);
+        let shard_index = *extract::<ShardIndex>(req);
         let shard_selector = ShardSelector::Known(shard_index);
 
         // TODO: untangle this from TenantManagerWrapper::resolve() and Cache::get(), to avoid the
@@ -3546,7 +3538,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         &self,
         req: tonic::Request<proto::CheckRelExistsRequest>,
     ) -> Result<tonic::Response<proto::CheckRelExistsResponse>, tonic::Status> {
-        let received_at = Self::extract::<ReceivedAt>(&req).0;
+        let received_at = extract::<ReceivedAt>(&req).0;
         let timeline = self.get_request_timeline(&req).await?;
         let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
 
@@ -3660,7 +3652,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         &self,
         req: tonic::Request<proto::GetDbSizeRequest>,
     ) -> Result<tonic::Response<proto::GetDbSizeResponse>, tonic::Status> {
-        let received_at = Self::extract::<ReceivedAt>(&req).0;
+        let received_at = extract::<ReceivedAt>(&req).0;
         let timeline = self.get_request_timeline(&req).await?;
         let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
 
@@ -3691,8 +3683,8 @@ impl proto::PageService for GrpcPageServiceHandler {
         req: tonic::Request<tonic::Streaming<proto::GetPageRequest>>,
     ) -> Result<tonic::Response<Self::GetPagesStream>, tonic::Status> {
         // Extract the timeline from the request and check that it exists.
-        let ttid = *Self::extract::<TenantTimelineId>(&req);
-        let shard_index = *Self::extract::<ShardIndex>(&req);
+        let ttid = *extract::<TenantTimelineId>(&req);
+        let shard_index = *extract::<ShardIndex>(&req);
         let shard_selector = ShardSelector::Known(shard_index);
 
         let mut handles = TimelineHandles::new(self.tenant_manager.clone());
@@ -3725,7 +3717,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         &self,
         req: tonic::Request<proto::GetRelSizeRequest>,
     ) -> Result<tonic::Response<proto::GetRelSizeResponse>, tonic::Status> {
-        let received_at = Self::extract::<ReceivedAt>(&req).0;
+        let received_at = extract::<ReceivedAt>(&req).0;
         let timeline = self.get_request_timeline(&req).await?;
         let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
 
@@ -3755,7 +3747,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         &self,
         req: tonic::Request<proto::GetSlruSegmentRequest>,
     ) -> Result<tonic::Response<proto::GetSlruSegmentResponse>, tonic::Status> {
-        let received_at = Self::extract::<ReceivedAt>(&req).0;
+        let received_at = extract::<ReceivedAt>(&req).0;
         let timeline = self.get_request_timeline(&req).await?;
         let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
 
@@ -3904,7 +3896,7 @@ impl tonic::service::Interceptor for TenantMetadataInterceptor {
     }
 }
 
-/// Authenticates gRPC page service requests. Must run after TenantMetadataInterceptor.
+/// Authenticates gRPC page service requests.
 #[derive(Clone)]
 struct TenantAuthInterceptor {
     auth: Option<Arc<SwappableJwtAuth>>,
@@ -3923,11 +3915,8 @@ impl tonic::service::Interceptor for TenantAuthInterceptor {
             return Ok(req);
         };
 
-        // Fetch the tenant ID that's been set by TenantMetadataInterceptor.
-        let ttid = req
-            .extensions()
-            .get::<TenantTimelineId>()
-            .expect("TenantMetadataInterceptor must run before TenantAuthInterceptor");
+        // Fetch the tenant ID from the request extensions (set by TenantMetadataInterceptor).
+        let TenantTimelineId { tenant_id, .. } = *extract::<TenantTimelineId>(&req);
 
         // Fetch and decode the JWT token.
         let jwt = req
@@ -3945,13 +3934,28 @@ impl tonic::service::Interceptor for TenantAuthInterceptor {
         let claims = jwtdata.claims;
 
         // Check if the token is valid for this tenant.
-        check_permission(&claims, Some(ttid.tenant_id))
+        check_permission(&claims, Some(tenant_id))
             .map_err(|err| tonic::Status::permission_denied(err.to_string()))?;
 
         // TODO: consider stashing the claims in the request extensions, if needed.
 
         Ok(req)
     }
+}
+
+/// Extracts the given type from the request extensions, or panics if it is missing.
+fn extract<T: Send + Sync + 'static>(req: &tonic::Request<impl Any>) -> &T {
+    extract_from(req.extensions())
+}
+
+/// Extract the given type from the request extensions, or panics if it is missing. This variant
+/// can extract both from a tonic::Request and http::Request.
+fn extract_from<T: Send + Sync + 'static>(ext: &http::Extensions) -> &T {
+    let Some(value) = ext.get::<T>() else {
+        let name = std::any::type_name::<T>();
+        panic!("extension {name} should be set by middleware");
+    };
+    value
 }
 
 #[derive(Debug, thiserror::Error)]
