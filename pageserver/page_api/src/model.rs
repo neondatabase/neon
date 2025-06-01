@@ -50,7 +50,8 @@ pub struct ReadLsn {
     pub request_lsn: Lsn,
     /// If given, the caller guarantees that the page has not been modified since this LSN. Must be
     /// smaller than or equal to request_lsn. This allows the Pageserver to serve an old page
-    /// without waiting for the request LSN to arrive. Valid for all request types.
+    /// without waiting for the request LSN to arrive. If not given, the request will read at the
+    /// request_lsn and wait for it to arrive if necessary. Valid for all request types.
     ///
     /// It is undefined behaviour to make a request such that the page was, in fact, modified
     /// between request_lsn and not_modified_since_lsn. The Pageserver might detect it and return an

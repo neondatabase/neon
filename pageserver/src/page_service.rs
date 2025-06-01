@@ -3389,7 +3389,9 @@ impl GrpcPageServiceHandler {
         PagestreamRequest {
             reqid: req_id,
             request_lsn: read_lsn.request_lsn,
-            not_modified_since: read_lsn.not_modified_since_lsn.unwrap_or_default(),
+            not_modified_since: read_lsn
+                .not_modified_since_lsn
+                .unwrap_or(read_lsn.request_lsn),
         }
     }
 
