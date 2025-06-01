@@ -569,6 +569,20 @@ impl Persistence {
         let updated = self
             .with_measured_conn(DatabaseOperation::ReAttach, move |conn| {
                 Box::pin(async move {
+                    // Check if the node is not marked as deleted
+                    let deleted_node: i64 = nodes
+                        .filter(node_id.eq(input_node_id.0 as i64))
+                        .filter(lifecycle.eq(String::from(NodeLifecycle::Deleted)))
+                        .count()
+                        .get_result(conn)
+                        .await?;
+                    if deleted_node > 0 {
+                        return Err(DatabaseError::Logical(format!(
+                            "Node {} is marked as deleted, re-attach is not allowed",
+                            input_node_id
+                        )));
+                    }
+
                     let rows_updated = diesel::update(tenant_shards)
                         .filter(generation_pageserver.eq(input_node_id.0 as i64))
                         .set(generation.eq(generation + 1))
@@ -589,7 +603,6 @@ impl Persistence {
                     // then reset it's node scheduling policy to active.
                     diesel::update(nodes)
                         .filter(node_id.eq(input_node_id.0 as i64))
-                        .filter(lifecycle.ne(String::from(NodeLifecycle::Deleted)))
                         .filter(
                             scheduling_policy
                                 .eq(String::from(NodeSchedulingPolicy::PauseForRestart))

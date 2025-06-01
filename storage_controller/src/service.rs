@@ -7351,7 +7351,6 @@ impl Service {
 
         Ok(availability_transition)
     }
-
     /// Handle availability transition of one node
     ///
     /// Note that you should first call [`Self::node_state_configure`] to update
