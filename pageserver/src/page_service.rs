@@ -3395,8 +3395,7 @@ impl GrpcPageServiceHandler {
         }
     }
 
-    /// Acquires a timeline handle for the given request. The request must have been decorated by
-    /// TenantMetadataInterceptor first.
+    /// Acquires a timeline handle for the given request.
     async fn get_request_timeline(
         &self,
         req: &tonic::Request<impl Any>,
