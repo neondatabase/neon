@@ -2042,6 +2042,7 @@ impl TenantShardPersistence {
 pub(crate) struct NodePersistence {
     pub(crate) node_id: i64,
     pub(crate) scheduling_policy: String,
+    pub(crate) lifecycle: String,
     pub(crate) listen_http_addr: String,
     pub(crate) listen_http_port: i32,
     pub(crate) listen_pg_addr: String,
