@@ -10,7 +10,8 @@ use tokio_rustls::server::TlsStream;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::metrics::Metrics;
 use crate::pqproto::{
-    BeMessage, FE_PASSWORD_MESSAGE, FeStartupPacket, WriteBuf, read_message, read_startup,
+    BeMessage, FE_PASSWORD_MESSAGE, FeStartupPacket, SQLSTATE_INTERNAL_ERROR, WriteBuf,
+    read_message, read_startup,
 };
 use crate::tls::TlsServerEndPoint;
 
@@ -185,8 +186,6 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
     where
         E: UserFacingError + Into<anyhow::Error>,
     {
-        const SQLSTATE_INTERNAL_ERROR: [u8; 5] = *b"XX000";
-
         let error_kind = error.get_error_kind();
         let msg = error.to_string_client();
 
@@ -223,6 +222,7 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
             }
         }
 
+        // TODO: either preserve the error code from postgres, or assign error codes to proxy errors.
         self.write.write_error(msg, SQLSTATE_INTERNAL_ERROR);
 
         self.flush()
