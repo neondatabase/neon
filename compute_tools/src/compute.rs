@@ -962,32 +962,28 @@ impl ComputeNode {
         let mut client = config.connect(NoTls)?;
         let pageserver_connect_micros = start_time.elapsed().as_micros() as u64;
 
-        let basebackup_cmd = match lsn {
-            Lsn(0) => {
-                if spec.spec.mode != ComputeMode::Primary {
-                    format!(
-                        "basebackup {} {} --gzip --replica",
-                        spec.tenant_id, spec.timeline_id
-                    )
-                } else {
-                    format!("basebackup {} {} --gzip", spec.tenant_id, spec.timeline_id)
-                }
-            }
-            _ => {
-                if spec.spec.mode != ComputeMode::Primary {
-                    format!(
-                        "basebackup {} {} {} --gzip --replica",
-                        spec.tenant_id, spec.timeline_id, lsn
-                    )
-                } else {
-                    format!(
-                        "basebackup {} {} {} --gzip",
-                        spec.tenant_id, spec.timeline_id, lsn
-                    )
-                }
-            }
-        };
-
+        let tenant_id = spec.tenant_id.to_string();
+        let timeline_id = spec.timeline_id.to_string();
+        let lsn_str = lsn.to_string();
+        let mut cmd = Vec::new();
+        cmd.push("basebackup");
+        cmd.push(&tenant_id);
+        cmd.push(&timeline_id);
+        if lsn != Lsn::INVALID {
+            cmd.push(&lsn_str);
+        }
+        cmd.push("--gzip");
+        if spec.spec.mode != ComputeMode::Primary {
+            cmd.push("--replica");
+        }
+        if spec
+            .spec
+            .features
+            .contains(&ComputeFeature::LazySlruDownload)
+        {
+            cmd.push("--lazy-slru-download")
+        }
+        let basebackup_cmd = cmd.join(" ");
         let copyreader = client.copy_out(basebackup_cmd.as_str())?;
         let mut measured_reader = MeasuredReader::new(copyreader);
         let mut bufreader = std::io::BufReader::new(&mut measured_reader);

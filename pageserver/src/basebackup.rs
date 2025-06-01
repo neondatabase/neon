@@ -73,6 +73,7 @@ impl From<GetVectoredError> for BasebackupError {
 ///  * When working without safekeepers. In this situation it is important to match the lsn
 ///    we are taking basebackup on with the lsn that is used in pageserver's walreceiver
 ///    to start the replication.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_basebackup_tarball<'a, W>(
     write: &'a mut W,
     timeline: &'a Timeline,
@@ -80,6 +81,7 @@ pub async fn send_basebackup_tarball<'a, W>(
     prev_lsn: Option<Lsn>,
     full_backup: bool,
     replica: bool,
+    lazy_slru_download_enabled: bool,
     ctx: &'a RequestContext,
 ) -> Result<(), BasebackupError>
 where
@@ -131,8 +133,8 @@ where
     };
 
     info!(
-        "taking basebackup lsn={}, prev_lsn={} (full_backup={}, replica={})",
-        backup_lsn, prev_lsn, full_backup, replica
+        "taking basebackup lsn={}, prev_lsn={} (full_backup={}, replica={}, lazy_slru_download_enabled={})",
+        backup_lsn, prev_lsn, full_backup, replica, lazy_slru_download_enabled
     );
 
     let basebackup = Basebackup {
@@ -142,6 +144,7 @@ where
         prev_record_lsn: prev_lsn,
         full_backup,
         replica,
+        lazy_slru_download_enabled,
         ctx,
         io_concurrency: IoConcurrency::spawn_from_conf(
             timeline.conf.get_vectored_concurrent_io,
@@ -170,6 +173,7 @@ where
     prev_record_lsn: Lsn,
     full_backup: bool,
     replica: bool,
+    lazy_slru_download_enabled: bool,
     ctx: &'a RequestContext,
     io_concurrency: IoConcurrency,
 }
@@ -308,7 +312,10 @@ where
                 self.timeline.pg_version,
             )?;
 
-        let lazy_slru_download = self.timeline.get_lazy_slru_download() && !self.full_backup;
+        let lazy_slru_download = self
+            .timeline
+            .get_lazy_slru_download(self.lazy_slru_download_enabled)
+            && !self.full_backup;
 
         let pgversion = self.timeline.pg_version;
         let subdirs = dispatch_pgversion!(pgversion, &pgv::bindings::PGDATA_SUBDIRS[..]);

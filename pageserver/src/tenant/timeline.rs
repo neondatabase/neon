@@ -2533,12 +2533,11 @@ impl Timeline {
         tenant_conf.is_gc_blocked_by_lsn_lease_deadline()
     }
 
-    pub(crate) fn get_lazy_slru_download(&self) -> bool {
+    pub(crate) fn get_lazy_slru_download(&self, lazy_slru_download_enabled_by_cp: bool) -> bool {
         let tenant_conf = self.tenant_conf.load();
-        tenant_conf
-            .tenant_conf
-            .lazy_slru_download
-            .unwrap_or(self.conf.default_tenant_conf.lazy_slru_download)
+        tenant_conf.tenant_conf.lazy_slru_download.unwrap_or(
+            lazy_slru_download_enabled_by_cp || self.conf.default_tenant_conf.lazy_slru_download,
+        )
     }
 
     /// Checks if a get page request should get perf tracing
