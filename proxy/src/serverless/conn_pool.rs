@@ -11,7 +11,7 @@ use smallvec::SmallVec;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, error, info, info_span, warn};
+use tracing::{error, info, info_span, warn};
 #[cfg(test)]
 use {
     super::conn_pool_lib::GlobalConnPoolOptions,
@@ -20,8 +20,7 @@ use {
 };
 
 use super::conn_pool_lib::{
-    Client, ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, EndpointConnPool,
-    GlobalConnPool,
+    ClientDataEnum, ClientInnerCommon, ConnInfo, EndpointConnPoolExt, GlobalConnPool,
 };
 use crate::context::RequestContext;
 use crate::control_plane::messages::MetricsAuxInfo;
@@ -29,6 +28,7 @@ use crate::metrics::Metrics;
 use crate::tls::postgres_rustls::MakeRustlsConnect;
 
 type TlsStream = <MakeRustlsConnect as MakeTlsConnect<TcpStream>>::Stream;
+pub(super) type Conn = postgres_client::Connection<TcpStream, TlsStream>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ConnInfoWithAuth {
@@ -56,20 +56,20 @@ impl fmt::Display for ConnInfo {
     }
 }
 
-pub(crate) fn poll_client<C: ClientInnerExt>(
-    global_pool: Arc<GlobalConnPool<C, EndpointConnPool<C>>>,
+pub(crate) fn poll_client_generic<P: EndpointConnPoolExt>(
+    global_pool: Arc<GlobalConnPool<P>>,
     ctx: &RequestContext,
     conn_info: ConnInfo,
-    client: C,
-    mut connection: postgres_client::Connection<TcpStream, TlsStream>,
+    client: P::ClientInner,
+    connection: P::Connection,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
-) -> Client<C> {
+) -> P::Client {
     let conn_gauge = Metrics::get().proxy.db_connections.guard(ctx.protocol());
-    let mut session_id = ctx.session_id();
+    let session_id = ctx.session_id();
     let (tx, mut rx) = tokio::sync::watch::channel(session_id);
 
-    let span = info_span!(parent: None, "connection", %conn_id);
+    let span = info_span!(parent: None, "connection", %conn_id, %session_id);
     let cold_start_info = ctx.cold_start_info();
     span.in_scope(|| {
         info!(cold_start_info = cold_start_info.as_str(), %conn_info, %session_id, "new connection");
@@ -85,27 +85,30 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
     let cancel = CancellationToken::new();
     let cancelled = cancel.clone().cancelled_owned();
 
-    tokio::spawn(
-    async move {
+    tokio::spawn(async move {
         let _conn_gauge = conn_gauge;
         let mut idle_timeout = pin!(tokio::time::sleep(idle));
         let mut cancelled = pin!(cancelled);
+        let mut connection = pin!(P::spawn_conn(connection));
 
         poll_fn(move |cx| {
+            let _enter = span.enter();
+
             if cancelled.as_mut().poll(cx).is_ready() {
                 info!("connection dropped");
-                return Poll::Ready(())
+                return Poll::Ready(());
             }
 
             match rx.has_changed() {
                 Ok(true) => {
-                    session_id = *rx.borrow_and_update();
-                    info!(%session_id, "changed session");
+                    let session_id = *rx.borrow_and_update();
+                    span.record("session_id", tracing::field::display(session_id));
+                    info!("changed session");
                     idle_timeout.as_mut().reset(Instant::now() + idle);
                 }
                 Err(_) => {
                     info!("connection dropped");
-                    return Poll::Ready(())
+                    return Poll::Ready(());
                 }
                 _ => {}
             }
@@ -117,48 +120,25 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
                 if let Some(pool) = pool.clone().upgrade() {
                     // remove client from pool - should close the connection if it's idle.
                     // does nothing if the client is currently checked-out and in-use
-                    if pool.write().remove_client(db_user.clone(), conn_id) {
+                    if pool.write().remove_conn(db_user.clone(), conn_id) {
                         info!("idle connection removed");
                     }
                 }
             }
 
-            loop {
-                let message = ready!(connection.poll_message(cx));
-
-                match message {
-                    Some(Ok(AsyncMessage::Notice(notice))) => {
-                        info!(%session_id, "notice: {}", notice);
-                    }
-                    Some(Ok(AsyncMessage::Notification(notif))) => {
-                        warn!(%session_id, pid = notif.process_id(), channel = notif.channel(), "notification received");
-                    }
-                    Some(Ok(_)) => {
-                        warn!(%session_id, "unknown message");
-                    }
-                    Some(Err(e)) => {
-                        error!(%session_id, "connection error: {}", e);
-                        break
-                    }
-                    None => {
-                        info!("connection closed");
-                        break
-                    }
-                }
-            }
+            ready!(connection.as_mut().poll(cx));
 
             // remove from connection pool
             if let Some(pool) = pool.clone().upgrade() {
-                if pool.write().remove_client(db_user.clone(), conn_id) {
+                if pool.write().remove_conn(db_user.clone(), conn_id) {
                     info!("closed connection removed");
                 }
             }
 
             Poll::Ready(())
-        }).await;
-
-    }
-    .instrument(span));
+        })
+        .await;
+    });
     let inner = ClientInnerCommon {
         inner: client,
         aux,
@@ -169,7 +149,42 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
         }),
     };
 
-    Client::new(inner, conn_info, pool_clone)
+    P::wrap_client(inner, conn_info, pool_clone)
+}
+
+pub async fn poll_tokio_postgres_conn_really(mut connection: Conn) {
+    poll_fn(move |cx| {
+        loop {
+            let message = ready!(connection.poll_message(cx));
+
+            match message {
+                Some(Ok(AsyncMessage::Notice(notice))) => {
+                    info!("notice: {}", notice);
+                }
+                Some(Ok(AsyncMessage::Notification(notif))) => {
+                    warn!(
+                        pid = notif.process_id(),
+                        channel = notif.channel(),
+                        "notification received"
+                    );
+                }
+                Some(Ok(_)) => {
+                    warn!("unknown message");
+                }
+                Some(Err(e)) => {
+                    error!("connection error: {}", e);
+                    break;
+                }
+                None => {
+                    info!("connection closed");
+                    break;
+                }
+            }
+        }
+
+        Poll::Ready(())
+    })
+    .await;
 }
 
 #[derive(Clone)]
@@ -179,11 +194,11 @@ pub(crate) struct ClientDataRemote {
 }
 
 impl ClientDataRemote {
-    pub fn session(&mut self) -> &mut tokio::sync::watch::Sender<uuid::Uuid> {
-        &mut self.session
+    pub fn session(&self) -> &tokio::sync::watch::Sender<uuid::Uuid> {
+        &self.session
     }
 
-    pub fn cancel(&mut self) {
+    pub fn cancel(&self) {
         self.cancel.cancel();
     }
 }
@@ -195,6 +210,7 @@ mod tests {
     use super::*;
     use crate::proxy::NeonOptions;
     use crate::serverless::cancel_set::CancelSet;
+    use crate::serverless::conn_pool_lib::{Client, ClientInnerExt};
     use crate::types::{BranchId, EndpointId, ProjectId};
 
     struct MockClient(Arc<AtomicBool>);
