@@ -3396,6 +3396,12 @@ impl GrpcPageServiceHandler {
     }
 
     /// Acquires a timeline handle for the given request.
+    ///
+    /// TODO: consider moving this to a middleware layer; all requests need it. Needs to manage
+    /// the TimelineHandles lifecycle.
+    ///
+    /// TODO: untangle acquisition from TenantManagerWrapper::resolve() and Cache::get(), to avoid
+    /// the unnecessary overhead.
     async fn get_request_timeline(
         &self,
         req: &tonic::Request<impl Any>,
@@ -3404,8 +3410,6 @@ impl GrpcPageServiceHandler {
         let shard_index = *extract::<ShardIndex>(req);
         let shard_selector = ShardSelector::Known(shard_index);
 
-        // TODO: untangle this from TenantManagerWrapper::resolve() and Cache::get(), to avoid the
-        // unnecessary overhead.
         TimelineHandles::new(self.tenant_manager.clone())
             .get(ttid.tenant_id, ttid.timeline_id, shard_selector)
             .await
@@ -3444,6 +3448,12 @@ impl GrpcPageServiceHandler {
         io_concurrency: IoConcurrency,
     ) -> Result<proto::GetPageResponse, tonic::Status> {
         let received_at = Instant::now();
+        let timeline = timeline.upgrade().map_err(|err| match err {
+            HandleUpgradeError::ShutDown => tonic::Status::unavailable("timeline is shutting down"),
+        })?;
+        let ctx = ctx.with_scope_page_service_pagestream(&timeline);
+
+        // Validate the request, decorate the span, and convert it to a Pagestream request.
         let req: page_api::GetPageRequest = req.try_into()?;
 
         span_record!(
@@ -3453,11 +3463,6 @@ impl GrpcPageServiceHandler {
             blks = %req.block_numbers.len(),
             lsn = %req.read_lsn,
         );
-
-        let timeline = timeline.upgrade().map_err(|err| match err {
-            HandleUpgradeError::ShutDown => tonic::Status::unavailable("timeline is shutting down"),
-        })?;
-        let ctx = ctx.with_scope_page_service_pagestream(&timeline);
 
         let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn(); // hold guard
         let effective_lsn = match PageServerHandler::effective_request_lsn(
