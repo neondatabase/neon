@@ -2,6 +2,7 @@
 mod tests;
 
 pub(crate) mod connect_compute;
+pub mod conntrack;
 mod copy_bidirectional;
 pub(crate) mod handshake;
 pub(crate) mod passthrough;
@@ -30,6 +31,7 @@ use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
 use crate::protocol2::{ConnectHeader, ConnectionInfo, ConnectionInfoExtra, read_proxy_protocol};
+use crate::proxy::conntrack::ConnectionTracking;
 use crate::proxy::handshake::{HandshakeData, handshake};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::{PqStream, Stream};
@@ -60,6 +62,7 @@ pub async fn task_main(
     cancellation_token: CancellationToken,
     cancellation_handler: Arc<CancellationHandler>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
+    conntracking: Arc<ConnectionTracking>,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("proxy has shut down");
@@ -85,6 +88,7 @@ pub async fn task_main(
         let session_id = uuid::Uuid::new_v4();
         let cancellation_handler = Arc::clone(&cancellation_handler);
         let cancellations = cancellations.clone();
+        let conntracking = Arc::clone(&conntracking);
 
         debug!(protocol = "tcp", %session_id, "accepted new TCP connection");
         let endpoint_rate_limiter2 = endpoint_rate_limiter.clone();
@@ -149,6 +153,7 @@ pub async fn task_main(
                 endpoint_rate_limiter2,
                 conn_gauge,
                 cancellations,
+                conntracking,
             )
             .instrument(ctx.span())
             .boxed()
@@ -268,6 +273,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     conn_gauge: NumClientConnectionsGuard<'static>,
     cancellations: tokio_util::task::task_tracker::TaskTracker,
+    conntracking: Arc<ConnectionTracking>,
 ) -> Result<Option<ProxyPassthrough<S>>, ClientRequestError> {
     debug!(
         protocol = %ctx.protocol(),
@@ -407,6 +413,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         compute: node,
         session_id: ctx.session_id(),
         cancel: session,
+        conntracking,
         _req: request_gauge,
         _conn: conn_gauge,
     }))
