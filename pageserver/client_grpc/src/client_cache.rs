@@ -20,6 +20,7 @@ use uuid;
 use std::{
     pin::Pin,
     task::{Context, Poll},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use futures::future;
@@ -283,6 +284,7 @@ pub struct ConnectionPool<T> {
     error_threshold: usize,
     /// The maximum duration a connection can be idle before being removed.
     max_idle_duration: Duration,
+    max_total_connections: usize,
 
     channel_semaphore: Arc<Semaphore>,
 
@@ -310,6 +312,7 @@ struct ConnectionEntry<T> {
 pub struct PooledClient<T> {
     pub channel: T,
     pool: Arc<ConnectionPool<T>>,
+    is_ok: bool,
     id: uuid::Uuid,
     permit: OwnedSemaphorePermit,
 }
@@ -322,6 +325,7 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
         max_consumers: usize,
         error_threshold: usize,
         max_idle_duration: Duration,
+        max_total_connections: usize,
         aggregate_metrics: Option<Arc<crate::PageserverClientAggregateMetrics>>,
     ) -> Arc<Self> {
         let shutdown_token = CancellationToken::new();
@@ -339,6 +343,7 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
             max_consumers,
             error_threshold,
             max_idle_duration,
+            max_total_connections,
             channel_semaphore: Arc::new(Semaphore::new(0)),
             shutdown_token: shutdown_token.clone(),
             aggregate_metrics: aggregate_metrics.clone(),
@@ -438,6 +443,7 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
             let client = PooledClient::<T> {
                 channel: entry.channel.clone(),
                 pool: Arc::clone(&self),
+                is_ok: true,
                 id,
                 permit: permit,
             };
@@ -461,7 +467,6 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
     }
 
     pub async fn get_client(self: Arc<Self>) -> Result<PooledClient<T>, tonic::Status> {
-        info!("GEtting client");
         // The pool is shutting down. Don't accept new connections.
         if self.shutdown_token.is_cancelled() {
             return Err(tonic::Status::unavailable("Pool is shutting down"));
@@ -508,7 +513,13 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
                         //
                         let mut inner = self_clone.inner.lock().await;
                         inner.waiters += 1;
-                        if inner.waiters >= (inner.in_progress * self_clone.max_consumers) {
+                        if inner.waiters > (inner.in_progress * self_clone.max_consumers) {
+                            if (inner.entries.len() + inner.in_progress) >= self_clone.max_total_connections {
+                                // return error status
+                                return Err(tonic::Status::unavailable(
+                                    "Maximum number of connections reached",
+                                ));
+                            }
                             let self_clone_spawn = Arc::clone(&self_clone);
                             tokio::task::spawn(async move {
                                 self_clone_spawn.create_connection().await;
@@ -712,7 +723,6 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
                 }
             }
         }
-        // The semaphore permit is released when the pooled client is dropped.
     }
 }
 
@@ -720,10 +730,12 @@ impl<T: Clone + Send + 'static> PooledClient<T> {
     pub fn channel(&self) -> T {
         return self.channel.clone();
     }
-
-    pub async fn finish(self, result: Result<(), tonic::Status>) {
-        self.pool
-            .return_client(self.id, result.is_ok(), self.permit)
-            .await;
+    pub async fn finish(mut self, result: Result<(), tonic::Status>) {
+        self.is_ok = result.is_ok();
+        self.pool.return_client(
+            self.id,
+            self.is_ok,
+            self.permit,
+        ).await;
     }
 }

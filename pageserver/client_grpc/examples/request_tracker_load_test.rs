@@ -39,9 +39,10 @@ async fn main() {
         hang_rate:          0.0,
         connect_timeout:    Duration::from_secs(0),
         connect_backoff:    Duration::from_millis(0),
-        max_consumers:      10,
+        max_consumers:      1000,
         error_threshold:    10,
         max_idle_duration:  Duration::from_secs(60),
+        max_total_connections: 10000,
     };
 
     // 2) metrics collector (we assume Default is implemented)

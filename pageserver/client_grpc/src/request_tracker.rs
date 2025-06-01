@@ -66,7 +66,7 @@ impl PooledItemFactory<MockStreamReturner> for MockStreamFactory {
             while let Some(request) = receiver.recv().await {
 
                 // Break out of the loop with 1% chance
-                if rand::random::<f32>() < 0.1 {
+                if rand::random::<f32>() < 0.001 {
                     break;
                 }
                 // Generate a random number between 0 and 100
@@ -130,6 +130,7 @@ impl RequestTracker {
             client_cache_options.max_consumers,
             client_cache_options.error_threshold,
             client_cache_options.max_idle_duration,
+            client_cache_options.max_total_connections,
             Some(Arc::clone(&aggregate_metrics)),
         );
         let mut getpage_response_receiver: tokio::sync::mpsc::Receiver<proto::GetPageResponse>;
@@ -188,6 +189,7 @@ impl RequestTracker {
                 client_cache_options.max_consumers,
                 client_cache_options.error_threshold,
                 client_cache_options.max_idle_duration,
+                client_cache_options.max_total_connections,
                 Some(Arc::clone(&aggregate_metrics)),
             ),
             client_cache_options,

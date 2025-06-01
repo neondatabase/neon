@@ -20,8 +20,9 @@ use pageserver_page_api::proto::PageServiceClient;
 use utils::shard::ShardIndex;
 
 use std::fmt::Debug;
-mod client_cache;
+pub mod client_cache;
 pub mod request_tracker;
+pub mod moc;
 
 use metrics::{IntCounterVec, core::Collector};
 use crate::client_cache::{ConnectionPool, PooledItemFactory};
@@ -182,6 +183,7 @@ pub struct ClientCacheOptions {
     pub connect_timeout: Duration,
     pub connect_backoff: Duration,
     pub max_idle_duration: Duration,
+    pub max_total_connections: usize,
     pub max_delay_ms: u64,
     pub drop_rate: f64,
     pub hang_rate: f64,
@@ -201,6 +203,7 @@ impl PageserverClient {
             connect_timeout: Duration::from_secs(5),
             connect_backoff: Duration::from_secs(1),
             max_idle_duration: Duration::from_secs(60),
+            max_total_connections: 100000,
             max_delay_ms: 0,
             drop_rate: 0.0,
             hang_rate: 0.0,
@@ -461,6 +464,7 @@ impl PageserverClient {
                     self.client_cache_options.max_consumers,
                     self.client_cache_options.error_threshold,
                     self.client_cache_options.max_idle_duration,
+                    self.client_cache_options.max_total_connections,
                     self.aggregate_metrics.clone(),
                 );
                 let mut write_pool = self.channels.write().unwrap();
