@@ -556,3 +556,138 @@ impl BeMessage<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use tokio::io::{AsyncWriteExt, duplex};
+    use zerocopy::IntoBytes;
+
+    use crate::pqproto::{FeStartupPacket, read_message, read_startup};
+
+    use super::ProtocolVersion;
+
+    #[tokio::test]
+    async fn reject_large_startup() {
+        // we're going to define a v3.0 startup message with far too many parameters.
+        let mut payload = vec![];
+        // 10001 + 8 bytes.
+        payload.extend_from_slice(&10009_u32.to_be_bytes());
+        payload.extend_from_slice(ProtocolVersion::new(3, 0).as_bytes());
+        payload.resize(10009, b'a');
+
+        let (mut server, mut client) = duplex(128);
+        #[rustfmt::skip]
+        let (server, client) = tokio::join!(
+            async move { read_startup(&mut server).await.unwrap_err() },
+            async move { client.write_all(&payload).await.unwrap_err() },
+        );
+
+        assert_eq!(server.to_string(), "invalid startup message length 10001");
+        assert_eq!(client.to_string(), "broken pipe");
+    }
+
+    #[tokio::test]
+    async fn reject_large_password() {
+        // we're going to define a password message that is far too long.
+        let mut payload = vec![];
+        payload.push(b'p');
+        payload.extend_from_slice(&517_u32.to_be_bytes());
+        payload.resize(518, b'a');
+
+        let (mut server, mut client) = duplex(128);
+        #[rustfmt::skip]
+        let (server, client) = tokio::join!(
+            async move { read_message(&mut server, &mut vec![], 512).await.unwrap_err() },
+            async move { client.write_all(&payload).await.unwrap_err() },
+        );
+
+        assert_eq!(server.to_string(), "invalid message length 513");
+        assert_eq!(client.to_string(), "broken pipe");
+    }
+
+    #[tokio::test]
+    async fn read_startup_message() {
+        let mut payload = vec![];
+        payload.extend_from_slice(&17_u32.to_be_bytes());
+        payload.extend_from_slice(ProtocolVersion::new(3, 0).as_bytes());
+        payload.extend_from_slice(b"abc\0def\0\0");
+
+        let startup = read_startup(&mut Cursor::new(&payload)).await.unwrap();
+        let FeStartupPacket::StartupMessage { version, params } = startup else {
+            panic!("unexpected startup message: {startup:?}");
+        };
+
+        assert_eq!(version.major(), 3);
+        assert_eq!(version.minor(), 0);
+        assert_eq!(params.params, "abc\0def\0");
+    }
+
+    #[tokio::test]
+    async fn read_ssl_message() {
+        let mut payload = vec![];
+        payload.extend_from_slice(&8_u32.to_be_bytes());
+        payload.extend_from_slice(ProtocolVersion::new(1234, 5679).as_bytes());
+
+        let startup = read_startup(&mut Cursor::new(&payload)).await.unwrap();
+        let FeStartupPacket::SslRequest { direct: None } = startup else {
+            panic!("unexpected startup message: {startup:?}");
+        };
+    }
+
+    #[tokio::test]
+    async fn read_tls_message() {
+        // sample client hello taken from <https://tls13.xargs.org/#client-hello>
+        let client_hello = [
+            0x16, 0x03, 0x01, 0x00, 0xf8, 0x01, 0x00, 0x00, 0xf4, 0x03, 0x03, 0x00, 0x01, 0x02,
+            0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+            0x1f, 0x20, 0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb,
+            0xec, 0xed, 0xee, 0xef, 0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9,
+            0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff, 0x00, 0x08, 0x13, 0x02, 0x13, 0x03, 0x13, 0x01,
+            0x00, 0xff, 0x01, 0x00, 0x00, 0xa3, 0x00, 0x00, 0x00, 0x18, 0x00, 0x16, 0x00, 0x00,
+            0x13, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x75, 0x6c, 0x66, 0x68, 0x65,
+            0x69, 0x6d, 0x2e, 0x6e, 0x65, 0x74, 0x00, 0x0b, 0x00, 0x04, 0x03, 0x00, 0x01, 0x02,
+            0x00, 0x0a, 0x00, 0x16, 0x00, 0x14, 0x00, 0x1d, 0x00, 0x17, 0x00, 0x1e, 0x00, 0x19,
+            0x00, 0x18, 0x01, 0x00, 0x01, 0x01, 0x01, 0x02, 0x01, 0x03, 0x01, 0x04, 0x00, 0x23,
+            0x00, 0x00, 0x00, 0x16, 0x00, 0x00, 0x00, 0x17, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x1e,
+            0x00, 0x1c, 0x04, 0x03, 0x05, 0x03, 0x06, 0x03, 0x08, 0x07, 0x08, 0x08, 0x08, 0x09,
+            0x08, 0x0a, 0x08, 0x0b, 0x08, 0x04, 0x08, 0x05, 0x08, 0x06, 0x04, 0x01, 0x05, 0x01,
+            0x06, 0x01, 0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04, 0x00, 0x2d, 0x00, 0x02, 0x01,
+            0x01, 0x00, 0x33, 0x00, 0x26, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20, 0x35, 0x80, 0x72,
+            0xd6, 0x36, 0x58, 0x80, 0xd1, 0xae, 0xea, 0x32, 0x9a, 0xdf, 0x91, 0x21, 0x38, 0x38,
+            0x51, 0xed, 0x21, 0xa2, 0x8e, 0x3b, 0x75, 0xe9, 0x65, 0xd0, 0xd2, 0xcd, 0x16, 0x62,
+            0x54,
+        ];
+
+        let mut cursor = Cursor::new(&client_hello);
+
+        let startup = read_startup(&mut cursor).await.unwrap();
+        let FeStartupPacket::SslRequest {
+            direct: Some(prefix),
+        } = startup
+        else {
+            panic!("unexpected startup message: {startup:?}");
+        };
+
+        // check that no data is lost.
+        assert_eq!(prefix, [0x16, 0x03, 0x01, 0x00, 0xf8, 0x01, 0x00, 0x00]);
+        assert_eq!(cursor.position(), 8);
+    }
+
+    #[tokio::test]
+    async fn read_message_success() {
+        let query = b"Q\0\0\0\x0cSELECT 1Q\0\0\0\x0cSELECT 2";
+        let mut cursor = Cursor::new(&query);
+
+        let mut buf = vec![];
+        let (tag, message) = read_message(&mut cursor, &mut buf, 100).await.unwrap();
+        assert_eq!(tag, b'Q');
+        assert_eq!(message, b"SELECT 1");
+
+        let (tag, message) = read_message(&mut cursor, &mut buf, 100).await.unwrap();
+        assert_eq!(tag, b'Q');
+        assert_eq!(message, b"SELECT 2");
+    }
+}
