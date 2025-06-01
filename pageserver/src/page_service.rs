@@ -3441,9 +3441,7 @@ impl GrpcPageServiceHandler {
         io_concurrency: IoConcurrency,
     ) -> Result<proto::GetPageResponse, tonic::Status> {
         let received_at = Instant::now();
-        let timeline = timeline.upgrade().map_err(|err| match err {
-            HandleUpgradeError::ShutDown => tonic::Status::unavailable("timeline is shutting down"),
-        })?;
+        let timeline = timeline.upgrade()?;
         let ctx = ctx.with_scope_page_service_pagestream(&timeline);
 
         // Validate the request, decorate the span, and convert it to a Pagestream request.
@@ -4060,6 +4058,14 @@ impl From<HandleUpgradeError> for QueryError {
     fn from(e: HandleUpgradeError) -> Self {
         match e {
             HandleUpgradeError::ShutDown => QueryError::Shutdown,
+        }
+    }
+}
+
+impl From<HandleUpgradeError> for tonic::Status {
+    fn from(err: HandleUpgradeError) -> Self {
+        match err {
+            HandleUpgradeError::ShutDown => tonic::Status::unavailable("timeline is shutting down"),
         }
     }
 }
