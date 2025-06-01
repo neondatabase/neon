@@ -184,12 +184,12 @@ pub enum SlruKind {
     MultiXactOffsets,
 }
 
-impl SlruKind {
-    pub fn to_str(&self) -> &'static str {
+impl fmt::Display for SlruKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Clog => "pg_xact",
-            Self::MultiXactMembers => "pg_multixact/members",
-            Self::MultiXactOffsets => "pg_multixact/offsets",
+            Self::Clog => write!(f, "pg_xact"),
+            Self::MultiXactMembers => write!(f, "pg_multixact/members"),
+            Self::MultiXactOffsets => write!(f, "pg_multixact/offsets"),
         }
     }
 }

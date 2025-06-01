@@ -272,7 +272,7 @@ where
     async fn flush(&mut self) -> Result<(), BasebackupError> {
         let nblocks = self.buf.len() / BLCKSZ as usize;
         let (kind, segno) = self.current_segment.take().unwrap();
-        let segname = format!("{}/{:>04X}", kind.to_str(), segno);
+        let segname = format!("{kind}/{segno:>04X}");
         let header = new_tar_header(&segname, self.buf.len() as u64)?;
         self.ar
             .append(&header, self.buf.as_slice())

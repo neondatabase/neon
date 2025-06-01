@@ -3435,26 +3435,36 @@ impl GrpcPageServiceHandler {
     ///
     /// NB: errors will terminate the stream. Per-request errors should return a GetPageResponse
     /// with an appropriate status code instead.
-    async fn handle_get_page_request(
+    #[instrument(skip_all, fields(req_id, rel, blkno, blks, req_lsn, mod_lsn))]
+    async fn get_page(
         ctx: &RequestContext,
         timeline: &WeakHandle<TenantManagerTypes>,
         req: proto::GetPageRequest,
         io_concurrency: IoConcurrency,
     ) -> Result<proto::GetPageResponse, tonic::Status> {
         let received_at = Instant::now();
+        let req: page_api::GetPageRequest = req.try_into()?;
+
+        span_record!(
+            req_id = %req.request_id,
+            rel = %req.rel,
+            blkno = %req.block_numbers[0],
+            blks = %req.block_numbers.len(),
+            lsn = %req.read_lsn,
+        );
+
         let timeline = timeline.upgrade().map_err(|err| match err {
             HandleUpgradeError::ShutDown => tonic::Status::unavailable("timeline is shutting down"),
         })?;
         let ctx = ctx.with_scope_page_service_pagestream(&timeline);
 
-        // Validate the request and convert it to a Pagestream request.
-        let req: page_api::GetPageRequest = req.try_into()?;
-
         let effective_lsn = match PageServerHandler::effective_request_lsn(
             &timeline,
             timeline.get_last_record_lsn(),
             req.read_lsn.request_lsn,
-            req.read_lsn.not_modified_since_lsn.unwrap_or_default(),
+            req.read_lsn
+                .not_modified_since_lsn
+                .unwrap_or(req.read_lsn.request_lsn),
             &timeline.get_applied_gc_cutoff_lsn(),
         ) {
             Ok(lsn) => lsn,
@@ -3523,6 +3533,7 @@ impl GrpcPageServiceHandler {
 
 /// Implements the gRPC page service.
 ///
+/// TODO: cancellation.
 /// TODO: when the libpq impl is removed, remove the Pagestream types and inline the handler code.
 #[tonic::async_trait]
 impl proto::PageService for GrpcPageServiceHandler {
@@ -3533,7 +3544,7 @@ impl proto::PageService for GrpcPageServiceHandler {
     type GetPagesStream =
         Pin<Box<dyn Stream<Item = Result<proto::GetPageResponse, tonic::Status>> + Send>>;
 
-    #[instrument(skip_all)]
+    #[instrument(skip_all, fields(rel, lsn))]
     async fn check_rel_exists(
         &self,
         req: tonic::Request<proto::CheckRelExistsRequest>,
@@ -3542,9 +3553,12 @@ impl proto::PageService for GrpcPageServiceHandler {
         let timeline = self.get_request_timeline(&req).await?;
         let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
 
-        // Validate the request and convert it to a Pagestream request.
+        // Validate the request, decorate the span, and convert it to a Pagestream request.
         Self::ensure_shard_zero(&timeline)?;
         let req: page_api::CheckRelExistsRequest = req.into_inner().try_into()?;
+
+        span_record!(rel=%req.rel, lsn=%req.read_lsn);
+
         let req = PagestreamExistsRequest {
             hdr: Self::make_hdr(req.read_lsn, 0),
             rel: req.rel,
@@ -3564,7 +3578,7 @@ impl proto::PageService for GrpcPageServiceHandler {
     }
 
     // TODO: ensure clients use gzip compression for the stream.
-    #[instrument(skip_all)]
+    #[instrument(skip_all, fields(lsn))]
     async fn get_base_backup(
         &self,
         req: tonic::Request<proto::GetBaseBackupRequest>,
@@ -3575,20 +3589,22 @@ impl proto::PageService for GrpcPageServiceHandler {
         let timeline = self.get_request_timeline(&req).await?;
         let ctx = self.ctx.with_scope_timeline(&timeline);
 
+        // Validate the request, decorate the span, and wait for the LSN to arrive.
+        //
+        // TODO: this requires a read LSN, is that ok?
+        Self::ensure_shard_zero(&timeline)?;
         if timeline.is_archived() == Some(true) {
             return Err(tonic::Status::failed_precondition("timeline is archived"));
         }
-
-        // Validate the request and wait for the LSN to arrive.
-        //
-        // TODO: this requires a read LSN, is that ok?
         let req: page_api::GetBaseBackupRequest = req.into_inner().try_into()?;
+
+        span_record!(lsn=%req.read_lsn);
 
         let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         timeline
             .wait_lsn(
                 req.read_lsn.request_lsn,
-                WaitLsnWaiter::BaseBackupCache,
+                WaitLsnWaiter::PageService,
                 WaitLsnTimeout::Default,
                 &ctx,
             )
@@ -3602,7 +3618,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         // Spawn a task to run the basebackup.
         //
         // TODO: do we need to support full base backups, for debugging?
-        // TODO: cancellation.
+        let span = Span::current();
         let (mut simplex_read, mut simplex_write) = tokio::io::simplex(CHUNK_SIZE);
         let jh = tokio::spawn(async move {
             let result = basebackup::send_basebackup_tarball(
@@ -3614,6 +3630,7 @@ impl proto::PageService for GrpcPageServiceHandler {
                 req.replica,
                 &ctx,
             )
+            .instrument(span) // propagate request span
             .await;
             simplex_write.shutdown().await.map_err(|err| {
                 BasebackupError::Server(anyhow!("simplex shutdown failed: {err}"))
@@ -3647,7 +3664,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         Ok(tonic::Response::new(Box::pin(chunks)))
     }
 
-    #[instrument(skip_all)]
+    #[instrument(skip_all, fields(db_oid, lsn))]
     async fn get_db_size(
         &self,
         req: tonic::Request<proto::GetDbSizeRequest>,
@@ -3656,9 +3673,12 @@ impl proto::PageService for GrpcPageServiceHandler {
         let timeline = self.get_request_timeline(&req).await?;
         let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
 
-        // Validate the request and convert it to a Pagestream request.
+        // Validate the request, decorate the span, and convert it to a Pagestream request.
         Self::ensure_shard_zero(&timeline)?;
         let req: page_api::GetDbSizeRequest = req.into_inner().try_into()?;
+
+        span_record!(db_oid=%req.db_oid, lsn=%req.read_lsn);
+
         let req = PagestreamDbSizeRequest {
             hdr: Self::make_hdr(req.read_lsn, 0),
             dbnode: req.db_oid,
@@ -3703,8 +3723,8 @@ impl proto::PageService for GrpcPageServiceHandler {
                 .downgrade();
             while let Some(req) = reqs.message().await? {
                 // TODO: implement IoConcurrency sidecar.
-                yield Self::handle_get_page_request(&ctx, &timeline, req, IoConcurrency::Sequential)
-                    .instrument(span.clone())
+                yield Self::get_page(&ctx, &timeline, req, IoConcurrency::Sequential)
+                    .instrument(span.clone()) // propagate request span
                     .await?
             }
         };
@@ -3712,7 +3732,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         Ok(tonic::Response::new(Box::pin(resps)))
     }
 
-    #[instrument(skip_all)]
+    #[instrument(skip_all, fields(rel, lsn))]
     async fn get_rel_size(
         &self,
         req: tonic::Request<proto::GetRelSizeRequest>,
@@ -3721,9 +3741,12 @@ impl proto::PageService for GrpcPageServiceHandler {
         let timeline = self.get_request_timeline(&req).await?;
         let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
 
-        // Validate the request and convert it to a Pagestream request.
+        // Validate the request, decorate the span, and convert it to a Pagestream request.
         Self::ensure_shard_zero(&timeline)?;
         let req: page_api::GetRelSizeRequest = req.into_inner().try_into()?;
+
+        span_record!(rel=%req.rel, lsn=%req.read_lsn);
+
         let req = PagestreamNblocksRequest {
             hdr: Self::make_hdr(req.read_lsn, 0),
             rel: req.rel,
@@ -3742,7 +3765,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         Ok(tonic::Response::new(resp.into()))
     }
 
-    #[instrument(skip_all)]
+    #[instrument(skip_all, fields(kind, segno, lsn))]
     async fn get_slru_segment(
         &self,
         req: tonic::Request<proto::GetSlruSegmentRequest>,
@@ -3751,9 +3774,12 @@ impl proto::PageService for GrpcPageServiceHandler {
         let timeline = self.get_request_timeline(&req).await?;
         let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
 
-        // Validate the request and convert it to a Pagestream request.
+        // Validate the request, decorate the span, and convert it to a Pagestream request.
         Self::ensure_shard_zero(&timeline)?;
         let req: page_api::GetSlruSegmentRequest = req.into_inner().try_into()?;
+
+        span_record!(kind=%req.kind, segno=%req.segno, lsn=%req.read_lsn);
+
         let req = PagestreamGetSlruSegmentRequest {
             hdr: Self::make_hdr(req.read_lsn, 0),
             kind: req.kind as u8,
