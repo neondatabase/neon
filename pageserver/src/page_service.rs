@@ -774,29 +774,22 @@ impl PageStreamError {
 impl From<PageStreamError> for tonic::Status {
     fn from(err: PageStreamError) -> Self {
         use tonic::Code;
-        let code = match &err {
+        let message = err.to_string();
+        let code = match err {
             PageStreamError::Reconnect(_) => Code::Unavailable,
             PageStreamError::Shutdown => Code::Unavailable,
             PageStreamError::Read(err) => match err {
                 PageReconstructError::Cancelled => Code::Unavailable,
                 PageReconstructError::MissingKey(_) => Code::NotFound,
-                PageReconstructError::AncestorLsnTimeout(err) => match err {
-                    WaitLsnError::Timeout(_) => Code::Internal,
-                    WaitLsnError::BadState(_) => Code::Internal,
-                    WaitLsnError::Shutdown => Code::Unavailable,
-                },
+                PageReconstructError::AncestorLsnTimeout(err) => tonic::Status::from(err).code(),
                 PageReconstructError::Other(_) => Code::Internal,
                 PageReconstructError::WalRedo(_) => Code::Internal,
             },
-            PageStreamError::LsnTimeout(err) => match err {
-                WaitLsnError::Timeout(_) => Code::Internal,
-                WaitLsnError::BadState(_) => Code::Internal,
-                WaitLsnError::Shutdown => Code::Unavailable,
-            },
+            PageStreamError::LsnTimeout(err) => tonic::Status::from(err).code(),
             PageStreamError::NotFound(_) => Code::NotFound,
             PageStreamError::BadRequest(_) => Code::InvalidArgument,
         };
-        tonic::Status::new(code, format!("{err}"))
+        tonic::Status::new(code, message)
     }
 }
 
@@ -4009,6 +4002,29 @@ impl From<GetActiveTimelineError> for QueryError {
     }
 }
 
+impl From<GetActiveTimelineError> for tonic::Status {
+    fn from(err: GetActiveTimelineError) -> Self {
+        let message = err.to_string();
+        let code = match err {
+            GetActiveTimelineError::Tenant(err) => tonic::Status::from(err).code(),
+            GetActiveTimelineError::Timeline(err) => tonic::Status::from(err).code(),
+        };
+        tonic::Status::new(code, message)
+    }
+}
+
+impl From<GetTimelineError> for tonic::Status {
+    fn from(err: GetTimelineError) -> Self {
+        use tonic::Code;
+        let code = match &err {
+            GetTimelineError::NotFound { .. } => Code::NotFound,
+            GetTimelineError::NotActive { .. } => Code::Unavailable,
+            GetTimelineError::ShuttingDown => Code::Unavailable,
+        };
+        tonic::Status::new(code, err.to_string())
+    }
+}
+
 impl From<GetActiveTenantError> for QueryError {
     fn from(e: GetActiveTenantError) -> Self {
         match e {
@@ -4025,33 +4041,26 @@ impl From<GetActiveTenantError> for QueryError {
     }
 }
 
+impl From<GetActiveTenantError> for tonic::Status {
+    fn from(err: GetActiveTenantError) -> Self {
+        use tonic::Code;
+        let code = match &err {
+            GetActiveTenantError::Broken(_) => Code::Internal,
+            GetActiveTenantError::Cancelled => Code::Unavailable,
+            GetActiveTenantError::NotFound(_) => Code::NotFound,
+            GetActiveTenantError::SwitchedTenant => Code::Unavailable,
+            GetActiveTenantError::WaitForActiveTimeout { .. } => Code::Unavailable,
+            GetActiveTenantError::WillNotBecomeActive(_) => Code::Unavailable,
+        };
+        tonic::Status::new(code, err.to_string())
+    }
+}
+
 impl From<HandleUpgradeError> for QueryError {
     fn from(e: HandleUpgradeError) -> Self {
         match e {
             HandleUpgradeError::ShutDown => QueryError::Shutdown,
         }
-    }
-}
-
-impl From<GetActiveTimelineError> for tonic::Status {
-    fn from(err: GetActiveTimelineError) -> Self {
-        use tonic::Code;
-        let code = match &err {
-            GetActiveTimelineError::Tenant(err) => match err {
-                GetActiveTenantError::Broken(_) => Code::Internal,
-                GetActiveTenantError::Cancelled => Code::Unavailable,
-                GetActiveTenantError::NotFound(_) => Code::NotFound,
-                GetActiveTenantError::SwitchedTenant => Code::Unavailable,
-                GetActiveTenantError::WaitForActiveTimeout { .. } => Code::Unavailable,
-                GetActiveTenantError::WillNotBecomeActive(_) => Code::Unavailable,
-            },
-            GetActiveTimelineError::Timeline(err) => match err {
-                GetTimelineError::NotFound { .. } => Code::NotFound,
-                GetTimelineError::NotActive { .. } => Code::Unavailable,
-                GetTimelineError::ShuttingDown => Code::Unavailable,
-            },
-        };
-        tonic::Status::new(code, format!("{err}"))
     }
 }
 

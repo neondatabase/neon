@@ -85,7 +85,7 @@ impl From<BasebackupError> for tonic::Status {
             BasebackupError::Server(_) => Code::Internal,
             BasebackupError::Shutdown => Code::Unavailable,
         };
-        tonic::Status::new(code, format!("{err}"))
+        tonic::Status::new(code, err.to_string())
     }
 }
 

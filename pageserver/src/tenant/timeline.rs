@@ -958,7 +958,7 @@ impl From<WaitLsnError> for tonic::Status {
             WaitLsnError::BadState(_) => Code::Internal,
             WaitLsnError::Shutdown => Code::Unavailable,
         };
-        tonic::Status::new(code, format!("{err}"))
+        tonic::Status::new(code, err.to_string())
     }
 }
 
