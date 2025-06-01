@@ -245,7 +245,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     session.write_cancel_key(node.cancel_closure.clone())?;
 
     prepare_client_connection(&node, *session.key(), &mut stream);
-    let stream = stream.take_over().await?;
+    let stream = stream.flush_and_into_inner().await?;
 
     Ok(Some(ProxyPassthrough {
         client: stream,

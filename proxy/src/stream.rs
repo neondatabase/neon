@@ -168,8 +168,7 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
     /// Flush the output buffer into the underlying stream.
     ///
     /// This is cancel safe.
-    pub async fn take_over(mut self) -> io::Result<S> {
-        self.stream.write_all_buf(&mut self.write).await?;
+    pub async fn flush_and_into_inner(mut self) -> io::Result<S> {
         self.flush().await?;
         Ok(self.stream)
     }

@@ -6,7 +6,6 @@ use std::io::{self, Cursor};
 use bytes::{Buf, BufMut};
 use itertools::Itertools;
 use rand::distributions::{Distribution, Standard};
-use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use zerocopy::{FromBytes, Immutable, IntoBytes, big_endian};
 
@@ -109,22 +108,9 @@ where
                 ));
             }
 
-            #[derive(Clone, Copy, FromBytes)]
-            #[repr(C)]
-            struct Cancel {
-                backend_pid: big_endian::I32,
-                cancel_key: big_endian::I32,
-            }
-
-            let Cancel {
-                backend_pid,
-                cancel_key,
-            } = read!(stream => Cancel);
-
-            Ok(FeStartupPacket::CancelRequest(CancelKeyData {
-                backend_pid: backend_pid.get(),
-                cancel_key: cancel_key.get(),
-            }))
+            Ok(FeStartupPacket::CancelRequest(
+                read!(stream => CancelKeyData),
+            ))
         }
         NEGOTIATE_SSL_CODE => {
             // Requested upgrade to SSL (aka TLS)
@@ -364,29 +350,18 @@ impl StartupMessageParams {
     }
 }
 
-// TODO: can we not use i32s here? we would need to patch serialize/deserialize impl accordingly since
-// we store this as json in redis...
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
-pub struct CancelKeyData {
-    pub backend_pid: i32,
-    pub cancel_key: i32,
-}
+/// Cancel keys usually are represented as PID+SecretKey, but to proxy they're just
+/// opaque bytes.
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, FromBytes, IntoBytes, Immutable)]
+pub struct CancelKeyData(pub big_endian::U64);
 
 pub fn id_to_cancel_key(id: u64) -> CancelKeyData {
-    CancelKeyData {
-        backend_pid: (id >> 32) as i32,
-        cancel_key: (id & 0xffff_ffff) as i32,
-    }
+    CancelKeyData(big_endian::U64::new(id))
 }
 
 impl fmt::Display for CancelKeyData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let hi = (self.backend_pid as u64) << 32;
-        let lo = (self.cancel_key as u64) & 0xffff_ffff;
-        let id = hi | lo;
-
-        // This format is more compact and might work better for logs.
+        let id = self.0;
         f.debug_tuple("CancelKeyData")
             .field(&format_args!("{id:x}"))
             .finish()
@@ -394,10 +369,7 @@ impl fmt::Display for CancelKeyData {
 }
 impl Distribution<CancelKeyData> for Standard {
     fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> CancelKeyData {
-        CancelKeyData {
-            backend_pid: rng.r#gen(),
-            cancel_key: rng.r#gen(),
-        }
+        id_to_cancel_key(rng.r#gen())
     }
 }
 
@@ -463,11 +435,9 @@ impl BeMessage<'_> {
                 }
             }
 
+            // <https://www.postgresql.org/docs/current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-BACKENDKEYDATA>
             BeMessage::BackendKeyData(key_data) => {
-                buf.write_raw(8, b'K', |buf| {
-                    buf.put_i32(key_data.backend_pid);
-                    buf.put_i32(key_data.cancel_key);
-                });
+                buf.write_raw(8, b'K', |buf| buf.put_slice(key_data.as_bytes()));
             }
 
             // <https://www.postgresql.org/docs/current/protocol-error-fields.html>

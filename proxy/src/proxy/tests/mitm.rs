@@ -49,7 +49,7 @@ async fn proxy_mitm(
         };
 
         let mut end_server = tokio_util::codec::Framed::new(end_server, PgFrame);
-        let end_client = end_client.take_over().await.unwrap();
+        let end_client = end_client.flush_and_into_inner().await.unwrap();
         let mut end_client = tokio_util::codec::Framed::new(end_client, PgFrame);
 
         // give the end_server the startup parameters
