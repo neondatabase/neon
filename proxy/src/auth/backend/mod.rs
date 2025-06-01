@@ -263,15 +263,7 @@ async fn auth_quirks(
     .await
     {
         Ok(keys) => Ok((keys, access_controls)),
-        Err(e) => {
-            if e.is_password_failed() {
-                // The password could have been changed, so we invalidate the cache.
-                // We should only invalidate the cache if the TTL might have expired.
-
-                // TODO: cached_entry.invalidate();
-            }
-            Err(e)
-        }
+        Err(e) => Err(e),
     }
 }
 
