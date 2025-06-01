@@ -81,7 +81,7 @@ use crate::tenant::mgr::{
     GetActiveTenantError, GetTenantError, ShardResolveResult, ShardSelector, TenantManager,
 };
 use crate::tenant::storage_layer::IoConcurrency;
-use crate::tenant::timeline::handle::{HandleUpgradeError, WeakHandle};
+use crate::tenant::timeline::handle::{Handle, HandleUpgradeError, WeakHandle};
 use crate::tenant::timeline::{self, WaitLsnError, WaitLsnTimeout, WaitLsnWaiter};
 use crate::tenant::{GetTimelineError, PageReconstructError, Timeline};
 use crate::{CancellableTask, PERF_TRACE_TARGET, timed_after_cancellation};
@@ -550,7 +550,7 @@ impl TimelineHandles {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
-    ) -> Result<timeline::handle::Handle<TenantManagerTypes>, GetActiveTimelineError> {
+    ) -> Result<Handle<TenantManagerTypes>, GetActiveTimelineError> {
         if *self.wrapper.tenant_id.get_or_init(|| tenant_id) != tenant_id {
             return Err(GetActiveTimelineError::Tenant(
                 GetActiveTenantError::SwitchedTenant,
@@ -1432,7 +1432,7 @@ impl PageServerHandler {
 
     /// Starts a SmgrOpTimer at received_at and throttles the request.
     async fn record_op_start_and_throttle(
-        shard: &timeline::handle::Handle<TenantManagerTypes>,
+        shard: &Handle<TenantManagerTypes>,
         op: metrics::SmgrQueryType,
         received_at: Instant,
     ) -> Result<SmgrOpTimer, QueryError> {
@@ -3406,7 +3406,7 @@ impl GrpcPageServiceHandler {
     async fn get_request_timeline(
         &self,
         req: &tonic::Request<impl Any>,
-    ) -> Result<timeline::handle::Handle<TenantManagerTypes>, GetActiveTimelineError> {
+    ) -> Result<Handle<TenantManagerTypes>, GetActiveTimelineError> {
         let ttid = *Self::extract::<TenantTimelineId>(req);
         let shard_index = *Self::extract::<ShardIndex>(req);
         let shard_selector = ShardSelector::Known(shard_index);
@@ -3424,7 +3424,7 @@ impl GrpcPageServiceHandler {
     /// TODO: move timer construction to ObservabilityLayer (see TODO there).
     /// TODO: decouple rate limiting (middleware?), and return SlowDown errors instead.
     async fn record_op_start_and_throttle(
-        timeline: &timeline::handle::Handle<TenantManagerTypes>,
+        timeline: &Handle<TenantManagerTypes>,
         op: metrics::SmgrQueryType,
         received_at: Instant,
     ) -> Result<SmgrOpTimer, tonic::Status> {
