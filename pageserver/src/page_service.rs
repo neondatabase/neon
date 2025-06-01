@@ -3373,10 +3373,10 @@ pub struct GrpcPageServiceHandler {
 
 impl GrpcPageServiceHandler {
     /// Errors if the request is executed on a non-zero shard. Only shard 0 has a complete view of
-    /// relations and their sizes, as well as SLRU segments and other data.
+    /// relations and their sizes, as well as SLRU segments and similar data.
     #[allow(clippy::result_large_err)]
-    fn ensure_shard_zero(req: &tonic::Request<impl Any>) -> Result<(), tonic::Status> {
-        match extract::<ShardIndex>(req).shard_number.0 {
+    fn ensure_shard_zero(timeline: &Handle<TenantManagerTypes>) -> Result<(), tonic::Status> {
+        match timeline.get_shard_index().shard_number.0 {
             0 => Ok(()),
             shard => Err(tonic::Status::invalid_argument(format!(
                 "request must execute on shard zero (is shard {shard})",
@@ -3543,7 +3543,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
 
         // Validate the request and convert it to a Pagestream request.
-        Self::ensure_shard_zero(&req)?;
+        Self::ensure_shard_zero(&timeline)?;
         let req: page_api::CheckRelExistsRequest = req.into_inner().try_into()?;
         let req = PagestreamExistsRequest {
             hdr: Self::make_hdr(req.read_lsn, 0),
@@ -3657,7 +3657,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
 
         // Validate the request and convert it to a Pagestream request.
-        Self::ensure_shard_zero(&req)?;
+        Self::ensure_shard_zero(&timeline)?;
         let req: page_api::GetDbSizeRequest = req.into_inner().try_into()?;
         let req = PagestreamDbSizeRequest {
             hdr: Self::make_hdr(req.read_lsn, 0),
@@ -3722,7 +3722,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
 
         // Validate the request and convert it to a Pagestream request.
-        Self::ensure_shard_zero(&req)?;
+        Self::ensure_shard_zero(&timeline)?;
         let req: page_api::GetRelSizeRequest = req.into_inner().try_into()?;
         let req = PagestreamNblocksRequest {
             hdr: Self::make_hdr(req.read_lsn, 0),
@@ -3752,7 +3752,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
 
         // Validate the request and convert it to a Pagestream request.
-        Self::ensure_shard_zero(&req)?;
+        Self::ensure_shard_zero(&timeline)?;
         let req: page_api::GetSlruSegmentRequest = req.into_inner().try_into()?;
         let req = PagestreamGetSlruSegmentRequest {
             hdr: Self::make_hdr(req.read_lsn, 0),
