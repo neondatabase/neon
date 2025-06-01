@@ -3460,6 +3460,7 @@ impl GrpcPageServiceHandler {
         })?;
         let ctx = ctx.with_scope_page_service_pagestream(&timeline);
 
+        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn(); // hold guard
         let effective_lsn = match PageServerHandler::effective_request_lsn(
             &timeline,
             timeline.get_last_record_lsn(),
@@ -3467,7 +3468,7 @@ impl GrpcPageServiceHandler {
             req.read_lsn
                 .not_modified_since_lsn
                 .unwrap_or(req.read_lsn.request_lsn),
-            &timeline.get_applied_gc_cutoff_lsn(),
+            &latest_gc_cutoff_lsn,
         ) {
             Ok(lsn) => lsn,
             Err(err) => return err.into_get_page_response(req.request_id),
