@@ -19,7 +19,7 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use itertools::Itertools;
 use pageserver_api::controller_api::{
-    AvailabilityZone, MetadataHealthRecord, NodeSchedulingPolicy, PlacementPolicy,
+    AvailabilityZone, MetadataHealthRecord, NodeLifecycle, NodeSchedulingPolicy, PlacementPolicy,
     SafekeeperDescribeResponse, ShardSchedulingPolicy, SkSchedulingPolicy,
 };
 use pageserver_api::models::{ShardImportStatus, TenantConfig};
@@ -373,19 +373,22 @@ impl Persistence {
 
     /// At startup, populate the list of nodes which our shards may be placed on
     pub(crate) async fn list_nodes(&self) -> DatabaseResult<Vec<NodePersistence>> {
-        let nodes: Vec<NodePersistence> = self
+        use crate::schema::nodes::dsl::*;
+
+        let result: Vec<NodePersistence> = self
             .with_measured_conn(DatabaseOperation::ListNodes, move |conn| {
                 Box::pin(async move {
                     Ok(crate::schema::nodes::table
+                        .filter(lifecycle.ne(String::from(NodeLifecycle::Deleted)))
                         .load::<NodePersistence>(conn)
                         .await?)
                 })
             })
             .await?;
 
-        tracing::info!("list_nodes: loaded {} nodes", nodes.len());
+        tracing::info!("list_nodes: loaded {} nodes", result.len());
 
-        Ok(nodes)
+        Ok(result)
     }
 
     pub(crate) async fn update_node<V>(
@@ -404,6 +407,7 @@ impl Persistence {
                 Box::pin(async move {
                     let updated = diesel::update(nodes)
                         .filter(node_id.eq(input_node_id.0 as i64))
+                        .filter(lifecycle.ne(String::from(NodeLifecycle::Deleted)))
                         .set(values)
                         .execute(conn)
                         .await?;
@@ -545,16 +549,10 @@ impl Persistence {
 
     pub(crate) async fn delete_node(&self, del_node_id: NodeId) -> DatabaseResult<()> {
         use crate::schema::nodes::dsl::*;
-        self.with_measured_conn(DatabaseOperation::DeleteNode, move |conn| {
-            Box::pin(async move {
-                diesel::delete(nodes)
-                    .filter(node_id.eq(del_node_id.0 as i64))
-                    .execute(conn)
-                    .await?;
-
-                Ok(())
-            })
-        })
+        self.update_node(
+            del_node_id,
+            lifecycle.eq(String::from(NodeLifecycle::Deleted)),
+        )
         .await
     }
 
@@ -591,6 +589,7 @@ impl Persistence {
                     // then reset it's node scheduling policy to active.
                     diesel::update(nodes)
                         .filter(node_id.eq(input_node_id.0 as i64))
+                        .filter(lifecycle.ne(String::from(NodeLifecycle::Deleted)))
                         .filter(
                             scheduling_policy
                                 .eq(String::from(NodeSchedulingPolicy::PauseForRestart))
