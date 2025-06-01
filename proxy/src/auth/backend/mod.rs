@@ -31,6 +31,7 @@ use crate::control_plane::{
 };
 use crate::intern::EndpointIdInt;
 use crate::metrics::Metrics;
+use crate::pqproto::BeMessage;
 use crate::protocol2::ConnectionInfoExtra;
 use crate::proxy::NeonOptions;
 use crate::proxy::connect_compute::ComputeConnectBackend;
@@ -402,7 +403,7 @@ async fn authenticate_with_secret(
         };
 
         // we have authenticated the password
-        client.write_message_noflush(&pq_proto::BeMessage::AuthenticationOk)?;
+        client.write_message(BeMessage::AuthenticationOk);
 
         return Ok(ComputeCredentials { info, keys });
     }
@@ -702,7 +703,7 @@ mod tests {
     #[tokio::test]
     async fn auth_quirks_scram() {
         let (mut client, server) = tokio::io::duplex(1024);
-        let mut stream = PqStream::new(Stream::from_raw(server));
+        let mut stream = PqStream::new_skip_handshake(Stream::from_raw(server));
 
         let ctx = RequestContext::test();
         let api = Auth {
@@ -784,7 +785,7 @@ mod tests {
     #[tokio::test]
     async fn auth_quirks_cleartext() {
         let (mut client, server) = tokio::io::duplex(1024);
-        let mut stream = PqStream::new(Stream::from_raw(server));
+        let mut stream = PqStream::new_skip_handshake(Stream::from_raw(server));
 
         let ctx = RequestContext::test();
         let api = Auth {
@@ -838,7 +839,7 @@ mod tests {
     #[tokio::test]
     async fn auth_quirks_password_hack() {
         let (mut client, server) = tokio::io::duplex(1024);
-        let mut stream = PqStream::new(Stream::from_raw(server));
+        let mut stream = PqStream::new_skip_handshake(Stream::from_raw(server));
 
         let ctx = RequestContext::test();
         let api = Auth {

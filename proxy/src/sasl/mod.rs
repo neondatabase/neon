@@ -14,7 +14,7 @@ use std::io;
 
 pub(crate) use channel_binding::ChannelBinding;
 pub(crate) use messages::FirstMessage;
-pub(crate) use stream::{Outcome, SaslStream};
+pub(crate) use stream::{Outcome, authenticate};
 use thiserror::Error;
 
 use crate::error::{ReportableError, UserFacingError};
@@ -22,6 +22,9 @@ use crate::error::{ReportableError, UserFacingError};
 /// Fine-grained auth errors help in writing tests.
 #[derive(Error, Debug)]
 pub(crate) enum Error {
+    #[error("Unsupported authentication method: {0}")]
+    BadAuthMethod(Box<str>),
+
     #[error("Channel binding failed: {0}")]
     ChannelBindingFailed(&'static str),
 
@@ -54,6 +57,7 @@ impl UserFacingError for Error {
 impl ReportableError for Error {
     fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self {
+            Error::BadAuthMethod(_) => crate::error::ErrorKind::User,
             Error::ChannelBindingFailed(_) => crate::error::ErrorKind::User,
             Error::ChannelBindingBadMethod(_) => crate::error::ErrorKind::User,
             Error::BadClientMessage(_) => crate::error::ErrorKind::User,

@@ -2,11 +2,9 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use futures::StreamExt;
-use pq_proto::CancelKeyData;
 use redis::aio::PubSub;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 use super::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use crate::cache::project_info::ProjectInfoCache;
@@ -98,14 +96,6 @@ pub(crate) struct AllowedVpcEndpointsUpdatedForProjects {
 pub(crate) struct PasswordUpdate {
     project_id: ProjectIdInt,
     role_name: RoleNameInt,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub(crate) struct CancelSession {
-    pub(crate) region_id: Option<String>,
-    pub(crate) cancel_key_data: CancelKeyData,
-    pub(crate) session_id: Uuid,
-    pub(crate) peer_addr: Option<std::net::IpAddr>,
 }
 
 fn deserialize_json_string<'de, D, T>(deserializer: D) -> Result<T, D::Error>
