@@ -19,11 +19,13 @@ if [[ ${RUN_PARALLEL:-off} = on ]]; then
   READY_CONTAINER=pcomputes_are_ready
   READY_MESSAGE="All pcomputes are started"
   COMPUTES=$(echo pcompute{1..3})
+  PARALLEL_FLAG=-p
 else
   export COMPOSE_PROFILES=test-extensions
   READY_CONTAINER=compute_is_ready
   READY_MESSAGE="accepting connections"
   COMPUTES=compute
+  PARALLEL_FLAG=
 fi
 cd "$(dirname "${0}")"
 PSQL_OPTION="-h localhost -U cloud_admin -p 55433 -d postgres"
@@ -41,6 +43,8 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
     cleanup
     PG_TEST_VERSION=$((pg_version < 16 ? 16 : pg_version))
     PG_VERSION=${pg_version} PG_TEST_VERSION=${PG_TEST_VERSION} docker compose up --quiet-pull --build -d
+    # XXX remove before merge
+    docker compose cp ext-src neon-test-extensions:/
 
     echo "wait until the compute is ready. timeout after 60s. "
     cnt=0
@@ -89,7 +93,7 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         # We are running tests now
         rm -f testout.txt testout_contrib.txt
         docker compose exec -e USE_PGXS=1 -e SKIP=timescaledb-src,rdkit-src,pg_jsonschema-src,kq_imcx-src,wal2json_2_5-src,rag_jina_reranker_v1_tiny_en-src,rag_bge_small_en_v15-src \
-        neon-test-extensions /run-tests.sh /ext-src | tee testout.txt && EXT_SUCCESS=1 || EXT_SUCCESS=0
+        neon-test-extensions /run-tests.sh ${PARALLEL_FLAG} /ext-src | tee testout.txt && EXT_SUCCESS=1 || EXT_SUCCESS=0
         docker compose exec -e SKIP=start-scripts,postgres_fdw,ltree_plpython,jsonb_plpython,jsonb_plperl,hstore_plpython,hstore_plperl,dblink,bool_plperl \
         neon-test-extensions /run-tests.sh /postgres/contrib | tee testout_contrib.txt && CONTRIB_SUCCESS=1 || CONTRIB_SUCCESS=0
         if [[ ${EXT_SUCCESS} -eq 0 || ${CONTRIB_SUCCESS} -eq 0 ]]; then
