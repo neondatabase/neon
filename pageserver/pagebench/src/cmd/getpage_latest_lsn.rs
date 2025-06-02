@@ -509,8 +509,9 @@ impl GrpcClient {
     async fn new(connstring: String, ttid: TenantTimelineId) -> anyhow::Result<Self> {
         let mut client = pageserver_page_api::proto::PageServiceClient::connect(connstring).await?;
 
-        // The channel has a buffer size of 1, since 0 is not allowed. It does not matter, because
-        // the benchmark will control the queue depth (i.e. in-flight requests) anyway.
+        // The channel has a buffer size of 1, since 0 is not allowed. It does not matter, since the
+        // benchmark will control the queue depth (i.e. in-flight requests) anyway, and requests are
+        // buffered by Tonic and the OS too.
         let (req_tx, req_rx) = tokio::sync::mpsc::channel(1);
         let req_stream = tokio_stream::wrappers::ReceiverStream::new(req_rx);
         let mut req = tonic::Request::new(req_stream);
