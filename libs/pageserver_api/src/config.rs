@@ -713,9 +713,9 @@ impl Default for ConfigToml {
             enable_tls_page_service_api: false,
             dev_mode: false,
             timeline_import_config: TimelineImportConfig {
-                import_job_concurrency: NonZeroUsize::new(64).unwrap(),
-                import_job_soft_size_limit: NonZeroUsize::new(512 * 1024 * 1024).unwrap(),
-                import_job_checkpoint_threshold: NonZeroUsize::new(64).unwrap(),
+                import_job_concurrency: NonZeroUsize::new(32).unwrap(),
+                import_job_soft_size_limit: NonZeroUsize::new(256 * 1024 * 1024).unwrap(),
+                import_job_checkpoint_threshold: NonZeroUsize::new(32).unwrap(),
             },
             basebackup_cache_config: None,
             posthog_config: None,
