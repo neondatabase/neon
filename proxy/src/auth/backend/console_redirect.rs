@@ -2,7 +2,6 @@ use std::fmt;
 
 use async_trait::async_trait;
 use postgres_client::config::SslMode;
-use pq_proto::BeMessage as Be;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, info_span};
@@ -16,6 +15,7 @@ use crate::context::RequestContext;
 use crate::control_plane::client::cplane_proxy_v1;
 use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
 use crate::error::{ReportableError, UserFacingError};
+use crate::pqproto::BeMessage;
 use crate::proxy::NeonOptions;
 use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::stream::PqStream;
@@ -154,11 +154,13 @@ async fn authenticate(
 
     // Give user a URL to spawn a new database.
     info!(parent: &span, "sending the auth URL to the user");
-    client
-        .write_message_noflush(&Be::AuthenticationOk)?
-        .write_message_noflush(&Be::CLIENT_ENCODING)?
-        .write_message(&Be::NoticeResponse(&greeting))
-        .await?;
+    client.write_message(BeMessage::AuthenticationOk);
+    client.write_message(BeMessage::ParameterStatus {
+        name: b"client_encoding",
+        value: b"UTF8",
+    });
+    client.write_message(BeMessage::NoticeResponse(&greeting));
+    client.flush().await?;
 
     // Wait for console response via control plane (see `mgmt`).
     info!(parent: &span, "waiting for console's reply...");
@@ -188,7 +190,7 @@ async fn authenticate(
         }
     }
 
-    client.write_message_noflush(&Be::NoticeResponse("Connecting to database."))?;
+    client.write_message(BeMessage::NoticeResponse("Connecting to database."));
 
     // This config should be self-contained, because we won't
     // take username or dbname from client's startup message.
