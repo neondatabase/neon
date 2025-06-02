@@ -132,11 +132,19 @@ impl ReportableError for ReportedError {
 impl<S: AsyncWrite + Unpin> PqStream<S> {
     /// Tell the client that we are willing to accept SSL.
     /// This is not cancel safe
-    pub async fn accept_tls(mut self) -> io::Result<S> {
-        // S for SSL.
-        self.write.encryption(b'S');
-        self.flush().await?;
-        Ok(self.stream)
+    pub fn accept_tls(self) -> impl Future<Output = io::Result<S>> {
+        let Self {
+            mut stream,
+            mut write,
+            ..
+        } = self;
+        async move {
+            // S for SSL.
+            write.encryption(b'S');
+            stream.write_all_buf(&mut write).await?;
+            stream.flush().await?;
+            Ok(stream)
+        }
     }
 
     /// Assert that we are using direct TLS.
@@ -168,10 +176,18 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
 
     /// Flush the output buffer into the underlying stream.
     ///
-    /// This is cancel safe.
-    pub async fn flush_and_into_inner(mut self) -> io::Result<S> {
-        self.flush().await?;
-        Ok(self.stream)
+    /// This is not cancel safe.
+    pub fn flush_and_into_inner(self) -> impl Future<Output = io::Result<S>> {
+        let Self {
+            mut stream,
+            mut write,
+            ..
+        } = self;
+        async move {
+            stream.write_all_buf(&mut write).await?;
+            stream.flush().await?;
+            Ok(stream)
+        }
     }
 
     /// Write the error message to the client, then re-throw it.
