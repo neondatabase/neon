@@ -3410,8 +3410,13 @@ where
 
     fn call(&mut self, req: http::Request<B>) -> Self::Future {
         // Create a basic tracing span. Enter the span for the current thread (to use it for inner
-        // non-async code like interceptors), and instrument the future (to use it for inner async
-        // code like the page service itself).
+        // sync code like interceptors), and instrument the future (to use it for inner async code
+        // like the page service itself).
+        //
+        // The instrument() call below is not sufficient. It only affects the returned future, and
+        // only takes effect when the caller polls it. Any sync code executed when we call
+        // self.inner.call() below (such as interceptors) runs outside of the returned future, and
+        // is not affected by it. We therefore have to enter the span on the current thread too.
         let span = info_span!(
             "grpc:pageservice",
             // Set by TenantMetadataInterceptor.
