@@ -1,0 +1,4 @@
+comment = 'Lsm3 index'
+default_version = '1.0'
+module_pathname = '$libdir/lsm3'
+relocatable = true
