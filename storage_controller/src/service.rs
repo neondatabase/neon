@@ -82,7 +82,7 @@ use crate::peer_client::GlobalObservedState;
 use crate::persistence::split_state::SplitState;
 use crate::persistence::{
     AbortShardSplitStatus, ControllerPersistence, DatabaseError, DatabaseResult,
-    MetadataHealthPersistence, Persistence, ShardGenerationState, TenantFilter,
+    MetadataHealthPersistence, NodePersistence, Persistence, ShardGenerationState, TenantFilter,
     TenantShardPersistence,
 };
 use crate::reconciler::{
@@ -6909,7 +6909,7 @@ impl Service {
     /// detaching or deleting it on pageservers.  We do not try and re-schedule any
     /// tenants that were on this node.
     pub(crate) async fn node_drop(&self, node_id: NodeId) -> Result<(), ApiError> {
-        self.persistence.update_node_on_deletion(node_id).await?;
+        self.persistence.soft_delete_node(node_id).await?;
 
         let mut locked = self.inner.write().unwrap();
 
@@ -7035,7 +7035,7 @@ impl Service {
 
         // 2. Actually delete the node from the database and from in-memory state
         tracing::info!("Deleting node from database");
-        self.persistence.update_node_on_deletion(node_id).await?;
+        self.persistence.soft_delete_node(node_id).await?;
 
         Ok(())
     }
@@ -7052,6 +7052,21 @@ impl Service {
         };
 
         Ok(nodes)
+    }
+
+    pub(crate) async fn soft_deleted_node_list(&self) -> Result<Vec<Node>, ApiError> {
+        self.persistence
+            .list_soft_deleted_nodes()
+            .await?
+            .into_iter()
+            .map(|np| Node::from_persistent(np, false))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ApiError::InternalServerError(e.into()))
+    }
+
+    pub(crate) async fn node_hard_delete(&self, node_id: NodeId) -> Result<(), ApiError> {
+        self.persistence.hard_delete_node(node_id).await?;
+        Ok(())
     }
 
     pub(crate) async fn get_node(&self, node_id: NodeId) -> Result<Node, ApiError> {

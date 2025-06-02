@@ -100,8 +100,9 @@ pub(crate) enum DatabaseError {
 pub(crate) enum DatabaseOperation {
     InsertNode,
     UpdateNode,
-    DeleteNode,
+    HardDeleteNode,
     ListNodes,
+    ListSoftDeletedNodes,
     BeginShardSplit,
     CompleteShardSplit,
     AbortShardSplit,
@@ -393,6 +394,25 @@ impl Persistence {
         Ok(result)
     }
 
+    pub(crate) async fn list_soft_deleted_nodes(&self) -> DatabaseResult<Vec<NodePersistence>> {
+        use crate::schema::nodes::dsl::*;
+
+        let result: Vec<NodePersistence> = self
+            .with_measured_conn(DatabaseOperation::ListSoftDeletedNodes, move |conn| {
+                Box::pin(async move {
+                    Ok(crate::schema::nodes::table
+                        .filter(lifecycle.eq(String::from(NodeLifecycle::Deleted)))
+                        .load::<NodePersistence>(conn)
+                        .await?)
+                })
+            })
+            .await?;
+
+        tracing::info!("list_soft_deleted_nodes: loaded {} nodes", result.len());
+
+        Ok(result)
+    }
+
     pub(crate) async fn update_node<V>(
         &self,
         input_node_id: NodeId,
@@ -453,12 +473,56 @@ impl Persistence {
         .await
     }
 
-    pub(crate) async fn update_node_on_deletion(&self, del_node_id: NodeId) -> DatabaseResult<()> {
+    pub(crate) async fn soft_delete_node(&self, del_node_id: NodeId) -> DatabaseResult<()> {
         use crate::schema::nodes::dsl::*;
         self.update_node(
             del_node_id,
             lifecycle.eq(String::from(NodeLifecycle::Deleted)),
         )
+        .await
+    }
+
+    pub(crate) async fn hard_delete_node(&self, del_node_id: NodeId) -> DatabaseResult<()> {
+        use crate::schema::nodes::dsl::*;
+        self.with_measured_conn(DatabaseOperation::HardDeleteNode, move |conn| {
+            Box::pin(async move {
+                // You can hard delete a node if it was soft deleted before.
+                // We need to check if the node has lifecycle set to deleted.
+                let node_to_delete = nodes
+                    .filter(node_id.eq(del_node_id.0 as i64))
+                    .first::<NodePersistence>(conn)
+                    .await
+                    .optional()?;
+
+                if let Some(np) = node_to_delete {
+                    let lc = NodeLifecycle::from_str(&np.lifecycle).map_err(|e| {
+                        DatabaseError::Logical(format!(
+                            "Node {} has invalid lifecycle: {}",
+                            del_node_id, e
+                        ))
+                    })?;
+
+                    if lc != NodeLifecycle::Deleted {
+                        return Err(DatabaseError::Logical(format!(
+                            "Node {} was not soft deleted before, cannot hard delete it",
+                            del_node_id
+                        )));
+                    }
+
+                    diesel::delete(nodes)
+                        .filter(node_id.eq(del_node_id.0 as i64))
+                        .execute(conn)
+                        .await?;
+
+                    Ok(())
+                } else {
+                    Err(DatabaseError::Logical(format!(
+                        "Node {} not found",
+                        del_node_id
+                    )))
+                }
+            })
+        })
         .await
     }
 
@@ -552,22 +616,6 @@ impl Persistence {
                     .filter(tenant_id.eq(del_tenant_id.to_string()))
                     .execute(conn)
                     .await?;
-                Ok(())
-            })
-        })
-        .await
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn delete_node(&self, del_node_id: NodeId) -> DatabaseResult<()> {
-        use crate::schema::nodes::dsl::*;
-        self.with_measured_conn(DatabaseOperation::DeleteNode, move |conn| {
-            Box::pin(async move {
-                diesel::delete(nodes)
-                    .filter(node_id.eq(del_node_id.0 as i64))
-                    .execute(conn)
-                    .await?;
-
                 Ok(())
             })
         })
