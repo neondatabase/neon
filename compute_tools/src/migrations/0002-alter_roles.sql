@@ -1,3 +1,6 @@
+-- SKIP: This migration does nothing. All roles default to INHERIT and
+-- NOBYPASSRLS.
+
 DO $$
 DECLARE
     role_name text;
