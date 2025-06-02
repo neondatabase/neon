@@ -1934,7 +1934,7 @@ pub enum PagestreamFeMessage {
 }
 
 // Wrapped in libpq CopyData
-#[derive(strum_macros::EnumProperty)]
+#[derive(Debug, strum_macros::EnumProperty)]
 pub enum PagestreamBeMessage {
     Exists(PagestreamExistsResponse),
     Nblocks(PagestreamNblocksResponse),
