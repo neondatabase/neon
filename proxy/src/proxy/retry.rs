@@ -125,8 +125,9 @@ pub(crate) fn retry_after(num_retries: u32, config: RetryConfig) -> time::Durati
 
 #[cfg(test)]
 mod tests {
-    use super::ShouldRetryWakeCompute;
     use postgres_client::error::{DbError, SqlState};
+
+    use super::ShouldRetryWakeCompute;
 
     #[test]
     fn should_retry_wake_compute_for_db_error() {

@@ -113,7 +113,7 @@ impl WalReceiver {
                 }
                 connection_manager_state.shutdown().await;
                 *loop_status.write().unwrap() = None;
-                debug!("task exits");
+                info!("task exits");
             }
             .instrument(info_span!(parent: None, "wal_connection_manager", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), timeline_id = %timeline_id))
         });
