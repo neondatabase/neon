@@ -13,6 +13,8 @@ use utils::{
     shard::{ShardIndex, TenantShardId},
 };
 
+use crate::timeline::Timeline;
+
 #[derive(Default)]
 pub struct World {
     pageservers: RwLock<HashMap<NodeId, Arc<Pageserver>>>,
@@ -42,7 +44,7 @@ pub struct SafekeeperTimeline {}
 
 impl World {
     pub fn housekeeping(&self) {}
-    pub fn load_timeline(&self, ttid: TenantTimelineId) -> Arc<SafekeeperTimeline> {
+    pub fn load_timeline(&self, ttid: Arc<Timeline>) -> Arc<SafekeeperTimeline> {
         todo!()
     }
     pub fn update_pageserver_attachments(
@@ -55,6 +57,9 @@ impl World {
 }
 
 impl SafekeeperTimeline {
+    pub fn update_commit_lsn(&self, commit_lsn: Lsn) {
+        todo!()
+    }
     pub fn get_pageserver_timeline(
         &self,
         ttld: TenantTimelineId,

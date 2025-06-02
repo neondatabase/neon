@@ -108,7 +108,6 @@ impl Env {
             &timeline_dir,
             &remote_path,
             shared_state,
-            todo!(),
             conf.clone(),
             wal_backup.clone(),
         );
@@ -118,6 +117,7 @@ impl Env {
             Arc::new(TimelinesSet::default()), // ignored for now
             RateLimiter::new(0, 0),
             wal_backup,
+            todo!(),
         );
         Ok(timeline)
     }

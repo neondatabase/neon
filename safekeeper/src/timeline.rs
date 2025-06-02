@@ -450,7 +450,6 @@ pub struct Timeline {
     /// synchronized with the disk. This is tokio mutex as we write WAL to disk
     /// while holding it, ensuring that consensus checks are in order.
     mutex: RwLock<SharedState>,
-    pub(crate) wal_advertiser: Arc<wal_advertiser::advmap::SafekeeperTimeline>,
     walsenders: Arc<WalSenders>,
     walreceivers: Arc<WalReceivers>,
     timeline_dir: Utf8PathBuf,
@@ -482,7 +481,6 @@ impl Timeline {
         timeline_dir: &Utf8Path,
         remote_path: &RemotePath,
         shared_state: SharedState,
-        wal_advertiser: Arc<wal_advertiser::advmap::SafekeeperTimeline>,
         conf: Arc<SafeKeeperConf>,
         wal_backup: Arc<WalBackup>,
     ) -> Arc<Self> {
@@ -507,7 +505,6 @@ impl Timeline {
             shared_state_version_tx,
             shared_state_version_rx,
             mutex: RwLock::new(shared_state),
-            wal_advertiser,
             walsenders: WalSenders::new(walreceivers.clone()),
             walreceivers,
             gate: Default::default(),
@@ -528,7 +525,6 @@ impl Timeline {
         conf: Arc<SafeKeeperConf>,
         ttid: TenantTimelineId,
         wal_backup: Arc<WalBackup>,
-        wal_advertiser: Arc<wal_advertiser::advmap::SafekeeperTimeline>,
     ) -> Result<Arc<Timeline>> {
         let _enter = info_span!("load_timeline", timeline = %ttid.timeline_id).entered();
 
@@ -541,7 +537,6 @@ impl Timeline {
             &timeline_dir,
             &remote_path,
             shared_state,
-            wal_advertiser,
             conf,
             wal_backup,
         ))
@@ -555,6 +550,7 @@ impl Timeline {
         broker_active_set: Arc<TimelinesSet>,
         partial_backup_rate_limiter: RateLimiter,
         wal_backup: Arc<WalBackup>,
+        wal_advertiser: Arc<wal_advertiser::advmap::World>,
     ) {
         let (tx, rx) = self.manager_ctl.bootstrap_manager();
 
@@ -578,6 +574,7 @@ impl Timeline {
                     rx,
                     partial_backup_rate_limiter,
                     wal_backup,
+                    wal_advertiser,
                 )
                 .await
             }

@@ -24,6 +24,7 @@ use utils::shard::TenantShardId;
 use crate::defaults::DEFAULT_EVICTION_CONCURRENCY;
 use crate::http::routes::DeleteOrExcludeError;
 use crate::rate_limit::RateLimiter;
+use crate::receive_wal::WalAcceptor;
 use crate::state::TimelinePersistentState;
 use crate::timeline::{Timeline, TimelineError, delete_dir, get_tenant_dir, get_timeline_dir};
 use crate::timelines_set::TimelinesSet;
@@ -180,13 +181,7 @@ impl GlobalTimelines {
                         TimelineId::from_str(timeline_dir_entry.file_name().to_str().unwrap_or(""))
                     {
                         let ttid = TenantTimelineId::new(tenant_id, timeline_id);
-                        let wal_advertiser = wal_advertiser.load_timeline(ttid);
-                        match Timeline::load_timeline(
-                            conf.clone(),
-                            ttid,
-                            wal_backup.clone(),
-                            wal_advertiser,
-                        ) {
+                        match Timeline::load_timeline(conf.clone(), ttid, wal_backup.clone()) {
                             Ok(tli) => {
                                 let mut shared_state = tli.write_shared_state().await;
                                 self.state
@@ -200,6 +195,7 @@ impl GlobalTimelines {
                                     broker_active_set.clone(),
                                     partial_backup_rate_limiter.clone(),
                                     wal_backup.clone(),
+                                    wal_advertiser.clone(),
                                 );
                             }
                             // If we can't load a timeline, it's most likely because of a corrupted
@@ -325,11 +321,9 @@ impl GlobalTimelines {
         };
 
         // Do the actual move and reflect the result in the map.
-        let wal_advertiser = wal_advertiser.load_timeline(ttid);
         match GlobalTimelines::install_temp_timeline(
             ttid,
             tmp_path,
-            wal_advertiser,
             conf.clone(),
             wal_backup.clone(),
         )
@@ -353,6 +347,7 @@ impl GlobalTimelines {
                     broker_active_set,
                     partial_backup_rate_limiter,
                     wal_backup,
+                    wal_advertiser.clone(),
                 );
                 drop(timeline_shared_state);
                 Ok(timeline)
@@ -374,7 +369,6 @@ impl GlobalTimelines {
     async fn install_temp_timeline(
         ttid: TenantTimelineId,
         tmp_path: &Utf8PathBuf,
-        wal_advertiser: Arc<wal_advertiser::advmap::SafekeeperTimeline>,
         conf: Arc<SafeKeeperConf>,
         wal_backup: Arc<WalBackup>,
     ) -> Result<Arc<Timeline>> {
@@ -418,7 +412,7 @@ impl GlobalTimelines {
         // Do the move.
         durable_rename(tmp_path, &timeline_path, !conf.no_sync).await?;
 
-        Timeline::load_timeline(conf, ttid, wal_backup, wal_advertiser)
+        Timeline::load_timeline(conf, ttid, wal_backup)
     }
 
     /// Get a timeline from the global map. If it's not present, it doesn't exist on disk,

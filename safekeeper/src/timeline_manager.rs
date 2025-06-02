@@ -22,7 +22,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info, info_span, instrument, warn};
 use utils::lsn::Lsn;
 
-use crate::SafeKeeperConf;
 use crate::control_file::{FileStorage, Storage};
 use crate::metrics::{
     MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL, MISC_OPERATION_SECONDS, NUM_EVICTED_TIMELINES,
@@ -37,6 +36,7 @@ use crate::timeline_guard::{AccessService, GuardId, ResidenceGuard};
 use crate::timelines_set::{TimelineSetGuard, TimelinesSet};
 use crate::wal_backup::{self, WalBackup, WalBackupTaskHandle};
 use crate::wal_backup_partial::{self, PartialBackup, PartialRemoteSegment};
+use crate::{SafeKeeperConf, wal_advertiser};
 
 pub(crate) struct StateSnapshot {
     // inmem values
@@ -201,6 +201,7 @@ pub(crate) struct Manager {
     pub(crate) wal_seg_size: usize,
     pub(crate) walsenders: Arc<WalSenders>,
     pub(crate) wal_backup: Arc<WalBackup>,
+    pub(crate) wal_advertiser: Arc<wal_advertiser::advmap::SafekeeperTimeline>,
 
     // current state
     pub(crate) state_version_rx: tokio::sync::watch::Receiver<usize>,
@@ -240,6 +241,7 @@ pub async fn main_task(
     mut manager_rx: tokio::sync::mpsc::UnboundedReceiver<ManagerCtlMessage>,
     global_rate_limiter: RateLimiter,
     wal_backup: Arc<WalBackup>,
+    wal_advertiser: Arc<wal_advertiser::advmap::World>,
 ) {
     tli.set_status(Status::Started);
 
@@ -259,6 +261,7 @@ pub async fn main_task(
         manager_tx,
         global_rate_limiter,
         wal_backup,
+        wal_advertiser,
     )
     .await;
 
@@ -287,7 +290,9 @@ pub async fn main_task(
 
             mgr.set_status(Status::UpdateBackup);
             let is_wal_backup_required = mgr.update_backup(num_computes, &state_snapshot).await;
-            mgr.update_is_active(is_wal_backup_required, num_computes, &state_snapshot);
+
+            mgr.update_broker_active(is_wal_backup_required, num_computes, &state_snapshot);
+            mgr.update_wal_advertiser(&state_snapshot);
 
             mgr.set_status(Status::UpdateControlFile);
             mgr.update_control_file_save(&state_snapshot, &mut next_event)
@@ -419,6 +424,7 @@ impl Manager {
         manager_tx: tokio::sync::mpsc::UnboundedSender<ManagerCtlMessage>,
         global_rate_limiter: RateLimiter,
         wal_backup: Arc<WalBackup>,
+        wal_advertiser: Arc<wal_advertiser::advmap::World>,
     ) -> Manager {
         let (is_offloaded, partial_backup_uploaded) = tli.bootstrap_mgr().await;
         Manager {
@@ -428,6 +434,7 @@ impl Manager {
             state_version_rx: tli.get_state_version_rx(),
             num_computes_rx: tli.get_walreceivers().get_num_rx(),
             tli_broker_active: broker_active_set.guard(tli.clone()),
+            wal_advertiser: wal_advertiser.load_timeline(tli.clone()),
             last_removed_segno: 0,
             is_offloaded,
             backup_task: None,
@@ -494,8 +501,8 @@ impl Manager {
         is_wal_backup_required
     }
 
-    /// Update is_active flag and returns its value.
-    fn update_is_active(
+    /// Update broker is_active flag and returns its value.
+    fn update_broker_active(
         &mut self,
         is_wal_backup_required: bool,
         num_computes: usize,
@@ -520,6 +527,11 @@ impl Manager {
         self.tli
             .broker_active
             .store(is_active, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn update_wal_advertiser(&mut self, state: &StateSnapshot) {
+        self.wal_advertiser.update_commit_lsn(state.commit_lsn);
+        // TODO: feed back monitoring info into Arc<Timeline> like we do for tli.broker_active in update_broker_active
     }
 
     /// Save control file if needed. Returns Instant if we should persist the control file in the future.
