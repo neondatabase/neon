@@ -6,7 +6,6 @@
 //! walingest.rs handles a few things like implicit relation creation and extension.
 //! Clarify that)
 //!
-use core::panic;
 use std::collections::{HashMap, HashSet, hash_map};
 use std::ops::{ControlFlow, Range};
 
