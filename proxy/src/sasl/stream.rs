@@ -30,52 +30,53 @@ where
     F: FnOnce(&str) -> super::Result<M>,
     M: Mechanism,
 {
-    let sasl = {
+    let (mut mechanism, mut input) = {
         // pause the timer while we communicate with the client
         let _paused = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
 
         // Initial client message contains the chosen auth method's name.
         let msg = stream.read_password_message().await?;
-        super::FirstMessage::parse(msg).ok_or(super::Error::BadClientMessage("bad sasl message"))?
+
+        let sasl = super::FirstMessage::parse(msg)
+            .ok_or(super::Error::BadClientMessage("bad sasl message"))?;
+
+        (mechanism(sasl.method)?, sasl.message)
     };
 
-    let mut mechanism = mechanism(sasl.method)?;
-    let mut input = sasl.message;
     loop {
-        let step = mechanism
-            .exchange(input)
-            .inspect_err(|error| tracing::info!(?error, "error during SASL exchange"))?;
-
-        match step {
-            Step::Continue(moved_mechanism, reply) => {
+        match mechanism.exchange(input) {
+            Ok(Step::Continue(moved_mechanism, reply)) => {
                 mechanism = moved_mechanism;
-
-                // pause the timer while we communicate with the client
-                let _paused = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
 
                 // write reply
                 let sasl_msg = BeAuthenticationSaslMessage::Continue(reply.as_bytes());
                 stream.write_message(BeMessage::AuthenticationSasl(sasl_msg));
-
-                // get next input
-                stream.flush().await?;
-                let msg = stream.read_password_message().await?;
-                input = std::str::from_utf8(msg)
-                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad encoding"))?;
+                drop(reply);
             }
-            Step::Success(result, reply) => {
-                // pause the timer while we communicate with the client
-                let _paused = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
-
+            Ok(Step::Success(result, reply)) => {
                 // write reply
                 let sasl_msg = BeAuthenticationSaslMessage::Final(reply.as_bytes());
                 stream.write_message(BeMessage::AuthenticationSasl(sasl_msg));
                 stream.write_message(BeMessage::AuthenticationOk);
+
                 // exit with success
                 break Ok(Outcome::Success(result));
             }
             // exit with failure
-            Step::Failure(reason) => break Ok(Outcome::Failure(reason)),
+            Ok(Step::Failure(reason)) => break Ok(Outcome::Failure(reason)),
+            Err(error) => {
+                tracing::info!(?error, "error during SASL exchange");
+                return Err(error);
+            }
         }
+
+        // pause the timer while we communicate with the client
+        let _paused = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
+
+        // get next input
+        stream.flush().await?;
+        let msg = stream.read_password_message().await?;
+        input = std::str::from_utf8(msg)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad encoding"))?;
     }
 }

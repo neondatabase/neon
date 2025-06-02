@@ -25,19 +25,15 @@ pub(super) async fn authenticate(
         }
         AuthSecret::Scram(secret) => {
             debug!("auth endpoint chooses SCRAM");
-            let scram = auth::Scram(&secret, ctx);
 
-            let auth_outcome = tokio::time::timeout(config.scram_protocol_timeout, async {
-                AuthFlow::new(client, scram)
-                    .authenticate()
-                    .await
-                    .inspect_err(|error| {
-                        warn!(?error, "error processing scram messages");
-                    })
-            })
+            let auth_outcome = tokio::time::timeout(
+                config.scram_protocol_timeout,
+                AuthFlow::new(client, auth::Scram(&secret, ctx)).authenticate(),
+            )
             .await
             .inspect_err(|_| warn!("error processing scram messages error = authentication timed out, execution time exceeded {} seconds", config.scram_protocol_timeout.as_secs()))
-            .map_err(auth::AuthError::user_timeout)??;
+            .map_err(auth::AuthError::user_timeout)?
+            .inspect_err(|error| warn!(?error, "error processing scram messages"))?;
 
             let client_key = match auth_outcome {
                 sasl::Outcome::Success(key) => key,

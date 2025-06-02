@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use ::http::HeaderName;
 use ::http::header::AUTHORIZATION;
+use bytes::Bytes;
 use futures::TryFutureExt;
+use hyper::StatusCode;
 use postgres_client::config::SslMode;
 use tokio::time::Instant;
 use tracing::{Instrument, debug, info, info_span, warn};
@@ -72,28 +74,34 @@ impl NeonControlPlaneClient {
         role: &RoleName,
     ) -> Result<AuthInfo, GetAuthInfoError> {
         async {
-            let request = self
-                .endpoint
-                .get_path("get_endpoint_access_control")
-                .header(X_REQUEST_ID, ctx.session_id().to_string())
-                .header(AUTHORIZATION, format!("Bearer {}", &self.jwt))
-                .query(&[("session_id", ctx.session_id())])
-                .query(&[
-                    ("application_name", ctx.console_application_name().as_str()),
-                    ("endpointish", endpoint.as_str()),
-                    ("role", role.as_str()),
-                ])
-                .build()?;
-
-            debug!(url = request.url().as_str(), "sending http request");
-            let start = Instant::now();
             let response = {
-                let _pause = ctx.latency_timer_pause_at(start, crate::metrics::Waiting::Cplane);
-                self.endpoint.execute(request).await?
-            };
-            info!(duration = ?start.elapsed(), "received http response");
+                let request = self
+                    .endpoint
+                    .get_path("get_endpoint_access_control")
+                    .header(X_REQUEST_ID, ctx.session_id().to_string())
+                    .header(AUTHORIZATION, format!("Bearer {}", &self.jwt))
+                    .query(&[("session_id", ctx.session_id())])
+                    .query(&[
+                        ("application_name", ctx.console_application_name().as_str()),
+                        ("endpointish", endpoint.as_str()),
+                        ("role", role.as_str()),
+                    ])
+                    .build()?;
 
-            let body = match parse_body::<GetEndpointAccessControl>(response).await {
+                debug!(url = request.url().as_str(), "sending http request");
+                let start = Instant::now();
+                let _pause = ctx.latency_timer_pause_at(start, crate::metrics::Waiting::Cplane);
+                let response = self.endpoint.execute(request).await?;
+
+                info!(duration = ?start.elapsed(), "received http response");
+
+                response
+            };
+
+            let body = match parse_body::<GetEndpointAccessControl>(
+                response.status(),
+                response.bytes().await?,
+            ) {
                 Ok(body) => body,
                 // Error 404 is special: it's ok not to have a secret.
                 // TODO(anna): retry
@@ -184,7 +192,10 @@ impl NeonControlPlaneClient {
             drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
 
-            let body = parse_body::<EndpointJwksResponse>(response).await?;
+            let body = parse_body::<EndpointJwksResponse>(
+                response.status(),
+                response.bytes().await.map_err(ControlPlaneError::from)?,
+            )?;
 
             let rules = body
                 .jwks
@@ -236,7 +247,7 @@ impl NeonControlPlaneClient {
             let response = self.endpoint.execute(request).await?;
             drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
-            let body = parse_body::<WakeCompute>(response).await?;
+            let body = parse_body::<WakeCompute>(response.status(), response.bytes().await?)?;
 
             // Unfortunately, ownership won't let us use `Option::ok_or` here.
             let (host, port) = match parse_host_port(&body.address) {
@@ -487,33 +498,33 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
 }
 
 /// Parse http response body, taking status code into account.
-async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
-    response: http::Response,
+fn parse_body<T: for<'a> serde::Deserialize<'a>>(
+    status: StatusCode,
+    body: Bytes,
 ) -> Result<T, ControlPlaneError> {
-    let status = response.status();
     if status.is_success() {
         // We shouldn't log raw body because it may contain secrets.
         info!("request succeeded, processing the body");
-        return Ok(response.json().await?);
+        return Ok(serde_json::from_slice(&body).map_err(std::io::Error::other)?);
     }
-    let s = response.bytes().await?;
+
     // Log plaintext to be able to detect, whether there are some cases not covered by the error struct.
-    info!("response_error plaintext: {:?}", s);
+    info!("response_error plaintext: {:?}", body);
 
     // Don't throw an error here because it's not as important
     // as the fact that the request itself has failed.
-    let mut body = serde_json::from_slice(&s).unwrap_or_else(|e| {
+    let mut body = serde_json::from_slice(&body).unwrap_or_else(|e| {
         warn!("failed to parse error body: {e}");
-        ControlPlaneErrorMessage {
+        Box::new(ControlPlaneErrorMessage {
             error: "reason unclear (malformed error message)".into(),
             http_status_code: status,
             status: None,
-        }
+        })
     });
     body.http_status_code = status;
 
     warn!("console responded with an error ({status}): {body:?}");
-    Err(ControlPlaneError::Message(Box::new(body)))
+    Err(ControlPlaneError::Message(body))
 }
 
 fn parse_host_port(input: &str) -> Option<(&str, u16)> {
