@@ -6909,7 +6909,7 @@ impl Service {
     /// detaching or deleting it on pageservers.  We do not try and re-schedule any
     /// tenants that were on this node.
     pub(crate) async fn node_drop(&self, node_id: NodeId) -> Result<(), ApiError> {
-        self.persistence.delete_node(node_id).await?;
+        self.persistence.update_node_on_deletion(node_id).await?;
 
         let mut locked = self.inner.write().unwrap();
 
@@ -7035,7 +7035,7 @@ impl Service {
 
         // 2. Actually delete the node from the database and from in-memory state
         tracing::info!("Deleting node from database");
-        self.persistence.delete_node(node_id).await?;
+        self.persistence.update_node_on_deletion(node_id).await?;
 
         Ok(())
     }
@@ -7351,6 +7351,7 @@ impl Service {
 
         Ok(availability_transition)
     }
+
     /// Handle availability transition of one node
     ///
     /// Note that you should first call [`Self::node_state_configure`] to update

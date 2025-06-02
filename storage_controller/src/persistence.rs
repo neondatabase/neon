@@ -357,6 +357,8 @@ impl Persistence {
     }
 
     /// When a node is first registered, persist it before using it for anything
+    /// If the provided node_id already exists, it will be error.
+    /// The common case is when a node marked for deletion wants to reattach
     pub(crate) async fn insert_node(&self, node: &Node) -> DatabaseResult<()> {
         let np = &node.to_persistent();
         self.with_measured_conn(DatabaseOperation::InsertNode, move |conn| {
@@ -447,6 +449,15 @@ impl Persistence {
         self.update_node(
             input_node_id,
             listen_https_port.eq(input_https_port.map(|x| x as i32)),
+        )
+        .await
+    }
+
+    pub(crate) async fn update_node_on_deletion(&self, del_node_id: NodeId) -> DatabaseResult<()> {
+        use crate::schema::nodes::dsl::*;
+        self.update_node(
+            del_node_id,
+            lifecycle.eq(String::from(NodeLifecycle::Deleted)),
         )
         .await
     }
@@ -547,12 +558,19 @@ impl Persistence {
         .await
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn delete_node(&self, del_node_id: NodeId) -> DatabaseResult<()> {
         use crate::schema::nodes::dsl::*;
-        self.update_node(
-            del_node_id,
-            lifecycle.eq(String::from(NodeLifecycle::Deleted)),
-        )
+        self.with_measured_conn(DatabaseOperation::DeleteNode, move |conn| {
+            Box::pin(async move {
+                diesel::delete(nodes)
+                    .filter(node_id.eq(del_node_id.0 as i64))
+                    .execute(conn)
+                    .await?;
+
+                Ok(())
+            })
+        })
         .await
     }
 
@@ -2054,13 +2072,13 @@ impl TenantShardPersistence {
 pub(crate) struct NodePersistence {
     pub(crate) node_id: i64,
     pub(crate) scheduling_policy: String,
-    pub(crate) lifecycle: String,
     pub(crate) listen_http_addr: String,
     pub(crate) listen_http_port: i32,
     pub(crate) listen_pg_addr: String,
     pub(crate) listen_pg_port: i32,
     pub(crate) availability_zone_id: String,
     pub(crate) listen_https_port: Option<i32>,
+    pub(crate) lifecycle: String,
 }
 
 /// Tenant metadata health status that are stored durably.
