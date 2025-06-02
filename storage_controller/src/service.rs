@@ -82,7 +82,7 @@ use crate::peer_client::GlobalObservedState;
 use crate::persistence::split_state::SplitState;
 use crate::persistence::{
     AbortShardSplitStatus, ControllerPersistence, DatabaseError, DatabaseResult,
-    MetadataHealthPersistence, NodePersistence, Persistence, ShardGenerationState, TenantFilter,
+    MetadataHealthPersistence, Persistence, ShardGenerationState, TenantFilter,
     TenantShardPersistence,
 };
 use crate::reconciler::{
@@ -7061,7 +7061,7 @@ impl Service {
             .into_iter()
             .map(|np| Node::from_persistent(np, false))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| ApiError::InternalServerError(e.into()))
+            .map_err(ApiError::InternalServerError)
     }
 
     pub(crate) async fn node_hard_delete(&self, node_id: NodeId) -> Result<(), ApiError> {
