@@ -196,7 +196,8 @@ impl Client {
         body: TenantShardPageserverAttachmentChange,
     ) -> Result<()> {
         let uri = format!(
-            "{}/v1/tenant/{tenant_shard_id}/pageserver_attachments",
+            "{}/v1/tenant/{}/pageserver_attachments",
+            tenant_shard_id.tenant_id,
             self.mgmt_api_endpoint
         );
         let resp = self.post(uri, body).await?;

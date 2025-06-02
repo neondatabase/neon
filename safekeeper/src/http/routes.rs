@@ -18,8 +18,8 @@ use pem::Pem;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use safekeeper_api::models::{
     AcceptorStateStatus, PullTimelineRequest, SafekeeperStatus, SkTimelineInfo, TenantDeleteResult,
-    TermSwitchApiEntry, TimelineCopyRequest, TimelineCreateRequest, TimelineDeleteResult,
-    TimelineStatus, TimelineTermBumpRequest,
+    TenantShardPageserverAttachmentChange, TermSwitchApiEntry, TimelineCopyRequest,
+    TimelineCreateRequest, TimelineDeleteResult, TimelineStatus, TimelineTermBumpRequest,
 };
 use safekeeper_api::{ServerInfo, membership, models};
 use storage_broker::proto::{SafekeeperTimelineInfo, TenantTimelineId as ProtoTenantTimelineId};
@@ -65,6 +65,22 @@ fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Res
     check_permission_with(request, |claims| {
         crate::auth::check_permission(claims, tenant_id)
     })
+}
+
+async fn post_tenant_pageserver_attachments(mut request: Request<Body>) -> Result<(), ApiError> {
+    let tenant_id = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+    let body: TenantShardPageserverAttachmentChange = json_request(&mut request).await?;
+    let global_timelines = get_global_timelines(&request);
+    
+    match body {
+        TenantShardPageserverAttachmentChange::Attach(tenant_shard_pageserver_attachment) => {
+            todo!()
+        }
+        TenantShardPageserverAttachmentChange::Detach(tenant_shard_pageserver_attachment) => {
+            todo!()
+        }
+    }
 }
 
 /// Deactivates all timelines for the tenant and removes its data directory.
@@ -718,6 +734,9 @@ pub fn make_router(
             })
         })
         .get("/v1/utilization", |r| request_span(r, utilization_handler))
+        .post("/v1/tenant/:tenant_id/pageserver_attachments", |r| {
+            request_span(r, post_tenant_pageserver_attachments)
+        })
         .delete("/v1/tenant/:tenant_id", |r| {
             request_span(r, tenant_delete_handler)
         })

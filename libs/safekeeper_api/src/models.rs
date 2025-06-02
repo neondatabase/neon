@@ -10,6 +10,7 @@ use utils::generation::Generation;
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
 use utils::pageserver_feedback::PageserverFeedback;
+use utils::shard::{ShardIndex, TenantShardId};
 
 use crate::membership::Configuration;
 use crate::{ServerInfo, Term};
@@ -320,6 +321,7 @@ pub enum TenantShardPageserverAttachmentChange {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TenantShardPageserverAttachment {
-    pub ps_id: NodeId,
+    pub shard: ShardIndex,
     pub generation: Generation,
+    pub ps_id: NodeId,
 }

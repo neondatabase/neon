@@ -16,6 +16,7 @@ use utils::{
     generation::Generation,
     id::{NodeId, TenantId},
     logging::SecretString,
+    shard::ShardIndex,
 };
 
 use crate::{
@@ -223,6 +224,10 @@ impl DeliveryAttempt {
 
         let body = {
             let val = TenantShardPageserverAttachment {
+                shard: ShardIndex {
+                    shard_number: utils::shard::ShardNumber(self.work.shard_number as u8),
+                    shard_count: utils::shard::ShardCount(self.work.shard_count as u8),
+                },
                 ps_id: NodeId(self.work.ps_id as u64),
                 generation: Generation::new(self.work.ps_generation as u32),
             };
