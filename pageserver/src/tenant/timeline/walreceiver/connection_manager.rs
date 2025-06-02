@@ -880,8 +880,6 @@ impl ConnectionManagerState {
                     listen_pg_addr_str: info.safekeeper_connstr.as_ref(),
                     auth_token: self.conf.auth_token.as_ref().map(|t| t.as_str()),
                     availability_zone: self.conf.availability_zone.as_deref(),
-                    // TODO: do we still have the emergency mode that runs without generations? If so, this expect would panic in that mode.
-                    pageserver_generation: Some(self.timeline.generation.into().expect("attachments always have a generation number nowadays")),
                 };
 
                 match wal_stream_connection_config(connection_conf_args) {

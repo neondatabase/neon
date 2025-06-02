@@ -60,19 +60,4 @@ impl SafekeeperTimeline {
     pub fn update_commit_lsn(&self, commit_lsn: Lsn) {
         todo!()
     }
-    pub fn get_pageserver_timeline(
-        &self,
-        ttld: TenantTimelineId,
-        shard: ShardIndex,
-        pageserver_generation: Generation,
-    ) -> Arc<PageserverTimeline> {
-        assert!(!pageserver_generation.is_none());
-        todo!()
-    }
-}
-
-impl PageserverTimeline {
-    pub fn update_remote_consistent_lsn(&self, lsn: Lsn) -> anyhow::Result<()> {
-        todo!()
-    }
 }

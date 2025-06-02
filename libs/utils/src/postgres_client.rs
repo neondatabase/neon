@@ -46,8 +46,6 @@ pub struct ConnectionConfigArgs<'a> {
 
     pub auth_token: Option<&'a str>,
     pub availability_zone: Option<&'a str>,
-
-    pub pageserver_generation: Option<u32>,
 }
 
 impl<'a> ConnectionConfigArgs<'a> {
@@ -72,10 +70,6 @@ impl<'a> ConnectionConfigArgs<'a> {
                 "shard_stripe_size={}",
                 self.shard_stripe_size.unwrap()
             ));
-        }
-
-        if let Some(pageserver_generation) = self.pageserver_generation {
-            options.push(format!("pageserver_generation={pageserver_generation}"));
         }
 
         options
