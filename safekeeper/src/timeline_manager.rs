@@ -201,7 +201,7 @@ pub(crate) struct Manager {
     pub(crate) wal_seg_size: usize,
     pub(crate) walsenders: Arc<WalSenders>,
     pub(crate) wal_backup: Arc<WalBackup>,
-    pub(crate) wal_advertiser: Arc<wal_advertiser::advmap::SafekeeperTimeline>,
+    pub(crate) wal_advertiser: wal_advertiser::advmap::SafekeeperTimelineHandle,
 
     // current state
     pub(crate) state_version_rx: tokio::sync::watch::Receiver<usize>,
@@ -292,7 +292,6 @@ pub async fn main_task(
             let is_wal_backup_required = mgr.update_backup(num_computes, &state_snapshot).await;
 
             mgr.update_broker_active(is_wal_backup_required, num_computes, &state_snapshot);
-            mgr.update_wal_advertiser(&state_snapshot);
 
             mgr.set_status(Status::UpdateControlFile);
             mgr.update_control_file_save(&state_snapshot, &mut next_event)
@@ -434,7 +433,7 @@ impl Manager {
             state_version_rx: tli.get_state_version_rx(),
             num_computes_rx: tli.get_walreceivers().get_num_rx(),
             tli_broker_active: broker_active_set.guard(tli.clone()),
-            wal_advertiser: wal_advertiser.load_timeline(tli.clone()),
+            wal_advertiser: wal_advertiser.spawn(tli.clone()),
             last_removed_segno: 0,
             is_offloaded,
             backup_task: None,
@@ -527,11 +526,6 @@ impl Manager {
         self.tli
             .broker_active
             .store(is_active, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn update_wal_advertiser(&mut self, state: &StateSnapshot) {
-        self.wal_advertiser.update_commit_lsn(state.commit_lsn);
-        // TODO: feed back monitoring info into Arc<Timeline> like we do for tli.broker_active in update_broker_active
     }
 
     /// Save control file if needed. Returns Instant if we should persist the control file in the future.
