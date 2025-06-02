@@ -14,7 +14,17 @@
 set -eux -o pipefail
 
 export COMPOSE_FILE='docker-compose.yml'
-export COMPOSE_PROFILES=test-extensions
+if [[ ${RUN_PARALLEL:-off} = on ]]; then
+  export COMPOSE_PROFILES=parallel-test-extensions
+  READY_CONTAINER=pcomputes_are_ready
+  READY_MESSAGE="All pcomputes are started"
+  COMPUTES=$(echo pcompute{1..3})
+else
+  export COMPOSE_PROFILES=test-extensions
+  READY_CONTAINER=compute_is_ready
+  READY_MESSAGE="accepting connections"
+  COMPUTES=compute
+fi
 cd "$(dirname "${0}")"
 PSQL_OPTION="-h localhost -U cloud_admin -p 55433 -d postgres"
 
@@ -41,7 +51,7 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
             echo "timeout before the compute is ready."
             exit 1
         fi
-        if docker compose logs "compute_is_ready" | grep -q "accepting connections"; then
+        if docker compose logs ${READY_CONTAINER} | grep -q "${READY_MESSAGE}"; then
             echo "OK. The compute is ready to connect."
             echo "execute simple queries."
             docker compose exec compute /bin/bash -c "psql ${PSQL_OPTION} -c 'SELECT 1'"
@@ -50,31 +60,32 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
     done
 
     if [[ ${pg_version} -ge 16 ]]; then
-        # This is required for the pg_hint_plan test, to prevent flaky log message causing the test to fail
-        # It cannot be moved to Dockerfile now because the database directory is created after the start of the container
-        echo Adding dummy config
-        docker compose exec compute touch /var/db/postgres/compute/compute_ctl_temp_override.conf
-        # Prepare for the PostGIS test
-        docker compose exec compute mkdir -p /tmp/pgis_reg/pgis_reg_tmp
         TMPDIR=$(mktemp -d)
-        docker compose cp neon-test-extensions:/ext-src/postgis-src/raster/test "${TMPDIR}"
+        mkdir "${TMPDIR}"/{pg_hint_plan_src,file_fdw}
+        docker compose cp neon-test-extensions:/ext-src/postgis-src/raster/test "${TMPDIR}/postgis-src"
         docker compose cp neon-test-extensions:/ext-src/postgis-src/regress/00-regress-install "${TMPDIR}"
-        docker compose exec compute mkdir -p /ext-src/postgis-src/raster /ext-src/postgis-src/regress /ext-src/postgis-src/regress/00-regress-install
-        docker compose cp "${TMPDIR}/test" compute:/ext-src/postgis-src/raster/test
-        docker compose cp "${TMPDIR}/00-regress-install" compute:/ext-src/postgis-src/regress
-        rm -rf "${TMPDIR}"
-        # The following block copies the files for the pg_hintplan test to the compute node for the extension test in an isolated docker-compose environment
-        TMPDIR=$(mktemp -d)
-        docker compose cp neon-test-extensions:/ext-src/pg_hint_plan-src/data "${TMPDIR}/data"
-        docker compose cp "${TMPDIR}/data" compute:/ext-src/pg_hint_plan-src/
-        rm -rf "${TMPDIR}"
-        # The following block does the same for the contrib/file_fdw test
-        TMPDIR=$(mktemp -d)
-        docker compose cp neon-test-extensions:/postgres/contrib/file_fdw/data "${TMPDIR}/data"
-        docker compose cp "${TMPDIR}/data" compute:/postgres/contrib/file_fdw/data
+        docker compose cp neon-test-extensions:/ext-src/pg_hint_plan-src/data "${TMPDIR}/pg_hint_plan-src/data"
+        docker compose cp neon-test-extensions:/postgres/contrib/file_fdw/data "${TMPDIR}/file_fdw/data"
+
+        for compute in ${COMPUTES}; do
+          # This is required for the pg_hint_plan test, to prevent flaky log message causing the test to fail
+          # It cannot be moved to Dockerfile now because the database directory is created after the start of the container
+          echo Adding dummy config on "${compute}"
+          docker compose exec "${compute}" touch /var/db/postgres/compute/compute_ctl_temp_override.conf
+          # Prepare for the PostGIS test
+          docker compose exec "${compute}" mkdir -p /tmp/pgis_reg/pgis_reg_tmp /ext-src/postgis-src/raster /ext-src/postgis-src/regress /ext-src/postgis-src/regress/00-regress-install
+          docker compose cp "${TMPDIR}/postgis-src/test" "${compute}":/ext-src/postgis-src/raster/test
+          docker compose cp "${TMPDIR}/00-regress-install" "${compute}":/ext-src/postgis-src/regress
+          # The following block copies the files for the pg_hintplan test to the compute node for the extension test in an isolated docker-compose environment
+          docker compose cp "${TMPDIR}/pg_hint_plan/data" "${compute}":/ext-src/pg_hint_plan-src/
+          # The following block does the same for the contrib/file_fdw test
+          docker compose cp "${TMPDIR}/file_fdw/data" "${compute}":/postgres/contrib/file_fdw/data
+        done
         rm -rf "${TMPDIR}"
         # Apply patches
         docker compose exec -T neon-test-extensions bash -c "(cd /postgres && patch -p1)" <"../compute/patches/contrib_pg${pg_version}.patch"
+        # Add packages
+        docker exec neon-test-extensions bash -c "apt update; apt -y install parallel"
         # We are running tests now
         rm -f testout.txt testout_contrib.txt
         docker compose exec -e USE_PGXS=1 -e SKIP=timescaledb-src,rdkit-src,pg_jsonschema-src,kq_imcx-src,wal2json_2_5-src,rag_jina_reranker_v1_tiny_en-src,rag_bge_small_en_v15-src \
