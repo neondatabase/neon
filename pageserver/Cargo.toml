@@ -34,6 +34,7 @@ fail.workspace = true
 futures.workspace = true
 hashlink.workspace = true
 hex.workspace = true
+http.workspace = true
 http-utils.workspace = true
 humantime-serde.workspace = true
 humantime.workspace = true
@@ -93,6 +94,7 @@ tokio-util.workspace = true
 toml_edit = { workspace = true, features = [ "serde" ] }
 tonic.workspace = true
 tonic-reflection.workspace = true
+tower.workspace = true
 tracing.workspace = true
 tracing-utils.workspace = true
 url.workspace = true
