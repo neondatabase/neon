@@ -11191,7 +11191,7 @@ mod tests {
                     let selected_lsn = interesting_lsns.choose(&mut random).expect("not empty");
                     let mut selected_key = start_key.add(random.gen_range(0..KEY_DIMENSION_SIZE));
 
-                    while used_keys.len() < tenant.conf.max_get_vectored_keys.get() as usize {
+                    while used_keys.len() < tenant.conf.max_get_vectored_keys.get() {
                         if used_keys.contains(&selected_key)
                             || selected_key >= start_key.add(KEY_DIMENSION_SIZE)
                         {
