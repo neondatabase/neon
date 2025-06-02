@@ -383,7 +383,7 @@ pub struct TenantShard {
 
     l0_flush_global_state: L0FlushGlobalState,
 
-    feature_resolver: FeatureResolver,
+    pub(crate) feature_resolver: FeatureResolver,
 }
 impl std::fmt::Debug for TenantShard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -5832,6 +5832,7 @@ pub(crate) mod harness {
         pub conf: &'static PageServerConf,
         pub tenant_conf: pageserver_api::models::TenantConfig,
         pub tenant_shard_id: TenantShardId,
+        pub shard_identity: ShardIdentity,
         pub generation: Generation,
         pub shard: ShardIndex,
         pub remote_storage: GenericRemoteStorage,
@@ -5899,6 +5900,7 @@ pub(crate) mod harness {
                 conf,
                 tenant_conf,
                 tenant_shard_id,
+                shard_identity,
                 generation,
                 shard,
                 remote_storage,
@@ -5960,8 +5962,7 @@ pub(crate) mod harness {
                     &ShardParameters::default(),
                 ))
                 .unwrap(),
-                // This is a legacy/test code path: sharding isn't supported here.
-                ShardIdentity::unsharded(),
+                self.shard_identity,
                 Some(walredo_mgr),
                 self.tenant_shard_id,
                 self.remote_storage.clone(),
@@ -6083,6 +6084,7 @@ mod tests {
     use timeline::compaction::{KeyHistoryRetention, KeyLogAtLsn};
     use timeline::{CompactOptions, DeltaLayerTestDesc, VersionedKeySpaceQuery};
     use utils::id::TenantId;
+    use utils::shard::{ShardCount, ShardNumber};
 
     use super::*;
     use crate::DEFAULT_PG_VERSION;
@@ -9414,6 +9416,77 @@ mod tests {
         timeline
             .init_lsn_lease(Lsn(leased_lsns[1]), timeline.get_lsn_lease_length(), &ctx)
             .expect("lease renewal with validation should succeed");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_failed_flush_should_not_update_disk_consistent_lsn() -> anyhow::Result<()> {
+        //
+        // Setup
+        //
+        let harness = TenantHarness::create_custom(
+            "test_failed_flush_should_not_upload_disk_consistent_lsn",
+            pageserver_api::models::TenantConfig::default(),
+            TenantId::generate(),
+            ShardIdentity::new(ShardNumber(0), ShardCount(4), ShardStripeSize(128)).unwrap(),
+            Generation::new(1),
+        )
+        .await?;
+        let (tenant, ctx) = harness.load().await;
+
+        let timeline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+        assert_eq!(timeline.get_shard_identity().count, ShardCount(4));
+        let mut writer = timeline.writer().await;
+        writer
+            .put(
+                *TEST_KEY,
+                Lsn(0x20),
+                &Value::Image(test_img("foo at 0x20")),
+                &ctx,
+            )
+            .await?;
+        writer.finish_write(Lsn(0x20));
+        drop(writer);
+        timeline.freeze_and_flush().await.unwrap();
+
+        timeline.remote_client.wait_completion().await.unwrap();
+        let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
+        let remote_consistent_lsn = timeline.get_remote_consistent_lsn_projected();
+        assert_eq!(Some(disk_consistent_lsn), remote_consistent_lsn);
+
+        //
+        // Test
+        //
+
+        let mut writer = timeline.writer().await;
+        writer
+            .put(
+                *TEST_KEY,
+                Lsn(0x30),
+                &Value::Image(test_img("foo at 0x30")),
+                &ctx,
+            )
+            .await?;
+        writer.finish_write(Lsn(0x30));
+        drop(writer);
+
+        fail::cfg(
+            "flush-layer-before-update-remote-consistent-lsn",
+            "return()",
+        )
+        .unwrap();
+
+        let flush_res = timeline.freeze_and_flush().await;
+        // if flush failed, the disk/remote consistent LSN should not be updated
+        assert!(flush_res.is_err());
+        assert_eq!(disk_consistent_lsn, timeline.get_disk_consistent_lsn());
+        assert_eq!(
+            remote_consistent_lsn,
+            timeline.get_remote_consistent_lsn_projected()
+        );
 
         Ok(())
     }

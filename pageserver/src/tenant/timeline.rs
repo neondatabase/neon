@@ -4769,7 +4769,10 @@ impl Timeline {
                     || !flushed_to_lsn.is_valid()
             );
 
-            if flushed_to_lsn < frozen_to_lsn && self.shard_identity.count.count() > 1 {
+            if flushed_to_lsn < frozen_to_lsn
+                && self.shard_identity.count.count() > 1
+                && result.is_ok()
+            {
                 // If our layer flushes didn't carry disk_consistent_lsn up to the `to_lsn` advertised
                 // to us via layer_flush_start_rx, then advance it here.
                 //
@@ -4947,6 +4950,10 @@ impl Timeline {
         if self.cancel.is_cancelled() {
             return Err(FlushLayerError::Cancelled);
         }
+
+        fail_point!("flush-layer-before-update-remote-consistent-lsn", |_| {
+            Err(FlushLayerError::Other(anyhow!("failpoint").into()))
+        });
 
         let disk_consistent_lsn = Lsn(lsn_range.end.0 - 1);
 
