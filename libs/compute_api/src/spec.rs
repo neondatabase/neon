@@ -181,6 +181,10 @@ pub struct ComputeSpec {
     /// Download LFC state from endpoint_storage and pass it to Postgres on startup
     #[serde(default)]
     pub autoprewarm: bool,
+
+    /// Whether postgres should use TLS
+    #[serde(default)]
+    pub enable_tls: bool,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.

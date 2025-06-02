@@ -213,6 +213,7 @@ pub struct ParsedSpec {
     pub storage_auth_token: Option<String>,
     pub endpoint_storage_addr: Option<SocketAddr>,
     pub endpoint_storage_token: Option<String>,
+    pub enable_tls: bool,
 }
 
 impl TryFrom<ComputeSpec> for ParsedSpec {
@@ -278,6 +279,8 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             .clone()
             .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_token"));
 
+        let enable_tls = spec.enable_tls;
+
         Ok(ParsedSpec {
             spec,
             pageserver_connstr,
@@ -287,6 +290,7 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             timeline_id,
             endpoint_storage_addr,
             endpoint_storage_token,
+            enable_tls,
         })
     }
 }
@@ -603,6 +607,11 @@ impl ComputeNode {
             });
         }
 
+        let mut tls_config = self.compute_ctl_config.tls.clone();
+        if !pspec.spec.enable_tls {
+            tls_config = None;
+        }
+
         // If there are any remote extensions in shared_preload_libraries, start downloading them
         if pspec.spec.remote_extensions.is_some() {
             let (this, spec) = (self.clone(), pspec.spec.clone());
@@ -659,7 +668,7 @@ impl ComputeNode {
             info!("tuning pgbouncer");
 
             let pgbouncer_settings = pgbouncer_settings.clone();
-            let tls_config = self.compute_ctl_config.tls.clone();
+            let tls_config = tls_config.clone();
 
             // Spawn a background task to do the tuning,
             // so that we don't block the main thread that starts Postgres.
@@ -678,7 +687,10 @@ impl ComputeNode {
 
             // Spawn a background task to do the configuration,
             // so that we don't block the main thread that starts Postgres.
-            let local_proxy = local_proxy.clone();
+
+            let mut local_proxy = local_proxy.clone();
+            local_proxy.tls = tls_config.clone();
+
             let _handle = tokio::spawn(async move {
                 if let Err(err) = local_proxy::configure(&local_proxy) {
                     error!("error while configuring local_proxy: {err:?}");
@@ -1205,13 +1217,18 @@ impl ComputeNode {
         let spec = &pspec.spec;
         let pgdata_path = Path::new(&self.params.pgdata);
 
+        let mut tls_config = self.compute_ctl_config.tls.clone();
+        if !spec.enable_tls {
+            tls_config = None;
+        }
+
         // Remove/create an empty pgdata directory and put configuration there.
         self.create_pgdata()?;
         config::write_postgres_conf(
             pgdata_path,
             &pspec.spec,
             self.params.internal_http_port,
-            &self.compute_ctl_config.tls,
+            &tls_config,
         )?;
 
         // Syncing safekeepers is only safe with primary nodes: if a primary
@@ -1536,14 +1553,22 @@ impl ComputeNode {
                 .clone(),
         );
 
+        let mut tls_config = self.compute_ctl_config.tls.clone();
+        if !spec.enable_tls {
+            tls_config = None;
+        }
+
         let max_concurrent_connections = self.max_service_connections(compute_state, &spec);
 
         // Merge-apply spec & changes to PostgreSQL state.
         self.apply_spec_sql(spec.clone(), conf.clone(), max_concurrent_connections)?;
 
         if let Some(local_proxy) = &spec.clone().local_proxy_config {
+            let mut local_proxy = local_proxy.clone();
+            local_proxy.tls = tls_config.clone();
+
             info!("configuring local_proxy");
-            local_proxy::configure(local_proxy).context("apply_config local_proxy")?;
+            local_proxy::configure(&local_proxy).context("apply_config local_proxy")?;
         }
 
         // Run migrations separately to not hold up cold starts
@@ -1594,12 +1619,16 @@ impl ComputeNode {
     #[instrument(skip_all)]
     pub fn reconfigure(&self) -> Result<()> {
         let spec = self.state.lock().unwrap().pspec.clone().unwrap().spec;
+        let mut tls_config = self.compute_ctl_config.tls.clone();
+        if !spec.enable_tls {
+            tls_config = None;
+        }
 
         if let Some(ref pgbouncer_settings) = spec.pgbouncer_settings {
             info!("tuning pgbouncer");
 
             let pgbouncer_settings = pgbouncer_settings.clone();
-            let tls_config = self.compute_ctl_config.tls.clone();
+            let tls_config = tls_config.clone();
 
             // Spawn a background task to do the tuning,
             // so that we don't block the main thread that starts Postgres.
@@ -1617,7 +1646,7 @@ impl ComputeNode {
             // Spawn a background task to do the configuration,
             // so that we don't block the main thread that starts Postgres.
             let mut local_proxy = local_proxy.clone();
-            local_proxy.tls = self.compute_ctl_config.tls.clone();
+            local_proxy.tls = tls_config.clone();
             tokio::spawn(async move {
                 if let Err(err) = local_proxy::configure(&local_proxy) {
                     error!("error while configuring local_proxy: {err:?}");
@@ -1635,7 +1664,7 @@ impl ComputeNode {
             pgdata_path,
             &spec,
             self.params.internal_http_port,
-            &self.compute_ctl_config.tls,
+            &tls_config,
         )?;
 
         if !spec.skip_pg_catalog_updates {
