@@ -14,6 +14,4 @@ patch -p1 <postgis-no-upgrade-test.patch
 patch -p1 <"postgis-regular-${PG_VERSION}.patch"
 psql -d contrib_regression -f raster_outdb_template.sql
 trap 'patch -R -p1 <postgis-no-upgrade-test.patch && patch -R -p1 <"postgis-regular-${PG_VERSION}.patch"' EXIT
-#XXX remove after fix of using system libpq problem
-export LD_LIBRARY_PATH=/usr/local/pgsql/lib
 POSTGIS_REGRESS_DB=contrib_regression RUNTESTFLAGS=--nocreate make installcheck-base
