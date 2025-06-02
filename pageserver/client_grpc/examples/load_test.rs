@@ -187,10 +187,10 @@ async fn main() {
     // --------------------------------------
     let connect_timeout    = Duration::from_millis(500);
     let connect_backoff    = Duration::from_millis(100);
-    let max_consumers      = 1000;                 // test limit
+    let max_consumers      = 100;                 // test limit
     let error_threshold    = 2;                 // mock never fails
     let max_idle_duration  = Duration::from_secs(2);
-    let max_total_connections  = 10;
+    let max_total_connections  = 3;
     let aggregate_metrics  = None;
 
     let pool: Arc<ConnectionPool<MockConnection>> = ConnectionPool::new(

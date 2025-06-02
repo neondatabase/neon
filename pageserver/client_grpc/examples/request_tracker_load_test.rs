@@ -39,10 +39,10 @@ async fn main() {
         hang_rate:          0.0,
         connect_timeout:    Duration::from_secs(0),
         connect_backoff:    Duration::from_millis(0),
-        max_consumers:      1000,
+        max_consumers:      500,
         error_threshold:    10,
         max_idle_duration:  Duration::from_secs(60),
-        max_total_connections: 10000,
+        max_total_connections: 500,
     };
 
     // 2) metrics collector (we assume Default is implemented)
@@ -60,8 +60,8 @@ async fn main() {
     );
 
     // 4) fire off 10 000 requests in parallel
-    let mut handles = Vec::with_capacity(100000);
-    for i in 0..100000 {
+    let mut handles = Vec::with_capacity(1000000);
+    for i in 0..1000000 {
 
         // taken mostly from pagebench
         let req = {

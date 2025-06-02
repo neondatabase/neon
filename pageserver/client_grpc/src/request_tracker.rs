@@ -159,17 +159,17 @@ impl RequestTracker {
                     match sender_get {
                         Some(s) => {
                             // Send the response back to the original request sender
+                            eprintln!("Sending response for request ID: {}", response.request_id);
                             sender = s.clone();
+                            if let Err(e) = sender.send(response.clone()).await {
+                                eprintln!("Failed to send response: {}", e);
+                            }
                         }
                         None => {
                             eprintln!("No request found for response with ID: {}", response.request_id);
                             continue;
                         }
                     }
-                }
-                // Send the response to the sender
-                if let Err(e) = sender.send(response).await {
-                    eprintln!("Failed to send response: {}", e);
                 }
             }
         });

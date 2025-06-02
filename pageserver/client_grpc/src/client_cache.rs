@@ -514,17 +514,15 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
                         let mut inner = self_clone.inner.lock().await;
                         inner.waiters += 1;
                         if inner.waiters > (inner.in_progress * self_clone.max_consumers) {
-                            if (inner.entries.len() + inner.in_progress) >= self_clone.max_total_connections {
-                                // return error status
-                                return Err(tonic::Status::unavailable(
-                                    "Maximum number of connections reached",
-                                ));
+                            if (inner.entries.len() + inner.in_progress) < self_clone.max_total_connections {
+
+                                let self_clone_spawn = Arc::clone(&self_clone);
+                                tokio::task::spawn(async move {
+                                    self_clone_spawn.create_connection().await;
+                                });
+                                inner.in_progress += 1;
                             }
-                            let self_clone_spawn = Arc::clone(&self_clone);
-                            tokio::task::spawn(async move {
-                                self_clone_spawn.create_connection().await;
-                            });
-                            inner.in_progress += 1;
+
                         }
                     }
                     // Wait for a connection to become available, either because it
@@ -703,6 +701,11 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
                     inner.pq.remove(&id);
                 }
 
+                // remove from entries
+                // check if entry is in inner
+                if inner.entries.contains_key(&id) {
+                    inner.entries.remove(&id);
+                }
                 inner.last_connect_failure = Some(Instant::now());
 
                 // The connection has been removed, it's permits will be
