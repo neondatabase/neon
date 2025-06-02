@@ -18,6 +18,7 @@ use safekeeper_api::models::ConnectionId;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{Instrument, debug, info, info_span};
 use utils::auth::{Claims, JwtAuth, Scope};
+use utils::generation::{self, Generation};
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
 use utils::postgres_client::PostgresClientProtocol;
@@ -37,6 +38,7 @@ pub struct SafekeeperPostgresHandler {
     pub timeline_id: Option<TimelineId>,
     pub ttid: TenantTimelineId,
     pub shard: Option<ShardIdentity>,
+    pub pageserver_generation: Option<Generation>,
     pub protocol: Option<PostgresClientProtocol>,
     /// Unique connection id is logged in spans for observability.
     pub conn_id: ConnectionId,
@@ -159,6 +161,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                 let mut shard_count: Option<u8> = None;
                 let mut shard_number: Option<u8> = None;
                 let mut shard_stripe_size: Option<u32> = None;
+                let mut pageserver_generation: Option<Generation> = None;
 
                 for opt in options {
                     // FIXME `ztenantid` and `ztimelineid` left for compatibility during deploy,
@@ -200,6 +203,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                             shard_stripe_size = Some(value.parse::<u32>().with_context(|| {
                                 format!("Failed to parse {value} as shard stripe size")
                             })?);
+                        }
+                        Some(("pageserver_generation", value)) => {
+                            self.pageserver_generation =
+                                Some(value.parse::<u32>().map(Generation::new).with_context(
+                                    || format!("Failed to parse {value} as generation"),
+                                )?);
                         }
                         _ => continue,
                     }
@@ -258,6 +267,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                 if let Some(slug) = shard.shard_slug().strip_prefix("-") {
                     tracing::Span::current().record("shard", tracing::field::display(slug));
                 }
+            }
+            if let Some(pageserver_generation) = self.pageserver_generation {
+                tracing::Span::current().record(
+                    "pageserver_generation",
+                    tracing::field::display(pageserver_generation.get_suffix()),
+                );
             }
 
             Ok(())
@@ -370,6 +385,7 @@ impl SafekeeperPostgresHandler {
             timeline_id: None,
             ttid: TenantTimelineId::empty(),
             shard: None,
+            pageserver_generation: None,
             protocol: None,
             conn_id,
             claims: None,

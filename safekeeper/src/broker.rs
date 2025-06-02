@@ -50,7 +50,8 @@ async fn push_loop(
         conf.broker_endpoint.clone(),
         conf.broker_keepalive_interval,
         make_tls_config(&conf),
-    )?;
+    )?
+    .into_raw_grpc_client();
     let push_interval = Duration::from_millis(PUSH_INTERVAL_MSEC);
 
     let outbound = async_stream::stream! {
@@ -97,7 +98,8 @@ async fn pull_loop(
         conf.broker_endpoint.clone(),
         conf.broker_keepalive_interval,
         make_tls_config(&conf),
-    )?;
+    )?
+    .into_raw_grpc_client();
 
     // TODO: subscribe only to local timelines instead of all
     let request = SubscribeSafekeeperInfoRequest {
@@ -153,7 +155,8 @@ async fn discover_loop(
         conf.broker_endpoint.clone(),
         conf.broker_keepalive_interval,
         make_tls_config(&conf),
-    )?;
+    )?
+    .into_raw_grpc_client();
 
     let request = SubscribeByFilterRequest {
         types: vec![TypeSubscription {

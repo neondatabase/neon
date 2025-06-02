@@ -6678,6 +6678,7 @@ dependencies = [
  "rustls 0.23.18",
  "tokio",
  "tokio-rustls 0.26.0",
+ "tokio-util",
  "tonic",
  "tonic-build",
  "tracing",

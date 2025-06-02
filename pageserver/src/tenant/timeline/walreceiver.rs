@@ -28,7 +28,6 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
-use storage_broker::BrokerClientChannel;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -70,7 +69,7 @@ impl WalReceiver {
     pub fn start(
         timeline: Arc<Timeline>,
         conf: WalReceiverConf,
-        mut broker_client: BrokerClientChannel,
+        mut broker_client: storage_broker::TimelineUpdatesSubscriber,
         ctx: &RequestContext,
     ) -> Self {
         let tenant_shard_id = timeline.tenant_shard_id;

@@ -61,7 +61,6 @@ use postgres_ffi::{WAL_SEGMENT_SIZE, to_pg_timestamp};
 use rand::Rng;
 use remote_storage::DownloadError;
 use serde_with::serde_as;
-use storage_broker::BrokerClientChannel;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{Notify, oneshot, watch};
@@ -2080,7 +2079,7 @@ impl Timeline {
     pub(crate) fn activate(
         self: &Arc<Self>,
         parent: Arc<crate::tenant::TenantShard>,
-        broker_client: BrokerClientChannel,
+        broker_client: storage_broker::TimelineUpdatesSubscriber,
         background_jobs_can_start: Option<&completion::Barrier>,
         ctx: &RequestContext,
     ) {
@@ -3114,7 +3113,7 @@ impl Timeline {
     fn launch_wal_receiver(
         self: &Arc<Self>,
         ctx: &RequestContext,
-        broker_client: BrokerClientChannel,
+        broker_client: storage_broker::TimelineUpdatesSubscriber,
     ) {
         info!(
             "launching WAL receiver for timeline {} of tenant {}",

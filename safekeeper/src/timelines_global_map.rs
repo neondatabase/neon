@@ -2,6 +2,7 @@
 //! All timelines should always be present in this map, this is done by loading them
 //! all from the disk on startup and keeping them in memory.
 
+use std::any;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -11,13 +12,16 @@ use anyhow::{Context, Result, bail};
 use camino::Utf8PathBuf;
 use camino_tempfile::Utf8TempDir;
 use safekeeper_api::membership::Configuration;
-use safekeeper_api::models::{SafekeeperUtilization, TimelineDeleteResult};
+use safekeeper_api::models::{
+    SafekeeperUtilization, TenantShardPageserverLocation, TimelineDeleteResult,
+};
 use safekeeper_api::{ServerInfo, membership};
 use tokio::fs;
 use tracing::*;
 use utils::crashsafe::{durable_rename, fsync_async_opt};
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
+use utils::shard::TenantShardId;
 
 use crate::defaults::DEFAULT_EVICTION_CONCURRENCY;
 use crate::http::routes::DeleteOrExcludeError;
@@ -27,7 +31,7 @@ use crate::timeline::{Timeline, TimelineError, delete_dir, get_tenant_dir, get_t
 use crate::timelines_set::TimelinesSet;
 use crate::wal_backup::WalBackup;
 use crate::wal_storage::Storage;
-use crate::{SafeKeeperConf, control_file, wal_storage};
+use crate::{SafeKeeperConf, control_file, wal_advertiser, wal_storage};
 
 // Timeline entry in the global map: either a ready timeline, or mark that it is
 // being created.
@@ -47,6 +51,7 @@ struct GlobalTimelinesState {
 
     conf: Arc<SafeKeeperConf>,
     broker_active_set: Arc<TimelinesSet>,
+    wal_advertisement: Arc<wal_advertiser::advmap::World>,
     global_rate_limiter: RateLimiter,
     wal_backup: Arc<WalBackup>,
 }
@@ -54,18 +59,26 @@ struct GlobalTimelinesState {
 impl GlobalTimelinesState {
     /// Get dependencies for a timeline constructor.
     fn get_dependencies(
+
         &self,
+    ,
     ) -> (
+
         Arc<SafeKeeperConf>,
+
         Arc<TimelinesSet>,
+
         RateLimiter,
         Arc<WalBackup>,
+    ,
+        Arc<wal_advertiser::advmap::World>,
     ) {
         (
             self.conf.clone(),
             self.broker_active_set.clone(),
             self.global_rate_limiter.clone(),
             self.wal_backup.clone(),
+            self.wal_advertisement.clone(),
         )
     }
 
@@ -101,6 +114,7 @@ impl GlobalTimelines {
                 tombstones: HashMap::new(),
                 conf,
                 broker_active_set: Arc::new(TimelinesSet::default()),
+                wal_advertisement: Arc::new(wal_advertiser::advmap::World::default()),
                 global_rate_limiter: RateLimiter::new(1, 1),
                 wal_backup,
             }),
@@ -158,12 +172,13 @@ impl GlobalTimelines {
     /// just lock and unlock it for each timeline -- this function is called
     /// during init when nothing else is running, so this is fine.
     async fn load_tenant_timelines(&self, tenant_id: TenantId) -> Result<()> {
-        let (conf, broker_active_set, partial_backup_rate_limiter, wal_backup) = {
+        let (conf, broker_active_set, partial_backup_rate_limiter, wal_backup, wal_advertiser) = {
             let state = self.state.lock().unwrap();
             state.get_dependencies()
         };
 
         let timelines_dir = get_tenant_dir(&conf, &tenant_id);
+
         for timelines_dir_entry in std::fs::read_dir(&timelines_dir)
             .with_context(|| format!("failed to list timelines dir {}", timelines_dir))?
         {
@@ -173,7 +188,8 @@ impl GlobalTimelines {
                         TimelineId::from_str(timeline_dir_entry.file_name().to_str().unwrap_or(""))
                     {
                         let ttid = TenantTimelineId::new(tenant_id, timeline_id);
-                        match Timeline::load_timeline(conf.clone(), ttid, wal_backup.clone()) {
+                        let wal_advertiser = wal_advertiser.load_timeline(ttid);
+                        match Timeline::load_timeline(conf.clone(), ttid, wal_backup.clone(), wal_advertiser) {
                             Ok(tli) => {
                                 let mut shared_state = tli.write_shared_state().await;
                                 self.state
@@ -283,7 +299,7 @@ impl GlobalTimelines {
         check_tombstone: bool,
     ) -> Result<Arc<Timeline>> {
         // Check for existence and mark that we're creating it.
-        let (conf, broker_active_set, partial_backup_rate_limiter, wal_backup) = {
+        let (conf, broker_active_set, partial_backup_rate_limiter, wal_backup, wal_advertiser) = {
             let mut state = self.state.lock().unwrap();
             match state.timelines.get(&ttid) {
                 Some(GlobalMapTimeline::CreationInProgress) => {
@@ -312,13 +328,16 @@ impl GlobalTimelines {
         };
 
         // Do the actual move and reflect the result in the map.
+        let wal_advertiser = wal_advertiser.load_timeline(ttid);
         match GlobalTimelines::install_temp_timeline(
             ttid,
             tmp_path,
-            conf.clone(),
+            wal_advertiser, conf.clone(),
             wal_backup.clone(),
         )
-        .await
+
+            .await
+
         {
             Ok(timeline) => {
                 let mut timeline_shared_state = timeline.write_shared_state().await;
@@ -359,6 +378,7 @@ impl GlobalTimelines {
     async fn install_temp_timeline(
         ttid: TenantTimelineId,
         tmp_path: &Utf8PathBuf,
+        wal_advertiser: Arc<wal_advertiser::advmap::SafekeeperTimeline>,
         conf: Arc<SafeKeeperConf>,
         wal_backup: Arc<WalBackup>,
     ) -> Result<Arc<Timeline>> {
@@ -402,7 +422,7 @@ impl GlobalTimelines {
         // Do the move.
         durable_rename(tmp_path, &timeline_path, !conf.no_sync).await?;
 
-        Timeline::load_timeline(conf, ttid, wal_backup)
+        Timeline::load_timeline(conf, ttid, wal_backup, wal_advertiser)
     }
 
     /// Get a timeline from the global map. If it's not present, it doesn't exist on disk,
@@ -588,6 +608,10 @@ impl GlobalTimelines {
         delete_dir(&tenant_dir).await?;
 
         Ok(deleted)
+    }
+
+    pub fn get_wal_advertiser(&self) -> Arc<wal_advertiser::advmap::World> {
+        self.state.lock().unwrap().wal_advertisement.clone()
     }
 
     pub fn housekeeping(&self, tombstone_ttl: &Duration) {

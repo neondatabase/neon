@@ -10,7 +10,7 @@ use utils::generation::Generation;
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
 use utils::pageserver_feedback::PageserverFeedback;
-use utils::shard::{ShardIndex, TenantShardId};
+use utils::shard::ShardIndex;
 
 use crate::membership::Configuration;
 use crate::{ServerInfo, Term};

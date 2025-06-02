@@ -161,7 +161,7 @@ impl<'t> UninitializedTimeline<'t> {
         tenant: Arc<TenantShard>,
         copyin_read: &mut (impl tokio::io::AsyncRead + Send + Sync + Unpin),
         base_lsn: Lsn,
-        broker_client: storage_broker::BrokerClientChannel,
+        broker_client: storage_broker::TimelineUpdatesSubscriber,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         self.write(|raw_timeline| async move {

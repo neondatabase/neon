@@ -24,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::id::{NodeId, TenantId, TenantTimelineId};
 use utils::lsn::Lsn;
+use utils::shard::TenantShardId;
 use utils::sync::gate::Gate;
 
 use crate::metrics::{FullTimelineInfo, MISC_OPERATION_SECONDS, WalStorageMetrics};
@@ -39,7 +40,9 @@ use crate::wal_backup;
 use crate::wal_backup::{WalBackup, remote_timeline_path};
 use crate::wal_backup_partial::PartialRemoteSegment;
 use crate::wal_storage::{Storage as wal_storage_iface, WalReader};
-use crate::{SafeKeeperConf, control_file, debug_dump, timeline_manager, wal_storage};
+use crate::{
+    SafeKeeperConf, control_file, debug_dump, timeline_manager, wal_advertiser, wal_storage,
+};
 
 fn peer_info_from_sk_info(sk_info: &SafekeeperTimelineInfo, ts: Instant) -> PeerInfo {
     PeerInfo {
@@ -447,6 +450,7 @@ pub struct Timeline {
     /// synchronized with the disk. This is tokio mutex as we write WAL to disk
     /// while holding it, ensuring that consensus checks are in order.
     mutex: RwLock<SharedState>,
+    pub(crate) wal_advertiser: Arc<wal_advertiser::advmap::SafekeeperTimeline>,
     walsenders: Arc<WalSenders>,
     walreceivers: Arc<WalReceivers>,
     timeline_dir: Utf8PathBuf,
@@ -478,6 +482,7 @@ impl Timeline {
         timeline_dir: &Utf8Path,
         remote_path: &RemotePath,
         shared_state: SharedState,
+        wal_advertiser: Arc<wal_advertiser::advmap::SafekeeperTimeline>,
         conf: Arc<SafeKeeperConf>,
         wal_backup: Arc<WalBackup>,
     ) -> Arc<Self> {
@@ -502,6 +507,7 @@ impl Timeline {
             shared_state_version_tx,
             shared_state_version_rx,
             mutex: RwLock::new(shared_state),
+            wal_advertiser,
             walsenders: WalSenders::new(walreceivers.clone()),
             walreceivers,
             gate: Default::default(),
@@ -522,6 +528,7 @@ impl Timeline {
         conf: Arc<SafeKeeperConf>,
         ttid: TenantTimelineId,
         wal_backup: Arc<WalBackup>,
+        wal_advertiser: Arc<wal_advertiser::advmap::SafekeeperTimeline>,
     ) -> Result<Arc<Timeline>> {
         let _enter = info_span!("load_timeline", timeline = %ttid.timeline_id).entered();
 
@@ -534,6 +541,7 @@ impl Timeline {
             &timeline_dir,
             &remote_path,
             shared_state,
+            wal_advertiser,
             conf,
             wal_backup,
         ))

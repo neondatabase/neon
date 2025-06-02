@@ -17,19 +17,12 @@ use std::time::Duration;
 
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
+use futures::StreamExt;
 use pageserver_api::models::TimelineState;
 use postgres_connection::PgConnectionConfig;
-use storage_broker::proto::{
-    FilterTenantTimelineId, MessageType, SafekeeperDiscoveryRequest, SafekeeperDiscoveryResponse,
-    SubscribeByFilterRequest, TenantTimelineId as ProtoTenantTimelineId, TypeSubscription,
-    TypedMessage,
-};
-use storage_broker::{BrokerClientChannel, Code, Streaming};
+use storage_broker::proto::SafekeeperDiscoveryResponse;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::backoff::{
-    DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS, exponential_backoff,
-};
 use utils::id::{NodeId, TenantTimelineId};
 use utils::lsn::Lsn;
 use utils::postgres_client::{
@@ -56,7 +49,7 @@ pub(crate) struct Cancelled;
 ///
 /// Not cancellation-safe. Use `cancel` token to request cancellation.
 pub(super) async fn connection_manager_loop_step(
-    broker_client: &mut BrokerClientChannel,
+    broker_client: &mut storage_broker::TimelineUpdatesSubscriber,
     connection_manager_state: &mut ConnectionManagerState,
     ctx: &RequestContext,
     cancel: &CancellationToken,
@@ -81,11 +74,6 @@ pub(super) async fn connection_manager_loop_step(
         WALRECEIVER_ACTIVE_MANAGERS.dec();
     }
 
-    let id = TenantTimelineId {
-        tenant_id: connection_manager_state.timeline.tenant_shard_id.tenant_id,
-        timeline_id: connection_manager_state.timeline.timeline_id,
-    };
-
     let mut timeline_state_updates = connection_manager_state
         .timeline
         .subscribe_for_state_updates();
@@ -101,7 +89,12 @@ pub(super) async fn connection_manager_loop_step(
     // Subscribe to the broker updates. Stream shares underlying TCP connection
     // with other streams on this client (other connection managers). When
     // object goes out of scope, stream finishes in drop() automatically.
-    let mut broker_subscription = subscribe_for_timeline_updates(broker_client, id, cancel).await?;
+    let (timeline_updates, mut discovery_requester) = broker_client.subscribe(
+        connection_manager_state.timeline.tenant_shard_id,
+        connection_manager_state.timeline.timeline_id,
+        cancel,
+    );
+    let mut timeline_updates = Box::pin(timeline_updates);
     debug!("Subscribed for broker timeline updates");
 
     loop {
@@ -155,29 +148,10 @@ pub(super) async fn connection_manager_loop_step(
                 }
             },
 
-            // Got a new update from the broker
-            broker_update = broker_subscription.message() /* TODO: review cancellation-safety */ => {
-                match broker_update {
-                    Ok(Some(broker_update)) => connection_manager_state.register_timeline_update(broker_update),
-                    Err(status) => {
-                        match status.code() {
-                            Code::Unknown if status.message().contains("stream closed because of a broken pipe") || status.message().contains("connection reset") || status.message().contains("error reading a body from connection") => {
-                                // tonic's error handling doesn't provide a clear code for disconnections: we get
-                                // "h2 protocol error: error reading a body from connection: stream closed because of a broken pipe"
-                                // => https://github.com/neondatabase/neon/issues/9562
-                                info!("broker disconnected: {status}");
-                            },
-                            _ => {
-                                warn!("broker subscription failed: {status}");
-                            }
-                        }
-                        return Ok(());
-                    }
-                    Ok(None) => {
-                        error!("broker subscription stream ended"); // can't happen
-                        return Ok(());
-                    }
-                }
+            // Got a new update from the broker.
+            // The stream ends with None if and only if `cancel` is cancelled.
+            Some(timeline_update) = timeline_updates.next() => {
+                connection_manager_state.register_timeline_update(timeline_update)
             },
 
             new_event = async {
@@ -258,32 +232,11 @@ pub(super) async fn connection_manager_loop_step(
                     tokio::time::sleep(next_discovery_ts - now).await;
                 }
 
-                let tenant_timeline_id = Some(ProtoTenantTimelineId {
-                    tenant_id: id.tenant_id.as_ref().to_owned(),
-                    timeline_id: id.timeline_id.as_ref().to_owned(),
-                });
-                let request = SafekeeperDiscoveryRequest { tenant_timeline_id };
-                let msg = TypedMessage {
-                    r#type: MessageType::SafekeeperDiscoveryRequest as i32,
-                    safekeeper_timeline_info: None,
-                    safekeeper_discovery_request: Some(request),
-                    safekeeper_discovery_response: None,
-                    };
+                info!("No active connection and no candidates, sending discovery request to the broker");
+                discovery_requester.request().await;
 
                 last_discovery_ts = Some(std::time::Instant::now());
-                info!("No active connection and no candidates, sending discovery request to the broker");
 
-                // Cancellation safety: we want to send a message to the broker, but publish_one()
-                // function can get cancelled by the other select! arm. This is absolutely fine, because
-                // we just want to receive broker updates and discovery is not important if we already
-                // receive updates.
-                //
-                // It is possible that `last_discovery_ts` will be updated, but the message will not be sent.
-                // This is totally fine because of the reason above.
-
-                // This is a fire-and-forget request, we don't care about the response
-                let _ = broker_client.publish_one(msg).await;
-                debug!("Discovery request sent to the broker");
                 None
             } => {}
         }
@@ -295,63 +248,6 @@ pub(super) async fn connection_manager_loop_step(
                 .await
         }
         *manager_status.write().unwrap() = Some(connection_manager_state.manager_status());
-    }
-}
-
-/// Endlessly try to subscribe for broker updates for a given timeline.
-async fn subscribe_for_timeline_updates(
-    broker_client: &mut BrokerClientChannel,
-    id: TenantTimelineId,
-    cancel: &CancellationToken,
-) -> Result<Streaming<TypedMessage>, Cancelled> {
-    let mut attempt = 0;
-    loop {
-        exponential_backoff(
-            attempt,
-            DEFAULT_BASE_BACKOFF_SECONDS,
-            DEFAULT_MAX_BACKOFF_SECONDS,
-            cancel,
-        )
-        .await;
-        attempt += 1;
-
-        // subscribe to the specific timeline
-        let request = SubscribeByFilterRequest {
-            types: vec![
-                TypeSubscription {
-                    r#type: MessageType::SafekeeperTimelineInfo as i32,
-                },
-                TypeSubscription {
-                    r#type: MessageType::SafekeeperDiscoveryResponse as i32,
-                },
-            ],
-            tenant_timeline_id: Some(FilterTenantTimelineId {
-                enabled: true,
-                tenant_timeline_id: Some(ProtoTenantTimelineId {
-                    tenant_id: id.tenant_id.as_ref().to_owned(),
-                    timeline_id: id.timeline_id.as_ref().to_owned(),
-                }),
-            }),
-        };
-
-        match {
-            tokio::select! {
-                r = broker_client.subscribe_by_filter(request) => { r }
-                _ = cancel.cancelled() => { return Err(Cancelled); }
-            }
-        } {
-            Ok(resp) => {
-                return Ok(resp.into_inner());
-            }
-            Err(e) => {
-                // Safekeeper nodes can stop pushing timeline updates to the broker, when no new writes happen and
-                // entire WAL is streamed. Keep this noticeable with logging, but do not warn/error.
-                info!(
-                    "Attempt #{attempt}, failed to subscribe for timeline {id} updates in broker: {e:#}"
-                );
-                continue;
-            }
-        }
     }
 }
 
@@ -695,43 +591,13 @@ impl ConnectionManagerState {
     }
 
     /// Adds another broker timeline into the state, if its more recent than the one already added there for the same key.
-    fn register_timeline_update(&mut self, typed_msg: TypedMessage) {
-        let mut is_discovery = false;
-        let timeline_update = match typed_msg.r#type() {
-            MessageType::SafekeeperTimelineInfo => {
-                let info = match typed_msg.safekeeper_timeline_info {
-                    Some(info) => info,
-                    None => {
-                        warn!("bad proto message from broker: no safekeeper_timeline_info");
-                        return;
-                    }
-                };
-                SafekeeperDiscoveryResponse {
-                    safekeeper_id: info.safekeeper_id,
-                    tenant_timeline_id: info.tenant_timeline_id,
-                    commit_lsn: info.commit_lsn,
-                    safekeeper_connstr: info.safekeeper_connstr,
-                    availability_zone: info.availability_zone,
-                    standby_horizon: info.standby_horizon,
-                }
-            }
-            MessageType::SafekeeperDiscoveryResponse => {
-                is_discovery = true;
-                match typed_msg.safekeeper_discovery_response {
-                    Some(response) => response,
-                    None => {
-                        warn!("bad proto message from broker: no safekeeper_discovery_response");
-                        return;
-                    }
-                }
-            }
-            _ => {
-                // unexpected message
-                return;
-            }
-        };
-
+    fn register_timeline_update(&mut self, timeline_update: storage_broker::TimelineShardUpdate) {
         WALRECEIVER_BROKER_UPDATES.inc();
+
+        let storage_broker::TimelineShardUpdate {
+            is_discovery,
+            inner: timeline_update,
+        } = timeline_update;
 
         trace!(
             "safekeeper info update: standby_horizon(cutoff)={}",
@@ -1013,7 +879,9 @@ impl ConnectionManagerState {
                     shard_stripe_size,
                     listen_pg_addr_str: info.safekeeper_connstr.as_ref(),
                     auth_token: self.conf.auth_token.as_ref().map(|t| t.as_str()),
-                    availability_zone: self.conf.availability_zone.as_deref()
+                    availability_zone: self.conf.availability_zone.as_deref(),
+                    // TODO: do we still have the emergency mode that runs without generations? If so, this expect would panic in that mode.
+                    pageserver_generation: Some(self.timeline.generation.into().expect("attachments always have a generation number nowadays")),
                 };
 
                 match wal_stream_connection_config(connection_conf_args) {

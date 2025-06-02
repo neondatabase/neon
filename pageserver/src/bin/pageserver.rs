@@ -423,11 +423,14 @@ fn start_pageserver(
                     .map(storage_broker::Certificate::from_pem),
             );
             // Note: we do not attempt connecting here (but validate endpoints sanity).
-            storage_broker::connect(
+            let service_client = storage_broker::connect(
                 conf.broker_endpoint.clone(),
                 conf.broker_keepalive_interval,
                 tls_config,
-            )
+            )?;
+            anyhow::Ok(storage_broker::TimelineUpdatesSubscriber::new(
+                service_client,
+            ))
         })
         .with_context(|| {
             format!(
