@@ -17,10 +17,9 @@ use hyper::{Body, Request, Response, StatusCode};
 use pem::Pem;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use safekeeper_api::models::{
-    AcceptorStateStatus, PullTimelineRequest, PutTenantPageserverLocationRequest, SafekeeperStatus,
-    SkTimelineInfo, TenantDeleteResult, TenantShardPageserverLocation, TermSwitchApiEntry,
-    TimelineCopyRequest, TimelineCreateRequest, TimelineDeleteResult, TimelineStatus,
-    TimelineTermBumpRequest,
+    AcceptorStateStatus, PullTimelineRequest, SafekeeperStatus, SkTimelineInfo, TenantDeleteResult,
+    TermSwitchApiEntry, TimelineCopyRequest, TimelineCreateRequest, TimelineDeleteResult,
+    TimelineStatus, TimelineTermBumpRequest,
 };
 use safekeeper_api::{ServerInfo, membership, models};
 use storage_broker::proto::{SafekeeperTimelineInfo, TenantTimelineId as ProtoTenantTimelineId};
@@ -37,7 +36,6 @@ use utils::shard::TenantShardId;
 use crate::debug_dump::TimelineDigestRequest;
 use crate::safekeeper::TermLsn;
 use crate::timelines_global_map::DeleteOrExclude;
-use crate::wal_advertiser::advmap::UpdatePageserverAttachmentsArg;
 use crate::{
     GlobalTimelines, SafeKeeperConf, copy_timeline, debug_dump, patch_control_file, pull_timeline,
     wal_advertiser,
@@ -71,20 +69,17 @@ fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Res
     })
 }
 
-async fn post_tenant_pageserver_attachments(mut request: Request<Body>) -> Result<(), ApiError> {
+async fn post_tenant_pageserver_attachments(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
-    let body: TenantShardPageserverAttachmentChange = json_request(&mut request).await?;
+    let body: models::TenantShardPageserverAttachmentChange = json_request(&mut request).await?;
     let global_timelines = get_global_timelines(&request);
+    let wal_advertiser = global_timelines.get_wal_advertiser();
+    wal_advertiser
+        .update_pageserver_attachments(tenant_id, body)
+        .map_err(ApiError::InternalServerError)?;
 
-    match body {
-        TenantShardPageserverAttachmentChange::Attach(tenant_shard_pageserver_attachment) => {
-            todo!()
-        }
-        TenantShardPageserverAttachmentChange::Detach(tenant_shard_pageserver_attachment) => {
-            todo!()
-        }
-    }
+    json_response(StatusCode::OK, ())
 }
 
 /// Deactivates all timelines for the tenant and removes its data directory.
@@ -109,39 +104,6 @@ async fn tenant_delete_handler(mut request: Request<Body>) -> Result<Response<Bo
         .map(|(ttid, resp)| (format!("{}", ttid.timeline_id), *resp))
         .collect::<HashMap<String, TimelineDeleteResult>>();
     json_response(StatusCode::OK, response_body)
-}
-
-async fn tenant_put_pageserver_attachments(
-    mut request: Request<Body>,
-) -> Result<Response<Body>, ApiError> {
-    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
-    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
-
-    let PutTenantPageserverLocationRequest {
-        pageserver_locations,
-    }: PutTenantPageserverLocationRequest = json_request(&mut request).await?;
-
-    let global_timelines = get_global_timelines(&request);
-    let wal_advertiser = global_timelines.get_wal_advertiser();
-    wal_advertiser
-        .update_pageserver_attachments(
-            tenant_shard_id,
-            pageserver_locations
-                .into_iter()
-                .map(
-                    |TenantShardPageserverLocation {
-                         generation,
-                         pageserver_node_id,
-                     }| UpdatePageserverAttachmentsArg {
-                        generation,
-                        pageserver_node_id,
-                    },
-                )
-                .collect(),
-        )
-        .map_err(ApiError::InternalServerError)?;
-
-    json_response(StatusCode::OK, ())
 }
 
 async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -776,9 +738,6 @@ pub fn make_router(
         })
         .delete("/v1/tenant/:tenant_id", |r| {
             request_span(r, tenant_delete_handler)
-        })
-        .put("/v1/tenant/:tenant_shard_id/pageserver_attachments", |r| {
-            request_span(r, tenant_put_pageserver_attachments)
         })
         // Will be used in the future instead of implicit timeline creation
         .post("/v1/tenant/timeline", |r| {

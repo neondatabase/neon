@@ -12,9 +12,7 @@ use anyhow::{Context, Result, bail};
 use camino::Utf8PathBuf;
 use camino_tempfile::Utf8TempDir;
 use safekeeper_api::membership::Configuration;
-use safekeeper_api::models::{
-    SafekeeperUtilization, TenantShardPageserverLocation, TimelineDeleteResult,
-};
+use safekeeper_api::models::{SafekeeperUtilization, TimelineDeleteResult};
 use safekeeper_api::{ServerInfo, membership};
 use tokio::fs;
 use tracing::*;
@@ -59,18 +57,12 @@ struct GlobalTimelinesState {
 impl GlobalTimelinesState {
     /// Get dependencies for a timeline constructor.
     fn get_dependencies(
-
         &self,
-    ,
     ) -> (
-
         Arc<SafeKeeperConf>,
-
         Arc<TimelinesSet>,
-
         RateLimiter,
         Arc<WalBackup>,
-    ,
         Arc<wal_advertiser::advmap::World>,
     ) {
         (
@@ -189,7 +181,12 @@ impl GlobalTimelines {
                     {
                         let ttid = TenantTimelineId::new(tenant_id, timeline_id);
                         let wal_advertiser = wal_advertiser.load_timeline(ttid);
-                        match Timeline::load_timeline(conf.clone(), ttid, wal_backup.clone(), wal_advertiser) {
+                        match Timeline::load_timeline(
+                            conf.clone(),
+                            ttid,
+                            wal_backup.clone(),
+                            wal_advertiser,
+                        ) {
                             Ok(tli) => {
                                 let mut shared_state = tli.write_shared_state().await;
                                 self.state
@@ -254,7 +251,7 @@ impl GlobalTimelines {
         start_lsn: Lsn,
         commit_lsn: Lsn,
     ) -> Result<Arc<Timeline>> {
-        let (conf, _, _, _) = {
+        let (conf, _, _, _, _) = {
             let state = self.state.lock().unwrap();
             if let Ok(timeline) = state.get(&ttid) {
                 // Timeline already exists, return it.
@@ -332,12 +329,11 @@ impl GlobalTimelines {
         match GlobalTimelines::install_temp_timeline(
             ttid,
             tmp_path,
-            wal_advertiser, conf.clone(),
+            wal_advertiser,
+            conf.clone(),
             wal_backup.clone(),
         )
-
-            .await
-
+        .await
         {
             Ok(timeline) => {
                 let mut timeline_shared_state = timeline.write_shared_state().await;

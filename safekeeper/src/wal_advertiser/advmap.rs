@@ -8,7 +8,7 @@ use std::{
 use serde::Serialize;
 use utils::{
     generation::Generation,
-    id::{NodeId, TenantTimelineId, TimelineId},
+    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
     shard::{ShardIndex, TenantShardId},
 };
@@ -40,11 +40,6 @@ pub struct PageserverTimeline {
 
 pub struct SafekeeperTimeline {}
 
-pub struct UpdatePageserverAttachmentsArg {
-    pub generation: Generation,
-    pub pageserver_node_id: NodeId,
-}
-
 impl World {
     pub fn housekeeping(&self) {}
     pub fn load_timeline(&self, ttid: TenantTimelineId) -> Arc<SafekeeperTimeline> {
@@ -52,8 +47,8 @@ impl World {
     }
     pub fn update_pageserver_attachments(
         &self,
-        tenant_shard_id: TenantShardId,
-        arg: Vec<UpdatePageserverAttachmentsArg>,
+        tenant_id: TenantId,
+        arg: safekeeper_api::models::TenantShardPageserverAttachmentChange,
     ) -> anyhow::Result<()> {
         todo!()
     }
