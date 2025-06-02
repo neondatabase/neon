@@ -270,7 +270,7 @@ impl ReportableError for ClientRequestError {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
+pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     config: &'static ProxyConfig,
     auth_backend: &'static auth::Backend<'static, ()>,
     ctx: &RequestContext,

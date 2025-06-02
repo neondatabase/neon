@@ -1,3 +1,4 @@
+use futures::{FutureExt, TryFutureExt};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, warn};
@@ -57,7 +58,7 @@ pub(crate) enum HandshakeData<S> {
 /// It's easier to work with owned `stream` here as we need to upgrade it to TLS;
 /// we also take an extra care of propagating only the select handshake errors to client.
 #[tracing::instrument(skip_all)]
-pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
+pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin + Send>(
     ctx: &RequestContext,
     stream: S,
     mut tls: Option<&TlsConfig>,
@@ -108,7 +109,9 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                                         }
                                     }
                                 }
-                            });
+                            })
+                            .map_ok(Box::new)
+                            .boxed();
 
                         res?;
 
@@ -146,7 +149,7 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                             tls.cert_resolver.resolve(conn_info.server_name());
 
                         let tls = Stream::Tls {
-                            tls: Box::new(tls_stream),
+                            tls: tls_stream,
                             tls_server_end_point,
                         };
                         (stream, msg) = PqStream::parse_startup(tls).await?;
