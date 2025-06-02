@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use futures::{FutureExt, TryFutureExt};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info};
 
@@ -221,12 +221,10 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         .await
     {
         Ok(auth_result) => auth_result,
-        Err(e) => {
-            return stream.throw_error(e, Some(ctx)).await?;
-        }
+        Err(e) => Err(stream.throw_error(e, Some(ctx)).await)?,
     };
 
-    let mut node = connect_to_compute(
+    let node = connect_to_compute(
         ctx,
         &TcpMechanism {
             user_info,
@@ -238,7 +236,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         config.wake_compute_retry_config,
         &config.connect_to_compute,
     )
-    .or_else(|e| stream.throw_error(e, Some(ctx)))
+    .or_else(|e| async { Err(stream.throw_error(e, Some(ctx)).await) })
     .await?;
 
     let cancellation_handler_clone = Arc::clone(&cancellation_handler);
@@ -246,14 +244,8 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     session.write_cancel_key(node.cancel_closure.clone())?;
 
-    prepare_client_connection(&node, *session.key(), &mut stream).await?;
-
-    // Before proxy passing, forward to compute whatever data is left in the
-    // PqStream input buffer. Normally there is none, but our serverless npm
-    // driver in pipeline mode sends startup, password and first query
-    // immediately after opening the connection.
-    let (stream, read_buf) = stream.into_inner();
-    node.stream.write_all(&read_buf).await?;
+    prepare_client_connection(&node, *session.key(), &mut stream);
+    let stream = stream.flush_and_into_inner().await?;
 
     Ok(Some(ProxyPassthrough {
         client: stream,

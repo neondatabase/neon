@@ -20,7 +20,7 @@ use utils::sentry_init::init_sentry;
 use utils::{project_build_tag, project_git_version};
 
 use crate::auth::backend::jwt::JwkCache;
-use crate::auth::backend::{AuthRateLimiter, ConsoleRedirectBackend, MaybeOwned};
+use crate::auth::backend::{ConsoleRedirectBackend, MaybeOwned};
 use crate::cancellation::{CancellationHandler, handle_cancel_messages};
 use crate::config::{
     self, AuthenticationConfig, CacheOptions, ComputeConfig, HttpConfig, ProjectInfoCacheOptions,
@@ -29,9 +29,7 @@ use crate::config::{
 use crate::context::parquet::ParquetUploadArgs;
 use crate::http::health_server::AppMetrics;
 use crate::metrics::Metrics;
-use crate::rate_limiter::{
-    EndpointRateLimiter, LeakyBucketConfig, RateBucketInfo, WakeComputeRateLimiter,
-};
+use crate::rate_limiter::{EndpointRateLimiter, RateBucketInfo, WakeComputeRateLimiter};
 use crate::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use crate::redis::kv_ops::RedisKVClient;
 use crate::redis::{elasticache, notifications};
@@ -154,15 +152,6 @@ struct ProxyCliArgs {
     /// Wake compute rate limiter max number of requests per second.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_SET)]
     wake_compute_limit: Vec<RateBucketInfo>,
-    /// Whether the auth rate limiter actually takes effect (for testing)
-    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
-    auth_rate_limit_enabled: bool,
-    /// Authentication rate limiter max number of hashes per second.
-    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_AUTH_SET)]
-    auth_rate_limit: Vec<RateBucketInfo>,
-    /// The IP subnet to use when considering whether two IP addresses are considered the same.
-    #[clap(long, default_value_t = 64)]
-    auth_rate_limit_ip_subnet: u8,
     /// Redis rate limiter max number of requests per second.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_REDIS_SET)]
     redis_rps_limit: Vec<RateBucketInfo>,
@@ -410,22 +399,9 @@ pub async fn run() -> anyhow::Result<()> {
         Some(tx_cancel),
     ));
 
-    // bit of a hack - find the min rps and max rps supported and turn it into
-    // leaky bucket config instead
-    let max = args
-        .endpoint_rps_limit
-        .iter()
-        .map(|x| x.rps())
-        .max_by(f64::total_cmp)
-        .unwrap_or(EndpointRateLimiter::DEFAULT.max);
-    let rps = args
-        .endpoint_rps_limit
-        .iter()
-        .map(|x| x.rps())
-        .min_by(f64::total_cmp)
-        .unwrap_or(EndpointRateLimiter::DEFAULT.rps);
     let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new_with_shards(
-        LeakyBucketConfig { rps, max },
+        RateBucketInfo::to_leaky_bucket(&args.endpoint_rps_limit)
+            .unwrap_or(EndpointRateLimiter::DEFAULT),
         64,
     ));
 
@@ -476,8 +452,7 @@ pub async fn run() -> anyhow::Result<()> {
         let key_path = args.tls_key.expect("already asserted it is set");
         let cert_path = args.tls_cert.expect("already asserted it is set");
 
-        let (tls_config, tls_server_end_point) =
-            super::pg_sni_router::parse_tls(&key_path, &cert_path)?;
+        let tls_config = super::pg_sni_router::parse_tls(&key_path, &cert_path)?;
 
         let dest = Arc::new(dest);
 
@@ -485,7 +460,6 @@ pub async fn run() -> anyhow::Result<()> {
             dest.clone(),
             tls_config.clone(),
             None,
-            tls_server_end_point,
             listen,
             cancellation_token.clone(),
         ));
@@ -494,7 +468,6 @@ pub async fn run() -> anyhow::Result<()> {
             dest,
             tls_config,
             Some(config.connect_to_compute.tls.clone()),
-            tls_server_end_point,
             listen_tls,
             cancellation_token.clone(),
         ));
@@ -681,9 +654,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         jwks_cache: JwkCache::default(),
         thread_pool,
         scram_protocol_timeout: args.scram_protocol_timeout,
-        rate_limiter_enabled: args.auth_rate_limit_enabled,
-        rate_limiter: AuthRateLimiter::new(args.auth_rate_limit.clone()),
-        rate_limit_ip_subnet: args.auth_rate_limit_ip_subnet,
         ip_allowlist_check_enabled: !args.is_private_access_proxy,
         is_vpc_acccess_proxy: args.is_private_access_proxy,
         is_auth_broker: args.is_auth_broker,
