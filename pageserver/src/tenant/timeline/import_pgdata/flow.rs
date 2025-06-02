@@ -471,6 +471,8 @@ impl Plan {
                             last_completed_job_idx = job_idx;
 
                             if last_completed_job_idx % checkpoint_every == 0 {
+                                tracing::info!(last_completed_job_idx, jobs=%jobs_in_plan, "Checkpointing import status");
+
                                 let progress = ShardImportProgressV1 {
                                     jobs: jobs_in_plan,
                                     completed: last_completed_job_idx,
@@ -492,8 +494,6 @@ impl Plan {
                                     anyhow::anyhow!("Shut down while putting timeline import status")
                                 })?;
                             }
-
-                            tracing::info!(last_completed_job_idx, jobs=%jobs_in_plan, "Checkpointing import status");
                         },
                         Some(Err(_)) => {
                             anyhow::bail!(
