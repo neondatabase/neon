@@ -301,6 +301,10 @@ safekeepers_cmp(char *old, char *new)
 	return true;
 }
 
+/*
+ * GUC assign_hook for neon.safekeepers. Restarts walproposer through FATAL if
+ * the list changed.
+ */
 static void
 assign_neon_safekeepers(const char *newval, void *extra)
 {
@@ -500,6 +504,9 @@ BackpressureThrottlingTime(void)
 
 /*
  * Register a background worker proposing WAL to wal acceptors.
+ * We start walproposer bgworker even for replicas in order to support possible replica promotion.
+ * When pg_promote() function is called, then walproposer bgworker registered with BgWorkerStart_RecoveryFinished
+ * is automatically launched when promotion is completed.
  */
 static void
 walprop_register_bgworker(void)
