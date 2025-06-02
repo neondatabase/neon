@@ -48,11 +48,9 @@ impl JsonResponse {
 
     /// Create an error response related to the compute being in an invalid state
     pub(self) fn invalid_status(status: ComputeStatus) -> Response {
-        Self::create_response(
+        Self::error(
             StatusCode::PRECONDITION_FAILED,
-            &GenericAPIError {
-                error: format!("invalid compute status: {status}"),
-            },
+            format!("invalid compute status: {status}"),
         )
     }
 }
