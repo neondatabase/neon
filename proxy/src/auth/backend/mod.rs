@@ -206,7 +206,7 @@ async fn auth_quirks(
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-) -> auth::Result<(ComputeCredentials, EndpointAccessControl)> {
+) -> auth::Result<ComputeCredentials> {
     // If there's no project so far, that entails that client doesn't
     // support SNI or other means of passing the endpoint (project) name.
     // We now expect to see a very specific payload in the place of password.
@@ -262,7 +262,7 @@ async fn auth_quirks(
     )
     .await
     {
-        Ok(keys) => Ok((keys, access_controls)),
+        Ok(keys) => Ok(keys),
         Err(e) => Err(e),
     }
 }
@@ -326,7 +326,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
         allow_cleartext: bool,
         config: &'static AuthenticationConfig,
         endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-    ) -> auth::Result<(Backend<'a, ComputeCredentials>, EndpointAccessControl)> {
+    ) -> auth::Result<Backend<'a, ComputeCredentials>> {
         let res = match self {
             Self::ControlPlane(api, user_info) => {
                 debug!(
@@ -346,9 +346,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
                 )
                 .await;
                 match auth_res {
-                    Ok((credentials, ip_allowlist)) => {
-                        Ok((Backend::ControlPlane(api, credentials), ip_allowlist))
-                    }
+                    Ok(credentials) => Ok(Backend::ControlPlane(api, credentials)),
                     Err(e) => {
                         // The password could have been changed, so we invalidate the cache.
                         // We should only invalidate the cache if the TTL might have expired.
@@ -717,7 +715,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(creds.0.info.endpoint, "my-endpoint");
+        assert_eq!(creds.info.endpoint, "my-endpoint");
 
         handle.await.unwrap();
     }

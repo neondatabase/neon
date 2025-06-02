@@ -345,7 +345,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     };
 
     let user = user_info.get_user().to_owned();
-    let (user_info, _ip_allowlist) = match user_info
+    let user_info = match user_info
         .authenticate(
             ctx,
             &mut stream,
