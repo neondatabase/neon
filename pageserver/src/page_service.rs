@@ -3390,6 +3390,10 @@ impl GrpcPageServiceHandler {
 
     /// Acquires a timeline handle for the given request.
     ///
+    /// TODO: during shard splits, the compute may still be sending requests to the parent shard
+    /// until the entire split is committed and the compute is notified. Consider installing a
+    /// temporary shard router from the parent to the children while the split is in progress.
+    ///
     /// TODO: consider moving this to a middleware layer; all requests need it. Needs to manage
     /// the TimelineHandles lifecycle.
     ///
@@ -3433,6 +3437,10 @@ impl GrpcPageServiceHandler {
     ///
     /// NB: errors will terminate the stream. Per-request errors should return a GetPageResponse
     /// with an appropriate status code instead.
+    ///
+    /// TODO: get_vectored() currently enforces a batch limit of 32. Postgres will typically send
+    /// batches up to effective_io_concurrency = 100. Either we have to accept large batches, or
+    /// split them up in the client or server.
     #[instrument(skip_all, fields(req_id, rel, blkno, blks, req_lsn, mod_lsn))]
     async fn get_page(
         ctx: &RequestContext,
@@ -3497,6 +3505,9 @@ impl GrpcPageServiceHandler {
             });
         }
 
+        // TODO: this does a relation size query for every page in the batch. Since this batch is
+        // all for one relation, we could do this only once. However, this is not the case for the
+        // libpq implementation.
         let results = PageServerHandler::handle_get_page_at_lsn_request_batched(
             &timeline,
             batch,
