@@ -920,7 +920,7 @@ async fn main() -> anyhow::Result<()> {
                         storcon_client
                             .dispatch::<(), ()>(
                                 Method::PUT,
-                                format!("control/v1/node/{node_id}/drain"),
+                                format!("control/v1/node/{node_id}/drain?graceful=true"),
                                 None,
                             )
                             .await?;

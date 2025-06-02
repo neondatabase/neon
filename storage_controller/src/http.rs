@@ -47,7 +47,9 @@ use crate::metrics::{
 };
 use crate::persistence::SafekeeperUpsert;
 use crate::reconciler::ReconcileError;
-use crate::service::{LeadershipStatus, RECONCILE_TIMEOUT, STARTUP_RECONCILE_TIMEOUT, Service};
+use crate::service::{
+    LeadershipStatus, NodeDrainMode, RECONCILE_TIMEOUT, STARTUP_RECONCILE_TIMEOUT, Service,
+};
 
 /// State available to HTTP request handlers
 pub struct HttpState {
@@ -1000,8 +1002,18 @@ async fn handle_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiErro
 
     let state = get_state(&req);
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
+    let graceful: bool = parse_query_param(&req, "graceful")?.unwrap_or(false);
 
-    state.service.start_node_drain(node_id).await?;
+    let node_drain_mode = if graceful {
+        NodeDrainMode::FullWithReprovisioning
+    } else {
+        NodeDrainMode::AttachedOnly
+    };
+
+    state
+        .service
+        .start_node_drain(node_id, node_drain_mode)
+        .await?;
 
     json_response(StatusCode::ACCEPTED, ())
 }

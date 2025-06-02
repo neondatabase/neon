@@ -687,6 +687,16 @@ struct ShardMutationLocations {
 #[derive(Default, Clone)]
 struct TenantMutationLocations(BTreeMap<TenantShardId, ShardMutationLocations>);
 
+#[allow(dead_code)]
+pub(crate) enum NodeDrainMode {
+    /// Drain only attached locations (primary node itself)
+    AttachedOnly,
+    /// Drain attached and secondary locations (but don't create new secondaries)
+    AttachedAndSecondaries,
+    /// Drain everything and also provision new secondaries for the newly promoted primaries
+    FullWithReprovisioning,
+}
+
 impl Service {
     pub fn get_config(&self) -> &Config {
         &self.config
@@ -7548,6 +7558,7 @@ impl Service {
     pub(crate) async fn start_node_drain(
         self: &Arc<Self>,
         node_id: NodeId,
+        _mode: NodeDrainMode,
     ) -> Result<(), ApiError> {
         let (ongoing_op, node_available, node_policy, schedulable_nodes_count) = {
             let locked = self.inner.read().unwrap();
