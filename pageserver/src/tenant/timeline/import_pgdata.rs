@@ -106,6 +106,8 @@ pub async fn doit(
                 );
             }
 
+            tracing::info!("Import plan executed. Flushing remote changes and notifying storcon");
+
             timeline
                 .remote_client
                 .schedule_index_upload_for_file_changes()?;

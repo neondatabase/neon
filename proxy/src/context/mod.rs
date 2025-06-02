@@ -4,7 +4,6 @@ use std::net::IpAddr;
 
 use chrono::Utc;
 use once_cell::sync::OnceCell;
-use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
 use tokio::sync::mpsc;
 use tracing::field::display;
@@ -20,6 +19,7 @@ use crate::metrics::{
     ConnectOutcome, InvalidEndpointsGroup, LatencyAccumulated, LatencyTimer, Metrics, Protocol,
     Waiting,
 };
+use crate::pqproto::StartupMessageParams;
 use crate::protocol2::{ConnectionInfo, ConnectionInfoExtra};
 use crate::types::{DbName, EndpointId, RoleName};
 
@@ -366,6 +366,18 @@ impl RequestContext {
         LatencyTimerPause {
             ctx: self,
             start: tokio::time::Instant::now(),
+            waiting_for,
+        }
+    }
+
+    pub(crate) fn latency_timer_pause_at(
+        &self,
+        at: tokio::time::Instant,
+        waiting_for: Waiting,
+    ) -> LatencyTimerPause<'_> {
+        LatencyTimerPause {
+            ctx: self,
+            start: at,
             waiting_for,
         }
     }

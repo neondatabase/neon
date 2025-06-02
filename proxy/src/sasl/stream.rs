@@ -3,60 +3,11 @@
 use std::io;
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::info;
 
-use super::Mechanism;
-use super::messages::ServerMessage;
+use super::{Mechanism, Step};
+use crate::context::RequestContext;
+use crate::pqproto::{BeAuthenticationSaslMessage, BeMessage};
 use crate::stream::PqStream;
-
-/// Abstracts away all peculiarities of the libpq's protocol.
-pub(crate) struct SaslStream<'a, S> {
-    /// The underlying stream.
-    stream: &'a mut PqStream<S>,
-    /// Current password message we received from client.
-    current: bytes::Bytes,
-    /// First SASL message produced by client.
-    first: Option<&'a str>,
-}
-
-impl<'a, S> SaslStream<'a, S> {
-    pub(crate) fn new(stream: &'a mut PqStream<S>, first: &'a str) -> Self {
-        Self {
-            stream,
-            current: bytes::Bytes::new(),
-            first: Some(first),
-        }
-    }
-}
-
-impl<S: AsyncRead + Unpin> SaslStream<'_, S> {
-    // Receive a new SASL message from the client.
-    async fn recv(&mut self) -> io::Result<&str> {
-        if let Some(first) = self.first.take() {
-            return Ok(first);
-        }
-
-        self.current = self.stream.read_password_message().await?;
-        let s = std::str::from_utf8(&self.current)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad encoding"))?;
-
-        Ok(s)
-    }
-}
-
-impl<S: AsyncWrite + Unpin> SaslStream<'_, S> {
-    // Send a SASL message to the client.
-    async fn send(&mut self, msg: &ServerMessage<&str>) -> io::Result<()> {
-        self.stream.write_message(&msg.to_reply()).await?;
-        Ok(())
-    }
-
-    // Queue a SASL message for the client.
-    fn send_noflush(&mut self, msg: &ServerMessage<&str>) -> io::Result<()> {
-        self.stream.write_message_noflush(&msg.to_reply())?;
-        Ok(())
-    }
-}
 
 /// SASL authentication outcome.
 /// It's much easier to match on those two variants
@@ -69,33 +20,63 @@ pub(crate) enum Outcome<R> {
     Failure(&'static str),
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> SaslStream<'_, S> {
-    /// Perform SASL message exchange according to the underlying algorithm
-    /// until user is either authenticated or denied access.
-    pub(crate) async fn authenticate<M: Mechanism>(
-        mut self,
-        mut mechanism: M,
-    ) -> super::Result<Outcome<M::Output>> {
-        loop {
-            let input = self.recv().await?;
-            let step = mechanism.exchange(input).map_err(|error| {
-                info!(?error, "error during SASL exchange");
-                error
-            })?;
+pub async fn authenticate<S, F, M>(
+    ctx: &RequestContext,
+    stream: &mut PqStream<S>,
+    mechanism: F,
+) -> super::Result<Outcome<M::Output>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnOnce(&str) -> super::Result<M>,
+    M: Mechanism,
+{
+    let (mut mechanism, mut input) = {
+        // pause the timer while we communicate with the client
+        let _paused = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
 
-            use super::Step;
-            return Ok(match step {
-                Step::Continue(moved_mechanism, reply) => {
-                    self.send(&ServerMessage::Continue(&reply)).await?;
-                    mechanism = moved_mechanism;
-                    continue;
-                }
-                Step::Success(result, reply) => {
-                    self.send_noflush(&ServerMessage::Final(&reply))?;
-                    Outcome::Success(result)
-                }
-                Step::Failure(reason) => Outcome::Failure(reason),
-            });
+        // Initial client message contains the chosen auth method's name.
+        let msg = stream.read_password_message().await?;
+
+        let sasl = super::FirstMessage::parse(msg)
+            .ok_or(super::Error::BadClientMessage("bad sasl message"))?;
+
+        (mechanism(sasl.method)?, sasl.message)
+    };
+
+    loop {
+        match mechanism.exchange(input) {
+            Ok(Step::Continue(moved_mechanism, reply)) => {
+                mechanism = moved_mechanism;
+
+                // write reply
+                let sasl_msg = BeAuthenticationSaslMessage::Continue(reply.as_bytes());
+                stream.write_message(BeMessage::AuthenticationSasl(sasl_msg));
+                drop(reply);
+            }
+            Ok(Step::Success(result, reply)) => {
+                // write reply
+                let sasl_msg = BeAuthenticationSaslMessage::Final(reply.as_bytes());
+                stream.write_message(BeMessage::AuthenticationSasl(sasl_msg));
+                stream.write_message(BeMessage::AuthenticationOk);
+
+                // exit with success
+                break Ok(Outcome::Success(result));
+            }
+            // exit with failure
+            Ok(Step::Failure(reason)) => break Ok(Outcome::Failure(reason)),
+            Err(error) => {
+                tracing::info!(?error, "error during SASL exchange");
+                return Err(error);
+            }
         }
+
+        // pause the timer while we communicate with the client
+        let _paused = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
+
+        // get next input
+        stream.flush().await?;
+        let msg = stream.read_password_message().await?;
+        input = std::str::from_utf8(msg)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad encoding"))?;
     }
 }

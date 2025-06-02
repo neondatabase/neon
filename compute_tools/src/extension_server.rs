@@ -83,6 +83,7 @@ use reqwest::StatusCode;
 use tar::Archive;
 use tracing::info;
 use tracing::log::warn;
+use url::Url;
 use zstd::stream::read::Decoder;
 
 use crate::metrics::{REMOTE_EXT_REQUESTS_TOTAL, UNKNOWN_HTTP_STATUS};
@@ -158,14 +159,14 @@ fn parse_pg_version(human_version: &str) -> PostgresMajorVersion {
 pub async fn download_extension(
     ext_name: &str,
     ext_path: &RemotePath,
-    remote_ext_base_url: &str,
+    remote_ext_base_url: &Url,
     pgbin: &str,
 ) -> Result<u64> {
     info!("Download extension {:?} from {:?}", ext_name, ext_path);
 
     // TODO add retry logic
     let download_buffer =
-        match download_extension_tar(remote_ext_base_url, &ext_path.to_string()).await {
+        match download_extension_tar(remote_ext_base_url.as_str(), &ext_path.to_string()).await {
             Ok(buffer) => buffer,
             Err(error_message) => {
                 return Err(anyhow::anyhow!(

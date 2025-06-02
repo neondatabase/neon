@@ -31,7 +31,9 @@ mod private {
         type Output = io::Result<RustlsStream<S>>;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            Pin::new(&mut self.inner).poll(cx).map_ok(RustlsStream)
+            Pin::new(&mut self.inner)
+                .poll(cx)
+                .map_ok(|s| RustlsStream(Box::new(s)))
         }
     }
 
@@ -57,7 +59,7 @@ mod private {
         }
     }
 
-    pub struct RustlsStream<S>(TlsStream<S>);
+    pub struct RustlsStream<S>(Box<TlsStream<S>>);
 
     impl<S> postgres_client::tls::TlsStream for RustlsStream<S>
     where
