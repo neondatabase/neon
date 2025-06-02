@@ -186,7 +186,7 @@ where
 pub async fn read_message<'a, S>(
     stream: &mut S,
     buf: &'a mut Vec<u8>,
-    max: usize,
+    max: u32,
 ) -> io::Result<(u8, &'a mut [u8])>
 where
     S: AsyncRead + Unpin,
@@ -206,7 +206,7 @@ where
     let header = read!(stream => Header);
 
     // as described above, the length must be at least 4.
-    let Some(len) = (header.len.get() as usize).checked_sub(4) else {
+    let Some(len) = header.len.get().checked_sub(4) else {
         return Err(io::Error::other(format!(
             "invalid startup message length {}, must be at least 4.",
             header.len,
@@ -222,7 +222,7 @@ where
     }
 
     // read in our entire message.
-    buf.resize(len, 0);
+    buf.resize(len as usize, 0);
     stream.read_exact(buf).await?;
 
     Ok((header.tag, buf))

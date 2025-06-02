@@ -72,7 +72,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> PqStream<S> {
 impl<S: AsyncRead + Unpin> PqStream<S> {
     /// Read a raw postgres packet, which will respect the max length requested.
     /// This is not cancel safe.
-    async fn read_raw_expect(&mut self, tag: u8, max: usize) -> io::Result<&mut [u8]> {
+    async fn read_raw_expect(&mut self, tag: u8, max: u32) -> io::Result<&mut [u8]> {
         let (actual_tag, msg) = read_message(&mut self.stream, &mut self.read, max).await?;
         if actual_tag != tag {
             return Err(io::Error::other(format!(
@@ -89,7 +89,7 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
         // passwords are usually pretty short
         // and SASL SCRAM messages are no longer than 256 bytes in my testing
         // (a few hashes and random bytes, encoded into base64).
-        const MAX_PASSWORD_LENGTH: usize = 512;
+        const MAX_PASSWORD_LENGTH: u32 = 512;
         self.read_raw_expect(FE_PASSWORD_MESSAGE, MAX_PASSWORD_LENGTH)
             .await
     }
@@ -132,19 +132,11 @@ impl ReportableError for ReportedError {
 impl<S: AsyncWrite + Unpin> PqStream<S> {
     /// Tell the client that we are willing to accept SSL.
     /// This is not cancel safe
-    pub fn accept_tls(self) -> impl Future<Output = io::Result<S>> {
-        let Self {
-            mut stream,
-            mut write,
-            ..
-        } = self;
-        async move {
-            // S for SSL.
-            write.encryption(b'S');
-            stream.write_all_buf(&mut write).await?;
-            stream.flush().await?;
-            Ok(stream)
-        }
+    pub async fn accept_tls(mut self) -> io::Result<S> {
+        // S for SSL.
+        self.write.encryption(b'S');
+        self.flush().await?;
+        Ok(self.stream)
     }
 
     /// Assert that we are using direct TLS.
@@ -176,18 +168,10 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
 
     /// Flush the output buffer into the underlying stream.
     ///
-    /// This is not cancel safe.
-    pub fn flush_and_into_inner(self) -> impl Future<Output = io::Result<S>> {
-        let Self {
-            mut stream,
-            mut write,
-            ..
-        } = self;
-        async move {
-            stream.write_all_buf(&mut write).await?;
-            stream.flush().await?;
-            Ok(stream)
-        }
+    /// This is cancel safe.
+    pub async fn flush_and_into_inner(mut self) -> io::Result<S> {
+        self.flush().await?;
+        Ok(self.stream)
     }
 
     /// Write the error message to the client, then re-throw it.
