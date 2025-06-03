@@ -156,7 +156,7 @@ impl PageserverClient {
         let mut client =
             PageServiceClient::with_interceptor(chan, self.auth_interceptor.for_shard(shard));
 
-        let request = proto::CheckRelExistsRequest::try_from(request)?;
+        let request = proto::CheckRelExistsRequest::from(request);
         let response = client.check_rel_exists(tonic::Request::new(request)).await;
 
         match response {
@@ -183,7 +183,7 @@ impl PageserverClient {
         let mut client =
             PageServiceClient::with_interceptor(chan, self.auth_interceptor.for_shard(shard));
 
-        let request = proto::GetRelSizeRequest::try_from(request)?;
+        let request = proto::GetRelSizeRequest::from(request);
         let response = client.get_rel_size(tonic::Request::new(request)).await;
 
         match response {
@@ -213,7 +213,7 @@ impl PageserverClient {
         let mut client =
             PageServiceClient::with_interceptor(chan, self.auth_interceptor.for_shard(shard));
 
-        let request = proto::GetPageRequest::try_from(request)?;
+        let request = proto::GetPageRequest::from(request);
 
         let request_stream = futures::stream::once(std::future::ready(request));
 
@@ -296,7 +296,7 @@ impl PageserverClient {
         let mut client =
             PageServiceClient::with_interceptor(chan, self.auth_interceptor.for_shard(shard));
 
-        let request = proto::GetDbSizeRequest::try_from(request)?;
+        let request = proto::GetDbSizeRequest::from(request);
         let response = client.get_db_size(tonic::Request::new(request)).await;
 
         match response {
@@ -331,7 +331,7 @@ impl PageserverClient {
             client = client.accept_compressed(tonic::codec::CompressionEncoding::Gzip);
         }
 
-        let request = proto::GetBaseBackupRequest::try_from(request)?;
+        let request = proto::GetBaseBackupRequest::from(request);
         let response = client.get_base_backup(tonic::Request::new(request)).await;
 
         match response {

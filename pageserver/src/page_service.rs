@@ -765,7 +765,7 @@ impl PageStreamError {
             request_id,
             status_code,
             reason: Some(status.message().to_string()),
-            page_images: SmallVec::new(),
+            page_images: Vec::new(),
         }
         .into())
     }
@@ -3521,7 +3521,7 @@ impl GrpcPageServiceHandler {
             request_id: req.request_id,
             status_code: page_api::GetPageStatusCode::Ok,
             reason: None,
-            page_images: SmallVec::with_capacity(results.len()),
+            page_images: Vec::with_capacity(results.len()),
         };
 
         for result in results {
@@ -3660,7 +3660,7 @@ impl proto::PageService for GrpcPageServiceHandler {
                     if chunk.is_empty() {
                         break;
                     }
-                    yield proto::GetBaseBackupResponseChunk::try_from(chunk.clone().freeze())?;
+                    yield proto::GetBaseBackupResponseChunk::from(chunk.clone().freeze());
                     chunk.clear();
                 }
             }
@@ -3806,7 +3806,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         let resp =
             PageServerHandler::handle_get_slru_segment_request(&timeline, &req, &ctx).await?;
         let resp: page_api::GetSlruSegmentResponse = resp.segment;
-        Ok(tonic::Response::new(resp.try_into()?))
+        Ok(tonic::Response::new(resp.into()))
     }
 }
 

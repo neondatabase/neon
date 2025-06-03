@@ -431,10 +431,10 @@ impl Timeline {
                         GetVectoredError::InvalidLsn(e) => {
                             Err(anyhow::anyhow!("invalid LSN: {e:?}").into())
                         }
-                        // NB: this should never happen in practice because we limit MAX_GET_VECTORED_KEYS
+                        // NB: this should never happen in practice because we limit batch size to be smaller than max_get_vectored_keys
                         // TODO: we can prevent this error class by moving this check into the type system
-                        GetVectoredError::Oversized(err) => {
-                            Err(anyhow::anyhow!("batching oversized: {err:?}").into())
+                        GetVectoredError::Oversized(err, max) => {
+                            Err(anyhow::anyhow!("batching oversized: {err} > {max}").into())
                         }
                     };
 
@@ -719,7 +719,7 @@ impl Timeline {
 
         let batches = keyspace.partition(
             self.get_shard_identity(),
-            Timeline::MAX_GET_VECTORED_KEYS * BLCKSZ as u64,
+            self.conf.max_get_vectored_keys.get() as u64 * BLCKSZ as u64,
         );
 
         let io_concurrency = IoConcurrency::spawn_from_conf(
@@ -959,7 +959,7 @@ impl Timeline {
 
             let batches = keyspace.partition(
                 self.get_shard_identity(),
-                Timeline::MAX_GET_VECTORED_KEYS * BLCKSZ as u64,
+                self.conf.max_get_vectored_keys.get() as u64 * BLCKSZ as u64,
             );
 
             let io_concurrency = IoConcurrency::spawn_from_conf(
