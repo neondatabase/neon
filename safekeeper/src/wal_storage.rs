@@ -154,7 +154,7 @@ pub struct PhysicalStorage {
     ///
     /// Partial segment 002 has no WAL records, and it will be removed by the
     /// next truncate_wal(). This flag will be set to false after the first
-    /// truncate_wal() call.
+    /// successful truncate_wal() call.
     ///
     /// [`write_lsn`]: Self::write_lsn
     pending_wal_truncation: bool,
