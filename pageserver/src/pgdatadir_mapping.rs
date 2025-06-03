@@ -482,7 +482,7 @@ impl Timeline {
 
         for rel in rels {
             let n_blocks = self
-                .get_rel_size_cached(rel, version, Some((reldir_key, &reldir)), ctx)
+                .get_rel_size_in_reldir(rel, version, Some((reldir_key, &reldir)), ctx)
                 .await?;
             total_blocks += n_blocks as usize;
         }
@@ -499,17 +499,17 @@ impl Timeline {
         version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<BlockNumber, PageReconstructError> {
-        self.get_rel_size_cached(tag, version, None, ctx).await
+        self.get_rel_size_in_reldir(tag, version, None, ctx).await
     }
 
     /// Get size of a relation file. The relation must exist, otherwise an error is returned.
     ///
-    /// See [`Self::get_rel_exists_cached`] on why we need `reldir_v1_des_cache`.
-    pub(crate) async fn get_rel_size_cached(
+    /// See [`Self::get_rel_exists_in_reldir`] on why we need `deserialized_reldir_v1`.
+    pub(crate) async fn get_rel_size_in_reldir(
         &self,
         tag: RelTag,
         version: Version<'_>,
-        reldir_v1_des_cache: Option<(Key, &RelDirectory)>,
+        deserialized_reldir_v1: Option<(Key, &RelDirectory)>,
         ctx: &RequestContext,
     ) -> Result<BlockNumber, PageReconstructError> {
         if tag.relnode == 0 {
@@ -524,7 +524,7 @@ impl Timeline {
 
         if (tag.forknum == FSM_FORKNUM || tag.forknum == VISIBILITYMAP_FORKNUM)
             && !self
-                .get_rel_exists_cached(tag, version, reldir_v1_des_cache, ctx)
+                .get_rel_exists_in_reldir(tag, version, deserialized_reldir_v1, ctx)
                 .await?
         {
             // FIXME: Postgres sometimes calls smgrcreate() to create
@@ -554,7 +554,7 @@ impl Timeline {
         version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
-        self.get_rel_exists_cached(tag, version, None, ctx).await
+        self.get_rel_exists_in_reldir(tag, version, None, ctx).await
     }
 
     /// Does the relation exist? With a cached deserialized `RelDirectory`.
@@ -563,11 +563,11 @@ impl Timeline {
     /// the caller should obtain the deserialized `RelDirectory` first and then call this function
     /// to avoid duplicated work of deserliazation. This is a hack and should be removed by introducing
     /// a new API (e.g., `get_rel_exists_batched`).
-    pub(crate) async fn get_rel_exists_cached(
+    pub(crate) async fn get_rel_exists_in_reldir(
         &self,
         tag: RelTag,
         version: Version<'_>,
-        reldir_v1_des_cache: Option<(Key, &RelDirectory)>,
+        deserialized_reldir_v1: Option<(Key, &RelDirectory)>,
         ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
         if tag.relnode == 0 {
@@ -612,11 +612,13 @@ impl Timeline {
 
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
 
-        if let Some((cached_key, dir)) = reldir_v1_des_cache {
+        if let Some((cached_key, dir)) = deserialized_reldir_v1 {
             if cached_key == key {
                 return Ok(dir.rels.contains(&(tag.relnode, tag.forknum)));
             } else if cfg!(test) || cfg!(feature = "testing") {
-                panic!("cached key mismatch: {cached_key} != {key}");
+                panic!("cached reldir key mismatch: {cached_key} != {key}");
+            } else {
+                warn!("cached reldir key mismatch: {cached_key} != {key}");
             }
             // Fallback to reading the directory from the datadir.
         }
