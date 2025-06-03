@@ -25,5 +25,6 @@ message RemoteConsistentLsnAdvertisement {
 message TenantTimelineId {
     bytes tenant_id = 1;
     bytes timeline_id = 2;
+    uint64 commit_lsn = 3;
 }
 
