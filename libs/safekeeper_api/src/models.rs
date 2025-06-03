@@ -320,7 +320,7 @@ pub enum TenantShardPageserverAttachmentChange {
 }
 
 impl TenantShardPageserverAttachmentChange {
-    pub fn attachment(&self) -> TenantShardPageserverAttachment {
+    pub fn attachment(&self) -> &TenantShardPageserverAttachment {
         match self {
             TenantShardPageserverAttachmentChange::Attach(a) => a,
             TenantShardPageserverAttachmentChange::Detach(a) => a,
