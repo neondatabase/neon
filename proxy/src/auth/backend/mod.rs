@@ -168,8 +168,6 @@ impl ComputeUserInfo {
 
 #[cfg_attr(test, derive(Debug))]
 pub(crate) enum ComputeCredentialKeys {
-    #[cfg(any(test, feature = "testing"))]
-    Password(Vec<u8>),
     AuthKeys(AuthKeys),
     JwtPayload(Vec<u8>),
     None,

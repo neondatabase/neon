@@ -39,10 +39,6 @@ pub mod mgmt;
 /// Auth secret which is managed by the cloud.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub(crate) enum AuthSecret {
-    #[cfg(any(test, feature = "testing"))]
-    /// Md5 hash of user's password.
-    Md5([u8; 16]),
-
     /// [SCRAM](crate::scram) authentication info.
     Scram(scram::ServerSecret),
 }
@@ -93,8 +89,6 @@ impl NodeInfo {
 
     pub(crate) fn set_keys(&mut self, keys: &ComputeCredentialKeys) {
         match keys {
-            #[cfg(any(test, feature = "testing"))]
-            ComputeCredentialKeys::Password(password) => self.config.password(password),
             ComputeCredentialKeys::AuthKeys(auth_keys) => self.config.auth_keys(*auth_keys),
             ComputeCredentialKeys::JwtPayload(_) | ComputeCredentialKeys::None => &mut self.config,
         };

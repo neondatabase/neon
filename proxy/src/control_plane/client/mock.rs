@@ -87,8 +87,7 @@ impl MockControlPlane {
             .await?
             {
                 info!("got a secret: {entry}"); // safe since it's not a prod scenario
-                let secret = scram::ServerSecret::parse(&entry).map(AuthSecret::Scram);
-                secret.or_else(|| parse_md5(&entry).map(AuthSecret::Md5))
+                scram::ServerSecret::parse(&entry).map(AuthSecret::Scram)
             } else {
                 warn!("user '{role}' does not exist");
                 None
@@ -265,13 +264,4 @@ impl super::ControlPlaneApi for MockControlPlane {
     ) -> Result<CachedNodeInfo, WakeComputeError> {
         self.do_wake_compute().map_ok(Cached::new_uncached).await
     }
-}
-
-fn parse_md5(input: &str) -> Option<[u8; 16]> {
-    let text = input.strip_prefix("md5")?;
-
-    let mut bytes = [0u8; 16];
-    hex::decode_to_slice(text, &mut bytes).ok()?;
-
-    Some(bytes)
 }

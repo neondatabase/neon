@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use async_trait::async_trait;
 use http::StatusCode;
-use postgres_client::config::SslMode;
+use postgres_client::config::{AuthKeys, ScramKeys, SslMode};
 use postgres_client::tls::{MakeTlsConnect, NoTls};
 use retry::{ShouldRetryWakeCompute, retry_after};
 use rstest::rstest;
@@ -581,7 +581,10 @@ fn helper_create_connect_info(
                 user: "user".into(),
                 options: NeonOptions::parse_options_raw(""),
             },
-            keys: ComputeCredentialKeys::Password("password".into()),
+            keys: ComputeCredentialKeys::AuthKeys(AuthKeys::ScramSha256(ScramKeys {
+                client_key: [0; 32],
+                server_key: [0; 32],
+            })),
         },
     )
 }
