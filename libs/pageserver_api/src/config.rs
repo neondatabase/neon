@@ -329,6 +329,8 @@ pub struct TimelineImportConfig {
     pub import_job_concurrency: NonZeroUsize,
     pub import_job_soft_size_limit: NonZeroUsize,
     pub import_job_checkpoint_threshold: NonZeroUsize,
+    /// Max size of the remote storage partial read done by any job
+    pub import_job_max_byte_range_size: NonZeroUsize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -716,6 +718,7 @@ impl Default for ConfigToml {
                 import_job_concurrency: NonZeroUsize::new(32).unwrap(),
                 import_job_soft_size_limit: NonZeroUsize::new(256 * 1024 * 1024).unwrap(),
                 import_job_checkpoint_threshold: NonZeroUsize::new(32).unwrap(),
+                import_job_max_byte_range_size: NonZeroUsize::new(4 * 1024 * 1024).unwrap(),
             },
             basebackup_cache_config: None,
             posthog_config: None,
