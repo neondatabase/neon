@@ -446,6 +446,15 @@ static PAGE_CACHE_ERRORS: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub(crate) static FEATURE_FLAG_EVALUATION: Lazy<CounterVec> = Lazy::new(|| {
+    register_counter_vec!(
+        "pageserver_feature_flag_evaluation",
+        "Number of times a feature flag is evaluated",
+        &["flag_key", "status", "value"],
+    )
+    .unwrap()
+});
+
 #[derive(IntoStaticStr)]
 #[strum(serialize_all = "kebab_case")]
 pub(crate) enum PageCacheErrorKind {
