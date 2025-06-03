@@ -63,7 +63,6 @@ use utils::{failpoint_support, span_record};
 use crate::auth::check_permission;
 use crate::basebackup::{self, BasebackupError};
 use crate::basebackup_cache::BasebackupCache;
-use crate::compute_service::page_service_conn_main;
 use crate::config::PageServerConf;
 use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
@@ -345,8 +344,6 @@ pub async fn libpq_listener_main(
                     .perf_span_dispatch(perf_trace_dispatch.clone())
                     .detached_child();
 
-                let (dummy_tx, _) = tokio::sync::mpsc::channel(1);
-
                 connection_handler_tasks.spawn(page_service_conn_main(
                     conf,
                     tenant_manager.clone(),
@@ -355,11 +352,10 @@ pub async fn libpq_listener_main(
                     auth_type,
                     tls_config.clone(),
                     pipelining_config.clone(),
-                    basebackup_cache.clone(),
+                    Arc::clone(&basebackup_cache),
                     connection_ctx,
                     connections_cancel.child_token(),
                     gate_guard,
-                    dummy_tx,
                 ));
             }
             Err(err) => {
@@ -389,10 +385,9 @@ struct ConnectionPerfSpanFields {
     compute_mode: Option<String>,
 }
 
-/// note: the caller has already set TCP_NODELAY on the socket
 #[instrument(skip_all, fields(peer_addr, application_name, compute_mode))]
 #[allow(clippy::too_many_arguments)]
-pub async fn libpq_page_service_conn_main(
+async fn page_service_conn_main(
     conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<SwappableJwtAuth>>,
@@ -408,6 +403,10 @@ pub async fn libpq_page_service_conn_main(
     let _guard = LIVE_CONNECTIONS
         .with_label_values(&["page_service"])
         .guard();
+
+    socket
+        .set_nodelay(true)
+        .context("could not set TCP_NODELAY")?;
 
     let socket_fd = socket.as_raw_fd();
 
@@ -527,7 +526,7 @@ struct PageServerHandler {
     gate_guard: GateGuard,
 }
 
-pub struct TimelineHandles {
+struct TimelineHandles {
     wrapper: TenantManagerWrapper,
     /// Note on size: the typical size of this map is 1.  The largest size we expect
     /// to see is the number of shards divided by the number of pageservers (typically < 2),

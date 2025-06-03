@@ -23,8 +23,6 @@ pub use pageserver_api::keyspace;
 use tokio_util::sync::CancellationToken;
 mod assert_u64_eq_usize;
 pub mod aux_file;
-pub mod compute_service;
-pub mod compute_service_grpc;
 pub mod metrics;
 pub mod page_cache;
 pub mod page_service;
@@ -86,7 +84,7 @@ impl CancellableTask {
 pub async fn shutdown_pageserver(
     http_listener: HttpEndpointListener,
     https_listener: Option<HttpsEndpointListener>,
-    compute_service: compute_service::Listener,
+    page_service: page_service::Listener,
     grpc_task: Option<CancellableTask>,
     consumption_metrics_worker: ConsumptionMetricsTasks,
     disk_usage_eviction_task: Option<DiskUsageEvictionTask>,
@@ -172,11 +170,11 @@ pub async fn shutdown_pageserver(
         }
     });
 
-    // Shut down the compute service endpoint task. This prevents new connections from
+    // Shut down the libpq endpoint task. This prevents new connections from
     // being accepted.
     let remaining_connections = timed(
-        compute_service.stop_accepting(),
-        "shutdown compte service listener",
+        page_service.stop_accepting(),
+        "shutdown LibpqEndpointListener",
         Duration::from_secs(1),
     )
     .await;
