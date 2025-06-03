@@ -95,8 +95,6 @@ impl Client {
         let channel = endpoint.connect().await
             .map_err(|e| Error::new(ErrorKind::ConnectionRefused, e.to_string()))?;
 
-        // Attempt to parse headers, so that parsing fails early. Later, we can assume
-        // that the headers are valid ASCII strings.
         let tenant_ascii : AsciiMetadataValue = tenant_id.to_string().try_into()
             .map_err(|e: InvalidMetadataValue| {
                 convert_metadata_err(InvalidMetadataValue::from(e), "tenant-id".to_string())
