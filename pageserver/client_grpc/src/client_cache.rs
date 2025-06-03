@@ -20,7 +20,6 @@ use uuid;
 use std::{
     pin::Pin,
     task::{Context, Poll},
-    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use futures::future;
@@ -33,8 +32,6 @@ use tower::service_fn;
 
 use tokio_util::sync::CancellationToken;
 use async_trait::async_trait;
-
-use tracing::info;
 
 //
 // The "TokioTcp" is flakey TCP network for testing purposes, in order

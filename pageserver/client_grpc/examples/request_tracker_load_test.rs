@@ -15,6 +15,11 @@ use pageserver_api::key::Key;
 use utils::lsn::Lsn;
 use utils::id::TenantTimelineId;
 
+use futures::stream::FuturesOrdered;
+use futures::StreamExt;
+// use chrono
+use chrono::Utc;
+
 use pageserver_page_api::model::{GetPageClass, GetPageResponse, GetPageStatus};
 #[derive(Clone)]
 struct KeyRange {
@@ -39,10 +44,10 @@ async fn main() {
         hang_rate:          0.0,
         connect_timeout:    Duration::from_secs(0),
         connect_backoff:    Duration::from_millis(0),
-        max_consumers:      500,
+        max_consumers:      64,
         error_threshold:    10,
         max_idle_duration:  Duration::from_secs(60),
-        max_total_connections: 500,
+        max_total_connections: 12,
     };
 
     // 2) metrics collector (we assume Default is implemented)
@@ -60,8 +65,8 @@ async fn main() {
     );
 
     // 4) fire off 10 000 requests in parallel
-    let mut handles = Vec::with_capacity(1000000);
-    for i in 0..1000000 {
+    let mut handles = FuturesOrdered::new();
+    for i in 0..500000 {
 
         // taken mostly from pagebench
         let req = {
@@ -100,17 +105,27 @@ async fn main() {
 
         // RequestTracker is Clone, so we can share it
         let mut tr = tracker.clone();
-        handles.push(tokio::spawn(async move {
+        let fut = async move {
             let resp = tr.send_request(req).await;
             // sanity‐check: the mock echo returns the same request_id
             assert!(resp.request_id > 0);
-        }));
+        };
+        handles.push_back(fut);
+
+        // empty future
+        let fut = async move {};
+        fut.await;
     }
 
+    // print timestamp
+    println!("Starting 5000000 requests at: {}", chrono::Utc::now());
     // 5) wait for them all
-    for h in handles {
-        h.await.expect("task panicked");
+    for i in 0..500000 {
+        handles.next().await.expect("Failed to get next handle");
     }
+
+    // print timestamp
+    println!("Finished 5000000 requests at: {}", chrono::Utc::now());
 
     println!("✅ All 100000 requests completed successfully");
 }
