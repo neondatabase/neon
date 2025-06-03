@@ -2,16 +2,18 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::{io, task};
 
+use bytes::Bytes;
+use postgres_protocol::message::frontend::StartupMessageParams;
 use rustls::ServerConfig;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio_rustls::server::TlsStream;
 
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::metrics::Metrics;
 use crate::pqproto::{
-    BeMessage, FE_PASSWORD_MESSAGE, FeStartupPacket, SQLSTATE_INTERNAL_ERROR, WriteBuf,
-    read_message, read_startup,
+    BE_AUTH_MESSAGE, BE_ERR_MESSAGE, BeMessage, FE_PASSWORD_MESSAGE, FeStartupPacket,
+    SQLSTATE_INTERNAL_ERROR, WriteBuf, read_message, read_startup,
 };
 use crate::tls::TlsServerEndPoint;
 
@@ -58,6 +60,30 @@ impl<S: AsyncRead + AsyncWrite + Unpin> PqStream<S> {
         ))
     }
 
+    /// Construct a new libpq protocol wrapper and write the first startup message.
+    pub fn new_startup(stream: S, params: &StartupMessageParams) -> Self {
+        let mut write = WriteBuf::new();
+        write.startup(params);
+        Self {
+            stream,
+            read: Vec::new(),
+            write,
+        }
+    }
+
+    /// Construct a new libpq protocol wrapper and request SSL.
+    pub async fn negotiate_tls(stream: &mut S) -> io::Result<bool> {
+        let mut write = WriteBuf::new();
+        write.request_tls();
+        stream.write_all_buf(&mut write).await?;
+        stream.flush().await?;
+
+        let mut res = [0];
+        stream.read_exact(&mut res).await?;
+
+        Ok(res == [b'S'])
+    }
+
     /// Tell the client that encryption is not supported.
     ///
     /// This is not cancel safe
@@ -83,7 +109,34 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
         Ok(msg)
     }
 
-    /// Read a postgres password message, which will respect the max length requested.
+    /// Read a raw postgres packet from the backend, which will respect the max length requested,
+    /// as well as handling postgres error messages.
+    ///
+    /// This is not cancel safe.
+    pub async fn read_raw_be(&mut self, max: u32) -> io::Result<(u8, &mut [u8])> {
+        let (tag, msg) = read_message(&mut self.stream, &mut self.read, max).await?;
+        match tag {
+            BE_ERR_MESSAGE => Err(io::Error::other(Box::new(BackendError {
+                data: msg.to_vec().into(),
+            }))),
+            tag => Ok((tag, msg)),
+        }
+    }
+
+    /// Read a raw postgres packet, which will respect the max length requested.
+    /// This is not cancel safe.
+    async fn read_raw_be_expect(&mut self, tag: u8, max: u32) -> io::Result<&mut [u8]> {
+        let (actual_tag, msg) = self.read_raw_be(max).await?;
+        if actual_tag != tag {
+            return Err(io::Error::other(format!(
+                "incorrect message tag, expected {:?}, got {:?}",
+                tag as char, actual_tag as char,
+            )));
+        }
+        Ok(msg)
+    }
+
+    /// Read a postgres password message.
     /// This is not cancel safe.
     pub async fn read_password_message(&mut self) -> io::Result<&mut [u8]> {
         // passwords are usually pretty short
@@ -93,7 +146,36 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
         self.read_raw_expect(FE_PASSWORD_MESSAGE, MAX_PASSWORD_LENGTH)
             .await
     }
+
+    /// Read a postgres backend auth message.
+    /// This is not cancel safe.
+    pub async fn read_auth_message(&mut self) -> io::Result<(u32, &mut [u8])> {
+        const MAX_AUTH_LENGTH: u32 = 512;
+
+        self.read_raw_be_expect(BE_AUTH_MESSAGE, MAX_AUTH_LENGTH)
+            .await?
+            .split_first_chunk_mut()
+            .map(|(tag, msg)| (u32::from_be_bytes(*tag), msg))
+            .ok_or_else(|| io::Error::other("invalid auth message format"))
+    }
 }
+
+pub struct BackendError {
+    data: Bytes,
+}
+
+impl std::fmt::Debug for BackendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", &self.data)
+    }
+}
+
+impl std::fmt::Display for BackendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", &self.data)
+    }
+}
+impl std::error::Error for BackendError {}
 
 #[derive(Debug)]
 pub struct ReportedError {
@@ -142,6 +224,10 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
     /// Assert that we are using direct TLS.
     pub fn accept_direct_tls(self) -> S {
         self.stream
+    }
+
+    pub fn write_buf_len(&self) -> usize {
+        self.write.len()
     }
 
     /// Write a raw message to the internal buffer.

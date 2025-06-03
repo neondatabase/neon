@@ -5,9 +5,8 @@ use std::time::Duration;
 
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
+use postgres_client::CancelToken;
 use postgres_client::tls::MakeTlsConnect;
-use postgres_client::{CancelToken, RawConnection};
-use postgres_protocol::message::backend::NoticeResponseBody;
 use rustls::pki_types::InvalidDnsNameError;
 use thiserror::Error;
 use tokio::net::{TcpStream, lookup_host};
@@ -26,8 +25,13 @@ use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, NumDbConnectionsGuard};
 use crate::pqproto::StartupMessageParams;
 use crate::proxy::neon_option;
+use crate::stream::BackendError;
+use crate::stream::PqStream;
 use crate::tls::postgres_rustls::MakeRustlsConnect;
 use crate::types::Host;
+
+mod connect_raw;
+pub use connect_raw::Stream;
 
 pub const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
 
@@ -271,19 +275,25 @@ impl ConnCfg {
 type RustlsStream = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>::Stream;
 
 pub(crate) struct PostgresConnection {
+    // /// Socket connected to a compute node.
+    // pub(crate) stream:
+    //     postgres_client::maybe_tls_stream::MaybeTlsStream<tokio::net::TcpStream, RustlsStream>,
+    // /// PostgreSQL connection parameters.
+    // pub(crate) params: std::collections::HashMap<String, String>,
+    // /// Query cancellation token.
+    // pub(crate) cancel_closure: CancelClosure,
+    // /// Labels for proxy's metrics.
+    // pub(crate) aux: MetricsAuxInfo,
+    // /// Notices received from compute after authenticating
+    // pub(crate) delayed_notice: Vec<NoticeResponseBody>,
     /// Socket connected to a compute node.
-    pub(crate) stream:
-        postgres_client::maybe_tls_stream::MaybeTlsStream<tokio::net::TcpStream, RustlsStream>,
-    /// PostgreSQL connection parameters.
-    pub(crate) params: std::collections::HashMap<String, String>,
+    pub(crate) stream: PqStream<connect_raw::Stream<TcpStream>>,
     /// Query cancellation token.
     pub(crate) cancel_closure: CancelClosure,
     /// Labels for proxy's metrics.
     pub(crate) aux: MetricsAuxInfo,
-    /// Notices received from compute after authenticating
-    pub(crate) delayed_notice: Vec<NoticeResponseBody>,
 
-    _guage: NumDbConnectionsGuard<'static>,
+    pub(crate) _guage: NumDbConnectionsGuard<'static>,
 }
 
 impl ConnCfg {
@@ -295,32 +305,42 @@ impl ConnCfg {
         config: &ComputeConfig,
         user_info: ComputeUserInfo,
     ) -> Result<PostgresConnection, ConnectionError> {
+        info!("connecting1");
+
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let (socket_addr, stream, host) = self.connect_raw(config.timeout).await?;
         drop(pause);
 
-        let mut mk_tls = crate::tls::postgres_rustls::MakeRustlsConnect::new(config.tls.clone());
-        let tls = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>::make_tls_connect(
-            &mut mk_tls,
-            host,
-        )?;
+        info!("doing postgres things2");
 
         // connect_raw() will not use TLS if sslmode is "disable"
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let connection = self.0.connect_raw(stream, tls).await?;
+        let stream = connect_raw::connect_raw(stream, config.tls.clone(), &self.0)
+            .await
+            .inspect_err(|error| {
+                if let Some(error) = error.downcast_ref::<BackendError>() {
+                    error!(?error, "error talking to postgres");
+                } else {
+                    error!(?error, "error talking to postgres");
+                }
+            })
+            .map_err(std::io::Error::other)?;
         drop(pause);
 
-        let RawConnection {
-            stream,
-            parameters,
-            delayed_notice,
-            process_id,
-            secret_key,
-        } = connection;
 
-        tracing::Span::current().record("pid", tracing::field::display(process_id));
-        tracing::Span::current().record("compute_id", tracing::field::display(&aux.compute_id));
-        let stream = stream.into_inner();
+        // stream.
+
+        // let RawConnection {
+        //     stream,
+        //     parameters,
+        //     delayed_notice,
+        //     process_id,
+        //     secret_key,
+        // } = connection;
+
+        // tracing::Span::current().record("pid", tracing::field::display(process_id));
+        // tracing::Span::current().record("compute_id", tracing::field::display(&aux.compute_id));
+        // let stream = stream.into_inner();
 
         // TODO: lots of useful info but maybe we can move it elsewhere (eg traces?)
         info!(
@@ -338,23 +358,19 @@ impl ConnCfg {
             CancelToken {
                 socket_config: None,
                 ssl_mode: self.0.get_ssl_mode(),
-                process_id,
-                secret_key,
+                process_id: 0,
+                secret_key: 0,
             },
             host.to_string(),
             user_info,
         );
 
-        let connection = PostgresConnection {
+        Ok(PostgresConnection {
             stream,
-            params: parameters,
-            delayed_notice,
             cancel_closure,
             aux,
             _guage: Metrics::get().proxy.db_connections.guard(ctx.protocol()),
-        };
-
-        Ok(connection)
+        })
     }
 }
 

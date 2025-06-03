@@ -14,6 +14,8 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, big_endian};
 pub type ErrorCode = [u8; 5];
 
 pub const FE_PASSWORD_MESSAGE: u8 = b'p';
+pub const BE_AUTH_MESSAGE: u8 = b'R';
+pub const BE_ERR_MESSAGE: u8 = b'E';
 
 pub const SQLSTATE_INTERNAL_ERROR: [u8; 5] = *b"XX000";
 
@@ -66,32 +68,32 @@ macro_rules! read {
     }};
 }
 
+/// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L118>
+const MAX_STARTUP_PACKET_LENGTH: usize = 10000;
+const RESERVED_INVALID_MAJOR_VERSION: u16 = 1234;
+/// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L132>
+const CANCEL_REQUEST_CODE: ProtocolVersion = ProtocolVersion::new(1234, 5678);
+/// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L166>
+const NEGOTIATE_SSL_CODE: ProtocolVersion = ProtocolVersion::new(1234, 5679);
+/// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L167>
+const NEGOTIATE_GSS_CODE: ProtocolVersion = ProtocolVersion::new(1234, 5680);
+
+/// This first reads the startup message header, is 8 bytes.
+/// The first 4 bytes is a big-endian message length, and the next 4 bytes is a version number.
+///
+/// The length value is inclusive of the header. For example,
+/// an empty message will always have length 8.
+#[derive(Clone, Copy, FromBytes, IntoBytes, Immutable)]
+#[repr(C)]
+struct StartupHeader {
+    len: big_endian::U32,
+    version: ProtocolVersion,
+}
+
 pub async fn read_startup<S>(stream: &mut S) -> io::Result<FeStartupPacket>
 where
     S: AsyncRead + Unpin,
 {
-    /// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L118>
-    const MAX_STARTUP_PACKET_LENGTH: usize = 10000;
-    const RESERVED_INVALID_MAJOR_VERSION: u16 = 1234;
-    /// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L132>
-    const CANCEL_REQUEST_CODE: ProtocolVersion = ProtocolVersion::new(1234, 5678);
-    /// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L166>
-    const NEGOTIATE_SSL_CODE: ProtocolVersion = ProtocolVersion::new(1234, 5679);
-    /// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L167>
-    const NEGOTIATE_GSS_CODE: ProtocolVersion = ProtocolVersion::new(1234, 5680);
-
-    /// This first reads the startup message header, is 8 bytes.
-    /// The first 4 bytes is a big-endian message length, and the next 4 bytes is a version number.
-    ///
-    /// The length value is inclusive of the header. For example,
-    /// an empty message will always have length 8.
-    #[derive(Clone, Copy, FromBytes, IntoBytes, Immutable)]
-    #[repr(C)]
-    struct StartupHeader {
-        len: big_endian::U32,
-        version: ProtocolVersion,
-    }
-
     let header = read!(stream => StartupHeader);
 
     // <https://github.com/postgres/postgres/blob/04bcf9e19a4261fe9c7df37c777592c2e10c32a7/src/backend/tcop/backend_startup.c#L378-L382>
@@ -252,6 +254,10 @@ impl WriteBuf {
         Self(Cursor::new(Vec::new()))
     }
 
+    pub const fn len(&self) -> usize {
+        self.0.get_ref().len()
+    }
+
     /// Use a heuristic to determine if we should shrink the write buffer.
     #[inline]
     fn should_shrink(&self) -> bool {
@@ -311,6 +317,30 @@ impl WriteBuf {
     /// Write an encryption response message.
     pub fn encryption(&mut self, m: u8) {
         self.0.get_mut().push(m);
+    }
+
+    /// Write a startup message.
+    pub fn startup(&mut self, params: &postgres_protocol::message::frontend::StartupMessageParams) {
+        self.0.get_mut().extend_from_slice(
+            StartupHeader {
+                len: big_endian::U32::new(params.params.len() as u32 + 9),
+                version: ProtocolVersion::new(3, 0),
+            }
+            .as_bytes(),
+        );
+        self.0.get_mut().extend_from_slice(params.params.as_bytes());
+        self.0.get_mut().push(0);
+    }
+
+    /// Write a SSL negotiation message.
+    pub fn request_tls(&mut self) {
+        self.0.get_mut().extend_from_slice(
+            StartupHeader {
+                len: big_endian::U32::new(8),
+                version: NEGOTIATE_SSL_CODE,
+            }
+            .as_bytes(),
+        );
     }
 
     pub fn write_error(&mut self, msg: &str, error_code: ErrorCode) {

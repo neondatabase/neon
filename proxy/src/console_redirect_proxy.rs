@@ -224,7 +224,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         Err(e) => Err(stream.throw_error(e, Some(ctx)).await)?,
     };
 
-    let node = connect_to_compute(
+    let mut node = connect_to_compute(
         ctx,
         &TcpMechanism {
             user_info,
@@ -239,22 +239,24 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     .or_else(|e| async { Err(stream.throw_error(e, Some(ctx)).await) })
     .await?;
 
-    let cancellation_handler_clone = Arc::clone(&cancellation_handler);
-    let session = cancellation_handler_clone.get_key();
+    let session = cancellation_handler.get_key();
 
+    prepare_client_connection(&mut node, session.key(), &mut stream).await?;
     session.write_cancel_key(node.cancel_closure.clone())?;
 
-    prepare_client_connection(&node, *session.key(), &mut stream);
-    let stream = stream.flush_and_into_inner().await?;
+    let client = stream.flush_and_into_inner().await?;
+    let compute = node.stream.flush_and_into_inner().await?;
 
     Ok(Some(ProxyPassthrough {
-        client: stream,
-        aux: node.aux.clone(),
+        client,
+        compute,
+        aux: node.aux,
+        cancel_closure: node.cancel_closure,
         private_link_id: None,
-        compute: node,
         session_id: ctx.session_id(),
         cancel: session,
         _req: request_gauge,
         _conn: conn_gauge,
+        _guage: node._guage,
     }))
 }

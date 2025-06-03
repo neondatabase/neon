@@ -20,10 +20,11 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, warn};
+use zerocopy::{IntoBytes, TryFromBytes};
 
 use self::connect_compute::{TcpMechanism, connect_to_compute};
 use self::passthrough::ProxyPassthrough;
-use crate::cancellation::{self, CancellationHandler};
+use crate::cancellation::{self, CancellationHandler, Session};
 use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
 use crate::context::RequestContext;
 use crate::error::{ReportableError, UserFacingError};
@@ -391,17 +392,18 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     )
     .await;
 
-    let node = match res {
+    let mut node = match res {
         Ok(node) => node,
         Err(e) => Err(stream.throw_error(e, Some(ctx)).await)?,
     };
 
-    let cancellation_handler_clone = Arc::clone(&cancellation_handler);
-    let session = cancellation_handler_clone.get_key();
+    let session = cancellation_handler.get_key();
 
+    prepare_client_connection(&mut node, session.key(), &mut stream).await?;
     session.write_cancel_key(node.cancel_closure.clone())?;
-    prepare_client_connection(&node, *session.key(), &mut stream);
-    let stream = stream.flush_and_into_inner().await?;
+
+    let client = stream.flush_and_into_inner().await?;
+    let compute = node.stream.flush_and_into_inner().await?;
 
     let private_link_id = match ctx.extra() {
         Some(ConnectionInfoExtra::Aws { vpce_id }) => Some(vpce_id.clone()),
@@ -410,40 +412,53 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     };
 
     Ok(Some(ProxyPassthrough {
-        client: stream,
-        aux: node.aux.clone(),
+        client,
+        compute,
+        aux: node.aux,
+        cancel_closure: node.cancel_closure,
         private_link_id,
-        compute: node,
         session_id: ctx.session_id(),
         cancel: session,
         _req: request_gauge,
         _conn: conn_gauge,
+        _guage: node._guage,
     }))
 }
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
-pub(crate) fn prepare_client_connection(
-    node: &compute::PostgresConnection,
-    cancel_key_data: CancelKeyData,
+pub(crate) async fn prepare_client_connection(
+    node: &mut compute::PostgresConnection,
+    key_data: &CancelKeyData,
     stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) {
-    // Forward all deferred notices to the client.
-    for notice in &node.delayed_notice {
-        stream.write_raw(notice.as_bytes().len(), b'N', |buf| {
-            buf.extend_from_slice(notice.as_bytes());
-        });
+) -> Result<(), std::io::Error> {
+    loop {
+        match node.stream.read_raw_be(1024).await? {
+            // parse backend keys, and substitute our own.
+            (b'K', msg) => {
+                stream.write_raw(8, b'K', |b| b.extend_from_slice(key_data.as_bytes()));
+
+                let key_data = CancelKeyData::try_read_from_bytes(msg)
+                    .map_err(|_| std::io::Error::other("invalid msg len"))?;
+
+                node.cancel_closure.cancel_token.process_id = (key_data.0.get() >> 32) as i32;
+                node.cancel_closure.cancel_token.secret_key =
+                    (key_data.0.get() & 0xffff_ffff) as i32;
+            }
+            // ready for query, we're done :)
+            (b'Z', msg) => {
+                stream.write_raw(msg.len(), b'Z', |b| b.extend_from_slice(msg.as_bytes()));
+                break;
+            }
+            // either a notice or a parameter status.
+            (tag, msg) => stream.write_raw(msg.len(), tag, |b| b.extend_from_slice(msg.as_bytes())),
+        }
+
+        if stream.write_buf_len() > 512 {
+            stream.flush().await?;
+        }
     }
 
-    // Forward all postgres connection params to the client.
-    for (name, value) in &node.params {
-        stream.write_message(BeMessage::ParameterStatus {
-            name: name.as_bytes(),
-            value: value.as_bytes(),
-        });
-    }
-
-    stream.write_message(BeMessage::BackendKeyData(cancel_key_data));
-    stream.write_message(BeMessage::ReadyForQuery);
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

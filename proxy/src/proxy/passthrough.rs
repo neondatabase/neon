@@ -1,17 +1,21 @@
 use futures::FutureExt;
 use smol_str::SmolStr;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpStream;
 use tracing::debug;
 use utils::measured_stream::MeasuredStream;
 
 use super::copy_bidirectional::ErrorSource;
-use crate::cancellation;
-use crate::compute::PostgresConnection;
+use crate::cancellation::CancelClosure;
 use crate::config::ComputeConfig;
 use crate::control_plane::messages::MetricsAuxInfo;
-use crate::metrics::{Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard};
+use crate::metrics::{
+    Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard,
+    NumDbConnectionsGuard,
+};
 use crate::stream::Stream;
 use crate::usage_metrics::{Ids, MetricCounterRecorder, USAGE_METRICS};
+use crate::{cancellation, compute};
 
 /// Forward bytes in both directions (client <-> compute).
 #[tracing::instrument(skip_all)]
@@ -64,7 +68,9 @@ pub(crate) async fn proxy_pass(
 
 pub(crate) struct ProxyPassthrough<S> {
     pub(crate) client: Stream<S>,
-    pub(crate) compute: PostgresConnection,
+    pub(crate) compute: compute::Stream<TcpStream>,
+
+    pub(crate) cancel_closure: CancelClosure,
     pub(crate) aux: MetricsAuxInfo,
     pub(crate) session_id: uuid::Uuid,
     pub(crate) private_link_id: Option<SmolStr>,
@@ -72,6 +78,7 @@ pub(crate) struct ProxyPassthrough<S> {
 
     pub(crate) _req: NumConnectionRequestsGuard<'static>,
     pub(crate) _conn: NumClientConnectionsGuard<'static>,
+    pub(crate) _guage: NumDbConnectionsGuard<'static>,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
@@ -79,15 +86,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
         self,
         compute_config: &ComputeConfig,
     ) -> Result<(), ErrorSource> {
-        let res = proxy_pass(
-            self.client,
-            self.compute.stream,
-            self.aux,
-            self.private_link_id,
-        )
-        .await;
+        let res = proxy_pass(self.client, self.compute, self.aux, self.private_link_id).await;
         if let Err(err) = self
-            .compute
             .cancel_closure
             .try_cancel_query(compute_config)
             .boxed()

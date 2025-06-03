@@ -17,7 +17,6 @@ use crate::{Client, Connection, Error};
 
 /// TLS configuration.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
 pub enum SslMode {
     /// Do not use TLS.
     Disable,
@@ -29,7 +28,6 @@ pub enum SslMode {
 
 /// Channel binding configuration.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum ChannelBinding {
     /// Do not use channel binding.
     Disable,
@@ -41,7 +39,6 @@ pub enum ChannelBinding {
 
 /// Replication mode configuration.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum ReplicationMode {
     /// Physical replication.
     Physical,
@@ -54,6 +51,14 @@ pub enum ReplicationMode {
 pub enum Host {
     /// A TCP hostname.
     Tcp(String),
+}
+
+impl std::fmt::Display for Host {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Host::Tcp(host) => f.write_str(host),
+        }
+    }
 }
 
 /// Precomputed keys which may override password during auth.
@@ -75,7 +80,7 @@ pub struct Config {
     pub(crate) ssl_mode: SslMode,
     pub(crate) connect_timeout: Option<Duration>,
     pub(crate) channel_binding: ChannelBinding,
-    pub(crate) server_params: StartupMessageParams,
+    pub server_params: StartupMessageParams,
 
     database: bool,
     username: bool,
