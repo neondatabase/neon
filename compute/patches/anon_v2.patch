@@ -13,7 +13,7 @@ index 0cdc769..d707a99 100644
 +GRANT ALL ON ALL TABLES IN SCHEMA anon TO neon_superuser;
 +GRANT SET ON PARAMETER anon.transparent_dynamic_masking TO neon_superuser;
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..7961984 100644
+index 7da6553..9b6164b 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
 @@ -74,50 +74,49 @@ $$
@@ -128,26 +128,3 @@ index 7da6553..7961984 100644
    VOLATILE
    PARALLEL UNSAFE -- because init is unsafe
    SECURITY INVOKER
-@@ -264,3 +263,22 @@ $$
- ;
- 
- SECURITY LABEL FOR anon ON FUNCTION anon.unload IS 'UNTRUSTED';
-+
-+
-+CREATE OR REPLACE FUNCTION anon.toggle_transparent_dynamic_masking(
-+  dbname TEXT,
-+  toggle BOOLEAN DEFAULT TRUE
-+)
-+RETURNS VOID AS
-+$$
-+BEGIN
-+  EXECUTE format('ALTER DATABASE %I SET anon.transparent_dynamic_masking TO %s', dbname, toggle::TEXT);
-+END;
-+$$
-+  LANGUAGE plpgsql
-+  VOLATILE
-+  SECURITY DEFINER
-+  SET search_path=''
-+;
-+
-+SECURITY LABEL FOR anon ON FUNCTION anon.toggle_transparent_dynamic_masking IS 'UNTRUSTED';
