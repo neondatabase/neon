@@ -817,8 +817,8 @@ pub(crate) enum GetVectoredError {
     #[error("timeline shutting down")]
     Cancelled,
 
-    #[error("requested too many keys: {0} > {}", Timeline::MAX_GET_VECTORED_KEYS)]
-    Oversized(u64),
+    #[error("requested too many keys: {0} > {1}")]
+    Oversized(u64, u64),
 
     #[error("requested at invalid LSN: {0}")]
     InvalidLsn(Lsn),
@@ -1019,7 +1019,7 @@ impl From<GetVectoredError> for PageReconstructError {
         match e {
             GetVectoredError::Cancelled => PageReconstructError::Cancelled,
             GetVectoredError::InvalidLsn(_) => PageReconstructError::Other(anyhow!("Invalid LSN")),
-            err @ GetVectoredError::Oversized(_) => PageReconstructError::Other(err.into()),
+            err @ GetVectoredError::Oversized(_, _) => PageReconstructError::Other(err.into()),
             GetVectoredError::MissingKey(err) => PageReconstructError::MissingKey(err),
             GetVectoredError::GetReadyAncestorError(err) => PageReconstructError::from(err),
             GetVectoredError::Other(err) => PageReconstructError::Other(err),
@@ -1199,7 +1199,6 @@ impl Timeline {
         }
     }
 
-    pub(crate) const MAX_GET_VECTORED_KEYS: u64 = 32;
     pub(crate) const LAYERS_VISITED_WARN_THRESHOLD: u32 = 100;
 
     /// Look up multiple page versions at a given LSN
@@ -1214,9 +1213,12 @@ impl Timeline {
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         let total_keyspace = query.total_keyspace();
 
-        let key_count = total_keyspace.total_raw_size().try_into().unwrap();
-        if key_count > Timeline::MAX_GET_VECTORED_KEYS {
-            return Err(GetVectoredError::Oversized(key_count));
+        let key_count = total_keyspace.total_raw_size();
+        if key_count > self.conf.max_get_vectored_keys.get() {
+            return Err(GetVectoredError::Oversized(
+                key_count as u64,
+                self.conf.max_get_vectored_keys.get() as u64,
+            ));
         }
 
         for range in &total_keyspace.ranges {
@@ -5270,7 +5272,7 @@ impl Timeline {
                 key = key.next();
 
                 // Maybe flush `key_rest_accum`
-                if key_request_accum.raw_size() >= Timeline::MAX_GET_VECTORED_KEYS
+                if key_request_accum.raw_size() >= self.conf.max_get_vectored_keys.get() as u64
                     || (last_key_in_range && key_request_accum.raw_size() > 0)
                 {
                     let query =

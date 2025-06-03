@@ -9,7 +9,6 @@ bytes.workspace = true
 pageserver_api.workspace = true
 postgres_ffi.workspace = true
 prost.workspace = true
-smallvec.workspace = true
 thiserror.workspace = true
 tonic.workspace = true
 utils.workspace = true

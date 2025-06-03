@@ -201,8 +201,8 @@ async fn prepare_import(
         .await;
         match res {
             Ok(_) => break,
-            Err(err) => {
-                info!(?err, "indefinitely waiting for pgdata to finish");
+            Err(_err) => {
+                info!("indefinitely waiting for pgdata to finish");
                 if tokio::time::timeout(std::time::Duration::from_secs(10), cancel.cancelled())
                     .await
                     .is_ok()
