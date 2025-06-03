@@ -54,7 +54,7 @@ pub struct LocalEvaluationFlagFilterProperty {
     operator: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum PostHogFlagFilterPropertyValue {
     String(String),
@@ -497,6 +497,13 @@ pub struct PostHogClient {
     client: reqwest::Client,
 }
 
+#[derive(Serialize, Debug)]
+pub struct CaptureEvent {
+    pub event: String,
+    pub distinct_id: String,
+    pub properties: serde_json::Value,
+}
+
 impl PostHogClient {
     pub fn new(config: PostHogClientConfig) -> Self {
         let client = reqwest::Client::new();
@@ -560,12 +567,12 @@ impl PostHogClient {
         &self,
         event: &str,
         distinct_id: &str,
-        properties: &HashMap<String, PostHogFlagFilterPropertyValue>,
+        properties: &serde_json::Value,
     ) -> anyhow::Result<()> {
         // PUBLIC_URL/capture/
-        // with bearer token of self.client_api_key
         let url = format!("{}/capture/", self.config.public_api_url);
-        self.client
+        let response = self
+            .client
             .post(url)
             .body(serde_json::to_string(&json!({
                 "api_key": self.config.client_api_key,
@@ -575,6 +582,39 @@ impl PostHogClient {
             }))?)
             .send()
             .await?;
+        let status = response.status();
+        let body = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "Failed to capture events: {}, {}",
+                status,
+                body
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn capture_event_batch(&self, events: &[CaptureEvent]) -> anyhow::Result<()> {
+        // PUBLIC_URL/batch/
+        let url = format!("{}/batch/", self.config.public_api_url);
+        let response = self
+            .client
+            .post(url)
+            .body(serde_json::to_string(&json!({
+                "api_key": self.config.client_api_key,
+                "batch": events,
+            }))?)
+            .send()
+            .await?;
+        let status = response.status();
+        let body = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "Failed to capture events: {}, {}",
+                status,
+                body
+            ));
+        }
         Ok(())
     }
 }
