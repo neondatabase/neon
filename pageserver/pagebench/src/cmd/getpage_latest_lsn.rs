@@ -521,7 +521,7 @@ struct GrpcClient {
 impl GrpcClient {
     async fn new(connstring: String, ttid: TenantTimelineId) -> anyhow::Result<Self> {
 
-        let domain_client = pageserver_page_api::client::Client::new(
+        let mut domain_client = pageserver_page_api::client::Client::new(
             connstring.clone(),
             ttid.tenant_id.clone(), ttid.timeline_id.clone(), ShardIndex::unsharded().clone(), None).await?;
         //let req_tx : impl Stream<Item = GetPageRequest> + Send + 'static;

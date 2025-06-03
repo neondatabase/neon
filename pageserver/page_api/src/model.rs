@@ -167,6 +167,18 @@ impl TryFrom<proto::CheckRelExistsRequest> for CheckRelExistsRequest {
     }
 }
 
+
+impl TryFrom<CheckRelExistsRequest> for proto::CheckRelExistsRequest {
+    type Error = ProtocolError;
+
+    fn try_from(req: CheckRelExistsRequest) -> Result<Self, Self::Error> {
+        Ok(Self {
+            read_lsn: Some(req.read_lsn.try_into()?),
+            rel: Some(req.rel.into()),
+        })
+    }
+}
+
 pub type CheckRelExistsResponse = bool;
 
 impl From<proto::CheckRelExistsResponse> for CheckRelExistsResponse {

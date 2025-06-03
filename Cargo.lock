@@ -4466,6 +4466,7 @@ dependencies = [
 name = "pageserver_page_api"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "bytes",
  "futures",
  "futures-core",
@@ -4474,6 +4475,7 @@ dependencies = [
  "prost 0.13.5",
  "smallvec",
  "thiserror 1.0.69",
+ "tokio",
  "tonic 0.13.1",
  "tonic-build",
  "utils",
