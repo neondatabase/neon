@@ -87,62 +87,68 @@ async fn authenticate<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    // When testing locally, we don't actually authenticate...
-    // Because of that, we cannot pipeline our SASL message accordingly.
-    // TODO: fix this pls
-    #[cfg(feature = "testing")]
-    {
-        stream.flush().await?;
-        // verify we're using SASL.
-        match stream.read_auth_message().await? {
-            (10, _mechanisms) => {
-                for mechanism in _mechanisms.split(|&b| b == b'0') {
-                    info!("compute supports {}", String::from_utf8_lossy(mechanism));
+    // TODO: rather than checking for SASL, maybe we can just assume it.
+    // With SCRAM_SHA_256 if we're not using TLS,
+    // and SCRAM_SHA_256_PLUS if we are using TLS.
+    // Problem: when testing locally, we don't use scram, so we cannot assume it.
+
+    stream.flush().await?;
+
+    let (channel_binding, mechanism) = match stream.read_auth_message().await? {
+        // Ok.
+        (0, _) => return Ok(()),
+        // SASL
+        (10, mechanisms) => {
+            let mut has_scram = false;
+            let mut has_scram_plus = false;
+            for mechanism in mechanisms.split(|&b| b == b'0') {
+                match mechanism {
+                    b"SCRAM_SHA_256" => has_scram = true,
+                    b"SCRAM_SHA_256_PLUS" => has_scram_plus = true,
+                    _ => {}
                 }
             }
-            (0, _) => return Ok(()),
-            (tag, msg) => {
-                error!("womp womp {tag} {}", String::from_utf8_lossy(msg));
+
+            let channel_binding = match stream.get_ref().tls_server_end_point() {
+                TlsServerEndPoint::Sha256(h)
+                    if config.get_channel_binding()
+                        != postgres_client::config::ChannelBinding::Disable =>
+                {
+                    Some(h)
+                }
+                _ => None,
+            };
+
+            if has_scram_plus {
+                match channel_binding {
+                    Some(h) => (
+                        ChannelBinding::tls_server_end_point(h.to_vec()),
+                        SCRAM_SHA_256_PLUS,
+                    ),
+                    None => (ChannelBinding::unsupported(), SCRAM_SHA_256),
+                }
+            } else if has_scram {
+                match channel_binding {
+                    Some(_) => (ChannelBinding::unrequested(), SCRAM_SHA_256),
+                    None => (ChannelBinding::unsupported(), SCRAM_SHA_256),
+                }
+            } else {
                 bail!("unsupported authentication method1");
             }
         }
-    }
-
-    // Let's just assume that postgres gives us SASL
-    // with SCRAM_SHA_256 if we're not using TLS,
-    // and SCRAM_SHA_256_PLUS if we are using TLS.
-
-    let (channel_binding, mechanism) = match stream.get_ref().tls_server_end_point() {
-        TlsServerEndPoint::Undefined
-            if config.get_channel_binding() == postgres_client::config::ChannelBinding::Require =>
-        {
-            bail!("channel binding required")
+        (tag, msg) => {
+            error!("womp womp {tag} {}", String::from_utf8_lossy(msg));
+            bail!("unsupported authentication method1");
         }
-        TlsServerEndPoint::Sha256(h)
-            if config.get_channel_binding() != postgres_client::config::ChannelBinding::Disable =>
-        {
-            (
-                ChannelBinding::tls_server_end_point(h.to_vec()),
-                SCRAM_SHA_256_PLUS,
-            )
-        }
-        _ => (ChannelBinding::unsupported(), SCRAM_SHA_256),
     };
 
     let mut scram = if let Some(AuthKeys::ScramSha256(keys)) = config.get_auth_keys() {
         ScramSha256::new_with_keys(keys, channel_binding)
     } else if let Some(password) = config.get_password() {
+        // We only touch passwords when it comes to console-redirect.
         ScramSha256::new(password, channel_binding)
     } else {
-        // let's assume AuthenticationOk will follow :)
-        stream.flush().await?;
-        match stream.read_auth_message().await? {
-            (0, _) => return Ok(()),
-            (tag, msg) => {
-                error!("womp womp {tag} {}", String::from_utf8_lossy(msg));
-                bail!("unsupported authentication method1");
-            }
-        }
+        bail!("cannot authenticate without credentials");
     };
 
     stream.write_raw(0, b'p', |buf| {
@@ -154,31 +160,6 @@ where
         buf.put_slice(data);
     });
     stream.flush().await?;
-
-    // verify we're using SASL.
-    #[cfg(not(feature = "testing"))]
-    match stream.read_auth_message().await? {
-        (10, _mechanisms) => {
-            // maybe we should check mechanisms?
-            // let mut has_scram = false;
-            // let mut has_scram_plus = false;
-            // for mechanism in _mechanisms.split(|&b| b == b'0') {
-            //     match mechanism {
-            //         b"SCRAM_SHA_256" => has_scram = true,
-            //         b"SCRAM_SHA_256_PLUS" => has_scram_plus = true,
-            //         _ => {}
-            //     }
-            // }
-
-            for mechanism in _mechanisms.split(|&b| b == b'0') {
-                info!("compute supports {}", String::from_utf8_lossy(mechanism));
-            }
-        }
-        (tag, msg) => {
-            error!("womp womp {tag} {}", String::from_utf8_lossy(msg));
-            bail!("unsupported authentication method1");
-        }
-    }
 
     loop {
         // wait for SASLContinue or SASLFinal.

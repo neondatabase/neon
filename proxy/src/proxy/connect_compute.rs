@@ -4,7 +4,7 @@ use tracing::{debug, info, warn};
 
 use super::retry::ShouldRetryWakeCompute;
 use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
-use crate::compute::{self, COULD_NOT_CONNECT, PostgresConnection, NodeInfo};
+use crate::compute::{self, COULD_NOT_CONNECT, NodeInfo, PostgresConnection};
 use crate::config::{ComputeConfig, RetryConfig};
 use crate::context::RequestContext;
 use crate::control_plane::errors::WakeComputeError;
@@ -81,10 +81,7 @@ impl ConnectMechanism for TcpMechanism<'_> {
     type ConnectError = compute::ConnectionError;
     type Error = compute::ConnectionError;
 
-    #[tracing::instrument(skip_all, fields(
-        pid = tracing::field::Empty,
-        compute_id = tracing::field::Empty
-    ))]
+    #[tracing::instrument(skip_all)]
     async fn connect_once(
         &self,
         ctx: &RequestContext,

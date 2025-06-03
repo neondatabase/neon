@@ -24,12 +24,12 @@ use zerocopy::{IntoBytes, TryFromBytes};
 
 use self::connect_compute::{TcpMechanism, connect_to_compute};
 use self::passthrough::ProxyPassthrough;
-use crate::cancellation::{self, CancellationHandler, Session};
+use crate::cancellation::{self, CancellationHandler};
 use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
 use crate::context::RequestContext;
 use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
-use crate::pqproto::{BeMessage, CancelKeyData, StartupMessageParams};
+use crate::pqproto::{CancelKeyData, StartupMessageParams};
 use crate::protocol2::{ConnectHeader, ConnectionInfo, ConnectionInfoExtra, read_proxy_protocol};
 use crate::proxy::handshake::{HandshakeData, handshake};
 use crate::rate_limiter::EndpointRateLimiter;
@@ -402,6 +402,11 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     prepare_client_connection(&mut node, session.key(), &mut stream).await?;
     session.write_cancel_key(node.cancel_closure.clone())?;
 
+    ctx.span().record(
+        "pid",
+        tracing::field::display(node.cancel_closure.process_id),
+    );
+
     let client = stream.flush_and_into_inner().await?;
     let compute = node.stream.flush_and_into_inner().await?;
 
@@ -414,14 +419,17 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     Ok(Some(ProxyPassthrough {
         client,
         compute,
-        aux: node.aux,
+        ids: crate::usage_metrics::Ids {
+            endpoint_id: node.aux.endpoint_id,
+            branch_id: node.aux.branch_id,
+            private_link_id,
+        },
         cancel_closure: node.cancel_closure,
-        private_link_id,
-        session_id: ctx.session_id(),
         cancel: session,
+        session_id: ctx.session_id(),
         _req: request_gauge,
         _conn: conn_gauge,
-        _guage: node._guage,
+        _guage: node.guage,
     }))
 }
 
@@ -440,9 +448,8 @@ pub(crate) async fn prepare_client_connection(
                 let key_data = CancelKeyData::try_read_from_bytes(msg)
                     .map_err(|_| std::io::Error::other("invalid msg len"))?;
 
-                node.cancel_closure.cancel_token.process_id = (key_data.0.get() >> 32) as i32;
-                node.cancel_closure.cancel_token.secret_key =
-                    (key_data.0.get() & 0xffff_ffff) as i32;
+                node.cancel_closure.process_id = (key_data.0.get() >> 32) as i32;
+                node.cancel_closure.secret_key = (key_data.0.get() & 0xffff_ffff) as i32;
             }
             // ready for query, we're done :)
             (b'Z', msg) => {

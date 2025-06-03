@@ -1,5 +1,4 @@
 use futures::FutureExt;
-use smol_str::SmolStr;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tracing::debug;
@@ -8,7 +7,6 @@ use utils::measured_stream::MeasuredStream;
 use super::copy_bidirectional::ErrorSource;
 use crate::cancellation::CancelClosure;
 use crate::config::ComputeConfig;
-use crate::control_plane::messages::MetricsAuxInfo;
 use crate::metrics::{
     Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard,
     NumDbConnectionsGuard,
@@ -22,15 +20,9 @@ use crate::{cancellation, compute};
 pub(crate) async fn proxy_pass(
     client: impl AsyncRead + AsyncWrite + Unpin,
     compute: impl AsyncRead + AsyncWrite + Unpin,
-    aux: MetricsAuxInfo,
-    private_link_id: Option<SmolStr>,
+    ids: Ids,
 ) -> Result<(), ErrorSource> {
-    // we will report ingress at a later date
-    let usage_tx = USAGE_METRICS.register(Ids {
-        endpoint_id: aux.endpoint_id,
-        branch_id: aux.branch_id,
-        private_link_id,
-    });
+    let usage_tx = USAGE_METRICS.register(ids);
 
     let metrics = &Metrics::get().proxy.io_bytes;
     let m_sent = metrics.with_labels(Direction::Tx);
@@ -70,11 +62,10 @@ pub(crate) struct ProxyPassthrough<S> {
     pub(crate) client: Stream<S>,
     pub(crate) compute: compute::Stream<TcpStream>,
 
+    pub(crate) ids: Ids,
     pub(crate) cancel_closure: CancelClosure,
-    pub(crate) aux: MetricsAuxInfo,
-    pub(crate) session_id: uuid::Uuid,
-    pub(crate) private_link_id: Option<SmolStr>,
     pub(crate) cancel: cancellation::Session,
+    pub(crate) session_id: uuid::Uuid,
 
     pub(crate) _req: NumConnectionRequestsGuard<'static>,
     pub(crate) _conn: NumClientConnectionsGuard<'static>,
@@ -86,7 +77,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
         self,
         compute_config: &ComputeConfig,
     ) -> Result<(), ErrorSource> {
-        let res = proxy_pass(self.client, self.compute, self.aux, self.private_link_id).await;
+        let res = proxy_pass(self.client, self.compute, self.ids).await;
         if let Err(err) = self
             .cancel_closure
             .try_cancel_query(compute_config)

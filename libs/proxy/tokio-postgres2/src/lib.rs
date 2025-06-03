@@ -45,7 +45,7 @@ impl From<ReadyForQueryBody> for ReadyForQueryStatus {
 }
 
 mod cancel_query;
-mod cancel_query_raw;
+pub mod cancel_query_raw;
 mod cancel_token;
 mod client;
 mod codec;

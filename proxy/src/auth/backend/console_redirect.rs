@@ -10,11 +10,11 @@ use super::ComputeCredentialKeys;
 use crate::auth::IpPattern;
 use crate::auth::backend::ComputeUserInfo;
 use crate::cache::Cached;
+use crate::compute::NodeInfo;
 use crate::config::AuthenticationConfig;
 use crate::context::RequestContext;
 use crate::control_plane::client::cplane_proxy_v1;
 use crate::control_plane::{self, CachedNodeInfo};
-use crate::compute::NodeInfo;
 use crate::error::{ReportableError, UserFacingError};
 use crate::pqproto::BeMessage;
 use crate::proxy::NeonOptions;
@@ -156,9 +156,8 @@ async fn authenticate(
     // Give user a URL to spawn a new database.
     info!(parent: &span, "sending the auth URL to the user");
     client.write_message(BeMessage::AuthenticationOk);
-    client.write_message(BeMessage::ParameterStatus {
-        name: b"client_encoding",
-        value: b"UTF8",
+    client.write_raw(21, b'S', |buf| {
+        buf.extend_from_slice(b"client_encoding\0UTF8\0");
     });
     client.write_message(BeMessage::NoticeResponse(&greeting));
     client.flush().await?;

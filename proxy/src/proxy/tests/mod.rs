@@ -29,6 +29,7 @@ use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
 use crate::control_plane::{self, CachedNodeInfo, NodeInfoCache};
 use crate::error::ErrorKind;
+use crate::pqproto::BeMessage;
 use crate::tls::client_config::compute_client_config_with_certs;
 use crate::tls::postgres_rustls::MakeRustlsConnect;
 use crate::tls::server_config::CertResolver;
@@ -182,11 +183,10 @@ async fn dummy_proxy(
 
     auth.authenticate(&mut stream).await?;
 
-    stream.write_message(BeMessage::ParameterStatus {
-        name: b"client_encoding",
-        value: b"UTF8",
+    stream.write_raw(21, b'S', |buf| {
+        buf.extend_from_slice(b"client_encoding\0UTF8\0");
     });
-    stream.write_message(BeMessage::ReadyForQuery);
+    stream.write_raw(1, b'Z', |buf| buf.push(b'I'));
     stream.flush().await?;
 
     Ok(())

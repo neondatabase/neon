@@ -6,7 +6,6 @@ use std::time::Duration;
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
 use postgres_client::CancelToken;
-use postgres_client::tls::MakeTlsConnect;
 use rustls::pki_types::InvalidDnsNameError;
 use thiserror::Error;
 use tokio::net::{TcpStream, lookup_host};
@@ -27,7 +26,6 @@ use crate::pqproto::StartupMessageParams;
 use crate::proxy::neon_option;
 use crate::stream::BackendError;
 use crate::stream::PqStream;
-use crate::tls::postgres_rustls::MakeRustlsConnect;
 use crate::types::Host;
 
 mod connect_raw;
@@ -272,20 +270,7 @@ impl ConnCfg {
     }
 }
 
-type RustlsStream = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>::Stream;
-
 pub(crate) struct PostgresConnection {
-    // /// Socket connected to a compute node.
-    // pub(crate) stream:
-    //     postgres_client::maybe_tls_stream::MaybeTlsStream<tokio::net::TcpStream, RustlsStream>,
-    // /// PostgreSQL connection parameters.
-    // pub(crate) params: std::collections::HashMap<String, String>,
-    // /// Query cancellation token.
-    // pub(crate) cancel_closure: CancelClosure,
-    // /// Labels for proxy's metrics.
-    // pub(crate) aux: MetricsAuxInfo,
-    // /// Notices received from compute after authenticating
-    // pub(crate) delayed_notice: Vec<NoticeResponseBody>,
     /// Socket connected to a compute node.
     pub(crate) stream: PqStream<connect_raw::Stream<TcpStream>>,
     /// Query cancellation token.
@@ -293,7 +278,7 @@ pub(crate) struct PostgresConnection {
     /// Labels for proxy's metrics.
     pub(crate) aux: MetricsAuxInfo,
 
-    pub(crate) _guage: NumDbConnectionsGuard<'static>,
+    pub(crate) guage: NumDbConnectionsGuard<'static>,
 }
 
 impl ConnCfg {
@@ -327,20 +312,8 @@ impl ConnCfg {
             .map_err(std::io::Error::other)?;
         drop(pause);
 
-
-        // stream.
-
-        // let RawConnection {
-        //     stream,
-        //     parameters,
-        //     delayed_notice,
-        //     process_id,
-        //     secret_key,
-        // } = connection;
-
-        // tracing::Span::current().record("pid", tracing::field::display(process_id));
-        // tracing::Span::current().record("compute_id", tracing::field::display(&aux.compute_id));
-        // let stream = stream.into_inner();
+        ctx.span()
+            .record("compute_id", tracing::field::display(&aux.compute_id));
 
         // TODO: lots of useful info but maybe we can move it elsewhere (eg traces?)
         info!(
@@ -369,7 +342,7 @@ impl ConnCfg {
             stream,
             cancel_closure,
             aux,
-            _guage: Metrics::get().proxy.db_connections.guard(ctx.protocol()),
+            guage: Metrics::get().proxy.db_connections.guard(ctx.protocol()),
         })
     }
 }

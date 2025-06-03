@@ -470,12 +470,6 @@ pub enum BeMessage<'a> {
     AuthenticationOk,
     AuthenticationSasl(BeAuthenticationSaslMessage<'a>),
     AuthenticationCleartextPassword,
-    BackendKeyData(CancelKeyData),
-    ParameterStatus {
-        name: &'a [u8],
-        value: &'a [u8],
-    },
-    ReadyForQuery,
     NoticeResponse(&'a str),
     NegotiateProtocolVersion {
         version: ProtocolVersion,
@@ -530,11 +524,6 @@ impl BeMessage<'_> {
                 });
             }
 
-            // <https://www.postgresql.org/docs/current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-BACKENDKEYDATA>
-            BeMessage::BackendKeyData(key_data) => {
-                buf.write_raw(8, b'K', |buf| buf.put_slice(key_data.as_bytes()));
-            }
-
             // <https://www.postgresql.org/docs/current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-NOTICERESPONSE>
             // <https://www.postgresql.org/docs/current/protocol-error-fields.html>
             BeMessage::NoticeResponse(msg) => {
@@ -554,21 +543,6 @@ impl BeMessage<'_> {
                     // End notice.
                     buf.put_u8(0);
                 });
-            }
-
-            // <https://www.postgresql.org/docs/current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-PARAMETERSTATUS>
-            BeMessage::ParameterStatus { name, value } => {
-                buf.write_raw(name.len() + value.len() + 2, b'S', |buf| {
-                    buf.put_slice(name.as_bytes());
-                    buf.put_u8(0);
-                    buf.put_slice(value.as_bytes());
-                    buf.put_u8(0);
-                });
-            }
-
-            // <https://www.postgresql.org/docs/current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-NEGOTIATEPROTOCOLVERSION>
-            BeMessage::ReadyForQuery => {
-                buf.write_raw(1, b'Z', |buf| buf.put_u8(b'I'));
             }
 
             // <https://www.postgresql.org/docs/current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-NEGOTIATEPROTOCOLVERSION>

@@ -250,13 +250,16 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     Ok(Some(ProxyPassthrough {
         client,
         compute,
-        aux: node.aux,
+        ids: crate::usage_metrics::Ids {
+            endpoint_id: node.aux.endpoint_id,
+            branch_id: node.aux.branch_id,
+            private_link_id: None,
+        },
         cancel_closure: node.cancel_closure,
-        private_link_id: None,
-        session_id: ctx.session_id(),
         cancel: session,
+        session_id: ctx.session_id(),
         _req: request_gauge,
         _conn: conn_gauge,
-        _guage: node._guage,
+        _guage: node.guage,
     }))
 }
