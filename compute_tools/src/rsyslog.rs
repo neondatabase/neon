@@ -82,18 +82,50 @@ fn restart_rsyslog() -> Result<()> {
     Ok(())
 }
 
+fn parse_audit_syslog_address(remote_endpoint: &str) -> Result<(&str, u16)> {
+    if let Some((host, port_str)) = remote_endpoint.rsplit_once(':') {
+        let port = port_str
+            .parse::<u16>()
+            .map_err(|_| anyhow!("Invalid port in remote_endpoint"))?;
+        Ok((host, port))
+    } else {
+        Err(anyhow!(
+            "Invalid address {remote_endpoint} for audit syslog, use host:port"
+        ))
+    }
+}
+
+fn generate_audit_rsyslog_config(
+    log_directory: String,
+    endpoint_id: &str,
+    project_id: &str,
+    remote_syslog_host: &str,
+    remote_syslog_port: u16,
+) -> String {
+    format!(
+        include_str!("config_template/compute_audit_rsyslog_template.conf"),
+        log_directory = log_directory,
+        endpoint_id = endpoint_id,
+        project_id = project_id,
+        remote_syslog_host = remote_syslog_host,
+        remote_syslog_port = remote_syslog_port
+    )
+}
+
 pub fn configure_audit_rsyslog(
     log_directory: String,
     endpoint_id: &str,
     project_id: &str,
     remote_endpoint: &str,
 ) -> Result<()> {
-    let config_content: String = format!(
-        include_str!("config_template/compute_audit_rsyslog_template.conf"),
-        log_directory = log_directory,
-        endpoint_id = endpoint_id,
-        project_id = project_id,
-        remote_endpoint = remote_endpoint
+    let (remote_syslog_host, remote_syslog_port) =
+        parse_audit_syslog_address(remote_endpoint).unwrap();
+    let config_content = generate_audit_rsyslog_config(
+        log_directory,
+        endpoint_id,
+        project_id,
+        remote_syslog_host,
+        remote_syslog_port,
     );
 
     info!("rsyslog config_content: {}", config_content);
@@ -258,6 +290,8 @@ pub fn launch_pgaudit_gc(log_directory: String) {
 mod tests {
     use crate::rsyslog::PostgresLogsRsyslogConfig;
 
+    use super::{generate_audit_rsyslog_config, parse_audit_syslog_address};
+
     #[test]
     fn test_postgres_logs_config() {
         {
@@ -285,6 +319,52 @@ mod tests {
             let conf = PostgresLogsRsyslogConfig::new(Some("invalid"));
             let res = conf.build();
             assert!(res.is_err());
+        }
+    }
+
+    #[test]
+    fn test_parse_audit_syslog_address() {
+        {
+            // host:port format
+            let parsed = parse_audit_syslog_address("collector.host.tld:5555");
+            assert!(parsed.is_ok());
+            assert_eq!(parsed.unwrap(), ("collector.host.tld", 5555));
+        }
+
+        {
+            // host without port
+            let parsed = parse_audit_syslog_address("collector.host.tld");
+            assert!(parsed.is_err());
+        }
+
+        {
+            // host with invalid port
+            let parsed = parse_audit_syslog_address("collector.host.tld:90001");
+            assert!(parsed.is_err());
+        }
+    }
+
+    #[test]
+    fn test_generate_audit_rsyslog_config() {
+        {
+            let log_directory = "/tmp/log".to_string();
+            let endpoint_id = "ep-test-endpoint-id";
+            let project_id = "test-project-id";
+            let remote_syslog_host = "collector.host.tld";
+            let remote_syslog_port = 5555;
+
+            let conf_str = generate_audit_rsyslog_config(
+                log_directory,
+                endpoint_id,
+                project_id,
+                remote_syslog_host,
+                remote_syslog_port,
+            );
+
+            assert!(conf_str.contains(r#"type="omfwd""#));
+            assert!(conf_str.contains(r#"target="collector.host.tld""#));
+            assert!(conf_str.contains(r#"port="5555""#));
+            assert!(conf_str.contains(r#"StreamDriverPermittedPeers="collector.host.tld""#));
         }
     }
 }

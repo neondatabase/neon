@@ -1984,6 +1984,7 @@ RUN apt update && \
         lsof \
         procps \
         rsyslog \
+        rsyslog-openssl \
         screen \
         tcpdump \
         $VERSION_INSTALLS && \
