@@ -30,9 +30,13 @@
 #include "catalog/pg_authid.h"
 #include "catalog/pg_proc.h"
 #include "commands/defrem.h"
+#include "commands/event_trigger.h"
+#include "commands/user.h"
 #include "fmgr.h"
 #include "libpq/crypt.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
+#include "parser/parse_func.h"
 #include "tcop/pquery.h"
 #include "tcop/utility.h"
 #include "utils/acl.h"
@@ -50,6 +54,7 @@ static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
 static fmgr_hook_type next_fmgr_hook = NULL;
 static needs_fmgr_hook_type next_needs_fmgr_hook = NULL;
 static bool neon_enable_event_triggers_for_superuser = false;
+static bool neon_event_triggers = true;
 
 static const char *jwt_token = NULL;
 
@@ -811,6 +816,24 @@ neon_needs_fmgr_hook(Oid functionId) {
 		|| get_func_rettype(functionId) == EVENT_TRIGGEROID;
 }
 
+static void
+LookupFuncOwnerSecDef(Oid functionId, Oid *funcOwner, bool *is_secdef)
+{
+	Form_pg_proc procForm;
+	HeapTuple proc_tup = SearchSysCache1(PROCOID, ObjectIdGetDatum(functionId));
+
+	if (!HeapTupleIsValid(proc_tup))
+		ereport(ERROR,
+				(errmsg("cache lookup failed for function %u", functionId)));
+
+	procForm = (Form_pg_proc) GETSTRUCT(proc_tup);
+
+	*funcOwner = procForm->proowner;
+	*is_secdef = procForm->prosecdef;
+
+	ReleaseSysCache(proc_tup);
+}
+
 
 PG_FUNCTION_INFO_V1(noop);
 Datum noop(__attribute__ ((unused)) PG_FUNCTION_ARGS) { PG_RETURN_VOID();}
@@ -829,29 +852,109 @@ force_noop(FmgrInfo *finfo)
     finfo->fn_expr   = NULL;                 /* no parse tree */
 }
 
+
+/*
+ * Skip executing Event Triggers execution for superusers, because Event
+ * Triggers are SECURITY DEFINER and user provided code could then attempt
+ * privilege escalation.
+ *
+ * Also skip executing Event Triggers when GUC neon.event_triggers has been
+ * set to false. This might be necessary to be able to connect again after a
+ * LOGIN Event Trigger has been installed that would prevent connections as
+ * neon_superuser.
+ */
 static void
 neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 {
-    if (event == FHET_START
+	/*
+	 * It can be other needs_fmgr_hook which cause our hook to be invoked for
+	 * non-trigger function, so recheck that is is trigger function.
+	 */
+	if (flinfo->fn_oid != InvalidOid &&
+		get_func_rettype(flinfo->fn_oid) != EVENT_TRIGGEROID)
+	{
+		if (next_fmgr_hook)
+			(*next_fmgr_hook) (event, flinfo, private);
 
-		/* by default execution of event triggers is prohibited for superuser */
-		&& !neon_enable_event_triggers_for_superuser
+		return;
+	}
 
-		/* still enable it to pass pg_regress tests */
-		&& !RegressTestMode
-
-		/* disable execution of security definer functions as well */
-		&& GetSessionUserIsSuperuser()
+	/* SET neon.event_triggers TO false; disables Event Triggers */
+	if (event == FHET_START && !neon_event_triggers)
+	{
+		elog(WARNING,
+			 "Skipping Event Trigger: neon.event_triggers is false");
 
 		/*
-		 * It can be other needs_fmgr_hook which cause our hook to be invoked
-		 * for non-trigger function, so recheck that is is trigger function.
+		 * we can't skip execution directly inside the fmgr_hook so instead we
+		 * change the event trigger function to a noop function.
 		 */
-		&& (flinfo->fn_oid == InvalidOid ||
-			get_func_rettype(flinfo->fn_oid) == EVENT_TRIGGEROID))
+		force_noop(flinfo);
+	}
 
+	/*
+	 * Fire Event Trigger if both function owner and current user are
+	 * superuser, or none of them are.
+	 */
+    else if (event == FHET_START
+		/* still enable it to pass pg_regress tests */
+		&& !RegressTestMode)
 	{
-		elog(WARNING, "Skipping event trigger for superuser");
+		/*
+		 * Get the current user oid as of before SECURITY DEFINER change of
+		 * CurrentUserId, and that would be SessionUserId.
+		 */
+		Oid current_role_oid = GetSessionUserId();
+		bool role_is_super = superuser_arg(current_role_oid);
+
+		/* Find the Function Attributes (owner Oid, security definer) */
+		Oid function_owner = InvalidOid;
+		bool function_is_secdef = false;
+		bool function_is_owned_by_super = false;
+
+		LookupFuncOwnerSecDef(flinfo->fn_oid, &function_owner, &function_is_secdef);
+
+		function_is_owned_by_super = superuser_arg(function_owner);
+
+		/*
+		 * 1. Refuse to run SECURITY DEFINER function that belongs to a
+		 * superuser when the current user is not a superuser itself.
+		 */
+		if (!role_is_super
+			&& function_is_owned_by_super
+			&& function_is_secdef)
+		{
+			char *func_name = get_func_name(flinfo->fn_oid);
+
+			ereport(WARNING,
+					(errmsg("Skipping Event Trigger"),
+					 errdetail("Event Trigger function \"%s\" is owned by \"%s\" "
+							   "and is SECURITY DEFINER",
+							   func_name,
+							   GetUserNameFromId(function_owner, false))));
+		}
+
+		/*
+		 * 2. Refuse to run SECURITY INVOKER function that belongs to a
+		 * non-superuser when the current user is a superuser: avoid to give
+		 * superuser privelges to non-superuser code.
+		 */
+		else if (role_is_super
+				 && neon_enable_event_triggers_for_superuser
+				 && !function_is_secdef
+				 && !function_is_owned_by_super)
+		{
+			char *func_name = get_func_name(flinfo->fn_oid);
+
+			ereport(WARNING,
+					(errmsg("Skipping Event Trigger"),
+					 errdetail("Event Trigger function \"%s\" "
+							   "is owned by non-superuser role \"%s\", "
+							   "and current_user \"%s\" is superuser",
+							   func_name,
+							   GetUserNameFromId(function_owner, false),
+							   GetUserNameFromId(current_role_oid, false))));
+		}
 
 		/*
 		 * we can't skip execution directly inside the fmgr_hook so instead we
@@ -899,8 +1002,73 @@ switch_to_original_role(void)
     switched_to_superuser = false;
 }
 
+/*
+ * ALTER ROLE ... SUPERUSER;
+ *
+ * Used internally to give superuser to a non-privileged role to allow
+ * ownership of superuser-only objects such as Event Trigger.
+ *
+ *   ALTER ROLE foo SUPERUSER;
+ *   CREATE EVENT TRIGGER ... ; -- owned by foo
+ *   ALTER ROLE foo NOSUPERUSER;
+ *
+ * Now the EVENT TRIGGER has been installed and is owned by foo, who can DROP
+ * it without having to be superuser again.
+ */
 static void
-NeonProcessUtility(
+alter_role_super(const char* rolename, bool make_super)
+{
+	AlterRoleStmt *alter_stmt = NULL;
+
+	RoleSpec *rolespec   = makeNode(RoleSpec);
+	rolespec->roletype   = ROLESPEC_CSTRING;
+	rolespec->rolename   = pstrdup(rolename);
+	rolespec->location   = -1;
+
+	alter_stmt = makeNode(AlterRoleStmt);
+	alter_stmt->role = rolespec;
+
+	alter_stmt->options = list_make1(
+		/* using makeInteger because makeBoolean is not available on pg <= 14 */
+		makeDefElem("superuser", (Node *) makeInteger(make_super), -1)
+		);
+
+#if PG_MAJORVERSION_NUM < 15
+	AlterRole(alter_stmt);
+#else
+	AlterRole(NULL, alter_stmt);
+#endif
+
+	CommandCounterIncrement();
+}
+
+
+/*
+ * Changes the OWNER of an Event Trigger.
+ *
+ * Event Triggers can only be owned by superusers, so this ALTER ROLE with
+ * SUPERUSER and then removes the property.
+ */
+static void
+alter_event_trigger_owner(const char *obj_name, Oid role_oid)
+{
+	char* role_name = GetUserNameFromId(role_oid, false);
+
+	alter_role_super(role_name, true);
+
+	AlterEventTriggerOwner(obj_name, role_oid);
+	CommandCounterIncrement();
+
+	alter_role_super(role_name, false);
+}
+
+
+/*
+ * Neon processing of the CREATE EVENT TRIGGER requires special attention and
+ * is worth having its own ProcessUtility_hook for that.
+ */
+static void
+ProcessCreateEventTrigger(
 				   PlannedStmt *pstmt,
 				   const char *queryString,
 				   bool readOnlyTree,
@@ -913,6 +1081,168 @@ NeonProcessUtility(
 	Node	   *parseTree = pstmt->utilityStmt;
 	bool		sudo = false;
 
+	/* We double-check that after local variable declaration block */
+	CreateEventTrigStmt *stmt = (CreateEventTrigStmt *) parseTree;
+
+	/*
+	 * We are going to change the current user privileges (sudo) and might
+	 * need after execution cleanup. For that we want to capture the UserId
+	 * before changing it for our sudo implementation.
+	 */
+	const Oid current_user_id = GetUserId();
+	bool current_user_is_super = superuser_arg(current_user_id);
+
+	if (nodeTag(parseTree) != T_CreateEventTrigStmt)
+	{
+		ereport(ERROR,
+				errcode(ERRCODE_INTERNAL_ERROR),
+				errmsg("ProcessCreateEventTrigger called for the wrong command"));
+	}
+
+	/*
+	 * Allow neon_superuser to create Event Trigger, while keeping the
+	 * ownership of the object.
+	 *
+	 * For that we give superuser membership to the role for the execution of
+	 * the command.
+	 */
+	if (IsTransactionState() && is_neon_superuser())
+	{
+		/* Find the Event Trigger function Oid */
+		Oid func_oid = LookupFuncName(stmt->funcname, 0, NULL, false);
+
+		/* Find the Function Owner Oid */
+		Oid func_owner = InvalidOid;
+		bool is_secdef = false;
+		bool function_is_owned_by_super = false;
+
+		LookupFuncOwnerSecDef(func_oid, &func_owner, &is_secdef);
+
+		function_is_owned_by_super = superuser_arg(func_owner);
+
+		if(!current_user_is_super && function_is_owned_by_super)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("Permission denied to execute "
+							"a function owned by a superuser role"),
+					 errdetail("current user \"%s\" is not a superuser "
+							   "and Event Trigger function \"%s\" "
+							   "is owned by a superuser",
+							   GetUserNameFromId(current_user_id, false),
+							   NameListToString(stmt->funcname))));
+		}
+
+		if(current_user_is_super && !function_is_owned_by_super)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("Permission denied to execute "
+							"a function owned by a non-superuser role"),
+					 errdetail("current user \"%s\" is a superuser "
+							   "and function \"%s\" is "
+							   "owned by a non-superuser",
+							   GetUserNameFromId(current_user_id, false),
+							   NameListToString(stmt->funcname))));
+		}
+
+		sudo = switch_to_superuser();
+	}
+
+	PG_TRY();
+	{
+		if (PreviousProcessUtilityHook)
+		{
+			PreviousProcessUtilityHook(
+				pstmt,
+				queryString,
+				readOnlyTree,
+				context,
+				params,
+				queryEnv,
+				dest,
+				qc);
+		}
+		else
+		{
+			standard_ProcessUtility(
+				pstmt,
+				queryString,
+				readOnlyTree,
+				context,
+				params,
+				queryEnv,
+				dest,
+				qc);
+		}
+
+		/*
+		 * Now that the Event Trigger has been installed via our sudo
+		 * mechanism, if the original role was not a superuser then change
+		 * the event trigger ownership back to the original role.
+		 *
+		 * That way [ ALTER | DROP ] EVENT TRIGGER commands just work.
+		 */
+		if (IsTransactionState() && is_neon_superuser())
+		{
+			CreateEventTrigStmt *stmt = (CreateEventTrigStmt *) parseTree;
+
+			if (!current_user_is_super)
+			{
+				/*
+				 * Change event trigger owner to the current role (making
+				 * it a privileged role during the ALTER OWNER command).
+				 */
+				alter_event_trigger_owner(stmt->trigname, current_user_id);
+			}
+		}
+	}
+	PG_FINALLY();
+	{
+		if (sudo)
+			switch_to_original_role();
+	}
+	PG_END_TRY();
+}
+
+
+/*
+ * Neon hooks for DDLs (handling privileges, limiting features, etc).
+ */
+static void
+NeonProcessUtility(
+				   PlannedStmt *pstmt,
+				   const char *queryString,
+				   bool readOnlyTree,
+				   ProcessUtilityContext context,
+				   ParamListInfo params,
+				   QueryEnvironment *queryEnv,
+				   DestReceiver *dest,
+				   QueryCompletion *qc)
+{
+	Node	   *parseTree = pstmt->utilityStmt;
+
+	/*
+	 * The process utility hook for CREATE EVENT TRIGGER is its own
+	 * implementation and warrant being addressed separately from here.
+	 */
+	if (nodeTag(parseTree) == T_CreateEventTrigStmt)
+	{
+		ProcessCreateEventTrigger(
+				pstmt,
+				queryString,
+				readOnlyTree,
+				context,
+				params,
+				queryEnv,
+				dest,
+				qc);
+		return;
+	}
+
+	/*
+	 * Other commands that need Neon specific implementations are handled here:
+	 */
 	switch (nodeTag(parseTree))
 	{
 		case T_CreatedbStmt:
@@ -944,74 +1274,34 @@ NeonProcessUtility(
 					errmsg("CREATE TABLESPACE is not supported on Neon")));
 			}
    			break;
-		case T_CreateEventTrigStmt:
-		case T_AlterEventTrigStmt:
-			if (IsTransactionState() && is_neon_superuser())
-			{
-				/* Allow neon_superuser to create/alter event trigger. */
-				sudo = switch_to_superuser();
-			}
-			break;
-		case T_DropStmt:
-			if (is_neon_superuser())
-			{
-				DropStmt *stmt = (DropStmt *)parseTree;
-				if (stmt->removeType == OBJECT_EVENT_TRIGGER)
-				{
-					/*
-					 * Allow neon_superuser to drop event trigger.
-					 *
-					 * FIXME: now neon_superuser is also able to drop event
-					 * triggers created by superuser.
-					 *
-					 * We now do not use such triggers, but in future it can
-					 * be changed. The problem is that event triggers are
-					 * created by neon_superuser by switching to superuser
-					 * role, so it is not possible to distinguish event
-					 * triggers created by superuser from ones created by
-					 * neon_superuser.
-					 */
-					sudo = switch_to_superuser();
-				}
-			}
-			break;
 		default:
 			break;
 	}
 
-	PG_TRY();
+	if (PreviousProcessUtilityHook)
 	{
-		if (PreviousProcessUtilityHook)
-		{
-			PreviousProcessUtilityHook(
-				pstmt,
-				queryString,
-				readOnlyTree,
-				context,
-				params,
-				queryEnv,
-				dest,
-				qc);
-		}
-		else
-		{
-			standard_ProcessUtility(
-				pstmt,
-				queryString,
-				readOnlyTree,
-				context,
-				params,
-				queryEnv,
-				dest,
-				qc);
-		}
+		PreviousProcessUtilityHook(
+			pstmt,
+			queryString,
+			readOnlyTree,
+			context,
+			params,
+			queryEnv,
+			dest,
+			qc);
 	}
-	PG_FINALLY();
+	else
 	{
-		if (sudo)
-			switch_to_original_role();
+		standard_ProcessUtility(
+			pstmt,
+			queryString,
+			readOnlyTree,
+			context,
+			params,
+			queryEnv,
+			dest,
+			qc);
 	}
-	PG_END_TRY();
 }
 
 void
@@ -1029,6 +1319,11 @@ InitDDLHandler()
 	RegisterXactCallback(NeonXactCallback, NULL);
 	RegisterSubXactCallback(NeonSubXactCallback, NULL);
 
+	/*
+	 * By default Neon does not fire Event Triggers for a privileged role, to
+	 * protect again privilege escalation. It is still possible to opt-in for
+	 * Event Triggers and superuser access though.
+	 */
 	DefineCustomBoolVariable(
 							 "neon.enable_event_triggers_for_superuser",
 							 "Enable firing of event triggers for superuser",
@@ -1036,6 +1331,26 @@ InitDDLHandler()
 							 &neon_enable_event_triggers_for_superuser,
 							 false,
 							 PGC_SUSET,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
+	/*
+	 * The GUC neon.event_triggers should provide the same effect as the
+	 * Postgres GUC event_triggers, but the neon one is PGC_USERSET.
+	 *
+	 * This allows using the GUC in the connection string and work out of a
+	 * LOGIN Event Trigger that would break database access, all without
+	 * having to edit and reload the Postgres configuration file.
+	 */
+	DefineCustomBoolVariable(
+							 "neon.event_triggers",
+							 "Enable firing of event triggers",
+							 NULL,
+							 &neon_event_triggers,
+							 true,
+							 PGC_USERSET,
 							 0,
 							 NULL,
 							 NULL,
