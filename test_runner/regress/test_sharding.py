@@ -1454,7 +1454,8 @@ def test_sharding_split_failures(
 
         # The split should appear to be rolled back from the point of view of all pageservers
         # apart from the one that is offline
-        wait_until(lambda: assert_rolled_back(exclude_ps_id=failure.pageserver_id), timeout=120)
+        env.storage_controller.reconcile_until_idle()
+        wait_until(lambda: assert_rolled_back(exclude_ps_id=failure.pageserver_id))
 
         finish_split()
         wait_until(lambda: assert_split_done(exclude_ps_id=failure.pageserver_id))
@@ -1468,7 +1469,8 @@ def test_sharding_split_failures(
         log.info("Clearing failure...")
         failure.clear(env)
 
-        wait_until(assert_rolled_back, timeout=120)
+        env.storage_controller.reconcile_until_idle()
+        wait_until(assert_rolled_back)
 
         # Having rolled back, the tenant should be working
         workload.churn_rows(10)
