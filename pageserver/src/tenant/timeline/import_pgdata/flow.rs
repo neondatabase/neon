@@ -130,7 +130,15 @@ async fn run_v1(
 
     pausable_failpoint!("import-timeline-pre-execute-pausable");
 
+    let jobs_count = import_progress.as_ref().map(|p| p.jobs);
     let start_from_job_idx = import_progress.map(|progress| progress.completed);
+
+    tracing::info!(
+        start_from_job_idx=?start_from_job_idx,
+        jobs=?jobs_count,
+        "Executing import plan"
+    );
+
     plan.execute(timeline, start_from_job_idx, plan_hash, &import_config, ctx)
         .await
 }
@@ -463,6 +471,8 @@ impl Plan {
                             last_completed_job_idx = job_idx;
 
                             if last_completed_job_idx % checkpoint_every == 0 {
+                                tracing::info!(last_completed_job_idx, jobs=%jobs_in_plan, "Checkpointing import status");
+
                                 let progress = ShardImportProgressV1 {
                                     jobs: jobs_in_plan,
                                     completed: last_completed_job_idx,
@@ -760,7 +770,7 @@ impl ImportTask for ImportRelBlocksTask {
         layer_writer: &mut ImageLayerWriter,
         ctx: &RequestContext,
     ) -> anyhow::Result<usize> {
-        const MAX_BYTE_RANGE_SIZE: usize = 128 * 1024 * 1024;
+        const MAX_BYTE_RANGE_SIZE: usize = 4 * 1024 * 1024;
 
         debug!("Importing relation file");
 
