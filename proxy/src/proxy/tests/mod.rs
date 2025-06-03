@@ -23,10 +23,11 @@ use super::*;
 use crate::auth::backend::{
     ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned,
 };
+use crate::compute::NodeInfo;
 use crate::config::{ComputeConfig, RetryConfig};
 use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
-use crate::control_plane::{self, CachedNodeInfo, NodeInfo, NodeInfoCache};
+use crate::control_plane::{self, CachedNodeInfo, NodeInfoCache};
 use crate::error::ErrorKind;
 use crate::tls::client_config::compute_client_config_with_certs;
 use crate::tls::postgres_rustls::MakeRustlsConnect;

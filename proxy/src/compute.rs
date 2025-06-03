@@ -13,6 +13,7 @@ use thiserror::Error;
 use tokio::net::{TcpStream, lookup_host};
 use tracing::{debug, error, info, warn};
 
+use crate::auth::backend::ComputeCredentialKeys;
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::parse_endpoint_param;
 use crate::cancellation::CancelClosure;
@@ -90,6 +91,45 @@ impl ReportableError for ConnectionError {
             ConnectionError::WakeComputeError(e) => e.get_error_kind(),
             ConnectionError::TooManyConnectionAttempts(e) => e.get_error_kind(),
         }
+    }
+}
+
+/// Info for establishing a connection to a compute node.
+/// This is what we get after auth succeeded, but not before!
+#[derive(Clone)]
+pub(crate) struct NodeInfo {
+    /// Compute node connection params.
+    /// It's sad that we have to clone this, but this will improve
+    /// once we migrate to a bespoke connection logic.
+    pub(crate) config: ConnCfg,
+
+    /// Labels for proxy's metrics.
+    pub(crate) aux: MetricsAuxInfo,
+}
+
+impl NodeInfo {
+    pub(crate) async fn connect(
+        &self,
+        ctx: &RequestContext,
+        config: &ComputeConfig,
+        user_info: ComputeUserInfo,
+    ) -> Result<PostgresConnection, ConnectionError> {
+        self.config
+            .connect(ctx, self.aux.clone(), config, user_info)
+            .await
+    }
+
+    pub(crate) fn reuse_settings(&mut self, other: Self) {
+        self.config.reuse_password(other.config);
+    }
+
+    pub(crate) fn set_keys(&mut self, keys: &ComputeCredentialKeys) {
+        match keys {
+            #[cfg(any(test, feature = "testing"))]
+            ComputeCredentialKeys::Password(password) => self.config.password(password),
+            ComputeCredentialKeys::AuthKeys(auth_keys) => self.config.auth_keys(*auth_keys),
+            ComputeCredentialKeys::JwtPayload(_) | ComputeCredentialKeys::None => &mut self.config,
+        };
     }
 }
 

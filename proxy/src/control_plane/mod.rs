@@ -11,17 +11,17 @@ pub(crate) mod errors;
 
 use std::sync::Arc;
 
+use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::AuthRule;
-use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
 use crate::auth::{AuthError, IpPattern, check_peer_addr_is_in_list};
 use crate::cache::{Cached, TimedLru};
-use crate::config::ComputeConfig;
+use crate::compute::NodeInfo;
 use crate::context::RequestContext;
-use crate::control_plane::messages::{ControlPlaneErrorMessage, MetricsAuxInfo};
+use crate::control_plane::messages::ControlPlaneErrorMessage;
 use crate::intern::{AccountIdInt, ProjectIdInt};
 use crate::protocol2::ConnectionInfoExtra;
+use crate::scram;
 use crate::types::{EndpointCacheKey, EndpointId, RoleName};
-use crate::{compute, scram};
 
 /// Various cache-related types.
 pub mod caches {
@@ -60,45 +60,6 @@ pub(crate) struct AuthInfo {
     pub(crate) account_id: Option<AccountIdInt>,
     /// Are public connections or VPC connections blocked?
     pub(crate) access_blocker_flags: AccessBlockerFlags,
-}
-
-/// Info for establishing a connection to a compute node.
-/// This is what we get after auth succeeded, but not before!
-#[derive(Clone)]
-pub(crate) struct NodeInfo {
-    /// Compute node connection params.
-    /// It's sad that we have to clone this, but this will improve
-    /// once we migrate to a bespoke connection logic.
-    pub(crate) config: compute::ConnCfg,
-
-    /// Labels for proxy's metrics.
-    pub(crate) aux: MetricsAuxInfo,
-}
-
-impl NodeInfo {
-    pub(crate) async fn connect(
-        &self,
-        ctx: &RequestContext,
-        config: &ComputeConfig,
-        user_info: ComputeUserInfo,
-    ) -> Result<compute::PostgresConnection, compute::ConnectionError> {
-        self.config
-            .connect(ctx, self.aux.clone(), config, user_info)
-            .await
-    }
-
-    pub(crate) fn reuse_settings(&mut self, other: Self) {
-        self.config.reuse_password(other.config);
-    }
-
-    pub(crate) fn set_keys(&mut self, keys: &ComputeCredentialKeys) {
-        match keys {
-            #[cfg(any(test, feature = "testing"))]
-            ComputeCredentialKeys::Password(password) => self.config.password(password),
-            ComputeCredentialKeys::AuthKeys(auth_keys) => self.config.auth_keys(*auth_keys),
-            ComputeCredentialKeys::JwtPayload(_) | ComputeCredentialKeys::None => &mut self.config,
-        };
-    }
 }
 
 #[derive(Copy, Clone, Default)]
