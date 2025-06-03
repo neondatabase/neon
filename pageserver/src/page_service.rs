@@ -765,7 +765,7 @@ impl PageStreamError {
             request_id,
             status_code,
             reason: Some(status.message().to_string()),
-            page_images: SmallVec::new(),
+            page_images: Vec::new(),
         }
         .into())
     }
@@ -3521,7 +3521,7 @@ impl GrpcPageServiceHandler {
             request_id: req.request_id,
             status_code: page_api::GetPageStatusCode::Ok,
             reason: None,
-            page_images: SmallVec::with_capacity(results.len()),
+            page_images: Vec::with_capacity(results.len()),
         };
 
         for result in results {
