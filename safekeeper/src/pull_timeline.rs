@@ -507,10 +507,7 @@ pub async fn handle_request(
     // Note that we operate on the in-memory status while `start_snapshot` uses
     // the persisted status. For now, we live with this inconsistency, maybe we
     // can add some code later on if it bites us (say a param for the status API).
-    let from_lsn = min(
-        status.remote_consistent_lsn,
-        status.backup_lsn,
-    );
+    let from_lsn = min(status.remote_consistent_lsn, status.backup_lsn);
 
     if from_lsn == Lsn(0) {
         // The timeline has had no writes yet, even on the most advanced safeekeeper.

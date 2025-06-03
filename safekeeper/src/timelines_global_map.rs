@@ -256,7 +256,15 @@ impl GlobalTimelines {
         commit_lsn: Lsn,
     ) -> Result<Arc<Timeline>> {
         let check_tombstone = true;
-        self.create_maybe_check_tombstone(ttid, mconf, server_info, start_lsn, commit_lsn, check_tombstone).await
+        self.create_maybe_check_tombstone(
+            ttid,
+            mconf,
+            server_info,
+            start_lsn,
+            commit_lsn,
+            check_tombstone,
+        )
+        .await
     }
 
     /// Create a new timeline with the given id. If the timeline already exists, returns
@@ -293,7 +301,9 @@ impl GlobalTimelines {
         // immediately initialize first WAL segment as well.
         let state = TimelinePersistentState::new(&ttid, mconf, server_info, start_lsn, commit_lsn)?;
         control_file::FileStorage::create_new(&tmp_dir_path, state, conf.no_sync).await?;
-        let timeline = self.load_temp_timeline(ttid, &tmp_dir_path, check_tombstone).await?;
+        let timeline = self
+            .load_temp_timeline(ttid, &tmp_dir_path, check_tombstone)
+            .await?;
         Ok(timeline)
     }
 
