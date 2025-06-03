@@ -65,9 +65,10 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
 
     if [[ ${pg_version} -ge 16 ]]; then
         TMPDIR=$(mktemp -d)
-        mkdir "${TMPDIR}"/{pg_hint_plan_src,file_fdw}
-        docker compose cp neon-test-extensions:/ext-src/postgis-src/raster/test "${TMPDIR}/postgis-src"
-        docker compose cp neon-test-extensions:/ext-src/postgis-src/regress/00-regress-install "${TMPDIR}"
+        trap 'rm -rf ${TMPDIR}' EXIT
+        mkdir "${TMPDIR}"/{pg_hint_plan-src,file_fdw,postgis-src}
+        docker compose cp neon-test-extensions:/ext-src/postgis-src/raster/test "${TMPDIR}/postgis-src/test"
+        docker compose cp neon-test-extensions:/ext-src/postgis-src/regress/00-regress-install "${TMPDIR}/postgis-src/00-regress-install"
         docker compose cp neon-test-extensions:/ext-src/pg_hint_plan-src/data "${TMPDIR}/pg_hint_plan-src/data"
         docker compose cp neon-test-extensions:/postgres/contrib/file_fdw/data "${TMPDIR}/file_fdw/data"
 
@@ -79,17 +80,16 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
           # Prepare for the PostGIS test
           docker compose exec "${compute}" mkdir -p /tmp/pgis_reg/pgis_reg_tmp /ext-src/postgis-src/raster /ext-src/postgis-src/regress /ext-src/postgis-src/regress/00-regress-install
           docker compose cp "${TMPDIR}/postgis-src/test" "${compute}":/ext-src/postgis-src/raster/test
-          docker compose cp "${TMPDIR}/00-regress-install" "${compute}":/ext-src/postgis-src/regress
+          docker compose cp "${TMPDIR}/postgis-src/00-regress-install" "${compute}":/ext-src/postgis-src/regress
           # The following block copies the files for the pg_hintplan test to the compute node for the extension test in an isolated docker-compose environment
-          docker compose cp "${TMPDIR}/pg_hint_plan/data" "${compute}":/ext-src/pg_hint_plan-src/
+          docker compose cp "${TMPDIR}/pg_hint_plan-src/data" "${compute}":/ext-src/pg_hint_plan-src/
           # The following block does the same for the contrib/file_fdw test
           docker compose cp "${TMPDIR}/file_fdw/data" "${compute}":/postgres/contrib/file_fdw/data
         done
-        rm -rf "${TMPDIR}"
         # Apply patches
         docker compose exec -T neon-test-extensions bash -c "(cd /postgres && patch -p1)" <"../compute/patches/contrib_pg${pg_version}.patch"
         # Add packages
-        docker exec neon-test-extensions bash -c "apt update; apt -y install parallel"
+        docker compose exec neon-test-extensions bash -c "apt update; apt -y install parallel"
         # We are running tests now
         rm -f testout.txt testout_contrib.txt
         docker compose exec -e USE_PGXS=1 -e SKIP=timescaledb-src,rdkit-src,pg_jsonschema-src,kq_imcx-src,wal2json_2_5-src,rag_jina_reranker_v1_tiny_en-src,rag_bge_small_en_v15-src \
