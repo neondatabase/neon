@@ -3660,7 +3660,7 @@ impl proto::PageService for GrpcPageServiceHandler {
                     if chunk.is_empty() {
                         break;
                     }
-                    yield proto::GetBaseBackupResponseChunk::try_from(chunk.clone().freeze())?;
+                    yield proto::GetBaseBackupResponseChunk::from(chunk.clone().freeze());
                     chunk.clear();
                 }
             }
@@ -3806,7 +3806,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         let resp =
             PageServerHandler::handle_get_slru_segment_request(&timeline, &req, &ctx).await?;
         let resp: page_api::GetSlruSegmentResponse = resp.segment;
-        Ok(tonic::Response::new(resp.try_into()?))
+        Ok(tonic::Response::new(resp.into()))
     }
 }
 
