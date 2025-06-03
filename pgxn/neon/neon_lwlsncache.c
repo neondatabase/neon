@@ -48,7 +48,7 @@ static HTAB *lastWrittenLsnCache;
 
 LwLsnCacheCtl* LwLsnCache;
 
-static int lwlsn_cache_size = (128 * 1024); 
+static int lwlsn_cache_size = 1;
 
 
 static void
@@ -58,7 +58,7 @@ lwlc_register_gucs(void)
 							"Size of last written LSN cache used by Neon",
 							NULL,
 							&lwlsn_cache_size,
-							(128*1024), 1024, INT_MAX,
+							1, 1, INT_MAX,
 							PGC_POSTMASTER,
 							0, /* plain units */
 							NULL, NULL, NULL);
