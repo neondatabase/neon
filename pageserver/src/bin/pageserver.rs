@@ -102,11 +102,10 @@ fn main() -> anyhow::Result<()> {
     let (conf, ignored) = initialize_config(&identity_file_path, &cfg_file_path, &workdir)?;
 
     if !conf.dev_mode {
-        if matches!(conf.http_auth_type, AuthType::Trust)
-            || matches!(conf.pg_auth_type, AuthType::Trust)
+        if [conf.http_auth_type, conf.pg_auth_type, conf.grpc_auth_type].contains(&AuthType::Trust)
         {
             bail!(
-                "Pageserver refuses to start with HTTP or PostgreSQL API authentication disabled.\n\
+                "Pageserver refuses to start with HTTP, PostgreSQL or GRPC API authentication disabled.\n\
                   Set dev_mode = true in pageserver.toml to allow running without authentication.\n\
                   This is insecure and should only be used in development environments."
             );
