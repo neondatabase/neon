@@ -1,5 +1,4 @@
 use std::convert::TryInto;
-use std::pin::Pin;
 use std::io::Error;
 use std::io::ErrorKind;
 
@@ -93,7 +92,7 @@ impl Client {
         let endpoint = tonic::transport::Endpoint::from_shared(connstring)
             .map_err(|e| Error::new(ErrorKind::InvalidInput, e.to_string()))?;
 
-        let mut channel = endpoint.connect().await
+        let channel = endpoint.connect().await
             .map_err(|e| Error::new(ErrorKind::ConnectionRefused, e.to_string()))?;
 
         // Attempt to parse headers, so that parsing fails early. Later, we can assume
@@ -108,12 +107,12 @@ impl Client {
                 convert_metadata_err(InvalidMetadataValue::from(e), "timeline-id".to_string())
             })?;
 
-        let shard_ascii : AsciiMetadataValue = shard_id.clone().to_string().try_into()
+        let _shard_ascii : AsciiMetadataValue = shard_id.clone().to_string().try_into()
             .map_err(|e: InvalidMetadataValue| {
                 convert_metadata_err(InvalidMetadataValue::from(e), "shard-id".to_string())
             })?;
 
-        let auth = AuthInterceptor::new(tenant_ascii, timeline_ascii, None);
+        let auth = AuthInterceptor::new(tenant_ascii, timeline_ascii, auth_header);
 
         let client = proto::PageServiceClient::with_interceptor(
             channel,
@@ -190,7 +189,7 @@ impl Client {
                     domain_req.try_into().unwrap()
                 });
 
-        let mut req_new = Request::new(outbound_proto);
+        let req_new = Request::new(outbound_proto);
 
         let response_stream: Streaming<proto::GetPageResponse> =
             self.client.get_pages(req_new).await?.into_inner();

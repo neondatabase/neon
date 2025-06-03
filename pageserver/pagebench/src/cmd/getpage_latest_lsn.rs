@@ -16,7 +16,6 @@ use pageserver_api::models::{
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_page_api::proto;
-use pageserver_page_api::client;
 use pageserver_page_api::GetPageRequest;
 use pageserver_page_api::GetPageResponse;
 use rand::prelude::*;
@@ -33,7 +32,6 @@ use crate::util::tokio_thread_local_stats::AllThreadLocalStats;
 use crate::util::{request_stats, tokio_thread_local_stats};
 
 use futures_core::Stream;
-use tonic::Request;
 
 
 use futures::StreamExt;
@@ -524,10 +522,8 @@ impl GrpcClient {
         let mut domain_client = pageserver_page_api::client::Client::new(
             connstring.clone(),
             ttid.tenant_id.clone(), ttid.timeline_id.clone(), ShardIndex::unsharded().clone(), None).await?;
-        //let req_tx : impl Stream<Item = GetPageRequest> + Send + 'static;
-        //let resp_stream: impl Stream<Item = Result<model::GetPageResponse, tonic::Status>>;
         let (req_tx, req_rx) = tokio::sync::mpsc::channel::<GetPageRequest>(1);
-        let mut inbound_stream = tokio_stream::wrappers::ReceiverStream::new(req_rx);
+        let inbound_stream = tokio_stream::wrappers::ReceiverStream::new(req_rx);
         let resp_stream = domain_client.get_pages(inbound_stream).await?;
 
         Ok(Self {
