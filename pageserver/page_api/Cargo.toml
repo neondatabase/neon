@@ -14,6 +14,8 @@ thiserror.workspace = true
 tonic.workspace = true
 utils.workspace = true
 workspace_hack.workspace = true
+futures.workspace = true
+futures-core.workspace = true
 
 [build-dependencies]
 tonic-build.workspace = true

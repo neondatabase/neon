@@ -25,6 +25,8 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true
 
+futures-core.workspace = true
+
 pageserver_client.workspace = true
 pageserver_api.workspace = true
 pageserver_page_api.workspace = true

@@ -19,5 +19,6 @@ pub mod proto {
 }
 
 mod model;
+pub mod client;
 
 pub use model::*;
