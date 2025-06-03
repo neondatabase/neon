@@ -14,7 +14,6 @@ use std::fmt::Display;
 
 use bytes::Bytes;
 use postgres_ffi::Oid;
-use smallvec::SmallVec;
 // TODO: split out Lsn, RelTag, SlruKind, Oid and other basic types to a separate crate, to avoid
 // pulling in all of their other crate dependencies when building the client.
 use utils::lsn::Lsn;
@@ -302,7 +301,7 @@ pub struct GetPageRequest {
     /// Multiple pages will be executed as a single batch by the Pageserver, amortizing layer access
     /// costs and parallelizing them. This may increase the latency of any individual request, but
     /// improves the overall latency and throughput of the batch as a whole.
-    pub block_numbers: SmallVec<[u32; 1]>,
+    pub block_numbers: Vec<u32>,
 }
 
 impl TryFrom<proto::GetPageRequest> for GetPageRequest {
@@ -320,7 +319,7 @@ impl TryFrom<proto::GetPageRequest> for GetPageRequest {
                 .ok_or(ProtocolError::Missing("read_lsn"))?
                 .try_into()?,
             rel: pb.rel.ok_or(ProtocolError::Missing("rel"))?.try_into()?,
-            block_numbers: pb.block_number.into(),
+            block_numbers: pb.block_number,
         })
     }
 }
@@ -337,7 +336,7 @@ impl TryFrom<GetPageRequest> for proto::GetPageRequest {
             request_class: request.request_class.into(),
             read_lsn: Some(request.read_lsn.try_into()?),
             rel: Some(request.rel.into()),
-            block_number: request.block_numbers.into_vec(),
+            block_number: request.block_numbers,
         })
     }
 }
@@ -410,7 +409,7 @@ pub struct GetPageResponse {
     /// A string describing the status, if any.
     pub reason: Option<String>,
     /// The 8KB page images, in the same order as the request. Empty if status != OK.
-    pub page_images: SmallVec<[Bytes; 1]>,
+    pub page_images: Vec<Bytes>,
 }
 
 impl From<proto::GetPageResponse> for GetPageResponse {
@@ -419,7 +418,7 @@ impl From<proto::GetPageResponse> for GetPageResponse {
             request_id: pb.request_id,
             status_code: pb.status_code.into(),
             reason: Some(pb.reason).filter(|r| !r.is_empty()),
-            page_images: pb.page_image.into(),
+            page_images: pb.page_image,
         }
     }
 }
@@ -430,7 +429,7 @@ impl From<GetPageResponse> for proto::GetPageResponse {
             request_id: response.request_id,
             status_code: response.status_code.into(),
             reason: response.reason.unwrap_or_default(),
-            page_image: response.page_images.into_vec(),
+            page_image: response.page_images,
         }
     }
 }
