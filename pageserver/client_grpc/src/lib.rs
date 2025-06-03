@@ -23,16 +23,14 @@ use std::fmt::Debug;
 pub mod client_cache;
 pub mod request_tracker;
 pub mod moc;
+use tonic::transport::Channel;
 
 use metrics::{IntCounterVec, core::Collector};
-use crate::client_cache::{ConnectionPool, PooledItemFactory};
+use crate::client_cache::{PooledItemFactory};
 
 use tokio::sync::mpsc;
-use tonic::{transport::{Channel}, Request};
 use async_trait::async_trait;
 
-use tokio_stream::wrappers::ReceiverStream;
-use crate::request_tracker::StreamReturner;
 
 #[derive(Error, Debug)]
 pub enum PageserverClientError {
@@ -417,7 +415,7 @@ pub struct AuthInterceptor {
 }
 
 impl AuthInterceptor {
-    fn new(tenant_id: &str, timeline_id: &str, auth_token: Option<&str>) -> Self {
+    pub fn new(tenant_id: &str, timeline_id: &str, auth_token: Option<&str>) -> Self {
         Self {
             tenant_id: tenant_id.parse().expect("could not parse tenant id"),
             shard_id: None,

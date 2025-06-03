@@ -3,10 +3,12 @@
 use std::{sync::Arc, time::Duration};
 use tokio;
 use pageserver_client_grpc::request_tracker::RequestTracker;
+use pageserver_client_grpc::request_tracker::MockStreamFactory;
+use pageserver_client_grpc::request_tracker::StreamReturner;
+use pageserver_client_grpc::client_cache::ConnectionPool;
 use pageserver_client_grpc::ClientCacheOptions;
 use pageserver_client_grpc::PageserverClientAggregateMetrics;
 
-use pageserver_page_api::model;
 
 use rand::prelude::*;
 
@@ -20,7 +22,8 @@ use futures::StreamExt;
 // use chrono
 use chrono::Utc;
 
-use pageserver_page_api::model::{GetPageClass, GetPageResponse, GetPageStatus};
+use pageserver_page_api::{GetPageClass, GetPageResponse};
+use pageserver_page_api::proto;
 #[derive(Clone)]
 struct KeyRange {
     timeline: TenantTimelineId,
@@ -42,8 +45,8 @@ async fn main() {
         max_delay_ms:       0,
         drop_rate:          0.0,
         hang_rate:          0.0,
-        connect_timeout:    Duration::from_secs(0),
-        connect_backoff:    Duration::from_millis(0),
+        connect_timeout:    Duration::from_secs(10),
+        connect_backoff:    Duration::from_millis(10),
         max_consumers:      64,
         error_threshold:    10,
         max_idle_duration:  Duration::from_secs(60),
@@ -52,61 +55,59 @@ async fn main() {
 
     // 2) metrics collector (we assume Default is implemented)
     let metrics = Arc::new(PageserverClientAggregateMetrics::new());
-
+    let pool = ConnectionPool::<StreamReturner>::new(
+        // TODO:
+        // Make the mock a parameter to avoid commenting things out
+        //Arc::new(StreamFactory::new(new_pool.clone(),
+        //                           auth_interceptor.clone(), ShardIndex::unsharded())),
+        Arc::new(MockStreamFactory::new(
+        )),
+        client_cache_options.connect_timeout,
+        client_cache_options.connect_backoff,
+        client_cache_options.max_consumers,
+        client_cache_options.error_threshold,
+        client_cache_options.max_idle_duration,
+        client_cache_options.max_total_connections,
+        Some(Arc::clone(&metrics)),
+    );
     // 3) build the tracker with a mock stream factory under the hood
     let auth_token: Option<String> = None;
     let mut tracker = RequestTracker::new(
-        client_cache_options.clone(),
-        "tenant1",
-        "timeline1",
-        &auth_token,
-        metrics.clone(),
-        "",
+        pool,
     );
 
     // 4) fire off 10 000 requests in parallel
     let mut handles = FuturesOrdered::new();
     for i in 0..500000 {
 
-        // taken mostly from pagebench
-        let req = {
             let mut rng = rand::thread_rng();
-            let r = KeyRange {
-                timeline: TenantTimelineId::empty(),
-                timeline_lsn: Lsn::from(i as u64),
-                start: 10,
-                end: 20,
-            };
-            let key: i128 = rng.gen_range(r.start..r.end);
+            let r = 0..=1000000i128;
+            let key: i128 = rng.gen_range(r.clone());
             let key = Key::from_i128(key);
             let (rel_tag, block_no) = key
                 .to_rel_block()
                 .expect("we filter non-rel-block keys out above");
-            pageserver_page_api::model::GetPageRequest {
-                request_id: 0, // TODO
-                request_class: GetPageClass::Normal,
-                read_lsn: pageserver_page_api::model::ReadLsn {
+
+            let req2 = proto::GetPageRequest {
+                request_id: 0,
+                request_class: proto::GetPageClass::Normal as i32,
+                read_lsn: Some(proto::ReadLsn {
                     request_lsn: if rng.gen_bool(0.5) {
-                        Lsn::MAX
+                        u64::from(Lsn::MAX)
                     } else {
-                        r.timeline_lsn
+                        10000
                     },
-                    not_modified_since_lsn: r.timeline_lsn,
-                },
-                rel: pageserver_page_api::model::RelTag {
-                    spc_oid: rel_tag.spcnode,
-                    db_oid: rel_tag.dbnode,
-                    rel_number: rel_tag.relnode,
-                    fork_number: rel_tag.forknum,
-                },
+                    not_modified_since_lsn: 10000,
+                }),
+                rel: Some(rel_tag.into()),
                 block_number: vec![block_no],
-            }
-        };
+            };
+        let req_model = pageserver_page_api::GetPageRequest::try_from(req2.clone());
 
         // RequestTracker is Clone, so we can share it
         let mut tr = tracker.clone();
         let fut = async move {
-            let resp = tr.send_request(req).await;
+            let resp = tr.send_getpage_request(req_model.unwrap()).await;
             // sanity‐check: the mock echo returns the same request_id
             assert!(resp.request_id > 0);
         };

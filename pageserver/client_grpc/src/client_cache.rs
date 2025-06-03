@@ -202,6 +202,7 @@ impl PooledItemFactory<Channel> for ChannelFactory {
         let drop_rate = self.drop_rate;
         let hang_rate = self.hang_rate;
 
+        eprintln!("Creating conn");
         // This is a custom connector that inserts delays and errors, for
         // testing purposes. It would normally be disabled by the config.
         let connector = service_fn(move |uri: Uri| {

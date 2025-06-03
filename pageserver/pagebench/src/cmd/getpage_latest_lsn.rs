@@ -1,10 +1,11 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use std::io::Error;
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -23,6 +24,8 @@ use tracing::info;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
 
+use tonic::transport::Channel;
+
 use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
@@ -38,10 +41,20 @@ use metrics::{Encoder, TextEncoder};
 use crate::util::tokio_thread_local_stats::AllThreadLocalStats;
 use crate::util::{request_stats, tokio_thread_local_stats};
 
+use pageserver_client_grpc::ClientCacheOptions;
+use pageserver_client_grpc::AuthInterceptor;
+use pageserver_client_grpc::client_cache::ConnectionPool;
+use pageserver_client_grpc::client_cache::ChannelFactory;
+use pageserver_client_grpc::PageserverClientAggregateMetrics;
+use pageserver_client_grpc::request_tracker::RequestTracker;
+use pageserver_client_grpc::request_tracker::StreamReturner;
+use pageserver_client_grpc::request_tracker::StreamFactory;
+
 #[derive(clap::ValueEnum, Clone, Debug)]
 enum Protocol {
     Libpq,
     Grpc,
+    Rt,
 }
 
 /// GetPage@LatestLSN, uniformly distributed across the compute-accessible keyspace.
@@ -429,6 +442,12 @@ async fn main_impl(
                         .await
                         .unwrap(),
                 ),
+
+                Protocol::Rt => Box::new(
+                    RtClient::new(args.page_service_connstring.clone(), worker_id.timeline)
+                        .await
+                        .unwrap(),
+                )
             };
             run_worker(args, client, ss, cancel, rps_period, ranges, weights).await
         })
@@ -696,6 +715,7 @@ impl Client for LibpqClient {
 struct GrpcClient {
     req_tx: tokio::sync::mpsc::Sender<proto::GetPageRequest>,
     resp_rx: tonic::Streaming<proto::GetPageResponse>,
+    start_times: Vec<Instant>,
 }
 
 impl GrpcClient {
@@ -719,6 +739,7 @@ impl GrpcClient {
         Ok(Self {
             req_tx,
             resp_rx: resp_stream,
+            start_times: Vec::new(),
         })
     }
 }
@@ -743,6 +764,7 @@ impl Client for GrpcClient {
             rel: Some(rel.into()),
             block_number: blks,
         };
+        self.start_times.push(Instant::now());
         self.req_tx.send(req).await?;
         Ok(())
     }
@@ -755,5 +777,51 @@ impl Client for GrpcClient {
             resp.status_code
         );
         Ok((resp.request_id, resp.page_image))
+    }
+}
+#[async_trait]
+
+impl Client for RtClient {
+    async fn send_get_page(&mut self, req: PagestreamGetPageRequest) -> anyhow::Result<()> {
+        let proto_req = proto::GetPageRequest {
+            request_id: 0,
+            request_class: proto::GetPageClass::Normal as i32,
+            read_lsn: Some(proto::ReadLsn {
+                request_lsn: req.hdr.request_lsn.0,
+                not_modified_since_lsn: req.hdr.not_modified_since.0,
+            }),
+            rel: Some(req.rel.into()),
+            block_number: vec![req.blkno],
+        };
+        let domain_req = pageserver_page_api::GetPageRequest::try_from(proto_req)?;
+        let start = Instant::now();
+        let mut rt_clone = self.inner.clone();
+        let fut : ReqFut = Box::pin(async move {
+            let response = rt_clone.send_getpage_request(domain_req).await;
+            return (start, Ok(PagestreamGetPageResponse {
+                page: response.page_image[0].clone(),
+                req: PagestreamGetPageRequest::default(), // dummy
+            }));
+        });
+        self.requests.push_back(fut);
+        STATS.with(|stats| {
+            stats
+                .borrow()
+                .lock()
+                .unwrap()
+                .observe(start.elapsed())
+                .unwrap();
+        });
+        Ok(())
+    }
+
+    async fn recv_get_page(&mut self) -> (Instant, anyhow::Result<PagestreamGetPageResponse>) {
+        let start = Instant::now();
+        let (start, resp) = self.requests.next().await.unwrap();
+        return (start, resp);
+    }
+
+    fn len(&self) -> usize {
+        self.requests.len()
     }
 }
