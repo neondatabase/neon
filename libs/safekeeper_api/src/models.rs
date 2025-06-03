@@ -319,9 +319,18 @@ pub enum TenantShardPageserverAttachmentChange {
     Detach(TenantShardPageserverAttachment),
 }
 
+impl TenantShardPageserverAttachmentChange {
+    pub fn attachment(&self) -> TenantShardPageserverAttachment {
+        match self {
+            TenantShardPageserverAttachmentChange::Attach(a) => a,
+            TenantShardPageserverAttachmentChange::Detach(a) => a,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TenantShardPageserverAttachment {
-    pub shard: ShardIndex,
+    pub shard_id: ShardIndex,
     pub generation: Generation,
     pub ps_id: NodeId,
 }

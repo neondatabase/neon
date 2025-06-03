@@ -224,7 +224,7 @@ impl DeliveryAttempt {
 
         let body = {
             let val = TenantShardPageserverAttachment {
-                shard: ShardIndex {
+                shard_id: ShardIndex {
                     shard_number: utils::shard::ShardNumber(self.work.shard_number as u8),
                     shard_count: utils::shard::ShardCount(self.work.shard_count as u8),
                 },
