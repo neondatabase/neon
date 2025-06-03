@@ -9,6 +9,11 @@
 //! - Use more precise datatypes, e.g. Lsn and uints shorter than 32 bits.
 //!
 //! - Validate protocol invariants, via try_from() and try_into().
+//!
+//! Validation only happens on the receiver side, i.e. when converting from Protobuf to domain
+//! types. This is where it matters -- the Protobuf types are less strict than the domain types, and
+//! receivers should expect all sorts of junk from senders. This also allows the sender to use e.g.
+//! stream combinators without dealing with errors, and avoids validating the same message twice.
 
 use std::fmt::Display;
 
@@ -71,47 +76,35 @@ impl Display for ReadLsn {
     }
 }
 
-impl ReadLsn {
-    /// Validates the ReadLsn.
-    pub fn validate(&self) -> Result<(), ProtocolError> {
-        if self.request_lsn == Lsn::INVALID {
-            return Err(ProtocolError::invalid("request_lsn", self.request_lsn));
-        }
-        if self.not_modified_since_lsn > Some(self.request_lsn) {
-            return Err(ProtocolError::invalid(
-                "not_modified_since_lsn",
-                self.not_modified_since_lsn,
-            ));
-        }
-        Ok(())
-    }
-}
-
 impl TryFrom<proto::ReadLsn> for ReadLsn {
     type Error = ProtocolError;
 
     fn try_from(pb: proto::ReadLsn) -> Result<Self, Self::Error> {
-        let read_lsn = Self {
+        if pb.request_lsn == 0 {
+            return Err(ProtocolError::invalid("request_lsn", pb.request_lsn));
+        }
+        if pb.not_modified_since_lsn > pb.request_lsn {
+            return Err(ProtocolError::invalid(
+                "not_modified_since_lsn",
+                pb.not_modified_since_lsn,
+            ));
+        }
+        Ok(Self {
             request_lsn: Lsn(pb.request_lsn),
             not_modified_since_lsn: match pb.not_modified_since_lsn {
                 0 => None,
                 lsn => Some(Lsn(lsn)),
             },
-        };
-        read_lsn.validate()?;
-        Ok(read_lsn)
+        })
     }
 }
 
-impl TryFrom<ReadLsn> for proto::ReadLsn {
-    type Error = ProtocolError;
-
-    fn try_from(read_lsn: ReadLsn) -> Result<Self, Self::Error> {
-        read_lsn.validate()?;
-        Ok(Self {
+impl From<ReadLsn> for proto::ReadLsn {
+    fn from(read_lsn: ReadLsn) -> Self {
+        Self {
             request_lsn: read_lsn.request_lsn.0,
             not_modified_since_lsn: read_lsn.not_modified_since_lsn.unwrap_or_default().0,
-        })
+        }
     }
 }
 
@@ -166,6 +159,15 @@ impl TryFrom<proto::CheckRelExistsRequest> for CheckRelExistsRequest {
     }
 }
 
+impl From<CheckRelExistsRequest> for proto::CheckRelExistsRequest {
+    fn from(request: CheckRelExistsRequest) -> Self {
+        Self {
+            read_lsn: Some(request.read_lsn.into()),
+            rel: Some(request.rel.into()),
+        }
+    }
+}
+
 pub type CheckRelExistsResponse = bool;
 
 impl From<proto::CheckRelExistsResponse> for CheckRelExistsResponse {
@@ -203,14 +205,12 @@ impl TryFrom<proto::GetBaseBackupRequest> for GetBaseBackupRequest {
     }
 }
 
-impl TryFrom<GetBaseBackupRequest> for proto::GetBaseBackupRequest {
-    type Error = ProtocolError;
-
-    fn try_from(request: GetBaseBackupRequest) -> Result<Self, Self::Error> {
-        Ok(Self {
-            read_lsn: Some(request.read_lsn.try_into()?),
+impl From<GetBaseBackupRequest> for proto::GetBaseBackupRequest {
+    fn from(request: GetBaseBackupRequest) -> Self {
+        Self {
+            read_lsn: Some(request.read_lsn.into()),
             replica: request.replica,
-        })
+        }
     }
 }
 
@@ -227,14 +227,9 @@ impl TryFrom<proto::GetBaseBackupResponseChunk> for GetBaseBackupResponseChunk {
     }
 }
 
-impl TryFrom<GetBaseBackupResponseChunk> for proto::GetBaseBackupResponseChunk {
-    type Error = ProtocolError;
-
-    fn try_from(chunk: GetBaseBackupResponseChunk) -> Result<Self, Self::Error> {
-        if chunk.is_empty() {
-            return Err(ProtocolError::Missing("chunk"));
-        }
-        Ok(Self { chunk })
+impl From<GetBaseBackupResponseChunk> for proto::GetBaseBackupResponseChunk {
+    fn from(chunk: GetBaseBackupResponseChunk) -> Self {
+        Self { chunk }
     }
 }
 
@@ -259,14 +254,12 @@ impl TryFrom<proto::GetDbSizeRequest> for GetDbSizeRequest {
     }
 }
 
-impl TryFrom<GetDbSizeRequest> for proto::GetDbSizeRequest {
-    type Error = ProtocolError;
-
-    fn try_from(request: GetDbSizeRequest) -> Result<Self, Self::Error> {
-        Ok(Self {
-            read_lsn: Some(request.read_lsn.try_into()?),
+impl From<GetDbSizeRequest> for proto::GetDbSizeRequest {
+    fn from(request: GetDbSizeRequest) -> Self {
+        Self {
+            read_lsn: Some(request.read_lsn.into()),
             db_oid: request.db_oid,
-        })
+        }
     }
 }
 
@@ -324,20 +317,15 @@ impl TryFrom<proto::GetPageRequest> for GetPageRequest {
     }
 }
 
-impl TryFrom<GetPageRequest> for proto::GetPageRequest {
-    type Error = ProtocolError;
-
-    fn try_from(request: GetPageRequest) -> Result<Self, Self::Error> {
-        if request.block_numbers.is_empty() {
-            return Err(ProtocolError::Missing("block_number"));
-        }
-        Ok(Self {
+impl From<GetPageRequest> for proto::GetPageRequest {
+    fn from(request: GetPageRequest) -> Self {
+        Self {
             request_id: request.request_id,
             request_class: request.request_class.into(),
-            read_lsn: Some(request.read_lsn.try_into()?),
+            read_lsn: Some(request.read_lsn.into()),
             rel: Some(request.rel.into()),
             block_number: request.block_numbers,
-        })
+        }
     }
 }
 
@@ -518,14 +506,12 @@ impl TryFrom<proto::GetRelSizeRequest> for GetRelSizeRequest {
     }
 }
 
-impl TryFrom<GetRelSizeRequest> for proto::GetRelSizeRequest {
-    type Error = ProtocolError;
-
-    fn try_from(request: GetRelSizeRequest) -> Result<Self, Self::Error> {
-        Ok(Self {
-            read_lsn: Some(request.read_lsn.try_into()?),
+impl From<GetRelSizeRequest> for proto::GetRelSizeRequest {
+    fn from(request: GetRelSizeRequest) -> Self {
+        Self {
+            read_lsn: Some(request.read_lsn.into()),
             rel: Some(request.rel.into()),
-        })
+        }
     }
 }
 
@@ -568,15 +554,13 @@ impl TryFrom<proto::GetSlruSegmentRequest> for GetSlruSegmentRequest {
     }
 }
 
-impl TryFrom<GetSlruSegmentRequest> for proto::GetSlruSegmentRequest {
-    type Error = ProtocolError;
-
-    fn try_from(request: GetSlruSegmentRequest) -> Result<Self, Self::Error> {
-        Ok(Self {
-            read_lsn: Some(request.read_lsn.try_into()?),
+impl From<GetSlruSegmentRequest> for proto::GetSlruSegmentRequest {
+    fn from(request: GetSlruSegmentRequest) -> Self {
+        Self {
+            read_lsn: Some(request.read_lsn.into()),
             kind: request.kind as u32,
             segno: request.segno,
-        })
+        }
     }
 }
 
@@ -593,15 +577,9 @@ impl TryFrom<proto::GetSlruSegmentResponse> for GetSlruSegmentResponse {
     }
 }
 
-impl TryFrom<GetSlruSegmentResponse> for proto::GetSlruSegmentResponse {
-    type Error = ProtocolError;
-
-    fn try_from(segment: GetSlruSegmentResponse) -> Result<Self, Self::Error> {
-        // TODO: can a segment legitimately be empty?
-        if segment.is_empty() {
-            return Err(ProtocolError::Missing("segment"));
-        }
-        Ok(Self { segment })
+impl From<GetSlruSegmentResponse> for proto::GetSlruSegmentResponse {
+    fn from(segment: GetSlruSegmentResponse) -> Self {
+        Self { segment }
     }
 }
 
