@@ -338,14 +338,21 @@ impl WalResidentTimeline {
         // removed further than `backup_lsn`. Since we're holding shared_state
         // lock and setting `wal_removal_on_hold` later, it guarantees that WAL
         // won't be removed until we're done.
+        let timeline_state = shared_state.sk.state();
         let from_lsn = min(
-            shared_state.sk.state().remote_consistent_lsn,
-            shared_state.sk.state().backup_lsn,
+            timeline_state.remote_consistent_lsn,
+            timeline_state.backup_lsn,
         );
         if from_lsn == Lsn::INVALID {
             // this is possible if snapshot is called before handling first
             // elected message
             bail!("snapshot is called on uninitialized timeline");
+        } else {
+            tracing::info!(
+                remote_consistent_lsn=%timeline_state.remote_consistent_lsn,
+                backup_lsn=%timeline_state.backup_lsn,
+                "timeline has had writes"
+            );
         }
         let from_segno = from_lsn.segment_number(wal_seg_size);
         let term = shared_state.sk.state().acceptor_state.term;
