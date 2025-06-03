@@ -186,7 +186,7 @@ impl Client {
 
         let outbound_proto =
                 inbound.map(|domain_req| {
-                    domain_req.try_into().unwrap()
+                    domain_req.into()
                 });
 
         let req_new = Request::new(outbound_proto);
