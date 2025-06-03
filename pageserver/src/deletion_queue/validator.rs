@@ -137,15 +137,20 @@ where
             return Ok(());
         }
 
-        let tenants_valid = match self
-            .controller_upcall_client
-            .validate(tenant_generations.iter().map(|(k, v)| (*k, *v)).collect())
-            .await
-        {
-            Ok(tenants) => tenants,
-            Err(RetryForeverError::ShuttingDown) => {
-                // The only way a validation call returns an error is when the cancellation token fires
-                return Err(DeletionQueueError::ShuttingDown);
+        let tenants_valid = if self.conf.control_plane_emergency_mode {
+            // In emergency mode, consider all tenants valid since there is no storage controller
+            tenant_generations.iter().map(|(k, _v)| (*k, true)).collect()
+        } else {
+            match self
+                .controller_upcall_client
+                .validate(tenant_generations.iter().map(|(k, v)| (*k, *v)).collect())
+                .await
+            {
+                Ok(tenants) => tenants,
+                Err(RetryForeverError::ShuttingDown) => {
+                    // The only way a validation call returns an error is when the cancellation token fires
+                    return Err(DeletionQueueError::ShuttingDown);
+                }
             }
         };
 
