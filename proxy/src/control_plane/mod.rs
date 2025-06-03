@@ -39,10 +39,6 @@ pub mod mgmt;
 /// Auth secret which is managed by the cloud.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub(crate) enum AuthSecret {
-    #[cfg(any(test, feature = "testing"))]
-    /// Md5 hash of user's password.
-    Md5([u8; 16]),
-
     /// [SCRAM](crate::scram) authentication info.
     Scram(scram::ServerSecret),
 }
