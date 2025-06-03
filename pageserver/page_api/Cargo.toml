@@ -15,8 +15,8 @@ utils.workspace = true
 workspace_hack.workspace = true
 futures.workspace = true
 futures-core.workspace = true
+tokio.workspace = true
+async-stream.workspace = true
 
-async-stream = "0.3"
-tokio = { version = "1", features = ["full"] }
 [build-dependencies]
 tonic-build.workspace = true
