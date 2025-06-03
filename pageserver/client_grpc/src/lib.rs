@@ -32,6 +32,7 @@ use tonic::{transport::{Channel}, Request};
 use async_trait::async_trait;
 
 use tokio_stream::wrappers::ReceiverStream;
+use crate::request_tracker::StreamReturner;
 
 #[derive(Error, Debug)]
 pub enum PageserverClientError {
@@ -87,79 +88,6 @@ impl PageserverClientAggregateMetrics {
     }
 }
 
-
-pub struct StreamFactory {
-    connection_pool: Arc<client_cache::ConnectionPool<Channel>>,
-    receiver_channel: tokio::sync::mpsc::Sender<proto::GetPageResponse>,
-    auth_interceptor: AuthInterceptor,
-    shard: ShardIndex,
-}
-
-impl StreamFactory {
-    pub fn new(
-        connection_pool: Arc<ConnectionPool<Channel>>,
-        receiver_channel: tokio::sync::mpsc::Sender<proto::GetPageResponse>,
-        auth_interceptor: AuthInterceptor,
-        shard: ShardIndex,
-    ) -> Self {
-        StreamFactory {
-            connection_pool,
-            receiver_channel,
-            auth_interceptor,
-            shard,
-        }
-    }
-}
-
-#[async_trait]
-impl PooledItemFactory<tokio::sync::mpsc::Sender<proto::GetPageRequest>> for StreamFactory {
-    async fn create(&self, _connect_timeout: Duration) -> Result<Result<tokio::sync::mpsc::Sender<proto::GetPageRequest>, tonic::Status>, tokio::time::error::Elapsed> {
-        let pool_clone : Arc<ConnectionPool<Channel>> = Arc::clone(&self.connection_pool);
-        let pooled_client = pool_clone.get_client().await;
-        let channel = pooled_client.unwrap().channel();
-        let mut client =
-            PageServiceClient::with_interceptor(channel, self.auth_interceptor.for_shard(self.shard));
-
-        let (tx, rx) = mpsc::channel::<proto::GetPageRequest>(8);
-        let outbound = ReceiverStream::new(rx);
-
-        let client_resp = client
-            .get_pages(Request::new(outbound))
-            .await;
-        match client_resp {
-            Err(status) => {
-                // TODO: Convert this error correctly
-                Ok(Err(tonic::Status::new(
-                    status.code(),
-                    format!("Failed to connect to pageserver: {}", status.message()),
-                )))
-            }
-            Ok(resp) => {
-                let mut response = resp.into_inner();
-                let receiver_st = self.receiver_channel.clone();
-
-                // Send all the responses to the channel specified
-                let forward_responses = async move {
-                    while let Some(r) = response.next().await {
-                        match r {
-                            Ok(page_response) => {
-                                receiver_st.send(page_response).await.unwrap();
-                            }
-                            Err(status) => {
-                                return Err(PageserverClientError::RequestError(status));
-                            }
-                        }
-                    }
-                    Ok(())
-                };
-
-                // tokio spawn forward_reponses
-                tokio::spawn(forward_responses);
-                Ok(Ok(tx))
-            }
-        }
-    }
-}
 pub struct PageserverClient {
     _tenant_id: String,
     _timeline_id: String,

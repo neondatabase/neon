@@ -8,11 +8,16 @@ use pageserver_page_api::model;
 use pageserver_page_api::proto;
 use crate::client_cache::ConnectionPool;
 use crate::AuthInterceptor;
-use tonic::transport::Channel;
+use tonic::{transport::{Channel}, Request};
 use crate::ClientCacheOptions;
 use crate::PageserverClientAggregateMetrics;
 use tokio::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use utils::shard::ShardIndex;
+
+use tokio_stream::wrappers::ReceiverStream;
+use pageserver_page_api::proto::PageServiceClient;
 
 use tonic::{
     Status,
@@ -23,19 +28,18 @@ use async_trait::async_trait;
 use std::time::Duration;
 use client_cache::PooledItemFactory;
 //use tracing::info;
-use tokio::select;
 //
 // A mock stream pool that just returns a sending channel, and whenever a GetPageRequest
 // comes in on that channel, it randomly sleeps before sending a GetPageResponse
 //
 
 #[derive(Clone)]
-pub struct MockStreamReturner {
+pub struct StreamReturner {
     sender: tokio::sync::mpsc::Sender<proto::GetPageRequest>,
-    sender_hashmap: Arc<Mutex<std::collections::HashMap<u64, tokio::sync::mpsc::Sender<proto::GetPageResponse>>>>,
+    sender_hashmap: Arc<Mutex<std::collections::HashMap<u64, tokio::sync::mpsc::Sender<Result<proto::GetPageResponse, Status>>>>>,
 }
 pub struct MockStreamFactory {
-    }
+}
 
 impl MockStreamFactory {
     pub fn new() -> Self {
@@ -44,16 +48,17 @@ impl MockStreamFactory {
     }
 }
 #[async_trait]
-impl PooledItemFactory<MockStreamReturner> for MockStreamFactory {
-    async fn create(&self, _connect_timeout: Duration) -> Result<Result<MockStreamReturner, tonic::Status>, tokio::time::error::Elapsed> {
+impl PooledItemFactory<StreamReturner> for MockStreamFactory {
+    async fn create(&self, _connect_timeout: Duration) -> Result<Result<StreamReturner, tonic::Status>, tokio::time::error::Elapsed> {
         let (sender, mut receiver) = tokio::sync::mpsc::channel::<proto::GetPageRequest>(1000);
-        // Create a MockStreamReturner that will send requests to the receiver channel
-        let mock_stream_returner = MockStreamReturner {
+        // Create a StreamReturner that will send requests to the receiver channel
+        let stream_returner = StreamReturner {
             sender: sender.clone(),
             sender_hashmap: Arc::new(Mutex::new(std::collections::HashMap::new())),
         };
 
-        let map : Arc<Mutex<std::collections::HashMap<u64, tokio::sync::mpsc::Sender<proto::GetPageResponse>>>> = Arc::clone(&mock_stream_returner.sender_hashmap);
+        let map : Arc<Mutex<std::collections::HashMap<u64, tokio::sync::mpsc::Sender<Result<proto::GetPageResponse, _>>>>>
+            = Arc::clone(&stream_returner.sender_hashmap);
         tokio::spawn(async move {
             while let Some(request) = receiver.recv().await {
 
@@ -75,7 +80,7 @@ impl PooledItemFactory<MockStreamReturner> for MockStreamFactory {
                     let mut hashmap = mapclone.lock().await;
                     if let Some(sender) = hashmap.get(&request.request_id) {
                         // Send the response to the original request sender
-                        if let Err(e) = sender.send(response.clone()).await {
+                        if let Err(e) = sender.send(Ok(response.clone())).await {
                             eprintln!("Failed to send response: {}", e);
                         }
                         hashmap.remove(&request.request_id);
@@ -92,13 +97,132 @@ impl PooledItemFactory<MockStreamReturner> for MockStreamFactory {
                     request_id: 0, // or some other identifier
                     ..Default::default()
                 };
-                if let Err(e) = sender.send(empty_response).await {
+                let error = Status::new(Code::Unknown, "Stream closed");
+                if let Err(e) = sender.send(Err(error)).await {
                     eprintln!("Failed to send close response: {}", e);
                 }
             }
         });
 
-        Ok(Ok(mock_stream_returner))
+        Ok(Ok(stream_returner))
+    }
+}
+
+
+
+pub struct StreamFactory {
+    connection_pool: Arc<client_cache::ConnectionPool<Channel>>,
+    receiver_channel: tokio::sync::mpsc::Sender<proto::GetPageResponse>,
+    auth_interceptor: AuthInterceptor,
+    shard: ShardIndex,
+}
+
+impl StreamFactory {
+    pub fn new(
+        connection_pool: Arc<ConnectionPool<Channel>>,
+        receiver_channel: tokio::sync::mpsc::Sender<proto::GetPageResponse>,
+        auth_interceptor: AuthInterceptor,
+        shard: ShardIndex,
+    ) -> Self {
+        StreamFactory {
+            connection_pool,
+            receiver_channel,
+            auth_interceptor,
+            shard,
+        }
+    }
+}
+
+#[async_trait]
+impl PooledItemFactory<StreamReturner> for StreamFactory {
+    async fn create(&self, _connect_timeout: Duration) ->
+    Result<Result<StreamReturner, tonic::Status>, tokio::time::error::Elapsed>
+    {
+        let pool_clone : Arc<ConnectionPool<Channel>> = Arc::clone(&self.connection_pool);
+        let pooled_client = pool_clone.get_client().await;
+        let channel = pooled_client.unwrap().channel();
+        let mut client =
+            PageServiceClient::with_interceptor(channel, self.auth_interceptor.for_shard(self.shard));
+
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<proto::GetPageRequest>(1000);
+        let outbound = ReceiverStream::new(receiver);
+
+        let client_resp = client
+            .get_pages(Request::new(outbound))
+            .await;
+        let client_st : &tonic::Response<tonic::Streaming<proto::GetPageResponse>>;
+        match client_resp {
+            Err(status) => {
+                return Ok(Err(tonic::Status::new(
+                    status.code(),
+                    format!("Failed to open get_page streams: {}", status.message()),
+                )));
+            }
+            Ok(ref client_resp) => {
+                client_st = client_resp;
+            }
+        }
+
+        match client_resp {
+            Err(status) => {
+                // TODO: Convert this error correctly
+                Ok(Err(tonic::Status::new(
+                    status.code(),
+                    format!("Failed to connect to pageserver: {}", status.message()),
+                )))
+            }
+            Ok(resp) => {
+                let stream_returner = StreamReturner {
+                    sender: sender.clone(),
+                    sender_hashmap: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                };
+                let map : Arc<Mutex<std::collections::HashMap<u64, tokio::sync::mpsc::Sender<Result<proto::GetPageResponse, _>>>>>
+                    = Arc::clone(&stream_returner.sender_hashmap);
+
+                tokio::spawn(async move {
+
+                    let map_clone = Arc::clone(&map);
+                    let mut inner = resp.into_inner();
+                    while let request = inner.message().await {
+
+                        if !request.is_ok() {
+                            break; // Exit the loop if no more messages
+                        }
+                        let req = request.unwrap().unwrap();
+                        let response = proto::GetPageResponse {
+                            request_id: req.request_id,
+                            ..Default::default()
+                        };
+                        // look up stream in hash map
+                        let mut hashmap = map_clone.lock().await;
+                        if let Some(sender) = hashmap.get(&req.request_id) {
+                            // Send the response to the original request sender
+                            if let Err(e) = sender.send(Ok(response.clone())).await {
+                                eprintln!("Failed to send response: {}", e);
+                            }
+                            hashmap.remove(&req.request_id);
+                        } else {
+                            eprintln!("No sender found for request ID: {}", req.request_id);
+                        }
+                    }
+                    // Close every sender stream in the hashmap
+                    let hashmap = map_clone.lock().await;
+                    for sender in hashmap.values() {
+                        // Send an empty response to indicate the stream is closed
+                        let empty_response = proto::GetPageResponse {
+                            request_id: 0, // or some other identifier
+                            ..Default::default()
+                        };
+                        let error = Status::new(Code::Unknown, "Stream closed");
+                        if let Err(e) = sender.send(Err(error)).await {
+                            eprintln!("Failed to send close response: {}", e);
+                        }
+                    }
+                });
+
+                Ok(Ok(stream_returner))
+            }
+        }
     }
 }
 //
@@ -108,7 +232,7 @@ impl PooledItemFactory<MockStreamReturner> for MockStreamFactory {
 #[derive(Clone)]
 pub struct RequestTracker {
     cur_id: Arc<AtomicU64>,
-    stream_pool: Arc<ConnectionPool<MockStreamReturner>>,
+    stream_pool: Arc<ConnectionPool<StreamReturner>>,
 }
 
 impl RequestTracker {
@@ -147,11 +271,11 @@ impl RequestTracker {
 
         RequestTracker {
             cur_id: cur_id.clone(),
-            stream_pool: ConnectionPool::<MockStreamReturner>::new(
+            stream_pool: ConnectionPool::<StreamReturner>::new(
                 // TODO:
                 // Make the mock a parameter to avoid commenting things out
-                // Arc::new(StreamFactory::new(new_pool.clone(), getpage_response_sender.clone(),
-                //                            auth_interceptor.clone(), ShardIndex::unsharded())),
+                //Arc::new(StreamFactory::new(new_pool.clone(), getpage_response_sender.clone(),
+                 //                           auth_interceptor.clone(), ShardIndex::unsharded())),
                 Arc::new(MockStreamFactory::new(
                 )),
                 client_cache_options.connect_timeout,
@@ -172,8 +296,8 @@ impl RequestTracker {
         loop {
             // Increment cur_id
             let request_id = self.cur_id.fetch_add(1, Ordering::SeqCst) + 1;
-            let response_sender: tokio::sync::mpsc::Sender<proto::GetPageResponse>;
-            let mut response_receiver : tokio::sync::mpsc::Receiver<proto::GetPageResponse>;
+            let response_sender: tokio::sync::mpsc::Sender<Result<proto::GetPageResponse, Status>>;
+            let mut response_receiver: tokio::sync::mpsc::Receiver<Result<proto::GetPageResponse, Status>>;
 
             (response_sender, response_receiver) = tokio::sync::mpsc::channel(1);
             request.request_id = request_id;
@@ -205,34 +329,34 @@ impl RequestTracker {
                     // remove from hashmap
                     map_inner.remove(&request_id);
                 }
-                stream_returner.finish(Err(Status::new(Code::Unknown, "Failed to send request"))).await;
+                stream_returner.finish(Err(Status::new(Code::Unknown,
+                                                       "Failed to send request"))).await;
                 continue;
             }
 
-            // wait on the response receiver and the tx broadcast at the same time
-            select! {
-                response = response_receiver.recv() => {
-                    if let Some(response) = response {
-
-                        if response.request_id == 0 {
-                            stream_returner.finish(Err(Status::new(Code::Unknown, "Failed to send request"))).await;
+            let response: Option<Result<proto::GetPageResponse, Status>>;
+            response = response_receiver.recv().await;
+            match response {
+                Some (resp) => {
+                    match resp {
+                        Err(_status) => {
+                            // Handle the case where the response was not received
+                            stream_returner.finish(Err(Status::new(Code::Unknown,
+                                                                   "Failed to receive response"))).await;
                             continue;
+                        },
+                        Ok(resp) => {
+                            stream_returner.finish(Result::Ok(())).await;
+                            return resp.clone();
                         }
-                        stream_returner.finish(Result::Ok(())).await;
-
-                        // check that ids are equal
-                        if response.request_id != request_id {
-                            eprintln!("Response ID {} does not match request ID {}", response.request_id, request_id);
-                            continue;
-                        };
-
-                        return response.clone();
-                    } else {
-                        // Handle the case where the response was not received
-                        stream_returner.finish(Err(Status::new(Code::Unknown, "Failed to send request"))).await;
-                        continue;
                     }
-                },
+                }
+                None => {
+                    // Handle the case where the response channel was closed
+                    stream_returner.finish(Err(Status::new(Code::Unknown,
+                                                           "Response channel closed"))).await;
+                    continue;
+                }
             }
         }
     }
