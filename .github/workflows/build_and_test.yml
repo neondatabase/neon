@@ -199,6 +199,20 @@ jobs:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
     secrets: inherit
 
+  validate-compute-manifest:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install jsonschema
+        run: npm install -g @sourcemeta/jsonschema
+
+      - name: Validate manifest against schema
+        run: jsonschema validate -d https://json-schema.org/draft/2020-12/schema compute/manifest.schema.json compute/manifest.yaml 
+
   build-and-test-locally:
     needs: [ meta, build-build-tools-image ]
     # We do need to run this in `.*-rc-pr` because of hotfixes.
