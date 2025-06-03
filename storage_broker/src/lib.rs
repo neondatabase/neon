@@ -20,6 +20,11 @@ pub mod proto {
     tonic::include_proto!("storage_broker");
 }
 
+pub mod wal_advertisement {
+    #![allow(clippy::derive_partial_eq_without_eq)]
+    tonic::include_proto!("wal_advertisement");
+}
+
 pub mod metrics;
 
 // Re-exports to avoid direct tonic dependency in user crates.

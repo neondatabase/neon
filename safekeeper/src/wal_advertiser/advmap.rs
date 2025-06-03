@@ -6,11 +6,12 @@ use std::{
     time::Duration,
 };
 
+use anyhow::Context;
 use safekeeper_api::models::TenantShardPageserverAttachment;
 use serde::Serialize;
 use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use utils::{
     generation::Generation,
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
@@ -67,11 +68,13 @@ struct PageserverTask {
     state: Arc<Mutex<PageserverSharedState>>,
     notify: Arc<tokio::sync::Notify>,
     cancel: CancellationToken,
+    pending_advertisements: HashMap<TenantTimelineId, Lsn>,
 }
 
 #[derive(Default)]
 struct PageserverSharedState {
     pending_advertisements: HashMap<TenantTimelineId, Lsn>,
+    endpoint: tonic::endpoint::Endpoint,
 }
 
 struct CommitLsnAdv {
@@ -110,7 +113,7 @@ struct SafekeeperTimeline {
     tli: Arc<Timeline>,
     /// Shared with [`SafekeeperTenant::tenant_shard_attachments`].
     tenant_shard_attachments: tokio::sync::watch::Receiver<TenantShardAttachments>,
-    remote_consistent_lsns: HashMap<ShardAttachmentId, Lsn>,
+    remote_consistent_lsns: Mutex<HashMap<ShardAttachmentId, Lsn>>,
 }
 
 #[derive(Default)]
@@ -159,6 +162,13 @@ struct ShardAttachmentId {
     ps_id: NodeId,
 }
 
+pub struct SafekeeperTimelineHandle {}
+impl SafekeeperTimelineHandle {
+    pub fn ready_for_eviction(&self) -> bool {
+        todo!()
+    }
+}
+
 impl World {
     pub fn register_timeline(
         &self,
@@ -182,7 +192,7 @@ impl World {
             .run()
             .await;
         });
-        Ok(vacant.insert(SafekeeperTimelineHandle { tx }).clone())
+        Ok(vacant.insert(SafekeeperTimelineHandle {}).clone())
     }
     pub fn update_pageserver_attachments(
         &self,
@@ -277,7 +287,6 @@ impl SafekeeperTimeline {
                 // that other nodes continue to recieve advertisements.
                 pageserver_handle.advertise_commit_lsn(CommitLsnAdv { ttid, commit_lsn });
             }
-            drop(shard_attachments);
         }
         drop(gate_guard);
     }
@@ -285,6 +294,7 @@ impl SafekeeperTimeline {
 
 impl PageserverHandle {
     pub fn advertise_commit_lsn(&self, adv: CommitLsnAdv) {
+        let CommitLsnAdv { ttid, commit_lsn } = adv;
         let mut state = self.state.write().unwrap();
         state.pending_advertisements.insert(ttid, commit_lsn);
     }
@@ -299,21 +309,41 @@ impl PageserverTask {
                 _ = self.cancel.cancelled() => {
                     return;
                 }
-                _ = self.notify.notified() => {}
-            }
-            {
-                let mut state = self.state.locck().unwrap();
-                pending_advertisements.clear();
-                pending_advertisements =
-                    std::mem::replace(&mut state.pending_advertisements, pending_advertisements);
-                drop(state);
-            }
-
-            todo!("grpc call");
-
-            // batch updates by sleeping
-            tokio::time::sleep(Duration::from_secs(1)).await;
+                res = self.run0() => {
+                    if let Err(err) = res {
+                        error!(?err, "pageserver loop failed");
+                        // TODO: backoff? + cancellation sensitivity
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                    }
+                    continue;
+                }
+            };
         }
+    }
+    async fn run0(&mut self) -> anyhow::Result<()> {
+        use storage_broker::wal_advertisement::pageserver_client::PageserverClient;
+        let stream = async_stream::stream! { loop {
+            while self.pending_advertisements.is_empty() {
+                tokio::select! {
+                    _ = self.cancel.cancelled() => {
+                        return;
+                    }
+                    _ = self.notify.notified() => {}
+                }
+                let mut state = self.state.lock().unwrap();
+                std::mem::swap(
+                    &mut state.pending_advertisements,
+                    &mut self.pending_advertisements,
+                );
+            }
+        } };
+        let client: PageserverClient<_> = PageserverClient::connect(todo!())
+            .await
+            .context("connect")?;
+        let publish_stream = client
+            .publish_commit_lsn_advertisements(stream)
+            .await
+            .context("publish stream")?;
     }
 }
 

@@ -52,6 +52,7 @@ tokio-postgres.workspace = true
 tokio-rustls.workspace = true
 tokio-tar.workspace = true
 tokio-util = { workspace = true }
+tonic = { workspace = true }
 tracing.workspace = true
 url.workspace = true
 metrics.workspace = true

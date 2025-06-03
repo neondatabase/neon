@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+import "google/protobuf/empty.proto";
+
+package wal_advertisement;
+
+service Pageserver {
+    rpc PublishCommitLsnAdvertisements(stream CommitLsnAdvertisement) returns (google.protobuf.Empty) {};
+    rpc SubscribeRemoteConsistentLsnAdvertisements(google.protobuf.Empty) returns (stream RemoteConsistentLsnAdvertisement) {};
+}
+
+message CommitLsnAdvertisement {
+    TenantTimelineId tenant_timeline_id = 1;
+
+}
+
+message RemoteConsistentLsnAdvertisement {
+    bytes tenant_id = 1;
+    uint32 shard_id = 2;
+    bytes timeline_id = 3;
+    uint64 generation = 4;
+    uint64 remote_consistent_lsn = 5;
+}
+
+message TenantTimelineId {
+    bytes tenant_id = 1;
+    bytes timeline_id = 2;
+}
+
