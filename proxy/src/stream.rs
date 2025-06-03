@@ -72,7 +72,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> PqStream<S> {
 impl<S: AsyncRead + Unpin> PqStream<S> {
     /// Read a raw postgres packet, which will respect the max length requested.
     /// This is not cancel safe.
-    async fn read_raw_expect(&mut self, tag: u8, max: usize) -> io::Result<&mut [u8]> {
+    async fn read_raw_expect(&mut self, tag: u8, max: u32) -> io::Result<&mut [u8]> {
         let (actual_tag, msg) = read_message(&mut self.stream, &mut self.read, max).await?;
         if actual_tag != tag {
             return Err(io::Error::other(format!(
@@ -89,7 +89,7 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
         // passwords are usually pretty short
         // and SASL SCRAM messages are no longer than 256 bytes in my testing
         // (a few hashes and random bytes, encoded into base64).
-        const MAX_PASSWORD_LENGTH: usize = 512;
+        const MAX_PASSWORD_LENGTH: u32 = 512;
         self.read_raw_expect(FE_PASSWORD_MESSAGE, MAX_PASSWORD_LENGTH)
             .await
     }

@@ -159,7 +159,7 @@ pub async fn task_main(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
+pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     config: &'static ProxyConfig,
     backend: &'static ConsoleRedirectBackend,
     ctx: &RequestContext,
