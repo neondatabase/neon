@@ -5,7 +5,6 @@ use anyhow::{Context, anyhow};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use postgres_client::CancelToken;
 use postgres_client::tls::MakeTlsConnect;
-use pq_proto::CancelKeyData;
 use redis::{Cmd, FromRedisValue, Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -13,15 +12,15 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
+use crate::auth::AuthError;
 use crate::auth::backend::ComputeUserInfo;
-use crate::auth::{AuthError, check_peer_addr_is_in_list};
 use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::control_plane::ControlPlaneApi;
 use crate::error::ReportableError;
 use crate::ext::LockExt;
 use crate::metrics::{CancelChannelSizeGuard, CancellationRequest, Metrics, RedisMsgKind};
-use crate::protocol2::ConnectionInfoExtra;
+use crate::pqproto::CancelKeyData;
 use crate::rate_limiter::LeakyBucketRateLimiter;
 use crate::redis::keys::KeyPrefix;
 use crate::redis::kv_ops::RedisKVClient;
@@ -30,8 +29,6 @@ use crate::tls::postgres_rustls::MakeRustlsConnect;
 type IpSubnetKey = IpNet;
 
 const CANCEL_KEY_TTL: i64 = 1_209_600; // 2 weeks cancellation key expire time
-const REDIS_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(10);
-const BATCH_SIZE: usize = 8;
 
 // Message types for sending through mpsc channel
 pub enum CancelKeyOp {
@@ -231,12 +228,13 @@ impl CancelReplyOp {
 pub async fn handle_cancel_messages(
     client: &mut RedisKVClient,
     mut rx: mpsc::Receiver<CancelKeyOp>,
+    batch_size: usize,
 ) -> anyhow::Result<()> {
-    let mut batch = Vec::with_capacity(BATCH_SIZE);
-    let mut pipeline = Pipeline::with_capacity(BATCH_SIZE);
+    let mut batch = Vec::with_capacity(batch_size);
+    let mut pipeline = Pipeline::with_capacity(batch_size);
 
     loop {
-        if rx.recv_many(&mut batch, BATCH_SIZE).await == 0 {
+        if rx.recv_many(&mut batch, batch_size).await == 0 {
             warn!("shutting down cancellation queue");
             break Ok(());
         }
@@ -273,13 +271,7 @@ pub(crate) enum CancelError {
     #[error("rate limit exceeded")]
     RateLimit,
 
-    #[error("IP is not allowed")]
-    IpNotAllowed,
-
-    #[error("VPC endpoint id is not allowed to connect")]
-    VpcEndpointIdNotAllowed,
-
-    #[error("Authentication backend error")]
+    #[error("Authentication error")]
     AuthError(#[from] AuthError),
 
     #[error("key not found")]
@@ -298,10 +290,7 @@ impl ReportableError for CancelError {
             }
             CancelError::Postgres(_) => crate::error::ErrorKind::Compute,
             CancelError::RateLimit => crate::error::ErrorKind::RateLimit,
-            CancelError::IpNotAllowed
-            | CancelError::VpcEndpointIdNotAllowed
-            | CancelError::NotFound => crate::error::ErrorKind::User,
-            CancelError::AuthError(_) => crate::error::ErrorKind::ControlPlane,
+            CancelError::NotFound | CancelError::AuthError(_) => crate::error::ErrorKind::User,
             CancelError::InternalError => crate::error::ErrorKind::Service,
         }
     }
@@ -367,8 +356,7 @@ impl CancellationHandler {
             return Err(CancelError::InternalError);
         };
 
-        tx.send_timeout(op, REDIS_SEND_TIMEOUT)
-            .await
+        tx.try_send(op)
             .map_err(|e| {
                 tracing::warn!("failed to send GetCancelData for {key}: {e}");
             })
@@ -424,7 +412,13 @@ impl CancellationHandler {
             IpAddr::V4(ip) => IpNet::V4(Ipv4Net::new_assert(ip, 24).trunc()), // use defaut mask here
             IpAddr::V6(ip) => IpNet::V6(Ipv6Net::new_assert(ip, 64).trunc()),
         };
-        if !self.limiter.lock_propagate_poison().check(subnet_key, 1) {
+
+        let allowed = {
+            let rate_limit_config = None;
+            let limiter = self.limiter.lock_propagate_poison();
+            limiter.check(subnet_key, rate_limit_config, 1)
+        };
+        if !allowed {
             // log only the subnet part of the IP address to know which subnet is rate limited
             tracing::warn!("Rate limit exceeded. Skipping cancellation message, {subnet_key}");
             Metrics::get()
@@ -452,52 +446,13 @@ impl CancellationHandler {
             return Err(CancelError::NotFound);
         };
 
-        if check_ip_allowed {
-            let ip_allowlist = auth_backend
-                .get_allowed_ips(&ctx, &cancel_closure.user_info)
-                .await
-                .map_err(|e| CancelError::AuthError(e.into()))?;
-
-            if !check_peer_addr_is_in_list(&ctx.peer_addr(), &ip_allowlist) {
-                // log it here since cancel_session could be spawned in a task
-                tracing::warn!(
-                    "IP is not allowed to cancel the query: {key}, address: {}",
-                    ctx.peer_addr()
-                );
-                return Err(CancelError::IpNotAllowed);
-            }
-        }
-
-        // check if a VPC endpoint ID is coming in and if yes, if it's allowed
-        let access_blocks = auth_backend
-            .get_block_public_or_vpc_access(&ctx, &cancel_closure.user_info)
+        let info = &cancel_closure.user_info;
+        let access_controls = auth_backend
+            .get_endpoint_access_control(&ctx, &info.endpoint, &info.user)
             .await
             .map_err(|e| CancelError::AuthError(e.into()))?;
 
-        if check_vpc_allowed {
-            if access_blocks.vpc_access_blocked {
-                return Err(CancelError::AuthError(AuthError::NetworkNotAllowed));
-            }
-
-            let incoming_vpc_endpoint_id = match ctx.extra() {
-                None => return Err(CancelError::AuthError(AuthError::MissingVPCEndpointId)),
-                Some(ConnectionInfoExtra::Aws { vpce_id }) => vpce_id.to_string(),
-                Some(ConnectionInfoExtra::Azure { link_id }) => link_id.to_string(),
-            };
-
-            let allowed_vpc_endpoint_ids = auth_backend
-                .get_allowed_vpc_endpoint_ids(&ctx, &cancel_closure.user_info)
-                .await
-                .map_err(|e| CancelError::AuthError(e.into()))?;
-            // TODO: For now an empty VPC endpoint ID list means all are allowed. We should replace that.
-            if !allowed_vpc_endpoint_ids.is_empty()
-                && !allowed_vpc_endpoint_ids.contains(&incoming_vpc_endpoint_id)
-            {
-                return Err(CancelError::VpcEndpointIdNotAllowed);
-            }
-        } else if access_blocks.public_access_blocked {
-            return Err(CancelError::VpcEndpointIdNotAllowed);
-        }
+        access_controls.check(&ctx, check_ip_allowed, check_vpc_allowed)?;
 
         Metrics::get()
             .proxy
@@ -570,7 +525,7 @@ impl Session {
     }
 
     // Send the store key op to the cancellation handler and set TTL for the key
-    pub(crate) async fn write_cancel_key(
+    pub(crate) fn write_cancel_key(
         &self,
         cancel_closure: CancelClosure,
     ) -> Result<(), CancelError> {
@@ -596,14 +551,14 @@ impl Session {
             expire: CANCEL_KEY_TTL,
         };
 
-        let _ = tx.send_timeout(op, REDIS_SEND_TIMEOUT).await.map_err(|e| {
+        let _ = tx.try_send(op).map_err(|e| {
             let key = self.key;
             tracing::warn!("failed to send StoreCancelKey for {key}: {e}");
         });
         Ok(())
     }
 
-    pub(crate) async fn remove_cancel_key(&self) -> Result<(), CancelError> {
+    pub(crate) fn remove_cancel_key(&self) -> Result<(), CancelError> {
         let Some(tx) = &self.cancellation_handler.tx else {
             tracing::warn!("cancellation handler is not available");
             return Err(CancelError::InternalError);
@@ -619,7 +574,7 @@ impl Session {
                 .guard(RedisMsgKind::HDel),
         };
 
-        let _ = tx.send_timeout(op, REDIS_SEND_TIMEOUT).await.map_err(|e| {
+        let _ = tx.try_send(op).map_err(|e| {
             let key = self.key;
             tracing::warn!("failed to send RemoveCancelKey for {key}: {e}");
         });

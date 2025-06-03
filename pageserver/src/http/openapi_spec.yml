@@ -353,6 +353,33 @@ paths:
         "200":
           description: OK
 
+  /v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/mark_invisible:
+    parameters:
+      - name: tenant_shard_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    put:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                is_visible:
+                  type: boolean
+                  default: false
+      responses:
+        "200":
+          description: OK
+
   /v1/tenant/{tenant_shard_id}/location_config:
     parameters:
       - name: tenant_shard_id
@@ -626,6 +653,8 @@ paths:
                   format: hex
                 pg_version:
                   type: integer
+                read_only:
+                  type: boolean
                 existing_initdb_timeline_id:
                   type: string
                   format: hex

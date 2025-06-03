@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 use std::{env, fs};
 use tokio::spawn;
 use tracing::{Instrument, debug, error, info, instrument, warn};
+use url::Url;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 use utils::measured_stream::MeasuredReader;
@@ -96,7 +97,10 @@ pub struct ComputeNodeParams {
     pub internal_http_port: u16,
 
     /// the address of extension storage proxy gateway
-    pub remote_ext_base_url: Option<String>,
+    pub remote_ext_base_url: Option<Url>,
+
+    /// Interval for installed extensions collection
+    pub installed_extensions_collection_interval: u64,
 }
 
 /// Compute node info shared across several `compute_ctl` threads.
@@ -695,25 +699,18 @@ impl ComputeNode {
                 let log_directory_path = Path::new(&self.params.pgdata).join("log");
                 let log_directory_path = log_directory_path.to_string_lossy().to_string();
 
-                // Add project_id,endpoint_id tag to identify the logs.
+                // Add project_id,endpoint_id to identify the logs.
                 //
                 // These ids are passed from cplane,
-                // for backwards compatibility (old computes that don't have them),
-                // we set them to None.
-                // TODO: Clean up this code when all computes have them.
-                let tag: Option<String> = match (
-                    pspec.spec.project_id.as_deref(),
-                    pspec.spec.endpoint_id.as_deref(),
-                ) {
-                    (Some(project_id), Some(endpoint_id)) => {
-                        Some(format!("{project_id}/{endpoint_id}"))
-                    }
-                    (Some(project_id), None) => Some(format!("{project_id}/None")),
-                    (None, Some(endpoint_id)) => Some(format!("None,{endpoint_id}")),
-                    (None, None) => None,
-                };
+                let endpoint_id = pspec.spec.endpoint_id.as_deref().unwrap_or("");
+                let project_id = pspec.spec.project_id.as_deref().unwrap_or("");
 
-                configure_audit_rsyslog(log_directory_path.clone(), tag, &remote_endpoint)?;
+                configure_audit_rsyslog(
+                    log_directory_path.clone(),
+                    endpoint_id,
+                    project_id,
+                    &remote_endpoint,
+                )?;
 
                 // Launch a background task to clean up the audit logs
                 launch_pgaudit_gc(log_directory_path);
@@ -749,17 +746,7 @@ impl ComputeNode {
 
             let conf = self.get_tokio_conn_conf(None);
             tokio::task::spawn(async {
-                let res = get_installed_extensions(conf).await;
-                match res {
-                    Ok(extensions) => {
-                        info!(
-                            "[NEON_EXT_STAT] {}",
-                            serde_json::to_string(&extensions)
-                                .expect("failed to serialize extensions list")
-                        );
-                    }
-                    Err(err) => error!("could not get installed extensions: {err:?}"),
-                }
+                let _ = installed_extensions(conf).await;
             });
         }
 
@@ -788,6 +775,9 @@ impl ComputeNode {
 
         // Log metrics so that we can search for slow operations in logs
         info!(?metrics, postmaster_pid = %postmaster_pid, "compute start finished");
+
+        // Spawn the extension stats background task
+        self.spawn_extension_stats_task();
 
         if pspec.spec.prewarm_lfc_on_startup {
             self.prewarm_lfc();
@@ -2199,6 +2189,41 @@ LIMIT 100",
             info!("Pageserver config changed");
         }
     }
+
+    pub fn spawn_extension_stats_task(&self) {
+        let conf = self.tokio_conn_conf.clone();
+        let installed_extensions_collection_interval =
+            self.params.installed_extensions_collection_interval;
+        tokio::spawn(async move {
+            // An initial sleep is added to ensure that two collections don't happen at the same time.
+            // The first collection happens during compute startup.
+            tokio::time::sleep(tokio::time::Duration::from_secs(
+                installed_extensions_collection_interval,
+            ))
+            .await;
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+                installed_extensions_collection_interval,
+            ));
+            loop {
+                interval.tick().await;
+                let _ = installed_extensions(conf.clone()).await;
+            }
+        });
+    }
+}
+
+pub async fn installed_extensions(conf: tokio_postgres::Config) -> Result<()> {
+    let res = get_installed_extensions(conf).await;
+    match res {
+        Ok(extensions) => {
+            info!(
+                "[NEON_EXT_STAT] {}",
+                serde_json::to_string(&extensions).expect("failed to serialize extensions list")
+            );
+        }
+        Err(err) => error!("could not get installed extensions: {err:?}"),
+    }
+    Ok(())
 }
 
 pub fn forward_termination_signal() {

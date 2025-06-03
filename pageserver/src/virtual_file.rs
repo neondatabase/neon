@@ -408,7 +408,7 @@ impl OpenFiles {
 /// error types may be elegible for retry.
 pub(crate) fn is_fatal_io_error(e: &std::io::Error) -> bool {
     use nix::errno::Errno::*;
-    match e.raw_os_error().map(nix::errno::from_i32) {
+    match e.raw_os_error().map(nix::errno::Errno::from_raw) {
         Some(EIO) => {
             // Terminate on EIO because we no longer trust the device to store
             // data safely, or to uphold persistence guarantees on fsync.

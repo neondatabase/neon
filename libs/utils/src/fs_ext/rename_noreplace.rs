@@ -11,9 +11,9 @@ pub fn rename_noreplace<P1: ?Sized + NixPath, P2: ?Sized + NixPath>(
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         {
             nix::fcntl::renameat2(
-                None,
+                nix::fcntl::AT_FDCWD,
                 src,
-                None,
+                nix::fcntl::AT_FDCWD,
                 dst,
                 nix::fcntl::RenameFlags::RENAME_NOREPLACE,
             )

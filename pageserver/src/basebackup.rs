@@ -65,6 +65,30 @@ impl From<GetVectoredError> for BasebackupError {
     }
 }
 
+impl From<BasebackupError> for postgres_backend::QueryError {
+    fn from(err: BasebackupError) -> Self {
+        use postgres_backend::QueryError;
+        use pq_proto::framed::ConnectionError;
+        match err {
+            BasebackupError::Client(err, _) => QueryError::Disconnected(ConnectionError::Io(err)),
+            BasebackupError::Server(err) => QueryError::Other(err),
+            BasebackupError::Shutdown => QueryError::Shutdown,
+        }
+    }
+}
+
+impl From<BasebackupError> for tonic::Status {
+    fn from(err: BasebackupError) -> Self {
+        use tonic::Code;
+        let code = match &err {
+            BasebackupError::Client(_, _) => Code::Cancelled,
+            BasebackupError::Server(_) => Code::Internal,
+            BasebackupError::Shutdown => Code::Unavailable,
+        };
+        tonic::Status::new(code, err.to_string())
+    }
+}
+
 /// Create basebackup with non-rel data in it.
 /// Only include relational data if 'full_backup' is true.
 ///
@@ -144,7 +168,7 @@ where
         replica,
         ctx,
         io_concurrency: IoConcurrency::spawn_from_conf(
-            timeline.conf,
+            timeline.conf.get_vectored_concurrent_io,
             timeline
                 .gate
                 .enter()
@@ -248,7 +272,7 @@ where
     async fn flush(&mut self) -> Result<(), BasebackupError> {
         let nblocks = self.buf.len() / BLCKSZ as usize;
         let (kind, segno) = self.current_segment.take().unwrap();
-        let segname = format!("{}/{:>04X}", kind.to_str(), segno);
+        let segname = format!("{kind}/{segno:>04X}");
         let header = new_tar_header(&segname, self.buf.len() as u64)?;
         self.ar
             .append(&header, self.buf.as_slice())
@@ -343,7 +367,7 @@ where
             // Gather non-relational files from object storage pages.
             let slru_partitions = self
                 .timeline
-                .get_slru_keyspace(Version::Lsn(self.lsn), self.ctx)
+                .get_slru_keyspace(Version::at(self.lsn), self.ctx)
                 .await?
                 .partition(
                     self.timeline.get_shard_identity(),
@@ -378,7 +402,7 @@ where
             // Otherwise only include init forks of unlogged relations.
             let rels = self
                 .timeline
-                .list_rels(spcnode, dbnode, Version::Lsn(self.lsn), self.ctx)
+                .list_rels(spcnode, dbnode, Version::at(self.lsn), self.ctx)
                 .await?;
             for &rel in rels.iter() {
                 // Send init fork as main fork to provide well formed empty
@@ -517,7 +541,7 @@ where
     async fn add_rel(&mut self, src: RelTag, dst: RelTag) -> Result<(), BasebackupError> {
         let nblocks = self
             .timeline
-            .get_rel_size(src, Version::Lsn(self.lsn), self.ctx)
+            .get_rel_size(src, Version::at(self.lsn), self.ctx)
             .await?;
 
         // If the relation is empty, create an empty file
@@ -577,7 +601,7 @@ where
         let relmap_img = if has_relmap_file {
             let img = self
                 .timeline
-                .get_relmap_file(spcnode, dbnode, Version::Lsn(self.lsn), self.ctx)
+                .get_relmap_file(spcnode, dbnode, Version::at(self.lsn), self.ctx)
                 .await?;
 
             if img.len()
@@ -631,7 +655,7 @@ where
             if !has_relmap_file
                 && self
                     .timeline
-                    .list_rels(spcnode, dbnode, Version::Lsn(self.lsn), self.ctx)
+                    .list_rels(spcnode, dbnode, Version::at(self.lsn), self.ctx)
                     .await?
                     .is_empty()
             {

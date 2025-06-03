@@ -48,7 +48,7 @@ use pageserver_api::shard::{
 };
 use pageserver_api::upcall_api::{
     PutTimelineImportStatusRequest, ReAttachRequest, ReAttachResponse, ReAttachResponseTenant,
-    ValidateRequest, ValidateResponse, ValidateResponseTenant,
+    TimelineImportStatusRequest, ValidateRequest, ValidateResponse, ValidateResponseTenant,
 };
 use pageserver_client::{BlockUnblock, mgmt_api};
 use reqwest::{Certificate, StatusCode};
@@ -107,8 +107,8 @@ use crate::tenant_shard::{
     ScheduleOptimization, ScheduleOptimizationAction, TenantShard,
 };
 use crate::timeline_import::{
-    ImportResult, ShardImportStatuses, TimelineImport, TimelineImportFinalizeError,
-    TimelineImportState, UpcallClient,
+    FinalizingImport, ImportResult, ShardImportStatuses, TimelineImport,
+    TimelineImportFinalizeError, TimelineImportState, UpcallClient,
 };
 
 const WAITER_FILL_DRAIN_POLL_TIMEOUT: Duration = Duration::from_millis(500);
@@ -203,6 +203,14 @@ pub(crate) enum LeadershipStatus {
     Candidate,
 }
 
+enum ShardGenerationValidity {
+    Valid,
+    Mismatched {
+        claimed: Generation,
+        actual: Option<Generation>,
+    },
+}
+
 pub const RECONCILER_CONCURRENCY_DEFAULT: usize = 128;
 pub const PRIORITY_RECONCILER_CONCURRENCY_DEFAULT: usize = 256;
 pub const SAFEKEEPER_RECONCILER_CONCURRENCY_DEFAULT: usize = 32;
@@ -238,6 +246,9 @@ struct ServiceState {
 
     /// Queue of tenants who are waiting for concurrency limits to permit them to reconcile
     delayed_reconcile_rx: tokio::sync::mpsc::Receiver<TenantShardId>,
+
+    /// Tracks ongoing timeline import finalization tasks
+    imports_finalizing: BTreeMap<(TenantId, TimelineId), FinalizingImport>,
 }
 
 /// Transform an error from a pageserver into an error to return to callers of a storage
@@ -314,6 +325,7 @@ impl ServiceState {
             scheduler,
             ongoing_operation: None,
             delayed_reconcile_rx,
+            imports_finalizing: Default::default(),
         }
     }
 
@@ -3830,6 +3842,13 @@ impl Service {
         .await;
         failpoint_support::sleep_millis_async!("tenant-create-timeline-shared-lock");
         let is_import = create_req.is_import();
+        let read_only = matches!(
+            create_req.mode,
+            models::TimelineCreateRequestMode::Branch {
+                read_only: true,
+                ..
+            }
+        );
 
         if is_import {
             // Ensure that there is no split on-going.
@@ -3902,13 +3921,13 @@ impl Service {
             }
 
             None
-        } else if safekeepers {
+        } else if safekeepers || read_only {
             // Note that for imported timelines, we do not create the timeline on the safekeepers
             // straight away. Instead, we do it once the import finalized such that we know what
             // start LSN to provide for the safekeepers. This is done in
             // [`Self::finalize_timeline_import`].
             let res = self
-                .tenant_timeline_create_safekeepers(tenant_id, &timeline_info)
+                .tenant_timeline_create_safekeepers(tenant_id, &timeline_info, read_only)
                 .instrument(tracing::info_span!("timeline_create_safekeepers", %tenant_id, timeline_id=%timeline_info.timeline_id))
                 .await?;
             Some(res)
@@ -3922,21 +3941,43 @@ impl Service {
         })
     }
 
+    #[instrument(skip_all, fields(
+        tenant_id=%req.tenant_shard_id.tenant_id,
+        shard_id=%req.tenant_shard_id.shard_slug(),
+        timeline_id=%req.timeline_id,
+    ))]
     pub(crate) async fn handle_timeline_shard_import_progress(
         self: &Arc<Self>,
-        tenant_shard_id: TenantShardId,
-        timeline_id: TimelineId,
+        req: TimelineImportStatusRequest,
     ) -> Result<ShardImportStatus, ApiError> {
+        let validity = self
+            .validate_shard_generation(req.tenant_shard_id, req.generation)
+            .await?;
+        match validity {
+            ShardGenerationValidity::Valid => {
+                // fallthrough
+            }
+            ShardGenerationValidity::Mismatched { claimed, actual } => {
+                tracing::info!(
+                    claimed=?claimed.into(),
+                    actual=?actual.and_then(|g| g.into()),
+                    "Rejecting import progress fetch from stale generation"
+                );
+
+                return Err(ApiError::BadRequest(anyhow::anyhow!("Invalid generation")));
+            }
+        }
+
         let maybe_import = self
             .persistence
-            .get_timeline_import(tenant_shard_id.tenant_id, timeline_id)
+            .get_timeline_import(req.tenant_shard_id.tenant_id, req.timeline_id)
             .await?;
 
         let import = maybe_import.ok_or_else(|| {
             ApiError::NotFound(
                 format!(
                     "import for {}/{} not found",
-                    tenant_shard_id.tenant_id, timeline_id
+                    req.tenant_shard_id.tenant_id, req.timeline_id
                 )
                 .into(),
             )
@@ -3945,19 +3986,42 @@ impl Service {
         import
             .shard_statuses
             .0
-            .get(&tenant_shard_id.to_index())
+            .get(&req.tenant_shard_id.to_index())
             .cloned()
             .ok_or_else(|| {
                 ApiError::NotFound(
-                    format!("shard {} not found", tenant_shard_id.shard_slug()).into(),
+                    format!("shard {} not found", req.tenant_shard_id.shard_slug()).into(),
                 )
             })
     }
 
+    #[instrument(skip_all, fields(
+        tenant_id=%req.tenant_shard_id.tenant_id,
+        shard_id=%req.tenant_shard_id.shard_slug(),
+        timeline_id=%req.timeline_id,
+    ))]
     pub(crate) async fn handle_timeline_shard_import_progress_upcall(
         self: &Arc<Self>,
         req: PutTimelineImportStatusRequest,
     ) -> Result<(), ApiError> {
+        let validity = self
+            .validate_shard_generation(req.tenant_shard_id, req.generation)
+            .await?;
+        match validity {
+            ShardGenerationValidity::Valid => {
+                // fallthrough
+            }
+            ShardGenerationValidity::Mismatched { claimed, actual } => {
+                tracing::info!(
+                    claimed=?claimed.into(),
+                    actual=?actual.and_then(|g| g.into()),
+                    "Rejecting import progress update from stale generation"
+                );
+
+                return Err(ApiError::PreconditionFailed("Invalid generation".into()));
+            }
+        }
+
         let res = self
             .persistence
             .update_timeline_import(req.tenant_shard_id, req.timeline_id, req.status)
@@ -3992,6 +4056,56 @@ impl Service {
         Ok(())
     }
 
+    /// Check that a provided generation for some tenant shard is the most recent one.
+    ///
+    /// Validate with the in-mem state first, and, if that passes, validate with the
+    /// database state which is authoritative.
+    async fn validate_shard_generation(
+        self: &Arc<Self>,
+        tenant_shard_id: TenantShardId,
+        generation: Generation,
+    ) -> Result<ShardGenerationValidity, ApiError> {
+        {
+            let locked = self.inner.read().unwrap();
+            let tenant_shard =
+                locked
+                    .tenants
+                    .get(&tenant_shard_id)
+                    .ok_or(ApiError::InternalServerError(anyhow::anyhow!(
+                        "{} shard not found",
+                        tenant_shard_id
+                    )))?;
+
+            if tenant_shard.generation != Some(generation) {
+                return Ok(ShardGenerationValidity::Mismatched {
+                    claimed: generation,
+                    actual: tenant_shard.generation,
+                });
+            }
+        }
+
+        let mut db_generations = self
+            .persistence
+            .shard_generations(std::iter::once(&tenant_shard_id))
+            .await?;
+        let (_tid, db_generation) =
+            db_generations
+                .pop()
+                .ok_or(ApiError::InternalServerError(anyhow::anyhow!(
+                    "{} shard not found",
+                    tenant_shard_id
+                )))?;
+
+        if db_generation != Some(generation) {
+            return Ok(ShardGenerationValidity::Mismatched {
+                claimed: generation,
+                actual: db_generation,
+            });
+        }
+
+        Ok(ShardGenerationValidity::Valid)
+    }
+
     /// Finalize the import of a timeline
     ///
     /// This method should be called once all shards have reported that the import is complete.
@@ -4002,11 +4116,56 @@ impl Service {
     ///
     /// If this method gets pre-empted by shut down, it will be called again at start-up (on-going
     /// imports are stored in the database).
+    ///
+    /// # Cancel-Safety
+    /// Not cancel safe.
+    /// If the caller stops polling, the import will not be removed from
+    /// [`ServiceState::imports_finalizing`].
     #[instrument(skip_all, fields(
         tenant_id=%import.tenant_id,
-        shard_id=%import.timeline_id,
+        timeline_id=%import.timeline_id,
     ))]
+
     async fn finalize_timeline_import(
+        self: &Arc<Self>,
+        import: TimelineImport,
+    ) -> Result<(), TimelineImportFinalizeError> {
+        let tenant_timeline = (import.tenant_id, import.timeline_id);
+
+        let (_finalize_import_guard, cancel) = {
+            let mut locked = self.inner.write().unwrap();
+            let gate = Gate::default();
+            let cancel = CancellationToken::default();
+
+            let guard = gate.enter().unwrap();
+
+            locked.imports_finalizing.insert(
+                tenant_timeline,
+                FinalizingImport {
+                    gate,
+                    cancel: cancel.clone(),
+                },
+            );
+
+            (guard, cancel)
+        };
+
+        let res = tokio::select! {
+            res = self.finalize_timeline_import_impl(import) => {
+                res
+            },
+            _ = cancel.cancelled() => {
+                Err(TimelineImportFinalizeError::Cancelled)
+            }
+        };
+
+        let mut locked = self.inner.write().unwrap();
+        locked.imports_finalizing.remove(&tenant_timeline);
+
+        res
+    }
+
+    async fn finalize_timeline_import_impl(
         self: &Arc<Self>,
         import: TimelineImport,
     ) -> Result<(), TimelineImportFinalizeError> {
@@ -4206,6 +4365,46 @@ impl Service {
                 .map(|import| self.finalize_timeline_import(import)),
         )
         .await;
+    }
+
+    /// Delete a timeline import if it exists
+    ///
+    /// Firstly, delete the entry from the database. Any updates
+    /// from pageservers after the update will fail with a 404, so the
+    /// import cannot progress into finalizing state if it's not there already.
+    /// Secondly, cancel the finalization if one is in progress.
+    pub(crate) async fn maybe_delete_timeline_import(
+        self: &Arc<Self>,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Result<(), DatabaseError> {
+        let tenant_has_ongoing_import = {
+            let locked = self.inner.read().unwrap();
+            locked
+                .tenants
+                .range(TenantShardId::tenant_range(tenant_id))
+                .any(|(_tid, shard)| shard.importing == TimelineImportState::Importing)
+        };
+
+        if !tenant_has_ongoing_import {
+            return Ok(());
+        }
+
+        self.persistence
+            .delete_timeline_import(tenant_id, timeline_id)
+            .await?;
+
+        let maybe_finalizing = {
+            let mut locked = self.inner.write().unwrap();
+            locked.imports_finalizing.remove(&(tenant_id, timeline_id))
+        };
+
+        if let Some(finalizing) = maybe_finalizing {
+            finalizing.cancel.cancel();
+            finalizing.gate.close().await;
+        }
+
+        Ok(())
     }
 
     pub(crate) async fn tenant_timeline_archival_config(
@@ -8744,8 +8943,9 @@ impl Service {
         Some(ShardCount(new_shard_count))
     }
 
-    /// Fetches the top tenant shards from every node, in descending order of
-    /// max logical size. Any node errors will be logged and ignored.
+    /// Fetches the top tenant shards from every available node, in descending order of
+    /// max logical size. Offline nodes are skipped, and any errors from available nodes
+    /// will be logged and ignored.
     async fn get_top_tenant_shards(
         &self,
         request: &TopTenantShardsRequest,
@@ -8756,6 +8956,7 @@ impl Service {
             .unwrap()
             .nodes
             .values()
+            .filter(|node| node.is_available())
             .cloned()
             .collect_vec();
 

@@ -8,6 +8,8 @@ pub const DEFAULT_PG_LISTEN_PORT: u16 = 64000;
 pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN_PORT}");
 pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
 pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
+// TODO: gRPC is disabled by default for now, but the port is used in neon_local.
+pub const DEFAULT_GRPC_LISTEN_PORT: u16 = 51051; // storage-broker already uses 50051
 
 use std::collections::HashMap;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -41,6 +43,21 @@ pub struct NodeMetadata {
     // use in this type: this type intentionally only names fields that require.
     #[serde(flatten)]
     pub other: HashMap<String, serde_json::Value>,
+}
+
+/// PostHog integration config.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PostHogConfig {
+    /// PostHog project ID
+    pub project_id: String,
+    /// Server-side (private) API key
+    pub server_api_key: String,
+    /// Client-side (public) API key
+    pub client_api_key: String,
+    /// Private API URL
+    pub private_api_url: String,
+    /// Public API URL
+    pub public_api_url: String,
 }
 
 /// `pageserver.toml`
@@ -104,6 +121,7 @@ pub struct ConfigToml {
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
     pub listen_https_addr: Option<String>,
+    pub listen_grpc_addr: Option<String>,
     pub ssl_key_file: Utf8PathBuf,
     pub ssl_cert_file: Utf8PathBuf,
     #[serde(with = "humantime_serde")]
@@ -123,6 +141,7 @@ pub struct ConfigToml {
     pub http_auth_type: AuthType,
     #[serde_as(as = "serde_with::DisplayFromStr")]
     pub pg_auth_type: AuthType,
+    pub grpc_auth_type: AuthType,
     pub auth_validation_public_key_path: Option<Utf8PathBuf>,
     pub remote_storage: Option<RemoteStorageConfig>,
     pub tenant_config: TenantConfigToml,
@@ -182,7 +201,11 @@ pub struct ConfigToml {
     pub tracing: Option<Tracing>,
     pub enable_tls_page_service_api: bool,
     pub dev_mode: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub posthog_config: Option<PostHogConfig>,
     pub timeline_import_config: TimelineImportConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub basebackup_cache_config: Option<BasebackupCacheConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -235,7 +258,7 @@ pub enum PageServiceProtocolPipelinedBatchingStrategy {
     ScatteredLsn,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case")]
 pub enum GetVectoredConcurrentIo {
     /// The read path is fully sequential: layers are visited
@@ -305,6 +328,27 @@ impl From<OtelExporterProtocol> for tracing_utils::Protocol {
 pub struct TimelineImportConfig {
     pub import_job_concurrency: NonZeroUsize,
     pub import_job_soft_size_limit: NonZeroUsize,
+    pub import_job_checkpoint_threshold: NonZeroUsize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct BasebackupCacheConfig {
+    #[serde(with = "humantime_serde")]
+    pub cleanup_period: Duration,
+    // FIXME: Support max_size_bytes.
+    // pub max_size_bytes: usize,
+    pub max_size_entries: i64,
+}
+
+impl Default for BasebackupCacheConfig {
+    fn default() -> Self {
+        Self {
+            cleanup_period: Duration::from_secs(60),
+            // max_size_bytes: 1024 * 1024 * 1024, // 1 GiB
+            max_size_entries: 1000,
+        }
+    }
 }
 
 pub mod statvfs {
@@ -490,6 +534,14 @@ pub struct TenantConfigToml {
     /// Tenant level performance sampling ratio override. Controls the ratio of get page requests
     /// that will get perf sampling for the tenant.
     pub sampling_ratio: Option<Ratio>,
+
+    /// Capacity of relsize snapshot cache (used by replicas).
+    pub relsize_snapshot_cache_capacity: usize,
+
+    /// Enable preparing basebackup on XLOG_CHECKPOINT_SHUTDOWN and using it in basebackup requests.
+    // FIXME: Remove skip_serializing_if when the feature is stable.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub basebackup_cache_enabled: bool,
 }
 
 pub mod defaults {
@@ -557,6 +609,7 @@ impl Default for ConfigToml {
             listen_pg_addr: (DEFAULT_PG_LISTEN_ADDR.to_string()),
             listen_http_addr: (DEFAULT_HTTP_LISTEN_ADDR.to_string()),
             listen_https_addr: (None),
+            listen_grpc_addr: None, // TODO: default to 127.0.0.1:51051
             ssl_key_file: Utf8PathBuf::from(DEFAULT_SSL_KEY_FILE),
             ssl_cert_file: Utf8PathBuf::from(DEFAULT_SSL_CERT_FILE),
             ssl_cert_reload_period: Duration::from_secs(60),
@@ -573,6 +626,7 @@ impl Default for ConfigToml {
             pg_distrib_dir: None, // Utf8PathBuf::from("./pg_install"), // TODO: formely, this was std::env::current_dir()
             http_auth_type: (AuthType::Trust),
             pg_auth_type: (AuthType::Trust),
+            grpc_auth_type: (AuthType::Trust),
             auth_validation_public_key_path: (None),
             remote_storage: None,
             broker_endpoint: (storage_broker::DEFAULT_ENDPOINT
@@ -639,23 +693,15 @@ impl Default for ConfigToml {
             tenant_config: TenantConfigToml::default(),
             no_sync: None,
             wal_receiver_protocol: DEFAULT_WAL_RECEIVER_PROTOCOL,
-            page_service_pipelining: if !cfg!(test) {
-                PageServicePipeliningConfig::Serial
-            } else {
-                // Do not turn this into the default until scattered reads have been
-                // validated and rolled-out fully.
-                PageServicePipeliningConfig::Pipelined(PageServicePipeliningConfigPipelined {
+            page_service_pipelining: PageServicePipeliningConfig::Pipelined(
+                PageServicePipeliningConfigPipelined {
                     max_batch_size: NonZeroUsize::new(32).unwrap(),
                     execution: PageServiceProtocolPipelinedExecutionStrategy::ConcurrentFutures,
                     batching: PageServiceProtocolPipelinedBatchingStrategy::ScatteredLsn,
-                })
-            },
-            get_vectored_concurrent_io: if !cfg!(test) {
-                GetVectoredConcurrentIo::Sequential
-            } else {
-                GetVectoredConcurrentIo::SidecarTask
-            },
-            enable_read_path_debugging: if cfg!(test) || cfg!(feature = "testing") {
+                },
+            ),
+            get_vectored_concurrent_io: GetVectoredConcurrentIo::SidecarTask,
+            enable_read_path_debugging: if cfg!(feature = "testing") {
                 Some(true)
             } else {
                 None
@@ -667,9 +713,12 @@ impl Default for ConfigToml {
             enable_tls_page_service_api: false,
             dev_mode: false,
             timeline_import_config: TimelineImportConfig {
-                import_job_concurrency: NonZeroUsize::new(128).unwrap(),
-                import_job_soft_size_limit: NonZeroUsize::new(1024 * 1024 * 1024).unwrap(),
+                import_job_concurrency: NonZeroUsize::new(32).unwrap(),
+                import_job_soft_size_limit: NonZeroUsize::new(256 * 1024 * 1024).unwrap(),
+                import_job_checkpoint_threshold: NonZeroUsize::new(32).unwrap(),
             },
+            basebackup_cache_config: None,
+            posthog_config: None,
         }
     }
 }
@@ -736,6 +785,7 @@ pub mod tenant_conf_defaults {
     pub const DEFAULT_GC_COMPACTION_VERIFICATION: bool = true;
     pub const DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB: u64 = 5 * 1024 * 1024; // 5GB
     pub const DEFAULT_GC_COMPACTION_RATIO_PERCENT: u64 = 100;
+    pub const DEFAULT_RELSIZE_SNAPSHOT_CACHE_CAPACITY: usize = 1000;
 }
 
 impl Default for TenantConfigToml {
@@ -793,6 +843,8 @@ impl Default for TenantConfigToml {
             gc_compaction_initial_threshold_kb: DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB,
             gc_compaction_ratio_percent: DEFAULT_GC_COMPACTION_RATIO_PERCENT,
             sampling_ratio: None,
+            relsize_snapshot_cache_capacity: DEFAULT_RELSIZE_SNAPSHOT_CACHE_CAPACITY,
+            basebackup_cache_enabled: false,
         }
     }
 }

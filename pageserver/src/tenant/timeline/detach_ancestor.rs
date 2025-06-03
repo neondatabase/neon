@@ -188,7 +188,7 @@ pub(crate) async fn generate_tombstone_image_layer(
         "removing non-inherited keys by writing an image layer with tombstones at the detach LSN"
     );
     let io_concurrency = IoConcurrency::spawn_from_conf(
-        detached.conf,
+        detached.conf.get_vectored_concurrent_io,
         detached.gate.enter().map_err(|_| Error::ShuttingDown)?,
     );
     let mut reconstruct_state = ValuesReconstructState::new(io_concurrency);

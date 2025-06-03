@@ -28,6 +28,7 @@ typedef struct FileCacheState
 extern bool lfc_store_prefetch_result;
 
 /* functions for local file cache */
+extern void lfc_invalidate(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber nblocks);
 extern void lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum,
 					   BlockNumber blkno, const void *const *buffers,
 					   BlockNumber nblocks);

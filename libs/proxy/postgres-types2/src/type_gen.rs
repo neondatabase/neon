@@ -393,7 +393,7 @@ impl Inner {
         }
     }
 
-    pub fn oid(&self) -> Oid {
+    pub const fn const_oid(&self) -> Oid {
         match *self {
             Inner::Bool => 16,
             Inner::Bytea => 17,
@@ -580,7 +580,14 @@ impl Inner {
             Inner::TstzmultiRangeArray => 6153,
             Inner::DatemultiRangeArray => 6155,
             Inner::Int8multiRangeArray => 6157,
+            Inner::Other(_) => u32::MAX,
+        }
+    }
+
+    pub fn oid(&self) -> Oid {
+        match *self {
             Inner::Other(ref u) => u.oid,
+            _ => self.const_oid(),
         }
     }
 
@@ -727,17 +734,17 @@ impl Inner {
             Inner::JsonbArray => &Kind::Array(Type(Inner::Jsonb)),
             Inner::AnyRange => &Kind::Pseudo,
             Inner::EventTrigger => &Kind::Pseudo,
-            Inner::Int4Range => &Kind::Range(Type(Inner::Int4)),
+            Inner::Int4Range => &const { Kind::Range(Inner::Int4.const_oid()) },
             Inner::Int4RangeArray => &Kind::Array(Type(Inner::Int4Range)),
-            Inner::NumRange => &Kind::Range(Type(Inner::Numeric)),
+            Inner::NumRange => &const { Kind::Range(Inner::Numeric.const_oid()) },
             Inner::NumRangeArray => &Kind::Array(Type(Inner::NumRange)),
-            Inner::TsRange => &Kind::Range(Type(Inner::Timestamp)),
+            Inner::TsRange => &const { Kind::Range(Inner::Timestamp.const_oid()) },
             Inner::TsRangeArray => &Kind::Array(Type(Inner::TsRange)),
-            Inner::TstzRange => &Kind::Range(Type(Inner::Timestamptz)),
+            Inner::TstzRange => &const { Kind::Range(Inner::Timestamptz.const_oid()) },
             Inner::TstzRangeArray => &Kind::Array(Type(Inner::TstzRange)),
-            Inner::DateRange => &Kind::Range(Type(Inner::Date)),
+            Inner::DateRange => &const { Kind::Range(Inner::Date.const_oid()) },
             Inner::DateRangeArray => &Kind::Array(Type(Inner::DateRange)),
-            Inner::Int8Range => &Kind::Range(Type(Inner::Int8)),
+            Inner::Int8Range => &const { Kind::Range(Inner::Int8.const_oid()) },
             Inner::Int8RangeArray => &Kind::Array(Type(Inner::Int8Range)),
             Inner::Jsonpath => &Kind::Simple,
             Inner::JsonpathArray => &Kind::Array(Type(Inner::Jsonpath)),

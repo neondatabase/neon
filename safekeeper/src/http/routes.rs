@@ -258,6 +258,7 @@ async fn timeline_snapshot_handler(request: Request<Body>) -> Result<Response<Bo
 
     let global_timelines = get_global_timelines(&request);
     let tli = global_timelines.get(ttid).map_err(ApiError::from)?;
+    let storage = global_timelines.get_wal_backup().get_storage();
 
     // To stream the body use wrap_stream which wants Stream of Result<Bytes>,
     // so create the chan and write to it in another task.
@@ -269,6 +270,7 @@ async fn timeline_snapshot_handler(request: Request<Body>) -> Result<Response<Bo
         conf.my_id,
         destination,
         tx,
+        storage,
     ));
 
     let rx_stream = ReceiverStream::new(rx);
@@ -390,12 +392,18 @@ async fn timeline_copy_handler(mut request: Request<Body>) -> Result<Response<Bo
     );
 
     let global_timelines = get_global_timelines(&request);
+    let wal_backup = global_timelines.get_wal_backup();
+    let storage = wal_backup
+        .get_storage()
+        .ok_or(ApiError::BadRequest(anyhow::anyhow!(
+            "Remote Storage is not configured"
+        )))?;
 
     copy_timeline::handle_request(copy_timeline::Request{
         source_ttid,
         until_lsn: request_data.until_lsn,
         destination_ttid: TenantTimelineId::new(source_ttid.tenant_id, request_data.target_timeline_id),
-    }, global_timelines)
+    }, global_timelines, storage)
         .instrument(info_span!("copy_timeline", from=%source_ttid, to=%request_data.target_timeline_id, until_lsn=%request_data.until_lsn))
         .await
         .map_err(ApiError::InternalServerError)?;

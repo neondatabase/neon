@@ -793,6 +793,7 @@ mod test {
             &self,
             _tenant_shard_id: TenantShardId,
             _timeline_id: TimelineId,
+            _generation: Generation,
             _status: pageserver_api::models::ShardImportStatus,
         ) -> Result<(), RetryForeverError> {
             unimplemented!()
@@ -802,7 +803,8 @@ mod test {
             &self,
             _tenant_shard_id: TenantShardId,
             _timeline_id: TimelineId,
-        ) -> Result<Option<ShardImportStatus>, RetryForeverError> {
+            _generation: Generation,
+        ) -> Result<ShardImportStatus, RetryForeverError> {
             unimplemented!()
         }
     }

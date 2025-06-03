@@ -336,14 +336,33 @@ impl TimelineCreateRequest {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ShardImportStatus {
-    InProgress,
+    InProgress(Option<ShardImportProgress>),
     Done,
     Error(String),
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ShardImportProgress {
+    V1(ShardImportProgressV1),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ShardImportProgressV1 {
+    /// Total number of jobs in the import plan
+    pub jobs: usize,
+    /// Number of jobs completed
+    pub completed: usize,
+    /// Hash of the plan
+    pub import_plan_hash: u64,
+    /// Soft limit for the job size
+    /// This needs to remain constant throughout the import
+    pub job_soft_size_limit: usize,
+}
+
 impl ShardImportStatus {
     pub fn is_terminal(&self) -> bool {
         match self {
-            ShardImportStatus::InProgress => false,
+            ShardImportStatus::InProgress(_) => false,
             ShardImportStatus::Done | ShardImportStatus::Error(_) => true,
         }
     }
@@ -386,6 +405,8 @@ pub enum TimelineCreateRequestMode {
         // using a flattened enum, so, it was an accepted field, and
         // we continue to accept it by having it here.
         pg_version: Option<u32>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        read_only: bool,
     },
     ImportPgdata {
         import_pgdata: TimelineCreateRequestModeImportPgdata,
@@ -614,6 +635,10 @@ pub struct TenantConfigPatch {
     pub gc_compaction_ratio_percent: FieldPatch<u64>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub sampling_ratio: FieldPatch<Option<Ratio>>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub relsize_snapshot_cache_capacity: FieldPatch<usize>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub basebackup_cache_enabled: FieldPatch<bool>,
 }
 
 /// Like [`crate::config::TenantConfigToml`], but preserves the information
@@ -743,6 +768,12 @@ pub struct TenantConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sampling_ratio: Option<Option<Ratio>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relsize_snapshot_cache_capacity: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub basebackup_cache_enabled: Option<bool>,
 }
 
 impl TenantConfig {
@@ -788,6 +819,8 @@ impl TenantConfig {
             mut gc_compaction_initial_threshold_kb,
             mut gc_compaction_ratio_percent,
             mut sampling_ratio,
+            mut relsize_snapshot_cache_capacity,
+            mut basebackup_cache_enabled,
         } = self;
 
         patch.checkpoint_distance.apply(&mut checkpoint_distance);
@@ -889,6 +922,12 @@ impl TenantConfig {
             .gc_compaction_ratio_percent
             .apply(&mut gc_compaction_ratio_percent);
         patch.sampling_ratio.apply(&mut sampling_ratio);
+        patch
+            .relsize_snapshot_cache_capacity
+            .apply(&mut relsize_snapshot_cache_capacity);
+        patch
+            .basebackup_cache_enabled
+            .apply(&mut basebackup_cache_enabled);
 
         Ok(Self {
             checkpoint_distance,
@@ -928,6 +967,8 @@ impl TenantConfig {
             gc_compaction_initial_threshold_kb,
             gc_compaction_ratio_percent,
             sampling_ratio,
+            relsize_snapshot_cache_capacity,
+            basebackup_cache_enabled,
         })
     }
 
@@ -1036,6 +1077,12 @@ impl TenantConfig {
                 .gc_compaction_ratio_percent
                 .unwrap_or(global_conf.gc_compaction_ratio_percent),
             sampling_ratio: self.sampling_ratio.unwrap_or(global_conf.sampling_ratio),
+            relsize_snapshot_cache_capacity: self
+                .relsize_snapshot_cache_capacity
+                .unwrap_or(global_conf.relsize_snapshot_cache_capacity),
+            basebackup_cache_enabled: self
+                .basebackup_cache_enabled
+                .unwrap_or(global_conf.basebackup_cache_enabled),
         }
     }
 }
@@ -1803,7 +1850,6 @@ pub struct TopTenantShardsResponse {
 }
 
 pub mod virtual_file {
-    use std::sync::LazyLock;
 
     #[derive(
         Copy,
@@ -1851,15 +1897,7 @@ pub mod virtual_file {
 
     impl IoMode {
         pub fn preferred() -> Self {
-            // The default behavior when running Rust unit tests without any further
-            // flags is to use the newest behavior (DirectRw).
-            // The CI uses the environment variable to unit tests for all different modes.
-            // NB: the Python regression & perf tests have their own defaults management
-            // that writes pageserver.toml; they do not use this variable.
-            static ENV_OVERRIDE: LazyLock<Option<IoMode>> = LazyLock::new(|| {
-                utils::env::var_serde_json_string("NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IO_MODE")
-            });
-            ENV_OVERRIDE.unwrap_or(IoMode::DirectRw)
+            IoMode::DirectRw
         }
     }
 
@@ -1896,7 +1934,7 @@ pub enum PagestreamFeMessage {
 }
 
 // Wrapped in libpq CopyData
-#[derive(strum_macros::EnumProperty)]
+#[derive(Debug, strum_macros::EnumProperty)]
 pub enum PagestreamBeMessage {
     Exists(PagestreamExistsResponse),
     Nblocks(PagestreamNblocksResponse),
@@ -2007,7 +2045,7 @@ pub enum PagestreamProtocolVersion {
 
 pub type RequestId = u64;
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub struct PagestreamRequest {
     pub reqid: RequestId,
     pub request_lsn: Lsn,
@@ -2026,7 +2064,7 @@ pub struct PagestreamNblocksRequest {
     pub rel: RelTag,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub struct PagestreamGetPageRequest {
     pub hdr: PagestreamRequest,
     pub rel: RelTag,

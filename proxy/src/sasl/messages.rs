@@ -1,7 +1,5 @@
 //! Definitions for SASL messages.
 
-use pq_proto::{BeAuthenticationSaslMessage, BeMessage};
-
 use crate::parse::split_cstr;
 
 /// SASL-specific payload of [`PasswordMessage`](pq_proto::FeMessage::PasswordMessage).
@@ -27,26 +25,6 @@ impl<'a> FirstMessage<'a> {
 
         let message = std::str::from_utf8(bytes).ok()?;
         Some(Self { method, message })
-    }
-}
-
-/// A single SASL message.
-/// This struct is deliberately decoupled from lower-level
-/// [`BeAuthenticationSaslMessage`].
-#[derive(Debug)]
-pub(super) enum ServerMessage<T> {
-    /// We expect to see more steps.
-    Continue(T),
-    /// This is the final step.
-    Final(T),
-}
-
-impl<'a> ServerMessage<&'a str> {
-    pub(super) fn to_reply(&self) -> BeMessage<'a> {
-        BeMessage::AuthenticationSasl(match self {
-            ServerMessage::Continue(s) => BeAuthenticationSaslMessage::Continue(s.as_bytes()),
-            ServerMessage::Final(s) => BeAuthenticationSaslMessage::Final(s.as_bytes()),
-        })
     }
 }
 

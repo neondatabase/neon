@@ -1,6 +1,6 @@
 //! A module to create and read lock files.
 //!
-//! File locking is done using [`fcntl::flock`] exclusive locks.
+//! File locking is done using [`nix::fcntl::Flock`] exclusive locks.
 //! The only consumer of this module is currently
 //! [`pid_file`](crate::pid_file). See the module-level comment
 //! there for potential pitfalls with lock files that are used
@@ -9,26 +9,25 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::ops::Deref;
-use std::os::unix::prelude::AsRawFd;
 
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use nix::errno::Errno::EAGAIN;
-use nix::fcntl;
+use nix::fcntl::{Flock, FlockArg};
 
 use crate::crashsafe;
 
-/// A handle to an open and unlocked, but not-yet-written lock file.
+/// A handle to an open and flocked, but not-yet-written lock file.
 /// Returned by [`create_exclusive`].
 #[must_use]
 pub struct UnwrittenLockFile {
     path: Utf8PathBuf,
-    file: fs::File,
+    file: Flock<fs::File>,
 }
 
 /// Returned by [`UnwrittenLockFile::write_content`].
 #[must_use]
-pub struct LockFileGuard(fs::File);
+pub struct LockFileGuard(Flock<fs::File>);
 
 impl Deref for LockFileGuard {
     type Target = fs::File;
@@ -67,17 +66,14 @@ pub fn create_exclusive(lock_file_path: &Utf8Path) -> anyhow::Result<UnwrittenLo
         .open(lock_file_path)
         .context("open lock file")?;
 
-    let res = fcntl::flock(
-        lock_file.as_raw_fd(),
-        fcntl::FlockArg::LockExclusiveNonblock,
-    );
+    let res = Flock::lock(lock_file, FlockArg::LockExclusiveNonblock);
     match res {
-        Ok(()) => Ok(UnwrittenLockFile {
+        Ok(lock_file) => Ok(UnwrittenLockFile {
             path: lock_file_path.to_owned(),
             file: lock_file,
         }),
-        Err(EAGAIN) => anyhow::bail!("file is already locked"),
-        Err(e) => Err(e).context("flock error"),
+        Err((_, EAGAIN)) => anyhow::bail!("file is already locked"),
+        Err((_, e)) => Err(e).context("flock error"),
     }
 }
 
@@ -105,32 +101,37 @@ pub enum LockFileRead {
 /// Check the [`LockFileRead`] variants for details.
 pub fn read_and_hold_lock_file(path: &Utf8Path) -> anyhow::Result<LockFileRead> {
     let res = fs::OpenOptions::new().read(true).open(path);
-    let mut lock_file = match res {
+    let lock_file = match res {
         Ok(f) => f,
         Err(e) => match e.kind() {
             std::io::ErrorKind::NotFound => return Ok(LockFileRead::NotExist),
             _ => return Err(e).context("open lock file"),
         },
     };
-    let res = fcntl::flock(
-        lock_file.as_raw_fd(),
-        fcntl::FlockArg::LockExclusiveNonblock,
-    );
+    let res = Flock::lock(lock_file, FlockArg::LockExclusiveNonblock);
     // We need the content regardless of lock success / failure.
     // But, read it after flock so that, if it succeeded, the content is consistent.
-    let mut content = String::new();
-    lock_file
-        .read_to_string(&mut content)
-        .context("read lock file")?;
     match res {
-        Ok(()) => Ok(LockFileRead::NotHeldByAnyProcess(
-            LockFileGuard(lock_file),
-            content,
-        )),
-        Err(EAGAIN) => Ok(LockFileRead::LockedByOtherProcess {
-            not_locked_file: lock_file,
-            content,
-        }),
-        Err(e) => Err(e).context("flock error"),
+        Ok(mut locked_file) => {
+            let mut content = String::new();
+            locked_file
+                .read_to_string(&mut content)
+                .context("read lock file")?;
+            Ok(LockFileRead::NotHeldByAnyProcess(
+                LockFileGuard(locked_file),
+                content,
+            ))
+        }
+        Err((mut not_locked_file, EAGAIN)) => {
+            let mut content = String::new();
+            not_locked_file
+                .read_to_string(&mut content)
+                .context("read lock file")?;
+            Ok(LockFileRead::LockedByOtherProcess {
+                not_locked_file,
+                content,
+            })
+        }
+        Err((_, e)) => Err(e).context("flock error"),
     }
 }
