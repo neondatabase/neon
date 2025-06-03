@@ -7,13 +7,13 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 use clashmap::ClashMap;
 use clashmap::Entry;
 
-use pageserver_page_api::model;
+use pageserver_page_api::RelTag;
 
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub enum RequestInProgressKey {
     Db(u32),
-    Rel(model::RelTag),
-    Block(model::RelTag, u32),
+    Rel(RelTag),
+    Block(RelTag, u32),
 }
 
 pub type RequestInProgressTable = MutexHashSet<RequestInProgressKey>;

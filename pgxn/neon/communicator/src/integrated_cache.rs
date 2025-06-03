@@ -29,7 +29,7 @@ use utils::lsn::{AtomicLsn, Lsn};
 
 use crate::file_cache::INVALID_CACHE_BLOCK;
 use crate::file_cache::{CacheBlock, FileCache};
-use pageserver_page_api::model::RelTag;
+use pageserver_page_api::RelTag;
 
 use metrics::{IntCounter, IntGauge};
 

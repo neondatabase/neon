@@ -13,7 +13,7 @@ use crate::neon_request::{CGetPageVRequest, CPrefetchVRequest};
 use crate::neon_request::{NeonIORequest, NeonIOResult};
 use crate::worker_process::in_progress_ios::{RequestInProgressKey, RequestInProgressTable};
 use pageserver_client_grpc::PageserverClient;
-use pageserver_page_api::model;
+use pageserver_page_api as page_api;
 
 use metrics::{IntCounter, IntCounterVec};
 
@@ -224,10 +224,10 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         }
     }
 
-    fn request_lsns(&self, not_modified_since_lsn: Lsn) -> model::ReadLsn {
-        model::ReadLsn {
+    fn request_lsns(&self, not_modified_since_lsn: Lsn) -> page_api::ReadLsn {
+        page_api::ReadLsn {
             request_lsn: get_request_lsn(),
-            not_modified_since_lsn,
+            not_modified_since_lsn: Some(not_modified_since_lsn),
         }
     }
 
@@ -252,7 +252,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
 
                 match self
                     .pageserver_client
-                    .process_check_rel_exists_request(&model::CheckRelExistsRequest {
+                    .process_check_rel_exists_request(&page_api::CheckRelExistsRequest {
                         read_lsn: self.request_lsns(not_modified_since),
                         rel,
                     })
@@ -286,7 +286,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 let read_lsn = self.request_lsns(not_modified_since);
                 match self
                     .pageserver_client
-                    .process_get_rel_size_request(&model::GetRelSizeRequest {
+                    .process_get_rel_size_request(&page_api::GetRelSizeRequest {
                         read_lsn,
                         rel: rel.clone(),
                     })
@@ -339,7 +339,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
 
                 match self
                     .pageserver_client
-                    .process_get_dbsize_request(&model::GetDbSizeRequest {
+                    .process_get_dbsize_request(&page_api::GetDbSizeRequest {
                         read_lsn: self.request_lsns(not_modified_since),
                         db_oid: req.db_oid,
                     })
@@ -462,12 +462,12 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         for (blkno, _lsn, dest, _guard) in cache_misses.iter() {
             match self
                 .pageserver_client
-                .get_page(&model::GetPageRequest {
+                .get_page(page_api::GetPageRequest {
                     request_id: self.next_request_id.fetch_add(1, Ordering::Relaxed),
-                    request_class: model::GetPageClass::Normal,
+                    request_class: page_api::GetPageClass::Normal,
                     read_lsn: self.request_lsns(not_modified_since),
                     rel: rel.clone(),
-                    block_number: vec![*blkno],
+                    block_numbers: vec![*blkno],
                 })
                 .await
             {
@@ -540,12 +540,12 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         for (blkno, _lsn, _guard) in cache_misses.iter() {
             match self
                 .pageserver_client
-                .get_page(&model::GetPageRequest {
+                .get_page(page_api::GetPageRequest {
                     request_id: self.next_request_id.fetch_add(1, Ordering::Relaxed),
-                    request_class: model::GetPageClass::Prefetch,
+                    request_class: page_api::GetPageClass::Prefetch,
                     read_lsn: self.request_lsns(not_modified_since),
                     rel: rel.clone(),
-                    block_number: vec![*blkno],
+                    block_numbers: vec![*blkno],
                 })
                 .await
             {

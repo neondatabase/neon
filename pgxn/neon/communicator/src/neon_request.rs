@@ -4,7 +4,7 @@ type COid = u32;
 // This conveniently matches PG_IOV_MAX
 pub const MAX_GETPAGEV_PAGES: usize = 32;
 
-use pageserver_page_api::model;
+use pageserver_page_api as page_api;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -12,7 +12,7 @@ pub enum NeonIORequest {
     Empty,
 
     // Read requests. These are C-friendly variants of the corresponding structs in
-    // pageserver_page_api::model.
+    // pageserver_page_api.
     RelExists(CRelExistsRequest),
     RelSize(CRelSizeRequest),
     GetPageV(CGetPageVRequest),
@@ -236,8 +236,8 @@ pub struct CRelUnlinkRequest {
 }
 
 impl CRelExistsRequest {
-    pub fn reltag(&self) -> model::RelTag {
-        model::RelTag {
+    pub fn reltag(&self) -> page_api::RelTag {
+        page_api::RelTag {
             spc_oid: self.spc_oid,
             db_oid: self.db_oid,
             rel_number: self.rel_number,
@@ -247,8 +247,8 @@ impl CRelExistsRequest {
 }
 
 impl CRelSizeRequest {
-    pub fn reltag(&self) -> model::RelTag {
-        model::RelTag {
+    pub fn reltag(&self) -> page_api::RelTag {
+        page_api::RelTag {
             spc_oid: self.spc_oid,
             db_oid: self.db_oid,
             rel_number: self.rel_number,
@@ -258,8 +258,8 @@ impl CRelSizeRequest {
 }
 
 impl CGetPageVRequest {
-    pub fn reltag(&self) -> model::RelTag {
-        model::RelTag {
+    pub fn reltag(&self) -> page_api::RelTag {
+        page_api::RelTag {
             spc_oid: self.spc_oid,
             db_oid: self.db_oid,
             rel_number: self.rel_number,
@@ -269,8 +269,8 @@ impl CGetPageVRequest {
 }
 
 impl CPrefetchVRequest {
-    pub fn reltag(&self) -> model::RelTag {
-        model::RelTag {
+    pub fn reltag(&self) -> page_api::RelTag {
+        page_api::RelTag {
             spc_oid: self.spc_oid,
             db_oid: self.db_oid,
             rel_number: self.rel_number,
@@ -280,8 +280,8 @@ impl CPrefetchVRequest {
 }
 
 impl CWritePageRequest {
-    pub fn reltag(&self) -> model::RelTag {
-        model::RelTag {
+    pub fn reltag(&self) -> page_api::RelTag {
+        page_api::RelTag {
             spc_oid: self.spc_oid,
             db_oid: self.db_oid,
             rel_number: self.rel_number,
@@ -291,8 +291,8 @@ impl CWritePageRequest {
 }
 
 impl CRelExtendRequest {
-    pub fn reltag(&self) -> model::RelTag {
-        model::RelTag {
+    pub fn reltag(&self) -> page_api::RelTag {
+        page_api::RelTag {
             spc_oid: self.spc_oid,
             db_oid: self.db_oid,
             rel_number: self.rel_number,
@@ -302,8 +302,8 @@ impl CRelExtendRequest {
 }
 
 impl CRelZeroExtendRequest {
-    pub fn reltag(&self) -> model::RelTag {
-        model::RelTag {
+    pub fn reltag(&self) -> page_api::RelTag {
+        page_api::RelTag {
             spc_oid: self.spc_oid,
             db_oid: self.db_oid,
             rel_number: self.rel_number,
@@ -313,8 +313,8 @@ impl CRelZeroExtendRequest {
 }
 
 impl CRelCreateRequest {
-    pub fn reltag(&self) -> model::RelTag {
-        model::RelTag {
+    pub fn reltag(&self) -> page_api::RelTag {
+        page_api::RelTag {
             spc_oid: self.spc_oid,
             db_oid: self.db_oid,
             rel_number: self.rel_number,
@@ -324,8 +324,8 @@ impl CRelCreateRequest {
 }
 
 impl CRelTruncateRequest {
-    pub fn reltag(&self) -> model::RelTag {
-        model::RelTag {
+    pub fn reltag(&self) -> page_api::RelTag {
+        page_api::RelTag {
             spc_oid: self.spc_oid,
             db_oid: self.db_oid,
             rel_number: self.rel_number,
@@ -335,8 +335,8 @@ impl CRelTruncateRequest {
 }
 
 impl CRelUnlinkRequest {
-    pub fn reltag(&self) -> model::RelTag {
-        model::RelTag {
+    pub fn reltag(&self) -> page_api::RelTag {
+        page_api::RelTag {
             spc_oid: self.spc_oid,
             db_oid: self.db_oid,
             rel_number: self.rel_number,
