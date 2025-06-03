@@ -11,7 +11,6 @@ use parquet::file::metadata::RowGroupMetaDataPtr;
 use parquet::file::properties::{DEFAULT_PAGE_SIZE, WriterProperties, WriterPropertiesPtr};
 use parquet::file::writer::SerializedFileWriter;
 use parquet::record::RecordWriter;
-use pq_proto::StartupMessageParams;
 use remote_storage::{GenericRemoteStorage, RemotePath, RemoteStorageConfig, TimeoutOrCancel};
 use serde::ser::SerializeMap;
 use tokio::sync::mpsc;
@@ -24,6 +23,7 @@ use super::{LOG_CHAN, RequestContextInner};
 use crate::config::remote_storage_from_toml;
 use crate::context::LOG_CHAN_DISCONNECT;
 use crate::ext::TaskExt;
+use crate::pqproto::StartupMessageParams;
 
 #[derive(clap::Args, Clone, Debug)]
 pub struct ParquetUploadArgs {

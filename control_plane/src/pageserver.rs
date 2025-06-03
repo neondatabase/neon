@@ -129,7 +129,9 @@ impl PageServerNode {
             ));
         }
 
-        if conf.http_auth_type != AuthType::Trust || conf.pg_auth_type != AuthType::Trust {
+        if [conf.http_auth_type, conf.pg_auth_type, conf.grpc_auth_type]
+            .contains(&AuthType::NeonJWT)
+        {
             // Keys are generated in the toplevel repo dir, pageservers' workdirs
             // are one level below that, so refer to keys with ../
             overrides.push("auth_validation_public_key_path='../auth_public_key.pem'".to_owned());

@@ -8,8 +8,10 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use utils::lsn::Lsn;
+use utils::pausable_failpoint;
+use utils::sync::gate::Gate;
 
-use super::Timeline;
+use super::{Timeline, TimelineDeleteProgress};
 use crate::context::RequestContext;
 use crate::controller_upcall_client::{StorageControllerUpcallApi, StorageControllerUpcallClient};
 use crate::tenant::metadata::TimelineMetadata;
@@ -19,14 +21,25 @@ mod importbucket_client;
 mod importbucket_format;
 pub(crate) mod index_part_format;
 
-pub(crate) struct ImportingTimeline {
+pub struct ImportingTimeline {
     pub import_task_handle: JoinHandle<()>,
+    pub import_task_gate: Gate,
     pub timeline: Arc<Timeline>,
+    pub delete_progress: TimelineDeleteProgress,
+}
+
+impl std::fmt::Debug for ImportingTimeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ImportingTimeline<{}>", self.timeline.timeline_id)
+    }
 }
 
 impl ImportingTimeline {
-    pub(crate) fn shutdown(self) {
+    pub async fn shutdown(&self) {
         self.import_task_handle.abort();
+        self.import_task_gate.close().await;
+
+        self.timeline.remote_client.shutdown().await;
     }
 }
 
@@ -92,6 +105,15 @@ pub async fn doit(
                     terminate_flow_with_error(timeline, err, &storcon_client, &cancel).await,
                 );
             }
+
+            tracing::info!("Import plan executed. Flushing remote changes and notifying storcon");
+
+            timeline
+                .remote_client
+                .schedule_index_upload_for_file_changes()?;
+            timeline.remote_client.wait_completion().await?;
+
+            pausable_failpoint!("import-timeline-pre-success-notify-pausable");
 
             // Communicate that shard is done.
             // Ensure at-least-once delivery of the upcall to storage controller
@@ -179,8 +201,8 @@ async fn prepare_import(
         .await;
         match res {
             Ok(_) => break,
-            Err(err) => {
-                info!(?err, "indefinitely waiting for pgdata to finish");
+            Err(_err) => {
+                info!("indefinitely waiting for pgdata to finish");
                 if tokio::time::timeout(std::time::Duration::from_secs(10), cancel.cancelled())
                     .await
                     .is_ok()

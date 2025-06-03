@@ -1312,11 +1312,44 @@ impl EvictionsWithLowResidenceDuration {
 //
 // Roughly logarithmic scale.
 const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
-    0.000030, // 30 usec
-    0.001000, // 1000 usec
-    0.030,    // 30 ms
-    1.000,    // 1000 ms
-    30.000,   // 30000 ms
+    0.00005,  // 50us
+    0.00006,  // 60us
+    0.00007,  // 70us
+    0.00008,  // 80us
+    0.00009,  // 90us
+    0.0001,   // 100us
+    0.000110, // 110us
+    0.000120, // 120us
+    0.000130, // 130us
+    0.000140, // 140us
+    0.000150, // 150us
+    0.000160, // 160us
+    0.000170, // 170us
+    0.000180, // 180us
+    0.000190, // 190us
+    0.000200, // 200us
+    0.000210, // 210us
+    0.000220, // 220us
+    0.000230, // 230us
+    0.000240, // 240us
+    0.000250, // 250us
+    0.000300, // 300us
+    0.000350, // 350us
+    0.000400, // 400us
+    0.000450, // 450us
+    0.000500, // 500us
+    0.000600, // 600us
+    0.000700, // 700us
+    0.000800, // 800us
+    0.000900, // 900us
+    0.001000, // 1ms
+    0.002000, // 2ms
+    0.003000, // 3ms
+    0.004000, // 4ms
+    0.005000, // 5ms
+    0.01000,  // 10ms
+    0.02000,  // 20ms
+    0.05000,  // 50ms
 ];
 
 /// VirtualFile fs operation variants.
@@ -2234,8 +2267,10 @@ impl BasebackupQueryTimeOngoingRecording<'_> {
         // If you want to change categorize of a specific error, also change it in `log_query_error`.
         let metric = match res {
             Ok(_) => &self.parent.ok,
-            Err(QueryError::Shutdown) => {
-                // Do not observe ok/err for shutdown
+            Err(QueryError::Shutdown) | Err(QueryError::Reconnect) => {
+                // Do not observe ok/err for shutdown/reconnect.
+                // Reconnect error might be raised when the operation is waiting for LSN and the tenant shutdown interrupts
+                // the operation. A reconnect error will be issued and the client will retry.
                 return;
             }
             Err(QueryError::Disconnected(ConnectionError::Io(io_error)))

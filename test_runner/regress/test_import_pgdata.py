@@ -1,7 +1,10 @@
 import base64
+import concurrent.futures
 import json
+import random
+import threading
 import time
-from enum import Enum
+from enum import Enum, StrEnum
 from pathlib import Path
 from threading import Event
 
@@ -9,9 +12,22 @@ import psycopg2
 import psycopg2.errors
 import pytest
 from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
-from fixtures.fast_import import FastImport
+from fixtures.fast_import import (
+    FastImport,
+    mock_import_bucket,
+    populate_vanilla_pg,
+    validate_import_from_vanilla_pg,
+)
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, PgProtocol, VanillaPostgres
+from fixtures.neon_fixtures import (
+    NeonEnvBuilder,
+    PageserverImportConfig,
+    PgBin,
+    PgProtocol,
+    StorageControllerApiException,
+    StorageControllerMigrationConfig,
+    VanillaPostgres,
+)
 from fixtures.pageserver.http import (
     ImportPgdataIdemptencyKey,
 )
@@ -47,24 +63,6 @@ smoke_params = [
     # many shards, small stripe size to speed up test
     *[(8, 1024, s) for s in RelBlockSize],
 ]
-
-
-def mock_import_bucket(vanilla_pg: VanillaPostgres, path: Path):
-    """
-    Mock the import S3 bucket into a local directory for a provided vanilla PG instance.
-    """
-    assert not vanilla_pg.is_running()
-
-    path.mkdir()
-    # what cplane writes before scheduling fast_import
-    specpath = path / "spec.json"
-    specpath.write_text(json.dumps({"branch_id": "somebranch", "project_id": "someproject"}))
-    # what fast_import writes
-    vanilla_pg.pgdatadir.rename(path / "pgdata")
-    statusdir = path / "status"
-    statusdir.mkdir()
-    (statusdir / "pgdata").write_text(json.dumps({"done": True}))
-    (statusdir / "fast_import").write_text(json.dumps({"command": "pgdata", "done": True}))
 
 
 @skip_in_debug_build("MULTIPLE_RELATION_SEGMENTS has non trivial amount of data")
@@ -121,10 +119,6 @@ def test_pgdata_import_smoke(
     # Put data in vanilla pg
     #
 
-    vanilla_pg.start()
-    vanilla_pg.safe_psql("create user cloud_admin with password 'postgres' superuser")
-
-    log.info("create relblock data")
     if rel_block_size == RelBlockSize.ONE_STRIPE_SIZE:
         target_relblock_size = stripe_size * 8192
     elif rel_block_size == RelBlockSize.TWO_STRPES_PER_SHARD:
@@ -135,45 +129,8 @@ def test_pgdata_import_smoke(
     else:
         raise ValueError
 
-    # fillfactor so we don't need to produce that much data
-    # 900 byte per row is > 10% => 1 row per page
-    vanilla_pg.safe_psql("""create table t (data char(900)) with (fillfactor = 10)""")
-
-    nrows = 0
-    while True:
-        relblock_size = vanilla_pg.safe_psql_scalar("select pg_relation_size('t')")
-        log.info(
-            f"relblock size: {relblock_size / 8192} pages (target: {target_relblock_size // 8192}) pages"
-        )
-        if relblock_size >= target_relblock_size:
-            break
-        addrows = int((target_relblock_size - relblock_size) // 8192)
-        assert addrows >= 1, "forward progress"
-        vanilla_pg.safe_psql(
-            f"insert into t select generate_series({nrows + 1}, {nrows + addrows})"
-        )
-        nrows += addrows
-    expect_nrows = nrows
-    expect_sum = (
-        (nrows) * (nrows + 1) // 2
-    )  # https://stackoverflow.com/questions/43901484/sum-of-the-integers-from-1-to-n
-
-    def validate_vanilla_equivalence(ep):
-        # TODO: would be nicer to just compare pgdump
-
-        # Enable IO concurrency for batching on large sequential scan, to avoid making
-        # this test unnecessarily onerous on CPU. Especially on debug mode, it's still
-        # pretty onerous though, so increase statement_timeout to avoid timeouts.
-        assert ep.safe_psql_many(
-            [
-                "set effective_io_concurrency=32;",
-                "SET statement_timeout='300s';",
-                "select count(*), sum(data::bigint)::bigint from t",
-            ]
-        ) == [[], [], [(expect_nrows, expect_sum)]]
-
-    validate_vanilla_equivalence(vanilla_pg)
-
+    vanilla_pg.start()
+    rows_inserted = populate_vanilla_pg(vanilla_pg, target_relblock_size)
     vanilla_pg.stop()
 
     #
@@ -264,14 +221,14 @@ def test_pgdata_import_smoke(
         config_lines=ep_config,
     )
 
-    validate_vanilla_equivalence(ro_endpoint)
+    validate_import_from_vanilla_pg(ro_endpoint, rows_inserted)
 
     # ensure the import survives restarts
     ro_endpoint.stop()
     env.pageserver.stop(immediate=True)
     env.pageserver.start()
     ro_endpoint.start()
-    validate_vanilla_equivalence(ro_endpoint)
+    validate_import_from_vanilla_pg(ro_endpoint, rows_inserted)
 
     #
     # validate the layer files in each shard only have the shard-specific data
@@ -311,7 +268,7 @@ def test_pgdata_import_smoke(
     child_workload = workload.branch(timeline_id=child_timeline_id, branch_name="br-tip")
     child_workload.validate()
 
-    validate_vanilla_equivalence(child_workload.endpoint())
+    validate_import_from_vanilla_pg(child_workload.endpoint(), rows_inserted)
 
     # ... at the initdb lsn
     _ = env.create_branch(
@@ -326,9 +283,20 @@ def test_pgdata_import_smoke(
         tenant_id=tenant_id,
         config_lines=ep_config,
     )
-    validate_vanilla_equivalence(br_initdb_endpoint)
+    validate_import_from_vanilla_pg(br_initdb_endpoint, rows_inserted)
     with pytest.raises(psycopg2.errors.UndefinedTable):
         br_initdb_endpoint.safe_psql(f"select * from {workload.table}")
+
+    # The storage controller might be overly eager and attempt to finalize
+    # the import before the task got a chance to exit.
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*Call to node.*management API.*failed.*Import task still running.*",
+        ]
+    )
+
+    for ps in env.pageservers:
+        ps.allowed_errors.extend([".*Error processing HTTP request.*Import task not done yet.*"])
 
 
 @run_only_on_default_postgres(reason="PG version is irrelevant here")
@@ -413,8 +381,12 @@ def test_import_completion_on_restart(
 
 
 @run_only_on_default_postgres(reason="PG version is irrelevant here")
-def test_import_respects_tenant_shutdown(
-    neon_env_builder: NeonEnvBuilder, vanilla_pg: VanillaPostgres, make_httpserver: HTTPServer
+@pytest.mark.parametrize("action", ["restart", "delete"])
+def test_import_respects_timeline_lifecycle(
+    neon_env_builder: NeonEnvBuilder,
+    vanilla_pg: VanillaPostgres,
+    make_httpserver: HTTPServer,
+    action: str,
 ):
     """
     Validate that importing timelines respect the usual timeline life cycle:
@@ -482,16 +454,276 @@ def test_import_respects_tenant_shutdown(
     wait_until(hit_failpoint)
     assert not import_completion_signaled.is_set()
 
-    # Restart the pageserver while an import job is in progress.
-    # This clears the failpoint and we expect that the import starts up afresh
-    # after the restart and eventually completes.
-    env.pageserver.stop()
-    env.pageserver.start()
+    if action == "restart":
+        # Restart the pageserver while an import job is in progress.
+        # This clears the failpoint and we expect that the import starts up afresh
+        # after the restart and eventually completes.
+        env.pageserver.stop()
+        env.pageserver.start()
 
-    def cplane_notified():
-        assert import_completion_signaled.is_set()
+        def cplane_notified():
+            assert import_completion_signaled.is_set()
 
-    wait_until(cplane_notified)
+        wait_until(cplane_notified)
+    elif action == "delete":
+        status = env.storage_controller.pageserver_api().timeline_delete(tenant_id, timeline_id)
+        assert status == 200
+
+        timeline_path = env.pageserver.timeline_dir(tenant_id, timeline_id)
+        assert not timeline_path.exists(), "Timeline dir exists after deletion"
+
+        shard_zero = TenantShardId(tenant_id, 0, 0)
+        location = env.storage_controller.inspect(shard_zero)
+        assert location is not None
+        generation = location[0]
+
+        with pytest.raises(StorageControllerApiException, match="not found"):
+            env.storage_controller.import_status(shard_zero, timeline_id, generation)
+    else:
+        raise RuntimeError(f"{action} param not recognized")
+
+    # The storage controller might be overly eager and attempt to finalize
+    # the import before the task got a chance to exit.
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*Call to node.*management API.*failed.*Import task still running.*",
+        ]
+    )
+
+    for ps in env.pageservers:
+        ps.allowed_errors.extend([".*Error processing HTTP request.*Import task not done yet.*"])
+
+
+@skip_in_debug_build("Validation query takes too long in debug builds")
+def test_import_chaos(
+    neon_env_builder: NeonEnvBuilder, vanilla_pg: VanillaPostgres, make_httpserver: HTTPServer
+):
+    """
+    Perform a timeline import while injecting chaos in the environment.
+    We expect that the import completes eventually, that it passes validation and
+    the resulting timeline can be written to.
+    """
+    TARGET_RELBOCK_SIZE = 512 * 1024 * 1024  # 512 MiB
+    ALLOWED_IMPORT_RUNTIME = 90  # seconds
+    SHARD_COUNT = 4
+
+    neon_env_builder.num_pageservers = SHARD_COUNT
+    neon_env_builder.pageserver_import_config = PageserverImportConfig(
+        import_job_concurrency=1,
+        import_job_soft_size_limit=64 * 1024,
+        import_job_checkpoint_threshold=4,
+    )
+
+    # Set up mock control plane HTTP server to listen for import completions
+    import_completion_signaled = Event()
+    # There's some Python magic at play here. A list can be updated from the
+    # handler thread, but an optional cannot. Hence, use a list with one element.
+    import_error = []
+
+    def handler(request: Request) -> Response:
+        assert request.json is not None
+
+        body = request.json
+        if "error" in body:
+            if body["error"]:
+                import_error.append(body["error"])
+
+        log.info(f"control plane /import_complete request: {request.json}")
+        import_completion_signaled.set()
+        return Response(json.dumps({}), status=200)
+
+    cplane_mgmt_api_server = make_httpserver
+    cplane_mgmt_api_server.expect_request(
+        "/storage/api/v1/import_complete", method="PUT"
+    ).respond_with_handler(handler)
+
+    # Plug the cplane mock in
+    neon_env_builder.control_plane_hooks_api = (
+        f"http://{cplane_mgmt_api_server.host}:{cplane_mgmt_api_server.port}/storage/api/v1/"
+    )
+
+    # The import will specifiy a local filesystem path mocking remote storage
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+
+    vanilla_pg.start()
+
+    inserted_rows = populate_vanilla_pg(vanilla_pg, TARGET_RELBOCK_SIZE)
+
+    vanilla_pg.stop()
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    # Pause after every import task to extend the test runtime and allow
+    # for more chaos injection.
+    for ps in env.pageservers:
+        ps.add_persistent_failpoint("import-task-complete-pausable", "sleep(5)")
+
+    env.storage_controller.allowed_errors.extend(
+        [
+            # The shard might have moved or the pageserver hosting the shard restarted
+            ".*Call to node.*management API.*failed.*",
+            # Migrations have their time outs set to 0
+            ".*Timed out after.*downloading layers.*",
+            ".*Failed to prepare by downloading layers.*",
+            # The test may kill the storage controller or pageservers
+            ".*request was dropped before completing.*",
+        ]
+    )
+    for ps in env.pageservers:
+        ps.allowed_errors.extend(
+            [
+                # We might re-write a layer in a different generation if the import
+                # needs to redo some of the progress since not each job is checkpointed.
+                ".*was unlinked but was not dangling.*",
+                # The test may kill the storage controller or pageservers
+                ".*request was dropped before completing.*",
+                # Test can SIGTERM pageserver while it is downloading
+                ".*removing local file.*temp_download.*",
+                ".*Failed to flush heatmap.*",
+                # Test can SIGTERM the storage controller while pageserver
+                # is attempting to upcall.
+                ".*storage controller upcall failed.*timeline_import_status.*",
+                # TODO(vlad): TenantManager::reset_tenant returns a blanked anyhow error.
+                # It should return ResourceUnavailable or something that doesn't error log.
+                ".*activate_post_import.*InternalServerError.*tenant map is shutting down.*",
+                # TODO(vlad): How can this happen?
+                ".*Failed to download a remote file: deserialize index part file.*",
+                ".*Cancelled request finished with an error.*",
+            ]
+        )
+
+    importbucket_path = neon_env_builder.repo_dir / "test_import_chaos_bucket"
+    mock_import_bucket(vanilla_pg, importbucket_path)
+
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+    idempotency = ImportPgdataIdemptencyKey.random()
+
+    env.storage_controller.tenant_create(
+        tenant_id, shard_count=SHARD_COUNT, placement_policy={"Attached": 1}
+    )
+    env.storage_controller.reconcile_until_idle()
+
+    env.storage_controller.timeline_create(
+        tenant_id,
+        {
+            "new_timeline_id": str(timeline_id),
+            "import_pgdata": {
+                "idempotency_key": str(idempotency),
+                "location": {"LocalFs": {"path": str(importbucket_path.absolute())}},
+            },
+        },
+    )
+
+    def chaos(stop_chaos: threading.Event):
+        class ChaosType(StrEnum):
+            MIGRATE_SHARD = "migrate_shard"
+            RESTART_IMMEDIATE = "restart_immediate"
+            RESTART = "restart"
+            STORCON_RESTART_IMMEDIATE = "storcon_restart_immediate"
+
+        while not stop_chaos.is_set():
+            chaos_type = random.choices(
+                population=[
+                    ChaosType.MIGRATE_SHARD,
+                    ChaosType.RESTART,
+                    ChaosType.RESTART_IMMEDIATE,
+                    ChaosType.STORCON_RESTART_IMMEDIATE,
+                ],
+                weights=[0.25, 0.25, 0.25, 0.25],
+                k=1,
+            )[0]
+
+            try:
+                if chaos_type == ChaosType.MIGRATE_SHARD:
+                    target_shard_number = random.randint(0, SHARD_COUNT - 1)
+                    target_shard = TenantShardId(tenant_id, target_shard_number, SHARD_COUNT)
+
+                    placements = env.storage_controller.get_tenants_placement()
+                    log.info(f"{placements=}")
+                    target_ps = placements[str(target_shard)]["intent"]["attached"]
+                    if len(placements[str(target_shard)]["intent"]["secondary"]) == 0:
+                        dest_ps = None
+                    else:
+                        dest_ps = placements[str(target_shard)]["intent"]["secondary"][0]
+
+                    if target_ps is None or dest_ps is None:
+                        continue
+
+                    config = StorageControllerMigrationConfig(
+                        secondary_warmup_timeout="0s",
+                        secondary_download_request_timeout="0s",
+                        prewarm=False,
+                    )
+                    env.storage_controller.tenant_shard_migrate(target_shard, dest_ps, config)
+
+                    log.info(
+                        f"CHAOS: Migrating shard {target_shard} from pageserver {target_ps} to {dest_ps}"
+                    )
+                elif chaos_type == ChaosType.RESTART_IMMEDIATE:
+                    target_ps = random.choice(env.pageservers)
+                    log.info(f"CHAOS: Immediate restart of pageserver {target_ps.id}")
+                    target_ps.stop(immediate=True)
+                    target_ps.start()
+                elif chaos_type == ChaosType.RESTART:
+                    target_ps = random.choice(env.pageservers)
+                    log.info(f"CHAOS: Normal restart of pageserver {target_ps.id}")
+                    target_ps.stop(immediate=False)
+                    target_ps.start()
+                elif chaos_type == ChaosType.STORCON_RESTART_IMMEDIATE:
+                    log.info("CHAOS: Immediate restart of storage controller")
+                    env.storage_controller.stop(immediate=True)
+                    env.storage_controller.start()
+            except Exception as e:
+                log.warning(f"CHAOS: Error during chaos operation {chaos_type}: {e}")
+
+            # Sleep before next chaos event
+            time.sleep(1)
+
+        log.info("Chaos injector stopped")
+
+    def wait_for_import_completion():
+        start = time.time()
+        done = import_completion_signaled.wait(ALLOWED_IMPORT_RUNTIME)
+        if not done:
+            raise TimeoutError(f"Import did not signal completion within {ALLOWED_IMPORT_RUNTIME}")
+
+        end = time.time()
+
+        log.info(f"Import completion signalled after {end - start}s {import_error=}")
+
+        if import_error:
+            raise RuntimeError(f"Import error: {import_error}")
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        stop_chaos = threading.Event()
+
+        wait_for_import_completion_fut = executor.submit(wait_for_import_completion)
+        chaos_fut = executor.submit(chaos, stop_chaos)
+
+        try:
+            wait_for_import_completion_fut.result()
+        except Exception as e:
+            raise e
+        finally:
+            stop_chaos.set()
+            chaos_fut.result()
+
+    import_branch_name = "imported"
+    env.neon_cli.mappings_map_branch(import_branch_name, tenant_id, timeline_id)
+    endpoint = env.endpoints.create_start(branch_name=import_branch_name, tenant_id=tenant_id)
+
+    # Validate the imported data is legit
+    validate_import_from_vanilla_pg(endpoint, inserted_rows)
+
+    endpoint.stop()
+
+    # Validate writes
+    workload = Workload(env, tenant_id, timeline_id, branch_name=import_branch_name)
+    workload.init()
+    workload.write_rows(64)
+    workload.validate()
 
 
 def test_fast_import_with_pageserver_ingest(

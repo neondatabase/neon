@@ -33,7 +33,6 @@ use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::WaitLsnTimeout;
 use async_stream::try_stream;
 use futures::Stream;
-use pageserver_api::reltag::SlruKind;
 use tokio::io::{AsyncWriteExt, ReadHalf, SimplexStream};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{Decoder, FramedRead};
@@ -41,9 +40,9 @@ use tokio_util::sync::CancellationToken;
 
 use futures::stream::StreamExt;
 
-use pageserver_page_api::model;
 use pageserver_page_api::proto::page_service_server::PageService;
 use pageserver_page_api::proto::page_service_server::PageServiceServer;
+use pageserver_page_api::*;
 
 use anyhow::Context;
 use bytes::BytesMut;
@@ -134,12 +133,12 @@ impl From<PageReconstructError> for tonic::Status {
     }
 }
 
-fn convert_reltag(value: &model::RelTag) -> pageserver_api::reltag::RelTag {
+fn convert_reltag(value: &RelTag) -> pageserver_api::reltag::RelTag {
     pageserver_api::reltag::RelTag {
-        spcnode: value.spc_oid,
-        dbnode: value.db_oid,
-        relnode: value.rel_number,
-        forknum: value.fork_number,
+        spcnode: value.spcnode,
+        dbnode: value.dbnode,
+        relnode: value.relnode,
+        forknum: value.forknum,
     }
 }
 
@@ -155,7 +154,7 @@ impl PageService for PageServiceService {
     ) -> std::result::Result<tonic::Response<proto::CheckRelExistsResponse>, tonic::Status> {
         let ttid = self.extract_ttid(request.metadata())?;
         let shard = self.extract_shard(request.metadata())?;
-        let req: model::CheckRelExistsRequest = request.get_ref().try_into()?;
+        let req: CheckRelExistsRequest = request.into_inner().try_into()?;
 
         let rel = convert_reltag(&req.rel);
         let span = tracing::info_span!("check_rel_exists", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, rel = %rel, req_lsn = %req.read_lsn.request_lsn);
@@ -167,7 +166,9 @@ impl PageService for PageServiceService {
             let lsn = Self::wait_or_get_last_lsn(
                 &timeline,
                 req.read_lsn.request_lsn,
-                req.read_lsn.not_modified_since_lsn,
+                req.read_lsn
+                    .not_modified_since_lsn
+                    .unwrap_or(req.read_lsn.request_lsn),
                 &latest_gc_cutoff_lsn,
                 &ctx,
             )
@@ -190,7 +191,7 @@ impl PageService for PageServiceService {
     ) -> std::result::Result<tonic::Response<proto::GetRelSizeResponse>, tonic::Status> {
         let ttid = self.extract_ttid(request.metadata())?;
         let shard = self.extract_shard(request.metadata())?;
-        let req: model::GetRelSizeRequest = request.get_ref().try_into()?;
+        let req: GetRelSizeRequest = request.into_inner().try_into()?;
         let rel = convert_reltag(&req.rel);
 
         let span = tracing::info_span!("get_rel_size", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, rel = %rel, req_lsn = %req.read_lsn.request_lsn);
@@ -202,7 +203,9 @@ impl PageService for PageServiceService {
             let lsn = Self::wait_or_get_last_lsn(
                 &timeline,
                 req.read_lsn.request_lsn,
-                req.read_lsn.not_modified_since_lsn,
+                req.read_lsn
+                    .not_modified_since_lsn
+                    .unwrap_or(req.read_lsn.request_lsn),
                 &latest_gc_cutoff_lsn,
                 &ctx,
             )
@@ -239,7 +242,7 @@ impl PageService for PageServiceService {
                     .enter()
                     .or(Err(tonic::Status::unavailable("timeline is shutting down")))?;
 
-                let request: model::GetPageRequest = (&request).try_into()?;
+                let request: GetPageRequest = request.try_into()?;
                 let rel = convert_reltag(&request.rel);
 
                 let span = tracing::info_span!("get_pages", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, shard_id = %shard, rel = %rel, req_lsn = %request.read_lsn.request_lsn);
@@ -248,7 +251,9 @@ impl PageService for PageServiceService {
                     let lsn = Self::wait_or_get_last_lsn(
                         &timeline,
                         request.read_lsn.request_lsn,
-                        request.read_lsn.not_modified_since_lsn,
+                        request.read_lsn
+                            .not_modified_since_lsn
+                            .unwrap_or(request.read_lsn.request_lsn),
                         &latest_gc_cutoff_lsn,
                         &ctx,
                     )
@@ -257,8 +262,8 @@ impl PageService for PageServiceService {
                     let io_concurrency = IoConcurrency::spawn_from_conf(conf.get_vectored_concurrent_io, guard);
 
                     // TODO: use get_rel_page_at_lsn_batched
-                    let mut page_images = Vec::with_capacity(request.block_number.len());
-                    for blkno in request.block_number {
+                    let mut page_images = Vec::with_capacity(request.block_numbers.len());
+                    for blkno in request.block_numbers {
                         let page_image = timeline
                             .get_rel_page_at_lsn(
                                 rel,
@@ -278,7 +283,7 @@ impl PageService for PageServiceService {
                 let page_images = result?;
                 yield proto::GetPageResponse {
                     request_id: request.request_id,
-                    status: proto::GetPageStatus::Ok as i32,
+                    status_code: proto::GetPageStatusCode::Ok as i32,
                     reason: "".to_string(),
                     page_image: page_images,
                 };
@@ -296,7 +301,7 @@ impl PageService for PageServiceService {
     ) -> Result<tonic::Response<proto::GetDbSizeResponse>, tonic::Status> {
         let ttid = self.extract_ttid(request.metadata())?;
         let shard = self.extract_shard(request.metadata())?;
-        let req: model::GetDbSizeRequest = request.get_ref().try_into()?;
+        let req: GetDbSizeRequest = request.into_inner().try_into()?;
 
         let span = tracing::info_span!("get_db_size", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, db_oid = %req.db_oid, req_lsn = %req.read_lsn.request_lsn);
 
@@ -307,7 +312,9 @@ impl PageService for PageServiceService {
             let lsn = Self::wait_or_get_last_lsn(
                 &timeline,
                 req.read_lsn.request_lsn,
-                req.read_lsn.not_modified_since_lsn,
+                req.read_lsn
+                    .not_modified_since_lsn
+                    .unwrap_or(req.read_lsn.request_lsn),
                 &latest_gc_cutoff_lsn,
                 &ctx,
             )
@@ -331,7 +338,7 @@ impl PageService for PageServiceService {
     ) -> Result<tonic::Response<Self::GetBaseBackupStream>, tonic::Status> {
         let ttid = self.extract_ttid(request.metadata())?;
         let shard = self.extract_shard(request.metadata())?;
-        let req: model::GetBaseBackupRequest = request.get_ref().try_into()?;
+        let req: GetBaseBackupRequest = request.into_inner().try_into()?;
 
         let timeline = self.get_timeline(ttid, shard).await?;
 
@@ -340,7 +347,9 @@ impl PageService for PageServiceService {
         let lsn = Self::wait_or_get_last_lsn(
             &timeline,
             req.read_lsn.request_lsn,
-            req.read_lsn.not_modified_since_lsn,
+            req.read_lsn
+                .not_modified_since_lsn
+                .unwrap_or(req.read_lsn.request_lsn),
             &latest_gc_cutoff_lsn,
             &ctx,
         )
@@ -471,7 +480,7 @@ impl PageService for PageServiceService {
     ) -> Result<tonic::Response<proto::GetSlruSegmentResponse>, tonic::Status> {
         let ttid = self.extract_ttid(request.metadata())?;
         let shard = self.extract_shard(request.metadata())?;
-        let req: model::GetSlruSegmentRequest = request.get_ref().try_into()?;
+        let req: GetSlruSegmentRequest = request.into_inner().try_into()?;
 
         let span = tracing::info_span!("get_slru_segment", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, kind = %req.kind, segno = %req.segno, req_lsn = %req.read_lsn.request_lsn);
 
@@ -482,16 +491,16 @@ impl PageService for PageServiceService {
             let lsn = Self::wait_or_get_last_lsn(
                 &timeline,
                 req.read_lsn.request_lsn,
-                req.read_lsn.not_modified_since_lsn,
+                req.read_lsn
+                    .not_modified_since_lsn
+                    .unwrap_or(req.read_lsn.request_lsn),
                 &latest_gc_cutoff_lsn,
                 &ctx,
             )
             .await?;
 
-            let kind = SlruKind::from_repr(req.kind)
-                .ok_or(tonic::Status::from_error("invalid SLRU kind".into()))?;
             let segment = timeline
-                .get_slru_segment(kind, req.segno, lsn, &ctx)
+                .get_slru_segment(req.kind, req.segno, lsn, &ctx)
                 .await?;
 
             Ok(tonic::Response::new(proto::GetSlruSegmentResponse {

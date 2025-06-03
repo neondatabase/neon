@@ -27,6 +27,7 @@ pub use prometheus::{
 
 pub mod launch_timestamp;
 mod wrappers;
+pub use prometheus;
 pub use wrappers::{CountedReader, CountedWriter};
 mod hll;
 pub use hll::{HyperLogLog, HyperLogLogState, HyperLogLogVec};

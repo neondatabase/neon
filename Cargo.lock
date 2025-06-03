@@ -254,17 +254,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a8ab6b55fe97976e46f91ddbed8d147d966475dc29b2032757ba47e02376fbc3"
 
 [[package]]
-name = "atomic_enum"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99e1aca718ea7b89985790c94aad72d77533063fe00bc497bb79a7c2dae6a661"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.100",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -700,38 +689,11 @@ dependencies = [
 
 [[package]]
 name = "axum"
-version = "0.7.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edca88bc138befd0323b20752846e6587272d3b03b0343c8ea28a6f819e6e71f"
-dependencies = [
- "async-trait",
- "axum-core 0.4.5",
- "bytes",
- "futures-util",
- "http 1.1.0",
- "http-body 1.0.0",
- "http-body-util",
- "itoa",
- "matchit 0.7.3",
- "memchr",
- "mime",
- "percent-encoding",
- "pin-project-lite",
- "rustversion",
- "serde",
- "sync_wrapper 1.0.1",
- "tower 0.5.2",
- "tower-layer",
- "tower-service",
-]
-
-[[package]]
-name = "axum"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d6fd624c75e18b3b4c6b9caf42b1afe24437daaee904069137d8bab077be8b8"
 dependencies = [
- "axum-core 0.5.0",
+ "axum-core",
  "base64 0.22.1",
  "bytes",
  "form_urlencoded",
@@ -742,7 +704,7 @@ dependencies = [
  "hyper 1.6.0",
  "hyper-util",
  "itoa",
- "matchit 0.8.4",
+ "matchit",
  "memchr",
  "mime",
  "percent-encoding",
@@ -760,26 +722,6 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
-]
-
-[[package]]
-name = "axum-core"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09f2bd6146b97ae3359fa0cc6d6b376d9539582c7b4220f041a33ec24c226199"
-dependencies = [
- "async-trait",
- "bytes",
- "futures-util",
- "http 1.1.0",
- "http-body 1.0.0",
- "http-body-util",
- "mime",
- "pin-project-lite",
- "rustversion",
- "sync_wrapper 1.0.1",
- "tower-layer",
- "tower-service",
 ]
 
 [[package]]
@@ -808,8 +750,8 @@ version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fc6f625a1f7705c6cf62d0d070794e94668988b1c38111baeec177c715f7b"
 dependencies = [
- "axum 0.8.1",
- "axum-core 0.5.0",
+ "axum",
+ "axum-core",
  "bytes",
  "futures-util",
  "headers",
@@ -1145,25 +1087,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
-name = "cbindgen"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eadd868a2ce9ca38de7eeafdcec9c7065ef89b42b32f0839278d55f35c54d1ff"
-dependencies = [
- "clap",
- "heck 0.4.1",
- "indexmap 2.9.0",
- "log",
- "proc-macro2",
- "quote",
- "serde",
- "serde_json",
- "syn 2.0.100",
- "tempfile",
- "toml",
-]
-
-[[package]]
 name = "cc"
 version = "1.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1289,7 +1212,7 @@ version = "4.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ac6a0c7b1a9e9a5186361f67dfa1b88213572f427fb9ab038efb2bd8c582dab"
 dependencies = [
- "heck 0.5.0",
+ "heck",
  "proc-macro2",
  "quote",
  "syn 2.0.100",
@@ -1348,34 +1271,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "communicator"
-version = "0.1.0"
-dependencies = [
- "atomic_enum",
- "axum 0.8.1",
- "bytes",
- "cbindgen",
- "clashmap",
- "http 1.1.0",
- "libc",
- "metrics",
- "neon-shmem",
- "nix 0.30.1",
- "pageserver_client_grpc",
- "pageserver_page_api",
- "prometheus",
- "prost 0.13.5",
- "thiserror 1.0.69",
- "tokio",
- "tokio-pipe",
- "tonic 0.12.3",
- "tracing",
- "tracing-subscriber",
- "uring-common",
- "utils",
-]
-
-[[package]]
 name = "compute_api"
 version = "0.1.0"
 dependencies = [
@@ -1400,7 +1295,7 @@ dependencies = [
  "aws-sdk-kms",
  "aws-sdk-s3",
  "aws-smithy-types",
- "axum 0.8.1",
+ "axum",
  "axum-extra",
  "base64 0.13.1",
  "bytes",
@@ -2041,7 +1936,7 @@ checksum = "0892a17df262a24294c382f0d5997571006e7a4348b4327557c4ff1cd4a8bccc"
 dependencies = [
  "darling",
  "either",
- "heck 0.5.0",
+ "heck",
  "proc-macro2",
  "quote",
  "syn 2.0.100",
@@ -2155,7 +2050,7 @@ name = "endpoint_storage"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "axum 0.8.1",
+ "axum",
  "axum-extra",
  "camino",
  "camino-tempfile",
@@ -2828,12 +2723,6 @@ checksum = "54b4a22553d4242c49fddb9ba998a99962b5cc6f22cb5a3482bec22522403ce4"
 dependencies = [
  "http 1.1.0",
 ]
-
-[[package]]
-name = "heck"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95505c38b4572b2d910cecb0281560f54b440a19336cbbcb27bf6ce6adc6f5a8"
 
 [[package]]
 name = "heck"
@@ -3728,12 +3617,6 @@ dependencies = [
 
 [[package]]
 name = "matchit"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
-
-[[package]]
-name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
@@ -3777,7 +3660,7 @@ version = "0.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9e6777fc80a575f9503d908c8b498782a6c3ee88a06cb416dc3941401e43b94"
 dependencies = [
- "heck 0.5.0",
+ "heck",
  "proc-macro2",
  "quote",
  "syn 2.0.100",
@@ -3934,17 +3817,6 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "workspace_hack",
-]
-
-[[package]]
-name = "neonart"
-version = "0.1.0"
-dependencies = [
- "crossbeam-utils",
- "rand 0.9.1",
- "rand_distr 0.5.1",
- "spin",
- "tracing",
 ]
 
 [[package]]
@@ -4379,7 +4251,8 @@ name = "pagebench"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum 0.8.1",
+ "async-trait",
+ "axum",
  "camino",
  "clap",
  "futures",
@@ -4399,6 +4272,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tonic 0.13.1",
  "tracing",
  "utils",
  "workspace_hack",
@@ -4454,6 +4328,7 @@ dependencies = [
  "hashlink",
  "hex",
  "hex-literal",
+ "http 1.1.0",
  "http-utils",
  "humantime",
  "humantime-serde",
@@ -4480,6 +4355,7 @@ dependencies = [
  "postgres_connection",
  "postgres_ffi",
  "postgres_initdb",
+ "posthog_client_lite",
  "pprof",
  "pq_proto",
  "procfs",
@@ -4516,6 +4392,8 @@ dependencies = [
  "tokio-util",
  "toml_edit",
  "tonic 0.13.1",
+ "tonic-reflection",
+ "tower 0.5.2",
  "tracing",
  "tracing-utils",
  "twox-hash",
@@ -4632,7 +4510,10 @@ name = "pageserver_page_api"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "pageserver_api",
+ "postgres_ffi",
  "prost 0.13.5",
+ "smallvec",
  "thiserror 1.0.69",
  "tonic 0.13.1",
  "tonic-build",
@@ -5086,11 +4967,16 @@ name = "posthog_client_lite"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "reqwest",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-utils",
  "workspace_hack",
 ]
 
@@ -5270,7 +5156,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
- "heck 0.5.0",
+ "heck",
  "itertools 0.12.1",
  "log",
  "multimap",
@@ -5291,7 +5177,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c1318b19085f08681016926435853bbf7858f9c082d0999b80550ff5d9abe15"
 dependencies = [
  "bytes",
- "heck 0.5.0",
+ "heck",
  "itertools 0.12.1",
  "log",
  "multimap",
@@ -5951,7 +5837,7 @@ dependencies = [
  "async-trait",
  "getrandom 0.2.11",
  "http 1.1.0",
- "matchit 0.8.4",
+ "matchit",
  "opentelemetry",
  "reqwest",
  "reqwest-middleware",
@@ -7126,7 +7012,7 @@ version = "0.26.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4c6bee85a5a24955dc440386795aa378cd9cf82acd5f764469152d2270e581be"
 dependencies = [
- "heck 0.5.0",
+ "heck",
  "proc-macro2",
  "quote",
  "rustversion",
@@ -7552,16 +7438,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-pipe"
-version = "0.2.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f213a84bffbd61b8fa0ba8a044b4bbe35d471d0b518867181e82bd5c15542784"
-dependencies = [
- "libc",
- "tokio",
-]
-
-[[package]]
 name = "tokio-postgres"
 version = "0.7.10"
 source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#f3cf448febde5fd298071d54d568a9c875a7a62b"
@@ -7755,25 +7631,16 @@ version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877c5b330756d856ffcc4553ab34a5684481ade925ecc54bcd1bf02b1d0d4d52"
 dependencies = [
- "async-stream",
  "async-trait",
- "axum 0.7.9",
  "base64 0.22.1",
  "bytes",
- "h2 0.4.4",
  "http 1.1.0",
  "http-body 1.0.0",
  "http-body-util",
- "hyper 1.6.0",
- "hyper-timeout",
- "hyper-util",
  "percent-encoding",
  "pin-project",
  "prost 0.13.5",
- "socket2",
- "tokio",
  "tokio-stream",
- "tower 0.4.13",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -7786,7 +7653,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e581ba15a835f4d9ea06c55ab1bd4dce26fc53752c69a04aac00703bfb49ba9"
 dependencies = [
  "async-trait",
- "axum 0.8.1",
+ "axum",
  "base64 0.22.1",
  "bytes",
  "flate2",
@@ -7826,6 +7693,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tonic-reflection"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9687bd5bfeafebdded2356950f278bba8226f0b32109537c4253406e09aafe1"
+dependencies = [
+ "prost 0.13.5",
+ "prost-types 0.13.3",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.13.1",
+]
+
+[[package]]
 name = "tower"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7833,13 +7713,9 @@ checksum = "b8fa9be0de6cf49e536ce1851f987bd21a43b771b09473c3549a6c853db37c1c"
 dependencies = [
  "futures-core",
  "futures-util",
- "indexmap 1.9.3",
  "pin-project",
  "pin-project-lite",
- "rand 0.8.5",
- "slab",
  "tokio",
- "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -8326,7 +8202,7 @@ name = "vm_monitor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum 0.8.1",
+ "axum",
  "cgroups-rs",
  "clap",
  "futures",
@@ -8819,6 +8695,8 @@ dependencies = [
  "ahash",
  "anstream",
  "anyhow",
+ "axum",
+ "axum-core",
  "base64 0.13.1",
  "base64 0.21.7",
  "base64ct",
@@ -8841,10 +8719,8 @@ dependencies = [
  "fail",
  "form_urlencoded",
  "futures-channel",
- "futures-core",
  "futures-executor",
  "futures-io",
- "futures-task",
  "futures-util",
  "generic-array",
  "getrandom 0.2.11",
@@ -8874,7 +8750,6 @@ dependencies = [
  "once_cell",
  "p256 0.13.2",
  "parquet",
- "percent-encoding",
  "prettyplease",
  "proc-macro2",
  "prost 0.13.5",

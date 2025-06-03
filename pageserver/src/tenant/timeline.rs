@@ -103,6 +103,7 @@ use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
 };
 use crate::disk_usage_eviction_task::{DiskUsageEvictionInfo, EvictionCandidate, finite_f32};
+use crate::feature_resolver::FeatureResolver;
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::l0_flush::{self, L0FlushGlobalState};
 use crate::metrics::{
@@ -198,6 +199,7 @@ pub struct TimelineResources {
     pub l0_compaction_trigger: Arc<Notify>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
     pub basebackup_prepare_sender: BasebackupPrepareSender,
+    pub feature_resolver: FeatureResolver,
 }
 
 pub struct Timeline {
@@ -444,6 +446,8 @@ pub struct Timeline {
 
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
     basebackup_prepare_sender: BasebackupPrepareSender,
+
+    feature_resolver: FeatureResolver,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -944,6 +948,18 @@ pub(crate) enum WaitLsnError {
     // Timeout expired while waiting for LSN to catch up with goal.
     #[error("{0}")]
     Timeout(String),
+}
+
+impl From<WaitLsnError> for tonic::Status {
+    fn from(err: WaitLsnError) -> Self {
+        use tonic::Code;
+        let code = match &err {
+            WaitLsnError::Timeout(_) => Code::Internal,
+            WaitLsnError::BadState(_) => Code::Internal,
+            WaitLsnError::Shutdown => Code::Unavailable,
+        };
+        tonic::Status::new(code, err.to_string())
+    }
 }
 
 // The impls below achieve cancellation mapping for errors.
@@ -3072,6 +3088,8 @@ impl Timeline {
                 wait_lsn_log_slow: tokio::sync::Semaphore::new(1),
 
                 basebackup_prepare_sender: resources.basebackup_prepare_sender,
+
+                feature_resolver: resources.feature_resolver,
             };
 
             result.repartition_threshold =
@@ -4761,7 +4779,10 @@ impl Timeline {
                     || !flushed_to_lsn.is_valid()
             );
 
-            if flushed_to_lsn < frozen_to_lsn && self.shard_identity.count.count() > 1 {
+            if flushed_to_lsn < frozen_to_lsn
+                && self.shard_identity.count.count() > 1
+                && result.is_ok()
+            {
                 // If our layer flushes didn't carry disk_consistent_lsn up to the `to_lsn` advertised
                 // to us via layer_flush_start_rx, then advance it here.
                 //
@@ -4906,6 +4927,7 @@ impl Timeline {
                     LastImageLayerCreationStatus::Initial,
                     false, // don't yield for L0, we're flushing L0
                 )
+                .instrument(info_span!("create_image_layers", mode = %ImageLayerCreationMode::Initial, partition_mode = "initial", lsn = %self.initdb_lsn))
                 .await?;
             debug_assert!(
                 matches!(is_complete, LastImageLayerCreationStatus::Complete),
@@ -4938,6 +4960,10 @@ impl Timeline {
         if self.cancel.is_cancelled() {
             return Err(FlushLayerError::Cancelled);
         }
+
+        fail_point!("flush-layer-before-update-remote-consistent-lsn", |_| {
+            Err(FlushLayerError::Other(anyhow!("failpoint").into()))
+        });
 
         let disk_consistent_lsn = Lsn(lsn_range.end.0 - 1);
 
@@ -5462,7 +5488,8 @@ impl Timeline {
 
     /// Returns the image layers generated and an enum indicating whether the process is fully completed.
     /// true = we have generate all image layers, false = we preempt the process for L0 compaction.
-    #[tracing::instrument(skip_all, fields(%lsn, %mode))]
+    ///
+    /// `partition_mode` is only for logging purpose and is not used anywhere in this function.
     async fn create_image_layers(
         self: &Arc<Timeline>,
         partitioning: &KeyPartitioning,

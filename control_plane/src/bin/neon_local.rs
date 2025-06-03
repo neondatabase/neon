@@ -32,6 +32,7 @@ use control_plane::storage_controller::{
 };
 use nix::fcntl::{Flock, FlockArg};
 use pageserver_api::config::{
+    DEFAULT_GRPC_LISTEN_PORT as DEFAULT_PAGESERVER_GRPC_PORT,
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
 };
@@ -1007,13 +1008,16 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
                     let pageserver_id = NodeId(DEFAULT_PAGESERVER_ID.0 + i as u64);
                     let pg_port = DEFAULT_PAGESERVER_PG_PORT + i;
                     let http_port = DEFAULT_PAGESERVER_HTTP_PORT + i;
+                    let grpc_port = DEFAULT_PAGESERVER_GRPC_PORT + i;
                     NeonLocalInitPageserverConf {
                         id: pageserver_id,
                         listen_pg_addr: format!("127.0.0.1:{pg_port}"),
                         listen_http_addr: format!("127.0.0.1:{http_port}"),
                         listen_https_addr: None,
+                        listen_grpc_addr: Some(format!("127.0.0.1:{grpc_port}")),
                         pg_auth_type: AuthType::Trust,
                         http_auth_type: AuthType::Trust,
+                        grpc_auth_type: AuthType::Trust,
                         other: Default::default(),
                         // Typical developer machines use disks with slow fsync, and we don't care
                         // about data integrity: disable disk syncs.
@@ -1275,6 +1279,7 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
                 mode: pageserver_api::models::TimelineCreateRequestMode::Branch {
                     ancestor_timeline_id,
                     ancestor_start_lsn: start_lsn,
+                    read_only: false,
                     pg_version: None,
                 },
             };

@@ -206,8 +206,8 @@ pub struct GcCompactionQueue {
 }
 
 static CONCURRENT_GC_COMPACTION_TASKS: Lazy<Arc<Semaphore>> = Lazy::new(|| {
-    // Only allow two timelines on one pageserver to run gc compaction at a time.
-    Arc::new(Semaphore::new(2))
+    // Only allow one timeline on one pageserver to run gc compaction at a time.
+    Arc::new(Semaphore::new(1))
 });
 
 impl GcCompactionQueue {
@@ -1278,11 +1278,55 @@ impl Timeline {
         }
 
         let gc_cutoff = *self.applied_gc_cutoff_lsn.read();
+        let l0_l1_boundary_lsn = {
+            // We do the repartition on the L0-L1 boundary. All data below the boundary
+            // are compacted by L0 with low read amplification, thus making the `repartition`
+            // function run fast.
+            let guard = self.layers.read().await;
+            guard
+                .all_persistent_layers()
+                .iter()
+                .map(|x| {
+                    // Use the end LSN of delta layers OR the start LSN of image layers.
+                    if x.is_delta {
+                        x.lsn_range.end
+                    } else {
+                        x.lsn_range.start
+                    }
+                })
+                .max()
+        };
+
+        let (partition_mode, partition_lsn) = if cfg!(test)
+            || cfg!(feature = "testing")
+            || self
+                .feature_resolver
+                .evaluate_boolean("image-compaction-boundary", self.tenant_shard_id.tenant_id)
+                .is_ok()
+        {
+            let last_repartition_lsn = self.partitioning.read().1;
+            let lsn = match l0_l1_boundary_lsn {
+                Some(boundary) => gc_cutoff
+                    .max(boundary)
+                    .max(last_repartition_lsn)
+                    .max(self.initdb_lsn)
+                    .max(self.ancestor_lsn),
+                None => self.get_last_record_lsn(),
+            };
+            if lsn <= self.initdb_lsn || lsn <= self.ancestor_lsn {
+                // Do not attempt to create image layers below the initdb or ancestor LSN -- no data below it
+                ("l0_l1_boundary", self.get_last_record_lsn())
+            } else {
+                ("l0_l1_boundary", lsn)
+            }
+        } else {
+            ("latest_record", self.get_last_record_lsn())
+        };
 
         // 2. Repartition and create image layers if necessary
         match self
             .repartition(
-                self.get_last_record_lsn(),
+                partition_lsn,
                 self.get_compaction_target_size(),
                 options.flags,
                 ctx,
@@ -1301,18 +1345,19 @@ impl Timeline {
                     .extend(sparse_partitioning.into_dense().parts);
 
                 // 3. Create new image layers for partitions that have been modified "enough".
+                let mode = if options
+                    .flags
+                    .contains(CompactFlags::ForceImageLayerCreation)
+                {
+                    ImageLayerCreationMode::Force
+                } else {
+                    ImageLayerCreationMode::Try
+                };
                 let (image_layers, outcome) = self
                     .create_image_layers(
                         &partitioning,
                         lsn,
-                        if options
-                            .flags
-                            .contains(CompactFlags::ForceImageLayerCreation)
-                        {
-                            ImageLayerCreationMode::Force
-                        } else {
-                            ImageLayerCreationMode::Try
-                        },
+                        mode,
                         &image_ctx,
                         self.last_image_layer_creation_status
                             .load()
@@ -1320,6 +1365,7 @@ impl Timeline {
                             .clone(),
                         options.flags.contains(CompactFlags::YieldForL0),
                     )
+                    .instrument(info_span!("create_image_layers", mode = %mode, partition_mode = %partition_mode, lsn = %lsn))
                     .await
                     .inspect_err(|err| {
                         if let CreateImageLayersError::GetVectoredError(
@@ -1344,7 +1390,8 @@ impl Timeline {
             }
 
             Ok(_) => {
-                info!("skipping repartitioning due to image compaction LSN being below GC cutoff");
+                // This happens very frequently so we don't want to log it.
+                debug!("skipping repartitioning due to image compaction LSN being below GC cutoff");
             }
 
             // Suppress errors when cancelled.

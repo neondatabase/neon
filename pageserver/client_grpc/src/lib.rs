@@ -13,8 +13,8 @@ use futures::{Stream, StreamExt};
 use thiserror::Error;
 use tonic::metadata::AsciiMetadataValue;
 
-use pageserver_page_api::model::*;
 use pageserver_page_api::proto;
+use pageserver_page_api::*;
 
 use pageserver_page_api::proto::PageServiceClient;
 use utils::shard::ShardIndex;
@@ -146,7 +146,7 @@ impl PageserverClient {
     }
     pub async fn process_check_rel_exists_request(
         &self,
-        request: &CheckRelExistsRequest,
+        request: CheckRelExistsRequest,
     ) -> Result<bool, PageserverClientError> {
         // Current sharding model assumes that all metadata is present only at shard 0.
         let shard = ShardIndex::unsharded();
@@ -156,7 +156,7 @@ impl PageserverClient {
         let mut client =
             PageServiceClient::with_interceptor(chan, self.auth_interceptor.for_shard(shard));
 
-        let request = proto::CheckRelExistsRequest::from(request);
+        let request = proto::CheckRelExistsRequest::try_from(request)?;
         let response = client.check_rel_exists(tonic::Request::new(request)).await;
 
         match response {
@@ -173,7 +173,7 @@ impl PageserverClient {
 
     pub async fn process_get_rel_size_request(
         &self,
-        request: &GetRelSizeRequest,
+        request: GetRelSizeRequest,
     ) -> Result<u32, PageserverClientError> {
         // Current sharding model assumes that all metadata is present only at shard 0.
         let shard = ShardIndex::unsharded();
@@ -183,7 +183,7 @@ impl PageserverClient {
         let mut client =
             PageServiceClient::with_interceptor(chan, self.auth_interceptor.for_shard(shard));
 
-        let request = proto::GetRelSizeRequest::from(request);
+        let request = proto::GetRelSizeRequest::try_from(request)?;
         let response = client.get_rel_size(tonic::Request::new(request)).await;
 
         match response {
@@ -203,7 +203,7 @@ impl PageserverClient {
     // TODO: This opens a new gRPC stream for every request, which is extremely inefficient
     pub async fn get_page(
         &self,
-        request: &GetPageRequest,
+        request: GetPageRequest,
     ) -> Result<Vec<Bytes>, PageserverClientError> {
         // FIXME: calculate the shard number correctly
         let shard = ShardIndex::unsharded();
@@ -213,7 +213,7 @@ impl PageserverClient {
         let mut client =
             PageServiceClient::with_interceptor(chan, self.auth_interceptor.for_shard(shard));
 
-        let request = proto::GetPageRequest::from(request);
+        let request = proto::GetPageRequest::try_from(request)?;
 
         let request_stream = futures::stream::once(std::future::ready(request));
 
@@ -245,8 +245,8 @@ impl PageserverClient {
             }
             Ok(resp) => {
                 pooled_client.finish(Ok(())).await; // Pass success to finish
-                let response: GetPageResponse = resp.try_into()?;
-                return Ok(response.page_image);
+                let response: GetPageResponse = resp.into();
+                return Ok(response.page_images.to_vec());
             }
         }
     }
@@ -286,7 +286,7 @@ impl PageserverClient {
     /// Process a request to get the size of a database.
     pub async fn process_get_dbsize_request(
         &self,
-        request: &GetDbSizeRequest,
+        request: GetDbSizeRequest,
     ) -> Result<u64, PageserverClientError> {
         // Current sharding model assumes that all metadata is present only at shard 0.
         let shard = ShardIndex::unsharded();
@@ -296,7 +296,7 @@ impl PageserverClient {
         let mut client =
             PageServiceClient::with_interceptor(chan, self.auth_interceptor.for_shard(shard));
 
-        let request = proto::GetDbSizeRequest::from(request);
+        let request = proto::GetDbSizeRequest::try_from(request)?;
         let response = client.get_db_size(tonic::Request::new(request)).await;
 
         match response {
@@ -313,7 +313,7 @@ impl PageserverClient {
     /// Process a request to get the size of a database.
     pub async fn get_base_backup(
         &self,
-        request: &GetBaseBackupRequest,
+        request: GetBaseBackupRequest,
         gzip: bool,
     ) -> std::result::Result<
         tonic::Response<tonic::codec::Streaming<proto::GetBaseBackupResponseChunk>>,
@@ -331,7 +331,7 @@ impl PageserverClient {
             client = client.accept_compressed(tonic::codec::CompressionEncoding::Gzip);
         }
 
-        let request = proto::GetBaseBackupRequest::from(request);
+        let request = proto::GetBaseBackupRequest::try_from(request)?;
         let response = client.get_base_backup(tonic::Request::new(request)).await;
 
         match response {

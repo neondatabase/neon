@@ -11,25 +11,14 @@
 //! - => S3 as the source for the PGDATA instead of local filesystem
 //!
 //! TODOs before productionization:
-//! - ChunkProcessingJob size / ImportJob::total_size does not account for sharding.
-//!   => produced image layers likely too small.
 //! - ChunkProcessingJob should cut up an ImportJob to hit exactly target image layer size.
-//! - asserts / unwraps need to be replaced with errors
-//! - don't trust remote objects will be small (=prevent OOMs in those cases)
-//!     - limit all in-memory buffers in size, or download to disk and read from there
-//! - limit task concurrency
-//! - generally play nice with other tenants in the system
-//!   - importbucket is different bucket than main pageserver storage, so, should be fine wrt S3 rate limits
-//!   - but concerns like network bandwidth, local disk write bandwidth, local disk capacity, etc
-//! - integrate with layer eviction system
-//! - audit for Tenant::cancel nor Timeline::cancel responsivity
-//! - audit for Tenant/Timeline gate holding (we spawn tokio tasks during this flow!)
 //!
 //! An incomplete set of TODOs from the Hackathon:
 //! - version-specific CheckPointData (=> pgv abstraction, already exists for regular walingest)
 
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
+use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -43,7 +32,7 @@ use pageserver_api::key::{
     rel_dir_to_key, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
     slru_segment_size_to_key,
 };
-use pageserver_api::keyspace::{contiguous_range_len, is_contiguous_range, singleton_range};
+use pageserver_api::keyspace::{ShardedRange, singleton_range};
 use pageserver_api::models::{ShardImportProgress, ShardImportProgressV1, ShardImportStatus};
 use pageserver_api::reltag::{RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
@@ -100,8 +89,24 @@ async fn run_v1(
         tasks: Vec::default(),
     };
 
-    let import_config = &timeline.conf.timeline_import_config;
-    let plan = planner.plan(import_config).await?;
+    // Use the job size limit encoded in the progress if we are resuming an import.
+    // This ensures that imports have stable plans even if the pageserver config changes.
+    let import_config = {
+        match &import_progress {
+            Some(progress) => {
+                let base = &timeline.conf.timeline_import_config;
+                TimelineImportConfig {
+                    import_job_soft_size_limit: NonZeroUsize::new(progress.job_soft_size_limit)
+                        .unwrap(),
+                    import_job_concurrency: base.import_job_concurrency,
+                    import_job_checkpoint_threshold: base.import_job_checkpoint_threshold,
+                }
+            }
+            None => timeline.conf.timeline_import_config.clone(),
+        }
+    };
+
+    let plan = planner.plan(&import_config).await?;
 
     // Hash the plan and compare with the hash of the plan we got back from the storage controller.
     // If the two match, it means that the planning stage had the same output.
@@ -113,20 +118,28 @@ async fn run_v1(
     let plan_hash = hasher.finish();
 
     if let Some(progress) = &import_progress {
-        if plan_hash != progress.import_plan_hash {
-            anyhow::bail!("Import plan does not match storcon metadata");
-        }
-
         // Handle collisions on jobs of unequal length
         if progress.jobs != plan.jobs.len() {
             anyhow::bail!("Import plan job length does not match storcon metadata")
+        }
+
+        if plan_hash != progress.import_plan_hash {
+            anyhow::bail!("Import plan does not match storcon metadata");
         }
     }
 
     pausable_failpoint!("import-timeline-pre-execute-pausable");
 
+    let jobs_count = import_progress.as_ref().map(|p| p.jobs);
     let start_from_job_idx = import_progress.map(|progress| progress.completed);
-    plan.execute(timeline, start_from_job_idx, plan_hash, import_config, ctx)
+
+    tracing::info!(
+        start_from_job_idx=?start_from_job_idx,
+        jobs=?jobs_count,
+        "Executing import plan"
+    );
+
+    plan.execute(timeline, start_from_job_idx, plan_hash, &import_config, ctx)
         .await
 }
 
@@ -150,6 +163,7 @@ impl Planner {
     /// This function is and must remain pure: given the same input, it will generate the same import plan.
     async fn plan(mut self, import_config: &TimelineImportConfig) -> anyhow::Result<Plan> {
         let pgdata_lsn = Lsn(self.control_file.control_file_data().checkPoint).align();
+        anyhow::ensure!(pgdata_lsn.is_valid());
 
         let datadir = PgDataDir::new(&self.storage).await?;
 
@@ -218,15 +232,36 @@ impl Planner {
                 checkpoint_buf,
             )));
 
+        // Sort the tasks by the key ranges they handle.
+        // The plan being generated here needs to be stable across invocations
+        // of this method.
+        self.tasks.sort_by_key(|task| match task {
+            AnyImportTask::SingleKey(key) => (key.key, key.key.next()),
+            AnyImportTask::RelBlocks(rel_blocks) => {
+                (rel_blocks.key_range.start, rel_blocks.key_range.end)
+            }
+            AnyImportTask::SlruBlocks(slru_blocks) => {
+                (slru_blocks.key_range.start, slru_blocks.key_range.end)
+            }
+        });
+
         // Assigns parts of key space to later parallel jobs
+        // Note: The image layers produced here may have gaps, meaning,
+        //       there is not an image for each key in the layer's key range.
+        //       The read path stops traversal at the first image layer, regardless
+        //       of whether a base image has been found for a key or not.
+        //       (Concept of sparse image layers doesn't exist.)
+        //       This behavior is exactly right for the base image layers we're producing here.
+        //       But, since no other place in the code currently produces image layers with gaps,
+        //       it seems noteworthy.
         let mut last_end_key = Key::MIN;
         let mut current_chunk = Vec::new();
         let mut current_chunk_size: usize = 0;
         let mut jobs = Vec::new();
         for task in std::mem::take(&mut self.tasks).into_iter() {
-            if current_chunk_size + task.total_size()
-                > import_config.import_job_soft_size_limit.into()
-            {
+            let task_size = task.total_size(&self.shard);
+            let projected_chunk_size = current_chunk_size.saturating_add(task_size);
+            if projected_chunk_size > import_config.import_job_soft_size_limit.into() {
                 let key_range = last_end_key..task.key_range().start;
                 jobs.push(ChunkProcessingJob::new(
                     key_range.clone(),
@@ -236,7 +271,7 @@ impl Planner {
                 last_end_key = key_range.end;
                 current_chunk_size = 0;
             }
-            current_chunk_size += task.total_size();
+            current_chunk_size = current_chunk_size.saturating_add(task_size);
             current_chunk.push(task);
         }
         jobs.push(ChunkProcessingJob::new(
@@ -426,6 +461,8 @@ impl Plan {
                     }));
                 },
                 maybe_complete_job_idx = work.next() => {
+                    pausable_failpoint!("import-task-complete-pausable");
+
                     match maybe_complete_job_idx {
                         Some(Ok((job_idx, res))) => {
                             assert!(last_completed_job_idx.checked_add(1).unwrap() == job_idx);
@@ -434,11 +471,17 @@ impl Plan {
                             last_completed_job_idx = job_idx;
 
                             if last_completed_job_idx % checkpoint_every == 0 {
+                                tracing::info!(last_completed_job_idx, jobs=%jobs_in_plan, "Checkpointing import status");
+
                                 let progress = ShardImportProgressV1 {
                                     jobs: jobs_in_plan,
                                     completed: last_completed_job_idx,
                                     import_plan_hash,
+                                    job_soft_size_limit: import_config.import_job_soft_size_limit.into(),
                                 };
+
+                                timeline.remote_client.schedule_index_upload_for_file_changes()?;
+                                timeline.remote_client.wait_completion().await?;
 
                                 storcon_client.put_timeline_import_status(
                                     timeline.tenant_shard_id,
@@ -568,18 +611,18 @@ impl PgDataDirDb {
                 };
 
                 let path = datadir_path.join(rel_tag.to_segfile_name(segno));
-                assert!(filesize % BLCKSZ as usize == 0); // TODO: this should result in an error
+                anyhow::ensure!(filesize % BLCKSZ as usize == 0);
                 let nblocks = filesize / BLCKSZ as usize;
 
-                PgDataDirDbFile {
+                Ok(PgDataDirDbFile {
                     path,
                     filesize,
                     rel_tag,
                     segno,
                     nblocks: Some(nblocks), // first non-cummulative sizes
-                }
+                })
             })
-            .collect();
+            .collect::<anyhow::Result<_, _>>()?;
 
         // Set cummulative sizes. Do all of that math here, so that later we could easier
         // parallelize over segments and know with which segments we need to write relsize
@@ -614,12 +657,22 @@ impl PgDataDirDb {
 trait ImportTask {
     fn key_range(&self) -> Range<Key>;
 
-    fn total_size(&self) -> usize {
-        // TODO: revisit this
-        if is_contiguous_range(&self.key_range()) {
-            contiguous_range_len(&self.key_range()) as usize * 8192
+    fn total_size(&self, shard_identity: &ShardIdentity) -> usize {
+        let range = ShardedRange::new(self.key_range(), shard_identity);
+        let page_count = range.page_count();
+        if page_count == u32::MAX {
+            tracing::warn!(
+                "Import task has non contiguous key range: {}..{}",
+                self.key_range().start,
+                self.key_range().end
+            );
+
+            // Tasks should operate on contiguous ranges. It is unexpected for
+            // ranges to violate this assumption. Calling code handles this by mapping
+            // any task on a non contiguous range to its own image layer.
+            usize::MAX
         } else {
-            u32::MAX as usize
+            page_count as usize * 8192
         }
     }
 
@@ -640,7 +693,11 @@ impl Hash for ImportSingleKeyTask {
         let ImportSingleKeyTask { key, buf } = self;
 
         key.hash(state);
-        buf.hash(state);
+        // The key value might not have a stable binary representation.
+        // For instance, the db directory uses an unstable hash-map.
+        // To work around this we are a bit lax here and only hash the
+        // size of the buffer which must be consistent.
+        buf.len().hash(state);
     }
 }
 
@@ -713,6 +770,8 @@ impl ImportTask for ImportRelBlocksTask {
         layer_writer: &mut ImageLayerWriter,
         ctx: &RequestContext,
     ) -> anyhow::Result<usize> {
+        const MAX_BYTE_RANGE_SIZE: usize = 4 * 1024 * 1024;
+
         debug!("Importing relation file");
 
         let (rel_tag, start_blk) = self.key_range.start.to_rel_block()?;
@@ -737,7 +796,7 @@ impl ImportTask for ImportRelBlocksTask {
                 assert_eq!(key.len(), 1);
                 assert!(!acc.is_empty());
                 assert!(acc_end > acc_start);
-                if acc_end == start /* TODO additional max range check here, to limit memory consumption per task to X */ {
+                if acc_end == start && end - acc_start <= MAX_BYTE_RANGE_SIZE {
                     acc.push(key.pop().unwrap());
                     Ok((acc, acc_start, end))
                 } else {
@@ -752,8 +811,8 @@ impl ImportTask for ImportRelBlocksTask {
                 .get_range(&self.path, range_start.into_u64(), range_end.into_u64())
                 .await?;
             let mut buf = Bytes::from(range_buf);
-            // TODO: batched writes
             for key in keys {
+                // The writer buffers writes internally
                 let image = buf.split_to(8192);
                 layer_writer.put_image(key, image, ctx).await?;
                 nimages += 1;
@@ -806,6 +865,9 @@ impl ImportTask for ImportSlruBlocksTask {
         debug!("Importing SLRU segment file {}", self.path);
         let buf = self.storage.get(&self.path).await?;
 
+        // TODO(vlad): Does timestamp to LSN work for imported timelines?
+        // Probably not since we don't append the `xact_time` to it as in
+        // [`WalIngest::ingest_xact_record`].
         let (kind, segno, start_blk) = self.key_range.start.to_slru_block()?;
         let (_kind, _segno, end_blk) = self.key_range.end.to_slru_block()?;
         let mut blknum = start_blk;
@@ -915,7 +977,7 @@ impl ChunkProcessingJob {
                 let guard = timeline.layers.read().await;
                 let existing_layer = guard.try_get_from_key(&desc.key());
                 if let Some(layer) = existing_layer {
-                    if layer.metadata().generation != timeline.generation {
+                    if layer.metadata().generation == timeline.generation {
                         return Err(anyhow::anyhow!(
                             "Import attempted to rewrite layer file in the same generation: {}",
                             layer.local_path()
@@ -942,6 +1004,15 @@ impl ChunkProcessingJob {
             .cloned();
         match existing_layer {
             Some(existing) => {
+                // Unlink the remote layer from the index without scheduling its deletion.
+                // When `existing_layer` drops [`LayerInner::drop`] will schedule its deletion from
+                // remote storage, but that assumes that the layer was unlinked from the index first.
+                timeline
+                    .remote_client
+                    .schedule_unlinking_of_layers_from_index_part(std::iter::once(
+                        existing.layer_desc().layer_name(),
+                    ))?;
+
                 guard.open_mut()?.rewrite_layers(
                     &[(existing.clone(), resident_layer.clone())],
                     &[],

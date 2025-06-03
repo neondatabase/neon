@@ -7,14 +7,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use async_trait::async_trait;
 use camino::Utf8PathBuf;
 use futures::StreamExt;
 use futures::stream::FuturesOrdered;
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::KeySpaceAccum;
-use pageserver_api::models::{PagestreamGetPageRequest, PagestreamRequest};
+use pageserver_api::models::{
+    PagestreamGetPageRequest, PagestreamGetPageResponse, PagestreamRequest,
+};
 use pageserver_api::shard::TenantShardId;
-use pageserver_page_api::model::{GetPageClass, GetPageResponse, GetPageStatus};
+use pageserver_page_api::proto;
 use rand::prelude::*;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -38,6 +41,12 @@ use metrics::{Encoder, TextEncoder};
 use crate::util::tokio_thread_local_stats::AllThreadLocalStats;
 use crate::util::{request_stats, tokio_thread_local_stats};
 
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum Protocol {
+    Libpq,
+    Grpc,
+}
+
 /// GetPage@LatestLSN, uniformly distributed across the compute-accessible keyspace.
 #[derive(clap::Parser)]
 pub(crate) struct Args {
@@ -55,6 +64,8 @@ pub(crate) struct Args {
     num_clients: NonZeroUsize,
     #[clap(long)]
     runtime: Option<humantime::Duration>,
+    #[clap(long, value_enum, default_value = "libpq")]
+    protocol: Protocol,
     /// Each client sends requests at the given rate.
     ///
     /// If a request takes too long and we should be issuing a new request already,
@@ -399,16 +410,20 @@ async fn main_impl(
 
         let new_value = new_metrics.clone();
         Box::pin(async move {
-            if args.grpc_stream {
-                client_grpc_stream(args, worker_id, ss, cancel, rps_period, ranges, weights).await
-            } else if args.grpc {
-                client_grpc(
-                    args, worker_id, new_value, ss, cancel, rps_period, ranges, weights,
-                )
-                .await
-            } else {
-                client_libpq(args, worker_id, ss, cancel, rps_period, ranges, weights).await
-            }
+            let client: Box<dyn Client> = match args.protocol {
+                Protocol::Libpq => Box::new(
+                    LibpqClient::new(args.page_service_connstring.clone(), worker_id.timeline)
+                        .await
+                        .unwrap(),
+                ),
+
+                Protocol::Grpc => Box::new(
+                    GrpcClient::new(args.page_service_connstring.clone(), worker_id.timeline)
+                        .await
+                        .unwrap(),
+                ),
+            };
+            run_worker(args, client, ss, cancel, rps_period, ranges, weights).await
         })
     };
 
@@ -460,23 +475,15 @@ async fn main_impl(
     anyhow::Ok(())
 }
 
-async fn client_libpq(
+async fn run_worker(
     args: &Args,
-    worker_id: WorkerId,
+    mut client: Box<dyn Client>,
     shared_state: Arc<SharedState>,
     cancel: CancellationToken,
     rps_period: Option<Duration>,
     ranges: Vec<KeyRange>,
     weights: rand::distributions::weighted::WeightedIndex<i128>,
 ) {
-    let client = pageserver_client::page_service::Client::new(args.page_service_connstring.clone())
-        .await
-        .unwrap();
-    let mut client = client
-        .pagestream(worker_id.timeline.tenant_id, worker_id.timeline.timeline_id)
-        .await
-        .unwrap();
-
     shared_state.start_work_barrier.wait().await;
     let client_start = Instant::now();
     let mut ticks_processed = 0;
@@ -520,12 +527,12 @@ async fn client_libpq(
                     blkno: block_no,
                 }
             };
-            client.getpage_send(req).await.unwrap();
+            client.send_get_page(req).await.unwrap();
             inflight.push_back(start);
         }
 
         let start = inflight.pop_front().unwrap();
-        client.getpage_recv().await.unwrap();
+        client.recv_get_page().await.unwrap();
         let end = Instant::now();
         shared_state.live_stats.request_done();
         ticks_processed += 1;
@@ -548,228 +555,103 @@ async fn client_libpq(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn client_grpc(
-    args: &Args,
-    worker_id: WorkerId,
-    client_metrics: Arc<pageserver_client_grpc::PageserverClientAggregateMetrics>,
-    shared_state: Arc<SharedState>,
-    cancel: CancellationToken,
-    rps_period: Option<Duration>,
-    ranges: Vec<KeyRange>,
-    weights: rand::distributions::weighted::WeightedIndex<i128>,
-) {
-    let shard_map = HashMap::from([(
-        ShardIndex::unsharded(),
-        args.page_service_connstring.clone(),
-    )]);
-    let options = pageserver_client_grpc::ClientCacheOptions {
-        max_consumers: args.pool_max_consumers.get(),
-        error_threshold: args.pool_error_threshold.get(),
-        connect_timeout: Duration::from_millis(args.pool_connect_timeout.get() as u64),
-        connect_backoff: Duration::from_millis(args.pool_connect_backoff.get() as u64),
-        max_idle_duration: Duration::from_millis(args.pool_max_idle_duration.get() as u64),
-        max_delay_ms: args.max_delay_ms as u64,
-        drop_rate: (args.percent_drops as f64) / 100.0,
-        hang_rate: (args.percent_hangs as f64) / 100.0,
-    };
-    let client = pageserver_client_grpc::PageserverClient::new_with_config(
-        &worker_id.timeline.tenant_id.to_string(),
-        &worker_id.timeline.timeline_id.to_string(),
-        &None,
-        shard_map,
-        options,
-        Some(client_metrics.clone()),
-    );
+/// A benchmark client, to allow switching out the transport protocol.
+///
+/// For simplicity, this just uses separate asynchronous send/recv methods. The send method could
+/// return a future that resolves when the response is received, but we don't really need it.
+#[async_trait]
+trait Client: Send {
+    /// Sends an asynchronous GetPage request to the pageserver.
+    async fn send_get_page(&mut self, req: PagestreamGetPageRequest) -> anyhow::Result<()>;
 
-    let client = Arc::new(client);
+    /// Receives the next GetPage response from the pageserver.
+    async fn recv_get_page(&mut self) -> anyhow::Result<PagestreamGetPageResponse>;
+}
 
-    shared_state.start_work_barrier.wait().await;
-    let client_start = Instant::now();
-    let mut ticks_processed = 0;
-    let mut inflight = FuturesOrdered::new();
-    while !cancel.is_cancelled() {
-        // Detect if a request took longer than the RPS rate
-        if let Some(period) = &rps_period {
-            let periods_passed_until_now =
-                usize::try_from(client_start.elapsed().as_micros() / period.as_micros()).unwrap();
+/// A libpq-based Pageserver client.
+struct LibpqClient {
+    inner: pageserver_client::page_service::PagestreamClient,
+}
 
-            if periods_passed_until_now > ticks_processed {
-                shared_state
-                    .live_stats
-                    .missed((periods_passed_until_now - ticks_processed) as u64);
-            }
-            ticks_processed = periods_passed_until_now;
-        }
-
-        while inflight.len() < args.queue_depth.get() {
-            let start = Instant::now();
-            let req = {
-                let mut rng = rand::thread_rng();
-                let r = &ranges[weights.sample(&mut rng)];
-                let key: i128 = rng.gen_range(r.start..r.end);
-                let key = Key::from_i128(key);
-                assert!(key.is_rel_block_key());
-                let (rel_tag, block_no) = key
-                    .to_rel_block()
-                    .expect("we filter non-rel-block keys out above");
-                pageserver_page_api::model::GetPageRequest {
-                    request_id: 0, // TODO
-                    request_class: GetPageClass::Normal,
-                    read_lsn: pageserver_page_api::model::ReadLsn {
-                        request_lsn: if rng.gen_bool(args.req_latest_probability) {
-                            Lsn::MAX
-                        } else {
-                            r.timeline_lsn
-                        },
-                        not_modified_since_lsn: r.timeline_lsn,
-                    },
-                    rel: pageserver_page_api::model::RelTag {
-                        spc_oid: rel_tag.spcnode,
-                        db_oid: rel_tag.dbnode,
-                        rel_number: rel_tag.relnode,
-                        fork_number: rel_tag.forknum,
-                    },
-                    block_number: vec![block_no],
-                }
-            };
-            let client_clone = client.clone();
-            let getpage_fut = async move {
-                let result = client_clone.get_page(&req).await;
-                (start, result)
-            };
-            inflight.push_back(getpage_fut);
-        }
-
-        let (start, result) = inflight.next().await.unwrap();
-        result.expect("getpage request should succeed");
-        let end = Instant::now();
-        shared_state.live_stats.request_done();
-        ticks_processed += 1;
-        STATS.with(|stats| {
-            stats
-                .borrow()
-                .lock()
-                .unwrap()
-                .observe(end.duration_since(start))
-                .unwrap();
-        });
-
-        if let Some(period) = &rps_period {
-            let next_at = client_start
-                + Duration::from_micros(
-                    (ticks_processed) as u64 * u64::try_from(period.as_micros()).unwrap(),
-                );
-            tokio::time::sleep_until(next_at.into()).await;
-        }
+impl LibpqClient {
+    async fn new(connstring: String, ttid: TenantTimelineId) -> anyhow::Result<Self> {
+        let inner = pageserver_client::page_service::Client::new(connstring)
+            .await?
+            .pagestream(ttid.tenant_id, ttid.timeline_id)
+            .await?;
+        Ok(Self { inner })
     }
 }
 
-async fn client_grpc_stream(
-    args: &Args,
-    worker_id: WorkerId,
-    shared_state: Arc<SharedState>,
-    cancel: CancellationToken,
-    rps_period: Option<Duration>,
-    ranges: Vec<KeyRange>,
-    weights: rand::distributions::weighted::WeightedIndex<i128>,
-) {
-    let shard_map = HashMap::from([(
-        ShardIndex::unsharded(),
-        args.page_service_connstring.clone(),
-    )]);
-    let client = pageserver_client_grpc::PageserverClient::new(
-        &worker_id.timeline.tenant_id.to_string(),
-        &worker_id.timeline.timeline_id.to_string(),
-        &None,
-        shard_map,
-    );
+#[async_trait]
+impl Client for LibpqClient {
+    async fn send_get_page(&mut self, req: PagestreamGetPageRequest) -> anyhow::Result<()> {
+        self.inner.getpage_send(req).await
+    }
 
-    let (request_tx, request_rx) = tokio::sync::mpsc::channel(1);
-    let request_stream = tokio_stream::wrappers::ReceiverStream::new(request_rx);
-    let mut response_stream = client.get_pages(request_stream).await.unwrap().into_inner();
+    async fn recv_get_page(&mut self) -> anyhow::Result<PagestreamGetPageResponse> {
+        self.inner.getpage_recv().await
+    }
+}
 
-    shared_state.start_work_barrier.wait().await;
-    let client_start = Instant::now();
-    let mut ticks_processed = 0;
-    let mut inflight = VecDeque::new();
+/// A gRPC client using the raw, no-frills gRPC client.
+struct GrpcClient {
+    req_tx: tokio::sync::mpsc::Sender<proto::GetPageRequest>,
+    resp_rx: tonic::Streaming<proto::GetPageResponse>,
+}
 
-    while !cancel.is_cancelled() {
-        // Detect if a request took longer than the RPS rate
-        if let Some(period) = &rps_period {
-            let periods_passed_until_now =
-                usize::try_from(client_start.elapsed().as_micros() / period.as_micros()).unwrap();
+impl GrpcClient {
+    async fn new(connstring: String, ttid: TenantTimelineId) -> anyhow::Result<Self> {
+        let mut client = pageserver_page_api::proto::PageServiceClient::connect(connstring).await?;
 
-            if periods_passed_until_now > ticks_processed {
-                shared_state
-                    .live_stats
-                    .missed((periods_passed_until_now - ticks_processed) as u64);
-            }
-            ticks_processed = periods_passed_until_now;
-        }
+        // The channel has a buffer size of 1, since 0 is not allowed. It does not matter, since the
+        // benchmark will control the queue depth (i.e. in-flight requests) anyway, and requests are
+        // buffered by Tonic and the OS too.
+        let (req_tx, req_rx) = tokio::sync::mpsc::channel(1);
+        let req_stream = tokio_stream::wrappers::ReceiverStream::new(req_rx);
+        let mut req = tonic::Request::new(req_stream);
+        let metadata = req.metadata_mut();
+        metadata.insert("neon-tenant-id", ttid.tenant_id.to_string().try_into()?);
+        metadata.insert("neon-timeline-id", ttid.timeline_id.to_string().try_into()?);
+        metadata.insert("neon-shard-id", "0000".try_into()?);
 
-        // Send requests until the queue depth is reached
-        // TODO: use batching
-        while inflight.len() < args.queue_depth.get() {
-            let start = Instant::now();
-            let req = {
-                let mut rng = rand::thread_rng();
-                let r = &ranges[weights.sample(&mut rng)];
-                let key: i128 = rng.gen_range(r.start..r.end);
-                let key = Key::from_i128(key);
-                assert!(key.is_rel_block_key());
-                let (rel_tag, block_no) = key
-                    .to_rel_block()
-                    .expect("we filter non-rel-block keys out above");
-                pageserver_page_api::model::GetPageRequest {
-                    request_id: 0, // TODO
-                    request_class: GetPageClass::Normal,
-                    read_lsn: pageserver_page_api::model::ReadLsn {
-                        request_lsn: if rng.gen_bool(args.req_latest_probability) {
-                            Lsn::MAX
-                        } else {
-                            r.timeline_lsn
-                        },
-                        not_modified_since_lsn: r.timeline_lsn,
-                    },
-                    rel: pageserver_page_api::model::RelTag {
-                        spc_oid: rel_tag.spcnode,
-                        db_oid: rel_tag.dbnode,
-                        rel_number: rel_tag.relnode,
-                        fork_number: rel_tag.forknum,
-                    },
-                    block_number: vec![block_no],
-                }
-            };
-            request_tx.send((&req).into()).await.unwrap();
-            inflight.push_back(start);
-        }
+        let resp = client.get_pages(req).await?;
+        let resp_stream = resp.into_inner();
 
-        // Receive responses for the inflight requests
-        if let Some(response) = response_stream.next().await {
-            let response: GetPageResponse = response.unwrap().try_into().unwrap();
-            assert_eq!(response.status, GetPageStatus::Ok);
-            let start = inflight.pop_front().unwrap();
-            let end = Instant::now();
-            shared_state.live_stats.request_done();
-            ticks_processed += 1;
-            STATS.with(|stats| {
-                stats
-                    .borrow()
-                    .lock()
-                    .unwrap()
-                    .observe(end.duration_since(start))
-                    .unwrap();
-            });
-        }
+        Ok(Self {
+            req_tx,
+            resp_rx: resp_stream,
+        })
+    }
+}
 
-        // Enforce RPS limit if specified
-        if let Some(period) = &rps_period {
-            let next_at = client_start
-                + Duration::from_micros(
-                    (ticks_processed) as u64 * u64::try_from(period.as_micros()).unwrap(),
-                );
-            tokio::time::sleep_until(next_at.into()).await;
-        }
+#[async_trait]
+impl Client for GrpcClient {
+    async fn send_get_page(&mut self, req: PagestreamGetPageRequest) -> anyhow::Result<()> {
+        let req = proto::GetPageRequest {
+            request_id: 0,
+            request_class: proto::GetPageClass::Normal as i32,
+            read_lsn: Some(proto::ReadLsn {
+                request_lsn: req.hdr.request_lsn.0,
+                not_modified_since_lsn: req.hdr.not_modified_since.0,
+            }),
+            rel: Some(req.rel.into()),
+            block_number: vec![req.blkno],
+        };
+        self.req_tx.send(req).await?;
+        Ok(())
+    }
+
+    async fn recv_get_page(&mut self) -> anyhow::Result<PagestreamGetPageResponse> {
+        let resp = self.resp_rx.message().await?.unwrap();
+        anyhow::ensure!(
+            resp.status_code == proto::GetPageStatusCode::Ok as i32,
+            "unexpected status code: {}",
+            resp.status_code
+        );
+        Ok(PagestreamGetPageResponse {
+            page: resp.page_image[0].clone(),
+            req: PagestreamGetPageRequest::default(), // dummy
+        })
     }
 }
