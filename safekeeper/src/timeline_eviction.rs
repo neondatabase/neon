@@ -42,6 +42,7 @@ impl Manager {
             && next_event.is_none()
             && self.access_service.is_empty()
             && !self.tli_broker_active.get()
+            && self.wal_advertiser.ready_for_eviction()
             // Partial segment of current flush_lsn is uploaded up to this flush_lsn.
             && !wal_backup_partial::needs_uploading(state, &self.partial_backup_uploaded)
             // And it is the next one after the last removed. Given that local
