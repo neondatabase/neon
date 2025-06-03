@@ -202,6 +202,9 @@ jobs:
   validate-compute-manifest:
     runs-on: ubuntu-22.04
     steps:
+
+      - uses: actions/checkout@v4
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
