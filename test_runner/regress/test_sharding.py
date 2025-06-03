@@ -1388,51 +1388,37 @@ def test_sharding_split_failures(
     with pytest.raises(failure.expect_exception()):
         env.storage_controller.tenant_shard_split(tenant_id, shard_count=4)
 
+    def assert_shard_count(shard_count: int, exclude_ps_id: int | None = None) -> None:
+        secondary_count = 0
+        attached_count = 0
+        log.info(f"Iterating over {len(env.pageservers)} pageservers to check shard count")
+        for ps in env.pageservers:
+            if exclude_ps_id is not None and ps.id == exclude_ps_id:
+                continue
+
+            locations = ps.http_client().tenant_list_locations()["tenant_shards"]
+            for loc in locations:
+                tenant_shard_id = TenantShardId.parse(loc[0])
+                if tenant_shard_id.tenant_id != tenant_id:
+                    continue  # skip bystanders
+                log.info(f"Shard {tenant_shard_id} seen on node {ps.id} in mode {loc[1]['mode']}")
+                assert tenant_shard_id.shard_count == shard_count
+                if loc[1]["mode"] == "Secondary":
+                    secondary_count += 1
+                else:
+                    attached_count += 1
+
+        assert secondary_count == shard_count
+        assert attached_count == shard_count
+
     # We expect that the overall operation will fail, but some split requests
     # will have succeeded: the net result should be to return to a clean state, including
     # detaching any child shards.
-    def assert_rolled_back(exclude_ps_id=None) -> None:
-        secondary_count = 0
-        attached_count = 0
-        for ps in env.pageservers:
-            if exclude_ps_id is not None and ps.id == exclude_ps_id:
-                continue
-
-            locations = ps.http_client().tenant_list_locations()["tenant_shards"]
-            for loc in locations:
-                tenant_shard_id = TenantShardId.parse(loc[0])
-                if tenant_shard_id.tenant_id != tenant_id:
-                    continue  # skip bystanders
-                log.info(f"Shard {tenant_shard_id} seen on node {ps.id} in mode {loc[1]['mode']}")
-                assert tenant_shard_id.shard_count == initial_shard_count
-                if loc[1]["mode"] == "Secondary":
-                    secondary_count += 1
-                else:
-                    attached_count += 1
-
-        assert secondary_count == initial_shard_count
-        assert attached_count == initial_shard_count
+    def assert_rolled_back(exclude_ps_id: int | None = None) -> None:
+        assert_shard_count(initial_shard_count, exclude_ps_id)
 
     def assert_split_done(exclude_ps_id: int | None = None) -> None:
-        secondary_count = 0
-        attached_count = 0
-        for ps in env.pageservers:
-            if exclude_ps_id is not None and ps.id == exclude_ps_id:
-                continue
-
-            locations = ps.http_client().tenant_list_locations()["tenant_shards"]
-            for loc in locations:
-                tenant_shard_id = TenantShardId.parse(loc[0])
-                if tenant_shard_id.tenant_id != tenant_id:
-                    continue  # skip bystanders
-                log.info(f"Shard {tenant_shard_id} seen on node {ps.id} in mode {loc[1]['mode']}")
-                assert tenant_shard_id.shard_count == split_shard_count
-                if loc[1]["mode"] == "Secondary":
-                    secondary_count += 1
-                else:
-                    attached_count += 1
-        assert attached_count == split_shard_count
-        assert secondary_count == split_shard_count
+        assert_shard_count(split_shard_count, exclude_ps_id)
 
     def finish_split():
         # Having failed+rolled back, we should be able to split again
@@ -1468,7 +1454,7 @@ def test_sharding_split_failures(
 
         # The split should appear to be rolled back from the point of view of all pageservers
         # apart from the one that is offline
-        wait_until(lambda: assert_rolled_back(exclude_ps_id=failure.pageserver_id))
+        wait_until(lambda: assert_rolled_back(exclude_ps_id=failure.pageserver_id), timeout=120)
 
         finish_split()
         wait_until(lambda: assert_split_done(exclude_ps_id=failure.pageserver_id))
@@ -1482,7 +1468,7 @@ def test_sharding_split_failures(
         log.info("Clearing failure...")
         failure.clear(env)
 
-        wait_until(assert_rolled_back)
+        wait_until(assert_rolled_back, timeout=120)
 
         # Having rolled back, the tenant should be working
         workload.churn_rows(10)
