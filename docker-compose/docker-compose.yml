@@ -207,10 +207,10 @@ services:
       #- RUST_BACKTRACE=1
     # Mount the test files directly, for faster editing cycle.
     volumes:
-      - ./compute_wrapper/var/db/postgres/specs/:/var/db/postgres/specs/
+      - ./compute_wrapper/var/db/postgres/configs/:/var/db/postgres/configs/
       - ./compute_wrapper/shell/:/shell/
     entrypoint:
-      - "/shell/pcompute.sh"
+      - "/shell/compute.sh"
     depends_on:
       - safekeeper1
       - safekeeper2
@@ -226,10 +226,10 @@ services:
       #- RUST_BACKTRACE=1
     # Mount the test files directly, for faster editing cycle.
     volumes:
-      - ./compute_wrapper/var/db/postgres/specs/:/var/db/postgres/specs/
+      - ./compute_wrapper/var/db/postgres/configs/:/var/db/postgres/configs/
       - ./compute_wrapper/shell/:/shell/
     entrypoint:
-      - "/shell/pcompute.sh"
+      - "/shell/compute.sh"
     depends_on:
       - safekeeper1
       - safekeeper2
@@ -245,10 +245,10 @@ services:
       #- RUST_BACKTRACE=1
     # Mount the test files directly, for faster editing cycle.
     volumes:
-      - ./compute_wrapper/var/db/postgres/specs/:/var/db/postgres/specs/
+      - ./compute_wrapper/var/db/postgres/configs/:/var/db/postgres/configs/
       - ./compute_wrapper/shell/:/shell/
     entrypoint:
-      - "/shell/pcompute.sh"
+      - "/shell/compute.sh"
     depends_on:
       - safekeeper1
       - safekeeper2
