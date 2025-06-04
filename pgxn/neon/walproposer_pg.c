@@ -272,12 +272,13 @@ split_safekeepers_list(char *safekeepers_list, char *safekeepers[])
 	return n_safekeepers;
 }
 
-static char *split_off_safekeepers_generation(char *safekeepers_list, uint32 *generation)
+char *walprop_pg_split_off_safekeepers_generation(char *safekeepers_list, uint32 *generation)
 {
 	char	   *endptr;
 
 	if (strncmp(safekeepers_list, "g#", 2) != 0)
 	{
+		*generation = INVALID_GENERATION;
 		return safekeepers_list;
 	}
 	else
@@ -310,8 +311,8 @@ safekeepers_cmp(char *old, char *new)
 	uint32		gen_old = INVALID_GENERATION;
 	uint32		gen_new = INVALID_GENERATION;
 
-	old = split_off_safekeepers_generation(old, &gen_old);
-	new = split_off_safekeepers_generation(new, &gen_new);
+	old = walprop_pg_split_off_safekeepers_generation(old, &gen_old);
+	new = walprop_pg_split_off_safekeepers_generation(new, &gen_new);
 
 	if (gen_old != gen_new)
 	{
