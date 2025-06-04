@@ -213,7 +213,6 @@ pub struct ParsedSpec {
     pub storage_auth_token: Option<String>,
     pub endpoint_storage_addr: Option<SocketAddr>,
     pub endpoint_storage_token: Option<String>,
-    pub enable_tls: bool,
 }
 
 impl TryFrom<ComputeSpec> for ParsedSpec {
@@ -279,8 +278,6 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             .clone()
             .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_token"));
 
-        let enable_tls = spec.enable_tls;
-
         Ok(ParsedSpec {
             spec,
             pageserver_connstr,
@@ -290,7 +287,6 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             timeline_id,
             endpoint_storage_addr,
             endpoint_storage_token,
-            enable_tls,
         })
     }
 }
