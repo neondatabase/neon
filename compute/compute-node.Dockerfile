@@ -297,6 +297,7 @@ RUN ./autogen.sh && \
     ./configure --with-sfcgal=/usr/local/bin/sfcgal-config && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
+    make staged-install && \
     cd extensions/postgis && \
     make clean && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
@@ -1842,10 +1843,25 @@ RUN make PG_VERSION="${PG_VERSION:?}" -C compute
 
 FROM pg-build AS extension-tests
 ARG PG_VERSION
+# This is required for the PostGIS test
+RUN apt-get update && case $DEBIAN_VERSION in \
+      bullseye) \
+        apt-get install -y libproj19 libgdal28 time; \
+      ;; \
+      bookworm) \
+        apt-get install -y libgdal32 libproj25 time; \
+      ;; \
+      *) \
+        echo "Unknown Debian version ${DEBIAN_VERSION}" && exit 1 \
+      ;; \
+    esac
+
 COPY docker-compose/ext-src/ /ext-src/
 
 COPY --from=pg-build /postgres /postgres
-#COPY --from=postgis-src /ext-src/ /ext-src/
+COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=postgis-build /ext-src/postgis-src /ext-src/postgis-src
+COPY --from=postgis-build /sfcgal/* /usr
 COPY --from=plv8-src /ext-src/ /ext-src/
 COPY --from=h3-pg-src /ext-src/h3-pg-src /ext-src/h3-pg-src
 COPY --from=postgresql-unit-src /ext-src/ /ext-src/
