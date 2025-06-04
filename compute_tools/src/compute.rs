@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
 use compute_api::responses::{
     ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus, LfcOffloadState,
-    LfcPrewarmState,
+    LfcPrewarmState, TlsConfig,
 };
 use compute_api::spec::{
     ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent,
@@ -603,14 +603,7 @@ impl ComputeNode {
             });
         }
 
-        let mut tls_config = None;
-        if pspec
-            .spec
-            .features
-            .contains(&ComputeFeature::TlsExperimental)
-        {
-            tls_config = self.compute_ctl_config.tls.clone();
-        }
+        let tls_config = self.tls_config(&pspec.spec);
 
         // If there are any remote extensions in shared_preload_libraries, start downloading them
         if pspec.spec.remote_extensions.is_some() {
@@ -1217,14 +1210,7 @@ impl ComputeNode {
         let spec = &pspec.spec;
         let pgdata_path = Path::new(&self.params.pgdata);
 
-        let mut tls_config = None;
-        if pspec
-            .spec
-            .features
-            .contains(&ComputeFeature::TlsExperimental)
-        {
-            tls_config = self.compute_ctl_config.tls.clone();
-        }
+        let tls_config = self.tls_config(&pspec.spec);
 
         // Remove/create an empty pgdata directory and put configuration there.
         self.create_pgdata()?;
@@ -1232,7 +1218,7 @@ impl ComputeNode {
             pgdata_path,
             &pspec.spec,
             self.params.internal_http_port,
-            &tls_config,
+            tls_config,
         )?;
 
         // Syncing safekeepers is only safe with primary nodes: if a primary
@@ -1557,7 +1543,7 @@ impl ComputeNode {
                 .clone(),
         );
 
-        let mut tls_config = None;
+        let mut tls_config = None::<TlsConfig>;
         if spec.features.contains(&ComputeFeature::TlsExperimental) {
             tls_config = self.compute_ctl_config.tls.clone();
         }
@@ -1624,10 +1610,7 @@ impl ComputeNode {
     pub fn reconfigure(&self) -> Result<()> {
         let spec = self.state.lock().unwrap().pspec.clone().unwrap().spec;
 
-        let mut tls_config = None;
-        if spec.features.contains(&ComputeFeature::TlsExperimental) {
-            tls_config = self.compute_ctl_config.tls.clone();
-        }
+        let tls_config = self.tls_config(&spec);
 
         if let Some(ref pgbouncer_settings) = spec.pgbouncer_settings {
             info!("tuning pgbouncer");
@@ -1669,7 +1652,7 @@ impl ComputeNode {
             pgdata_path,
             &spec,
             self.params.internal_http_port,
-            &tls_config,
+            tls_config,
         )?;
 
         if !spec.skip_pg_catalog_updates {
@@ -1786,6 +1769,14 @@ impl ComputeNode {
                     }
                 }
             });
+        }
+    }
+
+    pub fn tls_config(&self, spec: &ComputeSpec) -> &Option<TlsConfig> {
+        if spec.features.contains(&ComputeFeature::TlsExperimental) {
+            &self.compute_ctl_config.tls
+        } else {
+            &None::<TlsConfig>
         }
     }
 
