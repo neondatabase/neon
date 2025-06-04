@@ -166,7 +166,7 @@ pub async fn download_extension(
 
     // TODO add retry logic
     let download_buffer =
-        match download_extension_tar(remote_ext_base_url.as_str(), &ext_path.to_string()).await {
+        match download_extension_tar(remote_ext_base_url, &ext_path.to_string()).await {
             Ok(buffer) => buffer,
             Err(error_message) => {
                 return Err(anyhow::anyhow!(
@@ -271,10 +271,14 @@ pub fn create_control_files(remote_extensions: &RemoteExtSpec, pgbin: &str) {
 }
 
 // Do request to extension storage proxy, e.g.,
-// curl http://pg-ext-s3-gateway/latest/v15/extensions/anon.tar.zst
+// curl http://pg-ext-s3-gateway.pg-ext-s3-gateway.svc.cluster.local/latest/v15/extensions/anon.tar.zst
 // using HTTP GET and return the response body as bytes.
-async fn download_extension_tar(remote_ext_base_url: &str, ext_path: &str) -> Result<Bytes> {
-    let uri = format!("{}/{}", remote_ext_base_url, ext_path);
+async fn download_extension_tar(remote_ext_base_url: &Url, ext_path: &str) -> Result<Bytes> {
+    let uri = remote_ext_base_url.join(ext_path).with_context(|| {
+        format!(
+            "failed to create the remote extension URI for {ext_path} using {remote_ext_base_url}"
+        )
+    })?;
     let filename = Path::new(ext_path)
         .file_name()
         .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
@@ -284,7 +288,7 @@ async fn download_extension_tar(remote_ext_base_url: &str, ext_path: &str) -> Re
 
     info!("Downloading extension file '{}' from uri {}", filename, uri);
 
-    match do_extension_server_request(&uri).await {
+    match do_extension_server_request(uri).await {
         Ok(resp) => {
             info!("Successfully downloaded remote extension data {}", ext_path);
             REMOTE_EXT_REQUESTS_TOTAL
@@ -303,7 +307,7 @@ async fn download_extension_tar(remote_ext_base_url: &str, ext_path: &str) -> Re
 
 // Do a single remote extensions server request.
 // Return result or (error message + stringified status code) in case of any failures.
-async fn do_extension_server_request(uri: &str) -> Result<Bytes, (String, String)> {
+async fn do_extension_server_request(uri: Url) -> Result<Bytes, (String, String)> {
     let resp = reqwest::get(uri).await.map_err(|e| {
         (
             format!(
