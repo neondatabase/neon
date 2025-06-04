@@ -2,7 +2,6 @@
 mod tests;
 
 mod storage;
-mod completion;
 
 use std::collections::{HashMap, HashSet, hash_map};
 
@@ -51,14 +50,10 @@ pub struct RemoteConsistentLsnAdv {
     pub remote_consistent_lsn: Lsn,
 }
 
-pub enum Effect {
-    UnoffloadTimeline {
-        tenant_timeline_id: TenantTimelineId,
-    },
-    OffloadTimeline {
-        tenant_timeline_id: TenantTimelineId,
-    },
+pub struct WaitForStorage {
+
 }
+
 
 pub struct EffectCompletionUnoffloadTimeline {
     pub tenant_timeline_id: TenantTimelineId,
@@ -70,8 +65,8 @@ pub struct EffectCompletionOffloadTimeline {
 }
 
 enum OffloadState {
-    Unoffloading(completion::Waiter),
-    Offloading(completion::Waiter),
+    Unoffloading(storage::Waiter),
+    Offloading(storage::Waiter),
     Offloaded,
 }
 
@@ -104,7 +99,7 @@ impl World {
     pub fn handle_remote_consistent_lsn_advertisement(
         &mut self,
         adv: RemoteConsistentLsnAdv,
-    ) -> Result<(), Effect> {
+    ) -> Result<(), storage::Waiter> {
         let RemoteConsistentLsnAdv {
             attachment,
             remote_consistent_lsn,
@@ -172,13 +167,16 @@ impl World {
         commit_lsn_advertisements_by_node
     }
 
-    fn unoffload_timeline(&mut self, ttid: TenantTimelineId) -> Result<(), Effect> {
-        let Some(state) = self.offloaded_timelines.get(&ttid) else {
+    fn unoffload_timeline(&mut self, ttid: TenantTimelineId) -> Result<(), WaitForStorage> {
+        let Some(state) = self.offloaded_timelines.get_mut(&ttid) else {
             return Ok(());
         };
         match state {
-            OffloadState::InProgress(receiver) => return Err(Effect::WaitForOffload),
-            OffloadState::Offloaded => todo!(),
+            OffloadState::Unoffloading(waiter) |
+            OffloadState::Offloading(waiter) => waiter.clone(),
+            OffloadState::Offloaded => {
+                *state = &mut OffloadState::Unoffloading();
+            },
         }
         Err(Effect::UnoffloadTimeline {
             tenant_timeline_id: ttid,
@@ -228,7 +226,7 @@ impl World {
             hash_map::Entry::Occupied(occupied_entry) => {
                 match occupied_entry.get() {
                     OffloadState::Unoffloading |
-                    OffloadState::Offloading => 
+                    OffloadState::Offloading =>
                     OffloadState::Offloaded => todo!(),
                 }
             },

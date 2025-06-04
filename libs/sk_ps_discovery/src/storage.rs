@@ -9,6 +9,11 @@ pub trait Storage {
     fn store_timeline(&self, ttid: TenantTimelineId, timeline: Timeline);
 }
 
+#[derive(Clone)]
+pub struct Waiter {
+
+}
+
 pub struct Timeline {
     pub remote_consistent_lsns: HashMap<TimelineAttachmentId, Lsn>,
 }
