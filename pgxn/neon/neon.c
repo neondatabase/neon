@@ -484,7 +484,7 @@ _PG_init(void)
 							"Collect infortmation about query execution time",
 							NULL,
 							&monitor_query_exec_time,
-							true,
+							false,
 							PGC_USERSET,
 							0,
 							NULL, NULL, NULL);
