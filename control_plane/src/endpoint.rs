@@ -747,7 +747,7 @@ impl Endpoint {
                 logs_export_host: None::<String>,
                 endpoint_storage_addr: Some(endpoint_storage_addr),
                 endpoint_storage_token: Some(endpoint_storage_token),
-                prewarm_lfc_on_startup: false,
+                autoprewarm: false,
             };
 
             // this strange code is needed to support respec() in tests

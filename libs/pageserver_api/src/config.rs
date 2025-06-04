@@ -608,7 +608,10 @@ pub mod defaults {
     pub const DEFAULT_IO_BUFFER_ALIGNMENT: usize = 512;
 
     pub const DEFAULT_WAL_RECEIVER_PROTOCOL: utils::postgres_client::PostgresClientProtocol =
-        utils::postgres_client::PostgresClientProtocol::Vanilla;
+        utils::postgres_client::PostgresClientProtocol::Interpreted {
+            format: utils::postgres_client::InterpretedFormat::Protobuf,
+            compression: Some(utils::postgres_client::Compression::Zstd { level: 1 }),
+        };
 
     pub const DEFAULT_SSL_KEY_FILE: &str = "server.key";
     pub const DEFAULT_SSL_CERT_FILE: &str = "server.crt";
