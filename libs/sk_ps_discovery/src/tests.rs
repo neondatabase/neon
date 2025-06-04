@@ -23,7 +23,6 @@ fn basic() {
     };
 
     let ps1 = NodeId(0x100);
-    let ps2 = NodeId(0x200);
 
     // Out of order; in happy path, commit_lsn advances first, but let's test the
     // case where safekeeper doesn't know about the attachments yet first, before

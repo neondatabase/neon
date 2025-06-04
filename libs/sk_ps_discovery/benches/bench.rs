@@ -2,15 +2,14 @@
 
 use std::time::Instant;
 
-use criterion::Criterion;
+use criterion::{criterion_group, criterion_main, Criterion};
 use hex::FromHex;
+use pprof::criterion::{Output, PProfProfiler};
 use sk_ps_discovery::{
     AttachmentUpdate, RemoteConsistentLsnAdv, TenantShardAttachmentId, TimelineAttachmentId,
 };
 use utils::{
-    generation::Generation,
-    id::{TenantId, TenantTimelineId, TimelineId},
-    shard::ShardIndex,
+    generation::Generation, id::{NodeId, TenantId, TenantTimelineId, TimelineId}, lsn::Lsn, shard::ShardIndex
 };
 
 /// Use jemalloc and enable profiling, to mirror bin/safekeeper.rs.
@@ -39,12 +38,12 @@ fn bench_simple(c: &mut Criterion) {
     let n_tenants = 400_000;
     for t in 1..=n_tenants {
         let ps_id = NodeId(23);
-        let tenant_id = TenantId::from_hex(format!("{t:x}")).unwrap();
+        let tenant_id = TenantId::generate();
         let timeline_id = TimelineId::generate();
         let tenant_shard_attachment_id = TenantShardAttachmentId {
             tenant_id,
             shard_id: ShardIndex::unsharded(),
-            generation: Generation(0),
+            generation: Generation::Valid(0),
         };
         let timeline_attachment = TimelineAttachmentId {
             tenant_shard_attachment_id,
