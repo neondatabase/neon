@@ -221,6 +221,9 @@ pub struct TimelineMembershipSwitchRequest {
 pub struct TimelineMembershipSwitchResponse {
     pub previous_conf: Configuration,
     pub current_conf: Configuration,
+
+    pub term: Term,
+    pub flush_lsn: Lsn,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]

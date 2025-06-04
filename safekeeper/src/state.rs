@@ -280,6 +280,8 @@ where
         Ok(TimelineMembershipSwitchResponse {
             previous_conf: before,
             current_conf: self.mconf.clone(),
+            term: self.acceptor_state.term,
+            flush_lsn: Lsn::INVALID, // TODO(diko): return flush_lsn from somewhere
         })
     }
 }
