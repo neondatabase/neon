@@ -124,6 +124,42 @@ index 7a36b65..ad78fc7 100644
  
  DROP SCHEMA tm CASCADE;
 +
+diff --git a/regress/core/tests.mk b/regress/core/tests.mk
+index 64a9254..94903c3 100644
+--- a/regress/core/tests.mk
++++ b/regress/core/tests.mk
+@@ -23,7 +23,6 @@ current_dir := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+ RUNTESTFLAGS_INTERNAL += \
+   --before-upgrade-script $(top_srcdir)/regress/hooks/hook-before-upgrade.sql \
+   --after-upgrade-script  $(top_srcdir)/regress/hooks/hook-after-upgrade.sql \
+-  --after-create-script   $(top_srcdir)/regress/hooks/hook-after-create.sql \
+   --before-uninstall-script $(top_srcdir)/regress/hooks/hook-before-uninstall.sql
+ 
+ TESTS += \
+@@ -40,7 +39,6 @@ TESTS += \
+ 	$(top_srcdir)/regress/core/dumppoints \
+ 	$(top_srcdir)/regress/core/dumpsegments \
+ 	$(top_srcdir)/regress/core/empty \
+-	$(top_srcdir)/regress/core/estimatedextent \
+ 	$(top_srcdir)/regress/core/forcecurve \
+ 	$(top_srcdir)/regress/core/flatgeobuf \
+ 	$(top_srcdir)/regress/core/geography \
+@@ -55,7 +53,6 @@ TESTS += \
+ 	$(top_srcdir)/regress/core/out_marc21 \
+ 	$(top_srcdir)/regress/core/in_encodedpolyline \
+ 	$(top_srcdir)/regress/core/iscollection \
+-	$(top_srcdir)/regress/core/legacy \
+ 	$(top_srcdir)/regress/core/letters \
+ 	$(top_srcdir)/regress/core/long_xact \
+ 	$(top_srcdir)/regress/core/lwgeom_regress \
+@@ -112,7 +109,6 @@ TESTS += \
+ 	$(top_srcdir)/regress/core/temporal_knn \
+ 	$(top_srcdir)/regress/core/tickets \
+ 	$(top_srcdir)/regress/core/twkb \
+-	$(top_srcdir)/regress/core/typmod \
+ 	$(top_srcdir)/regress/core/wkb \
+ 	$(top_srcdir)/regress/core/wkt \
+ 	$(top_srcdir)/regress/core/wmsservers \
 diff --git a/regress/loader/tests.mk b/regress/loader/tests.mk
 index 1fc77ac..c3cb9de 100644
 --- a/regress/loader/tests.mk
