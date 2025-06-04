@@ -272,6 +272,30 @@ split_safekeepers_list(char *safekeepers_list, char *safekeepers[])
 	return n_safekeepers;
 }
 
+static char *split_off_safekeepers_generation(char *safekeepers_list, uint32 *generation)
+{
+	char	   *endptr;
+
+	if (strncmp(safekeepers_list, "g#", 2) != 0)
+	{
+		return safekeepers_list;
+	}
+	else
+	{
+		errno = 0;
+		*generation = strtoul(safekeepers_list + 2, &endptr, 10);
+		if (errno != 0)
+		{
+			wp_log(FATAL, "failed to parse neon.safekeepers generation number: %m");
+		}
+		if (*endptr != ':')
+		{
+			wp_log(FATAL, "failed to parse neon.safekeepers: no colon after generation");
+		}
+		return endptr + 1;
+	}
+}
+
 /*
  * Accept two coma-separated strings with list of safekeeper host:port addresses.
  * Split them into arrays and return false if two sets do not match, ignoring the order.
@@ -286,8 +310,8 @@ safekeepers_cmp(char *old, char *new)
 	uint32		gen_old = INVALID_GENERATION;
 	uint32		gen_new = INVALID_GENERATION;
 
-	old = walprop_split_off_safekeepers_generation(old, &gen_old);
-	new = walprop_split_off_safekeepers_generation(new, &gen_new);
+	old = split_off_safekeepers_generation(old, &gen_old);
+	new = split_off_safekeepers_generation(new, &gen_new);
 
 	if (gen_old != gen_new)
 	{

@@ -875,7 +875,6 @@ extern WalproposerShmemState *GetWalpropShmemState(void);
 extern void SafekeeperStateDesiredEvents(Safekeeper *sk, uint32 *sk_events, uint32 *nwr_events);
 extern TimeLineID walprop_pg_get_timeline_id(void);
 
-extern char *walprop_split_off_safekeepers_generation(char *safekeepers_list, uint32 *generation);
 
 #define WPEVENT		1337		/* special log level for walproposer internal
 								 * events */
