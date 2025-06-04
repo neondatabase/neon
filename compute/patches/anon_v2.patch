@@ -1,8 +1,8 @@
 diff --git a/sql/anon.sql b/sql/anon.sql
-index 0cdc769..d707a99 100644
+index 0cdc769..b450327 100644
 --- a/sql/anon.sql
 +++ b/sql/anon.sql
-@@ -1141,3 +1141,9 @@ $$
+@@ -1141,3 +1141,15 @@ $$
  -- TODO : https://en.wikipedia.org/wiki/L-diversity
  
  -- TODO : https://en.wikipedia.org/wiki/T-closeness
@@ -11,7 +11,13 @@ index 0cdc769..d707a99 100644
 +
 +GRANT ALL ON SCHEMA anon to neon_superuser;
 +GRANT ALL ON ALL TABLES IN SCHEMA anon TO neon_superuser;
-+GRANT SET ON PARAMETER anon.transparent_dynamic_masking TO neon_superuser;
++
++DO $$
++BEGIN
++    IF current_setting('server_version_num')::int >= 150000 THEN
++        GRANT SET ON PARAMETER anon.transparent_dynamic_masking TO neon_superuser;
++    END IF;
++END $$;
 diff --git a/sql/init.sql b/sql/init.sql
 index 7da6553..9b6164b 100644
 --- a/sql/init.sql
