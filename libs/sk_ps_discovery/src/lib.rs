@@ -20,7 +20,10 @@ pub struct World {
     attachments: BTreeMap<TenantShardAttachmentId, NodeId>,
 
     quiesced_timelines: BTreeMap<TenantTimelineId, Lsn>,
-
+    // ^
+    // either a timeline is in quiesced_timelines
+    // or it is in commit_lsns + remote_consistent_lsns
+    // v
     commit_lsns: BTreeMap<TenantTimelineId, Lsn>,
     remote_consistent_lsns: BTreeMap<TimelineAttachmentId, Lsn>,
 }
@@ -56,6 +59,9 @@ pub struct RemoteConsistentLsnAdv {
 
 impl World {
     fn check_invariants(&self) {
+        if !cfg!(debug_assertions) {
+            return;
+        }
         // quiescing
         {
             let quiesced_timelines: HashSet<TenantTimelineId> =

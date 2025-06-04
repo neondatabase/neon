@@ -160,6 +160,12 @@ fn quiescing_timeline_catchup() {
     });
     world.handle_commit_lsn_advancement(ttid, Lsn(23));
 
-    let advs = world.get_commit_lsn_advertisements();
-    validate_advertisements(advs, vec![(ps_id, vec![(ttid, Lsn(23))])]);
+    assert!(world.quiesced_timelines.is_empty());
+
+    world.handle_remote_consistent_lsn_advertisement(RemoteConsistentLsnAdv {
+        attachment: tenant_shard_attachment_id.timeline_attachment_id(timeline_id),
+        remote_consistent_lsn: Lsn(23),
+    });
+
+    assert!(world.quiesced_timelines.contains_key(&ttid));
 }
