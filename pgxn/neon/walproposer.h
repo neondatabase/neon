@@ -804,6 +804,9 @@ typedef struct WalProposer
 	/* Safekeepers walproposer is connecting to. */
 	Safekeeper	safekeeper[MAX_SAFEKEEPERS];
 
+	/* Current local TimeLineId in use */
+	TimeLineID	localTimeLineID;
+
 	/* WAL has been generated up to this point */
 	XLogRecPtr	availableLsn;
 

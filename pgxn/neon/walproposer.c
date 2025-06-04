@@ -98,6 +98,7 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 	wp = palloc0(sizeof(WalProposer));
 	wp->config = config;
 	wp->api = api;
+	wp->localTimeLineID = config->pgTimeline;
 	wp->state = WPS_COLLECTING_TERMS;
 	wp->mconf.generation = INVALID_GENERATION;
 	wp->mconf.members.len = 0;
