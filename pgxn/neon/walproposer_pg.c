@@ -288,6 +288,10 @@ static char *split_off_safekeepers_generation(char *safekeepers_list, uint32 *ge
 		{
 			wp_log(FATAL, "failed to parse neon.safekeepers generation number: %m");
 		}
+		if (*endptr != ':')
+		{
+			wp_log(FATAL, "failed to parse neon.safekeepers: no colon after generation");
+		}
 		return endptr + 1;
 	}
 }

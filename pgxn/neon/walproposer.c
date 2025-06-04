@@ -119,6 +119,10 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 		{
 			wp_log(FATAL, "failed to parse neon.safekeepers generation number: %m");
 		}
+		if (*endptr != ':')
+		{
+			wp_log(FATAL, "failed to parse neon.safekeepers: no colon after generation");
+		}
 		/* Skip past : to the first hostname. */
 		host = endptr + 1;
 	}
