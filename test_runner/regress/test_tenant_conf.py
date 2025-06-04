@@ -374,7 +374,7 @@ def test_tenant_config_patch(neon_env_builder: NeonEnvBuilder, ps_managed_by: st
 
     patch: dict[str, Any | None] = {
         "gc_period": "3h",
-        "gc_compaction_ratio_percent": "10",
+        "gc_compaction_ratio_percent": 10,
     }
     api.patch_tenant_config(env.initial_tenant, patch)
     tenant_conf_after_patch = api.tenant_config(env.initial_tenant).tenant_specific_overrides
