@@ -50,6 +50,7 @@ export FAILED_FILE=/tmp/failed
 LIST=$( (echo -e "${SKIP//","/"\n"}"; ls) | sort | uniq -u)
 if [[ ${RUN_PARALLEL} = true ]]; then
   parallel -j3 "[ -d {} ] || exit 0; if ! psql -c "select 1" >/dev/null; then {echo {} >> ${FAILED_FILE}; exit 1; fi ; if [ -f $extdir/{}/neon-test.sh ]; then echo Running from script; PGHOST=pcompute{%} time ${extdir}/{}/neon-test.sh || echo {} >> ${FAILED_FILE}; else echo Running using make; time USE_PGXS=1 PGHOST=pcompute{%} make -C {} installcheck || echo {} >> ${FAILED_FILE}; fi;" ::: ${LIST}
+  #parallel -j3 "[[ -d {} ]] || exit 0; export PGHOST=pcompute{%}; if ! psql -c 'select 1'>/dev/null; then exit 1; fi; echo ${extdir}; if [[ -f ${extdir}/{}/neon-test.sh ]]; then echo {}; fi" ::: $(ls ext-src)
 else
   for d in ${LIST}; do
       [ -d "${d}" ] || continue
