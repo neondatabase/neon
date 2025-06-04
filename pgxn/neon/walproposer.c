@@ -3012,11 +3012,11 @@ char *walprop_split_off_safekeepers_generation(char *safekeepers_list, uint32 *g
 		*generation = strtoul(safekeepers_list + 2, &endptr, 10);
 		if (errno != 0)
 		{
-			wp_log(FATAL, "failed to parse neon.safekeepers generation number: %m");
+			wpg_log(FATAL, "failed to parse neon.safekeepers generation number: %m");
 		}
 		if (*endptr != ':')
 		{
-			wp_log(FATAL, "failed to parse neon.safekeepers: no colon after generation");
+			wpg_log(FATAL, "failed to parse neon.safekeepers: no colon after generation");
 		}
 		return endptr + 1;
 	}
