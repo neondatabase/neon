@@ -819,6 +819,7 @@ fn start_pageserver(
             tenant_manager.clone(),
             grpc_auth,
             otel_guard.as_ref().map(|g| g.dispatch.clone()),
+            conf.get_vectored_concurrent_io,
             grpc_listener,
         )?);
     }
