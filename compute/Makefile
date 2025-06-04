@@ -48,3 +48,7 @@ jsonnetfmt-test:
 .PHONY: jsonnetfmt-format
 jsonnetfmt-format:
 	jsonnetfmt --in-place $(jsonnet_files)
+
+.PHONY: manifest-schema-validation
+manifest-schema-validation:
+	jsonschema validate -d https://json-schema.org/draft/2020-12/schema manifest.schema.json manifest.yaml 
