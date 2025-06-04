@@ -109,7 +109,7 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 	 * If safekeepers list starts with g# parse generation number followed by
 	 * :
 	 */
-	host = walprop_pg_split_off_safekeepers_generation(wp->config->safekeepers_list, wp.safekeepers_generation);
+	host = walprop_pg_split_off_safekeepers_generation(wp->config->safekeepers_list, &wp->safekeepers_generation);
 	wp_log(LOG, "safekeepers_generation=%u", wp->safekeepers_generation);
 
 	for (; host != NULL && *host != '\0'; host = sep)
