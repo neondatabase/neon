@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -35,13 +35,11 @@ enum State {
 pub struct Connection<S, T> {
     /// HACK: we need this in the Neon Proxy.
     pub stream: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
-    /// HACK: we need this in the Neon Proxy to forward params.
-    pub parameters: HashMap<String, String>,
 
     sender: PollSender<BackendMessages>,
     receiver: mpsc::UnboundedReceiver<FrontendMessage>,
 
-    pending_responses: VecDeque<BackendMessage>,
+    pending_responses: VecDeque<BackendMessages>,
     state: State,
 }
 
@@ -52,17 +50,14 @@ where
 {
     pub(crate) fn new(
         stream: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
-        pending_responses: VecDeque<BackendMessage>,
-        parameters: HashMap<String, String>,
         sender: mpsc::Sender<BackendMessages>,
         receiver: mpsc::UnboundedReceiver<FrontendMessage>,
     ) -> Connection<S, T> {
         Connection {
             stream,
-            parameters,
             sender: PollSender::new(sender),
             receiver,
-            pending_responses,
+            pending_responses: VecDeque::new(),
             state: State::Active,
         }
     }
@@ -71,9 +66,9 @@ where
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<BackendMessage, Error>>> {
-        if let Some(message) = self.pending_responses.pop_front() {
+        if let Some(messages) = self.pending_responses.pop_front() {
             trace!("retrying pending response");
-            return Poll::Ready(Some(Ok(message)));
+            return Poll::Ready(Some(Ok(BackendMessage::Normal { messages })));
         }
 
         Pin::new(&mut self.stream)
@@ -107,13 +102,7 @@ where
                     };
                     return Poll::Ready(Ok(AsyncMessage::Notification(notification)));
                 }
-                BackendMessage::Async(Message::ParameterStatus(body)) => {
-                    self.parameters.insert(
-                        body.name().map_err(Error::parse)?.to_string(),
-                        body.value().map_err(Error::parse)?.to_string(),
-                    );
-                    continue;
-                }
+                BackendMessage::Async(Message::ParameterStatus(_)) => continue,
                 BackendMessage::Async(_) => unreachable!(),
                 BackendMessage::Normal { messages } => messages,
             };
@@ -126,8 +115,7 @@ where
                     return Poll::Ready(Err(Error::closed()));
                 }
                 Poll::Pending => {
-                    self.pending_responses
-                        .push_back(BackendMessage::Normal { messages });
+                    self.pending_responses.push_back(messages);
                     trace!("poll_read: waiting on sender");
                     return Poll::Pending;
                 }
@@ -229,11 +217,6 @@ where
                 Poll::Pending
             }
         }
-    }
-
-    /// Returns the value of a runtime parameter for this connection.
-    pub fn parameter(&self, name: &str) -> Option<&str> {
-        self.parameters.get(name).map(|s| &**s)
     }
 
     /// Polls for asynchronous messages from the server.
