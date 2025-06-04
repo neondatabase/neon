@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 use std::{env, fs};
 use tokio::spawn;
 use tracing::{Instrument, debug, error, info, instrument, warn};
+use url::Url;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 use utils::measured_stream::MeasuredReader;
@@ -96,7 +97,7 @@ pub struct ComputeNodeParams {
     pub internal_http_port: u16,
 
     /// the address of extension storage proxy gateway
-    pub remote_ext_base_url: Option<String>,
+    pub remote_ext_base_url: Option<Url>,
 
     /// Interval for installed extensions collection
     pub installed_extensions_collection_interval: u64,
@@ -395,7 +396,7 @@ impl ComputeNode {
         // because QEMU will already have its memory allocated from the host, and
         // the necessary binaries will already be cached.
         if cli_spec.is_none() {
-            this.prewarm_postgres()?;
+            this.prewarm_postgres_vm_memory()?;
         }
 
         // Set the up metric with Empty status before starting the HTTP server.
@@ -778,7 +779,7 @@ impl ComputeNode {
         // Spawn the extension stats background task
         self.spawn_extension_stats_task();
 
-        if pspec.spec.prewarm_lfc_on_startup {
+        if pspec.spec.autoprewarm {
             self.prewarm_lfc();
         }
         Ok(())
@@ -1306,8 +1307,8 @@ impl ComputeNode {
     }
 
     /// Start and stop a postgres process to warm up the VM for startup.
-    pub fn prewarm_postgres(&self) -> Result<()> {
-        info!("prewarming");
+    pub fn prewarm_postgres_vm_memory(&self) -> Result<()> {
+        info!("prewarming VM memory");
 
         // Create pgdata
         let pgdata = &format!("{}.warmup", self.params.pgdata);
@@ -1349,7 +1350,7 @@ impl ComputeNode {
         kill(pm_pid, Signal::SIGQUIT)?;
         info!("sent SIGQUIT signal");
         pg.wait()?;
-        info!("done prewarming");
+        info!("done prewarming vm memory");
 
         // clean up
         let _ok = fs::remove_dir_all(pgdata);

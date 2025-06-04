@@ -15,7 +15,7 @@ pub type EndpointRateLimiter = LeakyBucketRateLimiter<EndpointIdInt>;
 
 pub struct LeakyBucketRateLimiter<Key> {
     map: ClashMap<Key, LeakyBucketState, RandomState>,
-    config: utils::leaky_bucket::LeakyBucketConfig,
+    default_config: utils::leaky_bucket::LeakyBucketConfig,
     access_count: AtomicUsize,
 }
 
@@ -28,14 +28,16 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
     pub fn new_with_shards(config: LeakyBucketConfig, shards: usize) -> Self {
         Self {
             map: ClashMap::with_hasher_and_shard_amount(RandomState::new(), shards),
-            config: config.into(),
+            default_config: config.into(),
             access_count: AtomicUsize::new(0),
         }
     }
 
     /// Check that number of connections to the endpoint is below `max_rps` rps.
-    pub(crate) fn check(&self, key: K, n: u32) -> bool {
+    pub(crate) fn check(&self, key: K, config: Option<LeakyBucketConfig>, n: u32) -> bool {
         let now = Instant::now();
+
+        let config = config.map_or(self.default_config, Into::into);
 
         if self.access_count.fetch_add(1, Ordering::AcqRel) % 2048 == 0 {
             self.do_gc(now);
@@ -46,7 +48,7 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
             .entry(key)
             .or_insert_with(|| LeakyBucketState { empty_at: now });
 
-        entry.add_tokens(&self.config, now, n as f64).is_ok()
+        entry.add_tokens(&config, now, n as f64).is_ok()
     }
 
     fn do_gc(&self, now: Instant) {

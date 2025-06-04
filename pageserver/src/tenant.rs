@@ -300,7 +300,7 @@ pub struct TenantShard {
     ///   as in progress.
     /// * Imported timelines are removed when the storage controller calls the post timeline
     ///   import activation endpoint.
-    timelines_importing: std::sync::Mutex<HashMap<TimelineId, ImportingTimeline>>,
+    timelines_importing: std::sync::Mutex<HashMap<TimelineId, Arc<ImportingTimeline>>>,
 
     /// The last tenant manifest known to be in remote storage. None if the manifest has not yet
     /// been either downloaded or uploaded. Always Some after tenant attach.
@@ -383,7 +383,7 @@ pub struct TenantShard {
 
     l0_flush_global_state: L0FlushGlobalState,
 
-    feature_resolver: FeatureResolver,
+    pub(crate) feature_resolver: FeatureResolver,
 }
 impl std::fmt::Debug for TenantShard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -672,6 +672,7 @@ pub enum MaybeOffloaded {
 pub enum TimelineOrOffloaded {
     Timeline(Arc<Timeline>),
     Offloaded(Arc<OffloadedTimeline>),
+    Importing(Arc<ImportingTimeline>),
 }
 
 impl TimelineOrOffloaded {
@@ -682,6 +683,9 @@ impl TimelineOrOffloaded {
             }
             TimelineOrOffloaded::Offloaded(offloaded) => {
                 TimelineOrOffloadedArcRef::Offloaded(offloaded)
+            }
+            TimelineOrOffloaded::Importing(importing) => {
+                TimelineOrOffloadedArcRef::Importing(importing)
             }
         }
     }
@@ -695,12 +699,16 @@ impl TimelineOrOffloaded {
         match self {
             TimelineOrOffloaded::Timeline(timeline) => &timeline.delete_progress,
             TimelineOrOffloaded::Offloaded(offloaded) => &offloaded.delete_progress,
+            TimelineOrOffloaded::Importing(importing) => &importing.delete_progress,
         }
     }
     fn maybe_remote_client(&self) -> Option<Arc<RemoteTimelineClient>> {
         match self {
             TimelineOrOffloaded::Timeline(timeline) => Some(timeline.remote_client.clone()),
             TimelineOrOffloaded::Offloaded(_offloaded) => None,
+            TimelineOrOffloaded::Importing(importing) => {
+                Some(importing.timeline.remote_client.clone())
+            }
         }
     }
 }
@@ -708,6 +716,7 @@ impl TimelineOrOffloaded {
 pub enum TimelineOrOffloadedArcRef<'a> {
     Timeline(&'a Arc<Timeline>),
     Offloaded(&'a Arc<OffloadedTimeline>),
+    Importing(&'a Arc<ImportingTimeline>),
 }
 
 impl TimelineOrOffloadedArcRef<'_> {
@@ -715,12 +724,14 @@ impl TimelineOrOffloadedArcRef<'_> {
         match self {
             TimelineOrOffloadedArcRef::Timeline(timeline) => timeline.tenant_shard_id,
             TimelineOrOffloadedArcRef::Offloaded(offloaded) => offloaded.tenant_shard_id,
+            TimelineOrOffloadedArcRef::Importing(importing) => importing.timeline.tenant_shard_id,
         }
     }
     pub fn timeline_id(&self) -> TimelineId {
         match self {
             TimelineOrOffloadedArcRef::Timeline(timeline) => timeline.timeline_id,
             TimelineOrOffloadedArcRef::Offloaded(offloaded) => offloaded.timeline_id,
+            TimelineOrOffloadedArcRef::Importing(importing) => importing.timeline.timeline_id,
         }
     }
 }
@@ -734,6 +745,12 @@ impl<'a> From<&'a Arc<Timeline>> for TimelineOrOffloadedArcRef<'a> {
 impl<'a> From<&'a Arc<OffloadedTimeline>> for TimelineOrOffloadedArcRef<'a> {
     fn from(timeline: &'a Arc<OffloadedTimeline>) -> Self {
         Self::Offloaded(timeline)
+    }
+}
+
+impl<'a> From<&'a Arc<ImportingTimeline>> for TimelineOrOffloadedArcRef<'a> {
+    fn from(timeline: &'a Arc<ImportingTimeline>) -> Self {
+        Self::Importing(timeline)
     }
 }
 
@@ -1789,20 +1806,25 @@ impl TenantShard {
                     },
                 ) => {
                     let timeline_id = timeline.timeline_id;
+                    let import_task_gate = Gate::default();
+                    let import_task_guard = import_task_gate.enter().unwrap();
                     let import_task_handle =
                         tokio::task::spawn(self.clone().create_timeline_import_pgdata_task(
                             timeline.clone(),
                             import_pgdata,
                             guard,
+                            import_task_guard,
                             ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn),
                         ));
 
                     let prev = self.timelines_importing.lock().unwrap().insert(
                         timeline_id,
-                        ImportingTimeline {
+                        Arc::new(ImportingTimeline {
                             timeline: timeline.clone(),
                             import_task_handle,
-                        },
+                            import_task_gate,
+                            delete_progress: TimelineDeleteProgress::default(),
+                        }),
                     );
 
                     assert!(prev.is_none());
@@ -2420,6 +2442,17 @@ impl TenantShard {
             .collect()
     }
 
+    /// Lists timelines the tenant contains.
+    /// It's up to callers to omit certain timelines that are not considered ready for use.
+    pub fn list_importing_timelines(&self) -> Vec<Arc<ImportingTimeline>> {
+        self.timelines_importing
+            .lock()
+            .unwrap()
+            .values()
+            .map(Arc::clone)
+            .collect()
+    }
+
     /// Lists timelines the tenant manages, including offloaded ones.
     ///
     /// It's up to callers to omit certain timelines that are not considered ready for use.
@@ -2853,19 +2886,25 @@ impl TenantShard {
 
         let (timeline, timeline_create_guard) = uninit_timeline.finish_creation_myself();
 
+        let import_task_gate = Gate::default();
+        let import_task_guard = import_task_gate.enter().unwrap();
+
         let import_task_handle = tokio::spawn(self.clone().create_timeline_import_pgdata_task(
             timeline.clone(),
             index_part,
             timeline_create_guard,
+            import_task_guard,
             timeline_ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn),
         ));
 
         let prev = self.timelines_importing.lock().unwrap().insert(
             timeline.timeline_id,
-            ImportingTimeline {
+            Arc::new(ImportingTimeline {
                 timeline: timeline.clone(),
                 import_task_handle,
-            },
+                import_task_gate,
+                delete_progress: TimelineDeleteProgress::default(),
+            }),
         );
 
         // Idempotency is enforced higher up the stack
@@ -2924,6 +2963,7 @@ impl TenantShard {
         timeline: Arc<Timeline>,
         index_part: import_pgdata::index_part_format::Root,
         timeline_create_guard: TimelineCreateGuard,
+        _import_task_guard: GateGuard,
         ctx: RequestContext,
     ) {
         debug_assert_current_span_has_tenant_and_timeline_id();
@@ -3834,6 +3874,9 @@ impl TenantShard {
                     let remote_client = self
                         .build_timeline_client(offloaded.timeline_id, self.remote_storage.clone());
                     Arc::new(remote_client)
+                }
+                TimelineOrOffloadedArcRef::Importing(_) => {
+                    unreachable!("Importing timelines are not included in the iterator")
                 }
             };
 
@@ -5045,6 +5088,14 @@ impl TenantShard {
                 Err(CreateTimelineError::Conflict)
             }
             Err(TimelineExclusionError::AlreadyExists {
+                existing: TimelineOrOffloaded::Importing(_existing),
+                ..
+            }) => {
+                // If there's a timeline already importing, then we would hit
+                // the [`TimelineExclusionError::AlreadyCreating`] branch above.
+                unreachable!("Importing timelines hold the creation guard")
+            }
+            Err(TimelineExclusionError::AlreadyExists {
                 existing: TimelineOrOffloaded::Timeline(existing),
                 arg,
             }) => {
@@ -5781,6 +5832,7 @@ pub(crate) mod harness {
         pub conf: &'static PageServerConf,
         pub tenant_conf: pageserver_api::models::TenantConfig,
         pub tenant_shard_id: TenantShardId,
+        pub shard_identity: ShardIdentity,
         pub generation: Generation,
         pub shard: ShardIndex,
         pub remote_storage: GenericRemoteStorage,
@@ -5848,6 +5900,7 @@ pub(crate) mod harness {
                 conf,
                 tenant_conf,
                 tenant_shard_id,
+                shard_identity,
                 generation,
                 shard,
                 remote_storage,
@@ -5909,8 +5962,7 @@ pub(crate) mod harness {
                     &ShardParameters::default(),
                 ))
                 .unwrap(),
-                // This is a legacy/test code path: sharding isn't supported here.
-                ShardIdentity::unsharded(),
+                self.shard_identity,
                 Some(walredo_mgr),
                 self.tenant_shard_id,
                 self.remote_storage.clone(),
@@ -6032,6 +6084,7 @@ mod tests {
     use timeline::compaction::{KeyHistoryRetention, KeyLogAtLsn};
     use timeline::{CompactOptions, DeltaLayerTestDesc, VersionedKeySpaceQuery};
     use utils::id::TenantId;
+    use utils::shard::{ShardCount, ShardNumber};
 
     use super::*;
     use crate::DEFAULT_PG_VERSION;
@@ -7144,7 +7197,7 @@ mod tests {
             let end = desc
                 .key_range
                 .start
-                .add(Timeline::MAX_GET_VECTORED_KEYS.try_into().unwrap());
+                .add(tenant.conf.max_get_vectored_keys.get() as u32);
             reads.push(KeySpace {
                 ranges: vec![start..end],
             });
@@ -9367,6 +9420,77 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_failed_flush_should_not_update_disk_consistent_lsn() -> anyhow::Result<()> {
+        //
+        // Setup
+        //
+        let harness = TenantHarness::create_custom(
+            "test_failed_flush_should_not_upload_disk_consistent_lsn",
+            pageserver_api::models::TenantConfig::default(),
+            TenantId::generate(),
+            ShardIdentity::new(ShardNumber(0), ShardCount(4), ShardStripeSize(128)).unwrap(),
+            Generation::new(1),
+        )
+        .await?;
+        let (tenant, ctx) = harness.load().await;
+
+        let timeline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+        assert_eq!(timeline.get_shard_identity().count, ShardCount(4));
+        let mut writer = timeline.writer().await;
+        writer
+            .put(
+                *TEST_KEY,
+                Lsn(0x20),
+                &Value::Image(test_img("foo at 0x20")),
+                &ctx,
+            )
+            .await?;
+        writer.finish_write(Lsn(0x20));
+        drop(writer);
+        timeline.freeze_and_flush().await.unwrap();
+
+        timeline.remote_client.wait_completion().await.unwrap();
+        let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
+        let remote_consistent_lsn = timeline.get_remote_consistent_lsn_projected();
+        assert_eq!(Some(disk_consistent_lsn), remote_consistent_lsn);
+
+        //
+        // Test
+        //
+
+        let mut writer = timeline.writer().await;
+        writer
+            .put(
+                *TEST_KEY,
+                Lsn(0x30),
+                &Value::Image(test_img("foo at 0x30")),
+                &ctx,
+            )
+            .await?;
+        writer.finish_write(Lsn(0x30));
+        drop(writer);
+
+        fail::cfg(
+            "flush-layer-before-update-remote-consistent-lsn",
+            "return()",
+        )
+        .unwrap();
+
+        let flush_res = timeline.freeze_and_flush().await;
+        // if flush failed, the disk/remote consistent LSN should not be updated
+        assert!(flush_res.is_err());
+        assert_eq!(disk_consistent_lsn, timeline.get_disk_consistent_lsn());
+        assert_eq!(
+            remote_consistent_lsn,
+            timeline.get_remote_consistent_lsn_projected()
+        );
+
+        Ok(())
+    }
+
     #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_deltas_1() -> anyhow::Result<()> {
@@ -11136,11 +11260,11 @@ mod tests {
                 let mut keyspaces_at_lsn: HashMap<Lsn, KeySpaceRandomAccum> = HashMap::default();
                 let mut used_keys: HashSet<Key> = HashSet::default();
 
-                while used_keys.len() < Timeline::MAX_GET_VECTORED_KEYS as usize {
+                while used_keys.len() < tenant.conf.max_get_vectored_keys.get() {
                     let selected_lsn = interesting_lsns.choose(&mut random).expect("not empty");
                     let mut selected_key = start_key.add(random.gen_range(0..KEY_DIMENSION_SIZE));
 
-                    while used_keys.len() < Timeline::MAX_GET_VECTORED_KEYS as usize {
+                    while used_keys.len() < tenant.conf.max_get_vectored_keys.get() {
                         if used_keys.contains(&selected_key)
                             || selected_key >= start_key.add(KEY_DIMENSION_SIZE)
                         {

@@ -65,6 +65,30 @@ impl From<GetVectoredError> for BasebackupError {
     }
 }
 
+impl From<BasebackupError> for postgres_backend::QueryError {
+    fn from(err: BasebackupError) -> Self {
+        use postgres_backend::QueryError;
+        use pq_proto::framed::ConnectionError;
+        match err {
+            BasebackupError::Client(err, _) => QueryError::Disconnected(ConnectionError::Io(err)),
+            BasebackupError::Server(err) => QueryError::Other(err),
+            BasebackupError::Shutdown => QueryError::Shutdown,
+        }
+    }
+}
+
+impl From<BasebackupError> for tonic::Status {
+    fn from(err: BasebackupError) -> Self {
+        use tonic::Code;
+        let code = match &err {
+            BasebackupError::Client(_, _) => Code::Cancelled,
+            BasebackupError::Server(_) => Code::Internal,
+            BasebackupError::Shutdown => Code::Unavailable,
+        };
+        tonic::Status::new(code, err.to_string())
+    }
+}
+
 /// Create basebackup with non-rel data in it.
 /// Only include relational data if 'full_backup' is true.
 ///
@@ -248,7 +272,7 @@ where
     async fn flush(&mut self) -> Result<(), BasebackupError> {
         let nblocks = self.buf.len() / BLCKSZ as usize;
         let (kind, segno) = self.current_segment.take().unwrap();
-        let segname = format!("{}/{:>04X}", kind.to_str(), segno);
+        let segname = format!("{kind}/{segno:>04X}");
         let header = new_tar_header(&segname, self.buf.len() as u64)?;
         self.ar
             .append(&header, self.buf.as_slice())
@@ -347,7 +371,7 @@ where
                 .await?
                 .partition(
                     self.timeline.get_shard_identity(),
-                    Timeline::MAX_GET_VECTORED_KEYS * BLCKSZ as u64,
+                    self.timeline.conf.max_get_vectored_keys.get() as u64 * BLCKSZ as u64,
                 );
 
             let mut slru_builder = SlruSegmentsBuilder::new(&mut self.ar);

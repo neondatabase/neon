@@ -28,6 +28,7 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
+#[derive(Clone, Copy)]
 pub struct LeakyBucketConfig {
     /// This is the "time cost" of a single request unit.
     /// Should loosely represent how long it takes to handle a request unit in active resource time.

@@ -354,6 +354,9 @@ pub struct ShardImportProgressV1 {
     pub completed: usize,
     /// Hash of the plan
     pub import_plan_hash: u64,
+    /// Soft limit for the job size
+    /// This needs to remain constant throughout the import
+    pub job_soft_size_limit: usize,
 }
 
 impl ShardImportStatus {
@@ -1931,7 +1934,7 @@ pub enum PagestreamFeMessage {
 }
 
 // Wrapped in libpq CopyData
-#[derive(strum_macros::EnumProperty)]
+#[derive(Debug, strum_macros::EnumProperty)]
 pub enum PagestreamBeMessage {
     Exists(PagestreamExistsResponse),
     Nblocks(PagestreamNblocksResponse),
@@ -2042,7 +2045,7 @@ pub enum PagestreamProtocolVersion {
 
 pub type RequestId = u64;
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub struct PagestreamRequest {
     pub reqid: RequestId,
     pub request_lsn: Lsn,
@@ -2061,7 +2064,7 @@ pub struct PagestreamNblocksRequest {
     pub rel: RelTag,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub struct PagestreamGetPageRequest {
     pub hdr: PagestreamRequest,
     pub rel: RelTag,
