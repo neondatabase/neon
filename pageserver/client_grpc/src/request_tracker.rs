@@ -141,7 +141,7 @@ impl PooledItemFactory<StreamReturner> for StreamFactory {
         let mut client =
             PageServiceClient::with_interceptor(channel, self.auth_interceptor.for_shard(self.shard));
 
-        let (sender, receiver) = tokio::sync::mpsc::channel::<proto::GetPageRequest>(1);
+        let (sender, receiver) = tokio::sync::mpsc::channel::<proto::GetPageRequest>(1000);
         let outbound = ReceiverStream::new(receiver);
 
         let client_resp = client
