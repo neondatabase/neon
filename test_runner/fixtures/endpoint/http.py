@@ -77,7 +77,7 @@ class EndpointHttpClient(requests.Session):
             status, err = json["status"], json.get("error")
             assert status == "completed", f"{status}, error {err}"
 
-        wait_until(prewarmed)
+        wait_until(prewarmed, timeout=60)
 
     def offload_lfc(self):
         url = f"http://localhost:{self.external_port}/lfc/offload"
