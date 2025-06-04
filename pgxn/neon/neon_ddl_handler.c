@@ -790,14 +790,6 @@ HandleDropRole(DropRoleStmt *stmt)
 	}
 }
 
-/*
- * Support of event triggers. In vanilla only superuser can create event triggers.
- * We allow it for neon_superuser by temporary switching to superuser.
- * But as far as event trigger can fire in superuser context we should protect superuser
- * from execution of arbitrary user's code. The idea was taken from Supabase PR:
- * https://github.com/supabase/supautils/pull/98 : we just skip execution of trigger function
- * for superuser.
- */
 
 static void
 HandleRename(RenameStmt *stmt)
@@ -807,6 +799,20 @@ HandleRename(RenameStmt *stmt)
 	else if (stmt->renameType == OBJECT_ROLE)
 		return HandleRoleRename(stmt);
 }
+
+
+/*
+ * Support for Event Triggers.
+ *
+ * In vanilla only superuser can create Event Triggers.
+ *
+ * We allow it for neon_superuser by temporary switching to superuser. But as
+ * far as event trigger can fire in superuser context we should protect
+ * superuser from execution of arbitrary user's code.
+ *
+ * The idea was taken from Supabase PR series starting at
+ *   https://github.com/supabase/supautils/pull/98
+ */
 
 static bool
 neon_needs_fmgr_hook(Oid functionId) {
@@ -884,20 +890,31 @@ neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 	 *
 	 *   SET neon.event_triggers TO false;
 	 *
-	 * This only applies to the neon_superuser role though.
+	 * This only applies to the neon_superuser role though, and only allows
+	 * skipping Event Triggers owned by neon_superuser, which we check by
+	 * proxy of the Event Trigger function being owned by neon_superuser.
 	 */
 	if (event == FHET_START
 		&& !neon_event_triggers
 		&& is_neon_superuser())
 	{
-		elog(WARNING,
-			 "Skipping Event Trigger: neon.event_triggers is false");
+		/* Find the Function Attributes (owner Oid, security definer) */
+		Oid function_owner = InvalidOid;
+		bool function_is_secdef = false;
 
-		/*
-		 * we can't skip execution directly inside the fmgr_hook so instead we
-		 * change the event trigger function to a noop function.
-		 */
-		force_noop(flinfo);
+		LookupFuncOwnerSecDef(flinfo->fn_oid, &function_owner, &function_is_secdef);
+
+		if (RoleIsNeonSuperuser(function_owner))
+		{
+			elog(WARNING,
+				 "Skipping Event Trigger: neon.event_triggers is false");
+
+			/*
+			 * we can't skip execution directly inside the fmgr_hook so instead we
+			 * change the event trigger function to a noop function.
+			 */
+			force_noop(flinfo);
+		}
 	}
 
 	/*
@@ -940,6 +957,13 @@ neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 							   "and is SECURITY DEFINER",
 							   func_name,
 							   GetUserNameFromId(function_owner, false))));
+
+			/*
+			 * we can't skip execution directly inside the fmgr_hook so
+			 * instead we change the event trigger function to a noop
+			 * function.
+			 */
+			force_noop(flinfo);
 		}
 
 		/*
@@ -961,13 +985,15 @@ neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 							   func_name,
 							   GetUserNameFromId(function_owner, false),
 							   GetUserNameFromId(current_role_oid, false))));
+
+			/*
+			 * we can't skip execution directly inside the fmgr_hook so
+			 * instead we change the event trigger function to a noop
+			 * function.
+			 */
+			force_noop(flinfo);
 		}
 
-		/*
-		 * we can't skip execution directly inside the fmgr_hook so instead we
-		 * change the event trigger function to a noop function.
-		 */
-		force_noop(flinfo);
 	}
 
 	if (next_fmgr_hook)
