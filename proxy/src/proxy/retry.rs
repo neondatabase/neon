@@ -131,11 +131,10 @@ impl ShouldRetryWakeCompute for BackendError {
 impl CouldRetry for compute::ConnectionError {
     fn could_retry(&self) -> bool {
         match self {
-            compute::ConnectionError::Postgres(err) => err.could_retry(),
-            compute::ConnectionError::Postgres2(PostgresError::Error(err)) => err.could_retry(),
-            compute::ConnectionError::Postgres2(PostgresError::Io(err)) => err.could_retry(),
-            compute::ConnectionError::Postgres2(PostgresError::Unexpected(_)) => false,
-            compute::ConnectionError::Postgres2(PostgresError::InvalidAuthMessage) => false,
+            compute::ConnectionError::Postgres(PostgresError::Error(err)) => err.could_retry(),
+            compute::ConnectionError::Postgres(PostgresError::Io(err)) => err.could_retry(),
+            compute::ConnectionError::Postgres(PostgresError::Unexpected(_)) => false,
+            compute::ConnectionError::Postgres(PostgresError::InvalidAuthMessage) => false,
             compute::ConnectionError::WakeComputeError(err) => err.could_retry(),
             _ => false,
         }
@@ -145,16 +144,15 @@ impl CouldRetry for compute::ConnectionError {
 impl ShouldRetryWakeCompute for compute::ConnectionError {
     fn should_retry_wake_compute(&self) -> bool {
         match self {
-            compute::ConnectionError::Postgres(err) => err.should_retry_wake_compute(),
             // the cache entry was not checked for validity
             compute::ConnectionError::TooManyConnectionAttempts(_) => false,
 
-            compute::ConnectionError::Postgres2(PostgresError::Error(err)) => {
+            compute::ConnectionError::Postgres(PostgresError::Error(err)) => {
                 err.should_retry_wake_compute()
             }
-            compute::ConnectionError::Postgres2(PostgresError::Io(_)) => true,
-            compute::ConnectionError::Postgres2(PostgresError::Unexpected(_)) => false,
-            compute::ConnectionError::Postgres2(PostgresError::InvalidAuthMessage) => false,
+            compute::ConnectionError::Postgres(PostgresError::Io(_)) => true,
+            compute::ConnectionError::Postgres(PostgresError::Unexpected(_)) => false,
+            compute::ConnectionError::Postgres(PostgresError::InvalidAuthMessage) => false,
 
             _ => true,
         }

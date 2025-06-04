@@ -35,13 +35,8 @@ pub const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
 
 #[derive(Debug, Error)]
 pub(crate) enum ConnectionError {
-    /// This error doesn't seem to reveal any secrets; for instance,
-    /// `postgres_client::error::Kind` doesn't contain ip addresses and such.
     #[error("{COULD_NOT_CONNECT}: {0}")]
-    Postgres(#[from] postgres_client::Error),
-
-    #[error("{COULD_NOT_CONNECT}: {0}")]
-    Postgres2(#[from] PostgresError),
+    Postgres(#[from] PostgresError),
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
     TlsError(#[from] TlsError),
@@ -68,25 +63,28 @@ impl UserFacingError for ConnectionError {
         match self {
             // This helps us drop irrelevant library-specific prefixes.
             // TODO: propagate severity level and other parameters.
-            ConnectionError::Postgres(err) => match err.as_db_error() {
-                Some(err) => {
-                    let msg = err.message();
+            ConnectionError::Postgres(PostgresError::Error(err)) => {
+                let (_code, msg) = err.parse();
+                let msg = String::from_utf8_lossy(msg);
 
-                    if msg.starts_with("unsupported startup parameter: ")
-                        || msg.starts_with("unsupported startup parameter in options: ")
-                    {
-                        format!("{msg}. Please use unpooled connection or remove this parameter from the startup package. More details: https://neon.tech/docs/connect/connection-errors#unsupported-startup-parameter")
-                    } else {
-                        msg.to_owned()
-                    }
+                if msg.starts_with("unsupported startup parameter: ")
+                    || msg.starts_with("unsupported startup parameter in options: ")
+                {
+                    format!(
+                        "{msg}. Please use unpooled connection or remove this parameter from the startup package. More details: https://neon.tech/docs/connect/connection-errors#unsupported-startup-parameter"
+                    )
+                } else {
+                    msg.into_owned()
                 }
-                None => err.to_string(),
-            },
+            }
+            ConnectionError::Postgres(err) => err.to_string(),
             ConnectionError::WakeComputeError(err) => err.to_string_client(),
             ConnectionError::TooManyConnectionAttempts(_) => {
                 "Failed to acquire permit to connect to the database. Too many database connection attempts are currently ongoing.".to_owned()
             }
-            _ => COULD_NOT_CONNECT.to_owned(),
+            ConnectionError::TlsError(_) => {
+                "Failed to establish secure connection to the database.".to_string()
+            }
         }
     }
 }
@@ -94,12 +92,8 @@ impl UserFacingError for ConnectionError {
 impl ReportableError for ConnectionError {
     fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self {
-            ConnectionError::Postgres(e) if e.as_db_error().is_some() => {
-                crate::error::ErrorKind::Postgres
-            }
-            ConnectionError::Postgres(_) => crate::error::ErrorKind::Compute,
-            ConnectionError::Postgres2(PostgresError::Io(_)) => crate::error::ErrorKind::Compute,
-            ConnectionError::Postgres2(
+            ConnectionError::Postgres(PostgresError::Io(_)) => crate::error::ErrorKind::Compute,
+            ConnectionError::Postgres(
                 PostgresError::Error(_)
                 | PostgresError::InvalidAuthMessage
                 | PostgresError::Unexpected(_),
