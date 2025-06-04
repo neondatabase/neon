@@ -547,6 +547,7 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
             }
             Err(e) => {
                 error!("Failed to pull timelines from peer safekeepers: {:?}", e);
+                return Err(e);
             }
         }
     }

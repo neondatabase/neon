@@ -1,12 +1,15 @@
-use std::{collections::HashMap, env::VarError, net::IpAddr, sync::Arc};
-
-use anyhow::Result;
-use pageserver_api::controller_api::{AvailabilityZone, NodeRegisterRequest, SafekeeperTimeline};
 use pem::Pem;
 use safekeeper_api::models::PullTimelineRequest;
+use std::{collections::HashMap, env::VarError, net::IpAddr, sync::Arc, time::Duration};
+use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use utils::{backoff, id::TenantTimelineId, ip_address};
+
+use anyhow::Result;
+use pageserver_api::controller_api::{
+    AvailabilityZone, NodeRegisterRequest, SafekeeperTimeline, SafekeeperTimelinesResponse,
+};
 
 use crate::{
     GlobalTimelines, SafeKeeperConf,
@@ -302,16 +305,35 @@ pub async fn hcc_pull_timelines(
 ) -> Result<()> {
     let _timer = SK_RECOVERY_PULL_TIMELINES_SECONDS.start_timer();
     tracing::info!("Start pulling timelines from SK peers");
-    let timelines = safekeeper_list_timelines_request(conf).await?;
+
+    let mut response = SafekeeperTimelinesResponse {
+        timelines: Vec::new(),
+        safekeeper_peers: Vec::new(),
+    };
+    for i in 0..100 {
+        match safekeeper_list_timelines_request(conf).await {
+            Ok(timelines) => {
+                response = timelines;
+            }
+            Err(e) => {
+                tracing::error!("Failed to list timelines from HCC: {}", e);
+                if i == 99 {
+                    return Err(e);
+                }
+            }
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
     let mut nodeid_http = HashMap::new();
-    for sk in timelines.safekeeper_peers {
+    for sk in response.safekeeper_peers {
         nodeid_http.insert(
             sk.node_id.0,
             format!("http://{}:{}", sk.listen_http_addr, sk.http_port),
         );
     }
-    tracing::info!("Received {} timelines from HCC", timelines.timelines.len());
-    for timeline in timelines.timelines {
+    tracing::info!("Received {} timelines from HCC", response.timelines.len());
+    for timeline in response.timelines {
         let _timer = SK_RECOVERY_PULL_TIMELINE_SECONDS
             .with_label_values(&[
                 &timeline.tenant_id.to_string(),
