@@ -43,7 +43,7 @@ members = [
     "libs/proxy/postgres-protocol2",
     "libs/proxy/postgres-types2",
     "libs/proxy/tokio-postgres2",
-    "endpoint_storage",
+    "endpoint_storage", "libs/sk_ps_discovery",
 ]
 
 [workspace.package]
