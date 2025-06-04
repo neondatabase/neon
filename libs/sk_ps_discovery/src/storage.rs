@@ -10,6 +10,5 @@ pub trait Storage {
 }
 
 pub struct Timeline {
-    pub commit_lsns: HashMap<TenantTimelineId, Lsn>,
     pub remote_consistent_lsns: HashMap<TimelineAttachmentId, Lsn>,
 }
