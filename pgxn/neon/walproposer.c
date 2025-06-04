@@ -109,7 +109,28 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 	 * If safekeepers list starts with g# parse generation number followed by
 	 * :
 	 */
-	host = walprop_pg_split_off_safekeepers_generation(wp->config->safekeepers_list, &wp->safekeepers_generation);
+	if (strncmp(wp->config->safekeepers_list, "g#", 2) == 0)
+	{
+		char	   *endptr;
+
+		errno = 0;
+		wp->safekeepers_generation = strtoul(wp->config->safekeepers_list + 2, &endptr, 10);
+		if (errno != 0)
+		{
+			wp_log(FATAL, "failed to parse neon.safekeepers generation number: %m");
+		}
+		if (*endptr != ':')
+		{
+			wp_log(FATAL, "failed to parse neon.safekeepers: no colon after generation");
+		}
+		/* Skip past : to the first hostname. */
+		host = endptr + 1;
+	}
+	else
+	{
+		wp->safekeepers_generation = INVALID_GENERATION;
+		host = wp->config->safekeepers_list;
+	}
 	wp_log(LOG, "safekeepers_generation=%u", wp->safekeepers_generation);
 
 	for (; host != NULL && *host != '\0'; host = sep)
