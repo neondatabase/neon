@@ -181,10 +181,6 @@ pub struct ComputeSpec {
     /// Download LFC state from endpoint_storage and pass it to Postgres on startup
     #[serde(default)]
     pub autoprewarm: bool,
-
-    /// Whether postgres should use TLS
-    #[serde(default)]
-    pub enable_tls: bool,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
@@ -195,6 +191,9 @@ pub enum ComputeFeature {
     /// Enable the experimental activity monitor logic, which uses `pg_stat_database` to
     /// track short-lived connections as user activity.
     ActivityMonitorExperimental,
+
+    /// Enable TLS functionality.
+    TlsExperimental,
 
     /// This is a special feature flag that is used to represent unknown feature flags.
     /// Basically all unknown to enum flags are represented as this one. See unit test

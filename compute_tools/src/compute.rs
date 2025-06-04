@@ -603,9 +603,13 @@ impl ComputeNode {
             });
         }
 
-        let mut tls_config = self.compute_ctl_config.tls.clone();
-        if !pspec.spec.enable_tls {
-            tls_config = None;
+        let mut tls_config = None;
+        if pspec
+            .spec
+            .features
+            .contains(&ComputeFeature::TlsExperimental)
+        {
+            tls_config = self.compute_ctl_config.tls.clone();
         }
 
         // If there are any remote extensions in shared_preload_libraries, start downloading them
@@ -1213,9 +1217,13 @@ impl ComputeNode {
         let spec = &pspec.spec;
         let pgdata_path = Path::new(&self.params.pgdata);
 
-        let mut tls_config = self.compute_ctl_config.tls.clone();
-        if !spec.enable_tls {
-            tls_config = None;
+        let mut tls_config = None;
+        if pspec
+            .spec
+            .features
+            .contains(&ComputeFeature::TlsExperimental)
+        {
+            tls_config = self.compute_ctl_config.tls.clone();
         }
 
         // Remove/create an empty pgdata directory and put configuration there.
@@ -1549,9 +1557,9 @@ impl ComputeNode {
                 .clone(),
         );
 
-        let mut tls_config = self.compute_ctl_config.tls.clone();
-        if !spec.enable_tls {
-            tls_config = None;
+        let mut tls_config = None;
+        if spec.features.contains(&ComputeFeature::TlsExperimental) {
+            tls_config = self.compute_ctl_config.tls.clone();
         }
 
         let max_concurrent_connections = self.max_service_connections(compute_state, &spec);
@@ -1615,9 +1623,10 @@ impl ComputeNode {
     #[instrument(skip_all)]
     pub fn reconfigure(&self) -> Result<()> {
         let spec = self.state.lock().unwrap().pspec.clone().unwrap().spec;
-        let mut tls_config = self.compute_ctl_config.tls.clone();
-        if !spec.enable_tls {
-            tls_config = None;
+
+        let mut tls_config = None;
+        if spec.features.contains(&ComputeFeature::TlsExperimental) {
+            tls_config = self.compute_ctl_config.tls.clone();
         }
 
         if let Some(ref pgbouncer_settings) = spec.pgbouncer_settings {
