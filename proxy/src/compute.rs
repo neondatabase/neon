@@ -24,7 +24,7 @@ use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, NumDbConnectionsGuard};
 use crate::pqproto::StartupMessageParams;
 use crate::proxy::neon_option;
-use crate::stream::BackendError;
+use crate::stream::PostgresError;
 use crate::stream::PqStream;
 use crate::types::Host;
 
@@ -41,16 +41,26 @@ pub(crate) enum ConnectionError {
     Postgres(#[from] postgres_client::Error),
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
-    CouldNotConnect(#[from] io::Error),
+    Postgres2(#[from] PostgresError),
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
-    TlsError(#[from] InvalidDnsNameError),
+    TlsError(#[from] TlsError),
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
     WakeComputeError(#[from] WakeComputeError),
 
     #[error("error acquiring resource permit: {0}")]
     TooManyConnectionAttempts(#[from] ApiLockError),
+}
+
+#[derive(Debug, Error)]
+pub enum TlsError {
+    #[error("{0}")]
+    Dns(#[from] InvalidDnsNameError),
+    #[error("{0}")]
+    Connection(#[from] std::io::Error),
+    #[error("TLS required but not provided")]
+    Required,
 }
 
 impl UserFacingError for ConnectionError {
@@ -88,7 +98,13 @@ impl ReportableError for ConnectionError {
                 crate::error::ErrorKind::Postgres
             }
             ConnectionError::Postgres(_) => crate::error::ErrorKind::Compute,
-            ConnectionError::CouldNotConnect(_) => crate::error::ErrorKind::Compute,
+            ConnectionError::Postgres2(PostgresError::Io(_)) => crate::error::ErrorKind::Compute,
+            ConnectionError::Postgres2(
+                PostgresError::Error(_)
+                | PostgresError::InvalidAuthMessage
+                | PostgresError::Unexpected(_),
+            ) => crate::error::ErrorKind::Postgres,
+            // ConnectionError::CouldNotConnect(_) => crate::error::ErrorKind::Compute,
             ConnectionError::TlsError(_) => crate::error::ErrorKind::Compute,
             ConnectionError::WakeComputeError(e) => e.get_error_kind(),
             ConnectionError::TooManyConnectionAttempts(e) => e.get_error_kind(),
@@ -290,26 +306,13 @@ impl ConnCfg {
         config: &ComputeConfig,
         user_info: ComputeUserInfo,
     ) -> Result<PostgresConnection, ConnectionError> {
-        info!("connecting1");
-
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let (socket_addr, stream, host) = self.connect_raw(config.timeout).await?;
-        drop(pause);
-
-        info!("doing postgres things2");
-
-        // connect_raw() will not use TLS if sslmode is "disable"
-        let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let stream = connect_raw::connect_raw(stream, config.tls.clone(), &self.0)
+        let (socket_addr, stream, host) = self
+            .connect_raw(config.timeout)
             .await
-            .inspect_err(|error| {
-                if let Some(error) = error.downcast_ref::<BackendError>() {
-                    error!(?error, "error talking to postgres");
-                } else {
-                    error!(?error, "error talking to postgres");
-                }
-            })
-            .map_err(std::io::Error::other)?;
+            .map_err(PostgresError::Io)?;
+
+        let stream = connect_raw::connect_raw(stream, config.tls.clone(), &self.0).await?;
         drop(pause);
 
         ctx.span()

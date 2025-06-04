@@ -101,10 +101,11 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
     async fn read_raw_expect(&mut self, tag: u8, max: u32) -> io::Result<&mut [u8]> {
         let (actual_tag, msg) = read_message(&mut self.stream, &mut self.read, max).await?;
         if actual_tag != tag {
-            return Err(io::Error::other(format!(
-                "incorrect message tag, expected {:?}, got {:?}",
-                tag as char, actual_tag as char,
-            )));
+            return Err(io::Error::other(UnexpectedMessage {
+                expected: tag,
+                tag: actual_tag,
+                data: msg.to_vec().into(),
+            }));
         }
         Ok(msg)
     }
@@ -113,25 +114,26 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
     /// as well as handling postgres error messages.
     ///
     /// This is not cancel safe.
-    pub async fn read_raw_be(&mut self, max: u32) -> io::Result<(u8, &mut [u8])> {
+    pub async fn read_raw_be(&mut self, max: u32) -> Result<(u8, &mut [u8]), PostgresError> {
         let (tag, msg) = read_message(&mut self.stream, &mut self.read, max).await?;
         match tag {
-            BE_ERR_MESSAGE => Err(io::Error::other(Box::new(BackendError {
+            BE_ERR_MESSAGE => Err(PostgresError::Error(BackendError {
                 data: msg.to_vec().into(),
-            }))),
+            })),
             tag => Ok((tag, msg)),
         }
     }
 
     /// Read a raw postgres packet, which will respect the max length requested.
     /// This is not cancel safe.
-    async fn read_raw_be_expect(&mut self, tag: u8, max: u32) -> io::Result<&mut [u8]> {
+    async fn read_raw_be_expect(&mut self, tag: u8, max: u32) -> Result<&mut [u8], PostgresError> {
         let (actual_tag, msg) = self.read_raw_be(max).await?;
         if actual_tag != tag {
-            return Err(io::Error::other(format!(
-                "incorrect message tag, expected {:?}, got {:?}",
-                tag as char, actual_tag as char,
-            )));
+            return Err(PostgresError::Unexpected(UnexpectedMessage {
+                expected: tag,
+                tag: actual_tag,
+                data: msg.to_vec().into(),
+            }));
         }
         Ok(msg)
     }
@@ -149,24 +151,76 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
 
     /// Read a postgres backend auth message.
     /// This is not cancel safe.
-    pub async fn read_auth_message(&mut self) -> io::Result<(u32, &mut [u8])> {
+    pub async fn read_auth_message(&mut self) -> Result<(u32, &mut [u8]), PostgresError> {
         const MAX_AUTH_LENGTH: u32 = 512;
 
         self.read_raw_be_expect(BE_AUTH_MESSAGE, MAX_AUTH_LENGTH)
             .await?
             .split_first_chunk_mut()
             .map(|(tag, msg)| (u32::from_be_bytes(*tag), msg))
-            .ok_or_else(|| io::Error::other("invalid auth message format"))
+            .ok_or(PostgresError::InvalidAuthMessage)
     }
 }
+
+#[derive(Debug, Error)]
+pub enum PostgresError {
+    #[error("postgres responded with error {0}")]
+    Error(#[from] BackendError),
+    #[error("postgres responded with an unexpected message: {0}")]
+    Unexpected(#[from] UnexpectedMessage),
+    #[error("postgres responded with an invalid authentication message")]
+    InvalidAuthMessage,
+    #[error("IO error from compute: {0}")]
+    Io(#[from] io::Error),
+}
+
+pub struct UnexpectedMessage {
+    expected: u8,
+    tag: u8,
+    data: Bytes,
+}
+
+impl std::fmt::Debug for UnexpectedMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self}")
+    }
+}
+
+impl std::fmt::Display for UnexpectedMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "expected {}, got {} with data {:?}",
+            self.expected as char, self.tag as char, &self.data
+        )
+    }
+}
+impl std::error::Error for UnexpectedMessage {}
 
 pub struct BackendError {
     data: Bytes,
 }
 
+impl BackendError {
+    pub fn parse(&self) -> (&[u8], &[u8]) {
+        let mut code = &[] as &[u8];
+        let mut message = &[] as &[u8];
+
+        for param in self.data.split(|b| *b == 0) {
+            match param {
+                [b'M', rest @ ..] => message = rest,
+                [b'C', rest @ ..] => code = rest,
+                _ => {}
+            }
+        }
+
+        (code, message)
+    }
+}
+
 impl std::fmt::Debug for BackendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", &self.data)
+        write!(f, "{self}")
     }
 }
 

@@ -33,7 +33,7 @@ use crate::pqproto::{CancelKeyData, StartupMessageParams};
 use crate::protocol2::{ConnectHeader, ConnectionInfo, ConnectionInfoExtra, read_proxy_protocol};
 use crate::proxy::handshake::{HandshakeData, handshake};
 use crate::rate_limiter::EndpointRateLimiter;
-use crate::stream::{PqStream, Stream};
+use crate::stream::{PostgresError, PqStream, Stream};
 use crate::types::EndpointCacheKey;
 use crate::{auth, compute};
 
@@ -440,9 +440,9 @@ pub(crate) async fn prepare_client_connection(
     stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> Result<(), std::io::Error> {
     loop {
-        match node.stream.read_raw_be(1024).await? {
+        match node.stream.read_raw_be(1024).await {
             // parse backend keys, and substitute our own.
-            (b'K', msg) => {
+            Ok((b'K', msg)) => {
                 stream.write_raw(8, b'K', |b| b.extend_from_slice(key_data.as_bytes()));
 
                 let key_data = CancelKeyData::try_read_from_bytes(msg)
@@ -452,12 +452,17 @@ pub(crate) async fn prepare_client_connection(
                 node.cancel_closure.secret_key = (key_data.0.get() & 0xffff_ffff) as i32;
             }
             // ready for query, we're done :)
-            (b'Z', msg) => {
+            Ok((b'Z', msg)) => {
                 stream.write_raw(msg.len(), b'Z', |b| b.extend_from_slice(msg.as_bytes()));
                 break;
             }
             // either a notice or a parameter status.
-            (tag, msg) => stream.write_raw(msg.len(), tag, |b| b.extend_from_slice(msg.as_bytes())),
+            Ok((tag, msg)) => {
+                stream.write_raw(msg.len(), tag, |b| b.extend_from_slice(msg.as_bytes()));
+            }
+            Err(PostgresError::Io(io)) => return Err(io),
+            Err(PostgresError::Error(e)) => return Err(std::io::Error::other(e)),
+            Err(_) => unreachable!("read_raw_be only returns IO or BackendError types"),
         }
 
         if stream.write_buf_len() > 512 {

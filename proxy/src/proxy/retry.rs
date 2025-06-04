@@ -1,10 +1,12 @@
 use std::error::Error;
 use std::io;
 
+use bstr::ByteSlice;
 use tokio::time;
 
 use crate::compute;
 use crate::config::RetryConfig;
+use crate::stream::{BackendError, PostgresError};
 
 pub(crate) trait CouldRetry {
     /// Returns true if the error could be retried
@@ -84,6 +86,7 @@ impl CouldRetry for postgres_client::Error {
         }
     }
 }
+
 impl ShouldRetryWakeCompute for postgres_client::Error {
     fn should_retry_wake_compute(&self) -> bool {
         if let Some(db_err) = self.source().and_then(|x| x.downcast_ref()) {
@@ -96,22 +99,63 @@ impl ShouldRetryWakeCompute for postgres_client::Error {
     }
 }
 
+impl CouldRetry for BackendError {
+    fn could_retry(&self) -> bool {
+        let (code, _message) = self.parse();
+        matches!(code, b"08006" | b"08000" | b"08003" | b"08001")
+    }
+}
+impl ShouldRetryWakeCompute for BackendError {
+    fn should_retry_wake_compute(&self) -> bool {
+        let (code, message) = self.parse();
+
+        // Here are errors that happens after the user successfully authenticated to the database.
+        let non_retriable_pg_errors = matches!(
+            code,
+            b"53300" | b"53200" | b"42601" | b"40001" | b"3D000" | b"3F000" | b"22023"
+        );
+        if non_retriable_pg_errors {
+            return false;
+        }
+
+        // PGBouncer errors that should not trigger a wake_compute retry.
+        if code == b"08P01" {
+            // Source for the error message:
+            // https://github.com/pgbouncer/pgbouncer/blob/f15997fe3effe3a94ba8bcc1ea562e6117d1a131/src/client.c#L1070
+            return message.contains_str("no more connections allowed (max_client_conn)");
+        }
+        true
+    }
+}
+
 impl CouldRetry for compute::ConnectionError {
     fn could_retry(&self) -> bool {
         match self {
             compute::ConnectionError::Postgres(err) => err.could_retry(),
-            compute::ConnectionError::CouldNotConnect(err) => err.could_retry(),
+            compute::ConnectionError::Postgres2(PostgresError::Error(err)) => err.could_retry(),
+            compute::ConnectionError::Postgres2(PostgresError::Io(err)) => err.could_retry(),
+            compute::ConnectionError::Postgres2(PostgresError::Unexpected(_)) => false,
+            compute::ConnectionError::Postgres2(PostgresError::InvalidAuthMessage) => false,
             compute::ConnectionError::WakeComputeError(err) => err.could_retry(),
             _ => false,
         }
     }
 }
+
 impl ShouldRetryWakeCompute for compute::ConnectionError {
     fn should_retry_wake_compute(&self) -> bool {
         match self {
             compute::ConnectionError::Postgres(err) => err.should_retry_wake_compute(),
             // the cache entry was not checked for validity
             compute::ConnectionError::TooManyConnectionAttempts(_) => false,
+
+            compute::ConnectionError::Postgres2(PostgresError::Error(err)) => {
+                err.should_retry_wake_compute()
+            }
+            compute::ConnectionError::Postgres2(PostgresError::Io(_)) => true,
+            compute::ConnectionError::Postgres2(PostgresError::Unexpected(_)) => false,
+            compute::ConnectionError::Postgres2(PostgresError::InvalidAuthMessage) => false,
+
             _ => true,
         }
     }
