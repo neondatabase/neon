@@ -6,9 +6,14 @@ use pageserver_client_grpc::request_tracker::RequestTracker;
 use pageserver_client_grpc::request_tracker::MockStreamFactory;
 use pageserver_client_grpc::request_tracker::StreamReturner;
 use pageserver_client_grpc::client_cache::ConnectionPool;
+use pageserver_client_grpc::client_cache::PooledItemFactory;
 use pageserver_client_grpc::ClientCacheOptions;
 use pageserver_client_grpc::PageserverClientAggregateMetrics;
+use pageserver_client_grpc::AuthInterceptor;
 
+use pageserver_client_grpc::client_cache::ChannelFactory;
+
+use tonic::{transport::{Channel}, Request};
 
 use rand::prelude::*;
 
@@ -46,7 +51,7 @@ async fn main() {
         drop_rate:          0.0,
         hang_rate:          0.0,
         connect_timeout:    Duration::from_secs(10),
-        connect_backoff:    Duration::from_millis(10),
+        connect_backoff:    Duration::from_millis(200),
         max_consumers:      64,
         error_threshold:    10,
         max_idle_duration:  Duration::from_secs(60),
@@ -56,10 +61,6 @@ async fn main() {
     // 2) metrics collector (we assume Default is implemented)
     let metrics = Arc::new(PageserverClientAggregateMetrics::new());
     let pool = ConnectionPool::<StreamReturner>::new(
-        // TODO:
-        // Make the mock a parameter to avoid commenting things out
-        //Arc::new(StreamFactory::new(new_pool.clone(),
-        //                           auth_interceptor.clone(), ShardIndex::unsharded())),
         Arc::new(MockStreamFactory::new(
         )),
         client_cache_options.connect_timeout,
@@ -70,10 +71,37 @@ async fn main() {
         client_cache_options.max_total_connections,
         Some(Arc::clone(&metrics)),
     );
-    // 3) build the tracker with a mock stream factory under the hood
-    let auth_token: Option<String> = None;
+
+    // -----------
+    // There is no mock for the unary connection pool, so for now just
+    // don't use this pool
+    //
+    let channel_fact : Arc<dyn PooledItemFactory<Channel> + Send + Sync> = Arc::new(ChannelFactory::new(
+        "".to_string(),
+        client_cache_options.max_delay_ms,
+        client_cache_options.drop_rate,
+        client_cache_options.hang_rate,
+    ));
+    let unary_pool: Arc<ConnectionPool<Channel>> = ConnectionPool::new(
+        Arc::clone(&channel_fact),
+        client_cache_options.connect_timeout,
+        client_cache_options.connect_backoff,
+        client_cache_options.max_consumers,
+        client_cache_options.error_threshold,
+        client_cache_options.max_idle_duration,
+        client_cache_options.max_total_connections,
+        Some(Arc::clone(&metrics)),
+    );
+
+    // -----------
+    // Dummy auth interceptor. This is not used in this test.
+    let auth_interceptor = AuthInterceptor::new("dummy_tenant_id",
+                                                "dummy_timeline_id",
+                                                None);
     let mut tracker = RequestTracker::new(
         pool,
+        unary_pool,
+        auth_interceptor,
     );
 
     // 4) fire off 10 000 requests in parallel
@@ -107,7 +135,7 @@ async fn main() {
         // RequestTracker is Clone, so we can share it
         let mut tr = tracker.clone();
         let fut = async move {
-            let resp = tr.send_getpage_request(req_model.unwrap()).await;
+            let resp = tr.send_getpage_request(req_model.unwrap()).await.unwrap();
             // sanity‐check: the mock echo returns the same request_id
             assert!(resp.request_id > 0);
         };

@@ -9,6 +9,7 @@ use pageserver_page_api::GetPageResponse;
 use pageserver_page_api::*;
 use pageserver_page_api::proto;
 use crate::client_cache::ConnectionPool;
+use crate::client_cache::ChannelFactory;
 use crate::AuthInterceptor;
 use tonic::{transport::{Channel}, Request};
 use crate::ClientCacheOptions;
@@ -16,7 +17,10 @@ use crate::PageserverClientAggregateMetrics;
 use tokio::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use std::pin::Pin;
 use utils::shard::ShardIndex;
+
+use utils::id::TenantTimelineId;
 
 use tokio_stream::wrappers::ReceiverStream;
 use pageserver_page_api::proto::PageServiceClient;
@@ -106,7 +110,6 @@ impl PooledItemFactory<StreamReturner> for MockStreamFactory {
 }
 
 
-
 pub struct StreamFactory {
     connection_pool: Arc<client_cache::ConnectionPool<Channel>>,
     auth_interceptor: AuthInterceptor,
@@ -133,13 +136,12 @@ impl PooledItemFactory<StreamReturner> for StreamFactory {
     Result<Result<StreamReturner, tonic::Status>, tokio::time::error::Elapsed>
     {
         let pool_clone : Arc<ConnectionPool<Channel>> = Arc::clone(&self.connection_pool);
-        eprintln!("Generating stream");
         let pooled_client = pool_clone.get_client().await;
         let channel = pooled_client.unwrap().channel();
         let mut client =
             PageServiceClient::with_interceptor(channel, self.auth_interceptor.for_shard(self.shard));
 
-        let (sender, receiver) = tokio::sync::mpsc::channel::<proto::GetPageRequest>(1000);
+        let (sender, receiver) = tokio::sync::mpsc::channel::<proto::GetPageRequest>(1);
         let outbound = ReceiverStream::new(receiver);
 
         let client_resp = client
@@ -201,28 +203,106 @@ impl PooledItemFactory<StreamReturner> for StreamFactory {
         }
     }
 }
-//
-// TODO: This does not handle errors and retries. It also only has one shard.
-//
 
 #[derive(Clone)]
 pub struct RequestTracker {
     cur_id: Arc<AtomicU64>,
     stream_pool: Arc<ConnectionPool<StreamReturner>>,
+    unary_pool: Arc<ConnectionPool<Channel>>,
+    auth_interceptor: AuthInterceptor,
 }
 
 impl RequestTracker {
     pub fn new(stream_pool: Arc<ConnectionPool<StreamReturner>>,
+                unary_pool: Arc<ConnectionPool<Channel>>,
+                auth_interceptor: AuthInterceptor
     ) -> Self {
-
-        // Set up a tokio task that listens on the response channel and sends the response
-        // to the channel in the hash table that matches that id
-
         let cur_id = Arc::new(AtomicU64::new(0));
 
         RequestTracker {
             cur_id: cur_id.clone(),
             stream_pool: stream_pool,
+            unary_pool: unary_pool,
+            auth_interceptor: auth_interceptor,
+        }
+    }
+
+    pub async fn send_process_check_rel_exists_request(
+        &self,
+        req: CheckRelExistsRequest,
+    ) -> Result<bool, tonic::Status> {
+        loop {
+            let unary_pool = Arc::clone(&self.unary_pool);
+            let pooled_client = unary_pool.get_client().await.unwrap();
+            let channel = pooled_client.channel();
+            let mut ps_client = PageServiceClient::with_interceptor(channel, self.auth_interceptor.clone());
+            let request = proto::CheckRelExistsRequest::from(req.clone());
+            let response = ps_client.check_rel_exists(tonic::Request::new(request)).await;
+
+            match response {
+                Err(status) => {
+                    pooled_client.finish(Err(status.clone())).await; // Pass error to finish
+                    continue;
+                }
+                Ok(resp) => {
+                    pooled_client.finish(Ok(())).await; // Pass success to finish
+                    return Ok(resp.get_ref().exists);
+                }
+            }
+        }
+    }
+
+    pub async fn send_process_get_rel_size_request(
+        &self,
+        req: GetRelSizeRequest,
+    ) -> Result<u32, tonic::Status> {
+        loop {
+            // Current sharding model assumes that all metadata is present only at shard 0.
+            let unary_pool = Arc::clone(&self.unary_pool);
+            let pooled_client = unary_pool.get_client().await.unwrap();
+            let channel = pooled_client.channel();
+            let mut ps_client = PageServiceClient::with_interceptor(channel, self.auth_interceptor.clone());
+
+            let request = proto::GetRelSizeRequest::from(req.clone());
+            let response = ps_client.get_rel_size(tonic::Request::new(request)).await;
+
+            match response {
+                Err(status) => {
+                    pooled_client.finish(Err(status.clone())).await; // Pass error to finish
+                    continue;
+                }
+                Ok(resp) => {
+                    pooled_client.finish(Ok(())).await; // Pass success to finish
+                    return Ok(resp.get_ref().num_blocks);
+                }
+            }
+
+        }
+    }
+
+    pub async fn send_process_get_dbsize_request(
+        &self,
+        req: GetDbSizeRequest,
+    ) -> Result<u64, tonic::Status> {
+        loop {
+            // Current sharding model assumes that all metadata is present only at shard 0.
+            let unary_pool = Arc::clone(&self.unary_pool);
+            let pooled_client = unary_pool.get_client().await.unwrap();let channel = pooled_client.channel();
+            let mut ps_client = PageServiceClient::with_interceptor(channel, self.auth_interceptor.clone());
+
+            let request = proto::GetDbSizeRequest::from(req.clone());
+            let response = ps_client.get_db_size(tonic::Request::new(request)).await;
+
+            match response {
+                Err(status) => {
+                    pooled_client.finish(Err(status.clone())).await; // Pass error to finish
+                    continue;
+                }
+                Ok(resp) => {
+                    pooled_client.finish(Ok(())).await; // Pass success to finish
+                    return Ok(resp.get_ref().num_bytes);
+                }
+            }
 
         }
     }
@@ -230,7 +310,7 @@ impl RequestTracker {
     pub async fn send_getpage_request(
         &mut self,
         req: GetPageRequest,
-    ) -> proto::GetPageResponse {
+    ) -> Result<GetPageResponse, tonic::Status> {
         loop {
             let mut request = req.clone();
             // Increment cur_id
@@ -286,7 +366,7 @@ impl RequestTracker {
                         },
                         Ok(resp) => {
                             stream_returner.finish(Result::Ok(())).await;
-                            return resp.clone();
+                            return Ok(resp.clone().into());
                         }
                     }
                 }
@@ -297,6 +377,211 @@ impl RequestTracker {
                     continue;
                 }
             }
+        }
+    }
+}
+
+struct ShardedRequestTrackerInner {
+    // Hashmap of shard index to RequestTracker
+    trackers: std::collections::HashMap<ShardIndex, RequestTracker>,
+}
+struct ShardedRequestTracker {
+    inner: Arc<Mutex<ShardedRequestTrackerInner>>,
+    tcp_client_cache_options: ClientCacheOptions,
+    stream_client_cache_options: ClientCacheOptions,
+}
+
+//
+// TODO: Functions in the ShardedRequestTracker should be able to timeout and
+// cancel a reqeust. The request should return an error if it is cancelled.
+//
+impl ShardedRequestTracker {
+    pub fn new() -> Self {
+        //
+        // Default configuration for the client. These could be added to a config file
+        //
+        let tcp_client_cache_options = ClientCacheOptions {
+            max_delay_ms:       0,
+            drop_rate:          0.0,
+            hang_rate:          0.0,
+            connect_timeout:    Duration::from_secs(1),
+            connect_backoff:    Duration::from_millis(100),
+            max_consumers:      8, // Streams per connection
+            error_threshold:    10,
+            max_idle_duration:  Duration::from_secs(5),
+            max_total_connections: 8,
+        };
+        let stream_client_cache_options = ClientCacheOptions {
+            max_delay_ms:       0,
+            drop_rate:          0.0,
+            hang_rate:          0.0,
+            connect_timeout:    Duration::from_secs(1),
+            connect_backoff:    Duration::from_millis(100),
+            max_consumers:      64, // Requests per stream
+            error_threshold:    10,
+            max_idle_duration:  Duration::from_secs(5),
+            max_total_connections: 64, // Total allowable number of streams
+        };
+        ShardedRequestTracker {
+            inner: Arc::new(Mutex::new(ShardedRequestTrackerInner {
+                trackers: std::collections::HashMap::new(),
+            })),
+            tcp_client_cache_options,
+            stream_client_cache_options,
+        }
+    }
+
+    pub async fn update_shard_map(&self,
+                            shard_urls: std::collections::HashMap<ShardIndex, String>,
+                            metrics: Arc<PageserverClientAggregateMetrics>,
+                            ttid: TenantTimelineId) {
+
+       let mut trackers = std::collections::HashMap::new();
+        for (shard, endpoint_url) in shard_urls {
+            //
+            // Create a pool of streams for streaming get_page requests
+            //
+            let channel_fact : Arc<dyn PooledItemFactory<Channel> + Send + Sync> = Arc::new(ChannelFactory::new(
+                endpoint_url.clone(),
+                self.tcp_client_cache_options.max_delay_ms,
+                self.tcp_client_cache_options.drop_rate,
+                self.tcp_client_cache_options.hang_rate,
+            ));
+            let new_pool: Arc<ConnectionPool<Channel>>;
+            new_pool = ConnectionPool::new(
+                Arc::clone(&channel_fact),
+                self.tcp_client_cache_options.connect_timeout,
+                self.tcp_client_cache_options.connect_backoff,
+                self.tcp_client_cache_options.max_consumers,
+                self.tcp_client_cache_options.error_threshold,
+                self.tcp_client_cache_options.max_idle_duration,
+                self.tcp_client_cache_options.max_total_connections,
+                Some(Arc::clone(&metrics)),
+            );
+
+            let auth_interceptor = AuthInterceptor::new(ttid.tenant_id.to_string().as_str(),
+                                                        ttid.timeline_id.to_string().as_str(),
+                                                        None);
+
+            let stream_pool = ConnectionPool::<StreamReturner>::new(
+                Arc::new(StreamFactory::new(new_pool.clone(),
+                                            auth_interceptor.clone(), ShardIndex::unsharded())),
+                self.stream_client_cache_options.connect_timeout,
+                self.stream_client_cache_options.connect_backoff,
+                self.stream_client_cache_options.max_consumers,
+                self.stream_client_cache_options.error_threshold,
+                self.stream_client_cache_options.max_idle_duration,
+                self.stream_client_cache_options.max_total_connections,
+                Some(Arc::clone(&metrics)),
+            );
+
+            //
+            // Create a client pool for unary requests
+            //
+
+            let unary_pool: Arc<ConnectionPool<Channel>>;
+            unary_pool = ConnectionPool::new(
+                Arc::clone(&channel_fact),
+                self.tcp_client_cache_options.connect_timeout,
+                self.tcp_client_cache_options.connect_backoff,
+                self.tcp_client_cache_options.max_consumers,
+                self.tcp_client_cache_options.error_threshold,
+                self.tcp_client_cache_options.max_idle_duration,
+                self.tcp_client_cache_options.max_total_connections,
+                Some(Arc::clone(&metrics)),
+            );
+            //
+            // Create a new RequestTracker for this shard
+            //
+            let new_tracker = RequestTracker::new(stream_pool, unary_pool, auth_interceptor);
+            trackers.insert(shard, new_tracker);
+        }
+        let mut inner = self.inner.lock().await;
+        inner.trackers = trackers;
+    }
+
+    pub async fn get_pages(
+        &self,
+        req: GetPageRequest,
+    ) -> Result<GetPageResponse, tonic::Status> {
+
+        // Get shard index from the request
+        let shard_index = ShardIndex::unsharded();
+        let inner = self.inner.lock().await;
+        let mut tracker : RequestTracker;
+        if let Some(t) = inner.trackers.get(&shard_index) {
+            tracker = t.clone();
+        } else {
+            return Err(tonic::Status::not_found(format!("Shard {} not found", shard_index)));
+        }
+        drop(inner);
+        // Call the send_getpage_request method on the tracker
+        let response = tracker.send_getpage_request(req).await;
+        match response {
+            Ok(resp) => Ok(resp),
+            Err(e) => Err(tonic::Status::unknown(format!("Failed to get page: {}", e))),
+        }
+    }
+    pub async fn process_get_dbsize_request(
+        &self,
+        request: GetDbSizeRequest,
+    ) -> Result<u64, tonic::Status> {
+        let shard_index = ShardIndex::unsharded();
+        let inner = self.inner.lock().await;
+        let mut tracker: RequestTracker;
+        if let Some(t) = inner.trackers.get(&shard_index) {
+            tracker = t.clone();
+        } else {
+            return Err(tonic::Status::not_found(format!("Shard {} not found", shard_index)));
+        }
+        drop(inner); // Release the lock before calling send_process_get_dbsize_request
+        // Call the send_process_get_dbsize_request method on the tracker
+        let response = tracker.send_process_get_dbsize_request(request).await;
+        match response {
+            Ok(resp) => Ok(resp),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub async fn process_get_rel_size_request(
+        &self,
+        request: GetRelSizeRequest,
+    ) -> Result<u32, tonic::Status> {
+        let shard_index = ShardIndex::unsharded();
+        let inner = self.inner.lock().await;
+        let mut tracker: RequestTracker;
+        if let Some(t) = inner.trackers.get(&shard_index) {
+            tracker = t.clone();
+        } else {
+            return Err(tonic::Status::not_found(format!("Shard {} not found", shard_index)));
+        }
+        drop(inner); // Release the lock before calling send_process_get_rel_size_request
+        // Call the send_process_get_rel_size_request method on the tracker
+        let response = tracker.send_process_get_rel_size_request(request).await;
+        match response {
+            Ok(resp) => Ok(resp),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub async fn process_check_rel_exists_request(
+        &self,
+        request: CheckRelExistsRequest,
+    ) -> Result<bool, tonic::Status> {
+        let shard_index = ShardIndex::unsharded();
+        let inner = self.inner.lock().await;
+        let mut tracker: RequestTracker;
+        if let Some(t) = inner.trackers.get(&shard_index) {
+            tracker = t.clone();
+        } else {
+            return Err(tonic::Status::not_found(format!("Shard {} not found", shard_index)));
+        }
+        drop(inner); // Release the lock before calling send_process_check_rel_exists_request
+        // Call the send_process_check_rel_exists_request method on the tracker
+        let response = tracker.send_process_check_rel_exists_request(request).await;
+        match response {
+            Ok(resp) => Ok(resp),
+            Err(e) => Err(e),
         }
     }
 }

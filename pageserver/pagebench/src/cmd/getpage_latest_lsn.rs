@@ -45,6 +45,7 @@ use pageserver_client_grpc::ClientCacheOptions;
 use pageserver_client_grpc::AuthInterceptor;
 use pageserver_client_grpc::client_cache::ConnectionPool;
 use pageserver_client_grpc::client_cache::ChannelFactory;
+use pageserver_client_grpc::client_cache::PooledItemFactory;
 use pageserver_client_grpc::PageserverClientAggregateMetrics;
 use pageserver_client_grpc::request_tracker::RequestTracker;
 use pageserver_client_grpc::request_tracker::StreamReturner;
@@ -797,9 +798,9 @@ impl Client for RtClient {
         let start = Instant::now();
         let mut rt_clone = self.inner.clone();
         let fut : ReqFut = Box::pin(async move {
-            let response = rt_clone.send_getpage_request(domain_req).await;
+            let response = rt_clone.send_getpage_request(domain_req).await.unwrap();
             return (start, Ok(PagestreamGetPageResponse {
-                page: response.page_image[0].clone(),
+                page: response.page_images[0].clone(),
                 req: PagestreamGetPageRequest::default(), // dummy
             }));
         });

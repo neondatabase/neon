@@ -487,6 +487,7 @@ impl From<GetPageStatusCode> for i32 {
 
 // Fetches the size of a relation at a given LSN, as # of blocks. Only valid on shard 0, other
 // shards will error.
+#[derive(Clone)]
 pub struct GetRelSizeRequest {
     pub read_lsn: ReadLsn,
     pub rel: RelTag,
