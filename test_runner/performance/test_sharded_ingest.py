@@ -15,19 +15,10 @@ from fixtures.neon_fixtures import (
 
 @pytest.mark.timeout(1200)
 @pytest.mark.parametrize("shard_count", [1, 8, 32])
-@pytest.mark.parametrize(
-    "wal_receiver_protocol",
-    [
-        "vanilla",
-        "interpreted-bincode-compressed",
-        "interpreted-protobuf-compressed",
-    ],
-)
 def test_sharded_ingest(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     shard_count: int,
-    wal_receiver_protocol: str,
 ):
     """
     Benchmarks sharded ingestion throughput, by ingesting a large amount of WAL into a Safekeeper
@@ -38,36 +29,6 @@ def test_sharded_ingest(
 
     neon_env_builder.num_pageservers = shard_count
     env = neon_env_builder.init_configs()
-
-    for ps in env.pageservers:
-        if wal_receiver_protocol == "vanilla":
-            ps.patch_config_toml_nonrecursive(
-                {
-                    "wal_receiver_protocol": {
-                        "type": "vanilla",
-                    }
-                }
-            )
-        elif wal_receiver_protocol == "interpreted-bincode-compressed":
-            ps.patch_config_toml_nonrecursive(
-                {
-                    "wal_receiver_protocol": {
-                        "type": "interpreted",
-                        "args": {"format": "bincode", "compression": {"zstd": {"level": 1}}},
-                    }
-                }
-            )
-        elif wal_receiver_protocol == "interpreted-protobuf-compressed":
-            ps.patch_config_toml_nonrecursive(
-                {
-                    "wal_receiver_protocol": {
-                        "type": "interpreted",
-                        "args": {"format": "protobuf", "compression": {"zstd": {"level": 1}}},
-                    }
-                }
-            )
-        else:
-            raise AssertionError("Test must use explicit wal receiver protocol config")
 
     env.start()
 
