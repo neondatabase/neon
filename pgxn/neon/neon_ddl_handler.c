@@ -53,7 +53,6 @@
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
 static fmgr_hook_type next_fmgr_hook = NULL;
 static needs_fmgr_hook_type next_needs_fmgr_hook = NULL;
-static bool neon_enable_event_triggers_for_superuser = false;
 static bool neon_event_triggers = true;
 
 static const char *jwt_token = NULL;
@@ -879,8 +878,17 @@ neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 		return;
 	}
 
-	/* SET neon.event_triggers TO false; disables Event Triggers */
-	if (event == FHET_START && !neon_event_triggers)
+	/*
+	 * The neon_superuser role can use the GUC neon.event_triggers to disable
+	 * firing Event Trigger.
+	 *
+	 *   SET neon.event_triggers TO false;
+	 *
+	 * This only applies to the neon_superuser role though.
+	 */
+	if (event == FHET_START
+		&& !neon_event_triggers
+		&& is_neon_superuser())
 	{
 		elog(WARNING,
 			 "Skipping Event Trigger: neon.event_triggers is false");
@@ -940,7 +948,6 @@ neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 		 * superuser privelges to non-superuser code.
 		 */
 		else if (role_is_super
-				 && neon_enable_event_triggers_for_superuser
 				 && !function_is_secdef
 				 && !function_is_owned_by_super)
 		{
@@ -1304,6 +1311,24 @@ NeonProcessUtility(
 	}
 }
 
+/*
+ * Only neon_superuser is granted privilege to edit neon.event_triggers GUC.
+ */
+static bool
+neon_event_triggers_change_hook(bool newval, void *extra)
+{
+	if (!is_neon_superuser())
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied to set neon.event_triggers"),
+				 errdetail("Only \"neon_superuser\" is allowed to set the GUC")));
+		return false;
+	}
+	return true;
+}
+
+
 void
 InitDDLHandler()
 {
@@ -1318,23 +1343,6 @@ InitDDLHandler()
 
 	RegisterXactCallback(NeonXactCallback, NULL);
 	RegisterSubXactCallback(NeonSubXactCallback, NULL);
-
-	/*
-	 * By default Neon does not fire Event Triggers for a privileged role, to
-	 * protect again privilege escalation. It is still possible to opt-in for
-	 * Event Triggers and superuser access though.
-	 */
-	DefineCustomBoolVariable(
-							 "neon.enable_event_triggers_for_superuser",
-							 "Enable firing of event triggers for superuser",
-							 NULL,
-							 &neon_enable_event_triggers_for_superuser,
-							 false,
-							 PGC_SUSET,
-							 0,
-							 NULL,
-							 NULL,
-							 NULL);
 
 	/*
 	 * The GUC neon.event_triggers should provide the same effect as the
@@ -1353,7 +1361,7 @@ InitDDLHandler()
 							 PGC_USERSET,
 							 0,
 							 NULL,
-							 NULL,
+							 neon_event_triggers_change_hook,
 							 NULL);
 
 	DefineCustomStringVariable(
