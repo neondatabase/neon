@@ -1,5 +1,6 @@
 use std::fmt;
 use std::num::ParseIntError;
+use std::ops::RangeInclusive;
 use std::str::FromStr;
 
 use anyhow::Context;
@@ -319,6 +320,19 @@ impl TenantTimelineId {
 
     pub fn empty() -> Self {
         Self::new(TenantId::from([0u8; 16]), TimelineId::from([0u8; 16]))
+    }
+
+    pub fn tenant_range(tenant_id: TenantId) -> RangeInclusive<Self> {
+        RangeInclusive::new(
+            Self {
+                tenant_id,
+                timeline_id: TimelineId::from_array([u8::MIN; 16]),
+            },
+            Self {
+                tenant_id,
+                timeline_id: TimelineId::from_array([u8::MAX; 16]),
+            },
+        )
     }
 }
 
