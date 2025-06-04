@@ -1,11 +1,15 @@
 use std::fmt::Debug;
 use std::io;
+use std::net::IpAddr;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
 use postgres_client::CancelToken;
+use postgres_client::config::AuthKeys;
+use postgres_client::config::SslMode;
 use rustls::pki_types::InvalidDnsNameError;
 use thiserror::Error;
 use tokio::net::{TcpStream, lookup_host};
@@ -137,42 +141,97 @@ impl NodeInfo {
 
     pub(crate) fn set_keys(&mut self, keys: &ComputeCredentialKeys) {
         match keys {
-            ComputeCredentialKeys::AuthKeys(auth_keys) => self.config.auth_keys(*auth_keys),
-            ComputeCredentialKeys::JwtPayload(_) | ComputeCredentialKeys::None => &mut self.config,
-        };
+            ComputeCredentialKeys::AuthKeys(AuthKeys::ScramSha256(auth_keys)) => {
+                self.config.auth = Some(Auth::Scram(Box::new(*auth_keys)));
+            }
+            ComputeCredentialKeys::JwtPayload(_) | ComputeCredentialKeys::None => {}
+        }
     }
 }
 
 /// A pair of `ClientKey` & `ServerKey` for `SCRAM-SHA-256`.
 pub(crate) type ScramKeys = postgres_client::config::ScramKeys<32>;
 
-/// A config for establishing a connection to compute node.
-/// Eventually, `postgres_client` will be replaced with something better.
-/// Newtype allows us to implement methods on top of it.
 #[derive(Clone)]
-pub(crate) struct ConnCfg(Box<postgres_client::Config>);
+pub enum Auth {
+    Password(Vec<u8>),
+    Scram(Box<ScramKeys>),
+}
+
+/// Contains only the data needed to establish a secure connection to compute.
+#[derive(Clone)]
+pub struct ConnectInfo {
+    pub host_addr: Option<IpAddr>,
+    pub host: Host,
+    pub port: u16,
+    pub ssl_mode: SslMode,
+}
+
+impl ConnectInfo {
+    pub(crate) fn new(host: Host, port: u16, ssl_mode: SslMode) -> Self {
+        Self {
+            host_addr: None,
+            host,
+            port,
+            ssl_mode,
+        }
+    }
+}
+
+/// A config for establishing a connection and authenticating to the compute node.
+#[derive(Clone)]
+pub(crate) struct ConnCfg {
+    pub(crate) connect: ConnectInfo,
+
+    pub(crate) auth: Option<Auth>,
+    pub server_params: StartupMessageParams,
+
+    skip_db_user: bool,
+}
 
 /// Creation and initialization routines.
 impl ConnCfg {
-    pub(crate) fn new(host: String, port: u16) -> Self {
-        Self(Box::new(postgres_client::Config::new(host, port)))
+    pub(crate) fn new(connect: ConnectInfo) -> Self {
+        Self {
+            connect,
+
+            auth: None,
+            server_params: StartupMessageParams::default(),
+            skip_db_user: false,
+        }
+    }
+
+    pub fn to_postgres_client_config(&self) -> postgres_client::Config {
+        let mut config =
+            postgres_client::Config::new(self.connect.host.to_string(), self.connect.port);
+        config.ssl_mode(self.connect.ssl_mode);
+        if let Some(host_addr) = self.connect.host_addr {
+            config.set_host_addr(host_addr);
+        }
+        match &self.auth {
+            Some(Auth::Password(pw)) => config.password(pw),
+            Some(Auth::Scram(keys)) => config.auth_keys(AuthKeys::ScramSha256(**keys)),
+            None => &mut config,
+        };
+        for (k, v) in self.server_params.iter() {
+            config.set_param(k, v);
+        }
+        config
     }
 
     /// Reuse password or auth keys from the other config.
     pub(crate) fn reuse_password(&mut self, other: Self) {
-        if let Some(password) = other.get_password() {
-            self.password(password);
-        }
-
-        if let Some(keys) = other.get_auth_keys() {
-            self.auth_keys(keys);
-        }
+        self.auth = other.auth;
     }
 
     pub(crate) fn get_host(&self) -> Host {
-        match self.0.get_host() {
-            postgres_client::config::Host::Tcp(s) => s.into(),
-        }
+        self.connect.host.clone()
+    }
+
+    pub fn dbname_and_user(&mut self, db: &str, user: &str) {
+        self.skip_db_user = true;
+        self.server_params.insert("database", db);
+        self.server_params.insert("user", user);
     }
 
     /// Apply startup message params to the connection config.
@@ -182,27 +241,28 @@ impl ConnCfg {
         arbitrary_params: bool,
     ) {
         if !arbitrary_params {
-            self.set_param("client_encoding", "UTF8");
+            self.server_params.insert("client_encoding", "UTF8");
         }
         for (k, v) in params.iter() {
             match k {
                 // Only set `user` if it's not present in the config.
                 // Console redirect auth flow takes username from the console's response.
-                "user" if self.user_is_set() => {}
-                "database" if self.db_is_set() => {}
+                "user" | "database" if self.skip_db_user => {}
+                // filter out neon specific options, as postgres won't
+                // know what to do with them.
                 "options" => {
                     if let Some(options) = filtered_options(v) {
-                        self.set_param(k, &options);
+                        self.server_params.insert(k, &options);
                     }
                 }
                 "user" | "database" | "application_name" | "replication" => {
-                    self.set_param(k, v);
+                    self.server_params.insert(k, v);
                 }
 
                 // if we allow arbitrary params, then we forward them through.
                 // this is a flag for a period of backwards compatibility
                 k if arbitrary_params => {
-                    self.set_param(k, v);
+                    self.server_params.insert(k, v);
                 }
                 _ => {}
             }
@@ -210,26 +270,13 @@ impl ConnCfg {
     }
 }
 
-impl std::ops::Deref for ConnCfg {
-    type Target = postgres_client::Config;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-/// For now, let's make it easier to setup the config.
-impl std::ops::DerefMut for ConnCfg {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl ConnCfg {
+impl ConnectInfo {
     /// Establish a raw TCP connection to the compute node.
-    async fn connect_raw(&self, timeout: Duration) -> io::Result<(SocketAddr, TcpStream, &str)> {
-        use postgres_client::config::Host;
-
+    async fn connect_raw(
+        &self,
+        tls: Arc<rustls::ClientConfig>,
+        timeout: Duration,
+    ) -> Result<(SocketAddr, Stream<TcpStream>), TlsError> {
         // wrap TcpStream::connect with timeout
         let connect_with_timeout = |addrs| {
             tokio::time::timeout(timeout, TcpStream::connect(addrs)).map(move |res| match res {
@@ -255,28 +302,20 @@ impl ConnCfg {
             })
         };
 
-        // We can't reuse connection establishing logic from `postgres_client` here,
-        // because it has no means for extracting the underlying socket which we
-        // require for our business.
-        let port = self.0.get_port();
-        let host = self.0.get_host();
-
-        let host = match host {
-            Host::Tcp(host) => host.as_str(),
-        };
-
-        let addrs = match self.0.get_host_addr() {
+        let host = &*self.host;
+        let port = self.port;
+        let addrs = match self.host_addr {
             Some(addr) => vec![SocketAddr::new(addr, port)],
             None => lookup_host((host, port)).await?.collect(),
         };
 
-        match connect_once(&*addrs).await {
-            Ok((sockaddr, stream)) => Ok((sockaddr, stream, host)),
-            Err(err) => {
-                warn!("couldn't connect to compute node at {host}:{port}: {err}");
-                Err(err)
-            }
-        }
+        let (sockaddr, stream) = connect_once(&*addrs).await.inspect_err(|err| {
+            warn!("couldn't connect to compute node at {host}:{port}: {err}");
+        })?;
+
+        let stream = connect_raw::connect_tls(stream, self.ssl_mode, tls, &self.host).await?;
+
+        Ok((sockaddr, stream))
     }
 }
 
@@ -301,12 +340,12 @@ impl ConnCfg {
         user_info: ComputeUserInfo,
     ) -> Result<PostgresConnection, ConnectionError> {
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let (socket_addr, stream, host) = self
-            .connect_raw(config.timeout)
-            .await
-            .map_err(PostgresError::Io)?;
-
-        let stream = connect_raw::connect_raw(stream, config.tls.clone(), &self.0).await?;
+        let (socket_addr, stream) = self
+            .connect
+            .connect_raw(config.tls.clone(), config.timeout)
+            .await?;
+        let stream =
+            connect_raw::authenticate(stream, self.auth.as_ref(), &self.server_params).await?;
         drop(pause);
 
         ctx.span()
@@ -315,8 +354,9 @@ impl ConnCfg {
         // TODO: lots of useful info but maybe we can move it elsewhere (eg traces?)
         info!(
             cold_start_info = ctx.cold_start_info().as_str(),
-            "connected to compute node at {host} ({socket_addr}) sslmode={:?}, latency={}, query_id={}",
-            self.0.get_ssl_mode(),
+            "connected to compute node at {} ({socket_addr}) sslmode={:?}, latency={}, query_id={}",
+            self.connect.host,
+            self.connect.ssl_mode,
             ctx.get_proxy_latency(),
             ctx.get_testodrome_id().unwrap_or_default(),
         );
@@ -327,11 +367,11 @@ impl ConnCfg {
             socket_addr,
             CancelToken {
                 socket_config: None,
-                ssl_mode: self.0.get_ssl_mode(),
+                ssl_mode: self.connect.ssl_mode,
                 process_id: 0,
                 secret_key: 0,
             },
-            host.to_string(),
+            self.connect.host.to_string(),
             user_info,
         );
 

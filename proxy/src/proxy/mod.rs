@@ -29,7 +29,7 @@ use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
 use crate::context::RequestContext;
 use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
-use crate::pqproto::{CancelKeyData, StartupMessageParams};
+use crate::pqproto::{CancelKeyData, StartupMessageParams, BE_KEY_MESSAGE, BE_READY_MESSAGE};
 use crate::protocol2::{ConnectHeader, ConnectionInfo, ConnectionInfoExtra, read_proxy_protocol};
 use crate::proxy::handshake::{HandshakeData, handshake};
 use crate::rate_limiter::EndpointRateLimiter;
@@ -442,8 +442,8 @@ pub(crate) async fn prepare_client_connection(
     loop {
         match node.stream.read_raw_be(1024).await {
             // parse backend keys, and substitute our own.
-            Ok((b'K', msg)) => {
-                stream.write_raw(8, b'K', |b| b.extend_from_slice(key_data.as_bytes()));
+            Ok((tag @ BE_KEY_MESSAGE, msg)) => {
+                stream.write_raw(8, tag.0, |b| b.extend_from_slice(key_data.as_bytes()));
 
                 let key_data = CancelKeyData::try_read_from_bytes(msg)
                     .map_err(|_| std::io::Error::other("invalid msg len"))?;
@@ -452,13 +452,13 @@ pub(crate) async fn prepare_client_connection(
                 node.cancel_closure.secret_key = (key_data.0.get() & 0xffff_ffff) as i32;
             }
             // ready for query, we're done :)
-            Ok((b'Z', msg)) => {
-                stream.write_raw(msg.len(), b'Z', |b| b.extend_from_slice(msg.as_bytes()));
+            Ok((tag @ BE_READY_MESSAGE, msg)) => {
+                stream.write_raw(msg.len(), tag.0, |b| b.extend_from_slice(msg.as_bytes()));
                 break;
             }
             // either a notice or a parameter status.
             Ok((tag, msg)) => {
-                stream.write_raw(msg.len(), tag, |b| b.extend_from_slice(msg.as_bytes()));
+                stream.write_raw(msg.len(), tag.0, |b| b.extend_from_slice(msg.as_bytes()));
             }
             Err(PostgresError::Io(io)) => return Err(io),
             Err(PostgresError::Error(e)) => return Err(std::io::Error::other(e)),

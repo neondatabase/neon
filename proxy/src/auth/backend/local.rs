@@ -1,11 +1,13 @@
 use std::net::SocketAddr;
 
 use arc_swap::ArcSwapOption;
+use smol_str::ToSmolStr;
 use tokio::sync::Semaphore;
 
 use super::jwt::{AuthRule, FetchAuthRules};
 use crate::auth::backend::jwt::FetchAuthRulesError;
 use crate::compute::ConnCfg;
+use crate::compute::ConnectInfo;
 use crate::compute::NodeInfo;
 use crate::compute_ctl::ComputeCtlApi;
 use crate::context::RequestContext;
@@ -29,7 +31,11 @@ impl LocalBackend {
                 api: http::Endpoint::new(compute_ctl, http::new_client()),
             },
             node_info: NodeInfo {
-                config: ConnCfg::new(postgres_addr.ip().to_string(), postgres_addr.port()),
+                config: ConnCfg::new(ConnectInfo::new(
+                    postgres_addr.ip().to_smolstr().into(),
+                    postgres_addr.port(),
+                    postgres_client::config::SslMode::Disable,
+                )),
                 // TODO(conrad): make this better reflect compute info rather than endpoint info.
                 aux: MetricsAuxInfo {
                     endpoint_id: EndpointIdTag::get_interner().get_or_intern("local"),

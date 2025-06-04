@@ -10,7 +10,7 @@ use super::ComputeCredentialKeys;
 use crate::auth::IpPattern;
 use crate::auth::backend::ComputeUserInfo;
 use crate::cache::Cached;
-use crate::compute::NodeInfo;
+use crate::compute::{Auth, NodeInfo};
 use crate::config::AuthenticationConfig;
 use crate::context::RequestContext;
 use crate::control_plane::client::cplane_proxy_v1;
@@ -192,10 +192,21 @@ async fn authenticate(
 
     client.write_message(BeMessage::NoticeResponse("Connecting to database."));
 
+    // Backwards compatibility. pg_sni_proxy uses "--" in domain names
+    // while direct connections do not. Once we migrate to pg_sni_proxy
+    // everywhere, we can remove this.
+    let ssl_mode = if db_info.host.contains("--") {
+        // we need TLS connection with SNI info to properly route it
+        SslMode::Require
+    } else {
+        SslMode::Disable
+    };
+
     // This config should be self-contained, because we won't
     // take username or dbname from client's startup message.
-    let mut config = compute::ConnCfg::new(db_info.host.to_string(), db_info.port);
-    config.dbname(&db_info.dbname).user(&db_info.user);
+    let config = compute::ConnectInfo::new(db_info.host.as_ref().into(), db_info.port, ssl_mode);
+    let mut config = compute::ConnCfg::new(config);
+    config.dbname_and_user(&db_info.dbname, &db_info.user);
 
     let user: RoleName = db_info.user.into();
     let user_info = ComputeUserInfo {
@@ -209,18 +220,8 @@ async fn authenticate(
     ctx.set_project(db_info.aux.clone());
     info!("woken up a compute node");
 
-    // Backwards compatibility. pg_sni_proxy uses "--" in domain names
-    // while direct connections do not. Once we migrate to pg_sni_proxy
-    // everywhere, we can remove this.
-    if db_info.host.contains("--") {
-        // we need TLS connection with SNI info to properly route it
-        config.ssl_mode(SslMode::Require);
-    } else {
-        config.ssl_mode(SslMode::Disable);
-    }
-
     if let Some(password) = db_info.password {
-        config.password(password.as_ref());
+        config.auth = Some(Auth::Password(password.into_boxed_bytes().into()));
     }
 
     Ok((

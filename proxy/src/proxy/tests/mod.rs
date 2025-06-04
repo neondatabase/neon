@@ -33,7 +33,7 @@ use crate::pqproto::BeMessage;
 use crate::tls::client_config::compute_client_config_with_certs;
 use crate::tls::postgres_rustls::MakeRustlsConnect;
 use crate::tls::server_config::CertResolver;
-use crate::types::{BranchId, EndpointId, ProjectId};
+use crate::types::{BranchId, EndpointId, Host, ProjectId};
 use crate::{sasl, scram};
 
 /// Generate a set of TLS certificates: CA + server.
@@ -559,7 +559,11 @@ impl TestControlPlaneClient for TestConnectMechanism {
 
 fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {
     let node = NodeInfo {
-        config: compute::ConnCfg::new("test".to_owned(), 5432),
+        config: compute::ConnCfg::new(compute::ConnectInfo::new(
+            Host::from("test"),
+            5432,
+            SslMode::Prefer,
+        )),
         aux: MetricsAuxInfo {
             endpoint_id: (&EndpointId::from("endpoint")).into(),
             project_id: (&ProjectId::from("project")).into(),

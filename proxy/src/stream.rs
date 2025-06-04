@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::{io, task};
 
 use bytes::Bytes;
-use postgres_protocol::message::frontend::StartupMessageParams;
 use rustls::ServerConfig;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -12,8 +11,9 @@ use tokio_rustls::server::TlsStream;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::metrics::Metrics;
 use crate::pqproto::{
-    BE_AUTH_MESSAGE, BE_ERR_MESSAGE, BeMessage, FE_PASSWORD_MESSAGE, FeStartupPacket,
-    SQLSTATE_INTERNAL_ERROR, WriteBuf, read_message, read_startup,
+    AuthTag, BE_AUTH_MESSAGE, BE_ERR_MESSAGE, BeMessage, BeTag, ErrorCode, FE_PASSWORD_MESSAGE,
+    FeStartupPacket, FeTag, SQLSTATE_INTERNAL_ERROR, StartupMessageParams, WriteBuf, read_message,
+    read_startup,
 };
 use crate::tls::TlsServerEndPoint;
 
@@ -98,11 +98,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> PqStream<S> {
 impl<S: AsyncRead + Unpin> PqStream<S> {
     /// Read a raw postgres packet, which will respect the max length requested.
     /// This is not cancel safe.
-    async fn read_raw_expect(&mut self, tag: u8, max: u32) -> io::Result<&mut [u8]> {
+    async fn read_raw_expect(&mut self, tag: FeTag, max: u32) -> io::Result<&mut [u8]> {
         let (actual_tag, msg) = read_message(&mut self.stream, &mut self.read, max).await?;
-        if actual_tag != tag {
+        if actual_tag != tag.0 {
             return Err(io::Error::other(UnexpectedMessage {
-                expected: tag,
+                expected: tag.0,
                 tag: actual_tag,
                 data: msg.to_vec().into(),
             }));
@@ -114,9 +114,9 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
     /// as well as handling postgres error messages.
     ///
     /// This is not cancel safe.
-    pub async fn read_raw_be(&mut self, max: u32) -> Result<(u8, &mut [u8]), PostgresError> {
+    pub async fn read_raw_be(&mut self, max: u32) -> Result<(BeTag, &mut [u8]), PostgresError> {
         let (tag, msg) = read_message(&mut self.stream, &mut self.read, max).await?;
-        match tag {
+        match BeTag(tag) {
             BE_ERR_MESSAGE => Err(PostgresError::Error(BackendError {
                 data: msg.to_vec().into(),
             })),
@@ -126,12 +126,16 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
 
     /// Read a raw postgres packet, which will respect the max length requested.
     /// This is not cancel safe.
-    async fn read_raw_be_expect(&mut self, tag: u8, max: u32) -> Result<&mut [u8], PostgresError> {
+    async fn read_raw_be_expect(
+        &mut self,
+        tag: BeTag,
+        max: u32,
+    ) -> Result<&mut [u8], PostgresError> {
         let (actual_tag, msg) = self.read_raw_be(max).await?;
         if actual_tag != tag {
             return Err(PostgresError::Unexpected(UnexpectedMessage {
-                expected: tag,
-                tag: actual_tag,
+                expected: tag.0,
+                tag: actual_tag.0,
                 data: msg.to_vec().into(),
             }));
         }
@@ -151,13 +155,13 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
 
     /// Read a postgres backend auth message.
     /// This is not cancel safe.
-    pub async fn read_auth_message(&mut self) -> Result<(u32, &mut [u8]), PostgresError> {
+    pub async fn read_auth_message(&mut self) -> Result<(AuthTag, &mut [u8]), PostgresError> {
         const MAX_AUTH_LENGTH: u32 = 512;
 
         self.read_raw_be_expect(BE_AUTH_MESSAGE, MAX_AUTH_LENGTH)
             .await?
             .split_first_chunk_mut()
-            .map(|(tag, msg)| (u32::from_be_bytes(*tag), msg))
+            .map(|(tag, msg)| (AuthTag(i32::from_be_bytes(*tag)), msg))
             .ok_or(PostgresError::InvalidAuthMessage)
     }
 }
@@ -202,7 +206,7 @@ pub struct BackendError {
 }
 
 impl BackendError {
-    pub fn parse(&self) -> (&[u8], &[u8]) {
+    pub fn parse(&self) -> (ErrorCode, &[u8]) {
         let mut code = &[] as &[u8];
         let mut message = &[] as &[u8];
 
@@ -213,6 +217,8 @@ impl BackendError {
                 _ => {}
             }
         }
+
+        let code = code.try_into().map_or(SQLSTATE_INTERNAL_ERROR, ErrorCode);
 
         (code, message)
     }

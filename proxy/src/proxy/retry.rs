@@ -102,7 +102,13 @@ impl ShouldRetryWakeCompute for postgres_client::Error {
 impl CouldRetry for BackendError {
     fn could_retry(&self) -> bool {
         let (code, _message) = self.parse();
-        matches!(code, b"08006" | b"08000" | b"08003" | b"08001")
+        matches!(
+            code,
+            crate::pqproto::CONNECTION_FAILURE
+                | crate::pqproto::CONNECTION_EXCEPTION
+                | crate::pqproto::CONNECTION_DOES_NOT_EXIST
+                | crate::pqproto::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION,
+        )
     }
 }
 impl ShouldRetryWakeCompute for BackendError {
@@ -112,14 +118,20 @@ impl ShouldRetryWakeCompute for BackendError {
         // Here are errors that happens after the user successfully authenticated to the database.
         let non_retriable_pg_errors = matches!(
             code,
-            b"53300" | b"53200" | b"42601" | b"40001" | b"3D000" | b"3F000" | b"22023"
+            crate::pqproto::TOO_MANY_CONNECTIONS
+                | crate::pqproto::OUT_OF_MEMORY
+                | crate::pqproto::SYNTAX_ERROR
+                | crate::pqproto::T_R_SERIALIZATION_FAILURE
+                | crate::pqproto::INVALID_CATALOG_NAME
+                | crate::pqproto::INVALID_SCHEMA_NAME
+                | crate::pqproto::INVALID_PARAMETER_VALUE,
         );
         if non_retriable_pg_errors {
             return false;
         }
 
         // PGBouncer errors that should not trigger a wake_compute retry.
-        if code == b"08P01" {
+        if code == crate::pqproto::PROTOCOL_VIOLATION {
             // Source for the error message:
             // https://github.com/pgbouncer/pgbouncer/blob/f15997fe3effe3a94ba8bcc1ea562e6117d1a131/src/client.c#L1070
             return message.contains_str("no more connections allowed (max_client_conn)");
