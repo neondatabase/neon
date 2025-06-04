@@ -101,7 +101,7 @@ impl ComputeMonitor {
     /// Every time we receive an error trying to check Postgres, we use
     /// [`ComputeMonitor::check_interrupts()`] because it could be that
     /// compute is being terminated already, then we can exit gracefully
-    /// to do not produce errors' noise in the log.
+    /// to not produce errors' noise in the log.
     /// NB: the only expected panic is at `Mutex` unwrap(), all other errors
     /// should be handled gracefully.
     #[instrument(skip_all)]
