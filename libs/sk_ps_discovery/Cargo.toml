@@ -67,3 +67,15 @@ utils.workspace = true
 wal_decoder.workspace = true
 env_logger.workspace = true
 
+[dev-dependencies]
+criterion.workspace = true
+itertools.workspace = true
+walproposer.workspace = true
+rand.workspace = true
+desim.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["json"] }
+
+[[bench]]
+name = "bench"
+harness = false

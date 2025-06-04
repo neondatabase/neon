@@ -6586,6 +6586,8 @@ dependencies = [
  "chrono",
  "clap",
  "crc32c",
+ "criterion",
+ "desim",
  "env_logger",
  "fail",
  "futures",
@@ -6633,9 +6635,11 @@ dependencies = [
  "tokio-util",
  "tonic",
  "tracing",
+ "tracing-subscriber",
  "url",
  "utils",
  "wal_decoder",
+ "walproposer",
  "workspace_hack",
 ]
 

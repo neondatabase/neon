@@ -511,6 +511,7 @@ impl Manager {
             || num_computes > 0
             || state.remote_consistent_lsn < state.commit_lsn;
 
+
         // update the broker timeline set
         if self.tli_broker_active.set(is_active) {
             // write log if state has changed

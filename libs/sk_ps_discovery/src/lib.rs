@@ -19,21 +19,21 @@ pub struct World {
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-struct TenantShardAttachmentId {
-    tenant_id: TenantId,
-    shard_id: ShardIndex,
-    generation: Generation,
+pub struct TenantShardAttachmentId {
+    pub tenant_id: TenantId,
+    pub shard_id: ShardIndex,
+    pub generation: Generation,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-struct TimelineAttachmentId {
-    tenant_shard_attachment_id: TenantShardAttachmentId,
-    timeline_id: TimelineId,
+pub struct TimelineAttachmentId {
+    pub tenant_shard_attachment_id: TenantShardAttachmentId,
+    pub timeline_id: TimelineId,
 }
 
 pub struct AttachmentUpdate {
-    tenant_shard_attachment_id: TenantShardAttachmentId,
-    action: AttachmentUpdateAction,
+    pub tenant_shard_attachment_id: TenantShardAttachmentId,
+    pub action: AttachmentUpdateAction,
 }
 
 pub enum AttachmentUpdateAction {
@@ -42,8 +42,8 @@ pub enum AttachmentUpdateAction {
 }
 
 pub struct RemoteConsistentLsnAdv {
-    attachment: TimelineAttachmentId,
-    remote_consistent_lsn: Lsn,
+    pub attachment: TimelineAttachmentId,
+    pub remote_consistent_lsn: Lsn,
 }
 
 impl World {
