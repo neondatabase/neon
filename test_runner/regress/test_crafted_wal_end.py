@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_cli import WalCraft
-from fixtures.neon_fixtures import NeonEnvBuilder
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnvBuilder
 
 # Restart nodes with WAL end having specially crafted shape, like last record
 # crossing segment boundary, to test decoding issues.
