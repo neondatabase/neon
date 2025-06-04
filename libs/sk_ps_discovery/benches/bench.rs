@@ -2,14 +2,17 @@
 
 use std::time::Instant;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use hex::FromHex;
 use pprof::criterion::{Output, PProfProfiler};
 use sk_ps_discovery::{
     AttachmentUpdate, RemoteConsistentLsnAdv, TenantShardAttachmentId, TimelineAttachmentId,
 };
 use utils::{
-    generation::Generation, id::{NodeId, TenantId, TenantTimelineId, TimelineId}, lsn::Lsn, shard::ShardIndex
+    generation::Generation,
+    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
+    lsn::Lsn,
+    shard::ShardIndex,
 };
 
 /// Use jemalloc and enable profiling, to mirror bin/safekeeper.rs.
@@ -35,35 +38,41 @@ fn bench_simple(c: &mut Criterion) {
     let mut world = sk_ps_discovery::World::default();
 
     // Simplified view: lots of tenants with one timeline each
-    let n_tenants = 400_000;
-    for t in 1..=n_tenants {
-        let ps_id = NodeId(23);
-        let tenant_id = TenantId::generate();
-        let timeline_id = TimelineId::generate();
-        let tenant_shard_attachment_id = TenantShardAttachmentId {
-            tenant_id,
-            shard_id: ShardIndex::unsharded(),
-            generation: Generation::Valid(0),
-        };
-        let timeline_attachment = TimelineAttachmentId {
-            tenant_shard_attachment_id,
-            timeline_id,
-        };
-        world.update_attachment(AttachmentUpdate {
-            tenant_shard_attachment_id,
-            action: sk_ps_discovery::AttachmentUpdateAction::Attach { ps_id },
-        });
-        world.handle_remote_consistent_lsn_advertisement(RemoteConsistentLsnAdv {
-            remote_consistent_lsn: Lsn(23),
-            attachment: timeline_attachment,
-        });
-        world.handle_commit_lsn_advancement(
-            TenantTimelineId {
-                tenant_id,
-                timeline_id,
-            },
-            Lsn(42),
-        );
+    let n_pageservers = 20;
+    let n_tenant_shards_per_pageserver = 2000;
+    for ps_id in 1..=n_pageservers {
+        for t in 1..=n_tenant_shards_per_pageserver {
+            let tenant_id = TenantId::generate();
+            let timeline_id = TimelineId::generate();
+            for generation in 10..=11 {
+                let tenant_shard_attachment_id = TenantShardAttachmentId {
+                    tenant_id,
+                    shard_id: ShardIndex::unsharded(),
+                    generation: Generation::Valid(generation),
+                };
+                let timeline_attachment = TimelineAttachmentId {
+                    tenant_shard_attachment_id,
+                    timeline_id,
+                };
+                world.update_attachment(AttachmentUpdate {
+                    tenant_shard_attachment_id,
+                    action: sk_ps_discovery::AttachmentUpdateAction::Attach {
+                        ps_id: NodeId(ps_id),
+                    },
+                });
+                world.handle_remote_consistent_lsn_advertisement(RemoteConsistentLsnAdv {
+                    remote_consistent_lsn: Lsn(23),
+                    attachment: timeline_attachment,
+                });
+            }
+            world.handle_commit_lsn_advancement(
+                TenantTimelineId {
+                    tenant_id,
+                    timeline_id,
+                },
+                Lsn(42),
+            );
+        }
     }
 
     // setup done

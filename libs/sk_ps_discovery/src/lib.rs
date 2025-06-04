@@ -1,7 +1,9 @@
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashMap, hash_map};
+mod storage;
+
+use std::collections::{HashMap, HashSet, hash_map};
 
 use tracing::{info, warn};
 use utils::{
@@ -16,6 +18,8 @@ pub struct World {
     attachments: HashMap<TenantShardAttachmentId, NodeId>,
     commit_lsns: HashMap<TenantTimelineId, Lsn>,
     remote_consistent_lsns: HashMap<TimelineAttachmentId, Lsn>,
+    paged_out: HashSet<TenantTimelineId>,
+    storage: Box<dyn storage::Storage>,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
@@ -77,6 +81,7 @@ impl World {
             attachment,
             remote_consistent_lsn,
         } = adv;
+        self.page_in_ttid(attachment.tenant_timeline_id());
         match self.remote_consistent_lsns.entry(attachment) {
             hash_map::Entry::Occupied(mut occupied_entry) => {
                 let current = occupied_entry.get_mut();
@@ -95,6 +100,7 @@ impl World {
         }
     }
     pub fn handle_commit_lsn_advancement(&mut self, ttid: TenantTimelineId, commit_lsn: Lsn) {
+        self.page_in_ttid(ttid);
         match self.commit_lsns.entry(ttid) {
             hash_map::Entry::Occupied(mut occupied_entry) => {
                 assert!(*occupied_entry.get() <= commit_lsn);
@@ -136,6 +142,46 @@ impl World {
             }
         }
         commit_lsn_advertisements_by_node
+    }
+
+    fn page_in_ttid(&mut self, ttid: TenantTimelineId) {
+        if !self.paged_out.remove(&ttid) {
+            return;
+        };
+        // below is infallible; if we ever make it fallible, need to
+        // rollback the removal from paged_out in case we bail with error
+        let storage::Timeline {
+            commit_lsns,
+            remote_consistent_lsns,
+        } = self.storage.get_timeline(ttid);
+        for (tenant_timeline_id, commit_lsn) in commit_lsns {
+            match self.commit_lsns.entry(tenant_timeline_id) {
+                hash_map::Entry::Occupied(occupied_entry) => {
+                    panic!(
+                        "inconsistent: entry is supposed to be paged_out:\ninmem={:?}\nondisk={:?}",
+                        occupied_entry.get(),
+                        (tenant_timeline_id, commit_lsn)
+                    )
+                }
+                hash_map::Entry::Vacant(vacant_entry) => {
+                    vacant_entry.insert(commit_lsn);
+                }
+            }
+        }
+        for (timeline_attachment_id, remote_consistent_lsn) in remote_consistent_lsns {
+            match self.remote_consistent_lsns.entry(timeline_attachment_id) {
+                hash_map::Entry::Occupied(occupied_entry) => {
+                    panic!(
+                        "inconsistent: entry is supposed to be paged_out:\ninmem={:?}\nondisk={:?}",
+                        occupied_entry.get(),
+                        (timeline_attachment_id, remote_consistent_lsn)
+                    )
+                }
+                hash_map::Entry::Vacant(vacant_entry) => {
+                    vacant_entry.insert(remote_consistent_lsn);
+                }
+            }
+        }
     }
 }
 
