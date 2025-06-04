@@ -32,9 +32,7 @@ use utils::backoff::{
 };
 use utils::id::{NodeId, TenantTimelineId};
 use utils::lsn::Lsn;
-use utils::postgres_client::{
-    ConnectionConfigArgs, PostgresClientProtocol, wal_stream_connection_config,
-};
+use utils::postgres_client::{ConnectionConfigArgs, wal_stream_connection_config};
 
 use super::walreceiver_connection::{WalConnectionStatus, WalReceiverError};
 use super::{TaskEvent, TaskHandle, TaskStateUpdate, WalReceiverConf};
@@ -991,19 +989,12 @@ impl ConnectionManagerState {
                     return None; // no connection string, ignore sk
                 }
 
-                let (shard_number, shard_count, shard_stripe_size) = match self.conf.protocol {
-                    PostgresClientProtocol::Vanilla => {
-                        (None, None, None)
-                    },
-                    PostgresClientProtocol::Interpreted { .. } => {
-                        let shard_identity = self.timeline.get_shard_identity();
-                        (
-                            Some(shard_identity.number.0),
-                            Some(shard_identity.count.0),
-                            Some(shard_identity.stripe_size.0),
-                        )
-                    }
-                };
+                let shard_identity = self.timeline.get_shard_identity();
+                let (shard_number, shard_count, shard_stripe_size) = (
+                    Some(shard_identity.number.0),
+                    Some(shard_identity.count.0),
+                    Some(shard_identity.stripe_size.0),
+                );
 
                 let connection_conf_args = ConnectionConfigArgs {
                     protocol: self.conf.protocol,

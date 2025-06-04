@@ -20,7 +20,6 @@ use serde_with::serde_as;
 pub use utilization::PageserverUtilization;
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
-use utils::postgres_client::PostgresClientProtocol;
 use utils::{completion, serde_system_time};
 
 use crate::config::Ratio;
@@ -622,8 +621,6 @@ pub struct TenantConfigPatch {
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub timeline_offloading: FieldPatch<bool>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
-    pub wal_receiver_protocol_override: FieldPatch<PostgresClientProtocol>,
-    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub rel_size_v2_enabled: FieldPatch<bool>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_compaction_enabled: FieldPatch<bool>,
@@ -749,9 +746,6 @@ pub struct TenantConfig {
     pub timeline_offloading: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub rel_size_v2_enabled: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -812,7 +806,6 @@ impl TenantConfig {
             mut lsn_lease_length,
             mut lsn_lease_length_for_ts,
             mut timeline_offloading,
-            mut wal_receiver_protocol_override,
             mut rel_size_v2_enabled,
             mut gc_compaction_enabled,
             mut gc_compaction_verification,
@@ -905,9 +898,6 @@ impl TenantConfig {
             .map(|v| humantime::parse_duration(&v))?
             .apply(&mut lsn_lease_length_for_ts);
         patch.timeline_offloading.apply(&mut timeline_offloading);
-        patch
-            .wal_receiver_protocol_override
-            .apply(&mut wal_receiver_protocol_override);
         patch.rel_size_v2_enabled.apply(&mut rel_size_v2_enabled);
         patch
             .gc_compaction_enabled
@@ -960,7 +950,6 @@ impl TenantConfig {
             lsn_lease_length,
             lsn_lease_length_for_ts,
             timeline_offloading,
-            wal_receiver_protocol_override,
             rel_size_v2_enabled,
             gc_compaction_enabled,
             gc_compaction_verification,
@@ -1058,9 +1047,6 @@ impl TenantConfig {
             timeline_offloading: self
                 .timeline_offloading
                 .unwrap_or(global_conf.timeline_offloading),
-            wal_receiver_protocol_override: self
-                .wal_receiver_protocol_override
-                .or(global_conf.wal_receiver_protocol_override),
             rel_size_v2_enabled: self
                 .rel_size_v2_enabled
                 .unwrap_or(global_conf.rel_size_v2_enabled),
