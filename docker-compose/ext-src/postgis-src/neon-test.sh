@@ -1,9 +1,6 @@
-#!/bin/bash
+#!/bin/sh
 set -ex
 cd "$(dirname "$0")"
-if [[ ${PG_VERSION} = v17 ]]; then
-  sed -i '/computed_columns/d' regress/core/tests.mk
-fi
-patch -p1 <postgis-no-upgrade-test.patch
-trap 'echo Cleaning up; patch -R -p1 <postgis-no-upgrade-test.patch' EXIT
+patch -p1 <"postgis-common-v${PG_VERSION}.patch"
+trap 'echo Cleaning up; patch -R -p1 <postgis-common-v${PG_VERSION}.patch' EXIT
 make installcheck-base
