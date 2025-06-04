@@ -6,7 +6,6 @@
 //!   .neon/safekeepers/<safekeeper id>
 //! ```
 use std::error::Error as _;
-use std::future::Future;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -14,9 +13,9 @@ use std::{io, result};
 
 use anyhow::Context;
 use camino::Utf8PathBuf;
-use http_utils::error::HttpErrorBody;
 use postgres_connection::PgConnectionConfig;
-use reqwest::{IntoUrl, Method};
+use safekeeper_api::models::TimelineCreateRequest;
+use safekeeper_client::mgmt_api;
 use thiserror::Error;
 use utils::auth::{Claims, Scope};
 use utils::id::NodeId;
@@ -35,25 +34,14 @@ pub enum SafekeeperHttpError {
 
 type Result<T> = result::Result<T, SafekeeperHttpError>;
 
-pub(crate) trait ResponseErrorMessageExt: Sized {
-    fn error_from_body(self) -> impl Future<Output = Result<Self>> + Send;
-}
-
-impl ResponseErrorMessageExt for reqwest::Response {
-    async fn error_from_body(self) -> Result<Self> {
-        let status = self.status();
-        if !(status.is_client_error() || status.is_server_error()) {
-            return Ok(self);
-        }
-
-        // reqwest does not export its error construction utility functions, so let's craft the message ourselves
-        let url = self.url().to_owned();
-        Err(SafekeeperHttpError::Response(
-            match self.json::<HttpErrorBody>().await {
-                Ok(err_body) => format!("Error: {}", err_body.msg),
-                Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
-            },
-        ))
+fn err_from_client_err(err: mgmt_api::Error) -> SafekeeperHttpError {
+    use mgmt_api::Error::*;
+    match err {
+        ApiError(_, str) => SafekeeperHttpError::Response(str),
+        Cancelled => SafekeeperHttpError::Response("Cancelled".to_owned()),
+        ReceiveBody(err) => SafekeeperHttpError::Response(format!("{err}")),
+        ReceiveErrorBody(err) => SafekeeperHttpError::Response(err),
+        Timeout(str) => SafekeeperHttpError::Response(format!("timeout: {str}")),
     }
 }
 
@@ -70,9 +58,8 @@ pub struct SafekeeperNode {
 
     pub pg_connection_config: PgConnectionConfig,
     pub env: LocalEnv,
-    pub http_client: reqwest::Client,
+    pub http_client: mgmt_api::Client,
     pub listen_addr: String,
-    pub http_base_url: String,
 }
 
 impl SafekeeperNode {
@@ -82,13 +69,14 @@ impl SafekeeperNode {
         } else {
             "127.0.0.1".to_string()
         };
+        let jwt = None;
+        let http_base_url = format!("http://{}:{}", listen_addr, conf.http_port);
         SafekeeperNode {
             id: conf.id,
             conf: conf.clone(),
             pg_connection_config: Self::safekeeper_connection_config(&listen_addr, conf.pg_port),
             env: env.clone(),
-            http_client: env.create_http_client(),
-            http_base_url: format!("http://{}:{}/v1", listen_addr, conf.http_port),
+            http_client: mgmt_api::Client::new(env.create_http_client(), http_base_url, jwt),
             listen_addr,
         }
     }
@@ -278,20 +266,11 @@ impl SafekeeperNode {
         )
     }
 
-    fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> reqwest::RequestBuilder {
-        // TODO: authentication
-        //if self.env.auth_type == AuthType::NeonJWT {
-        //    builder = builder.bearer_auth(&self.env.safekeeper_auth_token)
-        //}
-        self.http_client.request(method, url)
-    }
-
     pub async fn check_status(&self) -> Result<()> {
-        self.http_request(Method::GET, format!("{}/{}", self.http_base_url, "status"))
-            .send()
-            .await?
-            .error_from_body()
-            .await?;
+        self.http_client
+            .status()
+            .await
+            .map_err(err_from_client_err)?;
         Ok(())
     }
 }

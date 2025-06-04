@@ -183,6 +183,12 @@ impl Client {
         self.get(&uri).await
     }
 
+    pub async fn status(&self) -> Result<()> {
+        let uri = format!("{}/v1/status", self.mgmt_api_endpoint);
+        let resp = self.get(&uri).await?;
+        resp.json().await.map_err(Error::ReceiveBody)
+    }
+
     pub async fn utilization(&self) -> Result<SafekeeperUtilization> {
         let uri = format!("{}/v1/utilization", self.mgmt_api_endpoint);
         let resp = self.get(&uri).await?;
