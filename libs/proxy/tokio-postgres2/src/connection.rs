@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -39,7 +38,6 @@ pub struct Connection<S, T> {
     sender: PollSender<BackendMessages>,
     receiver: mpsc::UnboundedReceiver<FrontendMessage>,
 
-    pending_responses: VecDeque<BackendMessages>,
     state: State,
 }
 
@@ -57,7 +55,6 @@ where
             stream,
             sender: PollSender::new(sender),
             receiver,
-            pending_responses: VecDeque::new(),
             state: State::Active,
         }
     }
@@ -66,11 +63,6 @@ where
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<BackendMessage, Error>>> {
-        if let Some(messages) = self.pending_responses.pop_front() {
-            trace!("retrying pending response");
-            return Poll::Ready(Some(Ok(BackendMessage::Normal { messages })));
-        }
-
         Pin::new(&mut self.stream)
             .poll_next(cx)
             .map(|o| o.map(|r| r.map_err(Error::io)))
@@ -80,15 +72,9 @@ where
     /// client <- postgres
     fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<Result<AsyncMessage, Error>> {
         loop {
-            let message = match self.poll_response(cx)? {
-                Poll::Ready(Some(message)) => message,
-                Poll::Ready(None) => return Poll::Ready(Err(Error::closed())),
-                Poll::Pending => {
-                    trace!("poll_read: waiting on response");
-                    return Poll::Pending;
-                }
-            };
+            ready!(self.sender.poll_reserve(cx)).map_err(|_| Error::closed())?;
 
+            let message = ready!(self.poll_response(cx)?).ok_or_else(Error::closed)?;
             let messages = match message {
                 BackendMessage::Async(Message::NoticeResponse(body)) => {
                     let error = DbError::parse(&mut body.fields()).map_err(Error::parse)?;
@@ -107,19 +93,7 @@ where
                 BackendMessage::Normal { messages } => messages,
             };
 
-            match self.sender.poll_reserve(cx) {
-                Poll::Ready(Ok(())) => {
-                    let _ = self.sender.send_item(messages);
-                }
-                Poll::Ready(Err(_)) => {
-                    return Poll::Ready(Err(Error::closed()));
-                }
-                Poll::Pending => {
-                    self.pending_responses.push_back(messages);
-                    trace!("poll_read: waiting on sender");
-                    return Poll::Pending;
-                }
-            }
+            let _ = self.sender.send_item(messages);
         }
     }
 
