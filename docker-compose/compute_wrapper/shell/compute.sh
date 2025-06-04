@@ -71,7 +71,7 @@ else
         "http://pageserver:9898/v1/tenant/${tenant_id}/timeline/"
     )
     result=$(curl "${PARAMS[@]}")
-    echo "${result}" | jq .
+    printf '%s\n' "${result}" | jq .
   fi
 fi
 
