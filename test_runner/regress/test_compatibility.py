@@ -26,6 +26,7 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
+from fixtures.utils import skip_in_debug_build
 from fixtures.workload import Workload
 
 if TYPE_CHECKING:
@@ -197,6 +198,7 @@ ingest_lag_log_line = ".*ingesting record with timestamp lagging more than wait_
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
+@skip_in_debug_build("only run with release build")
 def test_backward_compatibility(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
@@ -224,6 +226,7 @@ def test_backward_compatibility(
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
+@skip_in_debug_build("only run with release build")
 def test_forward_compatibility(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
@@ -577,6 +580,7 @@ def test_historic_storage_formats(
 @pytest.mark.parametrize(
     **fixtures.utils.allpairs_versions(),
 )
+@skip_in_debug_build("only run with release build")
 def test_versions_mismatch(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
