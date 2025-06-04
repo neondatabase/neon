@@ -52,6 +52,7 @@ pub struct TenantShardId {
 impl ShardCount {
     pub const MAX: Self = Self(u8::MAX);
     pub const MIN: Self = Self(0);
+    pub const RANGE: RangeInclusive<Self> = RangeInclusive::new(Self::MIN, Self::MAX);
 
     /// The internal value of a ShardCount may be zero, which means "1 shard, but use
     /// legacy format for TenantShardId that excludes the shard suffix", also known
@@ -85,7 +86,9 @@ impl ShardCount {
 }
 
 impl ShardNumber {
+    pub const MIN: Self = Self(0);
     pub const MAX: Self = Self(u8::MAX);
+    pub const RANGE: RangeInclusive<Self> = RangeInclusive::new(Self::MIN, Self::MAX);
 }
 
 impl TenantShardId {
@@ -100,16 +103,17 @@ impl TenantShardId {
     /// The range of all TenantShardId that belong to a particular TenantId.  This is useful when
     /// you have a BTreeMap of TenantShardId, and are querying by TenantId.
     pub fn tenant_range(tenant_id: TenantId) -> RangeInclusive<Self> {
+        let shard_index_range: RangeInclusive<_> = ShardIndex::RANGE;
         RangeInclusive::new(
             Self {
                 tenant_id,
-                shard_number: ShardNumber(0),
-                shard_count: ShardCount(0),
+                shard_number: shard_index_range.start().shard_number,
+                shard_count: shard_index_range.start().shard_count,
             },
             Self {
                 tenant_id,
-                shard_number: ShardNumber::MAX,
-                shard_count: ShardCount::MAX,
+                shard_number: shard_index_range.end().shard_number,
+                shard_count: shard_index_range.end().shard_count,
             },
         )
     }
@@ -241,6 +245,16 @@ impl From<[u8; 18]> for TenantShardId {
 }
 
 impl ShardIndex {
+    pub const MIN: Self = ShardIndex {
+        shard_number: ShardNumber::MIN,
+        shard_count: ShardCount::MIN,
+    };
+    pub const MAX: Self = ShardIndex {
+        shard_number: ShardNumber::MAX,
+        shard_count: ShardCount::MAX,
+    };
+    pub const RANGE: RangeInclusive<Self> = RangeInclusive::new(Self::MIN, Self::MAX);
+
     pub fn new(number: ShardNumber, count: ShardCount) -> Self {
         Self {
             shard_number: number,

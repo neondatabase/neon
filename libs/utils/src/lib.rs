@@ -95,6 +95,8 @@ pub mod guard_arc_swap;
 
 pub mod elapsed_accum;
 
+pub mod merge_join;
+
 #[cfg(target_os = "linux")]
 pub mod linux_socket_ioctl;
 

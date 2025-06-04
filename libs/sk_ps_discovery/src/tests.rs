@@ -3,13 +3,25 @@ use utils::id::TenantId;
 use super::*;
 use crate::World;
 
+#[track_caller]
+fn validate_advertisements(
+    actual: HashMap<NodeId, HashMap<TenantTimelineId, Lsn>>,
+    expect: Vec<(NodeId, Vec<(TenantTimelineId, Lsn)>)>,
+) {
+    let expect: HashMap<_, _> = expect
+        .into_iter()
+        .map(|(node_id, innermap)| (node_id, innermap.into_iter().collect()))
+        .collect();
+    assert_eq!(actual, expect);
+}
+
 #[test]
 fn basic() {
     let mut world = World::default();
 
-    let tenant_id = TenantId::generate();
-    let timeline_id = TimelineId::generate();
-    let timeline2 = TimelineId::generate();
+    let tenant_id = TenantId::from_array([0xff; 16]);
+    let timeline_id = TimelineId::from_array([1; 16]);
+    let timeline2 = TimelineId::from_array([2; 16]);
 
     let attachment1 = TenantShardAttachmentId {
         tenant_id,
@@ -53,7 +65,19 @@ fn basic() {
         Lsn(0x66),
     );
     // Advs should still be empty
-    assert_eq!(world.get_commit_lsn_advertisements(), HashMap::default());
+    validate_advertisements(
+        world.get_commit_lsn_advertisements(),
+        vec![(
+            ps1,
+            vec![(
+                TenantTimelineId {
+                    tenant_id,
+                    timeline_id: timeline2,
+                },
+                Lsn(0x66),
+            )],
+        )],
+    );
 
     // Ok, out of order part tested. Now Safekeeper learns about the attachments.
 
@@ -67,19 +91,75 @@ fn basic() {
     );
     dbg!(&world);
     // Now advertisements to attachment1 will be sent out, but attachment2  is still not known, so, no advertisements to it.
-    {
-        let mut advs = world.get_commit_lsn_advertisements();
-        assert_eq!(advs.len(), 1);
-        let advs = advs.remove(&ps1).unwrap();
-        assert_eq!(advs.len(), 1);
-        let (tenant_timeline_id, lsn) = advs.into_iter().next().unwrap();
-        assert_eq!(
-            TenantTimelineId {
-                tenant_id,
-                timeline_id
-            },
-            tenant_timeline_id
-        );
-        assert_eq!(lsn, Lsn(0x55));
-    }
+    validate_advertisements(
+        world.get_commit_lsn_advertisements(),
+        vec![(
+            ps1,
+            vec![(
+                TenantTimelineId {
+                    tenant_id,
+                    timeline_id,
+                },
+                Lsn(0x55),
+            )],
+        )],
+    );
+}
+
+#[test]
+fn advertisement_for_new_timeline() {
+    let mut world = World::default();
+
+    let tenant_id = TenantId::generate();
+    let timeline_id = TimelineId::generate();
+    let ttid = TenantTimelineId {
+        tenant_id,
+        timeline_id,
+    };
+
+    let tenant_shard_attachment_id = TenantShardAttachmentId {
+        tenant_id,
+        shard_id: ShardIndex::unsharded(),
+        generation: Generation::Valid(2),
+    };
+
+    let ps_id = NodeId(0x100);
+
+    world.update_attachment(AttachmentUpdate {
+        tenant_shard_attachment_id,
+        action: AttachmentUpdateAction::Attach { ps_id },
+    });
+    world.handle_commit_lsn_advancement(ttid, Lsn(23));
+
+    let advs = world.get_commit_lsn_advertisements();
+    validate_advertisements(advs, vec![(ps_id, vec![(ttid, Lsn(23))])]);
+}
+
+#[test]
+fn quiescing_timeline_catchup() {
+    let mut world = World::default();
+
+    let tenant_id = TenantId::generate();
+    let timeline_id = TimelineId::generate();
+    let ttid = TenantTimelineId {
+        tenant_id,
+        timeline_id,
+    };
+
+    let tenant_shard_attachment_id = TenantShardAttachmentId {
+        tenant_id,
+        shard_id: ShardIndex::unsharded(),
+        generation: Generation::Valid(2),
+    };
+
+    let ps_id = NodeId(0x100);
+
+    world.update_attachment(AttachmentUpdate {
+        tenant_shard_attachment_id,
+        action: AttachmentUpdateAction::Attach { ps_id },
+    });
+    world.handle_commit_lsn_advancement(ttid, Lsn(23));
+
+    let advs = world.get_commit_lsn_advertisements();
+    validate_advertisements(advs, vec![(ps_id, vec![(ttid, Lsn(23))])]);
 }

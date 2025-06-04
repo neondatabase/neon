@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use std::{fmt::Debug, ops::RangeInclusive};
 
 use serde::{Deserialize, Serialize};
 
@@ -25,7 +25,9 @@ pub enum Generation {
 /// scenarios where pageservers might otherwise issue conflicting writes to
 /// remote storage
 impl Generation {
+    pub const MIN: Self = Self::None;
     pub const MAX: Self = Self::Valid(u32::MAX);
+    pub const RANGE: RangeInclusive<Self> = RangeInclusive::new(Self::MIN, Self::MAX);
 
     /// Create a new Generation that represents a legacy key format with
     /// no generation suffix

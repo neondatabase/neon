@@ -1,37 +1,42 @@
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, HashMap, HashSet, hash_map};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet, btree_map, hash_map},
+    ops::RangeInclusive,
+};
 
 use tracing::{info, warn};
 use utils::{
     generation::Generation,
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
+    merge_join,
     shard::ShardIndex,
 };
 
 #[derive(Debug, Default)]
 pub struct World {
-    attachments: HashMap<TenantShardAttachmentId, NodeId>,
+    attachments: BTreeMap<TenantShardAttachmentId, NodeId>,
 
     quiesced_timelines: BTreeMap<TenantTimelineId, Lsn>,
 
-    commit_lsns: HashMap<TenantTimelineId, Lsn>,
-    remote_consistent_lsns: HashMap<TimelineAttachmentId, Lsn>,
+    commit_lsns: BTreeMap<TenantTimelineId, Lsn>,
+    remote_consistent_lsns: BTreeMap<TimelineAttachmentId, Lsn>,
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, PartialOrd, Ord)]
 pub struct TenantShardAttachmentId {
     pub tenant_id: TenantId,
     pub shard_id: ShardIndex,
     pub generation: Generation,
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, PartialOrd, Ord)]
 pub struct TimelineAttachmentId {
-    pub tenant_shard_attachment_id: TenantShardAttachmentId,
-    pub timeline_id: TimelineId,
+    pub tenant_timeline_id: TenantTimelineId,
+    pub shard_id: ShardIndex,
+    pub generation: Generation,
 }
 
 pub struct AttachmentUpdate {
@@ -60,7 +65,7 @@ impl World {
             let remote_consistent_lsn_timelines: HashSet<TenantTimelineId> = self
                 .remote_consistent_lsns
                 .keys()
-                .map(|tlaid: &TimelineAttachmentId| tlaid.tenant_timeline_id())
+                .map(|tlaid: &TimelineAttachmentId| tlaid.tenant_timeline_id)
                 .collect();
             // quiesced \cap (commit_lsn \cup remote_consistent_lsns)
             #[rustfmt::skip]
@@ -72,7 +77,7 @@ impl World {
     pub fn update_attachment(&mut self, upd: AttachmentUpdate) {
         self.check_invariants();
         use AttachmentUpdateAction::*;
-        use hash_map::Entry::*;
+        use btree_map::Entry::*;
         let AttachmentUpdate {
             tenant_shard_attachment_id,
             action,
@@ -115,7 +120,7 @@ impl World {
         } = adv;
 
         match self.remote_consistent_lsns.entry(attachment) {
-            hash_map::Entry::Occupied(mut occupied_entry) => {
+            btree_map::Entry::Occupied(mut occupied_entry) => {
                 let current = occupied_entry.get_mut();
                 use std::cmp::Ordering::*;
                 match (*current).cmp(&remote_consistent_lsn) {
@@ -132,8 +137,8 @@ impl World {
                     }
                 }
             }
-            hash_map::Entry::Vacant(entry) => {
-                let ttid = attachment.tenant_timeline_id();
+            btree_map::Entry::Vacant(entry) => {
+                let ttid = attachment.tenant_timeline_id;
                 match self.quiesced_timelines.get(&ttid).cloned() {
                     Some(quiesced_lsn) if quiesced_lsn == remote_consistent_lsn => {
                         info!("ignoring no-op update for quiesced timeline");
@@ -155,7 +160,7 @@ impl World {
     pub fn handle_commit_lsn_advancement(&mut self, ttid: TenantTimelineId, update: Lsn) {
         self.check_invariants();
         match self.commit_lsns.entry(ttid) {
-            hash_map::Entry::Occupied(mut entry) => {
+            btree_map::Entry::Occupied(mut entry) => {
                 let current = entry.get_mut();
                 use std::cmp::Ordering::*;
                 match (*current).cmp(&update) {
@@ -175,7 +180,7 @@ impl World {
                 }
             }
 
-            hash_map::Entry::Vacant(entry) => {
+            btree_map::Entry::Vacant(entry) => {
                 match self.quiesced_timelines.get(&ttid).cloned() {
                     Some(quiesced_lsn) if quiesced_lsn == update => {
                         info!("ignoring no-op update for quiesced timeline");
@@ -198,28 +203,47 @@ impl World {
     pub fn get_commit_lsn_advertisements(&self) -> HashMap<NodeId, HashMap<TenantTimelineId, Lsn>> {
         let mut commit_lsn_advertisements_by_node: HashMap<NodeId, HashMap<TenantTimelineId, Lsn>> =
             Default::default();
-        for (timeline_attachment_id, remote_consistent_lsn) in
-            self.remote_consistent_lsns.iter().map(|(k, v)| (*k, *v))
-        {
-            let tenant_timeline_id = timeline_attachment_id.tenant_timeline_id();
-            if let Some(commit_lsn) = self.commit_lsns.get(&tenant_timeline_id).cloned() {
-                if commit_lsn > remote_consistent_lsn {
-                    if let Some(node_id) = self
-                        .attachments
-                        .get(&timeline_attachment_id.tenant_shard_attachment_id)
-                    {
-                        let for_node = commit_lsn_advertisements_by_node
-                            .entry(*node_id)
-                            .or_default();
-                        match for_node.entry(tenant_timeline_id) {
-                            hash_map::Entry::Vacant(vacant_entry) => {
-                                vacant_entry.insert(commit_lsn);
-                            }
-                            hash_map::Entry::Occupied(occupied_entry) => {
-                                assert_eq!(*occupied_entry.get(), commit_lsn);
-                            }
-                        }
-                    }
+        let commit_lsns_iter = self.commit_lsns.iter().map(|(k, v)| (*k, *v));
+        let attachments_iter = self.attachments.iter().map(|(k, v)| (*k, *v));
+
+        let join = merge_join::inner_equi_join_with_merge_strategy(
+            commit_lsns_iter,
+            attachments_iter,
+            |(tenant_timeline_id, _)| tenant_timeline_id.tenant_id,
+            |(shard_attachment_id, _)| shard_attachment_id.tenant_id,
+        );
+        for (l, r) in join {
+            let (tenant_timeline_id, commit_lsn): (TenantTimelineId, Lsn) = l;
+            let (tenant_shard_attachment_id, node_id): (TenantShardAttachmentId, NodeId) = r;
+
+            // TOOD three-way equi join
+            let timeline_attachment_id =
+                tenant_shard_attachment_id.timeline_attachment_id(tenant_timeline_id.timeline_id);
+            match self
+                .remote_consistent_lsns
+                .get(&timeline_attachment_id)
+                .cloned()
+            {
+                // TODO: can > ever happen?
+                Some(remote_consistent_lsn) if remote_consistent_lsn >= commit_lsn => {
+                    // this timeline shard attachment is already caught up
+                    continue;
+                }
+                Some(_) | None => {
+                    // need to advertise
+                    // -> fallthrough
+                }
+            };
+            // DISTINCT node_id, array_agg(DISTINCT tenant_shard_id )
+            let for_node = commit_lsn_advertisements_by_node
+                .entry(node_id)
+                .or_default();
+            match for_node.entry(tenant_timeline_id) {
+                hash_map::Entry::Vacant(vacant_entry) => {
+                    vacant_entry.insert(commit_lsn);
+                }
+                hash_map::Entry::Occupied(occupied_entry) => {
+                    assert_eq!(*occupied_entry.get(), commit_lsn);
                 }
             }
         }
@@ -233,21 +257,19 @@ impl World {
             .expect("must call this function only on quiesced tenant_timeline_id");
         let replaced = self.commit_lsns.insert(tenant_timeline_id, quiesced_lsn);
         assert_eq!(None, replaced);
-        let reconstruct_remote_consistent_lsn_entries =
-            self.attachments
-                .keys()
-                .cloned()
-                .map(|tenant_shard_attachment_id| {
-                    (
-                        TimelineAttachmentId {
-                            tenant_shard_attachment_id,
-                            timeline_id: tenant_timeline_id.timeline_id,
-                        },
-                        quiesced_lsn,
-                    )
-                });
-        self.remote_consistent_lsns
-            .reserve(reconstruct_remote_consistent_lsn_entries.len());
+        let reconstruct_remote_consistent_lsn_entries = self
+            .attachments
+            .range(TenantShardAttachmentId::tenant_range(
+                tenant_timeline_id.tenant_id,
+            ))
+            .map(|(k, _)| *k)
+            .map(|tenant_shard_attachment_id| {
+                (
+                    tenant_shard_attachment_id
+                        .timeline_attachment_id(tenant_timeline_id.timeline_id),
+                    quiesced_lsn,
+                )
+            });
         for (key, value) in reconstruct_remote_consistent_lsn_entries {
             let replaced = self.remote_consistent_lsns.insert(key, value);
             assert_eq!(None, replaced);
@@ -256,20 +278,56 @@ impl World {
 }
 
 impl TimelineAttachmentId {
-    pub fn tenant_timeline_id(&self) -> TenantTimelineId {
-        TenantTimelineId {
-            tenant_id: self.tenant_shard_attachment_id.tenant_id,
-            timeline_id: self.timeline_id,
+    pub fn timeline_range(ttid: TenantTimelineId) -> RangeInclusive<Self> {
+        let shard_index_range: RangeInclusive<_> = ShardIndex::RANGE;
+        let generation_range: RangeInclusive<_> = Generation::RANGE;
+        RangeInclusive::new(
+            TimelineAttachmentId {
+                tenant_timeline_id: ttid,
+                shard_id: *shard_index_range.start(),
+                generation: *generation_range.start(),
+            },
+            TimelineAttachmentId {
+                tenant_timeline_id: ttid,
+                shard_id: *shard_index_range.end(),
+                generation: *generation_range.end(),
+            },
+        )
+    }
+    pub fn tenant_shard_attachment_id(self) -> TenantShardAttachmentId {
+        TenantShardAttachmentId {
+            tenant_id: self.tenant_timeline_id.tenant_id,
+            shard_id: self.shard_id,
+            generation: self.generation,
         }
     }
 }
 
 impl TenantShardAttachmentId {
-    #[cfg(test)]
     pub fn timeline_attachment_id(self, timeline_id: TimelineId) -> TimelineAttachmentId {
         TimelineAttachmentId {
-            tenant_shard_attachment_id: self,
-            timeline_id,
+            tenant_timeline_id: TenantTimelineId {
+                tenant_id: self.tenant_id,
+                timeline_id,
+            },
+            shard_id: self.shard_id,
+            generation: self.generation,
         }
+    }
+    pub fn tenant_range(tenant_id: TenantId) -> RangeInclusive<Self> {
+        let shard_index_range: RangeInclusive<_> = ShardIndex::RANGE;
+        let generation_range: RangeInclusive<_> = Generation::RANGE;
+        RangeInclusive::new(
+            Self {
+                tenant_id,
+                shard_id: *shard_index_range.start(),
+                generation: *generation_range.start(),
+            },
+            Self {
+                tenant_id,
+                shard_id: *shard_index_range.end(),
+                generation: *generation_range.end(),
+            },
+        )
     }
 }
