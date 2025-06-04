@@ -15,7 +15,6 @@ use crate::auth::IpPattern;
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::AuthRule;
 use crate::cache::Cached;
-use crate::compute::ConnCfg;
 use crate::context::RequestContext;
 use crate::control_plane::errors::{
     ControlPlaneError, GetAuthInfoError, GetEndpointJwksError, WakeComputeError,
@@ -190,7 +189,7 @@ impl MockControlPlane {
         config.ssl_mode = SslMode::Disable;
 
         let node = NodeInfo {
-            config: ConnCfg::new(config),
+            config,
             aux: MetricsAuxInfo {
                 endpoint_id: (&EndpointId::from("endpoint")).into(),
                 project_id: (&ProjectId::from("project")).into(),

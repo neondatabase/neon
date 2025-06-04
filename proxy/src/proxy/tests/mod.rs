@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use async_trait::async_trait;
 use http::StatusCode;
-use postgres_client::config::{AuthKeys, ScramKeys, SslMode};
+use postgres_client::config::SslMode;
 use postgres_client::tls::{MakeTlsConnect, NoTls};
 use retry::{ShouldRetryWakeCompute, retry_after};
 use rstest::rstest;
@@ -20,9 +20,7 @@ use tracing_test::traced_test;
 use super::connect_compute::ConnectMechanism;
 use super::retry::CouldRetry;
 use super::*;
-use crate::auth::backend::{
-    ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned,
-};
+use crate::auth::backend::{ComputeUserInfo, MaybeOwned};
 use crate::compute::NodeInfo;
 use crate::config::{ComputeConfig, RetryConfig};
 use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
@@ -499,8 +497,6 @@ impl ConnectMechanism for TestConnectMechanism {
             x => panic!("expecting action {x:?}, connect is called instead"),
         }
     }
-
-    fn update_connect_config(&self, _conf: &mut compute::ConnCfg) {}
 }
 
 impl TestControlPlaneClient for TestConnectMechanism {
@@ -559,11 +555,7 @@ impl TestControlPlaneClient for TestConnectMechanism {
 
 fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {
     let node = NodeInfo {
-        config: compute::ConnCfg::new(compute::ConnectInfo::new(
-            Host::from("test"),
-            5432,
-            SslMode::Prefer,
-        )),
+        config: compute::ConnectInfo::new(Host::from("test"), 5432, SslMode::Prefer),
         aux: MetricsAuxInfo {
             endpoint_id: (&EndpointId::from("endpoint")).into(),
             project_id: (&ProjectId::from("project")).into(),
@@ -578,19 +570,13 @@ fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeIn
 
 fn helper_create_connect_info(
     mechanism: &TestConnectMechanism,
-) -> auth::Backend<'static, ComputeCredentials> {
+) -> auth::Backend<'static, ComputeUserInfo> {
     auth::Backend::ControlPlane(
         MaybeOwned::Owned(ControlPlaneClient::Test(Box::new(mechanism.clone()))),
-        ComputeCredentials {
-            info: ComputeUserInfo {
-                endpoint: "endpoint".into(),
-                user: "user".into(),
-                options: NeonOptions::parse_options_raw(""),
-            },
-            keys: ComputeCredentialKeys::AuthKeys(AuthKeys::ScramSha256(ScramKeys {
-                client_key: [0; 32],
-                server_key: [0; 32],
-            })),
+        ComputeUserInfo {
+            endpoint: "endpoint".into(),
+            user: "user".into(),
+            options: NeonOptions::parse_options_raw(""),
         },
     )
 }

@@ -1,6 +1,6 @@
 use tracing::{error, info};
 
-use super::connect_compute::ComputeConnectBackend;
+use super::connect_compute::WakeComputeBackend;
 use crate::config::RetryConfig;
 use crate::context::RequestContext;
 use crate::control_plane::CachedNodeInfo;
@@ -23,7 +23,7 @@ macro_rules! log_wake_compute_error {
     };
 }
 
-pub(crate) async fn wake_compute<B: ComputeConnectBackend>(
+pub(crate) async fn wake_compute<B: WakeComputeBackend>(
     num_retries: &mut u32,
     ctx: &RequestContext,
     api: &B,

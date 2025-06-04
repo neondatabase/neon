@@ -13,6 +13,7 @@ pub use copy_bidirectional::{ErrorSource, copy_bidirectional_client_compute};
 use futures::FutureExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
+use postgres_client::CancelToken;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use smol_str::{SmolStr, ToSmolStr, format_smolstr};
@@ -24,12 +25,13 @@ use zerocopy::{IntoBytes, TryFromBytes};
 
 use self::connect_compute::{TcpMechanism, connect_to_compute};
 use self::passthrough::ProxyPassthrough;
-use crate::cancellation::{self, CancellationHandler};
+use crate::cancellation::{self, CancelClosure, CancellationHandler};
+use crate::compute::AuthInfo;
 use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
 use crate::context::RequestContext;
 use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
-use crate::pqproto::{CancelKeyData, StartupMessageParams, BE_KEY_MESSAGE, BE_READY_MESSAGE};
+use crate::pqproto::{BE_KEY_MESSAGE, BE_READY_MESSAGE, CancelKeyData, StartupMessageParams};
 use crate::protocol2::{ConnectHeader, ConnectionInfo, ConnectionInfoExtra, read_proxy_protocol};
 use crate::proxy::handshake::{HandshakeData, handshake};
 use crate::rate_limiter::EndpointRateLimiter;
@@ -346,7 +348,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     };
 
     let user = user_info.get_user().to_owned();
-    let user_info = match user_info
+    let (user_info, keys) = match user_info
         .authenticate(
             ctx,
             &mut stream,
@@ -369,22 +371,17 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         }
     };
 
-    let compute_user_info = match &user_info {
-        auth::Backend::ControlPlane(_, info) => &info.info,
+    let info = match &user_info {
+        auth::Backend::ControlPlane(_, info) => info,
         auth::Backend::Local(_) => unreachable!("local proxy does not run tcp proxy service"),
     };
-    let params_compat = compute_user_info
-        .options
-        .get(NeonOptions::PARAMS_COMPAT)
-        .is_some();
+    let params_compat = info.options.get(NeonOptions::PARAMS_COMPAT).is_some();
 
     let res = connect_to_compute(
         ctx,
         &TcpMechanism {
-            user_info: compute_user_info.clone(),
-            params_compat,
-            params: &params,
             locks: &config.connect_compute_locks,
+            auth: AuthInfo::with_keys(keys).set_startup_params(&params, params_compat),
         },
         &user_info,
         config.wake_compute_retry_config,
@@ -399,13 +396,30 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let session = cancellation_handler.get_key();
 
-    prepare_client_connection(&mut node, session.key(), &mut stream).await?;
-    session.write_cancel_key(node.cancel_closure.clone())?;
+    let (process_id, secret_key) =
+        prepare_client_connection(&mut node, session.key(), &mut stream).await?;
 
-    ctx.span().record(
-        "pid",
-        tracing::field::display(node.cancel_closure.process_id),
+    let user_info = match user_info {
+        auth::Backend::ControlPlane(_, info) => info,
+        auth::Backend::Local(_) => unreachable!("local proxy does not run tcp proxy service"),
+    };
+
+    let cancel_closure = CancelClosure::new(
+        node.socket_addr,
+        CancelToken {
+            socket_config: None,
+            ssl_mode: node.ssl_mode,
+            process_id,
+            secret_key,
+        },
+        node.hostname,
+        user_info,
     );
+
+    session.write_cancel_key(cancel_closure.clone())?;
+
+    ctx.span()
+        .record("pid", tracing::field::display(process_id));
 
     let client = stream.flush_and_into_inner().await?;
     let compute = node.stream.flush_and_into_inner().await?;
@@ -424,7 +438,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
             branch_id: node.aux.branch_id,
             private_link_id,
         },
-        cancel_closure: node.cancel_closure,
+        cancel_closure,
         cancel: session,
         session_id: ctx.session_id(),
         _req: request_gauge,
@@ -438,7 +452,10 @@ pub(crate) async fn prepare_client_connection(
     node: &mut compute::PostgresConnection,
     key_data: &CancelKeyData,
     stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> Result<(), std::io::Error> {
+) -> Result<(i32, i32), std::io::Error> {
+    let mut process_id = 0;
+    let mut secret_key = 0;
+
     loop {
         match node.stream.read_raw_be(1024).await {
             // parse backend keys, and substitute our own.
@@ -448,8 +465,8 @@ pub(crate) async fn prepare_client_connection(
                 let key_data = CancelKeyData::try_read_from_bytes(msg)
                     .map_err(|_| std::io::Error::other("invalid msg len"))?;
 
-                node.cancel_closure.process_id = (key_data.0.get() >> 32) as i32;
-                node.cancel_closure.secret_key = (key_data.0.get() & 0xffff_ffff) as i32;
+                process_id = (key_data.0.get() >> 32) as i32;
+                secret_key = (key_data.0.get() & 0xffff_ffff) as i32;
             }
             // ready for query, we're done :)
             Ok((tag @ BE_READY_MESSAGE, msg)) => {
@@ -470,7 +487,7 @@ pub(crate) async fn prepare_client_connection(
         }
     }
 
-    Ok(())
+    Ok((process_id, secret_key))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

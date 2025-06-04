@@ -6,7 +6,6 @@ use tokio::sync::Semaphore;
 
 use super::jwt::{AuthRule, FetchAuthRules};
 use crate::auth::backend::jwt::FetchAuthRulesError;
-use crate::compute::ConnCfg;
 use crate::compute::ConnectInfo;
 use crate::compute::NodeInfo;
 use crate::compute_ctl::ComputeCtlApi;
@@ -31,11 +30,11 @@ impl LocalBackend {
                 api: http::Endpoint::new(compute_ctl, http::new_client()),
             },
             node_info: NodeInfo {
-                config: ConnCfg::new(ConnectInfo::new(
+                config: ConnectInfo::new(
                     postgres_addr.ip().to_smolstr().into(),
                     postgres_addr.port(),
                     postgres_client::config::SslMode::Disable,
-                )),
+                ),
                 // TODO(conrad): make this better reflect compute info rather than endpoint info.
                 aux: MetricsAuxInfo {
                     endpoint_id: EndpointIdTag::get_interner().get_or_intern("local"),

@@ -273,10 +273,7 @@ impl NeonControlPlaneClient {
             }
 
             let node = NodeInfo {
-                // Don't set anything but host and port! This config will be cached.
-                // We'll set username and such later using the startup message.
-                // TODO: add more type safety (in progress).
-                config: compute::ConnCfg::new(config),
+                config,
                 aux: body.aux,
             };
 

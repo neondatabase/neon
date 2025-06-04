@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+use postgres_client::config::SslMode;
 use postgres_client::CancelToken;
 use postgres_client::cancel_query_raw::cancel_query_raw;
-use postgres_client::config::SslMode;
 use postgres_client::tls::MakeTlsConnect;
 use redis::{Cmd, FromRedisValue, Value};
 use serde::{Deserialize, Serialize};

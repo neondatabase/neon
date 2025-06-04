@@ -21,9 +21,8 @@ use super::conn_pool_lib::{Client, ConnInfo, EndpointConnPool, GlobalConnPool};
 use super::http_conn_pool::{self, HttpConnPool, Send, poll_http2_client};
 use super::local_conn_pool::{self, EXT_NAME, EXT_SCHEMA, EXT_VERSION, LocalConnPool};
 use crate::auth::backend::local::StaticAuthRules;
-use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
+use crate::auth::backend::{ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo};
 use crate::auth::{self, AuthError};
-use crate::compute;
 use crate::compute_ctl::{
     ComputeCtlError, ExtensionInstallRequest, Privilege, SetRoleGrantsRequest,
 };
@@ -181,7 +180,7 @@ impl PoolingBackend {
         let conn_id = uuid::Uuid::new_v4();
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
-        let backend = self.auth_backend.as_ref().map(|()| keys);
+        let backend = self.auth_backend.as_ref().map(|()| keys.info);
         crate::proxy::connect_compute::connect_to_compute(
             ctx,
             &TokioMechanism {
@@ -189,6 +188,7 @@ impl PoolingBackend {
                 conn_info,
                 pool: self.pool.clone(),
                 locks: &self.config.connect_compute_locks,
+                keys: keys.keys,
             },
             &backend,
             self.config.wake_compute_retry_config,
@@ -215,16 +215,13 @@ impl PoolingBackend {
         let conn_id = uuid::Uuid::new_v4();
         tracing::Span::current().record("conn_id", display(conn_id));
         debug!(%conn_id, "pool: opening a new connection '{conn_info}'");
-        let backend = self.auth_backend.as_ref().map(|()| ComputeCredentials {
-            info: ComputeUserInfo {
-                user: conn_info.user_info.user.clone(),
-                endpoint: EndpointId::from(format!(
-                    "{}{LOCAL_PROXY_SUFFIX}",
-                    conn_info.user_info.endpoint.normalize()
-                )),
-                options: conn_info.user_info.options.clone(),
-            },
-            keys: crate::auth::backend::ComputeCredentialKeys::None,
+        let backend = self.auth_backend.as_ref().map(|()| ComputeUserInfo {
+            user: conn_info.user_info.user.clone(),
+            endpoint: EndpointId::from(format!(
+                "{}{LOCAL_PROXY_SUFFIX}",
+                conn_info.user_info.endpoint.normalize()
+            )),
+            options: conn_info.user_info.options.clone(),
         });
         crate::proxy::connect_compute::connect_to_compute(
             ctx,
@@ -494,6 +491,7 @@ struct TokioMechanism {
     pool: Arc<GlobalConnPool<postgres_client::Client, EndpointConnPool<postgres_client::Client>>>,
     conn_info: ConnInfo,
     conn_id: uuid::Uuid,
+    keys: ComputeCredentialKeys,
 
     /// connect_to_compute concurrency lock
     locks: &'static ApiLocks<Host>,
@@ -511,10 +509,14 @@ impl ConnectMechanism for TokioMechanism {
         node_info: &CachedNodeInfo,
         compute_config: &ComputeConfig,
     ) -> Result<Self::Connection, Self::ConnectError> {
-        let host = node_info.config.get_host();
-        let permit = self.locks.get_permit(&host).await?;
+        let permit = self.locks.get_permit(&node_info.config.host).await?;
 
         let mut config = node_info.config.to_postgres_client_config();
+
+        if let ComputeCredentialKeys::AuthKeys(keys) = self.keys {
+            config.auth_keys(keys);
+        }
+
         config
             .user(&self.conn_info.user_info.user)
             .dbname(&self.conn_info.dbname)
@@ -547,8 +549,6 @@ impl ConnectMechanism for TokioMechanism {
             node_info.aux.clone(),
         ))
     }
-
-    fn update_connect_config(&self, _config: &mut compute::ConnCfg) {}
 }
 
 struct HyperMechanism {
@@ -572,20 +572,20 @@ impl ConnectMechanism for HyperMechanism {
         node_info: &CachedNodeInfo,
         config: &ComputeConfig,
     ) -> Result<Self::Connection, Self::ConnectError> {
-        let host_addr = node_info.config.connect.host_addr;
-        let host = node_info.config.get_host();
-        let permit = self.locks.get_permit(&host).await?;
+        let host_addr = node_info.config.host_addr;
+        let host = &node_info.config.host;
+        let permit = self.locks.get_permit(host).await?;
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
 
-        let tls = if node_info.config.connect.ssl_mode == SslMode::Disable {
+        let tls = if node_info.config.ssl_mode == SslMode::Disable {
             None
         } else {
             Some(&config.tls)
         };
 
-        let port = node_info.config.connect.port;
-        let res = connect_http2(host_addr, &host, port, config.timeout, tls).await;
+        let port = node_info.config.port;
+        let res = connect_http2(host_addr, host, port, config.timeout, tls).await;
         drop(pause);
         let (client, connection) = permit.release_result(res)?;
 
@@ -608,8 +608,6 @@ impl ConnectMechanism for HyperMechanism {
             node_info.aux.clone(),
         ))
     }
-
-    fn update_connect_config(&self, _config: &mut compute::ConnCfg) {}
 }
 
 async fn connect_http2(

@@ -22,7 +22,7 @@ use super::{Auth, TlsError};
 pub async fn connect_tls<S>(
     mut stream: S,
     mode: SslMode,
-    tls: Arc<rustls::ClientConfig>,
+    tls: &Arc<rustls::ClientConfig>,
     host: &str,
 ) -> Result<Stream<S>, TlsError>
 where
@@ -41,7 +41,7 @@ where
         return Ok(Stream::Raw { raw: stream });
     }
 
-    let tls = tokio_rustls::TlsConnector::from(tls)
+    let tls = tokio_rustls::TlsConnector::from(tls.clone())
         .connect(
             ServerName::DnsName(DnsName::try_from_str(host)?.to_owned()),
             stream,

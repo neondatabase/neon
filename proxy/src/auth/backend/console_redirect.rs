@@ -6,11 +6,9 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, info_span};
 
-use super::ComputeCredentialKeys;
-use crate::auth::IpPattern;
 use crate::auth::backend::ComputeUserInfo;
 use crate::cache::Cached;
-use crate::compute::{Auth, NodeInfo};
+use crate::compute::{AuthInfo, NodeInfo};
 use crate::config::AuthenticationConfig;
 use crate::context::RequestContext;
 use crate::control_plane::client::cplane_proxy_v1;
@@ -18,7 +16,7 @@ use crate::control_plane::{self, CachedNodeInfo};
 use crate::error::{ReportableError, UserFacingError};
 use crate::pqproto::BeMessage;
 use crate::proxy::NeonOptions;
-use crate::proxy::connect_compute::ComputeConnectBackend;
+use crate::proxy::connect_compute::WakeComputeBackend;
 use crate::stream::PqStream;
 use crate::types::RoleName;
 use crate::{auth, compute, waiters};
@@ -99,15 +97,11 @@ impl ConsoleRedirectBackend {
         ctx: &RequestContext,
         auth_config: &'static AuthenticationConfig,
         client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-    ) -> auth::Result<(
-        ConsoleRedirectNodeInfo,
-        ComputeUserInfo,
-        Option<Vec<IpPattern>>,
-    )> {
+    ) -> auth::Result<(ConsoleRedirectNodeInfo, AuthInfo, ComputeUserInfo)> {
         authenticate(ctx, auth_config, &self.console_uri, client)
             .await
-            .map(|(node_info, user_info, ip_allowlist)| {
-                (ConsoleRedirectNodeInfo(node_info), user_info, ip_allowlist)
+            .map(|(node_info, auth_info, user_info)| {
+                (ConsoleRedirectNodeInfo(node_info), auth_info, user_info)
             })
     }
 }
@@ -115,16 +109,12 @@ impl ConsoleRedirectBackend {
 pub struct ConsoleRedirectNodeInfo(pub(super) NodeInfo);
 
 #[async_trait]
-impl ComputeConnectBackend for ConsoleRedirectNodeInfo {
+impl WakeComputeBackend for ConsoleRedirectNodeInfo {
     async fn wake_compute(
         &self,
         _ctx: &RequestContext,
     ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
         Ok(Cached::new_uncached(self.0.clone()))
-    }
-
-    fn get_keys(&self) -> &ComputeCredentialKeys {
-        &ComputeCredentialKeys::None
     }
 }
 
@@ -133,7 +123,7 @@ async fn authenticate(
     auth_config: &'static AuthenticationConfig,
     link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> auth::Result<(NodeInfo, ComputeUserInfo, Option<Vec<IpPattern>>)> {
+) -> auth::Result<(NodeInfo, AuthInfo, ComputeUserInfo)> {
     ctx.set_auth_method(crate::context::AuthMethod::ConsoleRedirect);
 
     // registering waiter can fail if we get unlucky with rng.
@@ -205,8 +195,8 @@ async fn authenticate(
     // This config should be self-contained, because we won't
     // take username or dbname from client's startup message.
     let config = compute::ConnectInfo::new(db_info.host.as_ref().into(), db_info.port, ssl_mode);
-    let mut config = compute::ConnCfg::new(config);
-    config.dbname_and_user(&db_info.dbname, &db_info.user);
+    let auth =
+        AuthInfo::for_console_redirect(&db_info.dbname, &db_info.user, db_info.password.as_deref());
 
     let user: RoleName = db_info.user.into();
     let user_info = ComputeUserInfo {
@@ -220,16 +210,12 @@ async fn authenticate(
     ctx.set_project(db_info.aux.clone());
     info!("woken up a compute node");
 
-    if let Some(password) = db_info.password {
-        config.auth = Some(Auth::Password(password.into_boxed_bytes().into()));
-    }
-
     Ok((
         NodeInfo {
             config,
             aux: db_info.aux,
         },
+        auth,
         user_info,
-        db_info.allowed_ips,
     ))
 }

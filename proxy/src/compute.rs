@@ -2,12 +2,9 @@ use std::fmt::Debug;
 use std::io;
 use std::net::IpAddr;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
 
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
-use postgres_client::CancelToken;
 use postgres_client::config::AuthKeys;
 use postgres_client::config::SslMode;
 use rustls::pki_types::InvalidDnsNameError;
@@ -16,9 +13,7 @@ use tokio::net::{TcpStream, lookup_host};
 use tracing::{debug, error, info, warn};
 
 use crate::auth::backend::ComputeCredentialKeys;
-use crate::auth::backend::ComputeUserInfo;
 use crate::auth::parse_endpoint_param;
-use crate::cancellation::CancelClosure;
 use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::control_plane::client::ApiLockError;
@@ -117,36 +112,10 @@ pub(crate) struct NodeInfo {
     /// Compute node connection params.
     /// It's sad that we have to clone this, but this will improve
     /// once we migrate to a bespoke connection logic.
-    pub(crate) config: ConnCfg,
+    pub(crate) config: ConnectInfo,
 
     /// Labels for proxy's metrics.
     pub(crate) aux: MetricsAuxInfo,
-}
-
-impl NodeInfo {
-    pub(crate) async fn connect(
-        &self,
-        ctx: &RequestContext,
-        config: &ComputeConfig,
-        user_info: ComputeUserInfo,
-    ) -> Result<PostgresConnection, ConnectionError> {
-        self.config
-            .connect(ctx, self.aux.clone(), config, user_info)
-            .await
-    }
-
-    pub(crate) fn reuse_settings(&mut self, other: Self) {
-        self.config.reuse_password(other.config);
-    }
-
-    pub(crate) fn set_keys(&mut self, keys: &ComputeCredentialKeys) {
-        match keys {
-            ComputeCredentialKeys::AuthKeys(AuthKeys::ScramSha256(auth_keys)) => {
-                self.config.auth = Some(Auth::Scram(Box::new(*auth_keys)));
-            }
-            ComputeCredentialKeys::JwtPayload(_) | ComputeCredentialKeys::None => {}
-        }
-    }
 }
 
 /// A pair of `ClientKey` & `ServerKey` for `SCRAM-SHA-256`.
@@ -158,88 +127,46 @@ pub enum Auth {
     Scram(Box<ScramKeys>),
 }
 
-/// Contains only the data needed to establish a secure connection to compute.
+/// A config for authenticating to the compute node.
 #[derive(Clone)]
-pub struct ConnectInfo {
-    pub host_addr: Option<IpAddr>,
-    pub host: Host,
-    pub port: u16,
-    pub ssl_mode: SslMode,
-}
-
-impl ConnectInfo {
-    pub(crate) fn new(host: Host, port: u16, ssl_mode: SslMode) -> Self {
-        Self {
-            host_addr: None,
-            host,
-            port,
-            ssl_mode,
-        }
-    }
-}
-
-/// A config for establishing a connection and authenticating to the compute node.
-#[derive(Clone)]
-pub(crate) struct ConnCfg {
-    pub(crate) connect: ConnectInfo,
-
+pub(crate) struct AuthInfo {
     pub(crate) auth: Option<Auth>,
     pub server_params: StartupMessageParams,
-
     skip_db_user: bool,
 }
-
-/// Creation and initialization routines.
-impl ConnCfg {
-    pub(crate) fn new(connect: ConnectInfo) -> Self {
+impl AuthInfo {
+    pub(crate) fn with_keys(keys: ComputeCredentialKeys) -> Self {
+        let auth = match keys {
+            ComputeCredentialKeys::AuthKeys(AuthKeys::ScramSha256(auth_keys)) => {
+                Some(Auth::Scram(Box::new(auth_keys)))
+            }
+            ComputeCredentialKeys::JwtPayload(_) | ComputeCredentialKeys::None => None,
+        };
         Self {
-            connect,
-
-            auth: None,
+            auth,
             server_params: StartupMessageParams::default(),
             skip_db_user: false,
         }
     }
 
-    pub fn to_postgres_client_config(&self) -> postgres_client::Config {
-        let mut config =
-            postgres_client::Config::new(self.connect.host.to_string(), self.connect.port);
-        config.ssl_mode(self.connect.ssl_mode);
-        if let Some(host_addr) = self.connect.host_addr {
-            config.set_host_addr(host_addr);
+    pub(crate) fn for_console_redirect(db: &str, user: &str, pw: Option<&str>) -> Self {
+        let mut params = StartupMessageParams::default();
+        params.insert("database", db);
+        params.insert("user", user);
+
+        Self {
+            auth: pw.map(|pw| Auth::Password(pw.as_bytes().to_owned())),
+            server_params: params,
+            skip_db_user: true,
         }
-        match &self.auth {
-            Some(Auth::Password(pw)) => config.password(pw),
-            Some(Auth::Scram(keys)) => config.auth_keys(AuthKeys::ScramSha256(**keys)),
-            None => &mut config,
-        };
-        for (k, v) in self.server_params.iter() {
-            config.set_param(k, v);
-        }
-        config
-    }
-
-    /// Reuse password or auth keys from the other config.
-    pub(crate) fn reuse_password(&mut self, other: Self) {
-        self.auth = other.auth;
-    }
-
-    pub(crate) fn get_host(&self) -> Host {
-        self.connect.host.clone()
-    }
-
-    pub fn dbname_and_user(&mut self, db: &str, user: &str) {
-        self.skip_db_user = true;
-        self.server_params.insert("database", db);
-        self.server_params.insert("user", user);
     }
 
     /// Apply startup message params to the connection config.
     pub(crate) fn set_startup_params(
-        &mut self,
+        mut self,
         params: &StartupMessageParams,
         arbitrary_params: bool,
-    ) {
+    ) -> Self {
         if !arbitrary_params {
             self.server_params.insert("client_encoding", "UTF8");
         }
@@ -267,25 +194,61 @@ impl ConnCfg {
                 _ => {}
             }
         }
+        self
+    }
+
+    async fn authenticate(
+        &self,
+        stream: Stream<TcpStream>,
+    ) -> Result<PqStream<Stream<TcpStream>>, PostgresError> {
+        connect_raw::authenticate(stream, self.auth.as_ref(), &self.server_params).await
     }
 }
 
+/// Contains only the data needed to establish a secure connection to compute.
+#[derive(Clone)]
+pub struct ConnectInfo {
+    pub host_addr: Option<IpAddr>,
+    pub host: Host,
+    pub port: u16,
+    pub ssl_mode: SslMode,
+}
+
 impl ConnectInfo {
+    pub(crate) fn new(host: Host, port: u16, ssl_mode: SslMode) -> Self {
+        Self {
+            host_addr: None,
+            host,
+            port,
+            ssl_mode,
+        }
+    }
+
+    pub fn to_postgres_client_config(&self) -> postgres_client::Config {
+        let mut config = postgres_client::Config::new(self.host.to_string(), self.port);
+        config.ssl_mode(self.ssl_mode);
+        if let Some(host_addr) = self.host_addr {
+            config.set_host_addr(host_addr);
+        }
+        config
+    }
+
     /// Establish a raw TCP connection to the compute node.
-    async fn connect_raw(
+    async fn connect(
         &self,
-        tls: Arc<rustls::ClientConfig>,
-        timeout: Duration,
+        config: &ComputeConfig,
     ) -> Result<(SocketAddr, Stream<TcpStream>), TlsError> {
         // wrap TcpStream::connect with timeout
         let connect_with_timeout = |addrs| {
-            tokio::time::timeout(timeout, TcpStream::connect(addrs)).map(move |res| match res {
-                Ok(tcpstream_connect_res) => tcpstream_connect_res,
-                Err(_) => Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("exceeded connection timeout {timeout:?}"),
-                )),
-            })
+            tokio::time::timeout(config.timeout, TcpStream::connect(addrs)).map(
+                move |res| match res {
+                    Ok(tcpstream_connect_res) => tcpstream_connect_res,
+                    Err(_) => Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("exceeded connection timeout {:?}", config.timeout),
+                    )),
+                },
+            )
         };
 
         let connect_once = |addrs| {
@@ -313,7 +276,8 @@ impl ConnectInfo {
             warn!("couldn't connect to compute node at {host}:{port}: {err}");
         })?;
 
-        let stream = connect_raw::connect_tls(stream, self.ssl_mode, tls, &self.host).await?;
+        let stream =
+            connect_raw::connect_tls(stream, self.ssl_mode, &config.tls, &self.host).await?;
 
         Ok((sockaddr, stream))
     }
@@ -322,63 +286,52 @@ impl ConnectInfo {
 pub(crate) struct PostgresConnection {
     /// Socket connected to a compute node.
     pub(crate) stream: PqStream<connect_raw::Stream<TcpStream>>,
-    /// Query cancellation token.
-    pub(crate) cancel_closure: CancelClosure,
-    /// Labels for proxy's metrics.
+
+    pub(crate) socket_addr: SocketAddr,
+    pub(crate) ssl_mode: SslMode,
+    pub(crate) hostname: String,
     pub(crate) aux: MetricsAuxInfo,
 
     pub(crate) guage: NumDbConnectionsGuard<'static>,
 }
 
-impl ConnCfg {
+impl NodeInfo {
     /// Connect to a corresponding compute node.
     pub(crate) async fn connect(
         &self,
         ctx: &RequestContext,
-        aux: MetricsAuxInfo,
+        auth: &AuthInfo,
         config: &ComputeConfig,
-        user_info: ComputeUserInfo,
     ) -> Result<PostgresConnection, ConnectionError> {
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let (socket_addr, stream) = self
-            .connect
-            .connect_raw(config.tls.clone(), config.timeout)
-            .await?;
-        let stream =
-            connect_raw::authenticate(stream, self.auth.as_ref(), &self.server_params).await?;
+
+        // what pglb will do
+        let (socket_addr, stream) = self.config.connect(config).await?;
+
+        // what neonkeeper will do
+        let stream = auth.authenticate(stream).await?;
+
         drop(pause);
 
         ctx.span()
-            .record("compute_id", tracing::field::display(&aux.compute_id));
+            .record("compute_id", tracing::field::display(&self.aux.compute_id));
 
         // TODO: lots of useful info but maybe we can move it elsewhere (eg traces?)
         info!(
             cold_start_info = ctx.cold_start_info().as_str(),
             "connected to compute node at {} ({socket_addr}) sslmode={:?}, latency={}, query_id={}",
-            self.connect.host,
-            self.connect.ssl_mode,
+            self.config.host,
+            self.config.ssl_mode,
             ctx.get_proxy_latency(),
             ctx.get_testodrome_id().unwrap_or_default(),
         );
 
-        // NB: CancelToken is supposed to hold socket_addr, but we use connect_raw.
-        // Yet another reason to rework the connection establishing code.
-        let cancel_closure = CancelClosure::new(
-            socket_addr,
-            CancelToken {
-                socket_config: None,
-                ssl_mode: self.connect.ssl_mode,
-                process_id: 0,
-                secret_key: 0,
-            },
-            self.connect.host.to_string(),
-            user_info,
-        );
-
         Ok(PostgresConnection {
             stream,
-            cancel_closure,
-            aux,
+            ssl_mode: self.config.ssl_mode,
+            hostname: self.config.host.to_string(),
+            socket_addr,
+            aux: self.aux.clone(),
             guage: Metrics::get().proxy.db_connections.guard(ctx.protocol()),
         })
     }
