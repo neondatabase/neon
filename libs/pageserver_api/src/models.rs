@@ -1934,7 +1934,7 @@ pub enum PagestreamFeMessage {
 }
 
 // Wrapped in libpq CopyData
-#[derive(strum_macros::EnumProperty)]
+#[derive(Debug, strum_macros::EnumProperty)]
 pub enum PagestreamBeMessage {
     Exists(PagestreamExistsResponse),
     Nblocks(PagestreamNblocksResponse),
@@ -2045,7 +2045,7 @@ pub enum PagestreamProtocolVersion {
 
 pub type RequestId = u64;
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub struct PagestreamRequest {
     pub reqid: RequestId,
     pub request_lsn: Lsn,
@@ -2064,7 +2064,7 @@ pub struct PagestreamNblocksRequest {
     pub rel: RelTag,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub struct PagestreamGetPageRequest {
     pub hdr: PagestreamRequest,
     pub rel: RelTag,
