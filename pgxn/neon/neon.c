@@ -617,12 +617,7 @@ neon_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	else
 		standard_ExecutorStart(queryDesc, eflags);
 
-	/*
-	 * If query has queryId zero, don't track it.  This prevents double
-	 * counting of optimizable statements that are directly contained in
-	 * utility statements.
-	 */
-	if (monitor_query_exec_time && queryDesc->plannedstmt->queryId != UINT64CONST(0))
+	if (monitor_query_exec_time)
 	{
 		/*
 		 * Set up to track total elapsed time in ExecutorRun.  Make sure the
@@ -646,9 +641,7 @@ neon_ExecutorStart(QueryDesc *queryDesc, int eflags)
 static void
 neon_ExecutorEnd(QueryDesc *queryDesc)
 {
-	uint64		queryId = queryDesc->plannedstmt->queryId;
-
-	if (monitor_query_exec_time && queryId != UINT64CONST(0) && queryDesc->totaltime)
+	if (monitor_query_exec_time && queryDesc->totaltime)
 	{
 		/*
 		 * Make sure stats accumulation is done.  (Note: it's okay if several
