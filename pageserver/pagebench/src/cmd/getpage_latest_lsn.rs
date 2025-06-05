@@ -32,7 +32,7 @@ use crate::util::tokio_thread_local_stats::AllThreadLocalStats;
 use crate::util::{request_stats, tokio_thread_local_stats};
 
 use futures_core::Stream;
-
+use http::Uri;
 
 use futures::StreamExt;
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -519,8 +519,9 @@ struct GrpcClient {
 impl GrpcClient {
     async fn new(connstring: String, ttid: TenantTimelineId) -> anyhow::Result<Self> {
 
+        let uri : Uri = connstring.parse().unwrap();
         let mut domain_client = pageserver_page_api::client::Client::new(
-            connstring.clone(),
+            uri,
             ttid.tenant_id.clone(), ttid.timeline_id.clone(), ShardIndex::unsharded().clone(), None).await?;
         let (req_tx, req_rx) = tokio::sync::mpsc::channel::<GetPageRequest>(1);
         let inbound_stream = tokio_stream::wrappers::ReceiverStream::new(req_rx);

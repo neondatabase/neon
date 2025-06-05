@@ -4242,6 +4242,7 @@ dependencies = [
  "futures",
  "futures-core",
  "hdrhistogram",
+ "http 1.1.0",
  "humantime",
  "humantime-serde",
  "pageserver_api",
@@ -4466,6 +4467,7 @@ dependencies = [
 name = "pageserver_page_api"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-stream",
  "bytes",
  "futures",

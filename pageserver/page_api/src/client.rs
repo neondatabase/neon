@@ -14,6 +14,8 @@ use utils::id::TenantId;
 use utils::id::TimelineId;
 use utils::shard::ShardIndex;
 
+use anyhow::Result;
+
 use crate::proto;
 use crate::model;
 #[derive(Clone)]
@@ -25,30 +27,31 @@ struct AuthInterceptor {
 }
 
 impl AuthInterceptor {
-    fn new(tenant_id: AsciiMetadataValue,
-           timeline_id: AsciiMetadataValue,
-           auth_token: Option<String>) -> Self {
+    fn new(tenant_id: TenantId,
+           timeline_id: TimelineId,
+           auth_token: Option<String>,
+            shard_id: ShardIndex) -> Result<Self, InvalidMetadataValue> {
 
-        Self {
-            tenant_id: tenant_id,
-            shard_id: None,
-            timeline_id: timeline_id,
-            auth_header: auth_token
-                .map(|t| format!("Bearer {t}"))
-                .map(|t| t.parse()
-                    .expect("could not parse auth header as AsciiMetadataValue")),
+        let tenant_ascii : AsciiMetadataValue = tenant_id.to_string().try_into()?;
+        let timeline_ascii : AsciiMetadataValue = timeline_id.to_string().try_into()?;
+        let shard_ascii : AsciiMetadataValue = shard_id.clone().to_string().try_into()?;
+
+        let auth_header : Option<AsciiMetadataValue>;
+        match auth_token {
+            Some(token) => {
+                auth_header = Some(format!("Bearer {token}").try_into()?);
+            }
+            None => {
+                auth_header = None;
+            }
         }
-    }
 
-    fn for_shard(&self, shard_id: ShardIndex) -> Self {
-        let mut with_shard = self.clone();
-        with_shard.shard_id = Some(
-            shard_id
-                .to_string()
-                .parse()
-                .expect("could not parse shard id"),
-        );
-        with_shard
+        Ok(Self {
+            tenant_id: tenant_ascii,
+            shard_id: Some(shard_ascii),
+            timeline_id: timeline_ascii,
+            auth_header,
+        })
     }
 }
 
@@ -73,49 +76,21 @@ pub struct Client {
     client: proto::PageServiceClient<tonic::service::interceptor::InterceptedService<Channel, AuthInterceptor>>,
 }
 
-fn convert_metadata_err(e: InvalidMetadataValue, s: String) -> Error {
-    let io_err = Error::new(
-        ErrorKind::InvalidInput,
-        format!("{} header was invalid: {}", s, e),
-    );
-    io_err
-}
-
 impl Client {
 
-    pub async fn new(connstring: String,
+    pub async fn new<T: Into<tonic::transport::Endpoint> + Send + Sync + 'static>
+                    (into_endpoint: T,
                     tenant_id: TenantId,
                     timeline_id: TimelineId,
                     shard_id: ShardIndex,
-                    auth_header: Option<String>) -> Result<Self, Error> {
+                    auth_header: Option<String>) -> anyhow::Result<Self> {
 
-        let endpoint = tonic::transport::Endpoint::from_shared(connstring)
+        let endpoint : tonic::transport::Endpoint = into_endpoint.into();
+        let channel = endpoint.connect().await?;
+        let auth = AuthInterceptor::new(tenant_id, timeline_id, auth_header, shard_id)
             .map_err(|e| Error::new(ErrorKind::InvalidInput, e.to_string()))?;
+        let client = proto::PageServiceClient::with_interceptor(channel, auth);
 
-        let channel = endpoint.connect().await
-            .map_err(|e| Error::new(ErrorKind::ConnectionRefused, e.to_string()))?;
-
-        let tenant_ascii : AsciiMetadataValue = tenant_id.to_string().try_into()
-            .map_err(|e: InvalidMetadataValue| {
-                convert_metadata_err(InvalidMetadataValue::from(e), "tenant-id".to_string())
-            })?;
-
-        let timeline_ascii : AsciiMetadataValue = timeline_id.to_string().try_into()
-            .map_err(|e: InvalidMetadataValue| {
-                convert_metadata_err(InvalidMetadataValue::from(e), "timeline-id".to_string())
-            })?;
-
-        let _shard_ascii : AsciiMetadataValue = shard_id.clone().to_string().try_into()
-            .map_err(|e: InvalidMetadataValue| {
-                convert_metadata_err(InvalidMetadataValue::from(e), "shard-id".to_string())
-            })?;
-
-        let auth = AuthInterceptor::new(tenant_ascii, timeline_ascii, auth_header);
-
-        let client = proto::PageServiceClient::with_interceptor(
-            channel,
-            auth.for_shard(shard_id.clone()),
-        );
         Ok(Self {
             client,
         })
@@ -126,8 +101,7 @@ impl Client {
         req: model::CheckRelExistsRequest,
     ) -> Result<model::CheckRelExistsResponse, tonic::Status> {
 
-        let proto_req = proto::CheckRelExistsRequest::try_from(req)
-            .map_err(|e| Status::internal(format!("Failed to convert request: {}", e)))?;
+        let proto_req = proto::CheckRelExistsRequest::from(req);
 
         let response = self
             .client
@@ -143,8 +117,7 @@ impl Client {
         req: model::GetBaseBackupRequest,
     ) -> Result<impl Stream<Item = Result<Bytes, tonic::Status>>, tonic::Status> {
 
-        let proto_req = proto::GetBaseBackupRequest::try_from(req)
-            .map_err(|e| Status::internal(format!("Failed to convert request: {}", e)))?;
+        let proto_req = proto::GetBaseBackupRequest::from(req);
 
         let response_stream: Streaming<proto::GetBaseBackupResponseChunk> = self
             .client
@@ -152,6 +125,7 @@ impl Client {
             .await?
             .into_inner();
 
+        // TODO: Consider dechunking internally
         let domain_stream = response_stream.map(|chunk_res| {
             chunk_res.and_then(|proto_chunk| {
                 let b: Bytes = proto_chunk.try_into().unwrap();
@@ -167,8 +141,7 @@ impl Client {
         req: model::GetDbSizeRequest,
     ) -> Result<u64, tonic::Status> {
 
-        let proto_req = proto::GetDbSizeRequest::try_from(req)
-            .map_err(|e| Status::internal(format!("Failed to convert request: {}", e)))?;
+        let proto_req = proto::GetDbSizeRequest::from(req);
 
         let response = self.client.get_db_size(proto_req).await?;
         Ok(response.into_inner().into())
@@ -212,8 +185,7 @@ impl Client {
         req: model::GetRelSizeRequest,
     ) -> Result<model::GetRelSizeResponse, tonic::Status> {
 
-        let proto_req = proto::GetRelSizeRequest::try_from(req)
-            .map_err(|e| Status::internal(format!("Failed to convert request: {}", e)))?;
+        let proto_req = proto::GetRelSizeRequest::from(req);
         let response = self.client.get_rel_size(proto_req).await?;
         let proto_resp = response.into_inner();
         Ok(proto_resp.into())
@@ -224,9 +196,7 @@ impl Client {
         req: model::GetSlruSegmentRequest,
     ) -> Result<model::GetSlruSegmentResponse, tonic::Status> {
 
-        let proto_req = proto::GetSlruSegmentRequest::try_from(req)
-            .map_err(|e| Status::internal(format!("Failed to convert request: {}", e)))?;
-
+        let proto_req = proto::GetSlruSegmentRequest::from(req);
         let response = self.client.get_slru_segment(proto_req).await?;
         Ok(response.into_inner().segment as Bytes)
     }

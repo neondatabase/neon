@@ -15,6 +15,7 @@ futures.workspace = true
 hdrhistogram.workspace = true
 humantime.workspace = true
 humantime-serde.workspace = true
+http.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
