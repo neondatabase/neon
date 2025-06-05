@@ -39,7 +39,7 @@ fn err_from_client_err(err: mgmt_api::Error) -> SafekeeperHttpError {
     match err {
         ApiError(_, str) => SafekeeperHttpError::Response(str),
         Cancelled => SafekeeperHttpError::Response("Cancelled".to_owned()),
-        ReceiveBody(err) => SafekeeperHttpError::Response(format!("{err}")),
+        ReceiveBody(err) => SafekeeperHttpError::Transport(err),
         ReceiveErrorBody(err) => SafekeeperHttpError::Response(err),
         Timeout(str) => SafekeeperHttpError::Response(format!("timeout: {str}")),
     }
