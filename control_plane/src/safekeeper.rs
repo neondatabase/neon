@@ -276,7 +276,7 @@ impl SafekeeperNode {
 
     pub async fn create_timeline(&self, req: &TimelineCreateRequest) -> Result<()> {
         self.http_client
-            .create_timeline(&req)
+            .create_timeline(req)
             .await
             .map_err(err_from_client_err)?;
         Ok(())
