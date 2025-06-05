@@ -1,4 +1,4 @@
-use utils::id::TenantId;
+use utils::{id::TenantId, logging};
 
 use super::*;
 use crate::World;
@@ -137,6 +137,13 @@ fn advertisement_for_new_timeline() {
 
 #[test]
 fn quiescing_timeline_catchup() {
+    let _guard = logging::init(
+        logging::LogFormat::Test,
+        logging::TracingErrorLayerEnablement::EnableWithRustLogFilter,
+        logging::Output::Stdout,
+    )
+    .unwrap();
+
     let mut world = World::default();
 
     let tenant_id = TenantId::generate();
