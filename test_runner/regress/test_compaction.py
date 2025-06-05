@@ -10,7 +10,6 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
-    PageserverWalReceiverProtocol,
     generate_uploads_and_deletions,
 )
 from fixtures.pageserver.http import PageserverApiException
@@ -68,14 +67,9 @@ PREEMPT_GC_COMPACTION_TENANT_CONF = {
 
 
 @skip_in_debug_build("only run with release build")
-@pytest.mark.parametrize(
-    "wal_receiver_protocol",
-    [PageserverWalReceiverProtocol.VANILLA, PageserverWalReceiverProtocol.INTERPRETED],
-)
 @pytest.mark.timeout(900)
 def test_pageserver_compaction_smoke(
     neon_env_builder: NeonEnvBuilder,
-    wal_receiver_protocol: PageserverWalReceiverProtocol,
 ):
     """
     This is a smoke test that compaction kicks in. The workload repeatedly churns
@@ -84,8 +78,6 @@ def test_pageserver_compaction_smoke(
     layers visited to gather reconstruct data for a given key is within the empirically
     observed bounds.
     """
-
-    neon_env_builder.pageserver_wal_receiver_protocol = wal_receiver_protocol
 
     # Effectively disable the page cache to rely only on image layers
     # to shorten reads.
