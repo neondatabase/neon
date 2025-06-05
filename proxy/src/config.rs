@@ -39,8 +39,6 @@ pub struct ComputeConfig {
 pub enum ProxyProtocolV2 {
     /// Connection will error if PROXY protocol v2 header is missing
     Required,
-    /// Connection will parse PROXY protocol v2 header, but accept the connection if it's missing.
-    Supported,
     /// Connection will error if PROXY protocol v2 header is provided
     Rejected,
 }
