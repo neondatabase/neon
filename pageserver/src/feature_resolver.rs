@@ -1,8 +1,11 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use posthog_client_lite::{
-    FeatureResolverBackgroundLoop, PostHogClientConfig, PostHogEvaluationError,
+    CaptureEvent, FeatureResolverBackgroundLoop, PostHogClientConfig, PostHogEvaluationError,
+    PostHogFlagFilterPropertyValue,
 };
+use remote_storage::RemoteStorageKind;
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use utils::id::TenantId;
 
@@ -11,11 +14,15 @@ use crate::{config::PageServerConf, metrics::FEATURE_FLAG_EVALUATION};
 #[derive(Clone)]
 pub struct FeatureResolver {
     inner: Option<Arc<FeatureResolverBackgroundLoop>>,
+    internal_properties: Option<Arc<HashMap<String, PostHogFlagFilterPropertyValue>>>,
 }
 
 impl FeatureResolver {
     pub fn new_disabled() -> Self {
-        Self { inner: None }
+        Self {
+            inner: None,
+            internal_properties: None,
+        }
     }
 
     pub fn spawn(
@@ -36,12 +43,112 @@ impl FeatureResolver {
                 shutdown_pageserver,
             );
             let inner = Arc::new(inner);
-            // TODO: make this configurable
-            inner.clone().spawn(handle, Duration::from_secs(60));
-            Ok(FeatureResolver { inner: Some(inner) })
+
+            // The properties shared by all tenants on this pageserver.
+            let internal_properties = {
+                let mut properties = HashMap::new();
+                properties.insert(
+                    "pageserver_id".to_string(),
+                    PostHogFlagFilterPropertyValue::String(conf.id.to_string()),
+                );
+                if let Some(availability_zone) = &conf.availability_zone {
+                    properties.insert(
+                        "availability_zone".to_string(),
+                        PostHogFlagFilterPropertyValue::String(availability_zone.clone()),
+                    );
+                }
+                // Infer region based on the remote storage config.
+                if let Some(remote_storage) = &conf.remote_storage_config {
+                    match &remote_storage.storage {
+                        RemoteStorageKind::AwsS3(config) => {
+                            properties.insert(
+                                "region".to_string(),
+                                PostHogFlagFilterPropertyValue::String(format!(
+                                    "aws-{}",
+                                    config.bucket_region
+                                )),
+                            );
+                        }
+                        RemoteStorageKind::AzureContainer(config) => {
+                            properties.insert(
+                                "region".to_string(),
+                                PostHogFlagFilterPropertyValue::String(format!(
+                                    "azure-{}",
+                                    config.container_region
+                                )),
+                            );
+                        }
+                        RemoteStorageKind::LocalFs { .. } => {
+                            properties.insert(
+                                "region".to_string(),
+                                PostHogFlagFilterPropertyValue::String("local".to_string()),
+                            );
+                        }
+                    }
+                }
+                // TODO: add pageserver URL.
+                Arc::new(properties)
+            };
+            let fake_tenants = {
+                let mut tenants = Vec::new();
+                for i in 0..10 {
+                    let distinct_id = format!(
+                        "fake_tenant_{}_{}_{}",
+                        conf.availability_zone.as_deref().unwrap_or_default(),
+                        conf.id,
+                        i
+                    );
+                    let properties = Self::collect_properties_inner(
+                        distinct_id.clone(),
+                        Some(&internal_properties),
+                    );
+                    tenants.push(CaptureEvent {
+                        event: "initial_tenant_report".to_string(),
+                        distinct_id,
+                        properties: json!({ "$set": properties }), // use `$set` to set the person properties instead of the event properties
+                    });
+                }
+                tenants
+            };
+            // TODO: make refresh period configurable
+            inner
+                .clone()
+                .spawn(handle, Duration::from_secs(60), fake_tenants);
+            Ok(FeatureResolver {
+                inner: Some(inner),
+                internal_properties: Some(internal_properties),
+            })
         } else {
-            Ok(FeatureResolver { inner: None })
+            Ok(FeatureResolver {
+                inner: None,
+                internal_properties: None,
+            })
         }
+    }
+
+    fn collect_properties_inner(
+        tenant_id: String,
+        internal_properties: Option<&HashMap<String, PostHogFlagFilterPropertyValue>>,
+    ) -> HashMap<String, PostHogFlagFilterPropertyValue> {
+        let mut properties = HashMap::new();
+        if let Some(internal_properties) = internal_properties {
+            for (key, value) in internal_properties.iter() {
+                properties.insert(key.clone(), value.clone());
+            }
+        }
+        properties.insert(
+            "tenant_id".to_string(),
+            PostHogFlagFilterPropertyValue::String(tenant_id),
+        );
+        properties
+    }
+
+    /// Collect all properties availble for the feature flag evaluation.
+    pub(crate) fn collect_properties(
+        &self,
+        tenant_id: TenantId,
+    ) -> HashMap<String, PostHogFlagFilterPropertyValue> {
+        Self::collect_properties_inner(tenant_id.to_string(), self.internal_properties.as_deref())
     }
 
     /// Evaluate a multivariate feature flag. Currently, we do not support any properties.
@@ -58,7 +165,7 @@ impl FeatureResolver {
             let res = inner.feature_store().evaluate_multivariate(
                 flag_key,
                 &tenant_id.to_string(),
-                &HashMap::new(),
+                &self.collect_properties(tenant_id),
             );
             match &res {
                 Ok(value) => {
@@ -96,7 +203,7 @@ impl FeatureResolver {
             let res = inner.feature_store().evaluate_boolean(
                 flag_key,
                 &tenant_id.to_string(),
-                &HashMap::new(),
+                &self.collect_properties(tenant_id),
             );
             match &res {
                 Ok(()) => {

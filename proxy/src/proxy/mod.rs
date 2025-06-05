@@ -1,15 +1,10 @@
 #[cfg(test)]
 mod tests;
 
-pub(crate) mod connect_compute;
-mod copy_bidirectional;
-pub(crate) mod handshake;
-pub(crate) mod passthrough;
 pub(crate) mod retry;
 pub(crate) mod wake_compute;
 use std::sync::Arc;
 
-pub use copy_bidirectional::{ErrorSource, copy_bidirectional_client_compute};
 use futures::FutureExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
@@ -21,16 +16,17 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, warn};
 
-use self::connect_compute::{TcpMechanism, connect_to_compute};
-use self::passthrough::ProxyPassthrough;
 use crate::cancellation::{self, CancellationHandler};
 use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
 use crate::context::RequestContext;
 use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
+use crate::pglb::connect_compute::{TcpMechanism, connect_to_compute};
+pub use crate::pglb::copy_bidirectional::{ErrorSource, copy_bidirectional_client_compute};
+use crate::pglb::handshake::{HandshakeData, HandshakeError, handshake};
+use crate::pglb::passthrough::ProxyPassthrough;
 use crate::pqproto::{BeMessage, CancelKeyData, StartupMessageParams};
 use crate::protocol2::{ConnectHeader, ConnectionInfo, ConnectionInfoExtra, read_proxy_protocol};
-use crate::proxy::handshake::{HandshakeData, handshake};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::{PqStream, Stream};
 use crate::types::EndpointCacheKey;
@@ -102,30 +98,24 @@ pub async fn task_main(
         let endpoint_rate_limiter2 = endpoint_rate_limiter.clone();
 
         connections.spawn(async move {
-            let (socket, conn_info) = match read_proxy_protocol(socket).await {
-                Err(e) => {
-                    warn!("per-client task finished with an error: {e:#}");
-                    return;
+            let (socket, conn_info) = match config.proxy_protocol_v2 {
+                ProxyProtocolV2::Required => {
+                    match read_proxy_protocol(socket).await {
+                        Err(e) => {
+                            warn!("per-client task finished with an error: {e:#}");
+                            return;
+                        }
+                        // our load balancers will not send any more data. let's just exit immediately
+                        Ok((_socket, ConnectHeader::Local)) => {
+                            debug!("healthcheck received");
+                            return;
+                        }
+                        Ok((socket, ConnectHeader::Proxy(info))) => (socket, info),
+                    }
                 }
-                // our load balancers will not send any more data. let's just exit immediately
-                Ok((_socket, ConnectHeader::Local)) => {
-                    debug!("healthcheck received");
-                    return;
-                }
-                Ok((_socket, ConnectHeader::Missing))
-                    if config.proxy_protocol_v2 == ProxyProtocolV2::Required =>
-                {
-                    warn!("missing required proxy protocol header");
-                    return;
-                }
-                Ok((_socket, ConnectHeader::Proxy(_)))
-                    if config.proxy_protocol_v2 == ProxyProtocolV2::Rejected =>
-                {
-                    warn!("proxy protocol header not supported");
-                    return;
-                }
-                Ok((socket, ConnectHeader::Proxy(info))) => (socket, info),
-                Ok((socket, ConnectHeader::Missing)) => (
+                // ignore the header - it cannot be confused for a postgres or http connection so will
+                // error later.
+                ProxyProtocolV2::Rejected => (
                     socket,
                     ConnectionInfo {
                         addr: peer_addr,
@@ -134,7 +124,7 @@ pub async fn task_main(
                 ),
             };
 
-            match socket.inner.set_nodelay(true) {
+            match socket.set_nodelay(true) {
                 Ok(()) => {}
                 Err(e) => {
                     error!(
@@ -248,7 +238,7 @@ pub(crate) enum ClientRequestError {
     #[error("{0}")]
     Cancellation(#[from] cancellation::CancelError),
     #[error("{0}")]
-    Handshake(#[from] handshake::HandshakeError),
+    Handshake(#[from] HandshakeError),
     #[error("{0}")]
     HandshakeTimeout(#[from] tokio::time::error::Elapsed),
     #[error("{0}")]

@@ -53,7 +53,7 @@ pub(crate) async fn proxy_pass(
 
     // Starting from here we only proxy the client's traffic.
     debug!("performing the proxy pass...");
-    let _ = crate::proxy::copy_bidirectional::copy_bidirectional_client_compute(
+    let _ = crate::pglb::copy_bidirectional::copy_bidirectional_client_compute(
         &mut client,
         &mut compute,
     )

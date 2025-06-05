@@ -32,9 +32,7 @@ use utils::backoff::{
 };
 use utils::id::{NodeId, TenantTimelineId};
 use utils::lsn::Lsn;
-use utils::postgres_client::{
-    ConnectionConfigArgs, PostgresClientProtocol, wal_stream_connection_config,
-};
+use utils::postgres_client::{ConnectionConfigArgs, wal_stream_connection_config};
 
 use super::walreceiver_connection::{WalConnectionStatus, WalReceiverError};
 use super::{TaskEvent, TaskHandle, TaskStateUpdate, WalReceiverConf};
@@ -991,19 +989,12 @@ impl ConnectionManagerState {
                     return None; // no connection string, ignore sk
                 }
 
-                let (shard_number, shard_count, shard_stripe_size) = match self.conf.protocol {
-                    PostgresClientProtocol::Vanilla => {
-                        (None, None, None)
-                    },
-                    PostgresClientProtocol::Interpreted { .. } => {
-                        let shard_identity = self.timeline.get_shard_identity();
-                        (
-                            Some(shard_identity.number.0),
-                            Some(shard_identity.count.0),
-                            Some(shard_identity.stripe_size.0),
-                        )
-                    }
-                };
+                let shard_identity = self.timeline.get_shard_identity();
+                let (shard_number, shard_count, shard_stripe_size) = (
+                    Some(shard_identity.number.0),
+                    Some(shard_identity.count.0),
+                    Some(shard_identity.stripe_size.0),
+                );
 
                 let connection_conf_args = ConnectionConfigArgs {
                     protocol: self.conf.protocol,
@@ -1120,8 +1111,8 @@ impl ReconnectReason {
 
 #[cfg(test)]
 mod tests {
-    use pageserver_api::config::defaults::DEFAULT_WAL_RECEIVER_PROTOCOL;
     use url::Host;
+    use utils::postgres_client::PostgresClientProtocol;
 
     use super::*;
     use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
@@ -1552,6 +1543,11 @@ mod tests {
             .await
             .expect("Failed to create an empty timeline for dummy wal connection manager");
 
+        let protocol = PostgresClientProtocol::Interpreted {
+            format: utils::postgres_client::InterpretedFormat::Protobuf,
+            compression: Some(utils::postgres_client::Compression::Zstd { level: 1 }),
+        };
+
         ConnectionManagerState {
             id: TenantTimelineId {
                 tenant_id: harness.tenant_shard_id.tenant_id,
@@ -1560,7 +1556,7 @@ mod tests {
             timeline,
             cancel: CancellationToken::new(),
             conf: WalReceiverConf {
-                protocol: DEFAULT_WAL_RECEIVER_PROTOCOL,
+                protocol,
                 wal_connect_timeout: Duration::from_secs(1),
                 lagging_wal_timeout: Duration::from_secs(1),
                 max_lsn_wal_lag: NonZeroU64::new(1024 * 1024).unwrap(),

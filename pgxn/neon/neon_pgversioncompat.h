@@ -170,6 +170,7 @@ InitBufferTag(BufferTag *tag, const RelFileNode *rnode,
 
 #if PG_MAJORVERSION_NUM < 15
 extern void InitMaterializedSRF(FunctionCallInfo fcinfo, bits32 flags);
+extern TimeLineID GetWALInsertionTimeLine(void);
 #endif
 
 #endif							/* NEON_PGVERSIONCOMPAT_H */
