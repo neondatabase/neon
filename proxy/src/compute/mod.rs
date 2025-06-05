@@ -1,3 +1,5 @@
+mod tls;
+
 use std::fmt::Debug;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -27,8 +29,6 @@ use crate::metrics::{Metrics, NumDbConnectionsGuard};
 use crate::pqproto::StartupMessageParams;
 use crate::proxy::neon_option;
 use crate::types::Host;
-
-mod tls;
 
 pub const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
 

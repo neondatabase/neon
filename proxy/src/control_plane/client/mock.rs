@@ -171,7 +171,7 @@ impl MockControlPlane {
 
     async fn do_wake_compute(&self) -> Result<NodeInfo, WakeComputeError> {
         let port = self.endpoint.port().unwrap_or(5432);
-        let config = match self.endpoint.host_str() {
+        let conn_info = match self.endpoint.host_str() {
             None => ConnectInfo {
                 host_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
                 host: "localhost".into(),
@@ -187,7 +187,7 @@ impl MockControlPlane {
         };
 
         let node = NodeInfo {
-            conn_info: config,
+            conn_info,
             aux: MetricsAuxInfo {
                 endpoint_id: (&EndpointId::from("endpoint")).into(),
                 project_id: (&ProjectId::from("project")).into(),

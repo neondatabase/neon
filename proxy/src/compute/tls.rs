@@ -4,15 +4,16 @@ use postgres_client::maybe_tls_stream::MaybeTlsStream;
 use postgres_client::tls::{MakeTlsConnect, TlsConnect};
 use rustls::pki_types::InvalidDnsNameError;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 
+use crate::pqproto::request_tls;
 use crate::proxy::retry::CouldRetry;
 
 #[derive(Debug, Error)]
 pub enum TlsError {
-    #[error("{0}")]
+    #[error(transparent)]
     Dns(#[from] InvalidDnsNameError),
-    #[error("{0}")]
+    #[error(transparent)]
     Connection(#[from] std::io::Error),
     #[error("TLS required but not provided")]
     Required,
@@ -48,17 +49,7 @@ where
         SslMode::Prefer | SslMode::Require => {}
     }
 
-    // These are the bytes for <https://www.postgresql.org/docs/current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-SSLREQUEST>
-    stream
-        .write_all(&[0, 0, 0, 8, 0x0f4, 0xd2, 0x16, 0x2f])
-        .await?;
-    stream.flush().await?;
-
-    // we expect back either `S` or `N` as a single byte.
-    let mut res = *b"0";
-    stream.read_exact(&mut res).await?;
-
-    if res != *b"S" {
+    if !request_tls(&mut stream).await? {
         if SslMode::Require == mode {
             return Err(TlsError::Required);
         }

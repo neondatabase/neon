@@ -261,17 +261,17 @@ impl NeonControlPlaneClient {
                 Some(_) => SslMode::Require,
                 None => SslMode::Disable,
             };
-            let host_name = match body.server_name {
+            let host = match body.server_name {
                 Some(host) => host.into(),
                 None => host.into(),
             };
 
             let node = NodeInfo {
                 conn_info: compute::ConnectInfo {
-                    host: host_name,
+                    host_addr,
+                    host,
                     port,
                     ssl_mode,
-                    host_addr,
                 },
                 aux: body.aux,
             };
