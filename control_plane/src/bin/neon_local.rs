@@ -1281,11 +1281,12 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
                     },
                     new_members: None,
                 };
+                let pg_version = args.pg_version * 10000;
                 let req = safekeeper_api::models::TimelineCreateRequest {
                     tenant_id,
                     timeline_id,
                     mconf,
-                    pg_version: args.pg_version,
+                    pg_version,
                     system_id: None,
                     wal_seg_size: None,
                     start_lsn: timeline_info.last_record_lsn,
