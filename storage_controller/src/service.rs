@@ -3837,6 +3837,9 @@ impl Service {
                 ..
             }
         );
+        if read_only {
+            tracing::info!("creating timeline as read-only");
+        }
 
         if is_import {
             // Ensure that there is no split on-going.
