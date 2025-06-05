@@ -232,6 +232,7 @@ communicator_new_bgworker_main(Datum main_arg)
 	 * sequence: WAL senders are shut down last, after the final checkpoint
 	 * has been written. That's what we want for the communicator process too
 	 */
+	am_walsender = true;
 	MarkPostmasterChildWalSender();
 
 	/* lfc_size_limit is in MBs */
