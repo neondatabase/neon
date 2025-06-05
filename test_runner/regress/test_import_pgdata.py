@@ -9,7 +9,6 @@ from pathlib import Path
 from threading import Event
 
 import psycopg2
-import psycopg2.errors
 import pytest
 from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.fast_import import (
@@ -1070,15 +1069,41 @@ def test_fast_import_restore_to_connstring_from_s3_spec(
         return mock_kms.encrypt(KeyId=key_id, Plaintext=x)
 
     # Start source postgres and ingest data
+    vanilla_pg.configure(["shared_preload_libraries='neon,neon_utils,neon_rmgr'"])
     vanilla_pg.start()
-    vanilla_pg.safe_psql("CREATE TABLE foo (a int); INSERT INTO foo SELECT generate_series(1, 10);")
+    res = vanilla_pg.safe_psql("SHOW shared_preload_libraries;")
+    log.info(f"shared_preload_libraries: {res}")
+    res = vanilla_pg.safe_psql("SELECT name FROM pg_available_extensions;")
+    log.info(f"pg_available_extensions: {res}")
+    res = vanilla_pg.safe_psql("SELECT extname FROM pg_extension;")
+    log.info(f"pg_extension: {res}")
+
+    # Create a number of extensions, we only will dump selected ones
+    vanilla_pg.safe_psql("CREATE EXTENSION neon;")
+    vanilla_pg.safe_psql("CREATE EXTENSION neon_utils;")
+    vanilla_pg.safe_psql("CREATE EXTENSION pg_visibility;")
+
+    # Default schema is always dumped
+    vanilla_pg.safe_psql(
+        "CREATE TABLE public.foo (a int); INSERT INTO public.foo SELECT generate_series(1, 7);"
+    )
+
+    # Create a number of schemas, we only will dump selected ones
+    vanilla_pg.safe_psql("CREATE SCHEMA custom;")
+    vanilla_pg.safe_psql(
+        "CREATE TABLE custom.foo (a int); INSERT INTO custom.foo SELECT generate_series(1, 13);"
+    )
+    vanilla_pg.safe_psql("CREATE SCHEMA other;")
+    vanilla_pg.safe_psql(
+        "CREATE TABLE other.foo (a int); INSERT INTO other.foo SELECT generate_series(1, 42);"
+    )
 
     # Start target postgres
     pgdatadir = test_output_dir / "destination-pgdata"
     pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
     port = port_distributor.get_port()
     with VanillaPostgres(pgdatadir, pg_bin, port) as destination_vanilla_pg:
-        destination_vanilla_pg.configure(["shared_preload_libraries='neon_rmgr'"])
+        destination_vanilla_pg.configure(["shared_preload_libraries='neon,neon_utils,neon_rmgr'"])
         destination_vanilla_pg.start()
 
         # Encrypt connstrings and put spec into S3
@@ -1092,6 +1117,8 @@ def test_fast_import_restore_to_connstring_from_s3_spec(
             "destination_connstring_ciphertext_base64": base64.b64encode(
                 destination_connstring_encrypted["CiphertextBlob"]
             ).decode("utf-8"),
+            "schemas": ["custom"],
+            "extensions": ["plpgsql", "neon"],
         }
 
         bucket = "test-bucket"
@@ -1117,9 +1144,31 @@ def test_fast_import_restore_to_connstring_from_s3_spec(
         }, f"got status: {job_status}"
         vanilla_pg.stop()
 
-        res = destination_vanilla_pg.safe_psql("SELECT count(*) FROM foo;")
+        res = destination_vanilla_pg.safe_psql("SELECT count(*) FROM public.foo;")
         log.info(f"Result: {res}")
-        assert res[0][0] == 10
+        assert res[0][0] == 7
+
+        res = destination_vanilla_pg.safe_psql("SELECT count(*) FROM custom.foo;")
+        log.info(f"Result: {res}")
+        assert res[0][0] == 13
+
+        # Check that other schema is not restored
+        with pytest.raises(psycopg2.errors.UndefinedTable):
+            destination_vanilla_pg.safe_psql("SELECT count(*) FROM other.foo;")
+
+        # Check that all schemas are listed correctly
+        res = destination_vanilla_pg.safe_psql("SELECT nspname FROM pg_namespace;")
+        log.info(f"Result: {res}")
+        schemas = [row[0] for row in res]
+        assert "other" not in schemas
+
+        # Check that only selected extensions are restored
+        res = destination_vanilla_pg.safe_psql("SELECT extname FROM pg_extension;")
+        log.info(f"Result: {res}")
+        assert len(res) == 2
+        extensions = set([str(row[0]) for row in res])
+        assert "plpgsql" in extensions
+        assert "neon" in extensions
 
 
 def test_fast_import_restore_to_connstring_error_to_s3_bad_destination(
