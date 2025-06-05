@@ -14,7 +14,7 @@
 set -eux -o pipefail
 
 export COMPOSE_FILE='docker-compose.yml'
-if [[ ${RUN_PARALLEL:-off} = on ]]; then
+if [[ ${RUN_PARALLEL:-false} = true ]]; then
   export COMPOSE_PROFILES=parallel-test-extensions
   READY_CONTAINER=pcomputes_are_ready
   READY_MESSAGE="All pcomputes are started"
