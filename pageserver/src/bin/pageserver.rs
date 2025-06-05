@@ -158,7 +158,6 @@ fn main() -> anyhow::Result<()> {
     // (maybe we should automate this with a visitor?).
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
     info!(?conf.virtual_file_io_mode, "starting with virtual_file IO mode");
-    info!(?conf.wal_receiver_protocol, "starting with WAL receiver protocol");
     info!(?conf.validate_wal_contiguity, "starting with WAL contiguity validation");
     info!(?conf.page_service_pipelining, "starting with page service pipelining config");
     info!(?conf.get_vectored_concurrent_io, "starting with get_vectored IO concurrency config");
@@ -819,6 +818,7 @@ fn start_pageserver(
             tenant_manager.clone(),
             grpc_auth,
             otel_guard.as_ref().map(|g| g.dispatch.clone()),
+            conf.get_vectored_concurrent_io,
             grpc_listener,
         )?);
     }

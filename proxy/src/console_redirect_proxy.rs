@@ -11,10 +11,10 @@ use crate::config::{ProxyConfig, ProxyProtocolV2};
 use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
+use crate::pglb::connect_compute::{TcpMechanism, connect_to_compute};
+use crate::pglb::handshake::{HandshakeData, handshake};
+use crate::pglb::passthrough::ProxyPassthrough;
 use crate::protocol2::{ConnectHeader, ConnectionInfo, read_proxy_protocol};
-use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
-use crate::proxy::handshake::{HandshakeData, handshake};
-use crate::proxy::passthrough::ProxyPassthrough;
 use crate::proxy::{
     ClientRequestError, ErrorSource, prepare_client_connection, run_until_cancelled,
 };
@@ -54,30 +54,24 @@ pub async fn task_main(
         debug!(protocol = "tcp", %session_id, "accepted new TCP connection");
 
         connections.spawn(async move {
-            let (socket, peer_addr) = match read_proxy_protocol(socket).await {
-                Err(e) => {
-                    error!("per-client task finished with an error: {e:#}");
-                    return;
+            let (socket, conn_info) = match config.proxy_protocol_v2 {
+                ProxyProtocolV2::Required => {
+                    match read_proxy_protocol(socket).await {
+                        Err(e) => {
+                            error!("per-client task finished with an error: {e:#}");
+                            return;
+                        }
+                        // our load balancers will not send any more data. let's just exit immediately
+                        Ok((_socket, ConnectHeader::Local)) => {
+                            debug!("healthcheck received");
+                            return;
+                        }
+                        Ok((socket, ConnectHeader::Proxy(info))) => (socket, info),
+                    }
                 }
-                // our load balancers will not send any more data. let's just exit immediately
-                Ok((_socket, ConnectHeader::Local)) => {
-                    debug!("healthcheck received");
-                    return;
-                }
-                Ok((_socket, ConnectHeader::Missing))
-                    if config.proxy_protocol_v2 == ProxyProtocolV2::Required =>
-                {
-                    error!("missing required proxy protocol header");
-                    return;
-                }
-                Ok((_socket, ConnectHeader::Proxy(_)))
-                    if config.proxy_protocol_v2 == ProxyProtocolV2::Rejected =>
-                {
-                    error!("proxy protocol header not supported");
-                    return;
-                }
-                Ok((socket, ConnectHeader::Proxy(info))) => (socket, info),
-                Ok((socket, ConnectHeader::Missing)) => (
+                // ignore the header - it cannot be confused for a postgres or http connection so will
+                // error later.
+                ProxyProtocolV2::Rejected => (
                     socket,
                     ConnectionInfo {
                         addr: peer_addr,
@@ -86,7 +80,7 @@ pub async fn task_main(
                 ),
             };
 
-            match socket.inner.set_nodelay(true) {
+            match socket.set_nodelay(true) {
                 Ok(()) => {}
                 Err(e) => {
                     error!(
@@ -98,7 +92,7 @@ pub async fn task_main(
 
             let ctx = RequestContext::new(
                 session_id,
-                peer_addr,
+                conn_info,
                 crate::metrics::Protocol::Tcp,
                 &config.region,
             );
