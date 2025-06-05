@@ -92,20 +92,16 @@ impl FeatureResolver {
             let fake_tenants = {
                 let mut tenants = Vec::new();
                 for i in 0..10 {
-                    let mut properties = HashMap::new();
                     let distinct_id = format!(
                         "fake_tenant_{}_{}_{}",
                         conf.availability_zone.as_deref().unwrap_or_default(),
                         conf.id,
                         i
                     );
-                    properties.insert(
-                        "tenant_id".to_string(),
-                        PostHogFlagFilterPropertyValue::String(distinct_id.clone()),
+                    let properties = Self::collect_properties_inner(
+                        distinct_id.clone(),
+                        Some(&internal_properties),
                     );
-                    for (key, value) in internal_properties.iter() {
-                        properties.insert(key.clone(), value.clone());
-                    }
                     tenants.push(CaptureEvent {
                         event: "initial_tenant_report".to_string(),
                         distinct_id,
@@ -130,22 +126,29 @@ impl FeatureResolver {
         }
     }
 
-    // Collect all properties availble for the feature flag evaluation.
-    pub(crate) fn collect_properties(
-        &self,
-        tenant_id: TenantId,
+    fn collect_properties_inner(
+        tenant_id: String,
+        internal_properties: Option<&HashMap<String, PostHogFlagFilterPropertyValue>>,
     ) -> HashMap<String, PostHogFlagFilterPropertyValue> {
         let mut properties = HashMap::new();
-        if let Some(internal_properties) = &self.internal_properties {
+        if let Some(internal_properties) = internal_properties {
             for (key, value) in internal_properties.iter() {
                 properties.insert(key.clone(), value.clone());
             }
         }
         properties.insert(
             "tenant_id".to_string(),
-            PostHogFlagFilterPropertyValue::String(tenant_id.to_string()),
+            PostHogFlagFilterPropertyValue::String(tenant_id),
         );
         properties
+    }
+
+    /// Collect all properties availble for the feature flag evaluation.
+    pub(crate) fn collect_properties(
+        &self,
+        tenant_id: TenantId,
+    ) -> HashMap<String, PostHogFlagFilterPropertyValue> {
+        Self::collect_properties_inner(tenant_id.to_string(), self.internal_properties.as_deref())
     }
 
     /// Evaluate a multivariate feature flag. Currently, we do not support any properties.
