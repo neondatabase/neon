@@ -102,30 +102,24 @@ pub async fn task_main(
         let endpoint_rate_limiter2 = endpoint_rate_limiter.clone();
 
         connections.spawn(async move {
-            let (socket, conn_info) = match read_proxy_protocol(socket).await {
-                Err(e) => {
-                    warn!("per-client task finished with an error: {e:#}");
-                    return;
+            let (socket, conn_info) = match config.proxy_protocol_v2 {
+                ProxyProtocolV2::Required => {
+                    match read_proxy_protocol(socket).await {
+                        Err(e) => {
+                            warn!("per-client task finished with an error: {e:#}");
+                            return;
+                        }
+                        // our load balancers will not send any more data. let's just exit immediately
+                        Ok((_socket, ConnectHeader::Local)) => {
+                            debug!("healthcheck received");
+                            return;
+                        }
+                        Ok((socket, ConnectHeader::Proxy(info))) => (socket, info),
+                    }
                 }
-                // our load balancers will not send any more data. let's just exit immediately
-                Ok((_socket, ConnectHeader::Local)) => {
-                    debug!("healthcheck received");
-                    return;
-                }
-                Ok((_socket, ConnectHeader::Missing))
-                    if config.proxy_protocol_v2 == ProxyProtocolV2::Required =>
-                {
-                    warn!("missing required proxy protocol header");
-                    return;
-                }
-                Ok((_socket, ConnectHeader::Proxy(_)))
-                    if config.proxy_protocol_v2 == ProxyProtocolV2::Rejected =>
-                {
-                    warn!("proxy protocol header not supported");
-                    return;
-                }
-                Ok((socket, ConnectHeader::Proxy(info))) => (socket, info),
-                Ok((socket, ConnectHeader::Missing)) => (
+                // ignore the header - it cannot be confused for a postgres or http connection so will
+                // error later.
+                ProxyProtocolV2::Rejected => (
                     socket,
                     ConnectionInfo {
                         addr: peer_addr,
@@ -134,7 +128,7 @@ pub async fn task_main(
                 ),
             };
 
-            match socket.inner.set_nodelay(true) {
+            match socket.set_nodelay(true) {
                 Ok(()) => {}
                 Err(e) => {
                     error!(
