@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
 use compute_api::responses::{
     ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus, LfcOffloadState,
-    LfcPrewarmState,
+    LfcPrewarmState, PromoteState
 };
 use compute_api::spec::{
     ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent,
@@ -160,6 +160,8 @@ pub struct ComputeState {
 
     pub lfc_prewarm_state: LfcPrewarmState,
     pub lfc_offload_state: LfcOffloadState,
+
+    pub promote_state: PromoteState,
 
     pub metrics: ComputeMetrics,
 }

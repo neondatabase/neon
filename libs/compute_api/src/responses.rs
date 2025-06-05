@@ -70,6 +70,18 @@ pub enum LfcOffloadState {
     },
 }
 
+#[derive(Serialize, Default, Debug, Clone)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum PromoteState {
+    #[default]
+    NotPromoted,
+    Promoting,
+    Completed,
+    Failed {
+        error: String,
+    },
+}
+
 /// Response of the /status API
 #[derive(Serialize, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
