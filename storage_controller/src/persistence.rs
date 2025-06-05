@@ -1352,13 +1352,13 @@ impl Persistence {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-        current_generation: SafekeeperGeneration,
+        new_generation: SafekeeperGeneration,
         sk_set: &[NodeId],
         new_sk_set: Option<&[NodeId]>,
     ) -> DatabaseResult<()> {
         use crate::schema::timelines::dsl;
 
-        let previous_generation = generation.previous().unwrap();
+        let prev_generation = new_generation.previous().unwrap();
 
         let tenant_id = &tenant_id;
         let timeline_id = &timeline_id;
@@ -1367,9 +1367,9 @@ impl Persistence {
                 let updated = diesel::update(dsl::timelines)
                     .filter(dsl::tenant_id.eq(&tenant_id.to_string()))
                     .filter(dsl::timeline_id.eq(&timeline_id.to_string()))
-                    .filter(dsl::generation.eq(previous_generation.into_inner() as i32))
+                    .filter(dsl::generation.eq(prev_generation.into_inner() as i32))
                     .set((
-                        dsl::generation.eq(generation.into_inner() as i32),
+                        dsl::generation.eq(new_generation.into_inner() as i32),
                         dsl::sk_set.eq(sk_set.iter().map(|id| id.0 as i64).collect::<Vec<_>>()),
                         dsl::new_sk_set.eq(new_sk_set
                             .map(|set| set.iter().map(|id| id.0 as i64).collect::<Vec<_>>())),

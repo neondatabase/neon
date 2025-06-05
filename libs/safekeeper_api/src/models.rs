@@ -210,7 +210,7 @@ pub struct TimelineStatus {
 }
 
 /// Request to switch membership configuration.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TimelineMembershipSwitchRequest {
     pub mconf: Configuration,

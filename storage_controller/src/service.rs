@@ -222,7 +222,7 @@ const MAX_DELAYED_RECONCILES: usize = 10000;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct TimelineSafekeeperMigrateRequest {
-    pub desired_sk_set: Vec<NodeId>,
+    pub new_sk_set: Vec<NodeId>,
 }
 
 // Top level state available to all HTTP handlers
