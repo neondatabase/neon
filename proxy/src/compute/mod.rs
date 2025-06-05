@@ -106,13 +106,14 @@ pub enum Auth {
 }
 
 /// A config for authenticating to the compute node.
-#[derive(Clone)]
 pub(crate) struct AuthInfo {
     /// None for local-proxy, as we use trust-based localhost auth.
     /// Some for sql-over-http, ws, tcp, and in most cases for console-redirect.
     /// Might be None for console-redirect, but that's only a consequence of testing environments ATM.
     auth: Option<Auth>,
     server_params: StartupMessageParams,
+
+    /// Console redirect sets user and database, we shouldn't re-use those from the params.
     skip_db_user: bool,
 }
 
@@ -125,70 +126,52 @@ pub struct ConnectInfo {
     pub ssl_mode: SslMode,
 }
 
-/// A config for establishing a connection to compute node.
-/// Eventually, `postgres_client` will be replaced with something better.
-/// Newtype allows us to implement methods on top of it.
-#[derive(Clone)]
-pub(crate) struct ConnCfg {
-    auth: AuthInfo,
-    pub conn: ConnectInfo,
+/// Creation and initialization routines.
+impl AuthInfo {
+    pub(crate) fn for_console_redirect(db: &str, user: &str, pw: Option<&str>) -> Self {
+        let mut server_params = StartupMessageParams::default();
+        server_params.insert("database", db);
+        server_params.insert("user", user);
+        Self {
+            auth: pw.map(|pw| Auth::Password(pw.as_bytes().to_owned())),
+            server_params,
+            skip_db_user: true,
+        }
+    }
+
+    pub(crate) fn with_auth_keys(keys: &ComputeCredentialKeys) -> Self {
+        Self {
+            auth: match keys {
+                ComputeCredentialKeys::AuthKeys(AuthKeys::ScramSha256(auth_keys)) => {
+                    Some(Auth::Scram(Box::new(*auth_keys)))
+                }
+                ComputeCredentialKeys::JwtPayload(_) | ComputeCredentialKeys::None => None,
+            },
+            server_params: StartupMessageParams::default(),
+            skip_db_user: false,
+        }
+    }
 }
 
-/// Creation and initialization routines.
-impl ConnCfg {
-    pub(crate) fn new(host: Host, port: u16, ssl_mode: SslMode) -> Self {
-        Self {
-            conn: ConnectInfo {
-                host_addr: None,
-                host,
-                port,
-                ssl_mode,
-            },
-            auth: AuthInfo {
-                auth: None,
-                server_params: StartupMessageParams::default(),
-                skip_db_user: false,
-            },
-        }
-    }
-
-    /// Reuse password or auth keys from the other config.
-    pub(crate) fn reuse_password(&mut self, other: Self) {
-        self.auth.auth = other.auth.auth;
-    }
-
-    pub(crate) fn get_host(&self) -> Host {
-        self.conn.host.clone()
-    }
-
-    pub(crate) fn for_console_redirect(&mut self, db: &str, user: &str, pw: Option<&str>) {
-        self.auth.skip_db_user = true;
-        self.auth.server_params.insert("database", db);
-        self.auth.server_params.insert("user", user);
-        self.auth.auth = pw.map(|pw| Auth::Password(pw.as_bytes().to_owned()));
-    }
-
-    pub(crate) fn with_auth_keys(&mut self, keys: &ComputeCredentialKeys) {
-        self.auth.auth = match keys {
-            ComputeCredentialKeys::AuthKeys(AuthKeys::ScramSha256(auth_keys)) => {
-                Some(Auth::Scram(Box::new(*auth_keys)))
-            }
-            ComputeCredentialKeys::JwtPayload(_) | ComputeCredentialKeys::None => None,
-        };
-    }
-
+impl ConnectInfo {
     pub fn to_postgres_client_config(&self) -> postgres_client::Config {
-        let mut config = postgres_client::Config::new(self.conn.host.to_string(), self.conn.port);
-        config.ssl_mode(self.conn.ssl_mode);
-        if let Some(host_addr) = self.conn.host_addr {
+        let mut config = postgres_client::Config::new(self.host.to_string(), self.port);
+        config.ssl_mode(self.ssl_mode);
+        if let Some(host_addr) = self.host_addr {
             config.set_host_addr(host_addr);
         }
-        match &self.auth.auth {
+        config
+    }
+}
+
+impl AuthInfo {
+    fn enrich(&self, mut config: postgres_client::Config) -> postgres_client::Config {
+        match &self.auth {
             Some(Auth::Scram(keys)) => config.auth_keys(AuthKeys::ScramSha256(**keys)),
             Some(Auth::Password(pw)) => config.password(pw),
             None => &mut config,
         };
-        for (k, v) in self.auth.server_params.iter() {
+        for (k, v) in self.server_params.iter() {
             config.set_param(k, v);
         }
         config
@@ -201,26 +184,26 @@ impl ConnCfg {
         arbitrary_params: bool,
     ) {
         if !arbitrary_params {
-            self.auth.server_params.insert("client_encoding", "UTF8");
+            self.server_params.insert("client_encoding", "UTF8");
         }
         for (k, v) in params.iter() {
             match k {
                 // Only set `user` if it's not present in the config.
                 // Console redirect auth flow takes username from the console's response.
-                "user" | "database" if self.auth.skip_db_user => {}
+                "user" | "database" if self.skip_db_user => {}
                 "options" => {
                     if let Some(options) = filtered_options(v) {
-                        self.auth.server_params.insert(k, &options);
+                        self.server_params.insert(k, &options);
                     }
                 }
                 "user" | "database" | "application_name" | "replication" => {
-                    self.auth.server_params.insert(k, v);
+                    self.server_params.insert(k, v);
                 }
 
                 // if we allow arbitrary params, then we forward them through.
                 // this is a flag for a period of backwards compatibility
                 k if arbitrary_params => {
-                    self.auth.server_params.insert(k, v);
+                    self.server_params.insert(k, v);
                 }
                 _ => {}
             }
@@ -295,17 +278,18 @@ pub(crate) struct PostgresConnection {
     _guage: NumDbConnectionsGuard<'static>,
 }
 
-impl ConnCfg {
+impl ConnectInfo {
     /// Connect to a corresponding compute node.
     pub(crate) async fn connect(
         &self,
         ctx: &RequestContext,
         aux: MetricsAuxInfo,
+        auth: &AuthInfo,
         config: &ComputeConfig,
         user_info: ComputeUserInfo,
     ) -> Result<PostgresConnection, ConnectionError> {
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let (socket_addr, stream, host) = self.conn.connect_raw(config.timeout).await?;
+        let (socket_addr, stream, host) = self.connect_raw(config.timeout).await?;
         drop(pause);
 
         let mut mk_tls = crate::tls::postgres_rustls::MakeRustlsConnect::new(config.tls.clone());
@@ -314,7 +298,7 @@ impl ConnCfg {
             host,
         )?;
 
-        let tmp_config = self.to_postgres_client_config();
+        let tmp_config = auth.enrich(self.to_postgres_client_config());
 
         // connect_raw() will not use TLS if sslmode is "disable"
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
@@ -337,7 +321,7 @@ impl ConnCfg {
         info!(
             cold_start_info = ctx.cold_start_info().as_str(),
             "connected to compute node at {host} ({socket_addr}) sslmode={:?}, latency={}, query_id={}",
-            self.conn.ssl_mode,
+            self.ssl_mode,
             ctx.get_proxy_latency(),
             ctx.get_testodrome_id().unwrap_or_default(),
         );
@@ -348,7 +332,7 @@ impl ConnCfg {
             socket_addr,
             CancelToken {
                 socket_config: None,
-                ssl_mode: self.conn.ssl_mode,
+                ssl_mode: self.ssl_mode,
                 process_id,
                 secret_key,
             },

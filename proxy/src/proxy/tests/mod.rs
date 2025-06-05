@@ -497,8 +497,6 @@ impl ConnectMechanism for TestConnectMechanism {
             x => panic!("expecting action {x:?}, connect is called instead"),
         }
     }
-
-    fn update_connect_config(&self, _conf: &mut compute::ConnCfg) {}
 }
 
 impl TestControlPlaneClient for TestConnectMechanism {
@@ -557,7 +555,12 @@ impl TestControlPlaneClient for TestConnectMechanism {
 
 fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {
     let node = NodeInfo {
-        config: compute::ConnCfg::new("test".into(), 5432, SslMode::Disable),
+        conn_info: compute::ConnectInfo {
+            host: "test".into(),
+            port: 5432,
+            ssl_mode: SslMode::Disable,
+            host_addr: None,
+        },
         aux: MetricsAuxInfo {
             endpoint_id: (&EndpointId::from("endpoint")).into(),
             project_id: (&ProjectId::from("project")).into(),

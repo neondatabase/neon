@@ -417,13 +417,6 @@ impl ComputeConnectBackend for Backend<'_, ComputeCredentials> {
             Self::Local(local) => Ok(Cached::new_uncached(local.node_info.clone())),
         }
     }
-
-    fn get_keys(&self) -> &ComputeCredentialKeys {
-        match self {
-            Self::ControlPlane(_, creds) => &creds.keys,
-            Self::Local(_) => &ComputeCredentialKeys::None,
-        }
-    }
 }
 
 #[cfg(test)]

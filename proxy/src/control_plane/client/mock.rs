@@ -15,6 +15,7 @@ use crate::auth::IpPattern;
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::AuthRule;
 use crate::cache::Cached;
+use crate::compute::ConnectInfo;
 use crate::context::RequestContext;
 use crate::control_plane::errors::{
     ControlPlaneError, GetAuthInfoError, GetEndpointJwksError, WakeComputeError,
@@ -25,9 +26,9 @@ use crate::control_plane::{
     RoleAccessControl,
 };
 use crate::intern::RoleNameInt;
+use crate::scram;
 use crate::types::{BranchId, EndpointId, ProjectId, RoleName};
 use crate::url::ApiUrl;
-use crate::{compute, scram};
 
 #[derive(Debug, Error)]
 enum MockApiError {
@@ -171,22 +172,22 @@ impl MockControlPlane {
     async fn do_wake_compute(&self) -> Result<NodeInfo, WakeComputeError> {
         let port = self.endpoint.port().unwrap_or(5432);
         let config = match self.endpoint.host_str() {
-            None => {
-                let mut config = compute::ConnCfg::new("localhost".into(), port, SslMode::Disable);
-                config.conn.host_addr = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
-                config
-            }
-            Some(host) => {
-                let mut config = compute::ConnCfg::new(host.into(), port, SslMode::Disable);
-                if let Ok(addr) = IpAddr::from_str(host) {
-                    config.conn.host_addr = Some(addr);
-                }
-                config
-            }
+            None => ConnectInfo {
+                host_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                host: "localhost".into(),
+                port,
+                ssl_mode: SslMode::Disable,
+            },
+            Some(host) => ConnectInfo {
+                host_addr: IpAddr::from_str(host).ok(),
+                host: host.into(),
+                port,
+                ssl_mode: SslMode::Disable,
+            },
         };
 
         let node = NodeInfo {
-            config,
+            conn_info: config,
             aux: MetricsAuxInfo {
                 endpoint_id: (&EndpointId::from("endpoint")).into(),
                 project_id: (&ProjectId::from("project")).into(),
