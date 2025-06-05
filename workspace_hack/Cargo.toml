@@ -20,6 +20,7 @@ anstream = { version = "0.6" }
 anyhow = { version = "1", features = ["backtrace"] }
 axum = { version = "0.8", features = ["ws"] }
 axum-core = { version = "0.5", default-features = false, features = ["tracing"] }
+axum-extra = { version = "0.10", features = ["cookie-private", "typed-header"] }
 base64-594e8ee84c453af0 = { package = "base64", version = "0.13", features = ["alloc"] }
 base64-647d43efb71741da = { package = "base64", version = "0.21" }
 base64ct = { version = "1", default-features = false, features = ["std"] }
@@ -30,6 +31,7 @@ clap = { version = "4", features = ["derive", "env", "string"] }
 clap_builder = { version = "4", default-features = false, features = ["color", "env", "help", "std", "string", "suggestions", "usage"] }
 const-oid = { version = "0.9", default-features = false, features = ["db", "std"] }
 crypto-bigint = { version = "0.5", features = ["generic-array", "zeroize"] }
+crypto-common = { version = "0.1", default-features = false, features = ["getrandom", "std"] }
 der = { version = "0.7", default-features = false, features = ["derive", "flagset", "oid", "pem", "std"] }
 deranged = { version = "0.3", default-features = false, features = ["powerfmt", "serde", "std"] }
 digest = { version = "0.10", features = ["mac", "oid", "std"] }
