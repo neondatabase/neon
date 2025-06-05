@@ -14,7 +14,10 @@ use std::time::Duration;
 use anyhow::{Context, bail, ensure};
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
-use pageserver_api::config::{DiskUsageEvictionTaskConfig, MaxVectoredReadBytes, PostHogConfig};
+use pageserver_api::config::{
+    DiskUsageEvictionTaskConfig, MaxGetVectoredKeys, MaxVectoredReadBytes,
+    PageServicePipeliningConfig, PageServicePipeliningConfigPipelined, PostHogConfig,
+};
 use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
 use pem::Pem;
@@ -24,7 +27,6 @@ use reqwest::Url;
 use storage_broker::Uri;
 use utils::id::{NodeId, TimelineId};
 use utils::logging::{LogFormat, SecretString};
-use utils::postgres_client::PostgresClientProtocol;
 
 use crate::tenant::storage_layer::inmemory_layer::IndexEntry;
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
@@ -185,6 +187,9 @@ pub struct PageServerConf {
 
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
 
+    /// Maximum number of keys to be read in a single get_vectored call.
+    pub max_get_vectored_keys: MaxGetVectoredKeys,
+
     pub image_compression: ImageCompressionAlgorithm,
 
     /// Whether to offload archived timelines automatically
@@ -204,8 +209,6 @@ pub struct PageServerConf {
 
     /// Optionally disable disk syncs (unsafe!)
     pub no_sync: bool,
-
-    pub wal_receiver_protocol: PostgresClientProtocol,
 
     pub page_service_pipelining: pageserver_api::config::PageServicePipeliningConfig,
 
@@ -404,6 +407,7 @@ impl PageServerConf {
             secondary_download_concurrency,
             ingest_batch_size,
             max_vectored_read_bytes,
+            max_get_vectored_keys,
             image_compression,
             timeline_offloading,
             ephemeral_bytes_per_memory_kb,
@@ -414,7 +418,6 @@ impl PageServerConf {
             virtual_file_io_engine,
             tenant_config,
             no_sync,
-            wal_receiver_protocol,
             page_service_pipelining,
             get_vectored_concurrent_io,
             enable_read_path_debugging,
@@ -470,13 +473,13 @@ impl PageServerConf {
             secondary_download_concurrency,
             ingest_batch_size,
             max_vectored_read_bytes,
+            max_get_vectored_keys,
             image_compression,
             timeline_offloading,
             ephemeral_bytes_per_memory_kb,
             import_pgdata_upcall_api,
             import_pgdata_upcall_api_token: import_pgdata_upcall_api_token.map(SecretString::from),
             import_pgdata_aws_endpoint_url,
-            wal_receiver_protocol,
             page_service_pipelining,
             get_vectored_concurrent_io,
             tracing,
@@ -598,6 +601,19 @@ impl PageServerConf {
                 )
             })?;
 
+        if let PageServicePipeliningConfig::Pipelined(PageServicePipeliningConfigPipelined {
+            max_batch_size,
+            ..
+        }) = conf.page_service_pipelining
+        {
+            if max_batch_size.get() > conf.max_get_vectored_keys.get() {
+                return Err(anyhow::anyhow!(
+                    "`max_batch_size` ({max_batch_size}) must be less than or equal to `max_get_vectored_keys` ({})",
+                    conf.max_get_vectored_keys.get()
+                ));
+            }
+        };
+
         Ok(conf)
     }
 
@@ -685,6 +701,7 @@ impl ConfigurableSemaphore {
 mod tests {
 
     use camino::Utf8PathBuf;
+    use rstest::rstest;
     use utils::id::NodeId;
 
     use super::PageServerConf;
@@ -723,5 +740,29 @@ mod tests {
         let workdir = Utf8PathBuf::from("/nonexistent");
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
             .expect_err("parse_and_validate should fail for endpoint without scheme");
+    }
+
+    #[rstest]
+    #[case(32, 32, true)]
+    #[case(64, 32, false)]
+    #[case(64, 64, true)]
+    #[case(128, 128, true)]
+    fn test_config_max_batch_size_is_valid(
+        #[case] max_batch_size: usize,
+        #[case] max_get_vectored_keys: usize,
+        #[case] is_valid: bool,
+    ) {
+        let input = format!(
+            r#"
+            control_plane_api = "http://localhost:6666"
+            max_get_vectored_keys = {max_get_vectored_keys}
+            page_service_pipelining = {{ mode="pipelined", execution="concurrent-futures", max_batch_size={max_batch_size}, batching="uniform-lsn" }}
+        "#,
+        );
+        let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
+            .expect("config has valid fields");
+        let workdir = Utf8PathBuf::from("/nonexistent");
+        let result = PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir);
+        assert_eq!(result.is_ok(), is_valid);
     }
 }

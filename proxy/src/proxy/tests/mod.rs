@@ -17,7 +17,6 @@ use rustls::pki_types;
 use tokio::io::DuplexStream;
 use tracing_test::traced_test;
 
-use super::connect_compute::ConnectMechanism;
 use super::retry::CouldRetry;
 use super::*;
 use crate::auth::backend::{
@@ -26,10 +25,9 @@ use crate::auth::backend::{
 use crate::config::{ComputeConfig, RetryConfig};
 use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
-use crate::control_plane::{
-    self, CachedAllowedIps, CachedAllowedVpcEndpointIds, CachedNodeInfo, NodeInfo, NodeInfoCache,
-};
+use crate::control_plane::{self, CachedNodeInfo, NodeInfo, NodeInfoCache};
 use crate::error::ErrorKind;
+use crate::pglb::connect_compute::ConnectMechanism;
 use crate::tls::client_config::compute_client_config_with_certs;
 use crate::tls::postgres_rustls::MakeRustlsConnect;
 use crate::tls::server_config::CertResolver;
@@ -128,7 +126,7 @@ trait TestAuth: Sized {
         self,
         stream: &mut PqStream<Stream<S>>,
     ) -> anyhow::Result<()> {
-        stream.write_message_noflush(&Be::AuthenticationOk)?;
+        stream.write_message(BeMessage::AuthenticationOk);
         Ok(())
     }
 }
@@ -157,9 +155,7 @@ impl TestAuth for Scram {
         self,
         stream: &mut PqStream<Stream<S>>,
     ) -> anyhow::Result<()> {
-        let outcome = auth::AuthFlow::new(stream)
-            .begin(auth::Scram(&self.0, &RequestContext::test()))
-            .await?
+        let outcome = auth::AuthFlow::new(stream, auth::Scram(&self.0, &RequestContext::test()))
             .authenticate()
             .await?;
 
@@ -177,7 +173,6 @@ async fn dummy_proxy(
     tls: Option<TlsConfig>,
     auth: impl TestAuth + Send,
 ) -> anyhow::Result<()> {
-    let (client, _) = read_proxy_protocol(client).await?;
     let mut stream = match handshake(&RequestContext::test(), client, tls.as_ref(), false).await? {
         HandshakeData::Startup(stream, _) => stream,
         HandshakeData::Cancel(_) => bail!("cancellation not supported"),
@@ -185,10 +180,12 @@ async fn dummy_proxy(
 
     auth.authenticate(&mut stream).await?;
 
-    stream
-        .write_message_noflush(&Be::CLIENT_ENCODING)?
-        .write_message(&Be::ReadyForQuery)
-        .await?;
+    stream.write_message(BeMessage::ParameterStatus {
+        name: b"client_encoding",
+        value: b"UTF8",
+    });
+    stream.write_message(BeMessage::ReadyForQuery);
+    stream.flush().await?;
 
     Ok(())
 }
@@ -547,20 +544,9 @@ impl TestControlPlaneClient for TestConnectMechanism {
         }
     }
 
-    fn get_allowed_ips(&self) -> Result<CachedAllowedIps, control_plane::errors::GetAuthInfoError> {
-        unimplemented!("not used in tests")
-    }
-
-    fn get_allowed_vpc_endpoint_ids(
+    fn get_access_control(
         &self,
-    ) -> Result<CachedAllowedVpcEndpointIds, control_plane::errors::GetAuthInfoError> {
-        unimplemented!("not used in tests")
-    }
-
-    fn get_block_public_or_vpc_access(
-        &self,
-    ) -> Result<control_plane::CachedAccessBlockerFlags, control_plane::errors::GetAuthInfoError>
-    {
+    ) -> Result<control_plane::EndpointAccessControl, control_plane::errors::GetAuthInfoError> {
         unimplemented!("not used in tests")
     }
 

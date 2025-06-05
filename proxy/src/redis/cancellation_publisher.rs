@@ -1,9 +1,10 @@
 use core::net::IpAddr;
 use std::sync::Arc;
 
-use pq_proto::CancelKeyData;
 use tokio::sync::Mutex;
 use uuid::Uuid;
+
+use crate::pqproto::CancelKeyData;
 
 pub trait CancellationPublisherMut: Send + Sync + 'static {
     #[allow(async_fn_in_trait)]

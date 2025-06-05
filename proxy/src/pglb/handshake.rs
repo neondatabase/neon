@@ -1,8 +1,4 @@
-use bytes::Buf;
-use pq_proto::framed::Framed;
-use pq_proto::{
-    BeMessage as Be, CancelKeyData, FeStartupPacket, ProtocolVersion, StartupMessageParams,
-};
+use futures::{FutureExt, TryFutureExt};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, warn};
@@ -12,7 +8,10 @@ use crate::config::TlsConfig;
 use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::Metrics;
-use crate::proxy::ERR_INSECURE_CONNECTION;
+use crate::pqproto::{
+    BeMessage, CancelKeyData, FeStartupPacket, ProtocolVersion, StartupMessageParams,
+};
+use crate::proxy::TlsRequired;
 use crate::stream::{PqStream, Stream, StreamUpgradeError};
 use crate::tls::PG_ALPN_PROTOCOL;
 
@@ -59,7 +58,7 @@ pub(crate) enum HandshakeData<S> {
 /// It's easier to work with owned `stream` here as we need to upgrade it to TLS;
 /// we also take an extra care of propagating only the select handshake errors to client.
 #[tracing::instrument(skip_all)]
-pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
+pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin + Send>(
     ctx: &RequestContext,
     stream: S,
     mut tls: Option<&TlsConfig>,
@@ -71,33 +70,25 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     const PG_PROTOCOL_EARLIEST: ProtocolVersion = ProtocolVersion::new(3, 0);
     const PG_PROTOCOL_LATEST: ProtocolVersion = ProtocolVersion::new(3, 0);
 
-    let mut stream = PqStream::new(Stream::from_raw(stream));
+    let (mut stream, mut msg) = PqStream::parse_startup(Stream::from_raw(stream)).await?;
     loop {
-        let msg = stream.read_startup_packet().await?;
         match msg {
             FeStartupPacket::SslRequest { direct } => match stream.get_ref() {
                 Stream::Raw { .. } if !tried_ssl => {
                     tried_ssl = true;
 
-                    // We can't perform TLS handshake without a config
-                    let have_tls = tls.is_some();
-                    if !direct {
-                        stream
-                            .write_message(&Be::EncryptionResponse(have_tls))
-                            .await?;
-                    } else if !have_tls {
-                        return Err(HandshakeError::ProtocolViolation);
-                    }
-
                     if let Some(tls) = tls.take() {
                         // Upgrade raw stream into a secure TLS-backed stream.
                         // NOTE: We've consumed `tls`; this fact will be used later.
 
-                        let Framed {
-                            stream: raw,
-                            read_buf,
-                            write_buf,
-                        } = stream.framed;
+                        let mut read_buf;
+                        let raw = if let Some(direct) = &direct {
+                            read_buf = &direct[..];
+                            stream.accept_direct_tls()
+                        } else {
+                            read_buf = &[];
+                            stream.accept_tls().await?
+                        };
 
                         let Stream::Raw { raw } = raw else {
                             return Err(HandshakeError::StreamUpgradeError(
@@ -105,12 +96,11 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                             ));
                         };
 
-                        let mut read_buf = read_buf.reader();
                         let mut res = Ok(());
                         let accept = tokio_rustls::TlsAcceptor::from(tls.pg_config.clone())
                             .accept_with(raw, |session| {
                                 // push the early data to the tls session
-                                while !read_buf.get_ref().is_empty() {
+                                while !read_buf.is_empty() {
                                     match session.read_tls(&mut read_buf) {
                                         Ok(_) => {}
                                         Err(e) => {
@@ -119,11 +109,12 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                                         }
                                     }
                                 }
-                            });
+                            })
+                            .map_ok(Box::new)
+                            .boxed();
 
                         res?;
 
-                        let read_buf = read_buf.into_inner();
                         if !read_buf.is_empty() {
                             return Err(HandshakeError::EarlyData);
                         }
@@ -157,16 +148,17 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                         let (_, tls_server_end_point) =
                             tls.cert_resolver.resolve(conn_info.server_name());
 
-                        stream = PqStream {
-                            framed: Framed {
-                                stream: Stream::Tls {
-                                    tls: Box::new(tls_stream),
-                                    tls_server_end_point,
-                                },
-                                read_buf,
-                                write_buf,
-                            },
+                        let tls = Stream::Tls {
+                            tls: tls_stream,
+                            tls_server_end_point,
                         };
+                        (stream, msg) = PqStream::parse_startup(tls).await?;
+                    } else {
+                        if direct.is_some() {
+                            // client sent us a ClientHello already, we can't do anything with it.
+                            return Err(HandshakeError::ProtocolViolation);
+                        }
+                        msg = stream.reject_encryption().await?;
                     }
                 }
                 _ => return Err(HandshakeError::ProtocolViolation),
@@ -176,7 +168,7 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                     tried_gss = true;
 
                     // Currently, we don't support GSSAPI
-                    stream.write_message(&Be::EncryptionResponse(false)).await?;
+                    msg = stream.reject_encryption().await?;
                 }
                 _ => return Err(HandshakeError::ProtocolViolation),
             },
@@ -186,13 +178,7 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 // Check that the config has been consumed during upgrade
                 // OR we didn't provide it at all (for dev purposes).
                 if tls.is_some() {
-                    return stream
-                        .throw_error_str(
-                            ERR_INSECURE_CONNECTION,
-                            crate::error::ErrorKind::User,
-                            None,
-                        )
-                        .await?;
+                    Err(stream.throw_error(TlsRequired, None).await)?;
                 }
 
                 // This log highlights the start of the connection.
@@ -214,20 +200,21 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 // no protocol extensions are supported.
                 // <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/backend/tcop/backend_startup.c#L744-L753>
                 let mut unsupported = vec![];
-                for (k, _) in params.iter() {
+                let mut supported = StartupMessageParams::default();
+
+                for (k, v) in params.iter() {
                     if k.starts_with("_pq_.") {
                         unsupported.push(k);
+                    } else {
+                        supported.insert(k, v);
                     }
                 }
 
-                // TODO: remove unsupported options so we don't send them to compute.
-
-                stream
-                    .write_message(&Be::NegotiateProtocolVersion {
-                        version: PG_PROTOCOL_LATEST,
-                        options: &unsupported,
-                    })
-                    .await?;
+                stream.write_message(BeMessage::NegotiateProtocolVersion {
+                    version: PG_PROTOCOL_LATEST,
+                    options: &unsupported,
+                });
+                stream.flush().await?;
 
                 info!(
                     ?version,
@@ -235,7 +222,7 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                     session_type = "normal",
                     "successful handshake; unsupported minor version requested"
                 );
-                break Ok(HandshakeData::Startup(stream, params));
+                break Ok(HandshakeData::Startup(stream, supported));
             }
             FeStartupPacket::StartupMessage { version, params } => {
                 warn!(

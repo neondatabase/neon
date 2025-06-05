@@ -1,6 +1,5 @@
 use tracing::{error, info};
 
-use super::connect_compute::ComputeConnectBackend;
 use crate::config::RetryConfig;
 use crate::context::RequestContext;
 use crate::control_plane::CachedNodeInfo;
@@ -9,6 +8,7 @@ use crate::error::ReportableError;
 use crate::metrics::{
     ConnectOutcome, ConnectionFailuresBreakdownGroup, Metrics, RetriesMetricGroup, RetryType,
 };
+use crate::pglb::connect_compute::ComputeConnectBackend;
 use crate::proxy::retry::{retry_after, should_retry};
 
 // Use macro to retain original callsite.
