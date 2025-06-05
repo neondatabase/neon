@@ -20,7 +20,6 @@ use postgres_backend::AuthType;
 use remote_storage::RemoteStorageConfig;
 use serde_with::serde_as;
 use utils::logging::LogFormat;
-use utils::postgres_client::PostgresClientProtocol;
 
 use crate::models::{ImageCompressionAlgorithm, LsnLease};
 
@@ -189,7 +188,6 @@ pub struct ConfigToml {
     pub virtual_file_io_mode: Option<crate::models::virtual_file::IoMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_sync: Option<bool>,
-    pub wal_receiver_protocol: PostgresClientProtocol,
     pub page_service_pipelining: PageServicePipeliningConfig,
     pub get_vectored_concurrent_io: GetVectoredConcurrentIo,
     pub enable_read_path_debugging: Option<bool>,
@@ -527,8 +525,6 @@ pub struct TenantConfigToml {
     /// (either this flag or the pageserver-global one need to be set)
     pub timeline_offloading: bool,
 
-    pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
-
     /// Enable rel_size_v2 for this tenant. Once enabled, the tenant will persist this information into
     /// `index_part.json`, and it cannot be reversed.
     pub rel_size_v2_enabled: bool,
@@ -608,12 +604,6 @@ pub mod defaults {
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
 
     pub const DEFAULT_IO_BUFFER_ALIGNMENT: usize = 512;
-
-    pub const DEFAULT_WAL_RECEIVER_PROTOCOL: utils::postgres_client::PostgresClientProtocol =
-        utils::postgres_client::PostgresClientProtocol::Interpreted {
-            format: utils::postgres_client::InterpretedFormat::Protobuf,
-            compression: Some(utils::postgres_client::Compression::Zstd { level: 1 }),
-        };
 
     pub const DEFAULT_SSL_KEY_FILE: &str = "server.key";
     pub const DEFAULT_SSL_CERT_FILE: &str = "server.crt";
@@ -713,7 +703,6 @@ impl Default for ConfigToml {
             virtual_file_io_mode: None,
             tenant_config: TenantConfigToml::default(),
             no_sync: None,
-            wal_receiver_protocol: DEFAULT_WAL_RECEIVER_PROTOCOL,
             page_service_pipelining: PageServicePipeliningConfig::Pipelined(
                 PageServicePipeliningConfigPipelined {
                     max_batch_size: NonZeroUsize::new(32).unwrap(),
@@ -858,7 +847,6 @@ impl Default for TenantConfigToml {
             lsn_lease_length: LsnLease::DEFAULT_LENGTH,
             lsn_lease_length_for_ts: LsnLease::DEFAULT_LENGTH_FOR_TS,
             timeline_offloading: true,
-            wal_receiver_protocol_override: None,
             rel_size_v2_enabled: false,
             gc_compaction_enabled: DEFAULT_GC_COMPACTION_ENABLED,
             gc_compaction_verification: DEFAULT_GC_COMPACTION_VERIFICATION,

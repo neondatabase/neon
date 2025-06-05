@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use tokio::time;
 use tracing::{debug, info, warn};
 
-use super::retry::ShouldRetryWakeCompute;
 use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
 use crate::compute::{self, COULD_NOT_CONNECT, PostgresConnection};
 use crate::config::{ComputeConfig, RetryConfig};
@@ -15,7 +14,7 @@ use crate::metrics::{
     ConnectOutcome, ConnectionFailureKind, Metrics, RetriesMetricGroup, RetryType,
 };
 use crate::pqproto::StartupMessageParams;
-use crate::proxy::retry::{CouldRetry, retry_after, should_retry};
+use crate::proxy::retry::{CouldRetry, ShouldRetryWakeCompute, retry_after, should_retry};
 use crate::proxy::wake_compute::wake_compute;
 use crate::types::Host;
 
