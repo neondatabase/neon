@@ -10,7 +10,7 @@ pub(in crate::http) async fn prewarm_state(compute: Compute) -> Json<LfcPrewarmS
 }
 
 // Following functions are marked async for axum, as it's more convenient than wrapping these
-// in async lambdas at call site
+// in asyncr is:closed  lambdas at call site
 
 pub(in crate::http) async fn offload_state(compute: Compute) -> Json<LfcOffloadState> {
     Json(compute.lfc_offload_state())
