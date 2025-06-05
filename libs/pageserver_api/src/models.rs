@@ -422,6 +422,21 @@ pub enum TimelineCreateRequestMode {
     },
 }
 
+impl TimelineCreateRequestMode {
+    pub fn read_only(&self) -> bool {
+        matches!(
+            self,
+            TimelineCreateRequestMode::Branch {
+                read_only: true,
+                ..
+            } | TimelineCreateRequestMode::Bootstrap {
+                read_only: true,
+                ..
+            }
+        )
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TimelineCreateRequestModeImportPgdata {
     pub location: ImportPgdataLocation,

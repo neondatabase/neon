@@ -3810,10 +3810,12 @@ impl Service {
     ) -> Result<TimelineCreateResponseStorcon, ApiError> {
         let safekeepers = self.config.timelines_onto_safekeepers;
         let timeline_id = create_req.new_timeline_id;
+        let read_only = create_req.mode.read_only();
 
         tracing::info!(
             mode=%create_req.mode_tag(),
             %safekeepers,
+            read_only,
             "Creating timeline {}/{}",
             tenant_id,
             timeline_id,
@@ -3827,19 +3829,6 @@ impl Service {
         .await;
         failpoint_support::sleep_millis_async!("tenant-create-timeline-shared-lock");
         let is_import = create_req.is_import();
-        let read_only = matches!(
-            create_req.mode,
-            models::TimelineCreateRequestMode::Branch {
-                read_only: true,
-                ..
-            } | models::TimelineCreateRequestMode::Bootstrap {
-                read_only: true,
-                ..
-            }
-        );
-        if read_only {
-            tracing::info!("creating timeline as read-only");
-        }
 
         if is_import {
             // Ensure that there is no split on-going.
