@@ -907,7 +907,7 @@ async fn handle_node_delete(req: Request<Body>) -> Result<Response<Body>, ApiErr
     json_response(StatusCode::OK, state.service.node_delete(node_id).await?)
 }
 
-async fn handle_soft_deleted_node_list(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn handle_tombstone_list(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
     let req = match maybe_forward(req).await {
@@ -918,14 +918,14 @@ async fn handle_soft_deleted_node_list(req: Request<Body>) -> Result<Response<Bo
     };
 
     let state = get_state(&req);
-    let mut nodes = state.service.soft_deleted_node_list().await?;
+    let mut nodes = state.service.tombstone_list().await?;
     nodes.sort_by_key(|n| n.get_id());
     let api_nodes = nodes.into_iter().map(|n| n.describe()).collect::<Vec<_>>();
 
     json_response(StatusCode::OK, api_nodes)
 }
 
-async fn handle_node_hard_delete(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn handle_tombstone_delete(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
     let req = match maybe_forward(req).await {
@@ -939,7 +939,7 @@ async fn handle_node_hard_delete(req: Request<Body>) -> Result<Response<Body>, A
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
     json_response(
         StatusCode::OK,
-        state.service.node_hard_delete(node_id).await?,
+        state.service.tombstone_delete(node_id).await?,
     )
 }
 
@@ -2101,14 +2101,14 @@ pub fn make_router(
         .delete("/debug/v1/tombstone/:node_id", |r| {
             named_request_span(
                 r,
-                handle_node_hard_delete,
+                handle_tombstone_delete,
                 RequestName("debug_v1_tombstone_delete"),
             )
         })
         .get("/debug/v1/tombstone", |r| {
             named_request_span(
                 r,
-                handle_soft_deleted_node_list,
+                handle_tombstone_list,
                 RequestName("debug_v1_tombstone_list"),
             )
         })

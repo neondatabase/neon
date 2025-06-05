@@ -100,9 +100,9 @@ pub(crate) enum DatabaseError {
 pub(crate) enum DatabaseOperation {
     InsertNode,
     UpdateNode,
-    HardDeleteNode,
+    DeleteNode,
     ListNodes,
-    ListSoftDeletedNodes,
+    ListTombstones,
     BeginShardSplit,
     CompleteShardSplit,
     AbortShardSplit,
@@ -359,7 +359,7 @@ impl Persistence {
 
     /// When a node is first registered, persist it before using it for anything
     /// If the provided node_id already exists, it will be error.
-    /// The common case is when a node marked for deletion wants to reattach
+    /// The common case is when a node marked for deletion wants to register.
     pub(crate) async fn insert_node(&self, node: &Node) -> DatabaseResult<()> {
         let np = &node.to_persistent();
         self.with_measured_conn(DatabaseOperation::InsertNode, move |conn| {
@@ -394,11 +394,11 @@ impl Persistence {
         Ok(result)
     }
 
-    pub(crate) async fn list_soft_deleted_nodes(&self) -> DatabaseResult<Vec<NodePersistence>> {
+    pub(crate) async fn list_tombstones(&self) -> DatabaseResult<Vec<NodePersistence>> {
         use crate::schema::nodes::dsl::*;
 
         let result: Vec<NodePersistence> = self
-            .with_measured_conn(DatabaseOperation::ListSoftDeletedNodes, move |conn| {
+            .with_measured_conn(DatabaseOperation::ListTombstones, move |conn| {
                 Box::pin(async move {
                     Ok(crate::schema::nodes::table
                         .filter(lifecycle.eq(String::from(NodeLifecycle::Deleted)))
@@ -408,7 +408,7 @@ impl Persistence {
             })
             .await?;
 
-        tracing::info!("list_soft_deleted_nodes: loaded {} nodes", result.len());
+        tracing::info!("list_tombstones: loaded {} nodes", result.len());
 
         Ok(result)
     }
@@ -473,7 +473,10 @@ impl Persistence {
         .await
     }
 
-    pub(crate) async fn soft_delete_node(&self, del_node_id: NodeId) -> DatabaseResult<()> {
+    /// Tombstone is a special state where the node is not deleted from the database,
+    /// but it is not available for usage.
+    /// The main reason for it is to prevent the flaky node to register.
+    pub(crate) async fn set_tombstone(&self, del_node_id: NodeId) -> DatabaseResult<()> {
         use crate::schema::nodes::dsl::*;
         self.update_node(
             del_node_id,
@@ -482,12 +485,12 @@ impl Persistence {
         .await
     }
 
-    pub(crate) async fn hard_delete_node(&self, del_node_id: NodeId) -> DatabaseResult<()> {
+    pub(crate) async fn delete_node(&self, del_node_id: NodeId) -> DatabaseResult<()> {
         use crate::schema::nodes::dsl::*;
-        self.with_measured_conn(DatabaseOperation::HardDeleteNode, move |conn| {
+        self.with_measured_conn(DatabaseOperation::DeleteNode, move |conn| {
             Box::pin(async move {
-                // You can hard delete a node if it was soft deleted before.
-                // We need to check if the node has lifecycle set to deleted.
+                // You can hard delete a node only if it has a tombstone.
+                // So we need to check if the node has lifecycle set to deleted.
                 let node_to_delete = nodes
                     .filter(node_id.eq(del_node_id.0 as i64))
                     .first::<NodePersistence>(conn)
@@ -513,14 +516,9 @@ impl Persistence {
                         .filter(node_id.eq(del_node_id.0 as i64))
                         .execute(conn)
                         .await?;
-
-                    Ok(())
-                } else {
-                    Err(DatabaseError::Logical(format!(
-                        "Node {} not found",
-                        del_node_id
-                    )))
                 }
+
+                Ok(())
             })
         })
         .await

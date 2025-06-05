@@ -3093,6 +3093,58 @@ def test_storage_controller_ps_restarted_during_drain(neon_env_builder: NeonEnvB
     wait_until(reconfigure_node_again)
 
 
+def test_ps_unavailable_after_delete(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_pageservers = 3
+
+    env = neon_env_builder.init_start()
+
+    def assert_nodes_count(n: int):
+        nodes = env.storage_controller.node_list()
+        assert len(nodes) == n
+
+    # Nodes count must remain the same before deletion
+    assert_nodes_count(3)
+
+    ps = env.pageservers[0]
+    env.storage_controller.node_delete(ps.id)
+
+    # After deletion, the node count must be reduced
+    assert_nodes_count(2)
+
+    # Running pageserver CLI init in a separate thread
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        log.info("Restarting tombstoned pageserver...")
+        ps.stop()
+        ps_start_fut = executor.submit(lambda: ps.start(await_active=False))
+
+        # After deleted pageserver restart, the node count must remain the same
+        assert_nodes_count(2)
+
+        tombstones = env.storage_controller.tombstone_list()
+        assert len(tombstones) == 1 and tombstones[0]["id"] == ps.id
+
+        env.storage_controller.tombstone_delete(ps.id)
+
+        tombstones = env.storage_controller.tombstone_list()
+        assert len(tombstones) == 0
+
+        # Wait for the pageserver start operation to complete.
+        # If it fails with an exception, we try restarting the pageserver since the failure
+        # may be due to the storage controller refusing to register the node.
+        # However, if we get a TimeoutError that means the pageserver is completely hung,
+        # which is an unexpected failure mode that we'll let propagate up.
+        try:
+            ps_start_fut.result(timeout=20)
+        except TimeoutError:
+            raise
+        except Exception:
+            log.info("Restarting deleted pageserver...")
+            ps.restart()
+
+        # Finally, the node can be registered again after tombstone is deleted
+        wait_until(lambda: assert_nodes_count(3))
+
+
 def test_storage_controller_timeline_crud_race(neon_env_builder: NeonEnvBuilder):
     """
     The storage controller is meant to handle the case where a timeline CRUD operation races

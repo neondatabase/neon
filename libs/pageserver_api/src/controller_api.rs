@@ -367,7 +367,7 @@ impl From<NodeLifecycle> for String {
         use NodeLifecycle::*;
         match value {
             Active => "active",
-            Deleted => "filling",
+            Deleted => "deleted",
         }
         .to_string()
     }
