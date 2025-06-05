@@ -30,6 +30,7 @@ def test_safekeeper_delete_timeline(neon_env_builder: NeonEnvBuilder, auth_enabl
     env.pageserver.allowed_errors.extend(
         [
             ".*Timeline .* was not found in global map.*",
+            ".*Timeline .* has been deleted.*",
             ".*Timeline .* was cancelled and cannot be used anymore.*",
         ]
     )

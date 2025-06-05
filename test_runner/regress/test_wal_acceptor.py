@@ -433,6 +433,7 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder):
     env.pageserver.allowed_errors.extend(
         [
             ".*Timeline .* was not found in global map.*",
+            ".*Timeline .* has been deleted.*",
             ".*Timeline .* was cancelled and cannot be used anymore.*",
         ]
     )
@@ -1934,6 +1935,7 @@ def test_membership_api(neon_env_builder: NeonEnvBuilder):
     env.pageserver.allowed_errors.extend(
         [
             ".*Timeline .* was not found in global map.*",
+            ".*Timeline .* has been deleted.*",
             ".*Timeline .* was cancelled and cannot be used anymore.*",
         ]
     )
