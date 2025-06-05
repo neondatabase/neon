@@ -7,7 +7,7 @@ use http::StatusCode;
 use tokio::task;
 use tracing::info;
 
-use crate::compute::ComputeNode;
+use crate::compute::{ComputeNode, forward_termination_signal};
 use crate::http::JsonResponse;
 
 /// Terminate the compute.
@@ -26,7 +26,7 @@ pub(in crate::http) async fn terminate(State(compute): State<Arc<ComputeNode>>) 
         drop(state);
     }
 
-    compute.forward_termination_signal();
+    forward_termination_signal();
     info!("sent signal and notified waiters");
 
     // Spawn a blocking thread to wait for compute to become Terminated.
