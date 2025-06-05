@@ -391,6 +391,7 @@ typedef struct WalproposerShmemState
 	/* last feedback from each shard */
 	PageserverFeedback shard_ps_feedback[MAX_SHARDS];
 	int			num_shards;
+	bool		replica_promote;
 
 	/* aggregated feedback with min LSNs across shards */
 	PageserverFeedback min_ps_feedback;
@@ -805,6 +806,9 @@ typedef struct WalProposer
 	int			n_safekeepers;
 	/* Safekeepers walproposer is connecting to. */
 	Safekeeper	safekeeper[MAX_SAFEKEEPERS];
+
+	/* Current local TimeLineId in use */
+	TimeLineID	localTimeLineID;
 
 	/* WAL has been generated up to this point */
 	XLogRecPtr	availableLsn;

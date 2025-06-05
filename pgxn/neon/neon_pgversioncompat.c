@@ -5,6 +5,7 @@
 
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "access/xlog.h"
 #include "utils/tuplestore.h"
 
 #include "neon_pgversioncompat.h"
@@ -41,5 +42,12 @@ InitMaterializedSRF(FunctionCallInfo fcinfo, bits32 flags)
 	rsinfo->setDesc = stored_tupdesc;
 	MemoryContextSwitchTo(old_context);
 }
+
+TimeLineID GetWALInsertionTimeLine(void)
+{
+	return ThisTimeLineID + 1;
+}
+
+
 #endif
 
