@@ -70,7 +70,7 @@ pub(super) async fn init(
     tenant_id: String,
     timeline_id: String,
     auth_token: Option<String>,
-    shard_map: HashMap<utils::shard::ShardIndex, String>,
+    mut shard_map: HashMap<utils::shard::ShardIndex, String>,
     initial_file_cache_size: u64,
     file_cache_path: Option<PathBuf>,
 ) -> CommunicatorWorkerProcessStruct<'static> {
@@ -85,6 +85,12 @@ pub(super) async fn init(
                 .expect("could not create cache file"),
         )
     };
+
+    // TODO: for now, just hack in the gRPC port number. This needs to be plumbed through.
+    for connstr in shard_map.values_mut() {
+        *connstr = connstr.replace(":64000", ":51051");
+    }
+    tracing::warn!("mangled connstrings to use gRPC port 51051 shard_map={shard_map:?}");
 
     // Initialize subsystems
     let cache = cis
