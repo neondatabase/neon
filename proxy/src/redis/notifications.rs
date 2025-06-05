@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use crate::cache::project_info::ProjectInfoCache;
-use crate::intern::{AccountIdInt, ProjectIdInt, RoleNameInt};
+use crate::intern::{AccountIdInt, EndpointIdInt, ProjectIdInt, RoleNameInt};
 use crate::metrics::{Metrics, RedisErrors, RedisEventsCount};
 
 const CPLANE_CHANNEL_NAME: &str = "neondb-proxy-ws-updates";
@@ -31,38 +31,39 @@ struct NotificationHeader<'a> {
 #[serde(tag = "topic", content = "data")]
 pub(crate) enum Notification {
     #[serde(
-        rename = "/allowed_ips_updated",
+        rename = "/account_settings_update",
+        alias = "/allowed_vpc_endpoints_updated_for_org",
         deserialize_with = "deserialize_json_string"
     )]
-    AllowedIpsUpdate {
-        allowed_ips_update: AllowedIpsUpdate,
-    },
+    AccountSettingsUpdate(InvalidateOrg),
+
     #[serde(
-        rename = "/block_public_or_vpc_access_updated",
+        rename = "/endpoint_settings_update",
         deserialize_with = "deserialize_json_string"
     )]
-    BlockPublicOrVpcAccessUpdated {
-        block_public_or_vpc_access_updated: BlockPublicOrVpcAccessUpdated,
-    },
+    EndpointSettingsUpdate(InvalidateEndpoint),
+
     #[serde(
-        rename = "/allowed_vpc_endpoints_updated_for_org",
+        rename = "/projects_settings_update",
+        alias = "/allowed_vpc_endpoints_updated_for_projects",
         deserialize_with = "deserialize_json_string"
     )]
-    AllowedVpcEndpointsUpdatedForOrg {
-        allowed_vpc_endpoints_updated_for_org: AllowedVpcEndpointsUpdatedForOrg,
-    },
+    ProjectsSettingsUpdate(InvalidateProjects),
+
     #[serde(
-        rename = "/allowed_vpc_endpoints_updated_for_projects",
+        rename = "/project_settings_update",
+        alias = "/allowed_ips_updated",
+        alias = "/block_public_or_vpc_access_updated",
         deserialize_with = "deserialize_json_string"
     )]
-    AllowedVpcEndpointsUpdatedForProjects {
-        allowed_vpc_endpoints_updated_for_projects: AllowedVpcEndpointsUpdatedForProjects,
-    },
+    ProjectSettingsUpdate(InvalidateProject),
+
     #[serde(
-        rename = "/password_updated",
+        rename = "/role_setting_update",
+        alias = "/password_updated",
         deserialize_with = "deserialize_json_string"
     )]
-    PasswordUpdate { password_update: PasswordUpdate },
+    RoleSettingUpdate(InvalidateRole),
 
     #[serde(
         other,
@@ -73,27 +74,27 @@ pub(crate) enum Notification {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub(crate) struct AllowedIpsUpdate {
+pub(crate) struct InvalidateEndpoint {
+    endpoint_id: EndpointIdInt,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub(crate) struct InvalidateProject {
     project_id: ProjectIdInt,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub(crate) struct BlockPublicOrVpcAccessUpdated {
-    project_id: ProjectIdInt,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub(crate) struct AllowedVpcEndpointsUpdatedForOrg {
-    account_id: AccountIdInt,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub(crate) struct AllowedVpcEndpointsUpdatedForProjects {
+pub(crate) struct InvalidateProjects {
     project_ids: Vec<ProjectIdInt>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub(crate) struct PasswordUpdate {
+pub(crate) struct InvalidateOrg {
+    account_id: AccountIdInt,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub(crate) struct InvalidateRole {
     project_id: ProjectIdInt,
     role_name: RoleNameInt,
 }
@@ -177,41 +178,33 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
 
         tracing::debug!(?msg, "received a message");
         match msg {
-            Notification::AllowedIpsUpdate { .. }
-            | Notification::PasswordUpdate { .. }
-            | Notification::BlockPublicOrVpcAccessUpdated { .. }
-            | Notification::AllowedVpcEndpointsUpdatedForOrg { .. }
-            | Notification::AllowedVpcEndpointsUpdatedForProjects { .. } => {
+            Notification::RoleSettingUpdate { .. }
+            | Notification::EndpointSettingsUpdate { .. }
+            | Notification::ProjectSettingsUpdate { .. }
+            | Notification::ProjectsSettingsUpdate { .. }
+            | Notification::AccountSettingsUpdate { .. } => {
                 invalidate_cache(self.cache.clone(), msg.clone());
-                if matches!(msg, Notification::AllowedIpsUpdate { .. }) {
-                    Metrics::get()
-                        .proxy
-                        .redis_events_count
-                        .inc(RedisEventsCount::AllowedIpsUpdate);
-                } else if matches!(msg, Notification::PasswordUpdate { .. }) {
-                    Metrics::get()
-                        .proxy
-                        .redis_events_count
-                        .inc(RedisEventsCount::PasswordUpdate);
-                } else if matches!(
-                    msg,
-                    Notification::AllowedVpcEndpointsUpdatedForProjects { .. }
-                ) {
-                    Metrics::get()
-                        .proxy
-                        .redis_events_count
-                        .inc(RedisEventsCount::AllowedVpcEndpointIdsUpdateForProjects);
-                } else if matches!(msg, Notification::AllowedVpcEndpointsUpdatedForOrg { .. }) {
-                    Metrics::get()
-                        .proxy
-                        .redis_events_count
-                        .inc(RedisEventsCount::AllowedVpcEndpointIdsUpdateForAllProjectsInOrg);
-                } else if matches!(msg, Notification::BlockPublicOrVpcAccessUpdated { .. }) {
-                    Metrics::get()
-                        .proxy
-                        .redis_events_count
-                        .inc(RedisEventsCount::BlockPublicOrVpcAccessUpdate);
+
+                let m = &Metrics::get().proxy.redis_events_count;
+                match msg {
+                    Notification::RoleSettingUpdate { .. } => {
+                        m.inc(RedisEventsCount::InvalidateRole);
+                    }
+                    Notification::EndpointSettingsUpdate { .. } => {
+                        m.inc(RedisEventsCount::InvalidateEndpoint);
+                    }
+                    Notification::ProjectsSettingsUpdate { .. } => {
+                        m.inc(RedisEventsCount::InvalidateProjects);
+                    }
+                    Notification::ProjectSettingsUpdate { .. } => {
+                        m.inc(RedisEventsCount::InvalidateProject);
+                    }
+                    Notification::AccountSettingsUpdate { .. } => {
+                        m.inc(RedisEventsCount::InvalidateOrg);
+                    }
+                    Notification::UnknownTopic => {}
                 }
+
                 // TODO: add additional metrics for the other event types.
 
                 // It might happen that the invalid entry is on the way to be cached.
@@ -233,30 +226,31 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
 
 fn invalidate_cache<C: ProjectInfoCache>(cache: Arc<C>, msg: Notification) {
     match msg {
-        Notification::AllowedIpsUpdate {
-            allowed_ips_update: AllowedIpsUpdate { project_id },
+        Notification::EndpointSettingsUpdate(InvalidateEndpoint { endpoint_id }) => {
+            cache.invalidate_endpoint_access(endpoint_id);
         }
-        | Notification::BlockPublicOrVpcAccessUpdated {
-            block_public_or_vpc_access_updated: BlockPublicOrVpcAccessUpdated { project_id },
-        } => cache.invalidate_endpoint_access_for_project(project_id),
-        Notification::AllowedVpcEndpointsUpdatedForOrg {
-            allowed_vpc_endpoints_updated_for_org: AllowedVpcEndpointsUpdatedForOrg { account_id },
-        } => cache.invalidate_endpoint_access_for_org(account_id),
-        Notification::AllowedVpcEndpointsUpdatedForProjects {
-            allowed_vpc_endpoints_updated_for_projects:
-                AllowedVpcEndpointsUpdatedForProjects { project_ids },
-        } => {
+
+        Notification::AccountSettingsUpdate(InvalidateOrg { account_id }) => {
+            cache.invalidate_endpoint_access_for_org(account_id);
+        }
+
+        Notification::ProjectsSettingsUpdate(InvalidateProjects { project_ids }) => {
             for project in project_ids {
                 cache.invalidate_endpoint_access_for_project(project);
             }
         }
-        Notification::PasswordUpdate {
-            password_update:
-                PasswordUpdate {
-                    project_id,
-                    role_name,
-                },
-        } => cache.invalidate_role_secret_for_project(project_id, role_name),
+
+        Notification::ProjectSettingsUpdate(InvalidateProject { project_id }) => {
+            cache.invalidate_endpoint_access_for_project(project_id);
+        }
+
+        Notification::RoleSettingUpdate(InvalidateRole {
+            project_id,
+            role_name,
+        }) => {
+            cache.invalidate_role_secret_for_project(project_id, role_name);
+        }
+
         Notification::UnknownTopic => unreachable!(),
     }
 }
@@ -353,11 +347,9 @@ mod tests {
         let result: Notification = serde_json::from_str(&text)?;
         assert_eq!(
             result,
-            Notification::AllowedIpsUpdate {
-                allowed_ips_update: AllowedIpsUpdate {
-                    project_id: (&project_id).into()
-                }
-            }
+            Notification::ProjectSettingsUpdate(InvalidateProject {
+                project_id: (&project_id).into()
+            })
         );
 
         Ok(())
@@ -379,12 +371,10 @@ mod tests {
         let result: Notification = serde_json::from_str(&text)?;
         assert_eq!(
             result,
-            Notification::PasswordUpdate {
-                password_update: PasswordUpdate {
-                    project_id: (&project_id).into(),
-                    role_name: (&role_name).into(),
-                }
-            }
+            Notification::RoleSettingUpdate(InvalidateRole {
+                project_id: (&project_id).into(),
+                role_name: (&role_name).into(),
+            })
         );
 
         Ok(())
