@@ -181,6 +181,7 @@ pub struct ConfigToml {
     pub virtual_file_io_engine: Option<crate::models::virtual_file::IoEngineKind>,
     pub ingest_batch_size: u64,
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
+    pub max_get_vectored_keys: MaxGetVectoredKeys,
     pub image_compression: ImageCompressionAlgorithm,
     pub timeline_offloading: bool,
     pub ephemeral_bytes_per_memory_kb: usize,
@@ -229,7 +230,7 @@ pub enum PageServicePipeliningConfig {
 }
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PageServicePipeliningConfigPipelined {
-    /// Causes runtime errors if larger than max get_vectored batch size.
+    /// Failed config parsing and validation if larger than `max_get_vectored_keys`.
     pub max_batch_size: NonZeroUsize,
     pub execution: PageServiceProtocolPipelinedExecutionStrategy,
     // The default below is such that new versions of the software can start
@@ -329,6 +330,8 @@ pub struct TimelineImportConfig {
     pub import_job_concurrency: NonZeroUsize,
     pub import_job_soft_size_limit: NonZeroUsize,
     pub import_job_checkpoint_threshold: NonZeroUsize,
+    /// Max size of the remote storage partial read done by any job
+    pub import_job_max_byte_range_size: NonZeroUsize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -402,6 +405,16 @@ impl Default for EvictionOrder {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct MaxVectoredReadBytes(pub NonZeroUsize);
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct MaxGetVectoredKeys(NonZeroUsize);
+
+impl MaxGetVectoredKeys {
+    pub fn get(&self) -> usize {
+        self.0.get()
+    }
+}
 
 /// Tenant-level configuration values, used for various purposes.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -587,6 +600,8 @@ pub mod defaults {
     /// That is, slightly above 128 kB.
     pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 130 * 1024; // 130 KiB
 
+    pub const DEFAULT_MAX_GET_VECTORED_KEYS: usize = 32;
+
     pub const DEFAULT_IMAGE_COMPRESSION: ImageCompressionAlgorithm =
         ImageCompressionAlgorithm::Zstd { level: Some(1) };
 
@@ -595,7 +610,10 @@ pub mod defaults {
     pub const DEFAULT_IO_BUFFER_ALIGNMENT: usize = 512;
 
     pub const DEFAULT_WAL_RECEIVER_PROTOCOL: utils::postgres_client::PostgresClientProtocol =
-        utils::postgres_client::PostgresClientProtocol::Vanilla;
+        utils::postgres_client::PostgresClientProtocol::Interpreted {
+            format: utils::postgres_client::InterpretedFormat::Protobuf,
+            compression: Some(utils::postgres_client::Compression::Zstd { level: 1 }),
+        };
 
     pub const DEFAULT_SSL_KEY_FILE: &str = "server.key";
     pub const DEFAULT_SSL_CERT_FILE: &str = "server.crt";
@@ -685,6 +703,9 @@ impl Default for ConfigToml {
             max_vectored_read_bytes: (MaxVectoredReadBytes(
                 NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
             )),
+            max_get_vectored_keys: (MaxGetVectoredKeys(
+                NonZeroUsize::new(DEFAULT_MAX_GET_VECTORED_KEYS).unwrap(),
+            )),
             image_compression: (DEFAULT_IMAGE_COMPRESSION),
             timeline_offloading: true,
             ephemeral_bytes_per_memory_kb: (DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
@@ -713,9 +734,10 @@ impl Default for ConfigToml {
             enable_tls_page_service_api: false,
             dev_mode: false,
             timeline_import_config: TimelineImportConfig {
-                import_job_concurrency: NonZeroUsize::new(128).unwrap(),
-                import_job_soft_size_limit: NonZeroUsize::new(1024 * 1024 * 1024).unwrap(),
-                import_job_checkpoint_threshold: NonZeroUsize::new(128).unwrap(),
+                import_job_concurrency: NonZeroUsize::new(32).unwrap(),
+                import_job_soft_size_limit: NonZeroUsize::new(256 * 1024 * 1024).unwrap(),
+                import_job_checkpoint_threshold: NonZeroUsize::new(32).unwrap(),
+                import_job_max_byte_range_size: NonZeroUsize::new(4 * 1024 * 1024).unwrap(),
             },
             basebackup_cache_config: None,
             posthog_config: None,

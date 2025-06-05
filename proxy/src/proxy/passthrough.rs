@@ -1,3 +1,4 @@
+use futures::FutureExt;
 use smol_str::SmolStr;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::debug;
@@ -89,6 +90,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
             .compute
             .cancel_closure
             .try_cancel_query(compute_config)
+            .boxed()
             .await
         {
             tracing::warn!(session_id = ?self.session_id, ?err, "could not cancel the query in the database");

@@ -423,6 +423,7 @@ class PageserverImportConfig:
             "import_job_concurrency": self.import_job_concurrency,
             "import_job_soft_size_limit": self.import_job_soft_size_limit,
             "import_job_checkpoint_threshold": self.import_job_checkpoint_threshold,
+            "import_job_max_byte_range_size": 4 * 1024 * 1024,  # Pageserver default
         }
         return ("timeline_import_config", value)
 
@@ -2339,6 +2340,22 @@ class NeonStorageController(MetricsGetter, LogUtils):
             headers=self.headers(TokenScope.ADMIN),
         )
 
+    def import_status(
+        self, tenant_shard_id: TenantShardId, timeline_id: TimelineId, generation: int
+    ):
+        payload = {
+            "tenant_shard_id": str(tenant_shard_id),
+            "timeline_id": str(timeline_id),
+            "generation": generation,
+        }
+
+        self.request(
+            "GET",
+            f"{self.api}/upcall/v1/timeline_import_status",
+            headers=self.headers(TokenScope.GENERATIONS_API),
+            json=payload,
+        )
+
     def reconcile_all(self):
         r = self.request(
             "POST",
@@ -2814,6 +2831,11 @@ class NeonPageserver(PgProtocol, LogUtils):
         self._persistent_failpoints[name] = action
         if self.running:
             self.http_client().configure_failpoints([(name, action)])
+
+    def clear_persistent_failpoint(self, name: str):
+        del self._persistent_failpoints[name]
+        if self.running:
+            self.http_client().configure_failpoints([(name, "off")])
 
     def timeline_dir(
         self,

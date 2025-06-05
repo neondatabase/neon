@@ -22,6 +22,16 @@ pub enum PostHogEvaluationError {
     Internal(String),
 }
 
+impl PostHogEvaluationError {
+    pub fn as_variant_str(&self) -> &'static str {
+        match self {
+            PostHogEvaluationError::NotAvailable(_) => "not_available",
+            PostHogEvaluationError::NoConditionGroupMatched => "no_condition_group_matched",
+            PostHogEvaluationError::Internal(_) => "internal",
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct LocalEvaluationResponse {
     pub flags: Vec<LocalEvaluationFlag>,
@@ -448,6 +458,18 @@ impl FeatureStore {
             )))
         }
     }
+
+    /// Infer whether a feature flag is a boolean flag by checking if it has a multivariate filter.
+    pub fn is_feature_flag_boolean(&self, flag_key: &str) -> Result<bool, PostHogEvaluationError> {
+        if let Some(flag_config) = self.flags.get(flag_key) {
+            Ok(flag_config.filters.multivariate.is_none())
+        } else {
+            Err(PostHogEvaluationError::NotAvailable(format!(
+                "Not found in the local evaluation spec: {}",
+                flag_key
+            )))
+        }
+    }
 }
 
 pub struct PostHogClientConfig {
@@ -528,7 +550,15 @@ impl PostHogClient {
             .bearer_auth(&self.config.server_api_key)
             .send()
             .await?;
+        let status = response.status();
         let body = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "Failed to get feature flags: {}, {}",
+                status,
+                body
+            ));
+        }
         Ok(serde_json::from_str(&body)?)
     }
 

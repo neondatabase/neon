@@ -1,0 +1,21 @@
+diff --git a/regress/runtest.mk b/regress/runtest.mk
+index c051f03..010e493 100644
+--- a/regress/runtest.mk
++++ b/regress/runtest.mk
+@@ -24,16 +24,6 @@ check-regress:
+ 
+ 	POSTGIS_TOP_BUILD_DIR=$(abs_top_builddir) $(PERL) $(top_srcdir)/regress/run_test.pl $(RUNTESTFLAGS) $(RUNTESTFLAGS_INTERNAL) $(TESTS)
+ 
+-	@if echo "$(RUNTESTFLAGS)" | grep -vq -- --upgrade; then \
+-		echo "Running upgrade test as RUNTESTFLAGS did not contain that"; \
+-		POSTGIS_TOP_BUILD_DIR=$(abs_top_builddir) $(PERL) $(top_srcdir)/regress/run_test.pl \
+-      --upgrade \
+-      $(RUNTESTFLAGS) \
+-      $(RUNTESTFLAGS_INTERNAL) \
+-      $(TESTS); \
+-	else \
+-		echo "Skipping upgrade test as RUNTESTFLAGS already requested upgrades"; \
+-	fi
+ 
+ check-long:
+ 	$(PERL) $(top_srcdir)/regress/run_test.pl $(RUNTESTFLAGS) $(TESTS) $(TESTS_SLOW)

@@ -6,7 +6,7 @@ use posthog_client_lite::{
 use tokio_util::sync::CancellationToken;
 use utils::id::TenantId;
 
-use crate::config::PageServerConf;
+use crate::{config::PageServerConf, metrics::FEATURE_FLAG_EVALUATION};
 
 #[derive(Clone)]
 pub struct FeatureResolver {
@@ -55,11 +55,24 @@ impl FeatureResolver {
         tenant_id: TenantId,
     ) -> Result<String, PostHogEvaluationError> {
         if let Some(inner) = &self.inner {
-            inner.feature_store().evaluate_multivariate(
+            let res = inner.feature_store().evaluate_multivariate(
                 flag_key,
                 &tenant_id.to_string(),
                 &HashMap::new(),
-            )
+            );
+            match &res {
+                Ok(value) => {
+                    FEATURE_FLAG_EVALUATION
+                        .with_label_values(&[flag_key, "ok", value])
+                        .inc();
+                }
+                Err(e) => {
+                    FEATURE_FLAG_EVALUATION
+                        .with_label_values(&[flag_key, "error", e.as_variant_str()])
+                        .inc();
+                }
+            }
+            res
         } else {
             Err(PostHogEvaluationError::NotAvailable(
                 "PostHog integration is not enabled".to_string(),
@@ -80,11 +93,34 @@ impl FeatureResolver {
         tenant_id: TenantId,
     ) -> Result<(), PostHogEvaluationError> {
         if let Some(inner) = &self.inner {
-            inner.feature_store().evaluate_boolean(
+            let res = inner.feature_store().evaluate_boolean(
                 flag_key,
                 &tenant_id.to_string(),
                 &HashMap::new(),
-            )
+            );
+            match &res {
+                Ok(()) => {
+                    FEATURE_FLAG_EVALUATION
+                        .with_label_values(&[flag_key, "ok", "true"])
+                        .inc();
+                }
+                Err(e) => {
+                    FEATURE_FLAG_EVALUATION
+                        .with_label_values(&[flag_key, "error", e.as_variant_str()])
+                        .inc();
+                }
+            }
+            res
+        } else {
+            Err(PostHogEvaluationError::NotAvailable(
+                "PostHog integration is not enabled".to_string(),
+            ))
+        }
+    }
+
+    pub fn is_feature_flag_boolean(&self, flag_key: &str) -> Result<bool, PostHogEvaluationError> {
+        if let Some(inner) = &self.inner {
+            inner.feature_store().is_feature_flag_boolean(flag_key)
         } else {
             Err(PostHogEvaluationError::NotAvailable(
                 "PostHog integration is not enabled".to_string(),

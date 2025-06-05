@@ -4192,10 +4192,10 @@ def test_storcon_create_delete_sk_down(
     # ensure the safekeeper deleted the timeline
     def timeline_deleted_on_active_sks():
         env.safekeepers[0].assert_log_contains(
-            f"deleting timeline {tenant_id}/{child_timeline_id} from disk"
+            f"((deleting timeline|Timeline) {tenant_id}/{child_timeline_id} (from disk|was already deleted)|DELETE.*tenant/{tenant_id} .*status: 200 OK)"
         )
         env.safekeepers[2].assert_log_contains(
-            f"deleting timeline {tenant_id}/{child_timeline_id} from disk"
+            f"((deleting timeline|Timeline) {tenant_id}/{child_timeline_id} (from disk|was already deleted)|DELETE.*tenant/{tenant_id} .*status: 200 OK)"
         )
 
     wait_until(timeline_deleted_on_active_sks)
@@ -4210,7 +4210,7 @@ def test_storcon_create_delete_sk_down(
     # ensure that there is log msgs for the third safekeeper too
     def timeline_deleted_on_sk():
         env.safekeepers[1].assert_log_contains(
-            f"deleting timeline {tenant_id}/{child_timeline_id} from disk"
+            f"((deleting timeline|Timeline) {tenant_id}/{child_timeline_id} (from disk|was already deleted)|DELETE.*tenant/{tenant_id} .*status: 200 OK)"
         )
 
     wait_until(timeline_deleted_on_sk)

@@ -1,18 +1,21 @@
 //! The Page Service listens for client connections and serves their GetPage@LSN
 //! requests.
 
+use std::any::Any;
 use std::borrow::Cow;
 use std::num::NonZeroUsize;
 use std::os::fd::AsRawFd;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 use std::{io, str};
 
-use anyhow::{Context, bail};
+use anyhow::{Context as _, anyhow, bail};
 use async_compression::tokio::write::GzipEncoder;
-use bytes::Buf;
+use bytes::{Buf, BytesMut};
+use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
 use itertools::Itertools;
 use jsonwebtoken::TokenData;
@@ -31,6 +34,7 @@ use pageserver_api::models::{
 };
 use pageserver_api::reltag::SlruKind;
 use pageserver_api::shard::TenantShardId;
+use pageserver_page_api as page_api;
 use pageserver_page_api::proto;
 use postgres_backend::{
     AuthType, PostgresBackend, PostgresBackendReader, QueryError, is_expected_io_error,
@@ -39,14 +43,14 @@ use postgres_ffi::BLCKSZ;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use pq_proto::framed::ConnectionError;
 use pq_proto::{BeMessage, FeMessage, FeStartupPacket, RowDescriptor};
+use smallvec::{SmallVec, smallvec};
 use strum_macros::IntoStaticStr;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufWriter};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tonic::service::Interceptor as _;
 use tracing::*;
 use utils::auth::{Claims, Scope, SwappableJwtAuth};
-use utils::failpoint_support;
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 use utils::logging::log_slow;
 use utils::lsn::Lsn;
@@ -54,6 +58,7 @@ use utils::shard::ShardIndex;
 use utils::simple_rcu::RcuReadGuard;
 use utils::sync::gate::{Gate, GateGuard};
 use utils::sync::spsc_fold;
+use utils::{failpoint_support, span_record};
 
 use crate::auth::check_permission;
 use crate::basebackup::{self, BasebackupError};
@@ -76,7 +81,8 @@ use crate::tenant::mgr::{
     GetActiveTenantError, GetTenantError, ShardResolveResult, ShardSelector, TenantManager,
 };
 use crate::tenant::storage_layer::IoConcurrency;
-use crate::tenant::timeline::{self, WaitLsnError};
+use crate::tenant::timeline::handle::{Handle, HandleUpgradeError, WeakHandle};
+use crate::tenant::timeline::{self, WaitLsnError, WaitLsnTimeout, WaitLsnWaiter};
 use crate::tenant::{GetTimelineError, PageReconstructError, Timeline};
 use crate::{CancellableTask, PERF_TRACE_TARGET, timed_after_cancellation};
 
@@ -165,15 +171,15 @@ pub fn spawn(
 
 /// Spawns a gRPC server for the page service.
 ///
+/// TODO: move this onto GrpcPageServiceHandler::spawn().
 /// TODO: this doesn't support TLS. We need TLS reloading via ReloadingCertificateResolver, so we
 /// need to reimplement the TCP+TLS accept loop ourselves.
 pub fn spawn_grpc(
-    conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<SwappableJwtAuth>>,
     perf_trace_dispatch: Option<Dispatch>,
+    get_vectored_concurrent_io: GetVectoredConcurrentIo,
     listener: std::net::TcpListener,
-    basebackup_cache: Arc<BasebackupCache>,
 ) -> anyhow::Result<CancellableTask> {
     let cancel = CancellationToken::new();
     let ctx = RequestContextBuilder::new(TaskKind::PageRequestHandler)
@@ -195,35 +201,40 @@ pub fn spawn_grpc(
     // Set up the gRPC server.
     //
     // TODO: consider tuning window sizes.
-    // TODO: wire up tracing.
     let mut server = tonic::transport::Server::builder()
         .http2_keepalive_interval(Some(GRPC_HTTP2_KEEPALIVE_INTERVAL))
         .http2_keepalive_timeout(Some(GRPC_HTTP2_KEEPALIVE_TIMEOUT))
         .max_concurrent_streams(Some(GRPC_MAX_CONCURRENT_STREAMS));
 
-    // Main page service.
-    let page_service_handler = PageServerHandler::new(
+    // Main page service stack. Uses a mix of Tonic interceptors and Tower layers:
+    //
+    // * Interceptors: can inspect and modify the gRPC request. Sync code only, runs before service.
+    //
+    // * Layers: allow async code, can run code after the service response. However, only has access
+    //   to the raw HTTP request/response, not the gRPC types.
+    let page_service_handler = GrpcPageServiceHandler {
         tenant_manager,
-        auth.clone(),
-        PageServicePipeliningConfig::Serial, // TODO: unused with gRPC
-        conf.get_vectored_concurrent_io,
-        ConnectionPerfSpanFields::default(),
-        basebackup_cache,
         ctx,
-        cancel.clone(),
-        gate.enter().expect("just created"),
-    );
-
-    let mut tenant_interceptor = TenantMetadataInterceptor;
-    let mut auth_interceptor = TenantAuthInterceptor::new(auth);
-    let interceptors = move |mut req: tonic::Request<()>| {
-        req = tenant_interceptor.call(req)?;
-        req = auth_interceptor.call(req)?;
-        Ok(req)
+        gate_guard: gate.enter().expect("gate was just created"),
+        get_vectored_concurrent_io,
     };
 
-    let page_service =
-        proto::PageServiceServer::with_interceptor(page_service_handler, interceptors);
+    let observability_layer = ObservabilityLayer;
+    let mut tenant_interceptor = TenantMetadataInterceptor;
+    let mut auth_interceptor = TenantAuthInterceptor::new(auth);
+
+    let page_service = tower::ServiceBuilder::new()
+        // Create tracing span and record request start time.
+        .layer(observability_layer)
+        // Intercept gRPC requests.
+        .layer(tonic::service::InterceptorLayer::new(move |mut req| {
+            // Extract tenant metadata.
+            req = tenant_interceptor.call(req)?;
+            // Authenticate tenant JWT token.
+            req = auth_interceptor.call(req)?;
+            Ok(req)
+        }))
+        .service(proto::PageServiceServer::new(page_service_handler));
     let server = server.add_service(page_service);
 
     // Reflection service for use with e.g. grpcurl.
@@ -489,10 +500,6 @@ async fn page_service_conn_main(
 }
 
 /// Page service connection handler.
-///
-/// TODO: for gRPC, this will be shared by all requests from all connections.
-/// Decompose it into global state and per-connection/request state, and make
-/// libpq-specific options (e.g. pipelining) separate.
 struct PageServerHandler {
     auth: Option<Arc<SwappableJwtAuth>>,
     claims: Option<Claims>,
@@ -542,7 +549,7 @@ impl TimelineHandles {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
-    ) -> Result<timeline::handle::Handle<TenantManagerTypes>, GetActiveTimelineError> {
+    ) -> Result<Handle<TenantManagerTypes>, GetActiveTimelineError> {
         if *self.wrapper.tenant_id.get_or_init(|| tenant_id) != tenant_id {
             return Err(GetActiveTimelineError::Tenant(
                 GetActiveTenantError::SwitchedTenant,
@@ -709,6 +716,82 @@ enum PageStreamError {
     BadRequest(Cow<'static, str>),
 }
 
+impl PageStreamError {
+    /// Converts a PageStreamError into a proto::GetPageResponse with the appropriate status
+    /// code, or a gRPC status if it should terminate the stream (e.g. shutdown). This is a
+    /// convenience method for use from a get_pages gRPC stream.
+    #[allow(clippy::result_large_err)]
+    fn into_get_page_response(
+        self,
+        request_id: page_api::RequestID,
+    ) -> Result<proto::GetPageResponse, tonic::Status> {
+        use page_api::GetPageStatusCode;
+        use tonic::Code;
+
+        // We dispatch to Into<tonic::Status> first, and then map it to a GetPageResponse.
+        let status: tonic::Status = self.into();
+        let status_code = match status.code() {
+            // We shouldn't see an OK status here, because we're emitting an error.
+            Code::Ok => {
+                debug_assert_ne!(status.code(), Code::Ok);
+                return Err(tonic::Status::internal(format!(
+                    "unexpected OK status: {status:?}",
+                )));
+            }
+
+            // These are per-request errors, returned as GetPageResponses.
+            Code::AlreadyExists => GetPageStatusCode::InvalidRequest,
+            Code::DataLoss => GetPageStatusCode::InternalError,
+            Code::FailedPrecondition => GetPageStatusCode::InvalidRequest,
+            Code::InvalidArgument => GetPageStatusCode::InvalidRequest,
+            Code::Internal => GetPageStatusCode::InternalError,
+            Code::NotFound => GetPageStatusCode::NotFound,
+            Code::OutOfRange => GetPageStatusCode::InvalidRequest,
+            Code::ResourceExhausted => GetPageStatusCode::SlowDown,
+
+            // These should terminate the stream.
+            Code::Aborted => return Err(status),
+            Code::Cancelled => return Err(status),
+            Code::DeadlineExceeded => return Err(status),
+            Code::PermissionDenied => return Err(status),
+            Code::Unauthenticated => return Err(status),
+            Code::Unavailable => return Err(status),
+            Code::Unimplemented => return Err(status),
+            Code::Unknown => return Err(status),
+        };
+
+        Ok(page_api::GetPageResponse {
+            request_id,
+            status_code,
+            reason: Some(status.message().to_string()),
+            page_images: Vec::new(),
+        }
+        .into())
+    }
+}
+
+impl From<PageStreamError> for tonic::Status {
+    fn from(err: PageStreamError) -> Self {
+        use tonic::Code;
+        let message = err.to_string();
+        let code = match err {
+            PageStreamError::Reconnect(_) => Code::Unavailable,
+            PageStreamError::Shutdown => Code::Unavailable,
+            PageStreamError::Read(err) => match err {
+                PageReconstructError::Cancelled => Code::Unavailable,
+                PageReconstructError::MissingKey(_) => Code::NotFound,
+                PageReconstructError::AncestorLsnTimeout(err) => tonic::Status::from(err).code(),
+                PageReconstructError::Other(_) => Code::Internal,
+                PageReconstructError::WalRedo(_) => Code::Internal,
+            },
+            PageStreamError::LsnTimeout(err) => tonic::Status::from(err).code(),
+            PageStreamError::NotFound(_) => Code::NotFound,
+            PageStreamError::BadRequest(_) => Code::InvalidArgument,
+        };
+        tonic::Status::new(code, message)
+    }
+}
+
 impl From<PageReconstructError> for PageStreamError {
     fn from(value: PageReconstructError) -> Self {
         match value {
@@ -789,37 +872,37 @@ enum BatchedFeMessage {
     Exists {
         span: Span,
         timer: SmgrOpTimer,
-        shard: timeline::handle::WeakHandle<TenantManagerTypes>,
+        shard: WeakHandle<TenantManagerTypes>,
         req: models::PagestreamExistsRequest,
     },
     Nblocks {
         span: Span,
         timer: SmgrOpTimer,
-        shard: timeline::handle::WeakHandle<TenantManagerTypes>,
+        shard: WeakHandle<TenantManagerTypes>,
         req: models::PagestreamNblocksRequest,
     },
     GetPage {
         span: Span,
-        shard: timeline::handle::WeakHandle<TenantManagerTypes>,
-        pages: smallvec::SmallVec<[BatchedGetPageRequest; 1]>,
+        shard: WeakHandle<TenantManagerTypes>,
+        pages: SmallVec<[BatchedGetPageRequest; 1]>,
         batch_break_reason: GetPageBatchBreakReason,
     },
     DbSize {
         span: Span,
         timer: SmgrOpTimer,
-        shard: timeline::handle::WeakHandle<TenantManagerTypes>,
+        shard: WeakHandle<TenantManagerTypes>,
         req: models::PagestreamDbSizeRequest,
     },
     GetSlruSegment {
         span: Span,
         timer: SmgrOpTimer,
-        shard: timeline::handle::WeakHandle<TenantManagerTypes>,
+        shard: WeakHandle<TenantManagerTypes>,
         req: models::PagestreamGetSlruSegmentRequest,
     },
     #[cfg(feature = "testing")]
     Test {
         span: Span,
-        shard: timeline::handle::WeakHandle<TenantManagerTypes>,
+        shard: WeakHandle<TenantManagerTypes>,
         requests: Vec<BatchedTestRequest>,
     },
     RespondError {
@@ -1068,26 +1151,6 @@ impl PageServerHandler {
         let neon_fe_msg =
             PagestreamFeMessage::parse(&mut copy_data_bytes.reader(), protocol_version)?;
 
-        // TODO: turn in to async closure once available to avoid repeating received_at
-        async fn record_op_start_and_throttle(
-            shard: &timeline::handle::Handle<TenantManagerTypes>,
-            op: metrics::SmgrQueryType,
-            received_at: Instant,
-        ) -> Result<SmgrOpTimer, QueryError> {
-            // It's important to start the smgr op metric recorder as early as possible
-            // so that the _started counters are incremented before we do
-            // any serious waiting, e.g., for throttle, batching, or actual request handling.
-            let mut timer = shard.query_metrics.start_smgr_op(op, received_at);
-            let now = Instant::now();
-            timer.observe_throttle_start(now);
-            let throttled = tokio::select! {
-                res = shard.pagestream_throttle.throttle(1, now) => res,
-                _ = shard.cancel.cancelled() => return Err(QueryError::Shutdown),
-            };
-            timer.observe_throttle_done(throttled);
-            Ok(timer)
-        }
-
         let batched_msg = match neon_fe_msg {
             PagestreamFeMessage::Exists(req) => {
                 let shard = timeline_handles
@@ -1095,7 +1158,7 @@ impl PageServerHandler {
                     .await?;
                 debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
                 let span = tracing::info_span!(parent: &parent_span, "handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.hdr.request_lsn, shard_id = %shard.tenant_shard_id.shard_slug());
-                let timer = record_op_start_and_throttle(
+                let timer = Self::record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetRelExists,
                     received_at,
@@ -1113,7 +1176,7 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .await?;
                 let span = tracing::info_span!(parent: &parent_span, "handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.hdr.request_lsn, shard_id = %shard.tenant_shard_id.shard_slug());
-                let timer = record_op_start_and_throttle(
+                let timer = Self::record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetRelSize,
                     received_at,
@@ -1131,7 +1194,7 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .await?;
                 let span = tracing::info_span!(parent: &parent_span, "handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.hdr.request_lsn, shard_id = %shard.tenant_shard_id.shard_slug());
-                let timer = record_op_start_and_throttle(
+                let timer = Self::record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetDbSize,
                     received_at,
@@ -1149,7 +1212,7 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .await?;
                 let span = tracing::info_span!(parent: &parent_span, "handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.hdr.request_lsn, shard_id = %shard.tenant_shard_id.shard_slug());
-                let timer = record_op_start_and_throttle(
+                let timer = Self::record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetSlruSegment,
                     received_at,
@@ -1274,7 +1337,7 @@ impl PageServerHandler {
                 // request handler log messages contain the request-specific fields.
                 let span = mkspan!(shard.tenant_shard_id.shard_slug());
 
-                let timer = record_op_start_and_throttle(
+                let timer = Self::record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetPageAtLsn,
                     received_at,
@@ -1321,7 +1384,7 @@ impl PageServerHandler {
                 BatchedFeMessage::GetPage {
                     span,
                     shard: shard.downgrade(),
-                    pages: smallvec::smallvec![BatchedGetPageRequest {
+                    pages: smallvec![BatchedGetPageRequest {
                         req,
                         timer,
                         lsn_range: LsnRange {
@@ -1343,9 +1406,12 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .await?;
                 let span = tracing::info_span!(parent: &parent_span, "handle_test_request", shard_id = %shard.tenant_shard_id.shard_slug());
-                let timer =
-                    record_op_start_and_throttle(&shard, metrics::SmgrQueryType::Test, received_at)
-                        .await?;
+                let timer = Self::record_op_start_and_throttle(
+                    &shard,
+                    metrics::SmgrQueryType::Test,
+                    received_at,
+                )
+                .await?;
                 BatchedFeMessage::Test {
                     span,
                     shard: shard.downgrade(),
@@ -1354,6 +1420,26 @@ impl PageServerHandler {
             }
         };
         Ok(Some(batched_msg))
+    }
+
+    /// Starts a SmgrOpTimer at received_at and throttles the request.
+    async fn record_op_start_and_throttle(
+        shard: &Handle<TenantManagerTypes>,
+        op: metrics::SmgrQueryType,
+        received_at: Instant,
+    ) -> Result<SmgrOpTimer, QueryError> {
+        // It's important to start the smgr op metric recorder as early as possible
+        // so that the _started counters are incremented before we do
+        // any serious waiting, e.g., for throttle, batching, or actual request handling.
+        let mut timer = shard.query_metrics.start_smgr_op(op, received_at);
+        let now = Instant::now();
+        timer.observe_throttle_start(now);
+        let throttled = tokio::select! {
+            res = shard.pagestream_throttle.throttle(1, now) => res,
+            _ = shard.cancel.cancelled() => return Err(QueryError::Shutdown),
+        };
+        timer.observe_throttle_done(throttled);
+        Ok(timer)
     }
 
     /// Post-condition: `batch` is Some()
@@ -1453,8 +1539,11 @@ impl PageServerHandler {
         let (mut handler_results, span) = {
             // TODO: we unfortunately have to pin the future on the heap, since GetPage futures are huge and
             // won't fit on the stack.
-            let mut boxpinned =
-                Box::pin(self.pagestream_dispatch_batched_message(batch, io_concurrency, ctx));
+            let mut boxpinned = Box::pin(Self::pagestream_dispatch_batched_message(
+                batch,
+                io_concurrency,
+                ctx,
+            ));
             log_slow(
                 log_slow_name,
                 LOG_SLOW_GETPAGE_THRESHOLD,
@@ -1610,7 +1699,6 @@ impl PageServerHandler {
     /// Helper which dispatches a batched message to the appropriate handler.
     /// Returns a vec of results, along with the extracted trace span.
     async fn pagestream_dispatch_batched_message(
-        &mut self,
         batch: BatchedFeMessage,
         io_concurrency: IoConcurrency,
         ctx: &RequestContext,
@@ -1640,10 +1728,10 @@ impl PageServerHandler {
                 let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     vec![
-                        self.handle_get_rel_exists_request(&shard, &req, &ctx)
+                        Self::handle_get_rel_exists_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
-                            .map(|msg| (msg, timer, ctx))
+                            .map(|msg| (PagestreamBeMessage::Exists(msg), timer, ctx))
                             .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
                     ],
                     span,
@@ -1659,10 +1747,10 @@ impl PageServerHandler {
                 let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     vec![
-                        self.handle_get_nblocks_request(&shard, &req, &ctx)
+                        Self::handle_get_nblocks_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
-                            .map(|msg| (msg, timer, ctx))
+                            .map(|msg| (PagestreamBeMessage::Nblocks(msg), timer, ctx))
                             .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
                     ],
                     span,
@@ -1680,16 +1768,15 @@ impl PageServerHandler {
                     {
                         let npages = pages.len();
                         trace!(npages, "handling getpage request");
-                        let res = self
-                            .handle_get_page_at_lsn_request_batched(
-                                &shard,
-                                pages,
-                                io_concurrency,
-                                batch_break_reason,
-                                &ctx,
-                            )
-                            .instrument(span.clone())
-                            .await;
+                        let res = Self::handle_get_page_at_lsn_request_batched(
+                            &shard,
+                            pages,
+                            io_concurrency,
+                            batch_break_reason,
+                            &ctx,
+                        )
+                        .instrument(span.clone())
+                        .await;
                         assert_eq!(res.len(), npages);
                         res
                     },
@@ -1706,10 +1793,10 @@ impl PageServerHandler {
                 let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     vec![
-                        self.handle_db_size_request(&shard, &req, &ctx)
+                        Self::handle_db_size_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
-                            .map(|msg| (msg, timer, ctx))
+                            .map(|msg| (PagestreamBeMessage::DbSize(msg), timer, ctx))
                             .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
                     ],
                     span,
@@ -1725,10 +1812,10 @@ impl PageServerHandler {
                 let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     vec![
-                        self.handle_get_slru_segment_request(&shard, &req, &ctx)
+                        Self::handle_get_slru_segment_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
-                            .map(|msg| (msg, timer, ctx))
+                            .map(|msg| (PagestreamBeMessage::GetSlruSegment(msg), timer, ctx))
                             .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
                     ],
                     span,
@@ -1746,8 +1833,7 @@ impl PageServerHandler {
                     {
                         let npages = requests.len();
                         trace!(npages, "handling getpage request");
-                        let res = self
-                            .handle_test_request_batch(&shard, requests, &ctx)
+                        let res = Self::handle_test_request_batch(&shard, requests, &ctx)
                             .instrument(span.clone())
                             .await;
                         assert_eq!(res.len(), npages);
@@ -2301,11 +2387,10 @@ impl PageServerHandler {
 
     #[instrument(skip_all, fields(shard_id))]
     async fn handle_get_rel_exists_request(
-        &mut self,
         timeline: &Timeline,
         req: &PagestreamExistsRequest,
         ctx: &RequestContext,
-    ) -> Result<PagestreamBeMessage, PageStreamError> {
+    ) -> Result<PagestreamExistsResponse, PageStreamError> {
         let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
@@ -2327,19 +2412,15 @@ impl PageServerHandler {
             )
             .await?;
 
-        Ok(PagestreamBeMessage::Exists(PagestreamExistsResponse {
-            req: *req,
-            exists,
-        }))
+        Ok(PagestreamExistsResponse { req: *req, exists })
     }
 
     #[instrument(skip_all, fields(shard_id))]
     async fn handle_get_nblocks_request(
-        &mut self,
         timeline: &Timeline,
         req: &PagestreamNblocksRequest,
         ctx: &RequestContext,
-    ) -> Result<PagestreamBeMessage, PageStreamError> {
+    ) -> Result<PagestreamNblocksResponse, PageStreamError> {
         let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
@@ -2361,19 +2442,18 @@ impl PageServerHandler {
             )
             .await?;
 
-        Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
+        Ok(PagestreamNblocksResponse {
             req: *req,
             n_blocks,
-        }))
+        })
     }
 
     #[instrument(skip_all, fields(shard_id))]
     async fn handle_db_size_request(
-        &mut self,
         timeline: &Timeline,
         req: &PagestreamDbSizeRequest,
         ctx: &RequestContext,
-    ) -> Result<PagestreamBeMessage, PageStreamError> {
+    ) -> Result<PagestreamDbSizeResponse, PageStreamError> {
         let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
@@ -2397,17 +2477,13 @@ impl PageServerHandler {
             .await?;
         let db_size = total_blocks as i64 * BLCKSZ as i64;
 
-        Ok(PagestreamBeMessage::DbSize(PagestreamDbSizeResponse {
-            req: *req,
-            db_size,
-        }))
+        Ok(PagestreamDbSizeResponse { req: *req, db_size })
     }
 
     #[instrument(skip_all)]
     async fn handle_get_page_at_lsn_request_batched(
-        &mut self,
         timeline: &Timeline,
-        requests: smallvec::SmallVec<[BatchedGetPageRequest; 1]>,
+        requests: SmallVec<[BatchedGetPageRequest; 1]>,
         io_concurrency: IoConcurrency,
         batch_break_reason: GetPageBatchBreakReason,
         ctx: &RequestContext,
@@ -2532,11 +2608,10 @@ impl PageServerHandler {
 
     #[instrument(skip_all, fields(shard_id))]
     async fn handle_get_slru_segment_request(
-        &mut self,
         timeline: &Timeline,
         req: &PagestreamGetSlruSegmentRequest,
         ctx: &RequestContext,
-    ) -> Result<PagestreamBeMessage, PageStreamError> {
+    ) -> Result<PagestreamGetSlruSegmentResponse, PageStreamError> {
         let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
@@ -2551,16 +2626,13 @@ impl PageServerHandler {
             .ok_or(PageStreamError::BadRequest("invalid SLRU kind".into()))?;
         let segment = timeline.get_slru_segment(kind, req.segno, lsn, ctx).await?;
 
-        Ok(PagestreamBeMessage::GetSlruSegment(
-            PagestreamGetSlruSegmentResponse { req: *req, segment },
-        ))
+        Ok(PagestreamGetSlruSegmentResponse { req: *req, segment })
     }
 
     // NB: this impl mimics what we do for batched getpage requests.
     #[cfg(feature = "testing")]
     #[instrument(skip_all, fields(shard_id))]
     async fn handle_test_request_batch(
-        &mut self,
         timeline: &Timeline,
         requests: Vec<BatchedTestRequest>,
         _ctx: &RequestContext,
@@ -2636,15 +2708,6 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
-        fn map_basebackup_error(err: BasebackupError) -> QueryError {
-            match err {
-                // TODO: passthrough the error site to the final error message?
-                BasebackupError::Client(e, _) => QueryError::Disconnected(ConnectionError::Io(e)),
-                BasebackupError::Server(e) => QueryError::Other(e),
-                BasebackupError::Shutdown => QueryError::Shutdown,
-            }
-        }
-
         let started = std::time::Instant::now();
 
         let timeline = self
@@ -2702,8 +2765,7 @@ impl PageServerHandler {
                 replica,
                 &ctx,
             )
-            .await
-            .map_err(map_basebackup_error)?;
+            .await?;
         } else {
             let mut writer = BufWriter::new(pgb.copyout_writer());
 
@@ -2726,11 +2788,8 @@ impl PageServerHandler {
                 from_cache = true;
                 tokio::io::copy(&mut cached, &mut writer)
                     .await
-                    .map_err(|e| {
-                        map_basebackup_error(BasebackupError::Client(
-                            e,
-                            "handle_basebackup_request,cached,copy",
-                        ))
+                    .map_err(|err| {
+                        BasebackupError::Client(err, "handle_basebackup_request,cached,copy")
                     })?;
             } else if gzip {
                 let mut encoder = GzipEncoder::with_quality(
@@ -2751,8 +2810,7 @@ impl PageServerHandler {
                     replica,
                     &ctx,
                 )
-                .await
-                .map_err(map_basebackup_error)?;
+                .await?;
                 // shutdown the encoder to ensure the gzip footer is written
                 encoder
                     .shutdown()
@@ -2768,15 +2826,12 @@ impl PageServerHandler {
                     replica,
                     &ctx,
                 )
-                .await
-                .map_err(map_basebackup_error)?;
+                .await?;
             }
-            writer.flush().await.map_err(|e| {
-                map_basebackup_error(BasebackupError::Client(
-                    e,
-                    "handle_basebackup_request,flush",
-                ))
-            })?;
+            writer
+                .flush()
+                .await
+                .map_err(|err| BasebackupError::Client(err, "handle_basebackup_request,flush"))?;
         }
 
         pgb.write_message_noflush(&BeMessage::CopyDone)
@@ -3300,80 +3355,543 @@ where
     }
 }
 
-/// Implements the page service over gRPC.
+/// Serves the page service over gRPC. Dispatches to PageServerHandler for request processing.
 ///
-/// TODO: not yet implemented, all methods return unimplemented.
-#[tonic::async_trait]
-impl proto::PageService for PageServerHandler {
-    type GetBaseBackupStream = Pin<
-        Box<dyn Stream<Item = Result<proto::GetBaseBackupResponseChunk, tonic::Status>> + Send>,
-    >;
-    type GetPagesStream =
-        Pin<Box<dyn Stream<Item = Result<proto::GetPageResponse, tonic::Status>> + Send>>;
+/// TODO: rename to PageServiceHandler when libpq impl is removed.
+pub struct GrpcPageServiceHandler {
+    tenant_manager: Arc<TenantManager>,
+    ctx: RequestContext,
+    gate_guard: GateGuard,
+    get_vectored_concurrent_io: GetVectoredConcurrentIo,
+}
 
-    async fn check_rel_exists(
-        &self,
-        _: tonic::Request<proto::CheckRelExistsRequest>,
-    ) -> Result<tonic::Response<proto::CheckRelExistsResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not implemented"))
+impl GrpcPageServiceHandler {
+    /// Errors if the request is executed on a non-zero shard. Only shard 0 has a complete view of
+    /// relations and their sizes, as well as SLRU segments and similar data.
+    #[allow(clippy::result_large_err)]
+    fn ensure_shard_zero(timeline: &Handle<TenantManagerTypes>) -> Result<(), tonic::Status> {
+        match timeline.get_shard_index().shard_number.0 {
+            0 => Ok(()),
+            shard => Err(tonic::Status::invalid_argument(format!(
+                "request must execute on shard zero (is shard {shard})",
+            ))),
+        }
     }
 
-    async fn get_base_backup(
-        &self,
-        _: tonic::Request<proto::GetBaseBackupRequest>,
-    ) -> Result<tonic::Response<Self::GetBaseBackupStream>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not implemented"))
+    /// Generates a PagestreamRequest header from a ReadLsn and request ID.
+    fn make_hdr(read_lsn: page_api::ReadLsn, req_id: u64) -> PagestreamRequest {
+        PagestreamRequest {
+            reqid: req_id,
+            request_lsn: read_lsn.request_lsn,
+            not_modified_since: read_lsn
+                .not_modified_since_lsn
+                .unwrap_or(read_lsn.request_lsn),
+        }
     }
 
-    async fn get_db_size(
+    /// Acquires a timeline handle for the given request.
+    ///
+    /// TODO: during shard splits, the compute may still be sending requests to the parent shard
+    /// until the entire split is committed and the compute is notified. Consider installing a
+    /// temporary shard router from the parent to the children while the split is in progress.
+    ///
+    /// TODO: consider moving this to a middleware layer; all requests need it. Needs to manage
+    /// the TimelineHandles lifecycle.
+    ///
+    /// TODO: untangle acquisition from TenantManagerWrapper::resolve() and Cache::get(), to avoid
+    /// the unnecessary overhead.
+    async fn get_request_timeline(
         &self,
-        _: tonic::Request<proto::GetDbSizeRequest>,
-    ) -> Result<tonic::Response<proto::GetDbSizeResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not implemented"))
+        req: &tonic::Request<impl Any>,
+    ) -> Result<Handle<TenantManagerTypes>, GetActiveTimelineError> {
+        let ttid = *extract::<TenantTimelineId>(req);
+        let shard_index = *extract::<ShardIndex>(req);
+        let shard_selector = ShardSelector::Known(shard_index);
+
+        TimelineHandles::new(self.tenant_manager.clone())
+            .get(ttid.tenant_id, ttid.timeline_id, shard_selector)
+            .await
     }
 
-    async fn get_pages(
-        &self,
-        _: tonic::Request<tonic::Streaming<proto::GetPageRequest>>,
-    ) -> Result<tonic::Response<Self::GetPagesStream>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not implemented"))
+    /// Starts a SmgrOpTimer at received_at, throttles the request, and records execution start.
+    /// Only errors if the timeline is shutting down.
+    ///
+    /// TODO: move timer construction to ObservabilityLayer (see TODO there).
+    /// TODO: decouple rate limiting (middleware?), and return SlowDown errors instead.
+    async fn record_op_start_and_throttle(
+        timeline: &Handle<TenantManagerTypes>,
+        op: metrics::SmgrQueryType,
+        received_at: Instant,
+    ) -> Result<SmgrOpTimer, tonic::Status> {
+        let mut timer = PageServerHandler::record_op_start_and_throttle(timeline, op, received_at)
+            .await
+            .map_err(|err| match err {
+                // record_op_start_and_throttle() only returns Shutdown.
+                QueryError::Shutdown => tonic::Status::unavailable(format!("{err}")),
+                err => tonic::Status::internal(format!("unexpected error: {err}")),
+            })?;
+        timer.observe_execution_start(Instant::now());
+        Ok(timer)
     }
 
-    async fn get_rel_size(
-        &self,
-        _: tonic::Request<proto::GetRelSizeRequest>,
-    ) -> Result<tonic::Response<proto::GetRelSizeResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not implemented"))
-    }
+    /// Processes a GetPage batch request, via the GetPages bidirectional streaming RPC.
+    ///
+    /// NB: errors will terminate the stream. Per-request errors should return a GetPageResponse
+    /// with an appropriate status code instead.
+    ///
+    /// TODO: get_vectored() currently enforces a batch limit of 32. Postgres will typically send
+    /// batches up to effective_io_concurrency = 100. Either we have to accept large batches, or
+    /// split them up in the client or server.
+    #[instrument(skip_all, fields(req_id, rel, blkno, blks, req_lsn, mod_lsn))]
+    async fn get_page(
+        ctx: &RequestContext,
+        timeline: &WeakHandle<TenantManagerTypes>,
+        req: proto::GetPageRequest,
+        io_concurrency: IoConcurrency,
+    ) -> Result<proto::GetPageResponse, tonic::Status> {
+        let received_at = Instant::now();
+        let timeline = timeline.upgrade()?;
+        let ctx = ctx.with_scope_page_service_pagestream(&timeline);
 
-    async fn get_slru_segment(
-        &self,
-        _: tonic::Request<proto::GetSlruSegmentRequest>,
-    ) -> Result<tonic::Response<proto::GetSlruSegmentResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not implemented"))
+        // Validate the request, decorate the span, and convert it to a Pagestream request.
+        let req: page_api::GetPageRequest = req.try_into()?;
+
+        span_record!(
+            req_id = %req.request_id,
+            rel = %req.rel,
+            blkno = %req.block_numbers[0],
+            blks = %req.block_numbers.len(),
+            lsn = %req.read_lsn,
+        );
+
+        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn(); // hold guard
+        let effective_lsn = match PageServerHandler::effective_request_lsn(
+            &timeline,
+            timeline.get_last_record_lsn(),
+            req.read_lsn.request_lsn,
+            req.read_lsn
+                .not_modified_since_lsn
+                .unwrap_or(req.read_lsn.request_lsn),
+            &latest_gc_cutoff_lsn,
+        ) {
+            Ok(lsn) => lsn,
+            Err(err) => return err.into_get_page_response(req.request_id),
+        };
+
+        let mut batch = SmallVec::with_capacity(req.block_numbers.len());
+        for blkno in req.block_numbers {
+            // TODO: this creates one timer per page and throttles it. We should have a timer for
+            // the entire batch, and throttle only the batch, but this is equivalent to what
+            // PageServerHandler does already so we keep it for now.
+            let timer = Self::record_op_start_and_throttle(
+                &timeline,
+                metrics::SmgrQueryType::GetPageAtLsn,
+                received_at,
+            )
+            .await?;
+
+            batch.push(BatchedGetPageRequest {
+                req: PagestreamGetPageRequest {
+                    hdr: Self::make_hdr(req.read_lsn, req.request_id),
+                    rel: req.rel,
+                    blkno,
+                },
+                lsn_range: LsnRange {
+                    effective_lsn,
+                    request_lsn: req.read_lsn.request_lsn,
+                },
+                timer,
+                ctx: ctx.attached_child(),
+                batch_wait_ctx: None, // TODO: add tracing
+            });
+        }
+
+        // TODO: this does a relation size query for every page in the batch. Since this batch is
+        // all for one relation, we could do this only once. However, this is not the case for the
+        // libpq implementation.
+        let results = PageServerHandler::handle_get_page_at_lsn_request_batched(
+            &timeline,
+            batch,
+            io_concurrency,
+            GetPageBatchBreakReason::BatchFull, // TODO: not relevant for gRPC batches
+            &ctx,
+        )
+        .await;
+
+        let mut resp = page_api::GetPageResponse {
+            request_id: req.request_id,
+            status_code: page_api::GetPageStatusCode::Ok,
+            reason: None,
+            page_images: Vec::with_capacity(results.len()),
+        };
+
+        for result in results {
+            match result {
+                Ok((PagestreamBeMessage::GetPage(r), _, _)) => resp.page_images.push(r.page),
+                Ok((resp, _, _)) => {
+                    return Err(tonic::Status::internal(format!(
+                        "unexpected response: {resp:?}"
+                    )));
+                }
+                Err(err) => return err.err.into_get_page_response(req.request_id),
+            };
+        }
+
+        Ok(resp.into())
     }
 }
 
-impl From<GetActiveTenantError> for QueryError {
-    fn from(e: GetActiveTenantError) -> Self {
-        match e {
-            GetActiveTenantError::WaitForActiveTimeout { .. } => QueryError::Disconnected(
-                ConnectionError::Io(io::Error::new(io::ErrorKind::TimedOut, e.to_string())),
-            ),
-            GetActiveTenantError::Cancelled
-            | GetActiveTenantError::WillNotBecomeActive(TenantState::Stopping { .. }) => {
-                QueryError::Shutdown
-            }
-            e @ GetActiveTenantError::NotFound(_) => QueryError::NotFound(format!("{e}").into()),
-            e => QueryError::Other(anyhow::anyhow!(e)),
+/// Implements the gRPC page service.
+///
+/// TODO: cancellation.
+/// TODO: when the libpq impl is removed, remove the Pagestream types and inline the handler code.
+#[tonic::async_trait]
+impl proto::PageService for GrpcPageServiceHandler {
+    type GetBaseBackupStream = Pin<
+        Box<dyn Stream<Item = Result<proto::GetBaseBackupResponseChunk, tonic::Status>> + Send>,
+    >;
+
+    type GetPagesStream =
+        Pin<Box<dyn Stream<Item = Result<proto::GetPageResponse, tonic::Status>> + Send>>;
+
+    #[instrument(skip_all, fields(rel, lsn))]
+    async fn check_rel_exists(
+        &self,
+        req: tonic::Request<proto::CheckRelExistsRequest>,
+    ) -> Result<tonic::Response<proto::CheckRelExistsResponse>, tonic::Status> {
+        let received_at = extract::<ReceivedAt>(&req).0;
+        let timeline = self.get_request_timeline(&req).await?;
+        let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
+
+        // Validate the request, decorate the span, and convert it to a Pagestream request.
+        Self::ensure_shard_zero(&timeline)?;
+        let req: page_api::CheckRelExistsRequest = req.into_inner().try_into()?;
+
+        span_record!(rel=%req.rel, lsn=%req.read_lsn);
+
+        let req = PagestreamExistsRequest {
+            hdr: Self::make_hdr(req.read_lsn, 0),
+            rel: req.rel,
+        };
+
+        // Execute the request and convert the response.
+        let _timer = Self::record_op_start_and_throttle(
+            &timeline,
+            metrics::SmgrQueryType::GetRelExists,
+            received_at,
+        )
+        .await?;
+
+        let resp = PageServerHandler::handle_get_rel_exists_request(&timeline, &req, &ctx).await?;
+        let resp: page_api::CheckRelExistsResponse = resp.exists;
+        Ok(tonic::Response::new(resp.into()))
+    }
+
+    // TODO: ensure clients use gzip compression for the stream.
+    #[instrument(skip_all, fields(lsn))]
+    async fn get_base_backup(
+        &self,
+        req: tonic::Request<proto::GetBaseBackupRequest>,
+    ) -> Result<tonic::Response<Self::GetBaseBackupStream>, tonic::Status> {
+        // Send 64 KB chunks to avoid large memory allocations.
+        const CHUNK_SIZE: usize = 64 * 1024;
+
+        let timeline = self.get_request_timeline(&req).await?;
+        let ctx = self.ctx.with_scope_timeline(&timeline);
+
+        // Validate the request, decorate the span, and wait for the LSN to arrive.
+        //
+        // TODO: this requires a read LSN, is that ok?
+        Self::ensure_shard_zero(&timeline)?;
+        if timeline.is_archived() == Some(true) {
+            return Err(tonic::Status::failed_precondition("timeline is archived"));
         }
+        let req: page_api::GetBaseBackupRequest = req.into_inner().try_into()?;
+
+        span_record!(lsn=%req.read_lsn);
+
+        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
+        timeline
+            .wait_lsn(
+                req.read_lsn.request_lsn,
+                WaitLsnWaiter::PageService,
+                WaitLsnTimeout::Default,
+                &ctx,
+            )
+            .await?;
+        timeline
+            .check_lsn_is_in_scope(req.read_lsn.request_lsn, &latest_gc_cutoff_lsn)
+            .map_err(|err| {
+                tonic::Status::invalid_argument(format!("invalid basebackup LSN: {err}"))
+            })?;
+
+        // Spawn a task to run the basebackup.
+        //
+        // TODO: do we need to support full base backups, for debugging?
+        let span = Span::current();
+        let (mut simplex_read, mut simplex_write) = tokio::io::simplex(CHUNK_SIZE);
+        let jh = tokio::spawn(async move {
+            let result = basebackup::send_basebackup_tarball(
+                &mut simplex_write,
+                &timeline,
+                Some(req.read_lsn.request_lsn),
+                None,
+                false,
+                req.replica,
+                &ctx,
+            )
+            .instrument(span) // propagate request span
+            .await;
+            simplex_write.shutdown().await.map_err(|err| {
+                BasebackupError::Server(anyhow!("simplex shutdown failed: {err}"))
+            })?;
+            result
+        });
+
+        // Emit chunks of size CHUNK_SIZE.
+        let chunks = async_stream::try_stream! {
+            let mut chunk = BytesMut::with_capacity(CHUNK_SIZE);
+            loop {
+                let n = simplex_read.read_buf(&mut chunk).await.map_err(|err| {
+                    tonic::Status::internal(format!("failed to read basebackup chunk: {err}"))
+                })?;
+
+                // If we read 0 bytes, either the chunk is full or the stream is closed.
+                if n == 0 {
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    yield proto::GetBaseBackupResponseChunk::from(chunk.clone().freeze());
+                    chunk.clear();
+                }
+            }
+            // Wait for the basebackup task to exit and check for errors.
+            jh.await.map_err(|err| {
+                tonic::Status::internal(format!("basebackup failed: {err}"))
+            })??;
+        };
+
+        Ok(tonic::Response::new(Box::pin(chunks)))
+    }
+
+    #[instrument(skip_all, fields(db_oid, lsn))]
+    async fn get_db_size(
+        &self,
+        req: tonic::Request<proto::GetDbSizeRequest>,
+    ) -> Result<tonic::Response<proto::GetDbSizeResponse>, tonic::Status> {
+        let received_at = extract::<ReceivedAt>(&req).0;
+        let timeline = self.get_request_timeline(&req).await?;
+        let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
+
+        // Validate the request, decorate the span, and convert it to a Pagestream request.
+        Self::ensure_shard_zero(&timeline)?;
+        let req: page_api::GetDbSizeRequest = req.into_inner().try_into()?;
+
+        span_record!(db_oid=%req.db_oid, lsn=%req.read_lsn);
+
+        let req = PagestreamDbSizeRequest {
+            hdr: Self::make_hdr(req.read_lsn, 0),
+            dbnode: req.db_oid,
+        };
+
+        // Execute the request and convert the response.
+        let _timer = Self::record_op_start_and_throttle(
+            &timeline,
+            metrics::SmgrQueryType::GetDbSize,
+            received_at,
+        )
+        .await?;
+
+        let resp = PageServerHandler::handle_db_size_request(&timeline, &req, &ctx).await?;
+        let resp = resp.db_size as page_api::GetDbSizeResponse;
+        Ok(tonic::Response::new(resp.into()))
+    }
+
+    // NB: don't instrument this, instrument each streamed request.
+    async fn get_pages(
+        &self,
+        req: tonic::Request<tonic::Streaming<proto::GetPageRequest>>,
+    ) -> Result<tonic::Response<Self::GetPagesStream>, tonic::Status> {
+        // Extract the timeline from the request and check that it exists.
+        let ttid = *extract::<TenantTimelineId>(&req);
+        let shard_index = *extract::<ShardIndex>(&req);
+        let shard_selector = ShardSelector::Known(shard_index);
+
+        let mut handles = TimelineHandles::new(self.tenant_manager.clone());
+        handles
+            .get(ttid.tenant_id, ttid.timeline_id, shard_selector)
+            .await?;
+
+        // Spawn an IoConcurrency sidecar, if enabled.
+        let Ok(gate_guard) = self.gate_guard.try_clone() else {
+            return Err(tonic::Status::unavailable("shutting down"));
+        };
+        let io_concurrency =
+            IoConcurrency::spawn_from_conf(self.get_vectored_concurrent_io, gate_guard);
+
+        // Spawn a task to handle the GetPageRequest stream.
+        let span = Span::current();
+        let ctx = self.ctx.attached_child();
+        let mut reqs = req.into_inner();
+
+        let resps = async_stream::try_stream! {
+            let timeline = handles
+                .get(ttid.tenant_id, ttid.timeline_id, shard_selector)
+                .await?
+                .downgrade();
+            while let Some(req) = reqs.message().await? {
+                yield Self::get_page(&ctx, &timeline, req, io_concurrency.clone())
+                    .instrument(span.clone()) // propagate request span
+                    .await?
+            }
+        };
+
+        Ok(tonic::Response::new(Box::pin(resps)))
+    }
+
+    #[instrument(skip_all, fields(rel, lsn))]
+    async fn get_rel_size(
+        &self,
+        req: tonic::Request<proto::GetRelSizeRequest>,
+    ) -> Result<tonic::Response<proto::GetRelSizeResponse>, tonic::Status> {
+        let received_at = extract::<ReceivedAt>(&req).0;
+        let timeline = self.get_request_timeline(&req).await?;
+        let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
+
+        // Validate the request, decorate the span, and convert it to a Pagestream request.
+        Self::ensure_shard_zero(&timeline)?;
+        let req: page_api::GetRelSizeRequest = req.into_inner().try_into()?;
+
+        span_record!(rel=%req.rel, lsn=%req.read_lsn);
+
+        let req = PagestreamNblocksRequest {
+            hdr: Self::make_hdr(req.read_lsn, 0),
+            rel: req.rel,
+        };
+
+        // Execute the request and convert the response.
+        let _timer = Self::record_op_start_and_throttle(
+            &timeline,
+            metrics::SmgrQueryType::GetRelSize,
+            received_at,
+        )
+        .await?;
+
+        let resp = PageServerHandler::handle_get_nblocks_request(&timeline, &req, &ctx).await?;
+        let resp: page_api::GetRelSizeResponse = resp.n_blocks;
+        Ok(tonic::Response::new(resp.into()))
+    }
+
+    #[instrument(skip_all, fields(kind, segno, lsn))]
+    async fn get_slru_segment(
+        &self,
+        req: tonic::Request<proto::GetSlruSegmentRequest>,
+    ) -> Result<tonic::Response<proto::GetSlruSegmentResponse>, tonic::Status> {
+        let received_at = extract::<ReceivedAt>(&req).0;
+        let timeline = self.get_request_timeline(&req).await?;
+        let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
+
+        // Validate the request, decorate the span, and convert it to a Pagestream request.
+        Self::ensure_shard_zero(&timeline)?;
+        let req: page_api::GetSlruSegmentRequest = req.into_inner().try_into()?;
+
+        span_record!(kind=%req.kind, segno=%req.segno, lsn=%req.read_lsn);
+
+        let req = PagestreamGetSlruSegmentRequest {
+            hdr: Self::make_hdr(req.read_lsn, 0),
+            kind: req.kind as u8,
+            segno: req.segno,
+        };
+
+        // Execute the request and convert the response.
+        let _timer = Self::record_op_start_and_throttle(
+            &timeline,
+            metrics::SmgrQueryType::GetSlruSegment,
+            received_at,
+        )
+        .await?;
+
+        let resp =
+            PageServerHandler::handle_get_slru_segment_request(&timeline, &req, &ctx).await?;
+        let resp: page_api::GetSlruSegmentResponse = resp.segment;
+        Ok(tonic::Response::new(resp.into()))
+    }
+}
+
+/// gRPC middleware layer that handles observability concerns:
+///
+/// * Creates and enters a tracing span.
+/// * Records the request start time as a ReceivedAt request extension.
+///
+/// TODO: add perf tracing.
+/// TODO: add timing and metrics.
+/// TODO: add logging.
+#[derive(Clone)]
+struct ObservabilityLayer;
+
+impl<S: tonic::server::NamedService> tower::Layer<S> for ObservabilityLayer {
+    type Service = ObservabilityLayerService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        Self::Service { inner }
+    }
+}
+
+#[derive(Clone)]
+struct ObservabilityLayerService<S> {
+    inner: S,
+}
+
+#[derive(Clone, Copy)]
+struct ReceivedAt(Instant);
+
+impl<S: tonic::server::NamedService> tonic::server::NamedService for ObservabilityLayerService<S> {
+    const NAME: &'static str = S::NAME; // propagate inner service name
+}
+
+impl<S, B> tower::Service<http::Request<B>> for ObservabilityLayerService<S>
+where
+    S: tower::Service<http::Request<B>>,
+    S::Future: Send + 'static,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+
+    fn call(&mut self, mut req: http::Request<B>) -> Self::Future {
+        // Record the request start time as a request extension.
+        //
+        // TODO: we should start a timer here instead, but it currently requires a timeline handle
+        // and SmgrQueryType, which we don't have yet. Refactor it to provide it later.
+        req.extensions_mut().insert(ReceivedAt(Instant::now()));
+
+        // Create a basic tracing span. Enter the span for the current thread (to use it for inner
+        // sync code like interceptors), and instrument the future (to use it for inner async code
+        // like the page service itself).
+        //
+        // The instrument() call below is not sufficient. It only affects the returned future, and
+        // only takes effect when the caller polls it. Any sync code executed when we call
+        // self.inner.call() below (such as interceptors) runs outside of the returned future, and
+        // is not affected by it. We therefore have to enter the span on the current thread too.
+        let span = info_span!(
+            "grpc:pageservice",
+            // Set by TenantMetadataInterceptor.
+            tenant_id = field::Empty,
+            timeline_id = field::Empty,
+            shard_id = field::Empty,
+        );
+        let _guard = span.enter();
+
+        Box::pin(self.inner.call(req).instrument(span.clone()))
+    }
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
     }
 }
 
 /// gRPC interceptor that decodes tenant metadata and stores it as request extensions of type
 /// TenantTimelineId and ShardIndex.
-///
-/// TODO: consider looking up the timeline handle here and storing it.
 #[derive(Clone)]
 struct TenantMetadataInterceptor;
 
@@ -3400,25 +3918,28 @@ impl tonic::service::Interceptor for TenantMetadataInterceptor {
             .map_err(|_| tonic::Status::invalid_argument("invalid neon-timeline-id"))?;
 
         // Decode the shard ID.
-        let shard_index = req
+        let shard_id = req
             .metadata()
             .get("neon-shard-id")
             .ok_or_else(|| tonic::Status::invalid_argument("missing neon-shard-id"))?
             .to_str()
             .map_err(|_| tonic::Status::invalid_argument("invalid neon-shard-id"))?;
-        let shard_index = ShardIndex::from_str(shard_index)
+        let shard_id = ShardIndex::from_str(shard_id)
             .map_err(|_| tonic::Status::invalid_argument("invalid neon-shard-id"))?;
 
         // Stash them in the request.
         let extensions = req.extensions_mut();
         extensions.insert(TenantTimelineId::new(tenant_id, timeline_id));
-        extensions.insert(shard_index);
+        extensions.insert(shard_id);
+
+        // Decorate the tracing span.
+        span_record!(%tenant_id, %timeline_id, %shard_id);
 
         Ok(req)
     }
 }
 
-/// Authenticates gRPC page service requests. Must run after TenantMetadataInterceptor.
+/// Authenticates gRPC page service requests.
 #[derive(Clone)]
 struct TenantAuthInterceptor {
     auth: Option<Arc<SwappableJwtAuth>>,
@@ -3437,11 +3958,8 @@ impl tonic::service::Interceptor for TenantAuthInterceptor {
             return Ok(req);
         };
 
-        // Fetch the tenant ID that's been set by TenantMetadataInterceptor.
-        let ttid = req
-            .extensions()
-            .get::<TenantTimelineId>()
-            .expect("TenantMetadataInterceptor must run before TenantAuthInterceptor");
+        // Fetch the tenant ID from the request extensions (set by TenantMetadataInterceptor).
+        let TenantTimelineId { tenant_id, .. } = *extract::<TenantTimelineId>(&req);
 
         // Fetch and decode the JWT token.
         let jwt = req
@@ -3459,13 +3977,28 @@ impl tonic::service::Interceptor for TenantAuthInterceptor {
         let claims = jwtdata.claims;
 
         // Check if the token is valid for this tenant.
-        check_permission(&claims, Some(ttid.tenant_id))
+        check_permission(&claims, Some(tenant_id))
             .map_err(|err| tonic::Status::permission_denied(err.to_string()))?;
 
         // TODO: consider stashing the claims in the request extensions, if needed.
 
         Ok(req)
     }
+}
+
+/// Extracts the given type from the request extensions, or panics if it is missing.
+fn extract<T: Send + Sync + 'static>(req: &tonic::Request<impl Any>) -> &T {
+    extract_from(req.extensions())
+}
+
+/// Extract the given type from the request extensions, or panics if it is missing. This variant
+/// can extract both from a tonic::Request and http::Request.
+fn extract_from<T: Send + Sync + 'static>(ext: &http::Extensions) -> &T {
+    let Some(value) = ext.get::<T>() else {
+        let name = std::any::type_name::<T>();
+        panic!("extension {name} should be set by middleware");
+    };
+    value
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -3486,10 +4019,72 @@ impl From<GetActiveTimelineError> for QueryError {
     }
 }
 
-impl From<crate::tenant::timeline::handle::HandleUpgradeError> for QueryError {
-    fn from(e: crate::tenant::timeline::handle::HandleUpgradeError) -> Self {
+impl From<GetActiveTimelineError> for tonic::Status {
+    fn from(err: GetActiveTimelineError) -> Self {
+        let message = err.to_string();
+        let code = match err {
+            GetActiveTimelineError::Tenant(err) => tonic::Status::from(err).code(),
+            GetActiveTimelineError::Timeline(err) => tonic::Status::from(err).code(),
+        };
+        tonic::Status::new(code, message)
+    }
+}
+
+impl From<GetTimelineError> for tonic::Status {
+    fn from(err: GetTimelineError) -> Self {
+        use tonic::Code;
+        let code = match &err {
+            GetTimelineError::NotFound { .. } => Code::NotFound,
+            GetTimelineError::NotActive { .. } => Code::Unavailable,
+            GetTimelineError::ShuttingDown => Code::Unavailable,
+        };
+        tonic::Status::new(code, err.to_string())
+    }
+}
+
+impl From<GetActiveTenantError> for QueryError {
+    fn from(e: GetActiveTenantError) -> Self {
         match e {
-            crate::tenant::timeline::handle::HandleUpgradeError::ShutDown => QueryError::Shutdown,
+            GetActiveTenantError::WaitForActiveTimeout { .. } => QueryError::Disconnected(
+                ConnectionError::Io(io::Error::new(io::ErrorKind::TimedOut, e.to_string())),
+            ),
+            GetActiveTenantError::Cancelled
+            | GetActiveTenantError::WillNotBecomeActive(TenantState::Stopping { .. }) => {
+                QueryError::Shutdown
+            }
+            e @ GetActiveTenantError::NotFound(_) => QueryError::NotFound(format!("{e}").into()),
+            e => QueryError::Other(anyhow::anyhow!(e)),
+        }
+    }
+}
+
+impl From<GetActiveTenantError> for tonic::Status {
+    fn from(err: GetActiveTenantError) -> Self {
+        use tonic::Code;
+        let code = match &err {
+            GetActiveTenantError::Broken(_) => Code::Internal,
+            GetActiveTenantError::Cancelled => Code::Unavailable,
+            GetActiveTenantError::NotFound(_) => Code::NotFound,
+            GetActiveTenantError::SwitchedTenant => Code::Unavailable,
+            GetActiveTenantError::WaitForActiveTimeout { .. } => Code::Unavailable,
+            GetActiveTenantError::WillNotBecomeActive(_) => Code::Unavailable,
+        };
+        tonic::Status::new(code, err.to_string())
+    }
+}
+
+impl From<HandleUpgradeError> for QueryError {
+    fn from(e: HandleUpgradeError) -> Self {
+        match e {
+            HandleUpgradeError::ShutDown => QueryError::Shutdown,
+        }
+    }
+}
+
+impl From<HandleUpgradeError> for tonic::Status {
+    fn from(err: HandleUpgradeError) -> Self {
+        match err {
+            HandleUpgradeError::ShutDown => tonic::Status::unavailable("timeline is shutting down"),
         }
     }
 }
