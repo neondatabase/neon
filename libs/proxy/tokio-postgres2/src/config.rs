@@ -17,7 +17,6 @@ use crate::{Client, Connection, Error};
 
 /// TLS configuration.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
 pub enum SslMode {
     /// Do not use TLS.
     Disable,
@@ -231,7 +230,7 @@ impl Config {
     /// Requires the `runtime` Cargo feature (enabled by default).
     pub async fn connect<T>(
         &self,
-        tls: T,
+        tls: &T,
     ) -> Result<(Client, Connection<TcpStream, T::Stream>), Error>
     where
         T: MakeTlsConnect<TcpStream>,

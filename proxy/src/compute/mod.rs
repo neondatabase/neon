@@ -1,15 +1,14 @@
 use std::fmt::Debug;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::time::Duration;
 
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
 use postgres_client::config::{AuthKeys, SslMode};
+use postgres_client::maybe_tls_stream::MaybeTlsStream;
 use postgres_client::tls::MakeTlsConnect;
-use postgres_client::{CancelToken, RawConnection};
+use postgres_client::{CancelToken, NoTls, RawConnection};
 use postgres_protocol::message::backend::NoticeResponseBody;
-use rustls::pki_types::InvalidDnsNameError;
 use thiserror::Error;
 use tokio::net::{TcpStream, lookup_host};
 use tracing::{debug, error, info, warn};
@@ -17,6 +16,7 @@ use tracing::{debug, error, info, warn};
 use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
 use crate::auth::parse_endpoint_param;
 use crate::cancellation::CancelClosure;
+use crate::compute::tls::TlsError;
 use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::control_plane::client::ApiLockError;
@@ -26,8 +26,9 @@ use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, NumDbConnectionsGuard};
 use crate::pqproto::StartupMessageParams;
 use crate::proxy::neon_option;
-use crate::tls::postgres_rustls::MakeRustlsConnect;
 use crate::types::Host;
+
+mod tls;
 
 pub const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
 
@@ -39,10 +40,7 @@ pub(crate) enum ConnectionError {
     Postgres(#[from] postgres_client::Error),
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
-    CouldNotConnect(#[from] io::Error),
-
-    #[error("{COULD_NOT_CONNECT}: {0}")]
-    TlsError(#[from] InvalidDnsNameError),
+    TlsError(#[from] TlsError),
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
     WakeComputeError(#[from] WakeComputeError),
@@ -74,7 +72,7 @@ impl UserFacingError for ConnectionError {
             ConnectionError::TooManyConnectionAttempts(_) => {
                 "Failed to acquire permit to connect to the database. Too many database connection attempts are currently ongoing.".to_owned()
             }
-            _ => COULD_NOT_CONNECT.to_owned(),
+            ConnectionError::TlsError(_) => COULD_NOT_CONNECT.to_owned(),
         }
     }
 }
@@ -86,7 +84,6 @@ impl ReportableError for ConnectionError {
                 crate::error::ErrorKind::Postgres
             }
             ConnectionError::Postgres(_) => crate::error::ErrorKind::Compute,
-            ConnectionError::CouldNotConnect(_) => crate::error::ErrorKind::Compute,
             ConnectionError::TlsError(_) => crate::error::ErrorKind::Compute,
             ConnectionError::WakeComputeError(e) => e.get_error_kind(),
             ConnectionError::TooManyConnectionAttempts(e) => e.get_error_kind(),
@@ -212,8 +209,13 @@ impl AuthInfo {
 }
 
 impl ConnectInfo {
-    /// Establish a raw TCP connection to the compute node.
-    async fn connect_raw(&self, timeout: Duration) -> io::Result<(SocketAddr, TcpStream, &str)> {
+    /// Establish a raw TCP+TLS connection to the compute node.
+    async fn connect_raw(
+        &self,
+        config: &ComputeConfig,
+    ) -> Result<(SocketAddr, MaybeTlsStream<TcpStream, RustlsStream>), TlsError> {
+        let timeout = config.timeout;
+
         // wrap TcpStream::connect with timeout
         let connect_with_timeout = |addrs| {
             tokio::time::timeout(timeout, TcpStream::connect(addrs)).map(move |res| match res {
@@ -251,21 +253,23 @@ impl ConnectInfo {
         };
 
         match connect_once(&*addrs).await {
-            Ok((sockaddr, stream)) => Ok((sockaddr, stream, host)),
+            Ok((sockaddr, stream)) => Ok((
+                sockaddr,
+                tls::connect_tls(stream, self.ssl_mode, config, host).await?,
+            )),
             Err(err) => {
                 warn!("couldn't connect to compute node at {host}:{port}: {err}");
-                Err(err)
+                Err(TlsError::Connection(err))
             }
         }
     }
 }
 
-type RustlsStream = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>::Stream;
+type RustlsStream = <ComputeConfig as MakeTlsConnect<tokio::net::TcpStream>>::Stream;
 
 pub(crate) struct PostgresConnection {
     /// Socket connected to a compute node.
-    pub(crate) stream:
-        postgres_client::maybe_tls_stream::MaybeTlsStream<tokio::net::TcpStream, RustlsStream>,
+    pub(crate) stream: MaybeTlsStream<tokio::net::TcpStream, RustlsStream>,
     /// PostgreSQL connection parameters.
     pub(crate) params: std::collections::HashMap<String, String>,
     /// Query cancellation token.
@@ -288,21 +292,13 @@ impl ConnectInfo {
         config: &ComputeConfig,
         user_info: ComputeUserInfo,
     ) -> Result<PostgresConnection, ConnectionError> {
+        let mut tmp_config = auth.enrich(self.to_postgres_client_config());
+        // we setup SSL early in `ConnectInfo::connect_raw`.
+        tmp_config.ssl_mode(SslMode::Disable);
+
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let (socket_addr, stream, host) = self.connect_raw(config.timeout).await?;
-        drop(pause);
-
-        let mut mk_tls = crate::tls::postgres_rustls::MakeRustlsConnect::new(config.tls.clone());
-        let tls = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>::make_tls_connect(
-            &mut mk_tls,
-            host,
-        )?;
-
-        let tmp_config = auth.enrich(self.to_postgres_client_config());
-
-        // connect_raw() will not use TLS if sslmode is "disable"
-        let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let connection = tmp_config.connect_raw(stream, tls).await?;
+        let (socket_addr, stream) = self.connect_raw(config).await?;
+        let connection = tmp_config.connect_raw(stream, NoTls).await?;
         drop(pause);
 
         let RawConnection {
@@ -315,12 +311,13 @@ impl ConnectInfo {
 
         tracing::Span::current().record("pid", tracing::field::display(process_id));
         tracing::Span::current().record("compute_id", tracing::field::display(&aux.compute_id));
-        let stream = stream.into_inner();
+        let MaybeTlsStream::Raw(stream) = stream.into_inner();
 
         // TODO: lots of useful info but maybe we can move it elsewhere (eg traces?)
         info!(
             cold_start_info = ctx.cold_start_info().as_str(),
-            "connected to compute node at {host} ({socket_addr}) sslmode={:?}, latency={}, query_id={}",
+            "connected to compute node at {} ({socket_addr}) sslmode={:?}, latency={}, query_id={}",
+            self.host,
             self.ssl_mode,
             ctx.get_proxy_latency(),
             ctx.get_testodrome_id().unwrap_or_default(),
@@ -336,7 +333,7 @@ impl ConnectInfo {
                 process_id,
                 secret_key,
             },
-            host.to_string(),
+            self.host.to_string(),
             user_info,
         );
 

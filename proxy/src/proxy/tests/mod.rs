@@ -29,7 +29,6 @@ use crate::control_plane::{self, CachedNodeInfo, NodeInfo, NodeInfoCache};
 use crate::error::ErrorKind;
 use crate::pglb::connect_compute::ConnectMechanism;
 use crate::tls::client_config::compute_client_config_with_certs;
-use crate::tls::postgres_rustls::MakeRustlsConnect;
 use crate::tls::server_config::CertResolver;
 use crate::types::{BranchId, EndpointId, ProjectId};
 use crate::{sasl, scram};
@@ -72,13 +71,14 @@ struct ClientConfig<'a> {
     hostname: &'a str,
 }
 
-type TlsConnect<S> = <MakeRustlsConnect as MakeTlsConnect<S>>::TlsConnect;
+type TlsConnect<S> = <ComputeConfig as MakeTlsConnect<S>>::TlsConnect;
 
 impl ClientConfig<'_> {
     fn make_tls_connect(self) -> anyhow::Result<TlsConnect<DuplexStream>> {
-        let mut mk = MakeRustlsConnect::new(self.config);
-        let tls = MakeTlsConnect::<DuplexStream>::make_tls_connect(&mut mk, self.hostname)?;
-        Ok(tls)
+        Ok(crate::tls::postgres_rustls::make_tls_connect(
+            &self.config,
+            self.hostname,
+        )?)
     }
 }
 

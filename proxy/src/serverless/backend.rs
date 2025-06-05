@@ -322,7 +322,7 @@ impl PoolingBackend {
             );
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let (client, connection) = config.connect(postgres_client::NoTls).await?;
+        let (client, connection) = config.connect(&postgres_client::NoTls).await?;
         drop(pause);
 
         let pid = client.get_process_id();
@@ -520,10 +520,8 @@ impl ConnectMechanism for TokioMechanism {
             .dbname(&self.conn_info.dbname)
             .connect_timeout(compute_config.timeout);
 
-        let mk_tls =
-            crate::tls::postgres_rustls::MakeRustlsConnect::new(compute_config.tls.clone());
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let res = config.connect(mk_tls).await;
+        let res = config.connect(compute_config).await;
         drop(pause);
         let (client, connection) = permit.release_result(res)?;
 
