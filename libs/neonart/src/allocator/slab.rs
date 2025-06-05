@@ -78,10 +78,19 @@ unsafe fn unlink_slab_block(mut list: Option<&mut BlockList>, elem: *mut SlabBlo
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 struct BlockList {
     head: *mut SlabBlockHeader,
     tail: *mut SlabBlockHeader,
+}
+
+impl Default for BlockList {
+    fn default() -> Self {
+        BlockList {
+            head: std::ptr::null_mut(),
+            tail: std::ptr::null_mut(),
+        }
+    }
 }
 
 impl BlockList {
