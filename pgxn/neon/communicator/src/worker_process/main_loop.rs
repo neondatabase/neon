@@ -98,8 +98,6 @@ pub(super) async fn init(
         .integrated_cache_init_struct
         .worker_process_init(last_lsn, file_cache);
 
-    info!("Test log message");
-
     let mut request_tracker = ShardedRequestTracker::new();
     request_tracker.update_shard_map(shard_map,
         None,
