@@ -3,7 +3,7 @@
 
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use camino::Utf8PathBuf;
 use num_traits::Num;
@@ -18,6 +18,7 @@ use crate::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64};
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache;
+use crate::tenant::storage_layer::inmemory_layer::GlobalResourceUnits;
 use crate::tenant::storage_layer::inmemory_layer::vectored_dio_read::File;
 use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAlignedMut;
 use crate::virtual_file::owned_buffers_io::slice::SliceMutExt;
@@ -30,9 +31,13 @@ pub struct EphemeralFile {
     _tenant_shard_id: TenantShardId,
     _timeline_id: TimelineId,
     page_cache_file_id: page_cache::FileId,
-    bytes_written: u64,
     file: TempVirtualFileCoOwnedByEphemeralFileAndBufferedWriter,
-    buffered_writer: BufferedWriter,
+
+    buffered_writer: tokio::sync::RwLock<BufferedWriter>,
+
+    bytes_written: AtomicU64,
+
+    resource_units: std::sync::Mutex<GlobalResourceUnits>,
 }
 
 type BufferedWriter = owned_buffers_io::write::BufferedWriter<
@@ -94,9 +99,8 @@ impl EphemeralFile {
             _tenant_shard_id: tenant_shard_id,
             _timeline_id: timeline_id,
             page_cache_file_id,
-            bytes_written: 0,
             file: file.clone(),
-            buffered_writer: BufferedWriter::new(
+            buffered_writer: tokio::sync::RwLock::new(BufferedWriter::new(
                 file,
                 0,
                 || IoBufferMut::with_capacity(TAIL_SZ),
@@ -104,7 +108,9 @@ impl EphemeralFile {
                 cancel.child_token(),
                 ctx,
                 info_span!(parent: None, "ephemeral_file_buffered_writer", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%timeline_id, path = %filename),
-            ),
+            )),
+            bytes_written: AtomicU64::new(0),
+            resource_units: std::sync::Mutex::new(GlobalResourceUnits::new()),
         })
     }
 }
@@ -159,7 +165,7 @@ pub(crate) enum EphemeralFileWriteError {
 
 impl EphemeralFile {
     pub(crate) fn len(&self) -> u64 {
-        self.bytes_written
+        self.bytes_written.load(Ordering::Acquire)
     }
 
     pub(crate) fn page_cache_file_id(&self) -> page_cache::FileId {
@@ -186,7 +192,7 @@ impl EphemeralFile {
     /// Panics if the write is short because there's no way we can recover from that.
     /// TODO: make upstack handle this as an error.
     pub(crate) async fn write_raw(
-        &mut self,
+        &self,
         srcbuf: &[u8],
         ctx: &RequestContext,
     ) -> Result<u64, EphemeralFileWriteError> {
@@ -198,11 +204,12 @@ impl EphemeralFile {
     }
 
     async fn write_raw_controlled(
-        &mut self,
+        &self,
         srcbuf: &[u8],
         ctx: &RequestContext,
     ) -> Result<(u64, Option<owned_buffers_io::write::FlushControl>), EphemeralFileWriteError> {
-        let pos = self.bytes_written;
+        // TODO(vlad): Memory ordering of this
+        let pos = self.bytes_written.load(Ordering::Acquire);
 
         let new_bytes_written = pos.checked_add(srcbuf.len().into_u64()).ok_or_else(|| {
             EphemeralFileWriteError::TooLong(format!(
@@ -211,9 +218,9 @@ impl EphemeralFile {
             ))
         })?;
 
-        // Write the payload
-        let (nwritten, control) = self
-            .buffered_writer
+        let mut writer = self.buffered_writer.write().await;
+
+        let (nwritten, control) = writer
             .write_buffered_borrowed_controlled(srcbuf, ctx)
             .await
             .map_err(|e| match e {
@@ -225,9 +232,19 @@ impl EphemeralFile {
             "buffered writer has no short writes"
         );
 
-        self.bytes_written = new_bytes_written;
+        self.bytes_written
+            .store(new_bytes_written, Ordering::Release);
+
+        let mut resource_units = self.resource_units.lock().unwrap();
+        resource_units.maybe_publish_size(new_bytes_written);
 
         Ok((pos, control))
+    }
+
+    pub(crate) fn tick(&self) -> Option<u64> {
+        let mut resource_units = self.resource_units.lock().unwrap();
+        let len = self.bytes_written.load(Ordering::Relaxed);
+        resource_units.publish_size(len)
     }
 }
 
@@ -235,31 +252,39 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
     async fn read_exact_at_eof_ok<B: IoBufAlignedMut + Send>(
         &self,
         start: u64,
-        dst: tokio_epoll_uring::Slice<B>,
+        mut dst: tokio_epoll_uring::Slice<B>,
         ctx: &RequestContext,
     ) -> std::io::Result<(tokio_epoll_uring::Slice<B>, usize)> {
-        let submitted_offset = self.buffered_writer.bytes_submitted();
+        // We will fill the slice in back to front. Hence, we need
+        // the slice to be fully initialized.
+        // TODO(vlad): Nicer way of doing this
+        dst.as_mut_rust_slice_full_zeroed();
 
-        let mutable = match self.buffered_writer.inspect_mutable() {
-            Some(mutable) => &mutable[0..mutable.pending()],
-            None => {
-                // Timeline::cancel and hence buffered writer flush was cancelled.
-                // Remain read-available while timeline is shutting down.
-                &[]
-            }
-        };
-
-        let maybe_flushed = self.buffered_writer.inspect_maybe_flushed();
+        let bytes_written = self.bytes_written.load(Ordering::Acquire);
 
         let dst_cap = dst.bytes_total().into_u64();
         let end = {
             // saturating_add is correct here because the max file size is u64::MAX, so,
             // if start + dst.len() > u64::MAX, then we know it will be a short read
             let mut end: u64 = start.saturating_add(dst_cap);
-            if end > self.bytes_written {
-                end = self.bytes_written;
+            if end > bytes_written {
+                end = bytes_written;
             }
             end
+        };
+
+        let writer = self.buffered_writer.read().await;
+
+        let submitted_offset = writer.bytes_submitted();
+        let maybe_flushed = writer.inspect_maybe_flushed();
+
+        let mutable = match writer.inspect_mutable() {
+            Some(mutable) => &mutable[0..mutable.pending()],
+            None => {
+                // Timeline::cancel and hence buffered writer flush was cancelled.
+                // Remain read-available while timeline is shutting down.
+                &[]
+            }
         };
 
         // inclusive, exclusive
@@ -306,13 +331,33 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
 
         let mutable_range = Range(std::cmp::max(start, submitted_offset), end);
 
-        let dst = if written_range.len() > 0 {
+        // There are three sources from which we might have to read data:
+        // 1. The file itself
+        // 2. The buffer which contains changes currently being flushed
+        // 3. The buffer which contains chnages yet to be flushed
+        //
+        // For better concurrency, we do them in reverse order: perform the in-memory
+        // reads while holding the writer lock, drop the writer lock and read from the
+        // file if required.
+
+        let dst = if mutable_range.len() > 0 {
+            let offset_in_buffer = mutable_range
+                .0
+                .checked_sub(submitted_offset)
+                .unwrap()
+                .into_usize();
+            let to_copy =
+                &mutable[offset_in_buffer..(offset_in_buffer + mutable_range.len().into_usize())];
             let bounds = dst.bounds();
-            let slice = self
-                .file
-                .read_exact_at(dst.slice(0..written_range.len().into_usize()), start, ctx)
-                .await?;
-            Slice::from_buf_bounds(Slice::into_inner(slice), bounds)
+            let mut view = dst.slice({
+                let start =
+                    written_range.len().into_usize() + maybe_flushed_range.len().into_usize();
+                let end = start.checked_add(mutable_range.len().into_usize()).unwrap();
+                start..end
+            });
+            view.as_mut_rust_slice_full_zeroed()
+                .copy_from_slice(to_copy);
+            Slice::from_buf_bounds(Slice::into_inner(view), bounds)
         } else {
             dst
         };
@@ -342,24 +387,15 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
             dst
         };
 
-        let dst = if mutable_range.len() > 0 {
-            let offset_in_buffer = mutable_range
-                .0
-                .checked_sub(submitted_offset)
-                .unwrap()
-                .into_usize();
-            let to_copy =
-                &mutable[offset_in_buffer..(offset_in_buffer + mutable_range.len().into_usize())];
+        drop(writer);
+
+        let dst = if written_range.len() > 0 {
             let bounds = dst.bounds();
-            let mut view = dst.slice({
-                let start =
-                    written_range.len().into_usize() + maybe_flushed_range.len().into_usize();
-                let end = start.checked_add(mutable_range.len().into_usize()).unwrap();
-                start..end
-            });
-            view.as_mut_rust_slice_full_zeroed()
-                .copy_from_slice(to_copy);
-            Slice::from_buf_bounds(Slice::into_inner(view), bounds)
+            let slice = self
+                .file
+                .read_exact_at(dst.slice(0..written_range.len().into_usize()), start, ctx)
+                .await?;
+            Slice::from_buf_bounds(Slice::into_inner(slice), bounds)
         } else {
             dst
         };
@@ -460,13 +496,15 @@ mod tests {
         let gate = utils::sync::gate::Gate::default();
         let cancel = CancellationToken::new();
 
-        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &cancel, &ctx)
+        let file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &cancel, &ctx)
             .await
             .unwrap();
 
-        let mutable = file.buffered_writer.mutable();
+        let writer = file.buffered_writer.read().await;
+        let mutable = writer.mutable();
         let cap = mutable.capacity();
         let align = mutable.align();
+        drop(writer);
 
         let write_nbytes = cap * 2 + cap / 2;
 
@@ -504,10 +542,11 @@ mod tests {
         let file_contents = std::fs::read(file.file.path()).unwrap();
         assert!(file_contents == content[0..cap * 2]);
 
-        let maybe_flushed_buffer_contents = file.buffered_writer.inspect_maybe_flushed().unwrap();
+        let writer = file.buffered_writer.read().await;
+        let maybe_flushed_buffer_contents = writer.inspect_maybe_flushed().unwrap();
         assert_eq!(&maybe_flushed_buffer_contents[..], &content[cap..cap * 2]);
 
-        let mutable_buffer_contents = file.buffered_writer.mutable();
+        let mutable_buffer_contents = writer.mutable();
         assert_eq!(mutable_buffer_contents, &content[cap * 2..write_nbytes]);
     }
 
@@ -517,12 +556,14 @@ mod tests {
 
         let gate = utils::sync::gate::Gate::default();
         let cancel = CancellationToken::new();
-        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &cancel, &ctx)
+        let file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &cancel, &ctx)
             .await
             .unwrap();
 
         // mutable buffer and maybe_flushed buffer each has `cap` bytes.
-        let cap = file.buffered_writer.mutable().capacity();
+        let writer = file.buffered_writer.read().await;
+        let cap = writer.mutable().capacity();
+        drop(writer);
 
         let content: Vec<u8> = rand::thread_rng()
             .sample_iter(rand::distributions::Standard)
@@ -540,12 +581,13 @@ mod tests {
             2 * cap.into_u64(),
             "buffered writer requires one write to be flushed if we write 2.5x buffer capacity"
         );
+        let writer = file.buffered_writer.read().await;
         assert_eq!(
-            &file.buffered_writer.inspect_maybe_flushed().unwrap()[0..cap],
+            &writer.inspect_maybe_flushed().unwrap()[0..cap],
             &content[cap..cap * 2]
         );
         assert_eq!(
-            &file.buffered_writer.mutable()[0..cap / 2],
+            &writer.mutable()[0..cap / 2],
             &content[cap * 2..cap * 2 + cap / 2]
         );
     }
@@ -563,13 +605,15 @@ mod tests {
         let gate = utils::sync::gate::Gate::default();
         let cancel = CancellationToken::new();
 
-        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &cancel, &ctx)
+        let file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &cancel, &ctx)
             .await
             .unwrap();
 
-        let mutable = file.buffered_writer.mutable();
+        let writer = file.buffered_writer.read().await;
+        let mutable = writer.mutable();
         let cap = mutable.capacity();
         let align = mutable.align();
+        drop(writer);
         let content: Vec<u8> = rand::thread_rng()
             .sample_iter(rand::distributions::Standard)
             .take(cap * 2 + cap / 2)
