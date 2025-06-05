@@ -1983,6 +1983,7 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
 # pgbouncer and its config
 COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer
 COPY --chmod=0666 --chown=postgres compute/etc/pgbouncer.ini /etc/pgbouncer.ini
+RUN mkdir -p /etc/pgbouncer && chown postgres:postgres /etc/pgbouncer
 
 COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
 COPY --from=compute-tools --chown=postgres /home/nonroot/target-bin/compute_ctl /usr/local/bin/compute_ctl
