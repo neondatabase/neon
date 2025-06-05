@@ -4237,6 +4237,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bytes",
  "camino",
  "clap",
  "futures",
@@ -4469,7 +4470,6 @@ dependencies = [
  "pageserver_api",
  "postgres_ffi",
  "prost 0.13.5",
- "smallvec",
  "thiserror 1.0.69",
  "tonic 0.13.1",
  "tonic-build",

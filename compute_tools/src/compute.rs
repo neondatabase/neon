@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
 use compute_api::responses::{
     ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus, LfcOffloadState,
-    LfcPrewarmState,
+    LfcPrewarmState, TlsConfig,
 };
 use compute_api::spec::{
     ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent,
@@ -396,7 +396,7 @@ impl ComputeNode {
         // because QEMU will already have its memory allocated from the host, and
         // the necessary binaries will already be cached.
         if cli_spec.is_none() {
-            this.prewarm_postgres()?;
+            this.prewarm_postgres_vm_memory()?;
         }
 
         // Set the up metric with Empty status before starting the HTTP server.
@@ -603,6 +603,8 @@ impl ComputeNode {
             });
         }
 
+        let tls_config = self.tls_config(&pspec.spec);
+
         // If there are any remote extensions in shared_preload_libraries, start downloading them
         if pspec.spec.remote_extensions.is_some() {
             let (this, spec) = (self.clone(), pspec.spec.clone());
@@ -659,7 +661,7 @@ impl ComputeNode {
             info!("tuning pgbouncer");
 
             let pgbouncer_settings = pgbouncer_settings.clone();
-            let tls_config = self.compute_ctl_config.tls.clone();
+            let tls_config = tls_config.clone();
 
             // Spawn a background task to do the tuning,
             // so that we don't block the main thread that starts Postgres.
@@ -678,7 +680,10 @@ impl ComputeNode {
 
             // Spawn a background task to do the configuration,
             // so that we don't block the main thread that starts Postgres.
-            let local_proxy = local_proxy.clone();
+
+            let mut local_proxy = local_proxy.clone();
+            local_proxy.tls = tls_config.clone();
+
             let _handle = tokio::spawn(async move {
                 if let Err(err) = local_proxy::configure(&local_proxy) {
                     error!("error while configuring local_proxy: {err:?}");
@@ -779,7 +784,7 @@ impl ComputeNode {
         // Spawn the extension stats background task
         self.spawn_extension_stats_task();
 
-        if pspec.spec.prewarm_lfc_on_startup {
+        if pspec.spec.autoprewarm {
             self.prewarm_lfc();
         }
         Ok(())
@@ -1205,13 +1210,15 @@ impl ComputeNode {
         let spec = &pspec.spec;
         let pgdata_path = Path::new(&self.params.pgdata);
 
+        let tls_config = self.tls_config(&pspec.spec);
+
         // Remove/create an empty pgdata directory and put configuration there.
         self.create_pgdata()?;
         config::write_postgres_conf(
             pgdata_path,
             &pspec.spec,
             self.params.internal_http_port,
-            &self.compute_ctl_config.tls,
+            tls_config,
         )?;
 
         // Syncing safekeepers is only safe with primary nodes: if a primary
@@ -1307,8 +1314,8 @@ impl ComputeNode {
     }
 
     /// Start and stop a postgres process to warm up the VM for startup.
-    pub fn prewarm_postgres(&self) -> Result<()> {
-        info!("prewarming");
+    pub fn prewarm_postgres_vm_memory(&self) -> Result<()> {
+        info!("prewarming VM memory");
 
         // Create pgdata
         let pgdata = &format!("{}.warmup", self.params.pgdata);
@@ -1350,7 +1357,7 @@ impl ComputeNode {
         kill(pm_pid, Signal::SIGQUIT)?;
         info!("sent SIGQUIT signal");
         pg.wait()?;
-        info!("done prewarming");
+        info!("done prewarming vm memory");
 
         // clean up
         let _ok = fs::remove_dir_all(pgdata);
@@ -1536,14 +1543,22 @@ impl ComputeNode {
                 .clone(),
         );
 
+        let mut tls_config = None::<TlsConfig>;
+        if spec.features.contains(&ComputeFeature::TlsExperimental) {
+            tls_config = self.compute_ctl_config.tls.clone();
+        }
+
         let max_concurrent_connections = self.max_service_connections(compute_state, &spec);
 
         // Merge-apply spec & changes to PostgreSQL state.
         self.apply_spec_sql(spec.clone(), conf.clone(), max_concurrent_connections)?;
 
         if let Some(local_proxy) = &spec.clone().local_proxy_config {
+            let mut local_proxy = local_proxy.clone();
+            local_proxy.tls = tls_config.clone();
+
             info!("configuring local_proxy");
-            local_proxy::configure(local_proxy).context("apply_config local_proxy")?;
+            local_proxy::configure(&local_proxy).context("apply_config local_proxy")?;
         }
 
         // Run migrations separately to not hold up cold starts
@@ -1595,11 +1610,13 @@ impl ComputeNode {
     pub fn reconfigure(&self) -> Result<()> {
         let spec = self.state.lock().unwrap().pspec.clone().unwrap().spec;
 
+        let tls_config = self.tls_config(&spec);
+
         if let Some(ref pgbouncer_settings) = spec.pgbouncer_settings {
             info!("tuning pgbouncer");
 
             let pgbouncer_settings = pgbouncer_settings.clone();
-            let tls_config = self.compute_ctl_config.tls.clone();
+            let tls_config = tls_config.clone();
 
             // Spawn a background task to do the tuning,
             // so that we don't block the main thread that starts Postgres.
@@ -1617,7 +1634,7 @@ impl ComputeNode {
             // Spawn a background task to do the configuration,
             // so that we don't block the main thread that starts Postgres.
             let mut local_proxy = local_proxy.clone();
-            local_proxy.tls = self.compute_ctl_config.tls.clone();
+            local_proxy.tls = tls_config.clone();
             tokio::spawn(async move {
                 if let Err(err) = local_proxy::configure(&local_proxy) {
                     error!("error while configuring local_proxy: {err:?}");
@@ -1635,7 +1652,7 @@ impl ComputeNode {
             pgdata_path,
             &spec,
             self.params.internal_http_port,
-            &self.compute_ctl_config.tls,
+            tls_config,
         )?;
 
         if !spec.skip_pg_catalog_updates {
@@ -1752,6 +1769,14 @@ impl ComputeNode {
                     }
                 }
             });
+        }
+    }
+
+    pub fn tls_config(&self, spec: &ComputeSpec) -> &Option<TlsConfig> {
+        if spec.features.contains(&ComputeFeature::TlsExperimental) {
+            &self.compute_ctl_config.tls
+        } else {
+            &None::<TlsConfig>
         }
     }
 

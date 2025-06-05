@@ -63,5 +63,9 @@ done
 for d in ${FAILED}; do
   cat "$(find $d -name regression.diffs)"
 done
+for postgis_diff in /tmp/pgis_reg/*_diff; do
+  echo "${postgis_diff}:"
+  cat "${postgis_diff}"
+done
 echo "${FAILED}"
 exit 1

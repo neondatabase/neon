@@ -17,7 +17,6 @@ use rustls::pki_types;
 use tokio::io::DuplexStream;
 use tracing_test::traced_test;
 
-use super::connect_compute::ConnectMechanism;
 use super::retry::CouldRetry;
 use super::*;
 use crate::auth::backend::{
@@ -28,6 +27,7 @@ use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
 use crate::control_plane::{self, CachedNodeInfo, NodeInfo, NodeInfoCache};
 use crate::error::ErrorKind;
+use crate::pglb::connect_compute::ConnectMechanism;
 use crate::tls::client_config::compute_client_config_with_certs;
 use crate::tls::postgres_rustls::MakeRustlsConnect;
 use crate::tls::server_config::CertResolver;
@@ -173,7 +173,6 @@ async fn dummy_proxy(
     tls: Option<TlsConfig>,
     auth: impl TestAuth + Send,
 ) -> anyhow::Result<()> {
-    let (client, _) = read_proxy_protocol(client).await?;
     let mut stream = match handshake(&RequestContext::test(), client, tls.as_ref(), false).await? {
         HandshakeData::Startup(stream, _) => stream,
         HandshakeData::Cancel(_) => bail!("cancellation not supported"),

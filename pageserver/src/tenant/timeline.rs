@@ -817,8 +817,8 @@ pub(crate) enum GetVectoredError {
     #[error("timeline shutting down")]
     Cancelled,
 
-    #[error("requested too many keys: {0} > {}", Timeline::MAX_GET_VECTORED_KEYS)]
-    Oversized(u64),
+    #[error("requested too many keys: {0} > {1}")]
+    Oversized(u64, u64),
 
     #[error("requested at invalid LSN: {0}")]
     InvalidLsn(Lsn),
@@ -1019,7 +1019,7 @@ impl From<GetVectoredError> for PageReconstructError {
         match e {
             GetVectoredError::Cancelled => PageReconstructError::Cancelled,
             GetVectoredError::InvalidLsn(_) => PageReconstructError::Other(anyhow!("Invalid LSN")),
-            err @ GetVectoredError::Oversized(_) => PageReconstructError::Other(err.into()),
+            err @ GetVectoredError::Oversized(_, _) => PageReconstructError::Other(err.into()),
             GetVectoredError::MissingKey(err) => PageReconstructError::MissingKey(err),
             GetVectoredError::GetReadyAncestorError(err) => PageReconstructError::from(err),
             GetVectoredError::Other(err) => PageReconstructError::Other(err),
@@ -1199,7 +1199,6 @@ impl Timeline {
         }
     }
 
-    pub(crate) const MAX_GET_VECTORED_KEYS: u64 = 32;
     pub(crate) const LAYERS_VISITED_WARN_THRESHOLD: u32 = 100;
 
     /// Look up multiple page versions at a given LSN
@@ -1214,9 +1213,12 @@ impl Timeline {
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         let total_keyspace = query.total_keyspace();
 
-        let key_count = total_keyspace.total_raw_size().try_into().unwrap();
-        if key_count > Timeline::MAX_GET_VECTORED_KEYS {
-            return Err(GetVectoredError::Oversized(key_count));
+        let key_count = total_keyspace.total_raw_size();
+        if key_count > self.conf.max_get_vectored_keys.get() {
+            return Err(GetVectoredError::Oversized(
+                key_count as u64,
+                self.conf.max_get_vectored_keys.get() as u64,
+            ));
         }
 
         for range in &total_keyspace.ranges {
@@ -2843,21 +2845,6 @@ impl Timeline {
             )
     }
 
-    /// Resolve the effective WAL receiver protocol to use for this tenant.
-    ///
-    /// Priority order is:
-    /// 1. Tenant config override
-    /// 2. Default value for tenant config override
-    /// 3. Pageserver config override
-    /// 4. Pageserver config default
-    pub fn resolve_wal_receiver_protocol(&self) -> PostgresClientProtocol {
-        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
-        tenant_conf
-            .wal_receiver_protocol_override
-            .or(self.conf.default_tenant_conf.wal_receiver_protocol_override)
-            .unwrap_or(self.conf.wal_receiver_protocol)
-    }
-
     pub(super) fn tenant_conf_updated(&self, new_conf: &AttachedTenantConf) {
         // NB: Most tenant conf options are read by background loops, so,
         // changes will automatically be picked up.
@@ -3213,10 +3200,16 @@ impl Timeline {
             guard.is_none(),
             "multiple launches / re-launches of WAL receiver are not supported"
         );
+
+        let protocol = PostgresClientProtocol::Interpreted {
+            format: utils::postgres_client::InterpretedFormat::Protobuf,
+            compression: Some(utils::postgres_client::Compression::Zstd { level: 1 }),
+        };
+
         *guard = Some(WalReceiver::start(
             Arc::clone(self),
             WalReceiverConf {
-                protocol: self.resolve_wal_receiver_protocol(),
+                protocol,
                 wal_connect_timeout,
                 lagging_wal_timeout,
                 max_lsn_wal_lag,
@@ -5270,7 +5263,7 @@ impl Timeline {
                 key = key.next();
 
                 // Maybe flush `key_rest_accum`
-                if key_request_accum.raw_size() >= Timeline::MAX_GET_VECTORED_KEYS
+                if key_request_accum.raw_size() >= self.conf.max_get_vectored_keys.get() as u64
                     || (last_key_in_range && key_request_accum.raw_size() > 0)
                 {
                     let query =

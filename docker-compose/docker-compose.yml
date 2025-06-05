@@ -189,13 +189,14 @@ services:
 
   neon-test-extensions:
     profiles: ["test-extensions"]
-    image: ${REPOSITORY:-ghcr.io/neondatabase}/neon-test-extensions-v${PG_TEST_VERSION:-16}:${TEST_EXTENSIONS_TAG:-${TAG:-latest}}
+    image: ${REPOSITORY:-ghcr.io/neondatabase}/neon-test-extensions-v${PG_TEST_VERSION:-${PG_VERSION:-16}}:${TEST_EXTENSIONS_TAG:-${TAG:-latest}}
     environment:
-      - PGPASSWORD=cloud_admin
+      - PGUSER=${PGUSER:-cloud_admin}
+      - PGPASSWORD=${PGPASSWORD:-cloud_admin}
     entrypoint:
       - "/bin/bash"
       - "-c"
     command:
-      - sleep 1800
+      - sleep 3600
     depends_on:
       - compute

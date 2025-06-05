@@ -515,11 +515,6 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'timeline_offloading' as bool")?,
-            wal_receiver_protocol_override: settings
-                .remove("wal_receiver_protocol_override")
-                .map(serde_json::from_str)
-                .transpose()
-                .context("parse `wal_receiver_protocol_override` from json")?,
             rel_size_v2_enabled: settings
                 .remove("rel_size_v2_enabled")
                 .map(|x| x.parse::<bool>())
