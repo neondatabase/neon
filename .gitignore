@@ -13,6 +13,7 @@ neon.iml
 /.neon
 /integration_tests/.neon
 compaction-suite-results.*
+pgxn/neon/communicator/communicator_bindings.h
 
 # Coverage
 *.profraw
