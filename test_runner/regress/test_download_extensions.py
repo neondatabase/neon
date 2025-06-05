@@ -159,7 +159,8 @@ def test_remote_extensions(
 
     # Setup a mock nginx S3 gateway which will return our test extension.
     (host, port) = httpserver_listen_address
-    extensions_endpoint = f"http://{host}:{port}/pg-ext-s3-gateway"
+    remote_ext_base_url = f"http://{host}:{port}/pg-ext-s3-gateway"
+    log.info(f"remote extensions base URL: {remote_ext_base_url}")
 
     extension.build(pg_config, test_output_dir)
     tarball = extension.package(test_output_dir)
@@ -221,7 +222,7 @@ def test_remote_extensions(
 
     endpoint.create_remote_extension_spec(spec)
 
-    endpoint.start(remote_ext_base_url=extensions_endpoint)
+    endpoint.start(remote_ext_base_url=remote_ext_base_url)
 
     with endpoint.connect() as conn:
         with conn.cursor() as cur:
@@ -249,7 +250,7 @@ def test_remote_extensions(
     # Remove the extension files to force a redownload of the extension.
     extension.remove(test_output_dir, pg_version)
 
-    endpoint.start(remote_ext_base_url=extensions_endpoint)
+    endpoint.start(remote_ext_base_url=remote_ext_base_url)
 
     # Test that ALTER EXTENSION UPDATE statements also fetch remote extensions.
     with endpoint.connect() as conn:

@@ -423,6 +423,7 @@ class PageserverImportConfig:
             "import_job_concurrency": self.import_job_concurrency,
             "import_job_soft_size_limit": self.import_job_soft_size_limit,
             "import_job_checkpoint_threshold": self.import_job_checkpoint_threshold,
+            "import_job_max_byte_range_size": 4 * 1024 * 1024,  # Pageserver default
         }
         return ("timeline_import_config", value)
 

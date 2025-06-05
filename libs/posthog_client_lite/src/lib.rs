@@ -22,6 +22,16 @@ pub enum PostHogEvaluationError {
     Internal(String),
 }
 
+impl PostHogEvaluationError {
+    pub fn as_variant_str(&self) -> &'static str {
+        match self {
+            PostHogEvaluationError::NotAvailable(_) => "not_available",
+            PostHogEvaluationError::NoConditionGroupMatched => "no_condition_group_matched",
+            PostHogEvaluationError::Internal(_) => "internal",
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct LocalEvaluationResponse {
     pub flags: Vec<LocalEvaluationFlag>,
