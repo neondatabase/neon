@@ -49,7 +49,7 @@ def test_basebackup_cache(neon_env_builder: NeonEnvBuilder):
             else:
                 # If the timeline is not initialized on safekeeprs,
                 # the compute_ctl sends `get_basebackup` with lsn=None for the first startup.
-                # We do not cache such requests, so it's niether a hit nor a miss.
+                # We do not use cache for such requests, so it's niether a hit nor a miss.
                 assert (
                     metrics.query_one(
                         "pageserver_basebackup_cache_read_total", {"result": "miss"}
