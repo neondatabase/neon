@@ -2506,6 +2506,13 @@ impl Timeline {
             // Preparing basebackup doesn't make sense for shards other than shard zero.
             return;
         }
+        if !self.is_active() {
+            // May happen during initial timeline creation.
+            // Such timeline is not in the global timeline map yet,
+            // so basebackup cache will not be able to find it.
+            // TODO(diko): We can prepare such timelines in finish_creation().
+            return;
+        }
 
         let res = self
             .basebackup_prepare_sender
