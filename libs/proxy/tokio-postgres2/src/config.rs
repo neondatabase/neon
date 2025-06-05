@@ -17,7 +17,6 @@ use crate::{Client, Connection, Error};
 
 /// TLS configuration.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
 pub enum SslMode {
     /// Do not use TLS.
     Disable,
@@ -29,7 +28,6 @@ pub enum SslMode {
 
 /// Channel binding configuration.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum ChannelBinding {
     /// Do not use channel binding.
     Disable,
@@ -41,7 +39,6 @@ pub enum ChannelBinding {
 
 /// Replication mode configuration.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum ReplicationMode {
     /// Physical replication.
     Physical,
@@ -54,6 +51,14 @@ pub enum ReplicationMode {
 pub enum Host {
     /// A TCP hostname.
     Tcp(String),
+}
+
+impl std::fmt::Display for Host {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Host::Tcp(host) => f.write_str(host),
+        }
+    }
 }
 
 /// Precomputed keys which may override password during auth.
@@ -75,10 +80,7 @@ pub struct Config {
     pub(crate) ssl_mode: SslMode,
     pub(crate) connect_timeout: Option<Duration>,
     pub(crate) channel_binding: ChannelBinding,
-    pub(crate) server_params: StartupMessageParams,
-
-    database: bool,
-    username: bool,
+    pub server_params: StartupMessageParams,
 }
 
 impl Config {
@@ -94,9 +96,6 @@ impl Config {
             connect_timeout: None,
             channel_binding: ChannelBinding::Prefer,
             server_params: StartupMessageParams::default(),
-
-            database: false,
-            username: false,
         }
     }
 
@@ -105,12 +104,6 @@ impl Config {
     /// Required.
     pub fn user(&mut self, user: &str) -> &mut Config {
         self.set_param("user", user)
-    }
-
-    /// Gets the user to authenticate with, if one has been configured with
-    /// the `user` method.
-    pub fn user_is_set(&self) -> bool {
-        self.username
     }
 
     /// Sets the password to authenticate with.
@@ -149,19 +142,7 @@ impl Config {
         self.set_param("database", dbname)
     }
 
-    /// Gets the name of the database to connect to, if one has been configured
-    /// with the `dbname` method.
-    pub fn db_is_set(&self) -> bool {
-        self.database
-    }
-
     pub fn set_param(&mut self, name: &str, value: &str) -> &mut Config {
-        if name == "database" {
-            self.database = true;
-        } else if name == "user" {
-            self.username = true;
-        }
-
         self.server_params.insert(name, value);
         self
     }

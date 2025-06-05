@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use futures::{FutureExt, TryFutureExt};
+use postgres_client::CancelToken;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info};
 
 use crate::auth::backend::ConsoleRedirectBackend;
-use crate::cancellation::CancellationHandler;
+use crate::cancellation::{CancelClosure, CancellationHandler};
 use crate::config::{ProxyConfig, ProxyProtocolV2};
 use crate::context::RequestContext;
 use crate::error::ReportableError;
@@ -216,7 +217,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     ctx.set_db_options(params.clone());
 
-    let (node_info, user_info, _ip_allowlist) = match backend
+    let (node_info, auth, user_info) = match backend
         .authenticate(ctx, &config.authentication_config, &mut stream)
         .await
     {
@@ -224,13 +225,11 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         Err(e) => Err(stream.throw_error(e, Some(ctx)).await)?,
     };
 
-    let node = connect_to_compute(
+    let mut node = connect_to_compute(
         ctx,
         &TcpMechanism {
-            user_info,
-            params_compat: true,
-            params: &params,
             locks: &config.connect_compute_locks,
+            auth: auth.set_startup_params(&params, true),
         },
         &node_info,
         config.wake_compute_retry_config,
@@ -239,22 +238,41 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     .or_else(|e| async { Err(stream.throw_error(e, Some(ctx)).await) })
     .await?;
 
-    let cancellation_handler_clone = Arc::clone(&cancellation_handler);
-    let session = cancellation_handler_clone.get_key();
+    let session = cancellation_handler.get_key();
 
-    session.write_cancel_key(node.cancel_closure.clone())?;
+    let (process_id, secret_key) =
+        prepare_client_connection(&mut node, session.key(), &mut stream).await?;
 
-    prepare_client_connection(&node, *session.key(), &mut stream);
-    let stream = stream.flush_and_into_inner().await?;
+    let cancel_closure = CancelClosure::new(
+        node.socket_addr,
+        CancelToken {
+            socket_config: None,
+            ssl_mode: node.ssl_mode,
+            process_id,
+            secret_key,
+        },
+        node.hostname,
+        user_info,
+    );
+
+    session.write_cancel_key(cancel_closure.clone())?;
+
+    let client = stream.flush_and_into_inner().await?;
+    let compute = node.stream.flush_and_into_inner().await?;
 
     Ok(Some(ProxyPassthrough {
-        client: stream,
-        aux: node.aux.clone(),
-        private_link_id: None,
-        compute: node,
-        session_id: ctx.session_id(),
+        client,
+        compute,
+        ids: crate::usage_metrics::Ids {
+            endpoint_id: node.aux.endpoint_id,
+            branch_id: node.aux.branch_id,
+            private_link_id: None,
+        },
+        cancel_closure,
         cancel: session,
+        session_id: ctx.session_id(),
         _req: request_gauge,
         _conn: conn_gauge,
+        _guage: node.guage,
     }))
 }

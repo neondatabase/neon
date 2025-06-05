@@ -27,7 +27,7 @@ use crate::control_plane::{
 use crate::intern::EndpointIdInt;
 use crate::pqproto::BeMessage;
 use crate::proxy::NeonOptions;
-use crate::proxy::connect_compute::ComputeConnectBackend;
+use crate::proxy::connect_compute::WakeComputeBackend;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::Stream;
 use crate::types::{EndpointCacheKey, EndpointId, RoleName};
@@ -168,8 +168,6 @@ impl ComputeUserInfo {
 
 #[cfg_attr(test, derive(Debug))]
 pub(crate) enum ComputeCredentialKeys {
-    #[cfg(any(test, feature = "testing"))]
-    Password(Vec<u8>),
     AuthKeys(AuthKeys),
     JwtPayload(Vec<u8>),
     None,
@@ -326,7 +324,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
         allow_cleartext: bool,
         config: &'static AuthenticationConfig,
         endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-    ) -> auth::Result<Backend<'a, ComputeCredentials>> {
+    ) -> auth::Result<(Backend<'a, ComputeUserInfo>, ComputeCredentialKeys)> {
         let res = match self {
             Self::ControlPlane(api, user_info) => {
                 debug!(
@@ -346,7 +344,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
                 )
                 .await;
                 match auth_res {
-                    Ok(credentials) => Ok(Backend::ControlPlane(api, credentials)),
+                    Ok(creds) => Ok((Backend::ControlPlane(api, creds.info), creds.keys)),
                     Err(e) => {
                         // The password could have been changed, so we invalidate the cache.
                         // We should only invalidate the cache if the TTL might have expired.
@@ -409,21 +407,14 @@ impl Backend<'_, ComputeUserInfo> {
 }
 
 #[async_trait::async_trait]
-impl ComputeConnectBackend for Backend<'_, ComputeCredentials> {
+impl WakeComputeBackend for Backend<'_, ComputeUserInfo> {
     async fn wake_compute(
         &self,
         ctx: &RequestContext,
     ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
         match self {
-            Self::ControlPlane(api, creds) => api.wake_compute(ctx, &creds.info).await,
+            Self::ControlPlane(api, info) => api.wake_compute(ctx, info).await,
             Self::Local(local) => Ok(Cached::new_uncached(local.node_info.clone())),
-        }
-    }
-
-    fn get_keys(&self) -> &ComputeCredentialKeys {
-        match self {
-            Self::ControlPlane(_, creds) => &creds.keys,
-            Self::Local(_) => &ComputeCredentialKeys::None,
         }
     }
 }

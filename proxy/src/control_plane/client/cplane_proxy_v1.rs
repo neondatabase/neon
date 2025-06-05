@@ -30,7 +30,7 @@ use crate::control_plane::{
 };
 use crate::metrics::Metrics;
 use crate::rate_limiter::WakeComputeRateLimiter;
-use crate::types::{EndpointCacheKey, EndpointId, RoleName};
+use crate::types::{EndpointCacheKey, EndpointId, Host, RoleName};
 use crate::{compute, http, scram};
 
 pub(crate) const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
@@ -261,21 +261,16 @@ impl NeonControlPlaneClient {
                 Some(_) => SslMode::Require,
                 None => SslMode::Disable,
             };
-            let host_name = match body.server_name {
-                Some(host) => host,
-                None => host.to_owned(),
+
+            let host_name = match &body.server_name {
+                Some(host) => Host::from(host),
+                None => Host::from(host),
             };
 
-            // Don't set anything but host and port! This config will be cached.
-            // We'll set username and such later using the startup message.
-            // TODO: add more type safety (in progress).
-            let mut config = compute::ConnCfg::new(host_name, port);
-
+            let mut config = compute::ConnectInfo::new(host_name, port, ssl_mode);
             if let Some(addr) = host_addr {
-                config.set_host_addr(addr);
+                config.host_addr = Some(addr);
             }
-
-            config.ssl_mode(ssl_mode);
 
             let node = NodeInfo {
                 config,

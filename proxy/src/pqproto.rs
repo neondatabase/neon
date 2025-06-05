@@ -2,7 +2,7 @@
 //!
 //! <https://www.postgresql.org/docs/current/protocol-message-formats.html>
 
-use std::fmt;
+use std::fmt::{self, Debug};
 use std::io::{self, Cursor};
 
 use bytes::{Buf, BufMut};
@@ -11,11 +11,84 @@ use rand::distributions::{Distribution, Standard};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use zerocopy::{FromBytes, Immutable, IntoBytes, big_endian};
 
-pub type ErrorCode = [u8; 5];
+#[derive(Copy, Clone, PartialEq)]
+pub struct ErrorCode(pub [u8; 5]);
+#[derive(Copy, Clone, PartialEq)]
+pub struct FeTag(pub u8);
+#[derive(Copy, Clone, PartialEq)]
+pub struct BeTag(pub u8);
+#[derive(Copy, Clone, PartialEq)]
+pub struct AuthTag(pub i32);
 
-pub const FE_PASSWORD_MESSAGE: u8 = b'p';
+pub const FE_PASSWORD_MESSAGE: FeTag = FeTag(b'p');
 
-pub const SQLSTATE_INTERNAL_ERROR: [u8; 5] = *b"XX000";
+pub const BE_AUTH_MESSAGE: BeTag = BeTag(b'R');
+pub const BE_ERR_MESSAGE: BeTag = BeTag(b'E');
+pub const BE_KEY_MESSAGE: BeTag = BeTag(b'K');
+pub const BE_READY_MESSAGE: BeTag = BeTag(b'Z');
+pub const BE_NEGOTIATE_MESSAGE: BeTag = BeTag(b'v');
+
+pub const AUTH_OK: AuthTag = AuthTag(0);
+pub const AUTH_CLEAR: AuthTag = AuthTag(3);
+pub const AUTH_SASL: AuthTag = AuthTag(10);
+pub const AUTH_SASL_CONT: AuthTag = AuthTag(11);
+pub const AUTH_SASL_FINAL: AuthTag = AuthTag(12);
+
+pub const SQLSTATE_INTERNAL_ERROR: ErrorCode = ErrorCode(*b"XX000");
+pub const CONNECTION_EXCEPTION: ErrorCode = ErrorCode(*b"08000");
+pub const CONNECTION_DOES_NOT_EXIST: ErrorCode = ErrorCode(*b"08003");
+pub const CONNECTION_FAILURE: ErrorCode = ErrorCode(*b"08006");
+pub const SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION: ErrorCode = ErrorCode(*b"08001");
+pub const PROTOCOL_VIOLATION: ErrorCode = ErrorCode(*b"08P01");
+pub const INVALID_PARAMETER_VALUE: ErrorCode = ErrorCode(*b"22023");
+pub const INVALID_CATALOG_NAME: ErrorCode = ErrorCode(*b"3D000");
+pub const INVALID_SCHEMA_NAME: ErrorCode = ErrorCode(*b"3F000");
+pub const T_R_SERIALIZATION_FAILURE: ErrorCode = ErrorCode(*b"40001");
+pub const SYNTAX_ERROR: ErrorCode = ErrorCode(*b"42601");
+pub const OUT_OF_MEMORY: ErrorCode = ErrorCode(*b"53200");
+pub const TOO_MANY_CONNECTIONS: ErrorCode = ErrorCode(*b"53300");
+
+impl fmt::Display for AuthTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            0 => f.write_str("Ok"),
+            2 => f.write_str("KerberosV5"),
+            3 => f.write_str("CleartextPassword"),
+            5 => f.write_str("MD5Password"),
+            7 => f.write_str("GSS"),
+            8 => f.write_str("GSSContinue"),
+            9 => f.write_str("SSPI"),
+            10 => f.write_str("SASL"),
+            11 => f.write_str("SASLContinue"),
+            12 => f.write_str("SASLFinal"),
+            x => write!(f, "{x}"),
+        }
+    }
+}
+
+impl fmt::Display for BeTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            BE_AUTH_MESSAGE => f.write_str("Authentication"),
+            BE_KEY_MESSAGE => f.write_str("BackendKeyData"),
+            BE_ERR_MESSAGE => f.write_str("ErrorResponse"),
+            BE_READY_MESSAGE => f.write_str("ReadyForQuery"),
+            BE_NEGOTIATE_MESSAGE => f.write_str("NegotiateProtocolVersion"),
+            BeTag(b'S') => f.write_str("ParameterStatus"),
+            BeTag(b'N') => f.write_str("NoticeMessage"),
+            BeTag(x) => write!(f, "{:?}", char::from(x)),
+        }
+    }
+}
+
+impl fmt::Display for FeTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            FE_PASSWORD_MESSAGE => f.write_str("Password"),
+            FeTag(x) => write!(f, "{:?}", char::from(x)),
+        }
+    }
+}
 
 /// The protocol version number.
 ///
@@ -66,32 +139,32 @@ macro_rules! read {
     }};
 }
 
+/// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L118>
+const MAX_STARTUP_PACKET_LENGTH: usize = 10000;
+const RESERVED_INVALID_MAJOR_VERSION: u16 = 1234;
+/// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L132>
+const CANCEL_REQUEST_CODE: ProtocolVersion = ProtocolVersion::new(1234, 5678);
+/// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L166>
+const NEGOTIATE_SSL_CODE: ProtocolVersion = ProtocolVersion::new(1234, 5679);
+/// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L167>
+const NEGOTIATE_GSS_CODE: ProtocolVersion = ProtocolVersion::new(1234, 5680);
+
+/// This first reads the startup message header, is 8 bytes.
+/// The first 4 bytes is a big-endian message length, and the next 4 bytes is a version number.
+///
+/// The length value is inclusive of the header. For example,
+/// an empty message will always have length 8.
+#[derive(Clone, Copy, FromBytes, IntoBytes, Immutable)]
+#[repr(C)]
+struct StartupHeader {
+    len: big_endian::U32,
+    version: ProtocolVersion,
+}
+
 pub async fn read_startup<S>(stream: &mut S) -> io::Result<FeStartupPacket>
 where
     S: AsyncRead + Unpin,
 {
-    /// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L118>
-    const MAX_STARTUP_PACKET_LENGTH: usize = 10000;
-    const RESERVED_INVALID_MAJOR_VERSION: u16 = 1234;
-    /// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L132>
-    const CANCEL_REQUEST_CODE: ProtocolVersion = ProtocolVersion::new(1234, 5678);
-    /// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L166>
-    const NEGOTIATE_SSL_CODE: ProtocolVersion = ProtocolVersion::new(1234, 5679);
-    /// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L167>
-    const NEGOTIATE_GSS_CODE: ProtocolVersion = ProtocolVersion::new(1234, 5680);
-
-    /// This first reads the startup message header, is 8 bytes.
-    /// The first 4 bytes is a big-endian message length, and the next 4 bytes is a version number.
-    ///
-    /// The length value is inclusive of the header. For example,
-    /// an empty message will always have length 8.
-    #[derive(Clone, Copy, FromBytes, IntoBytes, Immutable)]
-    #[repr(C)]
-    struct StartupHeader {
-        len: big_endian::U32,
-        version: ProtocolVersion,
-    }
-
     let header = read!(stream => StartupHeader);
 
     // <https://github.com/postgres/postgres/blob/04bcf9e19a4261fe9c7df37c777592c2e10c32a7/src/backend/tcop/backend_startup.c#L378-L382>
@@ -252,6 +325,10 @@ impl WriteBuf {
         Self(Cursor::new(Vec::new()))
     }
 
+    pub const fn len(&self) -> usize {
+        self.0.get_ref().len()
+    }
+
     /// Use a heuristic to determine if we should shrink the write buffer.
     #[inline]
     fn should_shrink(&self) -> bool {
@@ -313,6 +390,30 @@ impl WriteBuf {
         self.0.get_mut().push(m);
     }
 
+    /// Write a startup message.
+    pub fn startup(&mut self, params: &StartupMessageParams) {
+        self.0.get_mut().extend_from_slice(
+            StartupHeader {
+                len: big_endian::U32::new(params.params.len() as u32 + 9),
+                version: ProtocolVersion::new(3, 0),
+            }
+            .as_bytes(),
+        );
+        self.0.get_mut().extend_from_slice(params.params.as_bytes());
+        self.0.get_mut().push(0);
+    }
+
+    /// Write a SSL negotiation message.
+    pub fn request_tls(&mut self) {
+        self.0.get_mut().extend_from_slice(
+            StartupHeader {
+                len: big_endian::U32::new(8),
+                version: NEGOTIATE_SSL_CODE,
+            }
+            .as_bytes(),
+        );
+    }
+
     pub fn write_error(&mut self, msg: &str, error_code: ErrorCode) {
         self.shrink();
 
@@ -325,7 +426,7 @@ impl WriteBuf {
 
             // Code: error_code
             buf.put_u8(b'C');
-            buf.put_slice(&error_code);
+            buf.put_slice(&error_code.0);
             buf.put_u8(0);
 
             // Message: msg
@@ -440,12 +541,6 @@ pub enum BeMessage<'a> {
     AuthenticationOk,
     AuthenticationSasl(BeAuthenticationSaslMessage<'a>),
     AuthenticationCleartextPassword,
-    BackendKeyData(CancelKeyData),
-    ParameterStatus {
-        name: &'a [u8],
-        value: &'a [u8],
-    },
-    ReadyForQuery,
     NoticeResponse(&'a str),
     NegotiateProtocolVersion {
         version: ProtocolVersion,
@@ -466,18 +561,18 @@ impl BeMessage<'_> {
         match self {
             // <https://www.postgresql.org/docs/current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-AUTHENTICATIONCLEARTEXTPASSWORD>
             BeMessage::AuthenticationOk => {
-                buf.write_raw(1, b'R', |buf| buf.put_i32(0));
+                buf.write_raw(1, BE_AUTH_MESSAGE.0, |buf| buf.put_i32(AUTH_OK.0));
             }
             // <https://www.postgresql.org/docs/current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-AUTHENTICATIONCLEARTEXTPASSWORD>
             BeMessage::AuthenticationCleartextPassword => {
-                buf.write_raw(1, b'R', |buf| buf.put_i32(3));
+                buf.write_raw(1, BE_AUTH_MESSAGE.0, |buf| buf.put_i32(AUTH_CLEAR.0));
             }
 
             // <https://www.postgresql.org/docs/current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-AUTHENTICATIONSASL>
             BeMessage::AuthenticationSasl(BeAuthenticationSaslMessage::Methods(methods)) => {
                 let len: usize = methods.iter().map(|m| m.len() + 1).sum();
-                buf.write_raw(len + 2, b'R', |buf| {
-                    buf.put_i32(10); // Specifies that SASL auth method is used.
+                buf.write_raw(len + 2, BE_AUTH_MESSAGE.0, |buf| {
+                    buf.put_i32(AUTH_SASL.0);
                     for method in methods {
                         buf.put_slice(method.as_bytes());
                         buf.put_u8(0);
@@ -487,22 +582,17 @@ impl BeMessage<'_> {
             }
             // <https://www.postgresql.org/docs/current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-AUTHENTICATIONSASL>
             BeMessage::AuthenticationSasl(BeAuthenticationSaslMessage::Continue(extra)) => {
-                buf.write_raw(extra.len() + 1, b'R', |buf| {
-                    buf.put_i32(11); // Continue SASL auth.
+                buf.write_raw(extra.len() + 1, BE_AUTH_MESSAGE.0, |buf| {
+                    buf.put_i32(AUTH_SASL_CONT.0);
                     buf.put_slice(extra);
                 });
             }
             // <https://www.postgresql.org/docs/current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-AUTHENTICATIONSASL>
             BeMessage::AuthenticationSasl(BeAuthenticationSaslMessage::Final(extra)) => {
-                buf.write_raw(extra.len() + 1, b'R', |buf| {
-                    buf.put_i32(12); // Send final SASL message.
+                buf.write_raw(extra.len() + 1, BE_AUTH_MESSAGE.0, |buf| {
+                    buf.put_i32(AUTH_SASL_FINAL.0);
                     buf.put_slice(extra);
                 });
-            }
-
-            // <https://www.postgresql.org/docs/current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-BACKENDKEYDATA>
-            BeMessage::BackendKeyData(key_data) => {
-                buf.write_raw(8, b'K', |buf| buf.put_slice(key_data.as_bytes()));
             }
 
             // <https://www.postgresql.org/docs/current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-NOTICERESPONSE>
@@ -524,21 +614,6 @@ impl BeMessage<'_> {
                     // End notice.
                     buf.put_u8(0);
                 });
-            }
-
-            // <https://www.postgresql.org/docs/current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-PARAMETERSTATUS>
-            BeMessage::ParameterStatus { name, value } => {
-                buf.write_raw(name.len() + value.len() + 2, b'S', |buf| {
-                    buf.put_slice(name.as_bytes());
-                    buf.put_u8(0);
-                    buf.put_slice(value.as_bytes());
-                    buf.put_u8(0);
-                });
-            }
-
-            // <https://www.postgresql.org/docs/current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-NEGOTIATEPROTOCOLVERSION>
-            BeMessage::ReadyForQuery => {
-                buf.write_raw(1, b'Z', |buf| buf.put_u8(b'I'));
             }
 
             // <https://www.postgresql.org/docs/current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-NEGOTIATEPROTOCOLVERSION>

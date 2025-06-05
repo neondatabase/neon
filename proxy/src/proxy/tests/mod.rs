@@ -20,18 +20,18 @@ use tracing_test::traced_test;
 use super::connect_compute::ConnectMechanism;
 use super::retry::CouldRetry;
 use super::*;
-use crate::auth::backend::{
-    ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned,
-};
+use crate::auth::backend::{ComputeUserInfo, MaybeOwned};
+use crate::compute::NodeInfo;
 use crate::config::{ComputeConfig, RetryConfig};
 use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
-use crate::control_plane::{self, CachedNodeInfo, NodeInfo, NodeInfoCache};
+use crate::control_plane::{self, CachedNodeInfo, NodeInfoCache};
 use crate::error::ErrorKind;
+use crate::pqproto::BeMessage;
 use crate::tls::client_config::compute_client_config_with_certs;
 use crate::tls::postgres_rustls::MakeRustlsConnect;
 use crate::tls::server_config::CertResolver;
-use crate::types::{BranchId, EndpointId, ProjectId};
+use crate::types::{BranchId, EndpointId, Host, ProjectId};
 use crate::{sasl, scram};
 
 /// Generate a set of TLS certificates: CA + server.
@@ -181,11 +181,10 @@ async fn dummy_proxy(
 
     auth.authenticate(&mut stream).await?;
 
-    stream.write_message(BeMessage::ParameterStatus {
-        name: b"client_encoding",
-        value: b"UTF8",
+    stream.write_raw(21, b'S', |buf| {
+        buf.extend_from_slice(b"client_encoding\0UTF8\0");
     });
-    stream.write_message(BeMessage::ReadyForQuery);
+    stream.write_raw(1, b'Z', |buf| buf.push(b'I'));
     stream.flush().await?;
 
     Ok(())
@@ -498,8 +497,6 @@ impl ConnectMechanism for TestConnectMechanism {
             x => panic!("expecting action {x:?}, connect is called instead"),
         }
     }
-
-    fn update_connect_config(&self, _conf: &mut compute::ConnCfg) {}
 }
 
 impl TestControlPlaneClient for TestConnectMechanism {
@@ -558,7 +555,7 @@ impl TestControlPlaneClient for TestConnectMechanism {
 
 fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {
     let node = NodeInfo {
-        config: compute::ConnCfg::new("test".to_owned(), 5432),
+        config: compute::ConnectInfo::new(Host::from("test"), 5432, SslMode::Prefer),
         aux: MetricsAuxInfo {
             endpoint_id: (&EndpointId::from("endpoint")).into(),
             project_id: (&ProjectId::from("project")).into(),
@@ -573,16 +570,13 @@ fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeIn
 
 fn helper_create_connect_info(
     mechanism: &TestConnectMechanism,
-) -> auth::Backend<'static, ComputeCredentials> {
+) -> auth::Backend<'static, ComputeUserInfo> {
     auth::Backend::ControlPlane(
         MaybeOwned::Owned(ControlPlaneClient::Test(Box::new(mechanism.clone()))),
-        ComputeCredentials {
-            info: ComputeUserInfo {
-                endpoint: "endpoint".into(),
-                user: "user".into(),
-                options: NeonOptions::parse_options_raw(""),
-            },
-            keys: ComputeCredentialKeys::Password("password".into()),
+        ComputeUserInfo {
+            endpoint: "endpoint".into(),
+            user: "user".into(),
+            options: NeonOptions::parse_options_raw(""),
         },
     )
 }

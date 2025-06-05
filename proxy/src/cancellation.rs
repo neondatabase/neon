@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+use postgres_client::config::SslMode;
 use postgres_client::CancelToken;
+use postgres_client::cancel_query_raw::cancel_query_raw;
 use postgres_client::tls::MakeTlsConnect;
 use redis::{Cmd, FromRedisValue, Value};
 use serde::{Deserialize, Serialize};
@@ -471,7 +473,9 @@ impl CancellationHandler {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CancelClosure {
     socket_addr: SocketAddr,
-    cancel_token: CancelToken,
+    ssl_mode: SslMode,
+    pub process_id: i32,
+    pub secret_key: i32,
     hostname: String, // for pg_sni router
     user_info: ComputeUserInfo,
 }
@@ -485,7 +489,9 @@ impl CancelClosure {
     ) -> Self {
         Self {
             socket_addr,
-            cancel_token,
+            ssl_mode: cancel_token.ssl_mode,
+            process_id: cancel_token.process_id,
+            secret_key: cancel_token.secret_key,
             hostname,
             user_info,
         }
@@ -505,7 +511,7 @@ impl CancelClosure {
         )
         .map_err(|e| CancelError::IO(std::io::Error::other(e.to_string())))?;
 
-        self.cancel_token.cancel_query_raw(socket, tls).await?;
+        cancel_query_raw(socket, self.ssl_mode, tls, self.process_id, self.secret_key).await?;
         debug!("query was cancelled");
         Ok(())
     }

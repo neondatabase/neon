@@ -169,13 +169,6 @@ pub(crate) async fn validate_password_and_exchange(
     secret: AuthSecret,
 ) -> super::Result<sasl::Outcome<ComputeCredentialKeys>> {
     match secret {
-        #[cfg(any(test, feature = "testing"))]
-        AuthSecret::Md5(_) => {
-            // test only
-            Ok(sasl::Outcome::Success(ComputeCredentialKeys::Password(
-                password.to_owned(),
-            )))
-        }
         // perform scram authentication as both client and server to validate the keys
         AuthSecret::Scram(scram_secret) => {
             let outcome = crate::scram::exchange(pool, endpoint, &scram_secret, password).await?;

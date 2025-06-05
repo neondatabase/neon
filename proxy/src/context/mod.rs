@@ -138,6 +138,8 @@ impl RequestContext {
             %conn_info,
             ep = tracing::field::Empty,
             role = tracing::field::Empty,
+            pid = tracing::field::Empty,
+            compute_id = tracing::field::Empty,
         );
 
         let inner = RequestContextInner {

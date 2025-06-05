@@ -1,4 +1,3 @@
-use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -35,13 +34,10 @@ enum State {
 pub struct Connection<S, T> {
     /// HACK: we need this in the Neon Proxy.
     pub stream: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
-    /// HACK: we need this in the Neon Proxy to forward params.
-    pub parameters: HashMap<String, String>,
 
     sender: PollSender<BackendMessages>,
     receiver: mpsc::UnboundedReceiver<FrontendMessage>,
 
-    pending_responses: VecDeque<BackendMessage>,
     state: State,
 }
 
@@ -52,17 +48,13 @@ where
 {
     pub(crate) fn new(
         stream: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
-        pending_responses: VecDeque<BackendMessage>,
-        parameters: HashMap<String, String>,
         sender: mpsc::Sender<BackendMessages>,
         receiver: mpsc::UnboundedReceiver<FrontendMessage>,
     ) -> Connection<S, T> {
         Connection {
             stream,
-            parameters,
             sender: PollSender::new(sender),
             receiver,
-            pending_responses,
             state: State::Active,
         }
     }
@@ -71,11 +63,6 @@ where
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<BackendMessage, Error>>> {
-        if let Some(message) = self.pending_responses.pop_front() {
-            trace!("retrying pending response");
-            return Poll::Ready(Some(Ok(message)));
-        }
-
         Pin::new(&mut self.stream)
             .poll_next(cx)
             .map(|o| o.map(|r| r.map_err(Error::io)))
@@ -85,15 +72,9 @@ where
     /// client <- postgres
     fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<Result<AsyncMessage, Error>> {
         loop {
-            let message = match self.poll_response(cx)? {
-                Poll::Ready(Some(message)) => message,
-                Poll::Ready(None) => return Poll::Ready(Err(Error::closed())),
-                Poll::Pending => {
-                    trace!("poll_read: waiting on response");
-                    return Poll::Pending;
-                }
-            };
+            ready!(self.sender.poll_reserve(cx)).map_err(|_| Error::closed())?;
 
+            let message = ready!(self.poll_response(cx)?).ok_or_else(Error::closed)?;
             let messages = match message {
                 BackendMessage::Async(Message::NoticeResponse(body)) => {
                     let error = DbError::parse(&mut body.fields()).map_err(Error::parse)?;
@@ -107,31 +88,12 @@ where
                     };
                     return Poll::Ready(Ok(AsyncMessage::Notification(notification)));
                 }
-                BackendMessage::Async(Message::ParameterStatus(body)) => {
-                    self.parameters.insert(
-                        body.name().map_err(Error::parse)?.to_string(),
-                        body.value().map_err(Error::parse)?.to_string(),
-                    );
-                    continue;
-                }
+                BackendMessage::Async(Message::ParameterStatus(_)) => continue,
                 BackendMessage::Async(_) => unreachable!(),
                 BackendMessage::Normal { messages } => messages,
             };
 
-            match self.sender.poll_reserve(cx) {
-                Poll::Ready(Ok(())) => {
-                    let _ = self.sender.send_item(messages);
-                }
-                Poll::Ready(Err(_)) => {
-                    return Poll::Ready(Err(Error::closed()));
-                }
-                Poll::Pending => {
-                    self.pending_responses
-                        .push_back(BackendMessage::Normal { messages });
-                    trace!("poll_read: waiting on sender");
-                    return Poll::Pending;
-                }
-            }
+            let _ = self.sender.send_item(messages);
         }
     }
 
@@ -229,11 +191,6 @@ where
                 Poll::Pending
             }
         }
-    }
-
-    /// Returns the value of a runtime parameter for this connection.
-    pub fn parameter(&self, name: &str) -> Option<&str> {
-        self.parameters.get(name).map(|s| &**s)
     }
 
     /// Polls for asynchronous messages from the server.
