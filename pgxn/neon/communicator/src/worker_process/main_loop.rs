@@ -252,7 +252,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
 
                 match self
                     .pageserver_client
-                    .process_check_rel_exists_request(&page_api::CheckRelExistsRequest {
+                    .process_check_rel_exists_request(page_api::CheckRelExistsRequest {
                         read_lsn: self.request_lsns(not_modified_since),
                         rel,
                     })
@@ -286,7 +286,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 let read_lsn = self.request_lsns(not_modified_since);
                 match self
                     .pageserver_client
-                    .process_get_rel_size_request(&page_api::GetRelSizeRequest {
+                    .process_get_rel_size_request(page_api::GetRelSizeRequest {
                         read_lsn,
                         rel: rel.clone(),
                     })
@@ -339,7 +339,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
 
                 match self
                     .pageserver_client
-                    .process_get_dbsize_request(&page_api::GetDbSizeRequest {
+                    .process_get_dbsize_request(page_api::GetDbSizeRequest {
                         read_lsn: self.request_lsns(not_modified_since),
                         db_oid: req.db_oid,
                     })

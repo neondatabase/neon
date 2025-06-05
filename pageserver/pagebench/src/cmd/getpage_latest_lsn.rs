@@ -10,8 +10,6 @@ use anyhow::Context;
 use async_trait::async_trait;
 use bytes::Bytes;
 use camino::Utf8PathBuf;
-use futures::StreamExt;
-use futures::stream::FuturesOrdered;
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::KeySpaceAccum;
 use pageserver_api::models::{PagestreamGetPageRequest, PagestreamRequest};
@@ -24,7 +22,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
-use utils::shard::ShardIndex;
 
 use axum::Router;
 use axum::body::Body;
@@ -108,9 +105,6 @@ pub(crate) struct Args {
     /// 1 RPS and 1 queue depth.
     #[clap(long, default_value = "1")]
     batch_size: NonZeroUsize,
-
-    #[clap(long)]
-    only_relnode: Option<u32>,
 
     targets: Option<Vec<TenantTimelineId>>,
 
@@ -407,7 +401,6 @@ async fn main_impl(
     let rps_period = args
         .per_client_rate
         .map(|rps_limit| Duration::from_secs_f64(1.0 / (rps_limit as f64)));
-    let new_metrics = client_metrics.clone();
 
     let make_worker: &dyn Fn(WorkerId) -> Pin<Box<dyn Send + Future<Output = ()>>> = &|worker_id| {
         let ss = shared_state.clone();
@@ -421,7 +414,6 @@ async fn main_impl(
             rand::distributions::weighted::WeightedIndex::new(ranges.iter().map(|v| v.len()))
                 .unwrap();
 
-        let new_value = new_metrics.clone();
         Box::pin(async move {
             let client: Box<dyn Client> = match args.protocol {
                 Protocol::Libpq => Box::new(

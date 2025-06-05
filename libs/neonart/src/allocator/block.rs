@@ -62,6 +62,7 @@ impl<'t> BlockAllocator<'t> {
         .cast()
     }
 
+    #[allow(clippy::mut_from_ref)]
     pub(crate) fn alloc_block(&self) -> &mut [MaybeUninit<u8>] {
         // FIXME: handle OOM
         let blkno = self.alloc_block_internal();
