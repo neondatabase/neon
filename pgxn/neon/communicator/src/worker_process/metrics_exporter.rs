@@ -12,6 +12,10 @@ use metrics;
 use metrics::proto::MetricFamily;
 use metrics::{Encoder, TextEncoder};
 
+use std::path::PathBuf;
+
+use tokio::net::UnixListener;
+
 use crate::worker_process::main_loop::CommunicatorWorkerProcessStruct;
 
 impl<'a> CommunicatorWorkerProcessStruct<'a> {
@@ -22,10 +26,10 @@ impl<'a> CommunicatorWorkerProcessStruct<'a> {
             .route("/dump_cache_map", get(dump_cache_map))
             .with_state(self);
 
-        // TODO: make configurable. Or listen on unix domain socket?
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:9090")
-            .await
-            .unwrap();
+        // Listen on unix domain socket, in the data directory. That should be unique.
+        let path = PathBuf::from(".metrics.socket");
+
+        let listener = UnixListener::bind(path.clone()).unwrap();
 
         tokio::spawn(async {
             tracing::info!("metrics listener spawned");
