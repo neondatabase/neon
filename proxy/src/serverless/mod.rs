@@ -50,10 +50,10 @@ use crate::context::RequestContext;
 use crate::ext::TaskExt;
 use crate::metrics::Metrics;
 use crate::protocol2::{ConnectHeader, ConnectionInfo, read_proxy_protocol};
-use crate::proxy::run_until_cancelled;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
 use crate::serverless::http_util::{api_error_into_response, json_response};
+use crate::util::run_until_cancelled;
 
 pub(crate) const SERVERLESS_DRIVER_SNI: &str = "api";
 pub(crate) const AUTH_BROKER_SNI: &str = "apiauth";
