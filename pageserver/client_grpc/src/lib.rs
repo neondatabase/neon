@@ -22,7 +22,6 @@ use utils::shard::ShardIndex;
 use std::fmt::Debug;
 pub mod client_cache;
 pub mod request_tracker;
-pub mod moc;
 use tonic::transport::Channel;
 
 use metrics::{IntCounterVec, core::Collector};

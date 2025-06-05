@@ -17,10 +17,7 @@ use crate::PageserverClientAggregateMetrics;
 use tokio::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use std::pin::Pin;
 use utils::shard::ShardIndex;
-
-use utils::id::TenantTimelineId;
 
 use tokio_stream::wrappers::ReceiverStream;
 use pageserver_page_api::proto::PageServiceClient;
@@ -32,6 +29,7 @@ use tonic::{
 
 use async_trait::async_trait;
 use std::time::Duration;
+
 use client_cache::PooledItemFactory;
 //use tracing::info;
 //
@@ -385,7 +383,7 @@ struct ShardedRequestTrackerInner {
     // Hashmap of shard index to RequestTracker
     trackers: std::collections::HashMap<ShardIndex, RequestTracker>,
 }
-struct ShardedRequestTracker {
+pub struct ShardedRequestTracker {
     inner: Arc<Mutex<ShardedRequestTrackerInner>>,
     tcp_client_cache_options: ClientCacheOptions,
     stream_client_cache_options: ClientCacheOptions,
@@ -433,8 +431,9 @@ impl ShardedRequestTracker {
 
     pub async fn update_shard_map(&self,
                             shard_urls: std::collections::HashMap<ShardIndex, String>,
-                            metrics: Arc<PageserverClientAggregateMetrics>,
-                            ttid: TenantTimelineId) {
+                            metrics: Option<Arc<PageserverClientAggregateMetrics>>,
+                            tenant_id: String, timeline_id: String, auth_str: Option<&str>) {
+
 
        let mut trackers = std::collections::HashMap::new();
         for (shard, endpoint_url) in shard_urls {
@@ -456,12 +455,12 @@ impl ShardedRequestTracker {
                 self.tcp_client_cache_options.error_threshold,
                 self.tcp_client_cache_options.max_idle_duration,
                 self.tcp_client_cache_options.max_total_connections,
-                Some(Arc::clone(&metrics)),
+                metrics.clone(),
             );
 
-            let auth_interceptor = AuthInterceptor::new(ttid.tenant_id.to_string().as_str(),
-                                                        ttid.timeline_id.to_string().as_str(),
-                                                        None);
+            let auth_interceptor = AuthInterceptor::new(tenant_id.as_str(),
+                                                        timeline_id.as_str(),
+                                                        auth_str);
 
             let stream_pool = ConnectionPool::<StreamReturner>::new(
                 Arc::new(StreamFactory::new(new_pool.clone(),
@@ -472,7 +471,7 @@ impl ShardedRequestTracker {
                 self.stream_client_cache_options.error_threshold,
                 self.stream_client_cache_options.max_idle_duration,
                 self.stream_client_cache_options.max_total_connections,
-                Some(Arc::clone(&metrics)),
+                metrics.clone(),
             );
 
             //
@@ -488,7 +487,7 @@ impl ShardedRequestTracker {
                 self.tcp_client_cache_options.error_threshold,
                 self.tcp_client_cache_options.max_idle_duration,
                 self.tcp_client_cache_options.max_total_connections,
-                Some(Arc::clone(&metrics)),
+                metrics.clone()
             );
             //
             // Create a new RequestTracker for this shard
@@ -500,7 +499,7 @@ impl ShardedRequestTracker {
         inner.trackers = trackers;
     }
 
-    pub async fn get_pages(
+    pub async fn get_page(
         &self,
         req: GetPageRequest,
     ) -> Result<GetPageResponse, tonic::Status> {
