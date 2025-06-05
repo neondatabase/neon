@@ -430,7 +430,7 @@ impl InMemoryLayer {
 
     // Look up the keys in the provided keyspace and update
     // the reconstruct state with whatever is found.
-    pub(crate) async fn get_values_reconstruct_data(
+    pub async fn get_values_reconstruct_data(
         self: &Arc<InMemoryLayer>,
         keyspace: KeySpace,
         lsn_range: Range<Lsn>,
