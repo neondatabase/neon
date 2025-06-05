@@ -43,6 +43,7 @@ use pageserver_api::models::{
 use pageserver_api::shard::{ShardCount, TenantShardId};
 use remote_storage::{DownloadError, GenericRemoteStorage, TimeTravelError};
 use scopeguard::defer;
+use serde_json::json;
 use tenant_size_model::svg::SvgBranchKind;
 use tenant_size_model::{SizeResult, StorageModel};
 use tokio::time::Instant;
@@ -3679,23 +3680,24 @@ async fn tenant_evaluate_feature_flag(
         let tenant = state
             .tenant_manager
             .get_attached_tenant_shard(tenant_shard_id)?;
+        let properties = tenant.feature_resolver.collect_properties(tenant_shard_id.tenant_id);
         if as_type == "boolean" {
             let result = tenant.feature_resolver.evaluate_boolean(&flag, tenant_shard_id.tenant_id);
             let result = result.map(|_| true).map_err(|e| e.to_string());
-            json_response(StatusCode::OK, result)
+            json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
         } else if as_type == "multivariate" {
             let result = tenant.feature_resolver.evaluate_multivariate(&flag, tenant_shard_id.tenant_id).map_err(|e| e.to_string());
-            json_response(StatusCode::OK, result)
+            json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
         } else {
             // Auto infer the type of the feature flag.
             let is_boolean = tenant.feature_resolver.is_feature_flag_boolean(&flag).map_err(|e| ApiError::InternalServerError(anyhow::anyhow!("{e}")))?;
             if is_boolean {
                 let result = tenant.feature_resolver.evaluate_boolean(&flag, tenant_shard_id.tenant_id);
                 let result = result.map(|_| true).map_err(|e| e.to_string());
-                json_response(StatusCode::OK, result)
+                json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
             } else {
                 let result = tenant.feature_resolver.evaluate_multivariate(&flag, tenant_shard_id.tenant_id).map_err(|e| e.to_string());
-                json_response(StatusCode::OK, result)
+                json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
             }
         }
     }
