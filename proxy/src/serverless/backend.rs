@@ -35,7 +35,7 @@ use crate::control_plane::errors::{GetAuthInfoError, WakeComputeError};
 use crate::control_plane::locks::ApiLocks;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::intern::EndpointIdInt;
-use crate::proxy::connect_compute::ConnectMechanism;
+use crate::pglb::connect_compute::ConnectMechanism;
 use crate::proxy::retry::{CouldRetry, ShouldRetryWakeCompute};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::types::{EndpointId, Host, LOCAL_PROXY_SUFFIX};
@@ -182,7 +182,7 @@ impl PoolingBackend {
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
         let backend = self.auth_backend.as_ref().map(|()| keys);
-        crate::proxy::connect_compute::connect_to_compute(
+        crate::pglb::connect_compute::connect_to_compute(
             ctx,
             &TokioMechanism {
                 conn_id,
@@ -226,7 +226,7 @@ impl PoolingBackend {
             },
             keys: crate::auth::backend::ComputeCredentialKeys::None,
         });
-        crate::proxy::connect_compute::connect_to_compute(
+        crate::pglb::connect_compute::connect_to_compute(
             ctx,
             &HyperMechanism {
                 conn_id,
