@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -402,9 +402,15 @@ async fn run_worker(
     shared_state.start_work_barrier.wait().await;
     let client_start = Instant::now();
     let mut ticks_processed = 0;
-    let mut inflight = VecDeque::new();
     let mut req_id = 0;
     let batch_size: usize = args.batch_size.into();
+
+    // Track inflight requests by request ID and start time. This times the request duration, and
+    // ensures responses match requests. We don't expect responses back in any particular order.
+    //
+    // NB: this does not check that all requests received a response, because we don't wait for the
+    // inflight requests to complete when the duration elapses.
+    let mut inflight: HashMap<u64, Instant> = HashMap::new();
 
     while !cancel.is_cancelled() {
         // Detect if a request took longer than the RPS rate
@@ -477,11 +483,16 @@ async fn run_worker(
                 .send_get_page(req_id, req_lsn, mod_lsn, rel, blks)
                 .await
                 .unwrap();
-            inflight.push_back(start);
+            let old = inflight.insert(req_id, start);
+            assert!(old.is_none(), "duplicate request ID {req_id}");
         }
 
-        let start = inflight.pop_front().unwrap();
-        client.recv_get_page().await.unwrap();
+        let (req_id, pages) = client.recv_get_page().await.unwrap();
+        assert_eq!(pages.len(), batch_size, "unexpected page count");
+        assert!(pages.iter().all(|p| !p.is_empty()), "empty page");
+        let start = inflight
+            .remove(&req_id)
+            .expect("response for unknown request ID");
         let end = Instant::now();
         shared_state.live_stats.request_done();
         ticks_processed += 1;
@@ -555,7 +566,8 @@ impl Client for LibpqClient {
         blks: Vec<u32>,
     ) -> anyhow::Result<()> {
         // libpq doesn't support client-side batches, so we send a bunch of individual requests
-        // instead in the hope that the server will batch them for us.
+        // instead in the hope that the server will batch them for us. We use the same request ID
+        // for all, because we'll return a single batch response.
         self.batch_sizes.push_back(blks.len());
         for blkno in blks {
             let req = PagestreamGetPageRequest {
@@ -581,6 +593,7 @@ impl Client for LibpqClient {
             if req_id.is_none() {
                 req_id = Some(resp.req.hdr.reqid);
             }
+            assert_eq!(req_id, Some(resp.req.hdr.reqid), "request ID mismatch");
             batch.push(resp.page);
         }
         Ok((req_id.unwrap(), batch))
