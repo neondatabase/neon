@@ -12,7 +12,7 @@ use crate::integrated_cache::{CacheResult, IntegratedCacheWriteAccess};
 use crate::neon_request::{CGetPageVRequest, CPrefetchVRequest};
 use crate::neon_request::{NeonIORequest, NeonIOResult};
 use crate::worker_process::in_progress_ios::{RequestInProgressKey, RequestInProgressTable};
-use pageserver_client_grpc::PageserverClient;
+use pageserver_client_grpc::request_tracker::ShardedRequestTracker;
 use pageserver_page_api as page_api;
 
 use metrics::{IntCounter, IntCounterVec};
@@ -30,7 +30,7 @@ use utils::lsn::Lsn;
 pub struct CommunicatorWorkerProcessStruct<'a> {
     neon_request_slots: &'a [NeonIOHandle],
 
-    pageserver_client: PageserverClient,
+    request_tracker: ShardedRequestTracker,
 
     pub(crate) cache: IntegratedCacheWriteAccess<'a>,
 
@@ -74,6 +74,7 @@ pub(super) async fn init(
     initial_file_cache_size: u64,
     file_cache_path: Option<PathBuf>,
 ) -> CommunicatorWorkerProcessStruct<'static> {
+    info!("Test log message");
     let last_lsn = get_request_lsn();
 
     let file_cache = if let Some(path) = file_cache_path {
@@ -97,7 +98,12 @@ pub(super) async fn init(
         .integrated_cache_init_struct
         .worker_process_init(last_lsn, file_cache);
 
-    let pageserver_client = PageserverClient::new(&tenant_id, &timeline_id, &auth_token, shard_map);
+    let mut request_tracker = ShardedRequestTracker::new();
+    request_tracker.update_shard_map(shard_map,
+        None,
+        tenant_id,
+        timeline_id,
+        auth_token.as_deref()).await;
 
     let request_counters = IntCounterVec::new(
         metrics::core::Opts::new(
@@ -148,7 +154,7 @@ pub(super) async fn init(
 
     CommunicatorWorkerProcessStruct {
         neon_request_slots: cis.neon_request_slots,
-        pageserver_client,
+        request_tracker,
         cache,
         submission_pipe_read_fd: cis.submission_pipe_read_fd,
         next_request_id: AtomicU64::new(1),
@@ -257,7 +263,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 };
 
                 match self
-                    .pageserver_client
+                    .request_tracker
                     .process_check_rel_exists_request(page_api::CheckRelExistsRequest {
                         read_lsn: self.request_lsns(not_modified_since),
                         rel,
@@ -291,7 +297,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
 
                 let read_lsn = self.request_lsns(not_modified_since);
                 match self
-                    .pageserver_client
+                    .request_tracker
                     .process_get_rel_size_request(page_api::GetRelSizeRequest {
                         read_lsn,
                         rel: rel.clone(),
@@ -344,7 +350,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 };
 
                 match self
-                    .pageserver_client
+                    .request_tracker
                     .process_get_dbsize_request(page_api::GetDbSizeRequest {
                         read_lsn: self.request_lsns(not_modified_since),
                         db_oid: req.db_oid,
@@ -467,7 +473,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         // TODO: Use batched protocol
         for (blkno, _lsn, dest, _guard) in cache_misses.iter() {
             match self
-                .pageserver_client
+                .request_tracker
                 .get_page(page_api::GetPageRequest {
                     request_id: self.next_request_id.fetch_add(1, Ordering::Relaxed),
                     request_class: page_api::GetPageClass::Normal,
@@ -477,11 +483,11 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 })
                 .await
             {
-                Ok(page_images) => {
+                Ok(resp) => {
                     // Write the received page image directly to the shared memory location
                     // that the backend requested.
-                    assert!(page_images.len() == 1);
-                    let page_image = page_images[0].clone();
+                    assert!(resp.page_images.len() == 1);
+                    let page_image = resp.page_images[0].clone();
                     let src: &[u8] = page_image.as_ref();
                     let len = std::cmp::min(src.len(), dest.bytes_total() as usize);
                     unsafe {
@@ -545,7 +551,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         // TODO: Use batched protocol
         for (blkno, _lsn, _guard) in cache_misses.iter() {
             match self
-                .pageserver_client
+                .request_tracker
                 .get_page(page_api::GetPageRequest {
                     request_id: self.next_request_id.fetch_add(1, Ordering::Relaxed),
                     request_class: page_api::GetPageClass::Prefetch,
@@ -555,13 +561,13 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 })
                 .await
             {
-                Ok(page_images) => {
+                Ok(resp) => {
                     trace!(
                         "prefetch completed, remembering blk {} in rel {:?} in LFC",
                         *blkno, rel
                     );
-                    assert!(page_images.len() == 1);
-                    let page_image = page_images[0].clone();
+                    assert!(resp.page_images.len() == 1);
+                    let page_image = resp.page_images[0].clone();
                     self.cache
                         .remember_page(&rel, *blkno, page_image, not_modified_since, false)
                         .await;

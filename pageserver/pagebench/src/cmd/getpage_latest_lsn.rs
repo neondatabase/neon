@@ -1,10 +1,11 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, HashMap, VecDeque};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use std::io::Error;
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -22,6 +23,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
+
+use tonic::transport::Channel;
 
 use axum::Router;
 use axum::body::Body;
@@ -427,6 +430,7 @@ async fn main_impl(
                         .await
                         .unwrap(),
                 ),
+
             };
             run_worker(args, client, ss, cancel, rps_period, ranges, weights).await
         })
@@ -694,6 +698,7 @@ impl Client for LibpqClient {
 struct GrpcClient {
     req_tx: tokio::sync::mpsc::Sender<proto::GetPageRequest>,
     resp_rx: tonic::Streaming<proto::GetPageResponse>,
+    start_times: Vec<Instant>,
 }
 
 impl GrpcClient {
@@ -717,6 +722,7 @@ impl GrpcClient {
         Ok(Self {
             req_tx,
             resp_rx: resp_stream,
+            start_times: Vec::new(),
         })
     }
 }
@@ -741,6 +747,7 @@ impl Client for GrpcClient {
             rel: Some(rel.into()),
             block_number: blks,
         };
+        self.start_times.push(Instant::now());
         self.req_tx.send(req).await?;
         Ok(())
     }
@@ -755,3 +762,4 @@ impl Client for GrpcClient {
         Ok((resp.request_id, resp.page_image))
     }
 }
+
