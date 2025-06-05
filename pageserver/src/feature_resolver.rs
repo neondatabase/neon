@@ -86,7 +86,16 @@ impl FeatureResolver {
                         }
                     }
                 }
-                // TODO: add pageserver URL.
+                // TODO: move this to a background task so that we don't block startup in case of slow disk
+                if let Ok(hostname) = std::fs::read_to_string("/etc/hostname") {
+                    let hostname = hostname.trim().to_string();
+                    if hostname.ends_with(".neon.tech") || hostname.ends_with(".neon.build") {
+                        properties.insert(
+                            "pageserver_hostname".to_string(),
+                            PostHogFlagFilterPropertyValue::String(hostname),
+                        );
+                    }
+                }
                 Arc::new(properties)
             };
             let fake_tenants = {
