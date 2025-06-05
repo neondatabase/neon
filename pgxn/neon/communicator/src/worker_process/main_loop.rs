@@ -101,13 +101,11 @@ pub(super) async fn init(
     info!("Test log message");
 
     let mut request_tracker = ShardedRequestTracker::new();
-    info!("Request tracker createde");
     request_tracker.update_shard_map(shard_map,
         None,
         tenant_id,
         timeline_id,
         auth_token.as_deref()).await;
-    info!("Request tracker initialized");
 
     let request_counters = IntCounterVec::new(
         metrics::core::Opts::new(
