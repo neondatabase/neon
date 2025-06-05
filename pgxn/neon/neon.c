@@ -48,7 +48,7 @@ void		_PG_init(void);
 
 
 static int  running_xacts_overflow_policy;
-static bool monitor_query_exec_time = true;
+static bool monitor_query_exec_time = false;
 
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
 static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
