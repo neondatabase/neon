@@ -618,6 +618,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         ancestor_timeline_id: TimelineId | None = None,
         ancestor_start_lsn: Lsn | None = None,
         existing_initdb_timeline_id: TimelineId | None = None,
+        read_only: bool | None = None,
         **kwargs,
     ) -> dict[Any, Any]:
         body: dict[str, Any] = {
@@ -631,6 +632,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             body["existing_initdb_timeline_id"] = str(existing_initdb_timeline_id)
         if pg_version != PgVersion.NOT_SET:
             body["pg_version"] = int(pg_version)
+        if read_only is not None:
+            body["read_only"] = read_only
 
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline", json=body, **kwargs

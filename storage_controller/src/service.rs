@@ -3832,6 +3832,9 @@ impl Service {
             models::TimelineCreateRequestMode::Branch {
                 read_only: true,
                 ..
+            } | models::TimelineCreateRequestMode::Bootstrap {
+                read_only: true,
+                ..
             }
         );
 

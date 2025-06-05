@@ -417,6 +417,8 @@ pub enum TimelineCreateRequestMode {
         #[serde(default)]
         existing_initdb_timeline_id: Option<TimelineId>,
         pg_version: Option<u32>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        read_only: bool,
     },
 }
 

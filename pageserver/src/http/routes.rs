@@ -576,6 +576,7 @@ async fn timeline_create_handler(
         TimelineCreateRequestMode::Bootstrap {
             existing_initdb_timeline_id,
             pg_version,
+            read_only: _,
         } => tenant::CreateTimelineParams::Bootstrap(tenant::CreateTimelineParamsBootstrap {
             new_timeline_id,
             existing_initdb_timeline_id,
