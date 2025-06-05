@@ -204,6 +204,7 @@ services:
     image: docker-compose-compute
     environment:
       - PG_VERSION=${PG_VERSION:-16}
+      - RUN_PARALLEL=true
       #- RUST_BACKTRACE=1
     # Mount the test files directly, for faster editing cycle.
     volumes:
@@ -223,6 +224,7 @@ services:
     image: docker-compose-compute
     environment:
       - PG_VERSION=${PG_VERSION:-16}
+      - RUN_PARALLEL=true
       #- RUST_BACKTRACE=1
     # Mount the test files directly, for faster editing cycle.
     volumes:
@@ -242,6 +244,7 @@ services:
     image: docker-compose-compute
     environment:
       - PG_VERSION=${PG_VERSION:-16}
+      - RUN_PARALLEL=true
       #- RUST_BACKTRACE=1
     # Mount the test files directly, for faster editing cycle.
     volumes:
