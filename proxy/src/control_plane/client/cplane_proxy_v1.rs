@@ -262,20 +262,15 @@ impl NeonControlPlaneClient {
                 None => SslMode::Disable,
             };
             let host_name = match body.server_name {
-                Some(host) => host,
-                None => host.to_owned(),
+                Some(host) => host.into(),
+                None => host.into(),
             };
 
             // Don't set anything but host and port! This config will be cached.
             // We'll set username and such later using the startup message.
             // TODO: add more type safety (in progress).
-            let mut config = compute::ConnCfg::new(host_name, port);
-
-            if let Some(addr) = host_addr {
-                config.set_host_addr(addr);
-            }
-
-            config.ssl_mode(ssl_mode);
+            let mut config = compute::ConnCfg::new(host_name, port, ssl_mode);
+            config.conn.host_addr = host_addr;
 
             let node = NodeInfo {
                 config,

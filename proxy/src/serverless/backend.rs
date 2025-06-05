@@ -305,12 +305,10 @@ impl PoolingBackend {
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "local_pool: opening a new connection '{conn_info}'");
 
-        let mut node_info = local_backend.node_info.clone();
-
         let (key, jwk) = create_random_jwk();
 
-        let config = node_info
-            .config
+        let mut config = local_backend.node_info.config.to_postgres_client_config();
+        config
             .user(&conn_info.user_info.user)
             .dbname(&conn_info.dbname)
             .set_param(
@@ -336,7 +334,7 @@ impl PoolingBackend {
             connection,
             key,
             conn_id,
-            node_info.aux.clone(),
+            local_backend.node_info.aux.clone(),
         );
 
         {
@@ -515,7 +513,7 @@ impl ConnectMechanism for TokioMechanism {
         let host = node_info.config.get_host();
         let permit = self.locks.get_permit(&host).await?;
 
-        let mut config = (*node_info.config).clone();
+        let mut config = node_info.config.to_postgres_client_config();
         let config = config
             .user(&self.conn_info.user_info.user)
             .dbname(&self.conn_info.dbname)
@@ -573,19 +571,19 @@ impl ConnectMechanism for HyperMechanism {
         node_info: &CachedNodeInfo,
         config: &ComputeConfig,
     ) -> Result<Self::Connection, Self::ConnectError> {
-        let host_addr = node_info.config.get_host_addr();
+        let host_addr = node_info.config.conn.host_addr;
         let host = node_info.config.get_host();
         let permit = self.locks.get_permit(&host).await?;
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
 
-        let tls = if node_info.config.get_ssl_mode() == SslMode::Disable {
+        let tls = if node_info.config.conn.ssl_mode == SslMode::Disable {
             None
         } else {
             Some(&config.tls)
         };
 
-        let port = node_info.config.get_port();
+        let port = node_info.config.conn.port;
         let res = connect_http2(host_addr, &host, port, config.timeout, tls).await;
         drop(pause);
         let (client, connection) = permit.release_result(res)?;

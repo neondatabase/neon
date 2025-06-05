@@ -192,10 +192,20 @@ async fn authenticate(
 
     client.write_message(BeMessage::NoticeResponse("Connecting to database."));
 
+    // Backwards compatibility. pg_sni_proxy uses "--" in domain names
+    // while direct connections do not. Once we migrate to pg_sni_proxy
+    // everywhere, we can remove this.
+    let ssl_mode = if db_info.host.contains("--") {
+        // we need TLS connection with SNI info to properly route it
+        SslMode::Require
+    } else {
+        SslMode::Disable
+    };
+
     // This config should be self-contained, because we won't
     // take username or dbname from client's startup message.
-    let mut config = compute::ConnCfg::new(db_info.host.to_string(), db_info.port);
-    config.dbname(&db_info.dbname).user(&db_info.user);
+    let mut config = compute::ConnCfg::new(db_info.host.into(), db_info.port, ssl_mode);
+    config.for_console_redirect(&db_info.dbname, &db_info.user, db_info.password.as_deref());
 
     let user: RoleName = db_info.user.into();
     let user_info = ComputeUserInfo {
@@ -208,20 +218,6 @@ async fn authenticate(
     ctx.set_user(user);
     ctx.set_project(db_info.aux.clone());
     info!("woken up a compute node");
-
-    // Backwards compatibility. pg_sni_proxy uses "--" in domain names
-    // while direct connections do not. Once we migrate to pg_sni_proxy
-    // everywhere, we can remove this.
-    if db_info.host.contains("--") {
-        // we need TLS connection with SNI info to properly route it
-        config.ssl_mode(SslMode::Require);
-    } else {
-        config.ssl_mode(SslMode::Disable);
-    }
-
-    if let Some(password) = db_info.password {
-        config.password(password.as_ref());
-    }
 
     Ok((
         NodeInfo {

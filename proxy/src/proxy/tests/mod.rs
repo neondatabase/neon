@@ -557,7 +557,7 @@ impl TestControlPlaneClient for TestConnectMechanism {
 
 fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {
     let node = NodeInfo {
-        config: compute::ConnCfg::new("test".to_owned(), 5432),
+        config: compute::ConnCfg::new("test".into(), 5432, SslMode::Disable),
         aux: MetricsAuxInfo {
             endpoint_id: (&EndpointId::from("endpoint")).into(),
             project_id: (&ProjectId::from("project")).into(),

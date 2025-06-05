@@ -6,6 +6,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use futures::TryFutureExt;
+use postgres_client::config::SslMode;
 use thiserror::Error;
 use tokio_postgres::Client;
 use tracing::{Instrument, error, info, info_span, warn};
@@ -169,22 +170,20 @@ impl MockControlPlane {
 
     async fn do_wake_compute(&self) -> Result<NodeInfo, WakeComputeError> {
         let port = self.endpoint.port().unwrap_or(5432);
-        let mut config = match self.endpoint.host_str() {
+        let config = match self.endpoint.host_str() {
             None => {
-                let mut config = compute::ConnCfg::new("localhost".to_string(), port);
-                config.set_host_addr(IpAddr::V4(Ipv4Addr::LOCALHOST));
+                let mut config = compute::ConnCfg::new("localhost".into(), port, SslMode::Disable);
+                config.conn.host_addr = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
                 config
             }
             Some(host) => {
-                let mut config = compute::ConnCfg::new(host.to_string(), port);
+                let mut config = compute::ConnCfg::new(host.into(), port, SslMode::Disable);
                 if let Ok(addr) = IpAddr::from_str(host) {
-                    config.set_host_addr(addr);
+                    config.conn.host_addr = Some(addr);
                 }
                 config
             }
         };
-
-        config.ssl_mode(postgres_client::config::SslMode::Disable);
 
         let node = NodeInfo {
             config,

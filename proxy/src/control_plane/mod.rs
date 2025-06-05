@@ -88,10 +88,7 @@ impl NodeInfo {
     }
 
     pub(crate) fn set_keys(&mut self, keys: &ComputeCredentialKeys) {
-        match keys {
-            ComputeCredentialKeys::AuthKeys(auth_keys) => self.config.auth_keys(*auth_keys),
-            ComputeCredentialKeys::JwtPayload(_) | ComputeCredentialKeys::None => &mut self.config,
-        };
+        self.config.with_auth_keys(keys);
     }
 }
 
