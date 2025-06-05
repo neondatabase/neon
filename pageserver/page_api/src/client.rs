@@ -96,6 +96,7 @@ impl Client {
         })
     }
 
+    // Returns whether a relation exists.
     pub async fn check_rel_exists(
         &mut self,
         req: model::CheckRelExistsRequest,
@@ -112,6 +113,7 @@ impl Client {
         Ok(proto_resp.into())
     }
 
+    // Fetches a base backup.
     pub async fn get_base_backup(
         mut self,
         req: model::GetBaseBackupRequest,
@@ -136,6 +138,7 @@ impl Client {
         Ok(domain_stream)
     }
 
+    // Returns the total size of a database, as # of bytes.
     pub async fn get_db_size(
         mut self,
         req: model::GetDbSizeRequest,
@@ -147,6 +150,9 @@ impl Client {
         Ok(response.into_inner().into())
     }
 
+    // Fetches pages.
+    //
+    // This is implemented as a bidirectional streaming RPC for performance.
     pub async fn get_pages<ReqSt>(
         &mut self,
         inbound: ReqSt,
@@ -180,6 +186,7 @@ impl Client {
         Ok(domain_stream)
     }
 
+    // Returns the size of a relation, as # of blocks.
     pub async fn get_rel_size(
         mut self,
         req: model::GetRelSizeRequest,
@@ -191,6 +198,7 @@ impl Client {
         Ok(proto_resp.into())
     }
 
+    // Fetches an SLRU segment.
     pub async fn get_slru_segment(
         mut self,
         req: model::GetSlruSegmentRequest,
