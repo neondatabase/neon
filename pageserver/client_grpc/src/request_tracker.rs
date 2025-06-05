@@ -208,12 +208,14 @@ pub struct RequestTracker {
     stream_pool: Arc<ConnectionPool<StreamReturner>>,
     unary_pool: Arc<ConnectionPool<Channel>>,
     auth_interceptor: AuthInterceptor,
+    shard: ShardIndex,
 }
 
 impl RequestTracker {
     pub fn new(stream_pool: Arc<ConnectionPool<StreamReturner>>,
                 unary_pool: Arc<ConnectionPool<Channel>>,
-                auth_interceptor: AuthInterceptor
+                auth_interceptor: AuthInterceptor,
+                shard: ShardIndex,
     ) -> Self {
         let cur_id = Arc::new(AtomicU64::new(0));
 
@@ -222,6 +224,7 @@ impl RequestTracker {
             stream_pool: stream_pool,
             unary_pool: unary_pool,
             auth_interceptor: auth_interceptor,
+            shard: shard.clone()
         }
     }
 
@@ -233,7 +236,7 @@ impl RequestTracker {
             let unary_pool = Arc::clone(&self.unary_pool);
             let pooled_client = unary_pool.get_client().await.unwrap();
             let channel = pooled_client.channel();
-            let mut ps_client = PageServiceClient::with_interceptor(channel, self.auth_interceptor.clone());
+            let mut ps_client = PageServiceClient::with_interceptor(channel, self.auth_interceptor.for_shard(self.shard));
             let request = proto::CheckRelExistsRequest::from(req.clone());
             let response = ps_client.check_rel_exists(tonic::Request::new(request)).await;
 
@@ -259,7 +262,7 @@ impl RequestTracker {
             let unary_pool = Arc::clone(&self.unary_pool);
             let pooled_client = unary_pool.get_client().await.unwrap();
             let channel = pooled_client.channel();
-            let mut ps_client = PageServiceClient::with_interceptor(channel, self.auth_interceptor.clone());
+            let mut ps_client = PageServiceClient::with_interceptor(channel, self.auth_interceptor.for_shard(self.shard));
 
             let request = proto::GetRelSizeRequest::from(req.clone());
             let response = ps_client.get_rel_size(tonic::Request::new(request)).await;
@@ -286,7 +289,7 @@ impl RequestTracker {
             // Current sharding model assumes that all metadata is present only at shard 0.
             let unary_pool = Arc::clone(&self.unary_pool);
             let pooled_client = unary_pool.get_client().await.unwrap();let channel = pooled_client.channel();
-            let mut ps_client = PageServiceClient::with_interceptor(channel, self.auth_interceptor.clone());
+            let mut ps_client = PageServiceClient::with_interceptor(channel, self.auth_interceptor.for_shard(self.shard));
 
             let request = proto::GetDbSizeRequest::from(req.clone());
             let response = ps_client.get_db_size(tonic::Request::new(request)).await;
@@ -312,12 +315,13 @@ impl RequestTracker {
         loop {
             let mut request = req.clone();
             // Increment cur_id
-            let request_id = self.cur_id.fetch_add(1, Ordering::SeqCst) + 1;
+            //let request_id = self.cur_id.fetch_add(1, Ordering::SeqCst) + 1;
+            let request_id = request.request_id;
             let response_sender: tokio::sync::mpsc::Sender<Result<proto::GetPageResponse, Status>>;
             let mut response_receiver: tokio::sync::mpsc::Receiver<Result<proto::GetPageResponse, Status>>;
 
             (response_sender, response_receiver) = tokio::sync::mpsc::channel(1);
-            request.request_id = request_id;
+            //request.request_id = request_id;
 
             // Get a stream from the stream pool
             let pool_clone = Arc::clone(&self.stream_pool);
@@ -492,7 +496,7 @@ impl ShardedRequestTracker {
             //
             // Create a new RequestTracker for this shard
             //
-            let new_tracker = RequestTracker::new(stream_pool, unary_pool, auth_interceptor);
+            let new_tracker = RequestTracker::new(stream_pool, unary_pool, auth_interceptor, shard);
             trackers.insert(shard, new_tracker);
         }
         let mut inner = self.inner.lock().await;
