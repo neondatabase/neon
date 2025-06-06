@@ -813,7 +813,7 @@ impl From<layer_manager::Shutdown> for FlushLayerError {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub(crate) enum GetVectoredError {
+pub enum GetVectoredError {
     #[error("timeline shutting down")]
     Cancelled,
 
@@ -846,7 +846,7 @@ impl From<GetReadyAncestorError> for GetVectoredError {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub(crate) enum GetReadyAncestorError {
+pub enum GetReadyAncestorError {
     #[error("ancestor LSN wait error")]
     AncestorLsnTimeout(#[from] WaitLsnError),
 
@@ -936,7 +936,7 @@ impl std::fmt::Debug for Timeline {
 }
 
 #[derive(thiserror::Error, Debug, Clone)]
-pub(crate) enum WaitLsnError {
+pub enum WaitLsnError {
     // Called on a timeline which is shutting down
     #[error("Shutdown")]
     Shutdown,
