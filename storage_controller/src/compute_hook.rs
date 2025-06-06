@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use control_plane::endpoint::{ComputeControlPlane, EndpointStatus};
+use control_plane::endpoint::{ComputeControlPlane, EndpointStatus, PageserverProtocol};
 use control_plane::local_env::LocalEnv;
 use futures::StreamExt;
 use hyper::StatusCode;
@@ -428,7 +428,8 @@ impl ComputeHook {
                     .expect("Unknown pageserver");
                 let (pg_host, pg_port) = parse_host_port(&ps_conf.listen_pg_addr)
                     .expect("Unable to parse listen_pg_addr");
-                (pg_host, pg_port.unwrap_or(5432))
+                // TODO: plumb gRPC through storage-controller.
+                (PageserverProtocol::Libpq, pg_host, pg_port.unwrap_or(5432))
             })
             .collect::<Vec<_>>();
 

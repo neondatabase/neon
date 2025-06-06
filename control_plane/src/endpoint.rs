@@ -37,6 +37,7 @@
 //! ```
 //!
 use std::collections::BTreeMap;
+use std::fmt::Display;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::Command;
@@ -74,7 +75,6 @@ use utils::id::{NodeId, TenantId, TimelineId};
 
 use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;
-use crate::storage_controller::StorageController;
 
 // contents of a endpoint.json file
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
@@ -331,7 +331,7 @@ pub enum EndpointStatus {
     RunningNoPidfile,
 }
 
-impl std::fmt::Display for EndpointStatus {
+impl Display for EndpointStatus {
     fn fmt(&self, writer: &mut std::fmt::Formatter) -> std::fmt::Result {
         let s = match self {
             Self::Running => "running",
@@ -340,6 +340,28 @@ impl std::fmt::Display for EndpointStatus {
             Self::RunningNoPidfile => "running, no pidfile",
         };
         write!(writer, "{}", s)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum PageserverProtocol {
+    Libpq,
+    Grpc,
+}
+
+impl PageserverProtocol {
+    /// Returns the URL scheme for the protocol, used in connstrings.
+    pub fn scheme(&self) -> &'static str {
+        match self {
+            Self::Libpq => "postgresql",
+            Self::Grpc => "grpc",
+        }
+    }
+}
+
+impl Display for PageserverProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.scheme())
     }
 }
 
@@ -606,10 +628,10 @@ impl Endpoint {
         }
     }
 
-    fn build_pageserver_connstr(pageservers: &[(Host, u16)]) -> String {
+    fn build_pageserver_connstr(pageservers: &[(PageserverProtocol, Host, u16)]) -> String {
         pageservers
             .iter()
-            .map(|(host, port)| format!("postgresql://no_user@{host}:{port}"))
+            .map(|(scheme, host, port)| format!("{scheme}://no_user@{host}:{port}"))
             .collect::<Vec<_>>()
             .join(",")
     }
@@ -654,7 +676,7 @@ impl Endpoint {
         endpoint_storage_addr: String,
         safekeepers_generation: Option<SafekeeperGeneration>,
         safekeepers: Vec<NodeId>,
-        pageservers: Vec<(Host, u16)>,
+        pageservers: Vec<(PageserverProtocol, Host, u16)>,
         remote_ext_base_url: Option<&String>,
         shard_stripe_size: usize,
         create_test_user: bool,
@@ -939,10 +961,12 @@ impl Endpoint {
 
     pub async fn reconfigure(
         &self,
-        mut pageservers: Vec<(Host, u16)>,
+        pageservers: Vec<(PageserverProtocol, Host, u16)>,
         stripe_size: Option<ShardStripeSize>,
         safekeepers: Option<Vec<NodeId>>,
     ) -> Result<()> {
+        anyhow::ensure!(!pageservers.is_empty(), "no pageservers provided");
+
         let (mut spec, compute_ctl_config) = {
             let config_path = self.endpoint_path().join("config.json");
             let file = std::fs::File::open(config_path)?;
@@ -954,25 +978,7 @@ impl Endpoint {
         let postgresql_conf = self.read_postgresql_conf()?;
         spec.cluster.postgresql_conf = Some(postgresql_conf);
 
-        // If we weren't given explicit pageservers, query the storage controller
-        if pageservers.is_empty() {
-            let storage_controller = StorageController::from_env(&self.env);
-            let locate_result = storage_controller.tenant_locate(self.tenant_id).await?;
-            pageservers = locate_result
-                .shards
-                .into_iter()
-                .map(|shard| {
-                    (
-                        Host::parse(&shard.listen_pg_addr)
-                            .expect("Storage controller reported bad hostname"),
-                        shard.listen_pg_port,
-                    )
-                })
-                .collect::<Vec<_>>();
-        }
-
         let pageserver_connstr = Self::build_pageserver_connstr(&pageservers);
-        assert!(!pageserver_connstr.is_empty());
         spec.pageserver_connstring = Some(pageserver_connstr);
         if stripe_size.is_some() {
             spec.shard_stripe_size = stripe_size.map(|s| s.0 as usize);
