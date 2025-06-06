@@ -2956,7 +2956,7 @@ def test_storage_controller_leadership_transfer_during_split(
         env.storage_controller.allowed_errors.extend(
             [".*Unexpected child shard count.*", ".*Enqueuing background abort.*"]
         )
-        pause_failpoint = "shard-split-pre-complete"
+        pause_failpoint = "shard-split-pre-complete-pause"
         env.storage_controller.configure_failpoints((pause_failpoint, "pause"))
 
         split_fut = executor.submit(
@@ -3003,7 +3003,7 @@ def test_storage_controller_leadership_transfer_during_split(
         env.storage_controller.request(
             "PUT",
             f"http://127.0.0.1:{storage_controller_1_port}/debug/v1/failpoints",
-            json=[{"name": "shard-split-pre-complete", "actions": "off"}],
+            json=[{"name": pause_failpoint, "actions": "off"}],
             headers=env.storage_controller.headers(TokenScope.ADMIN),
         )
 

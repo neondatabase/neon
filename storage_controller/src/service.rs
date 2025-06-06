@@ -1108,7 +1108,8 @@ impl Service {
         observed
     }
 
-    /// Used during [`Self::startup_reconcile`]: detach a list of unknown-to-us tenants from pageservers.
+    /// Used during [`Self::startup_reconcile`] and shard splits: detach a list of unknown-to-us
+    /// tenants from pageservers.
     ///
     /// This is safe to run in the background, because if we don't have this TenantShardId in our map of
     /// tenants, then it is probably something incompletely deleted before: we will not fight with any
@@ -6211,7 +6212,11 @@ impl Service {
             }
         }
 
-        pausable_failpoint!("shard-split-pre-complete");
+        fail::fail_point!("shard-split-pre-complete", |_| Err(ApiError::Conflict(
+            "failpoint".to_string()
+        )));
+
+        pausable_failpoint!("shard-split-pre-complete-pause");
 
         // TODO: if the pageserver restarted concurrently with our split API call,
         // the actual generation of the child shard might differ from the generation
@@ -6232,6 +6237,15 @@ impl Service {
         // Replace all the shards we just split with their children: this phase is infallible.
         let (response, child_locations, waiters) =
             self.tenant_shard_split_commit_inmem(tenant_id, new_shard_count, new_stripe_size);
+
+        // Notify all page servers to detach and clean up the old shards because they will no longer
+        // be needed. This is best-effort: if it fails, it will be cleaned up on a subsequent
+        // Pageserver re-attach/startup.
+        let shards_to_cleanup = targets
+            .iter()
+            .map(|target| (target.parent_id, target.node.get_id()))
+            .collect();
+        self.cleanup_locations(shards_to_cleanup).await;
 
         // Send compute notifications for all the new shards
         let mut failed_notifications = Vec::new();
