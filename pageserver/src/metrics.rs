@@ -1053,6 +1053,15 @@ pub(crate) static TENANT_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("Failed to register pageserver_tenant_states_count metric")
 });
 
+pub(crate) static TIMELINE_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_timeline_states_count",
+        "Count of timelines per state",
+        &["state"]
+    )
+    .expect("Failed to register pageserver_timeline_states_count metric")
+});
+
 /// A set of broken tenants.
 ///
 /// These are expected to be so rare that a set is fine. Set as in a new timeseries per each broken
@@ -3325,6 +3334,8 @@ impl TimelineMetrics {
                 &timeline_id,
             );
 
+        TIMELINE_STATE_METRIC.with_label_values(&["active"]).inc();
+
         TimelineMetrics {
             tenant_id,
             shard_id,
@@ -3478,6 +3489,8 @@ impl TimelineMetrics {
             // TODO: this can be removed once https://github.com/neondatabase/neon/issues/5080
             return;
         }
+
+        TIMELINE_STATE_METRIC.with_label_values(&["active"]).dec();
 
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
