@@ -5,7 +5,6 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Deref;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
