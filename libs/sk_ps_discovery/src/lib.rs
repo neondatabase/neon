@@ -352,6 +352,7 @@ impl World {
             HashMap::with_capacity(self.nodes_timelines.len());
         let commit_lsns_iter = self.commit_lsns.iter().map(|(k, v)| (*k, *v));
         let attachments_iter = self.attachments.iter().map(|(k, v)| (*k, *v));
+        let remote_consistent_lsns_iter = self.remote_consistent_lsns.iter().map(|(k, v)| (*k, *v));
 
         let join = merge_join::inner_equi_join_with_merge_strategy(
             commit_lsns_iter,
@@ -359,20 +360,18 @@ impl World {
             |(tenant_timeline_id, _)| tenant_timeline_id.tenant_id,
             |(shard_attachment_id, _)| shard_attachment_id.tenant_id,
         );
-        for (l, r) in join {
-            let (tenant_timeline_id, commit_lsn): (TenantTimelineId, Lsn) = l;
-            let (tenant_shard_attachment_id, node_id): (TenantShardAttachmentId, NodeId) = r;
-
-            // TOOD three-way equi join
-            let timeline_attachment_id =
-                tenant_shard_attachment_id.timeline_attachment_id(tenant_timeline_id.timeline_id);
-            match self
-                .remote_consistent_lsns
-                .get(&timeline_attachment_id)
-                .cloned()
-            {
+        let join = merge_join::left_equi_join_with_merge_strategy(
+            join,
+            remote_consistent_lsns_iter,
+            |((ttid, _), _)| ttid.tenant_id,
+            |(tlaid, _)| tlaid.tenant_timeline_id.tenant_id,
+        );
+        for ((c, a), r) in join {
+            let (tenant_timeline_id, commit_lsn): (TenantTimelineId, Lsn) = c;
+            let (_, node_id): (TenantShardAttachmentId, NodeId) = a;
+            match r {
                 // TODO: can > ever happen?
-                Some(remote_consistent_lsn) if remote_consistent_lsn >= commit_lsn => {
+                Some((_, remote_consistent_lsn)) if remote_consistent_lsn >= commit_lsn => {
                     // this timeline shard attachment is already caught up
                     continue;
                 }
