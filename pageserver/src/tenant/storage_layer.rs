@@ -472,6 +472,7 @@ impl IoConcurrency {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn clone(&self) -> Self {
         match self {
             IoConcurrency::Sequential => IoConcurrency::Sequential,
