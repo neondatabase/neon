@@ -17,6 +17,7 @@ use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use diesel_migrations::{EmbeddedMigrations, embed_migrations};
 use futures::FutureExt;
 use futures::future::BoxFuture;
+use http_utils::error::ApiError;
 use itertools::Itertools;
 use pageserver_api::controller_api::{
     AvailabilityZone, MetadataHealthRecord, NodeLifecycle, NodeSchedulingPolicy, PlacementPolicy,
@@ -29,6 +30,7 @@ use pageserver_api::shard::{
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::ring;
+use safekeeper_api::membership::SafekeeperGeneration;
 use scoped_futures::ScopedBoxFuture;
 use serde::{Deserialize, Serialize};
 use utils::generation::Generation;
@@ -94,6 +96,8 @@ pub(crate) enum DatabaseError {
     Logical(String),
     #[error("Migration error: {0}")]
     Migration(String),
+    #[error("CAS error: {0}")]
+    CAS(String),
 }
 
 #[derive(measured::FixedCardinalityLabel, Copy, Clone)]
@@ -126,6 +130,7 @@ pub(crate) enum DatabaseOperation {
     UpdateLeader,
     SetPreferredAzs,
     InsertTimeline,
+    UpdateTimelineMembership,
     GetTimeline,
     InsertTimelineReconcile,
     RemoveTimelineReconcile,
@@ -1363,6 +1368,7 @@ impl Persistence {
 
         self.with_conn(move |conn| {
             Box::pin(async move {
+                // TODO (diko)
                 #[derive(Insertable, AsChangeset)]
                 #[diesel(table_name = crate::schema::safekeepers)]
                 struct UpdateSkSchedulingPolicy<'a> {
@@ -1408,6 +1414,54 @@ impl Persistence {
                     _ => Err(DatabaseError::Logical(format!(
                         "unexpected number of rows ({})",
                         inserted_updated
+                    ))),
+                }
+            })
+        })
+        .await
+    }
+
+    /// Update timeline membership configuration in database.
+    /// Updates only if
+    /// Returns true if the CAS was
+    pub(crate) async fn update_timeline_membership(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        new_generation: SafekeeperGeneration,
+        sk_set: &[NodeId],
+        new_sk_set: Option<&[NodeId]>,
+    ) -> DatabaseResult<()> {
+        use crate::schema::timelines::dsl;
+
+        let prev_generation = new_generation.previous().unwrap();
+
+        let tenant_id = &tenant_id;
+        let timeline_id = &timeline_id;
+        self.with_measured_conn(DatabaseOperation::UpdateTimelineMembership, move |conn| {
+            Box::pin(async move {
+                let updated = diesel::update(dsl::timelines)
+                    .filter(dsl::tenant_id.eq(&tenant_id.to_string()))
+                    .filter(dsl::timeline_id.eq(&timeline_id.to_string()))
+                    .filter(dsl::generation.eq(prev_generation.into_inner() as i32))
+                    .set((
+                        dsl::generation.eq(new_generation.into_inner() as i32),
+                        dsl::sk_set.eq(sk_set.iter().map(|id| id.0 as i64).collect::<Vec<_>>()),
+                        dsl::new_sk_set.eq(new_sk_set
+                            .map(|set| set.iter().map(|id| id.0 as i64).collect::<Vec<_>>())),
+                    ))
+                    .execute(conn)
+                    .await?;
+
+                match updated {
+                    0 => {
+                        // TODO: select generation.
+                        Err(DatabaseError::CAS("cas failed".to_string()))
+                    }
+                    1 => Ok(()),
+                    _ => Err(DatabaseError::Logical(format!(
+                        "unexpected number of rows ({})",
+                        updated
                     ))),
                 }
             })

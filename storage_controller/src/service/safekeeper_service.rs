@@ -10,6 +10,8 @@ use crate::persistence::{
     DatabaseError, SafekeeperTimelineOpKind, TimelinePendingOpPersistence, TimelinePersistence,
 };
 use crate::safekeeper::Safekeeper;
+use crate::safekeeper_client::SafekeeperClient;
+use crate::service::TimelineSafekeeperMigrateRequest;
 use crate::timeline_import::TimelineImportFinalizeError;
 use anyhow::Context;
 use http_utils::error::ApiError;
@@ -17,7 +19,13 @@ use pageserver_api::controller_api::{
     SafekeeperDescribeResponse, SkSchedulingPolicy, TimelineImportRequest,
 };
 use pageserver_api::models::{SafekeeperInfo, SafekeepersInfo, TimelineInfo};
-use safekeeper_api::membership::{MemberSet, SafekeeperId};
+use reqwest::StatusCode;
+use safekeeper_api::membership::{self, MemberSet, SafekeeperGeneration, SafekeeperId};
+use safekeeper_api::models::{
+    PullTimelineRequest, TimelineMembershipSwitchRequest, TimelineMembershipSwitchResponse,
+};
+use safekeeper_api::{INITIAL_TERM, Term};
+use safekeeper_client::mgmt_api;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use utils::id::{NodeId, TenantId, TimelineId};
@@ -27,6 +35,36 @@ use utils::lsn::Lsn;
 use super::Service;
 
 impl Service {
+    fn make_member_set(safekeepers: &[Safekeeper]) -> Result<MemberSet, ApiError> {
+        let mut members = Vec::new();
+        for sk in safekeepers {
+            members.push(SafekeeperId {
+                id: sk.get_id(),
+                host: sk.skp.host.clone(),
+                pg_port: sk.skp.port as u16,
+            });
+        }
+        MemberSet::new(members).map_err(ApiError::InternalServerError)
+    }
+
+    fn get_safekeepers(&self, ids: &[i64]) -> Result<Vec<Safekeeper>, ApiError> {
+        let safekeepers = {
+            let locked = self.inner.read().unwrap();
+            locked.safekeepers.clone()
+        };
+
+        ids.iter()
+            .map(|&id| {
+                let node_id = NodeId(id as u64);
+                safekeepers.get(&node_id).cloned().ok_or_else(|| {
+                    ApiError::InternalServerError(anyhow::anyhow!(
+                        "safekeeper {node_id} is not registered"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+    }
+
     /// Timeline creation on safekeepers
     ///
     /// Returns `Ok(left)` if the timeline has been created on a quorum of safekeepers,
@@ -39,35 +77,9 @@ impl Service {
         pg_version: u32,
         timeline_persistence: &TimelinePersistence,
     ) -> Result<Vec<NodeId>, ApiError> {
-        // If quorum is reached, return if we are outside of a specified timeout
-        let jwt = self
-            .config
-            .safekeeper_jwt_token
-            .clone()
-            .map(SecretString::from);
-        let mut joinset = JoinSet::new();
+        let safekeepers = self.get_safekeepers(&timeline_persistence.sk_set)?;
 
-        // Prepare membership::Configuration from choosen safekeepers.
-        let safekeepers = {
-            let locked = self.inner.read().unwrap();
-            locked.safekeepers.clone()
-        };
-
-        let mut members = Vec::new();
-        for sk_id in timeline_persistence.sk_set.iter() {
-            let sk_id = NodeId(*sk_id as u64);
-            let Some(safekeeper) = safekeepers.get(&sk_id) else {
-                return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                    "couldn't find entry for safekeeper with id {sk_id}"
-                )))?;
-            };
-            members.push(SafekeeperId {
-                id: sk_id,
-                host: safekeeper.skp.host.clone(),
-                pg_port: safekeeper.skp.port as u16,
-            });
-        }
-        let mset = MemberSet::new(members).map_err(ApiError::InternalServerError)?;
+        let mset = Self::make_member_set(&safekeepers)?;
         let mconf = safekeeper_api::membership::Configuration::new(mset);
 
         let req = safekeeper_api::models::TimelineCreateRequest {
@@ -80,37 +92,81 @@ impl Service {
             timeline_id,
             wal_seg_size: None,
         };
+
         const SK_CREATE_TIMELINE_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
-        for sk in timeline_persistence.sk_set.iter() {
-            let sk_id = NodeId(*sk as u64);
-            let safekeepers = safekeepers.clone();
+
+        let results = self
+            .tenant_timeline_safekeeper_op_quorum(
+                &safekeepers,
+                move |client| {
+                    let req = req.clone();
+                    async move { client.create_timeline(&req).await }
+                },
+                SK_CREATE_TIMELINE_RECONCILE_TIMEOUT,
+            )
+            .await?;
+
+        Ok(results
+            .into_iter()
+            .filter_map(|(sk_id, res)| {
+                if res.is_ok() {
+                    None // Success, don't return this safekeeper
+                } else {
+                    Some(sk_id) // Failure, return this safekeeper
+                }
+            })
+            .collect::<Vec<_>>())
+    }
+
+    /// Perform an operation on a quorum of safekeepers.
+    ///
+    /// Returns `Ok(left)` if the op has been applied on a quorum of safekeepers,
+    /// where `left` contains the list of safekeepers that didn't have a successful response.
+    async fn tenant_timeline_safekeeper_op<T, O, F>(
+        &self,
+        safekeepers: &[Safekeeper],
+        op: O,
+        timeout: Duration,
+    ) -> Result<Vec<(NodeId, mgmt_api::Result<T>)>, ApiError>
+    where
+        O: FnMut(SafekeeperClient) -> F + Send + 'static,
+        O: Clone,
+        F: std::future::Future<Output = mgmt_api::Result<T>> + Send + 'static,
+        T: Sync + Send + 'static,
+    {
+        // If quorum is reached, return if we are outside of a specified timeout
+        let jwt = self
+            .config
+            .safekeeper_jwt_token
+            .clone()
+            .map(SecretString::from);
+        let mut joinset = JoinSet::new();
+
+        for sk in safekeepers {
+            let sk = sk.clone();
             let http_client = self.http_client.clone();
             let jwt = jwt.clone();
-            let req = req.clone();
+            let op = op.clone();
             joinset.spawn(async move {
-                // Unwrap is fine as we already would have returned error above
-                let sk_p = safekeepers.get(&sk_id).unwrap();
-                let res = sk_p
+                let res = sk
                     .with_client_retries(
-                        |client| {
-                            let req = req.clone();
-                            async move { client.create_timeline(&req).await }
-                        },
+                        op,
                         &http_client,
                         &jwt,
                         3,
                         3,
-                        SK_CREATE_TIMELINE_RECONCILE_TIMEOUT,
+                        // TODO(diko): this is a wrong timeout
+                        timeout,
                         &CancellationToken::new(),
                     )
                     .await;
-                (sk_id, sk_p.skp.host.clone(), res)
+                (sk.get_id(), sk.skp.host.clone(), res)
             });
         }
         // After we have built the joinset, we now wait for the tasks to complete,
         // but with a specified timeout to make sure we return swiftly, either with
         // a failure or success.
-        let reconcile_deadline = tokio::time::Instant::now() + SK_CREATE_TIMELINE_RECONCILE_TIMEOUT;
+        let reconcile_deadline = tokio::time::Instant::now() + timeout;
 
         // Wait until all tasks finish or timeout is hit, whichever occurs
         // first.
@@ -125,9 +181,9 @@ impl Service {
                             "response from safekeeper id:{} at {}: {:?}",
                             res.0,
                             res.1,
-                            res.2
+                            res.2.is_ok(), // TODO(diko)
                         );
-                        reconcile_results.push(res);
+                        reconcile_results.push((res.0, res.2));
                     }
                     Err(join_err) => {
                         tracing::info!("join_err for task in joinset: {join_err}");
@@ -135,24 +191,37 @@ impl Service {
                 }
             } else {
                 tracing::info!(
-                    "timeout for creation call after {} responses",
+                    "timeout for operation call after {} responses",
                     reconcile_results.len()
                 );
+                // TODO: add timeouts to results
                 break;
             }
         }
 
-        // Now check now if quorum was reached in reconcile_results.
-        let total_result_count = reconcile_results.len();
-        let remaining = reconcile_results
-            .into_iter()
-            .filter_map(|res| res.2.is_err().then_some(res.0))
-            .collect::<Vec<_>>();
-        tracing::info!(
-            "Got {} non-successful responses from initial creation request of total {total_result_count} responses",
-            remaining.len()
-        );
-        let target_sk_count = timeline_persistence.sk_set.len();
+        Ok(reconcile_results)
+    }
+
+    // TODO(diko)
+    async fn tenant_timeline_safekeeper_op_quorum<T, O, F>(
+        &self,
+        safekeepers: &[Safekeeper],
+        op: O,
+        timeout: Duration,
+    ) -> Result<Vec<(NodeId, mgmt_api::Result<T>)>, ApiError>
+    where
+        O: FnMut(SafekeeperClient) -> F,
+        O: Clone + Send + 'static,
+        F: std::future::Future<Output = mgmt_api::Result<T>> + Send + 'static,
+        T: Sync + Send + 'static,
+    {
+        let (results) = self
+            .tenant_timeline_safekeeper_op(safekeepers, op, timeout)
+            .await?;
+
+        // Now check now if quorum was reached in results.
+
+        let target_sk_count = safekeepers.len();
         let quorum_size = match target_sk_count {
             0 => {
                 return Err(ApiError::InternalServerError(anyhow::anyhow!(
@@ -171,7 +240,7 @@ impl Service {
                     // in order to schedule work to them
                     tracing::warn!(
                         "couldn't find at least 3 safekeepers for timeline, found: {:?}",
-                        timeline_persistence.sk_set
+                        target_sk_count
                     );
                     return Err(ApiError::InternalServerError(anyhow::anyhow!(
                         "couldn't find at least 3 safekeepers to put timeline to"
@@ -180,7 +249,7 @@ impl Service {
             }
             _ => target_sk_count / 2 + 1,
         };
-        let success_count = target_sk_count - remaining.len();
+        let success_count = results.iter().filter(|(_, res)| res.is_ok()).count();
         if success_count < quorum_size {
             // Failure
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
@@ -188,7 +257,7 @@ impl Service {
             )));
         }
 
-        Ok(remaining)
+        Ok(results)
     }
 
     /// Create timeline in controller database and on safekeepers.
@@ -612,18 +681,8 @@ impl Service {
             )
         });
         // Number of safekeepers in different AZs we are looking for
-        let wanted_count = match all_safekeepers.len() {
-            0 => {
-                return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                    "couldn't find any active safekeeper for new timeline",
-                )));
-            }
-            // Have laxer requirements on testig mode as we don't want to
-            // spin up three safekeepers for every single test
-            #[cfg(feature = "testing")]
-            1 | 2 => all_safekeepers.len(),
-            _ => 3,
-        };
+        let wanted_count = self.config.timeline_safekeeper_count as usize;
+
         let mut sks = Vec::new();
         let mut azs = HashSet::new();
         for (_sk_util, sk_info, az_id) in all_safekeepers.iter() {
@@ -764,6 +823,353 @@ impl Service {
 
             locked.safekeepers = Arc::new(safekeepers);
         }
+        Ok(())
+    }
+
+    // TODO(diko): description
+    async fn tenant_timeline_set_membership_quorum(
+        self: &Arc<Self>,
+        safekeepers: &[Safekeeper],
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        config: membership::Configuration,
+        min_position: Option<(Term, Lsn)>,
+    ) -> Result<
+        Vec<(
+            NodeId,
+            Result<TimelineMembershipSwitchResponse, mgmt_api::Error>,
+        )>,
+        ApiError,
+    > {
+        let req = TimelineMembershipSwitchRequest {
+            mconf: config.clone(),
+        };
+
+        const SK_SET_MEM_TIMELINE_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
+
+        let results = self
+            .tenant_timeline_safekeeper_op_quorum(
+                safekeepers,
+                move |client| {
+                    let req = req.clone();
+                    async move {
+                        let mut res = client
+                            .switch_timeline_membership(tenant_id, timeline_id, &req)
+                            .await;
+
+                        if let Some(min_position) = min_position {
+                            if let Ok(ok_res) = &res {
+                                if (ok_res.term, ok_res.flush_lsn) < min_position {
+                                    res = Err(mgmt_api::Error::ApiError(
+                                        StatusCode::PRECONDITION_FAILED,
+                                        // format!(
+                                        // "safekeeper {} returned position {:?} which is less than minimum required position {:?}",
+                                        // client.get_id(),
+                                        // (res.term, res.flush_lsn),
+                                        // min_position
+                                        // )
+                                        "".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+
+                        res
+                    }
+                },
+                SK_SET_MEM_TIMELINE_RECONCILE_TIMEOUT,
+            )
+            .await?;
+
+        // let mut sync_position = (INITIAL_TERM, Lsn::INVALID);
+
+        for (_, res) in results.iter() {
+            if let Ok(res) = res {
+                if res.current_conf.generation > config.generation {
+                    return Err(ApiError::Conflict(format!(
+                        "received configuration with generation {} from safekeeper, but expected {}",
+                        res.current_conf.generation, config.generation
+                    )));
+                } else if res.current_conf.generation != config.generation {
+                    // should never happen,
+                    tracing::error!(
+                        "received configuration with generation {} from safekeeper, but expected {}",
+                        res.current_conf.generation,
+                        config.generation
+                    );
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                        "received configuration with generation {} from safekeeper, but expected {}",
+                        res.current_conf.generation,
+                        config.generation
+                    )));
+                }
+
+                // let res_position = (res.term, res.flush_lsn);
+                // if res_position > sync_position {
+                //     sync_position = res_position;
+                // }
+            }
+        }
+
+        Ok(results)
+
+        // Ok(sync_position)
+    }
+
+    // TODO(diko)
+    /// Pull timeline from safekeepers on a quorum.
+    ///
+    /// Returns `Ok(left)` if the timeline has been created on a quorum of safekeepers,
+    /// where `left` contains the list of safekeepers that didn't have a successful response.
+    /// Assumes tenant lock is held while calling this function.
+    async fn tenant_timeline_pull_from_peers(
+        self: &Arc<Self>,
+        to_safekeepers: &[Safekeeper],
+        from_safekeepers: &[Safekeeper],
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Result<(), ApiError> {
+        let http_hosts = from_safekeepers
+            .iter()
+            .map(|sk| sk.base_url())
+            .collect::<Vec<_>>();
+
+        let from_ids: HashSet<NodeId> = from_safekeepers.iter().map(|sk| sk.get_id()).collect();
+
+        // Filter safekeepers which are present in both "from" and "to" sets.
+        let to_safekeepers = to_safekeepers
+            .iter()
+            .filter(|sk| !from_ids.contains(&sk.get_id()))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        tracing::info!(
+            "pulling timeline {tenant_id}/{timeline_id} from safekeepers to {:?}",
+            to_safekeepers
+                .iter()
+                .map(|sk| sk.get_id())
+                .collect::<Vec<_>>()
+        );
+
+        // TODO: need to pass mconf
+        let req = PullTimelineRequest {
+            tenant_id,
+            timeline_id,
+            http_hosts: http_hosts,
+            ignore_tombstone: None,
+        };
+
+        const SK_PULL_TIMELINE_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
+
+        let responses = self
+            .tenant_timeline_safekeeper_op(
+                &to_safekeepers,
+                move |client| {
+                    let req = req.clone();
+                    async move { client.pull_timeline(&req).await }
+                },
+                SK_PULL_TIMELINE_RECONCILE_TIMEOUT,
+            )
+            .await?;
+
+        Ok(())
+        // TODO(diko)
+        // for (sk_id, res) in responses {}
+    }
+
+    pub(crate) async fn tenant_timeline_safekeeper_migrate(
+        self: &Arc<Self>,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        req: TimelineSafekeeperMigrateRequest,
+    ) -> Result<(), ApiError> {
+        let all_safekeepers = self.inner.read().unwrap().safekeepers.clone();
+
+        let new_sk_set = req.new_sk_set;
+
+        for sk_id in new_sk_set.iter() {
+            if !all_safekeepers.contains_key(sk_id) {
+                return Err(ApiError::BadRequest(anyhow::anyhow!(
+                    "safekeeper {sk_id} does not exist"
+                )));
+            }
+        }
+
+        // TODO(diko): take the lock?
+
+        // 1. Fetch current timeline configuration from the configuration storage.
+        let timeline = self
+            .persistence
+            .get_timeline(tenant_id, timeline_id)
+            .await?;
+
+        let Some(timeline) = timeline else {
+            return Err(ApiError::NotFound(
+                anyhow::anyhow!(
+                    "timeline {tenant_id}/{timeline_id} doesn't exist in timelines table"
+                )
+                .into(),
+            ));
+        };
+
+        let cur_sk_set = timeline
+            .sk_set
+            .iter()
+            .map(|&id| NodeId(id as u64))
+            .collect::<Vec<_>>();
+
+        tracing::info!(
+            "Migrating timeline to new safekeeper set {:?}, current set: {:?}",
+            new_sk_set,
+            cur_sk_set
+        );
+
+        let mut generation = SafekeeperGeneration::new(timeline.generation as u32);
+
+        if let Some(ref presistent_new_sk_set) = timeline.new_sk_set {
+            // 2. If it is already joint one and new_set is different from desired_set refuse to change.
+            if !presistent_new_sk_set
+                .iter()
+                .map(|&id| NodeId(id as u64))
+                .ne(new_sk_set.iter().cloned())
+            {
+                tracing::info!(
+                    "different new safekeeper set is already set in the database: {:?}, desired set: {:?}",
+                    presistent_new_sk_set,
+                    new_sk_set
+                );
+                return Err(ApiError::Conflict(format!(
+                    "the timeline is already in migration to a different safekeeper set: {:?}",
+                    presistent_new_sk_set
+                )));
+            }
+            // It it is the same new_sk_set, we can continue the migration (retry).
+        } else {
+            // 3. No active migration yet.
+            // Increment current generation and put desired_set to new_sk_set.
+            generation = generation.next();
+
+            self.persistence
+                .update_timeline_membership(
+                    tenant_id,
+                    timeline_id,
+                    generation,
+                    &cur_sk_set,
+                    Some(&new_sk_set),
+                )
+                .await?;
+        }
+
+        let cur_safekeepers = self.get_safekeepers(&timeline.sk_set)?;
+        let cur_sk_member_set = Self::make_member_set(&cur_safekeepers)?;
+
+        let new_sk_set_i64 = new_sk_set.iter().map(|id| id.0 as i64).collect::<Vec<_>>();
+        let new_safekeepers = self.get_safekeepers(&new_sk_set_i64)?;
+        let new_sk_member_set = Self::make_member_set(&new_safekeepers)?;
+
+        let joint_config = membership::Configuration {
+            generation: generation,
+            members: cur_sk_member_set,
+            new_members: Some(new_sk_member_set.clone()),
+        };
+
+        // 4. Call PUT configuration on safekeepers from the current set, delivering them joint_conf.
+
+        let results = self
+            .tenant_timeline_set_membership_quorum(
+                &cur_safekeepers,
+                tenant_id,
+                timeline_id,
+                joint_config.clone(),
+                None, // no min position
+            )
+            .await?;
+
+        let mut sync_position = (INITIAL_TERM, Lsn::INVALID);
+        for (_, res) in results {
+            if let Ok(res) = res {
+                let sk_position = (res.term, res.flush_lsn);
+                if sync_position < sk_position {
+                    sync_position = sk_position;
+                }
+            }
+        }
+
+        tracing::info!(
+            "safekeepers set membership updated to generation {generation} with term {} and sync_lsn {}",
+            sync_position.0,
+            sync_position.1
+        );
+
+        // 5. Initialize timeline on safekeeper(s) from new_sk_set where it doesn't exist yet
+        // by doing pull_timeline from the majority of the current set.
+
+        self.tenant_timeline_pull_from_peers(
+            &new_safekeepers,
+            &cur_safekeepers,
+            tenant_id,
+            timeline_id,
+        )
+        .await?;
+
+        // for sk_id in remaining {
+        //     let pending_op = TimelinePendingOpPersistence {
+        //         tenant_id: tenant_id.to_string(),
+        //         timeline_id: timeline_id.to_string(),
+        //         generation: generation,
+        //         op_kind: SafekeeperTimelineOpKind::Pull,
+        //         sk_id: *sk_id as i64,
+        //     };
+        //     tracing::info!("writing pending op for sk id {sk_id}");
+        //     self.persistence.insert_pending_op(pending_op).await?;
+        // }
+
+        // 6. Call POST bump_term(sync_term) on safekeepers from the new set. Success on majority is enough.
+
+        // TODO(diko): do we need to bump timeline term?
+
+        // 7. Repeatedly call PUT configuration on safekeepers from the new set,
+        // delivering them joint_conf and collecting their positions.
+
+        // let _ = self.tenant_timeline_set_membership(&safekeepers, tenant_id, timeline_id, join_config)
+        //     .await?;
+
+        tracing::info!("waiting for safekeepers to sync position {sync_position:?}");
+
+        self.tenant_timeline_set_membership_quorum(
+            &new_safekeepers,
+            tenant_id,
+            timeline_id,
+            joint_config,
+            Some(sync_position),
+        )
+        .await?;
+
+        // 8. Create new_conf: Configuration incrementing join_conf generation and having new safekeeper set as sk_set and None new_sk_set.
+
+        let generation = generation.next();
+
+        let new_conf = membership::Configuration {
+            generation: generation,
+            members: new_sk_member_set,
+            new_members: None,
+        };
+
+        self.persistence
+            .update_timeline_membership(tenant_id, timeline_id, generation, &new_sk_set, None)
+            .await?;
+
+        // At this point the operation is complete.
+
+        self.tenant_timeline_set_membership_quorum(
+            &new_safekeepers,
+            tenant_id,
+            timeline_id,
+            new_conf,
+            None, // no min position
+        )
+        .await?;
+
         Ok(())
     }
 }

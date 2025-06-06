@@ -322,6 +322,7 @@ pub(crate) enum DatabaseErrorLabel {
     ConnectionPool,
     Logical,
     Migration,
+    CAS,
 }
 
 impl DatabaseError {
@@ -332,6 +333,7 @@ impl DatabaseError {
             Self::ConnectionPool(_) => DatabaseErrorLabel::ConnectionPool,
             Self::Logical(_) => DatabaseErrorLabel::Logical,
             Self::Migration(_) => DatabaseErrorLabel::Migration,
+            Self::CAS(_) => DatabaseErrorLabel::CAS,
         }
     }
 }
