@@ -101,8 +101,8 @@ def test_cumulative_statistics_persistence(
     try:
         connstr = project["connection_uris"][0]["connection_uri"]
         env = connection_parameters_to_env(project["connection_uris"][0]["connection_parameters"])
-        # seed about 1 GiB of data into pgbench_accounts
-        pg_bin.run_capture(["pgbench", "-i", "-s68"], env=env)
+        # seed about 10 GiB of data into pgbench_accounts
+        pg_bin.run_capture(["pgbench", "-i", "-s680"], env=env)  # 10x increase from 68
 
         # assert rows in pgbench_accounts is 6800000 rows
         conn = psycopg2.connect(connstr)
