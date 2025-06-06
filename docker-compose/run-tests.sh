@@ -49,7 +49,7 @@ FAILED=
 export FAILED_FILE=/tmp/failed
 LIST=$( (echo -e "${SKIP//","/"\n"}"; ls) | sort | uniq -u)
 if [[ ${RUN_PARALLEL} = true ]]; then
-  parallel -j3 "[[ -d {} ]] || exit 0; export PGHOST=pcompute{%}; if ! psql -c 'select 1'>/dev/null; then exit 1; fi; echo -e '\033[0;31m'Running on \${PGHOST} '\033[0m'; if [[ -f ${extdir}/{}/neon-test.sh ]]; then echo Running from script; time ${extdir}/{}/neon-test.sh || echo {} >> ${FAILED_FILE}; else echo Running using make; time USE_PGXS=1 make -C {} installcheck || echo {} >> ${FAILED_FILE}; fi" ::: ${LIST}
+  parallel -j3 "[[ -d {} ]] || exit 0; export PGHOST=pcompute{%}; if ! psql -c 'select 1'>/dev/null; then exit 1; fi; echo Running on \${PGHOST}; if [[ -f ${extdir}/{}/neon-test.sh ]]; then echo Running from script; ${extdir}/{}/neon-test.sh || echo {} >> ${FAILED_FILE}; else echo Running using make; USE_PGXS=1 make -C {} installcheck || echo {} >> ${FAILED_FILE}; fi" ::: ${LIST}
 else
   for d in ${LIST}; do
       [ -d "${d}" ] || continue

@@ -217,6 +217,7 @@ services:
       - safekeeper2
       - safekeeper3
       - pageserver
+      - compute
 
   pcompute2:
     profiles: ["parallel-test-extensions"]
@@ -237,6 +238,7 @@ services:
       - safekeeper2
       - safekeeper3
       - pageserver
+      - compute
 
   pcompute3:
     profiles: ["parallel-test-extensions"]
@@ -257,6 +259,7 @@ services:
       - safekeeper2
       - safekeeper3
       - pageserver
+      - compute
 
   pcomputes_are_ready:
     profiles: ["parallel-test-extensions"]
