@@ -6,8 +6,12 @@ license.workspace = true
 
 [dependencies]
 thiserror.workspace = true
-nix.workspace=true
+nix.workspace = true
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }
+
+[dev-dependencies]
+rand = "0.9.1"
+rand_distr = "0.5.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tempfile = "3.14.0"

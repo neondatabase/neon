@@ -1,6 +1,5 @@
 # pgxs/neon/Makefile
 
-
 MODULE_big = neon
 OBJS = \
 	$(WIN32RES) \
@@ -22,7 +21,8 @@ OBJS = \
 	walproposer.o \
 	walproposer_pg.o \
 	control_plane_connector.o \
-	walsender_hooks.o
+	walsender_hooks.o \
+	$(LIBCOMMUNICATOR_PATH)/libcommunicator.a
 
 PG_CPPFLAGS = -I$(libpq_srcdir)
 SHLIB_LINK_INTERNAL = $(libpq)
