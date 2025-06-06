@@ -100,9 +100,9 @@ impl CouldRetry for compute::ConnectionError {
     fn could_retry(&self) -> bool {
         match self {
             compute::ConnectionError::Postgres(err) => err.could_retry(),
-            compute::ConnectionError::CouldNotConnect(err) => err.could_retry(),
+            compute::ConnectionError::TlsError(err) => err.could_retry(),
             compute::ConnectionError::WakeComputeError(err) => err.could_retry(),
-            _ => false,
+            compute::ConnectionError::TooManyConnectionAttempts(_) => false,
         }
     }
 }
