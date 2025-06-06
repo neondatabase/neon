@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use pageserver_api::config::NodeMetadata;
 use posthog_client_lite::{
     CaptureEvent, FeatureResolverBackgroundLoop, PostHogClientConfig, PostHogEvaluationError,
     PostHogFlagFilterPropertyValue,
@@ -87,13 +88,32 @@ impl FeatureResolver {
                     }
                 }
                 // TODO: move this to a background task so that we don't block startup in case of slow disk
-                if let Ok(hostname) = std::fs::read_to_string("/etc/hostname") {
-                    let hostname = hostname.trim().to_string();
-                    if hostname.ends_with(".neon.tech") || hostname.ends_with(".neon.build") {
-                        properties.insert(
-                            "pageserver_hostname".to_string(),
-                            PostHogFlagFilterPropertyValue::String(hostname),
-                        );
+                let metadata_path = conf.metadata_path();
+                match std::fs::read_to_string(&metadata_path) {
+                    Ok(metadata_str) => match serde_json::from_str::<NodeMetadata>(&metadata_str) {
+                        Ok(metadata) => {
+                            properties.insert(
+                                "hostname".to_string(),
+                                PostHogFlagFilterPropertyValue::String(metadata.http_host),
+                            );
+                            if let Some(cplane_region) = metadata.other.get("region_id") {
+                                if let Some(cplane_region) = cplane_region.as_str() {
+                                    // This region contains the cell number
+                                    properties.insert(
+                                        "neon_region".to_string(),
+                                        PostHogFlagFilterPropertyValue::String(
+                                            cplane_region.to_string(),
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to parse metadata.json: {}", e);
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("Failed to read metadata.json: {}", e);
                     }
                 }
                 Arc::new(properties)
