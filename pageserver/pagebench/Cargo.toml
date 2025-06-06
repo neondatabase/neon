@@ -15,7 +15,6 @@ futures.workspace = true
 hdrhistogram.workspace = true
 humantime.workspace = true
 humantime-serde.workspace = true
-http.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -25,8 +24,6 @@ tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true
-
-futures-core.workspace = true
 
 pageserver_client.workspace = true
 pageserver_api.workspace = true

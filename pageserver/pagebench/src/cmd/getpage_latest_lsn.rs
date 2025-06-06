@@ -15,26 +15,17 @@ use pageserver_api::models::{
     PagestreamGetPageRequest, PagestreamGetPageResponse, PagestreamRequest,
 };
 use pageserver_api::shard::TenantShardId;
-use pageserver_page_api::GetPageRequest;
-use pageserver_page_api::GetPageResponse;
 use pageserver_page_api::proto;
 use rand::prelude::*;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tonic::Status;
 use tracing::info;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
 
-use utils::shard::ShardIndex;
-
 use crate::util::tokio_thread_local_stats::AllThreadLocalStats;
 use crate::util::{request_stats, tokio_thread_local_stats};
 
-use futures_core::Stream;
-use http::Uri;
-
-use futures::StreamExt;
 #[derive(clap::ValueEnum, Clone, Debug)]
 enum Protocol {
     Libpq,
@@ -473,7 +464,6 @@ async fn run_worker(
 ///
 /// For simplicity, this just uses separate asynchronous send/recv methods. The send method could
 /// return a future that resolves when the response is received, but we don't really need it.
-
 #[async_trait]
 trait Client: Send {
     /// Sends an asynchronous GetPage request to the pageserver.
@@ -511,28 +501,31 @@ impl Client for LibpqClient {
 
 /// A gRPC client using the raw, no-frills gRPC client.
 struct GrpcClient {
-    req_tx: tokio::sync::mpsc::Sender<GetPageRequest>,
-    resp_rx: Pin<Box<dyn Stream<Item = Result<GetPageResponse, Status>> + Send + 'static>>,
+    req_tx: tokio::sync::mpsc::Sender<proto::GetPageRequest>,
+    resp_rx: tonic::Streaming<proto::GetPageResponse>,
 }
 
 impl GrpcClient {
     async fn new(connstring: String, ttid: TenantTimelineId) -> anyhow::Result<Self> {
-        let uri: Uri = connstring.parse().unwrap();
-        let mut domain_client = pageserver_page_api::client::Client::new(
-            uri,
-            ttid.tenant_id,
-            ttid.timeline_id,
-            ShardIndex::unsharded(),
-            None,
-        )
-        .await?;
-        let (req_tx, req_rx) = tokio::sync::mpsc::channel::<GetPageRequest>(1);
-        let inbound_stream = tokio_stream::wrappers::ReceiverStream::new(req_rx);
-        let resp_stream = domain_client.get_pages(inbound_stream).await?;
+        let mut client = pageserver_page_api::proto::PageServiceClient::connect(connstring).await?;
+
+        // The channel has a buffer size of 1, since 0 is not allowed. It does not matter, since the
+        // benchmark will control the queue depth (i.e. in-flight requests) anyway, and requests are
+        // buffered by Tonic and the OS too.
+        let (req_tx, req_rx) = tokio::sync::mpsc::channel(1);
+        let req_stream = tokio_stream::wrappers::ReceiverStream::new(req_rx);
+        let mut req = tonic::Request::new(req_stream);
+        let metadata = req.metadata_mut();
+        metadata.insert("neon-tenant-id", ttid.tenant_id.to_string().try_into()?);
+        metadata.insert("neon-timeline-id", ttid.timeline_id.to_string().try_into()?);
+        metadata.insert("neon-shard-id", "0000".try_into()?);
+
+        let resp = client.get_pages(req).await?;
+        let resp_stream = resp.into_inner();
 
         Ok(Self {
             req_tx,
-            resp_rx: Box::pin(resp_stream),
+            resp_rx: resp_stream,
         })
     }
 }
@@ -550,22 +543,19 @@ impl Client for GrpcClient {
             rel: Some(req.rel.into()),
             block_number: vec![req.blkno],
         };
-        let domain_req: pageserver_page_api::GetPageRequest = req.try_into()?;
-        self.req_tx.send(domain_req).await?;
+        self.req_tx.send(req).await?;
         Ok(())
     }
 
     async fn recv_get_page(&mut self) -> anyhow::Result<PagestreamGetPageResponse> {
-        let resp = self
-            .resp_rx
-            .next()
-            .await
-            .ok_or_else(|| anyhow::anyhow!("Empty response"))?
-            .unwrap();
-        anyhow::ensure!(true, "unexpected status code:",);
-
+        let resp = self.resp_rx.message().await?.unwrap();
+        anyhow::ensure!(
+            resp.status_code == proto::GetPageStatusCode::Ok as i32,
+            "unexpected status code: {}",
+            resp.status_code
+        );
         Ok(PagestreamGetPageResponse {
-            page: resp.page_images[0].clone(),
+            page: resp.page_image[0].clone(),
             req: PagestreamGetPageRequest::default(), // dummy
         })
     }
