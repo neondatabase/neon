@@ -2054,6 +2054,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
             headers=self.headers(TokenScope.ADMIN),
         )
 
+    def tombstone_delete(self, node_id):
+        log.info(f"tombstone_delete({node_id})")
+        self.request(
+            "DELETE",
+            f"{self.api}/debug/v1/tombstone/{node_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
     def node_drain(self, node_id):
         log.info(f"node_drain({node_id})")
         self.request(
@@ -2107,6 +2115,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
             "GET",
             f"{self.api}/control/v1/node",
             headers=self.headers(TokenScope.INFRA),
+        )
+        return response.json()
+
+    def tombstone_list(self):
+        response = self.request(
+            "GET",
+            f"{self.api}/debug/v1/tombstone",
+            headers=self.headers(TokenScope.ADMIN),
         )
         return response.json()
 
