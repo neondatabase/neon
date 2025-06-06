@@ -82,9 +82,9 @@ impl Client {
         shard_id: ShardIndex,
         auth_header: Option<String>,
     ) -> anyhow::Result<Self> {
-        let endpoint: tonic::transport::Endpoint = into_endpoint.try_into().map_err(|_e| {
-            Error::new(ErrorKind::InvalidInput, "Unable to convert into endpoint.")
-        })?;
+        let endpoint: tonic::transport::Endpoint = into_endpoint
+            .try_into()
+            .map_err(|_e| anyhow::anyhow!("Failed to convert endpoint"))?;
         let channel = endpoint.connect().await?;
         let auth = AuthInterceptor::new(tenant_id, timeline_id, auth_header, shard_id)
             .map_err(|e| Error::new(ErrorKind::InvalidInput, e.to_string()))?;
