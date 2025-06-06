@@ -1228,6 +1228,7 @@ class NeonEnv:
         ):
             pageserver_port = PageserverPort(
                 pg=self.port_distributor.get_port(),
+                grpc=self.port_distributor.get_port(),
                 http=self.port_distributor.get_port(),
                 https=self.port_distributor.get_port() if config.use_https_pageserver_api else None,
             )
@@ -1243,13 +1244,14 @@ class NeonEnv:
             ps_cfg: dict[str, Any] = {
                 "id": ps_id,
                 "listen_pg_addr": f"localhost:{pageserver_port.pg}",
+                "listen_grpc_addr": f"localhost:{pageserver_port.grpc}",
                 "listen_http_addr": f"localhost:{pageserver_port.http}",
                 "listen_https_addr": f"localhost:{pageserver_port.https}"
                 if config.use_https_pageserver_api
                 else None,
                 "pg_auth_type": pg_auth_type,
-                "http_auth_type": http_auth_type,
                 "grpc_auth_type": grpc_auth_type,
+                "http_auth_type": http_auth_type,
                 "availability_zone": availability_zone,
                 # Disable pageserver disk syncs in tests: when running tests concurrently, this avoids
                 # the pageserver taking a long time to start up due to syncfs flushing other tests' data
@@ -1762,6 +1764,7 @@ def neon_env_builder(
 @dataclass
 class PageserverPort:
     pg: int
+    grpc: int
     http: int
     https: int | None = None
 
