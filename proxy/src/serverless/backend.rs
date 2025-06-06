@@ -33,7 +33,7 @@ use crate::control_plane::client::ApiLockError;
 use crate::control_plane::errors::{GetAuthInfoError, WakeComputeError};
 use crate::control_plane::locks::ApiLocks;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
-use crate::intern::EndpointIdInt;
+use crate::intern::{EndpointIdInt, RoleNameInt};
 use crate::pglb::connect_compute::ConnectMechanism;
 use crate::proxy::retry::{CouldRetry, ShouldRetryWakeCompute};
 use crate::rate_limiter::EndpointRateLimiter;
@@ -79,9 +79,11 @@ impl PoolingBackend {
             info!("authentication info not found");
             return Err(AuthError::password_failed(&*user_info.user));
         };
+        let role = RoleNameInt::from(&user_info.user);
         let auth_outcome = crate::auth::validate_password_and_exchange(
             &self.config.authentication_config.thread_pool,
             ep,
+            role,
             password,
             secret,
         )

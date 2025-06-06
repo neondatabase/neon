@@ -1,5 +1,7 @@
 //! Tools for SCRAM server secret management.
 
+use std::time::Instant;
+
 use subtle::{Choice, ConstantTimeEq};
 
 use super::base64_decode_array;
@@ -9,6 +11,9 @@ use super::key::ScramKey;
 /// and is used throughout the authentication process.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub(crate) struct ServerSecret {
+    /// When this secret was cached.
+    pub(crate) cached_at: Instant,
+
     /// Number of iterations for `PBKDF2` function.
     pub(crate) iterations: u32,
     /// Salt used to hash user's password.
@@ -32,6 +37,7 @@ impl ServerSecret {
             params.split_once(':').zip(keys.split_once(':'))?;
 
         let secret = ServerSecret {
+            cached_at: Instant::now(),
             iterations: iterations.parse().ok()?,
             salt_base64: salt.to_owned(),
             stored_key: base64_decode_array(stored_key)?.into(),
@@ -52,6 +58,7 @@ impl ServerSecret {
     /// See `auth-scram.c : mock_scram_secret` for details.
     pub(crate) fn mock(nonce: [u8; 32]) -> Self {
         Self {
+            cached_at: Instant::now(),
             // this doesn't reveal much information as we're going to use
             // iteration count 1 for our generated passwords going forward.
             // PG16 users can set iteration count=1 already today.
