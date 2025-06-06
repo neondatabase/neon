@@ -47,6 +47,7 @@ extdir=${1}
 cd "${extdir}" || exit 2
 FAILED=
 export FAILED_FILE=/tmp/failed
+rm -f ${FAILED_FILE}
 LIST=$( (echo -e "${SKIP//","/"\n"}"; ls) | sort | uniq -u)
 if [[ ${RUN_PARALLEL} = true ]]; then
   parallel -j3 "[[ -d {} ]] || exit 0; export PGHOST=pcompute{%}; if ! psql -c 'select 1'>/dev/null; then exit 1; fi; echo Running on \${PGHOST}; if [[ -f ${extdir}/{}/neon-test.sh ]]; then echo Running from script; ${extdir}/{}/neon-test.sh || echo {} >> ${FAILED_FILE}; else echo Running using make; USE_PGXS=1 make -C {} installcheck || echo {} >> ${FAILED_FILE}; fi" ::: ${LIST}
@@ -68,8 +69,8 @@ else
         USE_PGXS=1 make -C "${d}" installcheck || FAILED="${d} ${FAILED}"
       fi
   done
-  [[ -z ${FAILED} ]] && exit 0
-  for d in ${FAILED}; do
+  [[ ${RUN_PARALLEL} != true && -z ${FAILED} ]] || [[ ${RUN_PARALLEL} = true && ! -f ${FAILED_FILE} ]] && exit 0
+  for d in ${FAILED} $([[ ! -f ${FAILED_FILE} ]] || cat ${FAILED_FILE}); do
     cat "$(find $d -name regression.diffs)"
   done
   for postgis_diff in /tmp/pgis_reg/*_diff; do
