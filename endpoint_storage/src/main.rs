@@ -3,7 +3,8 @@
 //! This service is deployed either as a separate component or as part of compute image
 //! for large computes.
 mod app;
-use anyhow::Context;
+use anyhow::{Context, bail};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tracing::info;
 use utils::logging;
 
@@ -12,9 +13,14 @@ const fn max_upload_file_limit() -> usize {
     100 * 1024 * 1024
 }
 
+const fn listen() -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 51243)
+}
+
 #[derive(serde::Deserialize)]
 #[serde(tag = "type")]
 struct Config {
+    #[serde(default = "listen")]
     listen: std::net::SocketAddr,
     pemfile: camino::Utf8PathBuf,
     #[serde(flatten)]
@@ -31,13 +37,21 @@ async fn main() -> anyhow::Result<()> {
         logging::Output::Stdout,
     )?;
 
-    let config: String = std::env::args().skip(1).take(1).collect();
-    if config.is_empty() {
-        anyhow::bail!("Usage: endpoint_storage config.json")
-    }
-    info!("Reading config from {config}");
-    let config = std::fs::read_to_string(config.clone())?;
-    let config: Config = serde_json::from_str(&config).context("parsing config")?;
+    // Allow either passing filename or inline config (for k8s helm chart)
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let config: Config = if args.len() == 1 && args[0].ends_with(".json") {
+        info!("Reading config from {}", args[0]);
+        let config = std::fs::read_to_string(args[0].clone())?;
+        serde_json::from_str(&config).context("parsing config")?
+    } else if !args.is_empty() && args[0].starts_with("--config=") {
+        info!("Reading inline config");
+        let config = args.join(" ");
+        let config = config.strip_prefix("--config=").unwrap();
+        serde_json::from_str(config).context("parsing config")?
+    } else {
+        bail!("Usage: endpoint_storage config.json or endpoint_storage --config=JSON");
+    };
+
     info!("Reading pemfile from {}", config.pemfile.clone());
     let pemfile = std::fs::read(config.pemfile.clone())?;
     info!("Loading public key from {}", config.pemfile.clone());
