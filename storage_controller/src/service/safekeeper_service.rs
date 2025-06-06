@@ -19,8 +19,11 @@ use pageserver_api::controller_api::{
     SafekeeperDescribeResponse, SkSchedulingPolicy, TimelineImportRequest,
 };
 use pageserver_api::models::{SafekeeperInfo, SafekeepersInfo, TimelineInfo};
+use reqwest::StatusCode;
 use safekeeper_api::membership::{self, MemberSet, SafekeeperGeneration, SafekeeperId};
-use safekeeper_api::models::{PullTimelineRequest, TimelineMembershipSwitchRequest};
+use safekeeper_api::models::{
+    PullTimelineRequest, TimelineMembershipSwitchRequest, TimelineMembershipSwitchResponse,
+};
 use safekeeper_api::{INITIAL_TERM, Term};
 use safekeeper_client::mgmt_api;
 use tokio::task::JoinSet;
@@ -840,7 +843,14 @@ impl Service {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         config: membership::Configuration,
-    ) -> Result<(Term, Lsn), ApiError> {
+        min_position: Option<(Term, Lsn)>,
+    ) -> Result<
+        Vec<(
+            NodeId,
+            Result<TimelineMembershipSwitchResponse, mgmt_api::Error>,
+        )>,
+        ApiError,
+    > {
         let req = TimelineMembershipSwitchRequest {
             mconf: config.clone(),
         };
@@ -853,18 +863,37 @@ impl Service {
                 move |client| {
                     let req = req.clone();
                     async move {
-                        client
+                        let mut res = client
                             .switch_timeline_membership(tenant_id, timeline_id, &req)
-                            .await
+                            .await;
+
+                        if let Some(min_position) = min_position {
+                            if let Ok(ok_res) = &res {
+                                if (ok_res.term, ok_res.flush_lsn) < min_position {
+                                    res = Err(mgmt_api::Error::ApiError(
+                                        StatusCode::PRECONDITION_FAILED,
+                                        // format!(
+                                        // "safekeeper {} returned position {:?} which is less than minimum required position {:?}",
+                                        // client.get_id(),
+                                        // (res.term, res.flush_lsn),
+                                        // min_position
+                                        // )
+                                        "".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+
+                        res
                     }
                 },
                 SK_SET_MEM_TIMELINE_RECONCILE_TIMEOUT,
             )
             .await?;
 
-        let mut sync_position = (INITIAL_TERM, Lsn::INVALID);
+        // let mut sync_position = (INITIAL_TERM, Lsn::INVALID);
 
-        for (_, res) in results {
+        for (_, res) in results.iter() {
             if let Ok(res) = res {
                 if res.current_conf.generation > config.generation {
                     return Err(ApiError::Conflict(format!(
@@ -872,7 +901,8 @@ impl Service {
                         res.current_conf.generation, config.generation
                     )));
                 } else if res.current_conf.generation != config.generation {
-                    tracing::warn!(
+                    // should never happen,
+                    tracing::error!(
                         "received configuration with generation {} from safekeeper, but expected {}",
                         res.current_conf.generation,
                         config.generation
@@ -884,29 +914,16 @@ impl Service {
                     )));
                 }
 
-                let res_position = (res.term, res.flush_lsn);
-                if res_position > sync_position {
-                    sync_position = res_position;
-                }
+                // let res_position = (res.term, res.flush_lsn);
+                // if res_position > sync_position {
+                //     sync_position = res_position;
+                // }
             }
         }
 
-        Ok(sync_position)
-    }
+        Ok(results)
 
-    async fn wait_safekeepers_sync_position(
-        self: &Arc<Self>,
-        safekeepers: &[Safekeeper],
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-        generation: SafekeeperGeneration,
-        sync_term: Term,
-        sync_lsn: Lsn,
-    ) -> Result<(), ApiError> {
-        // TODO(diko): implement this
-        // This function should wait until safekeepers reach the sync position.
-        // It should be used after setting the membership to ensure that safekeepers are in sync.
-        Ok(())
+        // Ok(sync_position)
     }
 
     // TODO(diko)
@@ -935,6 +952,14 @@ impl Service {
             .filter(|sk| !from_ids.contains(&sk.get_id()))
             .cloned()
             .collect::<Vec<_>>();
+
+        tracing::info!(
+            "pulling timeline {tenant_id}/{timeline_id} from safekeepers to {:?}",
+            to_safekeepers
+                .iter()
+                .map(|sk| sk.get_id())
+                .collect::<Vec<_>>()
+        );
 
         // TODO: need to pass mconf
         let req = PullTimelineRequest {
@@ -1060,17 +1085,30 @@ impl Service {
 
         // 4. Call PUT configuration on safekeepers from the current set, delivering them joint_conf.
 
-        let (sync_term, sync_lsn) = self
+        let results = self
             .tenant_timeline_set_membership_quorum(
                 &cur_safekeepers,
                 tenant_id,
                 timeline_id,
-                joint_config,
+                joint_config.clone(),
+                None, // no min position
             )
             .await?;
 
+        let mut sync_position = (INITIAL_TERM, Lsn::INVALID);
+        for (_, res) in results {
+            if let Ok(res) = res {
+                let sk_position = (res.term, res.flush_lsn);
+                if sync_position < sk_position {
+                    sync_position = sk_position;
+                }
+            }
+        }
+
         tracing::info!(
-            "safekeepers set membership updated to generation {generation} with term {sync_term} and sync_lsn {sync_lsn}"
+            "safekeepers set membership updated to generation {generation} with term {} and sync_lsn {}",
+            sync_position.0,
+            sync_position.1
         );
 
         // 5. Initialize timeline on safekeeper(s) from new_sk_set where it doesn't exist yet
@@ -1106,13 +1144,14 @@ impl Service {
         // let _ = self.tenant_timeline_set_membership(&safekeepers, tenant_id, timeline_id, join_config)
         //     .await?;
 
-        self.wait_safekeepers_sync_position(
+        tracing::info!("waiting for safekeepers to sync position {sync_position:?}");
+
+        self.tenant_timeline_set_membership_quorum(
             &new_safekeepers,
             tenant_id,
             timeline_id,
-            generation,
-            sync_term,
-            sync_lsn,
+            joint_config,
+            Some(sync_position),
         )
         .await?;
 
@@ -1131,6 +1170,15 @@ impl Service {
             .await?;
 
         // At this point the operation is complete.
+
+        self.tenant_timeline_set_membership_quorum(
+            &new_safekeepers,
+            tenant_id,
+            timeline_id,
+            new_conf,
+            None, // no min position
+        )
+        .await?;
 
         Ok(())
     }

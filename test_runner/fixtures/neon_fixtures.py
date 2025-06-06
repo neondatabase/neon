@@ -2236,12 +2236,12 @@ class NeonStorageController(MetricsGetter, LogUtils):
         self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-        desired_sk_set: list[int],
+        new_sk_set: list[int],
     ):
         response = self.request(
             "POST",
             f"{self.api}/v1/tenant/{tenant_id}/timeline/{timeline_id}/safekeeper_migrate",
-            json={"desired_sk_set": desired_sk_set},
+            json={"new_sk_set": new_sk_set},
             headers=self.headers(TokenScope.PAGE_SERVER_API),
         )
         response.raise_for_status()
