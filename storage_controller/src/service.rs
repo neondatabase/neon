@@ -166,6 +166,7 @@ enum NodeOperations {
     Register,
     Configure,
     Delete,
+    DeleteTombstone,
 }
 
 /// The leadership status for the storage controller process.
@@ -6909,7 +6910,7 @@ impl Service {
     /// detaching or deleting it on pageservers.  We do not try and re-schedule any
     /// tenants that were on this node.
     pub(crate) async fn node_drop(&self, node_id: NodeId) -> Result<(), ApiError> {
-        self.persistence.delete_node(node_id).await?;
+        self.persistence.set_tombstone(node_id).await?;
 
         let mut locked = self.inner.write().unwrap();
 
@@ -7033,9 +7034,10 @@ impl Service {
         // That is safe because in Service::spawn we only use generation_pageserver if it refers to a node
         // that exists.
 
-        // 2. Actually delete the node from the database and from in-memory state
+        // 2. Actually delete the node from in-memory state and set tombstone to the database
+        // for preventing the node to register again.
         tracing::info!("Deleting node from database");
-        self.persistence.delete_node(node_id).await?;
+        self.persistence.set_tombstone(node_id).await?;
 
         Ok(())
     }
@@ -7052,6 +7054,35 @@ impl Service {
         };
 
         Ok(nodes)
+    }
+
+    pub(crate) async fn tombstone_list(&self) -> Result<Vec<Node>, ApiError> {
+        self.persistence
+            .list_tombstones()
+            .await?
+            .into_iter()
+            .map(|np| Node::from_persistent(np, false))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ApiError::InternalServerError)
+    }
+
+    pub(crate) async fn tombstone_delete(&self, node_id: NodeId) -> Result<(), ApiError> {
+        let _node_lock = trace_exclusive_lock(
+            &self.node_op_locks,
+            node_id,
+            NodeOperations::DeleteTombstone,
+        )
+        .await;
+
+        if matches!(self.get_node(node_id).await, Err(ApiError::NotFound(_))) {
+            self.persistence.delete_node(node_id).await?;
+            Ok(())
+        } else {
+            Err(ApiError::Conflict(format!(
+                "Node {} is in use, consider using tombstone API first",
+                node_id
+            )))
+        }
     }
 
     pub(crate) async fn get_node(&self, node_id: NodeId) -> Result<Node, ApiError> {
@@ -7224,7 +7255,25 @@ impl Service {
         };
 
         match registration_status {
-            RegistrationStatus::New => self.persistence.insert_node(&new_node).await?,
+            RegistrationStatus::New => {
+                self.persistence.insert_node(&new_node).await.map_err(|e| {
+                    if matches!(
+                        e,
+                        crate::persistence::DatabaseError::Query(
+                            diesel::result::Error::DatabaseError(
+                                diesel::result::DatabaseErrorKind::UniqueViolation,
+                                _,
+                            )
+                        )
+                    ) {
+                        // The node can be deleted by tombstone API, and not show up in the list of nodes.
+                        // If you see this error, check tombstones first.
+                        ApiError::Conflict(format!("Node {} is already exists", new_node.get_id()))
+                    } else {
+                        ApiError::from(e)
+                    }
+                })?;
+            }
             RegistrationStatus::NeedUpdate => {
                 self.persistence
                     .update_node_on_registration(
