@@ -13,7 +13,7 @@ use crate::tls::{MakeTlsConnect, TlsConnect};
 use crate::{Client, Config, Connection, Error, RawConnection};
 
 pub async fn connect<T>(
-    mut tls: T,
+    tls: &T,
     config: &Config,
 ) -> Result<(Client, Connection<TcpStream, T::Stream>), Error>
 where

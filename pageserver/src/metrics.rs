@@ -446,6 +446,15 @@ static PAGE_CACHE_ERRORS: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub(crate) static FEATURE_FLAG_EVALUATION: Lazy<CounterVec> = Lazy::new(|| {
+    register_counter_vec!(
+        "pageserver_feature_flag_evaluation",
+        "Number of times a feature flag is evaluated",
+        &["flag_key", "status", "value"],
+    )
+    .unwrap()
+});
+
 #[derive(IntoStaticStr)]
 #[strum(serialize_all = "kebab_case")]
 pub(crate) enum PageCacheErrorKind {
@@ -2846,7 +2855,6 @@ pub(crate) struct WalIngestMetrics {
     pub(crate) records_received: IntCounter,
     pub(crate) records_observed: IntCounter,
     pub(crate) records_committed: IntCounter,
-    pub(crate) records_filtered: IntCounter,
     pub(crate) values_committed_metadata_images: IntCounter,
     pub(crate) values_committed_metadata_deltas: IntCounter,
     pub(crate) values_committed_data_images: IntCounter,
@@ -2900,11 +2908,6 @@ pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| {
     records_committed: register_int_counter!(
         "pageserver_wal_ingest_records_committed",
         "Number of WAL records which resulted in writes to pageserver storage"
-    )
-    .expect("failed to define a metric"),
-    records_filtered: register_int_counter!(
-        "pageserver_wal_ingest_records_filtered",
-        "Number of WAL records filtered out due to sharding"
     )
     .expect("failed to define a metric"),
     values_committed_metadata_images: values_committed.with_label_values(&["metadata", "image"]),

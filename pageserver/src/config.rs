@@ -27,7 +27,6 @@ use reqwest::Url;
 use storage_broker::Uri;
 use utils::id::{NodeId, TimelineId};
 use utils::logging::{LogFormat, SecretString};
-use utils::postgres_client::PostgresClientProtocol;
 
 use crate::tenant::storage_layer::inmemory_layer::IndexEntry;
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
@@ -210,8 +209,6 @@ pub struct PageServerConf {
 
     /// Optionally disable disk syncs (unsafe!)
     pub no_sync: bool,
-
-    pub wal_receiver_protocol: PostgresClientProtocol,
 
     pub page_service_pipelining: pageserver_api::config::PageServicePipeliningConfig,
 
@@ -421,7 +418,6 @@ impl PageServerConf {
             virtual_file_io_engine,
             tenant_config,
             no_sync,
-            wal_receiver_protocol,
             page_service_pipelining,
             get_vectored_concurrent_io,
             enable_read_path_debugging,
@@ -484,7 +480,6 @@ impl PageServerConf {
             import_pgdata_upcall_api,
             import_pgdata_upcall_api_token: import_pgdata_upcall_api_token.map(SecretString::from),
             import_pgdata_aws_endpoint_url,
-            wal_receiver_protocol,
             page_service_pipelining,
             get_vectored_concurrent_io,
             tracing,
