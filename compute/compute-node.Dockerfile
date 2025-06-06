@@ -1959,8 +1959,7 @@ RUN apt update && \
         locales \
         lsof \
         procps \
-        rsyslog \
-        rsyslog-openssl \
+        rsyslog-gnutls \
         screen \
         tcpdump \
         $VERSION_INSTALLS && \
