@@ -36,11 +36,11 @@ fn bench_simple(c: &mut Criterion) {
     // setup
     let mut world = sk_ps_discovery::World::default();
 
-    // Simplified view: lots of tenants with one timeline each
+    // Simplified view: lots of unsharded tenants with one timeline each
     let n_pageservers = 20;
     let n_tenant_shards_per_pageserver = 2000;
     for ps_id in 1..=n_pageservers {
-        for t in 1..=n_tenant_shards_per_pageserver {
+        for _ in ..n_tenant_shards_per_pageserver {
             let tenant_id = TenantId::generate();
             let timeline_id = TimelineId::generate();
             for generation in 10..=11 {
