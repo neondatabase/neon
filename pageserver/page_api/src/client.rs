@@ -38,12 +38,8 @@ impl AuthInterceptor {
         let shard_ascii: AsciiMetadataValue = shard_id.clone().to_string().try_into()?;
 
         let auth_header: Option<AsciiMetadataValue> = match auth_token {
-            Some(token) => {
-                Some(format!("Bearer {token}").try_into()?)
-            }
-            None => {
-                None
-            }
+            Some(token) => Some(format!("Bearer {token}").try_into()?),
+            None => None,
         };
 
         Ok(Self {
@@ -79,14 +75,16 @@ pub struct Client {
 }
 
 impl Client {
-    pub async fn new<T: Into<tonic::transport::Endpoint> + Send + Sync + 'static>(
+    pub async fn new<T: TryInto<tonic::transport::Endpoint> + Send + Sync + 'static>(
         into_endpoint: T,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         shard_id: ShardIndex,
         auth_header: Option<String>,
     ) -> anyhow::Result<Self> {
-        let endpoint: tonic::transport::Endpoint = into_endpoint.into();
+        let endpoint: tonic::transport::Endpoint = into_endpoint.try_into().map_err(|_e| {
+            Error::new(ErrorKind::InvalidInput, "Unable to convert into endpoint.")
+        })?;
         let channel = endpoint.connect().await?;
         let auth = AuthInterceptor::new(tenant_id, timeline_id, auth_header, shard_id)
             .map_err(|e| Error::new(ErrorKind::InvalidInput, e.to_string()))?;
@@ -158,9 +156,7 @@ impl Client {
             self.client.get_pages(req_new).await?.into_inner();
 
         let domain_stream = response_stream.map(|proto| match proto {
-            Ok(proto) => {
-                Ok(model::GetPageResponse::from(proto))
-            }
+            Ok(proto) => Ok(model::GetPageResponse::from(proto)),
             Err(status) => Err(status),
         });
 
