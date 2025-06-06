@@ -4,8 +4,10 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 use std::{fs::OpenOptions, io::Write};
+use url::{Host, Url};
 
 use anyhow::{Context, Result, anyhow};
+use hostname_validator;
 use tracing::{error, info, instrument, warn};
 
 const POSTGRES_LOGS_CONF_PATH: &str = "/etc/rsyslog.d/postgres_logs.conf";
@@ -82,17 +84,35 @@ fn restart_rsyslog() -> Result<()> {
     Ok(())
 }
 
-fn parse_audit_syslog_address(remote_endpoint: &str) -> Result<(&str, u16)> {
-    if let Some((host, port_str)) = remote_endpoint.rsplit_once(':') {
-        let port = port_str
-            .parse::<u16>()
-            .map_err(|_| anyhow!("Invalid port in remote_endpoint"))?;
-        Ok((host, port))
-    } else {
-        Err(anyhow!(
-            "Invalid address {remote_endpoint} for audit syslog, use host:port"
-        ))
+fn parse_audit_syslog_address(remote_endpoint: &str) -> Result<(String, u16)> {
+    // Urlify the remote_endpoint, so parsing can be done with url::Url.
+    let url_str = format!("http://{}", remote_endpoint);
+    let url = Url::parse(&url_str)
+        .map_err(|_| anyhow!("Error parsing {remote_endpoint}, expected host:port"))?;
+
+    let is_valid = url.scheme() == "http"
+        && url.path() == "/"
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.username() == ""
+        && url.password().is_none();
+
+    if !is_valid {
+        return Err(anyhow!(
+            "Invalid address format {remote_endpoint}, expected host:port"
+        ));
     }
+    let host = match url.host() {
+        Some(Host::Domain(h)) if hostname_validator::is_valid(h) => h.to_string(),
+        Some(Host::Ipv4(ip4)) => ip4.to_string(),
+        Some(Host::Ipv6(ip6)) => ip6.to_string(),
+        _ => return Err(anyhow!("Invalid host")),
+    };
+    let port = url
+        .port()
+        .ok_or_else(|| anyhow!("Invalid port in {remote_endpoint}"))?;
+
+    Ok((host, port))
 }
 
 fn generate_audit_rsyslog_config(
@@ -124,7 +144,7 @@ pub fn configure_audit_rsyslog(
         log_directory,
         endpoint_id,
         project_id,
-        remote_syslog_host,
+        &remote_syslog_host,
         remote_syslog_port,
     );
 
@@ -328,7 +348,27 @@ mod tests {
             // host:port format
             let parsed = parse_audit_syslog_address("collector.host.tld:5555");
             assert!(parsed.is_ok());
-            assert_eq!(parsed.unwrap(), ("collector.host.tld", 5555));
+            assert_eq!(parsed.unwrap(), (String::from("collector.host.tld"), 5555));
+        }
+
+        {
+            // host:port format with ipv4 ip address
+            let parsed = parse_audit_syslog_address("10.0.0.1:5555");
+            assert!(parsed.is_ok());
+            assert_eq!(parsed.unwrap(), (String::from("10.0.0.1"), 5555));
+        }
+
+        {
+            // host:port format with ipv6 ip address
+            let parsed =
+                parse_audit_syslog_address("[7e60:82ed:cb2e:d617:f904:f395:aaca:e252]:5555");
+            assert_eq!(
+                parsed.unwrap(),
+                (
+                    String::from("7e60:82ed:cb2e:d617:f904:f395:aaca:e252"),
+                    5555
+                )
+            );
         }
 
         {
@@ -338,8 +378,26 @@ mod tests {
         }
 
         {
-            // host with invalid port
+            // port without host
+            let parsed = parse_audit_syslog_address(":5555");
+            assert!(parsed.is_err());
+        }
+
+        {
+            // valid host with invalid port
             let parsed = parse_audit_syslog_address("collector.host.tld:90001");
+            assert!(parsed.is_err());
+        }
+
+        {
+            // invalid hostname with valid port
+            let parsed = parse_audit_syslog_address("-collector.host.tld:5555");
+            assert!(parsed.is_err());
+        }
+
+        {
+            // parse error
+            let parsed = parse_audit_syslog_address("collector.host.tld:::5555");
             assert!(parsed.is_err());
         }
     }
