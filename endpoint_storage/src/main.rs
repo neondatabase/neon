@@ -3,7 +3,8 @@
 //! This service is deployed either as a separate component or as part of compute image
 //! for large computes.
 mod app;
-use anyhow::{Context, bail};
+use anyhow::Context;
+use clap::Parser;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tracing::info;
 use utils::logging;
@@ -15,6 +16,18 @@ const fn max_upload_file_limit() -> usize {
 
 const fn listen() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 51243)
+}
+
+#[derive(Parser)]
+struct Args {
+    #[arg(exclusive = true)]
+    config_file: Option<String>,
+    #[arg(long, default_value = "false", requires = "config")]
+    /// to allow testing k8s helm chart where we don't have s3 credentials
+    no_s3_check_on_startup: bool,
+    #[arg(long, value_name = "FILE")]
+    /// inline config mode for k8s helm chart
+    config: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -37,19 +50,16 @@ async fn main() -> anyhow::Result<()> {
         logging::Output::Stdout,
     )?;
 
-    // Allow either passing filename or inline config (for k8s helm chart)
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let config: Config = if args.len() == 1 && args[0].ends_with(".json") {
-        info!("Reading config from {}", args[0]);
-        let config = std::fs::read_to_string(args[0].clone())?;
+    let args = Args::parse();
+    let config: Config = if let Some(config_path) = args.config_file {
+        info!("Reading config from {config_path}");
+        let config = std::fs::read_to_string(config_path)?;
         serde_json::from_str(&config).context("parsing config")?
-    } else if !args.is_empty() && args[0].starts_with("--config=") {
+    } else if let Some(config) = args.config {
         info!("Reading inline config");
-        let config = args.join(" ");
-        let config = config.strip_prefix("--config=").unwrap();
-        serde_json::from_str(config).context("parsing config")?
+        serde_json::from_str(&config).context("parsing config")?
     } else {
-        bail!("Usage: endpoint_storage config.json or endpoint_storage --config=JSON");
+        anyhow::bail!("Supply either config file path or --config=inline-config");
     };
 
     info!("Reading pemfile from {}", config.pemfile.clone());
@@ -62,7 +72,9 @@ async fn main() -> anyhow::Result<()> {
 
     let storage = remote_storage::GenericRemoteStorage::from_config(&config.storage_config).await?;
     let cancel = tokio_util::sync::CancellationToken::new();
-    app::check_storage_permissions(&storage, cancel.clone()).await?;
+    if !args.no_s3_check_on_startup {
+        app::check_storage_permissions(&storage, cancel.clone()).await?;
+    }
 
     let proxy = std::sync::Arc::new(endpoint_storage::Storage {
         auth,

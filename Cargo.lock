@@ -2055,6 +2055,7 @@ dependencies = [
  "axum-extra",
  "camino",
  "camino-tempfile",
+ "clap",
  "futures",
  "http-body-util",
  "itertools 0.10.5",
