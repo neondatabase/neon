@@ -693,6 +693,7 @@ impl Service {
             1 | 2 => all_safekeepers.len(),
             _ => 3,
         };
+        let wanted_count = self.config.timeline_safekeeper_count as usize;
         let mut sks = Vec::new();
         let mut azs = HashSet::new();
         for (_sk_util, sk_info, az_id) in all_safekeepers.iter() {
