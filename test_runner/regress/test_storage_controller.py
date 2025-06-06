@@ -4272,6 +4272,7 @@ def test_storcon_sk_graceful_migration(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.storage_controller_config = {
         "timelines_onto_safekeepers": True,
+        "timeline_safekeeper_count": 1,
     }
     env = neon_env_builder.init_start()
 
@@ -4281,12 +4282,24 @@ def test_storcon_sk_graceful_migration(neon_env_builder: NeonEnvBuilder):
     ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
     ep.safe_psql("CREATE TABLE t(a int)")
 
-    env.storage_controller.migrate_safekeepers(env.initial_tenant, env.initial_timeline, [1])
+    ep.safe_psql(f"INSERT INTO t VALUES (0)")
 
-    env.safekeepers[1].stop()
-    env.safekeepers[2].stop()
+    for i in range(1, 4):
+        env.storage_controller.migrate_safekeepers(env.initial_tenant, env.initial_timeline, [i])
+        
+        ep.safe_psql(f"INSERT INTO t VALUES ({2 * i - 1})")
 
-    ep.safe_psql("INSERT INTO t VALUES (1)")
+        for j in range(1, 4):
+            if j != i:
+                env.safekeepers[j - 1].stop()
+
+        ep.safe_psql(f"INSERT INTO t VALUES ({2 * i})")
+
+        for j in range(1, 4):
+            if j != i:
+                env.safekeepers[j - 1].start()
+
+    assert ep.safe_psql("SELECT * FROM t") == [(i,) for i in range(0, 7)]
 
     # env.safekeepers[1].start()
 

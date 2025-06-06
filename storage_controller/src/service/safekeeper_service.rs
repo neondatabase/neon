@@ -681,19 +681,8 @@ impl Service {
             )
         });
         // Number of safekeepers in different AZs we are looking for
-        let wanted_count = match all_safekeepers.len() {
-            0 => {
-                return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                    "couldn't find any active safekeeper for new timeline",
-                )));
-            }
-            // Have laxer requirements on testig mode as we don't want to
-            // spin up three safekeepers for every single test
-            #[cfg(feature = "testing")]
-            1 | 2 => all_safekeepers.len(),
-            _ => 3,
-        };
         let wanted_count = self.config.timeline_safekeeper_count as usize;
+
         let mut sks = Vec::new();
         let mut azs = HashSet::new();
         for (_sk_util, sk_info, az_id) in all_safekeepers.iter() {
