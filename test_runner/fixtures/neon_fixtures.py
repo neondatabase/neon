@@ -4208,6 +4208,8 @@ class Endpoint(PgProtocol, LogUtils):
         # and make tests more stable.
         config_lines = ["max_replication_write_lag=15MB"] + config_lines
 
+        config_lines = ["neon.enable_new_communicator=true"] + config_lines
+
         # Delete file cache if it exists (and we're recreating the endpoint)
         if USE_LFC:
             if (lfc_path := Path(self.lfc_path())).exists():
