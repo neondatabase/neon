@@ -168,8 +168,6 @@ impl ComputeUserInfo {
 
 #[cfg_attr(test, derive(Debug))]
 pub(crate) enum ComputeCredentialKeys {
-    #[cfg(any(test, feature = "testing"))]
-    Password(Vec<u8>),
     AuthKeys(AuthKeys),
     JwtPayload(Vec<u8>),
     None,
@@ -417,13 +415,6 @@ impl ComputeConnectBackend for Backend<'_, ComputeCredentials> {
         match self {
             Self::ControlPlane(api, creds) => api.wake_compute(ctx, &creds.info).await,
             Self::Local(local) => Ok(Cached::new_uncached(local.node_info.clone())),
-        }
-    }
-
-    fn get_keys(&self) -> &ComputeCredentialKeys {
-        match self {
-            Self::ControlPlane(_, creds) => &creds.keys,
-            Self::Local(_) => &ComputeCredentialKeys::None,
         }
     }
 }
