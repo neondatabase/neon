@@ -260,6 +260,14 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
         // TODO(vlad): Nicer way of doing this
         dst.as_mut_rust_slice_full_zeroed();
 
+        let writer = self.buffered_writer.read().await;
+
+        // Read bytes written while under lock. This is a hack to deal with concurrent
+        // writes updating the number of bytes written. `bytes_written` is not DIO alligned
+        // but we may end the read there.
+        //
+        // TODO(vlad):Feels like there's a nicer path where we align
+        // the end if it shoots over the end of the file.
         let bytes_written = self.bytes_written.load(Ordering::Acquire);
 
         let dst_cap = dst.bytes_total().into_u64();
@@ -272,8 +280,6 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
             }
             end
         };
-
-        let writer = self.buffered_writer.read().await;
 
         let submitted_offset = writer.bytes_submitted();
         let maybe_flushed = writer.inspect_maybe_flushed();
