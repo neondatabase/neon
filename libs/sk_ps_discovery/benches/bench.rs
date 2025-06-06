@@ -3,7 +3,6 @@
 use std::time::Instant;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use hex::FromHex;
 use pprof::criterion::{Output, PProfProfiler};
 use sk_ps_discovery::{
     AttachmentUpdate, RemoteConsistentLsnAdv, TenantShardAttachmentId, TimelineAttachmentId,
@@ -51,8 +50,12 @@ fn bench_simple(c: &mut Criterion) {
                     generation: Generation::Valid(generation),
                 };
                 let timeline_attachment = TimelineAttachmentId {
-                    tenant_shard_attachment_id,
-                    timeline_id,
+                    tenant_timeline_id: TenantTimelineId {
+                        tenant_id,
+                        timeline_id,
+                    },
+                    shard_id: ShardIndex::unsharded(),
+                    generation: Generation::Valid(generation),
                 };
                 world.update_attachment(AttachmentUpdate {
                     tenant_shard_attachment_id,

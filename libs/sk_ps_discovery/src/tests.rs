@@ -176,3 +176,47 @@ fn quiescing_timeline_catchup() {
 
     assert!(world.quiesced_timelines.contains_key(&ttid));
 }
+
+#[test]
+fn nodes_timelines() {
+    let mut world = World::default();
+
+    let tenant_id = TenantId::generate();
+    let timeline_id = TimelineId::from_array([0x1; 16]);
+    let ttid = TenantTimelineId {
+        tenant_id,
+        timeline_id,
+    };
+
+    let tenant_shard_attachment_id = TenantShardAttachmentId {
+        tenant_id,
+        shard_id: ShardIndex::unsharded(),
+        generation: Generation::Valid(2),
+    };
+
+    let ps_id = NodeId(0x100);
+
+    world.update_attachment(AttachmentUpdate {
+        tenant_shard_attachment_id,
+        action: AttachmentUpdateAction::Attach { ps_id },
+    });
+
+    assert!(world.nodes_timelines.get(&ps_id).is_none());
+
+    world.handle_commit_lsn_advancement(ttid, Lsn(0x23));
+
+    assert_eq!(world.nodes_timelines[&ps_id].len(), 1);
+
+    let timeline2 = TimelineId::from_array([0x2; 16]);
+    world.handle_remote_consistent_lsn_advertisement(RemoteConsistentLsnAdv {
+        attachment: TimelineAttachmentId {
+            tenant_timeline_id: TenantTimelineId {
+                tenant_id,
+                timeline_id: timeline2,
+            },
+            shard_id: ShardIndex::unsharded(),
+            generation: Generation::Valid(2),
+        },
+        remote_consistent_lsn: Lsn(0x42),
+    });
+}
