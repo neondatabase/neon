@@ -220,3 +220,5 @@ fn nodes_timelines() {
         remote_consistent_lsn: Lsn(0x42),
     });
 }
+
+// TODO: need more tests, esp for the removal path
