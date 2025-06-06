@@ -26,3 +26,5 @@ compaction-suite-results.*
 
 # pgindent typedef lists
 *.list
+
+venv/
