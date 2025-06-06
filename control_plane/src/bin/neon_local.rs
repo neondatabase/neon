@@ -1158,6 +1158,7 @@ async fn handle_tenant(subcmd: &TenantCmd, env: &mut local_env::LocalEnv) -> any
                         mode: pageserver_api::models::TimelineCreateRequestMode::Bootstrap {
                             existing_initdb_timeline_id: None,
                             pg_version: Some(args.pg_version),
+                            read_only: false,
                         },
                     },
                 )
@@ -1222,6 +1223,7 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
                 mode: pageserver_api::models::TimelineCreateRequestMode::Bootstrap {
                     existing_initdb_timeline_id: None,
                     pg_version: Some(args.pg_version),
+                    read_only: false,
                 },
             };
             let timeline_info = storage_controller
