@@ -54,14 +54,16 @@ else
     printf '%s\n' "${result}" | jq .
   fi
 
-  echo "Check if a timeline present"
-  PARAMS=(
-       -X GET
-       -H "Content-Type: application/json"
-       "http://pageserver:9898/v1/tenant/${tenant_id}/timeline"
-  )
-  timeline_id=$(curl "${PARAMS[@]}" | jq -r .[0].timeline_id)
-  if [[ -z "${timeline_id}" || "${timeline_id}" = null ]]; then
+  if [[ ${RUN_PARALLEL:-false} = false ]]; then
+    echo "Check if a timeline present"
+    PARAMS=(
+         -X GET
+         -H "Content-Type: application/json"
+        "http://pageserver:9898/v1/tenant/${tenant_id}/timeline"
+    )
+    timeline_id=$(curl "${PARAMS[@]}" | jq -r .[0].timeline_id)
+  fi
+  if [[ -z "${timeline_id:-}" || "${timeline_id:-}" = null ]]; then
     generate_id timeline_id
     PARAMS=(
         -sbf
