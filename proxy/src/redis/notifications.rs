@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use redis::aio::PubSub;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use super::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
@@ -27,15 +27,15 @@ struct NotificationHeader<'a> {
     topic: &'a str,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(tag = "topic", content = "data")]
-pub(crate) enum Notification {
+enum Notification {
     #[serde(
         rename = "/account_settings_update",
         alias = "/allowed_vpc_endpoints_updated_for_org",
         deserialize_with = "deserialize_json_string"
     )]
-    AccountSettingsUpdate(InvalidateOrg),
+    AccountSettingsUpdate(InvalidateAccount),
 
     #[serde(
         rename = "/endpoint_settings_update",
@@ -44,16 +44,10 @@ pub(crate) enum Notification {
     EndpointSettingsUpdate(InvalidateEndpoint),
 
     #[serde(
-        rename = "/projects_settings_update",
-        alias = "/allowed_vpc_endpoints_updated_for_projects",
-        deserialize_with = "deserialize_json_string"
-    )]
-    ProjectsSettingsUpdate(InvalidateProjects),
-
-    #[serde(
         rename = "/project_settings_update",
         alias = "/allowed_ips_updated",
         alias = "/block_public_or_vpc_access_updated",
+        alias = "/allowed_vpc_endpoints_updated_for_projects",
         deserialize_with = "deserialize_json_string"
     )]
     ProjectSettingsUpdate(InvalidateProject),
@@ -73,28 +67,56 @@ pub(crate) enum Notification {
     UnknownTopic,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub(crate) struct InvalidateEndpoint {
-    endpoint_id: EndpointIdInt,
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum InvalidateEndpoint {
+    EndpointId(EndpointIdInt),
+    EndpointIds(Vec<EndpointIdInt>),
+}
+impl std::ops::Deref for InvalidateEndpoint {
+    type Target = [EndpointIdInt];
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::EndpointId(id) => std::slice::from_ref(id),
+            Self::EndpointIds(ids) => ids,
+        }
+    }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub(crate) struct InvalidateProject {
-    project_id: ProjectIdInt,
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum InvalidateProject {
+    ProjectId(ProjectIdInt),
+    ProjectIds(Vec<ProjectIdInt>),
+}
+impl std::ops::Deref for InvalidateProject {
+    type Target = [ProjectIdInt];
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::ProjectId(id) => std::slice::from_ref(id),
+            Self::ProjectIds(ids) => ids,
+        }
+    }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub(crate) struct InvalidateProjects {
-    project_ids: Vec<ProjectIdInt>,
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum InvalidateAccount {
+    AccountId(AccountIdInt),
+    AccountIds(Vec<AccountIdInt>),
+}
+impl std::ops::Deref for InvalidateAccount {
+    type Target = [AccountIdInt];
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::AccountId(id) => std::slice::from_ref(id),
+            Self::AccountIds(ids) => ids,
+        }
+    }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub(crate) struct InvalidateOrg {
-    account_id: AccountIdInt,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub(crate) struct InvalidateRole {
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+struct InvalidateRole {
     project_id: ProjectIdInt,
     role_name: RoleNameInt,
 }
@@ -181,7 +203,6 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
             Notification::RoleSettingUpdate { .. }
             | Notification::EndpointSettingsUpdate { .. }
             | Notification::ProjectSettingsUpdate { .. }
-            | Notification::ProjectsSettingsUpdate { .. }
             | Notification::AccountSettingsUpdate { .. } => {
                 invalidate_cache(self.cache.clone(), msg.clone());
 
@@ -192,9 +213,6 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
                     }
                     Notification::EndpointSettingsUpdate { .. } => {
                         m.inc(RedisEventsCount::InvalidateEndpoint);
-                    }
-                    Notification::ProjectsSettingsUpdate { .. } => {
-                        m.inc(RedisEventsCount::InvalidateProjects);
                     }
                     Notification::ProjectSettingsUpdate { .. } => {
                         m.inc(RedisEventsCount::InvalidateProject);
@@ -226,30 +244,22 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
 
 fn invalidate_cache<C: ProjectInfoCache>(cache: Arc<C>, msg: Notification) {
     match msg {
-        Notification::EndpointSettingsUpdate(InvalidateEndpoint { endpoint_id }) => {
-            cache.invalidate_endpoint_access(endpoint_id);
-        }
+        Notification::EndpointSettingsUpdate(ids) => ids
+            .iter()
+            .for_each(|&id| cache.invalidate_endpoint_access(id)),
 
-        Notification::AccountSettingsUpdate(InvalidateOrg { account_id }) => {
-            cache.invalidate_endpoint_access_for_org(account_id);
-        }
+        Notification::AccountSettingsUpdate(ids) => ids
+            .iter()
+            .for_each(|&id| cache.invalidate_endpoint_access_for_org(id)),
 
-        Notification::ProjectsSettingsUpdate(InvalidateProjects { project_ids }) => {
-            for project in project_ids {
-                cache.invalidate_endpoint_access_for_project(project);
-            }
-        }
-
-        Notification::ProjectSettingsUpdate(InvalidateProject { project_id }) => {
-            cache.invalidate_endpoint_access_for_project(project_id);
-        }
+        Notification::ProjectSettingsUpdate(ids) => ids
+            .iter()
+            .for_each(|&id| cache.invalidate_endpoint_access_for_project(id)),
 
         Notification::RoleSettingUpdate(InvalidateRole {
             project_id,
             role_name,
-        }) => {
-            cache.invalidate_role_secret_for_project(project_id, role_name);
-        }
+        }) => cache.invalidate_role_secret_for_project(project_id, role_name),
 
         Notification::UnknownTopic => unreachable!(),
     }
@@ -347,9 +357,32 @@ mod tests {
         let result: Notification = serde_json::from_str(&text)?;
         assert_eq!(
             result,
-            Notification::ProjectSettingsUpdate(InvalidateProject {
-                project_id: (&project_id).into()
-            })
+            Notification::ProjectSettingsUpdate(InvalidateProject::ProjectId((&project_id).into()))
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_multiple_projects() -> anyhow::Result<()> {
+        let project_id1: ProjectId = "new_project1".into();
+        let project_id2: ProjectId = "new_project2".into();
+        let data = format!("{{\"project_ids\": [\"{project_id1}\",\"{project_id2}\"]}}");
+        let text = json!({
+            "type": "message",
+            "topic": "/allowed_vpc_endpoints_updated_for_projects",
+            "data": data,
+            "extre_fields": "something"
+        })
+        .to_string();
+
+        let result: Notification = serde_json::from_str(&text)?;
+        assert_eq!(
+            result,
+            Notification::ProjectSettingsUpdate(InvalidateProject::ProjectIds(vec![
+                (&project_id1).into(),
+                (&project_id2).into()
+            ]))
         );
 
         Ok(())
