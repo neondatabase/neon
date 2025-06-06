@@ -6239,8 +6239,8 @@ impl Service {
             self.tenant_shard_split_commit_inmem(tenant_id, new_shard_count, new_stripe_size);
 
         // Notify all page servers to detach and clean up the old shards because they will no longer
-        // be needed. This is best-effort: if it fails, it will be cleaned up by subsequent startup
-        // reconciliations.
+        // be needed. This is best-effort: if it fails, it will be cleaned up on a subsequent
+        // Pageserver re-attach/startup.
         let shards_to_cleanup = targets
             .iter()
             .map(|target| (target.parent_id, target.node.get_id()))
