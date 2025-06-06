@@ -1445,6 +1445,7 @@ dependencies = [
  "regex",
  "reqwest",
  "safekeeper_api",
+ "safekeeper_client",
  "scopeguard",
  "serde",
  "serde_json",

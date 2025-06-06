@@ -635,4 +635,16 @@ impl PageServerNode {
 
         Ok(())
     }
+    pub async fn timeline_info(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        force_await_logical_size: mgmt_api::ForceAwaitLogicalSize,
+    ) -> anyhow::Result<TimelineInfo> {
+        let timeline_info = self
+            .http_client
+            .timeline_info(tenant_shard_id, timeline_id, force_await_logical_size)
+            .await?;
+        Ok(timeline_info)
+    }
 }
