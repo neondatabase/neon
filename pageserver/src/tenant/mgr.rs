@@ -1878,7 +1878,7 @@ impl TenantManager {
     ) -> Result<Option<Utf8PathBuf>, TenantStateError> {
         let tenant_dir_rename_operation = |tenant_id_to_clean: TenantShardId| async move {
             let local_tenant_directory = conf.tenant_path(&tenant_id_to_clean);
-            if !Path::new(&local_tenant_directory).exists() {
+            if !tokio::fs::try_exists(&local_tenant_directory).await? {
                 // If the tenant directory doesn't exist, it's already cleaned up.
                 return Ok(None);
             }
