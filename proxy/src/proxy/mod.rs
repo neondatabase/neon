@@ -22,14 +22,14 @@ use crate::cancellation::{self, CancellationHandler};
 use crate::compute::COULD_NOT_CONNECT;
 use crate::config::{ComputeConfig, ProxyConfig, ProxyProtocolV2, RetryConfig, TlsConfig};
 use crate::context::RequestContext;
+use crate::control_plane::NodeInfo;
 use crate::control_plane::errors::WakeComputeError;
 use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{
-    ConnectOutcome, Metrics, NumClientConnectionsGuard, RetriesMetricGroup, RetryType,
+    ConnectOutcome, ConnectionFailureKind, Metrics, NumClientConnectionsGuard, RetriesMetricGroup,
+    RetryType,
 };
-use crate::pglb::connect_compute::{
-    ComputeConnectBackend, ConnectMechanism, TcpMechanism, invalidate_cache,
-};
+use crate::pglb::connect_compute::{ComputeConnectBackend, ConnectMechanism, TcpMechanism};
 pub use crate::pglb::copy_bidirectional::{ErrorSource, copy_bidirectional_client_compute};
 use crate::pglb::handshake::{HandshakeData, HandshakeError, handshake};
 use crate::pglb::passthrough::ProxyPassthrough;
@@ -41,7 +41,7 @@ use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::{PqStream, Stream};
 use crate::types::EndpointCacheKey;
 use crate::util::run_until_cancelled;
-use crate::{auth, compute};
+use crate::{auth, compute, control_plane};
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 
@@ -403,6 +403,25 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         _req: request_gauge,
         _conn: conn_gauge,
     }))
+}
+
+/// If we couldn't connect, a cached connection info might be to blame
+/// (e.g. the compute node's address might've changed at the wrong time).
+/// Invalidate the cache entry (if any) to prevent subsequent errors.
+#[tracing::instrument(skip_all)]
+pub(crate) fn invalidate_cache(node_info: control_plane::CachedNodeInfo) -> NodeInfo {
+    let is_cached = node_info.cached();
+    if is_cached {
+        warn!("invalidating stalled compute node info cache entry");
+    }
+    let label = if is_cached {
+        ConnectionFailureKind::ComputeCached
+    } else {
+        ConnectionFailureKind::ComputeUncached
+    };
+    Metrics::get().proxy.connection_failures_total.inc(label);
+
+    node_info.invalidate()
 }
 
 /// Try to connect to the compute node, retrying if necessary.

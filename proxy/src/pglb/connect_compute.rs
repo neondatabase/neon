@@ -1,34 +1,13 @@
 use async_trait::async_trait;
-use tracing::warn;
 
 use crate::auth::backend::ComputeUserInfo;
 use crate::compute::{self, AuthInfo, PostgresConnection};
 use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::control_plane::locks::ApiLocks;
-use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
+use crate::control_plane::{self, CachedNodeInfo};
 use crate::error::ReportableError;
-use crate::metrics::{ConnectionFailureKind, Metrics};
 use crate::types::Host;
-
-/// If we couldn't connect, a cached connection info might be to blame
-/// (e.g. the compute node's address might've changed at the wrong time).
-/// Invalidate the cache entry (if any) to prevent subsequent errors.
-#[tracing::instrument(name = "invalidate_cache", skip_all)]
-pub(crate) fn invalidate_cache(node_info: control_plane::CachedNodeInfo) -> NodeInfo {
-    let is_cached = node_info.cached();
-    if is_cached {
-        warn!("invalidating stalled compute node info cache entry");
-    }
-    let label = if is_cached {
-        ConnectionFailureKind::ComputeCached
-    } else {
-        ConnectionFailureKind::ComputeUncached
-    };
-    Metrics::get().proxy.connection_failures_total.inc(label);
-
-    node_info.invalidate()
-}
 
 #[async_trait]
 pub(crate) trait ConnectMechanism {
