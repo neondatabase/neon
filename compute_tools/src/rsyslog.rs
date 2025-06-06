@@ -90,7 +90,7 @@ fn parse_audit_syslog_address(remote_endpoint: &str) -> Result<(&str, u16)> {
         Ok((host, port))
     } else {
         Err(anyhow!(
-            "Invalid address format for audit syslog, use host:port"
+            "Invalid address {remote_endpoint} for audit syslog, use host:port"
         ))
     }
 }
