@@ -20,7 +20,7 @@ use crate::context::RequestContext;
 use crate::control_plane::errors::{
     ControlPlaneError, GetAuthInfoError, GetEndpointJwksError, WakeComputeError,
 };
-use crate::control_plane::messages::MetricsAuxInfo;
+use crate::control_plane::messages::{EndpointRateLimitConfig, MetricsAuxInfo};
 use crate::control_plane::{
     AccessBlockerFlags, AuthInfo, AuthSecret, CachedNodeInfo, EndpointAccessControl, NodeInfo,
     RoleAccessControl,
@@ -130,6 +130,7 @@ impl MockControlPlane {
             project_id: None,
             account_id: None,
             access_blocker_flags: AccessBlockerFlags::default(),
+            rate_limits: EndpointRateLimitConfig::default(),
         })
     }
 
@@ -233,6 +234,7 @@ impl super::ControlPlaneApi for MockControlPlane {
             allowed_ips: Arc::new(info.allowed_ips),
             allowed_vpce: Arc::new(info.allowed_vpc_endpoint_ids),
             flags: info.access_blocker_flags,
+            rate_limits: info.rate_limits,
         })
     }
 

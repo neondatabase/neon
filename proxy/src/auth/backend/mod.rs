@@ -14,12 +14,13 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info};
 
-use crate::auth::{self, AuthError, ComputeUserInfoMaybeEndpoint, validate_password_and_exchange};
+use crate::auth::{self, ComputeUserInfoMaybeEndpoint, validate_password_and_exchange};
 use crate::cache::Cached;
 use crate::config::AuthenticationConfig;
 use crate::context::RequestContext;
 use crate::control_plane::client::ControlPlaneClient;
 use crate::control_plane::errors::GetAuthInfoError;
+use crate::control_plane::messages::EndpointRateLimitConfig;
 use crate::control_plane::{
     self, AccessBlockerFlags, AuthSecret, CachedNodeInfo, ControlPlaneApi, EndpointAccessControl,
     RoleAccessControl,
@@ -230,11 +231,8 @@ async fn auth_quirks(
         config.is_vpc_acccess_proxy,
     )?;
 
-    let endpoint = EndpointIdInt::from(&info.endpoint);
-    let rate_limit_config = None;
-    if !endpoint_rate_limiter.check(endpoint, rate_limit_config, 1) {
-        return Err(AuthError::too_many_connections());
-    }
+    access_controls.connection_attempt_rate_limit(ctx, &info.endpoint, &endpoint_rate_limiter)?;
+
     let role_access = api
         .get_role_access_control(ctx, &info.endpoint, &info.user)
         .await?;
@@ -401,6 +399,7 @@ impl Backend<'_, ComputeUserInfo> {
                 allowed_ips: Arc::new(vec![]),
                 allowed_vpce: Arc::new(vec![]),
                 flags: AccessBlockerFlags::default(),
+                rate_limits: EndpointRateLimitConfig::default(),
             }),
         }
     }
@@ -439,6 +438,7 @@ mod tests {
     use crate::auth::{ComputeUserInfoMaybeEndpoint, IpPattern};
     use crate::config::AuthenticationConfig;
     use crate::context::RequestContext;
+    use crate::control_plane::messages::EndpointRateLimitConfig;
     use crate::control_plane::{
         self, AccessBlockerFlags, CachedNodeInfo, EndpointAccessControl, RoleAccessControl,
     };
@@ -477,6 +477,7 @@ mod tests {
                 allowed_ips: Arc::new(self.ips.clone()),
                 allowed_vpce: Arc::new(self.vpc_endpoint_ids.clone()),
                 flags: self.access_blocker_flags,
+                rate_limits: EndpointRateLimitConfig::default(),
             })
         }
 
