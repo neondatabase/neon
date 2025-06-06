@@ -211,6 +211,8 @@ enum Command {
     StartDrain {
         #[arg(long)]
         node_id: NodeId,
+        #[arg(long)]
+        drain_all: Option<bool>,
     },
     /// Cancel draining the specified pageserver and wait for `timeout`
     /// for the operation to be canceled. May be retried.
@@ -906,7 +908,7 @@ async fn main() -> anyhow::Result<()> {
                 match &storcon_client
                     .dispatch::<(), NodeDescribeResponse>(
                         Method::GET,
-                        format!("control/v1/node/{node_id}"),
+                        format!("control/v1/node/{node_id}?drain_all=true"),
                         None,
                     )
                     .await?
@@ -1146,13 +1148,14 @@ async fn main() -> anyhow::Result<()> {
                 failure
             );
         }
-        Command::StartDrain { node_id } => {
+        Command::StartDrain { node_id, drain_all } => {
+            let path = if drain_all == Some(true) {
+                format!("control/v1/node/{node_id}/drain?drain_all=true")
+            } else {
+                format!("control/v1/node/{node_id}/drain")
+            };
             storcon_client
-                .dispatch::<(), ()>(
-                    Method::PUT,
-                    format!("control/v1/node/{node_id}/drain"),
-                    None,
-                )
+                .dispatch::<(), ()>(Method::PUT, path, None)
                 .await?;
             println!("Drain started for {node_id}");
         }

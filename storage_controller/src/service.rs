@@ -687,16 +687,6 @@ struct ShardMutationLocations {
 #[derive(Default, Clone)]
 struct TenantMutationLocations(BTreeMap<TenantShardId, ShardMutationLocations>);
 
-#[allow(dead_code)]
-pub(crate) enum NodeDrainMode {
-    /// Drain only attached locations (primary node itself)
-    AttachedOnly,
-    /// Drain attached and secondary locations (but don't create new secondaries)
-    AttachedAndSecondaries,
-    /// Drain everything and also provision new secondaries for the newly promoted primaries
-    FullWithReprovisioning,
-}
-
 impl Service {
     pub fn get_config(&self) -> &Config {
         &self.config
@@ -7558,7 +7548,7 @@ impl Service {
     pub(crate) async fn start_node_drain(
         self: &Arc<Self>,
         node_id: NodeId,
-        _mode: NodeDrainMode,
+        drain_all: bool,
     ) -> Result<(), ApiError> {
         let (ongoing_op, node_available, node_policy, schedulable_nodes_count) = {
             let locked = self.inner.read().unwrap();
@@ -7632,7 +7622,7 @@ impl Service {
                         }
 
                         tracing::info!("Drain background operation starting");
-                        let res = service.drain_node(node_id, cancel).await;
+                        let res = service.drain_node(node_id, drain_all, cancel).await;
                         match res {
                             Ok(()) => {
                                 tracing::info!("Drain background operation completed successfully");
@@ -8798,9 +8788,30 @@ impl Service {
         }
     }
 
-    /// Drain a node by moving the shards attached to it as primaries.
-    /// This is a long running operation and it should run as a separate Tokio task.
+    /// Drain a node by moving shards that are attached to it, either as primaries or secondaries.
+    /// When `drain_all` is false, only primary attachments are moved - this is used during node
+    /// deployment when the node is expected to return to service soon. When `drain_all` is true,
+    /// both primary and secondary attachments are moved - this is used when permanently removing
+    /// a node.
+    ///
+    /// This is a long running operation that should be spawned as a separate Tokio task.
     pub(crate) async fn drain_node(
+        self: &Arc<Self>,
+        node_id: NodeId,
+        drain_all: bool,
+        cancel: CancellationToken,
+    ) -> Result<(), OperationError> {
+        self.drain_primary_attachments(node_id, cancel.clone())
+            .await?;
+        if drain_all {
+            self.drain_secondary_attachments(node_id, cancel).await?;
+        }
+        Ok(())
+    }
+
+    /// Drain a node by moving the shards attached to it as primaries.
+    /// This is a long running operation
+    async fn drain_primary_attachments(
         self: &Arc<Self>,
         node_id: NodeId,
         cancel: CancellationToken,
@@ -8994,6 +9005,14 @@ impl Service {
         }
 
         Ok(())
+    }
+
+    async fn drain_secondary_attachments(
+        self: &Arc<Self>,
+        node_id: NodeId,
+        cancel: CancellationToken,
+    ) -> Result<(), OperationError> {
+        unimplemented!();
     }
 
     /// Create a node fill plan (pick secondaries to promote), based on:
