@@ -3,12 +3,12 @@ use std::io::Error;
 use std::io::ErrorKind;
 
 use bytes::Bytes;
+use futures::StreamExt;
 use futures_core::Stream;
-use tonic::transport::Channel;
-use tonic::{Request, Status, Streaming};
 use tonic::metadata::AsciiMetadataValue;
 use tonic::metadata::errors::InvalidMetadataValue;
-use futures::StreamExt;
+use tonic::transport::Channel;
+use tonic::{Request, Streaming};
 
 use utils::id::TenantId;
 use utils::id::TimelineId;
@@ -16,8 +16,8 @@ use utils::shard::ShardIndex;
 
 use anyhow::Result;
 
-use crate::proto;
 use crate::model;
+use crate::proto;
 #[derive(Clone)]
 struct AuthInterceptor {
     tenant_id: AsciiMetadataValue,
@@ -27,24 +27,24 @@ struct AuthInterceptor {
 }
 
 impl AuthInterceptor {
-    fn new(tenant_id: TenantId,
-           timeline_id: TimelineId,
-           auth_token: Option<String>,
-            shard_id: ShardIndex) -> Result<Self, InvalidMetadataValue> {
+    fn new(
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        auth_token: Option<String>,
+        shard_id: ShardIndex,
+    ) -> Result<Self, InvalidMetadataValue> {
+        let tenant_ascii: AsciiMetadataValue = tenant_id.to_string().try_into()?;
+        let timeline_ascii: AsciiMetadataValue = timeline_id.to_string().try_into()?;
+        let shard_ascii: AsciiMetadataValue = shard_id.clone().to_string().try_into()?;
 
-        let tenant_ascii : AsciiMetadataValue = tenant_id.to_string().try_into()?;
-        let timeline_ascii : AsciiMetadataValue = timeline_id.to_string().try_into()?;
-        let shard_ascii : AsciiMetadataValue = shard_id.clone().to_string().try_into()?;
-
-        let auth_header : Option<AsciiMetadataValue>;
-        match auth_token {
+        let auth_header: Option<AsciiMetadataValue> = match auth_token {
             Some(token) => {
-                auth_header = Some(format!("Bearer {token}").try_into()?);
+                Some(format!("Bearer {token}").try_into()?)
             }
             None => {
-                auth_header = None;
+                None
             }
-        }
+        };
 
         Ok(Self {
             tenant_id: tenant_ascii,
@@ -73,27 +73,26 @@ impl tonic::service::Interceptor for AuthInterceptor {
 }
 #[derive(Clone)]
 pub struct Client {
-    client: proto::PageServiceClient<tonic::service::interceptor::InterceptedService<Channel, AuthInterceptor>>,
+    client: proto::PageServiceClient<
+        tonic::service::interceptor::InterceptedService<Channel, AuthInterceptor>,
+    >,
 }
 
 impl Client {
-
-    pub async fn new<T: Into<tonic::transport::Endpoint> + Send + Sync + 'static>
-                    (into_endpoint: T,
-                    tenant_id: TenantId,
-                    timeline_id: TimelineId,
-                    shard_id: ShardIndex,
-                    auth_header: Option<String>) -> anyhow::Result<Self> {
-
-        let endpoint : tonic::transport::Endpoint = into_endpoint.into();
+    pub async fn new<T: Into<tonic::transport::Endpoint> + Send + Sync + 'static>(
+        into_endpoint: T,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        shard_id: ShardIndex,
+        auth_header: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let endpoint: tonic::transport::Endpoint = into_endpoint.into();
         let channel = endpoint.connect().await?;
         let auth = AuthInterceptor::new(tenant_id, timeline_id, auth_header, shard_id)
             .map_err(|e| Error::new(ErrorKind::InvalidInput, e.to_string()))?;
         let client = proto::PageServiceClient::with_interceptor(channel, auth);
 
-        Ok(Self {
-            client,
-        })
+        Ok(Self { client })
     }
 
     // Returns whether a relation exists.
@@ -101,13 +100,9 @@ impl Client {
         &mut self,
         req: model::CheckRelExistsRequest,
     ) -> Result<model::CheckRelExistsResponse, tonic::Status> {
-
         let proto_req = proto::CheckRelExistsRequest::from(req);
 
-        let response = self
-            .client
-            .check_rel_exists(proto_req)
-            .await?;
+        let response = self.client.check_rel_exists(proto_req).await?;
 
         let proto_resp = response.into_inner();
         Ok(proto_resp.into())
@@ -118,20 +113,16 @@ impl Client {
         mut self,
         req: model::GetBaseBackupRequest,
     ) -> Result<impl Stream<Item = Result<Bytes, tonic::Status>>, tonic::Status> {
-
         let proto_req = proto::GetBaseBackupRequest::from(req);
 
-        let response_stream: Streaming<proto::GetBaseBackupResponseChunk> = self
-            .client
-            .get_base_backup(proto_req)
-            .await?
-            .into_inner();
+        let response_stream: Streaming<proto::GetBaseBackupResponseChunk> =
+            self.client.get_base_backup(proto_req).await?.into_inner();
 
         // TODO: Consider dechunking internally
         let domain_stream = response_stream.map(|chunk_res| {
-            chunk_res.and_then(|proto_chunk| {
+            chunk_res.map(|proto_chunk| {
                 let b: Bytes = proto_chunk.try_into().unwrap();
-                Ok(b)
+                b
             })
         });
 
@@ -139,11 +130,7 @@ impl Client {
     }
 
     // Returns the total size of a database, as # of bytes.
-    pub async fn get_db_size(
-        mut self,
-        req: model::GetDbSizeRequest,
-    ) -> Result<u64, tonic::Status> {
-
+    pub async fn get_db_size(mut self, req: model::GetDbSizeRequest) -> Result<u64, tonic::Status> {
         let proto_req = proto::GetDbSizeRequest::from(req);
 
         let response = self.client.get_db_size(proto_req).await?;
@@ -156,31 +143,25 @@ impl Client {
     pub async fn get_pages<ReqSt>(
         &mut self,
         inbound: ReqSt,
-    ) -> Result<impl Stream<Item = Result<model::GetPageResponse, tonic::Status>> + Send + 'static, tonic::Status>
+    ) -> Result<
+        impl Stream<Item = Result<model::GetPageResponse, tonic::Status>> + Send + 'static,
+        tonic::Status,
+    >
     where
         ReqSt: Stream<Item = model::GetPageRequest> + Send + 'static,
     {
-
-        let outbound_proto =
-                inbound.map(|domain_req| {
-                    domain_req.into()
-                });
+        let outbound_proto = inbound.map(|domain_req| domain_req.into());
 
         let req_new = Request::new(outbound_proto);
 
         let response_stream: Streaming<proto::GetPageResponse> =
             self.client.get_pages(req_new).await?.into_inner();
 
-        let domain_stream = response_stream.map(|proto| {
-            match proto {
-                Ok(proto) => {
-                    model::GetPageResponse::try_from(proto)
-                        .map_err(|e| Status::internal(e.to_string()))
-                }
-                Err(status) => {
-                    Err(Status::from(status))
-                }
+        let domain_stream = response_stream.map(|proto| match proto {
+            Ok(proto) => {
+                Ok(model::GetPageResponse::from(proto))
             }
+            Err(status) => Err(status),
         });
 
         Ok(domain_stream)
@@ -191,7 +172,6 @@ impl Client {
         mut self,
         req: model::GetRelSizeRequest,
     ) -> Result<model::GetRelSizeResponse, tonic::Status> {
-
         let proto_req = proto::GetRelSizeRequest::from(req);
         let response = self.client.get_rel_size(proto_req).await?;
         let proto_resp = response.into_inner();
@@ -203,7 +183,6 @@ impl Client {
         mut self,
         req: model::GetSlruSegmentRequest,
     ) -> Result<model::GetSlruSegmentResponse, tonic::Status> {
-
         let proto_req = proto::GetSlruSegmentRequest::from(req);
         let response = self.client.get_slru_segment(proto_req).await?;
         Ok(response.into_inner().segment as Bytes)

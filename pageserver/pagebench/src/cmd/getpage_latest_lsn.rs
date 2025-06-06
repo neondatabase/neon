@@ -15,16 +15,16 @@ use pageserver_api::models::{
     PagestreamGetPageRequest, PagestreamGetPageResponse, PagestreamRequest,
 };
 use pageserver_api::shard::TenantShardId;
-use pageserver_page_api::proto;
 use pageserver_page_api::GetPageRequest;
 use pageserver_page_api::GetPageResponse;
+use pageserver_page_api::proto;
 use rand::prelude::*;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+use tonic::Status;
 use tracing::info;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
-use tonic::Status;
 
 use utils::shard::ShardIndex;
 
@@ -474,7 +474,6 @@ async fn run_worker(
 /// For simplicity, this just uses separate asynchronous send/recv methods. The send method could
 /// return a future that resolves when the response is received, but we don't really need it.
 
-
 #[async_trait]
 trait Client: Send {
     /// Sends an asynchronous GetPage request to the pageserver.
@@ -518,11 +517,15 @@ struct GrpcClient {
 
 impl GrpcClient {
     async fn new(connstring: String, ttid: TenantTimelineId) -> anyhow::Result<Self> {
-
-        let uri : Uri = connstring.parse().unwrap();
+        let uri: Uri = connstring.parse().unwrap();
         let mut domain_client = pageserver_page_api::client::Client::new(
             uri,
-            ttid.tenant_id.clone(), ttid.timeline_id.clone(), ShardIndex::unsharded().clone(), None).await?;
+            ttid.tenant_id,
+            ttid.timeline_id,
+            ShardIndex::unsharded(),
+            None,
+        )
+        .await?;
         let (req_tx, req_rx) = tokio::sync::mpsc::channel::<GetPageRequest>(1);
         let inbound_stream = tokio_stream::wrappers::ReceiverStream::new(req_rx);
         let resp_stream = domain_client.get_pages(inbound_stream).await?;
@@ -541,23 +544,25 @@ impl Client for GrpcClient {
             request_id: 0,
             request_class: proto::GetPageClass::Normal as i32,
             read_lsn: Some(proto::ReadLsn {
-                request_lsn: req.hdr.request_lsn.0 ,
+                request_lsn: req.hdr.request_lsn.0,
                 not_modified_since_lsn: req.hdr.not_modified_since.0,
             }),
             rel: Some(req.rel.into()),
             block_number: vec![req.blkno],
         };
-        let domain_req : pageserver_page_api::GetPageRequest = req.try_into()?;
+        let domain_req: pageserver_page_api::GetPageRequest = req.try_into()?;
         self.req_tx.send(domain_req).await?;
         Ok(())
     }
 
     async fn recv_get_page(&mut self) -> anyhow::Result<PagestreamGetPageResponse> {
-        let resp = self.resp_rx.next().await.ok_or_else(|| anyhow::anyhow!("Empty response"))?.unwrap();
-        anyhow::ensure!(
-            true,
-            "unexpected status code:",
-        );
+        let resp = self
+            .resp_rx
+            .next()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("Empty response"))?
+            .unwrap();
+        anyhow::ensure!(true, "unexpected status code:",);
 
         Ok(PagestreamGetPageResponse {
             page: resp.page_images[0].clone(),
