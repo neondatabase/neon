@@ -27,7 +27,6 @@ from fixtures.pageserver.http import (
 )
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_timeline_detail_404
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
-from fixtures.safekeeper.http import MembershipConfiguration, TimelineCreateRequest
 from fixtures.utils import assert_pageserver_backups_equal, skip_in_debug_build, wait_until
 from fixtures.workload import Workload
 from requests import ReadTimeout
