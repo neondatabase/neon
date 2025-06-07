@@ -241,7 +241,7 @@ pub async fn main_task(
     mut manager_rx: tokio::sync::mpsc::UnboundedReceiver<ManagerCtlMessage>,
     global_rate_limiter: RateLimiter,
     wal_backup: Arc<WalBackup>,
-    wal_advertiser: Arc<wal_advertiser::advmap::World>,
+    wal_advertiser: Arc<wal_advertiser::GlobalState>,
 ) {
     tli.set_status(Status::Started);
 
@@ -423,7 +423,7 @@ impl Manager {
         manager_tx: tokio::sync::mpsc::UnboundedSender<ManagerCtlMessage>,
         global_rate_limiter: RateLimiter,
         wal_backup: Arc<WalBackup>,
-        wal_advertiser: Arc<wal_advertiser::advmap::World>,
+        wal_advertiser: Arc<wal_advertiser::GlobalState>,
     ) -> Manager {
         let (is_offloaded, partial_backup_uploaded) = tli.bootstrap_mgr().await;
         Manager {

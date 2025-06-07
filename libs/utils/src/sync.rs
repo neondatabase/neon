@@ -4,3 +4,5 @@ pub mod duplex;
 pub mod gate;
 
 pub mod spsc_fold;
+
+pub mod spsc_watch;

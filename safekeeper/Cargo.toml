@@ -63,6 +63,7 @@ pq_proto.workspace = true
 remote_storage.workspace = true
 safekeeper_api.workspace = true
 safekeeper_client.workspace = true
+sk_ps_discovery.workspace = true
 sha2.workspace = true
 sd-notify.workspace = true
 storage_broker.workspace = true

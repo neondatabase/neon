@@ -25,10 +25,11 @@ use safekeeper::defaults::{
 use safekeeper::wal_backup::WalBackup;
 use safekeeper::{
     BACKGROUND_RUNTIME, BROKER_RUNTIME, GlobalTimelines, HTTP_RUNTIME, SafeKeeperConf,
-    WAL_SERVICE_RUNTIME, broker, control_file, http, wal_service,
+    WAL_ADVERTISER_RUNTIME, WAL_SERVICE_RUNTIME, broker, control_file, http, wal_advertiser,
+    wal_service,
 };
 use sd_notify::NotifyState;
-use storage_broker::{DEFAULT_ENDPOINT, Uri};
+use storage_broker::{DEFAULT_ENDPOINT, Uri, wal_advertisement};
 use tokio::runtime::Handle;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::task::JoinError;
@@ -625,6 +626,16 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
         )
         .map(|res| ("broker main".to_owned(), res));
     tasks_handles.push(Box::pin(broker_task_handle));
+
+    let wal_advertiser_task_handle = current_thread_rt
+        .as_ref()
+        .unwrap_or_else(WAL_ADVERTISER_RUNTIME.handle())
+        .spawn(
+            wal_advertiser::task_main(conf.clone(), global_timelines.clone())
+                .instrument(info_span!("wal_advertiser_main")),
+        )
+        .map(|res| ("wal advertiser task handle".to_owned(), res));
+    tasks_handles.push(Box::pin(wal_advertiser_task_handle));
 
     set_build_info_metric(GIT_VERSION, BUILD_TAG);
 

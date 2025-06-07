@@ -47,7 +47,7 @@ struct GlobalTimelinesState {
 
     conf: Arc<SafeKeeperConf>,
     broker_active_set: Arc<TimelinesSet>,
-    wal_advertisement: Arc<wal_advertiser::advmap::World>,
+    wal_advertisement: Arc<wal_advertiser::GlobalState>,
     global_rate_limiter: RateLimiter,
     wal_backup: Arc<WalBackup>,
 }
@@ -61,7 +61,7 @@ impl GlobalTimelinesState {
         Arc<TimelinesSet>,
         RateLimiter,
         Arc<WalBackup>,
-        Arc<wal_advertiser::advmap::World>,
+        Arc<wal_advertiser::GlobalState>,
     ) {
         (
             self.conf.clone(),
@@ -104,7 +104,7 @@ impl GlobalTimelines {
                 tombstones: HashMap::new(),
                 conf,
                 broker_active_set: Arc::new(TimelinesSet::default()),
-                wal_advertisement: Arc::new(wal_advertiser::advmap::World::default()),
+                wal_advertisement: Arc::new(wal_advertiser::GlobalState::default()),
                 global_rate_limiter: RateLimiter::new(1, 1),
                 wal_backup,
             }),
@@ -597,7 +597,7 @@ impl GlobalTimelines {
         Ok(deleted)
     }
 
-    pub fn get_wal_advertiser(&self) -> Arc<wal_advertiser::advmap::World> {
+    pub fn get_wal_advertiser(&self) -> Arc<wal_advertiser::GlobalState> {
         self.state.lock().unwrap().wal_advertisement.clone()
     }
 

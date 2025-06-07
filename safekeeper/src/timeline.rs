@@ -549,7 +549,7 @@ impl Timeline {
         broker_active_set: Arc<TimelinesSet>,
         partial_backup_rate_limiter: RateLimiter,
         wal_backup: Arc<WalBackup>,
-        wal_advertiser: Arc<wal_advertiser::advmap::World>,
+        wal_advertiser: Arc<wal_advertiser::GlobalState>,
     ) {
         let (tx, rx) = self.manager_ctl.bootstrap_manager();
 
