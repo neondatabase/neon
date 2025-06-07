@@ -123,12 +123,6 @@ struct ProxyCliArgs {
     /// timeout for the TLS handshake
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     handshake_timeout: tokio::time::Duration,
-    /// http endpoint to receive periodic metric updates
-    #[clap(long)]
-    metric_collection_endpoint: Option<String>,
-    /// how often metrics should be sent to a collection endpoint
-    #[clap(long)]
-    metric_collection_interval: Option<String>,
     /// cache for `wake_compute` api method (use `size=0` to disable)
     #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
     wake_compute_cache: String,
@@ -161,12 +155,6 @@ struct ProxyCliArgs {
     /// Cancellation ops batch size for redis
     #[clap(long, default_value_t = 8)]
     cancellation_batch_size: usize,
-    /// cache for `allowed_ips` (use `size=0` to disable)
-    #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
-    allowed_ips_cache: String,
-    /// cache for `role_secret` (use `size=0` to disable)
-    #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
-    role_secret_cache: String,
     /// redis url for plain authentication
     #[clap(long, alias("redis-notifications"))]
     redis_plain: Option<String>,
@@ -197,6 +185,12 @@ struct ProxyCliArgs {
     #[clap(flatten)]
     parquet_upload: ParquetUploadArgs,
 
+    /// http endpoint to receive periodic metric updates
+    #[clap(long)]
+    metric_collection_endpoint: Option<String>,
+    /// how often metrics should be sent to a collection endpoint
+    #[clap(long)]
+    metric_collection_interval: Option<String>,
     /// interval for backup metric collection
     #[clap(long, default_value = "10m", value_parser = humantime::parse_duration)]
     metric_backup_collection_interval: std::time::Duration,
@@ -209,6 +203,7 @@ struct ProxyCliArgs {
     /// Size of each event is no more than 400 bytes, so 2**22 is about 200MB before the compression.
     #[clap(long, default_value = "4194304")]
     metric_backup_collection_chunk_size: usize,
+
     /// Whether to retry the connection to the compute node
     #[clap(long, default_value = config::RetryConfig::CONNECT_TO_COMPUTE_DEFAULT_VALUES)]
     connect_to_compute_retry: String,
