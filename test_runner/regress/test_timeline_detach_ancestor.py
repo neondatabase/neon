@@ -21,9 +21,13 @@ from fixtures.neon_fixtures import (
     last_flush_lsn_upload,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.http import HistoricLayerInfo, PageserverApiException
+from fixtures.pageserver.http import (
+    HistoricLayerInfo,
+    PageserverApiException,
+)
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_timeline_detail_404
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
+from fixtures.safekeeper.http import MembershipConfiguration, TimelineCreateRequest
 from fixtures.utils import assert_pageserver_backups_equal, skip_in_debug_build, wait_until
 from fixtures.workload import Workload
 from requests import ReadTimeout
@@ -413,6 +417,7 @@ def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder, snapshots
             "read_only": True,
         },
     )
+
     sk = env.safekeepers[0]
     assert sk
     with pytest.raises(requests.exceptions.HTTPError, match="Not Found"):
@@ -504,8 +509,15 @@ def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder, snapshots
             assert len(lineage.get("original_ancestor", [])) == 0
             assert len(lineage.get("reparenting_history", [])) == 0
 
-    for name, _, _, rows, starts in expected_result:
-        with env.endpoints.create_start(name, tenant_id=env.initial_tenant) as ep:
+    for branch_name, queried_timeline, _, rows, starts in expected_result:
+        details = client.timeline_detail(env.initial_tenant, queried_timeline)
+        log.info(f"reading data from branch {branch_name}")
+        # specifying the lsn makes the endpoint read-only and not connect to safekeepers
+        with env.endpoints.create(
+            branch_name,
+            lsn=Lsn(details["last_record_lsn"]),
+        ) as ep:
+            ep.start(safekeeper_generation=1)
             assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
             assert ep.safe_psql(f"SELECT count(*) FROM audit WHERE starts = {starts}")[0][0] == 1
 
