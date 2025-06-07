@@ -155,9 +155,6 @@ struct ProxyCliArgs {
     /// Wake compute rate limiter max number of requests per second.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_SET)]
     wake_compute_limit: Vec<RateBucketInfo>,
-    /// Redis rate limiter max number of requests per second.
-    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_REDIS_SET)]
-    redis_rps_limit: Vec<RateBucketInfo>,
     /// Cancellation channel size (max queue size for redis kv client)
     #[clap(long, default_value_t = 1024)]
     cancellation_ch_size: usize,
@@ -386,9 +383,6 @@ pub async fn run() -> anyhow::Result<()> {
 
     let cancellation_token = CancellationToken::new();
 
-    let redis_rps_limit = Vec::leak(args.redis_rps_limit.clone());
-    RateBucketInfo::validate(redis_rps_limit)?;
-
     let cancellation_handler = Arc::new(CancellationHandler::new(&config.connect_to_compute));
 
     let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new_with_shards(
@@ -502,7 +496,7 @@ pub async fn run() -> anyhow::Result<()> {
                 // This prevents immediate exit and pod restart,
                 // which can cause hammering of the redis in case of connection issues.
                 // cancellation key management
-                let mut redis_kv_client = RedisKVClient::new(client.clone(), redis_rps_limit);
+                let mut redis_kv_client = RedisKVClient::new(client.clone());
                 for attempt in (0..3).with_position() {
                     match redis_kv_client.try_connect().await {
                         Ok(()) => {
