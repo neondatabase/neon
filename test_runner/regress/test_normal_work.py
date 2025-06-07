@@ -10,14 +10,9 @@ if TYPE_CHECKING:
     from fixtures.pageserver.http import PageserverHttpClient
 
 
-def check_tenant(
-    env: NeonEnv, pageserver_http: PageserverHttpClient, safekeeper_proto_version: int
-):
+def check_tenant(env: NeonEnv, pageserver_http: PageserverHttpClient):
     tenant_id, timeline_id = env.create_tenant()
-    config_lines = [
-        f"neon.safekeeper_proto_version = {safekeeper_proto_version}",
-    ]
-    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id, config_lines=config_lines)
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     # we rely upon autocommit after each statement
     res_1 = endpoint.safe_psql_many(
         queries=[
@@ -42,13 +37,10 @@ def check_tenant(
 
 
 @pytest.mark.parametrize("num_timelines,num_safekeepers", [(3, 1)])
-# Test both proto versions until we fully migrate.
-@pytest.mark.parametrize("safekeeper_proto_version", [2, 3])
 def test_normal_work(
     neon_env_builder: NeonEnvBuilder,
     num_timelines: int,
     num_safekeepers: int,
-    safekeeper_proto_version: int,
 ):
     """
     Basic test:
@@ -68,4 +60,4 @@ def test_normal_work(
     pageserver_http = env.pageserver.http_client()
 
     for _ in range(num_timelines):
-        check_tenant(env, pageserver_http, safekeeper_proto_version)
+        check_tenant(env, pageserver_http)
