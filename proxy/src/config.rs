@@ -69,7 +69,7 @@ pub struct AuthenticationConfig {
     pub console_redirect_confirmation_timeout: tokio::time::Duration,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Deserialize)]
 pub struct EndpointCacheConfig {
     /// Batch size to receive all endpoints on the startup.
     pub initial_batch_size: usize,
@@ -205,7 +205,7 @@ impl FromStr for CacheOptions {
 }
 
 /// Helper for cmdline cache options parsing.
-#[derive(Debug)]
+#[derive(Debug, serde::Deserialize)]
 pub struct ProjectInfoCacheOptions {
     /// Max number of entries.
     pub size: usize,

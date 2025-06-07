@@ -5273,6 +5273,7 @@ dependencies = [
  "tokio-rustls 0.26.2",
  "tokio-tungstenite 0.21.0",
  "tokio-util",
+ "toml",
  "tracing",
  "tracing-log",
  "tracing-opentelemetry",
