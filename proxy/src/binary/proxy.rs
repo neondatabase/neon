@@ -472,6 +472,7 @@ pub async fn run() -> anyhow::Result<()> {
     client_tasks.spawn(crate::context::parquet::worker(
         cancellation_token.clone(),
         args.parquet_upload,
+        args.region,
     ));
 
     // maintenance tasks. these never return unless there's an error
@@ -673,7 +674,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         authentication_config,
         proxy_protocol_v2: args.proxy_protocol_v2,
         handshake_timeout: args.handshake_timeout,
-        region: args.region.clone(),
         wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,
         connect_compute_locks,
         connect_to_compute: compute_config,
