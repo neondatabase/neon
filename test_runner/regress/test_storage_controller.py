@@ -3635,6 +3635,9 @@ def test_timeline_delete_mid_live_migration(neon_env_builder: NeonEnvBuilder, mi
     env = neon_env_builder.init_configs()
     env.start()
 
+    for ps in env.pageservers:
+        ps.allowed_errors.append(".*Timeline.* has been deleted.*")
+
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
     env.storage_controller.tenant_create(tenant_id, placement_policy={"Attached": 1})
