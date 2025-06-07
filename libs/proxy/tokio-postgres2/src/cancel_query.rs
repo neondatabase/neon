@@ -10,7 +10,7 @@ use crate::{Error, cancel_query_raw, connect_socket};
 pub(crate) async fn cancel_query<T>(
     config: Option<SocketConfig>,
     ssl_mode: SslMode,
-    mut tls: T,
+    tls: T,
     process_id: i32,
     secret_key: i32,
 ) -> Result<(), Error>

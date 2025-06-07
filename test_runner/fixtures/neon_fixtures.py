@@ -357,31 +357,6 @@ class PgProtocol:
         return TimelineId(cast("str", self.safe_psql("show neon.timeline_id")[0][0]))
 
 
-class PageserverWalReceiverProtocol(StrEnum):
-    VANILLA = "vanilla"
-    INTERPRETED = "interpreted"
-
-    @staticmethod
-    def to_config_key_value(proto) -> tuple[str, dict[str, Any]]:
-        if proto == PageserverWalReceiverProtocol.VANILLA:
-            return (
-                "wal_receiver_protocol",
-                {
-                    "type": "vanilla",
-                },
-            )
-        elif proto == PageserverWalReceiverProtocol.INTERPRETED:
-            return (
-                "wal_receiver_protocol",
-                {
-                    "type": "interpreted",
-                    "args": {"format": "protobuf", "compression": {"zstd": {"level": 1}}},
-                },
-            )
-        else:
-            raise ValueError(f"Unknown protocol type: {proto}")
-
-
 @dataclass
 class PageserverTracingConfig:
     sampling_ratio: tuple[int, int]
@@ -475,7 +450,6 @@ class NeonEnvBuilder:
         safekeeper_extra_opts: list[str] | None = None,
         storage_controller_port_override: int | None = None,
         pageserver_virtual_file_io_mode: str | None = None,
-        pageserver_wal_receiver_protocol: PageserverWalReceiverProtocol | None = None,
         pageserver_get_vectored_concurrent_io: str | None = None,
         pageserver_tracing_config: PageserverTracingConfig | None = None,
         pageserver_import_config: PageserverImportConfig | None = None,
@@ -553,11 +527,6 @@ class NeonEnvBuilder:
         self.storage_controller_port_override = storage_controller_port_override
 
         self.pageserver_virtual_file_io_mode = pageserver_virtual_file_io_mode
-
-        if pageserver_wal_receiver_protocol is not None:
-            self.pageserver_wal_receiver_protocol = pageserver_wal_receiver_protocol
-        else:
-            self.pageserver_wal_receiver_protocol = PageserverWalReceiverProtocol.INTERPRETED
 
         assert test_name.startswith("test_"), (
             "Unexpectedly instantiated from outside a test function"
@@ -1204,7 +1173,6 @@ class NeonEnv:
 
         self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
         self.pageserver_virtual_file_io_mode = config.pageserver_virtual_file_io_mode
-        self.pageserver_wal_receiver_protocol = config.pageserver_wal_receiver_protocol
         self.pageserver_get_vectored_concurrent_io = config.pageserver_get_vectored_concurrent_io
         self.pageserver_tracing_config = config.pageserver_tracing_config
         if config.pageserver_import_config is None:
@@ -1335,13 +1303,6 @@ class NeonEnv:
                         override = toml.loads(o)
                         for key, value in override.items():
                             ps_cfg[key] = value
-
-            if self.pageserver_wal_receiver_protocol is not None:
-                key, value = PageserverWalReceiverProtocol.to_config_key_value(
-                    self.pageserver_wal_receiver_protocol
-                )
-                if key not in ps_cfg:
-                    ps_cfg[key] = value
 
             if self.pageserver_tracing_config is not None:
                 key, value = self.pageserver_tracing_config.to_config_key_value()
@@ -2095,6 +2056,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
             headers=self.headers(TokenScope.ADMIN),
         )
 
+    def tombstone_delete(self, node_id):
+        log.info(f"tombstone_delete({node_id})")
+        self.request(
+            "DELETE",
+            f"{self.api}/debug/v1/tombstone/{node_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
     def node_drain(self, node_id):
         log.info(f"node_drain({node_id})")
         self.request(
@@ -2148,6 +2117,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
             "GET",
             f"{self.api}/control/v1/node",
             headers=self.headers(TokenScope.INFRA),
+        )
+        return response.json()
+
+    def tombstone_list(self):
+        response = self.request(
+            "GET",
+            f"{self.api}/debug/v1/tombstone",
+            headers=self.headers(TokenScope.ADMIN),
         )
         return response.json()
 
@@ -4713,7 +4690,7 @@ class EndpointFactory:
         origin: Endpoint,
         endpoint_id: str | None = None,
         config_lines: list[str] | None = None,
-    ):
+    ) -> Endpoint:
         branch_name = origin.branch_name
         assert origin in self.endpoints
         assert branch_name is not None
@@ -4732,7 +4709,7 @@ class EndpointFactory:
         origin: Endpoint,
         endpoint_id: str | None = None,
         config_lines: list[str] | None = None,
-    ):
+    ) -> Endpoint:
         branch_name = origin.branch_name
         assert origin in self.endpoints
         assert branch_name is not None

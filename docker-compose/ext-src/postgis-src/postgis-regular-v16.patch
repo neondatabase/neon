@@ -125,7 +125,7 @@ index 7a36b65..ad78fc7 100644
  DROP SCHEMA tm CASCADE;
 +
 diff --git a/regress/core/tests.mk b/regress/core/tests.mk
-index 3abd7bc..94903c3 100644
+index 64a9254..94903c3 100644
 --- a/regress/core/tests.mk
 +++ b/regress/core/tests.mk
 @@ -23,7 +23,6 @@ current_dir := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
@@ -160,18 +160,6 @@ index 3abd7bc..94903c3 100644
  	$(top_srcdir)/regress/core/wkb \
  	$(top_srcdir)/regress/core/wkt \
  	$(top_srcdir)/regress/core/wmsservers \
-@@ -144,11 +140,6 @@ TESTS_SLOW = \
- 	$(top_srcdir)/regress/core/concave_hull_hard \
- 	$(top_srcdir)/regress/core/knn_recheck
- 
--ifeq ($(shell expr "$(POSTGIS_PGSQL_VERSION)" ">=" 120),1)
--	TESTS += \
--		$(top_srcdir)/regress/core/computed_columns
--endif
--
- ifeq ($(shell expr "$(POSTGIS_GEOS_VERSION)" ">=" 30700),1)
- 	# GEOS-3.7 adds:
- 	# ST_FrechetDistance
 diff --git a/regress/loader/tests.mk b/regress/loader/tests.mk
 index 1fc77ac..c3cb9de 100644
 --- a/regress/loader/tests.mk

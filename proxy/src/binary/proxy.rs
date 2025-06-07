@@ -221,8 +221,7 @@ struct ProxyCliArgs {
     is_private_access_proxy: bool,
 
     /// Configure whether all incoming requests have a Proxy Protocol V2 packet.
-    // TODO(conradludgate): switch default to rejected or required once we've updated all deployments
-    #[clap(value_enum, long, default_value_t = ProxyProtocolV2::Supported)]
+    #[clap(value_enum, long, default_value_t = ProxyProtocolV2::Rejected)]
     proxy_protocol_v2: ProxyProtocolV2,
 
     /// Time the proxy waits for the webauth session to be confirmed by the control plane.

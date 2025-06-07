@@ -345,6 +345,35 @@ impl Default for ShardSchedulingPolicy {
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
+pub enum NodeLifecycle {
+    Active,
+    Deleted,
+}
+
+impl FromStr for NodeLifecycle {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(Self::Active),
+            "deleted" => Ok(Self::Deleted),
+            _ => Err(anyhow::anyhow!("Unknown node lifecycle '{s}'")),
+        }
+    }
+}
+
+impl From<NodeLifecycle> for String {
+    fn from(value: NodeLifecycle) -> String {
+        use NodeLifecycle::*;
+        match value {
+            Active => "active",
+            Deleted => "deleted",
+        }
+        .to_string()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
 pub enum NodeSchedulingPolicy {
     Active,
     Filling,

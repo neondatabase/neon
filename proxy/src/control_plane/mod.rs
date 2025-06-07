@@ -11,8 +11,8 @@ pub(crate) mod errors;
 
 use std::sync::Arc;
 
+use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::AuthRule;
-use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
 use crate::auth::{AuthError, IpPattern, check_peer_addr_is_in_list};
 use crate::cache::{Cached, TimedLru};
 use crate::config::ComputeConfig;
@@ -39,10 +39,6 @@ pub mod mgmt;
 /// Auth secret which is managed by the cloud.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub(crate) enum AuthSecret {
-    #[cfg(any(test, feature = "testing"))]
-    /// Md5 hash of user's password.
-    Md5([u8; 16]),
-
     /// [SCRAM](crate::scram) authentication info.
     Scram(scram::ServerSecret),
 }
@@ -63,13 +59,9 @@ pub(crate) struct AuthInfo {
 }
 
 /// Info for establishing a connection to a compute node.
-/// This is what we get after auth succeeded, but not before!
 #[derive(Clone)]
 pub(crate) struct NodeInfo {
-    /// Compute node connection params.
-    /// It's sad that we have to clone this, but this will improve
-    /// once we migrate to a bespoke connection logic.
-    pub(crate) config: compute::ConnCfg,
+    pub(crate) conn_info: compute::ConnectInfo,
 
     /// Labels for proxy's metrics.
     pub(crate) aux: MetricsAuxInfo,
@@ -79,25 +71,13 @@ impl NodeInfo {
     pub(crate) async fn connect(
         &self,
         ctx: &RequestContext,
+        auth: &compute::AuthInfo,
         config: &ComputeConfig,
         user_info: ComputeUserInfo,
     ) -> Result<compute::PostgresConnection, compute::ConnectionError> {
-        self.config
-            .connect(ctx, self.aux.clone(), config, user_info)
+        self.conn_info
+            .connect(ctx, self.aux.clone(), auth, config, user_info)
             .await
-    }
-
-    pub(crate) fn reuse_settings(&mut self, other: Self) {
-        self.config.reuse_password(other.config);
-    }
-
-    pub(crate) fn set_keys(&mut self, keys: &ComputeCredentialKeys) {
-        match keys {
-            #[cfg(any(test, feature = "testing"))]
-            ComputeCredentialKeys::Password(password) => self.config.password(password),
-            ComputeCredentialKeys::AuthKeys(auth_keys) => self.config.auth_keys(*auth_keys),
-            ComputeCredentialKeys::JwtPayload(_) | ComputeCredentialKeys::None => &mut self.config,
-        };
     }
 }
 
