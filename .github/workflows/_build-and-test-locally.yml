@@ -266,7 +266,7 @@ jobs:
           role-duration-seconds: 18000 # 5 hours
 
       - name: Run rust tests
-        if: ${{ inputs.sanitizers != 'enabled' }}
+        if: ${{ inputs.sanitizers != 'enabled' && inputs.test-selection == '' }}
         env:
           NEXTEST_RETRIES: 3
         run: |
@@ -382,7 +382,8 @@ jobs:
         timeout-minutes: ${{ inputs.sanitizers != 'enabled' && 75 || 180 }}
         with:
           build_type: ${{ inputs.build-type }}
-          test_selection: regress
+          test_selection: ${{ inputs.test-selection != '' && inputs.test-selection || 'regress' }}
+          extended_testing: ${{ inputs.test-selection != '' && 'true' || 'false' }}
           needs_postgres_source: true
           run_with_real_s3: true
           real_s3_bucket: neon-github-ci-tests
@@ -395,9 +396,7 @@ jobs:
           # Attempt to stop tests gracefully to generate test reports
           # until they are forcibly stopped by the stricter `timeout-minutes` limit.
           extra_params: --session-timeout=${{ inputs.sanitizers != 'enabled' && 3000 || 10200 }} --count=${{ inputs.test-run-count }}
-                        ${{ inputs.test-selection != '' && format('-k "{0}"', inputs.test-selection) || '' }}
         env:
-          TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
           BUILD_TAG: ${{ inputs.build-tag }}
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
