@@ -24,7 +24,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::id::{NodeId, TenantId, TenantTimelineId};
 use utils::lsn::Lsn;
-use utils::shard::TenantShardId;
 use utils::sync::gate::Gate;
 
 use crate::metrics::{FullTimelineInfo, MISC_OPERATION_SECONDS, WalStorageMetrics};

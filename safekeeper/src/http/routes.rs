@@ -31,14 +31,12 @@ use tracing::{Instrument, info_span};
 use utils::auth::SwappableJwtAuth;
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
-use utils::shard::TenantShardId;
 
 use crate::debug_dump::TimelineDigestRequest;
 use crate::safekeeper::TermLsn;
 use crate::timelines_global_map::DeleteOrExclude;
 use crate::{
     GlobalTimelines, SafeKeeperConf, copy_timeline, debug_dump, patch_control_file, pull_timeline,
-    wal_advertiser,
 };
 
 /// Healthcheck handler.

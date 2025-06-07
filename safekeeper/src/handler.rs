@@ -18,7 +18,6 @@ use safekeeper_api::models::ConnectionId;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{Instrument, debug, info, info_span};
 use utils::auth::{Claims, JwtAuth, Scope};
-use utils::generation::{self, Generation};
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
 use utils::postgres_client::PostgresClientProtocol;

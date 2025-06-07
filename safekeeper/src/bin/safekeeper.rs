@@ -25,7 +25,7 @@ use safekeeper::defaults::{
 use safekeeper::wal_backup::WalBackup;
 use safekeeper::{
     BACKGROUND_RUNTIME, BROKER_RUNTIME, GlobalTimelines, HTTP_RUNTIME, SafeKeeperConf,
-    WAL_SERVICE_RUNTIME, broker, control_file, http, wal_advertiser, wal_service,
+    WAL_SERVICE_RUNTIME, broker, control_file, http, wal_service,
 };
 use sd_notify::NotifyState;
 use storage_broker::{DEFAULT_ENDPOINT, Uri};

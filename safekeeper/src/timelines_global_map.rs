@@ -2,7 +2,6 @@
 //! All timelines should always be present in this map, this is done by loading them
 //! all from the disk on startup and keeping them in memory.
 
-use std::any;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -19,12 +18,10 @@ use tracing::*;
 use utils::crashsafe::{durable_rename, fsync_async_opt};
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
-use utils::shard::TenantShardId;
 
 use crate::defaults::DEFAULT_EVICTION_CONCURRENCY;
 use crate::http::routes::DeleteOrExcludeError;
 use crate::rate_limit::RateLimiter;
-use crate::receive_wal::WalAcceptor;
 use crate::state::TimelinePersistentState;
 use crate::timeline::{Timeline, TimelineError, delete_dir, get_tenant_dir, get_timeline_dir};
 use crate::timelines_set::TimelinesSet;

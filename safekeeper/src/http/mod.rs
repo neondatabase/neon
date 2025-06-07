@@ -5,7 +5,7 @@ pub use routes::make_router;
 pub use safekeeper_api::models;
 use tokio_util::sync::CancellationToken;
 
-use crate::{GlobalTimelines, SafeKeeperConf, wal_advertiser};
+use crate::{GlobalTimelines, SafeKeeperConf};
 
 pub async fn task_main_http(
     conf: Arc<SafeKeeperConf>,

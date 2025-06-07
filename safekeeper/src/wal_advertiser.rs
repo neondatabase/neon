@@ -1,20 +1,36 @@
-//! Advertise pending WAL to all pageservers that might be interested in it.
+pub mod advmap {
+    use std::sync::Arc;
 
-use std::{collections::HashSet, sync::Arc, time::Duration};
+    use utils::id::TenantId;
 
-use crate::{GlobalTimelines, SafeKeeperConf};
+    use crate::timeline::Timeline;
 
-pub(crate) mod advmap;
+    pub struct World {}
+    pub struct SafekeeperTimelineHandle {}
 
-pub(crate) async fn wal_advertiser_loop(
-    conf: Arc<SafeKeeperConf>,
-    global_timelines: Arc<GlobalTimelines>,
-) -> anyhow::Result<()> {
-    todo!();
-    node_loop().await;
-    Ok(())
-}
-
-pub(crate) async fn node_loop() {
-    loop {}
+    impl World {
+        pub fn update_pageserver_attachments(
+            &self,
+            tenant_id: TenantId,
+            update: safekeeper_api::models::TenantShardPageserverAttachmentChange,
+        ) -> anyhow::Result<()> {
+            todo!()
+        }
+        pub fn register_timeline(
+            &self,
+            tli: Arc<Timeline>,
+        ) -> anyhow::Result<SafekeeperTimelineHandle> {
+            todo!()
+        }
+    }
+    impl SafekeeperTimelineHandle {
+        pub fn ready_for_eviction(&self) -> bool {
+            todo!()
+        }
+    }
+    impl Default for World {
+        fn default() -> Self {
+            todo!()
+        }
+    }
 }

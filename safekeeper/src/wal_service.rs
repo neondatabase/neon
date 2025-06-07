@@ -18,7 +18,7 @@ use utils::measured_stream::MeasuredStream;
 
 use crate::handler::SafekeeperPostgresHandler;
 use crate::metrics::TrafficMetrics;
-use crate::{GlobalTimelines, SafeKeeperConf, wal_advertiser};
+use crate::{GlobalTimelines, SafeKeeperConf};
 
 /// Accept incoming TCP connections and spawn them into a background thread.
 ///

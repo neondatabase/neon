@@ -37,7 +37,6 @@ use crate::send_interpreted_wal::{
     Batch, InterpretedWalReader, InterpretedWalReaderHandle, InterpretedWalSender,
 };
 use crate::timeline::WalResidentTimeline;
-use crate::wal_advertiser;
 use crate::wal_reader_stream::StreamingWalReader;
 use crate::wal_storage::WalReader;
 
