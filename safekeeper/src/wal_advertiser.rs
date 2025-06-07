@@ -19,7 +19,7 @@ pub async fn task_main(
         for (node_id, advs) in advertisements {
             loop {
                 let tx = senders.entry(node_id).or_insert_with(|| {
-                    let (tx, rx) = utils::sync::spsc_fold::channel();
+                    let (tx, rx) = spsc_watch::channel(advs);
                     tokio::spawn(
                         NodeTask {
                             ps_id: node_id,
@@ -40,55 +40,37 @@ pub async fn task_main(
 
 struct PageserverTask {
     ps_id: NodeId,
-    advs: spsc_fold::Receiver<HashMap<TenantTimelineId, Lsn>>,
+    advs: spsc_watch::Receiver<HashMap<TenantTimelineId, Lsn>>,
 }
 
 impl PageserverTask {
     /// Cancellation: happens through last PageserverHandle being dropped.
     async fn run(mut self) {
+        let mut current;
         loop {
-            let Ok(advs) = self.advs.recv().await else {
-                return;
-            };
-            tokio::select! {
-                _ = self.advs.cancelled() => {
-                    return;
+            let res = self.run0(advs).await;
+            match res {
+                Ok(()) => {}
+                Err(err) => {
+                    error!(?err, "error sending advertisements");
+                    // TODO: proper backoff?
+                    tokio::time::sleep(Duration::from_secs(5)).await;
                 }
-                res = self.run0() => {
-                    if let Err(err) = res {
-                        error!(?err, "failure sending advertisements, restarting after back-off");
-                        // TODO: backoff? + cancellation sensitivity
-                        tokio::time::sleep(Duration::from_secs(10)).await;
-                    }
-                    continue;
-                }
-            };
+            }
         }
     }
-    async fn run0(&mut self) -> anyhow::Result<()> {
+    async fn run0(&mut self, advs: HashMap<TenantTimelineId, Lsn>) -> anyhow::Result<()> {
         use storage_broker::wal_advertisement as proto;
         use storage_broker::wal_advertisement::pageserver_client::PageserverClient;
         let stream = async_stream::stream! { loop {
-            while self.pending_advertisements.is_empty() {
-                tokio::select! {
-                    _ = self.advs.cancelled() => {
-                        return;
-                    }
-                    _ = self.notify_pending_advertisements.notified() => {}
-                }
-                let mut state = self.state.lock().unwrap();
-                std::mem::swap(
-                    &mut state.pending_advertisements,
-                    &mut self.pending_advertisements,
-                );
-            }
-            for (tenant_timeline_id, commit_lsn) in self.pending_advertisements.drain() {
+            for (tenant_timeline_id, commit_lsn) in advs {
                 yield proto::CommitLsnAdvertisement {tenant_timeline_id: Some(tenant_timeline_id), commit_lsn: Some(commit_lsn) };
             }
-        } };
-        let client: PageserverClient<_> = PageserverClient::connect(todo!())
-            .await
-            .context("connect")?;
+        }};
+        let client: PageserverClient<_> =
+            PageserverClient::connect(todo!("how do we learn pageserver hostnames?"))
+                .await
+                .context("connect")?;
         let publish_stream = client
             .publish_commit_lsn_advertisements(stream)
             .await

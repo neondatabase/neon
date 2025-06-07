@@ -1,11 +1,12 @@
-//! Like [`tokio::sync::watch`] but the Sender gets an error when the Receiver is gone.
-//!
-//! TODO: an actually more efficient implementation
+//! watch is probably not the right word, because we do take out
 
 use tokio_util::sync::CancellationToken;
 
-pub fn channel<T>(init: T) -> (Sender<T>, Receiver<T>) {
-    let (tx, rx) = tokio::sync::watch::channel(init);
+use crate::sync::spsc_fold;
+
+pub fn channel<T: Send>(init: T) -> (Sender<T>, Receiver<T>) {
+    let (mut tx, rx) = spsc_fold::channel();
+    poll_ready(tx.send(init, |_, _| unreachable!("init")));
     let cancel = CancellationToken::new();
     (
         Sender {
@@ -17,45 +18,39 @@ pub fn channel<T>(init: T) -> (Sender<T>, Receiver<T>) {
 }
 
 pub struct Sender<T> {
-    tx: tokio::sync::watch::Sender<T>,
+    tx: spsc_fold::Sender<T>,
     cancel: tokio_util::sync::DropGuard,
 }
 
 pub struct Receiver<T> {
-    rx: tokio::sync::watch::Receiver<T>,
+    rx: spsc_fold::Receiver<T>,
     cancel: CancellationToken,
 }
 
-pub enum RecvError {
-    SenderGone,
-}
-pub enum SendError {
-    ReceiverGone,
-}
-
-impl<T> Sender<T> {
-    pub fn send_replace(&mut self, value: T) -> Result<(), (T, SendError)> {
-        if self.tx.receiver_count() == 0 {
-            // we don't provide outside access to tx, so, we know the only
-            // rx that is ever going to exist is gone
-            return Err((value, SendError::ReceiverGone));
-        }
-        self.tx.send_replace(value);
-        Ok(())
+impl<T: Send> Sender<T> {
+    pub fn send_replace(&mut self, value: T) -> Result<(), spsc_fold::SendError> {
+        poll_ready(self.tx.send(value, |old, new| {
+            *old = new;
+            Ok(())
+        }))
     }
 }
 
 impl<T> Receiver<T> {
-    pub async fn changed(&mut self) -> Result<(), RecvError> {
-        match self.rx.changed().await {
-            Ok(()) => Ok(self.rx.borrow()),
-            Err(e) => Err(RecvError::SenderGone),
-        }
+    pub async fn recv(&mut self) -> Result<(), spsc_fold::RecvError> {
+        todo!()
     }
-    pub fn borrow(&self) -> impl Deref<Target = T> {
-        self.rx.borrow()
-    }
-    pub async fn closed(&mut self) {
+    pub async fn cancelled(&mut self) {
         self.cancel.cancelled().await
     }
+}
+
+fn poll_ready<F: Future<Output = O>, O>(f: F) -> O {
+    futures::executor::block_on(async move {
+        let f = std::pin::pin!(f);
+        match futures::poll!(f) {
+            std::task::Poll::Ready(r) => r,
+            std::task::Poll::Pending => unreachable!("expecting future to always return Ready"),
+        }
+    })
 }
