@@ -237,7 +237,6 @@ pub(super) async fn task_main(
                         extra: None,
                     },
                     crate::metrics::Protocol::SniRouter,
-                    "sni",
                 );
                 handle_client(ctx, dest_suffix, tls_config, compute_tls_config, socket).await
             }
