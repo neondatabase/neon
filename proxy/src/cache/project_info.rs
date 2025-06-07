@@ -7,7 +7,6 @@ use async_trait::async_trait;
 use clashmap::ClashMap;
 use clashmap::mapref::one::Ref;
 use rand::{Rng, thread_rng};
-use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tracing::{debug, info};
 
@@ -22,8 +21,6 @@ pub(crate) trait ProjectInfoCache {
     fn invalidate_endpoint_access_for_project(&self, project_id: ProjectIdInt);
     fn invalidate_endpoint_access_for_org(&self, account_id: AccountIdInt);
     fn invalidate_role_secret_for_project(&self, project_id: ProjectIdInt, role_name: RoleNameInt);
-    async fn decrement_active_listeners(&self);
-    async fn increment_active_listeners(&self);
 }
 
 struct Entry<T> {
@@ -96,7 +93,6 @@ pub struct ProjectInfoCacheImpl {
 
     start_time: Instant,
     ttl_disabled_since_us: AtomicU64,
-    active_listeners_lock: Mutex<usize>,
 }
 
 #[async_trait]
@@ -152,29 +148,6 @@ impl ProjectInfoCache for ProjectInfoCacheImpl {
             }
         }
     }
-
-    async fn decrement_active_listeners(&self) {
-        let mut listeners_guard = self.active_listeners_lock.lock().await;
-        if *listeners_guard == 0 {
-            tracing::error!("active_listeners count is already 0, something is broken");
-            return;
-        }
-        *listeners_guard -= 1;
-        if *listeners_guard == 0 {
-            self.ttl_disabled_since_us
-                .store(u64::MAX, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-
-    async fn increment_active_listeners(&self) {
-        let mut listeners_guard = self.active_listeners_lock.lock().await;
-        *listeners_guard += 1;
-        if *listeners_guard == 1 {
-            let new_ttl = (self.start_time.elapsed() + self.config.ttl).as_micros() as u64;
-            self.ttl_disabled_since_us
-                .store(new_ttl, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
 }
 
 impl ProjectInfoCacheImpl {
@@ -186,7 +159,6 @@ impl ProjectInfoCacheImpl {
             config,
             ttl_disabled_since_us: AtomicU64::new(u64::MAX),
             start_time: Instant::now(),
-            active_listeners_lock: Mutex::new(0),
         }
     }
 

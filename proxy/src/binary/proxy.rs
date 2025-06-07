@@ -503,18 +503,10 @@ pub async fn run() -> anyhow::Result<()> {
                 (client1, client2) => {
                     let cache = api.caches.project_info.clone();
                     if let Some(client) = client1 {
-                        maintenance_tasks.spawn(notifications::task_main(
-                            client,
-                            cache.clone(),
-                            args.region.clone(),
-                        ));
+                        maintenance_tasks.spawn(notifications::task_main(client, cache.clone()));
                     }
                     if let Some(client) = client2 {
-                        maintenance_tasks.spawn(notifications::task_main(
-                            client,
-                            cache.clone(),
-                            args.region.clone(),
-                        ));
+                        maintenance_tasks.spawn(notifications::task_main(client, cache.clone()));
                     }
                     maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
                 }
