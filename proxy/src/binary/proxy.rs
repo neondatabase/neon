@@ -152,9 +152,6 @@ struct ProxyCliArgs {
     /// Wake compute rate limiter max number of requests per second.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_SET)]
     wake_compute_limit: Vec<RateBucketInfo>,
-    /// Redis rate limiter max number of requests per second.
-    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_REDIS_SET)]
-    redis_rps_limit: Vec<RateBucketInfo>,
     /// Cancellation channel size (max queue size for redis kv client)
     #[clap(long, default_value_t = 1024)]
     cancellation_ch_size: usize,
@@ -383,9 +380,6 @@ pub async fn run() -> anyhow::Result<()> {
 
     let cancellation_token = CancellationToken::new();
 
-    let redis_rps_limit = Vec::leak(args.redis_rps_limit.clone());
-    RateBucketInfo::validate(redis_rps_limit)?;
-
     // channel size should be higher than redis client limit to avoid blocking
     let cancel_ch_size = args.cancellation_ch_size;
     let (tx_cancel, rx_cancel) = tokio::sync::mpsc::channel(cancel_ch_size);
@@ -502,7 +496,7 @@ pub async fn run() -> anyhow::Result<()> {
                 maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
 
                 // cancellation key management
-                let mut redis_kv_client = RedisKVClient::new(client.clone(), redis_rps_limit);
+                let mut redis_kv_client = RedisKVClient::new(client.clone());
                 maintenance_tasks.spawn(async move {
                     redis_kv_client.try_connect().await?;
                     handle_cancel_messages(
