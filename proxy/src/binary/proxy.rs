@@ -170,25 +170,25 @@ struct ProxyCliArgs {
     /// cache for `role_secret` (use `size=0` to disable)
     #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
     role_secret_cache: String,
-    /// redis url for notifications (if empty, redis_host:port will be used for both notifications and streaming connections)
-    #[clap(long)]
-    redis_notifications: Option<String>,
-    /// what from the available authentications type to use for the regional redis we have. Supported are "irsa" and "plain".
+    /// redis url for plain authentication
+    #[clap(long, alias("redis-notifications"))]
+    redis_plain: Option<String>,
+    /// what from the available authentications type to use for redis. Supported are "irsa" and "plain".
     #[clap(long, default_value = "irsa")]
     redis_auth_type: String,
-    /// redis host for streaming connections (might be different from the notifications host)
+    /// redis host for irsa authentication
     #[clap(long)]
     redis_host: Option<String>,
-    /// redis port for streaming connections (might be different from the notifications host)
+    /// redis port for irsa authentication
     #[clap(long)]
     redis_port: Option<u16>,
-    /// redis cluster name, used in aws elasticache
+    /// redis cluster name for irsa authentication
     #[clap(long)]
     redis_cluster_name: Option<String>,
-    /// redis user_id, used in aws elasticache
+    /// redis user_id for irsa authentication
     #[clap(long)]
     redis_user_id: Option<String>,
-    /// aws region to retrieve credentials
+    /// aws region for irsa authentication
     #[clap(long, default_value_t = String::new())]
     aws_region: String,
     /// cache for `project_info` (use `size=0` to disable)
@@ -331,7 +331,7 @@ pub async fn run() -> anyhow::Result<()> {
         Either::Right(auth_backend) => info!("Authentication backend: {auth_backend:?}"),
     }
     info!("Using region: {}", args.aws_region);
-    let (regional_redis_client, redis_notifications_client) = configure_redis(&args).await?;
+    let redis_client = configure_redis(&args).await?;
 
     // Check that we can bind to address before further initialization
     info!("Starting http on {}", args.http);
@@ -388,10 +388,6 @@ pub async fn run() -> anyhow::Result<()> {
 
     let redis_rps_limit = Vec::leak(args.redis_rps_limit.clone());
     RateBucketInfo::validate(redis_rps_limit)?;
-
-    let redis_kv_client = regional_redis_client
-        .as_ref()
-        .map(|redis_publisher| RedisKVClient::new(redis_publisher.clone(), redis_rps_limit));
 
     let cancellation_handler = Arc::new(CancellationHandler::new(&config.connect_to_compute));
 
@@ -496,24 +492,17 @@ pub async fn run() -> anyhow::Result<()> {
     #[cfg_attr(not(any(test, feature = "testing")), expect(irrefutable_let_patterns))]
     if let Either::Left(auth::Backend::ControlPlane(api, ())) = &auth_backend {
         if let crate::control_plane::client::ControlPlaneClient::ProxyV1(api) = &**api {
-            match (redis_notifications_client, regional_redis_client.clone()) {
-                (None, None) => {}
-                (client1, client2) => {
-                    let cache = api.caches.project_info.clone();
-                    if let Some(client) = client1 {
-                        maintenance_tasks.spawn(notifications::task_main(client, cache.clone()));
-                    }
-                    if let Some(client) = client2 {
-                        maintenance_tasks.spawn(notifications::task_main(client, cache.clone()));
-                    }
-                    maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
-                }
-            }
+            if let Some(client) = redis_client {
+                // project info cache and invalidation of that cache.
+                let cache = api.caches.project_info.clone();
+                maintenance_tasks.spawn(notifications::task_main(client.clone(), cache.clone()));
+                maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
 
-            // Try to connect to Redis 3 times with 1 + (0..0.1) second interval.
-            // This prevents immediate exit and pod restart,
-            // which can cause hammering of the redis in case of connection issues.
-            if let Some(mut redis_kv_client) = redis_kv_client {
+                // Try to connect to Redis 3 times with 1 + (0..0.1) second interval.
+                // This prevents immediate exit and pod restart,
+                // which can cause hammering of the redis in case of connection issues.
+                // cancellation key management
+                let mut redis_kv_client = RedisKVClient::new(client.clone(), redis_rps_limit);
                 for attempt in (0..3).with_position() {
                     match redis_kv_client.try_connect().await {
                         Ok(()) => {
@@ -538,14 +527,12 @@ pub async fn run() -> anyhow::Result<()> {
                         }
                     }
                 }
-            }
 
-            if let Some(regional_redis_client) = regional_redis_client {
+                // listen for notifications of new projects/endpoints/branches
                 let cache = api.caches.endpoints_cache.clone();
-                let con = regional_redis_client;
                 let span = tracing::info_span!("endpoints_cache");
                 maintenance_tasks.spawn(
-                    async move { cache.do_read(con, cancellation_token.clone()).await }
+                    async move { cache.do_read(client, cancellation_token.clone()).await }
                         .instrument(span),
                 );
             }
@@ -835,21 +822,18 @@ fn build_auth_backend(
 
 async fn configure_redis(
     args: &ProxyCliArgs,
-) -> anyhow::Result<(
-    Option<ConnectionWithCredentialsProvider>,
-    Option<ConnectionWithCredentialsProvider>,
-)> {
+) -> anyhow::Result<Option<ConnectionWithCredentialsProvider>> {
     // TODO: untangle the config args
-    let regional_redis_client = match (args.redis_auth_type.as_str(), &args.redis_notifications) {
-        ("plain", redis_url) => match redis_url {
+    let redis_client = match &*args.redis_auth_type {
+        "plain" => match &args.redis_plain {
             None => {
-                bail!("plain auth requires redis_notifications to be set");
+                bail!("plain auth requires redis_plain to be set");
             }
             Some(url) => {
                 Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url.clone()))
             }
         },
-        ("irsa", _) => match (&args.redis_host, args.redis_port) {
+        "irsa" => match (&args.redis_host, args.redis_port) {
             (Some(host), Some(port)) => Some(
                 ConnectionWithCredentialsProvider::new_with_credentials_provider(
                     host.clone(),
@@ -873,18 +857,12 @@ async fn configure_redis(
                 bail!("redis-host and redis-port must be specified together");
             }
         },
-        _ => {
-            bail!("unknown auth type given");
+        auth_type => {
+            bail!("unknown auth type {auth_type:?} given")
         }
     };
 
-    let redis_notifications_client = if let Some(url) = &args.redis_notifications {
-        Some(ConnectionWithCredentialsProvider::new_with_static_credentials(&**url))
-    } else {
-        regional_redis_client.clone()
-    };
-
-    Ok((regional_redis_client, redis_notifications_client))
+    Ok(redis_client)
 }
 
 #[cfg(test)]
