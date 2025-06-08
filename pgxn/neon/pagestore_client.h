@@ -298,4 +298,30 @@ extern void set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumb
 extern void update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size);
 extern void forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum);
 
+enum RelKindEntryFlags
+{
+	RELKIND_UNLOGGED = 1,	/* relation is temp or unlogged */
+	RELKIND_UNLOGGED_BUILD = 2, /* unlogged index build */
+	RELKIND_RAW	= 4			/* relation persistence is not known */
+};
+
+/* utils for neon relkind cache */
+typedef struct
+{
+	NRelFileInfo rel;
+	uint8		flags;		/* See RelKindEntryFlags */
+	uint16		access_count;
+	dlist_node	lru_node;	/* LRU list node */
+} RelKindEntry;
+
+
+extern void relkind_hash_init(void);
+extern RelKindEntry* set_cached_relkind(NRelFileInfo rinfo, uint8 flags);
+extern RelKindEntry* get_cached_relkind(NRelFileInfo rinfo, uint8* flags);
+extern void store_cached_relkind(RelKindEntry* entry, uint8 flags);
+extern void clear_cached_relkind_flags(RelKindEntry* entry, uint8 flags);
+extern void unpin_cached_relkind(RelKindEntry* entry);
+extern void unlock_cached_relkind(void);
+extern void forget_cached_relkind(NRelFileInfo rinfo);
+
 #endif							/* PAGESTORE_CLIENT_H */
