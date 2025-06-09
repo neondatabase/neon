@@ -2217,25 +2217,11 @@ pub fn forward_termination_signal() {
         info!("{} {:?}", process.pid(), process.name());
     }
 
-    // First try to gracefully shutdown pgbouncer using its admin interface
-    if let Ok(mut client) = postgres::Config::new()
-        .host("127.0.0.1")
-        .port(6432) // pgbouncer listen_port from config
-        .dbname("postgres") // auth_dbname from config
-        .user("postgres") // admin_users from config
-        .connect(NoTls)
-    {
-        info!("Sending SHUTDOWN command to pgbouncer");
-        if let Err(e) = client.simple_query("SHUTDOWN") {
-            error!("Failed to send SHUTDOWN command to pgbouncer: {}", e);
-        }
-    }
-
     // Terminate pgbouncer
     match pid_file::read("/etc/pgbouncer/pid".into()) {
         Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
-            info!("sending SIGTERM to pgbouncer process pid: {}", pid);
-            if let Err(e) = kill(pid, Signal::SIGTERM) {
+            info!("sending SIGKILL to pgbouncer process pid: {}", pid);
+            if let Err(e) = kill(pid, Signal::SIGKILL) {
                 error!("failed to terminate pgbouncer: {}", e);
             }
         }
@@ -2244,10 +2230,10 @@ pub fn forward_termination_signal() {
             if let Ok(pid_str) = std::fs::read_to_string("/etc/pgbouncer/pid") {
                 if let Ok(pid) = pid_str.trim().parse::<i32>() {
                     info!(
-                        "sending SIGTERM to pgbouncer process pid: {} (from unlocked pid file)",
+                        "sending SIGKILL to pgbouncer process pid: {} (from unlocked pid file)",
                         pid
                     );
-                    if let Err(e) = kill(Pid::from_raw(pid), Signal::SIGTERM) {
+                    if let Err(e) = kill(Pid::from_raw(pid), Signal::SIGKILL) {
                         error!("failed to terminate pgbouncer: {}", e);
                     }
                 }
