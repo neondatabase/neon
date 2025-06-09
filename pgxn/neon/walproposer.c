@@ -1130,7 +1130,7 @@ VotesCollectedMset(WalProposer *wp, MemberSet *mset, Safekeeper **msk, StringInf
 				wp->propTermStartLsn = sk->voteResponse.flushLsn;
 				wp->donor = sk;
 			}
-			wp->truncateLsn = Max(wp->safekeeper[i].voteResponse.truncateLsn, wp->truncateLsn);
+			wp->truncateLsn = Max(sk->voteResponse.truncateLsn, wp->truncateLsn);
 
 			if (n_votes > 0)
 				appendStringInfoString(s, ", ");
