@@ -293,9 +293,6 @@ impl BackgroundPurges {
 /// and attached modes concurrently.
 pub struct TenantManager {
     conf: &'static PageServerConf,
-    // TODO: currently this is a &'static pointing to TENANTs.  When we finish refactoring
-    // out of that static variable, the TenantManager can own this.
-    // See https://github.com/neondatabase/neon/issues/5796
     tenants: std::sync::RwLock<TenantsMap>,
     resources: TenantSharedResources,
 
@@ -491,7 +488,7 @@ pub fn init(
     }
 }
 
-/// Initialize repositories with locally available timelines.
+/// Transition repositories from `Initializing` state to `Open` state with locally available timelines.
 /// Timelines that are only partially available locally (remote storage has more data than this pageserver)
 /// are scheduled for download and added to the tenant once download is completed.
 #[instrument(skip_all)]
@@ -499,6 +496,7 @@ pub async fn init_tenant_mgr(
     tenant_manager: Arc<TenantManager>,
     init_order: InitializationOrder,
 ) -> anyhow::Result<()> {
+    debug_assert!(matches!(*tenant_manager.tenants.read().unwrap(), TenantsMap::Initializing));
     let mut tenants = BTreeMap::new();
 
     let ctx = RequestContext::todo_child(TaskKind::Startup, DownloadBehavior::Warn);
