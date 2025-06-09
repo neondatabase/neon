@@ -2217,6 +2217,32 @@ pub fn forward_termination_signal() {
         info!("{} {:?}", process.pid(), process.name());
     }
 
+    // Try to gracefully shutdown pgbouncer using its admin interface
+    let pgbouncer_connstr = if std::env::var_os("AUTOSCALING").is_some() {
+        "host=/tmp port=6432 dbname=pgbouncer user=pgbouncer".to_string()
+    } else {
+        let mut pgbouncer_connstr =
+            "host=localhost port=6432 dbname=pgbouncer user=postgres sslmode=disable".to_string();
+        if let Ok(pass) = std::env::var("PGBOUNCER_PASSWORD") {
+            pgbouncer_connstr.push_str(format!(" password={}", pass).as_str());
+        }
+        pgbouncer_connstr
+    };
+
+    info!(
+        "Connecting to pgbouncer with connection string: {}",
+        pgbouncer_connstr
+    );
+    if let Ok(mut client) = postgres::Config::from_str(&pgbouncer_connstr)
+        .expect("Failed to parse pgbouncer connection string")
+        .connect(NoTls)
+    {
+        info!("Sending SHUTDOWN WAIT_FOR_SERVERS command to pgbouncer");
+        if let Err(e) = client.simple_query("SHUTDOWN WAIT_FOR_SERVERS") {
+            error!("Failed to send SHUTDOWN command to pgbouncer: {}", e);
+        }
+    }
+
     // Terminate pgbouncer
     match pid_file::read("/etc/pgbouncer/pid".into()) {
         Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
