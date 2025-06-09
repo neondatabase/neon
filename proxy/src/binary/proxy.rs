@@ -410,7 +410,7 @@ pub async fn run() -> anyhow::Result<()> {
     match auth_backend {
         Either::Left(auth_backend) => {
             if let Some(proxy_listener) = proxy_listener {
-                client_tasks.spawn(crate::proxy::task_main(
+                client_tasks.spawn(crate::pglb::task_main(
                     config,
                     auth_backend,
                     proxy_listener,

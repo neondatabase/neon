@@ -22,12 +22,13 @@ use super::*;
 use crate::auth::backend::{
     ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned,
 };
-use crate::config::{ComputeConfig, RetryConfig};
+use crate::config::{ComputeConfig, RetryConfig, TlsConfig};
 use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
 use crate::control_plane::{self, CachedNodeInfo, NodeInfo, NodeInfoCache};
 use crate::error::ErrorKind;
 use crate::pglb::connect_compute::ConnectMechanism;
+use crate::pglb::handshake::{HandshakeData, handshake};
 use crate::tls::client_config::compute_client_config_with_certs;
 use crate::tls::server_config::CertResolver;
 use crate::types::{BranchId, EndpointId, ProjectId};
