@@ -2216,6 +2216,21 @@ pub fn forward_termination_signal() {
     for process in s.processes_by_name("pgbouncer".as_ref()) {
         info!("{} {:?}", process.pid(), process.name());
     }
+
+    // First try to gracefully shutdown pgbouncer using its admin interface
+    if let Ok(mut client) = postgres::Config::new()
+        .host("127.0.0.1")
+        .port(6432) // pgbouncer listen_port from config
+        .dbname("postgres") // auth_dbname from config
+        .user("postgres") // admin_users from config
+        .connect(NoTls)
+    {
+        info!("Sending SHUTDOWN command to pgbouncer");
+        if let Err(e) = client.simple_query("SHUTDOWN") {
+            error!("Failed to send SHUTDOWN command to pgbouncer: {}", e);
+        }
+    }
+
     // Terminate pgbouncer
     match pid_file::read("/etc/pgbouncer/pid".into()) {
         Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
