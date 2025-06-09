@@ -152,6 +152,7 @@ services:
         - TAG=${COMPUTE_TAG:-${TAG:-latest}}
         - http_proxy=${http_proxy:-}
         - https_proxy=${https_proxy:-}
+    image: built-compute
     environment:
       - PG_VERSION=${PG_VERSION:-16}
       - TENANT_ID=${TENANT_ID:-}
@@ -201,7 +202,7 @@ services:
   pcompute1:
     profiles: ["parallel-test-extensions"]
     restart: always
-    image: docker-compose-compute
+    image: built-compute
     environment:
       - PG_VERSION=${PG_VERSION:-16}
       - RUN_PARALLEL=true
@@ -222,7 +223,7 @@ services:
   pcompute2:
     profiles: ["parallel-test-extensions"]
     restart: always
-    image: docker-compose-compute
+    image: built-compute
     environment:
       - PG_VERSION=${PG_VERSION:-16}
       - RUN_PARALLEL=true
@@ -243,7 +244,7 @@ services:
   pcompute3:
     profiles: ["parallel-test-extensions"]
     restart: always
-    image: docker-compose-compute
+    image: built-compute
     environment:
       - PG_VERSION=${PG_VERSION:-16}
       - RUN_PARALLEL=true
