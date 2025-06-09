@@ -36,6 +36,8 @@ use utils::lsn::Lsn;
 use utils::measured_stream::MeasuredReader;
 use utils::pid_file;
 
+use sysinfo::{ProcessExt, System, SystemExt};
+
 use crate::configurator::launch_configurator;
 use crate::disk_quota::set_disk_quota;
 use crate::installed_extensions::get_installed_extensions;
@@ -2208,7 +2210,12 @@ pub fn forward_termination_signal() {
         let ss_pid = nix::unistd::Pid::from_raw(ss_pid as i32);
         kill(ss_pid, Signal::SIGTERM).ok();
     }
+    let mut s = System::new_all();
 
+    info!("pgbouncer processes BEFORE termination:");
+    for process in s.processes_by_name("pgbouncer".as_ref()) {
+        info!("{} {:?}", process.pid(), process.name());
+    }
     // Terminate pgbouncer
     match pid_file::read("/etc/pgbouncer/pid".into()) {
         Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
@@ -2267,6 +2274,12 @@ pub fn forward_termination_signal() {
         // ROs to get a list of running xacts faster instead of going through the CLOG.
         // See https://www.postgresql.org/docs/current/server-shutdown.html for the list of modes and signals.
         kill(pg_pid, Signal::SIGINT).ok();
+    }
+
+    s.refresh_all();
+    info!("pgbouncer processes AFTER termination:");
+    for process in s.processes_by_name("pgbouncer".as_ref()) {
+        info!("{} {:?}", process.pid(), process.name());
     }
 }
 
