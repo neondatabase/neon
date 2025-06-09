@@ -1331,6 +1331,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "signal-hook",
+ "sysinfo",
  "tar",
  "thiserror 1.0.69",
  "tokio",
