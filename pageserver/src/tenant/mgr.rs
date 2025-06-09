@@ -102,7 +102,7 @@ pub(crate) enum TenantsMap {
     /// [`init_tenant_mgr`] is not done yet.
     Initializing,
     /// [`init_tenant_mgr`] is done, all on-disk tenants have been loaded.
-    /// New tenants can be added using [`tenant_map_acquire_slot`].
+    /// New tenants can be added using [`TenantManager::tenant_map_acquire_slot`].
     Open(BTreeMap<TenantShardId, TenantSlot>),
     /// The pageserver has entered shutdown mode via [`TenantManager::shutdown`].
     /// Existing tenants are still accessible, but no new tenants can be created.
