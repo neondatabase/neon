@@ -1109,27 +1109,12 @@ impl Service {
         )
         .await?;
 
-        // for sk_id in remaining {
-        //     let pending_op = TimelinePendingOpPersistence {
-        //         tenant_id: tenant_id.to_string(),
-        //         timeline_id: timeline_id.to_string(),
-        //         generation: generation,
-        //         op_kind: SafekeeperTimelineOpKind::Pull,
-        //         sk_id: *sk_id as i64,
-        //     };
-        //     tracing::info!("writing pending op for sk id {sk_id}");
-        //     self.persistence.insert_pending_op(pending_op).await?;
-        // }
-
         // 6. Call POST bump_term(sync_term) on safekeepers from the new set. Success on majority is enough.
 
         // TODO(diko): do we need to bump timeline term?
 
         // 7. Repeatedly call PUT configuration on safekeepers from the new set,
         // delivering them joint_conf and collecting their positions.
-
-        // let _ = self.tenant_timeline_set_membership(&safekeepers, tenant_id, timeline_id, join_config)
-        //     .await?;
 
         tracing::info!("waiting for safekeepers to sync position {sync_position:?}");
 
