@@ -17,7 +17,6 @@ use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use diesel_migrations::{EmbeddedMigrations, embed_migrations};
 use futures::FutureExt;
 use futures::future::BoxFuture;
-use http_utils::error::ApiError;
 use itertools::Itertools;
 use pageserver_api::controller_api::{
     AvailabilityZone, MetadataHealthRecord, NodeSchedulingPolicy, PlacementPolicy,
@@ -97,7 +96,7 @@ pub(crate) enum DatabaseError {
     #[error("Migration error: {0}")]
     Migration(String),
     #[error("CAS error: {0}")]
-    CAS(String),
+    Cas(String),
 }
 
 #[derive(measured::FixedCardinalityLabel, Copy, Clone)]
@@ -1380,7 +1379,7 @@ impl Persistence {
                 match updated {
                     0 => {
                         // TODO: select generation.
-                        Err(DatabaseError::CAS("cas failed".to_string()))
+                        Err(DatabaseError::Cas("CAS failed".to_string()))
                     }
                     1 => Ok(()),
                     _ => Err(DatabaseError::Logical(format!(

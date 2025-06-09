@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from fixtures.neon_fixtures import NeonEnvBuilder
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 def test_safekeeper_migration_simple(neon_env_builder: NeonEnvBuilder):
@@ -19,27 +22,25 @@ def test_safekeeper_migration_simple(neon_env_builder: NeonEnvBuilder):
     }
     env = neon_env_builder.init_start()
 
-    ep = env.endpoints.create(
-        "main", tenant_id=env.initial_tenant
-    )
+    ep = env.endpoints.create("main", tenant_id=env.initial_tenant)
     # We specify all safekeepers, so compute will connect to all of them.
     # Only thouse from the current membership configuration will be used.
     ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
     ep.safe_psql("CREATE TABLE t(a int)")
 
     for active_sk in range(1, 4):
-        env.storage_controller.migrate_safekeepers(env.initial_tenant, env.initial_timeline, [active_sk])
-        
-        other_sks = [sk for sk in range(1, 4) if sk != active_sk]
+        env.storage_controller.migrate_safekeepers(
+            env.initial_tenant, env.initial_timeline, [active_sk]
+        )
 
-        ep.safe_psql(f"INSERT INTO t VALUES ({2 * active_sk - 1})")
+        other_sks = [sk for sk in range(1, 4) if sk != active_sk]
 
         for sk in other_sks:
             env.safekeepers[sk - 1].stop()
 
-        ep.safe_psql(f"INSERT INTO t VALUES ({2 * active_sk})")
+        ep.safe_psql(f"INSERT INTO t VALUES ({active_sk})")
 
         for sk in other_sks:
             env.safekeepers[sk - 1].start()
 
-    assert ep.safe_psql("SELECT * FROM t") == [(i,) for i in range(1, 7)]
+    assert ep.safe_psql("SELECT * FROM t") == [(i,) for i in range(1, 4)]

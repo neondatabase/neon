@@ -19,7 +19,6 @@ use context_iterator::TenantShardContextIterator;
 use control_plane::storage_controller::{
     AttachHookRequest, AttachHookResponse, InspectRequest, InspectResponse,
 };
-use diesel::JoinTo;
 use diesel::result::DatabaseErrorKind;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -52,12 +51,7 @@ use pageserver_api::upcall_api::{
 };
 use pageserver_client::{BlockUnblock, mgmt_api};
 use reqwest::{Certificate, StatusCode};
-use safekeeper_api::membership::SafekeeperId;
-use safekeeper_api::membership::{self, SafekeeperGeneration};
-use safekeeper_api::models::{
-    PullTimelineRequest, SafekeeperUtilization, TimelineMembershipSwitchRequest,
-    TimelineTermBumpRequest,
-};
+use safekeeper_api::models::SafekeeperUtilization;
 use safekeeper_reconciler::SafekeeperReconcilers;
 use tokio::sync::TryAcquireError;
 use tokio::sync::mpsc::error::TrySendError;
@@ -66,7 +60,6 @@ use tracing::{Instrument, debug, error, info, info_span, instrument, warn};
 use utils::completion::Barrier;
 use utils::generation::Generation;
 use utils::id::{NodeId, TenantId, TimelineId};
-use utils::logging::SecretString;
 use utils::lsn::Lsn;
 use utils::shard::ShardIndex;
 use utils::sync::gate::{Gate, GateGuard};
@@ -97,7 +90,6 @@ use crate::reconciler::{
     attached_location_conf,
 };
 use crate::safekeeper::Safekeeper;
-use crate::safekeeper_client::SafekeeperClient;
 use crate::scheduler::{
     AttachedShardTag, MaySchedule, ScheduleContext, ScheduleError, ScheduleMode, Scheduler,
 };
@@ -167,7 +159,6 @@ enum TenantOperations {
     DropDetached,
     DownloadHeatmapLayers,
     TimelineLsnLease,
-    TimelineSafekeeperMigrate,
 }
 
 #[derive(Clone, strum_macros::Display)]
@@ -496,7 +487,7 @@ impl From<DatabaseError> for ApiError {
             DatabaseError::Logical(reason) | DatabaseError::Migration(reason) => {
                 ApiError::InternalServerError(anyhow::anyhow!(reason))
             }
-            DatabaseError::CAS(reason) => ApiError::Conflict(reason),
+            DatabaseError::Cas(reason) => ApiError::Conflict(reason),
         }
     }
 }

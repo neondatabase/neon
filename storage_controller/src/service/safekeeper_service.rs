@@ -20,7 +20,7 @@ use pageserver_api::controller_api::{
 };
 use pageserver_api::models::{SafekeeperInfo, SafekeepersInfo, TimelineInfo};
 use reqwest::StatusCode;
-use safekeeper_api::membership::{self, MemberSet, SafekeeperGeneration, SafekeeperId};
+use safekeeper_api::membership::{self, MemberSet, SafekeeperGeneration};
 use safekeeper_api::models::{
     PullTimelineRequest, TimelineMembershipSwitchRequest, TimelineMembershipSwitchResponse,
 };
@@ -36,14 +36,11 @@ use super::Service;
 
 impl Service {
     fn make_member_set(safekeepers: &[Safekeeper]) -> Result<MemberSet, ApiError> {
-        let mut members = Vec::new();
-        for sk in safekeepers {
-            members.push(SafekeeperId {
-                id: sk.get_id(),
-                host: sk.skp.host.clone(),
-                pg_port: sk.skp.port as u16,
-            });
-        }
+        let members = safekeepers
+            .iter()
+            .map(|sk| sk.get_safekeeper_id())
+            .collect::<Vec<_>>();
+
         MemberSet::new(members).map_err(ApiError::InternalServerError)
     }
 
@@ -108,33 +105,32 @@ impl Service {
 
         Ok(results
             .into_iter()
-            .filter_map(|(sk_id, res)| {
+            .enumerate()
+            .filter_map(|(idx, res)| {
                 if res.is_ok() {
                     None // Success, don't return this safekeeper
                 } else {
-                    Some(sk_id) // Failure, return this safekeeper
+                    Some(safekeepers[idx].get_id()) // Failure, return this safekeeper
                 }
             })
             .collect::<Vec<_>>())
     }
 
-    /// Perform an operation on a quorum of safekeepers.
+    /// Perform an operation on a list of safekeepers in parallel with retries.
     ///
-    /// Returns `Ok(left)` if the op has been applied on a quorum of safekeepers,
-    /// where `left` contains the list of safekeepers that didn't have a successful response.
+    /// Returns the results of the operation on each safekeeper in the input order.
     async fn tenant_timeline_safekeeper_op<T, O, F>(
         &self,
         safekeepers: &[Safekeeper],
         op: O,
         timeout: Duration,
-    ) -> Result<Vec<(NodeId, mgmt_api::Result<T>)>, ApiError>
+    ) -> Result<Vec<mgmt_api::Result<T>>, ApiError>
     where
         O: FnMut(SafekeeperClient) -> F + Send + 'static,
         O: Clone,
         F: std::future::Future<Output = mgmt_api::Result<T>> + Send + 'static,
         T: Sync + Send + 'static,
     {
-        // If quorum is reached, return if we are outside of a specified timeout
         let jwt = self
             .config
             .safekeeper_jwt_token
@@ -142,7 +138,7 @@ impl Service {
             .map(SecretString::from);
         let mut joinset = JoinSet::new();
 
-        for sk in safekeepers {
+        for (idx, sk) in safekeepers.iter().enumerate() {
             let sk = sk.clone();
             let http_client = self.http_client.clone();
             let jwt = jwt.clone();
@@ -160,9 +156,19 @@ impl Service {
                         &CancellationToken::new(),
                     )
                     .await;
-                (sk.get_id(), sk.skp.host.clone(), res)
+                (idx, res)
             });
         }
+
+        let mut results: Vec<mgmt_api::Result<T>> = safekeepers
+            .iter()
+            .map(|_| {
+                Err(mgmt_api::Error::Timeout(
+                    "safekeeper operation timed out".to_string(),
+                ))
+            })
+            .collect();
+
         // After we have built the joinset, we now wait for the tasks to complete,
         // but with a specified timeout to make sure we return swiftly, either with
         // a failure or success.
@@ -170,56 +176,58 @@ impl Service {
 
         // Wait until all tasks finish or timeout is hit, whichever occurs
         // first.
-        let mut reconcile_results = Vec::new();
+        let mut result_count = 0;
         loop {
             if let Ok(res) = tokio::time::timeout_at(reconcile_deadline, joinset.join_next()).await
             {
                 let Some(res) = res else { break };
                 match res {
                     Ok(res) => {
+                        let sk = &safekeepers[res.0];
                         tracing::info!(
                             "response from safekeeper id:{} at {}: {:?}",
-                            res.0,
-                            res.1,
-                            res.2.is_ok(), // TODO(diko)
+                            sk.get_id(),
+                            sk.skp.host,
+                            res.1.is_ok(), // TODO(diko)
                         );
-                        reconcile_results.push((res.0, res.2));
+                        results[res.0] = res.1;
+                        result_count += 1;
                     }
                     Err(join_err) => {
                         tracing::info!("join_err for task in joinset: {join_err}");
                     }
                 }
             } else {
-                tracing::info!(
-                    "timeout for operation call after {} responses",
-                    reconcile_results.len()
-                );
-                // TODO: add timeouts to results
+                tracing::info!("timeout for operation call after {result_count} responses",);
                 break;
             }
         }
 
-        Ok(reconcile_results)
+        Ok(results)
     }
 
-    // TODO(diko)
+    /// Perform an operation on a list of safekeepers in parallel with retries,
+    /// and validates that we reach a quorum of successful responses.
+    ///
+    /// Returns the results of the operation on each safekeeper in the input order.
+    /// It's guaranteed that at least a quorum of the responses are successful.
     async fn tenant_timeline_safekeeper_op_quorum<T, O, F>(
         &self,
         safekeepers: &[Safekeeper],
         op: O,
         timeout: Duration,
-    ) -> Result<Vec<(NodeId, mgmt_api::Result<T>)>, ApiError>
+    ) -> Result<Vec<mgmt_api::Result<T>>, ApiError>
     where
         O: FnMut(SafekeeperClient) -> F,
         O: Clone + Send + 'static,
         F: std::future::Future<Output = mgmt_api::Result<T>> + Send + 'static,
         T: Sync + Send + 'static,
     {
-        let (results) = self
+        let results = self
             .tenant_timeline_safekeeper_op(safekeepers, op, timeout)
             .await?;
 
-        // Now check now if quorum was reached in results.
+        // Now check if quorum was reached in results.
 
         let target_sk_count = safekeepers.len();
         let quorum_size = match target_sk_count {
@@ -249,7 +257,7 @@ impl Service {
             }
             _ => target_sk_count / 2 + 1,
         };
-        let success_count = results.iter().filter(|(_, res)| res.is_ok()).count();
+        let success_count = results.iter().filter(|res| res.is_ok()).count();
         if success_count < quorum_size {
             // Failure
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
@@ -826,7 +834,13 @@ impl Service {
         Ok(())
     }
 
-    // TODO(diko): description
+    /// Calls `switch_timeline_membership` on all safekeepers with retries
+    /// till the quorum of successful responses is reached.
+    ///
+    /// If not None, validates that each safekeeper from the quorum reached
+    /// at least min_position.
+    ///
+    /// Returns responses from safekeepers in the input order.
     async fn tenant_timeline_set_membership_quorum(
         self: &Arc<Self>,
         safekeepers: &[Safekeeper],
@@ -834,13 +848,7 @@ impl Service {
         timeline_id: TimelineId,
         config: membership::Configuration,
         min_position: Option<(Term, Lsn)>,
-    ) -> Result<
-        Vec<(
-            NodeId,
-            Result<TimelineMembershipSwitchResponse, mgmt_api::Error>,
-        )>,
-        ApiError,
-    > {
+    ) -> Result<Vec<mgmt_api::Result<TimelineMembershipSwitchResponse>>, ApiError> {
         let req = TimelineMembershipSwitchRequest {
             mconf: config.clone(),
         };
@@ -881,39 +889,30 @@ impl Service {
             )
             .await?;
 
-        // let mut sync_position = (INITIAL_TERM, Lsn::INVALID);
-
-        for (_, res) in results.iter() {
-            if let Ok(res) = res {
-                if res.current_conf.generation > config.generation {
-                    return Err(ApiError::Conflict(format!(
-                        "received configuration with generation {} from safekeeper, but expected {}",
-                        res.current_conf.generation, config.generation
-                    )));
-                } else if res.current_conf.generation != config.generation {
-                    // should never happen,
-                    tracing::error!(
-                        "received configuration with generation {} from safekeeper, but expected {}",
-                        res.current_conf.generation,
-                        config.generation
-                    );
-                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                        "received configuration with generation {} from safekeeper, but expected {}",
-                        res.current_conf.generation,
-                        config.generation
-                    )));
-                }
-
-                // let res_position = (res.term, res.flush_lsn);
-                // if res_position > sync_position {
-                //     sync_position = res_position;
-                // }
+        for res in results.iter().flatten() {
+            if res.current_conf.generation > config.generation {
+                // Antoher switch_membership raced us.
+                return Err(ApiError::Conflict(format!(
+                    "received configuration with generation {} from safekeeper, but expected {}",
+                    res.current_conf.generation, config.generation
+                )));
+            } else if res.current_conf.generation < config.generation {
+                // Note: should never happen.
+                // If we get a response, it should be at least the sent generation.
+                tracing::error!(
+                    "received configuration with generation {} from safekeeper, but expected {}",
+                    res.current_conf.generation,
+                    config.generation
+                );
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                    "received configuration with generation {} from safekeeper, but expected {}",
+                    res.current_conf.generation,
+                    config.generation
+                )));
             }
         }
 
         Ok(results)
-
-        // Ok(sync_position)
     }
 
     // TODO(diko)
@@ -955,13 +954,13 @@ impl Service {
         let req = PullTimelineRequest {
             tenant_id,
             timeline_id,
-            http_hosts: http_hosts,
+            http_hosts,
             ignore_tombstone: None,
         };
 
         const SK_PULL_TIMELINE_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 
-        let responses = self
+        let _responses = self
             .tenant_timeline_safekeeper_op(
                 &to_safekeepers,
                 move |client| {
@@ -1068,7 +1067,7 @@ impl Service {
         let new_sk_member_set = Self::make_member_set(&new_safekeepers)?;
 
         let joint_config = membership::Configuration {
-            generation: generation,
+            generation,
             members: cur_sk_member_set,
             new_members: Some(new_sk_member_set.clone()),
         };
@@ -1086,12 +1085,10 @@ impl Service {
             .await?;
 
         let mut sync_position = (INITIAL_TERM, Lsn::INVALID);
-        for (_, res) in results {
-            if let Ok(res) = res {
-                let sk_position = (res.term, res.flush_lsn);
-                if sync_position < sk_position {
-                    sync_position = sk_position;
-                }
+        for res in results.into_iter().flatten() {
+            let sk_position = (res.term, res.flush_lsn);
+            if sync_position < sk_position {
+                sync_position = sk_position;
             }
         }
 
@@ -1150,7 +1147,7 @@ impl Service {
         let generation = generation.next();
 
         let new_conf = membership::Configuration {
-            generation: generation,
+            generation,
             members: new_sk_member_set,
             new_members: None,
         };
