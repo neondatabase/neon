@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 # Test restarting page server, while safekeeper and compute node keep
 # running.
-def test_pageserver_restarts_under_worload(neon_simple_env: NeonEnv, pg_bin: PgBin):
+def test_pageserver_restarts_under_workload(neon_simple_env: NeonEnv, pg_bin: PgBin):
     env = neon_simple_env
     env.create_branch("test_pageserver_restarts")
     endpoint = env.endpoints.create_start("test_pageserver_restarts")
