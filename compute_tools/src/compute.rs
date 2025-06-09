@@ -2217,8 +2217,21 @@ pub fn forward_termination_signal() {
                 error!("failed to terminate pgbouncer: {}", e);
             }
         }
+        // pgbouncer does not lock the pid file, so we read and kill the process directly
         Ok(pid_file::PidFileRead::NotHeldByAnyProcess(_)) => {
-            info!("pgbouncer pid file exists but process not running");
+            if let Ok(pid_str) = std::fs::read_to_string("/etc/pgbouncer/pid") {
+                if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                    info!(
+                        "sending SIGTERM to pgbouncer process pid: {} (from unlocked pid file)",
+                        pid
+                    );
+                    if let Err(e) = kill(Pid::from_raw(pid), Signal::SIGTERM) {
+                        error!("failed to terminate pgbouncer: {}", e);
+                    }
+                }
+            } else {
+                info!("pgbouncer pid file exists but process not running");
+            }
         }
         Ok(pid_file::PidFileRead::NotExist) => {
             info!("pgbouncer pid file not found, process may not be running");
