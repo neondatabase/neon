@@ -8,7 +8,7 @@ use std::io::{self, Cursor};
 use bytes::{Buf, BufMut};
 use itertools::Itertools;
 use rand::distributions::{Distribution, Standard};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use zerocopy::{FromBytes, Immutable, IntoBytes, big_endian};
 
 pub type ErrorCode = [u8; 5];
@@ -53,6 +53,28 @@ impl fmt::Debug for ProtocolVersion {
     }
 }
 
+/// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L118>
+const MAX_STARTUP_PACKET_LENGTH: usize = 10000;
+const RESERVED_INVALID_MAJOR_VERSION: u16 = 1234;
+/// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L132>
+const CANCEL_REQUEST_CODE: ProtocolVersion = ProtocolVersion::new(1234, 5678);
+/// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L166>
+const NEGOTIATE_SSL_CODE: ProtocolVersion = ProtocolVersion::new(1234, 5679);
+/// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L167>
+const NEGOTIATE_GSS_CODE: ProtocolVersion = ProtocolVersion::new(1234, 5680);
+
+/// This first reads the startup message header, is 8 bytes.
+/// The first 4 bytes is a big-endian message length, and the next 4 bytes is a version number.
+///
+/// The length value is inclusive of the header. For example,
+/// an empty message will always have length 8.
+#[derive(Clone, Copy, FromBytes, IntoBytes, Immutable)]
+#[repr(C)]
+struct StartupHeader {
+    len: big_endian::U32,
+    version: ProtocolVersion,
+}
+
 /// read the type from the stream using zerocopy.
 ///
 /// not cancel safe.
@@ -66,32 +88,38 @@ macro_rules! read {
     }};
 }
 
+/// Returns true if TLS is supported.
+///
+/// This is not cancel safe.
+pub async fn request_tls<S>(stream: &mut S) -> io::Result<bool>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let payload = StartupHeader {
+        len: 8.into(),
+        version: NEGOTIATE_SSL_CODE,
+    };
+    stream.write_all(payload.as_bytes()).await?;
+    stream.flush().await?;
+
+    // we expect back either `S` or `N` as a single byte.
+    let mut res = *b"0";
+    stream.read_exact(&mut res).await?;
+
+    debug_assert!(
+        res == *b"S" || res == *b"N",
+        "unexpected SSL negotiation response: {}",
+        char::from(res[0]),
+    );
+
+    // S for SSL.
+    Ok(res == *b"S")
+}
+
 pub async fn read_startup<S>(stream: &mut S) -> io::Result<FeStartupPacket>
 where
     S: AsyncRead + Unpin,
 {
-    /// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L118>
-    const MAX_STARTUP_PACKET_LENGTH: usize = 10000;
-    const RESERVED_INVALID_MAJOR_VERSION: u16 = 1234;
-    /// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L132>
-    const CANCEL_REQUEST_CODE: ProtocolVersion = ProtocolVersion::new(1234, 5678);
-    /// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L166>
-    const NEGOTIATE_SSL_CODE: ProtocolVersion = ProtocolVersion::new(1234, 5679);
-    /// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L167>
-    const NEGOTIATE_GSS_CODE: ProtocolVersion = ProtocolVersion::new(1234, 5680);
-
-    /// This first reads the startup message header, is 8 bytes.
-    /// The first 4 bytes is a big-endian message length, and the next 4 bytes is a version number.
-    ///
-    /// The length value is inclusive of the header. For example,
-    /// an empty message will always have length 8.
-    #[derive(Clone, Copy, FromBytes, IntoBytes, Immutable)]
-    #[repr(C)]
-    struct StartupHeader {
-        len: big_endian::U32,
-        version: ProtocolVersion,
-    }
-
     let header = read!(stream => StartupHeader);
 
     // <https://github.com/postgres/postgres/blob/04bcf9e19a4261fe9c7df37c777592c2e10c32a7/src/backend/tcop/backend_startup.c#L378-L382>
@@ -564,9 +592,8 @@ mod tests {
     use tokio::io::{AsyncWriteExt, duplex};
     use zerocopy::IntoBytes;
 
-    use crate::pqproto::{FeStartupPacket, read_message, read_startup};
-
     use super::ProtocolVersion;
+    use crate::pqproto::{FeStartupPacket, read_message, read_startup};
 
     #[tokio::test]
     async fn reject_large_startup() {

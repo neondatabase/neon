@@ -1055,8 +1055,8 @@ pub(crate) enum WaitLsnWaiter<'a> {
 /// Argument to [`Timeline::shutdown`].
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ShutdownMode {
-    /// Graceful shutdown, may do a lot of I/O as we flush any open layers to disk and then
-    /// also to remote storage.  This method can easily take multiple seconds for a busy timeline.
+    /// Graceful shutdown, may do a lot of I/O as we flush any open layers to disk. This method can
+    /// take multiple seconds for a busy timeline.
     ///
     /// While we are flushing, we continue to accept read I/O for LSNs ingested before
     /// the call to [`Timeline::shutdown`].

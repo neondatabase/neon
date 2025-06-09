@@ -23,7 +23,6 @@ use super::local_conn_pool::{self, EXT_NAME, EXT_SCHEMA, EXT_VERSION, LocalConnP
 use crate::auth::backend::local::StaticAuthRules;
 use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
 use crate::auth::{self, AuthError};
-use crate::compute;
 use crate::compute_ctl::{
     ComputeCtlError, ExtensionInstallRequest, Privilege, SetRoleGrantsRequest,
 };
@@ -305,12 +304,13 @@ impl PoolingBackend {
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "local_pool: opening a new connection '{conn_info}'");
 
-        let mut node_info = local_backend.node_info.clone();
-
         let (key, jwk) = create_random_jwk();
 
-        let config = node_info
-            .config
+        let mut config = local_backend
+            .node_info
+            .conn_info
+            .to_postgres_client_config();
+        config
             .user(&conn_info.user_info.user)
             .dbname(&conn_info.dbname)
             .set_param(
@@ -322,7 +322,7 @@ impl PoolingBackend {
             );
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let (client, connection) = config.connect(postgres_client::NoTls).await?;
+        let (client, connection) = config.connect(&postgres_client::NoTls).await?;
         drop(pause);
 
         let pid = client.get_process_id();
@@ -336,7 +336,7 @@ impl PoolingBackend {
             connection,
             key,
             conn_id,
-            node_info.aux.clone(),
+            local_backend.node_info.aux.clone(),
         );
 
         {
@@ -512,19 +512,16 @@ impl ConnectMechanism for TokioMechanism {
         node_info: &CachedNodeInfo,
         compute_config: &ComputeConfig,
     ) -> Result<Self::Connection, Self::ConnectError> {
-        let host = node_info.config.get_host();
-        let permit = self.locks.get_permit(&host).await?;
+        let permit = self.locks.get_permit(&node_info.conn_info.host).await?;
 
-        let mut config = (*node_info.config).clone();
+        let mut config = node_info.conn_info.to_postgres_client_config();
         let config = config
             .user(&self.conn_info.user_info.user)
             .dbname(&self.conn_info.dbname)
             .connect_timeout(compute_config.timeout);
 
-        let mk_tls =
-            crate::tls::postgres_rustls::MakeRustlsConnect::new(compute_config.tls.clone());
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let res = config.connect(mk_tls).await;
+        let res = config.connect(compute_config).await;
         drop(pause);
         let (client, connection) = permit.release_result(res)?;
 
@@ -548,8 +545,6 @@ impl ConnectMechanism for TokioMechanism {
             node_info.aux.clone(),
         ))
     }
-
-    fn update_connect_config(&self, _config: &mut compute::ConnCfg) {}
 }
 
 struct HyperMechanism {
@@ -573,20 +568,20 @@ impl ConnectMechanism for HyperMechanism {
         node_info: &CachedNodeInfo,
         config: &ComputeConfig,
     ) -> Result<Self::Connection, Self::ConnectError> {
-        let host_addr = node_info.config.get_host_addr();
-        let host = node_info.config.get_host();
-        let permit = self.locks.get_permit(&host).await?;
+        let host_addr = node_info.conn_info.host_addr;
+        let host = &node_info.conn_info.host;
+        let permit = self.locks.get_permit(host).await?;
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
 
-        let tls = if node_info.config.get_ssl_mode() == SslMode::Disable {
+        let tls = if node_info.conn_info.ssl_mode == SslMode::Disable {
             None
         } else {
             Some(&config.tls)
         };
 
-        let port = node_info.config.get_port();
-        let res = connect_http2(host_addr, &host, port, config.timeout, tls).await;
+        let port = node_info.conn_info.port;
+        let res = connect_http2(host_addr, host, port, config.timeout, tls).await;
         drop(pause);
         let (client, connection) = permit.release_result(res)?;
 
@@ -609,8 +604,6 @@ impl ConnectMechanism for HyperMechanism {
             node_info.aux.clone(),
         ))
     }
-
-    fn update_connect_config(&self, _config: &mut compute::ConnCfg) {}
 }
 
 async fn connect_http2(

@@ -395,6 +395,8 @@ pub enum TimelineError {
     Cancelled(TenantTimelineId),
     #[error("Timeline {0} was not found in global map")]
     NotFound(TenantTimelineId),
+    #[error("Timeline {0} has been deleted")]
+    Deleted(TenantTimelineId),
     #[error("Timeline {0} creation is in progress")]
     CreationInProgress(TenantTimelineId),
     #[error("Timeline {0} exists on disk, but wasn't loaded on startup")]

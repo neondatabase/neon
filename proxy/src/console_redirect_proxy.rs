@@ -210,20 +210,20 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     ctx.set_db_options(params.clone());
 
-    let (node_info, user_info, _ip_allowlist) = match backend
+    let (node_info, mut auth_info, user_info) = match backend
         .authenticate(ctx, &config.authentication_config, &mut stream)
         .await
     {
         Ok(auth_result) => auth_result,
         Err(e) => Err(stream.throw_error(e, Some(ctx)).await)?,
     };
+    auth_info.set_startup_params(&params, true);
 
     let node = connect_to_compute(
         ctx,
         &TcpMechanism {
             user_info,
-            params_compat: true,
-            params: &params,
+            auth: auth_info,
             locks: &config.connect_compute_locks,
         },
         &node_info,

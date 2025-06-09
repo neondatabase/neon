@@ -87,6 +87,9 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
 
     # Set up pageserver for import
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+    neon_env_builder.storage_controller_config = {
+        "timelines_onto_safekeepers": True,
+    }
     env = neon_env_builder.init_start()
 
     env.pageserver.tenant_create(tenant)

@@ -45,7 +45,7 @@ use pageserver_api::models::{
 use pageserver_api::shard::{DEFAULT_STRIPE_SIZE, ShardCount, ShardStripeSize, TenantShardId};
 use postgres_backend::AuthType;
 use postgres_connection::parse_host_port;
-use safekeeper_api::membership::SafekeeperGeneration;
+use safekeeper_api::membership::{SafekeeperGeneration, SafekeeperId};
 use safekeeper_api::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_SAFEKEEPER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
@@ -1255,6 +1255,45 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
             pageserver
                 .timeline_import(tenant_id, timeline_id, base, pg_wal, args.pg_version)
                 .await?;
+            if env.storage_controller.timelines_onto_safekeepers {
+                println!("Creating timeline on safekeeper ...");
+                let timeline_info = pageserver
+                    .timeline_info(
+                        TenantShardId::unsharded(tenant_id),
+                        timeline_id,
+                        pageserver_client::mgmt_api::ForceAwaitLogicalSize::No,
+                    )
+                    .await?;
+                let default_sk = SafekeeperNode::from_env(env, env.safekeepers.first().unwrap());
+                let default_host = default_sk
+                    .conf
+                    .listen_addr
+                    .clone()
+                    .unwrap_or_else(|| "localhost".to_string());
+                let mconf = safekeeper_api::membership::Configuration {
+                    generation: SafekeeperGeneration::new(1),
+                    members: safekeeper_api::membership::MemberSet {
+                        m: vec![SafekeeperId {
+                            host: default_host,
+                            id: default_sk.conf.id,
+                            pg_port: default_sk.conf.pg_port,
+                        }],
+                    },
+                    new_members: None,
+                };
+                let pg_version = args.pg_version * 10000;
+                let req = safekeeper_api::models::TimelineCreateRequest {
+                    tenant_id,
+                    timeline_id,
+                    mconf,
+                    pg_version,
+                    system_id: None,
+                    wal_seg_size: None,
+                    start_lsn: timeline_info.last_record_lsn,
+                    commit_lsn: None,
+                };
+                default_sk.create_timeline(&req).await?;
+            }
             env.register_branch_mapping(branch_name.to_string(), tenant_id, timeline_id)?;
             println!("Done");
         }
