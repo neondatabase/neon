@@ -472,17 +472,6 @@ impl IoConcurrency {
         }
     }
 
-    #[allow(clippy::should_implement_trait)]
-    pub fn clone(&self) -> Self {
-        match self {
-            IoConcurrency::Sequential => IoConcurrency::Sequential,
-            IoConcurrency::SidecarTask { task_id, ios_tx } => IoConcurrency::SidecarTask {
-                task_id: *task_id,
-                ios_tx: ios_tx.clone(),
-            },
-        }
-    }
-
     /// Submit an IO to be executed in the background. DEADLOCK RISK, read the full doc string.
     ///
     /// The IO is represented as an opaque future.
@@ -617,6 +606,18 @@ impl IoConcurrency {
         Wrapper {
             inner: Self::spawn(selected),
             gate,
+        }
+    }
+}
+
+impl Clone for IoConcurrency {
+    fn clone(&self) -> Self {
+        match self {
+            IoConcurrency::Sequential => IoConcurrency::Sequential,
+            IoConcurrency::SidecarTask { task_id, ios_tx } => IoConcurrency::SidecarTask {
+                task_id: *task_id,
+                ios_tx: ios_tx.clone(),
+            },
         }
     }
 }

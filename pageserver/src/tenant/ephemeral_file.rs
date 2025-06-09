@@ -165,6 +165,10 @@ pub(crate) enum EphemeralFileWriteError {
 
 impl EphemeralFile {
     pub(crate) fn len(&self) -> u64 {
+        // TODO(vlad): The value returned here is not always correct if
+        // we have more tnat one concurrent writer. Writes are always
+        // sequenced, but we could grab the buffered writer lock if we wanted
+        // to.
         self.bytes_written.load(Ordering::Acquire)
     }
 
@@ -208,7 +212,6 @@ impl EphemeralFile {
         srcbuf: &[u8],
         ctx: &RequestContext,
     ) -> Result<(u64, Option<owned_buffers_io::write::FlushControl>), EphemeralFileWriteError> {
-        // TODO(vlad): Memory ordering of this
         let pos = self.bytes_written.load(Ordering::Acquire);
 
         let new_bytes_written = pos.checked_add(srcbuf.len().into_u64()).ok_or_else(|| {
@@ -257,7 +260,7 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
     ) -> std::io::Result<(tokio_epoll_uring::Slice<B>, usize)> {
         // We will fill the slice in back to front. Hence, we need
         // the slice to be fully initialized.
-        // TODO(vlad): Nicer way of doing this
+        // TODO(vlad): Is there a nicer way of doing this?
         dst.as_mut_rust_slice_full_zeroed();
 
         let writer = self.buffered_writer.read().await;
@@ -266,8 +269,8 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
         // writes updating the number of bytes written. `bytes_written` is not DIO alligned
         // but we may end the read there.
         //
-        // TODO(vlad):Feels like there's a nicer path where we align
-        // the end if it shoots over the end of the file.
+        // TODO(vlad): Feels like there's a nicer path where we align the end if it
+        // shoots over the end of the file.
         let bytes_written = self.bytes_written.load(Ordering::Acquire);
 
         let dst_cap = dst.bytes_total().into_u64();
