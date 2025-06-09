@@ -496,7 +496,10 @@ pub async fn init_tenant_mgr(
     tenant_manager: Arc<TenantManager>,
     init_order: InitializationOrder,
 ) -> anyhow::Result<()> {
-    debug_assert!(matches!(*tenant_manager.tenants.read().unwrap(), TenantsMap::Initializing));
+    debug_assert!(matches!(
+        *tenant_manager.tenants.read().unwrap(),
+        TenantsMap::Initializing
+    ));
     let mut tenants = BTreeMap::new();
 
     let ctx = RequestContext::todo_child(TaskKind::Startup, DownloadBehavior::Warn);
@@ -1788,7 +1791,7 @@ impl TenantManager {
 
     async fn shutdown_all_tenants0(&self) {
         let mut join_set = JoinSet::new();
-    
+
         #[cfg(all(debug_assertions, not(test)))]
         {
             // Check that our metrics properly tracked the size of the tenants map.  This is a convenient location to check,
@@ -1796,7 +1799,7 @@ impl TenantManager {
             let m = self.tenants.read().unwrap();
             debug_assert_eq!(METRICS.slots_total(), m.len() as u64);
         }
-    
+
         // Atomically, 1. create the shutdown tasks and 2. prevent creation of new tenants.
         let (total_in_progress, total_attached) = {
             let mut m = self.tenants.write().unwrap();
@@ -1810,30 +1813,31 @@ impl TenantManager {
                     let mut shutdown_state = BTreeMap::new();
                     let mut total_in_progress = 0;
                     let mut total_attached = 0;
-    
+
                     for (tenant_shard_id, v) in std::mem::take(tenants).into_iter() {
                         match v {
                             TenantSlot::Attached(t) => {
-                                shutdown_state.insert(tenant_shard_id, TenantSlot::Attached(t.clone()));
+                                shutdown_state
+                                    .insert(tenant_shard_id, TenantSlot::Attached(t.clone()));
                                 join_set.spawn(
                                     async move {
                                         let res = {
                                             let (_guard, shutdown_progress) = completion::channel();
                                             t.shutdown(shutdown_progress, ShutdownMode::FreezeAndFlush).await
                                         };
-    
+
                                         if let Err(other_progress) = res {
                                             // join the another shutdown in progress
                                             other_progress.wait().await;
                                         }
-    
+
                                         // we cannot afford per tenant logging here, because if s3 is degraded, we are
                                         // going to log too many lines
                                         debug!("tenant successfully stopped");
                                     }
                                     .instrument(info_span!("shutdown", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug())),
                                 );
-    
+
                                 total_attached += 1;
                             }
                             TenantSlot::Secondary(state) => {
@@ -1842,8 +1846,9 @@ impl TenantManager {
                                 // is just to encourage it to drop out if it is doing work
                                 // for this tenant right now.
                                 state.cancel.cancel();
-    
-                                shutdown_state.insert(tenant_shard_id, TenantSlot::Secondary(state));
+
+                                shutdown_state
+                                    .insert(tenant_shard_id, TenantSlot::Secondary(state));
                             }
                             TenantSlot::InProgress(notify) => {
                                 // InProgress tenants are not visible in TenantsMap::ShuttingDown: we will
@@ -1851,7 +1856,7 @@ impl TenantManager {
                                 join_set.spawn(async move {
                                     notify.wait().await;
                                 });
-    
+
                                 total_in_progress += 1;
                             }
                         }
@@ -1867,20 +1872,20 @@ impl TenantManager {
                 }
             }
         };
-    
+
         let started_at = std::time::Instant::now();
-    
+
         info!(
             "Waiting for {} InProgress tenants and {} Attached tenants to shut down",
             total_in_progress, total_attached
         );
-    
+
         let total = join_set.len();
         let mut panicked = 0;
         let mut buffering = true;
         const BUFFER_FOR: std::time::Duration = std::time::Duration::from_millis(500);
         let mut buffered = std::pin::pin!(tokio::time::sleep(BUFFER_FOR));
-    
+
         while !join_set.is_empty() {
             tokio::select! {
                 Some(joined) = join_set.join_next() => {
@@ -1911,14 +1916,14 @@ impl TenantManager {
                 }
             }
         }
-    
+
         if panicked > 0 {
             warn!(
                 panicked,
                 total, "observed panicks while shutting down tenants"
             );
         }
-    
+
         // caller will log how long we took
     }
 
@@ -1965,11 +1970,12 @@ impl TenantManager {
                 .map(Some)
         };
 
-        let mut removal_result = self.remove_tenant_from_memory(
-            tenant_shard_id,
-            tenant_dir_rename_operation(tenant_shard_id),
-        )
-        .await;
+        let mut removal_result = self
+            .remove_tenant_from_memory(
+                tenant_shard_id,
+                tenant_dir_rename_operation(tenant_shard_id),
+            )
+            .await;
 
         // If the tenant was not found, it was likely already removed. Attempt to remove the tenant
         // directory on disk anyway. For example, during shard splits, we shut down and remove the
@@ -2902,14 +2908,13 @@ mod tests {
         let _e = span.enter();
 
         let tenants = BTreeMap::from([(id, TenantSlot::Attached(t.clone()))]);
-        // let tenants = Arc::new(std::sync::RwLock::new(TenantsMap::Open(tenants)));
 
         // Invoke remove_tenant_from_memory with a cleanup hook that blocks until we manually
         // permit it to proceed: that will stick the tenant in InProgress
 
-        let (basebackup_prepare_sender, _) =
-            tokio::sync::mpsc::unbounded_channel::<crate::basebackup_cache::BasebackupPrepareRequest>(
-            );
+        let (basebackup_prepare_sender, _) = tokio::sync::mpsc::unbounded_channel::<
+            crate::basebackup_cache::BasebackupPrepareRequest,
+        >();
 
         let tenant_manager = TenantManager {
             tenants: std::sync::RwLock::new(TenantsMap::Open(tenants)),
@@ -2920,7 +2925,9 @@ mod tests {
                     .unwrap(),
                 remote_storage: h.remote_storage.clone(),
                 deletion_queue_client: h.deletion_queue.new_client(),
-                l0_flush_global_state: crate::l0_flush::L0FlushGlobalState::new(h.conf.l0_flush.clone()),
+                l0_flush_global_state: crate::l0_flush::L0FlushGlobalState::new(
+                    h.conf.l0_flush.clone(),
+                ),
                 basebackup_prepare_sender,
                 feature_resolver: crate::feature_resolver::FeatureResolver::new_disabled(),
             },
