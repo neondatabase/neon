@@ -708,7 +708,6 @@ impl InMemoryLayer {
         gate: &utils::sync::gate::Gate,
         cancel: CancellationToken,
     ) -> Result<Option<(PersistentLayerDesc, Utf8PathBuf)>> {
-        // No need to lock the file anymore - it handles concurrent access internally
         let index = self.index.read().await;
 
         use l0_flush::Inner;
