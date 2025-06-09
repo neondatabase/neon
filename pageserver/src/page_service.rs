@@ -14,7 +14,7 @@ use std::{io, str};
 
 use anyhow::{Context as _, anyhow, bail};
 use async_compression::tokio::write::GzipEncoder;
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, BufMut as _, BytesMut};
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
 use itertools::Itertools;
@@ -3610,20 +3610,24 @@ impl proto::PageService for GrpcPageServiceHandler {
 
         span_record!(lsn=%req.read_lsn);
 
-        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
-        timeline
-            .wait_lsn(
-                req.read_lsn.request_lsn,
-                WaitLsnWaiter::PageService,
-                WaitLsnTimeout::Default,
-                &ctx,
-            )
-            .await?;
-        timeline
-            .check_lsn_is_in_scope(req.read_lsn.request_lsn, &latest_gc_cutoff_lsn)
-            .map_err(|err| {
-                tonic::Status::invalid_argument(format!("invalid basebackup LSN: {err}"))
-            })?;
+        let mut lsn = None;
+        if req.read_lsn.request_lsn > Lsn(0) {
+            lsn = Some(req.read_lsn.request_lsn);
+            let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
+            timeline
+                .wait_lsn(
+                    req.read_lsn.request_lsn,
+                    WaitLsnWaiter::PageService,
+                    WaitLsnTimeout::Default,
+                    &ctx,
+                )
+                .await?;
+            timeline
+                .check_lsn_is_in_scope(req.read_lsn.request_lsn, &latest_gc_cutoff_lsn)
+                .map_err(|err| {
+                    tonic::Status::invalid_argument(format!("invalid basebackup LSN: {err}"))
+                })?;
+        }
 
         // Spawn a task to run the basebackup.
         //
@@ -3634,7 +3638,7 @@ impl proto::PageService for GrpcPageServiceHandler {
             let result = basebackup::send_basebackup_tarball(
                 &mut simplex_write,
                 &timeline,
-                Some(req.read_lsn.request_lsn),
+                lsn,
                 None,
                 false,
                 req.replica,
@@ -3650,20 +3654,21 @@ impl proto::PageService for GrpcPageServiceHandler {
 
         // Emit chunks of size CHUNK_SIZE.
         let chunks = async_stream::try_stream! {
-            let mut chunk = BytesMut::with_capacity(CHUNK_SIZE);
             loop {
-                let n = simplex_read.read_buf(&mut chunk).await.map_err(|err| {
-                    tonic::Status::internal(format!("failed to read basebackup chunk: {err}"))
-                })?;
+                let mut chunk = BytesMut::with_capacity(CHUNK_SIZE).limit(CHUNK_SIZE);
+                let mut n = 1;
+                while n != 0 {
+                    n = simplex_read.read_buf(&mut chunk).await.map_err(|err| {
+                        tonic::Status::internal(format!("failed to read basebackup chunk: {err}"))
+                    })?;
+                }
+                let chunk = chunk.into_inner();
 
                 // If we read 0 bytes, either the chunk is full or the stream is closed.
-                if n == 0 {
-                    if chunk.is_empty() {
-                        break;
-                    }
-                    yield proto::GetBaseBackupResponseChunk::from(chunk.clone().freeze());
-                    chunk.clear();
+                if chunk.is_empty() {
+                    break;
                 }
+                yield proto::GetBaseBackupResponseChunk::from(chunk.freeze());
             }
             // Wait for the basebackup task to exit and check for errors.
             jh.await.map_err(|err| {

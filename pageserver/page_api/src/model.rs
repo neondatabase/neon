@@ -195,11 +195,25 @@ impl TryFrom<proto::GetBaseBackupRequest> for GetBaseBackupRequest {
     type Error = ProtocolError;
 
     fn try_from(pb: proto::GetBaseBackupRequest) -> Result<Self, Self::Error> {
-        Ok(Self {
-            read_lsn: pb
-                .read_lsn
+        // Allow 0 read_lsn for base backups.
+        // TODO: reconsider requiring request_lsn > 0.
+        let zero = proto::ReadLsn {
+            request_lsn: 0,
+            not_modified_since_lsn: 0,
+        };
+        let read_lsn = if pb.read_lsn == Some(zero) || pb.read_lsn.is_none() {
+            ReadLsn {
+                request_lsn: Lsn(0),
+                not_modified_since_lsn: None,
+            }
+        } else {
+            pb.read_lsn
                 .ok_or(ProtocolError::Missing("read_lsn"))?
-                .try_into()?,
+                .try_into()?
+        };
+
+        Ok(Self {
+            read_lsn,
             replica: pb.replica,
         })
     }

@@ -4,6 +4,7 @@
 //! provide it by calling the compute_ctl's `/compute_ctl` endpoint, or
 //! compute_ctl can fetch it by calling the control plane's API.
 use std::collections::HashMap;
+use std::fmt::Display;
 
 use indexmap::IndexMap;
 use regex::Regex;
@@ -316,6 +317,12 @@ impl ComputeMode {
             ComputeMode::Static(_) => "static",
             ComputeMode::Replica => "replica",
         }
+    }
+}
+
+impl Display for ComputeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_type_str())
     }
 }
 
