@@ -21,7 +21,7 @@ use super::conn_pool_lib::{Client, ConnInfo, EndpointConnPool, GlobalConnPool};
 use super::http_conn_pool::{self, HttpConnPool, Send, poll_http2_client};
 use super::local_conn_pool::{self, EXT_NAME, EXT_SCHEMA, EXT_VERSION, LocalConnPool};
 use crate::auth::backend::local::StaticAuthRules;
-use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
+use crate::auth::backend::{ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo};
 use crate::auth::{self, AuthError};
 use crate::compute_ctl::{
     ComputeCtlError, ExtensionInstallRequest, Privilege, SetRoleGrantsRequest,
@@ -188,6 +188,7 @@ impl PoolingBackend {
                 conn_info,
                 pool: self.pool.clone(),
                 locks: &self.config.connect_compute_locks,
+                keys: keys.keys,
             },
             &backend,
             self.config.wake_compute_retry_config,
@@ -492,6 +493,7 @@ struct TokioMechanism {
     pool: Arc<GlobalConnPool<postgres_client::Client, EndpointConnPool<postgres_client::Client>>>,
     conn_info: ConnInfo,
     conn_id: uuid::Uuid,
+    keys: ComputeCredentialKeys,
 
     /// connect_to_compute concurrency lock
     locks: &'static ApiLocks<Host>,
@@ -516,6 +518,10 @@ impl ConnectMechanism for TokioMechanism {
             .user(&self.conn_info.user_info.user)
             .dbname(&self.conn_info.dbname)
             .connect_timeout(compute_config.timeout);
+
+        if let ComputeCredentialKeys::AuthKeys(auth_keys) = self.keys {
+            config.auth_keys(auth_keys);
+        }
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let res = config.connect(compute_config).await;
