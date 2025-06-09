@@ -6,7 +6,7 @@ use crate::auth::{self, AuthFlow};
 use crate::config::AuthenticationConfig;
 use crate::context::RequestContext;
 use crate::control_plane::AuthSecret;
-use crate::intern::EndpointIdInt;
+use crate::intern::{EndpointIdInt, RoleNameInt};
 use crate::sasl;
 use crate::stream::{self, Stream};
 
@@ -25,12 +25,14 @@ pub(crate) async fn authenticate_cleartext(
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
 
     let ep = EndpointIdInt::from(&info.endpoint);
+    let role = RoleNameInt::from(&info.user);
 
     let auth_flow = AuthFlow::new(
         client,
         auth::CleartextPassword {
             secret,
             endpoint: ep,
+            role,
             pool: config.thread_pool.clone(),
         },
     );
