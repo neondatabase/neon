@@ -4,9 +4,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::sync::spsc_fold;
 
-pub fn channel<T: Send>(init: T) -> (Sender<T>, Receiver<T>) {
+pub fn channel<T: Send>() -> (Sender<T>, Receiver<T>) {
     let (mut tx, rx) = spsc_fold::channel();
-    poll_ready(tx.send(init, |_, _| unreachable!("init")));
     let cancel = CancellationToken::new();
     (
         Sender {
@@ -28,7 +27,7 @@ pub struct Receiver<T> {
 }
 
 impl<T: Send> Sender<T> {
-    pub fn send_replace(&mut self, value: T) -> Result<(), spsc_fold::SendError> {
+    pub fn send_replace(&mut self, value: T) -> Result<(), (T, spsc_fold::SendError)> {
         poll_ready(self.tx.send(value, |old, new| {
             *old = new;
             Ok(())
@@ -36,9 +35,9 @@ impl<T: Send> Sender<T> {
     }
 }
 
-impl<T> Receiver<T> {
-    pub async fn recv(&mut self) -> Result<(), spsc_fold::RecvError> {
-        todo!()
+impl<T: Send> Receiver<T> {
+    pub async fn recv(&mut self) -> Result<T, spsc_fold::RecvError> {
+        self.rx.recv().await
     }
     pub async fn cancelled(&mut self) {
         self.cancel.cancelled().await

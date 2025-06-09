@@ -56,7 +56,7 @@ impl<T: Send> Sender<T> {
     /// # Panics
     ///
     /// If `try_fold` panics,  any subsequent call to `send` panic.
-    pub async fn send<F>(&mut self, value: T, try_fold: F) -> Result<(), SendError>
+    pub async fn send<F>(&mut self, value: T, try_fold: F) -> Result<(), (T, SendError)>
     where
         F: Fn(&mut T, T) -> Result<(), T>,
     {
@@ -104,7 +104,9 @@ impl<T: Send> Sender<T> {
                     }
                     Poll::Pending
                 }
-                State::ReceiverGone => Poll::Ready(Err(SendError::ReceiverGone)),
+                State::ReceiverGone => {
+                    Poll::Ready(Err((value.take().unwrap(), SendError::ReceiverGone)))
+                }
                 State::SenderGone(_)
                 | State::AllGone
                 | State::SenderDropping

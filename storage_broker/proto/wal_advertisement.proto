@@ -11,7 +11,7 @@ service Pageserver {
 
 message CommitLsnAdvertisement {
     TenantTimelineId tenant_timeline_id = 1;
-
+    uint64 commit_lsn = 2;
 }
 
 message RemoteConsistentLsnAdvertisement {
@@ -25,6 +25,5 @@ message RemoteConsistentLsnAdvertisement {
 message TenantTimelineId {
     bytes tenant_id = 1;
     bytes timeline_id = 2;
-    uint64 commit_lsn = 3;
 }
 

@@ -1,11 +1,16 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use anyhow::Context;
+use tracing::{Instrument, error, info, info_span};
 use utils::{
-    id::TenantTimelineId,
+    id::{NodeId, TenantTimelineId},
+    lsn::Lsn,
     sync::{spsc_fold, spsc_watch},
 };
 
 use crate::{GlobalTimelines, SafeKeeperConf};
+
+type Advs = HashMap<TenantTimelineId, Lsn>;
 
 pub async fn task_main(
     conf: Arc<SafeKeeperConf>,
@@ -13,15 +18,16 @@ pub async fn task_main(
 ) -> anyhow::Result<()> {
     let mut world = sk_ps_discovery::World::default();
 
-    let mut senders: HashMap<NodeId> = HashMap::new();
+    let mut senders: HashMap<utils::id::NodeId, spsc_watch::Sender<Advs>> = HashMap::new();
+    let mut endpoints: HashMap<utils::id::NodeId, tonic::transport::Endpoint> = HashMap::new();
     loop {
         let advertisements = world.get_commit_lsn_advertisements();
-        for (node_id, advs) in advertisements {
-            loop {
+        for (node_id, mut advs) in advertisements {
+            'inner: loop {
                 let tx = senders.entry(node_id).or_insert_with(|| {
-                    let (tx, rx) = spsc_watch::channel(advs);
+                    let (tx, rx) = spsc_watch::channel();
                     tokio::spawn(
-                        NodeTask {
+                        PageserverTask {
                             ps_id: node_id,
                             advs: rx,
                         }
@@ -30,8 +36,11 @@ pub async fn task_main(
                     );
                     tx
                 });
-                if let Err(err) = tx.send_modify(advs) {
+                if let Err((failed, err)) = tx.send_replace(advs) {
                     senders.remove(&node_id);
+                    advs = failed;
+                } else {
+                    break 'inner;
                 }
             }
         }
@@ -40,14 +49,18 @@ pub async fn task_main(
 
 struct PageserverTask {
     ps_id: NodeId,
-    advs: spsc_watch::Receiver<HashMap<TenantTimelineId, Lsn>>,
+    endpoint: tonic::transport::Endpoint,
+    advs: spsc_watch::Receiver<Advs>,
 }
 
 impl PageserverTask {
     /// Cancellation: happens through last PageserverHandle being dropped.
     async fn run(mut self) {
-        let mut current;
         loop {
+            let Ok(advs) = self.advs.recv().await else {
+                info!("main task gone, exiting");
+                return;
+            };
             let res = self.run0(advs).await;
             match res {
                 Ok(()) => {}
@@ -64,7 +77,10 @@ impl PageserverTask {
         use storage_broker::wal_advertisement::pageserver_client::PageserverClient;
         let stream = async_stream::stream! { loop {
             for (tenant_timeline_id, commit_lsn) in advs {
-                yield proto::CommitLsnAdvertisement {tenant_timeline_id: Some(tenant_timeline_id), commit_lsn: Some(commit_lsn) };
+                yield proto::CommitLsnAdvertisement {tenant_timeline_id: Some(proto::TenantTimelineId {
+                    tenant_id: tenant_timeline_id.tenant_id.as_ref().to_owned(),
+                    timeline_id: tenant_timeline_id.timeline_id.as_ref().to_owned(),
+                }), commit_lsn: commit_lsn.0 };
             }
         }};
         let client: PageserverClient<_> =
@@ -78,41 +94,38 @@ impl PageserverTask {
     }
 }
 
-struct GlobalState {}
+#[derive(Default)]
+pub struct GlobalState {}
 
-pub mod advmap {
-    use std::sync::Arc;
+use utils::id::TenantId;
 
-    use utils::id::TenantId;
+use crate::timeline::Timeline;
 
-    use crate::timeline::Timeline;
+pub struct World {}
+pub struct SafekeeperTimelineHandle {}
 
-    pub struct World {}
-    pub struct SafekeeperTimelineHandle {}
-
-    impl World {
-        pub fn update_pageserver_attachments(
-            &self,
-            tenant_id: TenantId,
-            update: safekeeper_api::models::TenantShardPageserverAttachmentChange,
-        ) -> anyhow::Result<()> {
-            todo!()
-        }
-        pub fn register_timeline(
-            &self,
-            tli: Arc<Timeline>,
-        ) -> anyhow::Result<SafekeeperTimelineHandle> {
-            todo!()
-        }
+impl GlobalState {
+    pub fn update_pageserver_attachments(
+        &self,
+        tenant_id: TenantId,
+        update: safekeeper_api::models::TenantShardPageserverAttachmentChange,
+    ) -> anyhow::Result<()> {
+        todo!()
     }
-    impl SafekeeperTimelineHandle {
-        pub fn ready_for_eviction(&self) -> bool {
-            todo!()
-        }
+    pub fn register_timeline(
+        &self,
+        tli: Arc<Timeline>,
+    ) -> anyhow::Result<SafekeeperTimelineHandle> {
+        todo!()
     }
-    impl Default for World {
-        fn default() -> Self {
-            todo!()
-        }
+}
+impl SafekeeperTimelineHandle {
+    pub fn ready_for_eviction(&self) -> bool {
+        todo!()
+    }
+}
+impl Default for World {
+    fn default() -> Self {
+        todo!()
     }
 }

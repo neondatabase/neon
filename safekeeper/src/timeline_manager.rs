@@ -201,7 +201,7 @@ pub(crate) struct Manager {
     pub(crate) wal_seg_size: usize,
     pub(crate) walsenders: Arc<WalSenders>,
     pub(crate) wal_backup: Arc<WalBackup>,
-    pub(crate) wal_advertiser: wal_advertiser::advmap::SafekeeperTimelineHandle,
+    pub(crate) wal_advertiser: wal_advertiser::SafekeeperTimelineHandle,
 
     // current state
     pub(crate) state_version_rx: tokio::sync::watch::Receiver<usize>,
