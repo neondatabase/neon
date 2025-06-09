@@ -2209,25 +2209,6 @@ pub fn forward_termination_signal() {
         kill(ss_pid, Signal::SIGTERM).ok();
     }
 
-    // Terminate local_proxy
-    match pid_file::read("/etc/local_proxy/pid".into()) {
-        Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
-            info!("sending SIGTERM to local_proxy process pid: {}", pid);
-            if let Err(e) = kill(pid, Signal::SIGTERM) {
-                error!("failed to terminate local_proxy: {}", e);
-            }
-        }
-        Ok(pid_file::PidFileRead::NotHeldByAnyProcess(_)) => {
-            info!("local_proxy PID file exists but process not running");
-        }
-        Ok(pid_file::PidFileRead::NotExist) => {
-            info!("local_proxy PID file not found, process may not be running");
-        }
-        Err(e) => {
-            error!("error reading local_proxy PID file: {}", e);
-        }
-    }
-
     // Terminate pgbouncer
     match pid_file::read("/etc/pgbouncer/pid".into()) {
         Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
@@ -2244,6 +2225,25 @@ pub fn forward_termination_signal() {
         }
         Err(e) => {
             error!("error reading pgbouncer pid file: {}", e);
+        }
+    }
+
+    // Terminate local_proxy
+    match pid_file::read("/etc/local_proxy/pid".into()) {
+        Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
+            info!("sending SIGTERM to local_proxy process pid: {}", pid);
+            if let Err(e) = kill(pid, Signal::SIGTERM) {
+                error!("failed to terminate local_proxy: {}", e);
+            }
+        }
+        Ok(pid_file::PidFileRead::NotHeldByAnyProcess(_)) => {
+            info!("local_proxy PID file exists but process not running");
+        }
+        Ok(pid_file::PidFileRead::NotExist) => {
+            info!("local_proxy PID file not found, process may not be running");
+        }
+        Err(e) => {
+            error!("error reading local_proxy PID file: {}", e);
         }
     }
 
