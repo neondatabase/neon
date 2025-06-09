@@ -14,7 +14,7 @@ use crate::context::RequestContext;
 use crate::control_plane::client::cplane_proxy_v1;
 use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
 use crate::error::{ReportableError, UserFacingError};
-use crate::pglb::connect_compute::ComputeConnectBackend;
+use crate::pglb::connect_compute::WakeComputeBackend;
 use crate::pqproto::BeMessage;
 use crate::proxy::NeonOptions;
 use crate::stream::PqStream;
@@ -109,7 +109,7 @@ impl ConsoleRedirectBackend {
 pub struct ConsoleRedirectNodeInfo(pub(super) NodeInfo);
 
 #[async_trait]
-impl ComputeConnectBackend for ConsoleRedirectNodeInfo {
+impl WakeComputeBackend for ConsoleRedirectNodeInfo {
     async fn wake_compute(
         &self,
         _ctx: &RequestContext,

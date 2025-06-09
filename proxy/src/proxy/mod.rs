@@ -358,12 +358,12 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         }
     };
 
-    let creds = match &user_info {
-        auth::Backend::ControlPlane(_, creds) => creds,
+    let (cplane, creds) = match user_info {
+        auth::Backend::ControlPlane(cplane, creds) => (cplane, creds),
         auth::Backend::Local(_) => unreachable!("local proxy does not run tcp proxy service"),
     };
     let params_compat = creds.info.options.get(NeonOptions::PARAMS_COMPAT).is_some();
-    let mut auth_info = compute::AuthInfo::with_auth_keys(&creds.keys);
+    let mut auth_info = compute::AuthInfo::with_auth_keys(creds.keys);
     auth_info.set_startup_params(&params, params_compat);
 
     let res = connect_to_compute(
@@ -373,7 +373,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
             auth: auth_info,
             locks: &config.connect_compute_locks,
         },
-        &user_info,
+        &auth::Backend::ControlPlane(cplane, creds.info),
         config.wake_compute_retry_config,
         &config.connect_to_compute,
     )

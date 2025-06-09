@@ -180,7 +180,7 @@ impl PoolingBackend {
         let conn_id = uuid::Uuid::new_v4();
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
-        let backend = self.auth_backend.as_ref().map(|()| keys);
+        let backend = self.auth_backend.as_ref().map(|()| keys.info);
         crate::pglb::connect_compute::connect_to_compute(
             ctx,
             &TokioMechanism {
@@ -214,16 +214,13 @@ impl PoolingBackend {
         let conn_id = uuid::Uuid::new_v4();
         tracing::Span::current().record("conn_id", display(conn_id));
         debug!(%conn_id, "pool: opening a new connection '{conn_info}'");
-        let backend = self.auth_backend.as_ref().map(|()| ComputeCredentials {
-            info: ComputeUserInfo {
-                user: conn_info.user_info.user.clone(),
-                endpoint: EndpointId::from(format!(
-                    "{}{LOCAL_PROXY_SUFFIX}",
-                    conn_info.user_info.endpoint.normalize()
-                )),
-                options: conn_info.user_info.options.clone(),
-            },
-            keys: crate::auth::backend::ComputeCredentialKeys::None,
+        let backend = self.auth_backend.as_ref().map(|()| ComputeUserInfo {
+            user: conn_info.user_info.user.clone(),
+            endpoint: EndpointId::from(format!(
+                "{}{LOCAL_PROXY_SUFFIX}",
+                conn_info.user_info.endpoint.normalize()
+            )),
+            options: conn_info.user_info.options.clone(),
         });
         crate::pglb::connect_compute::connect_to_compute(
             ctx,
