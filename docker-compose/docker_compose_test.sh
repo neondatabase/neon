@@ -92,7 +92,14 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         docker compose exec neon-test-extensions bash -c "apt update; apt -y install parallel"
         # We are running tests now
         rm -f testout.txt testout_contrib.txt
+        # We want to run the longest tests first to better utilize parallelization and reduce overall test time.
+        # Tests listed in the RUN_FIRST variable will be run before others.
+        # If parallelization is not used, this environment variable will be ignored.
+
+        # XXX remove before merge
+        docker compose cp run-tests.sh neon-test-extensions:/
         docker compose exec -e USE_PGXS=1 -e SKIP=timescaledb-src,rdkit-src,pg_jsonschema-src,kq_imcx-src,wal2json_2_5-src,rag_jina_reranker_v1_tiny_en-src,rag_bge_small_en_v15-src \
+        -e RUN_FIRST=hll-src,postgis-src,pgtap-src \
         neon-test-extensions /run-tests.sh ${PARALLEL_FLAG} /ext-src | tee testout.txt && EXT_SUCCESS=1 || EXT_SUCCESS=0
         docker compose exec -e SKIP=start-scripts,postgres_fdw,ltree_plpython,jsonb_plpython,jsonb_plperl,hstore_plpython,hstore_plperl,dblink,bool_plperl \
         neon-test-extensions /run-tests.sh ${PARALLEL_FLAG} /postgres/contrib | tee testout_contrib.txt && CONTRIB_SUCCESS=1 || CONTRIB_SUCCESS=0
