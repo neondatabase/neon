@@ -1473,9 +1473,6 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 // fully managed by storage controller, therefore not sharded.
                 (vec![(protocol, host, port)], DEFAULT_STRIPE_SIZE)
             } else {
-                // TODO: plumb Pageserver gRPC ports through storage-controller.
-                assert!(!args.grpc, "gRPC not supported with storage-controller yet");
-
                 // Look up the currently attached location of the tenant, and its striping metadata,
                 // to pass these on to postgres.
                 let storage_controller = StorageController::from_env(env);
@@ -1493,12 +1490,22 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                                 .await?;
                         }
 
-                        anyhow::Ok((
-                            PageserverProtocol::Libpq,
-                            Host::parse(&shard.listen_pg_addr)
-                                .expect("Storage controller reported bad hostname"),
-                            shard.listen_pg_port,
-                        ))
+                        let pageserver = if args.grpc {
+                            (
+                                PageserverProtocol::Grpc,
+                                Host::parse(&shard.listen_grpc_addr.expect("no gRPC addr"))
+                                    .expect("bad hostname"),
+                                shard.listen_grpc_port.expect("no gRPC port"),
+                            )
+                        } else {
+                            (
+                                PageserverProtocol::Libpq,
+                                Host::parse(&shard.listen_pg_addr).expect("bad hostname"),
+                                shard.listen_pg_port,
+                            )
+                        };
+
+                        anyhow::Ok(pageserver)
                     }),
                 )
                 .await?;
@@ -1565,8 +1572,6 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 };
                 vec![(protocol, host, port)]
             } else {
-                // TODO: plumb gRPC ports through storage-controller.
-                assert!(!args.grpc, "gRPC not supported with storage-controller yet");
                 let storage_controller = StorageController::from_env(env);
                 storage_controller
                     .tenant_locate(endpoint.tenant_id)
@@ -1574,12 +1579,20 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                     .shards
                     .into_iter()
                     .map(|shard| {
-                        (
-                            PageserverProtocol::Libpq,
-                            Host::parse(&shard.listen_pg_addr)
-                                .expect("Storage controller reported malformed host"),
-                            shard.listen_pg_port,
-                        )
+                        if args.grpc {
+                            (
+                                PageserverProtocol::Grpc,
+                                Host::parse(&shard.listen_grpc_addr.expect("no gRPC addr"))
+                                    .expect("bad hostname"),
+                                shard.listen_grpc_port.expect("no gRPC port"),
+                            )
+                        } else {
+                            (
+                                PageserverProtocol::Libpq,
+                                Host::parse(&shard.listen_pg_addr).expect("bad hostname"),
+                                shard.listen_pg_port,
+                            )
+                        }
                     })
                     .collect::<Vec<_>>()
             };

@@ -38,6 +38,11 @@ enum Command {
         listen_pg_port: u16,
 
         #[arg(long)]
+        listen_grpc_addr: Option<String>,
+        #[arg(long)]
+        listen_grpc_port: Option<u16>,
+
+        #[arg(long)]
         listen_http_addr: String,
         #[arg(long)]
         listen_http_port: u16,
@@ -410,6 +415,8 @@ async fn main() -> anyhow::Result<()> {
             node_id,
             listen_pg_addr,
             listen_pg_port,
+            listen_grpc_addr,
+            listen_grpc_port,
             listen_http_addr,
             listen_http_port,
             listen_https_port,
@@ -423,6 +430,8 @@ async fn main() -> anyhow::Result<()> {
                         node_id,
                         listen_pg_addr,
                         listen_pg_port,
+                        listen_grpc_addr,
+                        listen_grpc_port,
                         listen_http_addr,
                         listen_http_port,
                         listen_https_port,

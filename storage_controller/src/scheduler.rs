@@ -945,6 +945,8 @@ pub(crate) mod test_utils {
                         None,
                         format!("pghost-{i}"),
                         5432 + i as u16,
+                        None,
+                        None,
                         az_iter
                             .next()
                             .cloned()

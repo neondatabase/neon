@@ -195,6 +195,8 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
                         node_id: conf.id,
                         listen_pg_addr: m.postgres_host,
                         listen_pg_port: m.postgres_port,
+                        listen_grpc_addr: m.grpc_host,
+                        listen_grpc_port: m.grpc_port,
                         listen_http_addr: m.http_host,
                         listen_http_port: m.http_port,
                         listen_https_port: m.https_port,

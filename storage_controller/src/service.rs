@@ -1681,6 +1681,8 @@ impl Service {
                     None,
                     "".to_string(),
                     123,
+                    None,
+                    None,
                     AvailabilityZone("test_az".to_string()),
                     false,
                 )
@@ -7215,6 +7217,8 @@ impl Service {
             register_req.listen_https_port,
             register_req.listen_pg_addr,
             register_req.listen_pg_port,
+            register_req.listen_grpc_addr,
+            register_req.listen_grpc_port,
             register_req.availability_zone_id.clone(),
             self.config.use_https_pageserver_api,
         );

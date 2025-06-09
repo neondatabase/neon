@@ -265,6 +265,14 @@ impl PageServerNode {
             None => None,
         };
 
+        let mut grpc_host = None;
+        let mut grpc_port = None;
+        if let Some(grpc_addr) = &self.conf.listen_grpc_addr {
+            let (_, port) = parse_host_port(grpc_addr).expect("Unable to parse listen_grpc_addr");
+            grpc_host = Some("localhost".to_string());
+            grpc_port = Some(port.unwrap_or(51051));
+        }
+
         // Intentionally hand-craft JSON: this acts as an implicit format compat test
         // in case the pageserver-side structure is edited, and reflects the real life
         // situation: the metadata is written by some other script.
@@ -273,6 +281,8 @@ impl PageServerNode {
             serde_json::to_vec(&pageserver_api::config::NodeMetadata {
                 postgres_host: "localhost".to_string(),
                 postgres_port: self.pg_connection_config.port(),
+                grpc_host,
+                grpc_port,
                 http_host: "localhost".to_string(),
                 http_port,
                 https_port,

@@ -34,6 +34,8 @@ pub struct NodeMetadata {
     pub postgres_host: String,
     #[serde(rename = "port")]
     pub postgres_port: u16,
+    pub grpc_host: Option<String>,
+    pub grpc_port: Option<u16>,
     pub http_host: String,
     pub http_port: u16,
     pub https_port: Option<u16>,
