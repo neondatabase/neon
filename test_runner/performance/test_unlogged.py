@@ -3,14 +3,17 @@ from __future__ import annotations
 import threading
 from typing import TYPE_CHECKING
 
+import pytest
+
 if TYPE_CHECKING:
     from fixtures.neon_fixtures import NeonEnvBuilder
 
 
+@pytest.mark.timeout(10000)
 def test_unlogged(neon_env_builder: NeonEnvBuilder):
     n_tables = 20
     n_records = 1000
-    n_updates = 10
+    n_updates = 1000
     shared_buffers = 1
 
     env = neon_env_builder.init_start()
