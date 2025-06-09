@@ -358,21 +358,19 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         }
     };
 
-    let compute_user_info = match &user_info {
-        auth::Backend::ControlPlane(_, info) => &info.info,
+    let creds = match &user_info {
+        auth::Backend::ControlPlane(_, creds) => creds,
         auth::Backend::Local(_) => unreachable!("local proxy does not run tcp proxy service"),
     };
-    let params_compat = compute_user_info
-        .options
-        .get(NeonOptions::PARAMS_COMPAT)
-        .is_some();
+    let params_compat = creds.info.options.get(NeonOptions::PARAMS_COMPAT).is_some();
+    let mut auth_info = compute::AuthInfo::with_auth_keys(&creds.keys);
+    auth_info.set_startup_params(&params, params_compat);
 
     let res = connect_to_compute(
         ctx,
         &TcpMechanism {
-            user_info: compute_user_info.clone(),
-            params_compat,
-            params: &params,
+            user_info: creds.info.clone(),
+            auth: auth_info,
             locks: &config.connect_compute_locks,
         },
         &user_info,

@@ -18,6 +18,7 @@ use crate::types::{EndpointId, RoleName};
 
 #[async_trait]
 pub(crate) trait ProjectInfoCache {
+    fn invalidate_endpoint_access(&self, endpoint_id: EndpointIdInt);
     fn invalidate_endpoint_access_for_project(&self, project_id: ProjectIdInt);
     fn invalidate_endpoint_access_for_org(&self, account_id: AccountIdInt);
     fn invalidate_role_secret_for_project(&self, project_id: ProjectIdInt, role_name: RoleNameInt);
@@ -100,6 +101,13 @@ pub struct ProjectInfoCacheImpl {
 
 #[async_trait]
 impl ProjectInfoCache for ProjectInfoCacheImpl {
+    fn invalidate_endpoint_access(&self, endpoint_id: EndpointIdInt) {
+        info!("invalidating endpoint access for `{endpoint_id}`");
+        if let Some(mut endpoint_info) = self.cache.get_mut(&endpoint_id) {
+            endpoint_info.invalidate_endpoint();
+        }
+    }
+
     fn invalidate_endpoint_access_for_project(&self, project_id: ProjectIdInt) {
         info!("invalidating endpoint access for project `{project_id}`");
         let endpoints = self

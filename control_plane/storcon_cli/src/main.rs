@@ -61,6 +61,7 @@ enum Command {
         #[arg(long)]
         scheduling: Option<NodeSchedulingPolicy>,
     },
+    // Set a node status as deleted.
     NodeDelete {
         #[arg(long)]
         node_id: NodeId,
@@ -68,6 +69,11 @@ enum Command {
         /// Force flag to delete the node without draining
         #[arg(long)]
         force: bool,
+    },
+    /// Delete a tombstone of node from the storage controller.
+    NodeDeleteTombstone {
+        #[arg(long)]
+        node_id: NodeId,
     },
     /// Modify a tenant's policies in the storage controller
     TenantPolicy {
@@ -86,6 +92,8 @@ enum Command {
     },
     /// List nodes known to the storage controller
     Nodes {},
+    /// List soft deleted nodes known to the storage controller
+    NodeTombstones {},
     /// List tenants known to the storage controller
     Tenants {
         /// If this field is set, it will list the tenants on a specific node
@@ -937,6 +945,39 @@ async fn main() -> anyhow::Result<()> {
             storcon_client
                 .dispatch::<(), ()>(Method::DELETE, format!("control/v1/node/{node_id}"), None)
                 .await?;
+        }
+        Command::NodeDeleteTombstone { node_id } => {
+            storcon_client
+                .dispatch::<(), ()>(
+                    Method::DELETE,
+                    format!("debug/v1/tombstone/{node_id}"),
+                    None,
+                )
+                .await?;
+        }
+        Command::NodeTombstones {} => {
+            let mut resp = storcon_client
+                .dispatch::<(), Vec<NodeDescribeResponse>>(
+                    Method::GET,
+                    "debug/v1/tombstone".to_string(),
+                    None,
+                )
+                .await?;
+
+            resp.sort_by(|a, b| a.listen_http_addr.cmp(&b.listen_http_addr));
+
+            let mut table = comfy_table::Table::new();
+            table.set_header(["Id", "Hostname", "AZ", "Scheduling", "Availability"]);
+            for node in resp {
+                table.add_row([
+                    format!("{}", node.id),
+                    node.listen_http_addr,
+                    node.availability_zone_id,
+                    format!("{:?}", node.scheduling),
+                    format!("{:?}", node.availability),
+                ]);
+            }
+            println!("{table}");
         }
         Command::TenantSetTimeBasedEviction {
             tenant_id,

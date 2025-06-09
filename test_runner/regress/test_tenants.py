@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 import requests
-from fixtures.common_types import Lsn, TenantId, TimelineId
+from fixtures.common_types import Lsn, TenantId, TimelineArchivalState, TimelineId
 from fixtures.log_helper import log
 from fixtures.metrics import (
     PAGESERVER_GLOBAL_METRICS,
@@ -297,6 +297,65 @@ def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilde
 
         post_detach_samples = set([x.name for x in get_ps_metric_samples_for_tenant(tenant)])
         assert post_detach_samples == set()
+
+
+def test_pageserver_metrics_removed_after_offload(neon_env_builder: NeonEnvBuilder):
+    """Tests that when a timeline is offloaded, the tenant specific metrics are not left behind"""
+
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
+
+    neon_env_builder.num_safekeepers = 3
+
+    env = neon_env_builder.init_start()
+    tenant_1, _ = env.create_tenant()
+
+    timeline_1 = env.create_timeline("test_metrics_removed_after_offload_1", tenant_id=tenant_1)
+    timeline_2 = env.create_timeline("test_metrics_removed_after_offload_2", tenant_id=tenant_1)
+
+    endpoint_tenant1 = env.endpoints.create_start(
+        "test_metrics_removed_after_offload_1", tenant_id=tenant_1
+    )
+    endpoint_tenant2 = env.endpoints.create_start(
+        "test_metrics_removed_after_offload_2", tenant_id=tenant_1
+    )
+
+    for endpoint in [endpoint_tenant1, endpoint_tenant2]:
+        with closing(endpoint.connect()) as conn:
+            with conn.cursor() as cur:
+                cur.execute("CREATE TABLE t(key int primary key, value text)")
+                cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
+                cur.execute("SELECT sum(key) FROM t")
+                assert cur.fetchone() == (5000050000,)
+        endpoint.stop()
+
+    def get_ps_metric_samples_for_timeline(
+        tenant_id: TenantId, timeline_id: TimelineId
+    ) -> list[Sample]:
+        ps_metrics = env.pageserver.http_client().get_metrics()
+        samples = []
+        for metric_name in ps_metrics.metrics:
+            for sample in ps_metrics.query_all(
+                name=metric_name,
+                filter={"tenant_id": str(tenant_id), "timeline_id": str(timeline_id)},
+            ):
+                samples.append(sample)
+        return samples
+
+    for timeline in [timeline_1, timeline_2]:
+        pre_offload_samples = set(
+            [x.name for x in get_ps_metric_samples_for_timeline(tenant_1, timeline)]
+        )
+        assert len(pre_offload_samples) > 0, f"expected at least one sample for {timeline}"
+        env.pageserver.http_client().timeline_archival_config(
+            tenant_1,
+            timeline,
+            state=TimelineArchivalState.ARCHIVED,
+        )
+        env.pageserver.http_client().timeline_offload(tenant_1, timeline)
+        post_offload_samples = set(
+            [x.name for x in get_ps_metric_samples_for_timeline(tenant_1, timeline)]
+        )
+        assert post_offload_samples == set()
 
 
 def test_pageserver_with_empty_tenants(neon_env_builder: NeonEnvBuilder):

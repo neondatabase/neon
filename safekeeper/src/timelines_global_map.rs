@@ -78,7 +78,13 @@ impl GlobalTimelinesState {
             Some(GlobalMapTimeline::CreationInProgress) => {
                 Err(TimelineError::CreationInProgress(*ttid))
             }
-            None => Err(TimelineError::NotFound(*ttid)),
+            None => {
+                if self.has_tombstone(ttid) {
+                    Err(TimelineError::Deleted(*ttid))
+                } else {
+                    Err(TimelineError::NotFound(*ttid))
+                }
+            }
         }
     }
 

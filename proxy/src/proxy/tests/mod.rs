@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use async_trait::async_trait;
 use http::StatusCode;
-use postgres_client::config::SslMode;
+use postgres_client::config::{AuthKeys, ScramKeys, SslMode};
 use postgres_client::tls::{MakeTlsConnect, NoTls};
 use retry::{ShouldRetryWakeCompute, retry_after};
 use rstest::rstest;
@@ -29,7 +29,6 @@ use crate::control_plane::{self, CachedNodeInfo, NodeInfo, NodeInfoCache};
 use crate::error::ErrorKind;
 use crate::pglb::connect_compute::ConnectMechanism;
 use crate::tls::client_config::compute_client_config_with_certs;
-use crate::tls::postgres_rustls::MakeRustlsConnect;
 use crate::tls::server_config::CertResolver;
 use crate::types::{BranchId, EndpointId, ProjectId};
 use crate::{sasl, scram};
@@ -72,13 +71,14 @@ struct ClientConfig<'a> {
     hostname: &'a str,
 }
 
-type TlsConnect<S> = <MakeRustlsConnect as MakeTlsConnect<S>>::TlsConnect;
+type TlsConnect<S> = <ComputeConfig as MakeTlsConnect<S>>::TlsConnect;
 
 impl ClientConfig<'_> {
     fn make_tls_connect(self) -> anyhow::Result<TlsConnect<DuplexStream>> {
-        let mut mk = MakeRustlsConnect::new(self.config);
-        let tls = MakeTlsConnect::<DuplexStream>::make_tls_connect(&mut mk, self.hostname)?;
-        Ok(tls)
+        Ok(crate::tls::postgres_rustls::make_tls_connect(
+            &self.config,
+            self.hostname,
+        )?)
     }
 }
 
@@ -497,8 +497,6 @@ impl ConnectMechanism for TestConnectMechanism {
             x => panic!("expecting action {x:?}, connect is called instead"),
         }
     }
-
-    fn update_connect_config(&self, _conf: &mut compute::ConnCfg) {}
 }
 
 impl TestControlPlaneClient for TestConnectMechanism {
@@ -557,7 +555,12 @@ impl TestControlPlaneClient for TestConnectMechanism {
 
 fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {
     let node = NodeInfo {
-        config: compute::ConnCfg::new("test".to_owned(), 5432),
+        conn_info: compute::ConnectInfo {
+            host: "test".into(),
+            port: 5432,
+            ssl_mode: SslMode::Disable,
+            host_addr: None,
+        },
         aux: MetricsAuxInfo {
             endpoint_id: (&EndpointId::from("endpoint")).into(),
             project_id: (&ProjectId::from("project")).into(),
@@ -581,7 +584,10 @@ fn helper_create_connect_info(
                 user: "user".into(),
                 options: NeonOptions::parse_options_raw(""),
             },
-            keys: ComputeCredentialKeys::Password("password".into()),
+            keys: ComputeCredentialKeys::AuthKeys(AuthKeys::ScramSha256(ScramKeys {
+                client_key: [0; 32],
+                server_key: [0; 32],
+            })),
         },
     )
 }

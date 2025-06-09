@@ -907,6 +907,42 @@ async fn handle_node_delete(req: Request<Body>) -> Result<Response<Body>, ApiErr
     json_response(StatusCode::OK, state.service.node_delete(node_id).await?)
 }
 
+async fn handle_tombstone_list(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let state = get_state(&req);
+    let mut nodes = state.service.tombstone_list().await?;
+    nodes.sort_by_key(|n| n.get_id());
+    let api_nodes = nodes.into_iter().map(|n| n.describe()).collect::<Vec<_>>();
+
+    json_response(StatusCode::OK, api_nodes)
+}
+
+async fn handle_tombstone_delete(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+    json_response(
+        StatusCode::OK,
+        state.service.tombstone_delete(node_id).await?,
+    )
+}
+
 async fn handle_node_configure(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -2062,6 +2098,20 @@ pub fn make_router(
         })
         .post("/debug/v1/node/:node_id/drop", |r| {
             named_request_span(r, handle_node_drop, RequestName("debug_v1_node_drop"))
+        })
+        .delete("/debug/v1/tombstone/:node_id", |r| {
+            named_request_span(
+                r,
+                handle_tombstone_delete,
+                RequestName("debug_v1_tombstone_delete"),
+            )
+        })
+        .get("/debug/v1/tombstone", |r| {
+            named_request_span(
+                r,
+                handle_tombstone_list,
+                RequestName("debug_v1_tombstone_list"),
+            )
         })
         .post("/debug/v1/tenant/:tenant_id/import", |r| {
             named_request_span(

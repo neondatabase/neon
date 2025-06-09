@@ -6,6 +6,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use futures::TryFutureExt;
+use postgres_client::config::SslMode;
 use thiserror::Error;
 use tokio_postgres::Client;
 use tracing::{Instrument, error, info, info_span, warn};
@@ -14,6 +15,7 @@ use crate::auth::IpPattern;
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::AuthRule;
 use crate::cache::Cached;
+use crate::compute::ConnectInfo;
 use crate::context::RequestContext;
 use crate::control_plane::errors::{
     ControlPlaneError, GetAuthInfoError, GetEndpointJwksError, WakeComputeError,
@@ -24,9 +26,9 @@ use crate::control_plane::{
     RoleAccessControl,
 };
 use crate::intern::RoleNameInt;
+use crate::scram;
 use crate::types::{BranchId, EndpointId, ProjectId, RoleName};
 use crate::url::ApiUrl;
-use crate::{compute, scram};
 
 #[derive(Debug, Error)]
 enum MockApiError {
@@ -87,8 +89,7 @@ impl MockControlPlane {
             .await?
             {
                 info!("got a secret: {entry}"); // safe since it's not a prod scenario
-                let secret = scram::ServerSecret::parse(&entry).map(AuthSecret::Scram);
-                secret.or_else(|| parse_md5(&entry).map(AuthSecret::Md5))
+                scram::ServerSecret::parse(&entry).map(AuthSecret::Scram)
             } else {
                 warn!("user '{role}' does not exist");
                 None
@@ -170,25 +171,23 @@ impl MockControlPlane {
 
     async fn do_wake_compute(&self) -> Result<NodeInfo, WakeComputeError> {
         let port = self.endpoint.port().unwrap_or(5432);
-        let mut config = match self.endpoint.host_str() {
-            None => {
-                let mut config = compute::ConnCfg::new("localhost".to_string(), port);
-                config.set_host_addr(IpAddr::V4(Ipv4Addr::LOCALHOST));
-                config
-            }
-            Some(host) => {
-                let mut config = compute::ConnCfg::new(host.to_string(), port);
-                if let Ok(addr) = IpAddr::from_str(host) {
-                    config.set_host_addr(addr);
-                }
-                config
-            }
+        let conn_info = match self.endpoint.host_str() {
+            None => ConnectInfo {
+                host_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                host: "localhost".into(),
+                port,
+                ssl_mode: SslMode::Disable,
+            },
+            Some(host) => ConnectInfo {
+                host_addr: IpAddr::from_str(host).ok(),
+                host: host.into(),
+                port,
+                ssl_mode: SslMode::Disable,
+            },
         };
 
-        config.ssl_mode(postgres_client::config::SslMode::Disable);
-
         let node = NodeInfo {
-            config,
+            conn_info,
             aux: MetricsAuxInfo {
                 endpoint_id: (&EndpointId::from("endpoint")).into(),
                 project_id: (&ProjectId::from("project")).into(),
@@ -265,13 +264,4 @@ impl super::ControlPlaneApi for MockControlPlane {
     ) -> Result<CachedNodeInfo, WakeComputeError> {
         self.do_wake_compute().map_ok(Cached::new_uncached).await
     }
-}
-
-fn parse_md5(input: &str) -> Option<[u8; 16]> {
-    let text = input.strip_prefix("md5")?;
-
-    let mut bytes = [0u8; 16];
-    hex::decode_to_slice(text, &mut bytes).ok()?;
-
-    Some(bytes)
 }
