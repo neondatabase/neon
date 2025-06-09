@@ -1,7 +1,5 @@
 #!/bin/bash
 set -ex
-# XXX DO NOT MERGE, Test only
-exit 1
 cd "$(dirname "${0}")"
 dropdb --if-exists contrib_regression
 createdb contrib_regression
