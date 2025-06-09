@@ -1613,7 +1613,12 @@ impl TenantManager {
             }
         }
 
-        // Phase 5: Shut down the parent shard, and erase it from disk
+        // Phase 5: Shut down the parent shard. We leave it on disk in case the split fails and we
+        // have to roll back to the parent shard, avoiding a cold start. It will be cleaned up once
+        // the storage controller commits the split, or if all else fails, on the next restart.
+        //
+        // TODO: We don't flush the ephemeral layer here, because the split is likely to succeed and
+        // catching up the parent should be reasonably quick. Consider using FreezeAndFlush instead.
         let (_guard, progress) = completion::channel();
         match parent.shutdown(progress, ShutdownMode::Hard).await {
             Ok(()) => {}
@@ -1621,11 +1626,6 @@ impl TenantManager {
                 other.wait().await;
             }
         }
-        let local_tenant_directory = self.conf.tenant_path(&tenant_shard_id);
-        let tmp_path = safe_rename_tenant_dir(&local_tenant_directory)
-            .await
-            .with_context(|| format!("local tenant directory {local_tenant_directory:?} rename"))?;
-        self.background_purges.spawn(tmp_path);
 
         fail::fail_point!("shard-split-pre-finish", |_| Err(anyhow::anyhow!(
             "failpoint"
@@ -1924,41 +1924,68 @@ impl TenantManager {
         // caller will log how long we took
     }
 
+    /// Detaches a tenant, and removes its local files asynchronously.
+    ///
+    /// File removal is idempotent: even if the tenant has already been removed, this will still
+    /// remove any local files. This is used during shard splits, where we leave the parent shard's
+    /// files around in case we have to roll back the split.
     pub(crate) async fn detach_tenant(
         &self,
         conf: &'static PageServerConf,
         tenant_shard_id: TenantShardId,
         deletion_queue_client: &DeletionQueueClient,
     ) -> Result<(), TenantStateError> {
-        let tmp_path = self
+        if let Some(tmp_path) = self
             .detach_tenant0(conf, tenant_shard_id, deletion_queue_client)
-            .await?;
-        self.background_purges.spawn(tmp_path);
+            .await?
+        {
+            self.background_purges.spawn(tmp_path);
+        }
 
         Ok(())
     }
 
+    /// Detaches a tenant. This renames the tenant directory to a temporary path and returns it,
+    /// allowing the caller to delete it asynchronously. Returns None if the dir is already removed.
     async fn detach_tenant0(
         &self,
         conf: &'static PageServerConf,
         tenant_shard_id: TenantShardId,
         deletion_queue_client: &DeletionQueueClient,
-    ) -> Result<Utf8PathBuf, TenantStateError> {
+    ) -> Result<Option<Utf8PathBuf>, TenantStateError> {
         let tenant_dir_rename_operation = |tenant_id_to_clean: TenantShardId| async move {
             let local_tenant_directory = conf.tenant_path(&tenant_id_to_clean);
+            if !tokio::fs::try_exists(&local_tenant_directory).await? {
+                // If the tenant directory doesn't exist, it's already cleaned up.
+                return Ok(None);
+            }
             safe_rename_tenant_dir(&local_tenant_directory)
                 .await
                 .with_context(|| {
                     format!("local tenant directory {local_tenant_directory:?} rename")
                 })
+                .map(Some)
         };
 
-        let removal_result = self
-            .remove_tenant_from_memory(
-                tenant_shard_id,
-                tenant_dir_rename_operation(tenant_shard_id),
-            )
-            .await;
+        let mut removal_result = self.remove_tenant_from_memory(
+            tenant_shard_id,
+            tenant_dir_rename_operation(tenant_shard_id),
+        )
+        .await;
+
+        // If the tenant was not found, it was likely already removed. Attempt to remove the tenant
+        // directory on disk anyway. For example, during shard splits, we shut down and remove the
+        // parent shard, but leave its directory on disk in case we have to roll back the split.
+        //
+        // TODO: it would be better to leave the parent shard attached until the split is committed.
+        // This will be needed by the gRPC page service too, such that a compute can continue to
+        // read from the parent shard until it's notified about the new child shards. See:
+        // <https://github.com/neondatabase/neon/issues/11728>.
+        if let Err(TenantStateError::SlotError(TenantSlotError::NotFound(_))) = removal_result {
+            removal_result = tenant_dir_rename_operation(tenant_shard_id)
+                .await
+                .map_err(TenantStateError::Other);
+        }
 
         // Flush pending deletions, so that they have a good chance of passing validation
         // before this tenant is potentially re-attached elsewhere.
