@@ -33,7 +33,6 @@ const CANCEL_KEY_TTL: i64 = 1_209_600; // 2 weeks cancellation key expire time
 pub enum CancelKeyOp {
     StoreCancelKey {
         key: String,
-        field: String,
         value: String,
         resp_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
         _guard: CancelChannelSizeGuard<'static>,
@@ -41,7 +40,7 @@ pub enum CancelKeyOp {
     },
     GetCancelData {
         key: String,
-        resp_tx: oneshot::Sender<anyhow::Result<Vec<(String, String)>>>,
+        resp_tx: oneshot::Sender<anyhow::Result<String>>,
         _guard: CancelChannelSizeGuard<'static>,
     },
     RemoveCancelKey {
@@ -120,7 +119,6 @@ impl CancelKeyOp {
         match self {
             CancelKeyOp::StoreCancelKey {
                 key,
-                field,
                 value,
                 resp_tx,
                 _guard,
@@ -128,7 +126,7 @@ impl CancelKeyOp {
             } => {
                 let reply =
                     resp_tx.map(|resp_tx| CancelReplyOp::StoreCancelKey { resp_tx, _guard });
-                pipe.add_command(Cmd::hset(&key, field, value), reply);
+                pipe.add_command(Cmd::hset(&key, "data", value), reply);
                 pipe.add_command_no_reply(Cmd::expire(key, expire));
             }
             CancelKeyOp::GetCancelData {
@@ -137,7 +135,7 @@ impl CancelKeyOp {
                 _guard,
             } => {
                 let reply = CancelReplyOp::GetCancelData { resp_tx, _guard };
-                pipe.add_command_with_reply(Cmd::hgetall(key), reply);
+                pipe.add_command_with_reply(Cmd::hget(key, "data"), reply);
             }
             CancelKeyOp::RemoveCancelKey {
                 key,
@@ -160,7 +158,7 @@ pub enum CancelReplyOp {
         _guard: CancelChannelSizeGuard<'static>,
     },
     GetCancelData {
-        resp_tx: oneshot::Sender<anyhow::Result<Vec<(String, String)>>>,
+        resp_tx: oneshot::Sender<anyhow::Result<String>>,
         _guard: CancelChannelSizeGuard<'static>,
     },
     RemoveCancelKey {
@@ -347,7 +345,7 @@ impl CancellationHandler {
             _guard: Metrics::get()
                 .proxy
                 .cancel_channel_size
-                .guard(RedisMsgKind::HGetAll),
+                .guard(RedisMsgKind::HGet),
         };
 
         let Some(tx) = &self.tx else {
@@ -366,32 +364,21 @@ impl CancellationHandler {
             CancelError::InternalError
         })?;
 
-        let cancel_state_str: Option<String> = match result {
-            Ok(mut state) => {
-                if state.len() == 1 {
-                    Some(state.remove(0).1)
-                } else {
-                    tracing::warn!("unexpected number of entries in cancel state: {state:?}");
-                    return Err(CancelError::InternalError);
-                }
-            }
+        let cancel_state_str: String = match result {
+            Ok(s) => s,
             Err(e) => {
                 tracing::warn!("failed to receive cancel state from redis: {e}");
                 return Err(CancelError::InternalError);
             }
         };
 
-        let cancel_state: Option<CancelClosure> = match cancel_state_str {
-            Some(state) => {
-                let cancel_closure: CancelClosure = serde_json::from_str(&state).map_err(|e| {
-                    tracing::warn!("failed to deserialize cancel state: {e}");
-                    CancelError::InternalError
-                })?;
-                Some(cancel_closure)
-            }
-            None => None,
-        };
-        Ok(cancel_state)
+        let cancel_closure: CancelClosure =
+            serde_json::from_str(&cancel_state_str).map_err(|e| {
+                tracing::warn!("failed to deserialize cancel state: {e}");
+                CancelError::InternalError
+            })?;
+
+        Ok(Some(cancel_closure))
     }
     /// Try to cancel a running query for the corresponding connection.
     /// If the cancellation key is not found, it will be published to Redis.
@@ -538,7 +525,6 @@ impl Session {
 
         let op = CancelKeyOp::StoreCancelKey {
             key: self.redis_key.clone(),
-            field: "data".to_string(),
             value: closure_json,
             resp_tx: None,
             _guard: Metrics::get()
