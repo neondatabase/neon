@@ -90,7 +90,7 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
         // and SASL SCRAM messages are no longer than 256 bytes in my testing
         // (a few hashes and random bytes, encoded into base64).
         const MAX_PASSWORD_LENGTH: u32 = 512;
-        self.read_raw_expect(FE_PASSWORD_MESSAGE, MAX_PASSWORD_LENGTH)
+        self.read_raw_expect(FE_PASSWORD_MESSAGE.0, MAX_PASSWORD_LENGTH)
             .await
     }
 }
