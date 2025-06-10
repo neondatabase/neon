@@ -38,7 +38,6 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion, query
     secondary: Endpoint = env.endpoints.new_replica_start(origin=primary, endpoint_id="secondary")
 
     with primary.connect() as primary_conn:
-
         primary_cur = primary_conn.cursor()
 
         # TODO remove? default neon version should be 1.6
@@ -63,15 +62,13 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion, query
     http_client = primary.http_client()
     if query is PromoteMethod.COMPUTE_CTL:
         safekeepers_lsn = http_client.safekeepers_lsn()
-        http_client.offload_lfc()  # /promote depends on secondary being prewarmed
+        http_client.offload_lfc()
     else:
         wait_replica_caughtup(primary, secondary)
 
     with secondary.connect() as secondary_conn:
         secondary_cur = secondary_conn.cursor()
-
         secondary_cur.execute("select count(*) from t")
-
         assert secondary_cur.fetchone() == (100,)
 
         with raises(psycopg2.Error):
@@ -96,7 +93,7 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion, query
         assert "error" not in promote
     else:
         conn = secondary.connect()
-        cur = conn.cursor()  # can't use with: ALTER SYSTEM cannot run inside a transaction block
+        cur = conn.cursor()
         cur.execute(f"alter system set neon.safekeepers='{safekeepers}'")
         cur.execute("select pg_reload_conf()")
         cur.execute("SELECT * FROM pg_promote()")

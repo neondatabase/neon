@@ -50,9 +50,12 @@ impl ComputeNode {
             tokio::spawn(async move {
                 tx.send(match cloned.promote_impl(safekeepers_lsn).await {
                     Ok(_) => PromoteState::Completed,
-                    Err(err) => PromoteState::Failed {
-                        error: err.to_string(),
-                    },
+                    Err(err) => {
+                        tracing::error!(%err, "promoting");
+                        PromoteState::Failed {
+                            error: err.to_string(),
+                        }
+                    }
                 })
             });
             rx
@@ -116,18 +119,23 @@ impl ComputeNode {
             bail!("didn't catch up with primary in {RETRIES} retries");
         }
 
+        // using $1 doesn't work with ALTER SYSTEM SET
+        let safekeepers_sql = &format!(
+            "ALTER SYSTEM SET neon.safekeepers='{}'",
+            safekeepers_lsn.safekeepers
+        );
         client
-            .query_opt(
-                "ALTER SYSTEM SET neon.safekeepers='$1'",
-                &[&safekeepers_lsn.safekeepers],
-            )
+            .query(safekeepers_sql, &[])
             .await
             .context("setting safekeepers")?;
         client
-            .query_opt("SELECT pg_reload_conf()", &[])
+            .query("SELECT pg_reload_conf()", &[])
             .await
             .context("reloading postgres config")?;
 
+        //PG:2025-06-10 17:35:13.040 GMT [1144217] LOG:  received promote request
+        //PG:2025-06-10 17:35:13.041 GMT [1144218] FATAL:  terminating walreceiver process due to administrator command
+        //PG:2025-06-10 17:35:13.041 GMT [1144217] LOG:  invalid record length at 0/156CF08: expected at least 24, got 0
         let row = client
             .query_one("SELECT * FROM pg_promote()", &[])
             .await
