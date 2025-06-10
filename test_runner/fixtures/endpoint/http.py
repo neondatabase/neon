@@ -101,7 +101,10 @@ class EndpointHttpClient(requests.Session):
         return json
 
     def promote(self, safekeepers_lsn: dict[str, Any]):
-        self.post(f"http://localhost:{self.external_port}/promote", data=safekeepers_lsn).raise_for_status()
+        res = self.post(f"http://localhost:{self.external_port}/promote", data=safekeepers_lsn)
+        res.raise_for_status()
+        json: dict[str, str] = res.json()
+        return json
 
     def database_schema(self, database: str):
         res = self.get(

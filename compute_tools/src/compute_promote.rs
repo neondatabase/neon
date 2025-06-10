@@ -150,11 +150,11 @@ impl ComputeNode {
         let row = client
             .query_one(
                 "SHOW transaction_read_only",
-                &[&safekeepers_lsn.safekeepers],
+                &[],
             )
             .await
             .context("getting transaction_read_only")?;
-        if row.get::<usize, bool>(0) {
+        if row.get::<usize, &str>(0) == "true" {
             bail!("replica in read-only mode after reconnection");
         }
 

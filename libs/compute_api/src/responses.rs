@@ -81,7 +81,7 @@ pub enum LfcOffloadState {
     },
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 /// Response of /promote
 pub enum PromoteState {

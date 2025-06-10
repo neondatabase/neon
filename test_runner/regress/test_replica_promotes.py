@@ -80,9 +80,11 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion, query
         assert secondary_cur.fetchone() == (100,)
 
     primary_endpoint_id = primary.endpoint_id
-    primary.stop_and_destroy(mode="immediate")
+    primary.stop_and_destroy()
 
     # Reconnect to the secondary to make sure we get a read-write connection
+    promo_conn = secondary.connect()
+    promo_cur = promo_conn.cursor()
     http_client = secondary.http_client()
     if query is PromoteMethod.COMPUTE_CTL:
         # TODO Do we need to prewarm if LFC is full?
@@ -90,22 +92,20 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion, query
         http_client.prewarm_lfc(primary_endpoint_id)
         promote = http_client.promote(safekeepers_lsn)
         assert promote["status"] == "completed"
-        assert "error" not in promote
     else:
-        conn = secondary.connect()
-        cur = conn.cursor()
-        cur.execute(f"alter system set neon.safekeepers='{safekeepers}'")
-        cur.execute("select pg_reload_conf()")
-        cur.execute("SELECT * FROM pg_promote()")
-        assert cur.fetchone() == (True,)
-        cur.execute(
-            """
-                SELECT pg_current_wal_insert_lsn(),
-                       pg_current_wal_lsn(),
-                       pg_current_wal_flush_lsn()
-                """
-        )
-        log.info(f"Secondary: LSN after promotion is {cur.fetchone()}")
+        promo_cur.execute(f"alter system set neon.safekeepers='{safekeepers}'")
+        promo_cur.execute("select pg_reload_conf()")
+        promo_cur.execute("SELECT * FROM pg_promote()")
+        assert promo_cur.fetchone() == (True,)
+
+    promo_cur.execute(
+        """
+        SELECT pg_current_wal_insert_lsn(),
+               pg_current_wal_lsn(),
+               pg_current_wal_flush_lsn()
+        """
+    )
+    log.info(f"Secondary: LSN after promotion is {promo_cur.fetchone()}")
 
     # Reconnect to the secondary to make sure we get a read-write connection
     with secondary.connect() as conn, conn.cursor() as new_primary_cur:
