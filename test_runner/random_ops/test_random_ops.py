@@ -45,7 +45,7 @@ class NeonEndpoint:
         if self.branch.connect_env:
             self.connect_env = self.branch.connect_env.copy()
             self.connect_env["PGHOST"] = self.host
-        if self.type == 'read_only':
+        if self.type == "read_only":
             self.project.read_only_endpoints_total += 1
 
     def delete(self):
@@ -388,8 +388,8 @@ def do_action(project: NeonProject, action: str) -> bool:
     log.info("Action: %s", action)
     if action == "new_branch":
         log.info("Trying to create a new branch")
-        if project.limis['max_branches'] <= len(project.branches):
-            log.info('Maximum branch limit exceeded')
+        if project.limis["max_branches"] <= len(project.branches):
+            log.info("Maximum branch limit exceeded")
             return False
         parent = project.branches[
             random.choice(list(set(project.branches.keys()) - project.reset_branches))
@@ -409,7 +409,7 @@ def do_action(project: NeonProject, action: str) -> bool:
             log.info("Leaf branches not found, skipping")
             return False
     elif action == "new_ro_endpoint":
-        if project.read_only_endpoints_total >= project.limis['max_read_only_endpoints']:
+        if project.read_only_endpoints_total >= project.limis["max_read_only_endpoints"]:
             log.info("Maximum read only endpoint limit exceeded")
             return False
         ep = random.choice(
@@ -477,6 +477,6 @@ def test_api_random(
         while not do_action(
             project, random.choices([a[0] for a in ACTIONS], weights=[w[1] for w in ACTIONS])[0]
         ):
-            log.info('Retrying...')
+            log.info("Retrying...")
         project.check_all_benchmarks()
     assert True
