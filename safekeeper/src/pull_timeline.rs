@@ -338,14 +338,21 @@ impl WalResidentTimeline {
         // removed further than `backup_lsn`. Since we're holding shared_state
         // lock and setting `wal_removal_on_hold` later, it guarantees that WAL
         // won't be removed until we're done.
+        let timeline_state = shared_state.sk.state();
         let from_lsn = min(
-            shared_state.sk.state().remote_consistent_lsn,
-            shared_state.sk.state().backup_lsn,
+            timeline_state.remote_consistent_lsn,
+            timeline_state.backup_lsn,
         );
         if from_lsn == Lsn::INVALID {
             // this is possible if snapshot is called before handling first
             // elected message
             bail!("snapshot is called on uninitialized timeline");
+        } else {
+            tracing::info!(
+                remote_consistent_lsn=%timeline_state.remote_consistent_lsn,
+                backup_lsn=%timeline_state.backup_lsn,
+                "timeline has had writes"
+            );
         }
         let from_segno = from_lsn.segment_number(wal_seg_size);
         let term = shared_state.sk.state().acceptor_state.term;
@@ -502,6 +509,40 @@ pub async fn handle_request(
     assert!(status.timeline_id == request.timeline_id);
 
     let check_tombstone = !request.ignore_tombstone.unwrap_or_default();
+
+    // Mirrors the code in `WalResidentTimeline::start_snapshot`
+    // Note that we operate on the in-memory status while `start_snapshot` uses
+    // the persisted status. For now, we live with this inconsistency, maybe we
+    // can add some code later on if it bites us (say a param for the status API).
+    let from_lsn = min(status.remote_consistent_lsn, status.backup_lsn);
+
+    if from_lsn == Lsn(0) {
+        // The timeline has had no writes yet, even on the most advanced safeekeeper.
+        // Create it locally, as snapshots of timelines without writes are not supported.
+
+        let ttid = TenantTimelineId {
+            tenant_id: request.tenant_id,
+            timeline_id: request.timeline_id,
+        };
+
+        info!("creating timeline {ttid} as it is empty on most advanced {safekeeper_host}");
+
+        global_timelines
+            .create_maybe_check_tombstone(
+                ttid,
+                status.mconf,
+                status.pg_info,
+                status.timeline_start_lsn,
+                status.timeline_start_lsn,
+                check_tombstone,
+            )
+            .await
+            .map_err(ApiError::InternalServerError)?;
+
+        return Ok(PullTimelineResponse {
+            safekeeper_host: Some(safekeeper_host),
+        });
+    }
 
     match pull_timeline(
         status,

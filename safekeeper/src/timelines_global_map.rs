@@ -261,6 +261,29 @@ impl GlobalTimelines {
         start_lsn: Lsn,
         commit_lsn: Lsn,
     ) -> Result<Arc<Timeline>> {
+        let check_tombstone = true;
+        self.create_maybe_check_tombstone(
+            ttid,
+            mconf,
+            server_info,
+            start_lsn,
+            commit_lsn,
+            check_tombstone,
+        )
+        .await
+    }
+
+    /// Create a new timeline with the given id. If the timeline already exists, returns
+    /// an existing timeline.
+    pub(crate) async fn create_maybe_check_tombstone(
+        &self,
+        ttid: TenantTimelineId,
+        mconf: Configuration,
+        server_info: ServerInfo,
+        start_lsn: Lsn,
+        commit_lsn: Lsn,
+        check_tombstone: bool,
+    ) -> Result<Arc<Timeline>> {
         let (conf, _, _, _) = {
             let state = self.state.lock().unwrap();
             if let Ok(timeline) = state.get(&ttid) {
@@ -268,7 +291,7 @@ impl GlobalTimelines {
                 return Ok(timeline);
             }
 
-            if state.has_tombstone(&ttid) {
+            if check_tombstone && state.has_tombstone(&ttid) {
                 anyhow::bail!("Timeline {ttid} is deleted, refusing to recreate");
             }
 
@@ -284,7 +307,9 @@ impl GlobalTimelines {
         // immediately initialize first WAL segment as well.
         let state = TimelinePersistentState::new(&ttid, mconf, server_info, start_lsn, commit_lsn)?;
         control_file::FileStorage::create_new(&tmp_dir_path, state, conf.no_sync).await?;
-        let timeline = self.load_temp_timeline(ttid, &tmp_dir_path, true).await?;
+        let timeline = self
+            .load_temp_timeline(ttid, &tmp_dir_path, check_tombstone)
+            .await?;
         Ok(timeline)
     }
 
