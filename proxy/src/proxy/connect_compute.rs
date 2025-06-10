@@ -2,13 +2,13 @@ use async_trait::async_trait;
 use tokio::time;
 use tracing::{debug, info, warn};
 
-use crate::auth::backend::ComputeUserInfo;
+use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
 use crate::compute::{self, AuthInfo, COULD_NOT_CONNECT, PostgresConnection};
-use crate::config::{ComputeConfig, RetryConfig};
+use crate::config::{ComputeConfig, ProxyConfig, RetryConfig};
 use crate::context::RequestContext;
 use crate::control_plane::errors::WakeComputeError;
 use crate::control_plane::locks::ApiLocks;
-use crate::control_plane::{self, NodeInfo};
+use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ReportableError;
 use crate::metrics::{
     ConnectOutcome, ConnectionFailureKind, Metrics, RetriesMetricGroup, RetryType,
@@ -185,23 +185,32 @@ where
 }
 
 #[tracing::instrument(skip_all)]
-pub(crate) async fn connect_to_compute_pglb<M: ConnectMechanism, B: WakeComputeBackend>(
+pub(crate) async fn connect_to_compute_pglb<
+    F: AsyncFn(
+        &'static ProxyConfig,
+        &RequestContext,
+        &CachedNodeInfo,
+        &AuthInfo,
+        &ComputeCredentials,
+        &ComputeConfig,
+    ) -> Result<PostgresConnection, compute::ConnectionError>,
+    B: WakeComputeBackend,
+>(
+    config: &'static ProxyConfig,
     ctx: &RequestContext,
-    mechanism: &M,
+    connect_compute_fn: F,
     user_info: &B,
+    auth_info: &AuthInfo,
+    creds: &ComputeCredentials,
     wake_compute_retry_config: RetryConfig,
     compute: &ComputeConfig,
-) -> Result<M::Connection, M::Error>
-where
-    M::ConnectError: CouldRetry + ShouldRetryWakeCompute + std::fmt::Debug,
-    M::Error: From<WakeComputeError>,
-{
+) -> Result<PostgresConnection, compute::ConnectionError> {
     let mut num_retries = 0;
     let node_info =
         wake_compute(&mut num_retries, ctx, user_info, wake_compute_retry_config).await?;
 
     // try once
-    let err = match mechanism.connect_once(ctx, &node_info, compute).await {
+    let err = match connect_compute_fn(config, ctx, &node_info, &auth_info, &creds, compute).await {
         Ok(res) => {
             ctx.success();
             Metrics::get().proxy.retries_metric.observe(
@@ -246,7 +255,7 @@ where
     debug!("wake_compute success. attempting to connect");
     num_retries = 1;
     loop {
-        match mechanism.connect_once(ctx, &node_info, compute).await {
+        match connect_compute_fn(config, ctx, &node_info, &auth_info, &creds, compute).await {
             Ok(res) => {
                 ctx.success();
                 Metrics::get().proxy.retries_metric.observe(

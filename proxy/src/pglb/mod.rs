@@ -12,6 +12,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, warn};
 
+use crate::auth;
 use crate::cancellation::{self, CancellationHandler};
 use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
 use crate::context::RequestContext;
@@ -21,12 +22,11 @@ pub use crate::pglb::copy_bidirectional::ErrorSource;
 use crate::pglb::handshake::{HandshakeData, HandshakeError, handshake};
 use crate::pglb::passthrough::ProxyPassthrough;
 use crate::protocol2::{ConnectHeader, ConnectionInfo, ConnectionInfoExtra, read_proxy_protocol};
-use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute_pglb};
-use crate::proxy::{NeonOptions, prepare_client_connection};
+use crate::proxy::connect_compute::{ConnectMechanism, TcpMechanism};
+use crate::proxy::handle_connect_request;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::Stream;
 use crate::util::run_until_cancelled;
-use crate::{auth, compute};
 
 pub const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 
@@ -193,7 +193,7 @@ impl ClientMode {
         }
     }
 
-    fn hostname<'a, S>(&'a self, s: &'a Stream<S>) -> Option<&'a str> {
+    pub(crate) fn hostname<'a, S>(&'a self, s: &'a Stream<S>) -> Option<&'a str> {
         match self {
             ClientMode::Tcp => s.sni_hostname(),
             ClientMode::Websockets { hostname } => hostname.as_deref(),
@@ -246,7 +246,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     auth_backend: &'static auth::Backend<'static, ()>,
     ctx: &RequestContext,
     cancellation_handler: Arc<CancellationHandler>,
-    stream: S,
+    client: S,
     mode: ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     conn_gauge: NumClientConnectionsGuard<'static>,
@@ -266,12 +266,12 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let record_handshake_error = !ctx.has_private_peer_addr();
     let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
-    let do_handshake = handshake(ctx, stream, mode.handshake_tls(tls), record_handshake_error);
+    let do_handshake = handshake(ctx, client, mode.handshake_tls(tls), record_handshake_error);
 
-    let (mut stream, params) = match tokio::time::timeout(config.handshake_timeout, do_handshake)
+    let (client, params) = match tokio::time::timeout(config.handshake_timeout, do_handshake)
         .await??
     {
-        HandshakeData::Startup(stream, params) => (stream, params),
+        HandshakeData::Startup(client, params) => (client, params),
         HandshakeData::Cancel(cancel_key_data) => {
             // spawn a task to cancel the session, but don't wait for it
             cancellations.spawn({
@@ -300,77 +300,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     ctx.set_db_options(params.clone());
 
-    let hostname = mode.hostname(stream.get_ref());
-
     let common_names = tls.map(|tls| &tls.common_names);
-
-    // Extract credentials which we're going to use for auth.
-    let result = auth_backend
-        .as_ref()
-        .map(|()| auth::ComputeUserInfoMaybeEndpoint::parse(ctx, &params, hostname, common_names))
-        .transpose();
-
-    let user_info = match result {
-        Ok(user_info) => user_info,
-        Err(e) => Err(stream.throw_error(e, Some(ctx)).await)?,
-    };
-
-    let user = user_info.get_user().to_owned();
-    let user_info = match user_info
-        .authenticate(
-            ctx,
-            &mut stream,
-            mode.allow_cleartext(),
-            &config.authentication_config,
-            endpoint_rate_limiter,
-        )
-        .await
-    {
-        Ok(auth_result) => auth_result,
-        Err(e) => {
-            let db = params.get("database");
-            let app = params.get("application_name");
-            let params_span = tracing::info_span!("", ?user, ?db, ?app);
-
-            return Err(stream
-                .throw_error(e, Some(ctx))
-                .instrument(params_span)
-                .await)?;
-        }
-    };
-
-    let (cplane, creds) = match user_info {
-        auth::Backend::ControlPlane(cplane, creds) => (cplane, creds),
-        auth::Backend::Local(_) => unreachable!("local proxy does not run tcp proxy service"),
-    };
-    let params_compat = creds.info.options.get(NeonOptions::PARAMS_COMPAT).is_some();
-    let mut auth_info = compute::AuthInfo::with_auth_keys(creds.keys);
-    auth_info.set_startup_params(&params, params_compat);
-
-    let res = connect_to_compute_pglb(
-        ctx,
-        &TcpMechanism {
-            user_info: creds.info.clone(),
-            auth: auth_info,
-            locks: &config.connect_compute_locks,
-        },
-        &auth::Backend::ControlPlane(cplane, creds.info),
-        config.wake_compute_retry_config,
-        &config.connect_to_compute,
-    )
-    .await;
-
-    let node = match res {
-        Ok(node) => node,
-        Err(e) => Err(stream.throw_error(e, Some(ctx)).await)?,
-    };
-
-    let cancellation_handler_clone = Arc::clone(&cancellation_handler);
-    let session = cancellation_handler_clone.get_key();
-
-    session.write_cancel_key(node.cancel_closure.clone())?;
-    prepare_client_connection(&node, *session.key(), &mut stream);
-    let stream = stream.flush_and_into_inner().await?;
 
     let private_link_id = match ctx.extra() {
         Some(ConnectionInfoExtra::Aws { vpce_id }) => Some(vpce_id.clone()),
@@ -378,8 +308,30 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         None => None,
     };
 
+    let (node, client, session) = handle_connect_request(
+        config,
+        auth_backend,
+        ctx,
+        cancellation_handler,
+        client,
+        &mode,
+        endpoint_rate_limiter,
+        &params,
+        common_names,
+        async |config, ctx, node_info, auth_info, creds, compute_config| {
+            TcpMechanism {
+                auth: auth_info.clone(),
+                locks: &config.connect_compute_locks,
+                user_info: creds.info.clone(),
+            }
+            .connect_once(ctx, node_info, compute_config)
+            .await
+        },
+    )
+    .await?;
+
     Ok(Some(ProxyPassthrough {
-        client: stream,
+        client,
         aux: node.aux.clone(),
         private_link_id,
         compute: node,
