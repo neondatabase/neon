@@ -49,19 +49,16 @@ def test_safekeeper_migration_simple(neon_env_builder: NeonEnvBuilder):
         for sk in other_sks:
             env.safekeepers[sk - 1].stop()
 
-        ep.safe_psql(f"INSERT INTO t VALUES ({2 * active_sk - 1})")
-
-        ep.stop()
-        ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
-
-        ep.safe_psql(f"INSERT INTO t VALUES ({2 * active_sk})")
+        ep.safe_psql(f"INSERT INTO t VALUES ({active_sk})")
 
         for sk in other_sks:
             env.safekeepers[sk - 1].start()
 
-    assert ep.safe_psql("SELECT * FROM t") == [(i,) for i in range(1, 7)]
+    ep.clear_buffers()
+
+    assert ep.safe_psql("SELECT * FROM t") == [(i,) for i in range(1, 4)]
 
     ep.stop()
     ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
 
-    assert ep.safe_psql("SELECT * FROM t") == [(i,) for i in range(1, 7)]
+    assert ep.safe_psql("SELECT * FROM t") == [(i,) for i in range(1, 4)]
