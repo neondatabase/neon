@@ -25,7 +25,7 @@ use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
 use crate::control_plane::{self, CachedNodeInfo, NodeInfo, NodeInfoCache};
 use crate::error::ErrorKind;
-use crate::pglb::connect_compute::ConnectMechanism;
+use crate::proxy::connect_compute::ConnectMechanism;
 use crate::tls::client_config::compute_client_config_with_certs;
 use crate::tls::server_config::CertResolver;
 use crate::types::{BranchId, EndpointId, ProjectId};

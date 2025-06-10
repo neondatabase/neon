@@ -8,19 +8,19 @@ use crate::config::{ComputeConfig, RetryConfig};
 use crate::context::RequestContext;
 use crate::control_plane::errors::WakeComputeError;
 use crate::control_plane::locks::ApiLocks;
-use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
+use crate::control_plane::{self, NodeInfo};
 use crate::error::ReportableError;
 use crate::metrics::{
     ConnectOutcome, ConnectionFailureKind, Metrics, RetriesMetricGroup, RetryType,
 };
 use crate::proxy::retry::{CouldRetry, ShouldRetryWakeCompute, retry_after, should_retry};
-use crate::proxy::wake_compute::wake_compute;
+use crate::proxy::wake_compute::{WakeComputeBackend, wake_compute};
 use crate::types::Host;
 
 /// If we couldn't connect, a cached connection info might be to blame
 /// (e.g. the compute node's address might've changed at the wrong time).
 /// Invalidate the cache entry (if any) to prevent subsequent errors.
-#[tracing::instrument(name = "invalidate_cache", skip_all)]
+#[tracing::instrument(skip_all)]
 pub(crate) fn invalidate_cache(node_info: control_plane::CachedNodeInfo) -> NodeInfo {
     let is_cached = node_info.cached();
     if is_cached {
@@ -47,14 +47,6 @@ pub(crate) trait ConnectMechanism {
         node_info: &control_plane::CachedNodeInfo,
         config: &ComputeConfig,
     ) -> Result<Self::Connection, Self::ConnectError>;
-}
-
-#[async_trait]
-pub(crate) trait WakeComputeBackend {
-    async fn wake_compute(
-        &self,
-        ctx: &RequestContext,
-    ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError>;
 }
 
 pub(crate) struct TcpMechanism {

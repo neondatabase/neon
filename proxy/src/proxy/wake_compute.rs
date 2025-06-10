@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use tracing::{error, info};
 
 use crate::config::RetryConfig;
@@ -8,7 +9,6 @@ use crate::error::ReportableError;
 use crate::metrics::{
     ConnectOutcome, ConnectionFailuresBreakdownGroup, Metrics, RetriesMetricGroup, RetryType,
 };
-use crate::pglb::connect_compute::WakeComputeBackend;
 use crate::proxy::retry::{retry_after, should_retry};
 
 // Use macro to retain original callsite.
@@ -21,6 +21,11 @@ macro_rules! log_wake_compute_error {
             _ => error!(error = ?$error, num_retries = $num_retries, retriable = $retriable, "couldn't wake compute node"),
         }
     };
+}
+
+#[async_trait]
+pub(crate) trait WakeComputeBackend {
+    async fn wake_compute(&self, ctx: &RequestContext) -> Result<CachedNodeInfo, WakeComputeError>;
 }
 
 pub(crate) async fn wake_compute<B: WakeComputeBackend>(
