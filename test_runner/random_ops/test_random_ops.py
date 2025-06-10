@@ -413,7 +413,7 @@ def do_action(project: NeonProject, action: str) -> bool:
             log.info("Leaf branches not found, skipping")
             return False
     elif action == "new_ro_endpoint":
-        if 0 <= project.limis["max_read_only_endpoints"] <= project.read_only_endpoints_total:
+        if 0 <= project.limits["max_read_only_endpoints"] <= project.read_only_endpoints_total:
             log.info(
                 "Maximum read only endpoint limit exceeded (%s of %s)",
                 project.read_only_endpoints_total,
