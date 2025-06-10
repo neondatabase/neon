@@ -2233,14 +2233,22 @@ pub fn forward_termination_signal() {
         "Connecting to pgbouncer with connection string: {}",
         pgbouncer_connstr
     );
-    if let Ok(mut client) = postgres::Config::from_str(&pgbouncer_connstr)
-        .expect("Failed to parse pgbouncer connection string")
-        .connect(NoTls)
-    {
-        info!("Sending SHUTDOWN WAIT_FOR_SERVERS command to pgbouncer");
-        if let Err(e) = client.simple_query("SHUTDOWN WAIT_FOR_SERVERS") {
-            error!("Failed to send SHUTDOWN command to pgbouncer: {}", e);
+
+    match postgres::Config::from_str(&pgbouncer_connstr) {
+        Ok(config) => {
+            info!("Successfully parsed pgbouncer connection string");
+            match config.connect(NoTls) {
+                Ok(mut client) => {
+                    info!("Successfully connected to pgbouncer");
+                    info!("Sending SHUTDOWN WAIT_FOR_SERVERS command to pgbouncer");
+                    if let Err(e) = client.simple_query("SHUTDOWN WAIT_FOR_SERVERS") {
+                        error!("Failed to send SHUTDOWN command to pgbouncer: {}", e);
+                    }
+                }
+                Err(e) => error!("Failed to connect to pgbouncer: {}", e),
+            }
         }
+        Err(e) => error!("Failed to parse pgbouncer connection string: {}", e),
     }
 
     // Terminate pgbouncer
