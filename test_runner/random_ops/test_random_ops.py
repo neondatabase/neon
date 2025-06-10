@@ -389,7 +389,7 @@ def do_action(project: NeonProject, action: str) -> bool:
     if action == "new_branch":
         log.info("Trying to create a new branch")
         if project.limis["max_branches"] <= len(project.branches):
-            log.info("Maximum branch limit exceeded")
+            log.info("Maximum branch limit exceeded (%s vs %s)", len(project.branches), project.limis['max_branches'])
             return False
         parent = project.branches[
             random.choice(list(set(project.branches.keys()) - project.reset_branches))
