@@ -2204,7 +2204,7 @@ LIMIT 100",
     }
 }
 
-pub fn forward_termination_signal() {
+pub async fn forward_termination_signal() {
     let ss_pid = SYNC_SAFEKEEPERS_PID.load(Ordering::SeqCst);
     if ss_pid != 0 {
         let ss_pid = nix::unistd::Pid::from_raw(ss_pid as i32);
@@ -2234,24 +2234,28 @@ pub fn forward_termination_signal() {
         pgbouncer_connstr
     );
 
-    match postgres::Config::from_str(&pgbouncer_connstr) {
-        Ok(config) => {
-            info!("Successfully parsed pgbouncer connection string");
-            match config.connect(NoTls) {
-                Ok(mut client) => {
-                    info!("Successfully connected to pgbouncer");
-                    info!("Sending SHUTDOWN WAIT_FOR_SERVERS command to pgbouncer");
-                    if let Err(e) = client.simple_query("SHUTDOWN WAIT_FOR_SERVERS") {
-                        error!("Failed to send SHUTDOWN command to pgbouncer: {}", e);
-                    }
+    let client = match tokio_postgres::connect(&pgbouncer_connstr, NoTls).await {
+        Ok((client, connection)) => {
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    eprintln!("connection error: {}", e);
                 }
-                Err(e) => error!("Failed to connect to pgbouncer: {}", e),
-            }
+            });
+            Some(client)
         }
-        Err(e) => error!("Failed to parse pgbouncer connection string: {}", e),
+        Err(e) => {
+            error!("Failed to connect to pgbouncer: pgbouncer_connstr {}", e);
+            None
+        }
+    };
+
+    if let Some(client) = client {
+        if let Err(e) = client.simple_query("SHUTDOWN WAIT_FOR_SERVERS").await {
+            error!("Failed to send SHUTDOWN command to pgbouncer: {}", e);
+        }
     }
 
-    // Terminate pgbouncer
+    // Terminate pgbouncer with SIGKILL as fallback
     match pid_file::read("/etc/pgbouncer/pid".into()) {
         Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
             info!("sending SIGKILL to pgbouncer process pid: {}", pid);

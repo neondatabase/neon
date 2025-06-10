@@ -26,7 +26,7 @@ pub(in crate::http) async fn terminate(State(compute): State<Arc<ComputeNode>>) 
         drop(state);
     }
 
-    forward_termination_signal();
+    forward_termination_signal().await;
     info!("sent signal and notified waiters");
 
     // Spawn a blocking thread to wait for compute to become Terminated.
