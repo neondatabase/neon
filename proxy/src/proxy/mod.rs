@@ -30,6 +30,7 @@ use crate::protocol2::{ConnectHeader, ConnectionInfo, ConnectionInfoExtra, read_
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::{PqStream, Stream};
 use crate::types::EndpointCacheKey;
+use crate::util::run_until_cancelled;
 use crate::{auth, compute};
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
@@ -45,21 +46,6 @@ impl ReportableError for TlsRequired {
 }
 
 impl UserFacingError for TlsRequired {}
-
-pub async fn run_until_cancelled<F: std::future::Future>(
-    f: F,
-    cancellation_token: &CancellationToken,
-) -> Option<F::Output> {
-    match futures::future::select(
-        std::pin::pin!(f),
-        std::pin::pin!(cancellation_token.cancelled()),
-    )
-    .await
-    {
-        futures::future::Either::Left((f, _)) => Some(f),
-        futures::future::Either::Right(((), _)) => None,
-    }
-}
 
 pub async fn task_main(
     config: &'static ProxyConfig,
