@@ -104,8 +104,8 @@ impl ComputeNode {
                 .query_one("SELECT pg_last_wal_replay_lsn()", &[])
                 .await
                 .context("getting last replay lsn")?;
-            last_wal_replay_lsn =
-                Lsn::from_hex(row.get::<usize, &str>(0)).context("parsing last replay lsn")?;
+            let lsn: u64 = row.get::<usize, postgres_types::PgLsn>(0).into();
+            last_wal_replay_lsn = lsn.into();
             if last_wal_replay_lsn >= primary_lsn {
                 break;
             }
@@ -116,15 +116,22 @@ impl ComputeNode {
             bail!("didn't catch up with primary in {RETRIES} retries");
         }
 
-        let row = client
-            .query_one(
-                "ALTER SYSTEM SET neon.safekeepers='$1';\
-                SELECT pg_reload_conf();\
-                SELECT * FROM pg_promote()",
+        client
+            .query_opt(
+                "ALTER SYSTEM SET neon.safekeepers='$1'",
                 &[&safekeepers_lsn.safekeepers],
             )
             .await
             .context("setting safekeepers")?;
+        client
+            .query_opt("SELECT pg_reload_conf()", &[])
+            .await
+            .context("reloading postgres config")?;
+
+        let row = client
+            .query_one("SELECT * FROM pg_promote()", &[])
+            .await
+            .context("pg_promote")?;
         if !row.get::<usize, bool>(0) {
             bail!("pg_promote() returned false");
         }

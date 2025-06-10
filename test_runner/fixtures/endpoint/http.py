@@ -3,7 +3,6 @@ from __future__ import annotations
 import urllib.parse
 from enum import StrEnum
 from typing import TYPE_CHECKING, final, Any
-from fixtures.common_types import Lsn
 import requests
 from requests.adapters import HTTPAdapter
 from requests.auth import AuthBase
@@ -69,8 +68,10 @@ class EndpointHttpClient(requests.Session):
         json: dict[str, str] = res.json()
         return json
 
-    def prewarm_lfc(self):
-        self.post(f"http://localhost:{self.external_port}/lfc/prewarm").raise_for_status()
+    def prewarm_lfc(self, from_endpoint_id: str | None = None):
+        url: str = f"http://localhost:{self.external_port}/lfc/prewarm"
+        params = {"from_endpoint": from_endpoint_id} if from_endpoint_id else dict()
+        self.post(url, params=params).raise_for_status()
 
         def prewarmed():
             json = self.prewarm_lfc_status()

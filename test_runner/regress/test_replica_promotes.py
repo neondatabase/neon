@@ -40,6 +40,11 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion, query
     with primary.connect() as primary_conn:
 
         primary_cur = primary_conn.cursor()
+
+        # TODO remove? default neon version should be 1.6
+        if query is PromoteMethod.COMPUTE_CTL:
+            primary_cur.execute("create extension neon version '1.6'")
+
         primary_cur.execute(
             "create table t(pk bigint GENERATED ALWAYS AS IDENTITY, payload integer)"
         )
@@ -77,12 +82,15 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion, query
         secondary_cur.execute("select count(*) from t")
         assert secondary_cur.fetchone() == (100,)
 
+    primary_endpoint_id = primary.endpoint_id
     primary.stop_and_destroy(mode="immediate")
 
     # Reconnect to the secondary to make sure we get a read-write connection
     http_client = secondary.http_client()
     if query is PromoteMethod.COMPUTE_CTL:
-        http_client.prewarm_lfc()  # TODO(myrrc): use prewarm from primary endpoint
+        # TODO Do we need to prewarm if LFC is full?
+        # PG:2025-06-10 15:54:36.203 GMT [1079329] LOG:  LFC: skip prewarm because LFC is already filled
+        http_client.prewarm_lfc(primary_endpoint_id)
         promote = http_client.promote(safekeepers_lsn)
         assert promote["status"] == "completed"
         assert "error" not in promote
