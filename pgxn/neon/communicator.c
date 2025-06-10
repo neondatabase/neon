@@ -1092,13 +1092,15 @@ communicator_prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
 		   MyPState->ring_last <= ring_index);
 }
 
-/* internal version. Returns the ring index */
+/* Internal version. Returns the ring index of the last block (result of this function is used only
+*  when nblocks==1)
+*/
 static uint64
 prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
 						  BlockNumber nblocks, const bits8 *mask,
 						  bool is_prefetch)
 {
-	uint64		ring_index;
+	uint64		last_ring_index;
 	PrefetchRequest hashkey;
 #ifdef USE_ASSERT_CHECKING
 	bool		any_hits = false;
@@ -1122,7 +1124,7 @@ Retry:
 		MyPState->ring_unused - MyPState->ring_receive;
 	MyNeonCounters->getpage_prefetches_buffered =
 		MyPState->n_responses_buffered;
-	ring_index = UINT64_MAX;
+	last_ring_index = UINT64_MAX;
 
 	for (int i = 0; i < nblocks; i++)
 	{
@@ -1151,12 +1153,12 @@ Retry:
 		if (entry != NULL)
 		{
 			slot = entry->slot;
-			ring_index = slot->my_ring_index;
-			Assert(slot == GetPrfSlot(ring_index));
+			last_ring_index = slot->my_ring_index;
+			Assert(slot == GetPrfSlot(last_ring_index));
 
 			Assert(slot->status != PRFS_UNUSED);
-			Assert(MyPState->ring_last <= ring_index &&
-				   ring_index < MyPState->ring_unused);
+			Assert(MyPState->ring_last <= last_ring_index &&
+				   last_ring_index < MyPState->ring_unused);
 			Assert(BufferTagsEqual(&slot->buftag, &hashkey.buftag));
 
 			/*
@@ -1168,9 +1170,9 @@ Retry:
 				if (!neon_prefetch_response_usable(lsns, slot))
 				{
 					/* Wait for the old request to finish and discard it */
-					if (!prefetch_wait_for(ring_index))
+					if (!prefetch_wait_for(last_ring_index))
 						goto Retry;
-					prefetch_set_unused(ring_index);
+					prefetch_set_unused(last_ring_index);
 					entry = NULL;
 					slot = NULL;
 					pgBufferUsage.prefetch.expired += 1;
@@ -1187,7 +1189,7 @@ Retry:
 				 */
 				if (slot->status == PRFS_TAG_REMAINS)
 				{
-					prefetch_set_unused(ring_index);
+					prefetch_set_unused(last_ring_index);
 					entry = NULL;
 					slot = NULL;
 				}
@@ -1281,12 +1283,12 @@ Retry:
 		 * The next buffer pointed to by `ring_unused` is now definitely empty, so
 		 * we can insert the new request to it.
 		 */
-		ring_index = MyPState->ring_unused;
+		last_ring_index = MyPState->ring_unused;
 
-		Assert(MyPState->ring_last <= ring_index &&
-			   ring_index <= MyPState->ring_unused);
+		Assert(MyPState->ring_last <= last_ring_index &&
+			   last_ring_index <= MyPState->ring_unused);
 
-		slot = GetPrfSlotNoCheck(ring_index);
+		slot = GetPrfSlotNoCheck(last_ring_index);
 
 		Assert(slot->status == PRFS_UNUSED);
 
@@ -1296,7 +1298,7 @@ Retry:
 		 */
 		slot->buftag = hashkey.buftag;
 		slot->shard_no = get_shard_number(&tag);
-		slot->my_ring_index = ring_index;
+		slot->my_ring_index = last_ring_index;
 		slot->flags = 0;
 
 		if (is_prefetch)
@@ -1311,12 +1313,12 @@ Retry:
 		MyPState->ring_unused - MyPState->ring_receive;
 
 	Assert(any_hits);
-	Assert(ring_index != UINT64_MAX);
+	Assert(last_ring_index != UINT64_MAX);
 
-	Assert(GetPrfSlot(ring_index)->status == PRFS_REQUESTED ||
-		   GetPrfSlot(ring_index)->status == PRFS_RECEIVED);
-	Assert(MyPState->ring_last <= ring_index &&
-		   ring_index < MyPState->ring_unused);
+	Assert(GetPrfSlot(last_ring_index)->status == PRFS_REQUESTED ||
+		   GetPrfSlot(last_ring_index)->status == PRFS_RECEIVED);
+	Assert(MyPState->ring_last <= last_ring_index &&
+		   last_ring_index < MyPState->ring_unused);
 
 	if (flush_every_n_requests > 0 &&
 		MyPState->ring_unused - MyPState->ring_flush >= flush_every_n_requests)
@@ -1332,7 +1334,7 @@ Retry:
 		MyPState->ring_flush = MyPState->ring_unused;
 	}
 
-	return ring_index;
+	return last_ring_index;
 }
 
 static bool
