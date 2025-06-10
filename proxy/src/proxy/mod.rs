@@ -1,8 +1,10 @@
 #[cfg(test)]
 mod tests;
 
+pub(crate) mod connect_compute;
 pub(crate) mod retry;
 pub(crate) mod wake_compute;
+
 use std::sync::Arc;
 
 use futures::FutureExt;
@@ -21,12 +23,12 @@ use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
 use crate::context::RequestContext;
 use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
-use crate::pglb::connect_compute::{TcpMechanism, connect_to_compute};
 pub use crate::pglb::copy_bidirectional::{ErrorSource, copy_bidirectional_client_compute};
 use crate::pglb::handshake::{HandshakeData, HandshakeError, handshake};
 use crate::pglb::passthrough::ProxyPassthrough;
 use crate::pqproto::{BeMessage, CancelKeyData, StartupMessageParams};
 use crate::protocol2::{ConnectHeader, ConnectionInfo, ConnectionInfoExtra, read_proxy_protocol};
+use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::{PqStream, Stream};
 use crate::types::EndpointCacheKey;

@@ -11,10 +11,10 @@ use crate::config::{ProxyConfig, ProxyProtocolV2};
 use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
-use crate::pglb::connect_compute::{TcpMechanism, connect_to_compute};
 use crate::pglb::handshake::{HandshakeData, handshake};
 use crate::pglb::passthrough::ProxyPassthrough;
 use crate::protocol2::{ConnectHeader, ConnectionInfo, read_proxy_protocol};
+use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
 use crate::proxy::{ClientRequestError, ErrorSource, prepare_client_connection};
 use crate::util::run_until_cancelled;
 
