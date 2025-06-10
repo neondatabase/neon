@@ -21,7 +21,7 @@ pub use crate::pglb::copy_bidirectional::ErrorSource;
 use crate::pglb::handshake::{HandshakeData, HandshakeError, handshake};
 use crate::pglb::passthrough::ProxyPassthrough;
 use crate::protocol2::{ConnectHeader, ConnectionInfo, ConnectionInfoExtra, read_proxy_protocol};
-use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
+use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute_pglb};
 use crate::proxy::{NeonOptions, prepare_client_connection};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::Stream;
@@ -347,7 +347,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let mut auth_info = compute::AuthInfo::with_auth_keys(creds.keys);
     auth_info.set_startup_params(&params, params_compat);
 
-    let res = connect_to_compute(
+    let res = connect_to_compute_pglb(
         ctx,
         &TcpMechanism {
             user_info: creds.info.clone(),
