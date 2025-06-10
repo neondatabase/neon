@@ -388,7 +388,7 @@ def do_action(project: NeonProject, action: str) -> bool:
     log.info("Action: %s", action)
     if action == "new_branch":
         log.info("Trying to create a new branch")
-        if 0 <= project.limis["max_branches"] <= len(project.branches):
+        if 0 <= project.limits["max_branches"] <= len(project.branches):
             log.info(
                 "Maximum branch limit exceeded (%s of %s)",
                 len(project.branches),
