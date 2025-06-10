@@ -265,7 +265,8 @@ impl ConnectInfo {
     }
 }
 
-type RustlsStream = <ComputeConfig as MakeTlsConnect<tokio::net::TcpStream>>::Stream;
+pub type RustlsStream = <ComputeConfig as MakeTlsConnect<tokio::net::TcpStream>>::Stream;
+pub type MaybeRustlsStream = MaybeTlsStream<tokio::net::TcpStream, RustlsStream>;
 
 pub(crate) struct PostgresConnection {
     /// Socket connected to a compute node.
@@ -279,7 +280,7 @@ pub(crate) struct PostgresConnection {
     /// Notices received from compute after authenticating
     pub(crate) delayed_notice: Vec<NoticeResponseBody>,
 
-    _guage: NumDbConnectionsGuard<'static>,
+    pub(crate) guage: NumDbConnectionsGuard<'static>,
 }
 
 impl ConnectInfo {
@@ -342,7 +343,7 @@ impl ConnectInfo {
             delayed_notice,
             cancel_closure,
             aux,
-            _guage: Metrics::get().proxy.db_connections.guard(ctx.protocol()),
+            guage: Metrics::get().proxy.db_connections.guard(ctx.protocol()),
         };
 
         Ok(connection)
