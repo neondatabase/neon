@@ -24,7 +24,6 @@ use crate::pqproto::CancelKeyData;
 use crate::rate_limiter::LeakyBucketRateLimiter;
 use crate::redis::keys::KeyPrefix;
 use crate::redis::kv_ops::RedisKVClient;
-use crate::tls::postgres_rustls::MakeRustlsConnect;
 
 type IpSubnetKey = IpNet;
 
@@ -497,10 +496,8 @@ impl CancelClosure {
     ) -> Result<(), CancelError> {
         let socket = TcpStream::connect(self.socket_addr).await?;
 
-        let mut mk_tls =
-            crate::tls::postgres_rustls::MakeRustlsConnect::new(compute_config.tls.clone());
-        let tls = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>::make_tls_connect(
-            &mut mk_tls,
+        let tls = <_ as MakeTlsConnect<tokio::net::TcpStream>>::make_tls_connect(
+            compute_config,
             &self.hostname,
         )
         .map_err(|e| CancelError::IO(std::io::Error::other(e.to_string())))?;

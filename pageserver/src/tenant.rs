@@ -89,7 +89,8 @@ use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::{
     BROKEN_TENANTS_SET, CIRCUIT_BREAKERS_BROKEN, CIRCUIT_BREAKERS_UNBROKEN, CONCURRENT_INITDBS,
     INITDB_RUN_TIME, INITDB_SEMAPHORE_ACQUISITION_TIME, TENANT, TENANT_OFFLOADED_TIMELINES,
-    TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC, remove_tenant_metrics,
+    TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC, TIMELINE_STATE_METRIC,
+    remove_tenant_metrics,
 };
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::LocationMode;
@@ -544,6 +545,28 @@ pub struct OffloadedTimeline {
 
     /// Part of the `OffloadedTimeline` object's lifecycle: this needs to be set before we drop it
     pub deleted_from_ancestor: AtomicBool,
+
+    _metrics_guard: OffloadedTimelineMetricsGuard,
+}
+
+/// Increases the offloaded timeline count metric when created, and decreases when dropped.
+struct OffloadedTimelineMetricsGuard;
+
+impl OffloadedTimelineMetricsGuard {
+    fn new() -> Self {
+        TIMELINE_STATE_METRIC
+            .with_label_values(&["offloaded"])
+            .inc();
+        Self
+    }
+}
+
+impl Drop for OffloadedTimelineMetricsGuard {
+    fn drop(&mut self) {
+        TIMELINE_STATE_METRIC
+            .with_label_values(&["offloaded"])
+            .dec();
+    }
 }
 
 impl OffloadedTimeline {
@@ -576,6 +599,8 @@ impl OffloadedTimeline {
 
             delete_progress: timeline.delete_progress.clone(),
             deleted_from_ancestor: AtomicBool::new(false),
+
+            _metrics_guard: OffloadedTimelineMetricsGuard::new(),
         })
     }
     fn from_manifest(tenant_shard_id: TenantShardId, manifest: &OffloadedTimelineManifest) -> Self {
@@ -595,6 +620,7 @@ impl OffloadedTimeline {
             archived_at,
             delete_progress: TimelineDeleteProgress::default(),
             deleted_from_ancestor: AtomicBool::new(false),
+            _metrics_guard: OffloadedTimelineMetricsGuard::new(),
         }
     }
     fn manifest(&self) -> OffloadedTimelineManifest {
@@ -7197,7 +7223,7 @@ mod tests {
             let end = desc
                 .key_range
                 .start
-                .add(Timeline::MAX_GET_VECTORED_KEYS.try_into().unwrap());
+                .add(tenant.conf.max_get_vectored_keys.get() as u32);
             reads.push(KeySpace {
                 ranges: vec![start..end],
             });
@@ -11260,11 +11286,11 @@ mod tests {
                 let mut keyspaces_at_lsn: HashMap<Lsn, KeySpaceRandomAccum> = HashMap::default();
                 let mut used_keys: HashSet<Key> = HashSet::default();
 
-                while used_keys.len() < Timeline::MAX_GET_VECTORED_KEYS as usize {
+                while used_keys.len() < tenant.conf.max_get_vectored_keys.get() {
                     let selected_lsn = interesting_lsns.choose(&mut random).expect("not empty");
                     let mut selected_key = start_key.add(random.gen_range(0..KEY_DIMENSION_SIZE));
 
-                    while used_keys.len() < Timeline::MAX_GET_VECTORED_KEYS as usize {
+                    while used_keys.len() < tenant.conf.max_get_vectored_keys.get() {
                         if used_keys.contains(&selected_key)
                             || selected_key >= start_key.add(KEY_DIMENSION_SIZE)
                         {

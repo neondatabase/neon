@@ -33,6 +33,7 @@ diesel::table! {
         listen_pg_port -> Int4,
         availability_zone_id -> Varchar,
         listen_https_port -> Nullable<Int4>,
+        lifecycle -> Varchar,
     }
 }
 

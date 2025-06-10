@@ -439,6 +439,7 @@ pub fn empty_shmem() -> crate::bindings::WalproposerShmemState {
         currentClusterSize: crate::bindings::pg_atomic_uint64 { value: 0 },
         shard_ps_feedback: [empty_feedback; 128],
         num_shards: 0,
+        replica_promote: false,
         min_ps_feedback: empty_feedback,
     }
 }

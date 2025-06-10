@@ -20,7 +20,6 @@ use postgres_backend::AuthType;
 use remote_storage::RemoteStorageConfig;
 use serde_with::serde_as;
 use utils::logging::LogFormat;
-use utils::postgres_client::PostgresClientProtocol;
 
 use crate::models::{ImageCompressionAlgorithm, LsnLease};
 
@@ -181,6 +180,7 @@ pub struct ConfigToml {
     pub virtual_file_io_engine: Option<crate::models::virtual_file::IoEngineKind>,
     pub ingest_batch_size: u64,
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
+    pub max_get_vectored_keys: MaxGetVectoredKeys,
     pub image_compression: ImageCompressionAlgorithm,
     pub timeline_offloading: bool,
     pub ephemeral_bytes_per_memory_kb: usize,
@@ -188,7 +188,6 @@ pub struct ConfigToml {
     pub virtual_file_io_mode: Option<crate::models::virtual_file::IoMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_sync: Option<bool>,
-    pub wal_receiver_protocol: PostgresClientProtocol,
     pub page_service_pipelining: PageServicePipeliningConfig,
     pub get_vectored_concurrent_io: GetVectoredConcurrentIo,
     pub enable_read_path_debugging: Option<bool>,
@@ -229,7 +228,7 @@ pub enum PageServicePipeliningConfig {
 }
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PageServicePipeliningConfigPipelined {
-    /// Causes runtime errors if larger than max get_vectored batch size.
+    /// Failed config parsing and validation if larger than `max_get_vectored_keys`.
     pub max_batch_size: NonZeroUsize,
     pub execution: PageServiceProtocolPipelinedExecutionStrategy,
     // The default below is such that new versions of the software can start
@@ -329,6 +328,8 @@ pub struct TimelineImportConfig {
     pub import_job_concurrency: NonZeroUsize,
     pub import_job_soft_size_limit: NonZeroUsize,
     pub import_job_checkpoint_threshold: NonZeroUsize,
+    /// Max size of the remote storage partial read done by any job
+    pub import_job_max_byte_range_size: NonZeroUsize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -402,6 +403,16 @@ impl Default for EvictionOrder {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct MaxVectoredReadBytes(pub NonZeroUsize);
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct MaxGetVectoredKeys(NonZeroUsize);
+
+impl MaxGetVectoredKeys {
+    pub fn get(&self) -> usize {
+        self.0.get()
+    }
+}
 
 /// Tenant-level configuration values, used for various purposes.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -514,8 +525,6 @@ pub struct TenantConfigToml {
     /// (either this flag or the pageserver-global one need to be set)
     pub timeline_offloading: bool,
 
-    pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
-
     /// Enable rel_size_v2 for this tenant. Once enabled, the tenant will persist this information into
     /// `index_part.json`, and it cannot be reversed.
     pub rel_size_v2_enabled: bool,
@@ -587,15 +596,14 @@ pub mod defaults {
     /// That is, slightly above 128 kB.
     pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 130 * 1024; // 130 KiB
 
+    pub const DEFAULT_MAX_GET_VECTORED_KEYS: usize = 32;
+
     pub const DEFAULT_IMAGE_COMPRESSION: ImageCompressionAlgorithm =
         ImageCompressionAlgorithm::Zstd { level: Some(1) };
 
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
 
     pub const DEFAULT_IO_BUFFER_ALIGNMENT: usize = 512;
-
-    pub const DEFAULT_WAL_RECEIVER_PROTOCOL: utils::postgres_client::PostgresClientProtocol =
-        utils::postgres_client::PostgresClientProtocol::Vanilla;
 
     pub const DEFAULT_SSL_KEY_FILE: &str = "server.key";
     pub const DEFAULT_SSL_CERT_FILE: &str = "server.crt";
@@ -685,6 +693,9 @@ impl Default for ConfigToml {
             max_vectored_read_bytes: (MaxVectoredReadBytes(
                 NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
             )),
+            max_get_vectored_keys: (MaxGetVectoredKeys(
+                NonZeroUsize::new(DEFAULT_MAX_GET_VECTORED_KEYS).unwrap(),
+            )),
             image_compression: (DEFAULT_IMAGE_COMPRESSION),
             timeline_offloading: true,
             ephemeral_bytes_per_memory_kb: (DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
@@ -692,7 +703,6 @@ impl Default for ConfigToml {
             virtual_file_io_mode: None,
             tenant_config: TenantConfigToml::default(),
             no_sync: None,
-            wal_receiver_protocol: DEFAULT_WAL_RECEIVER_PROTOCOL,
             page_service_pipelining: PageServicePipeliningConfig::Pipelined(
                 PageServicePipeliningConfigPipelined {
                     max_batch_size: NonZeroUsize::new(32).unwrap(),
@@ -716,6 +726,7 @@ impl Default for ConfigToml {
                 import_job_concurrency: NonZeroUsize::new(32).unwrap(),
                 import_job_soft_size_limit: NonZeroUsize::new(256 * 1024 * 1024).unwrap(),
                 import_job_checkpoint_threshold: NonZeroUsize::new(32).unwrap(),
+                import_job_max_byte_range_size: NonZeroUsize::new(4 * 1024 * 1024).unwrap(),
             },
             basebackup_cache_config: None,
             posthog_config: None,
@@ -836,7 +847,6 @@ impl Default for TenantConfigToml {
             lsn_lease_length: LsnLease::DEFAULT_LENGTH,
             lsn_lease_length_for_ts: LsnLease::DEFAULT_LENGTH_FOR_TS,
             timeline_offloading: true,
-            wal_receiver_protocol_override: None,
             rel_size_v2_enabled: false,
             gc_compaction_enabled: DEFAULT_GC_COMPACTION_ENABLED,
             gc_compaction_verification: DEFAULT_GC_COMPACTION_VERIFICATION,

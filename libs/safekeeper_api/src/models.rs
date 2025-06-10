@@ -13,7 +13,7 @@ use utils::pageserver_feedback::PageserverFeedback;
 use crate::membership::Configuration;
 use crate::{ServerInfo, Term};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SafekeeperStatus {
     pub id: NodeId,
 }

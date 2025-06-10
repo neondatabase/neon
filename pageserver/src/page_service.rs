@@ -169,96 +169,6 @@ pub fn spawn(
     Listener { cancel, task }
 }
 
-/// Spawns a gRPC server for the page service.
-///
-/// TODO: move this onto GrpcPageServiceHandler::spawn().
-/// TODO: this doesn't support TLS. We need TLS reloading via ReloadingCertificateResolver, so we
-/// need to reimplement the TCP+TLS accept loop ourselves.
-pub fn spawn_grpc(
-    tenant_manager: Arc<TenantManager>,
-    auth: Option<Arc<SwappableJwtAuth>>,
-    perf_trace_dispatch: Option<Dispatch>,
-    listener: std::net::TcpListener,
-) -> anyhow::Result<CancellableTask> {
-    let cancel = CancellationToken::new();
-    let ctx = RequestContextBuilder::new(TaskKind::PageRequestHandler)
-        .download_behavior(DownloadBehavior::Download)
-        .perf_span_dispatch(perf_trace_dispatch)
-        .detached_child();
-    let gate = Gate::default();
-
-    // Set up the TCP socket. We take a preconfigured TcpListener to bind the
-    // port early during startup.
-    let incoming = {
-        let _runtime = COMPUTE_REQUEST_RUNTIME.enter(); // required by TcpListener::from_std
-        listener.set_nonblocking(true)?;
-        tonic::transport::server::TcpIncoming::from(tokio::net::TcpListener::from_std(listener)?)
-            .with_nodelay(Some(GRPC_TCP_NODELAY))
-            .with_keepalive(Some(GRPC_TCP_KEEPALIVE_TIME))
-    };
-
-    // Set up the gRPC server.
-    //
-    // TODO: consider tuning window sizes.
-    let mut server = tonic::transport::Server::builder()
-        .http2_keepalive_interval(Some(GRPC_HTTP2_KEEPALIVE_INTERVAL))
-        .http2_keepalive_timeout(Some(GRPC_HTTP2_KEEPALIVE_TIMEOUT))
-        .max_concurrent_streams(Some(GRPC_MAX_CONCURRENT_STREAMS));
-
-    // Main page service stack. Uses a mix of Tonic interceptors and Tower layers:
-    //
-    // * Interceptors: can inspect and modify the gRPC request. Sync code only, runs before service.
-    //
-    // * Layers: allow async code, can run code after the service response. However, only has access
-    //   to the raw HTTP request/response, not the gRPC types.
-    let page_service_handler = GrpcPageServiceHandler {
-        tenant_manager,
-        ctx,
-    };
-
-    let observability_layer = ObservabilityLayer;
-    let mut tenant_interceptor = TenantMetadataInterceptor;
-    let mut auth_interceptor = TenantAuthInterceptor::new(auth);
-
-    let page_service = tower::ServiceBuilder::new()
-        // Create tracing span and record request start time.
-        .layer(observability_layer)
-        // Intercept gRPC requests.
-        .layer(tonic::service::InterceptorLayer::new(move |mut req| {
-            // Extract tenant metadata.
-            req = tenant_interceptor.call(req)?;
-            // Authenticate tenant JWT token.
-            req = auth_interceptor.call(req)?;
-            Ok(req)
-        }))
-        .service(proto::PageServiceServer::new(page_service_handler));
-    let server = server.add_service(page_service);
-
-    // Reflection service for use with e.g. grpcurl.
-    let reflection_service = tonic_reflection::server::Builder::configure()
-        .register_encoded_file_descriptor_set(proto::FILE_DESCRIPTOR_SET)
-        .build_v1()?;
-    let server = server.add_service(reflection_service);
-
-    // Spawn server task.
-    let task_cancel = cancel.clone();
-    let task = COMPUTE_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
-        "grpc listener",
-        async move {
-            let result = server
-                .serve_with_incoming_shutdown(incoming, task_cancel.cancelled())
-                .await;
-            if result.is_ok() {
-                // TODO: revisit shutdown logic once page service is implemented.
-                gate.close().await;
-            }
-            result
-        },
-    ));
-
-    Ok(CancellableTask { task, cancel })
-}
-
 impl Listener {
     pub async fn stop_accepting(self) -> Connections {
         self.cancel.cancel();
@@ -497,10 +407,6 @@ async fn page_service_conn_main(
 }
 
 /// Page service connection handler.
-///
-/// TODO: for gRPC, this will be shared by all requests from all connections.
-/// Decompose it into global state and per-connection/request state, and make
-/// libpq-specific options (e.g. pipelining) separate.
 struct PageServerHandler {
     auth: Option<Arc<SwappableJwtAuth>>,
     claims: Option<Claims>,
@@ -765,7 +671,7 @@ impl PageStreamError {
             request_id,
             status_code,
             reason: Some(status.message().to_string()),
-            page_images: SmallVec::new(),
+            page_images: Vec::new(),
         }
         .into())
     }
@@ -3362,9 +3268,106 @@ where
 pub struct GrpcPageServiceHandler {
     tenant_manager: Arc<TenantManager>,
     ctx: RequestContext,
+    gate_guard: GateGuard,
+    get_vectored_concurrent_io: GetVectoredConcurrentIo,
 }
 
 impl GrpcPageServiceHandler {
+    /// Spawns a gRPC server for the page service.
+    ///
+    /// TODO: this doesn't support TLS. We need TLS reloading via ReloadingCertificateResolver, so we
+    /// need to reimplement the TCP+TLS accept loop ourselves.
+    pub fn spawn(
+        tenant_manager: Arc<TenantManager>,
+        auth: Option<Arc<SwappableJwtAuth>>,
+        perf_trace_dispatch: Option<Dispatch>,
+        get_vectored_concurrent_io: GetVectoredConcurrentIo,
+        listener: std::net::TcpListener,
+    ) -> anyhow::Result<CancellableTask> {
+        let cancel = CancellationToken::new();
+        let ctx = RequestContextBuilder::new(TaskKind::PageRequestHandler)
+            .download_behavior(DownloadBehavior::Download)
+            .perf_span_dispatch(perf_trace_dispatch)
+            .detached_child();
+        let gate = Gate::default();
+
+        // Set up the TCP socket. We take a preconfigured TcpListener to bind the
+        // port early during startup.
+        let incoming = {
+            let _runtime = COMPUTE_REQUEST_RUNTIME.enter(); // required by TcpListener::from_std
+            listener.set_nonblocking(true)?;
+            tonic::transport::server::TcpIncoming::from(tokio::net::TcpListener::from_std(
+                listener,
+            )?)
+            .with_nodelay(Some(GRPC_TCP_NODELAY))
+            .with_keepalive(Some(GRPC_TCP_KEEPALIVE_TIME))
+        };
+
+        // Set up the gRPC server.
+        //
+        // TODO: consider tuning window sizes.
+        let mut server = tonic::transport::Server::builder()
+            .http2_keepalive_interval(Some(GRPC_HTTP2_KEEPALIVE_INTERVAL))
+            .http2_keepalive_timeout(Some(GRPC_HTTP2_KEEPALIVE_TIMEOUT))
+            .max_concurrent_streams(Some(GRPC_MAX_CONCURRENT_STREAMS));
+
+        // Main page service stack. Uses a mix of Tonic interceptors and Tower layers:
+        //
+        // * Interceptors: can inspect and modify the gRPC request. Sync code only, runs before service.
+        //
+        // * Layers: allow async code, can run code after the service response. However, only has access
+        //   to the raw HTTP request/response, not the gRPC types.
+        let page_service_handler = GrpcPageServiceHandler {
+            tenant_manager,
+            ctx,
+            gate_guard: gate.enter().expect("gate was just created"),
+            get_vectored_concurrent_io,
+        };
+
+        let observability_layer = ObservabilityLayer;
+        let mut tenant_interceptor = TenantMetadataInterceptor;
+        let mut auth_interceptor = TenantAuthInterceptor::new(auth);
+
+        let page_service = tower::ServiceBuilder::new()
+            // Create tracing span and record request start time.
+            .layer(observability_layer)
+            // Intercept gRPC requests.
+            .layer(tonic::service::InterceptorLayer::new(move |mut req| {
+                // Extract tenant metadata.
+                req = tenant_interceptor.call(req)?;
+                // Authenticate tenant JWT token.
+                req = auth_interceptor.call(req)?;
+                Ok(req)
+            }))
+            // Run the page service.
+            .service(proto::PageServiceServer::new(page_service_handler));
+        let server = server.add_service(page_service);
+
+        // Reflection service for use with e.g. grpcurl.
+        let reflection_service = tonic_reflection::server::Builder::configure()
+            .register_encoded_file_descriptor_set(proto::FILE_DESCRIPTOR_SET)
+            .build_v1()?;
+        let server = server.add_service(reflection_service);
+
+        // Spawn server task.
+        let task_cancel = cancel.clone();
+        let task = COMPUTE_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
+            "grpc listener",
+            async move {
+                let result = server
+                    .serve_with_incoming_shutdown(incoming, task_cancel.cancelled())
+                    .await;
+                if result.is_ok() {
+                    // TODO: revisit shutdown logic once page service is implemented.
+                    gate.close().await;
+                }
+                result
+            },
+        ));
+
+        Ok(CancellableTask { task, cancel })
+    }
+
     /// Errors if the request is executed on a non-zero shard. Only shard 0 has a complete view of
     /// relations and their sizes, as well as SLRU segments and similar data.
     #[allow(clippy::result_large_err)]
@@ -3521,7 +3524,7 @@ impl GrpcPageServiceHandler {
             request_id: req.request_id,
             status_code: page_api::GetPageStatusCode::Ok,
             reason: None,
-            page_images: SmallVec::with_capacity(results.len()),
+            page_images: Vec::with_capacity(results.len()),
         };
 
         for result in results {
@@ -3660,7 +3663,7 @@ impl proto::PageService for GrpcPageServiceHandler {
                     if chunk.is_empty() {
                         break;
                     }
-                    yield proto::GetBaseBackupResponseChunk::try_from(chunk.clone().freeze())?;
+                    yield proto::GetBaseBackupResponseChunk::from(chunk.clone().freeze());
                     chunk.clear();
                 }
             }
@@ -3721,6 +3724,14 @@ impl proto::PageService for GrpcPageServiceHandler {
             .get(ttid.tenant_id, ttid.timeline_id, shard_selector)
             .await?;
 
+        // Spawn an IoConcurrency sidecar, if enabled.
+        let Ok(gate_guard) = self.gate_guard.try_clone() else {
+            return Err(tonic::Status::unavailable("shutting down"));
+        };
+        let io_concurrency =
+            IoConcurrency::spawn_from_conf(self.get_vectored_concurrent_io, gate_guard);
+
+        // Spawn a task to handle the GetPageRequest stream.
         let span = Span::current();
         let ctx = self.ctx.attached_child();
         let mut reqs = req.into_inner();
@@ -3731,8 +3742,7 @@ impl proto::PageService for GrpcPageServiceHandler {
                 .await?
                 .downgrade();
             while let Some(req) = reqs.message().await? {
-                // TODO: implement IoConcurrency sidecar.
-                yield Self::get_page(&ctx, &timeline, req, IoConcurrency::Sequential)
+                yield Self::get_page(&ctx, &timeline, req, io_concurrency.clone())
                     .instrument(span.clone()) // propagate request span
                     .await?
             }
@@ -3806,7 +3816,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         let resp =
             PageServerHandler::handle_get_slru_segment_request(&timeline, &req, &ctx).await?;
         let resp: page_api::GetSlruSegmentResponse = resp.segment;
-        Ok(tonic::Response::new(resp.try_into()?))
+        Ok(tonic::Response::new(resp.into()))
     }
 }
 
