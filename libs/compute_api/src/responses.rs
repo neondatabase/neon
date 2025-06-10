@@ -87,9 +87,7 @@ pub enum LfcOffloadState {
 pub enum PromoteState {
     NotPromoted,
     Completed,
-    Failed {
-        error: String,
-    },
+    Failed { error: String },
 }
 
 #[derive(Deserialize, Serialize, Default, Debug, Clone)]

@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
 use compute_api::responses::{
     ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus, LfcOffloadState,
-    LfcPrewarmState, TlsConfig, PromoteState,
+    LfcPrewarmState, PromoteState, TlsConfig,
 };
 use compute_api::spec::{
     ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent,
