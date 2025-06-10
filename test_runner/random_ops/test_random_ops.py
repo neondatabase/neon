@@ -389,7 +389,7 @@ def do_action(project: NeonProject, action: str) -> bool:
     if action == "new_branch":
         log.info("Trying to create a new branch")
         if project.limis["max_branches"] <= len(project.branches):
-            log.info("Maximum branch limit exceeded (%s vs %s)", len(project.branches), project.limis['max_branches'])
+            log.info("Maximum branch limit exceeded (%s of %s)", len(project.branches), project.limis['max_branches'])
             return False
         parent = project.branches[
             random.choice(list(set(project.branches.keys()) - project.reset_branches))
@@ -410,7 +410,8 @@ def do_action(project: NeonProject, action: str) -> bool:
             return False
     elif action == "new_ro_endpoint":
         if project.read_only_endpoints_total >= project.limis["max_read_only_endpoints"]:
-            log.info("Maximum read only endpoint limit exceeded")
+            log.info("Maximum read only endpoint limit exceeded (%s of %s)", project.read_only_endpoints_total,
+                     project.limis["max_read_only_endpoints"])
             return False
         ep = random.choice(
             [br for br in project.branches.values() if br.id not in project.reset_branches]
