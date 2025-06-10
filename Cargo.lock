@@ -701,7 +701,7 @@ dependencies = [
  "http 1.1.0",
  "http-body 1.0.0",
  "http-body-util",
- "hyper 1.4.1",
+ "hyper 1.6.0",
  "hyper-util",
  "itoa",
  "matchit",
@@ -718,7 +718,7 @@ dependencies = [
  "sync_wrapper 1.0.1",
  "tokio",
  "tokio-tungstenite 0.26.1",
- "tower 0.5.2",
+ "tower",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -761,7 +761,7 @@ dependencies = [
  "mime",
  "pin-project-lite",
  "serde",
- "tower 0.5.2",
+ "tower",
  "tower-layer",
  "tower-service",
 ]
@@ -1337,7 +1337,7 @@ dependencies = [
  "tokio-postgres",
  "tokio-stream",
  "tokio-util",
- "tower 0.5.2",
+ "tower",
  "tower-http",
  "tower-otel",
  "tracing",
@@ -2068,7 +2068,7 @@ dependencies = [
  "test-log",
  "tokio",
  "tokio-util",
- "tower 0.5.2",
+ "tower",
  "tracing",
  "utils",
  "workspace_hack",
@@ -2332,7 +2332,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "http-body-util",
- "hyper 1.4.1",
+ "hyper 1.6.0",
  "hyper-util",
  "pin-project",
  "rand 0.8.5",
@@ -2885,9 +2885,9 @@ dependencies = [
 
 [[package]]
 name = "httparse"
-version = "1.8.0"
+version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d897f394bad6a705d5f4104762e116a75639e470d80901eed05a860a95cb1904"
+checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
 name = "httpdate"
@@ -2937,9 +2937,9 @@ dependencies = [
 
 [[package]]
 name = "hyper"
-version = "1.4.1"
+version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50dfd22e0e76d0f662d429a5f80fcaf3855009297eab6a0a9f8543834744ba05"
+checksum = "cc2b571658e38e0c01b1fdca3bbbe93c00d3d71693ff2770043f8c29bc7d6f80"
 dependencies = [
  "bytes",
  "futures-channel",
@@ -2979,7 +2979,7 @@ checksum = "a0bea761b46ae2b24eb4aef630d8d1c398157b6fc29e6350ecf090a0b70c952c"
 dependencies = [
  "futures-util",
  "http 1.1.0",
- "hyper 1.4.1",
+ "hyper 1.6.0",
  "hyper-util",
  "rustls 0.22.4",
  "rustls-pki-types",
@@ -2994,7 +2994,7 @@ version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3203a961e5c83b6f5498933e78b6b263e208c197b63e9c6c53cc82ffd3f63793"
 dependencies = [
- "hyper 1.4.1",
+ "hyper 1.6.0",
  "hyper-util",
  "pin-project-lite",
  "tokio",
@@ -3003,20 +3003,20 @@ dependencies = [
 
 [[package]]
 name = "hyper-util"
-version = "0.1.7"
+version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cde7055719c54e36e95e8719f95883f22072a48ede39db7fc17a4e1d5281e9b9"
+checksum = "cf9f1e950e0d9d1d3c47184416723cf29c0d1f93bd8cccf37e4beb6b44f31710"
 dependencies = [
  "bytes",
  "futures-channel",
  "futures-util",
  "http 1.1.0",
  "http-body 1.0.0",
- "hyper 1.4.1",
+ "hyper 1.6.0",
+ "libc",
  "pin-project-lite",
  "socket2",
  "tokio",
- "tower 0.4.13",
  "tower-service",
  "tracing",
 ]
@@ -4442,6 +4442,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pageserver_client_grpc"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures",
+ "http 1.1.0",
+ "pageserver_page_api",
+ "thiserror 1.0.69",
+ "tokio",
+ "tonic 0.13.1",
+ "tracing",
+ "utils",
+]
+
+[[package]]
 name = "pageserver_compaction"
 version = "0.1.0"
 dependencies = [
@@ -5216,7 +5231,7 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "hyper 0.14.30",
- "hyper 1.4.1",
+ "hyper 1.6.0",
  "hyper-util",
  "indexmap 2.9.0",
  "ipnet",
@@ -5612,7 +5627,7 @@ dependencies = [
  "http-body-util",
  "http-types",
  "humantime-serde",
- "hyper 1.4.1",
+ "hyper 1.6.0",
  "itertools 0.10.5",
  "metrics",
  "once_cell",
@@ -5652,7 +5667,7 @@ dependencies = [
  "http 1.1.0",
  "http-body 1.0.0",
  "http-body-util",
- "hyper 1.4.1",
+ "hyper 1.6.0",
  "hyper-rustls 0.26.0",
  "hyper-util",
  "ipnet",
@@ -5709,7 +5724,7 @@ dependencies = [
  "futures",
  "getrandom 0.2.11",
  "http 1.1.0",
- "hyper 1.4.1",
+ "hyper 1.6.0",
  "parking_lot 0.11.2",
  "reqwest",
  "reqwest-middleware",
@@ -6650,12 +6665,12 @@ dependencies = [
 
 [[package]]
 name = "socket2"
-version = "0.5.5"
+version = "0.5.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b5fac59a5cb5dd637972e5fca70daf0523c9067fcdc4842f053dae04a18f8e9"
+checksum = "e22376abed350d73dd1cd119b57ffccad95b4e585a7cda43e286245ce23c0678"
 dependencies = [
  "libc",
- "windows-sys 0.48.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6721,7 +6736,7 @@ dependencies = [
  "http-body-util",
  "http-utils",
  "humantime",
- "hyper 1.4.1",
+ "hyper 1.6.0",
  "hyper-util",
  "metrics",
  "once_cell",
@@ -7550,7 +7565,7 @@ dependencies = [
  "http 1.1.0",
  "http-body 1.0.0",
  "http-body-util",
- "hyper 1.4.1",
+ "hyper 1.6.0",
  "hyper-timeout",
  "hyper-util",
  "percent-encoding",
@@ -7561,7 +7576,7 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.2",
  "tokio-stream",
- "tower 0.5.2",
+ "tower",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -7592,21 +7607,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic 0.13.1",
-]
-
-[[package]]
-name = "tower"
-version = "0.4.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8fa9be0de6cf49e536ce1851f987bd21a43b771b09473c3549a6c853db37c1c"
-dependencies = [
- "futures-core",
- "futures-util",
- "pin-project",
- "pin-project-lite",
- "tokio",
- "tower-layer",
- "tower-service",
 ]
 
 [[package]]
@@ -8599,7 +8599,7 @@ dependencies = [
  "hex",
  "hmac",
  "hyper 0.14.30",
- "hyper 1.4.1",
+ "hyper 1.6.0",
  "hyper-util",
  "indexmap 2.9.0",
  "itertools 0.12.1",
@@ -8653,7 +8653,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "toml_edit",
- "tower 0.5.2",
+ "tower",
  "tracing",
  "tracing-core",
  "tracing-log",
