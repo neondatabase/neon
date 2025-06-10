@@ -237,13 +237,18 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     prepare_client_connection(&node, *session.key(), &mut stream);
     let stream = stream.flush_and_into_inner().await?;
 
+    let session_id = ctx.session_id();
     let (cancel_on_shutdown, cancel) = tokio::sync::oneshot::channel();
-    tokio::spawn(session.maintain_cancel_key(
-        ctx.session_id(),
-        cancel,
-        node.cancel_closure,
-        &config.connect_to_compute,
-    ));
+    tokio::spawn(async move {
+        session
+            .maintain_cancel_key(
+                session_id,
+                cancel,
+                &node.cancel_closure,
+                &config.connect_to_compute,
+            )
+            .await;
+    });
 
     Ok(Some(ProxyPassthrough {
         client: stream,
