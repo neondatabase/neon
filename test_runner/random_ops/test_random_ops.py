@@ -388,7 +388,7 @@ def do_action(project: NeonProject, action: str) -> bool:
     log.info("Action: %s", action)
     if action == "new_branch":
         log.info("Trying to create a new branch")
-        if project.limis["max_branches"] <= len(project.branches):
+        if 0 <= project.limis["max_branches"] <= len(project.branches):
             log.info("Maximum branch limit exceeded (%s of %s)", len(project.branches), project.limis['max_branches'])
             return False
         parent = project.branches[
@@ -409,7 +409,7 @@ def do_action(project: NeonProject, action: str) -> bool:
             log.info("Leaf branches not found, skipping")
             return False
     elif action == "new_ro_endpoint":
-        if project.read_only_endpoints_total >= project.limis["max_read_only_endpoints"]:
+        if 0 <= project.limis["max_read_only_endpoints"] <= project.read_only_endpoints_total:
             log.info("Maximum read only endpoint limit exceeded (%s of %s)", project.read_only_endpoints_total,
                      project.limis["max_read_only_endpoints"])
             return False
