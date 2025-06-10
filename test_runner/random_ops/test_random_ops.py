@@ -417,7 +417,7 @@ def do_action(project: NeonProject, action: str) -> bool:
             log.info(
                 "Maximum read only endpoint limit exceeded (%s of %s)",
                 project.read_only_endpoints_total,
-                project.limis["max_read_only_endpoints"],
+                project.limits["max_read_only_endpoints"],
             )
             return False
         ep = random.choice(
