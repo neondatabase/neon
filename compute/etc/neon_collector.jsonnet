@@ -1,6 +1,7 @@
 {
   collector_name: 'neon_collector',
   metrics: [
+    import 'sql_exporter/autovacuum_stats.libsonnet',
     import 'sql_exporter/checkpoints_req.libsonnet',
     import 'sql_exporter/checkpoints_timed.libsonnet',
     import 'sql_exporter/compute_backpressure_throttling_seconds_total.libsonnet',
