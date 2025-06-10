@@ -32,6 +32,8 @@ use utils::id::{NodeId, TenantId, TimelineId};
 use utils::logging::SecretString;
 use utils::lsn::Lsn;
 
+use core::cmp::max;
+
 use super::Service;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -701,9 +703,9 @@ impl Service {
 
         // TODO(diko): remove this when `timeline_safekeeper_count` flag is in the release
         // branch and is used in tests.
-        if cfg!(feature = "testing") && wanted_count < all_safekeepers.len() {
+        if cfg!(feature = "testing") && all_safekeepers.len() < wanted_count {
             // In testing mode, we can have less safekeepers than the config says
-            wanted_count = all_safekeepers.len();
+            wanted_count = max(all_safekeepers.len(), 1);
         }
 
         let mut sks = Vec::new();
