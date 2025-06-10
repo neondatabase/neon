@@ -230,7 +230,7 @@ class NeonProject:
         self.benchmarks: dict[str, subprocess.Popen[Any]] = {}
         self.restore_num: int = 0
         self.restart_pgbench_on_console_errors: bool = False
-        self.limis: dict[str, Any] = self.get_limits()
+        self.limis: dict[str, Any] = self.get_limits()["limits"]
         self.read_only_endpoints_total: int = 0
 
     def get_limits(self) -> dict[str, Any]:
