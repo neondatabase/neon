@@ -30,7 +30,7 @@ use crate::pqproto::{BeMessage, CancelKeyData, StartupMessageParams};
 use crate::protocol2::{ConnectHeader, ConnectionInfo, ConnectionInfoExtra, read_proxy_protocol};
 use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
 use crate::rate_limiter::EndpointRateLimiter;
-use crate::stream::{PqStream, Stream};
+use crate::stream::{PqFeStream, Stream};
 use crate::types::EndpointCacheKey;
 use crate::util::run_until_cancelled;
 use crate::{auth, compute};
@@ -415,7 +415,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 pub(crate) fn prepare_client_connection(
     node: &compute::PostgresConnection,
     cancel_key_data: CancelKeyData,
-    stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    stream: &mut PqFeStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) {
     // Forward all deferred notices to the client.
     for notice in &node.delayed_notice {

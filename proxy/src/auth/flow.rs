@@ -15,7 +15,7 @@ use crate::pqproto::{BeAuthenticationSaslMessage, BeMessage};
 use crate::sasl;
 use crate::scram::threadpool::ThreadPool;
 use crate::scram::{self};
-use crate::stream::{PqStream, Stream};
+use crate::stream::{PqFeStream, Stream};
 use crate::tls::TlsServerEndPoint;
 
 /// Use [SCRAM](crate::scram)-based auth in [`AuthFlow`].
@@ -53,7 +53,7 @@ pub(crate) struct CleartextPassword {
 #[must_use]
 pub(crate) struct AuthFlow<'a, S, State> {
     /// The underlying stream which implements libpq's protocol.
-    stream: &'a mut PqStream<Stream<S>>,
+    stream: &'a mut PqFeStream<Stream<S>>,
     /// State might contain ancillary data.
     state: State,
     tls_server_end_point: TlsServerEndPoint,
@@ -62,7 +62,7 @@ pub(crate) struct AuthFlow<'a, S, State> {
 /// Initial state of the stream wrapper.
 impl<'a, S: AsyncRead + AsyncWrite + Unpin, M> AuthFlow<'a, S, M> {
     /// Create a new wrapper for client authentication.
-    pub(crate) fn new(stream: &'a mut PqStream<Stream<S>>, method: M) -> Self {
+    pub(crate) fn new(stream: &'a mut PqFeStream<Stream<S>>, method: M) -> Self {
         let tls_server_end_point = stream.get_ref().tls_server_end_point();
 
         Self {

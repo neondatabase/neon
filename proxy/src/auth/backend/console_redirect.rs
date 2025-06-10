@@ -17,7 +17,7 @@ use crate::error::{ReportableError, UserFacingError};
 use crate::pqproto::BeMessage;
 use crate::proxy::NeonOptions;
 use crate::proxy::wake_compute::WakeComputeBackend;
-use crate::stream::PqStream;
+use crate::stream::PqFeStream;
 use crate::types::RoleName;
 use crate::{auth, compute, waiters};
 
@@ -96,7 +96,7 @@ impl ConsoleRedirectBackend {
         &self,
         ctx: &RequestContext,
         auth_config: &'static AuthenticationConfig,
-        client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+        client: &mut PqFeStream<impl AsyncRead + AsyncWrite + Unpin>,
     ) -> auth::Result<(ConsoleRedirectNodeInfo, AuthInfo, ComputeUserInfo)> {
         authenticate(ctx, auth_config, &self.console_uri, client)
             .await
@@ -122,7 +122,7 @@ async fn authenticate(
     ctx: &RequestContext,
     auth_config: &'static AuthenticationConfig,
     link_uri: &reqwest::Url,
-    client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    client: &mut PqFeStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> auth::Result<(NodeInfo, AuthInfo, ComputeUserInfo)> {
     ctx.set_auth_method(crate::context::AuthMethod::ConsoleRedirect);
 

@@ -122,7 +122,7 @@ fn generate_tls_config<'a>(
 trait TestAuth: Sized {
     async fn authenticate<S: AsyncRead + AsyncWrite + Unpin + Send>(
         self,
-        stream: &mut PqStream<Stream<S>>,
+        stream: &mut PqFeStream<Stream<S>>,
     ) -> anyhow::Result<()> {
         stream.write_message(BeMessage::AuthenticationOk);
         Ok(())
@@ -151,7 +151,7 @@ impl Scram {
 impl TestAuth for Scram {
     async fn authenticate<S: AsyncRead + AsyncWrite + Unpin + Send>(
         self,
-        stream: &mut PqStream<Stream<S>>,
+        stream: &mut PqFeStream<Stream<S>>,
     ) -> anyhow::Result<()> {
         let outcome = auth::AuthFlow::new(stream, auth::Scram(&self.0, &RequestContext::test()))
             .authenticate()

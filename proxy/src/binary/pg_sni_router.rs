@@ -29,7 +29,7 @@ use crate::metrics::{Metrics, ThreadPoolMetrics};
 use crate::pqproto::FeStartupPacket;
 use crate::protocol2::ConnectionInfo;
 use crate::proxy::{ErrorSource, TlsRequired, copy_bidirectional_client_compute};
-use crate::stream::{PqStream, Stream};
+use crate::stream::{PqFeStream, Stream};
 use crate::util::run_until_cancelled;
 
 project_git_version!(GIT_VERSION);
@@ -262,7 +262,7 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     raw_stream: S,
     tls_config: Arc<rustls::ServerConfig>,
 ) -> anyhow::Result<TlsStream<S>> {
-    let (mut stream, msg) = PqStream::parse_startup(Stream::from_raw(raw_stream)).await?;
+    let (mut stream, msg) = PqFeStream::parse_startup(Stream::from_raw(raw_stream)).await?;
     match msg {
         FeStartupPacket::SslRequest { direct: None } => {
             let raw = stream.accept_tls().await?;
