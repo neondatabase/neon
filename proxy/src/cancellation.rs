@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use anyhow::anyhow;
 use futures::FutureExt;
@@ -11,6 +12,7 @@ use redis::{Cmd, FromRedisValue, Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::net::TcpStream;
+use tokio::time::timeout;
 use tracing::{debug, error, info};
 
 use crate::auth::AuthError;
@@ -237,10 +239,17 @@ impl CancellationHandler {
             return Err(CancelError::InternalError);
         };
 
-        let result = tx.call((guard, op)).await.map_err(|e| {
-            tracing::warn!("failed to receive GetCancelData response: {e}");
-            CancelError::InternalError
-        })?;
+        const TIMEOUT: Duration = Duration::from_secs(5);
+        let result = timeout(TIMEOUT, tx.call((guard, op)))
+            .await
+            .map_err(|_| {
+                tracing::warn!("timed out waiting to receive GetCancelData response");
+                CancelError::RateLimit
+            })?
+            .map_err(|e| {
+                tracing::warn!("failed to receive GetCancelData response: {e}");
+                CancelError::InternalError
+            })?;
 
         let cancel_state_str = String::from_owned_redis_value(result).map_err(|e| {
             tracing::warn!("failed to receive GetCancelData response: {e}");
