@@ -1367,7 +1367,6 @@ impl Persistence {
 
         self.with_conn(move |conn| {
             Box::pin(async move {
-                // TODO (diko)
                 #[derive(Insertable, AsChangeset)]
                 #[diesel(table_name = crate::schema::safekeepers)]
                 struct UpdateSkSchedulingPolicy<'a> {

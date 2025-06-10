@@ -379,7 +379,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
         StrictMode::Strict if args.timeline_safekeeper_count < 3 => {
             anyhow::bail!(
-                "Running with less than 3 safekeepers per timelines is only permitted in `--dev` mode"
+                "Running with less than 3 safekeepers per timeline is only permitted in `--dev` mode"
             );
         }
         StrictMode::Strict => {

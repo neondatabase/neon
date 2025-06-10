@@ -156,7 +156,8 @@ impl Service {
                         &jwt,
                         3,
                         3,
-                        // TODO(diko): this is a wrong timeout
+                        // TODO(diko): This is a wrong timeout.
+                        // It should be scaled to the retry count.
                         timeout,
                         &CancellationToken::new(),
                     )
@@ -991,7 +992,7 @@ impl Service {
 
     /// Exclude a timeline from safekeepers in parallel with retries.
     /// If an exclude request is unsuccessful, it will be added to
-    /// the reconciler, after which the function succeeds.
+    /// the reconciler, and after that the function will succeed.
     async fn tenant_timeline_safekeeper_exclude(
         self: &Arc<Self>,
         tenant_id: TenantId,
@@ -1115,7 +1116,7 @@ impl Service {
 
         if let Some(ref presistent_new_sk_set) = timeline.new_sk_set {
             // 2. If it is already joint one and new_set is different from desired_set refuse to change.
-            if !presistent_new_sk_set
+            if presistent_new_sk_set
                 .iter()
                 .map(|&id| NodeId(id as u64))
                 .ne(new_sk_set.iter().cloned())
