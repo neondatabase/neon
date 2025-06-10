@@ -1,8 +1,9 @@
 {
   metric_name: 'pg_autovacuum_stats',
   type: 'gauge',
-  help: 'Autovacuum statistics for all tables',
+  help: 'Autovacuum statistics for all tables across databases',
   key_labels: [
+    'datname',
     'schemaname',
     'relname',
   ],
