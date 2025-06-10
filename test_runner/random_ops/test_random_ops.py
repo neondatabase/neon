@@ -45,6 +45,8 @@ class NeonEndpoint:
         if self.branch.connect_env:
             self.connect_env = self.branch.connect_env.copy()
             self.connect_env["PGHOST"] = self.host
+        if self.type == 'read_only':
+            self.project.read_only_endpoints_total += 1
 
     def delete(self):
         self.project.delete_endpoint(self.id)
@@ -228,8 +230,13 @@ class NeonProject:
         self.benchmarks: dict[str, subprocess.Popen[Any]] = {}
         self.restore_num: int = 0
         self.restart_pgbench_on_console_errors: bool = False
+        self.limis: dict[str, Any] = self.get_limits()
+        self.read_only_endpoints_total: int = 0
 
-    def delete(self):
+    def get_limits(self) -> dict[str, Any]:
+        return self.neon_api.get_project_limits(self.id)
+
+    def delete(self) -> None:
         self.neon_api.delete_project(self.id)
 
     def create_branch(self, parent_id: str | None = None) -> NeonBranch | None:
@@ -282,6 +289,7 @@ class NeonProject:
         self.neon_api.delete_endpoint(self.id, endpoint_id)
         self.endpoints[endpoint_id].branch.endpoints.pop(endpoint_id)
         self.endpoints.pop(endpoint_id)
+        self.read_only_endpoints_total -= 1
         self.wait()
 
     def start_benchmark(self, target: str, clients: int = 10) -> subprocess.Popen[Any]:
@@ -369,49 +377,56 @@ def setup_class(
         print(f"::warning::Retried on 524 error {neon_api.retries524} times")
     if neon_api.retries4xx > 0:
         print(f"::warning::Retried on 4xx error {neon_api.retries4xx} times")
-    log.info("Removing the project")
+    log.info("Removing the project %s", project.id)
     project.delete()
 
 
-def do_action(project: NeonProject, action: str) -> None:
+def do_action(project: NeonProject, action: str) -> bool:
     """
     Runs the action
     """
     log.info("Action: %s", action)
     if action == "new_branch":
         log.info("Trying to create a new branch")
+        if project.limis['max_branches'] <= len(project.branches):
+            log.info('Maximum branch limit exceeded')
+            return False
         parent = project.branches[
             random.choice(list(set(project.branches.keys()) - project.reset_branches))
         ]
         log.info("Parent: %s", parent)
         child = parent.create_child_branch()
         if child is None:
-            return
+            return False
         log.info("Created branch %s", child)
         child.start_benchmark()
     elif action == "delete_branch":
         if project.leaf_branches:
-            target = random.choice(list(project.leaf_branches.values()))
+            target: NeonBranch = random.choice(list(project.leaf_branches.values()))
             log.info("Trying to delete branch %s", target)
             target.delete()
         else:
             log.info("Leaf branches not found, skipping")
+            return False
     elif action == "new_ro_endpoint":
+        if project.read_only_endpoints_total >= project.limis['max_read_only_endpoints']:
+            log.info("Maximum read only endpoint limit exceeded")
+            return False
         ep = random.choice(
             [br for br in project.branches.values() if br.id not in project.reset_branches]
         ).create_ro_endpoint()
         log.info("Created the RO endpoint with id %s branch: %s", ep.id, ep.branch.id)
         ep.start_benchmark()
     elif action == "delete_ro_endpoint":
+        if project.read_only_endpoints_total == 0:
+            log.info("no read_only endpoints present, skipping")
+            return False
         ro_endpoints: list[NeonEndpoint] = [
             endpoint for endpoint in project.endpoints.values() if endpoint.type == "read_only"
         ]
-        if ro_endpoints:
-            target_ep: NeonEndpoint = random.choice(ro_endpoints)
-            target_ep.delete()
-            log.info("endpoint %s deleted", target_ep.id)
-        else:
-            log.info("no read_only endpoints present, skipping")
+        target_ep: NeonEndpoint = random.choice(ro_endpoints)
+        target_ep.delete()
+        log.info("endpoint %s deleted", target_ep.id)
     elif action == "restore_random_time":
         if project.leaf_branches:
             br: NeonBranch = random.choice(list(project.leaf_branches.values()))
@@ -419,8 +434,10 @@ def do_action(project: NeonProject, action: str) -> None:
             br.restore_random_time()
         else:
             log.info("No leaf branches found")
+            return False
     else:
         raise ValueError(f"The action {action} is unknown")
+    return True
 
 
 @pytest.mark.timeout(7200)
@@ -457,8 +474,9 @@ def test_api_random(
     pg_bin.run(["pgbench", "-i", "-I", "dtGvp", "-s100"], env=project.main_branch.connect_env)
     for _ in range(num_operations):
         log.info("Starting action #%s", _ + 1)
-        do_action(
+        while not do_action(
             project, random.choices([a[0] for a in ACTIONS], weights=[w[1] for w in ACTIONS])[0]
-        )
+        ):
+            log.info('Retrying...')
         project.check_all_benchmarks()
     assert True
