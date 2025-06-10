@@ -8,7 +8,7 @@ use std::time::SystemTime;
 use anyhow::{Result, bail};
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use safekeeper_api::membership::Configuration;
-use safekeeper_api::models::{TimelineMembershipSwitchResponse, TimelineTermBumpResponse};
+use safekeeper_api::models::TimelineTermBumpResponse;
 use safekeeper_api::{INITIAL_TERM, ServerInfo, Term};
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -80,6 +80,11 @@ pub enum EvictionState {
     /// Last partial segment is offloaded to remote storage.
     /// Contains flush_lsn of the last offloaded segment.
     Offloaded(Lsn),
+}
+
+pub struct MembershipSwitchResult {
+    pub previous_conf: Configuration,
+    pub current_conf: Configuration,
 }
 
 impl TimelinePersistentState {
@@ -260,10 +265,7 @@ where
 
     /// Switch into membership configuration `to` if it is higher than the
     /// current one.
-    pub async fn membership_switch(
-        &mut self,
-        to: Configuration,
-    ) -> Result<TimelineMembershipSwitchResponse> {
+    pub async fn membership_switch(&mut self, to: Configuration) -> Result<MembershipSwitchResult> {
         let before = self.mconf.clone();
         // Is switch allowed?
         if to.generation <= self.mconf.generation {
@@ -277,11 +279,9 @@ where
             self.finish_change(&state).await?;
             info!("switched membership conf to {} from {}", to, before);
         }
-        Ok(TimelineMembershipSwitchResponse {
+        Ok(MembershipSwitchResult {
             previous_conf: before,
             current_conf: self.mconf.clone(),
-            term: self.acceptor_state.term,
-            flush_lsn: Lsn::INVALID, // TODO(diko): return flush_lsn from somewhere
         })
     }
 }

@@ -159,6 +159,7 @@ enum TenantOperations {
     DropDetached,
     DownloadHeatmapLayers,
     TimelineLsnLease,
+    TimelineSafekeeperMigrate,
 }
 
 #[derive(Clone, strum_macros::Display)]
