@@ -392,7 +392,7 @@ def do_action(project: NeonProject, action: str) -> bool:
             log.info(
                 "Maximum branch limit exceeded (%s of %s)",
                 len(project.branches),
-                project.limis["max_branches"],
+                project.limits["max_branches"],
             )
             return False
         parent = project.branches[
