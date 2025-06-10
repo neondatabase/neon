@@ -8,6 +8,7 @@ import psycopg2
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import Endpoint, NeonEnv, wait_replica_caughtup
+from fixtures.utils import USE_LFC
 from fixtures.pg_version import PgVersion
 from pytest import raises
 from enum import Enum
@@ -21,6 +22,7 @@ class PromoteMethod(Enum):
 QUERY_OPTIONS = PromoteMethod.POSTGRES, PromoteMethod.COMPUTE_CTL
 
 
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 @pytest.mark.parametrize("query", QUERY_OPTIONS, ids=["postgres", "compute-ctl"])
 def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion, query: PromoteMethod):
     """
@@ -36,6 +38,7 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion, query
     secondary: Endpoint = env.endpoints.new_replica_start(origin=primary, endpoint_id="secondary")
 
     with primary.connect() as primary_conn:
+
         primary_cur = primary_conn.cursor()
         primary_cur.execute(
             "create table t(pk bigint GENERATED ALWAYS AS IDENTITY, payload integer)"
@@ -55,11 +58,13 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion, query
     http_client = primary.http_client()
     if query is PromoteMethod.COMPUTE_CTL:
         safekeepers_lsn = http_client.safekeepers_lsn()
+        http_client.offload_lfc()  # /promote depends on secondary being prewarmed
     else:
         wait_replica_caughtup(primary, secondary)
 
     with secondary.connect() as secondary_conn:
         secondary_cur = secondary_conn.cursor()
+
         secondary_cur.execute("select count(*) from t")
 
         assert secondary_cur.fetchone() == (100,)
