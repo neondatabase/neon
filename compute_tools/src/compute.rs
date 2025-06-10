@@ -785,7 +785,7 @@ impl ComputeNode {
         self.spawn_extension_stats_task();
 
         if pspec.spec.autoprewarm {
-            self.prewarm_lfc();
+            self.prewarm_lfc(None);
         }
         Ok(())
     }
