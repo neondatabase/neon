@@ -2,6 +2,7 @@ use crate::compute_prewarm::LfcPrewarmStateWithProgress;
 use crate::http::JsonResponse;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, http::StatusCode};
+use axum_extra::extract::OptionalQuery;
 use compute_api::responses::LfcOffloadState;
 type Compute = axum::extract::State<std::sync::Arc<crate::compute::ComputeNode>>;
 
@@ -16,8 +17,16 @@ pub(in crate::http) async fn offload_state(compute: Compute) -> Json<LfcOffloadS
     Json(compute.lfc_offload_state())
 }
 
-pub(in crate::http) async fn prewarm(compute: Compute) -> Response {
-    if compute.prewarm_lfc() {
+#[derive(serde::Deserialize)]
+pub struct PrewarmQuery {
+    pub from_endpoint: String,
+}
+
+pub(in crate::http) async fn prewarm(
+    compute: Compute,
+    OptionalQuery(query): OptionalQuery<PrewarmQuery>,
+) -> Response {
+    if compute.prewarm_lfc(query.map(|q| q.from_endpoint)) {
         StatusCode::ACCEPTED.into_response()
     } else {
         JsonResponse::error(
