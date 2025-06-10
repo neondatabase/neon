@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
-use postgres_client::CancelToken;
+use postgres_client::RawCancelToken;
 use postgres_client::tls::MakeTlsConnect;
 use redis::{Cmd, FromRedisValue, Value};
 use serde::{Deserialize, Serialize};
@@ -470,7 +470,7 @@ impl CancellationHandler {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CancelClosure {
     socket_addr: SocketAddr,
-    cancel_token: CancelToken,
+    cancel_token: RawCancelToken,
     hostname: String, // for pg_sni router
     user_info: ComputeUserInfo,
 }
@@ -478,7 +478,7 @@ pub struct CancelClosure {
 impl CancelClosure {
     pub(crate) fn new(
         socket_addr: SocketAddr,
-        cancel_token: CancelToken,
+        cancel_token: RawCancelToken,
         hostname: String,
         user_info: ComputeUserInfo,
     ) -> Self {

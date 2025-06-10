@@ -9,7 +9,7 @@ use itertools::Itertools;
 use postgres_client::config::{AuthKeys, SslMode};
 use postgres_client::maybe_tls_stream::MaybeTlsStream;
 use postgres_client::tls::MakeTlsConnect;
-use postgres_client::{CancelToken, NoTls, RawConnection};
+use postgres_client::{NoTls, RawCancelToken, RawConnection};
 use postgres_protocol::message::backend::NoticeResponseBody;
 use thiserror::Error;
 use tokio::net::{TcpStream, lookup_host};
@@ -327,8 +327,7 @@ impl ConnectInfo {
         // Yet another reason to rework the connection establishing code.
         let cancel_closure = CancelClosure::new(
             socket_addr,
-            CancelToken {
-                socket_config: None,
+            RawCancelToken {
                 ssl_mode: self.ssl_mode,
                 process_id,
                 secret_key,
