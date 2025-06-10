@@ -27,6 +27,29 @@ use crate::tenant::storage_layer::{
 /// It's very generous and we should bring this value down over time.
 const LAYER_MANAGER_LOCK_WARN_THRESHOLD: Duration = Duration::from_secs(5);
 
+/// Describes the operation that is holding the layer manager lock
+#[derive(Debug, Clone, Copy, strum_macros::Display)]
+#[strum(serialize_all = "kebab_case")]
+pub(crate) enum LayerManagerLockHolder {
+    GetLayerMapInfo,
+    GenerateHeatmap,
+    GetPage,
+    Init,
+    LoadLayerMap,
+    GetLayerForWrite,
+    TryFreezeLayer,
+    FlushFrozenLayer,
+    FlushLoop,
+    Compaction,
+    GarbageCollection,
+    Shutdown,
+    ImportPgData,
+    DetachAncestor,
+    Eviction,
+    #[cfg(test)]
+    Testing,
+}
+
 /// Wrapper for the layer manager that tracks the amount of time during which
 /// it was held under read or write lock
 #[derive(Default)]
@@ -37,11 +60,13 @@ pub(crate) struct LockedLayerManager {
 pub(crate) struct LayerManagerReadGuard<'a> {
     guard: ManuallyDrop<tokio::sync::RwLockReadGuard<'a, LayerManager>>,
     acquired_at: std::time::Instant,
+    holder: LayerManagerLockHolder,
 }
 
 pub(crate) struct LayerManagerWriteGuard<'a> {
     guard: ManuallyDrop<tokio::sync::RwLockWriteGuard<'a, LayerManager>>,
     acquired_at: std::time::Instant,
+    holder: LayerManagerLockHolder,
 }
 
 impl Drop for LayerManagerReadGuard<'_> {
@@ -53,8 +78,9 @@ impl Drop for LayerManagerReadGuard<'_> {
         let held_for = self.acquired_at.elapsed();
         if held_for >= LAYER_MANAGER_LOCK_WARN_THRESHOLD {
             tracing::warn!(
-                "Layer manager read lock held for: {}s",
-                held_for.as_secs_f64()
+                holder=%self.holder,
+                "Layer manager read lock held for {}s",
+                held_for.as_secs_f64(),
             );
         }
     }
@@ -69,8 +95,9 @@ impl Drop for LayerManagerWriteGuard<'_> {
         let held_for = self.acquired_at.elapsed();
         if held_for >= LAYER_MANAGER_LOCK_WARN_THRESHOLD {
             tracing::warn!(
-                "Layer manager read lock held for: {}s",
-                held_for.as_secs_f64()
+                holder=%self.holder,
+                "Layer manager write lock held for {}s",
+                held_for.as_secs_f64(),
             );
         }
     }
@@ -99,37 +126,47 @@ impl DerefMut for LayerManagerWriteGuard<'_> {
 }
 
 impl LockedLayerManager {
-    pub(crate) async fn read(&self) -> LayerManagerReadGuard {
+    pub(crate) async fn read(&self, holder: LayerManagerLockHolder) -> LayerManagerReadGuard {
         let guard = ManuallyDrop::new(self.locked.read().await);
         LayerManagerReadGuard {
             guard,
             acquired_at: std::time::Instant::now(),
+            holder,
         }
     }
 
-    pub(crate) fn try_read(&self) -> Result<LayerManagerReadGuard, tokio::sync::TryLockError> {
+    pub(crate) fn try_read(
+        &self,
+        holder: LayerManagerLockHolder,
+    ) -> Result<LayerManagerReadGuard, tokio::sync::TryLockError> {
         let guard = ManuallyDrop::new(self.locked.try_read()?);
 
         Ok(LayerManagerReadGuard {
             guard,
             acquired_at: std::time::Instant::now(),
+            holder,
         })
     }
 
-    pub(crate) async fn write(&self) -> LayerManagerWriteGuard {
+    pub(crate) async fn write(&self, holder: LayerManagerLockHolder) -> LayerManagerWriteGuard {
         let guard = ManuallyDrop::new(self.locked.write().await);
         LayerManagerWriteGuard {
             guard,
             acquired_at: std::time::Instant::now(),
+            holder,
         }
     }
 
-    pub(crate) fn try_write(&self) -> Result<LayerManagerWriteGuard, tokio::sync::TryLockError> {
+    pub(crate) fn try_write(
+        &self,
+        holder: LayerManagerLockHolder,
+    ) -> Result<LayerManagerWriteGuard, tokio::sync::TryLockError> {
         let guard = ManuallyDrop::new(self.locked.try_write()?);
 
         Ok(LayerManagerWriteGuard {
             guard,
             acquired_at: std::time::Instant::now(),
+            holder,
         })
     }
 }

@@ -56,6 +56,7 @@ use crate::pgdatadir_mapping::{
 };
 use crate::task_mgr::TaskKind;
 use crate::tenant::storage_layer::{AsLayerDesc, ImageLayerWriter, Layer};
+use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
 
 pub async fn run(
     timeline: Arc<Timeline>,
@@ -984,7 +985,10 @@ impl ChunkProcessingJob {
             let (desc, path) = writer.finish(ctx).await?;
 
             {
-                let guard = timeline.layers.read().await;
+                let guard = timeline
+                    .layers
+                    .read(LayerManagerLockHolder::ImportPgData)
+                    .await;
                 let existing_layer = guard.try_get_from_key(&desc.key());
                 if let Some(layer) = existing_layer {
                     if layer.metadata().generation == timeline.generation {
@@ -1007,7 +1011,10 @@ impl ChunkProcessingJob {
         // certain that the existing layer is identical to the new one, so in that case
         // we replace the old layer with the one we just generated.
 
-        let mut guard = timeline.layers.write().await;
+        let mut guard = timeline
+            .layers
+            .write(LayerManagerLockHolder::ImportPgData)
+            .await;
 
         let existing_layer = guard
             .try_get_from_key(&resident_layer.layer_desc().key())

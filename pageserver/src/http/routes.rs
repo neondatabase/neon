@@ -73,6 +73,7 @@ use crate::tenant::remote_timeline_client::{
 use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::{IoConcurrency, LayerAccessStatsReset, LayerName};
+use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
 use crate::tenant::timeline::offload::{OffloadError, offload_timeline};
 use crate::tenant::timeline::{
     CompactFlags, CompactOptions, CompactRequest, CompactionError, MarkInvisibleRequest, Timeline,
@@ -1451,7 +1452,10 @@ async fn timeline_layer_scan_disposable_keys(
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download)
         .with_scope_timeline(&timeline);
 
-    let guard = timeline.layers.read().await;
+    let guard = timeline
+        .layers
+        .read(LayerManagerLockHolder::GetLayerMapInfo)
+        .await;
     let Some(layer) = guard.try_get_from_key(&layer_name.clone().into()) else {
         return Err(ApiError::NotFound(
             anyhow::anyhow!("Layer {tenant_shard_id}/{timeline_id}/{layer_name} not found").into(),
