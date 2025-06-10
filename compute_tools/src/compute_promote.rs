@@ -1,11 +1,18 @@
-use std::sync::Arc;
-
 use crate::compute::ComputeNode;
 use anyhow::{Context, Result, bail};
-use compute_api::responses::{LfcPrewarmState, PromoteState, SafekeepersLsn};
+use compute_api::{
+    responses::{LfcPrewarmState, PromoteState, SafekeepersLsn},
+    spec::ComputeMode,
+};
+use std::{sync::Arc, time::Duration};
+use tokio::time::sleep;
+use utils::lsn::Lsn;
 
 impl ComputeNode {
     /// Get safekeepers list and WAL flush LSN from primary replica for promotion
+    /// TODO(myrrc) change /terminate to return last flush LSN
+    ///    Safekeepers list already present on cplane side so it can be passed as is
+    ///    this call then may be removed
     pub async fn safekeepers_lsn(&self) -> Result<SafekeepersLsn> {
         let client = ComputeNode::get_maintenance_client(&self.tokio_conn_conf)
             .await
@@ -37,8 +44,8 @@ impl ComputeNode {
 
     /// Returns only when promote fails or succeeds. If a network error occurs
     /// and http client disconnects, this does not stop promotion, and subsequent
-    /// calls block until first error or success.
-    /// Call on secondary after primary endpoint is terminated
+    /// calls block until promote finishes.
+    /// Called by control plane on secondary after primary endpoint is terminated
     pub async fn promote(self: &Arc<Self>, safekeepers_lsn: SafekeepersLsn) -> PromoteState {
         let cloned = self.clone();
         let start_promotion = || {
@@ -55,7 +62,7 @@ impl ComputeNode {
         };
 
         let mut task;
-        // Unlock state after block ends so we can lock it in promote_impl
+        // self.state is unlocked after block ends so we lock it in promote_impl
         // and task.changed() is reached
         {
             task = self
@@ -70,37 +77,77 @@ impl ComputeNode {
         task.borrow().clone()
     }
 
+    // Why safekeepers? For second replica we use primary_connection_conninfo instead of safekeepers
+    // TODO(myrrc): suggestion by Muhammet: send new ComputeSpec and apply on secondary
+    //  should there be any disrepancies between primary and secondary
     async fn promote_impl(&self, safekeepers_lsn: SafekeepersLsn) -> Result<()> {
-        // 1. Check if we're not primary
-
-        // 2. Check we have prewarmed LFC
         {
+            let state = self.state.lock().unwrap();
+            let mode = &state.pspec.as_ref().unwrap().spec.mode;
+            if *mode != ComputeMode::Replica {
+                bail!("this is not replica node: {}", mode.to_type_str());
+            }
+
             // Not self.lfc_prewarm_state() as we don't need to query Postgres
-            let prewarm_state = self.state.lock().unwrap().lfc_prewarm_state.clone();
-            if prewarm_state != LfcPrewarmState::Completed {
-                bail!("Secondary replica prewarm not completed, status {prewarm_state}");
+            let prewarm_state = &state.lfc_prewarm_state;
+            if *prewarm_state != LfcPrewarmState::Completed {
+                bail!("secondary replica prewarm not completed, status {prewarm_state}");
             }
         }
 
-        // Set safekeepers from primary
         let client = ComputeNode::get_maintenance_client(&self.tokio_conn_conf)
             .await
             .context("connecting to postgres")?;
-        client
-            .query_opt(
+
+        let primary_lsn = safekeepers_lsn.wal_flush_lsn;
+        let mut last_wal_replay_lsn: Lsn = Lsn::INVALID;
+        const RETRIES: i32 = 20;
+        for i in 0..=RETRIES {
+            let row = client
+                .query_one("SELECT pg_last_wal_replay_lsn()", &[])
+                .await
+                .context("getting last replay lsn")?;
+            last_wal_replay_lsn =
+                Lsn::from_hex(row.get::<usize, &str>(0)).context("parsing last replay lsn")?;
+            if last_wal_replay_lsn >= primary_lsn {
+                break;
+            }
+            tracing::info!("Try {i}, replica lsn {last_wal_replay_lsn}, primary lsn {primary_lsn}");
+            sleep(Duration::from_secs(1)).await;
+        }
+        if last_wal_replay_lsn < primary_lsn {
+            bail!("didn't catch up with primary in {RETRIES} retries");
+        }
+
+        let row = client
+            .query_one(
                 "ALTER SYSTEM SET neon.safekeepers='$1';\
-                SELECT pg_reload_conf()",
+                SELECT pg_reload_conf();\
+                SELECT * FROM pg_promote()",
                 &[&safekeepers_lsn.safekeepers],
             )
             .await
             .context("setting safekeepers")?;
+        if !row.get::<usize, bool>(0) {
+            bail!("pg_promote() returned false");
+        }
 
-        // 3. check pg_last_wal_replay_lsn >= primary_lsn
-        // 4. SELECT * FROM pg_promote() -> (True,)
+        let client = ComputeNode::get_maintenance_client(&self.tokio_conn_conf)
+            .await
+            .context("connecting to postgres")?;
+        let row = client
+            .query_one(
+                "SHOW transaction_read_only",
+                &[&safekeepers_lsn.safekeepers],
+            )
+            .await
+            .context("getting transaction_read_only")?;
+        if row.get::<usize, bool>(0) {
+            bail!("replica in read-only mode after reconnection");
+        }
 
-        // 5. Check we're primary now
-        //  "Update endpoint setting to that it ids not more treated as replica."
-
+        let mut state = self.state.lock().unwrap();
+        state.pspec.as_mut().unwrap().spec.mode = ComputeMode::Primary;
         Ok(())
     }
 }
