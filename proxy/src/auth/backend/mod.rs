@@ -25,7 +25,7 @@ use crate::control_plane::{
     RoleAccessControl,
 };
 use crate::intern::EndpointIdInt;
-use crate::pglb::connect_compute::ComputeConnectBackend;
+use crate::pglb::connect_compute::WakeComputeBackend;
 use crate::pqproto::BeMessage;
 use crate::proxy::NeonOptions;
 use crate::rate_limiter::EndpointRateLimiter;
@@ -407,13 +407,13 @@ impl Backend<'_, ComputeUserInfo> {
 }
 
 #[async_trait::async_trait]
-impl ComputeConnectBackend for Backend<'_, ComputeCredentials> {
+impl WakeComputeBackend for Backend<'_, ComputeUserInfo> {
     async fn wake_compute(
         &self,
         ctx: &RequestContext,
     ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
         match self {
-            Self::ControlPlane(api, creds) => api.wake_compute(ctx, &creds.info).await,
+            Self::ControlPlane(api, info) => api.wake_compute(ctx, info).await,
             Self::Local(local) => Ok(Cached::new_uncached(local.node_info.clone())),
         }
     }

@@ -50,7 +50,7 @@ pub(crate) trait ConnectMechanism {
 }
 
 #[async_trait]
-pub(crate) trait ComputeConnectBackend {
+pub(crate) trait WakeComputeBackend {
     async fn wake_compute(
         &self,
         ctx: &RequestContext,
@@ -91,7 +91,7 @@ impl ConnectMechanism for TcpMechanism {
 
 /// Try to connect to the compute node, retrying if necessary.
 #[tracing::instrument(skip_all)]
-pub(crate) async fn connect_to_compute<M: ConnectMechanism, B: ComputeConnectBackend>(
+pub(crate) async fn connect_to_compute<M: ConnectMechanism, B: WakeComputeBackend>(
     ctx: &RequestContext,
     mechanism: &M,
     user_info: &B,
