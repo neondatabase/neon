@@ -35,7 +35,8 @@ use fail::fail_point;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 use handle::ShardTimelineId;
-use layer_manager::Shutdown;
+use layer_manager::{LayerManagerReadGuard, LayerManagerWriteGuard, LockedLayerManager, Shutdown};
+
 use offload::OffloadError;
 use once_cell::sync::Lazy;
 use pageserver_api::config::tenant_conf_defaults::DEFAULT_PITR_INTERVAL;
@@ -82,7 +83,6 @@ use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 use self::delete::DeleteTimelineFlow;
 pub(super) use self::eviction_task::EvictionTaskTenantState;
 use self::eviction_task::EvictionTaskTimelineState;
-use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 use super::remote_timeline_client::RemoteTimelineClient;
@@ -181,13 +181,13 @@ impl std::fmt::Display for ImageLayerCreationMode {
 
 /// Temporary function for immutable storage state refactor, ensures we are dropping mutex guard instead of other things.
 /// Can be removed after all refactors are done.
-fn drop_rlock<T>(rlock: tokio::sync::RwLockReadGuard<T>) {
+fn drop_layer_manager_rlock(rlock: LayerManagerReadGuard<'_>) {
     drop(rlock)
 }
 
 /// Temporary function for immutable storage state refactor, ensures we are dropping mutex guard instead of other things.
 /// Can be removed after all refactors are done.
-fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
+fn drop_layer_manager_wlock(rlock: LayerManagerWriteGuard<'_>) {
     drop(rlock)
 }
 
@@ -241,7 +241,7 @@ pub struct Timeline {
     ///
     /// In the future, we'll be able to split up the tuple of LayerMap and `LayerFileManager`,
     /// so that e.g. on-demand-download/eviction, and layer spreading, can operate just on `LayerFileManager`.
-    pub(crate) layers: tokio::sync::RwLock<LayerManager>,
+    pub(crate) layers: LockedLayerManager,
 
     last_freeze_at: AtomicLsn,
     // Atomic would be more appropriate here.
@@ -5737,7 +5737,7 @@ impl Timeline {
         guard
             .open_mut()?
             .track_new_image_layers(&image_layers, &self.metrics);
-        drop_wlock(guard);
+        drop_layer_manager_wlock(guard);
         let duration = timer.stop_and_record();
 
         // Creating image layers may have caused some previously visible layers to be covered
@@ -6156,7 +6156,7 @@ impl Timeline {
         self.remote_client
             .schedule_compaction_update(&remove_layers, new_deltas)?;
 
-        drop_wlock(guard);
+        drop_layer_manager_wlock(guard);
 
         Ok(())
     }

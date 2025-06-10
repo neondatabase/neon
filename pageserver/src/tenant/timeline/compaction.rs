@@ -9,7 +9,7 @@ use std::ops::{Deref, Range};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::layer_manager::LayerManager;
+use super::layer_manager::LayerManagerReadGuard;
 use super::{
     CompactFlags, CompactOptions, CompactionError, CreateImageLayersError, DurationRecorder,
     GetVectoredError, ImageLayerCreationMode, LastImageLayerCreationStatus, RecordedDuration,
@@ -62,7 +62,7 @@ use crate::tenant::storage_layer::{
 use crate::tenant::tasks::log_compaction_error;
 use crate::tenant::timeline::{
     DeltaLayerWriter, ImageLayerCreationOutcome, ImageLayerWriter, IoConcurrency, Layer,
-    ResidentLayer, drop_rlock,
+    ResidentLayer, drop_layer_manager_rlock,
 };
 use crate::tenant::{DeltaLayer, MaybeOffloaded};
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
@@ -1803,7 +1803,7 @@ impl Timeline {
     /// Level0 files first phase of compaction, explained in the [`Self::compact_legacy`] comment.
     async fn compact_level0_phase1<'a>(
         self: &'a Arc<Self>,
-        guard: tokio::sync::RwLockReadGuard<'a, LayerManager>,
+        guard: LayerManagerReadGuard<'a>,
         mut stats: CompactLevel0Phase1StatsBuilder,
         target_file_size: u64,
         force_compaction_ignore_threshold: bool,
@@ -2029,7 +2029,7 @@ impl Timeline {
             holes
         };
         stats.read_lock_held_compute_holes_micros = stats.read_lock_held_key_sort_micros.till_now();
-        drop_rlock(guard);
+        drop_layer_manager_rlock(guard);
 
         if self.cancel.is_cancelled() {
             return Err(CompactionError::ShuttingDown);

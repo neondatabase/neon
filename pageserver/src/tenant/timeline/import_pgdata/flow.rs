@@ -1036,7 +1036,7 @@ impl ChunkProcessingJob {
             }
         }
 
-        crate::tenant::timeline::drop_wlock(guard);
+        crate::tenant::timeline::drop_layer_manager_wlock(guard);
 
         timeline
             .remote_client
