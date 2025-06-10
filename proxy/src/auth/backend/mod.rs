@@ -25,9 +25,9 @@ use crate::control_plane::{
     RoleAccessControl,
 };
 use crate::intern::EndpointIdInt;
-use crate::pglb::connect_compute::WakeComputeBackend;
 use crate::pqproto::BeMessage;
 use crate::proxy::NeonOptions;
+use crate::proxy::wake_compute::WakeComputeBackend;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::Stream;
 use crate::types::{EndpointCacheKey, EndpointId, RoleName};
