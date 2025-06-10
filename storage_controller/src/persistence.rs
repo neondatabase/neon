@@ -1420,9 +1420,9 @@ impl Persistence {
         .await
     }
 
-    /// Update timeline membership configuration in database.
-    /// Updates only if
-    /// Returns true if the CAS was
+    /// Update timeline membership configuration in the database.
+    /// Perform a compare-and-swap (CAS) operation on the timeline's generation.
+    /// The `new_generation` must be the next (+1) generation after the one in the database.
     pub(crate) async fn update_timeline_membership(
         &self,
         tenant_id: TenantId,
@@ -1454,8 +1454,11 @@ impl Persistence {
 
                 match updated {
                     0 => {
-                        // TODO: select generation.
-                        Err(DatabaseError::Cas("CAS failed".to_string()))
+                        // TODO(diko): It makes sense to select the current generation
+                        // and include it in the error message for better debuggability.
+                        Err(DatabaseError::Cas(
+                            "Failed to update membership configuration".to_string(),
+                        ))
                     }
                     1 => Ok(()),
                     _ => Err(DatabaseError::Logical(format!(

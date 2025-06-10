@@ -201,7 +201,8 @@ impl PhysicalStorage {
             ttid.timeline_id, flush_lsn, state.commit_lsn, state.peer_horizon_lsn,
         );
         if flush_lsn < state.commit_lsn {
-            // note: can never happen. find_end_of_wal returns start_lsn if it didn't find anything.
+            // note: can never happen. find_end_of_wal returns provided start_lsn
+            // (state.commit_lsn in our case) if it doesn't find anything.
             bail!(
                 "timeline {} potential data loss: flush_lsn {} by find_end_of_wal is less than commit_lsn  {} from control file",
                 ttid.timeline_id,

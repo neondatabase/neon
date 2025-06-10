@@ -21,11 +21,22 @@ def test_safekeeper_migration_simple(neon_env_builder: NeonEnvBuilder):
         "timeline_safekeeper_count": 1,
     }
     env = neon_env_builder.init_start()
+    # TODO(diko): pageserver spams with various errors during safekeeper migration.
+    # Fix the code so it handles the migration better.
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*Timeline .* was cancelled and cannot be used anymore.*",
+            ".*Timeline .* has been deleted.*",
+            ".*wal receiver task finished with an error.*",
+        ]
+    )
 
     ep = env.endpoints.create("main", tenant_id=env.initial_tenant)
     # We specify all safekeepers, so compute will connect to all of them.
-    # Only thouse from the current membership configuration will be used.
+    # Only those from the current membership configuration will be used.
+    # TODO(diko): set only current safekeepers when cplane notify is implemented.
     ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
+    ep.safe_psql("CREATE EXTENSION neon_test_utils;")
     ep.safe_psql("CREATE TABLE t(a int)")
 
     for active_sk in range(1, 4):
@@ -38,9 +49,19 @@ def test_safekeeper_migration_simple(neon_env_builder: NeonEnvBuilder):
         for sk in other_sks:
             env.safekeepers[sk - 1].stop()
 
-        ep.safe_psql(f"INSERT INTO t VALUES ({active_sk})")
+        ep.safe_psql(f"INSERT INTO t VALUES ({2 * active_sk - 1})")
+
+        ep.stop()
+        ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
+
+        ep.safe_psql(f"INSERT INTO t VALUES ({2 * active_sk})")
 
         for sk in other_sks:
             env.safekeepers[sk - 1].start()
 
-    assert ep.safe_psql("SELECT * FROM t") == [(i,) for i in range(1, 4)]
+    assert ep.safe_psql("SELECT * FROM t") == [(i,) for i in range(1, 7)]
+
+    ep.stop()
+    ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
+
+    assert ep.safe_psql("SELECT * FROM t") == [(i,) for i in range(1, 7)]

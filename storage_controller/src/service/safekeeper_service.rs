@@ -12,7 +12,7 @@ use crate::persistence::{
 };
 use crate::safekeeper::Safekeeper;
 use crate::safekeeper_client::SafekeeperClient;
-use crate::service::{TenantOperations, TimelineSafekeeperMigrateRequest};
+use crate::service::TenantOperations;
 use crate::timeline_import::TimelineImportFinalizeError;
 use anyhow::Context;
 use http_utils::error::ApiError;
@@ -33,6 +33,11 @@ use utils::logging::SecretString;
 use utils::lsn::Lsn;
 
 use super::Service;
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct TimelineSafekeeperMigrateRequest {
+    pub new_sk_set: Vec<NodeId>,
+}
 
 impl Service {
     fn make_member_set(safekeepers: &[Safekeeper]) -> Result<MemberSet, ApiError> {
@@ -691,7 +696,14 @@ impl Service {
             )
         });
         // Number of safekeepers in different AZs we are looking for
-        let wanted_count = self.config.timeline_safekeeper_count as usize;
+        let mut wanted_count = self.config.timeline_safekeeper_count as usize;
+
+        // TODO(diko): remove this when `timeline_safekeeper_count` flag is in the release
+        // branch and is used in tests.
+        if cfg!(feature = "testing") && wanted_count < all_safekeepers.len() {
+            // In testing mode, we can have less safekeepers than the config says
+            wanted_count = all_safekeepers.len();
+        }
 
         let mut sks = Vec::new();
         let mut azs = HashSet::new();
@@ -1024,7 +1036,7 @@ impl Service {
                     host_list: Vec::new(),
                     tenant_id,
                     timeline_id: Some(timeline_id),
-                    generation: config.generation.into_inner() as u32,
+                    generation: config.generation.into_inner(),
                     kind: SafekeeperTimelineOpKind::Exclude,
                 };
                 reconcile_requests.push(req);

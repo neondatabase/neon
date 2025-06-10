@@ -103,6 +103,8 @@ use crate::timeline_import::{
     TimelineImportFinalizeError, TimelineImportState, UpcallClient,
 };
 
+pub use safekeeper_service::TimelineSafekeeperMigrateRequest;
+
 const WAITER_FILL_DRAIN_POLL_TIMEOUT: Duration = Duration::from_millis(500);
 
 // For operations that should be quick, like attaching a new tenant
@@ -212,11 +214,6 @@ pub const SAFEKEEPER_RECONCILER_CONCURRENCY_DEFAULT: usize = 32;
 // This channel is finite-size to avoid using excessive memory if we get into a state where reconciles are finishing more slowly
 // than they're being pushed onto the queue.
 const MAX_DELAYED_RECONCILES: usize = 10000;
-
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
-pub struct TimelineSafekeeperMigrateRequest {
-    pub new_sk_set: Vec<NodeId>,
-}
 
 // Top level state available to all HTTP handlers
 struct ServiceState {

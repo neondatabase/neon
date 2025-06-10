@@ -208,7 +208,9 @@ struct Cli {
     #[arg(long, default_value = "false")]
     use_local_compute_notifications: bool,
 
-    // TODO(diko): write comment
+    /// Number of safekeepers to choose for a timeline when creating it.
+    /// Safekeepers will be choosen from different availability zones.
+    /// This option exists primarily for testing purposes.
     #[arg(long, default_value = "3", value_parser = clap::value_parser!(i64).range(1..))]
     timeline_safekeeper_count: i64,
 }

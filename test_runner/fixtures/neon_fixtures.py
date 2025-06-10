@@ -1210,10 +1210,12 @@ class NeonEnv:
             storage_controller_config = storage_controller_config or {}
             storage_controller_config["use_https_safekeeper_api"] = True
 
-        if config.num_safekeepers < 3:
-            storage_controller_config = storage_controller_config or {}
-            if "timeline_safekeeper_count" not in storage_controller_config:
-                storage_controller_config["timeline_safekeeper_count"] = config.num_safekeepers
+        # TODO(diko): uncomment when timeline_safekeeper_count option is in the release branch,
+        # so the compat tests will not fail bacause of it presence.
+        # if config.num_safekeepers < 3:
+        #     storage_controller_config = storage_controller_config or {}
+        #     if "timeline_safekeeper_count" not in storage_controller_config:
+        #         storage_controller_config["timeline_safekeeper_count"] = config.num_safekeepers
 
         if storage_controller_config is not None:
             cfg["storage_controller"] = storage_controller_config
