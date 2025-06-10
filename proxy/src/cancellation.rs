@@ -3,6 +3,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::anyhow;
+use futures::FutureExt;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use postgres_client::RawCancelToken;
 use postgres_client::tls::MakeTlsConnect;
@@ -392,29 +393,39 @@ impl Session {
     /// but stop when the channel is dropped.
     pub(crate) async fn maintain_cancel_key(
         self,
+        session_id: uuid::Uuid,
         cancel: tokio::sync::oneshot::Receiver<Infallible>,
-        cancel_closure: &CancelClosure,
-    ) -> Result<(), CancelError> {
+        cancel_closure: CancelClosure,
+        compute_config: &ComputeConfig,
+    ) {
         tokio::select! {
-            res = self.maintain_redis_cancel_key(cancel_closure) => match res? {},
-            _ = cancel => Ok(()),
+            _ = self.maintain_redis_cancel_key(&cancel_closure) => {}
+            _ = cancel => {}
+        };
+
+        if let Err(err) = cancel_closure
+            .try_cancel_query(compute_config)
+            .boxed()
+            .await
+        {
+            tracing::warn!(
+                ?session_id,
+                ?err,
+                "could not cancel the query in the database"
+            );
         }
     }
 
-    /// Ensure the cancel key is continously refreshed.
-    async fn maintain_redis_cancel_key(
-        &self,
-        cancel_closure: &CancelClosure,
-    ) -> Result<Infallible, CancelError> {
+    // Ensure the cancel key is continously refreshed.
+    async fn maintain_redis_cancel_key(&self, cancel_closure: &CancelClosure) -> ! {
         let Some(tx) = self.cancellation_handler.tx.get() else {
             tracing::warn!("cancellation handler is not available");
-            return Err(CancelError::InternalError);
+            // don't exit, as we only want to exit if cancelled externally.
+            std::future::pending().await
         };
 
-        let closure_json = serde_json::to_string(&cancel_closure).map_err(|e| {
-            tracing::warn!("failed to serialize cancel closure: {e}");
-            CancelError::InternalError
-        })?;
+        let closure_json = serde_json::to_string(&cancel_closure)
+            .expect("serialising to json string should not fail");
 
         loop {
             let guard = Metrics::get()

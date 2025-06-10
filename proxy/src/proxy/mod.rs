@@ -155,7 +155,7 @@ pub async fn task_main(
                 Ok(Some(p)) => {
                     ctx.set_success();
                     let _disconnect = ctx.log_connect();
-                    match p.proxy_pass(&config.connect_to_compute).await {
+                    match p.proxy_pass().await {
                         Ok(()) => {}
                         Err(ErrorSource::Client(e)) => {
                             warn!(
@@ -377,9 +377,13 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     prepare_client_connection(&node, *session.key(), &mut stream);
     let stream = stream.flush_and_into_inner().await?;
 
-    let cancel_closure = node.cancel_closure.clone();
     let (cancel_on_shutdown, cancel) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move { session.maintain_cancel_key(cancel, &cancel_closure).await });
+    tokio::spawn(session.maintain_cancel_key(
+        ctx.session_id(),
+        cancel,
+        node.cancel_closure,
+        &config.connect_to_compute,
+    ));
 
     let private_link_id = match ctx.extra() {
         Some(ConnectionInfoExtra::Aws { vpce_id }) => Some(vpce_id.clone()),
@@ -389,13 +393,16 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     Ok(Some(ProxyPassthrough {
         client: stream,
-        aux: node.aux.clone(),
+        compute: node.stream,
+
+        aux: node.aux,
         private_link_id,
-        compute: node,
-        session_id: ctx.session_id(),
+
         _cancel_on_shutdown: cancel_on_shutdown,
+
         _req: request_gauge,
         _conn: conn_gauge,
+        _db_conn: node.guage,
     }))
 }
 
