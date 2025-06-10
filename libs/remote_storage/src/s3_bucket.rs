@@ -1022,6 +1022,7 @@ impl RemoteStorage for S3Bucket {
             let Version { key, .. } = &vd;
             let version_id = vd.version_id().map(|v| v.0.as_str());
             if version_id == Some("null") {
+                // TODO: check the behavior of using the SDK on a non-versioned container
                 return Err(TimeTravelError::Other(anyhow!(
                     "Received ListVersions response for key={key} with version_id='null', \
                     indicating either disabled versioning, or legacy objects with null version id values"

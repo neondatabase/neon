@@ -4068,6 +4068,16 @@ def static_proxy(
         "CREATE TABLE neon_control_plane.endpoints (endpoint_id VARCHAR(255) PRIMARY KEY, allowed_ips VARCHAR(255))"
     )
 
+    vanilla_pg.stop()
+    vanilla_pg.edit_hba(
+        [
+            "local all all              trust",
+            "host  all all 127.0.0.1/32 scram-sha-256",
+            "host  all all ::1/128      scram-sha-256",
+        ]
+    )
+    vanilla_pg.start()
+
     proxy_port = port_distributor.get_port()
     mgmt_port = port_distributor.get_port()
     http_port = port_distributor.get_port()

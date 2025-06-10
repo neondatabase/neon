@@ -8,7 +8,7 @@ use crate::error::ReportableError;
 use crate::metrics::{
     ConnectOutcome, ConnectionFailuresBreakdownGroup, Metrics, RetriesMetricGroup, RetryType,
 };
-use crate::pglb::connect_compute::ComputeConnectBackend;
+use crate::pglb::connect_compute::WakeComputeBackend;
 use crate::proxy::retry::{retry_after, should_retry};
 
 // Use macro to retain original callsite.
@@ -23,7 +23,7 @@ macro_rules! log_wake_compute_error {
     };
 }
 
-pub(crate) async fn wake_compute<B: ComputeConnectBackend>(
+pub(crate) async fn wake_compute<B: WakeComputeBackend>(
     num_retries: &mut u32,
     ctx: &RequestContext,
     api: &B,
