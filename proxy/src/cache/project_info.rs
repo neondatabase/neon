@@ -364,6 +364,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::control_plane::messages::EndpointRateLimitConfig;
     use crate::control_plane::{AccessBlockerFlags, AuthSecret};
     use crate::scram::ServerSecret;
     use crate::types::ProjectId;
@@ -399,6 +400,7 @@ mod tests {
                 allowed_ips: allowed_ips.clone(),
                 allowed_vpce: Arc::new(vec![]),
                 flags: AccessBlockerFlags::default(),
+                rate_limits: EndpointRateLimitConfig::default(),
             },
             RoleAccessControl {
                 secret: secret1.clone(),
@@ -414,6 +416,7 @@ mod tests {
                 allowed_ips: allowed_ips.clone(),
                 allowed_vpce: Arc::new(vec![]),
                 flags: AccessBlockerFlags::default(),
+                rate_limits: EndpointRateLimitConfig::default(),
             },
             RoleAccessControl {
                 secret: secret2.clone(),
@@ -439,6 +442,7 @@ mod tests {
                 allowed_ips: allowed_ips.clone(),
                 allowed_vpce: Arc::new(vec![]),
                 flags: AccessBlockerFlags::default(),
+                rate_limits: EndpointRateLimitConfig::default(),
             },
             RoleAccessControl {
                 secret: secret3.clone(),
