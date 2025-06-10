@@ -17,21 +17,18 @@ impl ComputeNode {
         let client = ComputeNode::get_maintenance_client(&self.tokio_conn_conf)
             .await
             .context("connecting to postgres")?;
-        let rows = client
-            .query(
-                "SHOW neon.safekeepers; SELECT pg_current_wal_flush_lsn()",
-                &[],
-            )
+        let row = client
+            .query_one("SHOW neon.safekeepers", &[])
             .await
-            .context("querying safekeepers and lsn")?;
-        let len = rows.len();
-        if len != 2 {
-            bail!("expected 2 rows, got {len}");
-        }
+            .context("querying safekeepers")?;
+        let safekeepers: String = row.get(0);
 
-        let safekeepers: String = rows[0].get(0);
-        let lsn = utils::lsn::Lsn::from_hex(rows[1].get::<usize, &str>(0))
-            .context("parsing flush lsn")?;
+        let row = client
+            .query_one("SELECT pg_current_wal_flush_lsn()", &[])
+            .await
+            .context("querying lsn")?;
+        let lsn: u64 = row.get::<usize, postgres_types::PgLsn>(0).into();
+        let lsn: utils::lsn::Lsn = lsn.into();
         if !lsn.is_valid() {
             bail!("invalid flush lsn {lsn}");
         }

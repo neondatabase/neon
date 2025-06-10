@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import urllib.parse
 from enum import StrEnum
-from typing import TYPE_CHECKING, final
-
+from typing import TYPE_CHECKING, final, Any
+from fixtures.common_types import Lsn
 import requests
 from requests.adapters import HTTPAdapter
 from requests.auth import AuthBase
@@ -91,6 +91,16 @@ class EndpointHttpClient(requests.Session):
             assert status == "completed", f"{status}, error {err}"
 
         wait_until(offloaded)
+
+    # TODO(myrrc): remove in favour of /terminate return change
+    def safekeepers_lsn(self) -> dict[str, str]:
+        res = self.get(f"http://localhost:{self.external_port}/safekeepers_lsn")
+        res.raise_for_status()
+        json: dict[str, str] = res.json()
+        return json
+
+    def promote(self, safekeepers_lsn: dict[str, Any]):
+        self.post(f"http://localhost:{self.external_port}/promote", data=safekeepers_lsn).raise_for_status()
 
     def database_schema(self, database: str):
         res = self.get(
