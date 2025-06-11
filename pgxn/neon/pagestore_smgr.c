@@ -2382,7 +2382,7 @@ get_fsm_physical_block(BlockNumber heapblk)
 static bool
 neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 {
-	static last_recptr = InvalidXLogRecPtr;
+	static XLogRecPtr last_recptr = InvalidXLogRecPtr;
 	static bool last_no_redo_needed;
 	XLogRecPtr	end_recptr = record->EndRecPtr;
 	NRelFileInfo rinfo;
