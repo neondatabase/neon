@@ -28,6 +28,7 @@
     import 'sql_exporter/getpage_wait_seconds_bucket.libsonnet',
     import 'sql_exporter/getpage_wait_seconds_count.libsonnet',
     import 'sql_exporter/getpage_wait_seconds_sum.libsonnet',
+    import 'sql_exporter/installed_extensions.libsonnet',
     import 'sql_exporter/lfc_approximate_working_set_size.libsonnet',
     import 'sql_exporter/lfc_approximate_working_set_size_windows.libsonnet',
     import 'sql_exporter/lfc_cache_size_limit.libsonnet',
