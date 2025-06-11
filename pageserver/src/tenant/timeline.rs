@@ -3407,10 +3407,6 @@ impl Timeline {
         // TenantShard::create_timeline will wait for these uploads to happen before returning, or
         // on retry.
 
-        // Now that we have the full layer map, we may calculate the visibility of layers within it (a global scan)
-        drop(guard); // drop write lock, update_layer_visibility will take a read lock.
-        self.update_layer_visibility().await?;
-
         info!(
             "loaded layer map with {} layers at {}, total physical size: {}",
             num_layers, disk_consistent_lsn, total_physical_size
