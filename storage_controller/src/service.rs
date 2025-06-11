@@ -8890,10 +8890,11 @@ impl Service {
         // to not stall the operation when a cold secondary is encountered.
         const SECONDARY_WARMUP_TIMEOUT: Duration = Duration::from_secs(30);
         const SECONDARY_DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-        let reconciler_config = ReconcilerConfigBuilder::new(ReconcilerPriority::Normal)
-            .secondary_warmup_timeout(SECONDARY_WARMUP_TIMEOUT)
-            .secondary_download_request_timeout(SECONDARY_DOWNLOAD_REQUEST_TIMEOUT)
-            .build();
+        let reconciler_config: ReconcilerConfig =
+            ReconcilerConfigBuilder::new(ReconcilerPriority::Normal)
+                .secondary_warmup_timeout(SECONDARY_WARMUP_TIMEOUT)
+                .secondary_download_request_timeout(SECONDARY_DOWNLOAD_REQUEST_TIMEOUT)
+                .build();
 
         let mut waiters = Vec::new();
 
@@ -9072,10 +9073,10 @@ impl Service {
 
     async fn drain_secondary_attachments(
         self: &Arc<Self>,
-        node_id: NodeId,
-        cancel: CancellationToken,
+        _node_id: NodeId,
+        _cancel: CancellationToken,
     ) -> Result<(), OperationError> {
-        unimplemented!();
+        Ok(())
     }
 
     /// Create a node fill plan (pick secondaries to promote), based on:

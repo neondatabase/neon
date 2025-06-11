@@ -2062,11 +2062,16 @@ class NeonStorageController(MetricsGetter, LogUtils):
             headers=self.headers(TokenScope.ADMIN),
         )
 
-    def node_drain(self, node_id):
-        log.info(f"node_drain({node_id})")
+    def node_drain(self, node_id: int, drain_all: bool | None = None):
+        log.info(f"node_drain({node_id}, drain_all={drain_all})")
+
+        url = f"{self.api}/control/v1/node/{node_id}/drain"
+        if drain_all is not None:
+            url += f"?drain_all={str(drain_all).lower()}"
+
         self.request(
             "PUT",
-            f"{self.api}/control/v1/node/{node_id}/drain",
+            url,
             headers=self.headers(TokenScope.INFRA),
         )
 
