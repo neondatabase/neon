@@ -51,6 +51,7 @@ use crate::tenant::config::{
 use crate::tenant::span::debug_assert_current_span_has_tenant_id;
 use crate::tenant::storage_layer::inmemory_layer;
 use crate::tenant::timeline::ShutdownMode;
+use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
 use crate::tenant::{
     AttachedTenantConf, GcError, LoadConfigError, SpawnMode, TenantShard, TenantState,
 };
@@ -1658,7 +1659,10 @@ impl TenantManager {
             let parent_timelines = timelines.keys().cloned().collect::<Vec<_>>();
             for timeline in timelines.values() {
                 tracing::info!(timeline_id=%timeline.timeline_id, "Loading list of layers to hardlink");
-                let layers = timeline.layers.read().await;
+                let layers = timeline
+                    .layers
+                    .read(LayerManagerLockHolder::GetLayerMapInfo)
+                    .await;
 
                 for layer in layers.likely_resident_layers() {
                     let relative_path = layer

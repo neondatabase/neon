@@ -1635,6 +1635,7 @@ pub(crate) mod test {
     use crate::tenant::disk_btree::tests::TestDisk;
     use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
     use crate::tenant::storage_layer::{Layer, ResidentLayer};
+    use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
     use crate::tenant::{TenantShard, Timeline};
 
     /// Construct an index for a fictional delta layer and and then
@@ -2002,7 +2003,7 @@ pub(crate) mod test {
 
         let initdb_layer = timeline
             .layers
-            .read()
+            .read(crate::tenant::timeline::layer_manager::LayerManagerLockHolder::Testing)
             .await
             .likely_resident_layers()
             .next()
@@ -2078,7 +2079,7 @@ pub(crate) mod test {
 
         let new_layer = timeline
             .layers
-            .read()
+            .read(LayerManagerLockHolder::Testing)
             .await
             .likely_resident_layers()
             .find(|&x| x != &initdb_layer)

@@ -15,6 +15,7 @@ use super::{Timeline, TimelineDeleteProgress};
 use crate::context::RequestContext;
 use crate::controller_upcall_client::{StorageControllerUpcallApi, StorageControllerUpcallClient};
 use crate::tenant::metadata::TimelineMetadata;
+use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
 
 mod flow;
 mod importbucket_client;
@@ -163,7 +164,10 @@ async fn prepare_import(
     info!("wipe the slate clean");
     {
         // TODO: do we need to hold GC lock for this?
-        let mut guard = timeline.layers.write().await;
+        let mut guard = timeline
+            .layers
+            .write(LayerManagerLockHolder::ImportPgData)
+            .await;
         assert!(
             guard.layer_map()?.open_layer.is_none(),
             "while importing, there should be no in-memory layer" // this just seems like a good place to assert it
