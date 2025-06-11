@@ -165,8 +165,12 @@ Users can use the feature flag evaluation API to get the flag evaluation result 
 curl http://localhost:9898/v1/tenant/:tenant_id/feature_flag?flag=:key&as=multivariate/boolean"
 ```
 
+By default, each pageserver refreshes the feature flag spec every 30 seconds, which means that a change in feature flag in the
+PostHog UI will propagate to the pageservers within 30 seconds.
+
 # Future Works
 
 * Support dynamic tenant properties like logical size as the evaluation condition.
-* Support properties like `plan_type` (needs cplane to pass it down)
-* Report feature flag evaluation result back to PostHog (if the cost is okay)
+* Support properties like `plan_type` (needs cplane to pass it down).
+* Report feature flag evaluation result back to PostHog (if the cost is okay).
+* Fast feature flag evaluation cache on critical paths (e.g., cache a feature flag result in `AtomicBool` and use it on the read path).
