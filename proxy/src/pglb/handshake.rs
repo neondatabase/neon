@@ -12,7 +12,7 @@ use crate::pqproto::{
     BeMessage, CancelKeyData, FeStartupPacket, ProtocolVersion, StartupMessageParams,
 };
 use crate::proxy::TlsRequired;
-use crate::stream::{PqStream, Stream, StreamUpgradeError};
+use crate::stream::{PqFeStream, Stream, StreamUpgradeError};
 use crate::tls::PG_ALPN_PROTOCOL;
 
 #[derive(Error, Debug)]
@@ -49,7 +49,7 @@ impl ReportableError for HandshakeError {
 }
 
 pub(crate) enum HandshakeData<S> {
-    Startup(PqStream<Stream<S>>, StartupMessageParams),
+    Startup(PqFeStream<Stream<S>>, StartupMessageParams),
     Cancel(CancelKeyData),
 }
 
@@ -70,7 +70,7 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin + Send>(
     const PG_PROTOCOL_EARLIEST: ProtocolVersion = ProtocolVersion::new(3, 0);
     const PG_PROTOCOL_LATEST: ProtocolVersion = ProtocolVersion::new(3, 0);
 
-    let (mut stream, mut msg) = PqStream::parse_startup(Stream::from_raw(stream)).await?;
+    let (mut stream, mut msg) = PqFeStream::parse_startup(Stream::from_raw(stream)).await?;
     loop {
         match msg {
             FeStartupPacket::SslRequest { direct } => match stream.get_ref() {
@@ -152,7 +152,7 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin + Send>(
                             tls: tls_stream,
                             tls_server_end_point,
                         };
-                        (stream, msg) = PqStream::parse_startup(tls).await?;
+                        (stream, msg) = PqFeStream::parse_startup(tls).await?;
                     } else {
                         if direct.is_some() {
                             // client sent us a ClientHello already, we can't do anything with it.

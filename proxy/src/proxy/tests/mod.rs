@@ -25,6 +25,7 @@ use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
 use crate::control_plane::{self, CachedNodeInfo, NodeInfo, NodeInfoCache};
 use crate::error::ErrorKind;
+use crate::pqproto::BeMessage;
 use crate::proxy::connect_compute::ConnectMechanism;
 use crate::tls::client_config::compute_client_config_with_certs;
 use crate::tls::server_config::CertResolver;
@@ -122,7 +123,7 @@ fn generate_tls_config<'a>(
 trait TestAuth: Sized {
     async fn authenticate<S: AsyncRead + AsyncWrite + Unpin + Send>(
         self,
-        stream: &mut PqStream<Stream<S>>,
+        stream: &mut PqFeStream<Stream<S>>,
     ) -> anyhow::Result<()> {
         stream.write_message(BeMessage::AuthenticationOk);
         Ok(())
@@ -151,7 +152,7 @@ impl Scram {
 impl TestAuth for Scram {
     async fn authenticate<S: AsyncRead + AsyncWrite + Unpin + Send>(
         self,
-        stream: &mut PqStream<Stream<S>>,
+        stream: &mut PqFeStream<Stream<S>>,
     ) -> anyhow::Result<()> {
         let outcome = auth::AuthFlow::new(stream, auth::Scram(&self.0, &RequestContext::test()))
             .authenticate()

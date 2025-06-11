@@ -17,7 +17,7 @@ use crate::stream::{self, Stream};
 pub(crate) async fn authenticate_cleartext(
     ctx: &RequestContext,
     info: ComputeUserInfo,
-    client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
+    client: &mut stream::PqFeStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     secret: AuthSecret,
     config: &'static AuthenticationConfig,
 ) -> auth::Result<ComputeCredentials> {
@@ -61,7 +61,7 @@ pub(crate) async fn authenticate_cleartext(
 pub(crate) async fn password_hack_no_authentication(
     ctx: &RequestContext,
     info: ComputeUserInfoNoEndpoint,
-    client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
+    client: &mut stream::PqFeStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
 ) -> auth::Result<(ComputeUserInfo, Vec<u8>)> {
     debug!("project not specified, resorting to the password hack auth flow");
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);

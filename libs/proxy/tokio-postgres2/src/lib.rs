@@ -3,7 +3,7 @@
 
 use postgres_protocol2::message::backend::ReadyForQueryBody;
 
-pub use crate::cancel_token::CancelToken;
+pub use crate::cancel_token::{CancelToken, RawCancelToken};
 pub use crate::client::{Client, SocketConfig};
 pub use crate::config::Config;
 pub use crate::connect_raw::RawConnection;

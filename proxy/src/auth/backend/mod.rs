@@ -201,7 +201,7 @@ async fn auth_quirks(
     ctx: &RequestContext,
     api: &impl control_plane::ControlPlaneApi,
     user_info: ComputeUserInfoMaybeEndpoint,
-    client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
+    client: &mut stream::PqFeStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
@@ -267,7 +267,7 @@ async fn authenticate_with_secret(
     ctx: &RequestContext,
     secret: AuthSecret,
     info: ComputeUserInfo,
-    client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
+    client: &mut stream::PqFeStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     unauthenticated_password: Option<Vec<u8>>,
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
@@ -318,7 +318,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
     pub(crate) async fn authenticate(
         self,
         ctx: &RequestContext,
-        client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
+        client: &mut stream::PqFeStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
         allow_cleartext: bool,
         config: &'static AuthenticationConfig,
         endpoint_rate_limiter: Arc<EndpointRateLimiter>,
@@ -446,7 +446,7 @@ mod tests {
     use crate::rate_limiter::EndpointRateLimiter;
     use crate::scram::ServerSecret;
     use crate::scram::threadpool::ThreadPool;
-    use crate::stream::{PqStream, Stream};
+    use crate::stream::{PqFeStream, Stream};
 
     struct Auth {
         ips: Vec<IpPattern>,
@@ -522,7 +522,7 @@ mod tests {
     #[tokio::test]
     async fn auth_quirks_scram() {
         let (mut client, server) = tokio::io::duplex(1024);
-        let mut stream = PqStream::new_skip_handshake(Stream::from_raw(server));
+        let mut stream = PqFeStream::new_skip_handshake(Stream::from_raw(server));
 
         let ctx = RequestContext::test();
         let api = Auth {
@@ -604,7 +604,7 @@ mod tests {
     #[tokio::test]
     async fn auth_quirks_cleartext() {
         let (mut client, server) = tokio::io::duplex(1024);
-        let mut stream = PqStream::new_skip_handshake(Stream::from_raw(server));
+        let mut stream = PqFeStream::new_skip_handshake(Stream::from_raw(server));
 
         let ctx = RequestContext::test();
         let api = Auth {
@@ -658,7 +658,7 @@ mod tests {
     #[tokio::test]
     async fn auth_quirks_password_hack() {
         let (mut client, server) = tokio::io::duplex(1024);
-        let mut stream = PqStream::new_skip_handshake(Stream::from_raw(server));
+        let mut stream = PqFeStream::new_skip_handshake(Stream::from_raw(server));
 
         let ctx = RequestContext::test();
         let api = Auth {

@@ -7,7 +7,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use super::{Mechanism, Step};
 use crate::context::RequestContext;
 use crate::pqproto::{BeAuthenticationSaslMessage, BeMessage};
-use crate::stream::PqStream;
+use crate::stream::PqFeStream;
 
 /// SASL authentication outcome.
 /// It's much easier to match on those two variants
@@ -22,7 +22,7 @@ pub(crate) enum Outcome<R> {
 
 pub async fn authenticate<S, F, M>(
     ctx: &RequestContext,
-    stream: &mut PqStream<S>,
+    stream: &mut PqFeStream<S>,
     mechanism: F,
 ) -> super::Result<Outcome<M::Output>>
 where

@@ -14,7 +14,7 @@ pub(crate) mod private {
 
 /// Channel binding information returned from a TLS handshake.
 pub struct ChannelBinding {
-    pub(crate) tls_server_end_point: Option<Vec<u8>>,
+    pub tls_server_end_point: Option<Vec<u8>>,
 }
 
 impl ChannelBinding {
