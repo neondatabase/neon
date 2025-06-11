@@ -156,8 +156,8 @@ struct ProxyCliArgs {
     #[clap(long, alias("redis-notifications"))]
     redis_plain: Option<String>,
     /// what from the available authentications type to use for redis. Supported are "irsa" and "plain".
-    #[clap(long)]
-    redis_auth_type: Option<String>,
+    #[clap(long, default_value = "irsa")]
+    redis_auth_type: String,
     /// redis host for irsa authentication
     #[clap(long)]
     redis_host: Option<String>,
@@ -805,8 +805,8 @@ async fn configure_redis(
     args: &ProxyCliArgs,
 ) -> anyhow::Result<Option<ConnectionWithCredentialsProvider>> {
     // TODO: untangle the config args
-    let redis_client = match args.redis_auth_type.as_deref() {
-        Some("plain") => match &args.redis_plain {
+    let redis_client = match &*args.redis_auth_type {
+        "plain" => match &args.redis_plain {
             None => {
                 bail!("plain auth requires redis_plain to be set");
             }
@@ -814,7 +814,7 @@ async fn configure_redis(
                 Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url.clone()))
             }
         },
-        Some("irsa") => match (&args.redis_host, args.redis_port) {
+        "irsa" => match (&args.redis_host, args.redis_port) {
             (Some(host), Some(port)) => Some(
                 ConnectionWithCredentialsProvider::new_with_credentials_provider(
                     host.clone(),
@@ -828,13 +828,13 @@ async fn configure_redis(
                 ),
             ),
             _ => {
-                bail!("redis-host and redis-port must be specified together")
+                tracing::warn!("redis-host and redis-port not specified");
+                None
             }
         },
-        Some(auth_type) => {
+        auth_type => {
             bail!("unknown auth type {auth_type:?} given")
         }
-        None => None,
     };
 
     Ok(redis_client)
