@@ -11,7 +11,7 @@ SELECT
 FROM dbs d,
 LATERAL (
   SELECT * FROM dblink(
-    'dbname=' || d.datname || ' user=' || current_user || ' connect_timeout=5',
+    'dbname=' || quote_ident(d.datname) || ' user=' || quote_ident(current_user) || ' connect_timeout=5',
     'SELECT sum(autovacuum_count) as autovacuum_count
      FROM pg_stat_all_tables 
      WHERE schemaname NOT IN (''pg_catalog'', ''information_schema'')'

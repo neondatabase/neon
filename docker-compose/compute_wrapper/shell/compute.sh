@@ -80,9 +80,9 @@ if [[ ${PG_VERSION} -ge 17 ]]; then
 else
   ulid_extension=ulid
 fi
-echo "Adding pgx_ulid and dblink"
+echo "Adding pgx_ulid"
 shared_libraries=$(jq -r '.spec.cluster.settings[] | select(.name=="shared_preload_libraries").value' ${CONFIG_FILE})
-sed -i "s|${shared_libraries}|${shared_libraries},${ulid_extension},dblink|" ${CONFIG_FILE}
+sed -i "s|${shared_libraries}|${shared_libraries},${ulid_extension}|" ${CONFIG_FILE}
 echo "Overwrite tenant id and timeline id in spec file"
 sed -i "s|TENANT_ID|${tenant_id}|" ${CONFIG_FILE}
 sed -i "s|TIMELINE_ID|${timeline_id}|" ${CONFIG_FILE}
