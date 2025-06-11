@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info};
 
 use crate::auth::backend::ConsoleRedirectBackend;
-use crate::cancellation::{CancelClosure, CancellationHandler};
+use crate::cancellation::CancellationHandler;
 use crate::config::{ProxyConfig, ProxyProtocolV2};
 use crate::context::RequestContext;
 use crate::error::ReportableError;
@@ -177,7 +177,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
     let do_handshake = handshake(ctx, stream, tls, record_handshake_error);
 
-    let (mut stream, params) = match tokio::time::timeout(config.handshake_timeout, do_handshake)
+    let (mut client, params) = match tokio::time::timeout(config.handshake_timeout, do_handshake)
         .await??
     {
         HandshakeData::Startup(stream, params) => (stream, params),
@@ -210,15 +210,15 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     ctx.set_db_options(params.clone());
 
     let (node_info, mut auth_info, user_info) = match backend
-        .authenticate(ctx, &config.authentication_config, &mut stream)
+        .authenticate(ctx, &config.authentication_config, &mut client)
         .await
     {
         Ok(auth_result) => auth_result,
-        Err(e) => Err(stream.throw_error(e, Some(ctx)).await)?,
+        Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
     };
     auth_info.set_startup_params(&params, true);
 
-    let node = connect_to_compute(
+    let mut node = connect_to_compute(
         ctx,
         &TcpMechanism {
             auth: auth_info,
@@ -228,24 +228,17 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         config.wake_compute_retry_config,
         &config.connect_to_compute,
     )
-    .or_else(|e| async { Err(stream.throw_error(e, Some(ctx)).await) })
+    .or_else(|e| async { Err(client.throw_error(e, Some(ctx)).await) })
     .await?;
 
     let session = cancellation_handler.get_key();
 
-    prepare_client_connection(&node, *session.key(), &mut stream);
-    let stream = stream.flush_and_into_inner().await?;
+    let cancel_closure =
+        prepare_client_connection(&mut node, session.key(), &mut client, user_info).await?;
 
     let session_id = ctx.session_id();
     let (cancel_on_shutdown, cancel) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        let cancel_closure = CancelClosure::new(
-            node.socket_addr,
-            node.cancel_token,
-            node.hostname,
-            user_info,
-        );
-
         session
             .maintain_cancel_key(
                 session_id,
@@ -256,9 +249,12 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
             .await;
     });
 
+    let client = client.flush_and_into_inner().await?;
+    let compute = node.stream.flush_and_into_inner().await?;
+
     Ok(Some(ProxyPassthrough {
-        client: stream,
-        compute: node.stream,
+        client,
+        compute,
 
         aux: node.aux,
         private_link_id: None,

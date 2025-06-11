@@ -11,16 +11,16 @@ use rand::distributions::{Distribution, Standard};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use zerocopy::{FromBytes, Immutable, IntoBytes, big_endian};
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct ErrorCode(pub [u8; 5]);
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct FeTag(pub u8);
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct BeTag(pub u8);
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct AuthTag(pub i32);
 
 pub const FE_PASSWORD_MESSAGE: FeTag = FeTag(b'p');
@@ -32,7 +32,6 @@ pub const BE_READY_MESSAGE: BeTag = BeTag(b'Z');
 pub const BE_NEGOTIATE_MESSAGE: BeTag = BeTag(b'v');
 
 pub const AUTH_OK: AuthTag = AuthTag(0);
-pub const AUTH_CLEAR: AuthTag = AuthTag(3);
 pub const AUTH_SASL: AuthTag = AuthTag(10);
 pub const AUTH_SASL_CONT: AuthTag = AuthTag(11);
 pub const AUTH_SASL_FINAL: AuthTag = AuthTag(12);
@@ -356,6 +355,10 @@ impl WriteBuf {
         Self(Cursor::new(Vec::new()))
     }
 
+    pub const fn len(&self) -> usize {
+        self.0.get_ref().len()
+    }
+
     /// Use a heuristic to determine if we should shrink the write buffer.
     #[inline]
     fn should_shrink(&self) -> bool {
@@ -557,11 +560,11 @@ pub enum BeMessage<'a> {
     AuthenticationOk,
     AuthenticationSasl(BeAuthenticationSaslMessage<'a>),
     AuthenticationCleartextPassword,
-    BackendKeyData(CancelKeyData),
     ParameterStatus {
         name: &'a [u8],
         value: &'a [u8],
     },
+    #[cfg(test)]
     ReadyForQuery,
     NoticeResponse(&'a str),
     NegotiateProtocolVersion {
@@ -617,13 +620,6 @@ impl BeMessage<'_> {
                 });
             }
 
-            // <https://www.postgresql.org/docs/current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-BACKENDKEYDATA>
-            BeMessage::BackendKeyData(key_data) => {
-                buf.write_raw(8, BE_KEY_MESSAGE.0, |buf| {
-                    buf.put_slice(key_data.as_bytes())
-                });
-            }
-
             // <https://www.postgresql.org/docs/current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-NOTICERESPONSE>
             // <https://www.postgresql.org/docs/current/protocol-error-fields.html>
             BeMessage::NoticeResponse(msg) => {
@@ -655,6 +651,7 @@ impl BeMessage<'_> {
                 });
             }
 
+            #[cfg(test)]
             // <https://www.postgresql.org/docs/current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-NEGOTIATEPROTOCOLVERSION>
             BeMessage::ReadyForQuery => {
                 buf.write_raw(1, BE_READY_MESSAGE.0, |buf| buf.put_u8(b'I'));

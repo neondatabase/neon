@@ -1,9 +1,11 @@
+mod pq_backend;
 mod pq_frontend;
 
 use std::pin::Pin;
 use std::sync::Arc;
 use std::{io, task};
 
+pub use pq_backend::{BackendError, PostgresError, PqBeStream};
 pub use pq_frontend::PqFeStream;
 use rustls::ServerConfig;
 use thiserror::Error;

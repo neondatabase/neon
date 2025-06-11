@@ -79,9 +79,7 @@ impl NodeInfo {
         auth: &compute::AuthInfo,
         config: &ComputeConfig,
     ) -> Result<compute::PostgresConnection, compute::ConnectionError> {
-        self.conn_info
-            .connect(ctx, self.aux.clone(), auth, config)
-            .await
+        self.conn_info.connect(ctx, &self.aux, auth, config).await
     }
 }
 

@@ -6,8 +6,8 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::error::{ErrorKind, UserFacingError};
 use crate::pqproto::{
-    BeMessage, FE_PASSWORD_MESSAGE, FeStartupPacket, FeTag, SQLSTATE_INTERNAL_ERROR, WriteBuf,
-    read_message, read_startup,
+    BeMessage, BeTag, FE_PASSWORD_MESSAGE, FeStartupPacket, FeTag, SQLSTATE_INTERNAL_ERROR,
+    WriteBuf, read_message, read_startup,
 };
 use crate::stream::ReportedError;
 
@@ -31,6 +31,10 @@ impl<S> PqFeStream<S> {
             read: Vec::new(),
             write: WriteBuf::new(),
         }
+    }
+
+    pub fn write_buf_len(&self) -> usize {
+        self.write.len()
     }
 }
 
@@ -103,8 +107,8 @@ impl<S: AsyncWrite + Unpin> PqFeStream<S> {
     }
 
     /// Write a raw message to the internal buffer.
-    pub fn write_raw(&mut self, size_hint: usize, tag: u8, f: impl FnOnce(&mut Vec<u8>)) {
-        self.write.write_raw(size_hint, tag, f);
+    pub fn write_raw(&mut self, size_hint: usize, tag: BeTag, f: impl FnOnce(&mut Vec<u8>)) {
+        self.write.write_raw(size_hint, tag.0, f);
     }
 
     /// Write the message into an internal buffer
@@ -150,6 +154,7 @@ impl<S: AsyncWrite + Unpin> PqFeStream<S> {
         if error_kind != ErrorKind::RateLimit && error_kind != ErrorKind::User {
             tracing::info!(
                 kind = error_kind.to_metric_label(),
+                %error,
                 msg,
                 "forwarding error to user"
             );

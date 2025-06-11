@@ -2,6 +2,7 @@ use std::convert::Infallible;
 
 use smol_str::SmolStr;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpStream;
 use tracing::debug;
 use utils::measured_stream::MeasuredStream;
 
@@ -66,8 +67,7 @@ pub(crate) async fn proxy_pass(
 
 pub(crate) struct ProxyPassthrough<S> {
     pub(crate) client: Stream<S>,
-    pub(crate) compute: MaybeRustlsStream,
-
+    pub(crate) compute: MaybeRustlsStream<TcpStream>,
     pub(crate) aux: MetricsAuxInfo,
     pub(crate) private_link_id: Option<SmolStr>,
 

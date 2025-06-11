@@ -10,6 +10,7 @@ use std::sync::Arc;
 use futures::FutureExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
+use postgres_client::RawCancelToken;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use smol_str::{SmolStr, ToSmolStr, format_smolstr};
@@ -18,6 +19,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, warn};
 
+use crate::auth::backend::ComputeUserInfo;
 use crate::cancellation::{self, CancelClosure, CancellationHandler};
 use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
 use crate::context::RequestContext;
@@ -26,11 +28,11 @@ use crate::metrics::{Metrics, NumClientConnectionsGuard};
 pub use crate::pglb::copy_bidirectional::{ErrorSource, copy_bidirectional_client_compute};
 use crate::pglb::handshake::{HandshakeData, HandshakeError, handshake};
 use crate::pglb::passthrough::ProxyPassthrough;
-use crate::pqproto::{BeMessage, CancelKeyData, StartupMessageParams};
+use crate::pqproto::{CancelKeyData, StartupMessageParams};
 use crate::protocol2::{ConnectHeader, ConnectionInfo, ConnectionInfoExtra, read_proxy_protocol};
 use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
 use crate::rate_limiter::EndpointRateLimiter;
-use crate::stream::{PqFeStream, Stream};
+use crate::stream::{PostgresError, PqFeStream, Stream};
 use crate::types::EndpointCacheKey;
 use crate::util::run_until_cancelled;
 use crate::{auth, compute};
@@ -253,7 +255,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     auth_backend: &'static auth::Backend<'static, ()>,
     ctx: &RequestContext,
     cancellation_handler: Arc<CancellationHandler>,
-    stream: S,
+    client: S,
     mode: ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     conn_gauge: NumClientConnectionsGuard<'static>,
@@ -273,9 +275,9 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let record_handshake_error = !ctx.has_private_peer_addr();
     let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
-    let do_handshake = handshake(ctx, stream, mode.handshake_tls(tls), record_handshake_error);
+    let do_handshake = handshake(ctx, client, mode.handshake_tls(tls), record_handshake_error);
 
-    let (mut stream, params) = match tokio::time::timeout(config.handshake_timeout, do_handshake)
+    let (mut client, params) = match tokio::time::timeout(config.handshake_timeout, do_handshake)
         .await??
     {
         HandshakeData::Startup(stream, params) => (stream, params),
@@ -307,7 +309,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     ctx.set_db_options(params.clone());
 
-    let hostname = mode.hostname(stream.get_ref());
+    let hostname = mode.hostname(client.get_ref());
 
     let common_names = tls.map(|tls| &tls.common_names);
 
@@ -319,14 +321,14 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let user_info = match result {
         Ok(user_info) => user_info,
-        Err(e) => Err(stream.throw_error(e, Some(ctx)).await)?,
+        Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
     };
 
     let user = user_info.get_user().to_owned();
     let user_info = match user_info
         .authenticate(
             ctx,
-            &mut stream,
+            &mut client,
             mode.allow_cleartext(),
             &config.authentication_config,
             endpoint_rate_limiter,
@@ -339,7 +341,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
             let app = params.get("application_name");
             let params_span = tracing::info_span!("", ?user, ?db, ?app);
 
-            return Err(stream
+            return Err(client
                 .throw_error(e, Some(ctx))
                 .instrument(params_span)
                 .await)?;
@@ -366,26 +368,19 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     )
     .await;
 
-    let node = match res {
+    let mut node = match res {
         Ok(node) => node,
-        Err(e) => Err(stream.throw_error(e, Some(ctx)).await)?,
+        Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
     };
 
     let session = cancellation_handler.get_key();
 
-    prepare_client_connection(&node, *session.key(), &mut stream);
-    let stream = stream.flush_and_into_inner().await?;
+    let cancel_closure =
+        prepare_client_connection(&mut node, session.key(), &mut client, creds.info).await?;
 
     let session_id = ctx.session_id();
     let (cancel_on_shutdown, cancel) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        let cancel_closure = CancelClosure::new(
-            node.socket_addr,
-            node.cancel_token,
-            node.hostname,
-            creds.info,
-        );
-
         session
             .maintain_cancel_key(
                 session_id,
@@ -396,6 +391,9 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
             .await;
     });
 
+    let client = client.flush_and_into_inner().await?;
+    let compute = node.stream.flush_and_into_inner().await?;
+
     let private_link_id = match ctx.extra() {
         Some(ConnectionInfoExtra::Aws { vpce_id }) => Some(vpce_id.clone()),
         Some(ConnectionInfoExtra::Azure { link_id }) => Some(link_id.to_smolstr()),
@@ -403,8 +401,8 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     };
 
     Ok(Some(ProxyPassthrough {
-        client: stream,
-        compute: node.stream,
+        client,
+        compute,
 
         aux: node.aux,
         private_link_id,
@@ -418,28 +416,60 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 }
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
-pub(crate) fn prepare_client_connection(
-    node: &compute::PostgresConnection,
-    cancel_key_data: CancelKeyData,
+pub(crate) async fn prepare_client_connection(
+    node: &mut compute::PostgresConnection,
+    key_data: &CancelKeyData,
     stream: &mut PqFeStream<impl AsyncRead + AsyncWrite + Unpin>,
-) {
-    // Forward all deferred notices to the client.
-    for notice in &node.delayed_notice {
-        stream.write_raw(notice.as_bytes().len(), b'N', |buf| {
-            buf.extend_from_slice(notice.as_bytes());
-        });
+    user_info: ComputeUserInfo,
+) -> Result<CancelClosure, std::io::Error> {
+    use zerocopy::{FromBytes, IntoBytes};
+
+    use crate::pqproto::{BE_KEY_MESSAGE, BE_READY_MESSAGE};
+
+    let mut process_id = 0;
+    let mut secret_key = 0;
+
+    loop {
+        match node.stream.read_raw_be(1024).await {
+            // parse backend keys, and substitute our own.
+            Ok((tag @ BE_KEY_MESSAGE, msg)) => {
+                stream.write_raw(8, tag, |b| b.extend_from_slice(key_data.as_bytes()));
+
+                let key_data = CancelKeyData::read_from_bytes(msg)
+                    .map_err(|_| std::io::Error::other("invalid msg len"))?;
+
+                process_id = (key_data.0.get() >> 32) as i32;
+                secret_key = (key_data.0.get() & 0xffff_ffff) as i32;
+            }
+            // ready for query, we're done :)
+            Ok((tag @ BE_READY_MESSAGE, msg)) => {
+                stream.write_raw(msg.len(), tag, |b| b.extend_from_slice(msg.as_bytes()));
+                break;
+            }
+            // either a notice or a parameter status.
+            Ok((tag, msg)) => {
+                stream.write_raw(msg.len(), tag, |b| b.extend_from_slice(msg.as_bytes()));
+            }
+            Err(PostgresError::Io(io)) => return Err(io),
+            Err(PostgresError::Error(e)) => return Err(std::io::Error::other(e)),
+            Err(_) => unreachable!("read_raw_be only returns IO or BackendError types"),
+        }
+
+        if stream.write_buf_len() > 512 {
+            stream.flush().await?;
+        }
     }
 
-    // Forward all postgres connection params to the client.
-    for (name, value) in &node.params {
-        stream.write_message(BeMessage::ParameterStatus {
-            name: name.as_bytes(),
-            value: value.as_bytes(),
-        });
-    }
-
-    stream.write_message(BeMessage::BackendKeyData(cancel_key_data));
-    stream.write_message(BeMessage::ReadyForQuery);
+    Ok(CancelClosure::new(
+        node.socket_addr,
+        RawCancelToken {
+            ssl_mode: node.ssl_mode,
+            process_id,
+            secret_key,
+        },
+        node.hostname.clone(),
+        user_info,
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
