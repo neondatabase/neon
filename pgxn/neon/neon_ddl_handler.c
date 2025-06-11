@@ -899,12 +899,14 @@ neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 		&& is_neon_superuser())
 	{
 		/* Find the Function Attributes (owner Oid, security definer) */
-		Oid function_owner = InvalidOid;
-		bool function_is_secdef = false;
+		const char *fun_owner_name = NULL;
+		Oid fun_owner = InvalidOid;
+		bool fun_is_secdef = false;
 
-		LookupFuncOwnerSecDef(flinfo->fn_oid, &function_owner, &function_is_secdef);
+		LookupFuncOwnerSecDef(flinfo->fn_oid, &fun_owner, &fun_is_secdef);
+		fun_owner_name = GetUserNameFromId(fun_owner, false);
 
-		if (RoleIsNeonSuperuser(function_owner))
+		if (RoleIsNeonSuperuser(fun_owner_name))
 		{
 			elog(WARNING,
 				 "Skipping Event Trigger: neon.event_triggers is false");
@@ -1042,33 +1044,36 @@ switch_to_original_role(void)
  * ownership of superuser-only objects such as Event Trigger.
  *
  *   ALTER ROLE foo SUPERUSER;
- *   CREATE EVENT TRIGGER ... ; -- owned by foo
+ *   ALTER EVENT TRIGGER ... OWNED BY foo;
  *   ALTER ROLE foo NOSUPERUSER;
  *
- * Now the EVENT TRIGGER has been installed and is owned by foo, who can DROP
- * it without having to be superuser again.
+ * Now the EVENT TRIGGER is owned by foo, who can DROP it without having to be
+ * superuser again.
  */
 static void
 alter_role_super(const char* rolename, bool make_super)
 {
-	AlterRoleStmt *alter_stmt = NULL;
+	AlterRoleStmt *alter_stmt = makeNode(AlterRoleStmt);
+
+	DefElem *defel_superuser =
+#if PG_MAJORVERSION_NUM <= 14
+		makeDefElem("superuser", (Node *) makeInteger(make_super), -1);
+#else
+		makeDefElem("superuser", (Node *) makeBoolean(make_super), -1);
+#endif
 
 	RoleSpec *rolespec   = makeNode(RoleSpec);
 	rolespec->roletype   = ROLESPEC_CSTRING;
 	rolespec->rolename   = pstrdup(rolename);
 	rolespec->location   = -1;
 
-	alter_stmt = makeNode(AlterRoleStmt);
 	alter_stmt->role = rolespec;
-
-	alter_stmt->options = list_make1(
-		/* using makeInteger because makeBoolean is not available on pg <= 14 */
-		makeDefElem("superuser", (Node *) makeInteger(make_super), -1)
-		);
+	alter_stmt->options = list_make1(defel_superuser);
 
 #if PG_MAJORVERSION_NUM < 15
 	AlterRole(alter_stmt);
 #else
+	/* ParseState *pstate, AlterRoleStmt *stmt */
 	AlterRole(NULL, alter_stmt);
 #endif
 
@@ -1340,18 +1345,18 @@ NeonProcessUtility(
 /*
  * Only neon_superuser is granted privilege to edit neon.event_triggers GUC.
  */
-static bool
-neon_event_triggers_change_hook(bool newval, void *extra)
+static void
+neon_event_triggers_assign_hook(bool newval, void *extra)
 {
-	if (!is_neon_superuser())
+	/* MyDatabaseId == InvalidOid || !OidIsValid(GetUserId())	 */
+
+	if (IsTransactionState() && !is_neon_superuser())
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("permission denied to set neon.event_triggers"),
 				 errdetail("Only \"neon_superuser\" is allowed to set the GUC")));
-		return false;
 	}
-	return true;
 }
 
 
@@ -1387,7 +1392,7 @@ InitDDLHandler()
 							 PGC_USERSET,
 							 0,
 							 NULL,
-							 neon_event_triggers_change_hook,
+							 neon_event_triggers_assign_hook,
 							 NULL);
 
 	DefineCustomStringVariable(
