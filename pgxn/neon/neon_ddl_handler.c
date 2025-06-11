@@ -893,11 +893,17 @@ neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 	 * This only applies to the neon_superuser role though, and only allows
 	 * skipping Event Triggers owned by neon_superuser, which we check by
 	 * proxy of the Event Trigger function being owned by neon_superuser.
+	 *
+	 * A role that is created in role neon_superuser should be allowed to also
+	 * benefit from the neon_event_triggers GUC, and will be considered the
+	 * same as the neon_superuser role.
 	 */
 	if (event == FHET_START
 		&& !neon_event_triggers
 		&& is_neon_superuser())
 	{
+		Oid neon_superuser_oid = get_role_oid("neon_superuser", false);
+
 		/* Find the Function Attributes (owner Oid, security definer) */
 		const char *fun_owner_name = NULL;
 		Oid fun_owner = InvalidOid;
@@ -906,7 +912,8 @@ neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 		LookupFuncOwnerSecDef(flinfo->fn_oid, &fun_owner, &fun_is_secdef);
 		fun_owner_name = GetUserNameFromId(fun_owner, false);
 
-		if (RoleIsNeonSuperuser(fun_owner_name))
+		if (RoleIsNeonSuperuser(fun_owner_name)
+			|| has_privs_of_role(fun_owner, neon_superuser_oid))
 		{
 			elog(WARNING,
 				 "Skipping Event Trigger: neon.event_triggers is false");
