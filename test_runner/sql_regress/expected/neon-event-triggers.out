@@ -65,8 +65,8 @@ NOTICE:  neondb secdef event trigger is executed for neon_admin
 -- Check that event trigger can be skipped
 set neon.event_triggers to false;
 create table t2(x integer);
-NOTICE:  neondb event trigger is executed for neon_admin
-NOTICE:  neondb secdef event trigger is executed for neon_admin
+WARNING:  Skipping Event Trigger: neon.event_triggers is false
+WARNING:  Skipping Event Trigger: neon.event_triggers is false
 \c regression cloud_admin
 -- Check that event triggers are not fired for superuser
 create table t3(x integer);
