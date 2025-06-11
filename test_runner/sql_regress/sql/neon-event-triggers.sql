@@ -21,6 +21,9 @@ execute procedure admin_proc();
 
 set role neon_user;
 
+-- check that non-privileged user can not change neon.event_triggers
+set neon.event_triggers to false;
+
 -- Non-privileged neon user should not be able to create event trigers
 create event trigger on_ddl2 on ddl_command_end
 execute procedure admin_proc();
