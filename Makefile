@@ -166,8 +166,6 @@ postgres-%: postgres-configure-% \
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/amcheck install
 	+@echo "Compiling test_decoding $*"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/test_decoding install
-	+@echo "Compiling dblink $*"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/dblink install
 
 .PHONY: postgres-clean-%
 postgres-clean-%:

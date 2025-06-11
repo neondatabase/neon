@@ -144,7 +144,6 @@ RUN set -e \
         openssh-client \
         parallel \
         pkg-config \
-        postgresql-contrib \
         unzip \
         wget \
         xz-utils \
