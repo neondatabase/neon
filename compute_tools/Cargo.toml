@@ -74,4 +74,3 @@ zstd = "0.13"
 bytes = "1.0"
 rust-ini = "0.20.0"
 rlimit = "0.10.1"
-sysinfo.workspace = true

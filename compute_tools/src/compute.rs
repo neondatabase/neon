@@ -36,8 +36,6 @@ use utils::lsn::Lsn;
 use utils::measured_stream::MeasuredReader;
 use utils::pid_file;
 
-use sysinfo::{ProcessExt, System, SystemExt};
-
 use crate::configurator::launch_configurator;
 use crate::disk_quota::set_disk_quota;
 use crate::installed_extensions::get_installed_extensions;
@@ -2210,57 +2208,8 @@ pub async fn forward_termination_signal() {
         let ss_pid = nix::unistd::Pid::from_raw(ss_pid as i32);
         kill(ss_pid, Signal::SIGTERM).ok();
     }
-    let mut s = System::new_all();
 
-    info!("pgbouncer processes BEFORE termination:");
-    for process in s.processes_by_name("pgbouncer".as_ref()) {
-        info!("{} {:?}", process.pid(), process.name());
-    }
-
-    // Try to gracefully shutdown pgbouncer using its admin interface
-    let pgbouncer_connstr = if std::env::var_os("AUTOSCALING").is_some() {
-        "host=/tmp port=6432 dbname=pgbouncer user=pgbouncer".to_string()
-    } else {
-        let mut pgbouncer_connstr =
-            "host=localhost port=6432 dbname=pgbouncer user=postgres sslmode=disable".to_string();
-        if let Ok(pass) = std::env::var("PGBOUNCER_PASSWORD") {
-            pgbouncer_connstr.push_str(format!(" password={}", pass).as_str());
-        }
-        pgbouncer_connstr
-    };
-
-    info!(
-        "Connecting to pgbouncer with connection string: {}",
-        pgbouncer_connstr
-    );
-
-    let client = match tokio_postgres::connect(&pgbouncer_connstr, NoTls).await {
-        Ok((client, connection)) => {
-            tokio::spawn(async move {
-                if let Err(e) = connection.await {
-                    eprintln!("connection error: {}", e);
-                }
-            });
-            Some(client)
-        }
-        Err(e) => {
-            error!("Failed to connect to pgbouncer: pgbouncer_connstr {}", e);
-            None
-        }
-    };
-
-    if let Some(client) = client {
-        match client.simple_query("SHUTDOWN WAIT_FOR_SERVERS").await {
-            Err(e) => {
-                error!("Failed to send SHUTDOWN command to pgbouncer: {}", e);
-            }
-            Ok(_) => {
-                info!("Sent SHUTDOWN command to pgbouncer");
-            }
-        }
-    }
-
-    // Terminate pgbouncer with SIGKILL as fallback
+    // Terminate pgbouncer with SIGKILL
     match pid_file::read("/etc/pgbouncer/pid".into()) {
         Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
             info!("sending SIGKILL to pgbouncer process pid: {}", pid);
@@ -2318,12 +2267,6 @@ pub async fn forward_termination_signal() {
         // ROs to get a list of running xacts faster instead of going through the CLOG.
         // See https://www.postgresql.org/docs/current/server-shutdown.html for the list of modes and signals.
         kill(pg_pid, Signal::SIGINT).ok();
-    }
-
-    s.refresh_all();
-    info!("pgbouncer processes AFTER termination:");
-    for process in s.processes_by_name("pgbouncer".as_ref()) {
-        info!("{} {:?}", process.pid(), process.name());
     }
 }
 
