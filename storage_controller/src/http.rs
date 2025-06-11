@@ -2165,7 +2165,7 @@ pub fn make_router(
             },
         )
         .get(
-            "/debug/v1/tenant/:tenant_id/timeline/:timline_id/locate",
+            "/debug/v1/tenant/:tenant_id/timeline/:timeline_id/locate",
             |r| {
                 tenant_service_handler(
                     r,
