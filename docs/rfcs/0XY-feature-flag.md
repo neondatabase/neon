@@ -120,3 +120,53 @@ We only need to pay for the 86400Y local evaluation requests (that would be $864
 * Feature flags can be modified by percentage, and the default config for each feature flag can be modified in UI without going through the release process.
 * Feature flags are more flexible and won't be persisted anywhere and will be passed as plain JSON over the wire so that do not need to handle backward/forward compatibility as in tenant config.
 * The expectation of tenant config is that once we add a flag we cannot remove it (or it will be hard to remove), but feature flags are more flexible.
+
+# Final Implementation
+
+* We added a new crate `posthog_lite_client` that supports local feature evaluations.
+* We set up two projects "Storage (staging)" and "Storage (production)" in the PostHog console.
+* Each pageserver reports 10 fake tenants to PostHog so that we can get all combinations of regions (and other properties) in the PostHog UI.
+* Supported properties: AZ, neon_region, pageserver, tenant_id.
+* You may use "Pageserver Feature Flags" dashboard to see the evaluation status.
+
+Each tenant has a `feature_resolver` object. After you add a feature flag in the PostHog console, you can retrieve it with:
+
+```rust
+// Boolean flag
+self
+    .feature_resolver
+    .evaluate_boolean("flag", self.tenant_shard_id.tenant_id)
+    .is_ok()
+// Multivariate flag
+self
+    .feature_resolver
+    .evaluate_multivariate("gc-comapction-strategy", self.tenant_shard_id.tenant_id)
+    .ok();
+```
+
+The user needs to handle the case where the evaluation result is an error. This can occur in a variety of cases:
+
+* During the pageserver start, the feature flag spec has not been retrieved.
+* No condition group is matched.
+* The feature flag spec contains an operand/operation not supported by the lite PostHog library.
+
+For boolean flags, the return value is `Result<(), Error>`. `Ok(())` means the flag is evaluated to true. Otherwise,
+there is either an error in evaluation or it does not match any groups.
+
+For multivariate flags, the return value is `Result<String, Error>`. `Ok(variant)` indicates the flag is evaluated
+to a variant. Otherwise, there is either an error in evaluation or it does not match any groups.
+
+The evaluation logic is documented in the PostHog lite library. It compares the consistent hash of a flag key + tenant_id
+with the rollout percentage and determines which tenant to roll out a specific feature.
+
+Users can use the feature flag evaluation API to get the flag evaluation result of a specific tenant for debugging purposes.
+
+```
+curl http://localhost:9898/v1/tenant/:tenant_id/feature_flag?flag=:key&as=multivariate/boolean"
+```
+
+# Future Works
+
+* Support dynamic tenant properties like logical size as the evaluation condition.
+* Support properties like `plan_type` (needs cplane to pass it down)
+* Report feature flag evaluation result back to PostHog (if the cost is okay)
