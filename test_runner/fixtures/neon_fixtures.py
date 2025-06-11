@@ -2227,11 +2227,9 @@ class NeonStorageController(MetricsGetter, LogUtils):
         """
         :return: dict {"generation": int, "sk_set": [int], "new_sk_set": [int]}
         """
-        url = f"{self.api}/debug/v1/tenant/{tenant_id}/timeline/{timeline_id}/locate"
-        log.info(f"XXX {url}")
         response = self.request(
             "GET",
-            url,
+            f"{self.api}/debug/v1/tenant/{tenant_id}/timeline/{timeline_id}/locate",
             headers=self.headers(TokenScope.ADMIN),
         )
         return response.json()
