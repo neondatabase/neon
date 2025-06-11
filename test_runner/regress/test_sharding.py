@@ -1358,6 +1358,8 @@ def test_sharding_split_failures(
             ".*Reconcile error.*Cancelled.*",
             # While parent shard's client is stopped during split, flush loop updating LSNs will emit this warning
             ".*Failed to schedule metadata upload after updating disk_consistent_lsn.*",
+            # We didn't identify a secondary to remove.
+            ".*Keeping extra secondaries.*",
         ]
     )
 
