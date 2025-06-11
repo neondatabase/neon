@@ -303,7 +303,7 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
         generation = res["generation"]
     except StorageControllerApiException as e:
         if e.status_code != 404:
-            raise e 
+            raise e
 
     ep.start(env=ep_env, safekeeper_generation=generation)
 
