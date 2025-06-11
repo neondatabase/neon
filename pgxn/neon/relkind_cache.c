@@ -72,7 +72,9 @@ static void relkind_shmem_request(void);
 #define DEFAULT_RELKIND_HASH_SIZE (64 * 1024)
 
 
-
+/*
+ * Callback for shared memory intialization
+ */
 static void
 relkind_cache_startup(void)
 {
@@ -104,31 +106,24 @@ relkind_cache_startup(void)
 }
 
 /*
- * Intialize new entry. This function is used by neon_start_unlogged_build to mark relation involved in unlogged build.
- * In case of overflow removes least recently used entry.
- * Return pinned entry. It will be released by unpin_cached_relkind at the end of unlogged build.
+ * Lookup existed entry or create new one
  */
-RelKindEntry*
-set_cached_relkind(NRelFileInfo rinfo, uint8 flags)
+static RelKindEntry*
+get_entry(NRelFileInfo rinfo, bool* found)
 {
-	RelKindEntry *entry = NULL;
-	bool found;
-
-	/* Use spinlock to prevent concurrent hash modifitcation */
-	SpinLockAcquire(&relkind_ctl->mutex);
-
+	RelKindEntry* entry;
 	/*
 	 * This should actually never happen! Below we check if hash is full and delete least recently user item in this case.
 	 * But for further safety we also perform check here.
 	 */
-	while ((entry = hash_search(relkind_hash, &rinfo, HASH_ENTER_NULL, &found)) == NULL)
+	while ((entry = hash_search(relkind_hash, &rinfo, HASH_ENTER_NULL, found)) == NULL)
 	{
 		RelKindEntry *victim = dlist_container(RelKindEntry, lru_node, dlist_pop_head_node(&relkind_ctl->lru));
 		hash_search(relkind_hash, &victim->rel, HASH_REMOVE, NULL);
 		Assert(relkind_ctl->size > 0);
 		relkind_ctl->size -= 1;
 	}
-	if (!found)
+	if (!*found)
 	{
 		if (++relkind_ctl->size == relkind_hash_size)
 		{
@@ -141,14 +136,33 @@ set_cached_relkind(NRelFileInfo rinfo, uint8 flags)
 			hash_search(relkind_hash, &victim->rel, HASH_REMOVE, NULL);
 			relkind_ctl->size -= 1;
 		}
+		entry->flags = RELKIND_RAW; /* information about relation kind is not yet available */
 		relkind_ctl->pinned += 1;
 		entry->access_count = 1;
 	}
 	else if (entry->access_count++ == 0)
 	{
+		Assert(!(entry->flags & RELKIND_RAW)); /* unpinned entry can not be raw */
 		dlist_delete(&entry->lru_node);
 		relkind_ctl->pinned += 1;
 	}
+	return entry;
+}
+
+/*
+ * Intialize new entry. This function is used by neon_start_unlogged_build to mark relation involved in unlogged build.
+ * In case of overflow removes least recently used entry.
+ * Return pinned entry. It will be released by unpin_cached_relkind at the end of unlogged build.
+ */
+RelKindEntry*
+set_cached_relkind(NRelFileInfo rinfo, uint8 flags)
+{
+	RelKindEntry *entry = NULL;
+	bool found;
+
+	/* Use spinlock to prevent concurrent hash modifitcation */
+	SpinLockAcquire(&relkind_ctl->mutex);
+	entry = get_entry(rinfo, &found);
 	entry->flags = flags;
 	SpinLockRelease(&relkind_ctl->mutex);
 	return entry;
@@ -168,44 +182,9 @@ get_cached_relkind(NRelFileInfo rinfo, uint8* flags)
 	bool found;
 
 	SpinLockAcquire(&relkind_ctl->mutex);
-	/*
-	 * This should actually never happen! Below we check if hash is full and delete least recently user item in this case.
-	 * But for further safety we also perform check here.
-	 */
-	while ((entry = hash_search(relkind_hash, &rinfo, HASH_ENTER_NULL, &found)) == NULL)
+	entry = get_entry(rinfo, &found);
+	if (found)
 	{
-		RelKindEntry *victim = dlist_container(RelKindEntry, lru_node, dlist_pop_head_node(&relkind_ctl->lru));
-		hash_search(relkind_hash, &victim->rel, HASH_REMOVE, NULL);
-		Assert(relkind_ctl->size > 0);
-		relkind_ctl->size -= 1;
-	}
-	if (!found)
-	{
-		if (++relkind_ctl->size == relkind_hash_size)
-		{
-			/*
-			 * Remove least recently used elment from the hash.
-			 * Hash size after is becomes `relkind_hash_size-1`.
-			 * But it is not considered to be a problem, because size of this hash is expecrted large enough and +-1 doesn't matter.
-			 */
-			RelKindEntry *victim = dlist_container(RelKindEntry, lru_node, dlist_pop_head_node(&relkind_ctl->lru));
-			hash_search(relkind_hash, &victim->rel, HASH_REMOVE, NULL);
-			relkind_ctl->size -= 1;
-		}
-		entry->flags = RELKIND_RAW; /* information about relation kind is not yet available */
-		entry->access_count = 1;
-		relkind_ctl->pinned += 1;
-	}
-	else
-	{
-		if (entry->access_count++ == 0) /* Entry is not pinned */
-		{
-			/*
-			 * Pin entry by remving it from the LRU list
-			 */
-			Assert(!(entry->flags & RELKIND_RAW)); /* unpinned entry can not be raw */
-			dlist_delete(&entry->lru_node);
-		}
 		/* If entry is not raw, then there is no need to pin it */
 		if (!(entry->flags & RELKIND_RAW))
 		{
