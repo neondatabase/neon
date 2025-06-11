@@ -302,7 +302,7 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
         res = env.storage_controller.timeline_locate(env.initial_tenant, env.initial_timeline)
         generation = res["generation"]
     except StorageControllerApiException as e:
-        if e.status_code != 404:
+        if e.status_code != 404 or not re.search(r"Timeline .* not found", str(e)):
             raise e
 
     ep.start(env=ep_env, safekeeper_generation=generation)

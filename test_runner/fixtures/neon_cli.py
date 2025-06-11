@@ -114,24 +114,6 @@ class AbstractNeonCli:
                 log.debug(f"Run {res.args} success: {stripped}")
             else:
                 log.debug("Run %s success:\n%s", res.args, textwrap.indent(stripped, indent))
-
-            indent = indent * 2
-            msg = textwrap.dedent(
-                """\
-            Run %s succeeded:
-              stdout:
-            %s
-              stderr:
-            %s
-            """
-            )
-            msg = msg % (
-                res.args,
-                textwrap.indent(res.stdout.strip(), indent),
-                textwrap.indent(res.stderr.strip(), indent),
-            )
-            log.info(msg)
-
         elif check_return_code:
             # this way command output will be in recorded and shown in CI in failure message
             indent = indent * 2

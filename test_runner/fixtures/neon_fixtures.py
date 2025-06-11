@@ -2225,7 +2225,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
     def timeline_locate(self, tenant_id: TenantId, timeline_id: TimelineId):
         """
-        :return: dict {"generation": Int, "sk_set": [NodeId], "new_sk_set": [NodeId]}
+        :return: dict {"generation": int, "sk_set": [int], "new_sk_set": [int]}
         """
         response = self.request(
             "GET",
