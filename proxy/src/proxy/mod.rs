@@ -18,7 +18,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, warn};
 
-use crate::cancellation::{self, CancellationHandler};
+use crate::cancellation::{self, CancelClosure, CancellationHandler};
 use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
 use crate::context::RequestContext;
 use crate::error::{ReportableError, UserFacingError};
@@ -357,11 +357,10 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let res = connect_to_compute(
         ctx,
         &TcpMechanism {
-            user_info: creds.info.clone(),
             auth: auth_info,
             locks: &config.connect_compute_locks,
         },
-        &auth::Backend::ControlPlane(cplane, creds.info),
+        &auth::Backend::ControlPlane(cplane, creds.info.clone()),
         config.wake_compute_retry_config,
         &config.connect_to_compute,
     )
@@ -380,11 +379,18 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let session_id = ctx.session_id();
     let (cancel_on_shutdown, cancel) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
+        let cancel_closure = CancelClosure::new(
+            node.socket_addr,
+            node.cancel_token,
+            node.hostname,
+            creds.info,
+        );
+
         session
             .maintain_cancel_key(
                 session_id,
                 cancel,
-                &node.cancel_closure,
+                &cancel_closure,
                 &config.connect_to_compute,
             )
             .await;

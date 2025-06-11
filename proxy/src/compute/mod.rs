@@ -15,9 +15,8 @@ use thiserror::Error;
 use tokio::net::{TcpStream, lookup_host};
 use tracing::{debug, error, info, warn};
 
-use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
+use crate::auth::backend::ComputeCredentialKeys;
 use crate::auth::parse_endpoint_param;
-use crate::cancellation::CancelClosure;
 use crate::compute::tls::TlsError;
 use crate::config::ComputeConfig;
 use crate::context::RequestContext;
@@ -273,8 +272,11 @@ pub(crate) struct PostgresConnection {
     pub(crate) stream: MaybeTlsStream<tokio::net::TcpStream, RustlsStream>,
     /// PostgreSQL connection parameters.
     pub(crate) params: std::collections::HashMap<String, String>,
-    /// Query cancellation token.
-    pub(crate) cancel_closure: CancelClosure,
+
+    pub socket_addr: SocketAddr,
+    pub cancel_token: RawCancelToken,
+    pub hostname: String,
+
     /// Labels for proxy's metrics.
     pub(crate) aux: MetricsAuxInfo,
     /// Notices received from compute after authenticating
@@ -291,7 +293,6 @@ impl ConnectInfo {
         aux: MetricsAuxInfo,
         auth: &AuthInfo,
         config: &ComputeConfig,
-        user_info: ComputeUserInfo,
     ) -> Result<PostgresConnection, ConnectionError> {
         let mut tmp_config = auth.enrich(self.to_postgres_client_config());
         // we setup SSL early in `ConnectInfo::connect_raw`.
@@ -324,24 +325,19 @@ impl ConnectInfo {
             ctx.get_testodrome_id().unwrap_or_default(),
         );
 
-        // NB: CancelToken is supposed to hold socket_addr, but we use connect_raw.
-        // Yet another reason to rework the connection establishing code.
-        let cancel_closure = CancelClosure::new(
-            socket_addr,
-            RawCancelToken {
-                ssl_mode: self.ssl_mode,
-                process_id,
-                secret_key,
-            },
-            self.host.to_string(),
-            user_info,
-        );
-
         let connection = PostgresConnection {
             stream,
             params: parameters,
             delayed_notice,
-            cancel_closure,
+
+            socket_addr,
+            cancel_token: RawCancelToken {
+                ssl_mode: self.ssl_mode,
+                process_id,
+                secret_key,
+            },
+            hostname: self.host.to_string(),
+
             aux,
             guage: Metrics::get().proxy.db_connections.guard(ctx.protocol()),
         };

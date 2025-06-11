@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info};
 
 use crate::auth::backend::ConsoleRedirectBackend;
-use crate::cancellation::CancellationHandler;
+use crate::cancellation::{CancelClosure, CancellationHandler};
 use crate::config::{ProxyConfig, ProxyProtocolV2};
 use crate::context::RequestContext;
 use crate::error::ReportableError;
@@ -221,7 +221,6 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let node = connect_to_compute(
         ctx,
         &TcpMechanism {
-            user_info,
             auth: auth_info,
             locks: &config.connect_compute_locks,
         },
@@ -240,11 +239,18 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let session_id = ctx.session_id();
     let (cancel_on_shutdown, cancel) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
+        let cancel_closure = CancelClosure::new(
+            node.socket_addr,
+            node.cancel_token,
+            node.hostname,
+            user_info,
+        );
+
         session
             .maintain_cancel_key(
                 session_id,
                 cancel,
-                &node.cancel_closure,
+                &cancel_closure,
                 &config.connect_to_compute,
             )
             .await;
