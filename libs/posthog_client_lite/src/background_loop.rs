@@ -55,9 +55,16 @@ impl FeatureResolverBackgroundLoop {
                             continue;
                         }
                     };
-                    let feature_store = FeatureStore::new_with_flags(resp.flags);
-                    this.feature_store.store(Arc::new(feature_store));
-                    tracing::info!("Feature flag updated");
+                    let project_id = this.posthog_client.config.project_id.parse::<u64>().ok();
+                    match FeatureStore::new_with_flags(resp.flags, project_id) {
+                        Ok(feature_store) => {
+                            this.feature_store.store(Arc::new(feature_store));
+                            tracing::info!("Feature flag updated");
+                        }
+                        Err(e) => {
+                            tracing::warn!("Cannot get feature flags: {}", e);
+                        }
+                    }
                 }
                 tracing::info!("PostHog feature resolver stopped");
             }
