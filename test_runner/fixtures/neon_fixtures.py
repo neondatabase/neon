@@ -2223,6 +2223,17 @@ class NeonStorageController(MetricsGetter, LogUtils):
         shards: list[dict[str, Any]] = body["shards"]
         return shards
 
+    def timeline_locate(self, tenant_id: TenantId, timeline_id: TimelineId):
+        """
+        :return: dict {"generation": Int, "sk_set": [NodeId], "new_sk_set": [NodeId]}
+        """
+        response = self.request(
+            "GET",
+            f"{self.api}/debug/v1/tenant/{tenant_id}/timeline/{timeline_id}/locate",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
+
     def tenant_describe(self, tenant_id: TenantId):
         """
         :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr: str, "listen_http_port: int, preferred_az_id: str}

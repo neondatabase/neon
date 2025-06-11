@@ -393,6 +393,13 @@ pub struct SafekeeperInfo {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
+pub struct TimelineLocateResponseStorcon {
+    pub generation: u32,
+    pub sk_set: Vec<NodeId>,
+    pub new_sk_set: Option<Vec<NodeId>>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum TimelineCreateRequestMode {
     Branch {

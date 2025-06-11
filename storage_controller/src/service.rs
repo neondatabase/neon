@@ -40,7 +40,7 @@ use pageserver_api::models::{
     TenantLocationConfigResponse, TenantShardLocation, TenantShardSplitRequest,
     TenantShardSplitResponse, TenantSorting, TenantTimeTravelRequest,
     TimelineArchivalConfigRequest, TimelineCreateRequest, TimelineCreateResponseStorcon,
-    TimelineInfo, TopTenantShardItem, TopTenantShardsRequest,
+    TimelineInfo, TimelineLocateResponseStorcon, TopTenantShardItem, TopTenantShardsRequest,
 };
 use pageserver_api::shard::{
     DEFAULT_STRIPE_SIZE, ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
@@ -4758,6 +4758,35 @@ impl Service {
         .await;
 
         Ok(())
+    }
+
+    pub(crate) async fn tenant_timeline_locate(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Result<TimelineLocateResponseStorcon, ApiError> {
+        let timeline = self
+            .persistence
+            .get_timeline(tenant_id, timeline_id)
+            .await?;
+
+        let Some(timeline) = timeline else {
+            return Err(ApiError::NotFound(
+                anyhow::anyhow!("Timeline {}/{} not found", tenant_id, timeline_id).into(),
+            ));
+        };
+
+        Ok(TimelineLocateResponseStorcon {
+            generation: timeline.generation as u32,
+            sk_set: timeline
+                .sk_set
+                .iter()
+                .map(|id| NodeId(*id as u64))
+                .collect(),
+            new_sk_set: timeline
+                .new_sk_set
+                .map(|sk_set| sk_set.iter().map(|id| NodeId(*id as u64)).collect()),
+        })
     }
 
     /// Helper for concurrently calling a pageserver API on a number of shards, such as timeline creation.

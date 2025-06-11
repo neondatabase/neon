@@ -18,6 +18,7 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
+    StorageControllerApiException,
     flush_ep_to_pageserver,
 )
 from fixtures.pageserver.http import PageserverApiException
@@ -291,7 +292,20 @@ def test_forward_compatibility(
 def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, repo_dir: Path):
     ep = env.endpoints.create("main")
     ep_env = {"LD_LIBRARY_PATH": str(env.pg_distrib_dir / f"v{env.pg_version}/lib")}
-    ep.start(env=ep_env)
+
+    # If the compatibility snapshot was created with --timelines-onto-safekeepers=false,
+    # we should not pass safekeeper_generation to the endpoint because the compute
+    # will not be able to start.
+    # Zero generation is INVALID_GENERATION.
+    generation = 0
+    try:
+        res = env.storage_controller.timeline_locate(env.initial_tenant, env.initial_timeline)
+        generation = res["generation"]
+    except StorageControllerApiException as e:
+        if e.status_code != 404:
+            raise e 
+
+    ep.start(env=ep_env, safekeeper_generation=generation)
 
     connstr = ep.connstr()
 
@@ -341,7 +355,7 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
     )
 
     # Timeline exists again: restart the endpoint
-    ep.start(env=ep_env)
+    ep.start(env=ep_env, safekeeper_generation=generation)
 
     pg_bin.run_capture(
         ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump-from-wal.sql'}"]

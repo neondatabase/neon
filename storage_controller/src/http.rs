@@ -635,6 +635,31 @@ async fn handle_tenant_timeline_download_heatmap_layers(
     json_response(StatusCode::OK, ())
 }
 
+async fn handle_tenant_timeline_locate(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
+    check_permissions(&req, Scope::PageServerApi)?;
+    maybe_rate_limit(&req, tenant_id).await;
+
+    match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(_req) => {}
+    };
+
+    json_response(
+        StatusCode::OK,
+        service
+            .tenant_timeline_locate(tenant_id, timeline_id)
+            .await?,
+    )
+}
+
 async fn handle_tenant_timeline_lsn_lease(
     service: Arc<Service>,
     req: Request<Body>,
@@ -2423,6 +2448,13 @@ pub fn make_router(
                 )
             },
         )
+        .get("/v1/tenant/:tenant_id/timeline/:timline_id/locate", |r| {
+            tenant_service_handler(
+                r,
+                handle_tenant_timeline_locate,
+                RequestName("v1_tenant_timeline_locate"),
+            )
+        })
         // LSN lease passthrough to all shards
         .post(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/lsn_lease",
