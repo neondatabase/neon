@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * control_plane_connector.c
+ * neon_ddl_handler.c
  *	  Captures updates to roles/databases using ProcessUtility_hook and
  *        sends them to the control ProcessUtility_hook. The changes are sent
  *        via HTTP to the URL specified by the GUC neon.console_url when the
@@ -13,15 +13,22 @@
  *        accumulate changes. On subtransaction commit, the top of the stack
  *        is merged with the table below it.
  *
+ *    Support event triggers for neon_superuser
+ *
+ * IDENTIFICATION
+ *	 contrib/neon/neon_dll_handler.c
+ *
  *-------------------------------------------------------------------------
  */
 
 #include "postgres.h"
 
 #include <curl/curl.h>
+#include <unistd.h>
 
 #include "access/xact.h"
 #include "catalog/pg_authid.h"
+#include "catalog/pg_proc.h"
 #include "commands/defrem.h"
 #include "fmgr.h"
 #include "libpq/crypt.h"
@@ -34,14 +41,15 @@
 #include "utils/memutils.h"
 #include "utils/jsonb.h"
 #include <utils/lsyscache.h>
+#include <utils/syscache.h>
 
-#include "control_plane_connector.h"
+#include "neon_ddl_handler.h"
 #include "neon_utils.h"
 
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
 static fmgr_hook_type next_fmgr_hook = NULL;
 static needs_fmgr_hook_type next_needs_fmgr_hook = NULL;
-static bool neon_disable_event_triggers_for_superuser = false;
+static bool neon_enable_event_triggers_for_superuser = false;
 
 static const char *jwt_token = NULL;
 
@@ -778,6 +786,15 @@ HandleDropRole(DropRoleStmt *stmt)
 	}
 }
 
+/*
+ * Support of event triggers. In vanilla only superuser can create event triggers.
+ * We allow it for neon_superuser by temporary switching to superuser.
+ * But as far as event trigger can fire in superuser context we should protect superuser
+ * from execution of arbitrary user's code. The idea was taken from Supabase PR:
+ * https://github.com/supabase/supautils/pull/98 : we just skip execution of trigger function
+ * for superuser.
+ */
+
 static void
 HandleRename(RenameStmt *stmt)
 {
@@ -815,11 +832,34 @@ force_noop(FmgrInfo *finfo)
 static void
 neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 {
-    if (event == FHET_START && neon_disable_event_triggers_for_superuser && superuser())
+    if (event == FHET_START && !neon_enable_event_triggers_for_superuser && superuser())
 	{
-		ereport(WARNING, (errmsg("Skipping event trigger for superuser"), errbacktrace()));
-		/* we can't skip execution directly inside the fmgr_hook so instead we change the event trigger function to a noop function */
-		force_noop(flinfo);
+		bool skip = true;
+		if (flinfo->fn_oid != InvalidOid)
+		{
+			/*
+			 * Even through event triggers are disabled for superuser, we still want to
+			 * allow firing of event triggers if procedures is owned by superuser.
+			 * It is needed to pass pg_regress tests and seems to be reasonable in any case.
+			 * If procedure was created by superuser, it should be safe to call it
+			 * with admin permissions.
+			 */
+			HeapTuple tuple = SearchSysCache1(PROCOID,
+											  ObjectIdGetDatum(flinfo->fn_oid));
+			if (HeapTupleIsValid(tuple))
+			{
+				Form_pg_proc procedureStruct = (Form_pg_proc) GETSTRUCT(tuple);
+				elog(LOG, "procedureStruct->proowner=%d, current user=%d", procedureStruct->proowner, GetUserId());
+				skip = procedureStruct->proowner != GetUserId();
+				ReleaseSysCache(tuple);
+			}
+		}
+		if (skip)
+		{
+			ereport(WARNING, (errmsg("Skipping event trigger %x for superuser", flinfo->fn_oid), errbacktrace()));
+			/* we can't skip execution directly inside the fmgr_hook so instead we change the event trigger function to a noop function */
+			force_noop(flinfo);
+		}
 	}
 	if (next_fmgr_hook)
 		(*next_fmgr_hook) (event, flinfo, private);
@@ -829,6 +869,10 @@ static Oid prev_role_oid = 0;
 static int prev_role_sec_context = 0;
 static bool switched_to_superuser = false;
 
+/*
+ * Switch tp superuser if not yet superuser.
+ * Returns false if already switched to superuser.
+ */
 static bool
 switch_to_superuser(void)
 {
@@ -856,6 +900,9 @@ switch_to_original_role(void)
     switched_to_superuser = false;
 }
 
+/*
+ * TODO: replcate with is_neon_superuser() once https://github.com/neondatabase/neon/pull/10625 is merged
+ */
 static bool
 neon_superuser(void)
 {
@@ -912,6 +959,7 @@ NeonProcessUtility(
 		case T_AlterEventTrigStmt:
 			if (IsTransactionState() && neon_superuser())
 			{
+				/* Allow neon_superuser to drop event trigger. */
 				sudo = switch_to_superuser();
 			}
 			break;
@@ -921,6 +969,14 @@ NeonProcessUtility(
 				DropStmt *stmt = (DropStmt *)parseTree;
 				if (stmt->removeType == OBJECT_EVENT_TRIGGER)
 				{
+					/*
+					 * Allow neon_superuser to drop event trigger.
+					 * FIXME: now neon_superuser is also ab;e to drop event triggers created by superuser.
+					 * We now do not use such triggers, but in future it can be changed.
+					 * The problem is that event triggers are created by neon_superuser by switching
+					 * to superuser role, so it is not possible to distinguish event triggers
+					 * created by superuser from ones created by neon_superuser.
+					 */
 					sudo = switch_to_superuser();
 				}
 			}
@@ -958,7 +1014,7 @@ NeonProcessUtility(
 }
 
 void
-InitControlPlaneConnector()
+InitDDLHandler()
 {
 	PreviousProcessUtilityHook = ProcessUtility_hook;
 	ProcessUtility_hook = NeonProcessUtility;
@@ -973,10 +1029,10 @@ InitControlPlaneConnector()
 	RegisterSubXactCallback(NeonSubXactCallback, NULL);
 
 	DefineCustomBoolVariable(
-							 "neon.disable_event_triggers_for_superuser",
-							 "Disable event triggers for superuser",
+							 "neon.enable_event_triggers_for_superuser",
+							 "Enable firing of not owned event triggers for superuser",
 							 NULL,
-							 &neon_disable_event_triggers_for_superuser,
+							 &neon_enable_event_triggers_for_superuser,
 							 false,
 							 PGC_SUSET,
 							 0,
