@@ -14,4 +14,4 @@
     'last_autovacuum',
   ],
   query: importstr 'sql_exporter/autovacuum_stats.sql',
-} 
+}
