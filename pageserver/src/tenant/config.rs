@@ -149,7 +149,12 @@ impl LocationConf {
     /// For use when attaching/re-attaching: update the generation stored in this
     /// structure.  If we were in a secondary state, promote to attached (posession
     /// of a fresh generation implies this).
-    pub(crate) fn attach_in_generation(&mut self, mode: AttachmentMode, generation: Generation) {
+    pub(crate) fn attach_in_generation(
+        &mut self,
+        mode: AttachmentMode,
+        generation: Generation,
+        stripe_size: ShardStripeSize,
+    ) {
         match &mut self.mode {
             LocationMode::Attached(attach_conf) => {
                 attach_conf.generation = generation;
@@ -163,6 +168,8 @@ impl LocationConf {
                 })
             }
         }
+
+        self.shard.stripe_size = stripe_size;
     }
 
     pub(crate) fn try_from(conf: &'_ models::LocationConfig) -> anyhow::Result<Self> {

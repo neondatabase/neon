@@ -129,7 +129,7 @@ pub(crate) enum ShardSelector {
 ///
 /// This represents the subset of a LocationConfig that we receive during re-attach.
 pub(crate) enum TenantStartupMode {
-    Attached((AttachmentMode, Generation)),
+    Attached((AttachmentMode, Generation, ShardStripeSize)),
     Secondary,
 }
 
@@ -143,15 +143,21 @@ impl TenantStartupMode {
         match (rart.mode, rart.r#gen) {
             (LocationConfigMode::Detached, _) => None,
             (LocationConfigMode::Secondary, _) => Some(Self::Secondary),
-            (LocationConfigMode::AttachedMulti, Some(g)) => {
-                Some(Self::Attached((AttachmentMode::Multi, Generation::new(g))))
-            }
-            (LocationConfigMode::AttachedSingle, Some(g)) => {
-                Some(Self::Attached((AttachmentMode::Single, Generation::new(g))))
-            }
-            (LocationConfigMode::AttachedStale, Some(g)) => {
-                Some(Self::Attached((AttachmentMode::Stale, Generation::new(g))))
-            }
+            (LocationConfigMode::AttachedMulti, Some(g)) => Some(Self::Attached((
+                AttachmentMode::Multi,
+                Generation::new(g),
+                rart.stripe_size,
+            ))),
+            (LocationConfigMode::AttachedSingle, Some(g)) => Some(Self::Attached((
+                AttachmentMode::Single,
+                Generation::new(g),
+                rart.stripe_size,
+            ))),
+            (LocationConfigMode::AttachedStale, Some(g)) => Some(Self::Attached((
+                AttachmentMode::Stale,
+                Generation::new(g),
+                rart.stripe_size,
+            ))),
             _ => {
                 tracing::warn!(
                     "Received invalid re-attach state for tenant {}: {rart:?}",
@@ -319,9 +325,11 @@ fn emergency_generations(
             Some((
                 *tid,
                 match &lc.mode {
-                    LocationMode::Attached(alc) => {
-                        TenantStartupMode::Attached((alc.attach_mode, alc.generation))
-                    }
+                    LocationMode::Attached(alc) => TenantStartupMode::Attached((
+                        alc.attach_mode,
+                        alc.generation,
+                        ShardStripeSize::default(),
+                    )),
                     LocationMode::Secondary(_) => TenantStartupMode::Secondary,
                 },
             ))
@@ -365,7 +373,7 @@ async fn init_load_generations(
         .iter()
         .flat_map(|(id, start_mode)| {
             match start_mode {
-                TenantStartupMode::Attached((_mode, generation)) => Some(generation),
+                TenantStartupMode::Attached((_mode, generation, _stripe_size)) => Some(generation),
                 TenantStartupMode::Secondary => None,
             }
             .map(|gen_| (*id, *gen_))
@@ -585,7 +593,7 @@ pub async fn init_tenant_mgr(
                         location_conf.mode = LocationMode::Secondary(DEFAULT_SECONDARY_CONF);
                     }
                 }
-                Some(TenantStartupMode::Attached((attach_mode, generation))) => {
+                Some(TenantStartupMode::Attached((attach_mode, generation, stripe_size))) => {
                     let old_gen_higher = match &location_conf.mode {
                         LocationMode::Attached(AttachedLocationConfig {
                             generation: old_generation,
@@ -609,7 +617,7 @@ pub async fn init_tenant_mgr(
                         // local disk content: demote to secondary rather than detaching.
                         location_conf.mode = LocationMode::Secondary(DEFAULT_SECONDARY_CONF);
                     } else {
-                        location_conf.attach_in_generation(*attach_mode, *generation);
+                        location_conf.attach_in_generation(*attach_mode, *generation, *stripe_size);
                     }
                 }
             }
