@@ -298,6 +298,13 @@ extern void set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumb
 extern void update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size);
 extern void forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum);
 
+/*
+ * Flags for relkind entry. It is bitmask, but not all combinations of this flags is possible.
+ * RAW is set when information about persistent is not known.
+ * When it is known, then UNLOGGED flags is set for unlogged relations.'
+ * Finally UNLOGGED_BUILD is set for unlogged build (building of GIST/SPGIST/GIN... indexes).
+ * Relation itself can be logged or unlogged.
+ */
 enum RelKindEntryFlags
 {
 	RELKIND_UNLOGGED = 1,	/* relation is temp or unlogged */
