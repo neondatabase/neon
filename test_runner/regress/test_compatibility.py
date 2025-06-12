@@ -18,6 +18,7 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
+    Safekeeper,
     flush_ep_to_pageserver,
 )
 from fixtures.pageserver.http import PageserverApiException
@@ -26,6 +27,7 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
+from fixtures.safekeeper.http import MembershipConfiguration
 from fixtures.workload import Workload
 
 if TYPE_CHECKING:
@@ -541,6 +543,24 @@ def test_historic_storage_formats(
     timelines = env.pageserver.http_client().timeline_list(dataset.tenant_id)
     # All our artifacts should contain at least one timeline
     assert len(timelines) > 0
+
+    # Import tenant does not create the timeline on safekeepers,
+    # because it is a debug handler and the timeline may have already been
+    # created on some set of safekeepers.
+    # Create the timeline on safekeepers manually.
+    # TODO(diko): when we have the script/storcon handler to migrate
+    # the timeline to storcon, we can replace this code with it.
+    mconf = MembershipConfiguration(
+        generation=1,
+        members=Safekeeper.sks_to_safekeeper_ids([env.safekeepers[0]]),
+        new_members=None,
+    )
+    members_sks = Safekeeper.mconf_sks(env, mconf)
+
+    for timeline in timelines:
+        Safekeeper.create_timeline(
+            dataset.tenant_id, timeline["timeline_id"], env.pageserver, mconf, members_sks
+        )
 
     # TODO: ensure that the snapshots we're importing contain a sensible variety of content, at the very
     # least they should include a mixture of deltas and image layers.  Preferably they should also
