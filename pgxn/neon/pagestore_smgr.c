@@ -1609,7 +1609,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 	XLogRecPtr	lsn;
 	RelKindEntry *entry;
 	bool unlogged;
-	uint8 flags;
+	uint8 flags = 0;
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -1699,7 +1699,7 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 {
 	RelKindEntry *entry;
 	bool unlogged;
-	uint8 flags;
+	uint8 flags = 0;
 
 	switch (reln->smgr_relpersistence)
 	{
