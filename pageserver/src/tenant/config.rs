@@ -61,8 +61,8 @@ pub(crate) struct LocationConf {
     /// The detailed shard identity.  This structure is already scoped within
     /// a TenantShardId, but we need the full ShardIdentity to enable calculating
     /// key->shard mappings.
+    // TODO(vlad): Remove this default once all configs have a shard identity on disk.
     #[serde(default = "ShardIdentity::unsharded")]
-    #[serde(skip_serializing_if = "ShardIdentity::is_unsharded")]
     pub(crate) shard: ShardIdentity,
 
     /// The pan-cluster tenant configuration, the same on all locations
