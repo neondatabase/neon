@@ -2202,7 +2202,7 @@ LIMIT 100",
     }
 }
 
-pub async fn forward_termination_signal() {
+pub fn forward_termination_signal() {
     let ss_pid = SYNC_SAFEKEEPERS_PID.load(Ordering::SeqCst);
     if ss_pid != 0 {
         let ss_pid = nix::unistd::Pid::from_raw(ss_pid as i32);
