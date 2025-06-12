@@ -56,6 +56,10 @@ impl SafekeeperClient {
         }
     }
 
+    pub(crate) fn node_id_label(&self) -> &str {
+        &self.node_id_label
+    }
+
     pub(crate) async fn create_timeline(
         &self,
         req: &TimelineCreateRequest,

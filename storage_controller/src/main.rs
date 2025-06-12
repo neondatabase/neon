@@ -207,6 +207,12 @@ struct Cli {
     /// the compute notification directly (instead of via control plane).
     #[arg(long, default_value = "false")]
     use_local_compute_notifications: bool,
+
+    /// Number of safekeepers to choose for a timeline when creating it.
+    /// Safekeepers will be choosen from different availability zones.
+    /// This option exists primarily for testing purposes.
+    #[arg(long, default_value = "3", value_parser = clap::value_parser!(i64).range(1..))]
+    timeline_safekeeper_count: i64,
 }
 
 enum StrictMode {
@@ -371,6 +377,11 @@ async fn async_main() -> anyhow::Result<()> {
         StrictMode::Strict if args.use_local_compute_notifications => {
             anyhow::bail!("`--use-local-compute-notifications` is only permitted in `--dev` mode");
         }
+        StrictMode::Strict if args.timeline_safekeeper_count < 3 => {
+            anyhow::bail!(
+                "Running with less than 3 safekeepers per timeline is only permitted in `--dev` mode"
+            );
+        }
         StrictMode::Strict => {
             tracing::info!("Starting in strict mode: configuration is OK.")
         }
@@ -433,6 +444,7 @@ async fn async_main() -> anyhow::Result<()> {
         ssl_ca_certs,
         timelines_onto_safekeepers: args.timelines_onto_safekeepers,
         use_local_compute_notifications: args.use_local_compute_notifications,
+        timeline_safekeeper_count: args.timeline_safekeeper_count,
     };
 
     // Validate that we can connect to the database
