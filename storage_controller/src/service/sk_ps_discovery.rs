@@ -232,7 +232,7 @@ impl DeliveryAttempt {
                 generation: Generation::new(self.work.ps_generation as u32),
             };
             match self.work.intent_state.as_str() {
-                "attached" => TenantShardPageserverAttachmentChange::Attach(val),
+                "attached" => TenantShardPageserverAttachmentChange::Attach { field1: val },
                 "detached" => TenantShardPageserverAttachmentChange::Detach(val),
                 x => anyhow::bail!("unknown intent state {x:?}"),
             }

@@ -44,6 +44,7 @@ pub mod wal_backup_partial;
 pub mod wal_reader_stream;
 pub mod wal_service;
 pub mod wal_storage;
+pub(crate) mod pageserver_connectivity;
 
 #[cfg(any(test, feature = "benchmarking"))]
 pub mod test_utils;
@@ -124,6 +125,7 @@ pub struct SafeKeeperConf {
     pub ssl_ca_certs: Vec<Pem>,
     pub use_https_safekeeper_api: bool,
     pub enable_tls_wal_service_api: bool,
+    pub storage_controller_api: Option<Uri>,
 }
 
 impl SafeKeeperConf {
@@ -169,6 +171,7 @@ impl SafeKeeperConf {
             ssl_ca_certs: Vec::new(),
             use_https_safekeeper_api: false,
             enable_tls_wal_service_api: false,
+            storage_controller_api: None,
         }
     }
 }

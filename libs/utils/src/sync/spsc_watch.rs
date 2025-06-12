@@ -5,12 +5,12 @@ use tokio_util::sync::CancellationToken;
 use crate::sync::spsc_fold;
 
 pub fn channel<T: Send>() -> (Sender<T>, Receiver<T>) {
-    let (mut tx, rx) = spsc_fold::channel();
+    let (tx, rx) = spsc_fold::channel();
     let cancel = CancellationToken::new();
     (
         Sender {
             tx,
-            cancel: cancel.clone().drop_guard(),
+            _cancel: cancel.clone().drop_guard(),
         },
         Receiver { rx, cancel },
     )
@@ -18,7 +18,7 @@ pub fn channel<T: Send>() -> (Sender<T>, Receiver<T>) {
 
 pub struct Sender<T> {
     tx: spsc_fold::Sender<T>,
-    cancel: tokio_util::sync::DropGuard,
+    _cancel: tokio_util::sync::DropGuard,
 }
 
 pub struct Receiver<T> {

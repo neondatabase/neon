@@ -433,7 +433,7 @@ impl Manager {
             state_version_rx: tli.get_state_version_rx(),
             num_computes_rx: tli.get_walreceivers().get_num_rx(),
             tli_broker_active: broker_active_set.guard(tli.clone()),
-            wal_advertiser: wal_advertiser.register_timeline(tli.clone()).unwrap(),
+            wal_advertiser: wal_advertiser.new_timeline(tli.clone()).await.unwrap(),
             last_removed_segno: 0,
             is_offloaded,
             backup_task: None,

@@ -27,7 +27,7 @@ use crate::timeline::{Timeline, TimelineError, delete_dir, get_tenant_dir, get_t
 use crate::timelines_set::TimelinesSet;
 use crate::wal_backup::WalBackup;
 use crate::wal_storage::Storage;
-use crate::{SafeKeeperConf, control_file, wal_advertiser, wal_storage};
+use crate::{SafeKeeperConf, control_file, pageserver_connectivity, wal_advertiser, wal_storage};
 
 // Timeline entry in the global map: either a ready timeline, or mark that it is
 // being created.
@@ -48,6 +48,7 @@ struct GlobalTimelinesState {
     conf: Arc<SafeKeeperConf>,
     broker_active_set: Arc<TimelinesSet>,
     wal_advertisement: Arc<wal_advertiser::GlobalState>,
+    pageserver_connectivity: Arc<pageserver_connectivity::GlobalState>,
     global_rate_limiter: RateLimiter,
     wal_backup: Arc<WalBackup>,
 }
@@ -105,6 +106,7 @@ impl GlobalTimelines {
                 conf,
                 broker_active_set: Arc::new(TimelinesSet::default()),
                 wal_advertisement: Arc::new(wal_advertiser::GlobalState::default()),
+                pageserver_connectivity: Arc::new(pageserver_connectivity::GlobalState::default()),
                 global_rate_limiter: RateLimiter::new(1, 1),
                 wal_backup,
             }),
@@ -599,6 +601,10 @@ impl GlobalTimelines {
 
     pub fn get_wal_advertiser(&self) -> Arc<wal_advertiser::GlobalState> {
         self.state.lock().unwrap().wal_advertisement.clone()
+    }
+
+    pub fn get_pageserver_connectivity(&self) -> Arc<pageserver_connectivity::GlobalState> {
+        self.state.lock().unwrap().pageserver_connectivity.clone()
     }
 
     pub fn housekeeping(&self, tombstone_ttl: &Duration) {

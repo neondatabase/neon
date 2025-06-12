@@ -333,4 +333,7 @@ pub struct TenantShardPageserverAttachment {
     pub shard_id: ShardIndex,
     pub generation: Generation,
     pub ps_id: NodeId,
+    // TODO: avoid transmitting this with every request.
+    // How nice things could be if there were simple DNS records for ps-$node_id.$cell.$region.$cloud.neon.tech
+    pub ps_hostname: String, // TODO: some type safety
 }

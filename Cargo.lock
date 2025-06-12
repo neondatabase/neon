@@ -6067,6 +6067,7 @@ dependencies = [
  "sk_ps_discovery",
  "smallvec",
  "storage_broker",
+ "storage_controller_client",
  "strum",
  "strum_macros",
  "thiserror 1.0.69",

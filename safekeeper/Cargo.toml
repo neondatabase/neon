@@ -67,6 +67,7 @@ sk_ps_discovery.workspace = true
 sha2.workspace = true
 sd-notify.workspace = true
 storage_broker.workspace = true
+storage_controller_client.workspace = true
 tokio-stream.workspace = true
 http-utils.workspace = true
 utils.workspace = true
