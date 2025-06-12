@@ -112,6 +112,7 @@ static RelKindEntry*
 get_entry(NRelFileInfo rinfo, bool* found)
 {
 	RelKindEntry* entry;
+
 	/*
 	 * This should actually never happen! Below we check if hash is full and delete least recently user item in this case.
 	 * But for further safety we also perform check here.
