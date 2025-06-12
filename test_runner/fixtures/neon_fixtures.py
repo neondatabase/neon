@@ -2361,9 +2361,10 @@ class NeonStorageController(MetricsGetter, LogUtils):
         while n > 0:
             try:
                 n = self.reconcile_all()
-            except Exception:
+            except Exception as e:
                 if not retry_on_failures:
                     raise
+                log.info(f"reconcile_all failed, will retry: {e}")
                 n = 1
 
             if n == 0:
