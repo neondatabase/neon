@@ -9,7 +9,7 @@ use itertools::Itertools;
 use postgres_client::config::{AuthKeys, SslMode};
 use postgres_client::maybe_tls_stream::MaybeTlsStream;
 use postgres_client::tls::MakeTlsConnect;
-use postgres_client::{CancelToken, NoTls, RawConnection};
+use postgres_client::{NoTls, RawCancelToken, RawConnection};
 use postgres_protocol::message::backend::NoticeResponseBody;
 use thiserror::Error;
 use tokio::net::{TcpStream, lookup_host};
@@ -265,7 +265,8 @@ impl ConnectInfo {
     }
 }
 
-type RustlsStream = <ComputeConfig as MakeTlsConnect<tokio::net::TcpStream>>::Stream;
+pub type RustlsStream = <ComputeConfig as MakeTlsConnect<tokio::net::TcpStream>>::Stream;
+pub type MaybeRustlsStream = MaybeTlsStream<tokio::net::TcpStream, RustlsStream>;
 
 pub(crate) struct PostgresConnection {
     /// Socket connected to a compute node.
@@ -279,7 +280,7 @@ pub(crate) struct PostgresConnection {
     /// Notices received from compute after authenticating
     pub(crate) delayed_notice: Vec<NoticeResponseBody>,
 
-    _guage: NumDbConnectionsGuard<'static>,
+    pub(crate) guage: NumDbConnectionsGuard<'static>,
 }
 
 impl ConnectInfo {
@@ -327,8 +328,7 @@ impl ConnectInfo {
         // Yet another reason to rework the connection establishing code.
         let cancel_closure = CancelClosure::new(
             socket_addr,
-            CancelToken {
-                socket_config: None,
+            RawCancelToken {
                 ssl_mode: self.ssl_mode,
                 process_id,
                 secret_key,
@@ -343,7 +343,7 @@ impl ConnectInfo {
             delayed_notice,
             cancel_closure,
             aux,
-            _guage: Metrics::get().proxy.db_connections.guard(ctx.protocol()),
+            guage: Metrics::get().proxy.db_connections.guard(ctx.protocol()),
         };
 
         Ok(connection)
