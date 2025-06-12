@@ -1230,8 +1230,6 @@ ProcessCreateEventTrigger(
 		 */
 		if (IsTransactionState() && is_neon_superuser())
 		{
-			CreateEventTrigStmt *stmt = (CreateEventTrigStmt *) parseTree;
-
 			if (!current_user_is_super)
 			{
 				/*
