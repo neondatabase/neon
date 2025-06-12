@@ -89,12 +89,7 @@ pub async fn task_main(
                 }
             }
 
-            let ctx = RequestContext::new(
-                session_id,
-                conn_info,
-                crate::metrics::Protocol::Tcp,
-                &config.region,
-            );
+            let ctx = RequestContext::new(session_id, conn_info, crate::metrics::Protocol::Tcp);
 
             let res = handle_client(
                 config,
