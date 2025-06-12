@@ -2468,7 +2468,7 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 				}
 			}
 		}
-		last_recptr != end_recptr;
+		last_recptr = end_recptr;
 		last_no_redo_needed = no_redo_needed;
 	}
 	else
