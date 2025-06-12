@@ -6,6 +6,8 @@
 //! side. This is good because it ensures the cleartext password won't
 //! end up in logs pg_stat displays, etc.
 
+use base64::Engine as _;
+use base64::prelude::BASE64_STANDARD;
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::digest::FixedOutput;
@@ -83,8 +85,8 @@ pub(crate) async fn scram_sha_256_salt(
     format!(
         "SCRAM-SHA-256${}:{}${}:{}",
         SCRAM_DEFAULT_ITERATIONS,
-        base64::encode(salt),
-        base64::encode(stored_key),
-        base64::encode(server_key)
+        BASE64_STANDARD.encode(salt),
+        BASE64_STANDARD.encode(stored_key),
+        BASE64_STANDARD.encode(server_key)
     )
 }
