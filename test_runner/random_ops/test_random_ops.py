@@ -114,8 +114,16 @@ class NeonBranch:
         """
         return f"{self.id}{'(r)' if self.id in self.project.reset_branches else ''}, parent: {self.parent}"
 
-    def create_child_branch(self) -> NeonBranch | None:
-        return self.project.create_branch(self.id)
+    def random_time(self) -> datetime:
+        min_time = self.updated_at + timedelta(seconds=1)
+        max_time = datetime.now(UTC) - timedelta(seconds=1)
+        return (min_time + (max_time - min_time) * random.random()).replace(microsecond=0)
+
+    def create_child_branch_random_time(self) -> NeonBranch | None:
+        return self.create_child_branch(self.random_time())
+
+    def create_child_branch(self, parent_timestamp: datetime | None = None) -> NeonBranch | None:
+        return self.project.create_branch(self.id, parent_timestamp)
 
     def create_ro_endpoint(self) -> NeonEndpoint:
         return NeonEndpoint(
@@ -139,12 +147,9 @@ class NeonBranch:
         """
         Does PITR, i.e. calls the reset API call on the same branch to the random time in the past
         """
-        min_time = self.updated_at + timedelta(seconds=1)
-        max_time = datetime.now(UTC) - timedelta(seconds=1)
-        target_time = (min_time + (max_time - min_time) * random.random()).replace(microsecond=0)
         res = self.restore(
             self.id,
-            source_timestamp=target_time.isoformat().replace("+00:00", "Z"),
+            source_timestamp=self.random_time().isoformat().replace("+00:00", "Z"),
             preserve_under_name=self.project.gen_restore_name(),
         )
         if res is None:
@@ -239,10 +244,17 @@ class NeonProject:
     def delete(self) -> None:
         self.neon_api.delete_project(self.id)
 
-    def create_branch(self, parent_id: str | None = None) -> NeonBranch | None:
+    def create_branch(
+        self, parent_id: str | None = None, parent_timestamp: datetime | None = None
+    ) -> NeonBranch | None:
         self.wait()
+        parent_timestamp_str: str | None = None
+        if parent_timestamp:
+            parent_timestamp_str = parent_timestamp.isoformat().replace("+00:00", "Z")
         try:
-            branch_def = self.neon_api.create_branch(self.id, parent_id=parent_id)
+            branch_def = self.neon_api.create_branch(
+                self.id, parent_id=parent_id, parent_timestamp=parent_timestamp_str
+            )
         except HTTPError as he:
             if (
                 he.response.status_code == 422
@@ -386,8 +398,9 @@ def do_action(project: NeonProject, action: str) -> bool:
     Runs the action
     """
     log.info("Action: %s", action)
-    if action == "new_branch":
-        log.info("Trying to create a new branch")
+    if action == "new_branch" or action == "new_branch_random_time":
+        use_random_time: bool = action == "new_branch_random_time"
+        log.info("Trying to create a new branch %s", "random time" if use_random_time else "")
         if 0 <= project.limits["max_branches"] <= len(project.branches):
             log.info(
                 "Maximum branch limit exceeded (%s of %s)",
@@ -399,7 +412,10 @@ def do_action(project: NeonProject, action: str) -> bool:
             random.choice(list(set(project.branches.keys()) - project.reset_branches))
         ]
         log.info("Parent: %s", parent)
-        child = parent.create_child_branch()
+        if use_random_time:
+            child = parent.create_child_branch_random_time()
+        else:
+            child = parent.create_child_branch()
         if child is None:
             return False
         log.info("Created branch %s", child)
@@ -469,10 +485,11 @@ def test_api_random(
     pg_bin, project = setup_class
     # Here we can assign weights
     ACTIONS = (
-        ("new_branch", 1.5),
+        ("new_branch", 1.2),
+        ("new_branch_random_time", 0.5),
         ("new_ro_endpoint", 1.4),
         ("delete_ro_endpoint", 0.8),
-        ("delete_branch", 1.0),
+        ("delete_branch", 1.2),
         ("restore_random_time", 1.2),
     )
     if num_ops_env := os.getenv("NUM_OPERATIONS"):
