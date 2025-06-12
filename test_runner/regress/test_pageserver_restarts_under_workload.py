@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 # Test restarting page server, while safekeeper and compute node keep
 # running.
-def test_pageserver_restarts_under_worload(neon_simple_env: NeonEnv, pg_bin: PgBin):
+def test_pageserver_restarts_under_workload(neon_simple_env: NeonEnv, pg_bin: PgBin):
     env = neon_simple_env
     env.create_branch("test_pageserver_restarts")
     endpoint = env.endpoints.create_start("test_pageserver_restarts")
@@ -28,7 +28,11 @@ def test_pageserver_restarts_under_worload(neon_simple_env: NeonEnv, pg_bin: PgB
         pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", f"-s{scale}", connstr])
         pg_bin.run_capture(["pgbench", f"-T{n_restarts}", connstr])
 
-    thread = threading.Thread(target=run_pgbench, args=(endpoint.connstr(),), daemon=True)
+    thread = threading.Thread(
+        target=run_pgbench,
+        args=(endpoint.connstr(options="-cstatement_timeout=360s"),),
+        daemon=True,
+    )
     thread.start()
 
     for _ in range(n_restarts):

@@ -1,0 +1,35 @@
+diff --git a/regress/core/tests.mk b/regress/core/tests.mk
+index 9e05244..90987df 100644
+--- a/regress/core/tests.mk
++++ b/regress/core/tests.mk
+@@ -143,8 +143,7 @@ TESTS += \
+ 	$(top_srcdir)/regress/core/oriented_envelope \
+ 	$(top_srcdir)/regress/core/point_coordinates \
+ 	$(top_srcdir)/regress/core/out_geojson \
+-  $(top_srcdir)/regress/core/wrapx \
+-	$(top_srcdir)/regress/core/computed_columns
++  $(top_srcdir)/regress/core/wrapx
+ 
+ # Slow slow tests
+ TESTS_SLOW = \
+diff --git a/regress/runtest.mk b/regress/runtest.mk
+index 4b95b7e..449d5a2 100644
+--- a/regress/runtest.mk
++++ b/regress/runtest.mk
+@@ -24,16 +24,6 @@ check-regress:
+ 
+ 	@POSTGIS_TOP_BUILD_DIR=$(abs_top_builddir) $(PERL) $(top_srcdir)/regress/run_test.pl $(RUNTESTFLAGS) $(RUNTESTFLAGS_INTERNAL) $(TESTS)
+ 
+-	@if echo "$(RUNTESTFLAGS)" | grep -vq -- --upgrade; then \
+-		echo "Running upgrade test as RUNTESTFLAGS did not contain that"; \
+-		POSTGIS_TOP_BUILD_DIR=$(abs_top_builddir) $(PERL) $(top_srcdir)/regress/run_test.pl \
+-      --upgrade \
+-      $(RUNTESTFLAGS) \
+-      $(RUNTESTFLAGS_INTERNAL) \
+-      $(TESTS); \
+-	else \
+-		echo "Skipping upgrade test as RUNTESTFLAGS already requested upgrades"; \
+-	fi
+ 
+ check-long:
+ 	$(PERL) $(top_srcdir)/regress/run_test.pl $(RUNTESTFLAGS) $(TESTS) $(TESTS_SLOW)

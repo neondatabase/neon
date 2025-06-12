@@ -8,8 +8,8 @@ use std::error::Error as _;
 use http_utils::error::HttpErrorBody;
 use reqwest::{IntoUrl, Method, StatusCode};
 use safekeeper_api::models::{
-    self, PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization, TimelineCreateRequest,
-    TimelineStatus,
+    self, PullTimelineRequest, PullTimelineResponse, SafekeeperStatus, SafekeeperUtilization,
+    TimelineCreateRequest, TimelineStatus,
 };
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::logging::SecretString;
@@ -181,6 +181,12 @@ impl Client {
             self.mgmt_api_endpoint, tenant_id, timeline_id, stream_to.0
         );
         self.get(&uri).await
+    }
+
+    pub async fn status(&self) -> Result<SafekeeperStatus> {
+        let uri = format!("{}/v1/status", self.mgmt_api_endpoint);
+        let resp = self.get(&uri).await?;
+        resp.json().await.map_err(Error::ReceiveBody)
     }
 
     pub async fn utilization(&self) -> Result<SafekeeperUtilization> {

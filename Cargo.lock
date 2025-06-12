@@ -753,6 +753,7 @@ dependencies = [
  "axum",
  "axum-core",
  "bytes",
+ "form_urlencoded",
  "futures-util",
  "headers",
  "http 1.1.0",
@@ -761,6 +762,8 @@ dependencies = [
  "mime",
  "pin-project-lite",
  "serde",
+ "serde_html_form",
+ "serde_path_to_error",
  "tower 0.5.2",
  "tower-layer",
  "tower-service",
@@ -1445,6 +1448,7 @@ dependencies = [
  "regex",
  "reqwest",
  "safekeeper_api",
+ "safekeeper_client",
  "scopeguard",
  "serde",
  "serde_json",
@@ -2054,6 +2058,7 @@ dependencies = [
  "axum-extra",
  "camino",
  "camino-tempfile",
+ "clap",
  "futures",
  "http-body-util",
  "itertools 0.10.5",
@@ -4236,6 +4241,8 @@ name = "pagebench"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "bytes",
  "camino",
  "clap",
  "futures",
@@ -4244,12 +4251,15 @@ dependencies = [
  "humantime-serde",
  "pageserver_api",
  "pageserver_client",
+ "pageserver_page_api",
  "rand 0.8.5",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "tokio-util",
+ "tonic 0.13.1",
  "tracing",
  "utils",
  "workspace_hack",
@@ -4305,6 +4315,7 @@ dependencies = [
  "hashlink",
  "hex",
  "hex-literal",
+ "http 1.1.0",
  "http-utils",
  "humantime",
  "humantime-serde",
@@ -4367,6 +4378,7 @@ dependencies = [
  "toml_edit",
  "tonic 0.13.1",
  "tonic-reflection",
+ "tower 0.5.2",
  "tracing",
  "tracing-utils",
  "twox-hash",
@@ -4463,7 +4475,6 @@ dependencies = [
  "pageserver_api",
  "postgres_ffi",
  "prost 0.13.5",
- "smallvec",
  "thiserror 1.0.69",
  "tonic 0.13.1",
  "tonic-build",
@@ -6412,6 +6423,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.100",
+]
+
+[[package]]
+name = "serde_html_form"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d2de91cf02bbc07cde38891769ccd5d4f073d22a40683aa4bc7a95781aaa2c4"
+dependencies = [
+ "form_urlencoded",
+ "indexmap 2.9.0",
+ "itoa",
+ "ryu",
+ "serde",
 ]
 
 [[package]]

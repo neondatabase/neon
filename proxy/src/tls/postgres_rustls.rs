@@ -2,9 +2,10 @@ use std::convert::TryFrom;
 use std::sync::Arc;
 
 use postgres_client::tls::MakeTlsConnect;
-use rustls::ClientConfig;
-use rustls::pki_types::ServerName;
+use rustls::pki_types::{InvalidDnsNameError, ServerName};
 use tokio::io::{AsyncRead, AsyncWrite};
+
+use crate::config::ComputeConfig;
 
 mod private {
     use std::future::Future;
@@ -31,7 +32,9 @@ mod private {
         type Output = io::Result<RustlsStream<S>>;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            Pin::new(&mut self.inner).poll(cx).map_ok(RustlsStream)
+            Pin::new(&mut self.inner)
+                .poll(cx)
+                .map_ok(|s| RustlsStream(Box::new(s)))
         }
     }
 
@@ -57,7 +60,7 @@ mod private {
         }
     }
 
-    pub struct RustlsStream<S>(TlsStream<S>);
+    pub struct RustlsStream<S>(Box<TlsStream<S>>);
 
     impl<S> postgres_client::tls::TlsStream for RustlsStream<S>
     where
@@ -121,36 +124,27 @@ mod private {
     }
 }
 
-/// A `MakeTlsConnect` implementation using `rustls`.
-///
-/// That way you can connect to PostgreSQL using `rustls` as the TLS stack.
-#[derive(Clone)]
-pub struct MakeRustlsConnect {
-    pub config: Arc<ClientConfig>,
-}
-
-impl MakeRustlsConnect {
-    /// Creates a new `MakeRustlsConnect` from the provided `ClientConfig`.
-    #[must_use]
-    pub fn new(config: Arc<ClientConfig>) -> Self {
-        Self { config }
-    }
-}
-
-impl<S> MakeTlsConnect<S> for MakeRustlsConnect
+impl<S> MakeTlsConnect<S> for ComputeConfig
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     type Stream = private::RustlsStream<S>;
     type TlsConnect = private::RustlsConnect;
-    type Error = rustls::pki_types::InvalidDnsNameError;
+    type Error = InvalidDnsNameError;
 
-    fn make_tls_connect(&mut self, hostname: &str) -> Result<Self::TlsConnect, Self::Error> {
-        ServerName::try_from(hostname).map(|dns_name| {
-            private::RustlsConnect(private::RustlsConnectData {
-                hostname: dns_name.to_owned(),
-                connector: Arc::clone(&self.config).into(),
-            })
-        })
+    fn make_tls_connect(&self, hostname: &str) -> Result<Self::TlsConnect, Self::Error> {
+        make_tls_connect(&self.tls, hostname)
     }
+}
+
+pub fn make_tls_connect(
+    tls: &Arc<rustls::ClientConfig>,
+    hostname: &str,
+) -> Result<private::RustlsConnect, InvalidDnsNameError> {
+    ServerName::try_from(hostname).map(|dns_name| {
+        private::RustlsConnect(private::RustlsConnectData {
+            hostname: dns_name.to_owned(),
+            connector: tls.clone().into(),
+        })
+    })
 }

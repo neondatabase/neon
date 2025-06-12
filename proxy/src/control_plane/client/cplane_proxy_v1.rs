@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use ::http::HeaderName;
 use ::http::header::AUTHORIZATION;
+use bytes::Bytes;
 use futures::TryFutureExt;
+use hyper::StatusCode;
 use postgres_client::config::SslMode;
 use tokio::time::Instant;
 use tracing::{Instrument, debug, info, info_span, warn};
@@ -15,7 +17,6 @@ use tracing::{Instrument, debug, info, info_span, warn};
 use super::super::messages::{ControlPlaneErrorMessage, GetEndpointAccessControl, WakeCompute};
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::AuthRule;
-use crate::cache::Cached;
 use crate::context::RequestContext;
 use crate::control_plane::caches::ApiCaches;
 use crate::control_plane::errors::{
@@ -24,12 +25,12 @@ use crate::control_plane::errors::{
 use crate::control_plane::locks::ApiLocks;
 use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, Reason};
 use crate::control_plane::{
-    AccessBlockerFlags, AuthInfo, AuthSecret, CachedAccessBlockerFlags, CachedAllowedIps,
-    CachedAllowedVpcEndpointIds, CachedNodeInfo, CachedRoleSecret, NodeInfo,
+    AccessBlockerFlags, AuthInfo, AuthSecret, CachedNodeInfo, EndpointAccessControl, NodeInfo,
+    RoleAccessControl,
 };
-use crate::metrics::{CacheOutcome, Metrics};
+use crate::metrics::Metrics;
 use crate::rate_limiter::WakeComputeRateLimiter;
-use crate::types::{EndpointCacheKey, EndpointId};
+use crate::types::{EndpointCacheKey, EndpointId, RoleName};
 use crate::{compute, http, scram};
 
 pub(crate) const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
@@ -66,66 +67,41 @@ impl NeonControlPlaneClient {
         self.endpoint.url().as_str()
     }
 
-    async fn do_get_auth_info(
-        &self,
-        ctx: &RequestContext,
-        user_info: &ComputeUserInfo,
-    ) -> Result<AuthInfo, GetAuthInfoError> {
-        if !self
-            .caches
-            .endpoints_cache
-            .is_valid(ctx, &user_info.endpoint.normalize())
-        {
-            // TODO: refactor this because it's weird
-            // this is a failure to authenticate but we return Ok.
-            info!("endpoint is not valid, skipping the request");
-            return Ok(AuthInfo::default());
-        }
-        self.do_get_auth_req(user_info, &ctx.session_id(), Some(ctx))
-            .await
-    }
-
     async fn do_get_auth_req(
         &self,
-        user_info: &ComputeUserInfo,
-        session_id: &uuid::Uuid,
-        ctx: Option<&RequestContext>,
+        ctx: &RequestContext,
+        endpoint: &EndpointId,
+        role: &RoleName,
     ) -> Result<AuthInfo, GetAuthInfoError> {
-        let request_id: String = session_id.to_string();
-        let application_name = if let Some(ctx) = ctx {
-            ctx.console_application_name()
-        } else {
-            "auth_cancellation".to_string()
-        };
-
         async {
-            let request = self
-                .endpoint
-                .get_path("get_endpoint_access_control")
-                .header(X_REQUEST_ID, &request_id)
-                .header(AUTHORIZATION, format!("Bearer {}", &self.jwt))
-                .query(&[("session_id", session_id)])
-                .query(&[
-                    ("application_name", application_name.as_str()),
-                    ("endpointish", user_info.endpoint.as_str()),
-                    ("role", user_info.user.as_str()),
-                ])
-                .build()?;
+            let response = {
+                let request = self
+                    .endpoint
+                    .get_path("get_endpoint_access_control")
+                    .header(X_REQUEST_ID, ctx.session_id().to_string())
+                    .header(AUTHORIZATION, format!("Bearer {}", &self.jwt))
+                    .query(&[("session_id", ctx.session_id())])
+                    .query(&[
+                        ("application_name", ctx.console_application_name().as_str()),
+                        ("endpointish", endpoint.as_str()),
+                        ("role", role.as_str()),
+                    ])
+                    .build()?;
 
-            debug!(url = request.url().as_str(), "sending http request");
-            let start = Instant::now();
-            let response = match ctx {
-                Some(ctx) => {
-                    let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Cplane);
-                    let rsp = self.endpoint.execute(request).await;
-                    drop(pause);
-                    rsp?
-                }
-                None => self.endpoint.execute(request).await?,
+                debug!(url = request.url().as_str(), "sending http request");
+                let start = Instant::now();
+                let _pause = ctx.latency_timer_pause_at(start, crate::metrics::Waiting::Cplane);
+                let response = self.endpoint.execute(request).await?;
+
+                info!(duration = ?start.elapsed(), "received http response");
+
+                response
             };
 
-            info!(duration = ?start.elapsed(), "received http response");
-            let body = match parse_body::<GetEndpointAccessControl>(response).await {
+            let body = match parse_body::<GetEndpointAccessControl>(
+                response.status(),
+                response.bytes().await?,
+            ) {
                 Ok(body) => body,
                 // Error 404 is special: it's ok not to have a secret.
                 // TODO(anna): retry
@@ -170,6 +146,7 @@ impl NeonControlPlaneClient {
                     public_access_blocked: block_public_connections,
                     vpc_access_blocked: block_vpc_connections,
                 },
+                rate_limits: body.rate_limits,
             })
         }
         .inspect_err(|e| tracing::debug!(error = ?e))
@@ -180,7 +157,7 @@ impl NeonControlPlaneClient {
     async fn do_get_endpoint_jwks(
         &self,
         ctx: &RequestContext,
-        endpoint: EndpointId,
+        endpoint: &EndpointId,
     ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
         if !self
             .caches
@@ -216,7 +193,10 @@ impl NeonControlPlaneClient {
             drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
 
-            let body = parse_body::<EndpointJwksResponse>(response).await?;
+            let body = parse_body::<EndpointJwksResponse>(
+                response.status(),
+                response.bytes().await.map_err(ControlPlaneError::from)?,
+            )?;
 
             let rules = body
                 .jwks
@@ -268,7 +248,7 @@ impl NeonControlPlaneClient {
             let response = self.endpoint.execute(request).await?;
             drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
-            let body = parse_body::<WakeCompute>(response).await?;
+            let body = parse_body::<WakeCompute>(response.status(), response.bytes().await?)?;
 
             // Unfortunately, ownership won't let us use `Option::ok_or` here.
             let (host, port) = match parse_host_port(&body.address) {
@@ -282,24 +262,18 @@ impl NeonControlPlaneClient {
                 Some(_) => SslMode::Require,
                 None => SslMode::Disable,
             };
-            let host_name = match body.server_name {
-                Some(host) => host,
-                None => host.to_owned(),
+            let host = match body.server_name {
+                Some(host) => host.into(),
+                None => host.into(),
             };
 
-            // Don't set anything but host and port! This config will be cached.
-            // We'll set username and such later using the startup message.
-            // TODO: add more type safety (in progress).
-            let mut config = compute::ConnCfg::new(host_name, port);
-
-            if let Some(addr) = host_addr {
-                config.set_host_addr(addr);
-            }
-
-            config.ssl_mode(ssl_mode);
-
             let node = NodeInfo {
-                config,
+                conn_info: compute::ConnectInfo {
+                    host_addr,
+                    host,
+                    port,
+                    ssl_mode,
+                },
                 aux: body.aux,
             };
 
@@ -313,225 +287,106 @@ impl NeonControlPlaneClient {
 
 impl super::ControlPlaneApi for NeonControlPlaneClient {
     #[tracing::instrument(skip_all)]
-    async fn get_role_secret(
+    async fn get_role_access_control(
         &self,
         ctx: &RequestContext,
-        user_info: &ComputeUserInfo,
-    ) -> Result<CachedRoleSecret, GetAuthInfoError> {
-        let normalized_ep = &user_info.endpoint.normalize();
-        let user = &user_info.user;
-        if let Some(role_secret) = self
+        endpoint: &EndpointId,
+        role: &RoleName,
+    ) -> Result<RoleAccessControl, crate::control_plane::errors::GetAuthInfoError> {
+        let normalized_ep = &endpoint.normalize();
+        if let Some(secret) = self
             .caches
             .project_info
-            .get_role_secret(normalized_ep, user)
+            .get_role_secret(normalized_ep, role)
         {
-            return Ok(role_secret);
+            return Ok(secret);
         }
-        let auth_info = self.do_get_auth_info(ctx, user_info).await?;
-        let account_id = auth_info.account_id;
+
+        if !self.caches.endpoints_cache.is_valid(ctx, normalized_ep) {
+            info!("endpoint is not valid, skipping the request");
+            return Err(GetAuthInfoError::UnknownEndpoint);
+        }
+
+        let auth_info = self.do_get_auth_req(ctx, endpoint, role).await?;
+
+        let control = EndpointAccessControl {
+            allowed_ips: Arc::new(auth_info.allowed_ips),
+            allowed_vpce: Arc::new(auth_info.allowed_vpc_endpoint_ids),
+            flags: auth_info.access_blocker_flags,
+            rate_limits: auth_info.rate_limits,
+        };
+        let role_control = RoleAccessControl {
+            secret: auth_info.secret,
+        };
+
         if let Some(project_id) = auth_info.project_id {
             let normalized_ep_int = normalized_ep.into();
-            self.caches.project_info.insert_role_secret(
+
+            self.caches.project_info.insert_endpoint_access(
+                auth_info.account_id,
                 project_id,
                 normalized_ep_int,
-                user.into(),
-                auth_info.secret.clone(),
-            );
-            self.caches.project_info.insert_allowed_ips(
-                project_id,
-                normalized_ep_int,
-                Arc::new(auth_info.allowed_ips),
-            );
-            self.caches.project_info.insert_allowed_vpc_endpoint_ids(
-                account_id,
-                project_id,
-                normalized_ep_int,
-                Arc::new(auth_info.allowed_vpc_endpoint_ids),
-            );
-            self.caches.project_info.insert_block_public_or_vpc_access(
-                project_id,
-                normalized_ep_int,
-                auth_info.access_blocker_flags,
+                role.into(),
+                control,
+                role_control.clone(),
             );
             ctx.set_project_id(project_id);
         }
-        // When we just got a secret, we don't need to invalidate it.
-        Ok(Cached::new_uncached(auth_info.secret))
+
+        Ok(role_control)
     }
 
-    async fn get_allowed_ips(
+    #[tracing::instrument(skip_all)]
+    async fn get_endpoint_access_control(
         &self,
         ctx: &RequestContext,
-        user_info: &ComputeUserInfo,
-    ) -> Result<CachedAllowedIps, GetAuthInfoError> {
-        let normalized_ep = &user_info.endpoint.normalize();
-        if let Some(allowed_ips) = self.caches.project_info.get_allowed_ips(normalized_ep) {
-            Metrics::get()
-                .proxy
-                .allowed_ips_cache_misses // TODO SR: Should we rename this variable to something like allowed_ip_cache_stats?
-                .inc(CacheOutcome::Hit);
-            return Ok(allowed_ips);
+        endpoint: &EndpointId,
+        role: &RoleName,
+    ) -> Result<EndpointAccessControl, GetAuthInfoError> {
+        let normalized_ep = &endpoint.normalize();
+        if let Some(control) = self.caches.project_info.get_endpoint_access(normalized_ep) {
+            return Ok(control);
         }
-        Metrics::get()
-            .proxy
-            .allowed_ips_cache_misses
-            .inc(CacheOutcome::Miss);
-        let auth_info = self.do_get_auth_info(ctx, user_info).await?;
-        let allowed_ips = Arc::new(auth_info.allowed_ips);
-        let allowed_vpc_endpoint_ids = Arc::new(auth_info.allowed_vpc_endpoint_ids);
-        let access_blocker_flags = auth_info.access_blocker_flags;
-        let user = &user_info.user;
-        let account_id = auth_info.account_id;
+
+        if !self.caches.endpoints_cache.is_valid(ctx, normalized_ep) {
+            info!("endpoint is not valid, skipping the request");
+            return Err(GetAuthInfoError::UnknownEndpoint);
+        }
+
+        let auth_info = self.do_get_auth_req(ctx, endpoint, role).await?;
+
+        let control = EndpointAccessControl {
+            allowed_ips: Arc::new(auth_info.allowed_ips),
+            allowed_vpce: Arc::new(auth_info.allowed_vpc_endpoint_ids),
+            flags: auth_info.access_blocker_flags,
+            rate_limits: auth_info.rate_limits,
+        };
+        let role_control = RoleAccessControl {
+            secret: auth_info.secret,
+        };
+
         if let Some(project_id) = auth_info.project_id {
             let normalized_ep_int = normalized_ep.into();
-            self.caches.project_info.insert_role_secret(
+
+            self.caches.project_info.insert_endpoint_access(
+                auth_info.account_id,
                 project_id,
                 normalized_ep_int,
-                user.into(),
-                auth_info.secret.clone(),
-            );
-            self.caches.project_info.insert_allowed_ips(
-                project_id,
-                normalized_ep_int,
-                allowed_ips.clone(),
-            );
-            self.caches.project_info.insert_allowed_vpc_endpoint_ids(
-                account_id,
-                project_id,
-                normalized_ep_int,
-                allowed_vpc_endpoint_ids.clone(),
-            );
-            self.caches.project_info.insert_block_public_or_vpc_access(
-                project_id,
-                normalized_ep_int,
-                access_blocker_flags,
+                role.into(),
+                control.clone(),
+                role_control,
             );
             ctx.set_project_id(project_id);
         }
-        Ok(Cached::new_uncached(allowed_ips))
-    }
 
-    async fn get_allowed_vpc_endpoint_ids(
-        &self,
-        ctx: &RequestContext,
-        user_info: &ComputeUserInfo,
-    ) -> Result<CachedAllowedVpcEndpointIds, GetAuthInfoError> {
-        let normalized_ep = &user_info.endpoint.normalize();
-        if let Some(allowed_vpc_endpoint_ids) = self
-            .caches
-            .project_info
-            .get_allowed_vpc_endpoint_ids(normalized_ep)
-        {
-            Metrics::get()
-                .proxy
-                .vpc_endpoint_id_cache_stats
-                .inc(CacheOutcome::Hit);
-            return Ok(allowed_vpc_endpoint_ids);
-        }
-
-        Metrics::get()
-            .proxy
-            .vpc_endpoint_id_cache_stats
-            .inc(CacheOutcome::Miss);
-
-        let auth_info = self.do_get_auth_info(ctx, user_info).await?;
-        let allowed_ips = Arc::new(auth_info.allowed_ips);
-        let allowed_vpc_endpoint_ids = Arc::new(auth_info.allowed_vpc_endpoint_ids);
-        let access_blocker_flags = auth_info.access_blocker_flags;
-        let user = &user_info.user;
-        let account_id = auth_info.account_id;
-        if let Some(project_id) = auth_info.project_id {
-            let normalized_ep_int = normalized_ep.into();
-            self.caches.project_info.insert_role_secret(
-                project_id,
-                normalized_ep_int,
-                user.into(),
-                auth_info.secret.clone(),
-            );
-            self.caches.project_info.insert_allowed_ips(
-                project_id,
-                normalized_ep_int,
-                allowed_ips.clone(),
-            );
-            self.caches.project_info.insert_allowed_vpc_endpoint_ids(
-                account_id,
-                project_id,
-                normalized_ep_int,
-                allowed_vpc_endpoint_ids.clone(),
-            );
-            self.caches.project_info.insert_block_public_or_vpc_access(
-                project_id,
-                normalized_ep_int,
-                access_blocker_flags,
-            );
-            ctx.set_project_id(project_id);
-        }
-        Ok(Cached::new_uncached(allowed_vpc_endpoint_ids))
-    }
-
-    async fn get_block_public_or_vpc_access(
-        &self,
-        ctx: &RequestContext,
-        user_info: &ComputeUserInfo,
-    ) -> Result<CachedAccessBlockerFlags, GetAuthInfoError> {
-        let normalized_ep = &user_info.endpoint.normalize();
-        if let Some(access_blocker_flags) = self
-            .caches
-            .project_info
-            .get_block_public_or_vpc_access(normalized_ep)
-        {
-            Metrics::get()
-                .proxy
-                .access_blocker_flags_cache_stats
-                .inc(CacheOutcome::Hit);
-            return Ok(access_blocker_flags);
-        }
-
-        Metrics::get()
-            .proxy
-            .access_blocker_flags_cache_stats
-            .inc(CacheOutcome::Miss);
-
-        let auth_info = self.do_get_auth_info(ctx, user_info).await?;
-        let allowed_ips = Arc::new(auth_info.allowed_ips);
-        let allowed_vpc_endpoint_ids = Arc::new(auth_info.allowed_vpc_endpoint_ids);
-        let access_blocker_flags = auth_info.access_blocker_flags;
-        let user = &user_info.user;
-        let account_id = auth_info.account_id;
-        if let Some(project_id) = auth_info.project_id {
-            let normalized_ep_int = normalized_ep.into();
-            self.caches.project_info.insert_role_secret(
-                project_id,
-                normalized_ep_int,
-                user.into(),
-                auth_info.secret.clone(),
-            );
-            self.caches.project_info.insert_allowed_ips(
-                project_id,
-                normalized_ep_int,
-                allowed_ips.clone(),
-            );
-            self.caches.project_info.insert_allowed_vpc_endpoint_ids(
-                account_id,
-                project_id,
-                normalized_ep_int,
-                allowed_vpc_endpoint_ids.clone(),
-            );
-            self.caches.project_info.insert_block_public_or_vpc_access(
-                project_id,
-                normalized_ep_int,
-                access_blocker_flags.clone(),
-            );
-            ctx.set_project_id(project_id);
-        }
-        Ok(Cached::new_uncached(access_blocker_flags))
+        Ok(control)
     }
 
     #[tracing::instrument(skip_all)]
     async fn get_endpoint_jwks(
         &self,
         ctx: &RequestContext,
-        endpoint: EndpointId,
+        endpoint: &EndpointId,
     ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
         self.do_get_endpoint_jwks(ctx, endpoint).await
     }
@@ -640,33 +495,33 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
 }
 
 /// Parse http response body, taking status code into account.
-async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
-    response: http::Response,
+fn parse_body<T: for<'a> serde::Deserialize<'a>>(
+    status: StatusCode,
+    body: Bytes,
 ) -> Result<T, ControlPlaneError> {
-    let status = response.status();
     if status.is_success() {
         // We shouldn't log raw body because it may contain secrets.
         info!("request succeeded, processing the body");
-        return Ok(response.json().await?);
+        return Ok(serde_json::from_slice(&body).map_err(std::io::Error::other)?);
     }
-    let s = response.bytes().await?;
+
     // Log plaintext to be able to detect, whether there are some cases not covered by the error struct.
-    info!("response_error plaintext: {:?}", s);
+    info!("response_error plaintext: {:?}", body);
 
     // Don't throw an error here because it's not as important
     // as the fact that the request itself has failed.
-    let mut body = serde_json::from_slice(&s).unwrap_or_else(|e| {
+    let mut body = serde_json::from_slice(&body).unwrap_or_else(|e| {
         warn!("failed to parse error body: {e}");
-        ControlPlaneErrorMessage {
+        Box::new(ControlPlaneErrorMessage {
             error: "reason unclear (malformed error message)".into(),
             http_status_code: status,
             status: None,
-        }
+        })
     });
     body.http_status_code = status;
 
     warn!("console responded with an error ({status}): {body:?}");
-    Err(ControlPlaneError::Message(Box::new(body)))
+    Err(ControlPlaneError::Message(body))
 }
 
 fn parse_host_port(input: &str) -> Option<(&str, u16)> {

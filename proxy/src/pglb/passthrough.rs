@@ -1,3 +1,4 @@
+use futures::FutureExt;
 use smol_str::SmolStr;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::debug;
@@ -52,7 +53,7 @@ pub(crate) async fn proxy_pass(
 
     // Starting from here we only proxy the client's traffic.
     debug!("performing the proxy pass...");
-    let _ = crate::proxy::copy_bidirectional::copy_bidirectional_client_compute(
+    let _ = crate::pglb::copy_bidirectional::copy_bidirectional_client_compute(
         &mut client,
         &mut compute,
     )
@@ -89,6 +90,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
             .compute
             .cancel_closure
             .try_cancel_query(compute_config)
+            .boxed()
             .await
         {
             tracing::warn!(session_id = ?self.session_id, ?err, "could not cancel the query in the database");

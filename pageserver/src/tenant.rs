@@ -51,6 +51,7 @@ use secondary::heatmap::{HeatMapTenant, HeatMapTimeline};
 use storage_broker::BrokerClientChannel;
 use timeline::compaction::{CompactionOutcome, GcCompactionQueue};
 use timeline::import_pgdata::ImportingTimeline;
+use timeline::layer_manager::LayerManagerLockHolder;
 use timeline::offload::{OffloadError, offload_timeline};
 use timeline::{
     CompactFlags, CompactOptions, CompactionError, PreviousHeatmap, ShutdownMode, import_pgdata,
@@ -89,7 +90,8 @@ use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::{
     BROKEN_TENANTS_SET, CIRCUIT_BREAKERS_BROKEN, CIRCUIT_BREAKERS_UNBROKEN, CONCURRENT_INITDBS,
     INITDB_RUN_TIME, INITDB_SEMAPHORE_ACQUISITION_TIME, TENANT, TENANT_OFFLOADED_TIMELINES,
-    TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC, remove_tenant_metrics,
+    TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC, TIMELINE_STATE_METRIC,
+    remove_tenant_metrics,
 };
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::LocationMode;
@@ -300,7 +302,7 @@ pub struct TenantShard {
     ///   as in progress.
     /// * Imported timelines are removed when the storage controller calls the post timeline
     ///   import activation endpoint.
-    timelines_importing: std::sync::Mutex<HashMap<TimelineId, ImportingTimeline>>,
+    timelines_importing: std::sync::Mutex<HashMap<TimelineId, Arc<ImportingTimeline>>>,
 
     /// The last tenant manifest known to be in remote storage. None if the manifest has not yet
     /// been either downloaded or uploaded. Always Some after tenant attach.
@@ -383,7 +385,7 @@ pub struct TenantShard {
 
     l0_flush_global_state: L0FlushGlobalState,
 
-    feature_resolver: FeatureResolver,
+    pub(crate) feature_resolver: FeatureResolver,
 }
 impl std::fmt::Debug for TenantShard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -544,6 +546,28 @@ pub struct OffloadedTimeline {
 
     /// Part of the `OffloadedTimeline` object's lifecycle: this needs to be set before we drop it
     pub deleted_from_ancestor: AtomicBool,
+
+    _metrics_guard: OffloadedTimelineMetricsGuard,
+}
+
+/// Increases the offloaded timeline count metric when created, and decreases when dropped.
+struct OffloadedTimelineMetricsGuard;
+
+impl OffloadedTimelineMetricsGuard {
+    fn new() -> Self {
+        TIMELINE_STATE_METRIC
+            .with_label_values(&["offloaded"])
+            .inc();
+        Self
+    }
+}
+
+impl Drop for OffloadedTimelineMetricsGuard {
+    fn drop(&mut self) {
+        TIMELINE_STATE_METRIC
+            .with_label_values(&["offloaded"])
+            .dec();
+    }
 }
 
 impl OffloadedTimeline {
@@ -576,6 +600,8 @@ impl OffloadedTimeline {
 
             delete_progress: timeline.delete_progress.clone(),
             deleted_from_ancestor: AtomicBool::new(false),
+
+            _metrics_guard: OffloadedTimelineMetricsGuard::new(),
         })
     }
     fn from_manifest(tenant_shard_id: TenantShardId, manifest: &OffloadedTimelineManifest) -> Self {
@@ -595,6 +621,7 @@ impl OffloadedTimeline {
             archived_at,
             delete_progress: TimelineDeleteProgress::default(),
             deleted_from_ancestor: AtomicBool::new(false),
+            _metrics_guard: OffloadedTimelineMetricsGuard::new(),
         }
     }
     fn manifest(&self) -> OffloadedTimelineManifest {
@@ -672,6 +699,7 @@ pub enum MaybeOffloaded {
 pub enum TimelineOrOffloaded {
     Timeline(Arc<Timeline>),
     Offloaded(Arc<OffloadedTimeline>),
+    Importing(Arc<ImportingTimeline>),
 }
 
 impl TimelineOrOffloaded {
@@ -682,6 +710,9 @@ impl TimelineOrOffloaded {
             }
             TimelineOrOffloaded::Offloaded(offloaded) => {
                 TimelineOrOffloadedArcRef::Offloaded(offloaded)
+            }
+            TimelineOrOffloaded::Importing(importing) => {
+                TimelineOrOffloadedArcRef::Importing(importing)
             }
         }
     }
@@ -695,12 +726,16 @@ impl TimelineOrOffloaded {
         match self {
             TimelineOrOffloaded::Timeline(timeline) => &timeline.delete_progress,
             TimelineOrOffloaded::Offloaded(offloaded) => &offloaded.delete_progress,
+            TimelineOrOffloaded::Importing(importing) => &importing.delete_progress,
         }
     }
     fn maybe_remote_client(&self) -> Option<Arc<RemoteTimelineClient>> {
         match self {
             TimelineOrOffloaded::Timeline(timeline) => Some(timeline.remote_client.clone()),
             TimelineOrOffloaded::Offloaded(_offloaded) => None,
+            TimelineOrOffloaded::Importing(importing) => {
+                Some(importing.timeline.remote_client.clone())
+            }
         }
     }
 }
@@ -708,6 +743,7 @@ impl TimelineOrOffloaded {
 pub enum TimelineOrOffloadedArcRef<'a> {
     Timeline(&'a Arc<Timeline>),
     Offloaded(&'a Arc<OffloadedTimeline>),
+    Importing(&'a Arc<ImportingTimeline>),
 }
 
 impl TimelineOrOffloadedArcRef<'_> {
@@ -715,12 +751,14 @@ impl TimelineOrOffloadedArcRef<'_> {
         match self {
             TimelineOrOffloadedArcRef::Timeline(timeline) => timeline.tenant_shard_id,
             TimelineOrOffloadedArcRef::Offloaded(offloaded) => offloaded.tenant_shard_id,
+            TimelineOrOffloadedArcRef::Importing(importing) => importing.timeline.tenant_shard_id,
         }
     }
     pub fn timeline_id(&self) -> TimelineId {
         match self {
             TimelineOrOffloadedArcRef::Timeline(timeline) => timeline.timeline_id,
             TimelineOrOffloadedArcRef::Offloaded(offloaded) => offloaded.timeline_id,
+            TimelineOrOffloadedArcRef::Importing(importing) => importing.timeline.timeline_id,
         }
     }
 }
@@ -734,6 +772,12 @@ impl<'a> From<&'a Arc<Timeline>> for TimelineOrOffloadedArcRef<'a> {
 impl<'a> From<&'a Arc<OffloadedTimeline>> for TimelineOrOffloadedArcRef<'a> {
     fn from(timeline: &'a Arc<OffloadedTimeline>) -> Self {
         Self::Offloaded(timeline)
+    }
+}
+
+impl<'a> From<&'a Arc<ImportingTimeline>> for TimelineOrOffloadedArcRef<'a> {
+    fn from(timeline: &'a Arc<ImportingTimeline>) -> Self {
+        Self::Importing(timeline)
     }
 }
 
@@ -862,6 +906,14 @@ impl Debug for SetStoppingError {
             Self::Broken => write!(f, "Broken"),
         }
     }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum FinalizeTimelineImportError {
+    #[error("Import task not done yet")]
+    ImportTaskStillRunning,
+    #[error("Shutting down")]
+    ShuttingDown,
 }
 
 /// Arguments to [`TenantShard::create_timeline`].
@@ -1150,10 +1202,20 @@ impl TenantShard {
             ctx,
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
-        anyhow::ensure!(
-            disk_consistent_lsn.is_valid(),
-            "Timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn"
-        );
+
+        if !disk_consistent_lsn.is_valid() {
+            // As opposed to normal timelines which get initialised with a disk consitent LSN
+            // via initdb, imported timelines start from 0. If the import task stops before
+            // it advances disk consitent LSN, allow it to resume.
+            let in_progress_import = import_pgdata
+                .as_ref()
+                .map(|import| !import.is_done())
+                .unwrap_or(false);
+            if !in_progress_import {
+                anyhow::bail!("Timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn");
+            }
+        }
+
         assert_eq!(
             disk_consistent_lsn,
             metadata.disk_consistent_lsn(),
@@ -1247,20 +1309,25 @@ impl TenantShard {
                     }
                 }
 
-                // Sanity check: a timeline should have some content.
-                anyhow::ensure!(
-                    ancestor.is_some()
-                        || timeline
-                            .layers
-                            .read()
-                            .await
-                            .layer_map()
-                            .expect("currently loading, layer manager cannot be shutdown already")
-                            .iter_historic_layers()
-                            .next()
-                            .is_some(),
-                    "Timeline has no ancestor and no layer files"
-                );
+                if disk_consistent_lsn.is_valid() {
+                    // Sanity check: a timeline should have some content.
+                    // Exception: importing timelines might not yet have any
+                    anyhow::ensure!(
+                        ancestor.is_some()
+                            || timeline
+                                .layers
+                                .read(LayerManagerLockHolder::LoadLayerMap)
+                                .await
+                                .layer_map()
+                                .expect(
+                                    "currently loading, layer manager cannot be shutdown already"
+                                )
+                                .iter_historic_layers()
+                                .next()
+                                .is_some(),
+                        "Timeline has no ancestor and no layer files"
+                    );
+                }
 
                 Ok(TimelineInitAndSyncResult::ReadyToActivate)
             }
@@ -1766,20 +1833,25 @@ impl TenantShard {
                     },
                 ) => {
                     let timeline_id = timeline.timeline_id;
+                    let import_task_gate = Gate::default();
+                    let import_task_guard = import_task_gate.enter().unwrap();
                     let import_task_handle =
                         tokio::task::spawn(self.clone().create_timeline_import_pgdata_task(
                             timeline.clone(),
                             import_pgdata,
                             guard,
+                            import_task_guard,
                             ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn),
                         ));
 
                     let prev = self.timelines_importing.lock().unwrap().insert(
                         timeline_id,
-                        ImportingTimeline {
+                        Arc::new(ImportingTimeline {
                             timeline: timeline.clone(),
                             import_task_handle,
-                        },
+                            import_task_gate,
+                            delete_progress: TimelineDeleteProgress::default(),
+                        }),
                     );
 
                     assert!(prev.is_none());
@@ -2397,6 +2469,17 @@ impl TenantShard {
             .collect()
     }
 
+    /// Lists timelines the tenant contains.
+    /// It's up to callers to omit certain timelines that are not considered ready for use.
+    pub fn list_importing_timelines(&self) -> Vec<Arc<ImportingTimeline>> {
+        self.timelines_importing
+            .lock()
+            .unwrap()
+            .values()
+            .map(Arc::clone)
+            .collect()
+    }
+
     /// Lists timelines the tenant manages, including offloaded ones.
     ///
     /// It's up to callers to omit certain timelines that are not considered ready for use.
@@ -2561,7 +2644,7 @@ impl TenantShard {
         }
         let layer_names = tline
             .layers
-            .read()
+            .read(LayerManagerLockHolder::Testing)
             .await
             .layer_map()
             .unwrap()
@@ -2830,19 +2913,25 @@ impl TenantShard {
 
         let (timeline, timeline_create_guard) = uninit_timeline.finish_creation_myself();
 
+        let import_task_gate = Gate::default();
+        let import_task_guard = import_task_gate.enter().unwrap();
+
         let import_task_handle = tokio::spawn(self.clone().create_timeline_import_pgdata_task(
             timeline.clone(),
             index_part,
             timeline_create_guard,
+            import_task_guard,
             timeline_ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn),
         ));
 
         let prev = self.timelines_importing.lock().unwrap().insert(
             timeline.timeline_id,
-            ImportingTimeline {
+            Arc::new(ImportingTimeline {
                 timeline: timeline.clone(),
                 import_task_handle,
-            },
+                import_task_gate,
+                delete_progress: TimelineDeleteProgress::default(),
+            }),
         );
 
         // Idempotency is enforced higher up the stack
@@ -2860,13 +2949,13 @@ impl TenantShard {
     pub(crate) async fn finalize_importing_timeline(
         &self,
         timeline_id: TimelineId,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), FinalizeTimelineImportError> {
         let timeline = {
             let locked = self.timelines_importing.lock().unwrap();
             match locked.get(&timeline_id) {
                 Some(importing_timeline) => {
                     if !importing_timeline.import_task_handle.is_finished() {
-                        return Err(anyhow::anyhow!("Import task not done yet"));
+                        return Err(FinalizeTimelineImportError::ImportTaskStillRunning);
                     }
 
                     importing_timeline.timeline.clone()
@@ -2879,8 +2968,13 @@ impl TenantShard {
 
         timeline
             .remote_client
-            .schedule_index_upload_for_import_pgdata_finalize()?;
-        timeline.remote_client.wait_completion().await?;
+            .schedule_index_upload_for_import_pgdata_finalize()
+            .map_err(|_err| FinalizeTimelineImportError::ShuttingDown)?;
+        timeline
+            .remote_client
+            .wait_completion()
+            .await
+            .map_err(|_err| FinalizeTimelineImportError::ShuttingDown)?;
 
         self.timelines_importing
             .lock()
@@ -2896,6 +2990,7 @@ impl TenantShard {
         timeline: Arc<Timeline>,
         index_part: import_pgdata::index_part_format::Root,
         timeline_create_guard: TimelineCreateGuard,
+        _import_task_guard: GateGuard,
         ctx: RequestContext,
     ) {
         debug_assert_current_span_has_tenant_and_timeline_id();
@@ -3064,7 +3159,12 @@ impl TenantShard {
 
         for timeline in &compact {
             // Collect L0 counts. Can't await while holding lock above.
-            if let Ok(lm) = timeline.layers.read().await.layer_map() {
+            if let Ok(lm) = timeline
+                .layers
+                .read(LayerManagerLockHolder::Compaction)
+                .await
+                .layer_map()
+            {
                 l0_counts.insert(timeline.timeline_id, lm.level0_deltas().len());
             }
         }
@@ -3484,8 +3584,9 @@ impl TenantShard {
             let mut timelines_importing = self.timelines_importing.lock().unwrap();
             timelines_importing
                 .drain()
-                .for_each(|(_timeline_id, importing_timeline)| {
-                    importing_timeline.shutdown();
+                .for_each(|(timeline_id, importing_timeline)| {
+                    let span = tracing::info_span!("importing_timeline_shutdown", %timeline_id);
+                    js.spawn(async move { importing_timeline.shutdown().instrument(span).await });
                 });
         }
         // test_long_timeline_create_then_tenant_delete is leaning on this message
@@ -3805,6 +3906,9 @@ impl TenantShard {
                     let remote_client = self
                         .build_timeline_client(offloaded.timeline_id, self.remote_storage.clone());
                     Arc::new(remote_client)
+                }
+                TimelineOrOffloadedArcRef::Importing(_) => {
+                    unreachable!("Importing timelines are not included in the iterator")
                 }
             };
 
@@ -4802,7 +4906,7 @@ impl TenantShard {
         }
         let layer_names = tline
             .layers
-            .read()
+            .read(LayerManagerLockHolder::Testing)
             .await
             .layer_map()
             .unwrap()
@@ -5014,6 +5118,14 @@ impl TenantShard {
             }) => {
                 info!("timeline already exists but is offloaded");
                 Err(CreateTimelineError::Conflict)
+            }
+            Err(TimelineExclusionError::AlreadyExists {
+                existing: TimelineOrOffloaded::Importing(_existing),
+                ..
+            }) => {
+                // If there's a timeline already importing, then we would hit
+                // the [`TimelineExclusionError::AlreadyCreating`] branch above.
+                unreachable!("Importing timelines hold the creation guard")
             }
             Err(TimelineExclusionError::AlreadyExists {
                 existing: TimelineOrOffloaded::Timeline(existing),
@@ -5286,6 +5398,7 @@ impl TenantShard {
             l0_compaction_trigger: self.l0_compaction_trigger.clone(),
             l0_flush_global_state: self.l0_flush_global_state.clone(),
             basebackup_prepare_sender: self.basebackup_prepare_sender.clone(),
+            feature_resolver: self.feature_resolver.clone(),
         }
     }
 
@@ -5751,6 +5864,7 @@ pub(crate) mod harness {
         pub conf: &'static PageServerConf,
         pub tenant_conf: pageserver_api::models::TenantConfig,
         pub tenant_shard_id: TenantShardId,
+        pub shard_identity: ShardIdentity,
         pub generation: Generation,
         pub shard: ShardIndex,
         pub remote_storage: GenericRemoteStorage,
@@ -5818,6 +5932,7 @@ pub(crate) mod harness {
                 conf,
                 tenant_conf,
                 tenant_shard_id,
+                shard_identity,
                 generation,
                 shard,
                 remote_storage,
@@ -5879,8 +5994,7 @@ pub(crate) mod harness {
                     &ShardParameters::default(),
                 ))
                 .unwrap(),
-                // This is a legacy/test code path: sharding isn't supported here.
-                ShardIdentity::unsharded(),
+                self.shard_identity,
                 Some(walredo_mgr),
                 self.tenant_shard_id,
                 self.remote_storage.clone(),
@@ -6002,6 +6116,7 @@ mod tests {
     use timeline::compaction::{KeyHistoryRetention, KeyLogAtLsn};
     use timeline::{CompactOptions, DeltaLayerTestDesc, VersionedKeySpaceQuery};
     use utils::id::TenantId;
+    use utils::shard::{ShardCount, ShardNumber};
 
     use super::*;
     use crate::DEFAULT_PG_VERSION;
@@ -6861,7 +6976,7 @@ mod tests {
             .await?;
         make_some_layers(tline.as_ref(), Lsn(0x20), &ctx).await?;
 
-        let layer_map = tline.layers.read().await;
+        let layer_map = tline.layers.read(LayerManagerLockHolder::Testing).await;
         let level0_deltas = layer_map
             .layer_map()?
             .level0_deltas()
@@ -7097,7 +7212,7 @@ mod tests {
         let lsn = Lsn(0x10);
         let inserted = bulk_insert_compact_gc(&tenant, &tline, &ctx, lsn, 50, 10000).await?;
 
-        let guard = tline.layers.read().await;
+        let guard = tline.layers.read(LayerManagerLockHolder::Testing).await;
         let lm = guard.layer_map()?;
 
         lm.dump(true, &ctx).await?;
@@ -7114,7 +7229,7 @@ mod tests {
             let end = desc
                 .key_range
                 .start
-                .add(Timeline::MAX_GET_VECTORED_KEYS.try_into().unwrap());
+                .add(tenant.conf.max_get_vectored_keys.get() as u32);
             reads.push(KeySpace {
                 ranges: vec![start..end],
             });
@@ -8125,12 +8240,23 @@ mod tests {
             tline.freeze_and_flush().await?; // force create a delta layer
         }
 
-        let before_num_l0_delta_files =
-            tline.layers.read().await.layer_map()?.level0_deltas().len();
+        let before_num_l0_delta_files = tline
+            .layers
+            .read(LayerManagerLockHolder::Testing)
+            .await
+            .layer_map()?
+            .level0_deltas()
+            .len();
 
         tline.compact(&cancel, EnumSet::default(), &ctx).await?;
 
-        let after_num_l0_delta_files = tline.layers.read().await.layer_map()?.level0_deltas().len();
+        let after_num_l0_delta_files = tline
+            .layers
+            .read(LayerManagerLockHolder::Testing)
+            .await
+            .layer_map()?
+            .level0_deltas()
+            .len();
 
         assert!(
             after_num_l0_delta_files < before_num_l0_delta_files,
@@ -8330,10 +8456,24 @@ mod tests {
             }
 
             tline.freeze_and_flush().await?;
+            // Force layers to L1
+            tline
+                .compact(
+                    &cancel,
+                    {
+                        let mut flags = EnumSet::new();
+                        flags.insert(CompactFlags::ForceL0Compaction);
+                        flags
+                    },
+                    &ctx,
+                )
+                .await?;
 
             if iter % 5 == 0 {
+                let scan_lsn = Lsn(lsn.0 + 1);
+                info!("scanning at {}", scan_lsn);
                 let (_, before_delta_file_accessed) =
-                    scan_with_statistics(&tline, &keyspace, lsn, &ctx, io_concurrency.clone())
+                    scan_with_statistics(&tline, &keyspace, scan_lsn, &ctx, io_concurrency.clone())
                         .await?;
                 tline
                     .compact(
@@ -8342,13 +8482,14 @@ mod tests {
                             let mut flags = EnumSet::new();
                             flags.insert(CompactFlags::ForceImageLayerCreation);
                             flags.insert(CompactFlags::ForceRepartition);
+                            flags.insert(CompactFlags::ForceL0Compaction);
                             flags
                         },
                         &ctx,
                     )
                     .await?;
                 let (_, after_delta_file_accessed) =
-                    scan_with_statistics(&tline, &keyspace, lsn, &ctx, io_concurrency.clone())
+                    scan_with_statistics(&tline, &keyspace, scan_lsn, &ctx, io_concurrency.clone())
                         .await?;
                 assert!(
                     after_delta_file_accessed < before_delta_file_accessed,
@@ -8789,6 +8930,8 @@ mod tests {
 
         let cancel = CancellationToken::new();
 
+        // Image layer creation happens on the disk_consistent_lsn so we need to force set it now.
+        tline.force_set_disk_consistent_lsn(Lsn(0x40));
         tline
             .compact(
                 &cancel,
@@ -8802,8 +8945,7 @@ mod tests {
             )
             .await
             .unwrap();
-
-        // Image layers are created at last_record_lsn
+        // Image layers are created at repartition LSN
         let images = tline
             .inspect_image_layers(Lsn(0x40), &ctx, io_concurrency.clone())
             .await
@@ -9317,6 +9459,77 @@ mod tests {
         timeline
             .init_lsn_lease(Lsn(leased_lsns[1]), timeline.get_lsn_lease_length(), &ctx)
             .expect("lease renewal with validation should succeed");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_failed_flush_should_not_update_disk_consistent_lsn() -> anyhow::Result<()> {
+        //
+        // Setup
+        //
+        let harness = TenantHarness::create_custom(
+            "test_failed_flush_should_not_upload_disk_consistent_lsn",
+            pageserver_api::models::TenantConfig::default(),
+            TenantId::generate(),
+            ShardIdentity::new(ShardNumber(0), ShardCount(4), ShardStripeSize(128)).unwrap(),
+            Generation::new(1),
+        )
+        .await?;
+        let (tenant, ctx) = harness.load().await;
+
+        let timeline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+        assert_eq!(timeline.get_shard_identity().count, ShardCount(4));
+        let mut writer = timeline.writer().await;
+        writer
+            .put(
+                *TEST_KEY,
+                Lsn(0x20),
+                &Value::Image(test_img("foo at 0x20")),
+                &ctx,
+            )
+            .await?;
+        writer.finish_write(Lsn(0x20));
+        drop(writer);
+        timeline.freeze_and_flush().await.unwrap();
+
+        timeline.remote_client.wait_completion().await.unwrap();
+        let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
+        let remote_consistent_lsn = timeline.get_remote_consistent_lsn_projected();
+        assert_eq!(Some(disk_consistent_lsn), remote_consistent_lsn);
+
+        //
+        // Test
+        //
+
+        let mut writer = timeline.writer().await;
+        writer
+            .put(
+                *TEST_KEY,
+                Lsn(0x30),
+                &Value::Image(test_img("foo at 0x30")),
+                &ctx,
+            )
+            .await?;
+        writer.finish_write(Lsn(0x30));
+        drop(writer);
+
+        fail::cfg(
+            "flush-layer-before-update-remote-consistent-lsn",
+            "return()",
+        )
+        .unwrap();
+
+        let flush_res = timeline.freeze_and_flush().await;
+        // if flush failed, the disk/remote consistent LSN should not be updated
+        assert!(flush_res.is_err());
+        assert_eq!(disk_consistent_lsn, timeline.get_disk_consistent_lsn());
+        assert_eq!(
+            remote_consistent_lsn,
+            timeline.get_remote_consistent_lsn_projected()
+        );
 
         Ok(())
     }
@@ -11090,11 +11303,11 @@ mod tests {
                 let mut keyspaces_at_lsn: HashMap<Lsn, KeySpaceRandomAccum> = HashMap::default();
                 let mut used_keys: HashSet<Key> = HashSet::default();
 
-                while used_keys.len() < Timeline::MAX_GET_VECTORED_KEYS as usize {
+                while used_keys.len() < tenant.conf.max_get_vectored_keys.get() {
                     let selected_lsn = interesting_lsns.choose(&mut random).expect("not empty");
                     let mut selected_key = start_key.add(random.gen_range(0..KEY_DIMENSION_SIZE));
 
-                    while used_keys.len() < Timeline::MAX_GET_VECTORED_KEYS as usize {
+                    while used_keys.len() < tenant.conf.max_get_vectored_keys.get() {
                         if used_keys.contains(&selected_key)
                             || selected_key >= start_key.add(KEY_DIMENSION_SIZE)
                         {
