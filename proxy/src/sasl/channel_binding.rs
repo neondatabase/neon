@@ -1,5 +1,8 @@
 //! Definition and parser for channel binding flag (a part of the `GS2` header).
 
+use base64::Engine as _;
+use base64::prelude::BASE64_STANDARD;
+
 /// Channel binding flag (possibly with params).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ChannelBinding<T> {
@@ -55,7 +58,7 @@ impl<T: std::fmt::Display> ChannelBinding<T> {
                 let mut cbind_input = vec![];
                 write!(&mut cbind_input, "p={mode},,",).unwrap();
                 cbind_input.extend_from_slice(get_cbind_data(mode)?);
-                base64::encode(&cbind_input).into()
+                BASE64_STANDARD.encode(&cbind_input).into()
             }
         })
     }
@@ -70,9 +73,9 @@ mod tests {
         use ChannelBinding::*;
 
         let cases = [
-            (NotSupportedClient, base64::encode("n,,")),
-            (NotSupportedServer, base64::encode("y,,")),
-            (Required("foo"), base64::encode("p=foo,,bar")),
+            (NotSupportedClient, BASE64_STANDARD.encode("n,,")),
+            (NotSupportedServer, BASE64_STANDARD.encode("y,,")),
+            (Required("foo"), BASE64_STANDARD.encode("p=foo,,bar")),
         ];
 
         for (cb, input) in cases {
