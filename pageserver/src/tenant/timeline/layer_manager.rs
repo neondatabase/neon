@@ -26,6 +26,7 @@ use crate::tenant::storage_layer::{
 /// Warn if the lock was held for longer than this threshold.
 /// It's very generous and we should bring this value down over time.
 const LAYER_MANAGER_LOCK_WARN_THRESHOLD: Duration = Duration::from_secs(5);
+const LAYER_MANAGER_LOCK_READ_WARN_THRESHOLD: Duration = Duration::from_secs(30);
 
 /// Describes the operation that is holding the layer manager lock
 #[derive(Debug, Clone, Copy, strum_macros::Display)]
@@ -76,7 +77,7 @@ impl Drop for LayerManagerReadGuard<'_> {
         unsafe { ManuallyDrop::drop(&mut self.guard) };
 
         let held_for = self.acquired_at.elapsed();
-        if held_for >= LAYER_MANAGER_LOCK_WARN_THRESHOLD {
+        if held_for >= LAYER_MANAGER_LOCK_READ_WARN_THRESHOLD {
             tracing::warn!(
                 holder=%self.holder,
                 "Layer manager read lock held for {}s",
