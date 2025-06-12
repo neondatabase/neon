@@ -11,6 +11,7 @@ use anyhow::Context;
 use anyhow::{bail, ensure};
 use arc_swap::ArcSwapOption;
 use futures::future::Either;
+use itertools::{Itertools, Position};
 use rand::{Rng, thread_rng};
 use remote_storage::RemoteStorageConfig;
 use tokio::net::TcpListener;
@@ -521,11 +522,11 @@ pub async fn run() -> anyhow::Result<()> {
                 }
             }
 
-            // Try to connect to Redis 3 times with 1 second (+/- 100ms) delay.
+            // Try to connect to Redis 3 times with 1 + (0..0.1) second interval.
             // This prevents immediate exit and pod restart,
             // which can cause hammering of the redis in case of connection issues.
             if let Some(mut redis_kv_client) = redis_kv_client {
-                for i in 0..3 {
+                for attempt in (0..3).with_position() {
                     match redis_kv_client.try_connect().await {
                         Ok(()) => {
                             info!("Connected to Redis KV client");
@@ -548,8 +549,11 @@ pub async fn run() -> anyhow::Result<()> {
                         }
                         Err(e) => {
                             error!("Failed to connect to Redis KV client: {e}");
-                            if i == 2 {
-                                bail!("Failed to connect to Redis KV client after 3 attempts");
+                            if matches!(attempt, Position::Last(_)) {
+                                bail!(
+                                    "Failed to connect to Redis KV client after {} attempts",
+                                    attempt.into_inner()
+                                );
                             }
                             let jitter = thread_rng().gen_range(0..100);
                             tokio::time::sleep(Duration::from_millis(1000 + jitter)).await;
