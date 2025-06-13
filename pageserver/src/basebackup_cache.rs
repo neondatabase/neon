@@ -199,7 +199,7 @@ impl BasebackupCache {
     }
 
     // Recreate the tmp directory to clear all files in it.
-    async fn recreate_tmp_dir(&self) -> anyhow::Result<()> {
+    async fn clean_tmp_dir(&self) -> anyhow::Result<()> {
         let tmp_dir = self.tmp_dir();
         if tmp_dir.exists() {
             tokio::fs::remove_dir_all(&tmp_dir).await?;
@@ -209,7 +209,7 @@ impl BasebackupCache {
     }
 
     async fn cleanup(&self) -> anyhow::Result<()> {
-        self.recreate_tmp_dir().await?;
+        self.clean_tmp_dir().await?;
 
         // Remove outdated entries.
         let entries_old = self.entries.lock().unwrap().clone();
@@ -248,9 +248,14 @@ impl BasebackupCache {
     }
 
     async fn on_startup(&self) -> anyhow::Result<()> {
-        self.recreate_tmp_dir()
+        // Create data_dir if it does not exist.
+        tokio::fs::create_dir_all(&self.data_dir)
             .await
-            .context("Failed to recreate tmp directory")?;
+            .context("Failed to create basebackup cache data directory")?;
+
+        self.clean_tmp_dir()
+            .await
+            .context("Failed to clean tmp directory")?;
 
         // Read existing entries from the data_dir and add them to in-memory state.
         let mut entries = HashMap::new();
