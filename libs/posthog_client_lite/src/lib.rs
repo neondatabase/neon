@@ -552,6 +552,13 @@ impl PostHogClient {
         })
     }
 
+    /// Check if the server API key is a feature flag secure API key. This key can only be
+    /// used to fetch the feature flag specs and can only be used on a undocumented API
+    /// endpoint.
+    fn is_feature_flag_secure_api_key(&self) -> bool {
+        self.config.server_api_key.starts_with("phs_")
+    }
+
     /// Fetch the feature flag specs from the server.
     ///
     /// This is unfortunately an undocumented API at:
@@ -568,7 +575,7 @@ impl PostHogClient {
         // OR
         // BASE_URL/api/feature_flag/local_evaluation/
         // with bearer token of feature flag specific self.server_api_key
-        let url = if self.config.server_api_key.starts_with("phs_") {
+        let url = if self.is_feature_flag_secure_api_key() {
             // The new feature local evaluation secure API token
             format!(
                 "{}/api/feature_flag/local_evaluation",
