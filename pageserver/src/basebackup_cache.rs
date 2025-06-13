@@ -180,7 +180,7 @@ struct BackgroundTask {
     /// Number of the entries in the cache.
     /// This counter is used for metrics and applying cache limits.
     /// It generally should be equal to c.entries.len(), but it's calculated
-    /// pessimistically for abnormal situations: if we encounterred some errors
+    /// pessimistically for abnormal situations: if we encountered some errors
     /// during removing the entry from disk, we won't decrement this counter to
     /// make sure that we don't exceed the limit with "trashed" files on the disk.
     /// It will also count files in the data_dir that are not valid cache entries.
@@ -391,7 +391,11 @@ impl BackgroundTask {
     }
 
     /// Try to remove an entry from disk.
-    /// Assume that it's already extracted from entries.
+    /// The caller is responsible for removing the entry from the in-memory state.
+    /// Updates size counters and corresponding metrics.
+    /// Ignores the filesystem errors as not-so-important, but the size counters
+    /// are not decremented in this case, so the file will continue to be counted
+    /// towards the size limits.
     async fn try_remove_entry(
         &mut self,
         tenant_id: TenantId,
@@ -411,8 +415,6 @@ impl BackgroundTask {
                     entry.lsn,
                     e
                 );
-                // We failed to remove the file, but we can still remove the entry from the in-memory state.
-                // The background cleanup task will take care of the file.
                 return;
             }
         }
@@ -424,6 +426,9 @@ impl BackgroundTask {
         BASEBACKUP_CACHE_SIZE.set(self.total_size_bytes);
     }
 
+    /// Insert the cache entry into in-memory state and update the size counters.
+    /// Assumes that the file for the entry already exists on disk.
+    /// If the entry already exists with previous LSN, it will be removed.
     async fn upsert_entry(
         &mut self,
         tenant_id: TenantId,
@@ -475,7 +480,7 @@ impl BackgroundTask {
                 %tenant_shard_id,
                 %timeline_id,
                 %req_lsn,
-                "Basebackup cache is full, skipping basebackup",
+                "Basebackup cache is full (max_size_entries), skipping basebackup",
             );
             self.prepare_skip_count.inc();
             return Ok(());
@@ -486,7 +491,7 @@ impl BackgroundTask {
                 %tenant_shard_id,
                 %timeline_id,
                 %req_lsn,
-                "Basebackup cache is full, skipping basebackup",
+                "Basebackup cache is full (max_total_size_bytes), skipping basebackup",
             );
             self.prepare_skip_count.inc();
             return Ok(());
@@ -622,7 +627,7 @@ impl BackgroundTask {
         writer.flush().await?;
         writer.into_inner().sync_all().await?;
 
-        // TODO(diko): we can count it via Writer wrapper.
+        // TODO(diko): we can count it via Writer wrapper instead of a syscall.
         let size_bytes = tokio::fs::metadata(entry_tmp_path).await?.len() as i64;
 
         Ok(CacheEntry {

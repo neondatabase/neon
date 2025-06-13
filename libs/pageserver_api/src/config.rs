@@ -337,6 +337,9 @@ pub struct TimelineImportConfig {
 pub struct BasebackupCacheConfig {
     #[serde(with = "humantime_serde")]
     pub cleanup_period: Duration,
+    /// Maximum total size of basebackup cache entries on disk in bytes.
+    /// The cache may slightly exceed this limit because we do not know
+    /// the exact size of the cache entry untill it's written to disk.
     pub max_total_size_bytes: i64,
     // TODO(diko): support max_entry_size_bytes.
     // pub max_entry_size_bytes: i64,
