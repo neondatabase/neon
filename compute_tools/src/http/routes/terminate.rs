@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use compute_api::responses::ComputeStatus;
 use http::StatusCode;
 use tokio::task;
@@ -15,7 +15,7 @@ pub(in crate::http) async fn terminate(State(compute): State<Arc<ComputeNode>>) 
     {
         let mut state = compute.state.lock().unwrap();
         if state.status == ComputeStatus::Terminated {
-            return StatusCode::CREATED.into_response();
+            return JsonResponse::success(StatusCode::CREATED, state.terminate_flush_lsn);
         }
 
         if !matches!(state.status, ComputeStatus::Empty | ComputeStatus::Running) {
@@ -23,7 +23,6 @@ pub(in crate::http) async fn terminate(State(compute): State<Arc<ComputeNode>>) 
         }
 
         state.set_status(ComputeStatus::TerminationPending, &compute.state_changed);
-        drop(state);
     }
 
     forward_termination_signal();
@@ -34,7 +33,7 @@ pub(in crate::http) async fn terminate(State(compute): State<Arc<ComputeNode>>) 
     // be able to serve other requests while some particular request
     // is waiting for compute to finish configuration.
     let c = compute.clone();
-    task::spawn_blocking(move || {
+    let lsn = task::spawn_blocking(move || {
         let mut state = c.state.lock().unwrap();
         while state.status != ComputeStatus::Terminated {
             state = c.state_changed.wait(state).unwrap();
@@ -44,11 +43,11 @@ pub(in crate::http) async fn terminate(State(compute): State<Arc<ComputeNode>>) 
                 state.status
             );
         }
+        state.terminate_flush_lsn
     })
     .await
     .unwrap();
 
-    info!("terminated Postgres");
-
-    StatusCode::OK.into_response()
+    info!(%lsn, "terminated Postgres");
+    JsonResponse::success(StatusCode::OK, lsn)
 }

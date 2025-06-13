@@ -4192,6 +4192,8 @@ class Endpoint(PgProtocol, LogUtils):
         self._running = threading.Semaphore(0)
         self.__jwt: str | None = None
 
+        self.terminate_flush_lsn: Lsn | None = None
+
     def http_client(self, retries: Retry | None = None) -> EndpointHttpClient:
         assert self.__jwt is not None
         return EndpointHttpClient(
