@@ -11,8 +11,10 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
 use crate::connect::connect;
-use crate::connect_raw::{RawConnection, connect_raw};
-use crate::tls::{MakeTlsConnect, TlsConnect};
+use crate::connect_raw::{RawConnection, connect_raw_tls};
+use crate::connect_tls::connect_tls;
+use crate::maybe_tls_stream::MaybeTlsStream;
+use crate::tls::{MakeTlsConnect, TlsConnect, TlsStream};
 use crate::{Client, Connection, Error};
 
 /// TLS configuration.
@@ -247,7 +249,19 @@ impl Config {
         S: AsyncRead + AsyncWrite + Unpin,
         T: TlsConnect<S>,
     {
-        connect_raw(stream, tls, self).await
+        let stream = connect_tls(stream, self.ssl_mode, tls).await?;
+        connect_raw_tls(stream, self).await
+    }
+
+    pub async fn connect_raw_tls<S, T>(
+        &self,
+        stream: MaybeTlsStream<S, T>,
+    ) -> Result<RawConnection<S, T>, Error>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+        T: TlsStream + Unpin,
+    {
+        connect_raw_tls(stream, self).await
     }
 }
 
