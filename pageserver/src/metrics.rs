@@ -4436,8 +4436,6 @@ pub(crate) static BASEBACKUP_CACHE_ENTRIES: Lazy<IntGauge> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-// FIXME: Support basebackup cache size metrics.
-#[allow(dead_code)]
 pub(crate) static BASEBACKUP_CACHE_SIZE: Lazy<IntGauge> = Lazy::new(|| {
     register_int_gauge!(
         "pageserver_basebackup_cache_size_bytes",
