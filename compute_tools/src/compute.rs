@@ -163,6 +163,9 @@ pub struct ComputeState {
     pub lfc_prewarm_state: LfcPrewarmState,
     pub lfc_offload_state: LfcOffloadState,
 
+    /// WAL flush LSN that is set after syncing safekeepers after terminating Postgres
+    pub terminate_flush_lsn: Lsn,
+
     pub metrics: ComputeMetrics,
 }
 
@@ -178,6 +181,7 @@ impl ComputeState {
             metrics: ComputeMetrics::default(),
             lfc_prewarm_state: LfcPrewarmState::default(),
             lfc_offload_state: LfcOffloadState::default(),
+            terminate_flush_lsn: Lsn::INVALID,
         }
     }
 
@@ -908,15 +912,19 @@ impl ComputeNode {
         // Maybe sync safekeepers again, to speed up next startup
         let compute_state = self.state.lock().unwrap().clone();
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
-        if matches!(pspec.spec.mode, compute_api::spec::ComputeMode::Primary) {
+        let lsn = if matches!(pspec.spec.mode, compute_api::spec::ComputeMode::Primary) {
             info!("syncing safekeepers on shutdown");
             let storage_auth_token = pspec.storage_auth_token.clone();
             let lsn = self.sync_safekeepers(storage_auth_token)?;
             info!("synced safekeepers at lsn {lsn}");
-        }
+            lsn
+        } else {
+            Lsn::INVALID
+        };
 
         let mut delay_exit = false;
         let mut state = self.state.lock().unwrap();
+        state.terminate_flush_lsn = lsn;
         if state.status == ComputeStatus::TerminationPending {
             state.status = ComputeStatus::Terminated;
             self.state_changed.notify_all();
