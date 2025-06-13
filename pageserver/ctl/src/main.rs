@@ -176,9 +176,11 @@ async fn main() -> anyhow::Result<()> {
             let config = RemoteStorageConfig::from_toml_str(&cmd.config_toml_str)?;
             let storage = remote_storage::GenericRemoteStorage::from_config(&config).await;
             let cancel = CancellationToken::new();
+            // Complexity limit: as we are running this command locally, we should have a lot of memory available, and we do not
+            // need to limit the number of versions we are going to delete.
             storage
                 .unwrap()
-                .time_travel_recover(Some(&prefix), timestamp, done_if_after, &cancel)
+                .time_travel_recover(Some(&prefix), timestamp, done_if_after, &cancel, None)
                 .await?;
         }
         Commands::Key(dkc) => dkc.execute(),

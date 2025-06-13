@@ -824,6 +824,7 @@ impl RemoteStorage for AzureBlobStorage {
         timestamp: SystemTime,
         done_if_after: SystemTime,
         cancel: &CancellationToken,
+        _complexity_limit: Option<NonZeroU32>,
     ) -> Result<(), TimeTravelError> {
         let msg = "PLEASE NOTE: Azure Blob storage time-travel recovery may not work as expected "
             .to_string()
