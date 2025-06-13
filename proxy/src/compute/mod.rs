@@ -9,7 +9,7 @@ use itertools::Itertools;
 use postgres_client::config::{AuthKeys, ChannelBinding, SslMode};
 use postgres_client::maybe_tls_stream::MaybeTlsStream;
 use postgres_client::tls::MakeTlsConnect;
-use postgres_client::{CancelToken, NoTls, RawConnection};
+use postgres_client::{CancelToken, RawConnection};
 use postgres_protocol::message::backend::NoticeResponseBody;
 use thiserror::Error;
 use tokio::net::{TcpStream, lookup_host};
@@ -298,13 +298,11 @@ impl ConnectInfo {
         config: &ComputeConfig,
         user_info: ComputeUserInfo,
     ) -> Result<PostgresConnection, ConnectionError> {
-        let mut tmp_config = auth.enrich(self.to_postgres_client_config());
-        // we setup SSL early in `ConnectInfo::connect_raw`.
-        tmp_config.ssl_mode(SslMode::Disable);
+        let tmp_config = auth.enrich(self.to_postgres_client_config());
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let (socket_addr, stream) = self.connect_raw(config).await?;
-        let connection = tmp_config.connect_raw(stream, NoTls).await?;
+        let connection = tmp_config.connect_raw_tls(stream).await?;
         drop(pause);
 
         let RawConnection {
@@ -317,7 +315,7 @@ impl ConnectInfo {
 
         tracing::Span::current().record("pid", tracing::field::display(process_id));
         tracing::Span::current().record("compute_id", tracing::field::display(&aux.compute_id));
-        let MaybeTlsStream::Raw(stream) = stream.into_inner();
+        let stream = stream.into_inner();
 
         // TODO: lots of useful info but maybe we can move it elsewhere (eg traces?)
         info!(
