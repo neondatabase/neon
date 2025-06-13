@@ -118,6 +118,7 @@ $(POSTGRES_INSTALL_DIR)/build/%/config.status:
 
 	VERSION=$*; \
 	EXTRA_VERSION=$$(cd $(ROOT_PROJECT_DIR)/vendor/postgres-$$VERSION && git rev-parse HEAD); \
+	sed 's/\(ReplicationSlotDropAtPubNode(LogRepWorkerWalRcvConn, syncslotname, false);\)/\1 pg_usleep(1000000L);/' -i $(ROOT_PROJECT_DIR)/vendor/postgres-$$VERSION/src/backend/replication/logical/tablesync.c; \
 	(cd $(POSTGRES_INSTALL_DIR)/build/$$VERSION && \
 	env PATH="$(EXTRA_PATH_OVERRIDES):$$PATH" $(ROOT_PROJECT_DIR)/vendor/postgres-$$VERSION/configure \
 		CFLAGS='$(PG_CFLAGS)' LDFLAGS='$(PG_LDFLAGS)' \
