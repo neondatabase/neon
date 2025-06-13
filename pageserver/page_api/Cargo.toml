@@ -17,6 +17,7 @@ workspace_hack.workspace = true
 futures.workspace = true
 futures-core.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 async-stream.workspace = true
 
 [build-dependencies]

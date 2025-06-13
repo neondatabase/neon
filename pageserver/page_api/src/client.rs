@@ -4,7 +4,10 @@ use std::io::ErrorKind;
 
 use bytes::Bytes;
 use futures::StreamExt;
+use futures::TryStreamExt;
 use futures_core::Stream;
+use tokio::io::AsyncRead;
+use tokio_util::io::StreamReader;
 use tonic::metadata::AsciiMetadataValue;
 use tonic::metadata::errors::InvalidMetadataValue;
 use tonic::transport::Channel;
@@ -108,23 +111,17 @@ impl Client {
 
     // Fetches a base backup.
     pub async fn get_base_backup(
-        mut self,
+        &mut self,
         req: model::GetBaseBackupRequest,
-    ) -> Result<impl Stream<Item = Result<Bytes, tonic::Status>>, tonic::Status> {
-        let proto_req = proto::GetBaseBackupRequest::from(req);
-
-        let response_stream: Streaming<proto::GetBaseBackupResponseChunk> =
-            self.client.get_base_backup(proto_req).await?.into_inner();
-
-        // TODO: Consider dechunking internally
-        let domain_stream = response_stream.map(|chunk_res| {
-            chunk_res.map(|proto_chunk| {
-                let b: Bytes = proto_chunk.try_into().unwrap();
-                b
-            })
-        });
-
-        Ok(domain_stream)
+    ) -> Result<impl AsyncRead + Unpin + use<>, tonic::Status> {
+        let req = proto::GetBaseBackupRequest::from(req);
+        let chunks = self.client.get_base_backup(req).await?.into_inner();
+        let reader = StreamReader::new(
+            chunks
+                .map_ok(|resp| resp.chunk)
+                .map_err(std::io::Error::other),
+        );
+        Ok(reader)
     }
 
     // Returns the total size of a database, as # of bytes.

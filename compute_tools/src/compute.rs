@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
 use compute_api::responses::{
@@ -15,6 +15,7 @@ use itertools::Itertools;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use once_cell::sync::Lazy;
+use pageserver_page_api as page_api;
 use postgres;
 use postgres::NoTls;
 use postgres::error::SqlState;
@@ -35,6 +36,7 @@ use url::Url;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 use utils::measured_stream::MeasuredReader;
+use utils::shard::{ShardCount, ShardIndex, ShardNumber};
 
 use crate::configurator::launch_configurator;
 use crate::disk_quota::set_disk_quota;
@@ -936,13 +938,76 @@ impl ComputeNode {
         Ok(())
     }
 
-    // Get basebackup from the libpq connection to pageserver using `connstr` and
-    // unarchive it to `pgdata` directory overriding all its previous content.
+    // Fetches a basebackup from the Pageserver using the compute state's Pageserver connstring and
+    // unarchives it to `pgdata` directory, replacing any existing contents.
     #[instrument(skip_all, fields(%lsn))]
     fn try_get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
-        let start_time = Instant::now();
+        let shard0_connstr = spec.pageserver_connstr.split(',').next().unwrap();
 
+        match Url::parse(shard0_connstr)?.scheme() {
+            "postgres" | "postgresql" => self.try_get_basebackup_libpq(spec, lsn),
+            "grpc" => self.try_get_basebackup_grpc(spec, lsn),
+            scheme => Err(anyhow!("unknown URL scheme {scheme}")),
+        }
+    }
+
+    fn try_get_basebackup_grpc(&self, spec: &ParsedSpec, lsn: Lsn) -> Result<()> {
+        let start_time = Instant::now();
+        let shard0_connstr = spec
+            .pageserver_connstr
+            .split(',')
+            .next()
+            .unwrap()
+            .to_string();
+        let shard_index = ShardIndex::new(
+            ShardNumber(0),
+            ShardCount(spec.pageserver_connstr.split(',').count() as u8),
+        );
+
+        let (reader, pageserver_connect_micros) =
+            tokio::runtime::Handle::current().block_on(async move {
+                let mut client = page_api::client::Client::new(
+                    shard0_connstr,
+                    spec.tenant_id,
+                    spec.timeline_id,
+                    shard_index,
+                    spec.storage_auth_token.clone(),
+                )
+                .await?;
+                let pageserver_connect_micros = start_time.elapsed().as_micros() as u64;
+                let reader = client
+                    .get_base_backup(page_api::GetBaseBackupRequest {
+                        lsn: Some(lsn),
+                        replica: false, // TODO: handle replicas
+                    })
+                    .await?;
+                anyhow::Ok((reader, pageserver_connect_micros))
+            })?;
+
+        let reader = tokio_util::io::SyncIoBridge::new(reader);
+        let mut reader = MeasuredReader::new(reader);
+
+        // Read the archive directly from the `reader`.
+        //
+        // Set `ignore_zeros` so that unpack() reads all the Copy data and
+        // doesn't stop at the end-of-archive marker. Otherwise, if the server
+        // sends an Error after finishing the tarball, we will not notice it.
+        let mut ar = tar::Archive::new(&mut reader);
+        ar.set_ignore_zeros(true);
+        ar.unpack(&self.params.pgdata)?;
+
+        // Report metrics
+        let mut state = self.state.lock().unwrap();
+        state.metrics.pageserver_connect_micros = pageserver_connect_micros;
+        state.metrics.basebackup_bytes = reader.get_byte_count() as u64;
+        state.metrics.basebackup_ms = start_time.elapsed().as_millis() as u64;
+
+        Ok(())
+    }
+
+    fn try_get_basebackup_libpq(&self, spec: &ParsedSpec, lsn: Lsn) -> Result<()> {
+        let start_time = Instant::now();
         let shard0_connstr = spec.pageserver_connstr.split(',').next().unwrap();
         let mut config = postgres::Config::from_str(shard0_connstr)?;
 
@@ -956,12 +1021,10 @@ impl ComputeNode {
         }
 
         config.application_name("compute_ctl");
-        if let Some(spec) = &compute_state.pspec {
-            config.options(&format!(
-                "-c neon.compute_mode={}",
-                spec.spec.mode.to_type_str()
-            ));
-        }
+        config.options(&format!(
+            "-c neon.compute_mode={}",
+            spec.spec.mode.to_type_str()
+        ));
 
         // Connect to pageserver
         let mut client = config.connect(NoTls)?;
