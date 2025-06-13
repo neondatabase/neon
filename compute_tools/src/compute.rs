@@ -35,6 +35,7 @@ use url::Url;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 use utils::measured_stream::MeasuredReader;
+use utils::pid_file;
 
 use crate::configurator::launch_configurator;
 use crate::disk_quota::set_disk_quota;
@@ -2257,6 +2258,58 @@ pub fn forward_termination_signal() {
         let ss_pid = nix::unistd::Pid::from_raw(ss_pid as i32);
         kill(ss_pid, Signal::SIGTERM).ok();
     }
+
+    // Terminate pgbouncer with SIGKILL
+    match pid_file::read("/etc/pgbouncer/pid".into()) {
+        Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
+            info!("sending SIGKILL to pgbouncer process pid: {}", pid);
+            if let Err(e) = kill(pid, Signal::SIGKILL) {
+                error!("failed to terminate pgbouncer: {}", e);
+            }
+        }
+        // pgbouncer does not lock the pid file, so we read and kill the process directly
+        Ok(pid_file::PidFileRead::NotHeldByAnyProcess(_)) => {
+            if let Ok(pid_str) = std::fs::read_to_string("/etc/pgbouncer/pid") {
+                if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                    info!(
+                        "sending SIGKILL to pgbouncer process pid: {} (from unlocked pid file)",
+                        pid
+                    );
+                    if let Err(e) = kill(Pid::from_raw(pid), Signal::SIGKILL) {
+                        error!("failed to terminate pgbouncer: {}", e);
+                    }
+                }
+            } else {
+                info!("pgbouncer pid file exists but process not running");
+            }
+        }
+        Ok(pid_file::PidFileRead::NotExist) => {
+            info!("pgbouncer pid file not found, process may not be running");
+        }
+        Err(e) => {
+            error!("error reading pgbouncer pid file: {}", e);
+        }
+    }
+
+    // Terminate local_proxy
+    match pid_file::read("/etc/local_proxy/pid".into()) {
+        Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
+            info!("sending SIGTERM to local_proxy process pid: {}", pid);
+            if let Err(e) = kill(pid, Signal::SIGTERM) {
+                error!("failed to terminate local_proxy: {}", e);
+            }
+        }
+        Ok(pid_file::PidFileRead::NotHeldByAnyProcess(_)) => {
+            info!("local_proxy PID file exists but process not running");
+        }
+        Ok(pid_file::PidFileRead::NotExist) => {
+            info!("local_proxy PID file not found, process may not be running");
+        }
+        Err(e) => {
+            error!("error reading local_proxy PID file: {}", e);
+        }
+    }
+
     let pg_pid = PG_PID.load(Ordering::SeqCst);
     if pg_pid != 0 {
         let pg_pid = nix::unistd::Pid::from_raw(pg_pid as i32);
