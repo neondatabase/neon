@@ -967,10 +967,7 @@ impl ComputeNode {
             let mut client = page_api::proto::PageServiceClient::connect(shard0_connstr).await?;
 
             let req = page_api::proto::GetBaseBackupRequest {
-                read_lsn: Some(page_api::proto::ReadLsn {
-                    request_lsn: lsn.0,
-                    not_modified_since_lsn: 0,
-                }),
+                lsn: lsn.0,
                 replica: false, // TODO: handle replicas, with LSN 0
             };
             let mut req = tonic::Request::new(req);

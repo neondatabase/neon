@@ -3606,24 +3606,22 @@ impl proto::PageService for GrpcPageServiceHandler {
         if timeline.is_archived() == Some(true) {
             return Err(tonic::Status::failed_precondition("timeline is archived"));
         }
-        let req: page_api::GetBaseBackupRequest = req.into_inner().try_into()?;
+        let req: page_api::GetBaseBackupRequest = req.into_inner().into();
 
-        span_record!(lsn=%req.read_lsn);
+        span_record!(lsn=?req.lsn);
 
-        let mut lsn = None;
-        if req.read_lsn.request_lsn > Lsn(0) {
-            lsn = Some(req.read_lsn.request_lsn);
+        if let Some(lsn) = req.lsn {
             let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
             timeline
                 .wait_lsn(
-                    req.read_lsn.request_lsn,
+                    lsn,
                     WaitLsnWaiter::PageService,
                     WaitLsnTimeout::Default,
                     &ctx,
                 )
                 .await?;
             timeline
-                .check_lsn_is_in_scope(req.read_lsn.request_lsn, &latest_gc_cutoff_lsn)
+                .check_lsn_is_in_scope(lsn, &latest_gc_cutoff_lsn)
                 .map_err(|err| {
                     tonic::Status::invalid_argument(format!("invalid basebackup LSN: {err}"))
                 })?;
@@ -3631,14 +3629,15 @@ impl proto::PageService for GrpcPageServiceHandler {
 
         // Spawn a task to run the basebackup.
         //
-        // TODO: do we need to support full base backups, for debugging?
+        // TODO: do we need to support full base backups, for debugging? This also requires passing
+        // the prev_lsn parameter.
         let span = Span::current();
         let (mut simplex_read, mut simplex_write) = tokio::io::simplex(CHUNK_SIZE);
         let jh = tokio::spawn(async move {
             let result = basebackup::send_basebackup_tarball(
                 &mut simplex_write,
                 &timeline,
-                lsn,
+                req.lsn,
                 None,
                 false,
                 req.replica,
@@ -3656,19 +3655,19 @@ impl proto::PageService for GrpcPageServiceHandler {
         let chunks = async_stream::try_stream! {
             loop {
                 let mut chunk = BytesMut::with_capacity(CHUNK_SIZE).limit(CHUNK_SIZE);
-                let mut n = 1;
-                while n != 0 {
-                    n = simplex_read.read_buf(&mut chunk).await.map_err(|err| {
+                loop {
+                    let n = simplex_read.read_buf(&mut chunk).await.map_err(|err| {
                         tonic::Status::internal(format!("failed to read basebackup chunk: {err}"))
                     })?;
+                    if n == 0 {
+                        break; // full chunk or closed stream
+                    }
                 }
-                let chunk = chunk.into_inner();
-
-                // If we read 0 bytes, either the chunk is full or the stream is closed.
+                let chunk = chunk.into_inner().freeze();
                 if chunk.is_empty() {
                     break;
                 }
-                yield proto::GetBaseBackupResponseChunk::from(chunk.freeze());
+                yield proto::GetBaseBackupResponseChunk::from(chunk);
             }
             // Wait for the basebackup task to exit and check for errors.
             jh.await.map_err(|err| {

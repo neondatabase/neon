@@ -320,10 +320,7 @@ async fn client_grpc(
         let mut basebackup_stream = client
             .get_base_backup(
                 GetBaseBackupRequest {
-                    read_lsn: ReadLsn {
-                        request_lsn: lsn,
-                        not_modified_since_lsn: Some(lsn),
-                    },
+                    lsn: Some(lsn),
                     replica: false,
                 },
                 gzip,
