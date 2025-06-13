@@ -2225,8 +2225,19 @@ impl Service {
         &self,
         reattach_req: ReAttachRequest,
     ) -> Result<ReAttachResponse, ApiError> {
+        let mut _node_lock: Option<TracingExclusiveGuard<NodeOperations>> = None;
+
         if let Some(register_req) = reattach_req.register {
-            self.node_register(register_req).await?;
+            _node_lock = Some(
+                trace_exclusive_lock(
+                    &self.node_op_locks,
+                    register_req.node_id,
+                    NodeOperations::Register,
+                )
+                .await,
+            );
+            self.node_register_with_lock(register_req, _node_lock.as_ref().unwrap())
+                .await?;
         }
 
         // Ordering: we must persist generation number updates before making them visible in the in-memory state
@@ -7162,13 +7173,21 @@ impl Service {
         &self,
         register_req: NodeRegisterRequest,
     ) -> Result<(), ApiError> {
-        let _node_lock = trace_exclusive_lock(
+        let node_lock = trace_exclusive_lock(
             &self.node_op_locks,
             register_req.node_id,
             NodeOperations::Register,
         )
         .await;
 
+        self.node_register_with_lock(register_req, &node_lock).await
+    }
+
+    async fn node_register_with_lock(
+        &self,
+        register_req: NodeRegisterRequest,
+        _node_lock: &TracingExclusiveGuard<NodeOperations>,
+    ) -> Result<(), ApiError> {
         #[derive(PartialEq)]
         enum RegistrationStatus {
             UpToDate,
