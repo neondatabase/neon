@@ -14,7 +14,7 @@ use std::{io, str};
 
 use anyhow::{Context as _, anyhow, bail};
 use async_compression::tokio::write::GzipEncoder;
-use bytes::{Buf, BytesMut};
+use bytes::{Buf as _, BufMut as _, BytesMut};
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
 use itertools::Itertools;
@@ -3601,42 +3601,44 @@ impl proto::PageService for GrpcPageServiceHandler {
         let timeline = self.get_request_timeline(&req).await?;
         let ctx = self.ctx.with_scope_timeline(&timeline);
 
-        // Validate the request, decorate the span, and wait for the LSN to arrive.
-        //
-        // TODO: this requires a read LSN, is that ok?
+        // Validate the request and decorate the span.
         Self::ensure_shard_zero(&timeline)?;
         if timeline.is_archived() == Some(true) {
             return Err(tonic::Status::failed_precondition("timeline is archived"));
         }
-        let req: page_api::GetBaseBackupRequest = req.into_inner().try_into()?;
+        let req: page_api::GetBaseBackupRequest = req.into_inner().into();
 
-        span_record!(lsn=%req.read_lsn);
+        span_record!(lsn=?req.lsn);
 
-        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
-        timeline
-            .wait_lsn(
-                req.read_lsn.request_lsn,
-                WaitLsnWaiter::PageService,
-                WaitLsnTimeout::Default,
-                &ctx,
-            )
-            .await?;
-        timeline
-            .check_lsn_is_in_scope(req.read_lsn.request_lsn, &latest_gc_cutoff_lsn)
-            .map_err(|err| {
-                tonic::Status::invalid_argument(format!("invalid basebackup LSN: {err}"))
-            })?;
+        // Wait for the LSN to arrive, if given.
+        if let Some(lsn) = req.lsn {
+            let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
+            timeline
+                .wait_lsn(
+                    lsn,
+                    WaitLsnWaiter::PageService,
+                    WaitLsnTimeout::Default,
+                    &ctx,
+                )
+                .await?;
+            timeline
+                .check_lsn_is_in_scope(lsn, &latest_gc_cutoff_lsn)
+                .map_err(|err| {
+                    tonic::Status::invalid_argument(format!("invalid basebackup LSN: {err}"))
+                })?;
+        }
 
         // Spawn a task to run the basebackup.
         //
-        // TODO: do we need to support full base backups, for debugging?
+        // TODO: do we need to support full base backups, for debugging? This also requires passing
+        // the prev_lsn parameter.
         let span = Span::current();
         let (mut simplex_read, mut simplex_write) = tokio::io::simplex(CHUNK_SIZE);
         let jh = tokio::spawn(async move {
             let result = basebackup::send_basebackup_tarball(
                 &mut simplex_write,
                 &timeline,
-                Some(req.read_lsn.request_lsn),
+                req.lsn,
                 None,
                 false,
                 req.replica,
@@ -3652,20 +3654,21 @@ impl proto::PageService for GrpcPageServiceHandler {
 
         // Emit chunks of size CHUNK_SIZE.
         let chunks = async_stream::try_stream! {
-            let mut chunk = BytesMut::with_capacity(CHUNK_SIZE);
             loop {
-                let n = simplex_read.read_buf(&mut chunk).await.map_err(|err| {
-                    tonic::Status::internal(format!("failed to read basebackup chunk: {err}"))
-                })?;
-
-                // If we read 0 bytes, either the chunk is full or the stream is closed.
-                if n == 0 {
-                    if chunk.is_empty() {
-                        break;
+                let mut chunk = BytesMut::with_capacity(CHUNK_SIZE).limit(CHUNK_SIZE);
+                loop {
+                    let n = simplex_read.read_buf(&mut chunk).await.map_err(|err| {
+                        tonic::Status::internal(format!("failed to read basebackup chunk: {err}"))
+                    })?;
+                    if n == 0 {
+                        break; // full chunk or closed stream
                     }
-                    yield proto::GetBaseBackupResponseChunk::from(chunk.clone().freeze());
-                    chunk.clear();
                 }
+                let chunk = chunk.into_inner().freeze();
+                if chunk.is_empty() {
+                    break;
+                }
+                yield proto::GetBaseBackupResponseChunk::from(chunk);
             }
             // Wait for the basebackup task to exit and check for errors.
             jh.await.map_err(|err| {

@@ -102,10 +102,10 @@ message CheckRelExistsResponse {
   bool exists = 1;
 }
 
-// Requests a base backup at a given LSN.
+// Requests a base backup.
 message GetBaseBackupRequest {
-  // The LSN to fetch a base backup at.
-  ReadLsn read_lsn = 1;
+  // The LSN to fetch the base backup at. 0 or absent means the latest LSN known to the Pageserver.
+  uint64 lsn = 1;
   // If true, logical replication slots will not be created.
   bool replica = 2;
 }
