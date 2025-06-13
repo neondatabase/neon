@@ -1316,6 +1316,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
  "p256 0.13.2",
+ "pageserver_page_api",
  "postgres",
  "postgres_initdb",
  "regex",
@@ -1334,6 +1335,7 @@ dependencies = [
  "tokio-postgres",
  "tokio-stream",
  "tokio-util",
+ "tonic 0.13.1",
  "tower 0.5.2",
  "tower-http",
  "tower-otel",
@@ -4465,11 +4467,17 @@ dependencies = [
 name = "pageserver_page_api"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-stream",
  "bytes",
+ "futures",
+ "futures-core",
  "pageserver_api",
  "postgres_ffi",
  "prost 0.13.5",
  "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
  "tonic 0.13.1",
  "tonic-build",
  "utils",
