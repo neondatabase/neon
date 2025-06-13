@@ -1,0 +1,280 @@
+name: Periodic proxy performance test on unit-perf hetzner runner
+
+on:
+  schedule:
+    # * is a special character in YAML so you have to quote this string
+    #        ┌───────────── minute (0 - 59)
+    #        │ ┌───────────── hour (0 - 23)
+    #        │ │ ┌───────────── day of the month (1 - 31)
+    #        │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
+    #        │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
+    - cron: '0 5 * * *' # Runs at 5 UTC once a day
+#   workflow_dispatch: # Allows manual triggering of the workflow
+#     inputs:
+#       commit_hash:
+#         type: string
+#         description: 'The long neon repo commit hash for the system under test (pageserver) to be tested.'
+#         required: false
+#         default: ''
+#       recreate_snapshots:
+#         type: boolean
+#         description: 'Recreate snapshots - !!!WARNING!!! We should only recreate snapshots if the previous ones are no longer compatible. Otherwise benchmarking results are not comparable across runs.'
+#         required: false
+        # default: false
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run_periodic_proxybench_test:
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
+      pull-requests: write
+    runs-on: [ self-hosted, unit-perf ]
+    container:
+      image: ghcr.io/neondatabase/build-tools:pinned-bookworm
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --init
+    timeout-minutes: 60  # 1h timeout
+    env:
+      RUN_ID: ${{ github.run_id }}
+      DEFAULT_PG_VERSION: 16
+      BUILD_TYPE: release
+      RUST_BACKTRACE: 1
+      S3_BUCKET: neon-github-public-dev
+      PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+    steps:
+#     # we don't need the neon source code because we run everything remotely
+#     # however we still need the local github actions to run the allure step below
+#     - name: Harden the runner (Audit all outbound calls)
+#       uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+#       with:
+#         egress-policy: audit
+
+#     - name: Set up the environment which depends on $RUNNER_TEMP on nvme drive
+#       id: set-env
+#       shell: bash -euxo pipefail {0}
+#       run: |
+#         {
+#           echo "NEON_DIR=${RUNNER_TEMP}/neon"
+#           echo "NEON_BIN=${RUNNER_TEMP}/neon/bin"
+#           echo "POSTGRES_DISTRIB_DIR=${RUNNER_TEMP}/neon/pg_install"
+#           echo "LD_LIBRARY_PATH=${RUNNER_TEMP}/neon/pg_install/v${DEFAULT_PG_VERSION}/lib"
+#           echo "BACKUP_DIR=${RUNNER_TEMP}/instance_store/saved_snapshots"
+#           echo "TEST_OUTPUT=${RUNNER_TEMP}/neon/test_output"
+#           echo "PERF_REPORT_DIR=${RUNNER_TEMP}/neon/test_output/perf-report-local"
+#           echo "ALLURE_DIR=${RUNNER_TEMP}/neon/test_output/allure-results"
+#           echo "ALLURE_RESULTS_DIR=${RUNNER_TEMP}/neon/test_output/allure-results/results"
+#         } >> "$GITHUB_ENV"
+
+#         echo "allure_results_dir=${RUNNER_TEMP}/neon/test_output/allure-results/results" >> "$GITHUB_OUTPUT"
+
+#     - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+#       with:
+#         aws-region: eu-central-1
+#         role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+#         role-duration-seconds: 18000 # max 5 hours (needed in case commit hash is still being built)
+#     - name: Determine commit hash
+#       id: commit_hash
+#       shell: bash -euxo pipefail {0}
+#       env:
+#         INPUT_COMMIT_HASH: ${{ github.event.inputs.commit_hash }}
+#       run: |
+#         if [[ -z "${INPUT_COMMIT_HASH}" ]]; then
+#           COMMIT_HASH=$(curl -s https://api.github.com/repos/neondatabase/neon/commits/main | jq -r '.sha')
+#           echo "COMMIT_HASH=$COMMIT_HASH" >> $GITHUB_ENV
+#           echo "commit_hash=$COMMIT_HASH" >> "$GITHUB_OUTPUT"
+#           echo "COMMIT_HASH_TYPE=latest" >> $GITHUB_ENV
+#         else
+#           COMMIT_HASH="${INPUT_COMMIT_HASH}"
+#           echo "COMMIT_HASH=$COMMIT_HASH" >> $GITHUB_ENV
+#           echo "commit_hash=$COMMIT_HASH" >> "$GITHUB_OUTPUT"
+#           echo "COMMIT_HASH_TYPE=manual" >> $GITHUB_ENV
+#         fi
+#     - name: Checkout the neon repository at given commit hash
+#       uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+#       with:
+#         ref: ${{ steps.commit_hash.outputs.commit_hash }}
+
+#     # does not reuse ./.github/actions/download because we need to download the artifact for the given commit hash
+#     # example artifact
+#     # s3://neon-github-public-dev/artifacts/48b870bc078bd2c450eb7b468e743b9c118549bf/15036827400/1/neon-Linux-X64-release-artifact.tar.zst /instance_store/artifacts/neon-Linux-release-artifact.tar.zst
+#     - name: Determine artifact S3_KEY for given commit hash and download and extract artifact
+#       id: artifact_prefix
+#       shell: bash -euxo pipefail {0}
+#       env:
+#         ARCHIVE: ${{ runner.temp }}/downloads/neon-${{ runner.os }}-${{ runner.arch }}-release-artifact.tar.zst
+#         COMMIT_HASH: ${{ env.COMMIT_HASH }}
+#         COMMIT_HASH_TYPE: ${{ env.COMMIT_HASH_TYPE }}
+#       run: |
+#         attempt=0
+#         max_attempts=24 # 5 minutes * 24 = 2 hours
+
+#         while [[ $attempt -lt $max_attempts ]]; do
+#           # the following command will fail until the artifacts are available ...
+#           S3_KEY=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "artifacts/$COMMIT_HASH/" \
+#             | jq -r '.Contents[]?.Key' \
+#             | grep "neon-${{ runner.os }}-${{ runner.arch }}-release-artifact.tar.zst" \
+#             | sort --version-sort \
+#             | tail -1) || true # ... thus ignore errors from the command
+#           if [[ -n "${S3_KEY}" ]]; then
+#             echo "Artifact found: $S3_KEY"
+#             echo "S3_KEY=$S3_KEY" >> $GITHUB_ENV
+#             break
+#           fi
+          
+#           # Increment attempt counter and sleep for 5 minutes
+#           attempt=$((attempt + 1))
+#           echo "Attempt $attempt of $max_attempts to find artifacts in S3 bucket s3://$S3_BUCKET/artifacts/$COMMIT_HASH failed. Retrying in 5 minutes..."
+#           sleep 300 # Sleep for 5 minutes
+#         done
+
+#         if [[ -z "${S3_KEY}" ]]; then
+#           echo "Error: artifact not found in S3 bucket s3://$S3_BUCKET/artifacts/$COMMIT_HASH" after 2 hours
+#         else
+#           mkdir -p $(dirname $ARCHIVE)
+#           time aws s3 cp --only-show-errors s3://$S3_BUCKET/${S3_KEY} ${ARCHIVE}
+#           mkdir -p ${NEON_DIR}
+#           time tar -xf ${ARCHIVE} -C ${NEON_DIR}
+#           rm -f ${ARCHIVE}
+#         fi
+
+#     - name: Download snapshots from S3
+#       if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.recreate_snapshots == 'false' || github.event.inputs.recreate_snapshots == '' }}
+#       id: download_snapshots
+#       shell: bash -euxo pipefail {0}
+#       run: |
+#         # Download the snapshots from S3
+#         mkdir -p ${TEST_OUTPUT}
+#         mkdir -p $BACKUP_DIR
+#         cd $BACKUP_DIR
+#         mkdir parts
+#         cd parts
+#         PART=$(aws s3api list-objects-v2 --bucket $S3_BUCKET --prefix performance/pagebench/ \
+#           | jq -r '.Contents[]?.Key' \
+#           | grep -E 'shared-snapshots-[0-9]{4}-[0-9]{2}-[0-9]{2}' \
+#           | sort \
+#           | tail -1)
+#         echo "Latest PART: $PART"
+#         if [[ -z "$PART" ]]; then
+#           echo "ERROR: No matching S3 key found" >&2
+#           exit 1
+#         fi
+#         S3_KEY=$(dirname $PART)
+#         time aws s3 cp --only-show-errors --recursive s3://${S3_BUCKET}/$S3_KEY/ .
+#         cd $TEST_OUTPUT
+#         time cat $BACKUP_DIR/parts/* | zstdcat | tar --extract --preserve-permissions
+#         rm -rf ${BACKUP_DIR}
+
+#     - name: Cache poetry deps
+#       uses: actions/cache@v4
+#       with:
+#         path: ~/.cache/pypoetry/virtualenvs
+#         key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-bookworm-${{ hashFiles('poetry.lock') }}
+
+#     - name: Install Python deps
+#       shell: bash -euxo pipefail {0}
+#       run: ./scripts/pysync
+
+#     # we need high number of open files for pagebench
+#     - name: show ulimits
+#       shell: bash -euxo pipefail {0}
+#       run: |
+#         ulimit -a
+
+#     - name: Run pagebench testcase
+#       shell: bash -euxo pipefail {0}
+#       env:
+#         CI: false  # need to override this env variable set by github to enforce using snapshots
+#       run: |
+#         export PLATFORM=hetzner-unit-perf-${COMMIT_HASH_TYPE}
+#         # report the commit hash of the neon repository in the revision of the test results
+#         export GITHUB_SHA=${COMMIT_HASH}
+#         rm -rf ${PERF_REPORT_DIR}
+#         rm -rf ${ALLURE_RESULTS_DIR}
+#         mkdir -p ${PERF_REPORT_DIR}
+#         mkdir -p ${ALLURE_RESULTS_DIR}
+#         PARAMS="--alluredir=${ALLURE_RESULTS_DIR} --tb=short --verbose -rA"
+#         EXTRA_PARAMS="--out-dir ${PERF_REPORT_DIR} --durations-path $TEST_OUTPUT/benchmark_durations.json"
+#         # run only two selected tests
+#         # environment set by parent:
+#         # RUST_BACKTRACE=1 DEFAULT_PG_VERSION=16 BUILD_TYPE=release
+#         ./scripts/pytest ${PARAMS} test_runner/performance/pageserver/pagebench/test_pageserver_max_throughput_getpage_at_latest_lsn.py::test_pageserver_characterize_throughput_with_n_tenants ${EXTRA_PARAMS}
+#         ./scripts/pytest ${PARAMS} test_runner/performance/pageserver/pagebench/test_pageserver_max_throughput_getpage_at_latest_lsn.py::test_pageserver_characterize_latencies_with_1_client_and_throughput_with_many_clients_one_tenant ${EXTRA_PARAMS}
+
+#     - name: upload the performance metrics to the Neon performance database which is used by grafana dashboards to display the results
+#       shell: bash -euxo pipefail {0}
+#       run: |
+#         export REPORT_FROM="$PERF_REPORT_DIR"
+#         export GITHUB_SHA=${COMMIT_HASH}
+#         time ./scripts/generate_and_push_perf_report.sh
+
+#     - name: Upload test results
+#       if: ${{ !cancelled() }}
+#       uses: ./.github/actions/allure-report-store
+#       with:
+#         report-dir:  ${{ steps.set-env.outputs.allure_results_dir }}
+#         unique-key: ${{ env.BUILD_TYPE }}-${{ env.DEFAULT_PG_VERSION }}-${{ runner.arch }}
+#         aws-oidc-role-arn:  ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+
+#     - name: Create Allure report
+#       id: create-allure-report
+#       if: ${{ !cancelled() }}
+#       uses: ./.github/actions/allure-report-generate
+#       with:
+#         aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+
+#     - name: Upload snapshots
+#       if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.recreate_snapshots != 'false' && github.event.inputs.recreate_snapshots != '' }}
+#       id: upload_snapshots
+#       shell: bash -euxo pipefail {0}
+#       run: |
+#         mkdir -p $BACKUP_DIR
+#         cd $TEST_OUTPUT
+#         tar --create --preserve-permissions --file - shared-snapshots | zstd -o $BACKUP_DIR/shared_snapshots.tar.zst
+#         cd $BACKUP_DIR
+#         mkdir parts
+#         split -b 1G shared_snapshots.tar.zst ./parts/shared_snapshots.tar.zst.part.
+#         SNAPSHOT_DATE=$(date +%F)  # YYYY-MM-DD
+#         cd parts
+#         time aws s3 cp --recursive . s3://${S3_BUCKET}/performance/pagebench/shared-snapshots-${SNAPSHOT_DATE}/
+
+#     - name: Post to a Slack channel
+#       if: ${{ github.event.schedule && failure() }}
+#       uses: slackapi/slack-github-action@fcfb566f8b0aab22203f066d80ca1d7e4b5d05b3 # v1.27.1
+#       with:
+#         channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
+#         slack-message: "Periodic pagebench testing on dedicated hardware: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+#       env:
+#         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        
+#     - name: Cleanup Test Resources
+#       if: always()
+#       shell: bash -euxo pipefail {0}
+#       env:
+#         ARCHIVE: ${{ runner.temp }}/downloads/neon-${{ runner.os }}-${{ runner.arch }}-release-artifact.tar.zst
+#       run: |
+#         # Cleanup the test resources
+#         if [[ -d "${BACKUP_DIR}" ]]; then
+#           rm -rf ${BACKUP_DIR}
+#         fi
+#         if [[ -d "${TEST_OUTPUT}" ]]; then
+#           rm -rf ${TEST_OUTPUT}
+#         fi
+#         if [[ -d "${NEON_DIR}" ]]; then
+#           rm -rf ${NEON_DIR}
+#         fi
+#         rm -rf $(dirname $ARCHIVE)
+
