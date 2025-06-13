@@ -247,7 +247,9 @@ impl AuthInfo {
         let tmp_config = self.enrich(tmp_config);
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let connection = tmp_config.connect_raw(&mut compute.stream, NoTls).await?;
+        let connection = tmp_config
+            .tls_and_authenticate(&mut compute.stream, NoTls)
+            .await?;
         drop(pause);
 
         let RawConnection {
