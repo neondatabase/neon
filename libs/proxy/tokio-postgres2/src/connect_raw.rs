@@ -16,9 +16,8 @@ use tokio_util::codec::Framed;
 use crate::Error;
 use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, PostgresCodec};
 use crate::config::{self, AuthKeys, Config};
-use crate::connect_tls::connect_tls;
 use crate::maybe_tls_stream::MaybeTlsStream;
-use crate::tls::{TlsConnect, TlsStream};
+use crate::tls::TlsStream;
 
 pub struct StartupStream<S, T> {
     inner: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
@@ -86,17 +85,14 @@ pub struct RawConnection<S, T> {
     pub secret_key: i32,
 }
 
-pub async fn connect_raw<S, T>(
-    stream: S,
-    tls: T,
+pub async fn connect_raw_tls<S, T>(
+    stream: MaybeTlsStream<S, T>,
     config: &Config,
-) -> Result<RawConnection<S, T::Stream>, Error>
+) -> Result<RawConnection<S, T>, Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
-    T: TlsConnect<S>,
+    T: TlsStream + Unpin,
 {
-    let stream = connect_tls(stream, config.ssl_mode, tls).await?;
-
     let mut stream = StartupStream {
         inner: Framed::new(stream, PostgresCodec),
         buf: BackendMessages::empty(),

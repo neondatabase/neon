@@ -7,8 +7,9 @@ use tokio::sync::mpsc;
 use crate::client::SocketConfig;
 use crate::codec::BackendMessage;
 use crate::config::Host;
-use crate::connect_raw::connect_raw;
+use crate::connect_raw::connect_raw_tls;
 use crate::connect_socket::connect_socket;
+use crate::connect_tls::connect_tls;
 use crate::tls::{MakeTlsConnect, TlsConnect};
 use crate::{Client, Config, Connection, Error, RawConnection};
 
@@ -44,13 +45,14 @@ where
     T: TlsConnect<TcpStream>,
 {
     let socket = connect_socket(host_addr, host, port, config.connect_timeout).await?;
+    let stream = connect_tls(socket, config.ssl_mode, tls).await?;
     let RawConnection {
         stream,
         parameters,
         delayed_notice,
         process_id,
         secret_key,
-    } = connect_raw(socket, tls, config).await?;
+    } = connect_raw_tls(stream, config).await?;
 
     let socket_config = SocketConfig {
         host_addr,
