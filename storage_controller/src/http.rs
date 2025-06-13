@@ -2489,7 +2489,7 @@ pub fn make_router(
         })
         // Tenant timeline mark_invisible passthrough to shard zero
         .put(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id/mark_invisible",
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/mark_invisible",
             |r| {
                 tenant_service_handler(
                     r,
