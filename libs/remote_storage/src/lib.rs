@@ -440,6 +440,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
         timestamp: SystemTime,
         done_if_after: SystemTime,
         cancel: &CancellationToken,
+        complexity_limit: Option<NonZeroU32>,
     ) -> Result<(), TimeTravelError>;
 }
 
@@ -651,22 +652,23 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         timestamp: SystemTime,
         done_if_after: SystemTime,
         cancel: &CancellationToken,
+        complexity_limit: Option<NonZeroU32>,
     ) -> Result<(), TimeTravelError> {
         match self {
             Self::LocalFs(s) => {
-                s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
+                s.time_travel_recover(prefix, timestamp, done_if_after, cancel, complexity_limit)
                     .await
             }
             Self::AwsS3(s) => {
-                s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
+                s.time_travel_recover(prefix, timestamp, done_if_after, cancel, complexity_limit)
                     .await
             }
             Self::AzureBlob(s) => {
-                s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
+                s.time_travel_recover(prefix, timestamp, done_if_after, cancel, complexity_limit)
                     .await
             }
             Self::Unreliable(s) => {
-                s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
+                s.time_travel_recover(prefix, timestamp, done_if_after, cancel, complexity_limit)
                     .await
             }
         }

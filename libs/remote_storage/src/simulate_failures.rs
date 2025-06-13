@@ -240,11 +240,12 @@ impl RemoteStorage for UnreliableWrapper {
         timestamp: SystemTime,
         done_if_after: SystemTime,
         cancel: &CancellationToken,
+        complexity_limit: Option<NonZeroU32>,
     ) -> Result<(), TimeTravelError> {
         self.attempt(RemoteOp::TimeTravelRecover(prefix.map(|p| p.to_owned())))
             .map_err(TimeTravelError::Other)?;
         self.inner
-            .time_travel_recover(prefix, timestamp, done_if_after, cancel)
+            .time_travel_recover(prefix, timestamp, done_if_after, cancel, complexity_limit)
             .await
     }
 }
