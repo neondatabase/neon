@@ -169,7 +169,7 @@ impl BasebackupCache {
 /// and manage the cache entries on disk.
 /// It is a separate struct from BasebackupCache to allow holding
 /// a mutable reference to this state without a mutex lock,
-/// while BasebackupCache is referenced  by the clients.
+/// while BasebackupCache is referenced by the clients.
 struct BackgroundTask {
     c: Arc<BasebackupCache>,
 
@@ -177,7 +177,17 @@ struct BackgroundTask {
     tenant_manager: Arc<TenantManager>,
     cancel: CancellationToken,
 
+    /// Number of the entries in the cache.
+    /// This counter is used for metrics and applying cache limits.
+    /// It generally should be equal to c.entries.len(), but it's calculated
+    /// pessimistically for abnormal situations: if we encounterred some errors
+    /// during removing the entry from disk, we won't decrement this counter to
+    /// make sure that we don't exceed the limit with "trashed" files on the disk.
+    /// It will also count files in the data_dir that are not valid cache entries.
     entry_count: i64,
+    /// Total size of all the entries on the disk.
+    /// This counter is used for metrics and applying cache limits.
+    /// Similar to entry_count, it is calculated pessimistically for abnormal situations.
     total_size_bytes: i64,
 
     prepare_ok_count: GenericCounter<AtomicU64>,
@@ -229,7 +239,7 @@ impl BackgroundTask {
     async fn cleanup(&mut self) -> anyhow::Result<()> {
         self.clean_tmp_dir().await?;
 
-        // Remove outdated entries.
+        // Leave only up-to-date entries.
         let entries_old = self.c.entries.lock().unwrap().clone();
         let mut entries_new = HashMap::new();
         for (tenant_shard_id, tenant_slot) in self.tenant_manager.list() {
@@ -251,6 +261,7 @@ impl BackgroundTask {
             }
         }
 
+        // Try to remove all entries that are not up-to-date.
         for (&tti, entry) in entries_old.iter() {
             if !entries_new.contains_key(&tti) {
                 self.try_remove_entry(tti.tenant_id, tti.timeline_id, entry)
@@ -258,7 +269,8 @@ impl BackgroundTask {
             }
         }
 
-        BASEBACKUP_CACHE_ENTRIES.set(entries_new.len() as i64);
+        // Note: BackgroundTask is the only writer for self.c.entries,
+        // so it couldn't have been modified concurrently.
         *self.c.entries.lock().unwrap() = entries_new;
 
         Ok(())
@@ -294,7 +306,10 @@ impl BackgroundTask {
                 .len() as i64;
 
             self.entry_count += 1;
+            BASEBACKUP_CACHE_ENTRIES.set(self.entry_count);
+
             self.total_size_bytes += size_bytes;
+            BASEBACKUP_CACHE_SIZE.set(self.total_size_bytes);
 
             let parsed = Self::parse_entry_filename(filename.to_string_lossy().as_ref());
             let Some((tenant_id, timeline_id, lsn)) = parsed else {
@@ -334,7 +349,6 @@ impl BackgroundTask {
             }
         }
 
-        BASEBACKUP_CACHE_ENTRIES.set(entries.len() as i64);
         *self.c.entries.lock().unwrap() = entries;
 
         Ok(())
@@ -415,7 +429,7 @@ impl BackgroundTask {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         entry: CacheEntry,
-    ) -> anyhow::Result<()> {
+    ) {
         let tti = TenantTimelineId::new(tenant_id, timeline_id);
 
         self.entry_count += 1;
@@ -430,8 +444,6 @@ impl BackgroundTask {
             self.try_remove_entry(tenant_id, timeline_id, &old_entry)
                 .await;
         }
-
-        Ok(())
     }
 
     /// Prepare a basebackup for the given timeline.
@@ -529,18 +541,21 @@ impl BackgroundTask {
             .prepare_basebackup_tmp(&entry_tmp_path, &timeline, req_lsn)
             .await;
 
-        if let Err(err) = res {
-            tracing::info!("Failed to prepare basebackup tmp file: {:#}", err);
-            // Try to clean up tmp file. If we fail, the background clean up task will take care of it.
-            match tokio::fs::remove_file(&entry_tmp_path).await {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    tracing::info!("Failed to remove basebackup tmp file: {:?}", e);
+        let entry = match res {
+            Ok(entry) => entry,
+            Err(err) => {
+                tracing::info!("Failed to prepare basebackup tmp file: {:#}", err);
+                // Try to clean up tmp file. If we fail, the background clean up task will take care of it.
+                match tokio::fs::remove_file(&entry_tmp_path).await {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        tracing::info!("Failed to remove basebackup tmp file: {:?}", e);
+                    }
                 }
+                return Err(err);
             }
-            return Err(err);
-        }
+        };
 
         // Move the tmp file to the final location atomically.
         // The tmp file is fsynced, so it's guaranteed that we will not have a partial file
@@ -553,15 +568,8 @@ impl BackgroundTask {
             .entry_path(tenant_shard_id.tenant_id, timeline_id, req_lsn);
         tokio::fs::rename(&entry_tmp_path, &entry_path).await?;
 
-        self.upsert_entry(
-            tenant_shard_id.tenant_id,
-            timeline_id,
-            CacheEntry {
-                lsn: req_lsn,
-                size_bytes: entry_tmp_path.metadata()?.len() as i64, // TODO(diko)
-            },
-        )
-        .await?;
+        self.upsert_entry(tenant_shard_id.tenant_id, timeline_id, entry)
+            .await;
 
         self.prepare_ok_count.inc();
         Ok(())
@@ -574,7 +582,7 @@ impl BackgroundTask {
         entry_tmp_path: &Utf8Path,
         timeline: &Arc<Timeline>,
         req_lsn: Lsn,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<CacheEntry> {
         let ctx = RequestContext::new(TaskKind::BasebackupCache, DownloadBehavior::Download);
         let ctx = ctx.with_scope_timeline(timeline);
 
@@ -614,6 +622,12 @@ impl BackgroundTask {
         writer.flush().await?;
         writer.into_inner().sync_all().await?;
 
-        Ok(())
+        // TODO(diko): we can count it via Writer wrapper.
+        let size_bytes = tokio::fs::metadata(entry_tmp_path).await?.len() as i64;
+
+        Ok(CacheEntry {
+            lsn: req_lsn,
+            size_bytes,
+        })
     }
 }
