@@ -73,6 +73,7 @@ use spki::{SubjectPublicKeyInfo, SubjectPublicKeyInfoRef};
 use tracing::debug;
 use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
+use utils::lsn::Lsn;
 
 use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;
@@ -1021,8 +1022,22 @@ impl Endpoint {
         }
     }
 
-    pub fn stop(&self, mode: &str, destroy: bool) -> Result<()> {
-        self.pg_ctl(&["-m", mode, "stop"], &None)?;
+    pub async fn stop(&self, mode: &str, destroy: bool) -> Result<Lsn> {
+        // In production, control plane uses /terminate for shutting down endpoint
+        // which returns LSN after syncing safekeepers.
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://{}:{}/terminate",
+                self.external_http_address.ip(),
+                self.external_http_address.port()
+            ))
+            .bearer_auth(self.generate_jwt(Some(ComputeClaimsScope::Admin))?)
+            .send()
+            .await?;
+        let lsn: Lsn = serde_json::from_str(&response.text().await?)?;
+
+        // In case /terminate doesn't exit soon
+        let _ = self.pg_ctl(&["-m", mode, "stop"], &None);
 
         // Also wait for the compute_ctl process to die. It might have some
         // cleanup work to do after postgres stops, like syncing safekeepers,
@@ -1041,7 +1056,7 @@ impl Endpoint {
             );
             std::fs::remove_dir_all(self.endpoint_path())?;
         }
-        Ok(())
+        Ok(lsn)
     }
 
     pub fn connstr(&self, user: &str, db_name: &str) -> String {
