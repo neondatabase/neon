@@ -141,11 +141,11 @@ pub(crate) struct StorageControllerMetricGroup {
         measured::CounterVec<ReconcileLongRunningLabelGroupSet>,
 
     /// Indicator of safekeeper reconciler queue depth, broken down by safekeeper, excluding ongoing reconciles.
-    pub(crate) storage_controller_safkeeper_reconciles_queued:
+    pub(crate) storage_controller_safekeeper_reconciles_queued:
         measured::GaugeVec<SafekeeperReconcilerLabelGroupSet>,
 
     /// Indicator of completed safekeeper reconciles, broken down by safekeeper.
-    pub(crate) storage_controller_safkeeper_reconciles_complete:
+    pub(crate) storage_controller_safekeeper_reconciles_complete:
         measured::CounterVec<SafekeeperReconcilerLabelGroupSet>,
 }
 
