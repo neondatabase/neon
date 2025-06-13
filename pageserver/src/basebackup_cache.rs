@@ -413,6 +413,19 @@ impl BasebackupCache {
             .tenant_manager
             .get_attached_tenant_shard(tenant_shard_id)?;
 
+        let feature_flag = tenant
+            .feature_resolver
+            .evaluate_boolean("enable-basebackup-cache", tenant_shard_id.tenant_id);
+
+        if feature_flag.is_err() {
+            tracing::info!(
+                tenant_id = %tenant_shard_id.tenant_id,
+                "Basebackup cache is disabled for tenant by feature flag, skipping basebackup",
+            );
+            self.prepare_skip_count.inc();
+            return Ok(());
+        }
+
         let tenant_state = tenant.current_state();
         if tenant_state != TenantState::Active {
             anyhow::bail!(
