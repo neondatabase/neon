@@ -1,5 +1,7 @@
 //! Tools for SCRAM server secret management.
 
+use base64::Engine as _;
+use base64::prelude::BASE64_STANDARD;
 use subtle::{Choice, ConstantTimeEq};
 
 use super::base64_decode_array;
@@ -56,7 +58,7 @@ impl ServerSecret {
             // iteration count 1 for our generated passwords going forward.
             // PG16 users can set iteration count=1 already today.
             iterations: 1,
-            salt_base64: base64::encode(nonce),
+            salt_base64: BASE64_STANDARD.encode(nonce),
             stored_key: ScramKey::default(),
             server_key: ScramKey::default(),
             doomed: true,
@@ -88,7 +90,7 @@ mod tests {
         assert_eq!(parsed.iterations, iterations);
         assert_eq!(parsed.salt_base64, salt);
 
-        assert_eq!(base64::encode(parsed.stored_key), stored_key);
-        assert_eq!(base64::encode(parsed.server_key), server_key);
+        assert_eq!(BASE64_STANDARD.encode(parsed.stored_key), stored_key);
+        assert_eq!(BASE64_STANDARD.encode(parsed.server_key), server_key);
     }
 }

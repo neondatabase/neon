@@ -2267,6 +2267,7 @@ impl Service {
                     // fail, and start from scratch, so it doesn't make sense for us to try and preserve
                     // the stale/multi states at this point.
                     mode: LocationConfigMode::AttachedSingle,
+                    stripe_size: shard.shard.stripe_size,
                 });
 
                 shard.generation = std::cmp::max(shard.generation, Some(new_gen));
@@ -2300,6 +2301,7 @@ impl Service {
                     id: *tenant_shard_id,
                     r#gen: None,
                     mode: LocationConfigMode::Secondary,
+                    stripe_size: shard.shard.stripe_size,
                 });
 
                 // We must not update observed, because we have no guarantee that our
@@ -6649,6 +6651,8 @@ impl Service {
 
     /// This is for debug/support only: assuming tenant data is already present in S3, we "create" a
     /// tenant with a very high generation number so that it will see the existing data.
+    /// It does not create timelines on safekeepers, because they might already exist on some
+    /// safekeeper set. So, the timelines are not storcon-managed after the import.
     pub(crate) async fn tenant_import(
         &self,
         tenant_id: TenantId,

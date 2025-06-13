@@ -51,6 +51,7 @@ use secondary::heatmap::{HeatMapTenant, HeatMapTimeline};
 use storage_broker::BrokerClientChannel;
 use timeline::compaction::{CompactionOutcome, GcCompactionQueue};
 use timeline::import_pgdata::ImportingTimeline;
+use timeline::layer_manager::LayerManagerLockHolder;
 use timeline::offload::{OffloadError, offload_timeline};
 use timeline::{
     CompactFlags, CompactOptions, CompactionError, PreviousHeatmap, ShutdownMode, import_pgdata,
@@ -1315,7 +1316,7 @@ impl TenantShard {
                         ancestor.is_some()
                             || timeline
                                 .layers
-                                .read()
+                                .read(LayerManagerLockHolder::LoadLayerMap)
                                 .await
                                 .layer_map()
                                 .expect(
@@ -2643,7 +2644,7 @@ impl TenantShard {
         }
         let layer_names = tline
             .layers
-            .read()
+            .read(LayerManagerLockHolder::Testing)
             .await
             .layer_map()
             .unwrap()
@@ -3158,7 +3159,12 @@ impl TenantShard {
 
         for timeline in &compact {
             // Collect L0 counts. Can't await while holding lock above.
-            if let Ok(lm) = timeline.layers.read().await.layer_map() {
+            if let Ok(lm) = timeline
+                .layers
+                .read(LayerManagerLockHolder::Compaction)
+                .await
+                .layer_map()
+            {
                 l0_counts.insert(timeline.timeline_id, lm.level0_deltas().len());
             }
         }
@@ -4900,7 +4906,7 @@ impl TenantShard {
         }
         let layer_names = tline
             .layers
-            .read()
+            .read(LayerManagerLockHolder::Testing)
             .await
             .layer_map()
             .unwrap()
@@ -6970,7 +6976,7 @@ mod tests {
             .await?;
         make_some_layers(tline.as_ref(), Lsn(0x20), &ctx).await?;
 
-        let layer_map = tline.layers.read().await;
+        let layer_map = tline.layers.read(LayerManagerLockHolder::Testing).await;
         let level0_deltas = layer_map
             .layer_map()?
             .level0_deltas()
@@ -7206,7 +7212,7 @@ mod tests {
         let lsn = Lsn(0x10);
         let inserted = bulk_insert_compact_gc(&tenant, &tline, &ctx, lsn, 50, 10000).await?;
 
-        let guard = tline.layers.read().await;
+        let guard = tline.layers.read(LayerManagerLockHolder::Testing).await;
         let lm = guard.layer_map()?;
 
         lm.dump(true, &ctx).await?;
@@ -8234,12 +8240,23 @@ mod tests {
             tline.freeze_and_flush().await?; // force create a delta layer
         }
 
-        let before_num_l0_delta_files =
-            tline.layers.read().await.layer_map()?.level0_deltas().len();
+        let before_num_l0_delta_files = tline
+            .layers
+            .read(LayerManagerLockHolder::Testing)
+            .await
+            .layer_map()?
+            .level0_deltas()
+            .len();
 
         tline.compact(&cancel, EnumSet::default(), &ctx).await?;
 
-        let after_num_l0_delta_files = tline.layers.read().await.layer_map()?.level0_deltas().len();
+        let after_num_l0_delta_files = tline
+            .layers
+            .read(LayerManagerLockHolder::Testing)
+            .await
+            .layer_map()?
+            .level0_deltas()
+            .len();
 
         assert!(
             after_num_l0_delta_files < before_num_l0_delta_files,

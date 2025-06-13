@@ -33,6 +33,7 @@ use crate::tenant::size::CalculateSyntheticSizeError;
 use crate::tenant::storage_layer::LayerVisibilityHint;
 use crate::tenant::tasks::{BackgroundLoopKind, BackgroundLoopSemaphorePermit, sleep_random};
 use crate::tenant::timeline::EvictionError;
+use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
 use crate::tenant::{LogicalSizeCalculationCause, TenantShard};
 
 #[derive(Default)]
@@ -208,7 +209,7 @@ impl Timeline {
 
         let mut js = tokio::task::JoinSet::new();
         {
-            let guard = self.layers.read().await;
+            let guard = self.layers.read(LayerManagerLockHolder::Eviction).await;
 
             guard
                 .likely_resident_layers()
