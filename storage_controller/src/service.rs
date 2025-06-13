@@ -6651,6 +6651,8 @@ impl Service {
 
     /// This is for debug/support only: assuming tenant data is already present in S3, we "create" a
     /// tenant with a very high generation number so that it will see the existing data.
+    /// It does not create timelines on safekeepers, because they might already exist on some
+    /// safekeeper set. So, the timelines are not storcon-managed after the import.
     pub(crate) async fn tenant_import(
         &self,
         tenant_id: TenantId,
