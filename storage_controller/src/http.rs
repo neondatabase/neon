@@ -676,7 +676,7 @@ async fn handle_tenant_timeline_passthrough(
     service: Arc<Service>,
     req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
-    let tenant_or_shard_id: TenantShardId = parse_request_param(&req, "tenant_id")?;
+    let tenant_or_shard_id: TenantShardId = parse_request_param(&req, "tenant_shard_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
     maybe_rate_limit(&req, tenant_or_shard_id.tenant_id).await;
 
@@ -2470,7 +2470,7 @@ pub fn make_router(
             },
         )
         // Tenant detail GET passthrough to shard zero:
-        .get("/v1/tenant/:tenant_id", |r| {
+        .get("/v1/tenant/:tenant_shard_id", |r| {
             tenant_service_handler(
                 r,
                 handle_tenant_timeline_passthrough,
@@ -2480,7 +2480,7 @@ pub fn make_router(
         // The `*` in the  URL is a wildcard: any tenant/timeline GET APIs on the pageserver
         // are implicitly exposed here.  This must be last in the list to avoid
         // taking precedence over other GET methods we might implement by hand.
-        .get("/v1/tenant/:tenant_id/*", |r| {
+        .get("/v1/tenant/:tenant_shard_id/*", |r| {
             tenant_service_handler(
                 r,
                 handle_tenant_timeline_passthrough,
