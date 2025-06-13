@@ -13,6 +13,7 @@ postgres_ffi.workspace = true
 prost.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tonic.workspace = true
 utils.workspace = true
 workspace_hack.workspace = true
