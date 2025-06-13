@@ -1,4 +1,4 @@
--- add 100000 rows or approx.10 MB to the state_values table
+-- add 100000 rows or approximately 10 MB to the state_values table
 -- takes about 5 minutes
 INSERT INTO workflows.action_kwargs (created_at, key, uuid, value_id, state_value_id, action_block_id)
 SELECT 
