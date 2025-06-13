@@ -571,14 +571,14 @@ impl PostHogClient {
         let url = if self.config.server_api_key.starts_with("phs_") {
             // The new feature local evaluation secure API token
             format!(
-                "{}/api/projects/{}/feature_flags/local_evaluation",
-                self.config.private_api_url, self.config.project_id
+                "{}/api/feature_flag/local_evaluation",
+                self.config.private_api_url
             )
         } else {
             // The old personal API token
             format!(
-                "{}/api/feature_flag/local_evaluation",
-                self.config.private_api_url
+                "{}/api/projects/{}/feature_flags/local_evaluation",
+                self.config.private_api_url, self.config.project_id
             )
         };
         let response = self

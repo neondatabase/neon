@@ -62,7 +62,7 @@ impl FeatureResolverBackgroundLoop {
                             tracing::info!("Feature flag updated");
                         }
                         Err(e) => {
-                            tracing::warn!("Cannot get feature flags: {}", e);
+                            tracing::warn!("Cannot process feature flag spec: {}", e);
                         }
                     }
                 }
