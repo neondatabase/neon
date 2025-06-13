@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import urllib.parse
 from enum import StrEnum
-from typing import TYPE_CHECKING, final
+from typing import TYPE_CHECKING, Any, final
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -93,6 +93,12 @@ class EndpointHttpClient(requests.Session):
             assert status == "completed", f"{status}, error {err}"
 
         wait_until(offloaded)
+
+    def promote(self, safekeepers_lsn: dict[str, Any]):
+        res = self.post(f"http://localhost:{self.external_port}/promote", data=safekeepers_lsn)
+        res.raise_for_status()
+        json: dict[str, str] = res.json()
+        return json
 
     def database_schema(self, database: str):
         res = self.get(

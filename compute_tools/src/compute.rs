@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
 use compute_api::responses::{
     ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus, LfcOffloadState,
-    LfcPrewarmState, TlsConfig,
+    LfcPrewarmState, PromoteState, TlsConfig,
 };
 use compute_api::spec::{
     ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PageserverProtocol, PgIdent,
@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use std::{env, fs};
-use tokio::spawn;
+use tokio::{spawn, sync::watch, task::JoinHandle};
 use tracing::{Instrument, debug, error, info, instrument, warn};
 use url::Url;
 use utils::id::{TenantId, TimelineId};
@@ -171,6 +171,7 @@ pub struct ComputeState {
     /// WAL flush LSN that is set after terminating Postgres and syncing safekeepers if
     /// mode == ComputeMode::Primary. None otherwise
     pub terminate_flush_lsn: Option<Lsn>,
+    pub promote_state: Option<watch::Receiver<PromoteState>>,
 
     pub metrics: ComputeMetrics,
 }
@@ -188,6 +189,7 @@ impl ComputeState {
             lfc_prewarm_state: LfcPrewarmState::default(),
             lfc_offload_state: LfcOffloadState::default(),
             terminate_flush_lsn: None,
+            promote_state: None,
         }
     }
 
@@ -368,7 +370,7 @@ fn maybe_cgexec(cmd: &str) -> Command {
 
 struct PostgresHandle {
     postgres: std::process::Child,
-    log_collector: tokio::task::JoinHandle<Result<()>>,
+    log_collector: JoinHandle<Result<()>>,
 }
 
 impl PostgresHandle {
@@ -382,7 +384,7 @@ struct StartVmMonitorResult {
     #[cfg(target_os = "linux")]
     token: tokio_util::sync::CancellationToken,
     #[cfg(target_os = "linux")]
-    vm_monitor: Option<tokio::task::JoinHandle<Result<()>>>,
+    vm_monitor: Option<JoinHandle<Result<()>>>,
 }
 
 impl ComputeNode {
@@ -543,6 +545,14 @@ impl ComputeNode {
 
         // Reap the postgres process
         delay_exit |= this.cleanup_after_postgres_exit()?;
+        let sleep_secs = if delay_exit {
+            30
+        } else {
+            // /terminate returns LSN. If we don't sleep before exiting, connection will
+            // error out "connection closed before message completed", and we won't get
+            // LSN
+            1
+        };
 
         // /terminate returns LSN. If we don't sleep at all, connection will break and we
         // won't get result. If we sleep too much, tests will take significantly longer
