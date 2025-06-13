@@ -9,7 +9,7 @@ use utils::id::{NodeId, TimelineId};
 
 use crate::controller_api::NodeRegisterRequest;
 use crate::models::{LocationConfigMode, ShardImportStatus};
-use crate::shard::TenantShardId;
+use crate::shard::{ShardStripeSize, TenantShardId};
 
 /// Upcall message sent by the pageserver to the configured `control_plane_api` on
 /// startup.
@@ -36,6 +36,10 @@ pub struct ReAttachResponseTenant {
     /// Default value only for backward compat: this field should be set
     #[serde(default = "default_mode")]
     pub mode: LocationConfigMode,
+
+    // Default value only for backward compat: this field should be set
+    #[serde(default = "ShardStripeSize::default")]
+    pub stripe_size: ShardStripeSize,
 }
 #[derive(Serialize, Deserialize)]
 pub struct ReAttachResponse {

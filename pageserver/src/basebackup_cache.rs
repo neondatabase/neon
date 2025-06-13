@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
+use anyhow::Context;
 use async_compression::tokio::write::GzipEncoder;
 use camino::{Utf8Path, Utf8PathBuf};
 use metrics::core::{AtomicU64, GenericCounter};
@@ -185,15 +186,17 @@ struct BackgroundTask {
 }
 
 impl BackgroundTask {
+    fn tmp_dir(&self) -> Utf8PathBuf {
+        self.c.data_dir.join("tmp")
+    }
+
     fn entry_tmp_path(
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         lsn: Lsn,
     ) -> Utf8PathBuf {
-        self.c
-            .data_dir
-            .join("tmp")
+        self.tmp_dir()
             .join(BasebackupCache::entry_filename(tenant_id, timeline_id, lsn))
     }
 
@@ -213,15 +216,18 @@ impl BackgroundTask {
         Some((tenant_id, timeline_id, lsn))
     }
 
-    async fn cleanup(&mut self) -> anyhow::Result<()> {
-        // Cleanup tmp directory.
-        let tmp_dir = self.c.data_dir.join("tmp");
-        let mut tmp_dir = tokio::fs::read_dir(&tmp_dir).await?;
-        while let Some(dir_entry) = tmp_dir.next_entry().await? {
-            if let Err(e) = tokio::fs::remove_file(dir_entry.path()).await {
-                tracing::warn!("Failed to remove basebackup cache tmp file: {:#}", e);
-            }
+    // Recreate the tmp directory to clear all files in it.
+    async fn clean_tmp_dir(&self) -> anyhow::Result<()> {
+        let tmp_dir = self.tmp_dir();
+        if tmp_dir.exists() {
+            tokio::fs::remove_dir_all(&tmp_dir).await?;
         }
+        tokio::fs::create_dir_all(&tmp_dir).await?;
+        Ok(())
+    }
+
+    async fn cleanup(&mut self) -> anyhow::Result<()> {
+        self.clean_tmp_dir().await?;
 
         // Remove outdated entries.
         let entries_old = self.c.entries.lock().unwrap().clone();
@@ -259,16 +265,14 @@ impl BackgroundTask {
     }
 
     async fn on_startup(&mut self) -> anyhow::Result<()> {
-        // Create data_dir and tmp directory if they do not exist.
-        tokio::fs::create_dir_all(&self.c.data_dir.join("tmp"))
+        // Create data_dir if it does not exist.
+        tokio::fs::create_dir_all(&self.c.data_dir)
             .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to create basebackup cache data_dir {:?}: {:?}",
-                    self.c.data_dir,
-                    e
-                )
-            })?;
+            .context("Failed to create basebackup cache data directory")?;
+
+        self.clean_tmp_dir()
+            .await
+            .context("Failed to clean tmp directory")?;
 
         // Read existing entries from the data_dir and add them to in-memory state.
         let mut entries = HashMap::<TenantTimelineId, CacheEntry>::new();
@@ -539,6 +543,11 @@ impl BackgroundTask {
         }
 
         // Move the tmp file to the final location atomically.
+        // The tmp file is fsynced, so it's guaranteed that we will not have a partial file
+        // in the main directory.
+        // It's not necessary to fsync the inode after renaming, because the worst case is that
+        // the rename operation will be rolled back on the disk failure, the entry will disappear
+        // from the main directory, and the entry access will cause a cache miss.
         let entry_path = self
             .c
             .entry_path(tenant_shard_id.tenant_id, timeline_id, req_lsn);
@@ -559,16 +568,17 @@ impl BackgroundTask {
     }
 
     /// Prepares a basebackup in a temporary file.
+    /// Guarantees that the tmp file is fsynced before returning.
     async fn prepare_basebackup_tmp(
         &self,
-        emptry_tmp_path: &Utf8Path,
+        entry_tmp_path: &Utf8Path,
         timeline: &Arc<Timeline>,
         req_lsn: Lsn,
     ) -> anyhow::Result<()> {
         let ctx = RequestContext::new(TaskKind::BasebackupCache, DownloadBehavior::Download);
         let ctx = ctx.with_scope_timeline(timeline);
 
-        let file = tokio::fs::File::create(emptry_tmp_path).await?;
+        let file = tokio::fs::File::create(entry_tmp_path).await?;
         let mut writer = BufWriter::new(file);
 
         let mut encoder = GzipEncoder::with_quality(

@@ -610,6 +610,7 @@ impl RemoteStorage for LocalFs {
         _timestamp: SystemTime,
         _done_if_after: SystemTime,
         _cancel: &CancellationToken,
+        _complexity_limit: Option<NonZeroU32>,
     ) -> Result<(), TimeTravelError> {
         Err(TimeTravelError::Unimplemented)
     }
