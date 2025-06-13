@@ -6,7 +6,7 @@ use std::net::{IpAddr, SocketAddr};
 
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
-use postgres_client::config::{AuthKeys, SslMode};
+use postgres_client::config::{AuthKeys, ChannelBinding, SslMode};
 use postgres_client::maybe_tls_stream::MaybeTlsStream;
 use postgres_client::tls::MakeTlsConnect;
 use postgres_client::{NoTls, RawCancelToken, RawConnection};
@@ -129,6 +129,8 @@ pub(crate) struct AuthInfo {
     auth: Option<Auth>,
     server_params: StartupMessageParams,
 
+    channel_binding: ChannelBinding,
+
     /// Console redirect sets user and database, we shouldn't re-use those from the params.
     skip_db_user: bool,
 }
@@ -152,6 +154,8 @@ impl AuthInfo {
             auth: pw.map(|pw| Auth::Password(pw.as_bytes().to_owned())),
             server_params,
             skip_db_user: true,
+            // pg-sni-router is a mitm so this would fail.
+            channel_binding: ChannelBinding::Disable,
         }
     }
 
@@ -165,6 +169,7 @@ impl AuthInfo {
             },
             server_params: StartupMessageParams::default(),
             skip_db_user: false,
+            channel_binding: ChannelBinding::Prefer,
         }
     }
 }
@@ -187,6 +192,7 @@ impl AuthInfo {
             Some(Auth::Password(pw)) => config.password(pw),
             None => &mut config,
         };
+        config.channel_binding(self.channel_binding);
         for (k, v) in self.server_params.iter() {
             config.set_param(k, v);
         }
