@@ -103,6 +103,8 @@ pub enum Auth {
 }
 
 /// A config for authenticating to the compute node.
+// TODO: avoid Clone
+#[derive(Clone)]
 pub(crate) struct AuthInfo {
     /// None for local-proxy, as we use trust-based localhost auth.
     /// Some for sql-over-http, ws, tcp, and in most cases for console-redirect.

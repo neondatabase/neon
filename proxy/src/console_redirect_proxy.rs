@@ -13,9 +13,10 @@ use crate::error::ReportableError;
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
 use crate::pglb::handshake::{HandshakeData, handshake};
 use crate::pglb::passthrough::ProxyPassthrough;
+use crate::pglb::{ClientRequestError, ErrorSource};
 use crate::protocol2::{ConnectHeader, ConnectionInfo, read_proxy_protocol};
 use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
-use crate::proxy::{ClientRequestError, ErrorSource, prepare_client_connection};
+use crate::proxy::prepare_client_connection;
 use crate::util::run_until_cancelled;
 
 pub async fn task_main(

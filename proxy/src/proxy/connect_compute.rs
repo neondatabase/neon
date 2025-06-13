@@ -2,13 +2,13 @@ use async_trait::async_trait;
 use tokio::time;
 use tracing::{debug, info, warn};
 
-use crate::auth::backend::ComputeUserInfo;
+use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
 use crate::compute::{self, AuthInfo, COULD_NOT_CONNECT, PostgresConnection};
-use crate::config::{ComputeConfig, RetryConfig};
+use crate::config::{ComputeConfig, ProxyConfig, RetryConfig};
 use crate::context::RequestContext;
 use crate::control_plane::errors::WakeComputeError;
 use crate::control_plane::locks::ApiLocks;
-use crate::control_plane::{self, NodeInfo};
+use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ReportableError;
 use crate::metrics::{
     ConnectOutcome, ConnectionFailureKind, Metrics, RetriesMetricGroup, RetryType,
@@ -145,6 +145,117 @@ where
     num_retries = 1;
     loop {
         match mechanism.connect_once(ctx, &node_info, compute).await {
+            Ok(res) => {
+                ctx.success();
+                Metrics::get().proxy.retries_metric.observe(
+                    RetriesMetricGroup {
+                        outcome: ConnectOutcome::Success,
+                        retry_type: RetryType::ConnectToCompute,
+                    },
+                    num_retries.into(),
+                );
+                // TODO: is this necessary? We have a metric.
+                info!(?num_retries, "connected to compute node after");
+                return Ok(res);
+            }
+            Err(e) => {
+                if !should_retry(&e, num_retries, compute.retry) {
+                    // Don't log an error here, caller will print the error
+                    Metrics::get().proxy.retries_metric.observe(
+                        RetriesMetricGroup {
+                            outcome: ConnectOutcome::Failed,
+                            retry_type: RetryType::ConnectToCompute,
+                        },
+                        num_retries.into(),
+                    );
+                    return Err(e.into());
+                }
+
+                warn!(error = ?e, num_retries, retriable = true, COULD_NOT_CONNECT);
+            }
+        }
+
+        let wait_duration = retry_after(num_retries, compute.retry);
+        num_retries += 1;
+
+        let pause = ctx.latency_timer_pause(crate::metrics::Waiting::RetryTimeout);
+        time::sleep(wait_duration).await;
+        drop(pause);
+    }
+}
+
+#[tracing::instrument(skip_all)]
+pub(crate) async fn connect_to_compute_pglb<
+    F: AsyncFn(
+        &'static ProxyConfig,
+        &RequestContext,
+        &CachedNodeInfo,
+        &AuthInfo,
+        &ComputeCredentials,
+        &ComputeConfig,
+    ) -> Result<PostgresConnection, compute::ConnectionError>,
+    B: WakeComputeBackend,
+>(
+    config: &'static ProxyConfig,
+    ctx: &RequestContext,
+    connect_compute_fn: F,
+    user_info: &B,
+    auth_info: &AuthInfo,
+    creds: &ComputeCredentials,
+    wake_compute_retry_config: RetryConfig,
+    compute: &ComputeConfig,
+) -> Result<PostgresConnection, compute::ConnectionError> {
+    let mut num_retries = 0;
+    let node_info =
+        wake_compute(&mut num_retries, ctx, user_info, wake_compute_retry_config).await?;
+
+    // try once
+    let err = match connect_compute_fn(config, ctx, &node_info, &auth_info, &creds, compute).await {
+        Ok(res) => {
+            ctx.success();
+            Metrics::get().proxy.retries_metric.observe(
+                RetriesMetricGroup {
+                    outcome: ConnectOutcome::Success,
+                    retry_type: RetryType::ConnectToCompute,
+                },
+                num_retries.into(),
+            );
+            return Ok(res);
+        }
+        Err(e) => e,
+    };
+
+    debug!(error = ?err, COULD_NOT_CONNECT);
+
+    let node_info = if !node_info.cached() || !err.should_retry_wake_compute() {
+        // If we just recieved this from cplane and didn't get it from cache, we shouldn't retry.
+        // Do not need to retrieve a new node_info, just return the old one.
+        if should_retry(&err, num_retries, compute.retry) {
+            Metrics::get().proxy.retries_metric.observe(
+                RetriesMetricGroup {
+                    outcome: ConnectOutcome::Failed,
+                    retry_type: RetryType::ConnectToCompute,
+                },
+                num_retries.into(),
+            );
+            return Err(err.into());
+        }
+        node_info
+    } else {
+        // if we failed to connect, it's likely that the compute node was suspended, wake a new compute node
+        debug!("compute node's state has likely changed; requesting a wake-up");
+        invalidate_cache(node_info);
+        // TODO: increment num_retries?
+        wake_compute(&mut num_retries, ctx, user_info, wake_compute_retry_config).await?
+    };
+
+    // now that we have a new node, try connect to it repeatedly.
+    // this can error for a few reasons, for instance:
+    // * DNS connection settings haven't quite propagated yet
+    debug!("wake_compute success. attempting to connect");
+    num_retries = 1;
+    loop {
+        match connect_compute_fn(config, ctx, &node_info, &auth_info, &creds, compute).await {
             Ok(res) => {
                 ctx.success();
                 Metrics::get().proxy.retries_metric.observe(
