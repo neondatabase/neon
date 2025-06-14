@@ -181,7 +181,7 @@ def run_test_pgbench(env: PgCompare, scale: int, duration: int, workload_type: P
     env.report_size()
 
 
-def get_durations_matrix(default: int = 45) -> list[int]:
+def get_durations_matrix(default: int = 450) -> list[int]:  # 10x increase from 45
     durations = os.getenv("TEST_PG_BENCH_DURATIONS_MATRIX", default=str(default))
     rv = []
     for d in durations.split(","):
@@ -197,7 +197,7 @@ def get_durations_matrix(default: int = 45) -> list[int]:
     return rv
 
 
-def get_scales_matrix(default: int = 10) -> list[int]:
+def get_scales_matrix(default: int = 100) -> list[int]:  # 10x increase from 10
     scales = os.getenv("TEST_PG_BENCH_SCALES_MATRIX", default=str(default))
     rv = []
     for s in scales.split(","):
