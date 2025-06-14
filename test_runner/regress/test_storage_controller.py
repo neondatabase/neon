@@ -3093,6 +3093,70 @@ def test_storage_controller_ps_restarted_during_drain(neon_env_builder: NeonEnvB
     wait_until(reconfigure_node_again)
 
 
+def test_drain_with_secondary_locations(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_pageservers = 4
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    def get_pageserver_tenant_shards(node_id):
+        ps = env.get_pageserver(node_id)
+        locations = ps.http_client().tenant_list_locations()["tenant_shards"]
+        ret = []
+        for loc in locations:
+            ret.append(
+                {
+                    "tenant_shard_id": TenantShardId.parse(loc[0]),
+                    "mode": loc[1]["mode"],
+                }
+            )
+        return ret
+
+    def log_pageservers_state():
+        for ps in env.pageservers:
+            for tenant_shard in get_pageserver_tenant_shards(ps.id):
+                tenant_shard_id = tenant_shard["tenant_shard_id"]
+                mode = tenant_shard["mode"]
+                log.info(f"[PS {ps.id}] Seen {tenant_shard_id} in mode {mode}")
+
+    tenants = {}  # id → shard_count
+    for shard_count in [1, 2, 4, 8]:
+        id, _ = env.create_tenant(shard_count=shard_count, placement_policy='{"Attached": 1}')
+        tenants[id] = shard_count
+
+    log.info("Pageservers before reconcilation:")
+    log_pageservers_state()
+
+    env.storage_controller.reconcile_until_idle()
+
+    log.info("Pageservers before drain:")
+    log_pageservers_state()
+
+    node_id = env.pageservers[0].id
+
+    env.storage_controller.warm_up_all_secondaries()
+    env.storage_controller.retryable_node_operation(
+        lambda ps_id: env.storage_controller.node_drain(ps_id, drain_all=True),
+        node_id,
+        max_attempts=3,
+        backoff=2,
+    )
+
+    env.storage_controller.poll_node_status(
+        node_id,
+        PageserverAvailability.ACTIVE,
+        PageserverSchedulingPolicy.PAUSE_FOR_RESTART,
+        max_attempts=6,
+        backoff=5,
+    )
+
+    log.info("Pageservers after drain:")
+    log_pageservers_state()
+
+    shards = get_pageserver_tenant_shards(node_id)
+    assert shards == []
+
+
 def test_ps_unavailable_after_delete(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_pageservers = 3
 

@@ -1036,8 +1036,9 @@ async fn handle_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiErro
 
     let state = get_state(&req);
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
+    let drain_all: bool = parse_query_param(&req, "drain_all")?.unwrap_or(false);
 
-    state.service.start_node_drain(node_id).await?;
+    state.service.start_node_drain(node_id, drain_all).await?;
 
     json_response(StatusCode::ACCEPTED, ())
 }

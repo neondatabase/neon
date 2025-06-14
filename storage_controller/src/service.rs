@@ -7615,6 +7615,7 @@ impl Service {
     pub(crate) async fn start_node_drain(
         self: &Arc<Self>,
         node_id: NodeId,
+        drain_all: bool,
     ) -> Result<(), ApiError> {
         let (ongoing_op, node_available, node_policy, schedulable_nodes_count) = {
             let locked = self.inner.read().unwrap();
@@ -7688,7 +7689,7 @@ impl Service {
                         }
 
                         tracing::info!("Drain background operation starting");
-                        let res = service.drain_node(node_id, cancel).await;
+                        let res = service.drain_node(node_id, drain_all, cancel).await;
                         match res {
                             Ok(()) => {
                                 tracing::info!("Drain background operation completed successfully");
@@ -8854,9 +8855,30 @@ impl Service {
         }
     }
 
-    /// Drain a node by moving the shards attached to it as primaries.
-    /// This is a long running operation and it should run as a separate Tokio task.
+    /// Drain a node by moving shards that are attached to it, either as primaries or secondaries.
+    /// When `drain_all` is false, only primary attachments are moved - this is used during node
+    /// deployment when the node is expected to return to service soon. When `drain_all` is true,
+    /// both primary and secondary attachments are moved - this is used when permanently removing
+    /// a node.
+    ///
+    /// This is a long running operation that should be spawned as a separate Tokio task.
     pub(crate) async fn drain_node(
+        self: &Arc<Self>,
+        node_id: NodeId,
+        drain_all: bool,
+        cancel: CancellationToken,
+    ) -> Result<(), OperationError> {
+        self.drain_primary_attachments(node_id, cancel.clone())
+            .await?;
+        if drain_all {
+            self.drain_secondary_attachments(node_id, cancel).await?;
+        }
+        Ok(())
+    }
+
+    /// Drain a node by moving the shards attached to it as primaries.
+    /// This is a long running operation
+    async fn drain_primary_attachments(
         self: &Arc<Self>,
         node_id: NodeId,
         cancel: CancellationToken,
@@ -8872,10 +8894,11 @@ impl Service {
         // to not stall the operation when a cold secondary is encountered.
         const SECONDARY_WARMUP_TIMEOUT: Duration = Duration::from_secs(30);
         const SECONDARY_DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-        let reconciler_config = ReconcilerConfigBuilder::new(ReconcilerPriority::Normal)
-            .secondary_warmup_timeout(SECONDARY_WARMUP_TIMEOUT)
-            .secondary_download_request_timeout(SECONDARY_DOWNLOAD_REQUEST_TIMEOUT)
-            .build();
+        let reconciler_config: ReconcilerConfig =
+            ReconcilerConfigBuilder::new(ReconcilerPriority::Normal)
+                .secondary_warmup_timeout(SECONDARY_WARMUP_TIMEOUT)
+                .secondary_download_request_timeout(SECONDARY_DOWNLOAD_REQUEST_TIMEOUT)
+                .build();
 
         let mut waiters = Vec::new();
 
@@ -9049,6 +9072,14 @@ impl Service {
             ));
         }
 
+        Ok(())
+    }
+
+    async fn drain_secondary_attachments(
+        self: &Arc<Self>,
+        _node_id: NodeId,
+        _cancel: CancellationToken,
+    ) -> Result<(), OperationError> {
         Ok(())
     }
 

@@ -65,6 +65,10 @@ enum Command {
     NodeDelete {
         #[arg(long)]
         node_id: NodeId,
+
+        /// Force flag to delete the node without draining
+        #[arg(long)]
+        force: bool,
     },
     /// Delete a tombstone of node from the storage controller.
     NodeDeleteTombstone {
@@ -215,6 +219,8 @@ enum Command {
     StartDrain {
         #[arg(long)]
         node_id: NodeId,
+        #[arg(long)]
+        drain_all: Option<bool>,
     },
     /// Cancel draining the specified pageserver and wait for `timeout`
     /// for the operation to be canceled. May be retried.
@@ -903,7 +909,39 @@ async fn main() -> anyhow::Result<()> {
                 .dispatch::<(), ()>(Method::POST, format!("debug/v1/node/{node_id}/drop"), None)
                 .await?;
         }
-        Command::NodeDelete { node_id } => {
+        Command::NodeDelete { node_id, force } => {
+            // If force is not set, we need to drain the node first
+            // This prevents the node from being deleted while there are still tenants on it
+            if !force {
+                match &storcon_client
+                    .dispatch::<(), NodeDescribeResponse>(
+                        Method::GET,
+                        format!("control/v1/node/{node_id}?drain_all=true"),
+                        None,
+                    )
+                    .await?
+                    .scheduling
+                {
+                    NodeSchedulingPolicy::Draining | NodeSchedulingPolicy::PauseForRestart => {
+                        println!("Node {} is already draining", node_id);
+                    }
+                    _ => {
+                        println!("Node {} is not draining, starting drain", node_id);
+                        storcon_client
+                            .dispatch::<(), ()>(
+                                Method::PUT,
+                                format!("control/v1/node/{node_id}/drain?graceful=true"),
+                                None,
+                            )
+                            .await?;
+                    }
+                }
+
+                // Wait for the node to be drained and printing the current state
+                watch_node_drain(&storcon_client, node_id).await?;
+            }
+
+            // Finally delete the node
             storcon_client
                 .dispatch::<(), ()>(Method::DELETE, format!("control/v1/node/{node_id}"), None)
                 .await?;
@@ -1151,13 +1189,14 @@ async fn main() -> anyhow::Result<()> {
                 failure
             );
         }
-        Command::StartDrain { node_id } => {
+        Command::StartDrain { node_id, drain_all } => {
+            let path = if drain_all == Some(true) {
+                format!("control/v1/node/{node_id}/drain?drain_all=true")
+            } else {
+                format!("control/v1/node/{node_id}/drain")
+            };
             storcon_client
-                .dispatch::<(), ()>(
-                    Method::PUT,
-                    format!("control/v1/node/{node_id}/drain"),
-                    None,
-                )
+                .dispatch::<(), ()>(Method::PUT, path, None)
                 .await?;
             println!("Drain started for {node_id}");
         }
@@ -1348,5 +1387,48 @@ async fn watch_tenant_shard(
 
         tokio::time::sleep(WATCH_INTERVAL).await;
     }
+    Ok(())
+}
+
+async fn watch_node_drain(storcon_client: &Client, node_id: NodeId) -> anyhow::Result<()> {
+    loop {
+        let node_desc = storcon_client
+            .dispatch::<(), NodeDescribeResponse>(
+                Method::GET,
+                format!("control/v1/node/{node_id}"),
+                None,
+            )
+            .await?;
+        let shards_count = storcon_client
+            .dispatch::<(), NodeShardResponse>(
+                Method::GET,
+                format!("control/v1/node/{node_id}/shards"),
+                None,
+            )
+            .await?
+            .shards
+            .len();
+
+        // Print the state
+        if node_desc.scheduling != NodeSchedulingPolicy::Draining {
+            if shards_count != 0 {
+                anyhow::bail!(
+                    "Node {} is not draining, but has {} shards",
+                    node_id,
+                    shards_count
+                );
+            }
+            break;
+        }
+
+        println!(
+            "Node {} is draining, {} shards remaining",
+            node_id, shards_count
+        );
+
+        tokio::time::sleep(WATCH_INTERVAL).await;
+    }
+
+    println!("Node {} is not draining", node_id);
     Ok(())
 }
