@@ -1,8 +1,8 @@
 diff --git a/sql/anon.sql b/sql/anon.sql
-index 0cdc769..f6cc950 100644
+index 0cdc769..85a58a6 100644
 --- a/sql/anon.sql
 +++ b/sql/anon.sql
-@@ -1141,3 +1141,8 @@ $$
+@@ -1141,3 +1141,9 @@ $$
  -- TODO : https://en.wikipedia.org/wiki/L-diversity
  
  -- TODO : https://en.wikipedia.org/wiki/T-closeness
@@ -11,8 +11,9 @@ index 0cdc769..f6cc950 100644
 +
 +GRANT ALL ON SCHEMA anon to neon_superuser;
 +GRANT ALL ON ALL TABLES IN SCHEMA anon TO neon_superuser;
++-- GRANT SET ON PARAMETER anon.transparent_dynamic_masking TO neon_superuser;
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..9b6164b 100644
+index 7da6553..7961984 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
 @@ -74,50 +74,49 @@ $$
@@ -127,3 +128,267 @@ index 7da6553..9b6164b 100644
    VOLATILE
    PARALLEL UNSAFE -- because init is unsafe
    SECURITY INVOKER
+@@ -264,3 +263,22 @@ $$
+ ;
+ 
+ SECURITY LABEL FOR anon ON FUNCTION anon.unload IS 'UNTRUSTED';
++
++
++CREATE OR REPLACE FUNCTION anon.toggle_transparent_dynamic_masking(
++  dbname TEXT,
++  toggle BOOLEAN DEFAULT TRUE
++)
++RETURNS VOID AS
++$$
++BEGIN
++  EXECUTE format('ALTER DATABASE %I SET anon.transparent_dynamic_masking TO %s', dbname, toggle::TEXT);
++END;
++$$
++  LANGUAGE plpgsql
++  VOLATILE
++  SECURITY DEFINER
++  SET search_path=''
++;
++
++SECURITY LABEL FOR anon ON FUNCTION anon.toggle_transparent_dynamic_masking IS 'UNTRUSTED';
+diff --git a/src/guc.rs b/src/guc.rs
+index 74d3822..d4121ae 100644
+--- a/src/guc.rs
++++ b/src/guc.rs
+@@ -3,7 +3,7 @@
+ //----------------------------------------------------------------------------
+ 
+ use pgrx::*;
+-use std::ffi::CStr;
++use std::ffi::{CStr, c_void};
+ 
+ pub static ANON_DUMMY_LOCALE: GucSetting<Option<&'static CStr>> =
+     GucSetting::<Option<&'static CStr>>::new(Some(unsafe {
+@@ -51,25 +51,97 @@ static ANON_MASK_SCHEMA: GucSetting<Option<&'static CStr>> =
+         CStr::from_bytes_with_nul_unchecked(b"mask\0")
+     }));
+ 
++
++unsafe extern "C-unwind" fn check_bool_guc_hook(
++   _newval: *mut bool,
++   _extra: *mut *mut c_void,
++   source: u32
++) -> bool {
++    unsafe {
++        // The sources that we allow are:
++        // 1. PGC_S_DEFAULT (0) -> for default boot up source, likely new session or server.
++        // 2. PGC_S_DATABASE (6) -> a GUC set for a particular database
++        // 3. PGC_S_USER (7) -> a GUC set for a particular role
++        // 4. PGC_S_DATABASE_USER (8) -> a GUC set for a particular role in a particular database
++        // This check only allows sources that load a variable, not ones that try to alter it.
++        // Sources that try to alter it are:
++        // 1. PGC_S_FILE (3) -> ALTER SYSTEM
++        // 2. PGC_S_TEST (12) -> ALTER ROLE/DATABASE
++        // 3. PGC_S_SESSION (13) -> SET ...
++        // TODO (thesuhas): Does PGC_S_GLOBAL need to be added to whitelisted sources?
++        pg_sys::info!("Source: {}", source);
++        if source == 0 || source == 6 || source == 7 || source == 8 {
++            return true;
++        }
++        let oid = pg_sys::GetUserId();
++        let user_name = CStr::from_ptr(pg_sys::GetUserNameFromId(oid, true));
++        let user_str = user_name.to_str().unwrap();
++        pg_sys::info!("user: {} trying to change boolean guc", user_str);
++        if pg_sys::superuser() || user_str == "neon_superuser" || user_str == "neondb_owner" {
++            return true;
++        }
++        pg_sys::ereport!(PgLogLevel::ERROR, PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE, "You are not authorized to change this GUC");
++        false
++    }
++}
++
++unsafe extern "C-unwind" fn check_string_guc_hook(
++_newval: *mut *mut libc::c_char,
++_extra: *mut *mut c_void,
++source: u32
++) -> bool {
++    unsafe {
++        // The sources that we allow are:
++        // 1. PGC_S_DEFAULT (0) -> for default boot up source, likely new session or server.
++        // 2. PGC_S_DATABASE (6) -> a GUC set for a particular database
++        // 3. PGC_S_USER (7) -> a GUC set for a particular role
++        // 4. PGC_S_DATABASE_USER (8) -> a GUC set for a particular role in a particular database
++        // This check only allows sources that load a variable, not ones that try to alter it.
++        // Sources that try to alter it are:
++        // 1. PGC_S_FILE (3) -> ALTER SYSTEM
++        // 2. PGC_S_TEST (12) -> ALTER ROLE/DATABASE
++        // 3. PGC_S_SESSION (13) -> SET ...
++        pg_sys::info!("Source: {}", source);
++        if source == 0 || source == 6 || source == 7 || source == 8 {
++            return true;
++        }
++        let oid = pg_sys::GetUserId();
++        let user_name = CStr::from_ptr(pg_sys::GetUserNameFromId(oid, true));
++        let user_str = user_name.to_str().unwrap();
++        pg_sys::info!("user: {} trying to change string guc", user_str);
++        if pg_sys::superuser() || user_str == "neon_superuser" || user_str == "neondb_owner" {
++            return true;
++        }
++        pg_sys::ereport!(PgLogLevel::ERROR, PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE, "You are not authorized to change this GUC");
++        false
++    }
++}
++
+ // Register the GUC parameters for the extension
+ //
+ pub fn register_gucs() {
+-    GucRegistry::define_string_guc(
++    GucRegistry::define_string_guc_with_hooks(
+         "anon.dummy_locale",
+         "The default locale for the dummy data functions",
+         "",
+         &ANON_DUMMY_LOCALE,
+         GucContext::Suset,
+         GucFlags::SUPERUSER_ONLY,
++        Some(check_string_guc_hook),
++        None,
++        None,
+     );
+ 
+-    GucRegistry::define_string_guc(
++    GucRegistry::define_string_guc_with_hooks(
+         "anon.k_anonymity_provider",
+         "The security label provider used for k-anonymity",
+         "",
+         &ANON_K_ANONYMITY_PROVIDER,
+         GucContext::Suset,
+         GucFlags::SUPERUSER_ONLY,
++        Some(check_string_guc_hook),
++        None,
++        None,
+     );
+ 
+     //
+@@ -80,86 +152,113 @@ pub fn register_gucs() {
+     //
+     // https://github.com/pgcentralfoundation/pgrx/commit/d096efe6fb2d86e87d117b520b9ccd2f90b2e0d1
+     //
+-    GucRegistry::define_string_guc(
++    GucRegistry::define_string_guc_with_hooks(
+         "anon.masking_policies",
+         "Define additional masking policies (the 'anon' policy is already defined)",
+         "",
+         &ANON_MASKING_POLICIES,
+         GucContext::Suset,
+         GucFlags::SUPERUSER_ONLY, /* | GucFlags::LIST_INPUT */
++        Some(check_string_guc_hook),
++        None,
++        None,
+     );
+ 
+-    GucRegistry::define_bool_guc(
++    GucRegistry::define_bool_guc_with_hooks(
+         "anon.privacy_by_default",
+         "Mask all columns with NULL (or the default value for NOT NULL columns)",
+         "",
+         &ANON_PRIVACY_BY_DEFAULT,
+-        GucContext::Suset,
++        GucContext::Userset,
+         GucFlags::default(),
++        Some(check_bool_guc_hook),
++        None,
++        None,
+     );
+-    GucRegistry::define_bool_guc(
++    GucRegistry::define_bool_guc_with_hooks(
+         "anon.transparent_dynamic_masking",
+         "New masking engine (EXPERIMENTAL)",
+         "",
+         &ANON_TRANSPARENT_DYNAMIC_MASKING,
+-        GucContext::Suset,
++        GucContext::Userset,
+         GucFlags::default(),
++        Some(check_bool_guc_hook),
++        None,
++        None,
+     );
+ 
+-    GucRegistry::define_bool_guc(
++    GucRegistry::define_bool_guc_with_hooks(
+         "anon.restrict_to_trusted_schemas",
+         "Masking filters must be in a trusted schema",
+         "Activate this option to prevent non-superuser from using their own masking filters",
+         &ANON_RESTRICT_TO_TRUSTED_SCHEMAS,
+         GucContext::Suset,
+         GucFlags::SUPERUSER_ONLY,
++        Some(check_bool_guc_hook),
++        None,
++        None,
+     );
+ 
+-    GucRegistry::define_bool_guc(
++    GucRegistry::define_bool_guc_with_hooks(
+         "anon.strict_mode",
+         "A masking rule cannot change a column data type, unless you disable this",
+         "Disabling the mode is not recommended",
+         &ANON_STRICT_MODE,
+-        GucContext::Suset,
++        GucContext::Userset,
+         GucFlags::default(),
++        Some(check_bool_guc_hook),
++        None,
++        None,
+     );
+ 
+     // The GUC vars below are not used in the Rust code
+     // but they are used in the plpgsql code
+ 
+-    GucRegistry::define_string_guc(
++    GucRegistry::define_string_guc_with_hooks(
+         "anon.algorithm",
+         "The hash method used for pseudonymizing functions",
+         "",
+         &ANON_ALGORITHM,
+         GucContext::Suset,
+         GucFlags::SUPERUSER_ONLY,
++        Some(check_string_guc_hook),
++        None,
++        None,
+     );
+ 
+-    GucRegistry::define_string_guc(
++    GucRegistry::define_string_guc_with_hooks(
+         "anon.maskschema",
+         "The schema where the dynamic masking views are stored",
+         "",
+         &ANON_MASK_SCHEMA,
+-        GucContext::Suset,
++        GucContext::Userset,
+         GucFlags::default(),
++        Some(check_string_guc_hook),
++        None,
++        None,
+     );
+ 
+-    GucRegistry::define_string_guc(
++    GucRegistry::define_string_guc_with_hooks(
+         "anon.salt",
+         "The salt value used for the pseudonymizing functions",
+         "",
+         &ANON_SALT,
+         GucContext::Suset,
+         GucFlags::SUPERUSER_ONLY,
++        Some(check_string_guc_hook),
++        None,
++        None,
+     );
+ 
+-    GucRegistry::define_string_guc(
++    GucRegistry::define_string_guc_with_hooks(
+         "anon.sourceschema",
+         "The schema where the table are masked by the dynamic masking engine",
+         "",
+         &ANON_SOURCE_SCHEMA,
+-        GucContext::Suset,
++        GucContext::Userset,
+         GucFlags::default(),
++        Some(check_string_guc_hook),
++        None,
++        None,
+     );
+ }
