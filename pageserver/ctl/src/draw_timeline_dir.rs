@@ -20,7 +20,7 @@
 //!
 //! # local timeline dir
 //! ls test_output/test_pgbench\[neon-45-684\]/repo/tenants/$TENANT/timelines/$TIMELINE | \
-//!     grep "__" | cargo run --release --bin pagectl draw-timeline-dir > out.svg
+//!     grep "__" | cargo run --release --bin pagectl draw-timeline > out.svg
 //!
 //! # Layer map dump from `/v1/tenant/$TENANT/timeline/$TIMELINE/layer`
 //! (jq -r '.historic_layers[] | .layer_file_name' | cargo  run -p pagectl draw-timeline) < layer-map.json > out.svg
