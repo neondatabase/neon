@@ -85,7 +85,7 @@ pub struct RawConnection<S, T> {
     pub secret_key: i32,
 }
 
-pub async fn connect_raw_tls<S, T>(
+pub async fn connect_raw<S, T>(
     stream: MaybeTlsStream<S, T>,
     config: &Config,
 ) -> Result<RawConnection<S, T>, Error>

@@ -302,7 +302,7 @@ impl ConnectInfo {
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let (socket_addr, stream) = self.connect_raw(config).await?;
-        let connection = tmp_config.connect_raw_tls(stream).await?;
+        let connection = tmp_config.connect_raw(stream).await?;
         drop(pause);
 
         let RawConnection {
