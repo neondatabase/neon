@@ -354,7 +354,7 @@ InitRoleTableIfNeeded()
 static void
 PushTable()
 {
-	DdlHashTable *new_table = MemoryContextAlloc(CurTransactionContext, sizeof(DdlHashTable));
+	DdlHashTable *new_table = MemoryContextAlloc(TopTransactionContext, sizeof(DdlHashTable));
 
 	new_table->prev_table = CurrentDdlTable;
 	new_table->role_table = NULL;
@@ -454,16 +454,15 @@ MergeTable()
 		}
 		hash_destroy(old_table->role_table);
 	}
+	pfree(old_table);
 }
 
 static void
 PopTable()
 {
-	/*
-	 * Current table gets freed because it is allocated in aborted
-	 * subtransaction's memory context.
-	 */
+	DdlHashTable *old_table = CurrentDdlTable;
 	CurrentDdlTable = CurrentDdlTable->prev_table;
+	pfree(old_table);
 }
 
 static void
