@@ -715,10 +715,10 @@ impl Persistence {
         node_id: NodeId,
     ) -> anyhow::Result<Generation> {
         use crate::schema::tenant_shards::dsl::*;
-        let updated = self
+        let generation_value = self
             .with_measured_conn(DatabaseOperation::IncrementGeneration, move |conn| {
                 Box::pin(async move {
-                    let updated = diesel::update(tenant_shards)
+                    let generation_value: Option<i32> = diesel::update(tenant_shards)
                         .filter(tenant_id.eq(tenant_shard_id.tenant_id.to_string()))
                         .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
                         .filter(shard_count.eq(tenant_shard_id.shard_count.literal() as i32))
@@ -726,20 +726,19 @@ impl Persistence {
                             generation.eq(generation + 1),
                             generation_pageserver.eq(node_id.0 as i64),
                         ))
-                        // TODO: only returning() the generation column
-                        .returning(TenantShardPersistence::as_returning())
+                        .returning(generation)
                         .get_result(conn)
                         .await?;
 
-                    Ok(updated)
+                    Ok(generation_value)
                 })
             })
             .await?;
 
         // Generation is always non-null in the rseult: if the generation column had been NULL, then we
         // should have experienced an SQL Confilict error while executing a query that tries to increment it.
-        debug_assert!(updated.generation.is_some());
-        let Some(g) = updated.generation else {
+        debug_assert!(generation_value.is_some());
+        let Some(g) = generation_value else {
             return Err(DatabaseError::Logical(
                 "Generation should always be set after incrementing".to_string(),
             )
