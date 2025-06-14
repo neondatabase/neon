@@ -139,10 +139,11 @@ impl FeatureResolver {
                 }
                 tenants
             };
-            // TODO: make refresh period configurable
-            inner
-                .clone()
-                .spawn(handle, Duration::from_secs(60), fake_tenants);
+            inner.clone().spawn(
+                handle,
+                Duration::from_secs(posthog_config.refresh_interval_seconds.unwrap_or(600)),
+                fake_tenants,
+            );
             Ok(FeatureResolver {
                 inner: Some(inner),
                 internal_properties: Some(internal_properties),
