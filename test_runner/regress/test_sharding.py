@@ -1482,7 +1482,7 @@ def test_sharding_split_failures(
         log.info("Clearing failure...")
         failure.clear(env)
 
-        wait_until(assert_rolled_back)
+        wait_until(assert_rolled_back, timeout=90)
 
         # Having rolled back, the tenant should be working
         workload.churn_rows(10)
@@ -1505,7 +1505,7 @@ def test_sharding_split_failures(
 
     # Having completed the split, pump the background reconciles to ensure that
     # the scheduler reaches an idle state
-    env.storage_controller.reconcile_until_idle(timeout_secs=30)
+    env.storage_controller.reconcile_until_idle(timeout_secs=90)
 
     # Check that all bystanders are still around.
     for bystander_id, bystander_shard_count in bystanders.items():

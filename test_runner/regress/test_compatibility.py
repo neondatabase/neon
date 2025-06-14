@@ -127,6 +127,12 @@ check_ondisk_data_compatibility_if_enabled = pytest.mark.skipif(
     reason="CHECK_ONDISK_DATA_COMPATIBILITY env is not set",
 )
 
+skip_old_debug_versions = pytest.mark.skipif(
+    os.getenv("BUILD_TYPE", "debug") == "debug"
+    and os.getenv("DEFAULT_PG_VERSION") in [PgVersion.V14, PgVersion.V15, PgVersion.V16],
+    reason="compatibility snaphots not available for old versions of debug builds",
+)
+
 
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(before="test_forward_compatibility")
@@ -197,6 +203,7 @@ ingest_lag_log_line = ".*ingesting record with timestamp lagging more than wait_
 
 
 @check_ondisk_data_compatibility_if_enabled
+@skip_old_debug_versions
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
 def test_backward_compatibility(
@@ -224,6 +231,7 @@ def test_backward_compatibility(
 
 
 @check_ondisk_data_compatibility_if_enabled
+@skip_old_debug_versions
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
 def test_forward_compatibility(
@@ -593,6 +601,7 @@ def test_historic_storage_formats(
 
 
 @check_ondisk_data_compatibility_if_enabled
+@skip_old_debug_versions
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.parametrize(
     **fixtures.utils.allpairs_versions(),
