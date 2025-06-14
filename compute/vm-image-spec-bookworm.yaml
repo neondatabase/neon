@@ -26,7 +26,7 @@ commands:
   - name: postgres-exporter
     user: nobody
     sysvInitAction: respawn
-    shell: 'DATA_SOURCE_NAME="user=cloud_admin sslmode=disable dbname=postgres application_name=postgres-exporter" /bin/postgres_exporter --config.file=/etc/postgres_exporter.yml'
+    shell: 'DATA_SOURCE_NAME="user=cloud_admin sslmode=disable dbname=postgres application_name=postgres-exporter pgaudit.log=none" /bin/postgres_exporter --config.file=/etc/postgres_exporter.yml'
   - name: pgbouncer-exporter
     user: postgres
     sysvInitAction: respawn
@@ -59,7 +59,7 @@ files:
       # the rules use ALL as the hostname. Avoid the pointless lookups and the "unable to
       # resolve host" log messages that they generate.
       Defaults !fqdn
-      
+
       # Allow postgres user (which is what compute_ctl runs as) to run /neonvm/bin/resize-swap
       # and /neonvm/bin/set-disk-quota as root without requiring entering a password (NOPASSWD),
       # regardless of hostname (ALL)
