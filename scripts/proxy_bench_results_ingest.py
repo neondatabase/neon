@@ -30,59 +30,67 @@ METRICS = [
     },
     {
         "name": "max_memory_kb",
-        "promql": 'max(libmetrics_maxrss_kb)',
+        "promql": "max(libmetrics_maxrss_kb)",
         "unit": "kB",
         "report": "LOWER_IS_BETTER",
         "labels": {},
     },
     {
         "name": "jemalloc_active_bytes",
-        "promql": 'sum(jemalloc_active_bytes)',
+        "promql": "sum(jemalloc_active_bytes)",
         "unit": "bytes",
         "report": "LOWER_IS_BETTER",
         "labels": {},
     },
     {
         "name": "open_connections",
-        "promql": 'sum by (protocol) (proxy_opened_client_connections_total - proxy_closed_client_connections_total)',
+        "promql": "sum by (protocol) (proxy_opened_client_connections_total - proxy_closed_client_connections_total)",
         "unit": "",
         "report": "HIGHER_IS_BETTER",
         "labels": {},
         "is_vector": True,
-        "label_field": "protocol"
+        "label_field": "protocol",
     },
 ]
 
+
 def query_prometheus(promql):
-    resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params={'query': promql})
+    resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": promql})
     resp.raise_for_status()
     return resp.json()
 
+
 def extract_scalar_metric(result_json):
     try:
-        return float(result_json['data']['result'][0]['value'][1])
+        return float(result_json["data"]["result"][0]["value"][1])
     except (IndexError, KeyError, ValueError, TypeError):
         return None
 
+
 def extract_vector_metric(result_json, label_field):
     out = []
-    for entry in result_json['data']['result']:
+    for entry in result_json["data"]["result"]:
         try:
-            value = float(entry['value'][1])
+            value = float(entry["value"][1])
         except Exception:
             continue
-        labels = entry.get('metric', {})
+        labels = entry.get("metric", {})
         label_val = labels.get(label_field, None)
         out.append((label_val, value, labels))
     return out
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Collect Prometheus metrics and output in benchmark fixture format")
+    parser = argparse.ArgumentParser(
+        description="Collect Prometheus metrics and output in benchmark fixture format"
+    )
     parser.add_argument("--revision", default=DEFAULT_REVISION)
     parser.add_argument("--platform", default=DEFAULT_PLATFORM)
     parser.add_argument("--suit", default=DEFAULT_SUIT)
     parser.add_argument("--out", default="metrics_benchmarks.json", help="Output JSON file")
-    parser.add_argument("--interval", default=SAMPLE_INTERVAL, type=int, help="Sampling interval (s)")
+    parser.add_argument(
+        "--interval", default=SAMPLE_INTERVAL, type=int, help="Sampling interval (s)"
+    )
     args = parser.parse_args()
 
     start_time = int(time.time())
@@ -99,7 +107,9 @@ def main():
                         query_prometheus(metric["promql"]), metric["label_field"]
                     ):
                         entry = {
-                            "name": f"{metric['name']}.{label_val}" if label_val else metric["name"],
+                            "name": f"{metric['name']}.{label_val}"
+                            if label_val
+                            else metric["name"],
                             "value": value,
                             "unit": metric["unit"],
                             "report": metric["report"],
@@ -135,12 +145,13 @@ def main():
                 "total_duration": total_duration,
                 "data": samples,
             }
-        ]
+        ],
     }
 
     with open(args.out, "w") as f:
         json.dump(out, f, indent=2)
     print(f"Wrote metrics in fixture format to {args.out}")
+
 
 if __name__ == "__main__":
     main()
