@@ -118,6 +118,7 @@ $(POSTGRES_INSTALL_DIR)/build/%/config.status:
 
 	VERSION=$*; \
 	EXTRA_VERSION=$$(cd $(ROOT_PROJECT_DIR)/vendor/postgres-$$VERSION && git rev-parse HEAD); \
+	sed 's/\(^\s\+for (;;)\)/pg_usleep(400000); \1/' -i $(ROOT_PROJECT_DIR)/vendor/postgres-$$VERSION/src/backend/replication/libpqwalreceiver/libpqwalreceiver.c; \
 	(cd $(POSTGRES_INSTALL_DIR)/build/$$VERSION && \
 	env PATH="$(EXTRA_PATH_OVERRIDES):$$PATH" $(ROOT_PROJECT_DIR)/vendor/postgres-$$VERSION/configure \
 		CFLAGS='$(PG_CFLAGS)' LDFLAGS='$(PG_LDFLAGS)' \
