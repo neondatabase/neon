@@ -1,0 +1,79 @@
+name: Periodic proxy performance test on unit-perf hetzner runner
+
+on:
+  push: # TODO: remove after testing
+    branches:
+      - test-proxy-bench # Runs on pushes to branches starting with test-proxy-bench
+  # schedule:
+    # * is a special character in YAML so you have to quote this string
+    #        ┌───────────── minute (0 - 59)
+    #        │ ┌───────────── hour (0 - 23)
+    #        │ │ ┌───────────── day of the month (1 - 31)
+    #        │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
+    #        │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
+    # - cron: '0 5 * * *' # Runs at 5 UTC once a day
+  workflow_dispatch: # adds an ability to run this manually
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run_periodic_proxybench_test:
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
+      pull-requests: write
+    runs-on: [self-hosted, unit-perf]
+    timeout-minutes: 60  # 1h timeout
+    container:
+      image: ghcr.io/neondatabase/build-tools:pinned-bookworm
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --init
+    steps:
+    - name: Checkout proxy-bench Repo
+      uses: actions/checkout@v4
+      with:
+        repository: neondatabase/proxy-bench
+        path: proxy-bench
+
+    - name: Run proxy-bench
+      run: |
+        chmod +x proxy-bench/run.sh
+        cd proxy-bench
+        ./run.sh
+
+    - name: Ingest Bench Results
+      if: success()
+      run: |
+        mkdir -p metrics_output
+        python proxy-bench/scripts/proxy_bench_results_ingest.py --out metrics_output
+
+    - name: Push Metrics to Perf Database
+      if: success()
+      env:
+        REPORT_FROM: metrics_output
+      run: |
+        chmod +x proxy-bench/scripts/generate_and_push_perf_report.sh
+        proxy-bench/scripts/generate_and_push_perf_report.sh
+  
+    - name: Generate Allure Report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: allure-results
+        path: proxy-bench/allure-results
+  
+    - name: Notify Failure
+      if: failure()
+      run: echo "Proxy bench job failed" && exit 1
