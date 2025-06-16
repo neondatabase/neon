@@ -26,7 +26,7 @@ use tracing::{debug, error, info, instrument};
 
 const POSTGRES_WAIT_TIMEOUT: Duration = Duration::from_millis(60 * 1000); // milliseconds
 
-pub const PGBOUNCER_PIDFILE: &'static str = "/tmp/pgbouncer/pid";
+pub const PGBOUNCER_PIDFILE: &str = "/tmp/pgbouncer/pid";
 
 /// Escape a string for including it in a SQL literal.
 ///
