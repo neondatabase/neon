@@ -22,6 +22,7 @@ pub(crate) struct CoreHashMap<'a, K, V> {
     pub(crate) free_head: u32,
 
     pub(crate) _user_list_head: u32,
+	pub(crate) alloc_limit: u32,
 
     // metrics
     pub(crate) buckets_in_use: u32,
@@ -83,6 +84,7 @@ where
             free_head: 0,
             buckets_in_use: 0,
             _user_list_head: INVALID_POS,
+			alloc_limit: INVALID_POS,
         }
     }
 
@@ -147,25 +149,50 @@ where
         self.buckets.len()
     }
 
+	pub fn is_shrinking(&self) -> bool {
+		self.alloc_limit != INVALID_POS
+	}
+	
     pub fn entry_at_bucket(&mut self, pos: usize) -> Option<OccupiedEntry<K, V>> {
         if pos >= self.buckets.len() {
             return None;
         }
 
-        todo!()
-        //self.buckets[pos].inner.as_ref()
+		let entry = self.buckets[pos].inner.as_ref();
+		if entry.is_none() {
+			return None;
+		}
+		
+        let (key, _) = entry.unwrap();
+		Some(OccupiedEntry {
+			_key: key.clone(), // TODO(quantumish): clone unavoidable?
+			bucket_pos: pos as u32,
+			map: self,
+			prev_pos: todo!(), // TODO(quantumish): possibly needs O(n) traversals to rediscover - costly!
+		})
     }
 
     pub(crate) fn alloc_bucket(&mut self, key: K, value: V) -> Result<u32, FullError> {
-        let pos = self.free_head;
-        if pos == INVALID_POS {
-            return Err(FullError());
-        }
+        let mut pos = self.free_head;        
 
-        let bucket = &mut self.buckets[pos as usize];
-        self.free_head = bucket.next;
-        self.buckets_in_use += 1;
+		// TODO(quantumish): relies on INVALID_POS being u32::MAX by default!
+		// instead add a clause `pos != INVALID_POS`?
+		let mut prev = PrevPos::First(self.free_head);
+		while pos < self.alloc_limit {
+			if pos == INVALID_POS {
+				return Err(FullError());
+			}
+			let bucket = &mut self.buckets[pos as usize];
+			prev = PrevPos::Chained(pos);
+			pos = bucket.next;
+		}
+		let bucket = &mut self.buckets[pos as usize];
+		match prev {
+			PrevPos::First(_) => self.free_head = bucket.next,
+			PrevPos::Chained(p) => self.buckets[p].next = bucket.next,
+		}
 
+		self.buckets_in_use += 1;
         bucket.next = INVALID_POS;
         bucket.inner = Some((key, value));
 

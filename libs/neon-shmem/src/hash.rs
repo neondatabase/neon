@@ -292,6 +292,54 @@ where
         Ok(())
     }
 
+	fn begin_shrink(&mut self, num_buckets: u32) {
+		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+		if num_buckets < map.inner.get_num_buckets() as u32 {
+            panic!("shrink called with a larger number of buckets");
+        }
+		map.inner.alloc_limit = num_buckets;
+	}
+
+	fn finish_shrink(&mut self) -> Result<(), crate::shmem::Error> {
+		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+		let inner = &mut map.inner;
+		if !inner.is_shrinking() {
+			panic!("called finish_shrink when no shrink is in progress");
+		}
+
+		let new_num_buckets = inner.alloc_limit; 
+
+		if inner.get_num_buckets() == new_num_buckets as usize {
+            return Ok(());
+        }
+		
+		for b in &inner.buckets[new_num_buckets as usize..] {
+			if b.inner.is_some() {
+				// TODO(quantumish) Do we want to treat this as a violation of an invariant
+				// or a legitimate error the caller can run into? Originally I thought this
+				// could return something like a UnevictedError(index) as soon as it runs
+				// into something (that way a caller could clear their soon-to-be-shrinked 
+				// buckets by repeatedly trying to call `finish_shrink`). 
+				//
+				// Would require making a wider error type enum with this and shmem errors.
+				panic!("unevicted entries in shrinked space")
+			}
+		}
+
+        let shmem_handle = self
+            .shmem_handle
+            .as_ref()
+            .expect("shrink called on a fixed-size hash table");
+
+		let size_bytes = HashMapInit::<K, V>::estimate_size(new_num_buckets);
+        shmem_handle.set_size(size_bytes)?;
+        let end_ptr: *mut u8 = unsafe { shmem_handle.data_ptr.as_ptr().add(size_bytes) };
+
+		let buckets_ptr = inner.buckets.as_mut_ptr();
+		
+		Ok(())
+	}
+
     // TODO: Shrinking is a multi-step process that requires co-operation from the caller
     //
     // 1. The caller must first call begin_shrink(). That forbids allocation of higher-numbered
