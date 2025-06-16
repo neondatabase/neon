@@ -1,13 +1,12 @@
 [package]
-name = "postgres_initdb"
+name = "postgres_versioninfo"
 version = "0.1.0"
-edition.workspace = true
+edition = "2024"
 license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-tokio.workspace = true
-camino.workspace = true
 thiserror.workspace = true
-postgres_versioninfo.workspace = true
+serde.workspace = true
+serde_repr.workspace = true
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }

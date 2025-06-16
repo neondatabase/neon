@@ -23,6 +23,7 @@ members = [
     "libs/pageserver_api",
     "libs/postgres_ffi",
     "libs/postgres_ffi_types",
+    "libs/postgres_versioninfo",
     "libs/safekeeper_api",
     "libs/desim",
     "libs/neon-shmem",
@@ -174,6 +175,7 @@ serde_json = "1"
 serde_path_to_error = "0.1"
 serde_with = { version = "3", features = [ "base64" ] }
 serde_assert = "0.5.0"
+serde_repr = "0.1.20"
 sha2 = "0.10.2"
 signal-hook = "0.3"
 smallvec = "1.11"
@@ -261,6 +263,7 @@ postgres_backend = { version = "0.1", path = "./libs/postgres_backend/" }
 postgres_connection = { version = "0.1", path = "./libs/postgres_connection/" }
 postgres_ffi = { version = "0.1", path = "./libs/postgres_ffi/" }
 postgres_ffi_types = { version = "0.1", path = "./libs/postgres_ffi_types/" }
+postgres_versioninfo = { version = "0.1", path = "./libs/postgres_versioninfo/" }
 postgres_initdb = { path = "./libs/postgres_initdb" }
 posthog_client_lite = { version = "0.1", path = "./libs/posthog_client_lite" }
 pq_proto = { version = "0.1", path = "./libs/pq_proto/" }

@@ -11,9 +11,9 @@ use super::super::waldecoder::WalStreamDecoder;
 use super::bindings::{
     CheckPoint, ControlFileData, DBState_DB_SHUTDOWNED, FullTransactionId, TimeLineID, TimestampTz,
     XLogLongPageHeaderData, XLogPageHeaderData, XLogRecPtr, XLogRecord, XLogSegNo, XLOG_PAGE_MAGIC,
+    MY_PGVERSION
 };
 use super::wal_generator::LogicalMessageGenerator;
-use super::PG_MAJORVERSION;
 use crate::pg_constants;
 use crate::PG_TLI;
 use crate::{uint32, uint64, Oid};
@@ -233,7 +233,7 @@ pub fn find_end_of_wal(
     let mut result = start_lsn;
     let mut curr_lsn = start_lsn;
     let mut buf = [0u8; XLOG_BLCKSZ];
-    let pg_version = PG_MAJORVERSION[1..3].parse::<u32>().unwrap();
+    let pg_version = MY_PGVERSION;
     debug!("find_end_of_wal PG_VERSION: {}", pg_version);
 
     let mut decoder = WalStreamDecoder::new(start_lsn, pg_version);

@@ -22,6 +22,7 @@ use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
 use postgres_connection::{PgConnectionConfig, parse_host_port};
+use safekeeper_api::PgMajorVersion;
 use utils::auth::{Claims, Scope};
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
@@ -607,7 +608,7 @@ impl PageServerNode {
         timeline_id: TimelineId,
         base: (Lsn, PathBuf),
         pg_wal: Option<(Lsn, PathBuf)>,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
     ) -> anyhow::Result<()> {
         // Init base reader
         let (start_lsn, base_tarfile_path) = base;

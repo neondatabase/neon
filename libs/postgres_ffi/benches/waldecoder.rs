@@ -4,6 +4,7 @@ use criterion::{Bencher, Criterion, criterion_group, criterion_main};
 use postgres_ffi::v17::wal_generator::LogicalMessageGenerator;
 use postgres_ffi::v17::waldecoder_handler::WalStreamDecoderHandler;
 use postgres_ffi::waldecoder::WalStreamDecoder;
+use postgres_versioninfo::PgMajorVersion;
 use pprof::criterion::{Output, PProfProfiler};
 use utils::lsn::Lsn;
 
@@ -32,7 +33,7 @@ fn bench_complete_record(c: &mut Criterion) {
         let value_size = LogicalMessageGenerator::make_value_size(size, PREFIX);
         let value = vec![1; value_size];
 
-        let mut decoder = WalStreamDecoder::new(Lsn(0), 170000);
+        let mut decoder = WalStreamDecoder::new(Lsn(0), PgMajorVersion::PG17);
         let msg = LogicalMessageGenerator::new(PREFIX, &value)
             .next()
             .unwrap()

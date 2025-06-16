@@ -38,6 +38,7 @@ use pageserver_api::models::{
     WalRedoManagerStatus,
 };
 use pageserver_api::shard::{ShardIdentity, ShardStripeSize, TenantShardId};
+use postgres_ffi::PgMajorVersion;
 use remote_storage::{DownloadError, GenericRemoteStorage, TimeoutOrCancel};
 use remote_timeline_client::index::GcCompactionState;
 use remote_timeline_client::manifest::{
@@ -497,7 +498,7 @@ impl WalRedoManager {
         lsn: Lsn,
         base_img: Option<(Lsn, bytes::Bytes)>,
         records: Vec<(Lsn, wal_decoder::models::record::NeonWalRecord)>,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         redo_attempt_type: RedoAttemptType,
     ) -> Result<bytes::Bytes, walredo::Error> {
         match self {
@@ -933,7 +934,7 @@ pub(crate) enum CreateTimelineParams {
 pub(crate) struct CreateTimelineParamsBootstrap {
     pub(crate) new_timeline_id: TimelineId,
     pub(crate) existing_initdb_timeline_id: Option<TimelineId>,
-    pub(crate) pg_version: u32,
+    pub(crate) pg_version: PgMajorVersion,
 }
 
 /// NB: See comment on [`CreateTimelineIdempotency::Branch`] for why there's no `pg_version` here.
@@ -971,7 +972,7 @@ pub(crate) enum CreateTimelineIdempotency {
     /// NB: special treatment, see comment in [`Self`].
     FailWithConflict,
     Bootstrap {
-        pg_version: u32,
+        pg_version: PgMajorVersion,
     },
     /// NB: branches always have the same `pg_version` as their ancestor.
     /// While [`pageserver_api::models::TimelineCreateRequestMode::Branch::pg_version`]
@@ -2541,7 +2542,7 @@ impl TenantShard {
         self: &Arc<Self>,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         ctx: &RequestContext,
     ) -> anyhow::Result<(UninitializedTimeline, RequestContext)> {
         anyhow::ensure!(
@@ -2593,7 +2594,7 @@ impl TenantShard {
         self: &Arc<Self>,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let (uninit_tl, ctx) = self
@@ -2632,7 +2633,7 @@ impl TenantShard {
         self: &Arc<Self>,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         ctx: &RequestContext,
         in_memory_layer_desc: Vec<timeline::InMemoryLayerTestDesc>,
         delta_layer_desc: Vec<timeline::DeltaLayerTestDesc>,
@@ -2898,7 +2899,7 @@ impl TenantShard {
                     Lsn(0),
                     initdb_lsn,
                     initdb_lsn,
-                    15,
+                    PgMajorVersion::PG15,
                 );
                 this.prepare_new_timeline(
                     new_timeline_id,
@@ -5090,7 +5091,7 @@ impl TenantShard {
     pub(crate) async fn bootstrap_timeline_test(
         self: &Arc<Self>,
         timeline_id: TimelineId,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         load_existing_initdb: Option<TimelineId>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
@@ -5232,7 +5233,7 @@ impl TenantShard {
     async fn bootstrap_timeline(
         self: &Arc<Self>,
         timeline_id: TimelineId,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         load_existing_initdb: Option<TimelineId>,
         ctx: &RequestContext,
     ) -> Result<CreateTimelineResult, CreateTimelineError> {
@@ -5770,7 +5771,7 @@ impl TenantShard {
 async fn run_initdb(
     conf: &'static PageServerConf,
     initdb_target_dir: &Utf8Path,
-    pg_version: u32,
+    pg_version: PgMajorVersion,
     cancel: &CancellationToken,
 ) -> Result<(), InitdbError> {
     let initdb_bin_path = conf
@@ -6051,7 +6052,7 @@ pub(crate) mod harness {
             lsn: Lsn,
             base_img: Option<(Lsn, Bytes)>,
             records: Vec<(Lsn, NeonWalRecord)>,
-            _pg_version: u32,
+            _pg_version: PgMajorVersion,
             _redo_attempt_type: RedoAttemptType,
         ) -> Result<Bytes, walredo::Error> {
             let records_neon = records.iter().all(|r| apply_neon::can_apply_in_neon(&r.1));
@@ -6223,7 +6224,7 @@ mod tests {
     async fn randomize_timeline(
         tenant: &Arc<TenantShard>,
         new_timeline_id: TimelineId,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         spec: TestTimelineSpecification,
         random: &mut rand::rngs::StdRng,
         ctx: &RequestContext,
