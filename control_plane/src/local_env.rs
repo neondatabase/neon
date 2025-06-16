@@ -15,6 +15,7 @@ use clap::ValueEnum;
 use pem::Pem;
 use postgres_backend::AuthType;
 use reqwest::{Certificate, Url};
+use safekeeper_api::PgMajorVersion;
 use serde::{Deserialize, Serialize};
 use utils::auth::encode_from_key_file;
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
@@ -421,25 +422,21 @@ impl LocalEnv {
         self.pg_distrib_dir.clone()
     }
 
-    pub fn pg_distrib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
+    pub fn pg_distrib_dir(&self, pg_version: PgMajorVersion) -> anyhow::Result<PathBuf> {
         let path = self.pg_distrib_dir.clone();
 
-        #[allow(clippy::manual_range_patterns)]
-        match pg_version {
-            14 | 15 | 16 | 17 => Ok(path.join(format!("v{pg_version}"))),
-            _ => bail!("Unsupported postgres version: {}", pg_version),
-        }
+        Ok(path.join(pg_version.v_str()))
     }
 
-    pub fn pg_dir(&self, pg_version: u32, dir_name: &str) -> anyhow::Result<PathBuf> {
+    pub fn pg_dir(&self, pg_version: PgMajorVersion, dir_name: &str) -> anyhow::Result<PathBuf> {
         Ok(self.pg_distrib_dir(pg_version)?.join(dir_name))
     }
 
-    pub fn pg_bin_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
+    pub fn pg_bin_dir(&self, pg_version: PgMajorVersion) -> anyhow::Result<PathBuf> {
         self.pg_dir(pg_version, "bin")
     }
 
-    pub fn pg_lib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
+    pub fn pg_lib_dir(&self, pg_version: PgMajorVersion) -> anyhow::Result<PathBuf> {
         self.pg_dir(pg_version, "lib")
     }
 

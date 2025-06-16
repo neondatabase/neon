@@ -20,7 +20,8 @@ use pageserver_api::key::{Key, rel_block_to_key};
 use pageserver_api::reltag::{RelTag, SlruKind};
 use postgres_ffi::pg_constants::{PG_HBA, PGDATA_SPECIAL_FILES};
 use postgres_ffi::{
-    BLCKSZ, PG_TLI, RELSEG_SIZE, WAL_SEGMENT_SIZE, XLogFileName, dispatch_pgversion, pg_constants,
+    BLCKSZ, PG_TLI, PgMajorVersion, RELSEG_SIZE, WAL_SEGMENT_SIZE, XLogFileName,
+    dispatch_pgversion, pg_constants,
 };
 use postgres_ffi_types::constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
 use postgres_ffi_types::forknum::{INIT_FORKNUM, MAIN_FORKNUM};
@@ -619,10 +620,7 @@ where
         };
 
         if spcnode == GLOBALTABLESPACE_OID {
-            let pg_version_str = match self.timeline.pg_version {
-                14 | 15 => self.timeline.pg_version.to_string(),
-                ver => format!("{ver}\x0A"),
-            };
+            let pg_version_str = self.timeline.pg_version.versionfile_string();
             let header = new_tar_header("PG_VERSION", pg_version_str.len() as u64)?;
             self.ar
                 .append(&header, pg_version_str.as_bytes())
@@ -679,10 +677,7 @@ where
             if let Some(img) = relmap_img {
                 let dst_path = format!("base/{}/PG_VERSION", dbnode);
 
-                let pg_version_str = match self.timeline.pg_version {
-                    14 | 15 => self.timeline.pg_version.to_string(),
-                    ver => format!("{ver}\x0A"),
-                };
+                let pg_version_str = self.timeline.pg_version.versionfile_string();
                 let header = new_tar_header(&dst_path, pg_version_str.len() as u64)?;
                 self.ar
                     .append(&header, pg_version_str.as_bytes())
@@ -713,7 +708,7 @@ where
         buf.extend_from_slice(&img[..]);
         let crc = crc32c::crc32c(&img[..]);
         buf.put_u32_le(crc);
-        let path = if self.timeline.pg_version < 17 {
+        let path = if self.timeline.pg_version < PgMajorVersion::PG17 {
             format!("pg_twophase/{:>08X}", xid)
         } else {
             format!("pg_twophase/{:>016X}", xid)

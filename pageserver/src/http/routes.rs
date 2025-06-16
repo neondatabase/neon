@@ -41,6 +41,7 @@ use pageserver_api::models::{
     TopTenantShardItem, TopTenantShardsRequest, TopTenantShardsResponse,
 };
 use pageserver_api::shard::{ShardCount, TenantShardId};
+use postgres_ffi::PgMajorVersion;
 use remote_storage::{DownloadError, GenericRemoteStorage, TimeTravelError};
 use scopeguard::defer;
 use serde_json::json;
@@ -3381,7 +3382,7 @@ async fn put_tenant_timeline_import_basebackup(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let base_lsn: Lsn = must_parse_query_param(&request, "base_lsn")?;
     let end_lsn: Lsn = must_parse_query_param(&request, "end_lsn")?;
-    let pg_version: u32 = must_parse_query_param(&request, "pg_version")?;
+    let pg_version: PgMajorVersion = must_parse_query_param(&request, "pg_version")?;
 
     check_permission(&request, Some(tenant_id))?;
 

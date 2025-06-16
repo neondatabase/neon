@@ -18,7 +18,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use futures::future::BoxFuture;
 use postgres_ffi::v14::xlog_utils::{IsPartialXLogFileName, IsXLogFileName, XLogFromFileName};
 use postgres_ffi::waldecoder::WalStreamDecoder;
-use postgres_ffi::{PG_TLI, XLogFileName, XLogSegNo, dispatch_pgversion};
+use postgres_ffi::{PG_TLI, PgMajorVersion, XLogFileName, XLogSegNo, dispatch_pgversion};
 use pq_proto::SystemId;
 use remote_storage::RemotePath;
 use std::sync::Arc;
@@ -180,7 +180,7 @@ impl PhysicalStorage {
         let write_lsn = if state.commit_lsn == Lsn(0) {
             Lsn(0)
         } else {
-            let version = state.server.pg_version / 10000;
+            let version = PgMajorVersion::try_from(state.server.pg_version).unwrap();
 
             dispatch_pgversion!(
                 version,
@@ -226,7 +226,10 @@ impl PhysicalStorage {
             write_record_lsn: write_lsn,
             flush_lsn,
             flush_record_lsn: flush_lsn,
-            decoder: WalStreamDecoder::new(write_lsn, state.server.pg_version / 10000),
+            decoder: WalStreamDecoder::new(
+                write_lsn,
+                PgMajorVersion::try_from(state.server.pg_version).unwrap(),
+            ),
             file: None,
             pending_wal_truncation: true,
         })
@@ -408,7 +411,7 @@ impl Storage for PhysicalStorage {
 
         let segno = init_lsn.segment_number(self.wal_seg_size);
         let (mut file, _) = self.open_or_create(segno).await?;
-        let major_pg_version = self.pg_version / 10000;
+        let major_pg_version = PgMajorVersion::try_from(self.pg_version).unwrap();
         let wal_seg =
             postgres_ffi::generate_wal_segment(segno, self.system_id, major_pg_version, init_lsn)?;
         file.seek(SeekFrom::Start(0)).await?;
@@ -654,7 +657,7 @@ pub struct WalReader {
     // pos is in the same segment as timeline_start_lsn.
     timeline_start_lsn: Lsn,
     // integer version number of PostgreSQL, e.g. 14; 15; 16
-    pg_version: u32,
+    pg_version: PgMajorVersion,
     system_id: SystemId,
     timeline_start_segment: Option<Bytes>,
 }
@@ -697,7 +700,7 @@ impl WalReader {
             wal_backup,
             local_start_lsn: state.local_start_lsn,
             timeline_start_lsn: state.timeline_start_lsn,
-            pg_version: state.server.pg_version / 10000,
+            pg_version: PgMajorVersion::try_from(state.server.pg_version).unwrap(),
             system_id: state.server.system_id,
             timeline_start_segment: None,
         })

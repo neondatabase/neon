@@ -7,12 +7,13 @@
 use std::fmt;
 
 use camino::Utf8Path;
+use postgres_versioninfo::PgMajorVersion;
 
 pub struct RunInitdbArgs<'a> {
     pub superuser: &'a str,
     pub locale: &'a str,
     pub initdb_bin: &'a Utf8Path,
-    pub pg_version: u32,
+    pub pg_version: PgMajorVersion,
     pub library_search_path: &'a Utf8Path,
     pub pgdata: &'a Utf8Path,
 }
@@ -79,12 +80,16 @@ pub async fn do_run_initdb(args: RunInitdbArgs<'_>) -> Result<(), Error> {
         .stderr(std::process::Stdio::piped());
 
     // Before version 14, only the libc provide was available.
-    if pg_version > 14 {
+    if pg_version > PgMajorVersion::PG14 {
         // Version 17 brought with it a builtin locale provider which only provides
         // C and C.UTF-8. While being safer for collation purposes since it is
         // guaranteed to be consistent throughout a major release, it is also more
         // performant.
-        let locale_provider = if pg_version >= 17 { "builtin" } else { "libc" };
+        let locale_provider = if pg_version >= PgMajorVersion::PG17 {
+            "builtin"
+        } else {
+            "libc"
+        };
 
         initdb_command.args(["--locale-provider", locale_provider]);
     }
