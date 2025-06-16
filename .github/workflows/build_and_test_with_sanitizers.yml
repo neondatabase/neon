@@ -79,6 +79,7 @@ jobs:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       build-tag: ${{ needs.tag.outputs.build-tag }}
       build-type: ${{ matrix.build-type }}
+      rerun-failed: false
       test-cfg: '[{"pg_version":"v17"}]'
       sanitizers: enabled
     secrets: inherit
