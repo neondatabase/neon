@@ -98,10 +98,11 @@ async fn main() {
     let auth_interceptor = AuthInterceptor::new("dummy_tenant_id",
                                                 "dummy_timeline_id",
                                                 None);
-    let mut tracker = RequestTracker::new(
+    let tracker = RequestTracker::new(
         pool,
         unary_pool,
         auth_interceptor,
+        ShardIndex::unsharded(),
     );
 
     // 4) fire off 10 000 requests in parallel
