@@ -57,7 +57,9 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
         secondary_cur.execute("select count(*) from t")
         assert secondary_cur.fetchone() == (100,)
 
-    primary.stop_and_destroy(mode="immediate")
+    primary.stop(mode="immediate")
+    lsn = primary.terminate_flush_lsn
+    assert primary.log_contains(f"terminated Postgres lsn={lsn}")
 
     # Reconnect to the secondary to make sure we get a read-write connection
     promo_conn = secondary.connect()
@@ -109,9 +111,9 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
 
     # wait_for_last_flush_lsn(env, secondary, env.initial_tenant, env.initial_timeline)
 
-    secondary.stop_and_destroy()
+    secondary.stop()
 
-    primary = env.endpoints.create_start(branch_name="main", endpoint_id="primary")
+    primary = env.endpoints.create_start(branch_name="main", endpoint_id="primary2")
 
     with primary.connect() as new_primary:
         new_primary_cur = new_primary.cursor()

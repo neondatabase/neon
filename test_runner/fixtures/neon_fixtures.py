@@ -4496,9 +4496,10 @@ class Endpoint(PgProtocol, LogUtils):
         running = self._running.acquire(blocking=False)
         if running:
             assert self.endpoint_id is not None
-            self.env.neon_cli.endpoint_stop(
+            lsn, _ = self.env.neon_cli.endpoint_stop(
                 self.endpoint_id, check_return_code=self.check_stop_result, mode=mode
             )
+            self.terminate_flush_lsn = lsn
 
         if sks_wait_walreceiver_gone is not None:
             for sk in sks_wait_walreceiver_gone[0]:
@@ -4516,9 +4517,10 @@ class Endpoint(PgProtocol, LogUtils):
         running = self._running.acquire(blocking=False)
         if running:
             assert self.endpoint_id is not None
-            self.env.neon_cli.endpoint_stop(
+            lsn, _ = self.env.neon_cli.endpoint_stop(
                 self.endpoint_id, True, check_return_code=self.check_stop_result, mode=mode
             )
+            self.terminate_flush_lsn = lsn
             self.endpoint_id = None
 
         return self

@@ -27,9 +27,12 @@ pub(in crate::http) async fn terminate(
     let immediate = match terminate.unwrap_or_default().mode.as_str() {
         "fast" => false,
         "immediate" => true,
-        v => return JsonResponse::error(
-            StatusCode::BAD_REQUEST,
-            format!("Expected \"fast\" or \"immediate\", got {v}")),
+        v => {
+            return JsonResponse::error(
+                StatusCode::BAD_REQUEST,
+                format!("Expected \"fast\" or \"immediate\", got {v}"),
+            );
+        }
     };
 
     {
