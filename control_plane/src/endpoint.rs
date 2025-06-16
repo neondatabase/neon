@@ -567,50 +567,6 @@ impl Endpoint {
         }
     }
 
-    fn pg_ctl(&self, args: &[&str], auth_token: &Option<String>) -> Result<()> {
-        let pg_ctl_path = self.env.pg_bin_dir(self.pg_version)?.join("pg_ctl");
-        let mut cmd = Command::new(&pg_ctl_path);
-        cmd.args(
-            [
-                &[
-                    "-D",
-                    self.pgdata().to_str().unwrap(),
-                    "-w", //wait till pg_ctl actually does what was asked
-                ],
-                args,
-            ]
-            .concat(),
-        )
-        .env_clear()
-        .env(
-            "LD_LIBRARY_PATH",
-            self.env.pg_lib_dir(self.pg_version)?.to_str().unwrap(),
-        )
-        .env(
-            "DYLD_LIBRARY_PATH",
-            self.env.pg_lib_dir(self.pg_version)?.to_str().unwrap(),
-        );
-
-        // Pass authentication token used for the connections to pageserver and safekeepers
-        if let Some(token) = auth_token {
-            cmd.env("NEON_AUTH_TOKEN", token);
-        }
-
-        let pg_ctl = cmd
-            .output()
-            .context(format!("{} failed", pg_ctl_path.display()))?;
-        if !pg_ctl.status.success() {
-            anyhow::bail!(
-                "pg_ctl failed, exit code: {}, stdout: {}, stderr: {}",
-                pg_ctl.status,
-                String::from_utf8_lossy(&pg_ctl.stdout),
-                String::from_utf8_lossy(&pg_ctl.stderr),
-            );
-        }
-
-        Ok(())
-    }
-
     fn wait_for_compute_ctl_to_exit(&self, send_sigterm: bool) -> Result<()> {
         // TODO use background_process::stop_process instead: https://github.com/neondatabase/neon/pull/6482
         let pidfile_path = self.endpoint_path().join("compute_ctl.pid");
