@@ -11,6 +11,9 @@ if TYPE_CHECKING:
 # Test that pageserver and safekeeper can restart quickly.
 # This is a regression test, see https://github.com/neondatabase/neon/issues/2247
 def test_fixture_restart(neon_env_builder: NeonEnvBuilder):
+    import random
+
+    assert random.random() > 0.05
     env = neon_env_builder.init_start()
 
     for _ in range(3):
@@ -20,3 +23,9 @@ def test_fixture_restart(neon_env_builder: NeonEnvBuilder):
     for _ in range(3):
         env.safekeepers[0].stop()
         env.safekeepers[0].start()
+
+
+def test_flaky3():
+    import random
+
+    assert random.random() > 0.05
