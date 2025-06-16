@@ -136,7 +136,8 @@ pub(crate) struct StorageControllerMetricGroup {
 
     pub(crate) storage_controller_leadership_status: measured::GaugeVec<LeadershipStatusGroupSet>,
 
-    /// HTTP request status counters for handled requests
+    /// Indicator of stucked (long-running) reconciles, broken down by tenant, shard and sequence.
+    /// The metric is automatically removed once the reconciliation completes.
     pub(crate) storage_controller_reconcile_long_running:
         measured::CounterVec<ReconcileLongRunningLabelGroupSet>,
 
