@@ -953,7 +953,7 @@ impl Endpoint {
                             }
                             // keep retrying
                         }
-                        ComputeStatus::Running => {
+                        ComputeStatus::Reloading | ComputeStatus::Running => {
                             // All good!
                             break;
                         }

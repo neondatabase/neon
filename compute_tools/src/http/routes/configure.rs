@@ -34,9 +34,17 @@ pub(in crate::http) async fn configure(
     let c = compute.clone();
     let completed = task::spawn_blocking(move || {
         let mut state = c.state.lock().unwrap();
-        while !matches!(state.status, ComputeStatus::Empty | ComputeStatus::Running) {
-            // wait until we are not concurrently configuring
-            state = c.state_changed.wait(state).unwrap();
+        loop {
+            match state.status {
+                // ideal state.
+                ComputeStatus::Empty | ComputeStatus::Running => break,
+                // we need to wait until reloaded
+                ComputeStatus::Reloading => {
+                    state = c.state_changed.wait(state).unwrap();
+                }
+                // All other cases are unexpected.
+                _ => return Err(JsonResponse::invalid_status(state.status)),
+            }
         }
 
         // Pass the tracing span to the main thread that performs the startup,
@@ -63,7 +71,7 @@ pub(in crate::http) async fn configure(
             if state.status == ComputeStatus::Failed {
                 let err = state.error.as_ref().map_or("unknown error", |x| x);
                 let msg = format!("compute configuration failed: {err:?}");
-                return Err(msg);
+                return Err(JsonResponse::error(StatusCode::INTERNAL_SERVER_ERROR, msg));
             }
         }
 
@@ -73,7 +81,7 @@ pub(in crate::http) async fn configure(
     .unwrap();
 
     if let Err(e) = completed {
-        return JsonResponse::error(StatusCode::INTERNAL_SERVER_ERROR, e);
+        return e;
     }
 
     // Return current compute state if everything went well.
