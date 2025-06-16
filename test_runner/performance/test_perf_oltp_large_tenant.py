@@ -169,7 +169,7 @@ def test_perf_oltp_large_tenant_pgbench(
 def test_perf_oltp_large_tenant_growth(
     remote_compare: PgCompare, duration: int
 ):
-    run_test_pgbench(remote_compare, get_custom_scripts(), duration)
+    run_test_pgbench(remote_compare, " ".join(get_custom_scripts()), duration)
 
 @pytest.mark.remote_cluster
 def test_perf_oltp_large_tenant_maintenance(remote_compare: PgCompare):
