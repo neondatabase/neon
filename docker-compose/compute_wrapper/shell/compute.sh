@@ -94,4 +94,5 @@ echo "Start compute node"
      -C "postgresql://cloud_admin@localhost:55433/postgres"  \
      -b /usr/local/bin/postgres                              \
      --compute-id "compute-$RANDOM"                          \
+     --dev                                                   \
      --config "$CONFIG_FILE"

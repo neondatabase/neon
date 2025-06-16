@@ -569,6 +569,8 @@ class NeonLocalCli(AbstractNeonCli):
             "endpoint",
             "start",
         ]
+        # Always run in dev mode for tests
+        args.append("--dev")
         extra_env_vars = env or {}
         if basebackup_request_tries is not None:
             extra_env_vars["NEON_COMPUTE_TESTING_BASEBACKUP_TRIES"] = str(basebackup_request_tries)
