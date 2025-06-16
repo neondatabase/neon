@@ -19,7 +19,7 @@ pub mod entry;
 #[cfg(test)]
 mod tests;
 
-use core::CoreHashMap;
+use core::{CoreHashMap, INVALID_POS};
 use entry::{Entry, OccupiedEntry};
 
 #[derive(Debug)]
@@ -210,6 +210,53 @@ where
         map.inner.buckets_in_use as usize
     }
 
+	/// Helper function that abstracts the common logic between growing and shrinking.
+	/// The only significant difference in the rehashing step is how many buckets to rehash!
+	fn rehash_dict(
+		&mut self,
+		inner: &mut CoreHashMap<'a, K, V>,
+		buckets_ptr: *mut core::Bucket<K, V>,
+		end_ptr: *mut u8,
+		num_buckets: u32,
+		rehash_buckets: u32,
+	) {
+		// Recalculate the dictionary
+        let buckets;
+        let dictionary;
+        unsafe {
+            let buckets_end_ptr = buckets_ptr.add(num_buckets as usize);
+            let dictionary_ptr: *mut u32 = buckets_end_ptr
+                .byte_add(buckets_end_ptr.align_offset(align_of::<u32>()))
+                .cast();
+            let dictionary_size: usize =
+                end_ptr.byte_offset_from(buckets_end_ptr) as usize / size_of::<u32>();
+
+            buckets = std::slice::from_raw_parts_mut(buckets_ptr, num_buckets as usize);
+            dictionary = std::slice::from_raw_parts_mut(dictionary_ptr, dictionary_size);
+        }
+        for i in 0..dictionary.len() {
+            dictionary[i] = INVALID_POS;
+        }
+
+        for i in 0..rehash_buckets as usize {
+            if buckets[i].inner.is_none() {
+                continue;
+            }
+
+            let mut hasher = DefaultHasher::new();
+            buckets[i].inner.as_ref().unwrap().0.hash(&mut hasher);
+            let hash = hasher.finish();
+
+            let pos: usize = (hash % dictionary.len() as u64) as usize;
+            buckets[i].next = dictionary[pos];
+            dictionary[pos] = i as u32;
+        }
+
+        // Finally, update the CoreHashMap struct
+        inner.dictionary = dictionary;
+        inner.buckets = buckets;
+	}
+	
     /// Grow
     ///
     /// 1. grow the underlying shared memory area
@@ -247,46 +294,17 @@ where
                     } else {
                         inner.free_head
                     },
+					prev: if i > 0 {
+						i as u32 - 1
+					} else {
+						INVALID_POS
+					},
                     inner: None,
                 });
             }
         }
 
-        // Recalculate the dictionary
-        let buckets;
-        let dictionary;
-        unsafe {
-            let buckets_end_ptr = buckets_ptr.add(num_buckets as usize);
-            let dictionary_ptr: *mut u32 = buckets_end_ptr
-                .byte_add(buckets_end_ptr.align_offset(align_of::<u32>()))
-                .cast();
-            let dictionary_size: usize =
-                end_ptr.byte_offset_from(buckets_end_ptr) as usize / size_of::<u32>();
-
-            buckets = std::slice::from_raw_parts_mut(buckets_ptr, num_buckets as usize);
-            dictionary = std::slice::from_raw_parts_mut(dictionary_ptr, dictionary_size);
-        }
-        for i in 0..dictionary.len() {
-            dictionary[i] = core::INVALID_POS;
-        }
-
-        for i in 0..old_num_buckets as usize {
-            if buckets[i].inner.is_none() {
-                continue;
-            }
-
-            let mut hasher = DefaultHasher::new();
-            buckets[i].inner.as_ref().unwrap().0.hash(&mut hasher);
-            let hash = hasher.finish();
-
-            let pos: usize = (hash % dictionary.len() as u64) as usize;
-            buckets[i].next = dictionary[pos];
-            dictionary[pos] = i as u32;
-        }
-
-        // Finally, update the CoreHashMap struct
-        inner.dictionary = dictionary;
-        inner.buckets = buckets;
+		self.rehash_dict(inner, buckets_ptr, end_ptr, num_buckets, old_num_buckets);
         inner.free_head = old_num_buckets;
 
         Ok(())
@@ -294,7 +312,7 @@ where
 
 	fn begin_shrink(&mut self, num_buckets: u32) {
 		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
-		if num_buckets < map.inner.get_num_buckets() as u32 {
+		if num_buckets > map.inner.get_num_buckets() as u32 {
             panic!("shrink called with a larger number of buckets");
         }
 		map.inner.alloc_limit = num_buckets;
@@ -307,14 +325,14 @@ where
 			panic!("called finish_shrink when no shrink is in progress");
 		}
 
-		let new_num_buckets = inner.alloc_limit; 
+		let num_buckets = inner.alloc_limit; 
 
-		if inner.get_num_buckets() == new_num_buckets as usize {
+		if inner.get_num_buckets() == num_buckets as usize {
             return Ok(());
         }
 		
-		for b in &inner.buckets[new_num_buckets as usize..] {
-			if b.inner.is_some() {
+		for i in (num_buckets as usize)..inner.buckets.len() {
+			if inner.buckets[i].inner.is_some() {
 				// TODO(quantumish) Do we want to treat this as a violation of an invariant
 				// or a legitimate error the caller can run into? Originally I thought this
 				// could return something like a UnevictedError(index) as soon as it runs
@@ -324,6 +342,10 @@ where
 				// Would require making a wider error type enum with this and shmem errors.
 				panic!("unevicted entries in shrinked space")
 			}
+			let prev_pos = inner.buckets[i].prev;
+			if prev_pos != INVALID_POS {
+				inner.buckets[prev_pos as usize].next = inner.buckets[i].next;
+			}
 		}
 
         let shmem_handle = self
@@ -331,22 +353,13 @@ where
             .as_ref()
             .expect("shrink called on a fixed-size hash table");
 
-		let size_bytes = HashMapInit::<K, V>::estimate_size(new_num_buckets);
+		let size_bytes = HashMapInit::<K, V>::estimate_size(num_buckets);
         shmem_handle.set_size(size_bytes)?;
         let end_ptr: *mut u8 = unsafe { shmem_handle.data_ptr.as_ptr().add(size_bytes) };
-
 		let buckets_ptr = inner.buckets.as_mut_ptr();
+		self.rehash_dict(inner, buckets_ptr, end_ptr, num_buckets, num_buckets);
 		
 		Ok(())
 	}
 
-    // TODO: Shrinking is a multi-step process that requires co-operation from the caller
-    //
-    // 1. The caller must first call begin_shrink(). That forbids allocation of higher-numbered
-    // buckets.
-    //
-    // 2. Next, the caller must evict all entries in higher-numbered buckets.
-    //
-    // 3. Finally, call finish_shrink(). This recomputes the dictionary and shrinks the underlying
-    //    shmem area
 }

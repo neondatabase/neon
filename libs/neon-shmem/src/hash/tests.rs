@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::hash::HashMapAccess;
 use crate::hash::HashMapInit;
-use crate::hash::UpdateAction;
+use crate::hash::Entry;
 use crate::shmem::ShmemHandle;
 
 use rand::seq::SliceRandom;
@@ -35,20 +35,28 @@ impl<'a> From<&'a [u8]> for TestKey {
     }
 }
 
-fn test_inserts<K: Into<TestKey> + Copy>(keys: &[K]) {
+fn test_inserts<K: Into<TestKey> + Copy>(keys: &[K]) {	
     const MAX_MEM_SIZE: usize = 10000000;
     let shmem = ShmemHandle::new("test_inserts", 0, MAX_MEM_SIZE).unwrap();
 
     let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(100000, shmem);
-    let w = init_struct.attach_writer();
+    let mut w = init_struct.attach_writer();
 
     for (idx, k) in keys.iter().enumerate() {
-        let res = w.insert(&(*k).into(), idx);
-        assert!(res.is_ok());
+		let hash = w.get_hash_value(&(*k).into());
+		let res = w.entry_with_hash((*k).into(), hash);
+		match res {
+			Entry::Occupied(mut e) => { e.insert(idx); }
+			Entry::Vacant(e) => {
+				let res = e.insert(idx);
+				assert!(res.is_ok());
+			},
+		};
     }
 
     for (idx, k) in keys.iter().enumerate() {
-        let x = w.get(&(*k).into());
+		let hash = w.get_hash_value(&(*k).into());
+        let x = w.get_with_hash(&(*k).into(), hash);
         let value = x.as_deref().copied();
         assert_eq!(value, Some(idx));
     }
@@ -121,7 +129,7 @@ struct TestOp(TestKey, Option<usize>);
 
 fn apply_op(
     op: &TestOp,
-    sut: &HashMapAccess<TestKey, TestValue>,
+    map: &mut HashMapAccess<TestKey, usize>,
     shadow: &mut BTreeMap<TestKey, usize>,
 ) {
     eprintln!("applying op: {op:?}");
@@ -133,21 +141,24 @@ fn apply_op(
         shadow.remove(&op.0)
     };
 
-    // apply to Art tree
-    sut.update_with_fn(&op.0, |existing| {
-        assert_eq!(existing.map(TestValue::load), shadow_existing);
+	let hash = map.get_hash_value(&op.0);
+	let entry = map.entry_with_hash(op.0, hash);
+    let hash_existing = match op.1 {
+		Some(new) => {
+			match entry {
+				Entry::Occupied(mut e) => Some(e.insert(new)),
+				Entry::Vacant(e) => { e.insert(new).unwrap(); None },
+			}
+		},
+		None => {
+			match entry {
+				Entry::Occupied(e) => Some(e.remove()),
+				Entry::Vacant(_) => None,
+			}
+		},
+	};
 
-        match (existing, op.1) {
-            (None, None) => UpdateAction::Nothing,
-            (None, Some(new_val)) => UpdateAction::Insert(TestValue::new(new_val)),
-            (Some(_old_val), None) => UpdateAction::Remove,
-            (Some(old_val), Some(new_val)) => {
-                old_val.0.store(new_val, Ordering::Relaxed);
-                UpdateAction::Nothing
-            }
-        }
-    })
-    .expect("out of memory");
+	assert_eq!(shadow_existing, hash_existing);
 }
 
 #[test]
@@ -155,8 +166,8 @@ fn random_ops() {
     const MAX_MEM_SIZE: usize = 10000000;
     let shmem = ShmemHandle::new("test_inserts", 0, MAX_MEM_SIZE).unwrap();
 
-    let init_struct = HashMapInit::<TestKey, TestValue>::init_in_shmem(100000, shmem);
-    let writer = init_struct.attach_writer();
+    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(100000, shmem);
+    let mut writer = init_struct.attach_writer();
 
     let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();
 
@@ -167,7 +178,7 @@ fn random_ops() {
 
         let op = TestOp(key, if rng.random_bool(0.75) { Some(i) } else { None });
 
-        apply_op(&op, &writer, &mut shadow);
+        apply_op(&op, &mut writer, &mut shadow);
 
         if i % 1000 == 0 {
             eprintln!("{i} ops processed");
@@ -182,8 +193,8 @@ fn test_grow() {
     const MEM_SIZE: usize = 10000000;
     let shmem = ShmemHandle::new("test_grow", 0, MEM_SIZE).unwrap();
 
-    let init_struct = HashMapInit::<TestKey, TestValue>::init_in_shmem(1000, shmem);
-    let writer = init_struct.attach_writer();
+    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(1000, shmem);
+    let mut writer = init_struct.attach_writer();
 
     let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();
 
@@ -193,7 +204,7 @@ fn test_grow() {
 
         let op = TestOp(key, if rng.random_bool(0.75) { Some(i) } else { None });
 
-        apply_op(&op, &writer, &mut shadow);
+        apply_op(&op, &mut writer, &mut shadow);
 
         if i % 1000 == 0 {
             eprintln!("{i} ops processed");
@@ -209,12 +220,58 @@ fn test_grow() {
 
         let op = TestOp(key, if rng.random_bool(0.75) { Some(i) } else { None });
 
-        apply_op(&op, &writer, &mut shadow);
+        apply_op(&op, &mut writer, &mut shadow);
 
         if i % 1000 == 0 {
             eprintln!("{i} ops processed");
             //eprintln!("stats: {:?}", tree_writer.get_statistics());
             //test_iter(&tree_writer, &shadow);
+        }
+    }
+}
+
+
+#[test]
+fn test_shrink() {
+    const MEM_SIZE: usize = 10000000;
+    let shmem = ShmemHandle::new("test_shrink", 0, MEM_SIZE).unwrap();
+
+    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(1500, shmem);
+    let mut writer = init_struct.attach_writer();
+
+    let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();
+
+    let mut rng = rand::rng();
+    for i in 0..100 {
+        let key: TestKey = ((rng.next_u32() % 1500) as u128).into();
+
+        let op = TestOp(key, if rng.random_bool(0.75) { Some(i) } else { None });
+
+        apply_op(&op, &mut writer, &mut shadow);
+
+        if i % 1000 == 0 {
+            eprintln!("{i} ops processed");
+        }
+    }
+
+    writer.begin_shrink(1000);
+	for i in 1000..1500 {
+		if let Some(entry) = writer.entry_at_bucket(i) {
+			shadow.remove(&entry._key);
+			entry.remove();
+		}
+	}
+	writer.finish_shrink().unwrap();
+	
+    for i in 0..10000 {
+        let key: TestKey = ((rng.next_u32() % 1000) as u128).into();
+
+        let op = TestOp(key, if rng.random_bool(0.75) { Some(i) } else { None });
+
+        apply_op(&op, &mut writer, &mut shadow);
+
+        if i % 1000 == 0 {
+            eprintln!("{i} ops processed");
         }
     }
 }

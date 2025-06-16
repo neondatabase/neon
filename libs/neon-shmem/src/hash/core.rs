@@ -13,6 +13,7 @@ pub(crate) const INVALID_POS: u32 = u32::MAX;
 // Bucket
 pub(crate) struct Bucket<K, V> {
     pub(crate) next: u32,
+	pub(crate) prev: u32,
     pub(crate) inner: Option<(K, V)>,
 }
 
@@ -22,6 +23,7 @@ pub(crate) struct CoreHashMap<'a, K, V> {
     pub(crate) free_head: u32,
 
     pub(crate) _user_list_head: u32,
+	/// Maximum index of a bucket allowed to be allocated. INVALID_POS if no limit.
 	pub(crate) alloc_limit: u32,
 
     // metrics
@@ -62,6 +64,11 @@ where
                 } else {
                     INVALID_POS
                 },
+				prev: if i > 0 {
+					i as u32 - 1
+				} else {
+					INVALID_POS
+				},
                 inner: None,
             });
         }
@@ -153,45 +160,61 @@ where
 		self.alloc_limit != INVALID_POS
 	}
 	
-    pub fn entry_at_bucket(&mut self, pos: usize) -> Option<OccupiedEntry<K, V>> {
-        if pos >= self.buckets.len() {
-            return None;
-        }
+    pub fn entry_at_bucket(&mut self, pos: usize) -> Option<OccupiedEntry<'a, '_, K, V>> {
+		if pos >= self.buckets.len() {
+			return None;
+		}
 
+		let prev = self.buckets[pos].prev;
 		let entry = self.buckets[pos].inner.as_ref();
 		if entry.is_none() {
 			return None;
-		}
-		
-        let (key, _) = entry.unwrap();
+		}		
+
+		let (key, _) = entry.unwrap();
 		Some(OccupiedEntry {
 			_key: key.clone(), // TODO(quantumish): clone unavoidable?
 			bucket_pos: pos as u32,
 			map: self,
-			prev_pos: todo!(), // TODO(quantumish): possibly needs O(n) traversals to rediscover - costly!
+			prev_pos: if prev == INVALID_POS {
+				// TODO(quantumish): populating this correctly would require an O(n) scan over the dictionary
+				// (perhaps not if we refactored the prev field to be itself something like PrevPos). The real
+				// question though is whether this even needs to be populated correctly? All downstream uses of
+				// this function so far are just for deletion, which isn't really concerned with the dictionary.
+				// Then again, it's unintuitive to appear to return a normal OccupiedEntry which really is fake.
+				PrevPos::First(todo!("unclear what to do here"))
+			} else {
+				PrevPos::Chained(prev)
+			}
 		})
     }
 
     pub(crate) fn alloc_bucket(&mut self, key: K, value: V) -> Result<u32, FullError> {
-        let mut pos = self.free_head;        
+        let mut pos = self.free_head;
 
-		// TODO(quantumish): relies on INVALID_POS being u32::MAX by default!
-		// instead add a clause `pos != INVALID_POS`?
 		let mut prev = PrevPos::First(self.free_head);
-		while pos < self.alloc_limit {
-			if pos == INVALID_POS {
-				return Err(FullError());
-			}
+		while pos!= INVALID_POS && pos >= self.alloc_limit {
 			let bucket = &mut self.buckets[pos as usize];
 			prev = PrevPos::Chained(pos);
 			pos = bucket.next;
 		}
-		let bucket = &mut self.buckets[pos as usize];
+		if pos == INVALID_POS {
+			return Err(FullError());
+		}
 		match prev {
-			PrevPos::First(_) => self.free_head = bucket.next,
-			PrevPos::Chained(p) => self.buckets[p].next = bucket.next,
+			PrevPos::First(_) => {
+				let next_pos = self.buckets[pos as usize].next;
+				self.free_head = next_pos;
+				self.buckets[next_pos as usize].prev = INVALID_POS;
+			}
+			PrevPos::Chained(p) => if p != INVALID_POS {
+				let next_pos = self.buckets[pos as usize].next;
+				self.buckets[p as usize].next = next_pos;
+				self.buckets[next_pos as usize].prev = p;
+			},
 		}
 
+		let bucket = &mut self.buckets[pos as usize];
 		self.buckets_in_use += 1;
         bucket.next = INVALID_POS;
         bucket.inner = Some((key, value));
@@ -199,3 +222,5 @@ where
         return Ok(pos);
     }
 }
+
+	
