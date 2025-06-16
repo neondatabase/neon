@@ -20,26 +20,12 @@ use rand::prelude::*;
 use pageserver_api::key::Key;
 
 use utils::lsn::Lsn;
-use utils::id::TenantTimelineId;
 use utils::shard::ShardIndex;
 
 use futures::stream::FuturesOrdered;
 use futures::StreamExt;
 
 use pageserver_page_api::proto;
-#[derive(Clone)]
-struct KeyRange {
-    timeline: TenantTimelineId,
-    timeline_lsn: Lsn,
-    start: i128,
-    end: i128,
-}
-
-impl KeyRange {
-    fn len(&self) -> i128 {
-        self.end - self.start
-    }
-}
 
 #[tokio::main]
 async fn main() {
