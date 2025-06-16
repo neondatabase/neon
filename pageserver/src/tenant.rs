@@ -1535,20 +1535,26 @@ impl TenantShard {
 
                 // We will time the duration of the attach phase unless this is a creation (attach will do no work)
                 let attach_start = std::time::Instant::now();
-                let attached = {
-                    let _attach_timer = Some(TENANT.attach.start_timer());
-                    tenant_clone.attach(preload, &ctx).await
-                };
-                let attach_duration = attach_start.elapsed();
-                _ = tenant_clone.attach_wal_lag_cooldown.set(WalLagCooldown::new(attach_start, attach_duration));
+				_ = backoff::retry(
+					|| async {
+						let attached = {
+							let _attach_timer = Some(TENANT.attach.start_timer());
+							tenant_clone.attach(preload, &ctx).await
+						};
+						let attach_duration = attach_start.elapsed();
+						_ = tenant_clone.attach_wal_lag_cooldown
+							.set(WalLagCooldown::new(attach_start, attach_duration));
+						attached
+					},
+					|_| false,
+					3,
+					u32::MAX,
+					"Retry any S3 operations.",
+					&tenant_clone.cancel
+				);
 
-                match attached {
-                    Ok(()) => {
-                        info!("attach finished, activating");
-                        tenant_clone.activate(broker_client, None, &ctx);
-                    }
-                    Err(e) => make_broken_or_stopping(&tenant_clone, anyhow::anyhow!(e)),
-                }
+                info!("attach finished, activating");
+                tenant_clone.activate(broker_client, None, &ctx);
 
                 // If we are doing an opportunistic warmup attachment at startup, initialize
                 // logical size at the same time.  This is better than starting a bunch of idle tenants
