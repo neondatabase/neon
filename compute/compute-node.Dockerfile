@@ -1630,7 +1630,7 @@ RUN make install USE_PGXS=1 -j $(getconf _NPROCESSORS_ONLN)
 # compile neon extensions
 #
 #########################################################################################
-FROM pg-build AS neon-ext-build
+FROM pg-build-with-cargo AS neon-ext-build
 ARG PG_VERSION
 
 COPY pgxn/ pgxn/

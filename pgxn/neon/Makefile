@@ -22,7 +22,8 @@ OBJS = \
 	walproposer.o \
 	walproposer_pg.o \
 	neon_ddl_handler.o \
-	walsender_hooks.o
+	walsender_hooks.o \
+	$(NEON_CARGO_ARTIFACT_TARGET_DIR)/libcommunicator.a
 
 PG_CPPFLAGS = -I$(libpq_srcdir)
 SHLIB_LINK_INTERNAL = $(libpq)
@@ -53,6 +54,17 @@ WALPROP_OBJS = \
 	walproposer.o \
 	neon_utils.o \
 	walproposer_compat.o
+
+# libcommunicator.a is built by cargo from the Rust sources under communicator/
+# subdirectory. `cargo build` also generates communicator_bindings.h.
+neon.o: communicator/communicator_bindings.h
+
+$(NEON_CARGO_ARTIFACT_TARGET_DIR)/libcommunicator.a communicator/communicator_bindings.h &:
+	(cd $(srcdir)/communicator && cargo build)
+
+# Force `cargo build` every time. Some of the Rust sources might have
+# changed.
+.PHONY: $(NEON_CARGO_ARTIFACT_TARGET_DIR)/libcommunicator.a communicator/communicator_bindings.h
 
 .PHONY: walproposer-lib
 walproposer-lib: CPPFLAGS += -DWALPROPOSER_LIB
