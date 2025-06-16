@@ -26,7 +26,7 @@ use utils::lsn::Lsn;
 use crate::proto;
 
 /// A protocol error. Typically returned via try_from() or try_into().
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Clone, Debug)]
 pub enum ProtocolError {
     #[error("field '{0}' has invalid value '{1}'")]
     Invalid(&'static str, String),
@@ -487,6 +487,7 @@ impl From<GetPageStatusCode> for i32 {
 
 // Fetches the size of a relation at a given LSN, as # of blocks. Only valid on shard 0, other
 // shards will error.
+#[derive(Clone, Copy, Debug)]
 pub struct GetRelSizeRequest {
     pub read_lsn: ReadLsn,
     pub rel: RelTag,
@@ -530,6 +531,7 @@ impl From<GetRelSizeResponse> for proto::GetRelSizeResponse {
 }
 
 /// Requests an SLRU segment. Only valid on shard 0, other shards will error.
+#[derive(Clone, Copy, Debug)]
 pub struct GetSlruSegmentRequest {
     pub read_lsn: ReadLsn,
     pub kind: SlruKind,
