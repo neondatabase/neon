@@ -10,12 +10,17 @@ use std::sync::Arc;
 use tokio::task;
 use tracing::info;
 
+fn fast() -> String {
+    "fast".to_string()
+}
+
 #[derive(Deserialize, Default)]
 pub struct TerminateQuery {
     //axum has issues deserializing enums i.e.
     // invalid type: string "immediate", expected internally tagged enum
     /// "fast": wait 30s till returning from /terminate to allow control plane to get the error
     /// "immediate": return from /terminate immediately as soon as all components are terminated
+    #[serde(default = "fast")]
     mode: String,
 }
 
