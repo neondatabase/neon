@@ -2210,7 +2210,7 @@ pub fn forward_termination_signal() {
     }
 
     // Terminate pgbouncer with SIGKILL
-    match pid_file::read("/etc/pgbouncer/pid".into()) {
+    match pid_file::read(PGBOUNCER_PIDFILE.into()) {
         Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
             info!("sending SIGKILL to pgbouncer process pid: {}", pid);
             if let Err(e) = kill(pid, Signal::SIGKILL) {
@@ -2219,7 +2219,7 @@ pub fn forward_termination_signal() {
         }
         // pgbouncer does not lock the pid file, so we read and kill the process directly
         Ok(pid_file::PidFileRead::NotHeldByAnyProcess(_)) => {
-            if let Ok(pid_str) = std::fs::read_to_string("/etc/pgbouncer/pid") {
+            if let Ok(pid_str) = std::fs::read_to_string(PGBOUNCER_PIDFILE) {
                 if let Ok(pid) = pid_str.trim().parse::<i32>() {
                     info!(
                         "sending SIGKILL to pgbouncer process pid: {} (from unlocked pid file)",
