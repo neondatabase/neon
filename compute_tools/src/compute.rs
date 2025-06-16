@@ -2187,6 +2187,7 @@ impl ComputeNode {
                         match state.status {
                             // let's update the state to config pending
                             ComputeStatus::ConfigurationPending | ComputeStatus::Running => {
+                                info!("reconfiguring compute due to TLS certificate renewal");
                                 state.set_status(
                                     ComputeStatus::ConfigurationPending,
                                     &self.state_changed,
@@ -2214,8 +2215,10 @@ impl ComputeNode {
 
                     // wait for a new certificate update
                     if handle.block_on(cert_watch.changed()).is_err() {
+                        error!("certificate renewal monitoring task closed unexpectedly");
                         break;
                     }
+                    info!("TLS certificates renewed");
                 }
             });
         }
