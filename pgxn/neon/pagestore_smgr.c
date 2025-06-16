@@ -1688,7 +1688,16 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 			if (mdexists(reln, INIT_FORKNUM))
 #endif
 			{
-				/* It exists locally. Guess it's unlogged then. */
+				/*
+				 * There can be race condition between backend A performing unlogged index build and some other backend B evicting page of this index.
+				 * After `mdexists` check in backend B is completed and returns true, backend A can complete unlogged build and unlink local files
+				 * of this relation before backend B performs `mdwrite`. It is not a problem if unlogged relation has just one segment:
+				 * it is opened and file descriptor is cached by smgr, preventing removing file on the disk. So subsequent `mdwrite` will succeed.
+				 * But if unlogged relation is large enough and consists of multiple segments, then first segment will be truncated and all other - removed.
+				 * So attempt to write to some segment cause error because file doesn't exists any more and previous segment is empty or not exists as well.
+				 * Calling `mdnblocks` cause SMGR to open and cache descriptors of all relation segments and so prevent there removal which guarantees that
+				 * subsequent `mdwrite` will succeed.
+				 */
 				if (mdnblocks(reln, forknum) >= blkno)
 				{
 					/* prevent race condition with unlogged build end which unlinks local files */
