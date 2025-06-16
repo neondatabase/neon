@@ -1659,7 +1659,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 .get(endpoint_id)
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
             let lsn = endpoint.stop(&args.mode, args.destroy).await?;
-            print!("{lsn}")
+            println!("{lsn}")
         }
         EndpointCmd::GenerateJwt(args) => {
             let endpoint = {

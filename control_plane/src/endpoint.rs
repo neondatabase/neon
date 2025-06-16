@@ -1042,21 +1042,18 @@ impl Endpoint {
     }
 
     pub async fn stop(&self, mode: &str, destroy: bool) -> Result<Lsn> {
-        // In production, control plane uses /terminate for shutting down endpoint
-        // which returns LSN after syncing safekeepers.
-        let response = reqwest::Client::new()
-            .post(format!(
-                "http://{}:{}/terminate",
-                self.external_http_address.ip(),
-                self.external_http_address.port()
-            ))
-            .bearer_auth(self.generate_jwt(Some(ComputeClaimsScope::Admin))?)
-            .send()
-            .await?;
-        let lsn: Lsn = serde_json::from_str(&response.text().await?)?;
+        let ip = self.external_http_address.ip();
+        let port = self.external_http_address.port();
+        // We ignore _mode_ and always pass "immediate", otherwise /terminate will
+        // wait 30s before returning which breaks tests
+        let url = format!("http://{ip}:{port}/terminate?mode=immediate");
+        let token = self.generate_jwt(Some(ComputeClaimsScope::Admin))?;
+        let request = reqwest::Client::new().post(url).bearer_auth(token);
 
-        // In case /terminate doesn't exit soon
-        let _ = self.pg_ctl(&["-m", mode, "stop"], &None);
+        let response = request.send().await.context("/terminate")?;
+        let text = response.text().await.context("/terminate result")?;
+        let lsn: Lsn =
+            serde_json::from_str(&text).with_context(|| format!("deserializing \"{text}\""))?;
 
         // Also wait for the compute_ctl process to die. It might have some
         // cleanup work to do after postgres stops, like syncing safekeepers,
