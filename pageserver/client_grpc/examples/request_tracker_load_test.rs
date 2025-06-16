@@ -13,7 +13,7 @@ use pageserver_client_grpc::AuthInterceptor;
 
 use pageserver_client_grpc::client_cache::ChannelFactory;
 
-use tonic::{transport::{Channel}, Request};
+use tonic::transport::Channel;
 
 use rand::prelude::*;
 
@@ -21,13 +21,11 @@ use pageserver_api::key::Key;
 
 use utils::lsn::Lsn;
 use utils::id::TenantTimelineId;
+use utils::shard::ShardIndex;
 
 use futures::stream::FuturesOrdered;
 use futures::StreamExt;
-// use chrono
-use chrono::Utc;
 
-use pageserver_page_api::{GetPageClass, GetPageResponse};
 use pageserver_page_api::proto;
 #[derive(Clone)]
 struct KeyRange {
@@ -107,7 +105,7 @@ async fn main() {
 
     // 4) fire off 10 000 requests in parallel
     let mut handles = FuturesOrdered::new();
-    for i in 0..500000 {
+    for _i in 0..500000 {
 
             let mut rng = rand::thread_rng();
             let r = 0..=1000000i128;
@@ -150,7 +148,7 @@ async fn main() {
     // print timestamp
     println!("Starting 5000000 requests at: {}", chrono::Utc::now());
     // 5) wait for them all
-    for i in 0..500000 {
+    for _i in 0..500000 {
         handles.next().await.expect("Failed to get next handle");
     }
 

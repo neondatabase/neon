@@ -12,7 +12,6 @@ use tokio::task;
 use tokio::time::sleep;
 use rand::Rng;
 use tonic::Status;
-use uuid::Uuid;
 
 // Pull in your ConnectionPool and PooledItemFactory from the pageserver_client_grpc crate.
 // Adjust these paths if necessary.
