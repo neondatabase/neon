@@ -205,7 +205,6 @@ jobs:
     # We do need to run this in `.*-rc-pr` because of hotfixes.
     if: ${{ contains(fromJSON('["pr", "push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     steps:
-
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
         with:
@@ -217,9 +216,6 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
-
-      - name: Install jsonschema
-        run: npm install -g @sourcemeta/jsonschema@9.3.4
 
       - name: Validate manifest against schema
         run: |
