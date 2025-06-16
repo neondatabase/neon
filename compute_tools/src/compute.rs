@@ -356,7 +356,9 @@ impl ComputeNode {
         // N.B. keep it in sync with `ZENITH_OPTIONS` in `get_maintenance_client()`.
         const EXTRA_OPTIONS: &str = "-c role=cloud_admin -c default_transaction_read_only=off -c search_path=public -c statement_timeout=0";
         let options = match conn_conf.get_options() {
-            Some(options) => format!("{} {}", options, EXTRA_OPTIONS),
+            // Allow the control plane to override any options set by the
+            // compute
+            Some(options) => format!("{} {}", EXTRA_OPTIONS, options),
             None => EXTRA_OPTIONS.to_string(),
         };
         conn_conf.options(&options);
