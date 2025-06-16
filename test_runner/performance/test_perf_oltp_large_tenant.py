@@ -47,8 +47,8 @@ def run_test_pgbench(env: PgCompare, custom_scripts: str, duration: int, clients
         "-n",  # no explicit vacuum before the test - we want to rely on auto-vacuum
         "-M",
         "prepared",
-        "--client={clients}}",
-        "--jobs={jobs}}",
+        f"--client={clients}",
+        f"--jobs={jobs}",
         f"-T{duration}",
         "-P60",  # progress every minute
         "--progress-timestamp",
