@@ -1,23 +1,36 @@
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::ops::Range;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use anyhow::Context;
+use anyhow::ensure;
+use futures::TryStreamExt as _;
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api::ForceAwaitLogicalSize;
 use pageserver_client::page_service::BasebackupRequest;
+use pageserver_page_api as page_api;
 use rand::prelude::*;
+use tokio::io::AsyncRead;
 use tokio::sync::Barrier;
 use tokio::task::JoinSet;
+use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+use tokio_util::io::StreamReader;
+use tonic::async_trait;
 use tracing::{info, instrument};
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
 
 use crate::util::tokio_thread_local_stats::AllThreadLocalStats;
 use crate::util::{request_stats, tokio_thread_local_stats};
+
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum Protocol {
+    Libpq,
+    Grpc,
+}
 
 /// basebackup@LatestLSN
 #[derive(clap::Parser)]
@@ -28,6 +41,8 @@ pub(crate) struct Args {
     page_service_connstring: String,
     #[clap(long)]
     pageserver_jwt: Option<String>,
+    #[clap(long, value_enum, default_value = "libpq")]
+    protocol: Protocol,
     #[clap(long, default_value = "1")]
     num_clients: NonZeroUsize,
     #[clap(long, default_value = "1.0")]
@@ -149,8 +164,13 @@ async fn main_impl(
     for tl in &timelines {
         let (sender, receiver) = tokio::sync::mpsc::channel(1); // TODO: not sure what the implications of this are
         work_senders.insert(tl, sender);
-        tasks.push(tokio::spawn(client(
+        let client: Box<dyn Client> = match args.protocol {
+            Protocol::Libpq => Box::new(LibpqClient::new(&args.page_service_connstring).await?),
+            Protocol::Grpc => Box::new(GrpcClient::new(&args.page_service_connstring).await?),
+        };
+        tasks.push(tokio::spawn(run_worker(
             args,
+            client,
             *tl,
             Arc::clone(&start_work_barrier),
             receiver,
@@ -220,8 +240,9 @@ struct Work {
 }
 
 #[instrument(skip_all)]
-async fn client(
-    args: &'static Args,
+async fn run_worker(
+    _args: &'static Args,
+    mut client: Box<dyn Client>,
     timeline: TenantTimelineId,
     start_work_barrier: Arc<Barrier>,
     mut work: tokio::sync::mpsc::Receiver<Work>,
@@ -230,37 +251,14 @@ async fn client(
 ) {
     start_work_barrier.wait().await;
 
-    let client = pageserver_client::page_service::Client::new(args.page_service_connstring.clone())
-        .await
-        .unwrap();
-
     while let Some(Work { lsn, gzip }) = work.recv().await {
         let start = Instant::now();
-        let copy_out_stream = client
-            .basebackup(&BasebackupRequest {
-                tenant_id: timeline.tenant_id,
-                timeline_id: timeline.timeline_id,
-                lsn,
-                gzip,
-            })
-            .await
-            .with_context(|| format!("start basebackup for {timeline}"))
-            .unwrap();
+        let stream = client.basebackup(timeline, lsn, gzip).await.unwrap();
 
-        use futures::StreamExt;
-        let size = Arc::new(AtomicUsize::new(0));
-        copy_out_stream
-            .for_each({
-                |r| {
-                    let size = Arc::clone(&size);
-                    async move {
-                        let size = Arc::clone(&size);
-                        size.fetch_add(r.unwrap().len(), Ordering::Relaxed);
-                    }
-                }
-            })
-            .await;
-        info!("basebackup size is {} bytes", size.load(Ordering::Relaxed));
+        let size = futures::io::copy(stream.compat(), &mut tokio::io::sink().compat_write())
+            .await
+            .unwrap();
+        info!("basebackup size is {size} bytes");
         let elapsed = start.elapsed();
         live_stats.inc();
         STATS.with(|stats| {
@@ -269,4 +267,91 @@ async fn client(
     }
 
     all_work_done_barrier.wait().await;
+}
+
+/// A basebackup client. This allows swithcing out the client protocol implementation.
+#[async_trait]
+trait Client: Send {
+    async fn basebackup(
+        &mut self,
+        ttid: TenantTimelineId,
+        lsn: Option<Lsn>,
+        gzip: bool,
+    ) -> anyhow::Result<Pin<Box<dyn AsyncRead + Send + 'static>>>;
+}
+
+/// A libpq-based Pageserver client.
+struct LibpqClient {
+    inner: pageserver_client::page_service::Client,
+}
+
+impl LibpqClient {
+    async fn new(connstring: &str) -> anyhow::Result<Self> {
+        let inner = pageserver_client::page_service::Client::new(connstring.to_string()).await?;
+        Ok(Self { inner })
+    }
+}
+
+#[async_trait]
+impl Client for LibpqClient {
+    async fn basebackup(
+        &mut self,
+        ttid: TenantTimelineId,
+        lsn: Option<Lsn>,
+        gzip: bool,
+    ) -> anyhow::Result<Pin<Box<dyn AsyncRead + Send + 'static>>> {
+        let req = BasebackupRequest {
+            tenant_id: ttid.tenant_id,
+            timeline_id: ttid.timeline_id,
+            lsn,
+            gzip,
+        };
+        let stream = self.inner.basebackup(&req).await?;
+        Ok(Box::pin(StreamReader::new(
+            stream.map_err(std::io::Error::other),
+        )))
+    }
+}
+
+/// A gRPC client using the raw, no-frills gRPC client.
+struct GrpcClient {
+    inner: page_api::proto::PageServiceClient<tonic::transport::Channel>,
+}
+
+impl GrpcClient {
+    async fn new(connstring: &str) -> anyhow::Result<Self> {
+        let inner = page_api::proto::PageServiceClient::connect(connstring.to_string()).await?;
+        Ok(Self { inner })
+    }
+}
+
+#[async_trait]
+impl Client for GrpcClient {
+    async fn basebackup(
+        &mut self,
+        ttid: TenantTimelineId,
+        lsn: Option<Lsn>,
+        gzip: bool,
+    ) -> anyhow::Result<Pin<Box<dyn AsyncRead + Send + 'static>>> {
+        // TODO: support gzip compression.
+        ensure!(!gzip, "gRPC client does not support gzip compression yet");
+
+        let req = page_api::proto::GetBaseBackupRequest {
+            lsn: lsn.unwrap_or(Lsn(0)).0,
+            replica: false,
+        };
+        let mut req = tonic::Request::new(req);
+        let metadata = req.metadata_mut();
+        metadata.insert("neon-tenant-id", ttid.tenant_id.to_string().try_into()?);
+        metadata.insert("neon-timeline-id", ttid.timeline_id.to_string().try_into()?);
+        metadata.insert("neon-shard-id", "0000".try_into()?);
+
+        let resp = self.inner.get_base_backup(req).await?;
+        let stream = resp.into_inner();
+        Ok(Box::pin(StreamReader::new(
+            stream
+                .map_ok(|chunk| chunk.chunk)
+                .map_err(std::io::Error::other),
+        )))
+    }
 }
