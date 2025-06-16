@@ -633,7 +633,8 @@ class NeonLocalCli(AbstractNeonCli):
             args.append(endpoint_id)
 
         proc = self.raw_cli(args, check_return_code=check_return_code)
-        lsn = Lsn(proc.stdout.removeprefix(".\ncompute_ctl stopped\n"))
+        log.debug(f"endpoint stop stdout: {proc.stdout}")
+        lsn = Lsn(proc.stdout.split()[-1])  # will always be last line of output
         return lsn, proc
 
     def mappings_map_branch(

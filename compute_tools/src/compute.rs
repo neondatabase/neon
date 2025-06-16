@@ -916,10 +916,13 @@ impl ComputeNode {
             info!("syncing safekeepers on shutdown");
             let storage_auth_token = pspec.storage_auth_token.clone();
             let lsn = self.sync_safekeepers(storage_auth_token)?;
-            info!("synced safekeepers at lsn {lsn}");
+            info!(%lsn, "synced safekeepers");
             lsn
         } else {
-            Lsn::INVALID
+            #[allow(non_upper_case_globals)] // for info!
+            const lsn: Lsn = Lsn::INVALID;
+            info!(%lsn, "not primary, not syncing safekeepers");
+            lsn
         };
 
         let mut delay_exit = false;
