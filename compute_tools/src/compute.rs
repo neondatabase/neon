@@ -2202,11 +2202,16 @@ LIMIT 100",
     }
 }
 
-pub fn forward_termination_signal() {
+pub fn forward_termination_signal(dev_mode: bool) {
     let ss_pid = SYNC_SAFEKEEPERS_PID.load(Ordering::SeqCst);
     if ss_pid != 0 {
         let ss_pid = nix::unistd::Pid::from_raw(ss_pid as i32);
         kill(ss_pid, Signal::SIGTERM).ok();
+    }
+
+    if dev_mode {
+        info!("skipping process termination in dev mode");
+        return;
     }
 
     // Terminate pgbouncer with SIGKILL

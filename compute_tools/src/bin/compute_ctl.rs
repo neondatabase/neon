@@ -136,6 +136,10 @@ struct Cli {
         requires = "compute-id"
     )]
     pub control_plane_uri: Option<String>,
+
+    /// Run in development mode, skipping VM-specific operations like process termination
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub dev: bool,
 }
 
 fn main() -> Result<()> {
@@ -194,9 +198,10 @@ async fn init() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL).await?;
 
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGQUIT])?;
+    let dev_mode = cli.dev;
     thread::spawn(move || {
         for sig in signals.forever() {
-            handle_exit_signal(sig);
+            handle_exit_signal(sig, dev_mode);
         }
     });
 
@@ -255,9 +260,9 @@ fn deinit_and_exit(exit_code: Option<i32>) -> ! {
 /// When compute_ctl is killed, send also termination signal to sync-safekeepers
 /// to prevent leakage. TODO: it is better to convert compute_ctl to async and
 /// wait for termination which would be easy then.
-fn handle_exit_signal(sig: i32) {
+fn handle_exit_signal(sig: i32, dev_mode: bool) {
     info!("received {sig} termination signal");
-    forward_termination_signal();
+    forward_termination_signal(dev_mode);
     exit(1);
 }
 
