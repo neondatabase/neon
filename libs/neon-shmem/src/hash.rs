@@ -20,7 +20,7 @@ pub mod entry;
 mod tests;
 
 use core::{CoreHashMap, INVALID_POS};
-use entry::{Entry, OccupiedEntry};
+use entry::{Entry, OccupiedEntry, PrevPos};
 
 #[derive(Debug)]
 pub struct OutOfMemoryError();
@@ -289,15 +289,15 @@ where
             for i in old_num_buckets..num_buckets {
                 let bucket_ptr = buckets_ptr.add(i as usize);
                 bucket_ptr.write(core::Bucket {
-                    next: if i < num_buckets {
+                    next: if i < num_buckets-1 {
                         i as u32 + 1
                     } else {
                         inner.free_head
                     },
 					prev: if i > 0 {
-						i as u32 - 1
+						PrevPos::Chained(i as u32 - 1)
 					} else {
-						INVALID_POS
+						PrevPos::First(INVALID_POS)
 					},
                     inner: None,
                 });
@@ -315,6 +315,10 @@ where
 		if num_buckets > map.inner.get_num_buckets() as u32 {
             panic!("shrink called with a larger number of buckets");
         }
+		_ = self
+            .shmem_handle
+            .as_ref()
+            .expect("shrink called on a fixed-size hash table");
 		map.inner.alloc_limit = num_buckets;
 	}
 
@@ -342,9 +346,21 @@ where
 				// Would require making a wider error type enum with this and shmem errors.
 				panic!("unevicted entries in shrinked space")
 			}
-			let prev_pos = inner.buckets[i].prev;
-			if prev_pos != INVALID_POS {
-				inner.buckets[prev_pos as usize].next = inner.buckets[i].next;
+			match inner.buckets[i].prev {
+				PrevPos::First(_) => {
+					let next_pos = inner.buckets[i].next;
+					inner.free_head = next_pos;
+					if next_pos != INVALID_POS {
+						inner.buckets[next_pos as usize].prev = PrevPos::First(INVALID_POS);
+					}
+				},
+				PrevPos::Chained(j) => {
+					let next_pos = inner.buckets[i].next;
+					inner.buckets[j as usize].next = next_pos;
+					if next_pos != INVALID_POS {
+						inner.buckets[next_pos as usize].prev = PrevPos::Chained(j);
+					}
+				}
 			}
 		}
 
@@ -358,6 +374,7 @@ where
         let end_ptr: *mut u8 = unsafe { shmem_handle.data_ptr.as_ptr().add(size_bytes) };
 		let buckets_ptr = inner.buckets.as_mut_ptr();
 		self.rehash_dict(inner, buckets_ptr, end_ptr, num_buckets, num_buckets);
+		inner.alloc_limit = INVALID_POS;
 		
 		Ok(())
 	}

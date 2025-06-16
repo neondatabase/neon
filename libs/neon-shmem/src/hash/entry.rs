@@ -10,6 +10,7 @@ pub enum Entry<'a, 'b, K, V> {
     Vacant(VacantEntry<'a, 'b, K, V>),
 }
 
+#[derive(Clone, Copy)]
 pub(crate) enum PrevPos {
     First(u32),
     Chained(u32),
@@ -58,10 +59,14 @@ impl<'a, 'b, K, V> OccupiedEntry<'a, 'b, K, V> {
             }
         }
 
-        // and add it to the freelist
+        // and add it to the freelist        
+		if self.map.free_head != INVALID_POS {
+			self.map.buckets[self.map.free_head as usize].prev = PrevPos::Chained(self.bucket_pos);
+		}
         let bucket = &mut self.map.buckets[self.bucket_pos as usize];
         let old_value = bucket.inner.take();
-        bucket.next = self.map.free_head;
+		bucket.next = self.map.free_head;
+		bucket.prev = PrevPos::First(INVALID_POS);
         self.map.free_head = self.bucket_pos;
         self.map.buckets_in_use -= 1;
 
@@ -82,6 +87,9 @@ impl<'a, 'b, K: Clone + Hash + Eq, V> VacantEntry<'a, 'b, K, V> {
             return Err(FullError());
         }
         let bucket = &mut self.map.buckets[pos as usize];
+		if let PrevPos::First(INVALID_POS) = bucket.prev {
+			bucket.prev = PrevPos::First(self.dict_pos);
+		}
         bucket.next = self.map.dictionary[self.dict_pos as usize];
         self.map.dictionary[self.dict_pos as usize] = pos;
 

@@ -13,7 +13,7 @@ pub(crate) const INVALID_POS: u32 = u32::MAX;
 // Bucket
 pub(crate) struct Bucket<K, V> {
     pub(crate) next: u32,
-	pub(crate) prev: u32,
+	pub(crate) prev: PrevPos,
     pub(crate) inner: Option<(K, V)>,
 }
 
@@ -65,9 +65,9 @@ where
                     INVALID_POS
                 },
 				prev: if i > 0 {
-					i as u32 - 1
+					PrevPos::Chained(i as u32 - 1)
 				} else {
-					INVALID_POS
+					PrevPos::First(INVALID_POS)
 				},
                 inner: None,
             });
@@ -176,24 +176,15 @@ where
 			_key: key.clone(), // TODO(quantumish): clone unavoidable?
 			bucket_pos: pos as u32,
 			map: self,
-			prev_pos: if prev == INVALID_POS {
-				// TODO(quantumish): populating this correctly would require an O(n) scan over the dictionary
-				// (perhaps not if we refactored the prev field to be itself something like PrevPos). The real
-				// question though is whether this even needs to be populated correctly? All downstream uses of
-				// this function so far are just for deletion, which isn't really concerned with the dictionary.
-				// Then again, it's unintuitive to appear to return a normal OccupiedEntry which really is fake.
-				PrevPos::First(todo!("unclear what to do here"))
-			} else {
-				PrevPos::Chained(prev)
-			}
+			prev_pos: prev,
 		})
     }
-
+	
     pub(crate) fn alloc_bucket(&mut self, key: K, value: V) -> Result<u32, FullError> {
         let mut pos = self.free_head;
 
 		let mut prev = PrevPos::First(self.free_head);
-		while pos!= INVALID_POS && pos >= self.alloc_limit {
+		while pos != INVALID_POS && pos >= self.alloc_limit {
 			let bucket = &mut self.buckets[pos as usize];
 			prev = PrevPos::Chained(pos);
 			pos = bucket.next;
@@ -204,16 +195,23 @@ where
 		match prev {
 			PrevPos::First(_) => {
 				let next_pos = self.buckets[pos as usize].next;
-				self.free_head = next_pos;
-				self.buckets[next_pos as usize].prev = INVALID_POS;
+				self.free_head = next_pos;				
+				// HACK(quantumish): Really, the INVALID_POS should be the position within the dictionary.
+				// This isn't passed into this function, though, and so for now rather than changing that
+				// we can just check it from `alloc_bucket`. Not a great solution.
+				if next_pos != INVALID_POS {
+					self.buckets[next_pos as usize].prev = PrevPos::First(INVALID_POS);
+				}
 			}
 			PrevPos::Chained(p) => if p != INVALID_POS {
 				let next_pos = self.buckets[pos as usize].next;
 				self.buckets[p as usize].next = next_pos;
-				self.buckets[next_pos as usize].prev = p;
+				if next_pos != INVALID_POS {
+					self.buckets[next_pos as usize].prev = PrevPos::Chained(p);
+				}
 			},
 		}
-
+		
 		let bucket = &mut self.buckets[pos as usize];
 		self.buckets_in_use += 1;
         bucket.next = INVALID_POS;

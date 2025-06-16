@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
+use std::mem::uninitialized;
+use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::hash::HashMapAccess;
@@ -132,8 +134,6 @@ fn apply_op(
     map: &mut HashMapAccess<TestKey, usize>,
     shadow: &mut BTreeMap<TestKey, usize>,
 ) {
-    eprintln!("applying op: {op:?}");
-
     // apply the change to the shadow tree first
     let shadow_existing = if let Some(v) = op.1 {
         shadow.insert(op.0, v)
@@ -161,16 +161,42 @@ fn apply_op(
 	assert_eq!(shadow_existing, hash_existing);
 }
 
+fn do_random_ops(
+	num_ops: usize,
+	size: u32,
+	del_prob: f64,
+	writer: &mut HashMapAccess<TestKey, usize>,
+	shadow: &mut BTreeMap<TestKey, usize>,
+	rng: &mut rand::rngs::ThreadRng,
+) {
+	for i in 0..num_ops {
+        let key: TestKey = ((rng.next_u32() % size) as u128).into();
+        let op = TestOp(key, if rng.random_bool(del_prob) { Some(i) } else { None });
+        apply_op(&op, writer, shadow);
+    }
+}
+
+fn do_deletes(
+	num_ops: usize,
+	writer: &mut HashMapAccess<TestKey, usize>,
+	shadow: &mut BTreeMap<TestKey, usize>,
+) {
+	for i in 0..num_ops {
+		let (k, _) = shadow.pop_first().unwrap();
+		let hash = writer.get_hash_value(&k);
+		writer.remove_with_hash(&k, hash);
+	}
+}
+
 #[test]
 fn random_ops() {
-    const MAX_MEM_SIZE: usize = 10000000;
-    let shmem = ShmemHandle::new("test_inserts", 0, MAX_MEM_SIZE).unwrap();
+    let shmem = ShmemHandle::new("test_inserts", 0, 10000000).unwrap();
 
     let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(100000, shmem);
     let mut writer = init_struct.attach_writer();
-
     let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();
 
+	
     let distribution = Zipf::new(u128::MAX as f64, 1.1).unwrap();
     let mut rng = rand::rng();
     for i in 0..100000 {
@@ -190,88 +216,97 @@ fn random_ops() {
 
 #[test]
 fn test_grow() {
-    const MEM_SIZE: usize = 10000000;
-    let shmem = ShmemHandle::new("test_grow", 0, MEM_SIZE).unwrap();
-
+    let shmem = ShmemHandle::new("test_grow", 0, 10000000).unwrap();
     let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(1000, shmem);
     let mut writer = init_struct.attach_writer();
-
     let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();
-
     let mut rng = rand::rng();
-    for i in 0..10000 {
-        let key: TestKey = ((rng.next_u32() % 1000) as u128).into();
 
-        let op = TestOp(key, if rng.random_bool(0.75) { Some(i) } else { None });
-
-        apply_op(&op, &mut writer, &mut shadow);
-
-        if i % 1000 == 0 {
-            eprintln!("{i} ops processed");
-            //eprintln!("stats: {:?}", tree_writer.get_statistics());
-            //test_iter(&tree_writer, &shadow);
-        }
-    }
-
+    do_random_ops(10000, 1000, 0.75, &mut writer, &mut shadow, &mut rng);
     writer.grow(1500).unwrap();
-
-    for i in 0..10000 {
-        let key: TestKey = ((rng.next_u32() % 1500) as u128).into();
-
-        let op = TestOp(key, if rng.random_bool(0.75) { Some(i) } else { None });
-
-        apply_op(&op, &mut writer, &mut shadow);
-
-        if i % 1000 == 0 {
-            eprintln!("{i} ops processed");
-            //eprintln!("stats: {:?}", tree_writer.get_statistics());
-            //test_iter(&tree_writer, &shadow);
-        }
-    }
+	do_random_ops(10000, 1500, 0.75, &mut writer, &mut shadow, &mut rng);
 }
 
-
-#[test]
-fn test_shrink() {
-    const MEM_SIZE: usize = 10000000;
-    let shmem = ShmemHandle::new("test_shrink", 0, MEM_SIZE).unwrap();
-
-    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(1500, shmem);
-    let mut writer = init_struct.attach_writer();
-
-    let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();
-
-    let mut rng = rand::rng();
-    for i in 0..100 {
-        let key: TestKey = ((rng.next_u32() % 1500) as u128).into();
-
-        let op = TestOp(key, if rng.random_bool(0.75) { Some(i) } else { None });
-
-        apply_op(&op, &mut writer, &mut shadow);
-
-        if i % 1000 == 0 {
-            eprintln!("{i} ops processed");
-        }
-    }
-
-    writer.begin_shrink(1000);
-	for i in 1000..1500 {
-		if let Some(entry) = writer.entry_at_bucket(i) {
+fn do_shrink(
+	writer: &mut HashMapAccess<TestKey, usize>,
+	shadow: &mut BTreeMap<TestKey, usize>,
+	from: u32,
+	to: u32
+) {
+	writer.begin_shrink(to);
+	for i in to..from {
+		if let Some(entry) = writer.entry_at_bucket(i as usize) {
 			shadow.remove(&entry._key);
 			entry.remove();
 		}
 	}
 	writer.finish_shrink().unwrap();
+
+}
+
+#[test]
+fn test_shrink() {
+    let shmem = ShmemHandle::new("test_shrink", 0, 10000000).unwrap();
+    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(1500, shmem);
+    let mut writer = init_struct.attach_writer();
+    let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();
+    let mut rng = rand::rng();
 	
-    for i in 0..10000 {
-        let key: TestKey = ((rng.next_u32() % 1000) as u128).into();
+    do_random_ops(10000, 1500, 0.75, &mut writer, &mut shadow, &mut rng);
+    do_shrink(&mut writer, &mut shadow, 1500, 1000);
+	do_deletes(500, &mut writer, &mut shadow);
+	do_random_ops(10000, 500, 0.75, &mut writer, &mut shadow, &mut rng);
+	assert!(writer.get_num_buckets_in_use() <= 1000);
+}
 
-        let op = TestOp(key, if rng.random_bool(0.75) { Some(i) } else { None });
+#[test]
+fn test_shrink_grow_seq() {
+    let shmem = ShmemHandle::new("test_shrink", 0, 10000000).unwrap();
+    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(1500, shmem);
+    let mut writer = init_struct.attach_writer();
+    let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();
+    let mut rng = rand::rng();
 
-        apply_op(&op, &mut writer, &mut shadow);
+    do_random_ops(500, 1000, 0.1, &mut writer, &mut shadow, &mut rng);
+	eprintln!("Shrinking to 750");
+    do_shrink(&mut writer, &mut shadow, 1000, 750);
+	do_random_ops(200, 1000, 0.5, &mut writer, &mut shadow, &mut rng);
+	eprintln!("Growing to 1500");
+	writer.grow(1500).unwrap();
+	do_random_ops(600, 1500, 0.1, &mut writer, &mut shadow, &mut rng);
+	eprintln!("Shrinking to 200");
+	do_shrink(&mut writer, &mut shadow, 1500, 200);
+	do_deletes(100, &mut writer, &mut shadow);
+	do_random_ops(50, 1500, 0.25, &mut writer, &mut shadow, &mut rng);
+	eprintln!("Growing to 10k");
+	writer.grow(10000).unwrap();
+	do_random_ops(10000, 5000, 0.25, &mut writer, &mut shadow, &mut rng);
+}
 
-        if i % 1000 == 0 {
-            eprintln!("{i} ops processed");
-        }
-    }
+
+#[test]
+#[should_panic]
+fn test_shrink_bigger() {
+    let shmem = ShmemHandle::new("test_shrink", 0, 10000000).unwrap();
+    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(1500, shmem);
+    let mut writer = init_struct.attach_writer();
+	writer.begin_shrink(2000);
+}
+
+#[test]
+#[should_panic]
+fn test_shrink_early_finish() {
+    let shmem = ShmemHandle::new("test_shrink", 0, 10000000).unwrap();
+    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(1500, shmem);
+    let mut writer = init_struct.attach_writer();
+	writer.finish_shrink().unwrap();
+}
+
+#[test]
+#[should_panic]
+fn test_shrink_fixed_size() {
+	let mut area = [MaybeUninit::uninit(); 10000];
+    let init_struct = HashMapInit::<TestKey, usize>::init_in_fixed_area(3, &mut area);
+    let mut writer = init_struct.attach_writer();
+	writer.begin_shrink(1);
 }
