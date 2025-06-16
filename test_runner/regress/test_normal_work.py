@@ -33,7 +33,7 @@ def check_tenant(
     endpoint.stop()
     log.info("compute stopped")
 
-    endpoint.start()
+    endpoint.start(grpc=True)
     res_2 = endpoint.safe_psql("SELECT sum(key) FROM t")
     assert res_2[0] == (5000050000,)
 
