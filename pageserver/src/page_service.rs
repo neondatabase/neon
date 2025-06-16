@@ -628,52 +628,12 @@ impl PageStreamError {
     /// code, or a gRPC status if it should terminate the stream (e.g. shutdown). This is a
     /// convenience method for use from a get_pages gRPC stream.
     #[allow(clippy::result_large_err)]
-    fn into_get_page_response(
+    fn try_into_get_page_response(
         self,
         request_id: page_api::RequestID,
     ) -> Result<proto::GetPageResponse, tonic::Status> {
-        use page_api::GetPageStatusCode;
-        use tonic::Code;
-
-        // We dispatch to Into<tonic::Status> first, and then map it to a GetPageResponse.
-        let status: tonic::Status = self.into();
-        let status_code = match status.code() {
-            // We shouldn't see an OK status here, because we're emitting an error.
-            Code::Ok => {
-                debug_assert_ne!(status.code(), Code::Ok);
-                return Err(tonic::Status::internal(format!(
-                    "unexpected OK status: {status:?}",
-                )));
-            }
-
-            // These are per-request errors, returned as GetPageResponses.
-            Code::AlreadyExists => GetPageStatusCode::InvalidRequest,
-            Code::DataLoss => GetPageStatusCode::InternalError,
-            Code::FailedPrecondition => GetPageStatusCode::InvalidRequest,
-            Code::InvalidArgument => GetPageStatusCode::InvalidRequest,
-            Code::Internal => GetPageStatusCode::InternalError,
-            Code::NotFound => GetPageStatusCode::NotFound,
-            Code::OutOfRange => GetPageStatusCode::InvalidRequest,
-            Code::ResourceExhausted => GetPageStatusCode::SlowDown,
-
-            // These should terminate the stream.
-            Code::Aborted => return Err(status),
-            Code::Cancelled => return Err(status),
-            Code::DeadlineExceeded => return Err(status),
-            Code::PermissionDenied => return Err(status),
-            Code::Unauthenticated => return Err(status),
-            Code::Unavailable => return Err(status),
-            Code::Unimplemented => return Err(status),
-            Code::Unknown => return Err(status),
-        };
-
-        Ok(page_api::GetPageResponse {
-            request_id,
-            status_code,
-            reason: Some(status.message().to_string()),
-            page_images: Vec::new(),
-        }
-        .into())
+        // Convert to a tonic::Status first, then to GetPageResponse as appropriate.
+        Ok(page_api::GetPageResponse::try_from_status(self.into(), request_id)?.into())
     }
 }
 
@@ -3456,7 +3416,15 @@ impl GrpcPageServiceHandler {
         let ctx = ctx.with_scope_page_service_pagestream(&timeline);
 
         // Validate the request, decorate the span, and convert it to a Pagestream request.
-        let req: page_api::GetPageRequest = req.try_into()?;
+        let req_id = req.request_id;
+        let req = match page_api::GetPageRequest::try_from(req) {
+            Ok(req) => req,
+            Err(err) => {
+                // Emit the error as a GetPageResponse or tonic::Status as appropriate.
+                return page_api::GetPageResponse::try_from_status(err.into(), req_id)
+                    .map(|resp| resp.into());
+            }
+        };
 
         span_record!(
             req_id = %req.request_id,
@@ -3477,7 +3445,7 @@ impl GrpcPageServiceHandler {
             &latest_gc_cutoff_lsn,
         ) {
             Ok(lsn) => lsn,
-            Err(err) => return err.into_get_page_response(req.request_id),
+            Err(err) => return err.try_into_get_page_response(req.request_id),
         };
 
         let mut batch = SmallVec::with_capacity(req.block_numbers.len());
@@ -3535,7 +3503,7 @@ impl GrpcPageServiceHandler {
                         "unexpected response: {resp:?}"
                     )));
                 }
-                Err(err) => return err.err.into_get_page_response(req.request_id),
+                Err(err) => return err.err.try_into_get_page_response(req.request_id),
             };
         }
 
