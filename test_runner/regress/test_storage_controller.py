@@ -4425,6 +4425,42 @@ def test_storage_controller_graceful_migration(neon_env_builder: NeonEnvBuilder,
         assert initial_ps.http_client().tenant_list_locations()["tenant_shards"] == []
 
 
+def test_attached_0_graceful_migration(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_pageservers = 4
+    neon_env_builder.num_azs = 2
+
+    env = neon_env_builder.init_start()
+
+    # It is default, but we want to ensure that there are no secondary locations requested
+    env.storage_controller.tenant_policy_update(env.initial_tenant, {"placement": {"Attached": 0}})
+    env.storage_controller.reconcile_until_idle()
+
+    desc = env.storage_controller.tenant_describe(env.initial_tenant)["shards"][0]
+    src_ps_id = desc["node_attached"]
+    src_ps = [ps for ps in env.pageservers if ps.id == src_ps_id][0]
+    src_az = desc["preferred_az_id"]
+
+    # There must be no secondary locations with Attached(0) placement policy
+    assert len(desc["node_secondary"]) == 0
+
+    # Migrate tenant shard to the same AZ node
+    dst_ps = [ps for ps in env.pageservers if ps.id != src_ps_id and ps.az_id == src_az][0]
+
+    env.storage_controller.tenant_shard_migrate(
+        TenantShardId(env.initial_tenant, 0, 0),
+        dst_ps.id,
+        config=StorageControllerMigrationConfig(prewarm=True),
+    )
+    env.storage_controller.reconcile_until_idle()
+
+    # After all we expect that tenant shard exists only on dst node.
+    src_locations = src_ps.http_client().tenant_list_locations()["tenant_shards"]
+    assert len(src_locations) == 0
+    dst_locations = dst_ps.http_client().tenant_list_locations()["tenant_shards"]
+    assert len(dst_locations) == 1
+    assert dst_locations[0][1]["mode"] == "AttachedSingle"
+
+
 @run_only_on_default_postgres("this is like a 'unit test' against storcon db")
 def test_storage_controller_migrate_with_pageserver_restart(
     neon_env_builder: NeonEnvBuilder, make_httpserver
