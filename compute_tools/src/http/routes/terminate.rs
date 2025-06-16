@@ -3,25 +3,16 @@ use crate::http::JsonResponse;
 use axum::extract::State;
 use axum::response::Response;
 use axum_extra::extract::OptionalQuery;
-use compute_api::responses::ComputeStatus;
+use compute_api::responses::{ComputeStatus, TerminateResponse};
 use http::StatusCode;
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::task;
 use tracing::info;
 
-fn fast() -> String {
-    "fast".to_string()
-}
-
 #[derive(Deserialize, Default)]
 pub struct TerminateQuery {
-    //axum has issues deserializing enums i.e.
-    // invalid type: string "immediate", expected internally tagged enum
-    /// "fast": wait 30s till returning from /terminate to allow control plane to get the error
-    /// "immediate": return from /terminate immediately as soon as all components are terminated
-    #[serde(default = "fast")]
-    mode: String,
+    mode: compute_api::responses::TerminateMode,
 }
 
 /// Terminate the compute.
@@ -29,17 +20,7 @@ pub(in crate::http) async fn terminate(
     State(compute): State<Arc<ComputeNode>>,
     OptionalQuery(terminate): OptionalQuery<TerminateQuery>,
 ) -> Response {
-    let immediate = match terminate.unwrap_or_default().mode.as_str() {
-        "fast" => false,
-        "immediate" => true,
-        v => {
-            return JsonResponse::error(
-                StatusCode::BAD_REQUEST,
-                format!("Expected \"fast\" or \"immediate\", got {v}"),
-            );
-        }
-    };
-
+    let mode = terminate.unwrap_or_default().mode;
     {
         let mut state = compute.state.lock().unwrap();
         if state.status == ComputeStatus::Terminated {
@@ -49,13 +30,10 @@ pub(in crate::http) async fn terminate(
         if !matches!(state.status, ComputeStatus::Empty | ComputeStatus::Running) {
             return JsonResponse::invalid_status(state.status);
         }
-
-        let status = if immediate {
-            ComputeStatus::Terminated
-        } else {
-            ComputeStatus::TerminationPending
-        };
-        state.set_status(status, &compute.state_changed);
+        state.set_status(
+            ComputeStatus::TerminationPending { mode },
+            &compute.state_changed,
+        );
     }
 
     forward_termination_signal(false);
@@ -80,7 +58,6 @@ pub(in crate::http) async fn terminate(
     })
     .await
     .unwrap();
-
-    info!(%lsn, "terminated Postgres");
-    JsonResponse::success(StatusCode::OK, lsn)
+    info!("terminated Postgres");
+    JsonResponse::success(StatusCode::OK, TerminateResponse { lsn })
 }

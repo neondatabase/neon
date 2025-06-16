@@ -163,8 +163,9 @@ pub struct ComputeState {
     pub lfc_prewarm_state: LfcPrewarmState,
     pub lfc_offload_state: LfcOffloadState,
 
-    /// WAL flush LSN that is set after syncing safekeepers after terminating Postgres
-    pub terminate_flush_lsn: Lsn,
+    /// WAL flush LSN that is set after terminating Postgres and syncing safekeepers if
+    /// mode == ComputeMode::Primary. None otherwise
+    pub terminate_flush_lsn: Option<Lsn>,
 
     pub metrics: ComputeMetrics,
 }
@@ -181,7 +182,7 @@ impl ComputeState {
             metrics: ComputeMetrics::default(),
             lfc_prewarm_state: LfcPrewarmState::default(),
             lfc_offload_state: LfcOffloadState::default(),
-            terminate_flush_lsn: Lsn::INVALID,
+            terminate_flush_lsn: None,
         }
     }
 
@@ -534,13 +535,21 @@ impl ComputeNode {
 
         // Reap the postgres process
         delay_exit |= this.cleanup_after_postgres_exit()?;
+        let sleep_secs = if delay_exit {
+            30
+        } else {
+            // /terminate returns LSN. If we don't sleep before exiting, connection will
+            // error out "connection closed before message completed", and we won't get
+            // LSN
+            1
+        };
 
         // If launch failed, keep serving HTTP requests for a while, so the cloud
         // control plane can get the actual error.
         if delay_exit {
             info!("giving control plane 30s to collect the error before shutdown");
-            std::thread::sleep(Duration::from_secs(30));
         }
+        std::thread::sleep(Duration::from_secs(sleep_secs));
         Ok(exit_code)
     }
 
@@ -917,22 +926,20 @@ impl ComputeNode {
             let storage_auth_token = pspec.storage_auth_token.clone();
             let lsn = self.sync_safekeepers(storage_auth_token)?;
             info!(%lsn, "synced safekeepers");
-            lsn
+            Some(lsn)
         } else {
-            #[allow(non_upper_case_globals)] // for info!
-            const lsn: Lsn = Lsn::INVALID;
-            info!(%lsn, "not primary, not syncing safekeepers");
-            lsn
+            info!("not primary, not syncing safekeepers");
+            None
         };
 
         let mut delay_exit = false;
         let mut state = self.state.lock().unwrap();
         state.terminate_flush_lsn = lsn;
-        if state.status == ComputeStatus::TerminationPending {
+        if let ComputeStatus::TerminationPending { mode } = state.status {
             state.status = ComputeStatus::Terminated;
             self.state_changed.notify_all();
             // we were asked to terminate gracefully, don't exit to avoid restart
-            delay_exit = true
+            delay_exit = mode == compute_api::responses::TerminateMode::Fast
         }
         drop(state);
 
@@ -1803,7 +1810,7 @@ impl ComputeNode {
 
                             // exit loop
                             ComputeStatus::Failed
-                            | ComputeStatus::TerminationPending
+                            | ComputeStatus::TerminationPending { .. }
                             | ComputeStatus::Terminated => break 'cert_update,
 
                             // wait

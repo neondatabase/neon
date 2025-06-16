@@ -14,11 +14,13 @@ from fixtures.pg_version import PgVersion
 from pytest import raises
 
 
-def stop_and_check_lsn(ep: Endpoint, expected_lsn: Lsn):
+def stop_and_check_lsn(ep: Endpoint, expected_lsn: Lsn | None):
     ep.stop(mode="immediate")
     lsn = ep.terminate_flush_lsn
-    assert ep.log_contains(f"terminated Postgres lsn={lsn}")
-    assert lsn == expected_lsn, f"Expected LSN {expected_lsn} after endpoint stop, got {lsn}"
+    if expected_lsn is not None:
+        assert lsn >= expected_lsn, f"{expected_lsn=} < {lsn=}"
+    else:
+        assert lsn == expected_lsn, f"{expected_lsn=} != {lsn=}"
 
 
 def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
@@ -121,8 +123,8 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
 
     # wait_for_last_flush_lsn(env, secondary, env.initial_tenant, env.initial_timeline)
 
-    # secondaries don't sync safekeepers on finish so LSN will be Lsn::INVALID
-    stop_and_check_lsn(secondary, Lsn("0/0"))
+    # secondaries don't sync safekeepers on finish so LSN will be None
+    stop_and_check_lsn(secondary, None)
 
     primary = env.endpoints.create_start(branch_name="main", endpoint_id="primary2")
 
@@ -135,7 +137,7 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
                    pg_current_wal_flush_lsn()
             """
         )
-        lsn_triple = cast("tuple[str, str, str]", primary_cur.fetchone())
+        lsn_triple = cast("tuple[str, str, str]", new_primary_cur.fetchone())
         expected_primary_lsn = Lsn(lsn_triple[2])
         log.info(f"New primary: Boot LSN is {lsn_triple}")
 

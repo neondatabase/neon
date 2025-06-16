@@ -52,7 +52,8 @@ use compute_api::requests::{
     COMPUTE_AUDIENCE, ComputeClaims, ComputeClaimsScope, ConfigurationRequest,
 };
 use compute_api::responses::{
-    ComputeConfig, ComputeCtlConfig, ComputeStatus, ComputeStatusResponse, TlsConfig,
+    ComputeConfig, ComputeCtlConfig, ComputeStatus, ComputeStatusResponse, TerminateResponse,
+    TlsConfig,
 };
 use compute_api::spec::{
     Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PgIdent,
@@ -875,7 +876,7 @@ impl Endpoint {
                         ComputeStatus::Empty
                         | ComputeStatus::ConfigurationPending
                         | ComputeStatus::Configuration
-                        | ComputeStatus::TerminationPending
+                        | ComputeStatus::TerminationPending { .. }
                         | ComputeStatus::Terminated => {
                             bail!("unexpected compute status: {:?}", state.status)
                         }
@@ -997,7 +998,7 @@ impl Endpoint {
         }
     }
 
-    pub async fn stop(&self, mode: &str, destroy: bool) -> Result<Lsn> {
+    pub async fn stop(&self, mode: &str, destroy: bool) -> Result<TerminateResponse> {
         let ip = self.external_http_address.ip();
         let port = self.external_http_address.port();
         // We ignore _mode_ and always pass "immediate", otherwise /terminate will
@@ -1005,11 +1006,10 @@ impl Endpoint {
         let url = format!("http://{ip}:{port}/terminate?mode=immediate");
         let token = self.generate_jwt(Some(ComputeClaimsScope::Admin))?;
         let request = reqwest::Client::new().post(url).bearer_auth(token);
-
         let response = request.send().await.context("/terminate")?;
         let text = response.text().await.context("/terminate result")?;
-        let lsn: Lsn =
-            serde_json::from_str(&text).with_context(|| format!("deserializing \"{text}\""))?;
+        let response: TerminateResponse =
+            serde_json::from_str(&text).with_context(|| format!("deserializing {text}"))?;
 
         // Also wait for the compute_ctl process to die. It might have some
         // cleanup work to do after postgres stops, like syncing safekeepers,
@@ -1028,7 +1028,7 @@ impl Endpoint {
             );
             std::fs::remove_dir_all(self.endpoint_path())?;
         }
-        Ok(lsn)
+        Ok(response)
     }
 
     pub fn connstr(&self, user: &str, db_name: &str) -> String {
