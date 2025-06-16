@@ -31,6 +31,7 @@ def get_custom_scripts(
     return rv
 
 
+
 def run_test_pgbench(env: PgCompare, custom_scripts: str, duration: int):
     password = env.pg.default_options.get("password", None)
     options = env.pg.default_options.get("options", "")
@@ -163,6 +164,12 @@ def test_perf_oltp_large_tenant_pgbench(
 ):
     run_test_pgbench(remote_compare, custom_scripts, duration)
 
+@pytest.mark.parametrize("duration", get_durations_matrix())
+@pytest.mark.remote_cluster
+def test_perf_oltp_large_tenant_growth(
+    remote_compare: PgCompare, duration: int
+):
+    run_test_pgbench(remote_compare, get_custom_scripts(), duration)
 
 @pytest.mark.remote_cluster
 def test_perf_oltp_large_tenant_maintenance(remote_compare: PgCompare):

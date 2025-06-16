@@ -147,7 +147,7 @@ jobs:
         test_selection: performance
         run_in_parallel: false
         save_perf_report: true
-        extra_params: -m remote_cluster --timeout 7200 -k test_perf_oltp_large_tenant_pgbench
+        extra_params: -m remote_cluster --timeout 7200 -k test_perf_oltp_large_tenant_growth
         pg_version: ${{ env.PG_VERSION }}
         aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
