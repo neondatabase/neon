@@ -623,20 +623,6 @@ enum PageStreamError {
     BadRequest(Cow<'static, str>),
 }
 
-impl PageStreamError {
-    /// Converts a PageStreamError into a proto::GetPageResponse with the appropriate status
-    /// code, or a gRPC status if it should terminate the stream (e.g. shutdown). This is a
-    /// convenience method for use from a get_pages gRPC stream.
-    #[allow(clippy::result_large_err)]
-    fn try_into_get_page_response(
-        self,
-        request_id: page_api::RequestID,
-    ) -> Result<proto::GetPageResponse, tonic::Status> {
-        // Convert to a tonic::Status first, then to GetPageResponse as appropriate.
-        Ok(page_api::GetPageResponse::try_from_status(self.into(), request_id)?.into())
-    }
-}
-
 impl From<PageStreamError> for tonic::Status {
     fn from(err: PageStreamError) -> Self {
         use tonic::Code;
@@ -3398,8 +3384,8 @@ impl GrpcPageServiceHandler {
 
     /// Processes a GetPage batch request, via the GetPages bidirectional streaming RPC.
     ///
-    /// NB: errors will terminate the stream. Per-request errors should return a GetPageResponse
-    /// with an appropriate status code instead.
+    /// NB: errors returned from here are intercepted in get_pages(), and may be converted to a
+    /// GetPageResponse with an appropriate status code to avoid terminating the stream.
     ///
     /// TODO: get_vectored() currently enforces a batch limit of 32. Postgres will typically send
     /// batches up to effective_io_concurrency = 100. Either we have to accept large batches, or
@@ -3416,15 +3402,7 @@ impl GrpcPageServiceHandler {
         let ctx = ctx.with_scope_page_service_pagestream(&timeline);
 
         // Validate the request, decorate the span, and convert it to a Pagestream request.
-        let req_id = req.request_id;
-        let req = match page_api::GetPageRequest::try_from(req) {
-            Ok(req) => req,
-            Err(err) => {
-                // Emit the error as a GetPageResponse or tonic::Status as appropriate.
-                return page_api::GetPageResponse::try_from_status(err.into(), req_id)
-                    .map(|resp| resp.into());
-            }
-        };
+        let req = page_api::GetPageRequest::try_from(req)?;
 
         span_record!(
             req_id = %req.request_id,
@@ -3435,7 +3413,7 @@ impl GrpcPageServiceHandler {
         );
 
         let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn(); // hold guard
-        let effective_lsn = match PageServerHandler::effective_request_lsn(
+        let effective_lsn = PageServerHandler::effective_request_lsn(
             &timeline,
             timeline.get_last_record_lsn(),
             req.read_lsn.request_lsn,
@@ -3443,10 +3421,7 @@ impl GrpcPageServiceHandler {
                 .not_modified_since_lsn
                 .unwrap_or(req.read_lsn.request_lsn),
             &latest_gc_cutoff_lsn,
-        ) {
-            Ok(lsn) => lsn,
-            Err(err) => return err.try_into_get_page_response(req.request_id),
-        };
+        )?;
 
         let mut batch = SmallVec::with_capacity(req.block_numbers.len());
         for blkno in req.block_numbers {
@@ -3503,7 +3478,7 @@ impl GrpcPageServiceHandler {
                         "unexpected response: {resp:?}"
                     )));
                 }
-                Err(err) => return err.err.try_into_get_page_response(req.request_id),
+                Err(err) => return Err(err.err.into()),
             };
         }
 
@@ -3710,9 +3685,16 @@ impl proto::PageService for GrpcPageServiceHandler {
                 .await?
                 .downgrade();
             while let Some(req) = reqs.message().await? {
-                yield Self::get_page(&ctx, &timeline, req, io_concurrency.clone())
+                let req_id = req.request_id;
+                let result = Self::get_page(&ctx, &timeline, req, io_concurrency.clone())
                     .instrument(span.clone()) // propagate request span
-                    .await?
+                    .await;
+                yield match result {
+                    Ok(resp) => resp,
+                    // Convert per-request errors to GetPageResponses as appropriate, or terminate
+                    // the stream with a tonic::Status.
+                    Err(err) => page_api::GetPageResponse::try_from_status(err, req_id)?.into(),
+                }
             }
         };
 
