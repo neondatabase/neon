@@ -7,17 +7,15 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 bytes.workspace = true
+futures.workspace = true
 pageserver_api.workspace = true
 postgres_ffi.workspace = true
 prost.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tonic.workspace = true
 utils.workspace = true
 workspace_hack.workspace = true
-futures.workspace = true
-futures-core.workspace = true
-tokio.workspace = true
-async-stream.workspace = true
 
 [build-dependencies]
 tonic-build.workspace = true

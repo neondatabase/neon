@@ -4469,10 +4469,8 @@ name = "pageserver_page_api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-stream",
  "bytes",
  "futures",
- "futures-core",
  "pageserver_api",
  "postgres_ffi",
  "prost 0.13.5",
