@@ -17,7 +17,6 @@ use postgres_client::error::{DbError, ErrorPosition, SqlState};
 use postgres_client::{
     GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, RowStream, Transaction,
 };
-use pq_proto::StartupMessageParamsBuilder;
 use serde::Serialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -41,10 +40,12 @@ use crate::context::RequestContext;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::http::{ReadBodyError, read_body_with_limit};
 use crate::metrics::{HttpDirection, Metrics, SniGroup, SniKind};
-use crate::proxy::{NeonOptions, run_until_cancelled};
+use crate::pqproto::StartupMessageParams;
+use crate::proxy::NeonOptions;
 use crate::serverless::backend::HttpConnError;
 use crate::types::{DbName, RoleName};
 use crate::usage_metrics::{MetricCounter, MetricCounterRecorder};
+use crate::util::run_until_cancelled;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -219,7 +220,7 @@ fn get_conn_info(
 
     let mut options = Option::None;
 
-    let mut params = StartupMessageParamsBuilder::default();
+    let mut params = StartupMessageParams::default();
     params.insert("user", &username);
     params.insert("database", &dbname);
     for (key, value) in pairs {

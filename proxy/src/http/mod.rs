@@ -4,9 +4,10 @@
 
 pub mod health_server;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use futures::FutureExt;
 use http::Method;
 use http_body_util::BodyExt;
 use hyper::body::Body;
@@ -109,15 +110,31 @@ impl Endpoint {
     }
 
     /// Execute a [request](reqwest::Request).
-    pub(crate) async fn execute(&self, request: Request) -> Result<Response, Error> {
-        let _timer = Metrics::get()
+    pub(crate) fn execute(
+        &self,
+        request: Request,
+    ) -> impl Future<Output = Result<Response, Error>> {
+        let metric = Metrics::get()
             .proxy
             .console_request_latency
-            .start_timer(ConsoleRequest {
+            .with_labels(ConsoleRequest {
                 request: request.url().path(),
             });
 
-        self.client.execute(request).await
+        let req = self.client.execute(request).boxed();
+
+        async move {
+            let start = Instant::now();
+            scopeguard::defer!({
+                Metrics::get()
+                    .proxy
+                    .console_request_latency
+                    .get_metric(metric)
+                    .observe_duration_since(start);
+            });
+
+            req.await
+        }
     }
 }
 

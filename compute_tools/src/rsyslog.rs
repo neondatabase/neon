@@ -84,13 +84,15 @@ fn restart_rsyslog() -> Result<()> {
 
 pub fn configure_audit_rsyslog(
     log_directory: String,
-    tag: Option<String>,
+    endpoint_id: &str,
+    project_id: &str,
     remote_endpoint: &str,
 ) -> Result<()> {
     let config_content: String = format!(
         include_str!("config_template/compute_audit_rsyslog_template.conf"),
         log_directory = log_directory,
-        tag = tag.unwrap_or("".to_string()),
+        endpoint_id = endpoint_id,
+        project_id = project_id,
         remote_endpoint = remote_endpoint
     );
 

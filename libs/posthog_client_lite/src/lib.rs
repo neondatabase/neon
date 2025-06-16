@@ -1,5 +1,9 @@
 //! A lite version of the PostHog client that only supports local evaluation of feature flags.
 
+mod background_loop;
+
+pub use background_loop::FeatureResolverBackgroundLoop;
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -18,14 +22,26 @@ pub enum PostHogEvaluationError {
     Internal(String),
 }
 
+impl PostHogEvaluationError {
+    pub fn as_variant_str(&self) -> &'static str {
+        match self {
+            PostHogEvaluationError::NotAvailable(_) => "not_available",
+            PostHogEvaluationError::NoConditionGroupMatched => "no_condition_group_matched",
+            PostHogEvaluationError::Internal(_) => "internal",
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct LocalEvaluationResponse {
-    #[allow(dead_code)]
-    flags: Vec<LocalEvaluationFlag>,
+    pub flags: Vec<LocalEvaluationFlag>,
 }
 
 #[derive(Deserialize)]
 pub struct LocalEvaluationFlag {
+    #[allow(dead_code)]
+    id: u64,
+    team_id: u64,
     key: String,
     filters: LocalEvaluationFlagFilters,
     active: bool,
@@ -34,7 +50,7 @@ pub struct LocalEvaluationFlag {
 #[derive(Deserialize)]
 pub struct LocalEvaluationFlagFilters {
     groups: Vec<LocalEvaluationFlagFilterGroup>,
-    multivariate: LocalEvaluationFlagMultivariate,
+    multivariate: Option<LocalEvaluationFlagMultivariate>,
 }
 
 #[derive(Deserialize)]
@@ -51,7 +67,7 @@ pub struct LocalEvaluationFlagFilterProperty {
     operator: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum PostHogFlagFilterPropertyValue {
     String(String),
@@ -94,11 +110,32 @@ impl FeatureStore {
         }
     }
 
-    pub fn set_flags(&mut self, flags: Vec<LocalEvaluationFlag>) {
+    pub fn new_with_flags(
+        flags: Vec<LocalEvaluationFlag>,
+        project_id: Option<u64>,
+    ) -> Result<Self, &'static str> {
+        let mut store = Self::new();
+        store.set_flags(flags, project_id)?;
+        Ok(store)
+    }
+
+    pub fn set_flags(
+        &mut self,
+        flags: Vec<LocalEvaluationFlag>,
+        project_id: Option<u64>,
+    ) -> Result<(), &'static str> {
         self.flags.clear();
         for flag in flags {
+            if let Some(project_id) = project_id {
+                if flag.team_id != project_id {
+                    return Err(
+                        "Retrieved a spec with different project id, wrong config? Discarding the feature flags.",
+                    );
+                }
+            }
             self.flags.insert(flag.key.clone(), flag);
         }
+        Ok(())
     }
 
     /// Generate a consistent hash for a user ID (e.g., tenant ID).
@@ -245,7 +282,7 @@ impl FeatureStore {
         }
     }
 
-    /// Evaluate a multivariate feature flag. Returns `None` if the flag is not available or if there are errors
+    /// Evaluate a multivariate feature flag. Returns an error if the flag is not available or if there are errors
     /// during the evaluation.
     ///
     /// The parsing logic is as follows:
@@ -263,10 +300,15 @@ impl FeatureStore {
     /// Example: we have a multivariate flag with 3 groups of the configured global rollout percentage: A (10%), B (20%), C (70%).
     /// There is a single group with a condition that has a rollout percentage of 10% and it does not have a variant override.
     /// Then, we will have 1% of the users evaluated to A, 2% to B, and 7% to C.
+    ///
+    /// Error handling: the caller should inspect the error and decide the behavior when a feature flag
+    /// cannot be evaluated (i.e., default to false if it cannot be resolved). The error should *not* be
+    /// propagated beyond where the feature flag gets resolved.
     pub fn evaluate_multivariate(
         &self,
         flag_key: &str,
         user_id: &str,
+        properties: &HashMap<String, PostHogFlagFilterPropertyValue>,
     ) -> Result<String, PostHogEvaluationError> {
         let hash_on_global_rollout_percentage =
             Self::consistent_hash(user_id, flag_key, "multivariate");
@@ -276,8 +318,37 @@ impl FeatureStore {
             flag_key,
             hash_on_global_rollout_percentage,
             hash_on_group_rollout_percentage,
-            &HashMap::new(),
+            properties,
         )
+    }
+
+    /// Evaluate a boolean feature flag. Returns  an error if the flag is not available or if there are errors
+    /// during the evaluation.
+    ///
+    /// The parsing logic is as follows:
+    ///
+    /// * Generate a consistent hash for the tenant-feature.
+    /// * Match each filter group.
+    ///   - If a group is matched, it will first determine whether the user is in the range of the rollout
+    ///     percentage.
+    ///   - If the hash falls within the group's rollout percentage, return true.
+    /// * Otherwise, continue with the next group until all groups are evaluated and no group is within the
+    ///   rollout percentage.
+    /// * If there are no matching groups, return an error.
+    ///
+    /// Returns `Ok(())` if the feature flag evaluates to true. In the future, it will return a payload.
+    ///
+    /// Error handling: the caller should inspect the error and decide the behavior when a feature flag
+    /// cannot be evaluated (i.e., default to false if it cannot be resolved). The error should *not* be
+    /// propagated beyond where the feature flag gets resolved.
+    pub fn evaluate_boolean(
+        &self,
+        flag_key: &str,
+        user_id: &str,
+        properties: &HashMap<String, PostHogFlagFilterPropertyValue>,
+    ) -> Result<(), PostHogEvaluationError> {
+        let hash_on_global_rollout_percentage = Self::consistent_hash(user_id, flag_key, "boolean");
+        self.evaluate_boolean_inner(flag_key, hash_on_global_rollout_percentage, properties)
     }
 
     /// Evaluate a multivariate feature flag. Note that we directly take the mapped user ID
@@ -306,6 +377,11 @@ impl FeatureStore {
                     flag_key
                 )));
             }
+            let Some(ref multivariate) = flag_config.filters.multivariate else {
+                return Err(PostHogEvaluationError::Internal(format!(
+                    "No multivariate available, should use evaluate_boolean?: {flag_key}"
+                )));
+            };
             // TODO: sort the groups so that variant overrides always get evaluated first and it follows the PostHog
             // Python SDK behavior; for now we do not configure conditions without variant overrides in Neon so it
             // does not matter.
@@ -314,7 +390,7 @@ impl FeatureStore {
                     GroupEvaluationResult::MatchedAndOverride(variant) => return Ok(variant),
                     GroupEvaluationResult::MatchedAndEvaluate => {
                         let mut percentage = 0;
-                        for variant in &flag_config.filters.multivariate.variants {
+                        for variant in &multivariate.variants {
                             percentage += variant.rollout_percentage;
                             if self
                                 .evaluate_percentage(hash_on_global_rollout_percentage, percentage)
@@ -342,6 +418,89 @@ impl FeatureStore {
             )))
         }
     }
+
+    /// Evaluate a multivariate feature flag. Note that we directly take the mapped user ID
+    /// (a consistent hash ranging from 0 to 1) so that it is easier to use it in the tests
+    /// and avoid duplicate computations.
+    ///
+    /// Use a different consistent hash for evaluating the group rollout percentage.
+    /// The behavior: if the condition is set to rolling out to 10% of the users, and
+    /// we set the variant A to 20% in the global config, then 2% of the total users will
+    /// be evaluated to variant A.
+    ///
+    /// Note that the hash to determine group rollout percentage is shared across all groups. So if we have two
+    /// exactly-the-same conditions with 10% and 20% rollout percentage respectively, a total of 20% of the users
+    /// will be evaluated (versus 30% if group evaluation is done independently).
+    pub(crate) fn evaluate_boolean_inner(
+        &self,
+        flag_key: &str,
+        hash_on_global_rollout_percentage: f64,
+        properties: &HashMap<String, PostHogFlagFilterPropertyValue>,
+    ) -> Result<(), PostHogEvaluationError> {
+        if let Some(flag_config) = self.flags.get(flag_key) {
+            if !flag_config.active {
+                return Err(PostHogEvaluationError::NotAvailable(format!(
+                    "The feature flag is not active: {}",
+                    flag_key
+                )));
+            }
+            if flag_config.filters.multivariate.is_some() {
+                return Err(PostHogEvaluationError::Internal(format!(
+                    "This looks like a multivariate flag, should use evaluate_multivariate?: {flag_key}"
+                )));
+            };
+            // TODO: sort the groups so that variant overrides always get evaluated first and it follows the PostHog
+            // Python SDK behavior; for now we do not configure conditions without variant overrides in Neon so it
+            // does not matter.
+            for group in &flag_config.filters.groups {
+                match self.evaluate_group(group, hash_on_global_rollout_percentage, properties)? {
+                    GroupEvaluationResult::MatchedAndOverride(_) => {
+                        return Err(PostHogEvaluationError::Internal(format!(
+                            "Boolean flag cannot have overrides: {}",
+                            flag_key
+                        )));
+                    }
+                    GroupEvaluationResult::MatchedAndEvaluate => {
+                        return Ok(());
+                    }
+                    GroupEvaluationResult::Unmatched => continue,
+                }
+            }
+            // If no group is matched, the feature is not available, and up to the caller to decide what to do.
+            Err(PostHogEvaluationError::NoConditionGroupMatched)
+        } else {
+            // The feature flag is not available yet
+            Err(PostHogEvaluationError::NotAvailable(format!(
+                "Not found in the local evaluation spec: {}",
+                flag_key
+            )))
+        }
+    }
+
+    /// Infer whether a feature flag is a boolean flag by checking if it has a multivariate filter.
+    pub fn is_feature_flag_boolean(&self, flag_key: &str) -> Result<bool, PostHogEvaluationError> {
+        if let Some(flag_config) = self.flags.get(flag_key) {
+            Ok(flag_config.filters.multivariate.is_none())
+        } else {
+            Err(PostHogEvaluationError::NotAvailable(format!(
+                "Not found in the local evaluation spec: {}",
+                flag_key
+            )))
+        }
+    }
+}
+
+pub struct PostHogClientConfig {
+    /// The server API key.
+    pub server_api_key: String,
+    /// The client API key.
+    pub client_api_key: String,
+    /// The project ID.
+    pub project_id: String,
+    /// The private API URL.
+    pub private_api_url: String,
+    /// The public API URL.
+    pub public_api_url: String,
 }
 
 /// A lite PostHog client.
@@ -360,37 +519,23 @@ impl FeatureStore {
 /// want to report the feature flag usage back to PostHog. The current plan is to use PostHog only as an UI to
 /// configure feature flags so it is very likely that the client API will not be used.
 pub struct PostHogClient {
-    /// The server API key.
-    server_api_key: String,
-    /// The client API key.
-    client_api_key: String,
-    /// The project ID.
-    project_id: String,
-    /// The private API URL.
-    private_api_url: String,
-    /// The public API URL.
-    public_api_url: String,
+    /// The config.
+    config: PostHogClientConfig,
     /// The HTTP client.
     client: reqwest::Client,
 }
 
+#[derive(Serialize, Debug)]
+pub struct CaptureEvent {
+    pub event: String,
+    pub distinct_id: String,
+    pub properties: serde_json::Value,
+}
+
 impl PostHogClient {
-    pub fn new(
-        server_api_key: String,
-        client_api_key: String,
-        project_id: String,
-        private_api_url: String,
-        public_api_url: String,
-    ) -> Self {
+    pub fn new(config: PostHogClientConfig) -> Self {
         let client = reqwest::Client::new();
-        Self {
-            server_api_key,
-            client_api_key,
-            project_id,
-            private_api_url,
-            public_api_url,
-            client,
-        }
+        Self { config, client }
     }
 
     pub fn new_with_us_region(
@@ -398,13 +543,20 @@ impl PostHogClient {
         client_api_key: String,
         project_id: String,
     ) -> Self {
-        Self::new(
+        Self::new(PostHogClientConfig {
             server_api_key,
             client_api_key,
             project_id,
-            "https://us.posthog.com".to_string(),
-            "https://us.i.posthog.com".to_string(),
-        )
+            private_api_url: "https://us.posthog.com".to_string(),
+            public_api_url: "https://us.i.posthog.com".to_string(),
+        })
+    }
+
+    /// Check if the server API key is a feature flag secure API key. This key can only be
+    /// used to fetch the feature flag specs and can only be used on a undocumented API
+    /// endpoint.
+    fn is_feature_flag_secure_api_key(&self) -> bool {
+        self.config.server_api_key.starts_with("phs_")
     }
 
     /// Fetch the feature flag specs from the server.
@@ -420,17 +572,37 @@ impl PostHogClient {
     ) -> anyhow::Result<LocalEvaluationResponse> {
         // BASE_URL/api/projects/:project_id/feature_flags/local_evaluation
         // with bearer token of self.server_api_key
-        let url = format!(
-            "{}/api/projects/{}/feature_flags/local_evaluation",
-            self.private_api_url, self.project_id
-        );
+        // OR
+        // BASE_URL/api/feature_flag/local_evaluation/
+        // with bearer token of feature flag specific self.server_api_key
+        let url = if self.is_feature_flag_secure_api_key() {
+            // The new feature local evaluation secure API token
+            format!(
+                "{}/api/feature_flag/local_evaluation",
+                self.config.private_api_url
+            )
+        } else {
+            // The old personal API token
+            format!(
+                "{}/api/projects/{}/feature_flags/local_evaluation",
+                self.config.private_api_url, self.config.project_id
+            )
+        };
         let response = self
             .client
             .get(url)
-            .bearer_auth(&self.server_api_key)
+            .bearer_auth(&self.config.server_api_key)
             .send()
             .await?;
+        let status = response.status();
         let body = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "Failed to get feature flags: {}, {}",
+                status,
+                body
+            ));
+        }
         Ok(serde_json::from_str(&body)?)
     }
 
@@ -442,21 +614,54 @@ impl PostHogClient {
         &self,
         event: &str,
         distinct_id: &str,
-        properties: &HashMap<String, PostHogFlagFilterPropertyValue>,
+        properties: &serde_json::Value,
     ) -> anyhow::Result<()> {
         // PUBLIC_URL/capture/
-        // with bearer token of self.client_api_key
-        let url = format!("{}/capture/", self.public_api_url);
-        self.client
+        let url = format!("{}/capture/", self.config.public_api_url);
+        let response = self
+            .client
             .post(url)
             .body(serde_json::to_string(&json!({
-                "api_key": self.client_api_key,
+                "api_key": self.config.client_api_key,
                 "distinct_id": distinct_id,
                 "event": event,
                 "properties": properties,
             }))?)
             .send()
             .await?;
+        let status = response.status();
+        let body = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "Failed to capture events: {}, {}",
+                status,
+                body
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn capture_event_batch(&self, events: &[CaptureEvent]) -> anyhow::Result<()> {
+        // PUBLIC_URL/batch/
+        let url = format!("{}/batch/", self.config.public_api_url);
+        let response = self
+            .client
+            .post(url)
+            .body(serde_json::to_string(&json!({
+                "api_key": self.config.client_api_key,
+                "batch": events,
+            }))?)
+            .send()
+            .await?;
+        let status = response.status();
+        let body = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "Failed to capture events: {}, {}",
+                status,
+                body
+            ));
+        }
         Ok(())
     }
 }
@@ -467,95 +672,162 @@ mod tests {
 
     fn data() -> &'static str {
         r#"{
-            "flags": [
-                {
-                    "id": 132794,
-                    "team_id": 152860,
-                    "name": "",
-                    "key": "gc-compaction",
-                    "filters": {
-                        "groups": [
-                            {
-                                "variant": "enabled-stage-2",
-                                "properties": [
-                                    {
-                                        "key": "plan_type",
-                                        "type": "person",
-                                        "value": [
-                                            "free"
-                                        ],
-                                        "operator": "exact"
-                                    },
-                                    {
-                                        "key": "pageserver_remote_size",
-                                        "type": "person",
-                                        "value": "10000000",
-                                        "operator": "lt"
-                                    }
-                                ],
-                                "rollout_percentage": 50
-                            },
-                            {
-                                "properties": [
-                                    {
-                                        "key": "plan_type",
-                                        "type": "person",
-                                        "value": [
-                                            "free"
-                                        ],
-                                        "operator": "exact"
-                                    },
-                                    {
-                                        "key": "pageserver_remote_size",
-                                        "type": "person",
-                                        "value": "10000000",
-                                        "operator": "lt"
-                                    }
-                                ],
-                                "rollout_percentage": 80
-                            }
-                        ],
-                        "payloads": {},
-                        "multivariate": {
-                            "variants": [
-                                {
-                                    "key": "disabled",
-                                    "name": "",
-                                    "rollout_percentage": 90
-                                },
-                                {
-                                    "key": "enabled-stage-1",
-                                    "name": "",
-                                    "rollout_percentage": 10
-                                },
-                                {
-                                    "key": "enabled-stage-2",
-                                    "name": "",
-                                    "rollout_percentage": 0
-                                },
-                                {
-                                    "key": "enabled-stage-3",
-                                    "name": "",
-                                    "rollout_percentage": 0
-                                },
-                                {
-                                    "key": "enabled",
-                                    "name": "",
-                                    "rollout_percentage": 0
-                                }
-                            ]
-                        }
-                    },
-                    "deleted": false,
-                    "active": true,
-                    "ensure_experience_continuity": false,
-                    "has_encrypted_payloads": false,
-                    "version": 6
-                }
+  "flags": [
+    {
+      "id": 141807,
+      "team_id": 152860,
+      "name": "",
+      "key": "image-compaction-boundary",
+      "filters": {
+        "groups": [
+          {
+            "variant": null,
+            "properties": [
+              {
+                "key": "plan_type",
+                "type": "person",
+                "value": [
+                  "free"
+                ],
+                "operator": "exact"
+              }
             ],
-            "group_type_mapping": {},
-            "cohorts": {}
-        }"#
+            "rollout_percentage": 40
+          },
+          {
+            "variant": null,
+            "properties": [],
+            "rollout_percentage": 10
+          }
+        ],
+        "payloads": {},
+        "multivariate": null
+      },
+      "deleted": false,
+      "active": true,
+      "ensure_experience_continuity": false,
+      "has_encrypted_payloads": false,
+      "version": 1
+    },
+    {
+      "id": 135586,
+      "team_id": 152860,
+      "name": "",
+      "key": "boolean-flag",
+      "filters": {
+        "groups": [
+          {
+            "variant": null,
+            "properties": [
+              {
+                "key": "plan_type",
+                "type": "person",
+                "value": [
+                  "free"
+                ],
+                "operator": "exact"
+              }
+            ],
+            "rollout_percentage": 47
+          }
+        ],
+        "payloads": {},
+        "multivariate": null
+      },
+      "deleted": false,
+      "active": true,
+      "ensure_experience_continuity": false,
+      "has_encrypted_payloads": false,
+      "version": 1
+    },
+    {
+      "id": 132794,
+      "team_id": 152860,
+      "name": "",
+      "key": "gc-compaction",
+      "filters": {
+        "groups": [
+          {
+            "variant": "enabled-stage-2",
+            "properties": [
+              {
+                "key": "plan_type",
+                "type": "person",
+                "value": [
+                  "free"
+                ],
+                "operator": "exact"
+              },
+              {
+                "key": "pageserver_remote_size",
+                "type": "person",
+                "value": "10000000",
+                "operator": "lt"
+              }
+            ],
+             "rollout_percentage": 50
+          },
+          {
+            "properties": [
+              {
+                "key": "plan_type",
+                "type": "person",
+                "value": [
+                  "free"
+                ],
+                "operator": "exact"
+              },
+              {
+                "key": "pageserver_remote_size",
+                "type": "person",
+                "value": "10000000",
+                "operator": "lt"
+              }
+            ],
+            "rollout_percentage": 80
+          }
+        ],
+        "payloads": {},
+        "multivariate": {
+          "variants": [
+            {
+              "key": "disabled",
+              "name": "",
+              "rollout_percentage": 90
+            },
+            {
+              "key": "enabled-stage-1",
+              "name": "",
+              "rollout_percentage": 10
+            },
+            {
+              "key": "enabled-stage-2",
+              "name": "",
+              "rollout_percentage": 0
+            },
+            {
+              "key": "enabled-stage-3",
+              "name": "",
+              "rollout_percentage": 0
+            },
+            {
+              "key": "enabled",
+              "name": "",
+              "rollout_percentage": 0
+            }
+          ]
+        }
+      },
+      "deleted": false,
+      "active": true,
+      "ensure_experience_continuity": false,
+      "has_encrypted_payloads": false,
+      "version": 7
+    }
+  ],
+  "group_type_mapping": {},
+  "cohorts": {}
+}"#
     }
 
     #[test]
@@ -568,7 +840,7 @@ mod tests {
     fn evaluate_multivariate() {
         let mut store = FeatureStore::new();
         let response: LocalEvaluationResponse = serde_json::from_str(data()).unwrap();
-        store.set_flags(response.flags);
+        store.set_flags(response.flags, None).unwrap();
 
         // This lacks the required properties and cannot be evaluated.
         let variant =
@@ -630,5 +902,126 @@ mod tests {
             variant,
             Err(PostHogEvaluationError::NoConditionGroupMatched)
         ),);
+    }
+
+    #[test]
+    fn evaluate_boolean_1() {
+        // The `boolean-flag` feature flag only has one group that matches on the free user.
+
+        let mut store = FeatureStore::new();
+        let response: LocalEvaluationResponse = serde_json::from_str(data()).unwrap();
+        store.set_flags(response.flags, None).unwrap();
+
+        // This lacks the required properties and cannot be evaluated.
+        let variant = store.evaluate_boolean_inner("boolean-flag", 1.00, &HashMap::new());
+        assert!(matches!(
+            variant,
+            Err(PostHogEvaluationError::NotAvailable(_))
+        ),);
+
+        let properties_unmatched = HashMap::from([
+            (
+                "plan_type".to_string(),
+                PostHogFlagFilterPropertyValue::String("paid".to_string()),
+            ),
+            (
+                "pageserver_remote_size".to_string(),
+                PostHogFlagFilterPropertyValue::Number(1000.0),
+            ),
+        ]);
+
+        // This does not match any group so there will be an error.
+        let variant = store.evaluate_boolean_inner("boolean-flag", 1.00, &properties_unmatched);
+        assert!(matches!(
+            variant,
+            Err(PostHogEvaluationError::NoConditionGroupMatched)
+        ),);
+
+        let properties = HashMap::from([
+            (
+                "plan_type".to_string(),
+                PostHogFlagFilterPropertyValue::String("free".to_string()),
+            ),
+            (
+                "pageserver_remote_size".to_string(),
+                PostHogFlagFilterPropertyValue::Number(1000.0),
+            ),
+        ]);
+
+        // It matches the first group as 0.10 <= 0.50 and the properties are matched. Then it gets evaluated to the variant override.
+        let variant = store.evaluate_boolean_inner("boolean-flag", 0.10, &properties);
+        assert!(variant.is_ok());
+
+        // It matches the group conditions but not the group rollout percentage.
+        let variant = store.evaluate_boolean_inner("boolean-flag", 1.00, &properties);
+        assert!(matches!(
+            variant,
+            Err(PostHogEvaluationError::NoConditionGroupMatched)
+        ),);
+    }
+
+    #[test]
+    fn evaluate_boolean_2() {
+        // The `image-compaction-boundary` feature flag has one group that matches on the free user and a group that matches on all users.
+
+        let mut store = FeatureStore::new();
+        let response: LocalEvaluationResponse = serde_json::from_str(data()).unwrap();
+        store.set_flags(response.flags, None).unwrap();
+
+        // This lacks the required properties and cannot be evaluated.
+        let variant =
+            store.evaluate_boolean_inner("image-compaction-boundary", 1.00, &HashMap::new());
+        assert!(matches!(
+            variant,
+            Err(PostHogEvaluationError::NotAvailable(_))
+        ),);
+
+        let properties_unmatched = HashMap::from([
+            (
+                "plan_type".to_string(),
+                PostHogFlagFilterPropertyValue::String("paid".to_string()),
+            ),
+            (
+                "pageserver_remote_size".to_string(),
+                PostHogFlagFilterPropertyValue::Number(1000.0),
+            ),
+        ]);
+
+        // This does not match the filtered group but the all user group.
+        let variant =
+            store.evaluate_boolean_inner("image-compaction-boundary", 1.00, &properties_unmatched);
+        assert!(matches!(
+            variant,
+            Err(PostHogEvaluationError::NoConditionGroupMatched)
+        ),);
+        let variant =
+            store.evaluate_boolean_inner("image-compaction-boundary", 0.05, &properties_unmatched);
+        assert!(variant.is_ok());
+
+        let properties = HashMap::from([
+            (
+                "plan_type".to_string(),
+                PostHogFlagFilterPropertyValue::String("free".to_string()),
+            ),
+            (
+                "pageserver_remote_size".to_string(),
+                PostHogFlagFilterPropertyValue::Number(1000.0),
+            ),
+        ]);
+
+        // It matches the first group as 0.30 <= 0.40 and the properties are matched. Then it gets evaluated to the variant override.
+        let variant = store.evaluate_boolean_inner("image-compaction-boundary", 0.30, &properties);
+        assert!(variant.is_ok());
+
+        // It matches the group conditions but not the group rollout percentage.
+        let variant = store.evaluate_boolean_inner("image-compaction-boundary", 1.00, &properties);
+        assert!(matches!(
+            variant,
+            Err(PostHogEvaluationError::NoConditionGroupMatched)
+        ),);
+
+        // It matches the second "all" group conditions.
+        let variant = store.evaluate_boolean_inner("image-compaction-boundary", 0.09, &properties);
+        assert!(variant.is_ok());
     }
 }

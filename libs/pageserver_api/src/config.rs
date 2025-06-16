@@ -8,6 +8,8 @@ pub const DEFAULT_PG_LISTEN_PORT: u16 = 64000;
 pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN_PORT}");
 pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
 pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
+// TODO: gRPC is disabled by default for now, but the port is used in neon_local.
+pub const DEFAULT_GRPC_LISTEN_PORT: u16 = 51051; // storage-broker already uses 50051
 
 use std::collections::HashMap;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -18,7 +20,6 @@ use postgres_backend::AuthType;
 use remote_storage::RemoteStorageConfig;
 use serde_with::serde_as;
 use utils::logging::LogFormat;
-use utils::postgres_client::PostgresClientProtocol;
 
 use crate::models::{ImageCompressionAlgorithm, LsnLease};
 
@@ -41,6 +42,21 @@ pub struct NodeMetadata {
     // use in this type: this type intentionally only names fields that require.
     #[serde(flatten)]
     pub other: HashMap<String, serde_json::Value>,
+}
+
+/// PostHog integration config.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PostHogConfig {
+    /// PostHog project ID
+    pub project_id: String,
+    /// Server-side (private) API key
+    pub server_api_key: String,
+    /// Client-side (public) API key
+    pub client_api_key: String,
+    /// Private API URL
+    pub private_api_url: String,
+    /// Public API URL
+    pub public_api_url: String,
 }
 
 /// `pageserver.toml`
@@ -104,6 +120,7 @@ pub struct ConfigToml {
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
     pub listen_https_addr: Option<String>,
+    pub listen_grpc_addr: Option<String>,
     pub ssl_key_file: Utf8PathBuf,
     pub ssl_cert_file: Utf8PathBuf,
     #[serde(with = "humantime_serde")]
@@ -123,6 +140,7 @@ pub struct ConfigToml {
     pub http_auth_type: AuthType,
     #[serde_as(as = "serde_with::DisplayFromStr")]
     pub pg_auth_type: AuthType,
+    pub grpc_auth_type: AuthType,
     pub auth_validation_public_key_path: Option<Utf8PathBuf>,
     pub remote_storage: Option<RemoteStorageConfig>,
     pub tenant_config: TenantConfigToml,
@@ -162,6 +180,7 @@ pub struct ConfigToml {
     pub virtual_file_io_engine: Option<crate::models::virtual_file::IoEngineKind>,
     pub ingest_batch_size: u64,
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
+    pub max_get_vectored_keys: MaxGetVectoredKeys,
     pub image_compression: ImageCompressionAlgorithm,
     pub timeline_offloading: bool,
     pub ephemeral_bytes_per_memory_kb: usize,
@@ -169,7 +188,6 @@ pub struct ConfigToml {
     pub virtual_file_io_mode: Option<crate::models::virtual_file::IoMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_sync: Option<bool>,
-    pub wal_receiver_protocol: PostgresClientProtocol,
     pub page_service_pipelining: PageServicePipeliningConfig,
     pub get_vectored_concurrent_io: GetVectoredConcurrentIo,
     pub enable_read_path_debugging: Option<bool>,
@@ -182,6 +200,8 @@ pub struct ConfigToml {
     pub tracing: Option<Tracing>,
     pub enable_tls_page_service_api: bool,
     pub dev_mode: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub posthog_config: Option<PostHogConfig>,
     pub timeline_import_config: TimelineImportConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub basebackup_cache_config: Option<BasebackupCacheConfig>,
@@ -208,7 +228,7 @@ pub enum PageServicePipeliningConfig {
 }
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PageServicePipeliningConfigPipelined {
-    /// Causes runtime errors if larger than max get_vectored batch size.
+    /// Failed config parsing and validation if larger than `max_get_vectored_keys`.
     pub max_batch_size: NonZeroUsize,
     pub execution: PageServiceProtocolPipelinedExecutionStrategy,
     // The default below is such that new versions of the software can start
@@ -308,6 +328,8 @@ pub struct TimelineImportConfig {
     pub import_job_concurrency: NonZeroUsize,
     pub import_job_soft_size_limit: NonZeroUsize,
     pub import_job_checkpoint_threshold: NonZeroUsize,
+    /// Max size of the remote storage partial read done by any job
+    pub import_job_max_byte_range_size: NonZeroUsize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -381,6 +403,16 @@ impl Default for EvictionOrder {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct MaxVectoredReadBytes(pub NonZeroUsize);
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct MaxGetVectoredKeys(NonZeroUsize);
+
+impl MaxGetVectoredKeys {
+    pub fn get(&self) -> usize {
+        self.0.get()
+    }
+}
 
 /// Tenant-level configuration values, used for various purposes.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -493,8 +525,6 @@ pub struct TenantConfigToml {
     /// (either this flag or the pageserver-global one need to be set)
     pub timeline_offloading: bool,
 
-    pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
-
     /// Enable rel_size_v2 for this tenant. Once enabled, the tenant will persist this information into
     /// `index_part.json`, and it cannot be reversed.
     pub rel_size_v2_enabled: bool,
@@ -566,15 +596,14 @@ pub mod defaults {
     /// That is, slightly above 128 kB.
     pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 130 * 1024; // 130 KiB
 
+    pub const DEFAULT_MAX_GET_VECTORED_KEYS: usize = 32;
+
     pub const DEFAULT_IMAGE_COMPRESSION: ImageCompressionAlgorithm =
         ImageCompressionAlgorithm::Zstd { level: Some(1) };
 
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
 
     pub const DEFAULT_IO_BUFFER_ALIGNMENT: usize = 512;
-
-    pub const DEFAULT_WAL_RECEIVER_PROTOCOL: utils::postgres_client::PostgresClientProtocol =
-        utils::postgres_client::PostgresClientProtocol::Vanilla;
 
     pub const DEFAULT_SSL_KEY_FILE: &str = "server.key";
     pub const DEFAULT_SSL_CERT_FILE: &str = "server.crt";
@@ -588,6 +617,7 @@ impl Default for ConfigToml {
             listen_pg_addr: (DEFAULT_PG_LISTEN_ADDR.to_string()),
             listen_http_addr: (DEFAULT_HTTP_LISTEN_ADDR.to_string()),
             listen_https_addr: (None),
+            listen_grpc_addr: None, // TODO: default to 127.0.0.1:51051
             ssl_key_file: Utf8PathBuf::from(DEFAULT_SSL_KEY_FILE),
             ssl_cert_file: Utf8PathBuf::from(DEFAULT_SSL_CERT_FILE),
             ssl_cert_reload_period: Duration::from_secs(60),
@@ -604,6 +634,7 @@ impl Default for ConfigToml {
             pg_distrib_dir: None, // Utf8PathBuf::from("./pg_install"), // TODO: formely, this was std::env::current_dir()
             http_auth_type: (AuthType::Trust),
             pg_auth_type: (AuthType::Trust),
+            grpc_auth_type: (AuthType::Trust),
             auth_validation_public_key_path: (None),
             remote_storage: None,
             broker_endpoint: (storage_broker::DEFAULT_ENDPOINT
@@ -662,6 +693,9 @@ impl Default for ConfigToml {
             max_vectored_read_bytes: (MaxVectoredReadBytes(
                 NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
             )),
+            max_get_vectored_keys: (MaxGetVectoredKeys(
+                NonZeroUsize::new(DEFAULT_MAX_GET_VECTORED_KEYS).unwrap(),
+            )),
             image_compression: (DEFAULT_IMAGE_COMPRESSION),
             timeline_offloading: true,
             ephemeral_bytes_per_memory_kb: (DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
@@ -669,7 +703,6 @@ impl Default for ConfigToml {
             virtual_file_io_mode: None,
             tenant_config: TenantConfigToml::default(),
             no_sync: None,
-            wal_receiver_protocol: DEFAULT_WAL_RECEIVER_PROTOCOL,
             page_service_pipelining: PageServicePipeliningConfig::Pipelined(
                 PageServicePipeliningConfigPipelined {
                     max_batch_size: NonZeroUsize::new(32).unwrap(),
@@ -690,11 +723,13 @@ impl Default for ConfigToml {
             enable_tls_page_service_api: false,
             dev_mode: false,
             timeline_import_config: TimelineImportConfig {
-                import_job_concurrency: NonZeroUsize::new(128).unwrap(),
-                import_job_soft_size_limit: NonZeroUsize::new(1024 * 1024 * 1024).unwrap(),
-                import_job_checkpoint_threshold: NonZeroUsize::new(128).unwrap(),
+                import_job_concurrency: NonZeroUsize::new(32).unwrap(),
+                import_job_soft_size_limit: NonZeroUsize::new(256 * 1024 * 1024).unwrap(),
+                import_job_checkpoint_threshold: NonZeroUsize::new(32).unwrap(),
+                import_job_max_byte_range_size: NonZeroUsize::new(4 * 1024 * 1024).unwrap(),
             },
             basebackup_cache_config: None,
+            posthog_config: None,
         }
     }
 }
@@ -812,7 +847,6 @@ impl Default for TenantConfigToml {
             lsn_lease_length: LsnLease::DEFAULT_LENGTH,
             lsn_lease_length_for_ts: LsnLease::DEFAULT_LENGTH_FOR_TS,
             timeline_offloading: true,
-            wal_receiver_protocol_override: None,
             rel_size_v2_enabled: false,
             gc_compaction_enabled: DEFAULT_GC_COMPACTION_ENABLED,
             gc_compaction_verification: DEFAULT_GC_COMPACTION_VERIFICATION,

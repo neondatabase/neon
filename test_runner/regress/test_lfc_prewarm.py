@@ -188,7 +188,8 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, query: LfcQueryMet
             pg_cur.execute("select pg_reload_conf()")
 
             if query is LfcQueryMethod.COMPUTE_CTL:
-                http_client.prewarm_lfc()
+                # Same thing as prewarm_lfc(), testing other method
+                http_client.prewarm_lfc(endpoint.endpoint_id)
             else:
                 pg_cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
 

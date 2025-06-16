@@ -675,7 +675,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
     def timeline_delete(
         self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId, **kwargs
-    ):
+    ) -> int:
         """
         Note that deletion is not instant, it is scheduled and performed mostly in the background.
         So if you need to wait for it to complete use `timeline_delete_wait_completed`.
@@ -687,6 +687,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         self.verbose_error(res)
         res_json = res.json()
         assert res_json is None
+
+        return res.status_code
 
     def timeline_gc(
         self,

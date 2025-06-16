@@ -45,6 +45,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use base64::Engine;
+use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use compute_api::requests::{
     COMPUTE_AUDIENCE, ComputeClaims, ComputeClaimsScope, ConfigurationRequest,
 };
@@ -164,7 +166,7 @@ impl ComputeControlPlane {
                     public_key_use: Some(PublicKeyUse::Signature),
                     key_operations: Some(vec![KeyOperations::Verify]),
                     key_algorithm: Some(KeyAlgorithm::EdDSA),
-                    key_id: Some(base64::encode_config(key_hash, base64::URL_SAFE_NO_PAD)),
+                    key_id: Some(BASE64_URL_SAFE_NO_PAD.encode(key_hash)),
                     x509_url: None::<String>,
                     x509_chain: None::<Vec<String>>,
                     x509_sha1_fingerprint: None::<String>,
@@ -173,7 +175,7 @@ impl ComputeControlPlane {
                 algorithm: AlgorithmParameters::OctetKeyPair(OctetKeyPairParameters {
                     key_type: OctetKeyPairType::OctetKeyPair,
                     curve: EllipticCurve::Ed25519,
-                    x: base64::encode_config(public_key, base64::URL_SAFE_NO_PAD),
+                    x: BASE64_URL_SAFE_NO_PAD.encode(public_key),
                 }),
             }],
         })
@@ -747,7 +749,7 @@ impl Endpoint {
                 logs_export_host: None::<String>,
                 endpoint_storage_addr: Some(endpoint_storage_addr),
                 endpoint_storage_token: Some(endpoint_storage_token),
-                prewarm_lfc_on_startup: false,
+                autoprewarm: false,
             };
 
             // this strange code is needed to support respec() in tests

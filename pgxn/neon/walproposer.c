@@ -98,6 +98,7 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 	wp = palloc0(sizeof(WalProposer));
 	wp->config = config;
 	wp->api = api;
+	wp->localTimeLineID = config->pgTimeline;
 	wp->state = WPS_COLLECTING_TERMS;
 	wp->mconf.generation = INVALID_GENERATION;
 	wp->mconf.members.len = 0;
@@ -118,6 +119,10 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 		if (errno != 0)
 		{
 			wp_log(FATAL, "failed to parse neon.safekeepers generation number: %m");
+		}
+		if (*endptr != ':')
+		{
+			wp_log(FATAL, "failed to parse neon.safekeepers: no colon after generation");
 		}
 		/* Skip past : to the first hostname. */
 		host = endptr + 1;
@@ -155,8 +160,9 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 			int			written = 0;
 
 			written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
-							   "host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
-							   sk->host, sk->port, wp->config->neon_timeline, wp->config->neon_tenant);
+							   "%s host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
+							   wp->config->safekeeper_conninfo_options, sk->host, sk->port,
+							   wp->config->neon_timeline, wp->config->neon_tenant);
 			if (written > MAXCONNINFO || written < 0)
 				wp_log(FATAL, "could not create connection string for safekeeper %s:%s", sk->host, sk->port);
 		}
@@ -1129,7 +1135,7 @@ VotesCollectedMset(WalProposer *wp, MemberSet *mset, Safekeeper **msk, StringInf
 				wp->propTermStartLsn = sk->voteResponse.flushLsn;
 				wp->donor = sk;
 			}
-			wp->truncateLsn = Max(wp->safekeeper[i].voteResponse.truncateLsn, wp->truncateLsn);
+			wp->truncateLsn = Max(sk->voteResponse.truncateLsn, wp->truncateLsn);
 
 			if (n_votes > 0)
 				appendStringInfoString(s, ", ");
@@ -1379,7 +1385,7 @@ ProcessPropStartPos(WalProposer *wp)
 	 * we must bail out, as clog and other non rel data is inconsistent.
 	 */
 	walprop_shared = wp->api.get_shmem_state(wp);
-	if (!wp->config->syncSafekeepers)
+	if (!wp->config->syncSafekeepers && !walprop_shared->replica_promote)
 	{
 		/*
 		 * Basebackup LSN always points to the beginning of the record (not

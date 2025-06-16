@@ -32,6 +32,7 @@ use control_plane::storage_controller::{
 };
 use nix::fcntl::{Flock, FlockArg};
 use pageserver_api::config::{
+    DEFAULT_GRPC_LISTEN_PORT as DEFAULT_PAGESERVER_GRPC_PORT,
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
 };
@@ -44,7 +45,7 @@ use pageserver_api::models::{
 use pageserver_api::shard::{DEFAULT_STRIPE_SIZE, ShardCount, ShardStripeSize, TenantShardId};
 use postgres_backend::AuthType;
 use postgres_connection::parse_host_port;
-use safekeeper_api::membership::SafekeeperGeneration;
+use safekeeper_api::membership::{SafekeeperGeneration, SafekeeperId};
 use safekeeper_api::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_SAFEKEEPER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
@@ -1007,13 +1008,16 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
                     let pageserver_id = NodeId(DEFAULT_PAGESERVER_ID.0 + i as u64);
                     let pg_port = DEFAULT_PAGESERVER_PG_PORT + i;
                     let http_port = DEFAULT_PAGESERVER_HTTP_PORT + i;
+                    let grpc_port = DEFAULT_PAGESERVER_GRPC_PORT + i;
                     NeonLocalInitPageserverConf {
                         id: pageserver_id,
                         listen_pg_addr: format!("127.0.0.1:{pg_port}"),
                         listen_http_addr: format!("127.0.0.1:{http_port}"),
                         listen_https_addr: None,
+                        listen_grpc_addr: Some(format!("127.0.0.1:{grpc_port}")),
                         pg_auth_type: AuthType::Trust,
                         http_auth_type: AuthType::Trust,
+                        grpc_auth_type: AuthType::Trust,
                         other: Default::default(),
                         // Typical developer machines use disks with slow fsync, and we don't care
                         // about data integrity: disable disk syncs.
@@ -1251,6 +1255,45 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
             pageserver
                 .timeline_import(tenant_id, timeline_id, base, pg_wal, args.pg_version)
                 .await?;
+            if env.storage_controller.timelines_onto_safekeepers {
+                println!("Creating timeline on safekeeper ...");
+                let timeline_info = pageserver
+                    .timeline_info(
+                        TenantShardId::unsharded(tenant_id),
+                        timeline_id,
+                        pageserver_client::mgmt_api::ForceAwaitLogicalSize::No,
+                    )
+                    .await?;
+                let default_sk = SafekeeperNode::from_env(env, env.safekeepers.first().unwrap());
+                let default_host = default_sk
+                    .conf
+                    .listen_addr
+                    .clone()
+                    .unwrap_or_else(|| "localhost".to_string());
+                let mconf = safekeeper_api::membership::Configuration {
+                    generation: SafekeeperGeneration::new(1),
+                    members: safekeeper_api::membership::MemberSet {
+                        m: vec![SafekeeperId {
+                            host: default_host,
+                            id: default_sk.conf.id,
+                            pg_port: default_sk.conf.pg_port,
+                        }],
+                    },
+                    new_members: None,
+                };
+                let pg_version = args.pg_version * 10000;
+                let req = safekeeper_api::models::TimelineCreateRequest {
+                    tenant_id,
+                    timeline_id,
+                    mconf,
+                    pg_version,
+                    system_id: None,
+                    wal_seg_size: None,
+                    start_lsn: timeline_info.last_record_lsn,
+                    commit_lsn: None,
+                };
+                default_sk.create_timeline(&req).await?;
+            }
             env.register_branch_mapping(branch_name.to_string(), tenant_id, timeline_id)?;
             println!("Done");
         }
@@ -1275,6 +1318,7 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
                 mode: pageserver_api::models::TimelineCreateRequestMode::Branch {
                     ancestor_timeline_id,
                     ancestor_start_lsn: start_lsn,
+                    read_only: false,
                     pg_version: None,
                 },
             };

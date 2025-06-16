@@ -40,7 +40,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use compute_api::responses::ComputeConfig;
 use compute_tools::compute::{
@@ -57,31 +57,15 @@ use tracing::{error, info};
 use url::Url;
 use utils::failpoint_support;
 
-// Compatibility hack: if the control plane specified any remote-ext-config
-// use the default value for extension storage proxy gateway.
-// Remove this once the control plane is updated to pass the gateway URL
-fn parse_remote_ext_base_url(arg: &str) -> Result<String> {
-    const FALLBACK_PG_EXT_GATEWAY_BASE_URL: &str =
-        "http://pg-ext-s3-gateway.pg-ext-s3-gateway.svc.cluster.local";
-
-    Ok(if arg.starts_with("http") {
-        arg
-    } else {
-        FALLBACK_PG_EXT_GATEWAY_BASE_URL
-    }
-    .to_owned())
-}
-
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 #[command(rename_all = "kebab-case")]
 struct Cli {
     #[arg(short = 'b', long, default_value = "postgres", env = "POSTGRES_PATH")]
     pub pgbin: String,
 
     /// The base URL for the remote extension storage proxy gateway.
-    /// Should be in the form of `http(s)://<gateway-hostname>[:<port>]`.
-    #[arg(short = 'r', long, value_parser = parse_remote_ext_base_url, alias = "remote-ext-config")]
-    pub remote_ext_base_url: Option<String>,
+    #[arg(short = 'r', long, value_parser = Self::parse_remote_ext_base_url)]
+    pub remote_ext_base_url: Option<Url>,
 
     /// The port to bind the external listening HTTP server to. Clients running
     /// outside the compute will talk to the compute through this port. Keep
@@ -137,9 +121,32 @@ struct Cli {
     )]
     pub control_plane_uri: Option<String>,
 
+    /// Interval in seconds for collecting installed extensions statistics
+    #[arg(long, default_value = "3600")]
+    pub installed_extensions_collection_interval: u64,
+
     /// Run in development mode, skipping VM-specific operations like process termination
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub dev: bool,
+}
+
+impl Cli {
+    /// Parse a URL from an argument. By default, this isn't necessary, but we
+    /// want to do some sanity checking.
+    fn parse_remote_ext_base_url(value: &str) -> Result<Url> {
+        // Remove extra trailing slashes, and add one. We use Url::join() later
+        // when downloading remote extensions. If the base URL is something like
+        // http://example.com/pg-ext-s3-gateway, and join() is called with
+        // something like "xyz", the resulting URL is http://example.com/xyz.
+        let value = value.trim_end_matches('/').to_owned() + "/";
+        let url = Url::parse(&value)?;
+
+        if url.query_pairs().count() != 0 {
+            bail!("parameters detected in remote extensions base URL")
+        }
+
+        Ok(url)
+    }
 }
 
 fn main() -> Result<()> {
@@ -183,6 +190,7 @@ fn main() -> Result<()> {
             cgroup: cli.cgroup,
             #[cfg(target_os = "linux")]
             vm_monitor_addr: cli.vm_monitor_addr,
+            installed_extensions_collection_interval: cli.installed_extensions_collection_interval,
         },
         config,
     )?;
@@ -268,7 +276,8 @@ fn handle_exit_signal(sig: i32, dev_mode: bool) {
 
 #[cfg(test)]
 mod test {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
+    use url::Url;
 
     use super::Cli;
 
@@ -278,16 +287,41 @@ mod test {
     }
 
     #[test]
-    fn parse_pg_ext_gateway_base_url() {
-        let arg = "http://pg-ext-s3-gateway2";
-        let result = super::parse_remote_ext_base_url(arg).unwrap();
-        assert_eq!(result, arg);
-
-        let arg = "pg-ext-s3-gateway";
-        let result = super::parse_remote_ext_base_url(arg).unwrap();
+    fn verify_remote_ext_base_url() {
+        let cli = Cli::parse_from([
+            "compute_ctl",
+            "--pgdata=test",
+            "--connstr=test",
+            "--compute-id=test",
+            "--remote-ext-base-url",
+            "https://example.com/subpath",
+        ]);
         assert_eq!(
-            result,
-            "http://pg-ext-s3-gateway.pg-ext-s3-gateway.svc.cluster.local"
+            cli.remote_ext_base_url.unwrap(),
+            Url::parse("https://example.com/subpath/").unwrap()
         );
+
+        let cli = Cli::parse_from([
+            "compute_ctl",
+            "--pgdata=test",
+            "--connstr=test",
+            "--compute-id=test",
+            "--remote-ext-base-url",
+            "https://example.com//",
+        ]);
+        assert_eq!(
+            cli.remote_ext_base_url.unwrap(),
+            Url::parse("https://example.com").unwrap()
+        );
+
+        Cli::try_parse_from([
+            "compute_ctl",
+            "--pgdata=test",
+            "--connstr=test",
+            "--compute-id=test",
+            "--remote-ext-base-url",
+            "https://example.com?hello=world",
+        ])
+        .expect_err("URL parameters are not allowed");
     }
 }

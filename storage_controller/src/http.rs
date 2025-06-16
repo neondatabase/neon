@@ -482,6 +482,10 @@ async fn handle_tenant_timeline_delete(
         ForwardOutcome::NotForwarded(_req) => {}
     };
 
+    service
+        .maybe_delete_timeline_import(tenant_id, timeline_id)
+        .await?;
+
     // For timeline deletions, which both implement an "initially return 202, then 404 once
     // we're done" semantic, we wrap with a retry loop to expose a simpler API upstream.
     async fn deletion_wrapper<R, F>(service: Arc<Service>, f: F) -> Result<Response<Body>, ApiError>
@@ -901,6 +905,42 @@ async fn handle_node_delete(req: Request<Body>) -> Result<Response<Body>, ApiErr
     let state = get_state(&req);
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
     json_response(StatusCode::OK, state.service.node_delete(node_id).await?)
+}
+
+async fn handle_tombstone_list(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let state = get_state(&req);
+    let mut nodes = state.service.tombstone_list().await?;
+    nodes.sort_by_key(|n| n.get_id());
+    let api_nodes = nodes.into_iter().map(|n| n.describe()).collect::<Vec<_>>();
+
+    json_response(StatusCode::OK, api_nodes)
+}
+
+async fn handle_tombstone_delete(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+    json_response(
+        StatusCode::OK,
+        state.service.tombstone_delete(node_id).await?,
+    )
 }
 
 async fn handle_node_configure(req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -1355,6 +1395,31 @@ async fn handle_timeline_import(req: Request<Body>) -> Result<Response<Body>, Ap
     json_response(
         StatusCode::OK,
         state.service.timeline_import(import_req).await?,
+    )
+}
+
+async fn handle_tenant_timeline_locate(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
+    check_permissions(&req, Scope::Admin)?;
+    maybe_rate_limit(&req, tenant_id).await;
+
+    match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(_req) => {}
+    };
+
+    json_response(
+        StatusCode::OK,
+        service
+            .tenant_timeline_locate(tenant_id, timeline_id)
+            .await?,
     )
 }
 
@@ -2005,10 +2070,10 @@ pub fn make_router(
 
     router
         .data(Arc::new(HttpState::new(service, auth, build_info)))
+        // Non-prefixed generic endpoints (status, metrics, profiling)
         .get("/metrics", |r| {
             named_request_span(r, measured_metrics_handler, RequestName("metrics"))
         })
-        // Non-prefixed generic endpoints (status, metrics, profiling)
         .get("/status", |r| {
             named_request_span(r, handle_status, RequestName("status"))
         })
@@ -2058,6 +2123,20 @@ pub fn make_router(
         .post("/debug/v1/node/:node_id/drop", |r| {
             named_request_span(r, handle_node_drop, RequestName("debug_v1_node_drop"))
         })
+        .delete("/debug/v1/tombstone/:node_id", |r| {
+            named_request_span(
+                r,
+                handle_tombstone_delete,
+                RequestName("debug_v1_tombstone_delete"),
+            )
+        })
+        .get("/debug/v1/tombstone", |r| {
+            named_request_span(
+                r,
+                handle_tombstone_list,
+                RequestName("debug_v1_tombstone_list"),
+            )
+        })
         .post("/debug/v1/tenant/:tenant_id/import", |r| {
             named_request_span(
                 r,
@@ -2082,6 +2161,16 @@ pub fn make_router(
                     r,
                     handle_timeline_import,
                     RequestName("debug_v1_timeline_import"),
+                )
+            },
+        )
+        .get(
+            "/debug/v1/tenant/:tenant_id/timeline/:timeline_id/locate",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_locate,
+                    RequestName("v1_tenant_timeline_locate"),
                 )
             },
         )

@@ -99,8 +99,8 @@ use crate::tenant_shard::{
     ScheduleOptimization, ScheduleOptimizationAction, TenantShard,
 };
 use crate::timeline_import::{
-    ImportResult, ShardImportStatuses, TimelineImport, TimelineImportFinalizeError,
-    TimelineImportState, UpcallClient,
+    FinalizingImport, ImportResult, ShardImportStatuses, TimelineImport,
+    TimelineImportFinalizeError, TimelineImportState, UpcallClient,
 };
 
 const WAITER_FILL_DRAIN_POLL_TIMEOUT: Duration = Duration::from_millis(500);
@@ -166,6 +166,7 @@ enum NodeOperations {
     Register,
     Configure,
     Delete,
+    DeleteTombstone,
 }
 
 /// The leadership status for the storage controller process.
@@ -232,6 +233,9 @@ struct ServiceState {
 
     /// Queue of tenants who are waiting for concurrency limits to permit them to reconcile
     delayed_reconcile_rx: tokio::sync::mpsc::Receiver<TenantShardId>,
+
+    /// Tracks ongoing timeline import finalization tasks
+    imports_finalizing: BTreeMap<(TenantId, TimelineId), FinalizingImport>,
 }
 
 /// Transform an error from a pageserver into an error to return to callers of a storage
@@ -308,6 +312,7 @@ impl ServiceState {
             scheduler,
             ongoing_operation: None,
             delayed_reconcile_rx,
+            imports_finalizing: Default::default(),
         }
     }
 
@@ -1103,7 +1108,8 @@ impl Service {
         observed
     }
 
-    /// Used during [`Self::startup_reconcile`]: detach a list of unknown-to-us tenants from pageservers.
+    /// Used during [`Self::startup_reconcile`] and shard splits: detach a list of unknown-to-us
+    /// tenants from pageservers.
     ///
     /// This is safe to run in the background, because if we don't have this TenantShardId in our map of
     /// tenants, then it is probably something incompletely deleted before: we will not fight with any
@@ -2261,6 +2267,7 @@ impl Service {
                     // fail, and start from scratch, so it doesn't make sense for us to try and preserve
                     // the stale/multi states at this point.
                     mode: LocationConfigMode::AttachedSingle,
+                    stripe_size: shard.shard.stripe_size,
                 });
 
                 shard.generation = std::cmp::max(shard.generation, Some(new_gen));
@@ -2294,6 +2301,7 @@ impl Service {
                     id: *tenant_shard_id,
                     r#gen: None,
                     mode: LocationConfigMode::Secondary,
+                    stripe_size: shard.shard.stripe_size,
                 });
 
                 // We must not update observed, because we have no guarantee that our
@@ -3823,6 +3831,13 @@ impl Service {
         .await;
         failpoint_support::sleep_millis_async!("tenant-create-timeline-shared-lock");
         let is_import = create_req.is_import();
+        let read_only = matches!(
+            create_req.mode,
+            models::TimelineCreateRequestMode::Branch {
+                read_only: true,
+                ..
+            }
+        );
 
         if is_import {
             // Ensure that there is no split on-going.
@@ -3895,13 +3910,13 @@ impl Service {
             }
 
             None
-        } else if safekeepers {
+        } else if safekeepers || read_only {
             // Note that for imported timelines, we do not create the timeline on the safekeepers
             // straight away. Instead, we do it once the import finalized such that we know what
             // start LSN to provide for the safekeepers. This is done in
             // [`Self::finalize_timeline_import`].
             let res = self
-                .tenant_timeline_create_safekeepers(tenant_id, &timeline_info)
+                .tenant_timeline_create_safekeepers(tenant_id, &timeline_info, read_only)
                 .instrument(tracing::info_span!("timeline_create_safekeepers", %tenant_id, timeline_id=%timeline_info.timeline_id))
                 .await?;
             Some(res)
@@ -3915,6 +3930,11 @@ impl Service {
         })
     }
 
+    #[instrument(skip_all, fields(
+        tenant_id=%req.tenant_shard_id.tenant_id,
+        shard_id=%req.tenant_shard_id.shard_slug(),
+        timeline_id=%req.timeline_id,
+    ))]
     pub(crate) async fn handle_timeline_shard_import_progress(
         self: &Arc<Self>,
         req: TimelineImportStatusRequest,
@@ -3964,6 +3984,11 @@ impl Service {
             })
     }
 
+    #[instrument(skip_all, fields(
+        tenant_id=%req.tenant_shard_id.tenant_id,
+        shard_id=%req.tenant_shard_id.shard_slug(),
+        timeline_id=%req.timeline_id,
+    ))]
     pub(crate) async fn handle_timeline_shard_import_progress_upcall(
         self: &Arc<Self>,
         req: PutTimelineImportStatusRequest,
@@ -4080,11 +4105,56 @@ impl Service {
     ///
     /// If this method gets pre-empted by shut down, it will be called again at start-up (on-going
     /// imports are stored in the database).
+    ///
+    /// # Cancel-Safety
+    /// Not cancel safe.
+    /// If the caller stops polling, the import will not be removed from
+    /// [`ServiceState::imports_finalizing`].
     #[instrument(skip_all, fields(
         tenant_id=%import.tenant_id,
         timeline_id=%import.timeline_id,
     ))]
+
     async fn finalize_timeline_import(
+        self: &Arc<Self>,
+        import: TimelineImport,
+    ) -> Result<(), TimelineImportFinalizeError> {
+        let tenant_timeline = (import.tenant_id, import.timeline_id);
+
+        let (_finalize_import_guard, cancel) = {
+            let mut locked = self.inner.write().unwrap();
+            let gate = Gate::default();
+            let cancel = CancellationToken::default();
+
+            let guard = gate.enter().unwrap();
+
+            locked.imports_finalizing.insert(
+                tenant_timeline,
+                FinalizingImport {
+                    gate,
+                    cancel: cancel.clone(),
+                },
+            );
+
+            (guard, cancel)
+        };
+
+        let res = tokio::select! {
+            res = self.finalize_timeline_import_impl(import) => {
+                res
+            },
+            _ = cancel.cancelled() => {
+                Err(TimelineImportFinalizeError::Cancelled)
+            }
+        };
+
+        let mut locked = self.inner.write().unwrap();
+        locked.imports_finalizing.remove(&tenant_timeline);
+
+        res
+    }
+
+    async fn finalize_timeline_import_impl(
         self: &Arc<Self>,
         import: TimelineImport,
     ) -> Result<(), TimelineImportFinalizeError> {
@@ -4284,6 +4354,46 @@ impl Service {
                 .map(|import| self.finalize_timeline_import(import)),
         )
         .await;
+    }
+
+    /// Delete a timeline import if it exists
+    ///
+    /// Firstly, delete the entry from the database. Any updates
+    /// from pageservers after the update will fail with a 404, so the
+    /// import cannot progress into finalizing state if it's not there already.
+    /// Secondly, cancel the finalization if one is in progress.
+    pub(crate) async fn maybe_delete_timeline_import(
+        self: &Arc<Self>,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Result<(), DatabaseError> {
+        let tenant_has_ongoing_import = {
+            let locked = self.inner.read().unwrap();
+            locked
+                .tenants
+                .range(TenantShardId::tenant_range(tenant_id))
+                .any(|(_tid, shard)| shard.importing == TimelineImportState::Importing)
+        };
+
+        if !tenant_has_ongoing_import {
+            return Ok(());
+        }
+
+        self.persistence
+            .delete_timeline_import(tenant_id, timeline_id)
+            .await?;
+
+        let maybe_finalizing = {
+            let mut locked = self.inner.write().unwrap();
+            locked.imports_finalizing.remove(&(tenant_id, timeline_id))
+        };
+
+        if let Some(finalizing) = maybe_finalizing {
+            finalizing.cancel.cancel();
+            finalizing.gate.close().await;
+        }
+
+        Ok(())
     }
 
     pub(crate) async fn tenant_timeline_archival_config(
@@ -6104,7 +6214,11 @@ impl Service {
             }
         }
 
-        pausable_failpoint!("shard-split-pre-complete");
+        fail::fail_point!("shard-split-pre-complete", |_| Err(ApiError::Conflict(
+            "failpoint".to_string()
+        )));
+
+        pausable_failpoint!("shard-split-pre-complete-pause");
 
         // TODO: if the pageserver restarted concurrently with our split API call,
         // the actual generation of the child shard might differ from the generation
@@ -6125,6 +6239,15 @@ impl Service {
         // Replace all the shards we just split with their children: this phase is infallible.
         let (response, child_locations, waiters) =
             self.tenant_shard_split_commit_inmem(tenant_id, new_shard_count, new_stripe_size);
+
+        // Notify all page servers to detach and clean up the old shards because they will no longer
+        // be needed. This is best-effort: if it fails, it will be cleaned up on a subsequent
+        // Pageserver re-attach/startup.
+        let shards_to_cleanup = targets
+            .iter()
+            .map(|target| (target.parent_id, target.node.get_id()))
+            .collect();
+        self.cleanup_locations(shards_to_cleanup).await;
 
         // Send compute notifications for all the new shards
         let mut failed_notifications = Vec::new();
@@ -6528,6 +6651,8 @@ impl Service {
 
     /// This is for debug/support only: assuming tenant data is already present in S3, we "create" a
     /// tenant with a very high generation number so that it will see the existing data.
+    /// It does not create timelines on safekeepers, because they might already exist on some
+    /// safekeeper set. So, the timelines are not storcon-managed after the import.
     pub(crate) async fn tenant_import(
         &self,
         tenant_id: TenantId,
@@ -6803,7 +6928,7 @@ impl Service {
     /// detaching or deleting it on pageservers.  We do not try and re-schedule any
     /// tenants that were on this node.
     pub(crate) async fn node_drop(&self, node_id: NodeId) -> Result<(), ApiError> {
-        self.persistence.delete_node(node_id).await?;
+        self.persistence.set_tombstone(node_id).await?;
 
         let mut locked = self.inner.write().unwrap();
 
@@ -6927,9 +7052,10 @@ impl Service {
         // That is safe because in Service::spawn we only use generation_pageserver if it refers to a node
         // that exists.
 
-        // 2. Actually delete the node from the database and from in-memory state
+        // 2. Actually delete the node from in-memory state and set tombstone to the database
+        // for preventing the node to register again.
         tracing::info!("Deleting node from database");
-        self.persistence.delete_node(node_id).await?;
+        self.persistence.set_tombstone(node_id).await?;
 
         Ok(())
     }
@@ -6946,6 +7072,35 @@ impl Service {
         };
 
         Ok(nodes)
+    }
+
+    pub(crate) async fn tombstone_list(&self) -> Result<Vec<Node>, ApiError> {
+        self.persistence
+            .list_tombstones()
+            .await?
+            .into_iter()
+            .map(|np| Node::from_persistent(np, false))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ApiError::InternalServerError)
+    }
+
+    pub(crate) async fn tombstone_delete(&self, node_id: NodeId) -> Result<(), ApiError> {
+        let _node_lock = trace_exclusive_lock(
+            &self.node_op_locks,
+            node_id,
+            NodeOperations::DeleteTombstone,
+        )
+        .await;
+
+        if matches!(self.get_node(node_id).await, Err(ApiError::NotFound(_))) {
+            self.persistence.delete_node(node_id).await?;
+            Ok(())
+        } else {
+            Err(ApiError::Conflict(format!(
+                "Node {} is in use, consider using tombstone API first",
+                node_id
+            )))
+        }
     }
 
     pub(crate) async fn get_node(&self, node_id: NodeId) -> Result<Node, ApiError> {
@@ -7118,7 +7273,25 @@ impl Service {
         };
 
         match registration_status {
-            RegistrationStatus::New => self.persistence.insert_node(&new_node).await?,
+            RegistrationStatus::New => {
+                self.persistence.insert_node(&new_node).await.map_err(|e| {
+                    if matches!(
+                        e,
+                        crate::persistence::DatabaseError::Query(
+                            diesel::result::Error::DatabaseError(
+                                diesel::result::DatabaseErrorKind::UniqueViolation,
+                                _,
+                            )
+                        )
+                    ) {
+                        // The node can be deleted by tombstone API, and not show up in the list of nodes.
+                        // If you see this error, check tombstones first.
+                        ApiError::Conflict(format!("Node {} is already exists", new_node.get_id()))
+                    } else {
+                        ApiError::from(e)
+                    }
+                })?;
+            }
             RegistrationStatus::NeedUpdate => {
                 self.persistence
                     .update_node_on_registration(
@@ -8521,8 +8694,9 @@ impl Service {
         Some(ShardCount(new_shard_count))
     }
 
-    /// Fetches the top tenant shards from every node, in descending order of
-    /// max logical size. Any node errors will be logged and ignored.
+    /// Fetches the top tenant shards from every available node, in descending order of
+    /// max logical size. Offline nodes are skipped, and any errors from available nodes
+    /// will be logged and ignored.
     async fn get_top_tenant_shards(
         &self,
         request: &TopTenantShardsRequest,
@@ -8533,6 +8707,7 @@ impl Service {
             .unwrap()
             .nodes
             .values()
+            .filter(|node| node.is_available())
             .cloned()
             .collect_vec();
 

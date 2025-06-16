@@ -100,9 +100,9 @@ impl CouldRetry for compute::ConnectionError {
     fn could_retry(&self) -> bool {
         match self {
             compute::ConnectionError::Postgres(err) => err.could_retry(),
-            compute::ConnectionError::CouldNotConnect(err) => err.could_retry(),
+            compute::ConnectionError::TlsError(err) => err.could_retry(),
             compute::ConnectionError::WakeComputeError(err) => err.could_retry(),
-            _ => false,
+            compute::ConnectionError::TooManyConnectionAttempts(_) => false,
         }
     }
 }
@@ -125,8 +125,9 @@ pub(crate) fn retry_after(num_retries: u32, config: RetryConfig) -> time::Durati
 
 #[cfg(test)]
 mod tests {
-    use super::ShouldRetryWakeCompute;
     use postgres_client::error::{DbError, SqlState};
+
+    use super::ShouldRetryWakeCompute;
 
     #[test]
     fn should_retry_wake_compute_for_db_error() {

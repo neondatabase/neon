@@ -3,6 +3,9 @@
 use std::fmt;
 use std::ops::Range;
 
+use base64::Engine as _;
+use base64::prelude::BASE64_STANDARD;
+
 use super::base64_decode_array;
 use super::key::{SCRAM_KEY_LEN, ScramKey};
 use super::signature::SignatureBuilder;
@@ -88,7 +91,7 @@ impl<'a> ClientFirstMessage<'a> {
 
         let mut message = String::new();
         write!(&mut message, "r={}", self.nonce).unwrap();
-        base64::encode_config_buf(nonce, base64::STANDARD, &mut message);
+        BASE64_STANDARD.encode_string(nonce, &mut message);
         let combined_nonce = 2..message.len();
         write!(&mut message, ",s={salt_base64},i={iterations}").unwrap();
 
@@ -142,11 +145,7 @@ impl<'a> ClientFinalMessage<'a> {
         server_key: &ScramKey,
     ) -> String {
         let mut buf = String::from("v=");
-        base64::encode_config_buf(
-            signature_builder.build(server_key),
-            base64::STANDARD,
-            &mut buf,
-        );
+        BASE64_STANDARD.encode_string(signature_builder.build(server_key), &mut buf);
 
         buf
     }
@@ -251,7 +250,7 @@ mod tests {
             "iiYEfS3rOgn8S3rtpSdrOsHtPLWvIkdgmHxA0hf3JNOAG4dU"
         );
         assert_eq!(
-            base64::encode(msg.proof),
+            BASE64_STANDARD.encode(msg.proof),
             "SRpfsIVS4Gk11w1LqQ4QvCUBZYQmqXNSDEcHqbQ3CHI="
         );
     }

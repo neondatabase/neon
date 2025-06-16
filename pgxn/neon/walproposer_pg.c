@@ -35,6 +35,7 @@
 #include "storage/proc.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
+#include "storage/pg_shmem.h"
 #include "storage/shmem.h"
 #include "storage/spin.h"
 #include "tcop/tcopprot.h"
@@ -64,6 +65,7 @@ char	   *wal_acceptors_list = "";
 int			wal_acceptor_reconnect_timeout = 1000;
 int			wal_acceptor_connection_timeout = 10000;
 int			safekeeper_proto_version = 3;
+char	   *safekeeper_conninfo_options = "";
 
 /* Set to true in the walproposer bgw. */
 static bool am_walproposer;
@@ -119,6 +121,7 @@ init_walprop_config(bool syncSafekeepers)
 	walprop_config.neon_timeline = neon_timeline;
 	/* WalProposerCreate scribbles directly on it, so pstrdup */
 	walprop_config.safekeepers_list = pstrdup(wal_acceptors_list);
+	walprop_config.safekeeper_conninfo_options = pstrdup(safekeeper_conninfo_options);
 	walprop_config.safekeeper_reconnect_timeout = wal_acceptor_reconnect_timeout;
 	walprop_config.safekeeper_connection_timeout = wal_acceptor_connection_timeout;
 	walprop_config.wal_segment_size = wal_segment_size;
@@ -157,12 +160,19 @@ WalProposerMain(Datum main_arg)
 {
 	WalProposer *wp;
 
+	if (*wal_acceptors_list == '\0')
+	{
+		wpg_log(WARNING, "Safekeepers list is empty");
+		return;
+	}
+
 	init_walprop_config(false);
 	walprop_pg_init_bgworker();
 	am_walproposer = true;
 	walprop_pg_load_libpqwalreceiver();
 
 	wp = WalProposerCreate(&walprop_config, walprop_pg);
+	wp->localTimeLineID = GetWALInsertionTimeLine();
 	wp->last_reconnect_attempt = walprop_pg_get_current_timestamp(wp);
 
 	walprop_pg_init_walsender();
@@ -202,6 +212,16 @@ nwp_register_gucs(void)
 							   GUC_LIST_INPUT,	/* extensions can't use*
 												 * GUC_LIST_QUOTE */
 							   NULL, assign_neon_safekeepers, NULL);
+
+	DefineCustomStringVariable(
+							   "neon.safekeeper_conninfo_options",
+							   "libpq keyword parameters and values to apply to safekeeper connections",
+							   NULL,
+							   &safekeeper_conninfo_options,
+							   "",
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
 
 	DefineCustomIntVariable(
 							"neon.safekeeper_reconnect_timeout",
@@ -260,6 +280,30 @@ split_safekeepers_list(char *safekeepers_list, char *safekeepers[])
 	return n_safekeepers;
 }
 
+static char *split_off_safekeepers_generation(char *safekeepers_list, uint32 *generation)
+{
+	char	   *endptr;
+
+	if (strncmp(safekeepers_list, "g#", 2) != 0)
+	{
+		return safekeepers_list;
+	}
+	else
+	{
+		errno = 0;
+		*generation = strtoul(safekeepers_list + 2, &endptr, 10);
+		if (errno != 0)
+		{
+			wp_log(FATAL, "failed to parse neon.safekeepers generation number: %m");
+		}
+		if (*endptr != ':')
+		{
+			wp_log(FATAL, "failed to parse neon.safekeepers: no colon after generation");
+		}
+		return endptr + 1;
+	}
+}
+
 /*
  * Accept two coma-separated strings with list of safekeeper host:port addresses.
  * Split them into arrays and return false if two sets do not match, ignoring the order.
@@ -271,6 +315,16 @@ safekeepers_cmp(char *old, char *new)
 	char	   *safekeepers_new[MAX_SAFEKEEPERS];
 	int			len_old = 0;
 	int			len_new = 0;
+	uint32		gen_old = INVALID_GENERATION;
+	uint32		gen_new = INVALID_GENERATION;
+
+	old = split_off_safekeepers_generation(old, &gen_old);
+	new = split_off_safekeepers_generation(new, &gen_new);
+
+	if (gen_old != gen_new)
+	{
+		return false;
+	}
 
 	len_old = split_safekeepers_list(old, safekeepers_old);
 	len_new = split_safekeepers_list(new, safekeepers_new);
@@ -303,6 +357,9 @@ assign_neon_safekeepers(const char *newval, void *extra)
 {
 	char	   *newval_copy;
 	char	   *oldval;
+
+	if (newval && *newval != '\0' && UsedShmemSegAddr && walprop_shared && RecoveryInProgress())
+		walprop_shared->replica_promote = true;
 
 	if (!am_walproposer)
 		return;
@@ -494,15 +551,14 @@ BackpressureThrottlingTime(void)
 
 /*
  * Register a background worker proposing WAL to wal acceptors.
+ * We start walproposer bgworker even for replicas in order to support possible replica promotion.
+ * When pg_promote() function is called, then walproposer bgworker registered with BgWorkerStart_RecoveryFinished
+ * is automatically launched when promotion is completed.
  */
 static void
 walprop_register_bgworker(void)
 {
 	BackgroundWorker bgw;
-
-	/* If no wal acceptors are specified, don't start the background worker. */
-	if (*wal_acceptors_list == '\0')
-		return;
 
 	memset(&bgw, 0, sizeof(bgw));
 	bgw.bgw_flags = BGWORKER_SHMEM_ACCESS;
@@ -1280,9 +1336,7 @@ StartProposerReplication(WalProposer *wp, StartReplicationCmd *cmd)
 
 #if PG_VERSION_NUM < 150000
 	if (ThisTimeLineID == 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("IDENTIFY_SYSTEM has not been run before START_REPLICATION")));
+		ThisTimeLineID = 1;
 #endif
 
 	/*
@@ -1496,7 +1550,7 @@ walprop_pg_wal_reader_allocate(Safekeeper *sk)
 
 	snprintf(log_prefix, sizeof(log_prefix), WP_LOG_PREFIX "sk %s:%s nwr: ", sk->host, sk->port);
 	Assert(!sk->xlogreader);
-	sk->xlogreader = NeonWALReaderAllocate(wal_segment_size, sk->wp->propTermStartLsn, log_prefix);
+	sk->xlogreader = NeonWALReaderAllocate(wal_segment_size, sk->wp->propTermStartLsn, log_prefix, sk->wp->localTimeLineID);
 	if (sk->xlogreader == NULL)
 		wpg_log(FATAL, "failed to allocate xlog reader");
 }
@@ -1510,7 +1564,7 @@ walprop_pg_wal_read(Safekeeper *sk, char *buf, XLogRecPtr startptr, Size count, 
 					  buf,
 					  startptr,
 					  count,
-					  walprop_pg_get_timeline_id());
+					  sk->wp->localTimeLineID);
 
 	if (res == NEON_WALREAD_SUCCESS)
 	{

@@ -43,6 +43,7 @@ use pageserver_api::models::{
 use pageserver_api::shard::{ShardCount, TenantShardId};
 use remote_storage::{DownloadError, GenericRemoteStorage, TimeTravelError};
 use scopeguard::defer;
+use serde_json::json;
 use tenant_size_model::svg::SvgBranchKind;
 use tenant_size_model::{SizeResult, StorageModel};
 use tokio::time::Instant;
@@ -72,6 +73,7 @@ use crate::tenant::remote_timeline_client::{
 use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::{IoConcurrency, LayerAccessStatsReset, LayerName};
+use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
 use crate::tenant::timeline::offload::{OffloadError, offload_timeline};
 use crate::tenant::timeline::{
     CompactFlags, CompactOptions, CompactRequest, CompactionError, MarkInvisibleRequest, Timeline,
@@ -370,6 +372,18 @@ impl From<crate::tenant::secondary::SecondaryTenantError> for ApiError {
     }
 }
 
+impl From<crate::tenant::FinalizeTimelineImportError> for ApiError {
+    fn from(err: crate::tenant::FinalizeTimelineImportError) -> ApiError {
+        use crate::tenant::FinalizeTimelineImportError::*;
+        match err {
+            ImportTaskStillRunning => {
+                ApiError::ResourceUnavailable("Import task still running".into())
+            }
+            ShuttingDown => ApiError::ShuttingDown,
+        }
+    }
+}
+
 // Helper function to construct a TimelineInfo struct for a timeline
 async fn build_timeline_info(
     timeline: &Arc<Timeline>,
@@ -572,6 +586,7 @@ async fn timeline_create_handler(
         TimelineCreateRequestMode::Branch {
             ancestor_timeline_id,
             ancestor_start_lsn,
+            read_only: _,
             pg_version: _,
         } => tenant::CreateTimelineParams::Branch(tenant::CreateTimelineParamsBranch {
             new_timeline_id,
@@ -1437,7 +1452,10 @@ async fn timeline_layer_scan_disposable_keys(
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download)
         .with_scope_timeline(&timeline);
 
-    let guard = timeline.layers.read().await;
+    let guard = timeline
+        .layers
+        .read(LayerManagerLockHolder::GetLayerMapInfo)
+        .await;
     let Some(layer) = guard.try_get_from_key(&layer_name.clone().into()) else {
         return Err(ApiError::NotFound(
             anyhow::anyhow!("Layer {tenant_shard_id}/{timeline_id}/{layer_name} not found").into(),
@@ -3532,10 +3550,7 @@ async fn activate_post_import_handler(
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
-        tenant
-            .finalize_importing_timeline(timeline_id)
-            .await
-            .map_err(ApiError::InternalServerError)?;
+        tenant.finalize_importing_timeline(timeline_id).await?;
 
         match tenant.get_timeline(timeline_id, false) {
             Ok(_timeline) => {
@@ -3651,6 +3666,47 @@ async fn read_tar_eof(mut reader: (impl tokio::io::AsyncRead + Unpin)) -> anyhow
         );
     }
     Ok(())
+}
+
+async fn tenant_evaluate_feature_flag(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let flag: String = must_parse_query_param(&request, "flag")?;
+    let as_type: String = must_parse_query_param(&request, "as")?;
+
+    let state = get_state(&request);
+
+    async {
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
+        let properties = tenant.feature_resolver.collect_properties(tenant_shard_id.tenant_id);
+        if as_type == "boolean" {
+            let result = tenant.feature_resolver.evaluate_boolean(&flag, tenant_shard_id.tenant_id);
+            let result = result.map(|_| true).map_err(|e| e.to_string());
+            json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
+        } else if as_type == "multivariate" {
+            let result = tenant.feature_resolver.evaluate_multivariate(&flag, tenant_shard_id.tenant_id).map_err(|e| e.to_string());
+            json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
+        } else {
+            // Auto infer the type of the feature flag.
+            let is_boolean = tenant.feature_resolver.is_feature_flag_boolean(&flag).map_err(|e| ApiError::InternalServerError(anyhow::anyhow!("{e}")))?;
+            if is_boolean {
+                let result = tenant.feature_resolver.evaluate_boolean(&flag, tenant_shard_id.tenant_id);
+                let result = result.map(|_| true).map_err(|e| e.to_string());
+                json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
+            } else {
+                let result = tenant.feature_resolver.evaluate_multivariate(&flag, tenant_shard_id.tenant_id).map_err(|e| e.to_string());
+                json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
+            }
+        }
+    }
+    .instrument(info_span!("tenant_evaluate_feature_flag", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
+    .await
 }
 
 /// Common functionality of all the HTTP API handlers.
@@ -4029,5 +4085,8 @@ pub fn make_router(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/activate_post_import",
             |r| api_handler(r, activate_post_import_handler),
         )
+        .get("/v1/tenant/:tenant_shard_id/feature_flag", |r| {
+            api_handler(r, tenant_evaluate_feature_flag)
+        })
         .any(handler_404))
 }

@@ -44,6 +44,7 @@ struct GlobalTimelinesState {
     // on-demand timeline creation from recreating deleted timelines.  This is only soft-enforced, as
     // this map is dropped on restart.
     tombstones: HashMap<TenantTimelineId, Instant>,
+    tenant_tombstones: HashMap<TenantId, Instant>,
 
     conf: Arc<SafeKeeperConf>,
     broker_active_set: Arc<TimelinesSet>,
@@ -77,13 +78,34 @@ impl GlobalTimelinesState {
             Some(GlobalMapTimeline::CreationInProgress) => {
                 Err(TimelineError::CreationInProgress(*ttid))
             }
-            None => Err(TimelineError::NotFound(*ttid)),
+            None => {
+                if self.has_tombstone(ttid) {
+                    Err(TimelineError::Deleted(*ttid))
+                } else {
+                    Err(TimelineError::NotFound(*ttid))
+                }
+            }
         }
+    }
+
+    fn has_tombstone(&self, ttid: &TenantTimelineId) -> bool {
+        self.tombstones.contains_key(ttid) || self.tenant_tombstones.contains_key(&ttid.tenant_id)
+    }
+
+    /// Removes all blocking tombstones for the given timeline ID.
+    /// Returns `true` if there have been actual changes.
+    fn remove_tombstone(&mut self, ttid: &TenantTimelineId) -> bool {
+        self.tombstones.remove(ttid).is_some()
+            || self.tenant_tombstones.remove(&ttid.tenant_id).is_some()
     }
 
     fn delete(&mut self, ttid: TenantTimelineId) {
         self.timelines.remove(&ttid);
         self.tombstones.insert(ttid, Instant::now());
+    }
+
+    fn add_tenant_tombstone(&mut self, tenant_id: TenantId) {
+        self.tenant_tombstones.insert(tenant_id, Instant::now());
     }
 }
 
@@ -99,6 +121,7 @@ impl GlobalTimelines {
             state: Mutex::new(GlobalTimelinesState {
                 timelines: HashMap::new(),
                 tombstones: HashMap::new(),
+                tenant_tombstones: HashMap::new(),
                 conf,
                 broker_active_set: Arc::new(TimelinesSet::default()),
                 global_rate_limiter: RateLimiter::new(1, 1),
@@ -245,7 +268,7 @@ impl GlobalTimelines {
                 return Ok(timeline);
             }
 
-            if state.tombstones.contains_key(&ttid) {
+            if state.has_tombstone(&ttid) {
                 anyhow::bail!("Timeline {ttid} is deleted, refusing to recreate");
             }
 
@@ -295,13 +318,14 @@ impl GlobalTimelines {
                 _ => {}
             }
             if check_tombstone {
-                if state.tombstones.contains_key(&ttid) {
+                if state.has_tombstone(&ttid) {
                     anyhow::bail!("timeline {ttid} is deleted, refusing to recreate");
                 }
             } else {
                 // We may be have been asked to load a timeline that was previously deleted (e.g. from `pull_timeline.rs`).  We trust
                 // that the human doing this manual intervention knows what they are doing, and remove its tombstone.
-                if state.tombstones.remove(&ttid).is_some() {
+                // It's also possible that we enter this when the tenant has been deleted, even if the timeline itself has never existed.
+                if state.remove_tombstone(&ttid) {
                     warn!("un-deleted timeline {ttid}");
                 }
             }
@@ -482,6 +506,7 @@ impl GlobalTimelines {
         let tli_res = {
             let state = self.state.lock().unwrap();
 
+            // Do NOT check tenant tombstones here: those were set earlier
             if state.tombstones.contains_key(ttid) {
                 // Presence of a tombstone guarantees that a previous deletion has completed and there is no work to do.
                 info!("Timeline {ttid} was already deleted");
@@ -557,6 +582,10 @@ impl GlobalTimelines {
         action: DeleteOrExclude,
     ) -> Result<HashMap<TenantTimelineId, TimelineDeleteResult>> {
         info!("deleting all timelines for tenant {}", tenant_id);
+
+        // Adding a tombstone before getting the timelines to prevent new timeline additions
+        self.state.lock().unwrap().add_tenant_tombstone(*tenant_id);
+
         let to_delete = self.get_all_for_tenant(*tenant_id);
 
         let mut err = None;
@@ -599,6 +628,9 @@ impl GlobalTimelines {
         let now = Instant::now();
         state
             .tombstones
+            .retain(|_, v| now.duration_since(*v) < *tombstone_ttl);
+        state
+            .tenant_tombstones
             .retain(|_, v| now.duration_since(*v) < *tombstone_ttl);
     }
 }

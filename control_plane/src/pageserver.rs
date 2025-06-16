@@ -129,7 +129,9 @@ impl PageServerNode {
             ));
         }
 
-        if conf.http_auth_type != AuthType::Trust || conf.pg_auth_type != AuthType::Trust {
+        if [conf.http_auth_type, conf.pg_auth_type, conf.grpc_auth_type]
+            .contains(&AuthType::NeonJWT)
+        {
             // Keys are generated in the toplevel repo dir, pageservers' workdirs
             // are one level below that, so refer to keys with ../
             overrides.push("auth_validation_public_key_path='../auth_public_key.pem'".to_owned());
@@ -511,11 +513,6 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'timeline_offloading' as bool")?,
-            wal_receiver_protocol_override: settings
-                .remove("wal_receiver_protocol_override")
-                .map(serde_json::from_str)
-                .transpose()
-                .context("parse `wal_receiver_protocol_override` from json")?,
             rel_size_v2_enabled: settings
                 .remove("rel_size_v2_enabled")
                 .map(|x| x.parse::<bool>())
@@ -637,5 +634,17 @@ impl PageServerNode {
         }
 
         Ok(())
+    }
+    pub async fn timeline_info(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        force_await_logical_size: mgmt_api::ForceAwaitLogicalSize,
+    ) -> anyhow::Result<TimelineInfo> {
+        let timeline_info = self
+            .http_client
+            .timeline_info(tenant_shard_id, timeline_id, force_await_logical_size)
+            .await?;
+        Ok(timeline_info)
     }
 }

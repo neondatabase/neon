@@ -357,31 +357,6 @@ class PgProtocol:
         return TimelineId(cast("str", self.safe_psql("show neon.timeline_id")[0][0]))
 
 
-class PageserverWalReceiverProtocol(StrEnum):
-    VANILLA = "vanilla"
-    INTERPRETED = "interpreted"
-
-    @staticmethod
-    def to_config_key_value(proto) -> tuple[str, dict[str, Any]]:
-        if proto == PageserverWalReceiverProtocol.VANILLA:
-            return (
-                "wal_receiver_protocol",
-                {
-                    "type": "vanilla",
-                },
-            )
-        elif proto == PageserverWalReceiverProtocol.INTERPRETED:
-            return (
-                "wal_receiver_protocol",
-                {
-                    "type": "interpreted",
-                    "args": {"format": "protobuf", "compression": {"zstd": {"level": 1}}},
-                },
-            )
-        else:
-            raise ValueError(f"Unknown protocol type: {proto}")
-
-
 @dataclass
 class PageserverTracingConfig:
     sampling_ratio: tuple[int, int]
@@ -402,6 +377,30 @@ class PageserverTracingConfig:
             },
         }
         return ("tracing", value)
+
+
+@dataclass
+class PageserverImportConfig:
+    import_job_concurrency: int
+    import_job_soft_size_limit: int
+    import_job_checkpoint_threshold: int
+
+    @staticmethod
+    def default() -> PageserverImportConfig:
+        return PageserverImportConfig(
+            import_job_concurrency=4,
+            import_job_soft_size_limit=512 * 1024,
+            import_job_checkpoint_threshold=4,
+        )
+
+    def to_config_key_value(self) -> tuple[str, dict[str, Any]]:
+        value = {
+            "import_job_concurrency": self.import_job_concurrency,
+            "import_job_soft_size_limit": self.import_job_soft_size_limit,
+            "import_job_checkpoint_threshold": self.import_job_checkpoint_threshold,
+            "import_job_max_byte_range_size": 4 * 1024 * 1024,  # Pageserver default
+        }
+        return ("timeline_import_config", value)
 
 
 class NeonEnvBuilder:
@@ -451,9 +450,9 @@ class NeonEnvBuilder:
         safekeeper_extra_opts: list[str] | None = None,
         storage_controller_port_override: int | None = None,
         pageserver_virtual_file_io_mode: str | None = None,
-        pageserver_wal_receiver_protocol: PageserverWalReceiverProtocol | None = None,
         pageserver_get_vectored_concurrent_io: str | None = None,
         pageserver_tracing_config: PageserverTracingConfig | None = None,
+        pageserver_import_config: PageserverImportConfig | None = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -511,6 +510,7 @@ class NeonEnvBuilder:
         )
 
         self.pageserver_tracing_config = pageserver_tracing_config
+        self.pageserver_import_config = pageserver_import_config
 
         self.pageserver_default_tenant_config_compaction_algorithm: dict[str, Any] | None = (
             pageserver_default_tenant_config_compaction_algorithm
@@ -525,11 +525,6 @@ class NeonEnvBuilder:
         self.storage_controller_port_override = storage_controller_port_override
 
         self.pageserver_virtual_file_io_mode = pageserver_virtual_file_io_mode
-
-        if pageserver_wal_receiver_protocol is not None:
-            self.pageserver_wal_receiver_protocol = pageserver_wal_receiver_protocol
-        else:
-            self.pageserver_wal_receiver_protocol = PageserverWalReceiverProtocol.INTERPRETED
 
         assert test_name.startswith("test_"), (
             "Unexpectedly instantiated from outside a test function"
@@ -1176,9 +1171,12 @@ class NeonEnv:
 
         self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
         self.pageserver_virtual_file_io_mode = config.pageserver_virtual_file_io_mode
-        self.pageserver_wal_receiver_protocol = config.pageserver_wal_receiver_protocol
         self.pageserver_get_vectored_concurrent_io = config.pageserver_get_vectored_concurrent_io
         self.pageserver_tracing_config = config.pageserver_tracing_config
+        if config.pageserver_import_config is None:
+            self.pageserver_import_config = PageserverImportConfig.default()
+        else:
+            self.pageserver_import_config = config.pageserver_import_config
 
         # Create the neon_local's `NeonLocalInitConf`
         cfg: dict[str, Any] = {
@@ -1224,6 +1222,7 @@ class NeonEnv:
         # Create config for pageserver
         http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
         pg_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
+        grpc_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
         for ps_id in range(
             self.BASE_PAGESERVER_ID, self.BASE_PAGESERVER_ID + config.num_pageservers
         ):
@@ -1250,18 +1249,13 @@ class NeonEnv:
                 else None,
                 "pg_auth_type": pg_auth_type,
                 "http_auth_type": http_auth_type,
+                "grpc_auth_type": grpc_auth_type,
                 "availability_zone": availability_zone,
                 # Disable pageserver disk syncs in tests: when running tests concurrently, this avoids
                 # the pageserver taking a long time to start up due to syncfs flushing other tests' data
                 "no_sync": True,
                 # Look for gaps in WAL received from safekeepeers
                 "validate_wal_contiguity": True,
-                # TODO(vlad): make these configurable through the builder
-                "timeline_import_config": {
-                    "import_job_concurrency": 4,
-                    "import_job_soft_size_limit": 512 * 1024,
-                    "import_job_checkpoint_threshold": 4,
-                },
             }
 
             # Batching (https://github.com/neondatabase/neon/issues/9377):
@@ -1308,13 +1302,6 @@ class NeonEnv:
                         for key, value in override.items():
                             ps_cfg[key] = value
 
-            if self.pageserver_wal_receiver_protocol is not None:
-                key, value = PageserverWalReceiverProtocol.to_config_key_value(
-                    self.pageserver_wal_receiver_protocol
-                )
-                if key not in ps_cfg:
-                    ps_cfg[key] = value
-
             if self.pageserver_tracing_config is not None:
                 key, value = self.pageserver_tracing_config.to_config_key_value()
 
@@ -1322,6 +1309,12 @@ class NeonEnv:
                     ps_cfg[key] = value
 
                 ps_cfg[key] = value
+
+            if self.pageserver_import_config is not None:
+                key, value = self.pageserver_import_config.to_config_key_value()
+
+                if key not in ps_cfg:
+                    ps_cfg[key] = value
 
             # Create a corresponding NeonPageserver object
             ps = NeonPageserver(
@@ -2061,6 +2054,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
             headers=self.headers(TokenScope.ADMIN),
         )
 
+    def tombstone_delete(self, node_id):
+        log.info(f"tombstone_delete({node_id})")
+        self.request(
+            "DELETE",
+            f"{self.api}/debug/v1/tombstone/{node_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
     def node_drain(self, node_id):
         log.info(f"node_drain({node_id})")
         self.request(
@@ -2114,6 +2115,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
             "GET",
             f"{self.api}/control/v1/node",
             headers=self.headers(TokenScope.INFRA),
+        )
+        return response.json()
+
+    def tombstone_list(self):
+        response = self.request(
+            "GET",
+            f"{self.api}/debug/v1/tombstone",
+            headers=self.headers(TokenScope.ADMIN),
         )
         return response.json()
 
@@ -2214,6 +2223,17 @@ class NeonStorageController(MetricsGetter, LogUtils):
         shards: list[dict[str, Any]] = body["shards"]
         return shards
 
+    def timeline_locate(self, tenant_id: TenantId, timeline_id: TimelineId):
+        """
+        :return: dict {"generation": int, "sk_set": [int], "new_sk_set": [int]}
+        """
+        response = self.request(
+            "GET",
+            f"{self.api}/debug/v1/tenant/{tenant_id}/timeline/{timeline_id}/locate",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
+
     def tenant_describe(self, tenant_id: TenantId):
         """
         :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr: str, "listen_http_port: int, preferred_az_id: str}
@@ -2304,6 +2324,22 @@ class NeonStorageController(MetricsGetter, LogUtils):
             "POST",
             f"{self.api}/debug/v1/tenant/{tenant_id}/import",
             headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def import_status(
+        self, tenant_shard_id: TenantShardId, timeline_id: TimelineId, generation: int
+    ):
+        payload = {
+            "tenant_shard_id": str(tenant_shard_id),
+            "timeline_id": str(timeline_id),
+            "generation": generation,
+        }
+
+        self.request(
+            "GET",
+            f"{self.api}/upcall/v1/timeline_import_status",
+            headers=self.headers(TokenScope.GENERATIONS_API),
+            json=payload,
         )
 
     def reconcile_all(self):
@@ -2781,6 +2817,11 @@ class NeonPageserver(PgProtocol, LogUtils):
         self._persistent_failpoints[name] = action
         if self.running:
             self.http_client().configure_failpoints([(name, action)])
+
+    def clear_persistent_failpoint(self, name: str):
+        del self._persistent_failpoints[name]
+        if self.running:
+            self.http_client().configure_failpoints([(name, "off")])
 
     def timeline_dir(
         self,
@@ -4016,6 +4057,16 @@ def static_proxy(
         "CREATE TABLE neon_control_plane.endpoints (endpoint_id VARCHAR(255) PRIMARY KEY, allowed_ips VARCHAR(255))"
     )
 
+    vanilla_pg.stop()
+    vanilla_pg.edit_hba(
+        [
+            "local all all              trust",
+            "host  all all 127.0.0.1/32 scram-sha-256",
+            "host  all all ::1/128      scram-sha-256",
+        ]
+    )
+    vanilla_pg.start()
+
     proxy_port = port_distributor.get_port()
     mgmt_port = port_distributor.get_port()
     http_port = port_distributor.get_port()
@@ -4658,7 +4709,7 @@ class EndpointFactory:
         origin: Endpoint,
         endpoint_id: str | None = None,
         config_lines: list[str] | None = None,
-    ):
+    ) -> Endpoint:
         branch_name = origin.branch_name
         assert origin in self.endpoints
         assert branch_name is not None
@@ -4677,7 +4728,7 @@ class EndpointFactory:
         origin: Endpoint,
         endpoint_id: str | None = None,
         config_lines: list[str] | None = None,
-    ):
+    ) -> Endpoint:
         branch_name = origin.branch_name
         assert origin in self.endpoints
         assert branch_name is not None

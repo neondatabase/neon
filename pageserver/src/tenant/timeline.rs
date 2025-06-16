@@ -35,7 +35,11 @@ use fail::fail_point;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 use handle::ShardTimelineId;
-use layer_manager::Shutdown;
+use layer_manager::{
+    LayerManagerLockHolder, LayerManagerReadGuard, LayerManagerWriteGuard, LockedLayerManager,
+    Shutdown,
+};
+
 use offload::OffloadError;
 use once_cell::sync::Lazy;
 use pageserver_api::config::tenant_conf_defaults::DEFAULT_PITR_INTERVAL;
@@ -82,7 +86,6 @@ use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 use self::delete::DeleteTimelineFlow;
 pub(super) use self::eviction_task::EvictionTaskTenantState;
 use self::eviction_task::EvictionTaskTimelineState;
-use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 use super::remote_timeline_client::RemoteTimelineClient;
@@ -103,6 +106,7 @@ use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
 };
 use crate::disk_usage_eviction_task::{DiskUsageEvictionInfo, EvictionCandidate, finite_f32};
+use crate::feature_resolver::FeatureResolver;
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::l0_flush::{self, L0FlushGlobalState};
 use crate::metrics::{
@@ -180,13 +184,13 @@ impl std::fmt::Display for ImageLayerCreationMode {
 
 /// Temporary function for immutable storage state refactor, ensures we are dropping mutex guard instead of other things.
 /// Can be removed after all refactors are done.
-fn drop_rlock<T>(rlock: tokio::sync::RwLockReadGuard<T>) {
+fn drop_layer_manager_rlock(rlock: LayerManagerReadGuard<'_>) {
     drop(rlock)
 }
 
 /// Temporary function for immutable storage state refactor, ensures we are dropping mutex guard instead of other things.
 /// Can be removed after all refactors are done.
-fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
+fn drop_layer_manager_wlock(rlock: LayerManagerWriteGuard<'_>) {
     drop(rlock)
 }
 
@@ -198,6 +202,7 @@ pub struct TimelineResources {
     pub l0_compaction_trigger: Arc<Notify>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
     pub basebackup_prepare_sender: BasebackupPrepareSender,
+    pub feature_resolver: FeatureResolver,
 }
 
 pub struct Timeline {
@@ -239,7 +244,7 @@ pub struct Timeline {
     ///
     /// In the future, we'll be able to split up the tuple of LayerMap and `LayerFileManager`,
     /// so that e.g. on-demand-download/eviction, and layer spreading, can operate just on `LayerFileManager`.
-    pub(crate) layers: tokio::sync::RwLock<LayerManager>,
+    pub(crate) layers: LockedLayerManager,
 
     last_freeze_at: AtomicLsn,
     // Atomic would be more appropriate here.
@@ -444,6 +449,8 @@ pub struct Timeline {
 
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
     basebackup_prepare_sender: BasebackupPrepareSender,
+
+    feature_resolver: FeatureResolver,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -813,8 +820,8 @@ pub(crate) enum GetVectoredError {
     #[error("timeline shutting down")]
     Cancelled,
 
-    #[error("requested too many keys: {0} > {}", Timeline::MAX_GET_VECTORED_KEYS)]
-    Oversized(u64),
+    #[error("requested too many keys: {0} > {1}")]
+    Oversized(u64, u64),
 
     #[error("requested at invalid LSN: {0}")]
     InvalidLsn(Lsn),
@@ -946,6 +953,18 @@ pub(crate) enum WaitLsnError {
     Timeout(String),
 }
 
+impl From<WaitLsnError> for tonic::Status {
+    fn from(err: WaitLsnError) -> Self {
+        use tonic::Code;
+        let code = match &err {
+            WaitLsnError::Timeout(_) => Code::Internal,
+            WaitLsnError::BadState(_) => Code::Internal,
+            WaitLsnError::Shutdown => Code::Unavailable,
+        };
+        tonic::Status::new(code, err.to_string())
+    }
+}
+
 // The impls below achieve cancellation mapping for errors.
 // Perhaps there's a way of achieving this with less cruft.
 
@@ -1003,7 +1022,7 @@ impl From<GetVectoredError> for PageReconstructError {
         match e {
             GetVectoredError::Cancelled => PageReconstructError::Cancelled,
             GetVectoredError::InvalidLsn(_) => PageReconstructError::Other(anyhow!("Invalid LSN")),
-            err @ GetVectoredError::Oversized(_) => PageReconstructError::Other(err.into()),
+            err @ GetVectoredError::Oversized(_, _) => PageReconstructError::Other(err.into()),
             GetVectoredError::MissingKey(err) => PageReconstructError::MissingKey(err),
             GetVectoredError::GetReadyAncestorError(err) => PageReconstructError::from(err),
             GetVectoredError::Other(err) => PageReconstructError::Other(err),
@@ -1039,8 +1058,8 @@ pub(crate) enum WaitLsnWaiter<'a> {
 /// Argument to [`Timeline::shutdown`].
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ShutdownMode {
-    /// Graceful shutdown, may do a lot of I/O as we flush any open layers to disk and then
-    /// also to remote storage.  This method can easily take multiple seconds for a busy timeline.
+    /// Graceful shutdown, may do a lot of I/O as we flush any open layers to disk. This method can
+    /// take multiple seconds for a busy timeline.
     ///
     /// While we are flushing, we continue to accept read I/O for LSNs ingested before
     /// the call to [`Timeline::shutdown`].
@@ -1183,7 +1202,6 @@ impl Timeline {
         }
     }
 
-    pub(crate) const MAX_GET_VECTORED_KEYS: u64 = 32;
     pub(crate) const LAYERS_VISITED_WARN_THRESHOLD: u32 = 100;
 
     /// Look up multiple page versions at a given LSN
@@ -1198,9 +1216,12 @@ impl Timeline {
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         let total_keyspace = query.total_keyspace();
 
-        let key_count = total_keyspace.total_raw_size().try_into().unwrap();
-        if key_count > Timeline::MAX_GET_VECTORED_KEYS {
-            return Err(GetVectoredError::Oversized(key_count));
+        let key_count = total_keyspace.total_raw_size();
+        if key_count > self.conf.max_get_vectored_keys.get() {
+            return Err(GetVectoredError::Oversized(
+                key_count as u64,
+                self.conf.max_get_vectored_keys.get() as u64,
+            ));
         }
 
         for range in &total_keyspace.ranges {
@@ -1517,7 +1538,10 @@ impl Timeline {
     /// This method makes no distinction between local and remote layers.
     /// Hence, the result **does not represent local filesystem usage**.
     pub(crate) async fn layer_size_sum(&self) -> u64 {
-        let guard = self.layers.read().await;
+        let guard = self
+            .layers
+            .read(LayerManagerLockHolder::GetLayerMapInfo)
+            .await;
         guard.layer_size_sum()
     }
 
@@ -1827,7 +1851,7 @@ impl Timeline {
         // time, and this was missed.
         // if write_guard.is_none() { return; }
 
-        let Ok(layers_guard) = self.layers.try_read() else {
+        let Ok(layers_guard) = self.layers.try_read(LayerManagerLockHolder::TryFreezeLayer) else {
             // Don't block if the layer lock is busy
             return;
         };
@@ -2140,7 +2164,7 @@ impl Timeline {
         if let ShutdownMode::FreezeAndFlush = mode {
             let do_flush = if let Some((open, frozen)) = self
                 .layers
-                .read()
+                .read(LayerManagerLockHolder::Shutdown)
                 .await
                 .layer_map()
                 .map(|lm| (lm.open_layer.is_some(), lm.frozen_layers.len()))
@@ -2244,7 +2268,10 @@ impl Timeline {
             // Allow any remaining in-memory layers to do cleanup -- until that, they hold the gate
             // open.
             let mut write_guard = self.write_lock.lock().await;
-            self.layers.write().await.shutdown(&mut write_guard);
+            self.layers
+                .write(LayerManagerLockHolder::Shutdown)
+                .await
+                .shutdown(&mut write_guard);
         }
 
         // Finally wait until any gate-holders are complete.
@@ -2347,7 +2374,10 @@ impl Timeline {
         &self,
         reset: LayerAccessStatsReset,
     ) -> Result<LayerMapInfo, layer_manager::Shutdown> {
-        let guard = self.layers.read().await;
+        let guard = self
+            .layers
+            .read(LayerManagerLockHolder::GetLayerMapInfo)
+            .await;
         let layer_map = guard.layer_map()?;
         let mut in_memory_layers = Vec::with_capacity(layer_map.frozen_layers.len() + 1);
         if let Some(open_layer) = &layer_map.open_layer {
@@ -2486,6 +2516,13 @@ impl Timeline {
         if !self.tenant_shard_id.is_shard_zero() {
             // In theory we should never get here, but just in case check it.
             // Preparing basebackup doesn't make sense for shards other than shard zero.
+            return;
+        }
+        if !self.is_active() {
+            // May happen during initial timeline creation.
+            // Such timeline is not in the global timeline map yet,
+            // so basebackup cache will not be able to find it.
+            // TODO(diko): We can prepare such timelines in finish_creation().
             return;
         }
 
@@ -2827,21 +2864,6 @@ impl Timeline {
             )
     }
 
-    /// Resolve the effective WAL receiver protocol to use for this tenant.
-    ///
-    /// Priority order is:
-    /// 1. Tenant config override
-    /// 2. Default value for tenant config override
-    /// 3. Pageserver config override
-    /// 4. Pageserver config default
-    pub fn resolve_wal_receiver_protocol(&self) -> PostgresClientProtocol {
-        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
-        tenant_conf
-            .wal_receiver_protocol_override
-            .or(self.conf.default_tenant_conf.wal_receiver_protocol_override)
-            .unwrap_or(self.conf.wal_receiver_protocol)
-    }
-
     pub(super) fn tenant_conf_updated(&self, new_conf: &AttachedTenantConf) {
         // NB: Most tenant conf options are read by background loops, so,
         // changes will automatically be picked up.
@@ -3072,6 +3094,8 @@ impl Timeline {
                 wait_lsn_log_slow: tokio::sync::Semaphore::new(1),
 
                 basebackup_prepare_sender: resources.basebackup_prepare_sender,
+
+                feature_resolver: resources.feature_resolver,
             };
 
             result.repartition_threshold =
@@ -3195,10 +3219,16 @@ impl Timeline {
             guard.is_none(),
             "multiple launches / re-launches of WAL receiver are not supported"
         );
+
+        let protocol = PostgresClientProtocol::Interpreted {
+            format: utils::postgres_client::InterpretedFormat::Protobuf,
+            compression: Some(utils::postgres_client::Compression::Zstd { level: 1 }),
+        };
+
         *guard = Some(WalReceiver::start(
             Arc::clone(self),
             WalReceiverConf {
-                protocol: self.resolve_wal_receiver_protocol(),
+                protocol,
                 wal_connect_timeout,
                 lagging_wal_timeout,
                 max_lsn_wal_lag,
@@ -3214,7 +3244,7 @@ impl Timeline {
 
     /// Initialize with an empty layer map. Used when creating a new timeline.
     pub(super) fn init_empty_layer_map(&self, start_lsn: Lsn) {
-        let mut layers = self.layers.try_write().expect(
+        let mut layers = self.layers.try_write(LayerManagerLockHolder::Init).expect(
             "in the context where we call this function, no other task has access to the object",
         );
         layers
@@ -3234,7 +3264,10 @@ impl Timeline {
         use init::Decision::*;
         use init::{Discovered, DismissedLayer};
 
-        let mut guard = self.layers.write().await;
+        let mut guard = self
+            .layers
+            .write(LayerManagerLockHolder::LoadLayerMap)
+            .await;
 
         let timer = self.metrics.load_layer_map_histo.start_timer();
 
@@ -3851,7 +3884,10 @@ impl Timeline {
         &self,
         layer_name: &LayerName,
     ) -> Result<Option<Layer>, layer_manager::Shutdown> {
-        let guard = self.layers.read().await;
+        let guard = self
+            .layers
+            .read(LayerManagerLockHolder::GetLayerMapInfo)
+            .await;
         let layer = guard
             .layer_map()?
             .iter_historic_layers()
@@ -3884,7 +3920,10 @@ impl Timeline {
             return None;
         }
 
-        let guard = self.layers.read().await;
+        let guard = self
+            .layers
+            .read(LayerManagerLockHolder::GenerateHeatmap)
+            .await;
 
         // Firstly, if there's any heatmap left over from when this location
         // was a secondary, take that into account. Keep layers that are:
@@ -3982,7 +4021,10 @@ impl Timeline {
     }
 
     pub(super) async fn generate_unarchival_heatmap(&self, end_lsn: Lsn) -> PreviousHeatmap {
-        let guard = self.layers.read().await;
+        let guard = self
+            .layers
+            .read(LayerManagerLockHolder::GenerateHeatmap)
+            .await;
 
         let now = SystemTime::now();
         let mut heatmap_layers = Vec::default();
@@ -4324,7 +4366,7 @@ impl Timeline {
         query: &VersionedKeySpaceQuery,
     ) -> Result<LayerFringe, GetVectoredError> {
         let mut fringe = LayerFringe::new();
-        let guard = self.layers.read().await;
+        let guard = self.layers.read(LayerManagerLockHolder::GetPage).await;
 
         match query {
             VersionedKeySpaceQuery::Uniform { keyspace, lsn } => {
@@ -4427,7 +4469,7 @@ impl Timeline {
             // required for correctness, but avoids visiting extra layers
             // which turns out to be a perf bottleneck in some cases.
             if !unmapped_keyspace.is_empty() {
-                let guard = timeline.layers.read().await;
+                let guard = timeline.layers.read(LayerManagerLockHolder::GetPage).await;
                 guard.update_search_fringe(&unmapped_keyspace, cont_lsn, &mut fringe)?;
 
                 // It's safe to drop the layer map lock after planning the next round of reads.
@@ -4537,7 +4579,10 @@ impl Timeline {
         _guard: &tokio::sync::MutexGuard<'_, Option<TimelineWriterState>>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<InMemoryLayer>> {
-        let mut guard = self.layers.write().await;
+        let mut guard = self
+            .layers
+            .write(LayerManagerLockHolder::GetLayerForWrite)
+            .await;
 
         let last_record_lsn = self.get_last_record_lsn();
         ensure!(
@@ -4579,7 +4624,10 @@ impl Timeline {
         write_lock: &mut tokio::sync::MutexGuard<'_, Option<TimelineWriterState>>,
     ) -> Result<u64, FlushLayerError> {
         let frozen = {
-            let mut guard = self.layers.write().await;
+            let mut guard = self
+                .layers
+                .write(LayerManagerLockHolder::TryFreezeLayer)
+                .await;
             guard
                 .open_mut()?
                 .try_freeze_in_memory_layer(at, &self.last_freeze_at, write_lock, &self.metrics)
@@ -4620,7 +4668,12 @@ impl Timeline {
         ctx: &RequestContext,
     ) {
         // Subscribe to L0 delta layer updates, for compaction backpressure.
-        let mut watch_l0 = match self.layers.read().await.layer_map() {
+        let mut watch_l0 = match self
+            .layers
+            .read(LayerManagerLockHolder::FlushLoop)
+            .await
+            .layer_map()
+        {
             Ok(lm) => lm.watch_level0_deltas(),
             Err(Shutdown) => return,
         };
@@ -4657,7 +4710,7 @@ impl Timeline {
 
                 // Fetch the next layer to flush, if any.
                 let (layer, l0_count, frozen_count, frozen_size) = {
-                    let layers = self.layers.read().await;
+                    let layers = self.layers.read(LayerManagerLockHolder::FlushLoop).await;
                     let Ok(lm) = layers.layer_map() else {
                         info!("dropping out of flush loop for timeline shutdown");
                         return;
@@ -4761,7 +4814,10 @@ impl Timeline {
                     || !flushed_to_lsn.is_valid()
             );
 
-            if flushed_to_lsn < frozen_to_lsn && self.shard_identity.count.count() > 1 {
+            if flushed_to_lsn < frozen_to_lsn
+                && self.shard_identity.count.count() > 1
+                && result.is_ok()
+            {
                 // If our layer flushes didn't carry disk_consistent_lsn up to the `to_lsn` advertised
                 // to us via layer_flush_start_rx, then advance it here.
                 //
@@ -4906,6 +4962,7 @@ impl Timeline {
                     LastImageLayerCreationStatus::Initial,
                     false, // don't yield for L0, we're flushing L0
                 )
+                .instrument(info_span!("create_image_layers", mode = %ImageLayerCreationMode::Initial, partition_mode = "initial", lsn = %self.initdb_lsn))
                 .await?;
             debug_assert!(
                 matches!(is_complete, LastImageLayerCreationStatus::Complete),
@@ -4939,13 +4996,20 @@ impl Timeline {
             return Err(FlushLayerError::Cancelled);
         }
 
+        fail_point!("flush-layer-before-update-remote-consistent-lsn", |_| {
+            Err(FlushLayerError::Other(anyhow!("failpoint").into()))
+        });
+
         let disk_consistent_lsn = Lsn(lsn_range.end.0 - 1);
 
         // The new on-disk layers are now in the layer map. We can remove the
         // in-memory layer from the map now. The flushed layer is stored in
         // the mapping in `create_delta_layer`.
         {
-            let mut guard = self.layers.write().await;
+            let mut guard = self
+                .layers
+                .write(LayerManagerLockHolder::FlushFrozenLayer)
+                .await;
 
             guard.open_mut()?.finish_flush_l0_layer(
                 delta_layer_to_add.as_ref(),
@@ -5160,7 +5224,7 @@ impl Timeline {
     async fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> bool {
         let threshold = self.get_image_creation_threshold();
 
-        let guard = self.layers.read().await;
+        let guard = self.layers.read(LayerManagerLockHolder::Compaction).await;
         let Ok(layers) = guard.layer_map() else {
             return false;
         };
@@ -5244,7 +5308,7 @@ impl Timeline {
                 key = key.next();
 
                 // Maybe flush `key_rest_accum`
-                if key_request_accum.raw_size() >= Timeline::MAX_GET_VECTORED_KEYS
+                if key_request_accum.raw_size() >= self.conf.max_get_vectored_keys.get() as u64
                     || (last_key_in_range && key_request_accum.raw_size() > 0)
                 {
                     let query =
@@ -5462,7 +5526,8 @@ impl Timeline {
 
     /// Returns the image layers generated and an enum indicating whether the process is fully completed.
     /// true = we have generate all image layers, false = we preempt the process for L0 compaction.
-    #[tracing::instrument(skip_all, fields(%lsn, %mode))]
+    ///
+    /// `partition_mode` is only for logging purpose and is not used anywhere in this function.
     async fn create_image_layers(
         self: &Arc<Timeline>,
         partitioning: &KeyPartitioning,
@@ -5577,7 +5642,7 @@ impl Timeline {
             if let ImageLayerCreationMode::Force = mode {
                 // When forced to create image layers, we might try and create them where they already
                 // exist.  This mode is only used in tests/debug.
-                let layers = self.layers.read().await;
+                let layers = self.layers.read(LayerManagerLockHolder::Compaction).await;
                 if layers.contains_key(&PersistentLayerKey {
                     key_range: img_range.clone(),
                     lsn_range: PersistentLayerDesc::image_layer_lsn_range(lsn),
@@ -5702,7 +5767,7 @@ impl Timeline {
 
         let image_layers = batch_image_writer.finish(self, ctx).await?;
 
-        let mut guard = self.layers.write().await;
+        let mut guard = self.layers.write(LayerManagerLockHolder::Compaction).await;
 
         // FIXME: we could add the images to be uploaded *before* returning from here, but right
         // now they are being scheduled outside of write lock; current way is inconsistent with
@@ -5710,7 +5775,7 @@ impl Timeline {
         guard
             .open_mut()?
             .track_new_image_layers(&image_layers, &self.metrics);
-        drop_wlock(guard);
+        drop_layer_manager_wlock(guard);
         let duration = timer.stop_and_record();
 
         // Creating image layers may have caused some previously visible layers to be covered
@@ -6080,7 +6145,7 @@ impl Timeline {
         layers_to_remove: &[Layer],
     ) -> Result<(), CompactionError> {
         let mut guard = tokio::select! {
-            guard = self.layers.write() => guard,
+            guard = self.layers.write(LayerManagerLockHolder::Compaction) => guard,
             _ = self.cancel.cancelled() => {
                 return Err(CompactionError::ShuttingDown);
             }
@@ -6129,7 +6194,7 @@ impl Timeline {
         self.remote_client
             .schedule_compaction_update(&remove_layers, new_deltas)?;
 
-        drop_wlock(guard);
+        drop_layer_manager_wlock(guard);
 
         Ok(())
     }
@@ -6139,7 +6204,7 @@ impl Timeline {
         mut replace_layers: Vec<(Layer, ResidentLayer)>,
         mut drop_layers: Vec<Layer>,
     ) -> Result<(), CompactionError> {
-        let mut guard = self.layers.write().await;
+        let mut guard = self.layers.write(LayerManagerLockHolder::Compaction).await;
 
         // Trim our lists in case our caller (compaction) raced with someone else (GC) removing layers: we want
         // to avoid double-removing, and avoid rewriting something that was removed.
@@ -6490,7 +6555,10 @@ impl Timeline {
         // 5. newer on-disk image layers cover the layer's whole key range
         //
         // TODO holding a write lock is too agressive and avoidable
-        let mut guard = self.layers.write().await;
+        let mut guard = self
+            .layers
+            .write(LayerManagerLockHolder::GarbageCollection)
+            .await;
         let layers = guard.layer_map()?;
         'outer: for l in layers.iter_historic_layers() {
             result.layers_total += 1;
@@ -6792,7 +6860,10 @@ impl Timeline {
         use pageserver_api::models::DownloadRemoteLayersTaskState;
 
         let remaining = {
-            let guard = self.layers.read().await;
+            let guard = self
+                .layers
+                .read(LayerManagerLockHolder::GetLayerMapInfo)
+                .await;
             let Ok(lm) = guard.layer_map() else {
                 // technically here we could look into iterating accessible layers, but downloading
                 // all layers of a shutdown timeline makes no sense regardless.
@@ -6898,7 +6969,7 @@ impl Timeline {
 impl Timeline {
     /// Returns non-remote layers for eviction.
     pub(crate) async fn get_local_layers_for_disk_usage_eviction(&self) -> DiskUsageEvictionInfo {
-        let guard = self.layers.read().await;
+        let guard = self.layers.read(LayerManagerLockHolder::Eviction).await;
         let mut max_layer_size: Option<u64> = None;
 
         let resident_layers = guard
@@ -6999,7 +7070,7 @@ impl Timeline {
         let image_layer = Layer::finish_creating(self.conf, self, desc, &path)?;
         info!("force created image layer {}", image_layer.local_path());
         {
-            let mut guard = self.layers.write().await;
+            let mut guard = self.layers.write(LayerManagerLockHolder::Testing).await;
             guard
                 .open_mut()
                 .unwrap()
@@ -7062,7 +7133,7 @@ impl Timeline {
         let delta_layer = Layer::finish_creating(self.conf, self, desc, &path)?;
         info!("force created delta layer {}", delta_layer.local_path());
         {
-            let mut guard = self.layers.write().await;
+            let mut guard = self.layers.write(LayerManagerLockHolder::Testing).await;
             guard
                 .open_mut()
                 .unwrap()
@@ -7157,7 +7228,7 @@ impl Timeline {
 
         // Link the layer to the layer map
         {
-            let mut guard = self.layers.write().await;
+            let mut guard = self.layers.write(LayerManagerLockHolder::Testing).await;
             let layer_map = guard.open_mut().unwrap();
             layer_map.force_insert_in_memory_layer(Arc::new(layer));
         }
@@ -7174,7 +7245,7 @@ impl Timeline {
         io_concurrency: IoConcurrency,
     ) -> anyhow::Result<Vec<(Key, Bytes)>> {
         let mut all_data = Vec::new();
-        let guard = self.layers.read().await;
+        let guard = self.layers.read(LayerManagerLockHolder::Testing).await;
         for layer in guard.layer_map()?.iter_historic_layers() {
             if !layer.is_delta() && layer.image_layer_lsn() == lsn {
                 let layer = guard.get_from_desc(&layer);
@@ -7203,7 +7274,7 @@ impl Timeline {
         self: &Arc<Timeline>,
     ) -> anyhow::Result<Vec<super::storage_layer::PersistentLayerKey>> {
         let mut layers = Vec::new();
-        let guard = self.layers.read().await;
+        let guard = self.layers.read(LayerManagerLockHolder::Testing).await;
         for layer in guard.layer_map()?.iter_historic_layers() {
             layers.push(layer.key());
         }
@@ -7315,7 +7386,7 @@ impl TimelineWriter<'_> {
         let l0_count = self
             .tl
             .layers
-            .read()
+            .read(LayerManagerLockHolder::GetLayerMapInfo)
             .await
             .layer_map()?
             .level0_deltas()
@@ -7534,6 +7605,7 @@ mod tests {
     use crate::tenant::harness::{TenantHarness, test_img};
     use crate::tenant::layer_map::LayerMap;
     use crate::tenant::storage_layer::{Layer, LayerName, LayerVisibilityHint};
+    use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
     use crate::tenant::timeline::{DeltaLayerTestDesc, EvictionError};
     use crate::tenant::{PreviousHeatmap, Timeline};
 
@@ -7641,7 +7713,7 @@ mod tests {
         // Evict all the layers and stash the old heatmap in the timeline.
         // This simulates a migration to a cold secondary location.
 
-        let guard = timeline.layers.read().await;
+        let guard = timeline.layers.read(LayerManagerLockHolder::Testing).await;
         let mut all_layers = Vec::new();
         let forever = std::time::Duration::from_secs(120);
         for layer in guard.likely_resident_layers() {
@@ -7763,7 +7835,7 @@ mod tests {
             })));
 
         // Evict all the layers in the previous heatmap
-        let guard = timeline.layers.read().await;
+        let guard = timeline.layers.read(LayerManagerLockHolder::Testing).await;
         let forever = std::time::Duration::from_secs(120);
         for layer in guard.likely_resident_layers() {
             layer.evict_and_wait(forever).await.unwrap();
@@ -7826,7 +7898,10 @@ mod tests {
     }
 
     async fn find_some_layer(timeline: &Timeline) -> Layer {
-        let layers = timeline.layers.read().await;
+        let layers = timeline
+            .layers
+            .read(LayerManagerLockHolder::GetLayerMapInfo)
+            .await;
         let desc = layers
             .layer_map()
             .unwrap()

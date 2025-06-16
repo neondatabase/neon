@@ -11,16 +11,18 @@ use anyhow::Context;
 use anyhow::{bail, ensure};
 use arc_swap::ArcSwapOption;
 use futures::future::Either;
+use itertools::{Itertools, Position};
+use rand::{Rng, thread_rng};
 use remote_storage::RemoteStorageConfig;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, info, warn};
+use tracing::{Instrument, error, info, warn};
 use utils::sentry_init::init_sentry;
 use utils::{project_build_tag, project_git_version};
 
 use crate::auth::backend::jwt::JwkCache;
-use crate::auth::backend::{AuthRateLimiter, ConsoleRedirectBackend, MaybeOwned};
+use crate::auth::backend::{ConsoleRedirectBackend, MaybeOwned};
 use crate::cancellation::{CancellationHandler, handle_cancel_messages};
 use crate::config::{
     self, AuthenticationConfig, CacheOptions, ComputeConfig, HttpConfig, ProjectInfoCacheOptions,
@@ -29,9 +31,7 @@ use crate::config::{
 use crate::context::parquet::ParquetUploadArgs;
 use crate::http::health_server::AppMetrics;
 use crate::metrics::Metrics;
-use crate::rate_limiter::{
-    EndpointRateLimiter, LeakyBucketConfig, RateBucketInfo, WakeComputeRateLimiter,
-};
+use crate::rate_limiter::{EndpointRateLimiter, RateBucketInfo, WakeComputeRateLimiter};
 use crate::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use crate::redis::kv_ops::RedisKVClient;
 use crate::redis::{elasticache, notifications};
@@ -154,15 +154,6 @@ struct ProxyCliArgs {
     /// Wake compute rate limiter max number of requests per second.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_SET)]
     wake_compute_limit: Vec<RateBucketInfo>,
-    /// Whether the auth rate limiter actually takes effect (for testing)
-    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
-    auth_rate_limit_enabled: bool,
-    /// Authentication rate limiter max number of hashes per second.
-    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_AUTH_SET)]
-    auth_rate_limit: Vec<RateBucketInfo>,
-    /// The IP subnet to use when considering whether two IP addresses are considered the same.
-    #[clap(long, default_value_t = 64)]
-    auth_rate_limit_ip_subnet: u8,
     /// Redis rate limiter max number of requests per second.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_REDIS_SET)]
     redis_rps_limit: Vec<RateBucketInfo>,
@@ -232,8 +223,7 @@ struct ProxyCliArgs {
     is_private_access_proxy: bool,
 
     /// Configure whether all incoming requests have a Proxy Protocol V2 packet.
-    // TODO(conradludgate): switch default to rejected or required once we've updated all deployments
-    #[clap(value_enum, long, default_value_t = ProxyProtocolV2::Supported)]
+    #[clap(value_enum, long, default_value_t = ProxyProtocolV2::Rejected)]
     proxy_protocol_v2: ProxyProtocolV2,
 
     /// Time the proxy waits for the webauth session to be confirmed by the control plane.
@@ -326,7 +316,7 @@ pub async fn run() -> anyhow::Result<()> {
     let jemalloc = match crate::jemalloc::MetricRecorder::new() {
         Ok(t) => Some(t),
         Err(e) => {
-            tracing::error!(error = ?e, "could not start jemalloc metrics loop");
+            error!(error = ?e, "could not start jemalloc metrics loop");
             None
         }
     };
@@ -410,22 +400,9 @@ pub async fn run() -> anyhow::Result<()> {
         Some(tx_cancel),
     ));
 
-    // bit of a hack - find the min rps and max rps supported and turn it into
-    // leaky bucket config instead
-    let max = args
-        .endpoint_rps_limit
-        .iter()
-        .map(|x| x.rps())
-        .max_by(f64::total_cmp)
-        .unwrap_or(EndpointRateLimiter::DEFAULT.max);
-    let rps = args
-        .endpoint_rps_limit
-        .iter()
-        .map(|x| x.rps())
-        .min_by(f64::total_cmp)
-        .unwrap_or(EndpointRateLimiter::DEFAULT.rps);
     let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new_with_shards(
-        LeakyBucketConfig { rps, max },
+        RateBucketInfo::to_leaky_bucket(&args.endpoint_rps_limit)
+            .unwrap_or(EndpointRateLimiter::DEFAULT),
         64,
     ));
 
@@ -476,8 +453,7 @@ pub async fn run() -> anyhow::Result<()> {
         let key_path = args.tls_key.expect("already asserted it is set");
         let cert_path = args.tls_cert.expect("already asserted it is set");
 
-        let (tls_config, tls_server_end_point) =
-            super::pg_sni_router::parse_tls(&key_path, &cert_path)?;
+        let tls_config = super::pg_sni_router::parse_tls(&key_path, &cert_path)?;
 
         let dest = Arc::new(dest);
 
@@ -485,7 +461,6 @@ pub async fn run() -> anyhow::Result<()> {
             dest.clone(),
             tls_config.clone(),
             None,
-            tls_server_end_point,
             listen,
             cancellation_token.clone(),
         ));
@@ -494,7 +469,6 @@ pub async fn run() -> anyhow::Result<()> {
             dest,
             tls_config,
             Some(config.connect_to_compute.tls.clone()),
-            tls_server_end_point,
             listen_tls,
             cancellation_token.clone(),
         ));
@@ -548,23 +522,44 @@ pub async fn run() -> anyhow::Result<()> {
                 }
             }
 
+            // Try to connect to Redis 3 times with 1 + (0..0.1) second interval.
+            // This prevents immediate exit and pod restart,
+            // which can cause hammering of the redis in case of connection issues.
             if let Some(mut redis_kv_client) = redis_kv_client {
-                maintenance_tasks.spawn(async move {
-                    redis_kv_client.try_connect().await?;
-                    handle_cancel_messages(
-                        &mut redis_kv_client,
-                        rx_cancel,
-                        args.cancellation_batch_size,
-                    )
-                    .await?;
+                for attempt in (0..3).with_position() {
+                    match redis_kv_client.try_connect().await {
+                        Ok(()) => {
+                            info!("Connected to Redis KV client");
+                            maintenance_tasks.spawn(async move {
+                                handle_cancel_messages(
+                                    &mut redis_kv_client,
+                                    rx_cancel,
+                                    args.cancellation_batch_size,
+                                )
+                                .await?;
 
-                    drop(redis_kv_client);
+                                drop(redis_kv_client);
 
-                    // `handle_cancel_messages` was terminated due to the tx_cancel
-                    // being dropped. this is not worthy of an error, and this task can only return `Err`,
-                    // so let's wait forever instead.
-                    std::future::pending().await
-                });
+                                // `handle_cancel_messages` was terminated due to the tx_cancel
+                                // being dropped. this is not worthy of an error, and this task can only return `Err`,
+                                // so let's wait forever instead.
+                                std::future::pending().await
+                            });
+                            break;
+                        }
+                        Err(e) => {
+                            error!("Failed to connect to Redis KV client: {e}");
+                            if matches!(attempt, Position::Last(_)) {
+                                bail!(
+                                    "Failed to connect to Redis KV client after {} attempts",
+                                    attempt.into_inner()
+                                );
+                            }
+                            let jitter = thread_rng().gen_range(0..100);
+                            tokio::time::sleep(Duration::from_millis(1000 + jitter)).await;
+                        }
+                    }
+                }
             }
 
             if let Some(regional_redis_client) = regional_redis_client {
@@ -681,9 +676,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         jwks_cache: JwkCache::default(),
         thread_pool,
         scram_protocol_timeout: args.scram_protocol_timeout,
-        rate_limiter_enabled: args.auth_rate_limit_enabled,
-        rate_limiter: AuthRateLimiter::new(args.auth_rate_limit.clone()),
-        rate_limit_ip_subnet: args.auth_rate_limit_ip_subnet,
         ip_allowlist_check_enabled: !args.is_private_access_proxy,
         is_vpc_acccess_proxy: args.is_private_access_proxy,
         is_auth_broker: args.is_auth_broker,

@@ -23,12 +23,12 @@ use super::conn_pool_lib::{
     Client, ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, EndpointConnPool,
     GlobalConnPool,
 };
+use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::metrics::Metrics;
-use crate::tls::postgres_rustls::MakeRustlsConnect;
 
-type TlsStream = <MakeRustlsConnect as MakeTlsConnect<TcpStream>>::Stream;
+type TlsStream = <ComputeConfig as MakeTlsConnect<TcpStream>>::Stream;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ConnInfoWithAuth {
