@@ -163,7 +163,7 @@ fn main() -> Result<()> {
         .build()?;
     let _rt_guard = runtime.enter();
 
-    runtime.block_on(init())?;
+    runtime.block_on(init(cli.dev))?;
 
     // enable core dumping for all child processes
     setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
@@ -202,11 +202,10 @@ fn main() -> Result<()> {
     deinit_and_exit(exit_code);
 }
 
-async fn init() -> Result<()> {
+async fn init(dev_mode: bool) -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL).await?;
 
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGQUIT])?;
-    let dev_mode = cli.dev;
     thread::spawn(move || {
         for sig in signals.forever() {
             handle_exit_signal(sig, dev_mode);
