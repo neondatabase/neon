@@ -3,7 +3,7 @@ use std::io::Error;
 use std::io::ErrorKind;
 
 use bytes::Bytes;
-use futures::{StreamExt, Stream};
+use futures::{Stream, StreamExt};
 use tonic::metadata::AsciiMetadataValue;
 use tonic::metadata::errors::InvalidMetadataValue;
 use tonic::transport::Channel;
@@ -54,7 +54,8 @@ impl tonic::service::Interceptor for AuthInterceptor {
     fn call(&mut self, mut req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
         req.metadata_mut()
             .insert("neon-tenant-id", self.tenant_id.clone());
-        req.metadata_mut().insert("neon-shard-id", self.shard_id.clone());
+        req.metadata_mut()
+            .insert("neon-shard-id", self.shard_id.clone());
         req.metadata_mut()
             .insert("neon-timeline-id", self.timeline_id.clone());
         if let Some(auth_header) = &self.auth_header {
@@ -125,7 +126,10 @@ impl Client {
     }
 
     /// Returns the total size of a database, as # of bytes.
-    pub async fn get_db_size(&mut self, req: model::GetDbSizeRequest) -> Result<u64, tonic::Status> {
+    pub async fn get_db_size(
+        &mut self,
+        req: model::GetDbSizeRequest,
+    ) -> Result<u64, tonic::Status> {
         let proto_req = proto::GetDbSizeRequest::from(req);
 
         let response = self.client.get_db_size(proto_req).await?;
