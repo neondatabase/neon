@@ -58,7 +58,7 @@ jobs:
       test-cfg: ${{ inputs.pg-versions }}
       test-selection: ${{ inputs.test-selection }}
       test-run-count: ${{ fromJson(inputs.run-count) }}
-      rerun_failed: false
+      rerun-failed: false
     secrets: inherit
 
   create-test-report:

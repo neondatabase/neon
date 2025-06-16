@@ -38,7 +38,7 @@ on:
         required: false
         default: 1
         type: number
-      rerun_failed:
+      rerun-failed:
         description: 'rerun failed tests to ignore flaky tests'
         required: false
         default: true
@@ -392,7 +392,7 @@ jobs:
           run_with_real_s3: true
           real_s3_bucket: neon-github-ci-tests
           real_s3_region: eu-central-1
-          rerun_failed: ${{ inputs.rerun_failed }}
+          rerun_failed: ${{ inputs.rerun-failed }}
           pg_version: ${{ matrix.pg_version }}
           sanitizers: ${{ inputs.sanitizers }}
           aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
