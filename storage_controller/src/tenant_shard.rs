@@ -1184,10 +1184,18 @@ impl TenantShard {
         for secondary in self.intent.get_secondary() {
             // Make sure we don't try to migrate a secondary to our attached location: this case happens
             // easily in environments without multiple AZs.
-            let exclude = match self.intent.attached {
+            let mut exclude = match self.intent.attached {
                 Some(attached) => vec![attached],
                 None => vec![],
             };
+
+            // Exclude all other secondaries from the scheduling process to avoid replacing
+            // one existing secondary with another existing secondary.
+            for another_secondary in self.intent.secondary.iter() {
+                if another_secondary != secondary {
+                    exclude.push(*another_secondary);
+                }
+            }
 
             let replacement = match &self.policy {
                 PlacementPolicy::Attached(_) => {
