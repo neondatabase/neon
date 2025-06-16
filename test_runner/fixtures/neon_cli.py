@@ -564,11 +564,11 @@ class NeonLocalCli(AbstractNeonCli):
         basebackup_request_tries: int | None = None,
         timeout: str | None = None,
         env: dict[str, str] | None = None,
+        dev: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         args = [
             "endpoint",
             "start",
-            "--dev",  # Run in dev mode for tests
         ]
         extra_env_vars = env or {}
         if basebackup_request_tries is not None:
@@ -590,6 +590,8 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["--create-test-user"])
         if timeout is not None:
             args.extend(["--start-timeout", str(timeout)])
+        if dev:
+            args.extend(["--dev"])
 
         res = self.raw_cli(args, extra_env_vars)
         res.check_returncode()

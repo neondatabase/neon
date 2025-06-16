@@ -44,8 +44,8 @@ use crate::logger::startup_context_from_env;
 use crate::lsn_lease::launch_lsn_lease_bg_task_for_static;
 use crate::metrics::COMPUTE_CTL_UP;
 use crate::monitor::launch_monitor;
-use crate::pgbouncer::*;
 use crate::pg_helpers::*;
+use crate::pgbouncer::*;
 use crate::rsyslog::{
     PostgresLogsRsyslogConfig, configure_audit_rsyslog, configure_postgres_logs_export,
     launch_pgaudit_gc,
