@@ -150,7 +150,8 @@ RUN case $DEBIAN_VERSION in \
     zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget ca-certificates pkg-config libssl-dev \
     libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd curl unzip g++ \
     $VERSION_INSTALLS \
-    && apt clean && rm -rf /var/lib/apt/lists/*
+    && apt clean && rm -rf /var/lib/apt/lists/* && \
+    useradd -ms /bin/bash nonroot -b /home
 
 #########################################################################################
 #
@@ -1057,17 +1058,14 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) && \
 
 #########################################################################################
 #
-# Layer "pg build with nonroot user and cargo installed"
-# This layer is base and common for layers with `pgrx`
+# Layer "build-deps with Rust toolchain installed"
 #
 #########################################################################################
-FROM pg-build AS pg-build-nonroot-with-cargo
-ARG PG_VERSION
+FROM build-deps AS build-deps-with-cargo
 
 RUN apt update && \
     apt install --no-install-recommends --no-install-suggests -y curl libclang-dev && \
-    apt clean && rm -rf /var/lib/apt/lists/* && \
-    useradd -ms /bin/bash nonroot -b /home
+    apt clean && rm -rf /var/lib/apt/lists/*
 
 ENV HOME=/home/nonroot
 ENV PATH="/home/nonroot/.cargo/bin:$PATH"
@@ -1084,11 +1082,27 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
 
 #########################################################################################
 #
+# Layer "pg-build with Rust toolchain installed"
+# This layer is base and common for layers with `pgrx`
+#
+#########################################################################################
+FROM pg-build AS pg-build-with-cargo
+ARG PG_VERSION
+
+ENV HOME=/home/nonroot
+ENV PATH="/home/nonroot/.cargo/bin:$PATH"
+USER nonroot
+WORKDIR /home/nonroot
+
+COPY --from=build-deps-with-cargo /home/nonroot /home/nonroot
+
+#########################################################################################
+#
 # Layer "rust extensions"
 # This layer is used to build `pgrx` deps
 #
 #########################################################################################
-FROM pg-build-nonroot-with-cargo AS rust-extensions-build
+FROM pg-build-with-cargo AS rust-extensions-build
 ARG PG_VERSION
 
 RUN case "${PG_VERSION:?}" in \
@@ -1110,7 +1124,7 @@ USER root
 # and eventually get merged with `rust-extensions-build`
 #
 #########################################################################################
-FROM pg-build-nonroot-with-cargo AS rust-extensions-build-pgrx12
+FROM pg-build-with-cargo AS rust-extensions-build-pgrx12
 ARG PG_VERSION
 
 RUN cargo install --locked --version 0.12.9 cargo-pgrx && \
@@ -1127,7 +1141,7 @@ USER root
 # and eventually get merged with `rust-extensions-build`
 #
 #########################################################################################
-FROM pg-build-nonroot-with-cargo AS rust-extensions-build-pgrx14
+FROM pg-build-with-cargo AS rust-extensions-build-pgrx14
 ARG PG_VERSION
 
 RUN cargo install --locked --version 0.14.1 cargo-pgrx && \
