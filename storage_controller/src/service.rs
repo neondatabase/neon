@@ -123,7 +123,7 @@ pub(crate) const STARTUP_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a node may be unresponsive to heartbeats before we declare it offline.
 /// This must be long enough to cover node restarts as well as normal operations: in future
-pub const MAX_OFFLINE_INTERVAL_DEFAULT: Duration = Duration::from_secs(30);
+pub const MAX_OFFLINE_INTERVAL_DEFAULT: Duration = Duration::from_secs(10);
 
 /// How long a node may be unresponsive to heartbeats during start up before we declare it
 /// offline.
