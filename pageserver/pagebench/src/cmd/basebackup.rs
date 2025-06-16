@@ -269,7 +269,7 @@ async fn run_worker(
     all_work_done_barrier.wait().await;
 }
 
-/// A basebackup client. This allows swithcing out the client protocol implementation.
+/// A basebackup client. This allows switching out the client protocol implementation.
 #[async_trait]
 trait Client: Send {
     async fn basebackup(
