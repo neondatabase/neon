@@ -18,10 +18,12 @@ ifeq ($(BUILD_TYPE),release)
 	PG_LDFLAGS = $(LDFLAGS)
 	# Unfortunately, `--profile=...` is a nightly feature
 	CARGO_BUILD_FLAGS += --release
+	NEON_CARGO_ARTIFACT_TARGET_DIR = $(ROOT_PROJECT_DIR)/target/release
 else ifeq ($(BUILD_TYPE),debug)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
 	PG_CFLAGS += -O0 -g3 $(CFLAGS)
 	PG_LDFLAGS = $(LDFLAGS)
+	NEON_CARGO_ARTIFACT_TARGET_DIR = $(ROOT_PROJECT_DIR)/target/debug
 else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
@@ -180,11 +182,16 @@ postgres-check-%: postgres-%
 
 .PHONY: neon-pg-ext-%
 neon-pg-ext-%: postgres-%
+	+@echo "Compiling communicator $*"
+	$(CARGO_CMD_PREFIX) cargo build -p communicator $(CARGO_BUILD_FLAGS)
+
 	+@echo "Compiling neon $*"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-$*
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
+		LIBCOMMUNICATOR_PATH=$(NEON_CARGO_ARTIFACT_TARGET_DIR) \
 		-C $(POSTGRES_INSTALL_DIR)/build/neon-$* \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile install
+
 	+@echo "Compiling neon_walredo $*"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-walredo-$*
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
