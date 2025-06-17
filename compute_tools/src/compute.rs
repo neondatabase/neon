@@ -535,13 +535,14 @@ impl ComputeNode {
 
         // Reap the postgres process
         delay_exit |= this.cleanup_after_postgres_exit()?;
-        let sleep_secs = if delay_exit {
-            30
+
+        // /terminate returns LSN. If we don't sleep at all, connection will break and we
+        // won't get result. If we sleep too much, tests will take significantly longer
+        // and Github Action run will error out
+        let sleep_duration = if delay_exit {
+            Duration::from_secs(30)
         } else {
-            // /terminate returns LSN. If we don't sleep before exiting, connection will
-            // error out "connection closed before message completed", and we won't get
-            // LSN
-            1
+            Duration::from_millis(300)
         };
 
         // If launch failed, keep serving HTTP requests for a while, so the cloud
@@ -549,7 +550,7 @@ impl ComputeNode {
         if delay_exit {
             info!("giving control plane 30s to collect the error before shutdown");
         }
-        std::thread::sleep(Duration::from_secs(sleep_secs));
+        std::thread::sleep(sleep_duration);
         Ok(exit_code)
     }
 
