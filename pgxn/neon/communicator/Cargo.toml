@@ -37,3 +37,10 @@ utils.workspace = true
 
 [build-dependencies]
 cbindgen.workspace = true
+
+[target.'cfg(target_os = "macos")']
+rustflags = [
+    "-l", "framework=Security",
+    "-l", "framework=CoreFoundation",
+    "-l", "framework=CoreServices",
+]

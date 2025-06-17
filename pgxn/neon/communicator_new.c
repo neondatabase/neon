@@ -342,7 +342,7 @@ callback_set_my_latch_unsafe(void)
  * FIXME: The logic from neon_get_request_lsns() needs to go here, except for
  * the last-written LSN cache stuff, which is managed by the rust code now.
  */
-uint64
+uint64_t
 callback_get_request_lsn_unsafe(void)
 {
 	/*
@@ -659,7 +659,7 @@ retry:
 					ereport(ERROR,
 							(errcode_for_file_access(),
 							 errmsg("could not read block %lu in local cache file: %m",
-									cached_block)));
+									(unsigned long)cached_block)));
 				bytes_total += nbytes;
 			}
 		}
