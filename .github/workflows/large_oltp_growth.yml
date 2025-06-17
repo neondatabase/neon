@@ -3,8 +3,8 @@ name: large oltp growth
 
 on:
   # uncomment to run on push for debugging your PR
-  push:
-    branches: [ bodobolero/increase_large_oltp_workload ]
+  # push:
+  #  branches: [ bodobolero/increase_large_oltp_workload ]
 
   schedule:
     # * is a special character in YAML so you have to quote this string
