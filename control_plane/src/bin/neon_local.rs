@@ -18,7 +18,7 @@ use clap::Parser;
 use compute_api::requests::ComputeClaimsScope;
 use compute_api::spec::ComputeMode;
 use control_plane::broker::StorageBroker;
-use control_plane::endpoint::ComputeControlPlane;
+use control_plane::endpoint::{ComputeControlPlane, PageserverProtocol};
 use control_plane::endpoint_storage::{ENDPOINT_STORAGE_DEFAULT_ADDR, EndpointStorage};
 use control_plane::local_env;
 use control_plane::local_env::{
@@ -604,6 +604,14 @@ struct EndpointCreateCmdArgs {
     #[arg(default_value_t = DEFAULT_PG_VERSION)]
     #[clap(long, help = "Postgres version")]
     pg_version: u32,
+
+    /// Use gRPC to communicate with Pageservers, by generating grpc:// connstrings.
+    ///
+    /// Specified on creation such that it's retained across reconfiguration and restarts.
+    ///
+    /// NB: not yet supported by computes.
+    #[clap(long)]
+    grpc: bool,
 
     #[clap(
         long,
@@ -1451,6 +1459,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 args.internal_http_port,
                 args.pg_version,
                 mode,
+                args.grpc,
                 !args.update_catalog,
                 false,
             )?;
@@ -1491,13 +1500,20 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
 
             let (pageservers, stripe_size) = if let Some(pageserver_id) = pageserver_id {
                 let conf = env.get_pageserver_conf(pageserver_id).unwrap();
-                let parsed = parse_host_port(&conf.listen_pg_addr).expect("Bad config");
-                (
-                    vec![(parsed.0, parsed.1.unwrap_or(5432))],
-                    // If caller is telling us what pageserver to use, this is not a tenant which is
-                    // full managed by storage controller, therefore not sharded.
-                    DEFAULT_STRIPE_SIZE,
-                )
+                // Use gRPC if requested.
+                let pageserver = if endpoint.grpc {
+                    let grpc_addr = conf.listen_grpc_addr.as_ref().expect("bad config");
+                    let (host, port) = parse_host_port(grpc_addr)?;
+                    let port = port.unwrap_or(DEFAULT_PAGESERVER_GRPC_PORT);
+                    (PageserverProtocol::Grpc, host, port)
+                } else {
+                    let (host, port) = parse_host_port(&conf.listen_pg_addr)?;
+                    let port = port.unwrap_or(5432);
+                    (PageserverProtocol::Libpq, host, port)
+                };
+                // If caller is telling us what pageserver to use, this is not a tenant which is
+                // fully managed by storage controller, therefore not sharded.
+                (vec![pageserver], DEFAULT_STRIPE_SIZE)
             } else {
                 // Look up the currently attached location of the tenant, and its striping metadata,
                 // to pass these on to postgres.
@@ -1516,11 +1532,20 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                                 .await?;
                         }
 
-                        anyhow::Ok((
-                            Host::parse(&shard.listen_pg_addr)
-                                .expect("Storage controller reported bad hostname"),
-                            shard.listen_pg_port,
-                        ))
+                        let pageserver = if endpoint.grpc {
+                            (
+                                PageserverProtocol::Grpc,
+                                Host::parse(&shard.listen_grpc_addr.expect("no gRPC address"))?,
+                                shard.listen_grpc_port.expect("no gRPC port"),
+                            )
+                        } else {
+                            (
+                                PageserverProtocol::Libpq,
+                                Host::parse(&shard.listen_pg_addr)?,
+                                shard.listen_pg_port,
+                            )
+                        };
+                        anyhow::Ok(pageserver)
                     }),
                 )
                 .await?;
@@ -1575,11 +1600,19 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 .get(endpoint_id.as_str())
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
             let pageservers = if let Some(ps_id) = args.endpoint_pageserver_id {
-                let pageserver = PageServerNode::from_env(env, env.get_pageserver_conf(ps_id)?);
-                vec![(
-                    pageserver.pg_connection_config.host().clone(),
-                    pageserver.pg_connection_config.port(),
-                )]
+                let conf = env.get_pageserver_conf(ps_id)?;
+                // Use gRPC if requested.
+                let pageserver = if endpoint.grpc {
+                    let grpc_addr = conf.listen_grpc_addr.as_ref().expect("bad config");
+                    let (host, port) = parse_host_port(grpc_addr)?;
+                    let port = port.unwrap_or(DEFAULT_PAGESERVER_GRPC_PORT);
+                    (PageserverProtocol::Grpc, host, port)
+                } else {
+                    let (host, port) = parse_host_port(&conf.listen_pg_addr)?;
+                    let port = port.unwrap_or(5432);
+                    (PageserverProtocol::Libpq, host, port)
+                };
+                vec![pageserver]
             } else {
                 let storage_controller = StorageController::from_env(env);
                 storage_controller
@@ -1588,11 +1621,21 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                     .shards
                     .into_iter()
                     .map(|shard| {
-                        (
-                            Host::parse(&shard.listen_pg_addr)
-                                .expect("Storage controller reported malformed host"),
-                            shard.listen_pg_port,
-                        )
+                        // Use gRPC if requested.
+                        if endpoint.grpc {
+                            (
+                                PageserverProtocol::Grpc,
+                                Host::parse(&shard.listen_grpc_addr.expect("no gRPC address"))
+                                    .expect("bad hostname"),
+                                shard.listen_grpc_port.expect("no gRPC port"),
+                            )
+                        } else {
+                            (
+                                PageserverProtocol::Libpq,
+                                Host::parse(&shard.listen_pg_addr).expect("bad hostname"),
+                                shard.listen_pg_port,
+                            )
+                        }
                     })
                     .collect::<Vec<_>>()
             };
