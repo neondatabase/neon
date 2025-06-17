@@ -1656,7 +1656,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 .endpoints
                 .get(endpoint_id)
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
-            match endpoint.stop(args.mode.clone(), args.destroy).await?.lsn {
+            match endpoint.stop(args.mode, args.destroy).await?.lsn {
                 Some(lsn) => println!("{lsn}"),
                 None => println!("null"),
             }
