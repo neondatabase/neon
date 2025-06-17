@@ -69,6 +69,11 @@ def test_basebackup_cache(neon_env_builder: NeonEnvBuilder):
                 ).value
                 == i + 1
             )
+            # There should be only one basebackup file in the cache.
+            assert metrics.query_one("pageserver_basebackup_cache_entries_total").value == 1
+            # The size of one basebackup for new DB is ~20KB.
+            size_bytes = metrics.query_one("pageserver_basebackup_cache_size_bytes").value
+            assert 10 * 1024 <= size_bytes <= 100 * 1024
 
         wait_until(check_metrics)
 

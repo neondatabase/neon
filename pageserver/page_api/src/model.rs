@@ -182,33 +182,28 @@ impl From<CheckRelExistsResponse> for proto::CheckRelExistsResponse {
     }
 }
 
-/// Requests a base backup at a given LSN.
+/// Requests a base backup.
 #[derive(Clone, Copy, Debug)]
 pub struct GetBaseBackupRequest {
-    /// The LSN to fetch a base backup at.
-    pub read_lsn: ReadLsn,
+    /// The LSN to fetch a base backup at. If None, uses the latest LSN known to the Pageserver.
+    pub lsn: Option<Lsn>,
     /// If true, logical replication slots will not be created.
     pub replica: bool,
 }
 
-impl TryFrom<proto::GetBaseBackupRequest> for GetBaseBackupRequest {
-    type Error = ProtocolError;
-
-    fn try_from(pb: proto::GetBaseBackupRequest) -> Result<Self, Self::Error> {
-        Ok(Self {
-            read_lsn: pb
-                .read_lsn
-                .ok_or(ProtocolError::Missing("read_lsn"))?
-                .try_into()?,
+impl From<proto::GetBaseBackupRequest> for GetBaseBackupRequest {
+    fn from(pb: proto::GetBaseBackupRequest) -> Self {
+        Self {
+            lsn: (pb.lsn != 0).then_some(Lsn(pb.lsn)),
             replica: pb.replica,
-        })
+        }
     }
 }
 
 impl From<GetBaseBackupRequest> for proto::GetBaseBackupRequest {
     fn from(request: GetBaseBackupRequest) -> Self {
         Self {
-            read_lsn: Some(request.read_lsn.into()),
+            lsn: request.lsn.unwrap_or_default().0,
             replica: request.replica,
         }
     }
@@ -422,6 +417,39 @@ impl From<GetPageResponse> for proto::GetPageResponse {
     }
 }
 
+impl GetPageResponse {
+    /// Attempts to represent a tonic::Status as a GetPageResponse if appropriate. Returning a
+    /// tonic::Status will terminate the GetPage stream, so per-request errors are emitted as a
+    /// GetPageResponse with a non-OK status code instead.
+    #[allow(clippy::result_large_err)]
+    pub fn try_from_status(
+        status: tonic::Status,
+        request_id: RequestID,
+    ) -> Result<Self, tonic::Status> {
+        // We shouldn't see an OK status here, because we're emitting an error.
+        debug_assert_ne!(status.code(), tonic::Code::Ok);
+        if status.code() == tonic::Code::Ok {
+            return Err(tonic::Status::internal(format!(
+                "unexpected OK status: {status:?}",
+            )));
+        }
+
+        // If we can't convert the tonic::Code to a GetPageStatusCode, this is not a per-request
+        // error and we should return a tonic::Status to terminate the stream.
+        let Ok(status_code) = status.code().try_into() else {
+            return Err(status);
+        };
+
+        // Return a GetPageResponse for the status.
+        Ok(Self {
+            request_id,
+            status_code,
+            reason: Some(status.message().to_string()),
+            page_images: Vec::new(),
+        })
+    }
+}
+
 /// A GetPage response status code.
 ///
 /// These are effectively equivalent to gRPC statuses. However, we use a bidirectional stream
@@ -482,6 +510,39 @@ impl From<GetPageStatusCode> for proto::GetPageStatusCode {
 impl From<GetPageStatusCode> for i32 {
     fn from(status_code: GetPageStatusCode) -> Self {
         proto::GetPageStatusCode::from(status_code).into()
+    }
+}
+
+impl TryFrom<tonic::Code> for GetPageStatusCode {
+    type Error = tonic::Code;
+
+    fn try_from(code: tonic::Code) -> Result<Self, Self::Error> {
+        use tonic::Code;
+
+        let status_code = match code {
+            Code::Ok => Self::Ok,
+
+            // These are per-request errors, which should be returned as GetPageResponses.
+            Code::AlreadyExists => Self::InvalidRequest,
+            Code::DataLoss => Self::InternalError,
+            Code::FailedPrecondition => Self::InvalidRequest,
+            Code::InvalidArgument => Self::InvalidRequest,
+            Code::Internal => Self::InternalError,
+            Code::NotFound => Self::NotFound,
+            Code::OutOfRange => Self::InvalidRequest,
+            Code::ResourceExhausted => Self::SlowDown,
+
+            // These should terminate the stream by returning a tonic::Status.
+            Code::Aborted
+            | Code::Cancelled
+            | Code::DeadlineExceeded
+            | Code::PermissionDenied
+            | Code::Unauthenticated
+            | Code::Unavailable
+            | Code::Unimplemented
+            | Code::Unknown => return Err(code),
+        };
+        Ok(status_code)
     }
 }
 

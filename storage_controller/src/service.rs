@@ -1683,6 +1683,8 @@ impl Service {
                     None,
                     "".to_string(),
                     123,
+                    None,
+                    None,
                     AvailabilityZone("test_az".to_string()),
                     false,
                 )
@@ -7254,6 +7256,12 @@ impl Service {
             ));
         }
 
+        if register_req.listen_grpc_addr.is_some() != register_req.listen_grpc_port.is_some() {
+            return Err(ApiError::BadRequest(anyhow::anyhow!(
+                "must specify both gRPC address and port"
+            )));
+        }
+
         // Ordering: we must persist the new node _before_ adding it to in-memory state.
         // This ensures that before we use it for anything or expose it via any external
         // API, it is guaranteed to be available after a restart.
@@ -7264,6 +7272,8 @@ impl Service {
             register_req.listen_https_port,
             register_req.listen_pg_addr,
             register_req.listen_pg_port,
+            register_req.listen_grpc_addr,
+            register_req.listen_grpc_port,
             register_req.availability_zone_id.clone(),
             self.config.use_https_pageserver_api,
         );
