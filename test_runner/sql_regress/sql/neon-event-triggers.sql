@@ -86,8 +86,7 @@ create table t3(x integer);
 
 \c neondb cloud_admin
 
--- Check that neondb_proc() is not fired for superuser
--- Check that neondb_secdef_proc() is fired for superuser (running as neon_admin)
+-- Check that user-defined event triggers are not fired for superuser
 create table t4(x integer);
 
 \c neondb neon_admin

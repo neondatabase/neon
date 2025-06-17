@@ -976,13 +976,15 @@ neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 		}
 
 		/*
-		 * 2. Refuse to run SECURITY INVOKER function that belongs to a
-		 * non-superuser when the current user is a superuser: avoid to give
-		 * superuser privelges to non-superuser code.
+		 * 2. Refuse to run functions that belongs to a non-superuser when the
+		 * current user is a superuser.
+		 *
+		 * We could run a SECURITY DEFINER user-function here and be safe with
+		 * privilege escalation risks, but superuser roles are only used for
+		 * infrastructure maintenance operations, where we prefer to skip
+		 * running user-defined code.
 		 */
-		else if (role_is_super
-				 && !function_is_secdef
-				 && !function_is_owned_by_super)
+		else if (role_is_super && !function_is_owned_by_super)
 		{
 			char *func_name = get_func_name(flinfo->fn_oid);
 
