@@ -8768,15 +8768,22 @@ impl Service {
         let waiter_count = waiters.len();
         match self.await_waiters(waiters, RECONCILE_TIMEOUT).await {
             Ok(()) => {}
-            Err(ReconcileWaitError::Failed(_, reconcile_error))
-                if matches!(*reconcile_error, ReconcileError::Cancel) =>
-            {
-                // Ignore reconciler cancel errors: this reconciler might have shut down
-                // because some other change superceded it.  We will return a nonzero number,
-                // so the caller knows they might have to call again to quiesce the system.
-            }
             Err(e) => {
-                return Err(e);
+                if let ReconcileWaitError::Failed(_, reconcile_error) = &e {
+                    match **reconcile_error {
+                        ReconcileError::Cancel
+                        | ReconcileError::Remote(mgmt_api::Error::Cancelled) => {
+                            // Ignore reconciler cancel errors: this reconciler might have shut down
+                            // because some other change superceded it.  We will return a nonzero number,
+                            // so the caller knows they might have to call again to quiesce the system.
+                        }
+                        _ => {
+                            return Err(e);
+                        }
+                    }
+                } else {
+                    return Err(e);
+                }
             }
         };
 
