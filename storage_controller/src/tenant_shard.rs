@@ -1356,28 +1356,19 @@ impl TenantShard {
     /// Reconciliation may still be needed for other aspects of state such as secondaries (see [`Self::dirty`]): this
     /// funciton should not be used to decide whether to reconcile.
     pub(crate) fn stably_attached(&self) -> Option<NodeId> {
-        if let Some(attach_intent) = self.intent.attached {
-            match self.observed.locations.get(&attach_intent) {
-                Some(loc) => match &loc.conf {
-                    Some(conf) => match conf.mode {
-                        LocationConfigMode::AttachedMulti
-                        | LocationConfigMode::AttachedSingle
-                        | LocationConfigMode::AttachedStale => {
-                            // Our intent and observed state agree that this node is in an attached state.
-                            Some(attach_intent)
-                        }
-                        // Our observed config is not an attached state
-                        _ => None,
-                    },
-                    // Our observed state is None, i.e. in flux
-                    None => None,
-                },
-                // We have no observed state for this node
-                None => None,
-            }
-        } else {
-            // Our intent is not to attach
-            None
+        // We have an intent to attach for this node
+        let attach_intent = self.intent.attached?;
+        // We have an observed state for this node
+        let location = self.observed.locations.get(&attach_intent)?;
+        // Our observed state is not None, i.e. not in flux
+        let location_config = location.conf.as_ref()?;
+
+        // Check if our intent and observed state agree that this node is in an attached state.
+        match location_config.mode {
+            LocationConfigMode::AttachedMulti
+            | LocationConfigMode::AttachedSingle
+            | LocationConfigMode::AttachedStale => Some(attach_intent),
+            _ => None,
         }
     }
 
