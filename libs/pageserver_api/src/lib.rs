@@ -5,6 +5,7 @@ pub mod controller_api;
 pub mod key;
 pub mod keyspace;
 pub mod models;
+pub mod pagestream_api;
 pub mod record;
 pub mod reltag;
 pub mod shard;
