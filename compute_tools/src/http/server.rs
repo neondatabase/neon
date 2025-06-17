@@ -27,6 +27,7 @@ use super::{
     },
 };
 use crate::compute::ComputeNode;
+use crate::http::routes::profile;
 
 /// `compute_ctl` has two servers: internal and external. The internal server
 /// binds to the loopback interface and handles communication from clients on
@@ -95,6 +96,7 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                     .route("/metrics.json", get(metrics_json::get_metrics))
                     .route("/status", get(status::get_status))
                     .route("/terminate", post(terminate::terminate))
+                    .route("/profile/cpu", get(profile::profile))
                     .layer(AsyncRequireAuthorizationLayer::new(Authorize::new(
                         compute_id.clone(),
                         config.jwks.clone(),

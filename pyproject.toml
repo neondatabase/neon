@@ -10,6 +10,7 @@ psycopg2-binary = "^2.9.10"
 typing-extensions = "^4.12.2"
 PyJWT = {version = "^2.1.0", extras = ["crypto"]}
 requests = "^2.32.4"
+protobuf = "^6.31.1"
 pytest-xdist = "^3.3.1"
 asyncpg = "^0.30.0"
 aiopg = "^1.4.0"
