@@ -120,6 +120,7 @@ anyhow = { version = "1", features = ["backtrace"] }
 bytes = { version = "1", features = ["serde"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "wasmbind"] }
+clang-sys = { version = "1", default-features = false, features = ["clang_11_0", "runtime"] }
 clap = { version = "4", features = ["derive", "env", "string"] }
 clap_builder = { version = "4", default-features = false, features = ["color", "env", "help", "std", "string", "suggestions", "usage"] }
 either = { version = "1" }

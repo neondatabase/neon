@@ -61,6 +61,9 @@ RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
         libpq5 \
         libpq-dev \
         libzstd-dev \
+        linux-perf \
+        bpfcc-tools \
+        linux-headers-$(case "$(uname -m)" in x86_64) echo amd64;; aarch64) echo arm64;; esac) \
         postgresql-16 \
         postgresql-server-dev-16 \
         postgresql-common  \
@@ -105,15 +108,21 @@ RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
 #
 # 'gdb' is included so that we get backtraces of core dumps produced in
 # regression tests
-RUN set -e \
+RUN set -ex \
+    && KERNEL_VERSION="$(uname -r | cut -d'-' -f1 | sed 's/\.0$//')" \
+    && echo KERNEL_VERSION=${KERNEL_VERSION} >> /etc/environment \
+    && KERNEL_ARCH=$(uname -m | awk '{ if ($1 ~ /^(x86_64|i[3-6]86)$/) print "x86"; else if ($1 ~ /^(aarch64|arm.*)$/) print "aarch"; else print $1 }') \
+    && echo KERNEL_ARCH=${KERNEL_ARCH} >> /etc/environment \
     && apt update \
     && apt install -y \
         autoconf \
         automake \
+        bc \
         bison \
         build-essential \
         ca-certificates \
         cmake \
+        cpio \
         curl \
         flex \
         gdb \
@@ -122,8 +131,10 @@ RUN set -e \
         gzip \
         jq \
         jsonnet \
+        kmod \
         libcurl4-openssl-dev \
         libbz2-dev \
+        libelf-dev \
         libffi-dev \
         liblzma-dev \
         libncurses5-dev \
@@ -137,6 +148,11 @@ RUN set -e \
         libxml2-dev \
         libxmlsec1-dev \
         libxxhash-dev \
+        linux-perf \
+        bpfcc-tools \
+        libbpfcc \
+        libbpfcc-dev \
+        linux-headers-$(case "$(uname -m)" in x86_64) echo amd64;; aarch64) echo arm64;; esac) \
         lsof \
         make \
         netcat-openbsd \
@@ -144,12 +160,35 @@ RUN set -e \
         openssh-client \
         parallel \
         pkg-config \
+        rsync \
+        sudo \
         unzip \
         wget \
         xz-utils \
         zlib1g-dev \
         zstd \
-    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
+    && git clone --depth 1 --branch v${KERNEL_VERSION} https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
+    && cd linux \
+    && make mrproper \
+    && make defconfig \
+    && scripts/config --module CONFIG_IKHEADERS \
+    && scripts/config --enable CONFIG_MODULE_COMPRESS \
+    && scripts/config --disable CONFIG_MODULE_COMPRESS_GZIP \
+    && scripts/config --enable CONFIG_MODULE_COMPRESS_ZSTD \
+    && make olddefconfig \
+    && make modules_prepare -j \
+    && make WERROR=0 NO_WERROR=1 -j 10 \
+    && make WERROR=0 NO_WERROR=1 modules -j10 \
+    && mkdir -p /lib/modules/$(uname -r)/build \
+    && mkdir -p /lib/modules/$(uname -r)/kernel/kernel \
+    && cp -a include arch/${KERNEL_ARCH}/include scripts Module.symvers .config Makefile /lib/modules/$(uname -r)/build/ \
+    && make headers_install INSTALL_HDR_PATH=/lib/modules/$(uname -r)/build \
+    && cp -a arch/${KERNEL_ARCH}/include /lib/modules/$(uname -r)/build/arch/${KERNEL_ARCH}/include \
+    && zstd -19 ./kernel/kheaders.ko -o ./kernel/kheaders.ko.zst \
+    && cp -a kernel/kheaders.ko.zst /lib/modules/$(uname -r)/kernel/kernel \
+    && execsnoop-bpfcc \
+    && rm -rf linux
 
 # sql_exporter
 
@@ -198,6 +237,8 @@ RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /
 # Configure sudo & docker
 RUN usermod -aG sudo nonroot && \
     echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers && \
+    mkdir -p /etc/sudoers.d && \
+    echo 'nonroot ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/nonroot && \
     usermod -aG docker nonroot
 
 # AWS CLI

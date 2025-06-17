@@ -109,6 +109,8 @@ RUN set -e \
         libreadline-dev \
         libseccomp-dev \
         ca-certificates \
+        bpfcc-tools \
+        sudo \
         openssl \
         unzip \
         curl \
