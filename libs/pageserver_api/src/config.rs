@@ -356,16 +356,21 @@ pub struct TimelineImportConfig {
 pub struct BasebackupCacheConfig {
     #[serde(with = "humantime_serde")]
     pub cleanup_period: Duration,
-    // FIXME: Support max_size_bytes.
-    // pub max_size_bytes: usize,
-    pub max_size_entries: i64,
+    /// Maximum total size of basebackup cache entries on disk in bytes.
+    /// The cache may slightly exceed this limit because we do not know
+    /// the exact size of the cache entry untill it's written to disk.
+    pub max_total_size_bytes: u64,
+    // TODO(diko): support max_entry_size_bytes.
+    // pub max_entry_size_bytes: u64,
+    pub max_size_entries: usize,
 }
 
 impl Default for BasebackupCacheConfig {
     fn default() -> Self {
         Self {
             cleanup_period: Duration::from_secs(60),
-            // max_size_bytes: 1024 * 1024 * 1024, // 1 GiB
+            max_total_size_bytes: 1024 * 1024 * 1024, // 1 GiB
+            // max_entry_size_bytes: 16 * 1024 * 1024,   // 16 MiB
             max_size_entries: 1000,
         }
     }
