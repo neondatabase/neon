@@ -19,11 +19,14 @@ use fail::fail_point;
 use pageserver_api::key::{Key, rel_block_to_key};
 use pageserver_api::reltag::{RelTag, SlruKind};
 use postgres_ffi::pg_constants::{
-    DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID, PG_HBA, PGDATA_SPECIAL_FILES,
+    PG_HBA, PGDATA_SPECIAL_FILES,
 };
-use postgres_ffi::relfile_utils::{INIT_FORKNUM, MAIN_FORKNUM};
 use postgres_ffi::{
     BLCKSZ, PG_TLI, RELSEG_SIZE, WAL_SEGMENT_SIZE, XLogFileName, dispatch_pgversion, pg_constants,
+};
+use postgres_ffi_types::forknum::{INIT_FORKNUM, MAIN_FORKNUM};
+use postgres_ffi_types::constants::{
+    DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID,
 };
 use tokio::io;
 use tokio::io::AsyncWrite;
@@ -372,6 +375,7 @@ where
                 .partition(
                     self.timeline.get_shard_identity(),
                     self.timeline.conf.max_get_vectored_keys.get() as u64 * BLCKSZ as u64,
+                    BLCKSZ as u64,
                 );
 
             let mut slru_builder = SlruSegmentsBuilder::new(&mut self.ar);

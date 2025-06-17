@@ -25,8 +25,9 @@ use pageserver_api::keyspace::{KeySpaceRandomAccum, SparseKeySpace};
 use pageserver_api::models::RelSizeMigration;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
-use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
-use postgres_ffi::{BLCKSZ, Oid, RepOriginId, TimestampTz, TransactionId};
+use postgres_ffi::{BLCKSZ, TimestampTz, TransactionId};
+use postgres_ffi_types::forknum::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
+use postgres_ffi_types::{Oid, RepOriginId};
 use serde::{Deserialize, Serialize};
 use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
@@ -720,6 +721,7 @@ impl Timeline {
         let batches = keyspace.partition(
             self.get_shard_identity(),
             self.conf.max_get_vectored_keys.get() as u64 * BLCKSZ as u64,
+            BLCKSZ as u64,
         );
 
         let io_concurrency = IoConcurrency::spawn_from_conf(
@@ -960,6 +962,7 @@ impl Timeline {
             let batches = keyspace.partition(
                 self.get_shard_identity(),
                 self.conf.max_get_vectored_keys.get() as u64 * BLCKSZ as u64,
+                BLCKSZ as u64,
             );
 
             let io_concurrency = IoConcurrency::spawn_from_conf(

@@ -11,12 +11,6 @@
 
 use crate::{BLCKSZ, PageHeaderData};
 
-//
-// From pg_tablespace_d.h
-//
-pub const DEFAULTTABLESPACE_OID: u32 = 1663;
-pub const GLOBALTABLESPACE_OID: u32 = 1664;
-
 // From storage_xlog.h
 pub const XLOG_SMGR_CREATE: u8 = 0x10;
 pub const XLOG_SMGR_TRUNCATE: u8 = 0x20;

@@ -30,12 +30,12 @@ use bytes::{Buf, Bytes};
 use pageserver_api::key::{Key, rel_block_to_key};
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
-use postgres_ffi::relfile_utils::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::walrecord::*;
 use postgres_ffi::{
     TimestampTz, TransactionId, dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch,
     fsm_logical_to_physical, pg_constants,
 };
+use postgres_ffi_types::forknum::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
 use tracing::*;
 use utils::bin_ser::{DeserializeError, SerializeError};
 use utils::lsn::Lsn;

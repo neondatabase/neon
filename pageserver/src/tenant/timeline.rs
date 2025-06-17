@@ -5211,7 +5211,11 @@ impl Timeline {
         }
 
         let (dense_ks, sparse_ks) = self.collect_keyspace(lsn, ctx).await?;
-        let dense_partitioning = dense_ks.partition(&self.shard_identity, partition_size);
+        let dense_partitioning = dense_ks.partition(
+            &self.shard_identity,
+            partition_size,
+            postgres_ffi::BLCKSZ as u64,
+        );
         let sparse_partitioning = SparseKeyPartitioning {
             parts: vec![sparse_ks],
         }; // no partitioning for metadata keys for now

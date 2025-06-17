@@ -37,7 +37,7 @@ use pageserver_api::models::{ShardImportProgress, ShardImportProgressV1, ShardIm
 use pageserver_api::reltag::{RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::relfile_utils::parse_relfilename;
-use postgres_ffi::{BLCKSZ, pg_constants};
+use postgres_ffi::BLCKSZ;
 use remote_storage::RemotePath;
 use tokio::sync::Semaphore;
 use tokio_stream::StreamExt;
@@ -558,7 +558,7 @@ impl PgDataDir {
                 PgDataDirDb::new(
                     storage,
                     &basedir.join(dboid.to_string()),
-                    pg_constants::DEFAULTTABLESPACE_OID,
+                    postgres_ffi_types::constants::DEFAULTTABLESPACE_OID,
                     dboid,
                     &datadir_path,
                 )
@@ -571,7 +571,7 @@ impl PgDataDir {
             PgDataDirDb::new(
                 storage,
                 &datadir_path.join("global"),
-                postgres_ffi::pg_constants::GLOBALTABLESPACE_OID,
+                postgres_ffi_types::constants::GLOBALTABLESPACE_OID,
                 0,
                 &datadir_path,
             )
