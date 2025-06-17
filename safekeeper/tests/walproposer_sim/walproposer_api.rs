@@ -499,7 +499,7 @@ impl ApiImpl for SimulationApi {
         true
     }
 
-    fn finish_sync_safekeepers(&self, lsn: u64) {
+    fn finish_sync_safekeepers(&self, lsn: u64) -> ! {
         debug!("finish_sync_safekeepers, lsn={}", lsn);
         executor::exit(0, Lsn(lsn).to_string());
     }

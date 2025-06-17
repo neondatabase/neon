@@ -63,8 +63,8 @@ url.workspace = true
 uuid.workspace = true
 walkdir.workspace = true
 x509-cert.workspace = true
-
 postgres_initdb.workspace = true
+postgres-types.workspace = true
 compute_api.workspace = true
 utils.workspace = true
 workspace_hack.workspace = true

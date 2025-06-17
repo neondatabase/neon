@@ -46,7 +46,7 @@ pub struct ExtensionInstallResponse {
     pub version: ExtVersion,
 }
 
-#[derive(Serialize, Default, Debug, Clone)]
+#[derive(Serialize, Default, Debug, Clone, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum LfcPrewarmState {
     #[default]
@@ -56,6 +56,17 @@ pub enum LfcPrewarmState {
     Failed {
         error: String,
     },
+}
+
+impl Display for LfcPrewarmState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LfcPrewarmState::NotPrewarmed => f.write_str("NotPrewarmed"),
+            LfcPrewarmState::Prewarming => f.write_str("Prewarming"),
+            LfcPrewarmState::Completed => f.write_str("Completed"),
+            LfcPrewarmState::Failed { error } => write!(f, "Error({error})"),
+        }
+    }
 }
 
 #[derive(Serialize, Default, Debug, Clone)]
@@ -70,6 +81,23 @@ pub enum LfcOffloadState {
     },
 }
 
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+/// Response of /promote
+pub enum PromoteState {
+    NotPromoted,
+    Completed,
+    Failed { error: String },
+}
+
+#[derive(Deserialize, Serialize, Default, Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+/// Result of /safekeepers_lsn
+pub struct SafekeepersLsn {
+    pub safekeepers: String,
+    pub wal_flush_lsn: utils::lsn::Lsn,
+}
+
 /// Response of the /status API
 #[derive(Serialize, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -81,6 +109,16 @@ pub struct ComputeStatusResponse {
     #[serde(serialize_with = "rfc3339_serialize")]
     pub last_active: Option<DateTime<Utc>>,
     pub error: Option<String>,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminateMode {
+    #[default]
+    /// wait 30s till returning from /terminate to allow control plane to get the error
+    Fast,
+    /// return from /terminate immediately as soon as all components are terminated
+    Immediate,
 }
 
 #[derive(Serialize, Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -103,9 +141,14 @@ pub enum ComputeStatus {
     // control-plane to terminate it.
     Failed,
     // Termination requested
-    TerminationPending,
+    TerminationPending { mode: TerminateMode },
     // Terminated Postgres
     Terminated,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct TerminateResponse {
+    pub lsn: Option<utils::lsn::Lsn>,
 }
 
 impl Display for ComputeStatus {
@@ -117,7 +160,7 @@ impl Display for ComputeStatus {
             ComputeStatus::Running => f.write_str("running"),
             ComputeStatus::Configuration => f.write_str("configuration"),
             ComputeStatus::Failed => f.write_str("failed"),
-            ComputeStatus::TerminationPending => f.write_str("termination-pending"),
+            ComputeStatus::TerminationPending { .. } => f.write_str("termination-pending"),
             ComputeStatus::Terminated => f.write_str("terminated"),
         }
     }

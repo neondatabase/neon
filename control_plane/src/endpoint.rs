@@ -52,7 +52,8 @@ use compute_api::requests::{
     COMPUTE_AUDIENCE, ComputeClaims, ComputeClaimsScope, ConfigurationRequest,
 };
 use compute_api::responses::{
-    ComputeConfig, ComputeCtlConfig, ComputeStatus, ComputeStatusResponse, TlsConfig,
+    ComputeConfig, ComputeCtlConfig, ComputeStatus, ComputeStatusResponse, TerminateResponse,
+    TlsConfig,
 };
 use compute_api::spec::{
     Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PgIdent,
@@ -566,50 +567,6 @@ impl Endpoint {
         }
     }
 
-    fn pg_ctl(&self, args: &[&str], auth_token: &Option<String>) -> Result<()> {
-        let pg_ctl_path = self.env.pg_bin_dir(self.pg_version)?.join("pg_ctl");
-        let mut cmd = Command::new(&pg_ctl_path);
-        cmd.args(
-            [
-                &[
-                    "-D",
-                    self.pgdata().to_str().unwrap(),
-                    "-w", //wait till pg_ctl actually does what was asked
-                ],
-                args,
-            ]
-            .concat(),
-        )
-        .env_clear()
-        .env(
-            "LD_LIBRARY_PATH",
-            self.env.pg_lib_dir(self.pg_version)?.to_str().unwrap(),
-        )
-        .env(
-            "DYLD_LIBRARY_PATH",
-            self.env.pg_lib_dir(self.pg_version)?.to_str().unwrap(),
-        );
-
-        // Pass authentication token used for the connections to pageserver and safekeepers
-        if let Some(token) = auth_token {
-            cmd.env("NEON_AUTH_TOKEN", token);
-        }
-
-        let pg_ctl = cmd
-            .output()
-            .context(format!("{} failed", pg_ctl_path.display()))?;
-        if !pg_ctl.status.success() {
-            anyhow::bail!(
-                "pg_ctl failed, exit code: {}, stdout: {}, stderr: {}",
-                pg_ctl.status,
-                String::from_utf8_lossy(&pg_ctl.stdout),
-                String::from_utf8_lossy(&pg_ctl.stderr),
-            );
-        }
-
-        Ok(())
-    }
-
     fn wait_for_compute_ctl_to_exit(&self, send_sigterm: bool) -> Result<()> {
         // TODO use background_process::stop_process instead: https://github.com/neondatabase/neon/pull/6482
         let pidfile_path = self.endpoint_path().join("compute_ctl.pid");
@@ -913,7 +870,7 @@ impl Endpoint {
                         ComputeStatus::Empty
                         | ComputeStatus::ConfigurationPending
                         | ComputeStatus::Configuration
-                        | ComputeStatus::TerminationPending
+                        | ComputeStatus::TerminationPending { .. }
                         | ComputeStatus::Terminated => {
                             bail!("unexpected compute status: {:?}", state.status)
                         }
@@ -1035,8 +992,18 @@ impl Endpoint {
         }
     }
 
-    pub fn stop(&self, mode: &str, destroy: bool) -> Result<()> {
-        self.pg_ctl(&["-m", mode, "stop"], &None)?;
+    pub async fn stop(&self, mode: &str, destroy: bool) -> Result<TerminateResponse> {
+        let ip = self.external_http_address.ip();
+        let port = self.external_http_address.port();
+        // We ignore _mode_ and always pass "immediate", otherwise /terminate will
+        // wait 30s before returning which breaks tests
+        let url = format!("http://{ip}:{port}/terminate?mode=immediate");
+        let token = self.generate_jwt(Some(ComputeClaimsScope::Admin))?;
+        let request = reqwest::Client::new().post(url).bearer_auth(token);
+        let response = request.send().await.context("/terminate")?;
+        let text = response.text().await.context("/terminate result")?;
+        let response: TerminateResponse =
+            serde_json::from_str(&text).with_context(|| format!("deserializing {text}"))?;
 
         // Also wait for the compute_ctl process to die. It might have some
         // cleanup work to do after postgres stops, like syncing safekeepers,
@@ -1055,7 +1022,7 @@ impl Endpoint {
             );
             std::fs::remove_dir_all(self.endpoint_path())?;
         }
-        Ok(())
+        Ok(response)
     }
 
     pub fn connstr(&self, user: &str, db_name: &str) -> String {

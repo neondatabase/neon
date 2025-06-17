@@ -83,7 +83,9 @@ impl ComputeMonitor {
         let compute_status = self.compute.get_status();
         if matches!(
             compute_status,
-            ComputeStatus::Terminated | ComputeStatus::TerminationPending | ComputeStatus::Failed
+            ComputeStatus::Terminated
+                | ComputeStatus::TerminationPending { .. }
+                | ComputeStatus::Failed
         ) {
             info!(
                 "compute is in {} status, stopping compute monitor",

@@ -1317,6 +1317,7 @@ dependencies = [
  "opentelemetry_sdk",
  "p256 0.13.2",
  "postgres",
+ "postgres-types",
  "postgres_initdb",
  "regex",
  "remote_storage",

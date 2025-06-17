@@ -1650,7 +1650,10 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 .endpoints
                 .get(endpoint_id)
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
-            endpoint.stop(&args.mode, args.destroy)?;
+            match endpoint.stop(&args.mode, args.destroy).await?.lsn {
+                Some(lsn) => println!("{lsn}"),
+                None => println!("null"),
+            }
         }
         EndpointCmd::GenerateJwt(args) => {
             let endpoint = {
@@ -2086,7 +2089,10 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
     match ComputeControlPlane::load(env.clone()) {
         Ok(cplane) => {
             for (_k, node) in cplane.endpoints {
-                if let Err(e) = node.stop(if immediate { "immediate" } else { "fast" }, false) {
+                if let Err(e) = node
+                    .stop(if immediate { "immediate" } else { "fast" }, false)
+                    .await
+                {
                     eprintln!("postgres stop failed: {e:#}");
                 }
             }

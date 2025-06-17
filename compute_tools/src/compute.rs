@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
 use compute_api::responses::{
     ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus, LfcOffloadState,
-    LfcPrewarmState, TlsConfig,
+    LfcPrewarmState, PromoteState, TlsConfig,
 };
 use compute_api::spec::{
     ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent,
@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use std::{env, fs};
-use tokio::spawn;
+use tokio::{spawn, sync::watch, task::JoinHandle};
 use tracing::{Instrument, debug, error, info, instrument, warn};
 use url::Url;
 use utils::id::{TenantId, TimelineId};
@@ -161,6 +161,11 @@ pub struct ComputeState {
     pub lfc_prewarm_state: LfcPrewarmState,
     pub lfc_offload_state: LfcOffloadState,
 
+    /// WAL flush LSN that is set after terminating Postgres and syncing safekeepers if
+    /// mode == ComputeMode::Primary. None otherwise
+    pub terminate_flush_lsn: Option<Lsn>,
+    pub promote_state: Option<watch::Receiver<PromoteState>>,
+
     pub metrics: ComputeMetrics,
 }
 
@@ -176,6 +181,8 @@ impl ComputeState {
             metrics: ComputeMetrics::default(),
             lfc_prewarm_state: LfcPrewarmState::default(),
             lfc_offload_state: LfcOffloadState::default(),
+            terminate_flush_lsn: None,
+            promote_state: None,
         }
     }
 
@@ -314,7 +321,7 @@ fn maybe_cgexec(cmd: &str) -> Command {
 
 struct PostgresHandle {
     postgres: std::process::Child,
-    log_collector: tokio::task::JoinHandle<Result<()>>,
+    log_collector: JoinHandle<Result<()>>,
 }
 
 impl PostgresHandle {
@@ -328,7 +335,7 @@ struct StartVmMonitorResult {
     #[cfg(target_os = "linux")]
     token: tokio_util::sync::CancellationToken,
     #[cfg(target_os = "linux")]
-    vm_monitor: Option<tokio::task::JoinHandle<Result<()>>>,
+    vm_monitor: Option<JoinHandle<Result<()>>>,
 }
 
 impl ComputeNode {
@@ -483,13 +490,21 @@ impl ComputeNode {
 
         // Reap the postgres process
         delay_exit |= this.cleanup_after_postgres_exit()?;
+        let sleep_secs = if delay_exit {
+            30
+        } else {
+            // /terminate returns LSN. If we don't sleep before exiting, connection will
+            // error out "connection closed before message completed", and we won't get
+            // LSN
+            1
+        };
 
         // If launch failed, keep serving HTTP requests for a while, so the cloud
         // control plane can get the actual error.
         if delay_exit {
             info!("giving control plane 30s to collect the error before shutdown");
-            std::thread::sleep(Duration::from_secs(30));
         }
+        std::thread::sleep(Duration::from_secs(sleep_secs));
         Ok(exit_code)
     }
 
@@ -861,20 +876,25 @@ impl ComputeNode {
         // Maybe sync safekeepers again, to speed up next startup
         let compute_state = self.state.lock().unwrap().clone();
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
-        if matches!(pspec.spec.mode, compute_api::spec::ComputeMode::Primary) {
+        let lsn = if matches!(pspec.spec.mode, compute_api::spec::ComputeMode::Primary) {
             info!("syncing safekeepers on shutdown");
             let storage_auth_token = pspec.storage_auth_token.clone();
             let lsn = self.sync_safekeepers(storage_auth_token)?;
-            info!("synced safekeepers at lsn {lsn}");
-        }
+            info!(%lsn, "synced safekeepers");
+            Some(lsn)
+        } else {
+            info!("not primary, not syncing safekeepers");
+            None
+        };
 
         let mut delay_exit = false;
         let mut state = self.state.lock().unwrap();
-        if state.status == ComputeStatus::TerminationPending {
+        state.terminate_flush_lsn = lsn;
+        if let ComputeStatus::TerminationPending { mode } = state.status {
             state.status = ComputeStatus::Terminated;
             self.state_changed.notify_all();
             // we were asked to terminate gracefully, don't exit to avoid restart
-            delay_exit = true
+            delay_exit = mode == compute_api::responses::TerminateMode::Fast
         }
         drop(state);
 
@@ -1745,7 +1765,7 @@ impl ComputeNode {
 
                             // exit loop
                             ComputeStatus::Failed
-                            | ComputeStatus::TerminationPending
+                            | ComputeStatus::TerminationPending { .. }
                             | ComputeStatus::Terminated => break 'cert_update,
 
                             // wait
