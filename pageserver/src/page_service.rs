@@ -3572,9 +3572,6 @@ impl proto::PageService for GrpcPageServiceHandler {
         }
 
         // Spawn a task to run the basebackup.
-        //
-        // TODO: do we need to support full base backups, for debugging? This also requires passing
-        // the prev_lsn parameter.
         let span = Span::current();
         let (mut simplex_read, mut simplex_write) = tokio::io::simplex(CHUNK_SIZE);
         let jh = tokio::spawn(async move {
@@ -3583,7 +3580,7 @@ impl proto::PageService for GrpcPageServiceHandler {
                 &timeline,
                 req.lsn,
                 None,
-                false,
+                req.full,
                 req.replica,
                 &ctx,
             )
