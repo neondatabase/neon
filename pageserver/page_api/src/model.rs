@@ -433,7 +433,7 @@ impl GetPageResponse {
     ) -> Result<Self, tonic::Status> {
         // We shouldn't see an OK status here, because we're emitting an error.
         debug_assert_ne!(status.code(), tonic::Code::Ok);
-        if status.code() != tonic::Code::Ok {
+        if status.code() == tonic::Code::Ok {
             return Err(tonic::Status::internal(format!(
                 "unexpected OK status: {status:?}",
             )));
