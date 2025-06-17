@@ -3,6 +3,7 @@
 import argparse
 import json
 import time
+from typing import Any, TypedDict, cast
 
 import requests
 
@@ -13,7 +14,18 @@ DEFAULT_REVISION = "unknown"
 DEFAULT_PLATFORM = "unknown"
 DEFAULT_SUIT = "proxy_bench"
 
-METRICS = [
+
+class MetricConfig(TypedDict, total=False):
+    name: str
+    promql: str
+    unit: str
+    report: str
+    labels: dict[str, str]
+    is_vector: bool
+    label_field: str
+
+
+METRICS: list[MetricConfig] = [
     {
         "name": "latency_p99",
         "promql": 'histogram_quantile(0.99, sum(rate(proxy_compute_connection_latency_seconds_bucket{outcome="success", excluded="client_and_cplane"}[5m])) by (le))',
@@ -54,25 +66,43 @@ METRICS = [
 ]
 
 
-def query_prometheus(promql):
+class PrometheusMetric(TypedDict):
+    metric: dict[str, str]
+    value: list[str | float]
+
+
+class PrometheusResult(TypedDict):
+    result: list[PrometheusMetric]
+
+
+class PrometheusResponse(TypedDict):
+    data: PrometheusResult
+
+
+def query_prometheus(promql: str) -> PrometheusResponse:
     resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": promql})
     resp.raise_for_status()
-    return resp.json()
+    return cast("PrometheusResponse", resp.json())
 
 
-def extract_scalar_metric(result_json):
+def extract_scalar_metric(result_json: PrometheusResponse) -> float | None:
     try:
         return float(result_json["data"]["result"][0]["value"][1])
     except (IndexError, KeyError, ValueError, TypeError):
         return None
 
 
-def extract_vector_metric(result_json, label_field):
-    out = []
+def extract_vector_metric(
+    result_json: PrometheusResponse, label_field: str
+) -> list[tuple[str | None, float, dict[str, str]]]:
+    out: list[tuple[str | None, float, dict[str, str]]] = []
     for entry in result_json["data"]["result"]:
         try:
-            value = float(entry["value"][1])
-        except Exception:
+            value_str = entry["value"][1]
+            if not isinstance(value_str, (str | float)):
+                continue
+            value = float(value_str)
+        except (IndexError, KeyError, ValueError, TypeError):
             continue
         labels = entry.get("metric", {})
         label_val = labels.get(label_field, None)
@@ -80,7 +110,7 @@ def extract_vector_metric(result_json, label_field):
     return out
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Collect Prometheus metrics and output in benchmark fixture format"
     )
@@ -94,14 +124,14 @@ def main():
     args = parser.parse_args()
 
     start_time = int(time.time())
-    samples = []
+    samples: list[dict[str, Any]] = []
 
     print("Collecting metrics (Ctrl+C to stop)...")
     try:
         while True:
             ts = int(time.time())
             for metric in METRICS:
-                if metric.get("is_vector"):
+                if metric.get("is_vector", False):
                     # Vector (per-label, e.g. per-protocol)
                     for label_val, value, labels in extract_vector_metric(
                         query_prometheus(metric["promql"]), metric["label_field"]
@@ -118,11 +148,11 @@ def main():
                         }
                         samples.append(entry)
                 else:
-                    value = extract_scalar_metric(query_prometheus(metric["promql"]))
-                    if value is not None:
+                    result = extract_scalar_metric(query_prometheus(metric["promql"]))
+                    if result is not None:
                         entry = {
                             "name": metric["name"],
-                            "value": value,
+                            "value": result,
                             "unit": metric["unit"],
                             "report": metric["report"],
                             "labels": metric.get("labels", {}),
