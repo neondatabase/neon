@@ -149,6 +149,7 @@ RUN case $DEBIAN_VERSION in \
     ninja-build git autoconf automake libtool build-essential bison flex libreadline-dev \
     zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget ca-certificates pkg-config libssl-dev \
     libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd curl unzip g++ \
+    libclang-dev \
     $VERSION_INSTALLS \
     && apt clean && rm -rf /var/lib/apt/lists/* && \
     useradd -ms /bin/bash nonroot -b /home
@@ -1062,10 +1063,6 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) && \
 #
 #########################################################################################
 FROM build-deps AS build-deps-with-cargo
-
-RUN apt update && \
-    apt install --no-install-recommends --no-install-suggests -y curl libclang-dev && \
-    apt clean && rm -rf /var/lib/apt/lists/*
 
 ENV HOME=/home/nonroot
 ENV PATH="/home/nonroot/.cargo/bin:$PATH"
