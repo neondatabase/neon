@@ -124,6 +124,10 @@ struct Cli {
     /// Interval in seconds for collecting installed extensions statistics
     #[arg(long, default_value = "3600")]
     pub installed_extensions_collection_interval: u64,
+
+    /// Run in development mode, skipping VM-specific operations like process termination
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub dev: bool,
 }
 
 impl Cli {
@@ -159,7 +163,7 @@ fn main() -> Result<()> {
         .build()?;
     let _rt_guard = runtime.enter();
 
-    runtime.block_on(init())?;
+    runtime.block_on(init(cli.dev))?;
 
     // enable core dumping for all child processes
     setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
@@ -198,13 +202,13 @@ fn main() -> Result<()> {
     deinit_and_exit(exit_code);
 }
 
-async fn init() -> Result<()> {
+async fn init(dev_mode: bool) -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL).await?;
 
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGQUIT])?;
     thread::spawn(move || {
         for sig in signals.forever() {
-            handle_exit_signal(sig);
+            handle_exit_signal(sig, dev_mode);
         }
     });
 
@@ -263,9 +267,9 @@ fn deinit_and_exit(exit_code: Option<i32>) -> ! {
 /// When compute_ctl is killed, send also termination signal to sync-safekeepers
 /// to prevent leakage. TODO: it is better to convert compute_ctl to async and
 /// wait for termination which would be easy then.
-fn handle_exit_signal(sig: i32) {
+fn handle_exit_signal(sig: i32, dev_mode: bool) {
     info!("received {sig} termination signal");
-    forward_termination_signal();
+    forward_termination_signal(dev_mode);
     exit(1);
 }
 

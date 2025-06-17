@@ -691,6 +691,7 @@ impl Endpoint {
         shard_stripe_size: usize,
         create_test_user: bool,
         start_timeout: Duration,
+        dev: bool,
     ) -> Result<()> {
         if self.status() == EndpointStatus::Running {
             anyhow::bail!("The endpoint is already running");
@@ -859,6 +860,10 @@ impl Endpoint {
 
         if let Some(remote_ext_base_url) = remote_ext_base_url {
             cmd.args(["--remote-ext-base-url", remote_ext_base_url]);
+        }
+
+        if dev {
+            cmd.arg("--dev");
         }
 
         let child = cmd.spawn()?;

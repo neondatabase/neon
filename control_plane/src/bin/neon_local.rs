@@ -672,6 +672,13 @@ struct EndpointStartCmdArgs {
     #[clap(short = 't', long, value_parser= humantime::parse_duration, help = "timeout until we fail the command")]
     #[arg(default_value = "90s")]
     start_timeout: Duration,
+
+    #[clap(
+        long,
+        help = "Run in development mode, skipping VM-specific operations like process termination",
+        action = clap::ArgAction::SetTrue
+    )]
+    dev: bool,
 }
 
 #[derive(clap::Args)]
@@ -1590,6 +1597,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                     stripe_size.0 as usize,
                     args.create_test_user,
                     args.start_timeout,
+                    args.dev,
                 )
                 .await?;
         }
