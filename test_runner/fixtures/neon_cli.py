@@ -564,7 +564,7 @@ class NeonLocalCli(AbstractNeonCli):
         basebackup_request_tries: int | None = None,
         timeout: str | None = None,
         env: dict[str, str] | None = None,
-        dev: bool = True,
+        dev: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         args = [
             "endpoint",
