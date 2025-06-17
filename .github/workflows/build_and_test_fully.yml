@@ -1,4 +1,4 @@
-name: Build and Test with Sanitizers
+name: Build and Test Fully
 
 on:
   schedule:
@@ -8,7 +8,7 @@ on:
     #          │ │ ┌───────────── day of the month (1 - 31)
     #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
     #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
-    - cron:   '0 1 * * *' # run once a day, timezone is utc
+    - cron:   '0 3 * * *' # run once a day, timezone is utc
   workflow_dispatch:
 
 defaults:
@@ -72,7 +72,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [ x64, arm64 ]
-        build-type: [ release ]
+        build-type: [ debug, release ]
     uses: ./.github/workflows/_build-and-test-locally.yml
     with:
       arch: ${{ matrix.arch }}
@@ -80,8 +80,14 @@ jobs:
       build-tag: ${{ needs.tag.outputs.build-tag }}
       build-type: ${{ matrix.build-type }}
       rerun-failed: false
-      test-cfg: '[{"pg_version":"v17"}]'
-      sanitizers: enabled
+      test-cfg: '[{"pg_version":"v14", "lfc_state": "with-lfc"},
+                  {"pg_version":"v15", "lfc_state": "with-lfc"},
+                  {"pg_version":"v16", "lfc_state": "with-lfc"},
+                  {"pg_version":"v17", "lfc_state": "with-lfc"},
+                  {"pg_version":"v14", "lfc_state": "without-lfc"},
+                  {"pg_version":"v15", "lfc_state": "without-lfc"},
+                  {"pg_version":"v16", "lfc_state": "without-lfc"},
+                  {"pg_version":"v17", "lfc_state": "withouts-lfc"}]'
     secrets: inherit
 
 

@@ -2070,10 +2070,10 @@ pub fn make_router(
 
     router
         .data(Arc::new(HttpState::new(service, auth, build_info)))
+        // Non-prefixed generic endpoints (status, metrics, profiling)
         .get("/metrics", |r| {
             named_request_span(r, measured_metrics_handler, RequestName("metrics"))
         })
-        // Non-prefixed generic endpoints (status, metrics, profiling)
         .get("/status", |r| {
             named_request_span(r, handle_status, RequestName("status"))
         })

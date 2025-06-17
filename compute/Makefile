@@ -48,3 +48,11 @@ jsonnetfmt-test:
 .PHONY: jsonnetfmt-format
 jsonnetfmt-format:
 	jsonnetfmt --in-place $(jsonnet_files)
+
+.PHONY: manifest-schema-validation
+manifest-schema-validation: node_modules
+	node_modules/.bin/jsonschema validate -d https://json-schema.org/draft/2020-12/schema manifest.schema.json manifest.yaml
+
+node_modules: package.json
+	npm install
+	touch node_modules

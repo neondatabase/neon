@@ -3124,12 +3124,12 @@ impl Timeline {
                 .await?;
             let jobs_len = jobs.len();
             for (idx, job) in jobs.into_iter().enumerate() {
-                info!(
-                    "running enhanced gc bottom-most compaction, sub-compaction {}/{}",
-                    idx + 1,
-                    jobs_len
-                );
+                let sub_compaction_progress = format!("{}/{}", idx + 1, jobs_len);
                 self.compact_with_gc_inner(cancel, job, ctx, yield_for_l0)
+                    .instrument(info_span!(
+                        "sub_compaction",
+                        sub_compaction_progress = sub_compaction_progress
+                    ))
                     .await?;
             }
             if jobs_len == 0 {
