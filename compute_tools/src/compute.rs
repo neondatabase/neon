@@ -25,7 +25,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use std::{env, fs};
@@ -100,7 +100,7 @@ pub struct ComputeNodeParams {
     pub remote_ext_base_url: Option<Url>,
 
     /// Interval for installed extensions collection
-    pub installed_extensions_collection_interval: u64,
+    pub installed_extensions_collection_interval: Arc<AtomicU64>,
 }
 
 /// Compute node info shared across several `compute_ctl` threads.
@@ -123,6 +123,9 @@ pub struct ComputeNode {
     // key: ext_archive_name, value: started download time, download_completed?
     pub ext_download_progress: RwLock<HashMap<String, (DateTime<Utc>, bool)>>,
     pub compute_ctl_config: ComputeCtlConfig,
+
+    /// Handle to the extension stats collection task
+    extension_stats_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 // store some metrics about download size that might impact startup time
@@ -376,6 +379,7 @@ impl ComputeNode {
             state_changed: Condvar::new(),
             ext_download_progress: RwLock::new(HashMap::new()),
             compute_ctl_config: config.compute_ctl_config,
+            extension_stats_task: Mutex::new(None),
         })
     }
 
@@ -462,6 +466,11 @@ impl ComputeNode {
         } else {
             None
         };
+
+        // Terminate the extension stats collection task
+        if let Some(handle) = this.extension_stats_task.lock().unwrap().take() {
+            handle.abort();
+        }
 
         // Terminate the vm_monitor so it releases the file watcher on
         // /sys/fs/cgroup/neon-postgres.
@@ -1607,6 +1616,12 @@ impl ComputeNode {
 
         let tls_config = self.tls_config(&spec);
 
+        // Update the interval for collecting installed extensions statistics
+        self.params.installed_extensions_collection_interval.store(
+            spec.suspend_timeout_seconds,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+
         if let Some(ref pgbouncer_settings) = spec.pgbouncer_settings {
             info!("tuning pgbouncer");
 
@@ -2211,10 +2226,17 @@ LIMIT 100",
     }
 
     pub fn spawn_extension_stats_task(&self) {
+        // Cancel any existing task
+        if let Some(handle) = self.extension_stats_task.lock().unwrap().take() {
+            handle.abort();
+        }
+
         let conf = self.tokio_conn_conf.clone();
-        let installed_extensions_collection_interval =
-            self.params.installed_extensions_collection_interval;
-        tokio::spawn(async move {
+        let atomic_interval = self.params.installed_extensions_collection_interval.clone();
+        let mut installed_extensions_collection_interval =
+            2 * atomic_interval.load(std::sync::atomic::Ordering::SeqCst);
+
+        let handle = tokio::spawn(async move {
             // An initial sleep is added to ensure that two collections don't happen at the same time.
             // The first collection happens during compute startup.
             tokio::time::sleep(tokio::time::Duration::from_secs(
@@ -2227,8 +2249,17 @@ LIMIT 100",
             loop {
                 interval.tick().await;
                 let _ = installed_extensions(conf.clone()).await;
+                // Acquire a read lock on the compute spec and then update the interval if necessary
+                interval = tokio::time::interval(tokio::time::Duration::from_secs(std::cmp::max(
+                    installed_extensions_collection_interval,
+                    2 * atomic_interval.load(std::sync::atomic::Ordering::SeqCst),
+                )));
+                installed_extensions_collection_interval = interval.period().as_secs();
             }
         });
+
+        // Store the new task handle
+        *self.extension_stats_task.lock().unwrap() = Some(handle);
     }
 }
 
