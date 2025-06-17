@@ -468,9 +468,7 @@ impl ComputeNode {
         };
 
         // Terminate the extension stats collection task
-        if let Some(handle) = this.extension_stats_task.lock().unwrap().take() {
-            handle.abort();
-        }
+        this.terminate_extension_stats_task();
 
         // Terminate the vm_monitor so it releases the file watcher on
         // /sys/fs/cgroup/neon-postgres.
@@ -2260,6 +2258,12 @@ LIMIT 100",
 
         // Store the new task handle
         *self.extension_stats_task.lock().unwrap() = Some(handle);
+    }
+
+    fn terminate_extension_stats_task(&self) {
+        if let Some(handle) = self.extension_stats_task.lock().unwrap().take() {
+            handle.abort();
+        }
     }
 }
 
