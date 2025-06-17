@@ -417,6 +417,39 @@ impl From<GetPageResponse> for proto::GetPageResponse {
     }
 }
 
+impl GetPageResponse {
+    /// Attempts to represent a tonic::Status as a GetPageResponse if appropriate. Returning a
+    /// tonic::Status will terminate the GetPage stream, so per-request errors are emitted as a
+    /// GetPageResponse with a non-OK status code instead.
+    #[allow(clippy::result_large_err)]
+    pub fn try_from_status(
+        status: tonic::Status,
+        request_id: RequestID,
+    ) -> Result<Self, tonic::Status> {
+        // We shouldn't see an OK status here, because we're emitting an error.
+        debug_assert_ne!(status.code(), tonic::Code::Ok);
+        if status.code() == tonic::Code::Ok {
+            return Err(tonic::Status::internal(format!(
+                "unexpected OK status: {status:?}",
+            )));
+        }
+
+        // If we can't convert the tonic::Code to a GetPageStatusCode, this is not a per-request
+        // error and we should return a tonic::Status to terminate the stream.
+        let Ok(status_code) = status.code().try_into() else {
+            return Err(status);
+        };
+
+        // Return a GetPageResponse for the status.
+        Ok(Self {
+            request_id,
+            status_code,
+            reason: Some(status.message().to_string()),
+            page_images: Vec::new(),
+        })
+    }
+}
+
 /// A GetPage response status code.
 ///
 /// These are effectively equivalent to gRPC statuses. However, we use a bidirectional stream
@@ -477,6 +510,39 @@ impl From<GetPageStatusCode> for proto::GetPageStatusCode {
 impl From<GetPageStatusCode> for i32 {
     fn from(status_code: GetPageStatusCode) -> Self {
         proto::GetPageStatusCode::from(status_code).into()
+    }
+}
+
+impl TryFrom<tonic::Code> for GetPageStatusCode {
+    type Error = tonic::Code;
+
+    fn try_from(code: tonic::Code) -> Result<Self, Self::Error> {
+        use tonic::Code;
+
+        let status_code = match code {
+            Code::Ok => Self::Ok,
+
+            // These are per-request errors, which should be returned as GetPageResponses.
+            Code::AlreadyExists => Self::InvalidRequest,
+            Code::DataLoss => Self::InternalError,
+            Code::FailedPrecondition => Self::InvalidRequest,
+            Code::InvalidArgument => Self::InvalidRequest,
+            Code::Internal => Self::InternalError,
+            Code::NotFound => Self::NotFound,
+            Code::OutOfRange => Self::InvalidRequest,
+            Code::ResourceExhausted => Self::SlowDown,
+
+            // These should terminate the stream by returning a tonic::Status.
+            Code::Aborted
+            | Code::Cancelled
+            | Code::DeadlineExceeded
+            | Code::PermissionDenied
+            | Code::Unauthenticated
+            | Code::Unavailable
+            | Code::Unimplemented
+            | Code::Unknown => return Err(code),
+        };
+        Ok(status_code)
     }
 }
 
