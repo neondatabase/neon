@@ -82,7 +82,7 @@ pub struct VacantEntry<'a, 'b, K, V> {
 
 impl<'a, 'b, K: Clone + Hash + Eq, V> VacantEntry<'a, 'b, K, V> {
     pub fn insert(self, value: V) -> Result<&'b mut V, FullError> {
-        let pos = self.map.alloc_bucket(self.key, value)?;
+        let pos = self.map.alloc_bucket(self.key, value, self.dict_pos)?;
         if pos == INVALID_POS {
             return Err(FullError());
         }

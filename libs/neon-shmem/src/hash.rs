@@ -131,7 +131,7 @@ where
         }
 
         HashMapInit {
-            shmem_handle: shmem_handle,
+            shmem_handle,
             shared_ptr,
         }
     }
@@ -211,7 +211,7 @@ where
     }
 
 	/// Helper function that abstracts the common logic between growing and shrinking.
-	/// The only significant difference in the rehashing step is how many buckets to rehash!
+	/// The only significant difference in the rehashing step is how many buckets to rehash.
 	fn rehash_dict(
 		&mut self,
 		inner: &mut CoreHashMap<'a, K, V>,
@@ -310,7 +310,8 @@ where
         Ok(())
     }
 
-	fn begin_shrink(&mut self, num_buckets: u32) {
+	/// Begin a shrink, limiting all new allocations to be in buckets with index less than `num_buckets`. 
+	pub fn begin_shrink(&mut self, num_buckets: u32) {
 		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
 		if num_buckets > map.inner.get_num_buckets() as u32 {
             panic!("shrink called with a larger number of buckets");
@@ -322,7 +323,8 @@ where
 		map.inner.alloc_limit = num_buckets;
 	}
 
-	fn finish_shrink(&mut self) -> Result<(), crate::shmem::Error> {
+	/// Complete a shrink after caller has evicted entries, removing the unused buckets and rehashing.
+	pub fn finish_shrink(&mut self) -> Result<(), crate::shmem::Error> {
 		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
 		let inner = &mut map.inner;
 		if !inner.is_shrinking() {

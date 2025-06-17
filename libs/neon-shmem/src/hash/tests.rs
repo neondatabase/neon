@@ -62,8 +62,6 @@ fn test_inserts<K: Into<TestKey> + Copy>(keys: &[K]) {
         let value = x.as_deref().copied();
         assert_eq!(value, Some(idx));
     }
-
-    //eprintln!("stats: {:?}", tree_writer.get_statistics());
 }
 
 #[test]
@@ -188,6 +186,23 @@ fn do_deletes(
 	}
 }
 
+fn do_shrink(
+	writer: &mut HashMapAccess<TestKey, usize>,
+	shadow: &mut BTreeMap<TestKey, usize>,
+	from: u32,
+	to: u32
+) {
+	writer.begin_shrink(to);
+	for i in to..from {
+		if let Some(entry) = writer.entry_at_bucket(i as usize) {
+			shadow.remove(&entry._key);
+			entry.remove();
+		}
+	}
+	writer.finish_shrink().unwrap();
+
+}
+
 #[test]
 fn random_ops() {
     let shmem = ShmemHandle::new("test_inserts", 0, 10000000).unwrap();
@@ -208,8 +223,6 @@ fn random_ops() {
 
         if i % 1000 == 0 {
             eprintln!("{i} ops processed");
-            //eprintln!("stats: {:?}", tree_writer.get_statistics());
-            //test_iter(&tree_writer, &shadow);
         }
     }
 }
@@ -225,23 +238,6 @@ fn test_grow() {
     do_random_ops(10000, 1000, 0.75, &mut writer, &mut shadow, &mut rng);
     writer.grow(1500).unwrap();
 	do_random_ops(10000, 1500, 0.75, &mut writer, &mut shadow, &mut rng);
-}
-
-fn do_shrink(
-	writer: &mut HashMapAccess<TestKey, usize>,
-	shadow: &mut BTreeMap<TestKey, usize>,
-	from: u32,
-	to: u32
-) {
-	writer.begin_shrink(to);
-	for i in to..from {
-		if let Some(entry) = writer.entry_at_bucket(i as usize) {
-			shadow.remove(&entry._key);
-			entry.remove();
-		}
-	}
-	writer.finish_shrink().unwrap();
-
 }
 
 #[test]
@@ -261,7 +257,7 @@ fn test_shrink() {
 
 #[test]
 fn test_shrink_grow_seq() {
-    let shmem = ShmemHandle::new("test_shrink", 0, 10000000).unwrap();
+    let shmem = ShmemHandle::new("test_shrink_grow_seq", 0, 10000000).unwrap();
     let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(1500, shmem);
     let mut writer = init_struct.attach_writer();
     let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();
@@ -283,11 +279,73 @@ fn test_shrink_grow_seq() {
 	do_random_ops(10000, 5000, 0.25, &mut writer, &mut shadow, &mut rng);
 }
 
+#[test]
+fn test_bucket_ops() {
+	let shmem = ShmemHandle::new("test_bucket_ops", 0, 10000000).unwrap();
+    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(1000, shmem);
+	let mut writer = init_struct.attach_writer();
+	let hash = writer.get_hash_value(&1.into());
+	match writer.entry_with_hash(1.into(), hash) {
+		Entry::Occupied(mut e) => { e.insert(2); },
+		Entry::Vacant(e) => { e.insert(2).unwrap(); },
+	}
+	assert_eq!(writer.get_num_buckets_in_use(), 1);
+	assert_eq!(writer.get_num_buckets(), 1000);
+	assert_eq!(writer.get_with_hash(&1.into(), hash), Some(&2));
+	match writer.entry_with_hash(1.into(), hash) {
+		Entry::Occupied(e) => {
+			assert_eq!(e._key, 1.into());
+			let pos = e.bucket_pos as usize;
+			assert_eq!(writer.entry_at_bucket(pos).unwrap()._key, 1.into());
+			assert_eq!(writer.get_at_bucket(pos), Some(&(1.into(), 2)));
+		},
+		Entry::Vacant(_) => { panic!("Insert didn't affect entry"); },
+	}
+	writer.remove_with_hash(&1.into(), hash);
+	assert_eq!(writer.get_with_hash(&1.into(), hash), None);
+}
+
+#[test]
+fn test_shrink_zero() {
+	let shmem = ShmemHandle::new("test_shrink_zero", 0, 10000000).unwrap();
+    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(1500, shmem);
+	let mut writer = init_struct.attach_writer();
+	writer.begin_shrink(0);
+	for i in 0..1500 {
+		writer.entry_at_bucket(i).map(|x| x.remove());
+	}
+	writer.finish_shrink().unwrap();
+	assert_eq!(writer.get_num_buckets_in_use(), 0);
+	let hash = writer.get_hash_value(&1.into());
+	let entry = writer.entry_with_hash(1.into(), hash);
+	if let Entry::Vacant(v) = entry {
+		assert!(v.insert(2).is_err());
+	} else {
+		panic!("Somehow got non-vacant entry in empty map.")
+	}
+	writer.grow(50).unwrap();
+	let entry = writer.entry_with_hash(1.into(), hash);
+	if let Entry::Vacant(v) = entry {
+		assert!(v.insert(2).is_ok());
+	} else {
+		panic!("Somehow got non-vacant entry in empty map.")
+	}
+	assert_eq!(writer.get_num_buckets_in_use(), 1);
+}
+
+#[test]
+#[should_panic]
+fn test_grow_oom() {
+    let shmem = ShmemHandle::new("test_grow_oom", 0, 500).unwrap();
+    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(5, shmem);
+    let mut writer = init_struct.attach_writer();
+	writer.grow(20000).unwrap();
+}
 
 #[test]
 #[should_panic]
 fn test_shrink_bigger() {
-    let shmem = ShmemHandle::new("test_shrink", 0, 10000000).unwrap();
+    let shmem = ShmemHandle::new("test_shrink_bigger", 0, 10000000).unwrap();
     let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(1500, shmem);
     let mut writer = init_struct.attach_writer();
 	writer.begin_shrink(2000);
@@ -296,7 +354,7 @@ fn test_shrink_bigger() {
 #[test]
 #[should_panic]
 fn test_shrink_early_finish() {
-    let shmem = ShmemHandle::new("test_shrink", 0, 10000000).unwrap();
+    let shmem = ShmemHandle::new("test_shrink_early_finish", 0, 10000000).unwrap();
     let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(1500, shmem);
     let mut writer = init_struct.attach_writer();
 	writer.finish_shrink().unwrap();
@@ -310,3 +368,4 @@ fn test_shrink_fixed_size() {
     let mut writer = init_struct.attach_writer();
 	writer.begin_shrink(1);
 }
+

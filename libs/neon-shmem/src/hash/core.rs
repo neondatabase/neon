@@ -159,7 +159,7 @@ where
 	pub fn is_shrinking(&self) -> bool {
 		self.alloc_limit != INVALID_POS
 	}
-	
+
     pub fn entry_at_bucket(&mut self, pos: usize) -> Option<OccupiedEntry<'a, '_, K, V>> {
 		if pos >= self.buckets.len() {
 			return None;
@@ -167,22 +167,22 @@ where
 
 		let prev = self.buckets[pos].prev;
 		let entry = self.buckets[pos].inner.as_ref();
-		if entry.is_none() {
-			return None;
+		match entry {
+			Some((key, _)) => Some(OccupiedEntry {
+				_key: key.clone(),
+				bucket_pos: pos as u32,
+				prev_pos: prev,
+				map: self,
+			}),
+			_ => None,
 		}		
-
-		let (key, _) = entry.unwrap();
-		Some(OccupiedEntry {
-			_key: key.clone(), // TODO(quantumish): clone unavoidable?
-			bucket_pos: pos as u32,
-			map: self,
-			prev_pos: prev,
-		})
     }
-	
-    pub(crate) fn alloc_bucket(&mut self, key: K, value: V) -> Result<u32, FullError> {
+
+	/// Find the position of an unused bucket via the freelist and initialize it. 
+    pub(crate) fn alloc_bucket(&mut self, key: K, value: V, dict_pos: u32) -> Result<u32, FullError> {
         let mut pos = self.free_head;
 
+		// Find the first bucket we're *allowed* to use.
 		let mut prev = PrevPos::First(self.free_head);
 		while pos != INVALID_POS && pos >= self.alloc_limit {
 			let bucket = &mut self.buckets[pos as usize];
@@ -192,15 +192,14 @@ where
 		if pos == INVALID_POS {
 			return Err(FullError());
 		}
+
+		// Repair the freelist.
 		match prev {
 			PrevPos::First(_) => {
 				let next_pos = self.buckets[pos as usize].next;
 				self.free_head = next_pos;				
-				// HACK(quantumish): Really, the INVALID_POS should be the position within the dictionary.
-				// This isn't passed into this function, though, and so for now rather than changing that
-				// we can just check it from `alloc_bucket`. Not a great solution.
 				if next_pos != INVALID_POS {
-					self.buckets[next_pos as usize].prev = PrevPos::First(INVALID_POS);
+					self.buckets[next_pos as usize].prev = PrevPos::First(dict_pos);
 				}
 			}
 			PrevPos::Chained(p) => if p != INVALID_POS {
@@ -211,7 +210,8 @@ where
 				}
 			},
 		}
-		
+
+		// Initialize the bucket.
 		let bucket = &mut self.buckets[pos as usize];
 		self.buckets_in_use += 1;
         bucket.next = INVALID_POS;
