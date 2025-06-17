@@ -2260,41 +2260,41 @@ pub fn forward_termination_signal(dev_mode: bool) {
         kill(ss_pid, Signal::SIGTERM).ok();
     }
 
-    if !dev_mode {
-        info!("not in dev mode, terminating pgbouncer");
+    // if !dev_mode {
+    //     info!("not in dev mode, terminating pgbouncer");
 
-        // Terminate pgbouncer with SIGKILL
-        match pid_file::read(PGBOUNCER_PIDFILE.into()) {
-            Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
-                info!("sending SIGKILL to pgbouncer process pid: {}", pid);
-                if let Err(e) = kill(pid, Signal::SIGKILL) {
-                    error!("failed to terminate pgbouncer: {}", e);
-                }
-            }
-            // pgbouncer does not lock the pid file, so we read and kill the process directly
-            Ok(pid_file::PidFileRead::NotHeldByAnyProcess(_)) => {
-                if let Ok(pid_str) = std::fs::read_to_string(PGBOUNCER_PIDFILE) {
-                    if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                        info!(
-                            "sending SIGKILL to pgbouncer process pid: {} (from unlocked pid file)",
-                            pid
-                        );
-                        if let Err(e) = kill(Pid::from_raw(pid), Signal::SIGKILL) {
-                            error!("failed to terminate pgbouncer: {}", e);
-                        }
-                    }
-                } else {
-                    info!("pgbouncer pid file exists but process not running");
-                }
-            }
-            Ok(pid_file::PidFileRead::NotExist) => {
-                info!("pgbouncer pid file not found, process may not be running");
-            }
-            Err(e) => {
-                error!("error reading pgbouncer pid file: {}", e);
+    // Terminate pgbouncer with SIGKILL
+    match pid_file::read(PGBOUNCER_PIDFILE.into()) {
+        Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
+            info!("sending SIGKILL to pgbouncer process pid: {}", pid);
+            if let Err(e) = kill(pid, Signal::SIGKILL) {
+                error!("failed to terminate pgbouncer: {}", e);
             }
         }
+        // pgbouncer does not lock the pid file, so we read and kill the process directly
+        Ok(pid_file::PidFileRead::NotHeldByAnyProcess(_)) => {
+            if let Ok(pid_str) = std::fs::read_to_string(PGBOUNCER_PIDFILE) {
+                if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                    info!(
+                        "sending SIGKILL to pgbouncer process pid: {} (from unlocked pid file)",
+                        pid
+                    );
+                    if let Err(e) = kill(Pid::from_raw(pid), Signal::SIGKILL) {
+                        error!("failed to terminate pgbouncer: {}", e);
+                    }
+                }
+            } else {
+                info!("pgbouncer pid file exists but process not running");
+            }
+        }
+        Ok(pid_file::PidFileRead::NotExist) => {
+            info!("pgbouncer pid file not found, process may not be running");
+        }
+        Err(e) => {
+            error!("error reading pgbouncer pid file: {}", e);
+        }
     }
+    // }
 
     // Terminate local_proxy
     match pid_file::read("/etc/local_proxy/pid".into()) {
