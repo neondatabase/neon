@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use camino::Utf8PathBuf;
+use pageserver_api::config::{DEFAULT_GRPC_LISTEN_PORT, DEFAULT_HTTP_LISTEN_PORT};
 use pageserver_api::models::{self, TenantInfo, TimelineInfo};
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
@@ -252,9 +253,10 @@ impl PageServerNode {
         // the storage controller
         let metadata_path = datadir.join("metadata.json");
 
-        let (_http_host, http_port) =
+        let http_host = "localhost".to_string();
+        let (_, http_port) =
             parse_host_port(&self.conf.listen_http_addr).expect("Unable to parse listen_http_addr");
-        let http_port = http_port.unwrap_or(9898);
+        let http_port = http_port.unwrap_or(DEFAULT_HTTP_LISTEN_PORT);
 
         let https_port = match self.conf.listen_https_addr.as_ref() {
             Some(https_addr) => {
@@ -265,6 +267,13 @@ impl PageServerNode {
             None => None,
         };
 
+        let (mut grpc_host, mut grpc_port) = (None, None);
+        if let Some(grpc_addr) = &self.conf.listen_grpc_addr {
+            let (_, port) = parse_host_port(grpc_addr).expect("Unable to parse listen_grpc_addr");
+            grpc_host = Some("localhost".to_string());
+            grpc_port = Some(port.unwrap_or(DEFAULT_GRPC_LISTEN_PORT));
+        }
+
         // Intentionally hand-craft JSON: this acts as an implicit format compat test
         // in case the pageserver-side structure is edited, and reflects the real life
         // situation: the metadata is written by some other script.
@@ -273,7 +282,9 @@ impl PageServerNode {
             serde_json::to_vec(&pageserver_api::config::NodeMetadata {
                 postgres_host: "localhost".to_string(),
                 postgres_port: self.pg_connection_config.port(),
-                http_host: "localhost".to_string(),
+                grpc_host,
+                grpc_port,
+                http_host,
                 http_port,
                 https_port,
                 other: HashMap::from([(

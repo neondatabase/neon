@@ -12,6 +12,7 @@ pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LI
 pub const DEFAULT_GRPC_LISTEN_PORT: u16 = 51051; // storage-broker already uses 50051
 
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::str::FromStr;
 use std::time::Duration;
@@ -24,16 +25,17 @@ use utils::logging::LogFormat;
 use crate::models::{ImageCompressionAlgorithm, LsnLease};
 
 // Certain metadata (e.g. externally-addressable name, AZ) is delivered
-// as a separate structure.  This information is not neeed by the pageserver
+// as a separate structure.  This information is not needed by the pageserver
 // itself, it is only used for registering the pageserver with the control
 // plane and/or storage controller.
-//
 #[derive(PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NodeMetadata {
     #[serde(rename = "host")]
     pub postgres_host: String,
     #[serde(rename = "port")]
     pub postgres_port: u16,
+    pub grpc_host: Option<String>,
+    pub grpc_port: Option<u16>,
     pub http_host: String,
     pub http_port: u16,
     pub https_port: Option<u16>,
@@ -42,6 +44,23 @@ pub struct NodeMetadata {
     // use in this type: this type intentionally only names fields that require.
     #[serde(flatten)]
     pub other: HashMap<String, serde_json::Value>,
+}
+
+impl Display for NodeMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "postgresql://{}:{} ",
+            self.postgres_host, self.postgres_port
+        )?;
+        if let Some(grpc_host) = &self.grpc_host {
+            let grpc_port = self.grpc_port.unwrap_or_default();
+            write!(f, "grpc://{grpc_host}:{grpc_port} ")?;
+        }
+        write!(f, "http://{}:{} ", self.http_host, self.http_port)?;
+        write!(f, "other:{:?}", self.other)?;
+        Ok(())
+    }
 }
 
 /// PostHog integration config.
