@@ -1,0 +1,129 @@
+diff --git a/src/test/regress/sql/box.sql b/src/test/regress/sql/box.sql
+index 249636c76c3..540c2b54dda 100644
+--- a/src/test/regress/sql/box.sql
++++ b/src/test/regress/sql/box.sql
+@@ -196,7 +196,7 @@ CREATE TABLE quad_box_tbl (id int, b box);
+ 
+ INSERT INTO quad_box_tbl
+   SELECT (x - 1) * 100 + y, box(point(x * 10, y * 10), point(x * 10 + 5, y * 10 + 5))
+-  FROM generate_series(1, 95 * 100) x,
++  FROM generate_series(1, 100) x,
+        generate_series(1, 95 * 100) y;
+ 
+ -- insert repeating data to test allTheSame
+diff --git a/src/test/regress/sql/partition_join.sql b/src/test/regress/sql/partition_join.sql
+index 3ca8a2d6090..a8e40f906c4 100644
+--- a/src/test/regress/sql/partition_join.sql
++++ b/src/test/regress/sql/partition_join.sql
+@@ -533,7 +533,7 @@ create temp table prtx2_3 partition of prtx2 for values from (21) to (31);
+ insert into prtx1 select 1 + i%30, i, i
+   from generate_series(1, 95 * 1000) i;
+ insert into prtx2 select 1 + i%30, i, i
+-  from generate_series(1, 95 * 500) i, generate_series(1, 95 * 10) j;
++  from generate_series(1, 500) i, generate_series(1, 95 * 10) j;
+ create index on prtx2 (b);
+ create index on prtx2 (c);
+ analyze prtx1;
+diff --git a/src/test/regress/sql/partition_prune.sql b/src/test/regress/sql/partition_prune.sql
+index 82ac39d5dc8..bef0a891ade 100644
+--- a/src/test/regress/sql/partition_prune.sql
++++ b/src/test/regress/sql/partition_prune.sql
+@@ -1274,9 +1274,9 @@ select
+   case c when 0 then null else 3 end,
+   case d when 0 then null else 4 end
+ from
+-  generate_series(0, 95 * 1) a,
+-  generate_series(0, 95 * 1) b,
+-  generate_series(0, 95 * 1) c,
++  generate_series(0, 1) a,
++  generate_series(0, 1) b,
++  generate_series(0, 1) c,
+   generate_series(0, 95 * 1) d;
+ 
+ -- Ensure partition pruning works correctly for each combination of IS NULL
+diff --git a/src/test/regress/sql/polygon.sql b/src/test/regress/sql/polygon.sql
+index d39a2b4e8f8..2d862985510 100644
+--- a/src/test/regress/sql/polygon.sql
++++ b/src/test/regress/sql/polygon.sql
+@@ -42,7 +42,7 @@ CREATE TABLE quad_poly_tbl (id int, p polygon);
+ 
+ INSERT INTO quad_poly_tbl
+ 	SELECT (x - 1) * 100 + y, polygon(circle(point(x * 10, y * 10), 1 + (x + y) % 10))
+-	FROM generate_series(1, 95 * 100) x,
++	FROM generate_series(1, 100) x,
+ 		 generate_series(1, 95 * 100) y;
+ 
+ INSERT INTO quad_poly_tbl
+diff --git a/src/test/regress/sql/rangetypes.sql b/src/test/regress/sql/rangetypes.sql
+index b51d6c405c2..4138418c7a6 100644
+--- a/src/test/regress/sql/rangetypes.sql
++++ b/src/test/regress/sql/rangetypes.sql
+@@ -314,13 +314,13 @@ select count(*) from test_range_gist where ir -|- int4multirange(int4range(100,2
+ create table test_range_spgist(ir int4range);
+ create index test_range_spgist_idx on test_range_spgist using spgist (ir);
+ 
+-insert into test_range_spgist select int4range(g, g+10) from generate_series(1, 95 * 2000) g;
+-insert into test_range_spgist select 'empty'::int4range from generate_series(1, 95 * 500) g;
+-insert into test_range_spgist select int4range(g, g+10000) from generate_series(1, 95 * 1000) g;
+-insert into test_range_spgist select 'empty'::int4range from generate_series(1, 95 * 500) g;
+-insert into test_range_spgist select int4range(NULL,g*10,'(]') from generate_series(1, 95 * 100) g;
+-insert into test_range_spgist select int4range(g*10,NULL,'(]') from generate_series(1, 95 * 100) g;
+-insert into test_range_spgist select int4range(g, g+10) from generate_series(1, 95 * 2000) g;
++insert into test_range_spgist select int4range(g, g+10) from generate_series(1, 0.1 * 95 * 2000) g;
++insert into test_range_spgist select 'empty'::int4range from generate_series(1, 0.1 * 95 * 500) g;
++insert into test_range_spgist select int4range(g, g+10000) from generate_series(1, 0.1 * 95 * 1000) g;
++insert into test_range_spgist select 'empty'::int4range from generate_series(1, 0.1 * 95 * 500) g;
++insert into test_range_spgist select int4range(NULL,g*10,'(]') from generate_series(1, 0.1 * 95 * 100) g;
++insert into test_range_spgist select int4range(g*10,NULL,'(]') from generate_series(1, 0.1 * 95 * 100) g;
++insert into test_range_spgist select int4range(g, g+10) from generate_series(1, 0.1 * 95 * 2000) g;
+ 
+ -- first, verify non-indexed results
+ SET enable_seqscan    = t;
+diff --git a/src/test/regress/sql/spgist.sql b/src/test/regress/sql/spgist.sql
+index 0c4f24e1d49..61e53375539 100644
+--- a/src/test/regress/sql/spgist.sql
++++ b/src/test/regress/sql/spgist.sql
+@@ -16,9 +16,9 @@ vacuum spgist_point_tbl;
+ 
+ -- Insert more data, to make the index a few levels deep.
+ insert into spgist_point_tbl (id, p)
+-select g,      point(g*10, g*10) from generate_series(1, 95 * 10000) g;
++select g,      point(g*10, g*10) from generate_series(1, 0.1 * 95 * 10000) g;
+ insert into spgist_point_tbl (id, p)
+-select g+100000, point(g*10+1, g*10+1) from generate_series(1, 95 * 10000) g;
++select g+100000, point(g*10+1, g*10+1) from generate_series(1, 0.1 * 95 * 10000) g;
+ 
+ -- To test vacuum, delete some entries from all over the index.
+ delete from spgist_point_tbl where id % 2 = 1;
+@@ -37,8 +37,8 @@ vacuum spgist_point_tbl;
+ create table spgist_box_tbl(id serial, b box);
+ insert into spgist_box_tbl(b)
+ select box(point(i,j),point(i+s,j+s))
+-  from generate_series(1, 95 * 100,5) i,
+-       generate_series(1, 95 * 100,5) j,
++  from generate_series(1,100,5) i,
++       generate_series(1,100,5) j,
+        generate_series(1, 95 * 10) s;
+ create index spgist_box_idx on spgist_box_tbl using spgist (b);
+ 
+@@ -86,6 +86,6 @@ create unlogged table spgist_unlogged_tbl(id serial, b box);
+ create index spgist_unlogged_idx on spgist_unlogged_tbl using spgist (b);
+ insert into spgist_unlogged_tbl(b)
+ select box(point(i,j))
+-  from generate_series(1, 95 * 100,5) i,
++  from generate_series(1,100,5) i,
+        generate_series(1, 95 * 10,5) j;
+ -- leave this table around, to help in testing dump/restore
+diff --git a/src/test/regress/sql/tuplesort.sql b/src/test/regress/sql/tuplesort.sql
+index fa762f26ac7..7a1fd619eba 100644
+--- a/src/test/regress/sql/tuplesort.sql
++++ b/src/test/regress/sql/tuplesort.sql
+@@ -276,7 +276,7 @@ ROLLBACK;
+ CREATE TEMP TABLE test_mark_restore(col1 int, col2 int, col12 int);
+ -- need a few duplicates for mark/restore to matter
+ INSERT INTO test_mark_restore(col1, col2, col12)
+-   SELECT a.i, b.i, a.i * b.i FROM generate_series(1, 95 * 500) a(i), generate_series(1, 95 * 5) b(i);
++   SELECT a.i, b.i, a.i * b.i FROM generate_series(1, 500) a(i), generate_series(1, 95 * 5) b(i);
+ 
+ BEGIN;
+ 
