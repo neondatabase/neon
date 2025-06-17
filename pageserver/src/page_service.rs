@@ -727,13 +727,13 @@ enum BatchedFeMessage {
         span: Span,
         timer: SmgrOpTimer,
         shard: WeakHandle<TenantManagerTypes>,
-        req: pagestream_api::PagestreamExistsRequest,
+        req: PagestreamExistsRequest,
     },
     Nblocks {
         span: Span,
         timer: SmgrOpTimer,
         shard: WeakHandle<TenantManagerTypes>,
-        req: pagestream_api::PagestreamNblocksRequest,
+        req: PagestreamNblocksRequest,
     },
     GetPage {
         span: Span,
@@ -745,13 +745,13 @@ enum BatchedFeMessage {
         span: Span,
         timer: SmgrOpTimer,
         shard: WeakHandle<TenantManagerTypes>,
-        req: pagestream_api::PagestreamDbSizeRequest,
+        req: PagestreamDbSizeRequest,
     },
     GetSlruSegment {
         span: Span,
         timer: SmgrOpTimer,
         shard: WeakHandle<TenantManagerTypes>,
-        req: pagestream_api::PagestreamGetSlruSegmentRequest,
+        req: PagestreamGetSlruSegmentRequest,
     },
     #[cfg(feature = "testing")]
     Test {
