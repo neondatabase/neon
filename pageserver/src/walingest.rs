@@ -28,7 +28,6 @@ use std::time::{Duration, Instant, SystemTime};
 
 use bytes::{Buf, Bytes};
 use pageserver_api::key::{Key, rel_block_to_key};
-use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
@@ -42,6 +41,7 @@ use utils::bin_ser::{DeserializeError, SerializeError};
 use utils::lsn::Lsn;
 use utils::rate_limit::RateLimit;
 use utils::{critical, failpoint_support};
+use wal_decoder::models::record::NeonWalRecord;
 use wal_decoder::models::*;
 
 use crate::ZERO_PAGE;

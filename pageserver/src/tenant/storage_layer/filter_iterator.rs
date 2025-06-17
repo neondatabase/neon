@@ -4,8 +4,8 @@ use std::sync::Arc;
 use anyhow::bail;
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::{KeySpace, SparseKeySpace};
-use pageserver_api::value::Value;
 use utils::lsn::Lsn;
+use wal_decoder::models::value::Value;
 
 use super::PersistentLayerKey;
 use super::merge_iterator::{MergeIterator, MergeIteratorItem};
