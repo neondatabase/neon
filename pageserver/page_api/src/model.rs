@@ -182,33 +182,28 @@ impl From<CheckRelExistsResponse> for proto::CheckRelExistsResponse {
     }
 }
 
-/// Requests a base backup at a given LSN.
+/// Requests a base backup.
 #[derive(Clone, Copy, Debug)]
 pub struct GetBaseBackupRequest {
-    /// The LSN to fetch a base backup at.
-    pub read_lsn: ReadLsn,
+    /// The LSN to fetch a base backup at. If None, uses the latest LSN known to the Pageserver.
+    pub lsn: Option<Lsn>,
     /// If true, logical replication slots will not be created.
     pub replica: bool,
 }
 
-impl TryFrom<proto::GetBaseBackupRequest> for GetBaseBackupRequest {
-    type Error = ProtocolError;
-
-    fn try_from(pb: proto::GetBaseBackupRequest) -> Result<Self, Self::Error> {
-        Ok(Self {
-            read_lsn: pb
-                .read_lsn
-                .ok_or(ProtocolError::Missing("read_lsn"))?
-                .try_into()?,
+impl From<proto::GetBaseBackupRequest> for GetBaseBackupRequest {
+    fn from(pb: proto::GetBaseBackupRequest) -> Self {
+        Self {
+            lsn: (pb.lsn != 0).then_some(Lsn(pb.lsn)),
             replica: pb.replica,
-        })
+        }
     }
 }
 
 impl From<GetBaseBackupRequest> for proto::GetBaseBackupRequest {
     fn from(request: GetBaseBackupRequest) -> Self {
         Self {
-            read_lsn: Some(request.read_lsn.into()),
+            lsn: request.lsn.unwrap_or_default().0,
             replica: request.replica,
         }
     }
