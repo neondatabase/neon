@@ -617,7 +617,7 @@ struct EndpointStopCmdArgs {
     /// Also delete data directory (now optional, should be default in future).
     #[clap(long)]
     destroy: bool,
-    /// Postgres shutdown mode, passed to "pg_ctl -m <mode>".
+    /// Postgres shutdown mode, passed to `pg_ctl -m <mode>`.
     #[clap(long, value_parser(["smart", "fast", "immediate"]))]
     #[arg(default_value = "fast")]
     mode: String,
