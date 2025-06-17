@@ -75,7 +75,6 @@ use spki::{SubjectPublicKeyInfo, SubjectPublicKeyInfoRef};
 use tracing::debug;
 use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
-use utils::lsn::Lsn;
 
 use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;
