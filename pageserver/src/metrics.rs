@@ -4428,16 +4428,16 @@ pub(crate) static BASEBACKUP_CACHE_PREPARE: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static BASEBACKUP_CACHE_ENTRIES: Lazy<IntGauge> = Lazy::new(|| {
-    register_int_gauge!(
+pub(crate) static BASEBACKUP_CACHE_ENTRIES: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
         "pageserver_basebackup_cache_entries_total",
         "Number of entries in the basebackup cache"
     )
     .expect("failed to define a metric")
 });
 
-pub(crate) static BASEBACKUP_CACHE_SIZE: Lazy<IntGauge> = Lazy::new(|| {
-    register_int_gauge!(
+pub(crate) static BASEBACKUP_CACHE_SIZE: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
         "pageserver_basebackup_cache_size_bytes",
         "Total size of all basebackup cache entries on disk in bytes"
     )

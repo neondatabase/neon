@@ -340,10 +340,10 @@ pub struct BasebackupCacheConfig {
     /// Maximum total size of basebackup cache entries on disk in bytes.
     /// The cache may slightly exceed this limit because we do not know
     /// the exact size of the cache entry untill it's written to disk.
-    pub max_total_size_bytes: i64,
+    pub max_total_size_bytes: u64,
     // TODO(diko): support max_entry_size_bytes.
-    // pub max_entry_size_bytes: i64,
-    pub max_size_entries: i64,
+    // pub max_entry_size_bytes: u64,
+    pub max_size_entries: usize,
 }
 
 impl Default for BasebackupCacheConfig {

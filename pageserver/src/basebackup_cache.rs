@@ -44,7 +44,7 @@ struct CacheEntry {
     /// LSN at which the basebackup was taken.
     lsn: Lsn,
     /// Size of the basebackup archive in bytes.
-    size_bytes: i64,
+    size_bytes: u64,
 }
 
 /// BasebackupCache stores cached basebackup archives for timelines on local disk.
@@ -184,11 +184,11 @@ struct BackgroundTask {
     /// during removing the entry from disk, we won't decrement this counter to
     /// make sure that we don't exceed the limit with "trashed" files on the disk.
     /// It will also count files in the data_dir that are not valid cache entries.
-    entry_count: i64,
+    entry_count: usize,
     /// Total size of all the entries on the disk.
     /// This counter is used for metrics and applying cache limits.
     /// Similar to entry_count, it is calculated pessimistically for abnormal situations.
-    total_size_bytes: i64,
+    total_size_bytes: u64,
 
     prepare_ok_count: GenericCounter<AtomicU64>,
     prepare_skip_count: GenericCounter<AtomicU64>,
@@ -303,10 +303,10 @@ impl BackgroundTask {
                 .map_err(|e| {
                     anyhow::anyhow!("Failed to read metadata for file {:?}: {:?}", filename, e)
                 })?
-                .len() as i64;
+                .len();
 
             self.entry_count += 1;
-            BASEBACKUP_CACHE_ENTRIES.set(self.entry_count);
+            BASEBACKUP_CACHE_ENTRIES.set(self.entry_count as u64);
 
             self.total_size_bytes += size_bytes;
             BASEBACKUP_CACHE_SIZE.set(self.total_size_bytes);
@@ -420,7 +420,7 @@ impl BackgroundTask {
         }
 
         self.entry_count -= 1;
-        BASEBACKUP_CACHE_ENTRIES.set(self.entry_count);
+        BASEBACKUP_CACHE_ENTRIES.set(self.entry_count as u64);
 
         self.total_size_bytes -= entry.size_bytes;
         BASEBACKUP_CACHE_SIZE.set(self.total_size_bytes);
@@ -438,7 +438,7 @@ impl BackgroundTask {
         let tti = TenantTimelineId::new(tenant_id, timeline_id);
 
         self.entry_count += 1;
-        BASEBACKUP_CACHE_ENTRIES.set(self.entry_count);
+        BASEBACKUP_CACHE_ENTRIES.set(self.entry_count as u64);
 
         self.total_size_bytes += entry.size_bytes;
         BASEBACKUP_CACHE_SIZE.set(self.total_size_bytes);
@@ -628,7 +628,7 @@ impl BackgroundTask {
         writer.into_inner().sync_all().await?;
 
         // TODO(diko): we can count it via Writer wrapper instead of a syscall.
-        let size_bytes = tokio::fs::metadata(entry_tmp_path).await?.len() as i64;
+        let size_bytes = tokio::fs::metadata(entry_tmp_path).await?.len();
 
         Ok(CacheEntry {
             lsn: req_lsn,
