@@ -15,7 +15,7 @@ from pytest import raises
 
 
 def stop_and_check_lsn(ep: Endpoint, expected_lsn: Lsn | None):
-    ep.stop(mode="immediate")
+    ep.stop(mode="immediate-terminate")
     lsn = ep.terminate_flush_lsn
     if expected_lsn is not None:
         assert lsn >= expected_lsn, f"{expected_lsn=} < {lsn=}"
