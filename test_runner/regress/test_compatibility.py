@@ -364,17 +364,6 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
         existing_initdb_timeline_id=timeline_id,
     )
 
-    members_sks = [env.safekeepers[0]]
-
-    mconf = MembershipConfiguration(
-        generation=1,
-        members=Safekeeper.sks_to_safekeeper_ids(members_sks),
-        new_members=None,
-    )
-    members_sks = Safekeeper.mconf_sks(env, mconf)
-
-    Safekeeper.create_timeline(tenant_id, timeline_id, env.pageservers[0], mconf, members_sks)
-
     # Timeline exists again: restart the endpoint
     ep.start(env=ep_env, safekeeper_generation=generation)
 
