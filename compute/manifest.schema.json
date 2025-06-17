@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Neon Compute Manifest Schema",
+  "description": "Schema for Neon compute node configuration manifest",
+  "type": "object",
+  "properties": {
+    "pg_settings": {
+      "type": "object",
+      "properties": {
+        "common": {
+          "type": "object",
+          "properties": {
+            "client_connection_check_interval": {
+              "type": "string",
+              "description": "Check for client disconnection interval in milliseconds"
+            },
+            "effective_io_concurrency": {
+              "type": "string",
+              "description": "Effective IO concurrency setting"
+            },
+            "fsync": {
+              "type": "string",
+              "enum": ["on", "off"],
+              "description": "Whether to force fsync to disk"
+            },
+            "hot_standby": {
+              "type": "string",
+              "enum": ["on", "off"],
+              "description": "Whether hot standby is enabled"
+            },
+            "idle_in_transaction_session_timeout": {
+              "type": "string",
+              "description": "Timeout for idle transactions in milliseconds"
+            },
+            "listen_addresses": {
+              "type": "string",
+              "description": "Addresses to listen on"
+            },
+            "log_connections": {
+              "type": "string",
+              "enum": ["on", "off"],
+              "description": "Whether to log connections"
+            },
+            "log_disconnections": {
+              "type": "string",
+              "enum": ["on", "off"],
+              "description": "Whether to log disconnections"
+            },
+            "log_temp_files": {
+              "type": "string",
+              "description": "Size threshold for logging temporary files in KB"
+            },
+            "log_error_verbosity": {
+              "type": "string",
+              "enum": ["terse", "verbose", "default"],
+              "description": "Error logging verbosity level"
+            },
+            "log_min_error_statement": {
+              "type": "string",
+              "description": "Minimum error level for statement logging"
+            },
+            "maintenance_io_concurrency": {
+              "type": "string",
+              "description": "Maintenance IO concurrency setting"
+            },
+            "max_connections": {
+              "type": "string",
+              "description": "Maximum number of connections"
+            },
+            "max_replication_flush_lag": {
+              "type": "string",
+              "description": "Maximum replication flush lag"
+            },
+            "max_replication_slots": {
+              "type": "string",
+              "description": "Maximum number of replication slots"
+            },
+            "max_replication_write_lag": {
+              "type": "string",
+              "description": "Maximum replication write lag"
+            },
+            "max_wal_senders": {
+              "type": "string",
+              "description": "Maximum number of WAL senders"
+            },
+            "max_wal_size": {
+              "type": "string",
+              "description": "Maximum WAL size"
+            },
+            "neon.unstable_extensions": {
+              "type": "string",
+              "description": "List of unstable extensions"
+            },
+            "neon.protocol_version": {
+              "type": "string",
+              "description": "Neon protocol version"
+            },
+            "password_encryption": {
+              "type": "string",
+              "description": "Password encryption method"
+            },
+            "restart_after_crash": {
+              "type": "string",
+              "enum": ["on", "off"],
+              "description": "Whether to restart after crash"
+            },
+            "superuser_reserved_connections": {
+              "type": "string",
+              "description": "Number of reserved connections for superuser"
+            },
+            "synchronous_standby_names": {
+              "type": "string",
+              "description": "Names of synchronous standby servers"
+            },
+            "wal_keep_size": {
+              "type": "string",
+              "description": "WAL keep size"
+            },
+            "wal_level": {
+              "type": "string",
+              "description": "WAL level"
+            },
+            "wal_log_hints": {
+              "type": "string",
+              "enum": ["on", "off"],
+              "description": "Whether to log hints in WAL"
+            },
+            "wal_sender_timeout": {
+              "type": "string",
+              "description": "WAL sender timeout in milliseconds"
+            }
+          },
+          "required": [
+            "client_connection_check_interval",
+            "effective_io_concurrency",
+            "fsync",
+            "hot_standby",
+            "idle_in_transaction_session_timeout",
+            "listen_addresses",
+            "log_connections",
+            "log_disconnections",
+            "log_temp_files",
+            "log_error_verbosity",
+            "log_min_error_statement",
+            "maintenance_io_concurrency",
+            "max_connections",
+            "max_replication_flush_lag",
+            "max_replication_slots",
+            "max_replication_write_lag",
+            "max_wal_senders",
+            "max_wal_size",
+            "neon.unstable_extensions",
+            "neon.protocol_version",
+            "password_encryption",
+            "restart_after_crash",
+            "superuser_reserved_connections",
+            "synchronous_standby_names",
+            "wal_keep_size",
+            "wal_level",
+            "wal_log_hints",
+            "wal_sender_timeout"
+          ]
+        },
+        "replica": {
+          "type": "object",
+          "properties": {
+            "hot_standby": {
+              "type": "string",
+              "enum": ["on", "off"],
+              "description": "Whether hot standby is enabled for replicas"
+            }
+          },
+          "required": ["hot_standby"]
+        },
+        "per_version": {
+          "type": "object",
+          "patternProperties": {
+            "^1[4-7]$": {
+              "type": "object",
+              "properties": {
+                "common": {
+                  "type": "object",
+                  "properties": {
+                    "io_combine_limit": {
+                      "type": "string",
+                      "description": "IO combine limit"
+                    }
+                  }
+                },
+                "replica": {
+                  "type": "object",
+                  "properties": {
+                    "recovery_prefetch": {
+                      "type": "string",
+                      "enum": ["on", "off"],
+                      "description": "Whether to enable recovery prefetch for PostgreSQL replicas"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "required": ["common", "replica", "per_version"]
+    }
+  },
+  "required": ["pg_settings"]
+} 

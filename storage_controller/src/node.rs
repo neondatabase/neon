@@ -37,6 +37,8 @@ pub(crate) struct Node {
 
     listen_pg_addr: String,
     listen_pg_port: u16,
+    listen_grpc_addr: Option<String>,
+    listen_grpc_port: Option<u16>,
 
     availability_zone_id: AvailabilityZone,
 
@@ -100,8 +102,8 @@ impl Node {
         self.id == register_req.node_id
             && self.listen_http_addr == register_req.listen_http_addr
             && self.listen_http_port == register_req.listen_http_port
-            // Note: listen_https_port may change. See [`Self::need_update`] for mode details.
-            // && self.listen_https_port == register_req.listen_https_port
+            // Note: HTTPS and gRPC addresses may change, to allow for migrations. See
+            // [`Self::need_update`] for more details.
             && self.listen_pg_addr == register_req.listen_pg_addr
             && self.listen_pg_port == register_req.listen_pg_port
             && self.availability_zone_id == register_req.availability_zone_id
@@ -109,9 +111,10 @@ impl Node {
 
     // Do we need to update an existing record in DB on this registration request?
     pub(crate) fn need_update(&self, register_req: &NodeRegisterRequest) -> bool {
-        // listen_https_port is checked here because it may change during migration to https.
-        // After migration, this check may be moved to registration_match.
+        // These are checked here, since they may change before we're fully migrated.
         self.listen_https_port != register_req.listen_https_port
+            || self.listen_grpc_addr != register_req.listen_grpc_addr
+            || self.listen_grpc_port != register_req.listen_grpc_port
     }
 
     /// For a shard located on this node, populate a response object
@@ -125,6 +128,8 @@ impl Node {
             listen_https_port: self.listen_https_port,
             listen_pg_addr: self.listen_pg_addr.clone(),
             listen_pg_port: self.listen_pg_port,
+            listen_grpc_addr: self.listen_grpc_addr.clone(),
+            listen_grpc_port: self.listen_grpc_port,
         }
     }
 
@@ -211,6 +216,8 @@ impl Node {
         listen_https_port: Option<u16>,
         listen_pg_addr: String,
         listen_pg_port: u16,
+        listen_grpc_addr: Option<String>,
+        listen_grpc_port: Option<u16>,
         availability_zone_id: AvailabilityZone,
         use_https: bool,
     ) -> anyhow::Result<Self> {
@@ -221,6 +228,10 @@ impl Node {
             );
         }
 
+        if listen_grpc_addr.is_some() != listen_grpc_port.is_some() {
+            anyhow::bail!("cannot create node {id}: must specify both gRPC address and port");
+        }
+
         Ok(Self {
             id,
             listen_http_addr,
@@ -228,6 +239,8 @@ impl Node {
             listen_https_port,
             listen_pg_addr,
             listen_pg_port,
+            listen_grpc_addr,
+            listen_grpc_port,
             scheduling: NodeSchedulingPolicy::Active,
             lifecycle: NodeLifecycle::Active,
             availability: NodeAvailability::Offline,
@@ -247,6 +260,8 @@ impl Node {
             listen_https_port: self.listen_https_port.map(|x| x as i32),
             listen_pg_addr: self.listen_pg_addr.clone(),
             listen_pg_port: self.listen_pg_port as i32,
+            listen_grpc_addr: self.listen_grpc_addr.clone(),
+            listen_grpc_port: self.listen_grpc_port.map(|port| port as i32),
             availability_zone_id: self.availability_zone_id.0.clone(),
         }
     }
@@ -257,6 +272,13 @@ impl Node {
                 "cannot load node {} from persistent: \
                 https is enabled, but https port is not specified",
                 np.node_id,
+            );
+        }
+
+        if np.listen_grpc_addr.is_some() != np.listen_grpc_port.is_some() {
+            anyhow::bail!(
+                "can't load node {}: must specify both gRPC address and port",
+                np.node_id
             );
         }
 
@@ -272,6 +294,8 @@ impl Node {
             listen_https_port: np.listen_https_port.map(|x| x as u16),
             listen_pg_addr: np.listen_pg_addr,
             listen_pg_port: np.listen_pg_port as u16,
+            listen_grpc_addr: np.listen_grpc_addr,
+            listen_grpc_port: np.listen_grpc_port.map(|port| port as u16),
             availability_zone_id: AvailabilityZone(np.availability_zone_id),
             use_https,
             cancel: CancellationToken::new(),
@@ -361,6 +385,8 @@ impl Node {
             listen_https_port: self.listen_https_port,
             listen_pg_addr: self.listen_pg_addr.clone(),
             listen_pg_port: self.listen_pg_port,
+            listen_grpc_addr: self.listen_grpc_addr.clone(),
+            listen_grpc_port: self.listen_grpc_port,
         }
     }
 }

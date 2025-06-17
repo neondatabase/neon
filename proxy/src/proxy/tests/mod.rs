@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use async_trait::async_trait;
 use http::StatusCode;
-use postgres_client::config::{AuthKeys, ScramKeys, SslMode};
+use postgres_client::config::SslMode;
 use postgres_client::tls::{MakeTlsConnect, NoTls};
 use retry::{ShouldRetryWakeCompute, retry_after};
 use rstest::rstest;
@@ -19,15 +19,13 @@ use tracing_test::traced_test;
 
 use super::retry::CouldRetry;
 use super::*;
-use crate::auth::backend::{
-    ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned,
-};
+use crate::auth::backend::{ComputeUserInfo, MaybeOwned};
 use crate::config::{ComputeConfig, RetryConfig};
 use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
 use crate::control_plane::{self, CachedNodeInfo, NodeInfo, NodeInfoCache};
 use crate::error::ErrorKind;
-use crate::pglb::connect_compute::ConnectMechanism;
+use crate::proxy::connect_compute::ConnectMechanism;
 use crate::tls::client_config::compute_client_config_with_certs;
 use crate::tls::server_config::CertResolver;
 use crate::types::{BranchId, EndpointId, ProjectId};
@@ -575,19 +573,13 @@ fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeIn
 
 fn helper_create_connect_info(
     mechanism: &TestConnectMechanism,
-) -> auth::Backend<'static, ComputeCredentials> {
+) -> auth::Backend<'static, ComputeUserInfo> {
     auth::Backend::ControlPlane(
         MaybeOwned::Owned(ControlPlaneClient::Test(Box::new(mechanism.clone()))),
-        ComputeCredentials {
-            info: ComputeUserInfo {
-                endpoint: "endpoint".into(),
-                user: "user".into(),
-                options: NeonOptions::parse_options_raw(""),
-            },
-            keys: ComputeCredentialKeys::AuthKeys(AuthKeys::ScramSha256(ScramKeys {
-                client_key: [0; 32],
-                server_key: [0; 32],
-            })),
+        ComputeUserInfo {
+            endpoint: "endpoint".into(),
+            user: "user".into(),
+            options: NeonOptions::parse_options_raw(""),
         },
     )
 }

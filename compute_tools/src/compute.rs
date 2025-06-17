@@ -354,11 +354,6 @@ impl ComputeNode {
         // that can affect `compute_ctl` and prevent it from properly configuring the database schema.
         // Unset them via connection string options before connecting to the database.
         // N.B. keep it in sync with `ZENITH_OPTIONS` in `get_maintenance_client()`.
-        //
-        // TODO(ololobus): we currently pass `-c default_transaction_read_only=off` from control plane
-        // as well. After rolling out this code, we can remove this parameter from control plane.
-        // In the meantime, double-passing is fine, the last value is applied.
-        // See: <https://github.com/neondatabase/cloud/blob/133dd8c4dbbba40edfbad475bf6a45073ca63faf/goapp/controlplane/internal/pkg/compute/provisioner/provisioner_common.go#L70>
         const EXTRA_OPTIONS: &str = "-c role=cloud_admin -c default_transaction_read_only=off -c search_path=public -c statement_timeout=0";
         let options = match conn_conf.get_options() {
             Some(options) => format!("{} {}", options, EXTRA_OPTIONS),
@@ -785,7 +780,7 @@ impl ComputeNode {
         self.spawn_extension_stats_task();
 
         if pspec.spec.autoprewarm {
-            self.prewarm_lfc();
+            self.prewarm_lfc(None);
         }
         Ok(())
     }

@@ -1398,6 +1398,31 @@ async fn handle_timeline_import(req: Request<Body>) -> Result<Response<Body>, Ap
     )
 }
 
+async fn handle_tenant_timeline_locate(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
+    check_permissions(&req, Scope::Admin)?;
+    maybe_rate_limit(&req, tenant_id).await;
+
+    match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(_req) => {}
+    };
+
+    json_response(
+        StatusCode::OK,
+        service
+            .tenant_timeline_locate(tenant_id, timeline_id)
+            .await?,
+    )
+}
+
 async fn handle_tenants_dump(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -2045,10 +2070,10 @@ pub fn make_router(
 
     router
         .data(Arc::new(HttpState::new(service, auth, build_info)))
+        // Non-prefixed generic endpoints (status, metrics, profiling)
         .get("/metrics", |r| {
             named_request_span(r, measured_metrics_handler, RequestName("metrics"))
         })
-        // Non-prefixed generic endpoints (status, metrics, profiling)
         .get("/status", |r| {
             named_request_span(r, handle_status, RequestName("status"))
         })
@@ -2136,6 +2161,16 @@ pub fn make_router(
                     r,
                     handle_timeline_import,
                     RequestName("debug_v1_timeline_import"),
+                )
+            },
+        )
+        .get(
+            "/debug/v1/tenant/:tenant_id/timeline/:timeline_id/locate",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_locate,
+                    RequestName("v1_tenant_timeline_locate"),
                 )
             },
         )

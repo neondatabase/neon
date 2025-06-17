@@ -2225,6 +2225,17 @@ class NeonStorageController(MetricsGetter, LogUtils):
         shards: list[dict[str, Any]] = body["shards"]
         return shards
 
+    def timeline_locate(self, tenant_id: TenantId, timeline_id: TimelineId):
+        """
+        :return: dict {"generation": int, "sk_set": [int], "new_sk_set": [int]}
+        """
+        response = self.request(
+            "GET",
+            f"{self.api}/debug/v1/tenant/{tenant_id}/timeline/{timeline_id}/locate",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
+
     def tenant_describe(self, tenant_id: TenantId):
         """
         :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr: str, "listen_http_port: int, preferred_az_id: str}
@@ -4047,6 +4058,16 @@ def static_proxy(
     vanilla_pg.safe_psql(
         "CREATE TABLE neon_control_plane.endpoints (endpoint_id VARCHAR(255) PRIMARY KEY, allowed_ips VARCHAR(255))"
     )
+
+    vanilla_pg.stop()
+    vanilla_pg.edit_hba(
+        [
+            "local all all              trust",
+            "host  all all 127.0.0.1/32 scram-sha-256",
+            "host  all all ::1/128      scram-sha-256",
+        ]
+    )
+    vanilla_pg.start()
 
     proxy_port = port_distributor.get_port()
     mgmt_port = port_distributor.get_port()

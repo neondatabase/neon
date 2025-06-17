@@ -753,6 +753,7 @@ dependencies = [
  "axum",
  "axum-core",
  "bytes",
+ "form_urlencoded",
  "futures-util",
  "headers",
  "http 1.1.0",
@@ -761,6 +762,8 @@ dependencies = [
  "mime",
  "pin-project-lite",
  "serde",
+ "serde_html_form",
+ "serde_path_to_error",
  "tower 0.5.2",
  "tower-layer",
  "tower-service",
@@ -899,12 +902,6 @@ name = "base64"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
-
-[[package]]
-name = "base64"
-version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ea22880d78093b0cbe17c89f64a7d457941e65759157ec6cb31a31d652b05e5"
 
 [[package]]
 name = "base64"
@@ -1297,7 +1294,7 @@ dependencies = [
  "aws-smithy-types",
  "axum",
  "axum-extra",
- "base64 0.13.1",
+ "base64 0.22.1",
  "bytes",
  "camino",
  "cfg-if",
@@ -1423,7 +1420,7 @@ name = "control_plane"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.13.1",
+ "base64 0.22.1",
  "camino",
  "clap",
  "comfy-table",
@@ -4815,7 +4812,7 @@ dependencies = [
 name = "postgres-protocol2"
 version = "0.1.0"
 dependencies = [
- "base64 0.20.0",
+ "base64 0.22.1",
  "byteorder",
  "bytes",
  "fallible-iterator",
@@ -5187,7 +5184,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-iam",
  "aws-sigv4",
- "base64 0.13.1",
+ "base64 0.22.1",
  "bstr",
  "bytes",
  "camino",
@@ -6423,6 +6420,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_html_form"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d2de91cf02bbc07cde38891769ccd5d4f073d22a40683aa4bc7a95781aaa2c4"
+dependencies = [
+ "form_urlencoded",
+ "indexmap 2.9.0",
+ "itoa",
+ "ryu",
+ "serde",
+]
+
+[[package]]
 name = "serde_json"
 version = "1.0.125"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6478,15 +6488,17 @@ dependencies = [
 
 [[package]]
 name = "serde_with"
-version = "2.3.3"
+version = "3.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07ff71d2c147a7b57362cead5e22f772cd52f6ab31cfcd9edcd7f6aeb2a0afbe"
+checksum = "d6b6f7f2fcb69f747921f79f3926bd1e203fce4fef62c268dd3abfb6d86029aa"
 dependencies = [
- "base64 0.13.1",
+ "base64 0.22.1",
  "chrono",
  "hex",
  "indexmap 1.9.3",
+ "indexmap 2.9.0",
  "serde",
+ "serde_derive",
  "serde_json",
  "serde_with_macros",
  "time",
@@ -6494,9 +6506,9 @@ dependencies = [
 
 [[package]]
 name = "serde_with_macros"
-version = "2.3.3"
+version = "3.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "881b6f881b17d13214e5d494c939ebab463d01264ce1811e9d4ac3a882e7695f"
+checksum = "8d00caa5193a3c8362ac2b73be6b9e768aa5a4b2f721d8f4b339600c3cb51f8e"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -8567,7 +8579,6 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-core",
- "base64 0.13.1",
  "base64 0.21.7",
  "base64ct",
  "bytes",

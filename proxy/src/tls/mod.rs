@@ -3,6 +3,8 @@ pub mod postgres_rustls;
 pub mod server_config;
 
 use anyhow::Context;
+use base64::Engine as _;
+use base64::prelude::BASE64_STANDARD;
 use rustls::pki_types::CertificateDer;
 use sha2::{Digest, Sha256};
 use tracing::{error, info};
@@ -58,7 +60,7 @@ impl TlsServerEndPoint {
         let oid = certificate.signature_algorithm.oid;
         if SHA256_OIDS.contains(&oid) {
             let tls_server_end_point: [u8; 32] = Sha256::new().chain_update(cert).finalize().into();
-            info!(%subject, tls_server_end_point = %base64::encode(tls_server_end_point), "determined channel binding");
+            info!(%subject, tls_server_end_point = %BASE64_STANDARD.encode(tls_server_end_point), "determined channel binding");
             Ok(Self::Sha256(tls_server_end_point))
         } else {
             error!(%subject, "unknown channel binding");

@@ -38,6 +38,11 @@ on:
         required: false
         default: 1
         type: number
+      rerun-failed:
+        description: 'rerun failed tests to ignore flaky tests'
+        required: false
+        default: true
+        type: boolean
 
 defaults:
   run:
@@ -379,7 +384,7 @@ jobs:
       - name: Pytest regression tests
         continue-on-error: ${{ matrix.lfc_state == 'with-lfc' && inputs.build-type == 'debug' }}
         uses: ./.github/actions/run-python-test-set
-        timeout-minutes: ${{ inputs.sanitizers != 'enabled' && 75 || 180 }}
+        timeout-minutes: ${{ (inputs.build-type == 'release' && inputs.sanitizers != 'enabled') && 75 || 180 }}
         with:
           build_type: ${{ inputs.build-type }}
           test_selection: regress
@@ -388,13 +393,14 @@ jobs:
           real_s3_bucket: neon-github-ci-tests
           real_s3_region: eu-central-1
           rerun_failed: false
+          #rerun_failed: ${{ inputs.rerun-failed }}
           pg_version: ${{ matrix.pg_version }}
           sanitizers: ${{ inputs.sanitizers }}
           aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
           # `--session-timeout` is equal to (timeout-minutes - 10 minutes) * 60 seconds.
           # Attempt to stop tests gracefully to generate test reports
           # until they are forcibly stopped by the stricter `timeout-minutes` limit.
-          extra_params: --session-timeout=${{ inputs.sanitizers != 'enabled' && 3000 || 10200 }} --count=${{ inputs.test-run-count }}
+          extra_params: --session-timeout=${{ (inputs.build-type == 'release' && inputs.sanitizers != 'enabled') && 3000 || 10200 }} --count=${{ inputs.test-run-count }}
                         ${{ inputs.test-selection != '' && format('-k "{0}"', inputs.test-selection) || '' }}
         env:
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}

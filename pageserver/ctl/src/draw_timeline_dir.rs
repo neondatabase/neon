@@ -20,7 +20,7 @@
 //!
 //! # local timeline dir
 //! ls test_output/test_pgbench\[neon-45-684\]/repo/tenants/$TENANT/timelines/$TIMELINE | \
-//!     grep "__" | cargo run --release --bin pagectl draw-timeline-dir > out.svg
+//!     grep "__" | cargo run --release --bin pagectl draw-timeline > out.svg
 //!
 //! # Layer map dump from `/v1/tenant/$TENANT/timeline/$TIMELINE/layer`
 //! (jq -r '.historic_layers[] | .layer_file_name' | cargo  run -p pagectl draw-timeline) < layer-map.json > out.svg
@@ -81,7 +81,11 @@ fn build_coordinate_compression_map<T: Ord + Copy>(coords: Vec<T>) -> BTreeMap<T
 fn parse_filename(name: &str) -> (Range<Key>, Range<Lsn>) {
     let split: Vec<&str> = name.split("__").collect();
     let keys: Vec<&str> = split[0].split('-').collect();
-    let mut lsns: Vec<&str> = split[1].split('-').collect();
+
+    // Remove the temporary file extension, e.g., remove the `.d20a.___temp` part from the following filename:
+    // 000000067F000040490000404A00441B0000-000000067F000040490000404A00441B4000__000043483A34CE00.d20a.___temp
+    let lsns = split[1].split('.').collect::<Vec<&str>>()[0];
+    let mut lsns: Vec<&str> = lsns.split('-').collect();
 
     // The current format of the layer file name: 000000067F0000000400000B150100000000-000000067F0000000400000D350100000000__00000000014B7AC8-v1-00000001
 
