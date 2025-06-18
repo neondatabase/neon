@@ -2360,6 +2360,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         delay_max = max_interval
         while n > 0:
             n = self.reconcile_all()
+
             if n == 0:
                 break
             elif time.time() - start_at > timeout_secs:
