@@ -7,4 +7,3 @@ WHERE ctid in (
     FROM workflows.edges
     TABLESAMPLE SYSTEM (0.0005) 
 );
-\sleep 59

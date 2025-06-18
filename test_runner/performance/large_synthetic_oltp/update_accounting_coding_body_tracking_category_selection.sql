@@ -7,4 +7,3 @@ WHERE ctid in (
     FROM  accounting.accounting_coding_body_tracking_category_selection
     TABLESAMPLE SYSTEM (0.0005) 
 );
-\sleep 59

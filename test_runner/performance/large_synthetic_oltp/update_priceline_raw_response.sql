@@ -7,4 +7,3 @@ WHERE ctid in (
     FROM booking_inventory.priceline_raw_response
     TABLESAMPLE SYSTEM (0.0005) 
 );
-\sleep 59

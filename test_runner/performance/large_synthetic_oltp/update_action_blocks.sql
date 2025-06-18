@@ -7,4 +7,3 @@ WHERE ctid in (
     FROM  workflows.action_blocks 
     TABLESAMPLE SYSTEM (0.001) 
 );
-\sleep 59

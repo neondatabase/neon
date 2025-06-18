@@ -7,4 +7,3 @@ WHERE ctid in (
     FROM   ocr.ocr_pipeline_results_version 
     TABLESAMPLE SYSTEM (0.0005) 
 );
-\sleep 59

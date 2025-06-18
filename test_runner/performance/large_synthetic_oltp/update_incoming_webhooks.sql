@@ -7,4 +7,3 @@ WHERE ctid in (
     FROM webhook.incoming_webhooks
     TABLESAMPLE SYSTEM (0.0002) 
 );
-\sleep 54

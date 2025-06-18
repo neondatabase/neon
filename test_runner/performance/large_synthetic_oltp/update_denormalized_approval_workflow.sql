@@ -7,4 +7,4 @@ WHERE ctid in (
     FROM  approvals_v2.denormalized_approval_workflow 
     TABLESAMPLE SYSTEM (0.0005) 
 );
-\sleep 59
+

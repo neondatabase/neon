@@ -7,4 +7,3 @@ WHERE ctid in (
     FROM authentication.device_fingerprint_event
     TABLESAMPLE SYSTEM (0.001) 
 );
-\sleep 54

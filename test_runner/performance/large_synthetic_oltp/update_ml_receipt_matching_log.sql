@@ -7,4 +7,3 @@ WHERE ctid in (
     FROM   receipt.ml_receipt_matching_log 
     TABLESAMPLE SYSTEM (0.0005) 
 );
-\sleep 59

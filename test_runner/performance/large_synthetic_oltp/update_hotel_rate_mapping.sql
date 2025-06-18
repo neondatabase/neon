@@ -7,4 +7,3 @@ WHERE ctid in (
     FROM  booking_inventory.hotel_rate_mapping
     TABLESAMPLE SYSTEM (0.0005) 
 );
-\sleep 59

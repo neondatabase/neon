@@ -7,4 +7,3 @@ WHERE ctid in (
     FROM  banking.manual_transaction
     TABLESAMPLE SYSTEM (0.0005) 
 );
-\sleep 58

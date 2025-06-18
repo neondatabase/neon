@@ -13,4 +13,3 @@ WHERE ctid IN (
     FROM banking.raw_finicity_transaction
     TABLESAMPLE SYSTEM (0.0005)
 );
-\sleep 59
