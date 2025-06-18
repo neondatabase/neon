@@ -713,7 +713,7 @@ struct BatchedGetPageRequest {
 
 #[cfg(feature = "testing")]
 struct BatchedTestRequest {
-    req: models::PagestreamTestRequest,
+    req: pagestream_api::PagestreamTestRequest,
     timer: SmgrOpTimer,
 }
 
@@ -2513,7 +2513,7 @@ impl PageServerHandler {
                 .map(|(req, res)| {
                     res.map(|()| {
                         (
-                            PagestreamBeMessage::Test(models::PagestreamTestResponse {
+                            PagestreamBeMessage::Test(pagestream_api::PagestreamTestResponse {
                                 req: req.req.clone(),
                             }),
                             req.timer,

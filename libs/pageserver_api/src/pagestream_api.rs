@@ -8,8 +8,6 @@ use crate::reltag::RelTag;
 
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-#[cfg(feature = "testing")]
-use camino::Utf8PathBuf;
 use postgres_ffi::BLCKSZ;
 use utils::lsn::Lsn;
 
@@ -728,10 +726,6 @@ impl PagestreamBeMessage {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
-    use serde_json::json;
-
     use super::*;
 
     #[test]
