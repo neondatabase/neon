@@ -1,6 +1,4 @@
 use std::convert::TryInto;
-use std::io::Error;
-use std::io::ErrorKind;
 
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
@@ -82,10 +80,10 @@ impl Client {
     ) -> anyhow::Result<Self> {
         let endpoint: tonic::transport::Endpoint = into_endpoint
             .try_into()
-            .map_err(|_e| anyhow::anyhow!("Failed to convert endpoint"))?;
+            .map_err(|_e| anyhow::anyhow!("failed to convert endpoint"))?;
         let channel = endpoint.connect().await?;
         let auth = AuthInterceptor::new(tenant_id, timeline_id, auth_header, shard_id)
-            .map_err(|e| Error::new(ErrorKind::InvalidInput, e.to_string()))?;
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let client = proto::PageServiceClient::with_interceptor(channel, auth);
 
         Ok(Self { client })
@@ -116,9 +114,10 @@ impl Client {
 
         // TODO: Consider dechunking internally
         let domain_stream = response_stream.map(|chunk_res| {
-            chunk_res.map(|proto_chunk| {
-                let b: Bytes = proto_chunk.try_into().unwrap();
-                b
+            chunk_res.and_then(|proto_chunk| {
+                proto_chunk.try_into().map_err(|e| {
+                    tonic::Status::internal(format!("Failed to convert response chunk: {}", e))
+                })
             })
         });
 
@@ -139,6 +138,8 @@ impl Client {
     /// Fetches pages.
     ///
     /// This is implemented as a bidirectional streaming RPC for performance.
+    /// Per-request errors are often returned as status_code instead of errors,
+    /// to avoid tearing down the entire stream via tonic::Status.
     pub async fn get_pages<ReqSt>(
         &mut self,
         inbound: ReqSt,
