@@ -712,6 +712,7 @@ struct EndpointStopCmdArgs {
     destroy: bool,
 
     #[clap(long, help = "Postgres shutdown mode")]
+    #[clap(default_value = "EndpointTerminateMode::Fast")]
     mode: EndpointTerminateMode,
 }
 
