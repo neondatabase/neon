@@ -1232,10 +1232,10 @@ mod test {
     use itertools::Itertools;
     use pageserver_api::key::Key;
     use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
-    use pageserver_api::value::Value;
     use utils::generation::Generation;
     use utils::id::{TenantId, TimelineId};
     use utils::lsn::Lsn;
+    use wal_decoder::models::value::Value;
 
     use super::{ImageLayerIterator, ImageLayerWriter};
     use crate::DEFAULT_PG_VERSION;

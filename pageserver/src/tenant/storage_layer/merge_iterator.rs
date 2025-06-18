@@ -436,7 +436,6 @@ mod tests {
     #[tokio::test]
     async fn merge_in_between() {
         use bytes::Bytes;
-        use pageserver_api::value::Value;
 
         let harness = TenantHarness::create("merge_iterator_merge_in_between")
             .await
@@ -501,7 +500,6 @@ mod tests {
     #[tokio::test]
     async fn delta_merge() {
         use bytes::Bytes;
-        use pageserver_api::value::Value;
 
         let harness = TenantHarness::create("merge_iterator_delta_merge")
             .await
@@ -578,7 +576,6 @@ mod tests {
     #[tokio::test]
     async fn delta_image_mixed_merge() {
         use bytes::Bytes;
-        use pageserver_api::value::Value;
 
         let harness = TenantHarness::create("merge_iterator_delta_image_mixed_merge")
             .await

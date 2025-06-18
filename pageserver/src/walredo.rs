@@ -571,11 +571,11 @@ mod tests {
 
     use bytes::Bytes;
     use pageserver_api::key::Key;
-    use pageserver_api::record::NeonWalRecord;
     use pageserver_api::shard::TenantShardId;
     use tracing::Instrument;
     use utils::id::TenantId;
     use utils::lsn::Lsn;
+    use wal_decoder::models::record::NeonWalRecord;
 
     use super::PostgresRedoManager;
     use crate::config::PageServerConf;

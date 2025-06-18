@@ -126,7 +126,6 @@ mod tests {
     #[tokio::test]
     async fn filter_keyspace_iterator() {
         use bytes::Bytes;
-        use pageserver_api::value::Value;
 
         let harness = TenantHarness::create("filter_iterator_filter_keyspace_iterator")
             .await

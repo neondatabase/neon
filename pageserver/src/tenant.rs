@@ -5836,10 +5836,10 @@ pub(crate) mod harness {
     use once_cell::sync::OnceCell;
     use pageserver_api::key::Key;
     use pageserver_api::models::ShardParameters;
-    use pageserver_api::record::NeonWalRecord;
     use pageserver_api::shard::ShardIndex;
     use utils::id::TenantId;
     use utils::logging;
+    use wal_decoder::models::record::NeonWalRecord;
 
     use super::*;
     use crate::deletion_queue::mock::MockDeletionQueue;
@@ -6096,7 +6096,6 @@ mod tests {
     use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
     #[cfg(feature = "testing")]
     use pageserver_api::record::NeonWalRecord;
-    use pageserver_api::value::Value;
     use pageserver_compaction::helpers::overlaps_with;
     #[cfg(feature = "testing")]
     use rand::SeedableRng;
@@ -6117,6 +6116,7 @@ mod tests {
     use timeline::{CompactOptions, DeltaLayerTestDesc, VersionedKeySpaceQuery};
     use utils::id::TenantId;
     use utils::shard::{ShardCount, ShardNumber};
+    use wal_decoder::models::value::Value;
 
     use super::*;
     use crate::DEFAULT_PG_VERSION;

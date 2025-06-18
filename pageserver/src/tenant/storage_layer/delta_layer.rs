@@ -1624,7 +1624,6 @@ pub(crate) mod test {
 
     use bytes::Bytes;
     use itertools::MinMaxResult;
-    use pageserver_api::value::Value;
     use rand::prelude::{SeedableRng, SliceRandom, StdRng};
     use rand::{Rng, RngCore};
 
@@ -1988,7 +1987,7 @@ pub(crate) mod test {
     #[tokio::test]
     async fn copy_delta_prefix_smoke() {
         use bytes::Bytes;
-        use pageserver_api::record::NeonWalRecord;
+        use wal_decoder::models::record::NeonWalRecord;
 
         let h = crate::tenant::harness::TenantHarness::create("truncate_delta_smoke")
             .await
