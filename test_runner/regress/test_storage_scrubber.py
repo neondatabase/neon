@@ -342,7 +342,9 @@ def test_scrubber_physical_gc_timeline_deletion(neon_env_builder: NeonEnvBuilder
     env.start()
 
     for ps in env.pageservers:
-        ps.allowed_errors.append(".*Timeline.* has been deleted.*")
+        ps.allowed_errors.extend(
+            [".*Timeline.* has been deleted.*", ".*Timeline.*was cancelled and cannot be used"]
+        )
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
