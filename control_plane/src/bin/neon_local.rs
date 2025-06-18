@@ -18,7 +18,7 @@ use clap::Parser;
 use compute_api::requests::ComputeClaimsScope;
 use compute_api::spec::ComputeMode;
 use control_plane::broker::StorageBroker;
-use control_plane::endpoint::{ComputeControlPlane, PageserverProtocol};
+use control_plane::endpoint::{ComputeControlPlane, EndpointTerminateMode, PageserverProtocol};
 use control_plane::endpoint_storage::{ENDPOINT_STORAGE_DEFAULT_ADDR, EndpointStorage};
 use control_plane::local_env;
 use control_plane::local_env::{
@@ -711,10 +711,9 @@ struct EndpointStopCmdArgs {
     )]
     destroy: bool,
 
-    #[clap(long, help = "Postgres shutdown mode, passed to \"pg_ctl -m <mode>\"")]
-    #[arg(value_parser(["smart", "fast", "immediate"]))]
-    #[arg(default_value = "fast")]
-    mode: String,
+    #[clap(long, help = "Postgres shutdown mode")]
+    #[clap(default_value = "fast")]
+    mode: EndpointTerminateMode,
 }
 
 #[derive(clap::Args)]
@@ -1658,7 +1657,10 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 .endpoints
                 .get(endpoint_id)
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
-            endpoint.stop(&args.mode, args.destroy)?;
+            match endpoint.stop(args.mode, args.destroy).await?.lsn {
+                Some(lsn) => println!("{lsn}"),
+                None => println!("null"),
+            }
         }
         EndpointCmd::GenerateJwt(args) => {
             let endpoint = {
@@ -2090,11 +2092,16 @@ async fn handle_stop_all(args: &StopCmdArgs, env: &local_env::LocalEnv) -> Resul
 }
 
 async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
+    let mode = if immediate {
+        EndpointTerminateMode::Immediate
+    } else {
+        EndpointTerminateMode::Fast
+    };
     // Stop all endpoints
     match ComputeControlPlane::load(env.clone()) {
         Ok(cplane) => {
             for (_k, node) in cplane.endpoints {
-                if let Err(e) = node.stop(if immediate { "immediate" } else { "fast" }, false) {
+                if let Err(e) = node.stop(mode, false).await {
                     eprintln!("postgres stop failed: {e:#}");
                 }
             }

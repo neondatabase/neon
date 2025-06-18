@@ -679,8 +679,7 @@ typedef struct walproposer_api
 	 * Finish sync safekeepers with the given LSN. This function should not
 	 * return and should exit the program.
 	 */
-	void		(*finish_sync_safekeepers) (WalProposer *wp, XLogRecPtr lsn);
-
+	void		(*finish_sync_safekeepers) (WalProposer *wp, XLogRecPtr lsn) __attribute__((noreturn)) ;
 	/*
 	 * Called after every AppendResponse from the safekeeper. Used to
 	 * propagate backpressure feedback and to confirm WAL persistence (has

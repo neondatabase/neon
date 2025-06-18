@@ -52,7 +52,8 @@ use compute_api::requests::{
     COMPUTE_AUDIENCE, ComputeClaims, ComputeClaimsScope, ConfigurationRequest,
 };
 use compute_api::responses::{
-    ComputeConfig, ComputeCtlConfig, ComputeStatus, ComputeStatusResponse, TlsConfig,
+    ComputeConfig, ComputeCtlConfig, ComputeStatus, ComputeStatusResponse, TerminateResponse,
+    TlsConfig,
 };
 use compute_api::spec::{
     Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PgIdent,
@@ -341,13 +342,33 @@ pub enum EndpointStatus {
 
 impl Display for EndpointStatus {
     fn fmt(&self, writer: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let s = match self {
+        writer.write_str(match self {
             Self::Running => "running",
             Self::Stopped => "stopped",
             Self::Crashed => "crashed",
             Self::RunningNoPidfile => "running, no pidfile",
-        };
-        write!(writer, "{}", s)
+        })
+    }
+}
+
+#[derive(Default, Clone, Copy, clap::ValueEnum)]
+pub enum EndpointTerminateMode {
+    #[default]
+    /// Use pg_ctl stop -m fast
+    Fast,
+    /// Use pg_ctl stop -m immediate
+    Immediate,
+    /// Use /terminate?mode=immediate
+    ImmediateTerminate,
+}
+
+impl std::fmt::Display for EndpointTerminateMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match &self {
+            EndpointTerminateMode::Fast => "fast",
+            EndpointTerminateMode::Immediate => "immediate",
+            EndpointTerminateMode::ImmediateTerminate => "immediate-terminate",
+        })
     }
 }
 
@@ -918,7 +939,7 @@ impl Endpoint {
                         ComputeStatus::Empty
                         | ComputeStatus::ConfigurationPending
                         | ComputeStatus::Configuration
-                        | ComputeStatus::TerminationPending
+                        | ComputeStatus::TerminationPending { .. }
                         | ComputeStatus::Terminated => {
                             bail!("unexpected compute status: {:?}", state.status)
                         }
@@ -1040,8 +1061,27 @@ impl Endpoint {
         }
     }
 
-    pub fn stop(&self, mode: &str, destroy: bool) -> Result<()> {
-        self.pg_ctl(&["-m", mode, "stop"], &None)?;
+    pub async fn stop(
+        &self,
+        mode: EndpointTerminateMode,
+        destroy: bool,
+    ) -> Result<TerminateResponse> {
+        // pg_ctl stop is fast but doesn't allow us to collect LSN. /terminate is
+        // slow, and test runs time out. Solution: special mode "immediate-terminate"
+        // which uses /terminate
+        let response = if let EndpointTerminateMode::ImmediateTerminate = mode {
+            let ip = self.external_http_address.ip();
+            let port = self.external_http_address.port();
+            let url = format!("http://{ip}:{port}/terminate?mode=immediate");
+            let token = self.generate_jwt(Some(ComputeClaimsScope::Admin))?;
+            let request = reqwest::Client::new().post(url).bearer_auth(token);
+            let response = request.send().await.context("/terminate")?;
+            let text = response.text().await.context("/terminate result")?;
+            serde_json::from_str(&text).with_context(|| format!("deserializing {text}"))?
+        } else {
+            self.pg_ctl(&["-m", &mode.to_string(), "stop"], &None)?;
+            TerminateResponse { lsn: None }
+        };
 
         // Also wait for the compute_ctl process to die. It might have some
         // cleanup work to do after postgres stops, like syncing safekeepers,
@@ -1051,7 +1091,7 @@ impl Endpoint {
         // waiting. Sometimes we do *not* want this cleanup: tests intentionally
         // do stop when majority of safekeepers is down, so sync-safekeepers
         // would hang otherwise. This could be a separate flag though.
-        let send_sigterm = destroy || mode == "immediate";
+        let send_sigterm = destroy || !matches!(mode, EndpointTerminateMode::Fast);
         self.wait_for_compute_ctl_to_exit(send_sigterm)?;
         if destroy {
             println!(
@@ -1060,7 +1100,7 @@ impl Endpoint {
             );
             std::fs::remove_dir_all(self.endpoint_path())?;
         }
-        Ok(())
+        Ok(response)
     }
 
     pub fn connstr(&self, user: &str, db_name: &str) -> String {
