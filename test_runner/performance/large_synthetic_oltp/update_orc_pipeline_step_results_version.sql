@@ -1,5 +1,5 @@
--- update approximately 5000 rows or 1 MB in the ocr.ocr_pipeline_step_results_version table
--- takes about 40 secondss
+-- update approximately 5000 rows or 1 MB in the ocr_pipeline_step_results_version table
+-- takes about 40 seconds
 UPDATE    ocr.ocr_pipeline_step_results_version  
 SET created_at = now()
 WHERE ctid in (
