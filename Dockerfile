@@ -5,8 +5,6 @@
 ARG REPOSITORY=ghcr.io/neondatabase
 ARG IMAGE=build-tools
 ARG TAG=pinned
-ARG DEFAULT_PG_VERSION=17
-ARG STABLE_PG_VERSION=16
 ARG DEBIAN_VERSION=bookworm
 ARG DEBIAN_FLAVOR=${DEBIAN_VERSION}-slim
 
@@ -63,14 +61,11 @@ FROM $REPOSITORY/$IMAGE:$TAG AS build
 WORKDIR /home/nonroot
 ARG GIT_VERSION=local
 ARG BUILD_TAG
-ARG STABLE_PG_VERSION
 
 COPY --from=pg-build /home/nonroot/pg_install/v14/include/postgresql/server pg_install/v14/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v15/include/postgresql/server pg_install/v15/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v16/include/postgresql/server pg_install/v16/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v17/include/postgresql/server pg_install/v17/include/postgresql/server
-COPY --from=pg-build /home/nonroot/pg_install/v16/lib                       pg_install/v16/lib
-COPY --from=pg-build /home/nonroot/pg_install/v17/lib                       pg_install/v17/lib
 COPY --from=plan     /home/nonroot/recipe.json                              recipe.json
 
 ARG ADDITIONAL_RUSTFLAGS=""
@@ -97,7 +92,6 @@ RUN set -e \
 # Build final image
 #
 FROM $BASE_IMAGE_SHA
-ARG DEFAULT_PG_VERSION
 WORKDIR /data
 
 RUN set -e \
@@ -107,8 +101,6 @@ RUN set -e \
         libreadline-dev \
         libseccomp-dev \
         ca-certificates \
-	# System postgres for use with client libraries (e.g. in storage controller)
-        postgresql-15 \
         openssl \
         unzip \
         curl \
