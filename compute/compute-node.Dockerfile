@@ -549,16 +549,24 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) OPTFLAGS="" && \
 FROM build-deps AS pg_tpcds-src
 ARG PG_VERSION
 
-WORKDIR /ext-src
-
-RUN git clone --recurse-submodules --depth 1 https://github.com/neondatabase-labs/pg_tpcds.git pg_tpcds-src 
+RUN case "${PG_VERSION:?}" in \
+    "v14" ) \
+        ;; \
+    *) \
+        echo "skipping the version of pg_tpcds for $PG_VERSION" && exit 0 \
+        ;; \
+    esac && \
+    git clone --recurse-submodules --depth 1 https://github.com/neondatabase-labs/pg_tpcds.git pg_tpcds-src
 
 FROM pg-build AS pg_tpcds-build
 COPY --from=pg_tpcds-src /ext-src/ /ext-src/
-WORKDIR /ext-src/pg_tpcds-src
-RUN cmake -Bbuild && \
-    cmake --build build --target install && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_tpcds.control
+WORKDIR /ext-src/
+RUN if [ -d pg_tpcds-src ]; then \
+        cd pg_tpcds-src && \
+        cmake -Bbuild && \
+        cmake --build build --target install && \
+        echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_tpcds.control; \
+    fi
 
 #########################################################################################
 #
@@ -1900,7 +1908,6 @@ COPY --from=plv8-src /ext-src/ /ext-src/
 COPY --from=h3-pg-src /ext-src/h3-pg-src /ext-src/h3-pg-src
 COPY --from=postgresql-unit-src /ext-src/ /ext-src/
 COPY --from=pgvector-src /ext-src/ /ext-src/
-COPY --from=pg_tpcds-src /ext-src/ /ext-src/
 COPY --from=pgjwt-src /ext-src/ /ext-src/
 #COPY --from=pgrag-src /ext-src/ /ext-src/
 #COPY --from=pg_jsonschema-src /ext-src/ /ext-src/
