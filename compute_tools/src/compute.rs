@@ -2320,8 +2320,6 @@ pub fn forward_termination_signal(dev_mode: bool) {
     }
 
     if !dev_mode {
-        info!("not in dev mode, terminating pgbouncer");
-
         //  Terminate pgbouncer with SIGKILL
         match pid_file::read(PGBOUNCER_PIDFILE.into()) {
             Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
@@ -2353,25 +2351,27 @@ pub fn forward_termination_signal(dev_mode: bool) {
                 error!("error reading pgbouncer pid file: {}", e);
             }
         }
-    }
 
-    // Terminate local_proxy
-    match pid_file::read("/etc/local_proxy/pid".into()) {
-        Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
-            info!("sending SIGTERM to local_proxy process pid: {}", pid);
-            if let Err(e) = kill(pid, Signal::SIGTERM) {
-                error!("failed to terminate local_proxy: {}", e);
+        // Terminate local_proxy
+        match pid_file::read("/etc/local_proxy/pid".into()) {
+            Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
+                info!("sending SIGTERM to local_proxy process pid: {}", pid);
+                if let Err(e) = kill(pid, Signal::SIGTERM) {
+                    error!("failed to terminate local_proxy: {}", e);
+                }
+            }
+            Ok(pid_file::PidFileRead::NotHeldByAnyProcess(_)) => {
+                info!("local_proxy PID file exists but process not running");
+            }
+            Ok(pid_file::PidFileRead::NotExist) => {
+                info!("local_proxy PID file not found, process may not be running");
+            }
+            Err(e) => {
+                error!("error reading local_proxy PID file: {}", e);
             }
         }
-        Ok(pid_file::PidFileRead::NotHeldByAnyProcess(_)) => {
-            info!("local_proxy PID file exists but process not running");
-        }
-        Ok(pid_file::PidFileRead::NotExist) => {
-            info!("local_proxy PID file not found, process may not be running");
-        }
-        Err(e) => {
-            error!("error reading local_proxy PID file: {}", e);
-        }
+    } else {
+        info!("Skipping pgbouncer and local_proxy termination because in dev mode");
     }
 
     let pg_pid = PG_PID.load(Ordering::SeqCst);
