@@ -88,6 +88,12 @@ def test_storage_controller_smoke(
     neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
     env = neon_env_builder.init_configs()
 
+    # These bubble up from safekeepers
+    for ps in env.pageservers:
+        ps.allowed_errors.extend(
+            [".*Timeline.* has been deleted.*", ".*Timeline.*was cancelled and cannot be used"]
+        )
+
     # Start services by hand so that we can skip a pageserver (this will start + register later)
     env.broker.start()
     env.storage_controller.start()
