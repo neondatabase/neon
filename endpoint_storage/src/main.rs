@@ -31,13 +31,12 @@ struct Args {
 }
 
 #[derive(serde::Deserialize)]
-#[serde(tag = "type")]
 struct Config {
     #[serde(default = "listen")]
     listen: std::net::SocketAddr,
     pemfile: camino::Utf8PathBuf,
     #[serde(flatten)]
-    storage_config: remote_storage::RemoteStorageConfig,
+    storage_kind: remote_storage::TypedRemoteStorageKind,
     #[serde(default = "max_upload_file_limit")]
     max_upload_file_limit: usize,
 }
@@ -70,7 +69,8 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(config.listen).await.unwrap();
     info!("listening on {}", listener.local_addr().unwrap());
 
-    let storage = remote_storage::GenericRemoteStorage::from_config(&config.storage_config).await?;
+    let storage =
+        remote_storage::GenericRemoteStorage::from_storage_kind(config.storage_kind).await?;
     let cancel = tokio_util::sync::CancellationToken::new();
     if !args.no_s3_check_on_startup {
         app::check_storage_permissions(&storage, cancel.clone()).await?;
