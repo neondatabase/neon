@@ -27,7 +27,6 @@ pub struct ComputeConfig {
     pub spec: Option<ComputeSpec>,
 
     /// The compute_ctl configuration
-    #[allow(dead_code)]
     pub compute_ctl_config: ComputeCtlConfig,
 }
 
