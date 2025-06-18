@@ -217,6 +217,46 @@ pub struct ParsedSpec {
     pub endpoint_storage_token: Option<String>,
 }
 
+impl ParsedSpec {
+    pub fn validate(&self) -> Result<(), String> {
+        // Only Primary nodes are using safekeeper_connstrings, and at the moment
+        // this method only validates that part of the specs.
+        if self.spec.mode != ComputeMode::Primary {
+            return Ok(());
+        }
+
+        // While it seems like a good idea to check for an odd number of entries in
+        // the safekeepers connection string, changes to the list of safekeepers might
+        // incur appending a new server to a list of 3, in which case a list of 4
+        // entries is okay in production.
+        //
+        // Still we want unique entries, and at least one entry in the vector
+        if self.safekeeper_connstrings.is_empty() {
+            return Err(String::from("safekeeper_connstrings is empty"));
+        }
+
+        // check for uniqueness of the connection strings in the set
+        let mut connstrings = self.safekeeper_connstrings.clone();
+
+        connstrings.sort();
+        let mut previous = &connstrings[0];
+
+        for current in connstrings.iter().skip(1) {
+            // duplicate entry?
+            if current == previous {
+                return Err(format!(
+                    "duplicate entry in safekeeper_connstrings: {}!",
+                    current,
+                ));
+            }
+
+            previous = current;
+        }
+
+        Ok(())
+    }
+}
+
 impl TryFrom<ComputeSpec> for ParsedSpec {
     type Error = String;
     fn try_from(spec: ComputeSpec) -> Result<Self, String> {
@@ -246,6 +286,7 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
         } else {
             spec.safekeeper_connstrings.clone()
         };
+
         let storage_auth_token = spec.storage_auth_token.clone();
         let tenant_id: TenantId = if let Some(tenant_id) = spec.tenant_id {
             tenant_id
@@ -280,7 +321,7 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             .clone()
             .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_token"));
 
-        Ok(ParsedSpec {
+        let res = ParsedSpec {
             spec,
             pageserver_connstr,
             safekeeper_connstrings,
@@ -289,7 +330,11 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             timeline_id,
             endpoint_storage_addr,
             endpoint_storage_token,
-        })
+        };
+
+        // Now check validity of the parsed specification
+        res.validate()?;
+        Ok(res)
     }
 }
 
@@ -2340,5 +2385,23 @@ impl<T: 'static> JoinSetExt<T> for tokio::task::JoinSet<T> {
             let _e = sp.enter();
             f()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::File;
+
+    use super::*;
+
+    #[test]
+    fn duplicate_safekeeper_connstring() {
+        let file = File::open("tests/cluster_spec.json").unwrap();
+        let spec: ComputeSpec = serde_json::from_reader(file).unwrap();
+
+        match ParsedSpec::try_from(spec.clone()) {
+            Ok(_p) => panic!("Failed to detect duplicate entry"),
+            Err(e) => assert!(e.starts_with("duplicate entry in safekeeper_connstrings:")),
+        };
     }
 }
