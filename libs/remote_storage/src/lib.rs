@@ -682,7 +682,8 @@ impl GenericRemoteStorage {
             storage: kind.into(),
             timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
             small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT,
-        }).await
+        })
+        .await
     }
 
     pub async fn from_config(storage_config: &RemoteStorageConfig) -> anyhow::Result<Self> {
