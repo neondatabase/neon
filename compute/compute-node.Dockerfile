@@ -548,6 +548,7 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) OPTFLAGS="" && \
 #########################################################################################
 FROM build-deps AS pg_tpcds-src
 ARG PG_VERSION
+WORKDIR /ext-src/
 
 RUN case "${PG_VERSION:?}" in \
     "v14" ) \
