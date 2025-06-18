@@ -4207,7 +4207,7 @@ class Endpoint(PgProtocol, LogUtils):
         self,
         branch_name: str,
         endpoint_id: str | None = None,
-        grpc: bool = False,
+        grpc: bool | None = None,
         hot_standby: bool = False,
         lsn: Lsn | None = None,
         config_lines: list[str] | None = None,
@@ -4530,7 +4530,7 @@ class Endpoint(PgProtocol, LogUtils):
         self,
         branch_name: str,
         endpoint_id: str | None = None,
-        grpc: bool = False,
+        grpc: bool | None = None,
         hot_standby: bool = False,
         lsn: Lsn | None = None,
         config_lines: list[str] | None = None,
@@ -4636,7 +4636,7 @@ class EndpointFactory:
         endpoint_id: str | None = None,
         tenant_id: TenantId | None = None,
         lsn: Lsn | None = None,
-        grpc: bool = False,
+        grpc: bool | None = None,
         hot_standby: bool = False,
         config_lines: list[str] | None = None,
         remote_ext_base_url: str | None = None,
@@ -4671,7 +4671,7 @@ class EndpointFactory:
         endpoint_id: str | None = None,
         tenant_id: TenantId | None = None,
         lsn: Lsn | None = None,
-        grpc: bool = False,
+        grpc: bool | None = None,
         hot_standby: bool = False,
         config_lines: list[str] | None = None,
         pageserver_id: int | None = None,
@@ -4719,7 +4719,7 @@ class EndpointFactory:
         self,
         origin: Endpoint,
         endpoint_id: str | None = None,
-        grpc: bool = False,
+        grpc: bool | None = None,
         config_lines: list[str] | None = None,
     ) -> Endpoint:
         branch_name = origin.branch_name
@@ -4740,7 +4740,7 @@ class EndpointFactory:
         self,
         origin: Endpoint,
         endpoint_id: str | None = None,
-        grpc: bool = False,
+        grpc: bool | None = None,
         config_lines: list[str] | None = None,
     ) -> Endpoint:
         branch_name = origin.branch_name
