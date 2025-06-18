@@ -1862,7 +1862,9 @@ impl TenantShard {
         // Now compute the layer visibility for all (not offloaded) timelines.
         let compute_visiblity_for = {
             let timelines_accessor = self.timelines.lock().unwrap();
-            let timelines_offloaded_accessor = self.timelines_offloaded.lock().unwrap();
+            let mut timelines_offloaded_accessor = self.timelines_offloaded.lock().unwrap();
+
+            timelines_offloaded_accessor.extend(offloaded_timelines_list.into_iter());
 
             // Before activation, populate each Timeline's GcInfo with information about its children
             self.initialize_gc_info(&timelines_accessor, &timelines_offloaded_accessor, None);
@@ -1897,10 +1899,6 @@ impl TenantShard {
             .await
             .context("resume_deletion")
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
-        }
-        {
-            let mut offloaded_timelines_accessor = self.timelines_offloaded.lock().unwrap();
-            offloaded_timelines_accessor.extend(offloaded_timelines_list.into_iter());
         }
 
         // Stash the preloaded tenant manifest, and upload a new manifest if changed.
