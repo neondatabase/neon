@@ -497,6 +497,7 @@ class NeonLocalCli(AbstractNeonCli):
         tenant_id: TenantId,
         pg_version: PgVersion,
         endpoint_id: str | None = None,
+        grpc: bool | None = None,
         hot_standby: bool = False,
         lsn: Lsn | None = None,
         pageserver_id: int | None = None,
@@ -521,6 +522,8 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["--external-http-port", str(external_http_port)])
         if internal_http_port is not None:
             args.extend(["--internal-http-port", str(internal_http_port)])
+        if grpc:
+            args.append("--grpc")
         if endpoint_id is not None:
             args.append(endpoint_id)
         if hot_standby:
