@@ -542,6 +542,26 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) OPTFLAGS="" && \
 
 #########################################################################################
 #
+# Layer "pg_tpcds-build"
+# compile pg_tpcds extension
+#
+#########################################################################################
+FROM build-deps AS pg_tpcds-src
+ARG PG_VERSION
+
+WORKDIR /ext-src
+
+RUN git clone --recurse-submodules --depth 1 https://github.com/neondatabase-labs/pg_tpcds.git pg_tpcds-src 
+
+FROM pg-build AS pg_tpcds-build
+COPY --from=pg_tpcds-src /ext-src/ /ext-src/
+WORKDIR /ext-src/pg_tpcds-src
+RUN cmake -Bbuild && \
+    cmake --build build --target install && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_tpcds.control
+
+#########################################################################################
+#
 # Layer "pgjwt-build"
 # compile pgjwt extension
 #
@@ -1721,6 +1741,7 @@ COPY --from=pg_duckdb-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_repack-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgaudit-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgauditlogtofile-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg_tpcds-build /usr/local/pgsql/ /usr/local/pgsql/
 
 #########################################################################################
 #
@@ -1879,6 +1900,7 @@ COPY --from=plv8-src /ext-src/ /ext-src/
 COPY --from=h3-pg-src /ext-src/h3-pg-src /ext-src/h3-pg-src
 COPY --from=postgresql-unit-src /ext-src/ /ext-src/
 COPY --from=pgvector-src /ext-src/ /ext-src/
+COPY --from=pg_tpcds-src /ext-src/ /ext-src/
 COPY --from=pgjwt-src /ext-src/ /ext-src/
 #COPY --from=pgrag-src /ext-src/ /ext-src/
 #COPY --from=pg_jsonschema-src /ext-src/ /ext-src/
