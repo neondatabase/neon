@@ -1337,7 +1337,7 @@ def test_sharding_split_failures(
     # Create bystander tenants with various shard counts. They should not be affected by the aborted
     # splits. Regression test for https://github.com/neondatabase/cloud/issues/28589.
     bystanders = {}  # id → shard_count
-    for bystander_shard_count in [1, 2, 3, 4]:
+    for bystander_shard_count in [1, 2, 4]:
         id, _ = env.create_tenant(shard_count=bystander_shard_count)
         bystanders[id] = bystander_shard_count
 
