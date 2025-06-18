@@ -1,6 +1,7 @@
 use std::convert::TryInto;
 
 use bytes::Bytes;
+use futures::TryStreamExt;
 use futures::{Stream, StreamExt};
 use tonic::metadata::AsciiMetadataValue;
 use tonic::metadata::errors::InvalidMetadataValue;
@@ -15,6 +16,11 @@ use anyhow::Result;
 
 use crate::model;
 use crate::proto;
+
+///
+/// AuthInterceptor adds tenant, timeline, and auth header to the channel. These
+/// headers are required at the pageserver.
+///
 #[derive(Clone)]
 struct AuthInterceptor {
     tenant_id: AsciiMetadataValue,
@@ -157,10 +163,7 @@ impl Client {
         let response_stream: Streaming<proto::GetPageResponse> =
             self.client.get_pages(req_new).await?.into_inner();
 
-        let domain_stream = response_stream.map(|proto| match proto {
-            Ok(proto) => Ok(model::GetPageResponse::from(proto)),
-            Err(status) => Err(status),
-        });
+        let domain_stream = response_stream.map_ok(model::GetPageResponse::from);
 
         Ok(domain_stream)
     }
@@ -183,6 +186,6 @@ impl Client {
     ) -> Result<model::GetSlruSegmentResponse, tonic::Status> {
         let proto_req = proto::GetSlruSegmentRequest::from(req);
         let response = self.client.get_slru_segment(proto_req).await?;
-        Ok(response.into_inner().segment as Bytes)
+        Ok(response.into_inner().try_into()?)
     }
 }
