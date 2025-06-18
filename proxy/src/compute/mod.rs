@@ -136,11 +136,11 @@ impl AuthInfo {
         }
     }
 
-    pub(crate) fn with_auth_keys(keys: &ComputeCredentialKeys) -> Self {
+    pub(crate) fn with_auth_keys(keys: ComputeCredentialKeys) -> Self {
         Self {
             auth: match keys {
                 ComputeCredentialKeys::AuthKeys(AuthKeys::ScramSha256(auth_keys)) => {
-                    Some(Auth::Scram(Box::new(*auth_keys)))
+                    Some(Auth::Scram(Box::new(auth_keys)))
                 }
                 ComputeCredentialKeys::JwtPayload(_) | ComputeCredentialKeys::None => None,
             },

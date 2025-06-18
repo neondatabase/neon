@@ -59,7 +59,7 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, query: LfcQueryMethod):
 
     pg_conn = endpoint.connect()
     pg_cur = pg_conn.cursor()
-    pg_cur.execute("create extension neon version '1.6'")
+    pg_cur.execute("create extension neon")
     pg_cur.execute("create database lfc")
 
     lfc_conn = endpoint.connect(dbname="lfc")
@@ -84,11 +84,8 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, query: LfcQueryMethod):
     endpoint.stop()
     endpoint.start()
 
-    # wait until compute_ctl completes downgrade of extension to default version
-    time.sleep(1)
     pg_conn = endpoint.connect()
     pg_cur = pg_conn.cursor()
-    pg_cur.execute("alter extension neon update to '1.6'")
 
     lfc_conn = endpoint.connect(dbname="lfc")
     lfc_cur = lfc_conn.cursor()
@@ -144,7 +141,7 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, query: LfcQueryMet
 
     pg_conn = endpoint.connect()
     pg_cur = pg_conn.cursor()
-    pg_cur.execute("create extension neon version '1.6'")
+    pg_cur.execute("create extension neon")
     pg_cur.execute("CREATE DATABASE lfc")
 
     lfc_conn = endpoint.connect(dbname="lfc")
@@ -188,7 +185,8 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, query: LfcQueryMet
             pg_cur.execute("select pg_reload_conf()")
 
             if query is LfcQueryMethod.COMPUTE_CTL:
-                http_client.prewarm_lfc()
+                # Same thing as prewarm_lfc(), testing other method
+                http_client.prewarm_lfc(endpoint.endpoint_id)
             else:
                 pg_cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
 

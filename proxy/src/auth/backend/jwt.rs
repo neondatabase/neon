@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use arc_swap::ArcSwapOption;
+use base64::Engine as _;
+use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use clashmap::ClashMap;
 use jose_jwk::crypto::KeyInfo;
 use reqwest::{Client, redirect};
@@ -347,17 +349,17 @@ impl JwkCacheEntryLock {
             .split_once('.')
             .ok_or(JwtEncodingError::InvalidCompactForm)?;
 
-        let header = base64::decode_config(header, base64::URL_SAFE_NO_PAD)?;
+        let header = BASE64_URL_SAFE_NO_PAD.decode(header)?;
         let header = serde_json::from_slice::<JwtHeader<'_>>(&header)?;
 
-        let payloadb = base64::decode_config(payload, base64::URL_SAFE_NO_PAD)?;
+        let payloadb = BASE64_URL_SAFE_NO_PAD.decode(payload)?;
         let payload = serde_json::from_slice::<JwtPayload<'_>>(&payloadb)?;
 
         if let Some(iss) = &payload.issuer {
             ctx.set_jwt_issuer(iss.as_ref().to_owned());
         }
 
-        let sig = base64::decode_config(signature, base64::URL_SAFE_NO_PAD)?;
+        let sig = BASE64_URL_SAFE_NO_PAD.decode(signature)?;
 
         let kid = header.key_id.ok_or(JwtError::MissingKeyId)?;
 
@@ -796,7 +798,6 @@ mod tests {
     use std::net::SocketAddr;
     use std::time::SystemTime;
 
-    use base64::URL_SAFE_NO_PAD;
     use bytes::Bytes;
     use http::Response;
     use http_body_util::Full;
@@ -871,9 +872,8 @@ mod tests {
             key_id: Some(Cow::Owned(kid)),
         };
 
-        let header =
-            base64::encode_config(serde_json::to_string(&header).unwrap(), URL_SAFE_NO_PAD);
-        let body = base64::encode_config(serde_json::to_string(&body).unwrap(), URL_SAFE_NO_PAD);
+        let header = BASE64_URL_SAFE_NO_PAD.encode(serde_json::to_string(&header).unwrap());
+        let body = BASE64_URL_SAFE_NO_PAD.encode(serde_json::to_string(&body).unwrap());
 
         format!("{header}.{body}")
     }
@@ -883,7 +883,7 @@ mod tests {
 
         let payload = build_jwt_payload(kid, jose_jwa::Signing::Es256);
         let sig: Signature = SigningKey::from(key).sign(payload.as_bytes());
-        let sig = base64::encode_config(sig.to_bytes(), URL_SAFE_NO_PAD);
+        let sig = BASE64_URL_SAFE_NO_PAD.encode(sig.to_bytes());
 
         format!("{payload}.{sig}")
     }
@@ -893,7 +893,7 @@ mod tests {
 
         let payload = build_custom_jwt_payload(kid, body, jose_jwa::Signing::Es256);
         let sig: Signature = SigningKey::from(key).sign(payload.as_bytes());
-        let sig = base64::encode_config(sig.to_bytes(), URL_SAFE_NO_PAD);
+        let sig = BASE64_URL_SAFE_NO_PAD.encode(sig.to_bytes());
 
         format!("{payload}.{sig}")
     }
@@ -904,7 +904,7 @@ mod tests {
 
         let payload = build_jwt_payload(kid, jose_jwa::Signing::Rs256);
         let sig = SigningKey::<sha2::Sha256>::new(key).sign(payload.as_bytes());
-        let sig = base64::encode_config(sig.to_bytes(), URL_SAFE_NO_PAD);
+        let sig = BASE64_URL_SAFE_NO_PAD.encode(sig.to_bytes());
 
         format!("{payload}.{sig}")
     }

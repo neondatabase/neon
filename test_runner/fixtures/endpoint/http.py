@@ -69,15 +69,17 @@ class EndpointHttpClient(requests.Session):
         json: dict[str, str] = res.json()
         return json
 
-    def prewarm_lfc(self):
-        self.post(f"http://localhost:{self.external_port}/lfc/prewarm").raise_for_status()
+    def prewarm_lfc(self, from_endpoint_id: str | None = None):
+        url: str = f"http://localhost:{self.external_port}/lfc/prewarm"
+        params = {"from_endpoint": from_endpoint_id} if from_endpoint_id else dict()
+        self.post(url, params=params).raise_for_status()
 
         def prewarmed():
             json = self.prewarm_lfc_status()
             status, err = json["status"], json.get("error")
             assert status == "completed", f"{status}, error {err}"
 
-        wait_until(prewarmed)
+        wait_until(prewarmed, timeout=60)
 
     def offload_lfc(self):
         url = f"http://localhost:{self.external_port}/lfc/offload"

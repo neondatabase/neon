@@ -17,7 +17,7 @@ use pageserver_api::controller_api::{
     SafekeeperDescribeResponse, SkSchedulingPolicy, TimelineImportRequest,
 };
 use pageserver_api::models::{SafekeeperInfo, SafekeepersInfo, TimelineInfo};
-use safekeeper_api::membership::{MemberSet, SafekeeperId};
+use safekeeper_api::membership::{MemberSet, SafekeeperGeneration, SafekeeperId};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use utils::id::{NodeId, TenantId, TimelineId};
@@ -25,6 +25,13 @@ use utils::logging::SecretString;
 use utils::lsn::Lsn;
 
 use super::Service;
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct TimelineLocateResponse {
+    pub generation: SafekeeperGeneration,
+    pub sk_set: Vec<NodeId>,
+    pub new_sk_set: Option<Vec<NodeId>>,
+}
 
 impl Service {
     /// Timeline creation on safekeepers
@@ -394,6 +401,38 @@ impl Service {
             tracing::info!("didn't import timeline into db, as it is already present in db");
         }
         Ok(())
+    }
+
+    /// Locate safekeepers for a timeline.
+    /// Return the generation, sk_set and new_sk_set if present.
+    /// If the timeline is not storcon-managed, return NotFound.
+    pub(crate) async fn tenant_timeline_locate(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Result<TimelineLocateResponse, ApiError> {
+        let timeline = self
+            .persistence
+            .get_timeline(tenant_id, timeline_id)
+            .await?;
+
+        let Some(timeline) = timeline else {
+            return Err(ApiError::NotFound(
+                anyhow::anyhow!("Timeline {}/{} not found", tenant_id, timeline_id).into(),
+            ));
+        };
+
+        Ok(TimelineLocateResponse {
+            generation: SafekeeperGeneration::new(timeline.generation as u32),
+            sk_set: timeline
+                .sk_set
+                .iter()
+                .map(|id| NodeId(*id as u64))
+                .collect(),
+            new_sk_set: timeline
+                .new_sk_set
+                .map(|sk_set| sk_set.iter().map(|id| NodeId(*id as u64)).collect()),
+        })
     }
 
     /// Perform timeline deletion on safekeepers. Will return success: we persist the deletion into the reconciler.

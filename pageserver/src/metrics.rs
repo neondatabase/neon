@@ -1053,6 +1053,15 @@ pub(crate) static TENANT_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("Failed to register pageserver_tenant_states_count metric")
 });
 
+pub(crate) static TIMELINE_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_timeline_states_count",
+        "Count of timelines per state",
+        &["state"]
+    )
+    .expect("Failed to register pageserver_timeline_states_count metric")
+});
+
 /// A set of broken tenants.
 ///
 /// These are expected to be so rare that a set is fine. Set as in a new timeseries per each broken
@@ -3325,6 +3334,8 @@ impl TimelineMetrics {
                 &timeline_id,
             );
 
+        TIMELINE_STATE_METRIC.with_label_values(&["active"]).inc();
+
         TimelineMetrics {
             tenant_id,
             shard_id,
@@ -3478,6 +3489,8 @@ impl TimelineMetrics {
             // TODO: this can be removed once https://github.com/neondatabase/neon/issues/5080
             return;
         }
+
+        TIMELINE_STATE_METRIC.with_label_values(&["active"]).dec();
 
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
@@ -4415,18 +4428,16 @@ pub(crate) static BASEBACKUP_CACHE_PREPARE: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static BASEBACKUP_CACHE_ENTRIES: Lazy<IntGauge> = Lazy::new(|| {
-    register_int_gauge!(
+pub(crate) static BASEBACKUP_CACHE_ENTRIES: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
         "pageserver_basebackup_cache_entries_total",
         "Number of entries in the basebackup cache"
     )
     .expect("failed to define a metric")
 });
 
-// FIXME: Support basebackup cache size metrics.
-#[allow(dead_code)]
-pub(crate) static BASEBACKUP_CACHE_SIZE: Lazy<IntGauge> = Lazy::new(|| {
-    register_int_gauge!(
+pub(crate) static BASEBACKUP_CACHE_SIZE: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
         "pageserver_basebackup_cache_size_bytes",
         "Total size of all basebackup cache entries on disk in bytes"
     )

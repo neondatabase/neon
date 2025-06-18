@@ -2,7 +2,9 @@ use std::io::{Read, Write, stdin, stdout};
 use std::time::Duration;
 
 use clap::Parser;
-use pageserver_api::models::{PagestreamRequest, PagestreamTestRequest};
+use pageserver_api::pagestream_api::{
+    PagestreamFeMessage, PagestreamRequest, PagestreamTestRequest,
+};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
@@ -28,17 +30,15 @@ async fn main() -> anyhow::Result<()> {
     let mut msg = 0;
     loop {
         msg += 1;
-        let fut = sender.send(pageserver_api::models::PagestreamFeMessage::Test(
-            PagestreamTestRequest {
-                hdr: PagestreamRequest {
-                    reqid: 0,
-                    request_lsn: Lsn(23),
-                    not_modified_since: Lsn(23),
-                },
-                batch_key: 42,
-                message: format!("message {}", msg),
+        let fut = sender.send(PagestreamFeMessage::Test(PagestreamTestRequest {
+            hdr: PagestreamRequest {
+                reqid: 0,
+                request_lsn: Lsn(23),
+                not_modified_since: Lsn(23),
             },
-        ));
+            batch_key: 42,
+            message: format!("message {}", msg),
+        }));
         let Ok(res) = tokio::time::timeout(Duration::from_secs(10), fut).await else {
             eprintln!("pipe seems full");
             break;

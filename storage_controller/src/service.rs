@@ -1683,6 +1683,8 @@ impl Service {
                     None,
                     "".to_string(),
                     123,
+                    None,
+                    None,
                     AvailabilityZone("test_az".to_string()),
                     false,
                 )
@@ -2267,6 +2269,7 @@ impl Service {
                     // fail, and start from scratch, so it doesn't make sense for us to try and preserve
                     // the stale/multi states at this point.
                     mode: LocationConfigMode::AttachedSingle,
+                    stripe_size: shard.shard.stripe_size,
                 });
 
                 shard.generation = std::cmp::max(shard.generation, Some(new_gen));
@@ -2300,6 +2303,7 @@ impl Service {
                     id: *tenant_shard_id,
                     r#gen: None,
                     mode: LocationConfigMode::Secondary,
+                    stripe_size: shard.shard.stripe_size,
                 });
 
                 // We must not update observed, because we have no guarantee that our
@@ -6649,6 +6653,8 @@ impl Service {
 
     /// This is for debug/support only: assuming tenant data is already present in S3, we "create" a
     /// tenant with a very high generation number so that it will see the existing data.
+    /// It does not create timelines on safekeepers, because they might already exist on some
+    /// safekeeper set. So, the timelines are not storcon-managed after the import.
     pub(crate) async fn tenant_import(
         &self,
         tenant_id: TenantId,
@@ -7250,6 +7256,12 @@ impl Service {
             ));
         }
 
+        if register_req.listen_grpc_addr.is_some() != register_req.listen_grpc_port.is_some() {
+            return Err(ApiError::BadRequest(anyhow::anyhow!(
+                "must specify both gRPC address and port"
+            )));
+        }
+
         // Ordering: we must persist the new node _before_ adding it to in-memory state.
         // This ensures that before we use it for anything or expose it via any external
         // API, it is guaranteed to be available after a restart.
@@ -7260,6 +7272,8 @@ impl Service {
             register_req.listen_https_port,
             register_req.listen_pg_addr,
             register_req.listen_pg_port,
+            register_req.listen_grpc_addr,
+            register_req.listen_grpc_port,
             register_req.availability_zone_id.clone(),
             self.config.use_https_pageserver_api,
         );
@@ -8764,15 +8778,22 @@ impl Service {
         let waiter_count = waiters.len();
         match self.await_waiters(waiters, RECONCILE_TIMEOUT).await {
             Ok(()) => {}
-            Err(ReconcileWaitError::Failed(_, reconcile_error))
-                if matches!(*reconcile_error, ReconcileError::Cancel) =>
-            {
-                // Ignore reconciler cancel errors: this reconciler might have shut down
-                // because some other change superceded it.  We will return a nonzero number,
-                // so the caller knows they might have to call again to quiesce the system.
-            }
             Err(e) => {
-                return Err(e);
+                if let ReconcileWaitError::Failed(_, reconcile_error) = &e {
+                    match **reconcile_error {
+                        ReconcileError::Cancel
+                        | ReconcileError::Remote(mgmt_api::Error::Cancelled) => {
+                            // Ignore reconciler cancel errors: this reconciler might have shut down
+                            // because some other change superceded it.  We will return a nonzero number,
+                            // so the caller knows they might have to call again to quiesce the system.
+                        }
+                        _ => {
+                            return Err(e);
+                        }
+                    }
+                } else {
+                    return Err(e);
+                }
             }
         };
 

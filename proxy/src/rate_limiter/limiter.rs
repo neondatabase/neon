@@ -12,10 +12,9 @@ use rand::{Rng, SeedableRng};
 use tokio::time::{Duration, Instant};
 use tracing::info;
 
+use super::LeakyBucketConfig;
 use crate::ext::LockExt;
 use crate::intern::EndpointIdInt;
-
-use super::LeakyBucketConfig;
 
 pub struct GlobalRateLimiter {
     data: Vec<RateBucket>,

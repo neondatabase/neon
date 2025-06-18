@@ -146,6 +146,7 @@ impl NeonControlPlaneClient {
                     public_access_blocked: block_public_connections,
                     vpc_access_blocked: block_vpc_connections,
                 },
+                rate_limits: body.rate_limits,
             })
         }
         .inspect_err(|e| tracing::debug!(error = ?e))
@@ -312,6 +313,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
             allowed_ips: Arc::new(auth_info.allowed_ips),
             allowed_vpce: Arc::new(auth_info.allowed_vpc_endpoint_ids),
             flags: auth_info.access_blocker_flags,
+            rate_limits: auth_info.rate_limits,
         };
         let role_control = RoleAccessControl {
             secret: auth_info.secret,
@@ -357,6 +359,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
             allowed_ips: Arc::new(auth_info.allowed_ips),
             allowed_vpce: Arc::new(auth_info.allowed_vpc_endpoint_ids),
             flags: auth_info.access_blocker_flags,
+            rate_limits: auth_info.rate_limits,
         };
         let role_control = RoleAccessControl {
             secret: auth_info.secret,
