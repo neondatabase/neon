@@ -1,4 +1,4 @@
--- update approximately 2000 rows or 200 kb in the  accounting.accounting_coding_body_tracking_category_selectiontable
+-- update approximately 2000 rows or 200 kb in the accounting_coding_body_tracking_category_selection table
 -- takes about 1 second
 UPDATE  accounting.accounting_coding_body_tracking_category_selection
 SET created_at = now()

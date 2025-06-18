@@ -1,4 +1,4 @@
--- add 100000 rows or approximately 20 MB to the ocr.ocr_pipeline_results_version table
+-- add 100000 rows or approximately 20 MB to the ocr_pipeline_results_version table
 -- takes about 1 second
 INSERT INTO ocr.ocr_pipeline_results_version (
     id, transaction_id, operation_type, created_at, updated_at, s3_filename, completed_at, result,

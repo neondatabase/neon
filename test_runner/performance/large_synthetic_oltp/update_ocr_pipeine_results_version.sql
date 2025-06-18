@@ -1,5 +1,5 @@
--- update approximately 2000 rows or 400 kb in the   ocr.ocr_pipeline_results_version   table
--- takes about 1 seconds
+-- update approximately 2000 rows or 400 kb in the ocr_pipeline_results_version table
+-- takes about 1 second
 UPDATE   ocr.ocr_pipeline_results_version 
 SET is_async = NOT is_async
 WHERE ctid in (

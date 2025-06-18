@@ -1,4 +1,4 @@
--- update approximately 4000 rows or 1 MB in the stripe.stripe_authorization_event_log table
+-- update approximately 4000 rows or 1 MB in the stripe_authorization_event_log table
 -- takes about 5 minutes
 UPDATE stripe.stripe_authorization_event_log
 SET approved = NOT approved

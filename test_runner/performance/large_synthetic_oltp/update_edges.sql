@@ -1,4 +1,4 @@
--- update approximately 4000 rows or 600 kb in the workflows.edges table
+-- update approximately 4000 rows or 600 kb in the edges table
 -- takes about 1 second
 UPDATE workflows.edges
 SET created_at = now()

@@ -1,4 +1,4 @@
--- add 100000 rows or approximately 11 MB to the workflows.edges table
+-- add 100000 rows or approximately 11 MB to the edges table
 -- takes about 1 minute
 INSERT INTO workflows.edges (created_at, workflow_id, uuid, from_vertex_id, to_vertex_id)
 SELECT 

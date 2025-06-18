@@ -1,4 +1,4 @@
--- update approximately 6000 rows or 600 kb in the banking.raw_finicity_transaction table
+-- update approximately 6000 rows or 600 kb in the raw_finicity_transaction table
 -- takes about 1 second
 UPDATE banking.raw_finicity_transaction
 SET raw_data = 
