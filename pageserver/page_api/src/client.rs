@@ -90,7 +90,11 @@ impl Client {
         let channel = endpoint.connect().await?;
         let auth = AuthInterceptor::new(tenant_id, timeline_id, auth_header, shard_id)
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        let client = proto::PageServiceClient::with_interceptor(channel, auth);
+        let client = proto::PageServiceClient::with_interceptor(channel, auth)
+            // TODO: benchmark this (including network latency), and also gzip.
+            // TODO: consider making this configurable.
+            .accept_compressed(tonic::codec::CompressionEncoding::Zstd)
+            .send_compressed(tonic::codec::CompressionEncoding::Zstd);
 
         Ok(Self { client })
     }

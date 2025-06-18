@@ -3286,7 +3286,14 @@ impl GrpcPageServiceHandler {
                 Ok(req)
             }))
             // Run the page service.
-            .service(proto::PageServiceServer::new(page_service_handler));
+            .service(
+                proto::PageServiceServer::new(page_service_handler)
+                    // Support both gzip and zstd compression. The client decides what to use.
+                    .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+                    .accept_compressed(tonic::codec::CompressionEncoding::Zstd)
+                    .send_compressed(tonic::codec::CompressionEncoding::Gzip)
+                    .send_compressed(tonic::codec::CompressionEncoding::Zstd),
+            );
         let server = server.add_service(page_service);
 
         // Reflection service for use with e.g. grpcurl.
@@ -3532,7 +3539,6 @@ impl proto::PageService for GrpcPageServiceHandler {
         Ok(tonic::Response::new(resp.into()))
     }
 
-    // TODO: ensure clients use gzip compression for the stream.
     #[instrument(skip_all, fields(lsn))]
     async fn get_base_backup(
         &self,
