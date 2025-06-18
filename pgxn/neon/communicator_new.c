@@ -13,6 +13,8 @@
  */
 #include "postgres.h"
 
+#include <unistd.h>
+
 #include "access/xlog.h"
 #include "access/xlogdefs.h"
 #if PG_VERSION_NUM >= 150000
