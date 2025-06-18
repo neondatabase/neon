@@ -25,12 +25,13 @@ use pageserver_api::config::{
     PageServiceProtocolPipelinedBatchingStrategy, PageServiceProtocolPipelinedExecutionStrategy,
 };
 use pageserver_api::key::rel_block_to_key;
-use pageserver_api::models::{
-    self, PageTraceEvent, PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
+use pageserver_api::models::{PageTraceEvent, TenantState};
+use pageserver_api::pagestream_api::{
+    self, PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
     PagestreamErrorResponse, PagestreamExistsRequest, PagestreamExistsResponse,
     PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetSlruSegmentRequest,
     PagestreamGetSlruSegmentResponse, PagestreamNblocksRequest, PagestreamNblocksResponse,
-    PagestreamProtocolVersion, PagestreamRequest, TenantState,
+    PagestreamProtocolVersion, PagestreamRequest,
 };
 use pageserver_api::reltag::SlruKind;
 use pageserver_api::shard::TenantShardId;
@@ -712,7 +713,7 @@ struct BatchedGetPageRequest {
 
 #[cfg(feature = "testing")]
 struct BatchedTestRequest {
-    req: models::PagestreamTestRequest,
+    req: pagestream_api::PagestreamTestRequest,
     timer: SmgrOpTimer,
 }
 
@@ -726,13 +727,13 @@ enum BatchedFeMessage {
         span: Span,
         timer: SmgrOpTimer,
         shard: WeakHandle<TenantManagerTypes>,
-        req: models::PagestreamExistsRequest,
+        req: PagestreamExistsRequest,
     },
     Nblocks {
         span: Span,
         timer: SmgrOpTimer,
         shard: WeakHandle<TenantManagerTypes>,
-        req: models::PagestreamNblocksRequest,
+        req: PagestreamNblocksRequest,
     },
     GetPage {
         span: Span,
@@ -744,13 +745,13 @@ enum BatchedFeMessage {
         span: Span,
         timer: SmgrOpTimer,
         shard: WeakHandle<TenantManagerTypes>,
-        req: models::PagestreamDbSizeRequest,
+        req: PagestreamDbSizeRequest,
     },
     GetSlruSegment {
         span: Span,
         timer: SmgrOpTimer,
         shard: WeakHandle<TenantManagerTypes>,
-        req: models::PagestreamGetSlruSegmentRequest,
+        req: PagestreamGetSlruSegmentRequest,
     },
     #[cfg(feature = "testing")]
     Test {
@@ -2443,10 +2444,9 @@ impl PageServerHandler {
                 .map(|(req, res)| {
                     res.map(|page| {
                         (
-                            PagestreamBeMessage::GetPage(models::PagestreamGetPageResponse {
-                                req: req.req,
-                                page,
-                            }),
+                            PagestreamBeMessage::GetPage(
+                                pagestream_api::PagestreamGetPageResponse { req: req.req, page },
+                            ),
                             req.timer,
                             req.ctx,
                         )
@@ -2513,7 +2513,7 @@ impl PageServerHandler {
                 .map(|(req, res)| {
                     res.map(|()| {
                         (
-                            PagestreamBeMessage::Test(models::PagestreamTestResponse {
+                            PagestreamBeMessage::Test(pagestream_api::PagestreamTestResponse {
                                 req: req.req.clone(),
                             }),
                             req.timer,
