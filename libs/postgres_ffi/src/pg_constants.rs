@@ -11,6 +11,8 @@
 
 use crate::{BLCKSZ, PageHeaderData};
 
+// Note: There are a few more widely-used constants in the postgres_ffi_types::constants crate.
+
 // From storage_xlog.h
 pub const XLOG_SMGR_CREATE: u8 = 0x10;
 pub const XLOG_SMGR_TRUNCATE: u8 = 0x20;
