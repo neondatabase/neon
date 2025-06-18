@@ -189,6 +189,8 @@ pub struct GetBaseBackupRequest {
     pub lsn: Option<Lsn>,
     /// If true, logical replication slots will not be created.
     pub replica: bool,
+    /// If true, include relation files in the base backup. Mainly for debugging and tests.
+    pub full: bool,
 }
 
 impl From<proto::GetBaseBackupRequest> for GetBaseBackupRequest {
@@ -196,6 +198,7 @@ impl From<proto::GetBaseBackupRequest> for GetBaseBackupRequest {
         Self {
             lsn: (pb.lsn != 0).then_some(Lsn(pb.lsn)),
             replica: pb.replica,
+            full: pb.full,
         }
     }
 }
@@ -205,6 +208,7 @@ impl From<GetBaseBackupRequest> for proto::GetBaseBackupRequest {
         Self {
             lsn: request.lsn.unwrap_or_default().0,
             replica: request.replica,
+            full: request.full,
         }
     }
 }
