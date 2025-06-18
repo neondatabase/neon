@@ -552,12 +552,10 @@ WORKDIR /ext-src/
 
 RUN case "${PG_VERSION:?}" in \
     "v14" ) \
-        ;; \
-    *) \
-        echo "skipping the version of pg_tpcds for $PG_VERSION" && exit 0 \
-        ;; \
-    esac && \
-    git clone --recurse-submodules --depth 1 https://github.com/neondatabase-labs/pg_tpcds.git pg_tpcds-src
+        echo "Skipping pg_tpcds for PG_VERSION=$PG_VERSION" && exit 0 ;; \
+    * ) \
+        git clone --recurse-submodules --depth 1 https://github.com/neondatabase-labs/pg_tpcds.git pg_tpcds-src ;; \
+    esac
 
 FROM pg-build AS pg_tpcds-build
 COPY --from=pg_tpcds-src /ext-src/ /ext-src/
