@@ -19,6 +19,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
     Safekeeper,
+    StorageControllerApiException,
     flush_ep_to_pageserver,
 )
 from fixtures.pageserver.http import PageserverApiException
@@ -127,6 +128,12 @@ check_ondisk_data_compatibility_if_enabled = pytest.mark.skipif(
     reason="CHECK_ONDISK_DATA_COMPATIBILITY env is not set",
 )
 
+skip_old_debug_versions = pytest.mark.skipif(
+    os.getenv("BUILD_TYPE", "debug") == "debug"
+    and os.getenv("DEFAULT_PG_VERSION") in [PgVersion.V14, PgVersion.V15, PgVersion.V16],
+    reason="compatibility snaphots not available for old versions of debug builds",
+)
+
 
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(before="test_forward_compatibility")
@@ -197,6 +204,7 @@ ingest_lag_log_line = ".*ingesting record with timestamp lagging more than wait_
 
 
 @check_ondisk_data_compatibility_if_enabled
+@skip_old_debug_versions
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
 def test_backward_compatibility(
@@ -224,6 +232,7 @@ def test_backward_compatibility(
 
 
 @check_ondisk_data_compatibility_if_enabled
+@skip_old_debug_versions
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
 def test_forward_compatibility(
@@ -293,7 +302,20 @@ def test_forward_compatibility(
 def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, repo_dir: Path):
     ep = env.endpoints.create("main")
     ep_env = {"LD_LIBRARY_PATH": str(env.pg_distrib_dir / f"v{env.pg_version}/lib")}
-    ep.start(env=ep_env)
+
+    # If the compatibility snapshot was created with --timelines-onto-safekeepers=false,
+    # we should not pass safekeeper_generation to the endpoint because the compute
+    # will not be able to start.
+    # Zero generation is INVALID_GENERATION.
+    generation = 0
+    try:
+        res = env.storage_controller.timeline_locate(env.initial_tenant, env.initial_timeline)
+        generation = res["generation"]
+    except StorageControllerApiException as e:
+        if e.status_code != 404 or not re.search(r"Timeline .* not found", str(e)):
+            raise e
+
+    ep.start(env=ep_env, safekeeper_generation=generation)
 
     connstr = ep.connstr()
 
@@ -343,7 +365,7 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
     )
 
     # Timeline exists again: restart the endpoint
-    ep.start(env=ep_env)
+    ep.start(env=ep_env, safekeeper_generation=generation)
 
     pg_bin.run_capture(
         ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump-from-wal.sql'}"]
@@ -593,6 +615,7 @@ def test_historic_storage_formats(
 
 
 @check_ondisk_data_compatibility_if_enabled
+@skip_old_debug_versions
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.parametrize(
     **fixtures.utils.allpairs_versions(),

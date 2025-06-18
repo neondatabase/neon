@@ -14,7 +14,7 @@ use std::{io, str};
 
 use anyhow::{Context as _, anyhow, bail};
 use async_compression::tokio::write::GzipEncoder;
-use bytes::{Buf, BytesMut};
+use bytes::{Buf as _, BufMut as _, BytesMut};
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
 use itertools::Itertools;
@@ -621,60 +621,6 @@ enum PageStreamError {
     /// Request asked for something that doesn't make sense, like an invalid LSN
     #[error("Bad request: {0}")]
     BadRequest(Cow<'static, str>),
-}
-
-impl PageStreamError {
-    /// Converts a PageStreamError into a proto::GetPageResponse with the appropriate status
-    /// code, or a gRPC status if it should terminate the stream (e.g. shutdown). This is a
-    /// convenience method for use from a get_pages gRPC stream.
-    #[allow(clippy::result_large_err)]
-    fn into_get_page_response(
-        self,
-        request_id: page_api::RequestID,
-    ) -> Result<proto::GetPageResponse, tonic::Status> {
-        use page_api::GetPageStatusCode;
-        use tonic::Code;
-
-        // We dispatch to Into<tonic::Status> first, and then map it to a GetPageResponse.
-        let status: tonic::Status = self.into();
-        let status_code = match status.code() {
-            // We shouldn't see an OK status here, because we're emitting an error.
-            Code::Ok => {
-                debug_assert_ne!(status.code(), Code::Ok);
-                return Err(tonic::Status::internal(format!(
-                    "unexpected OK status: {status:?}",
-                )));
-            }
-
-            // These are per-request errors, returned as GetPageResponses.
-            Code::AlreadyExists => GetPageStatusCode::InvalidRequest,
-            Code::DataLoss => GetPageStatusCode::InternalError,
-            Code::FailedPrecondition => GetPageStatusCode::InvalidRequest,
-            Code::InvalidArgument => GetPageStatusCode::InvalidRequest,
-            Code::Internal => GetPageStatusCode::InternalError,
-            Code::NotFound => GetPageStatusCode::NotFound,
-            Code::OutOfRange => GetPageStatusCode::InvalidRequest,
-            Code::ResourceExhausted => GetPageStatusCode::SlowDown,
-
-            // These should terminate the stream.
-            Code::Aborted => return Err(status),
-            Code::Cancelled => return Err(status),
-            Code::DeadlineExceeded => return Err(status),
-            Code::PermissionDenied => return Err(status),
-            Code::Unauthenticated => return Err(status),
-            Code::Unavailable => return Err(status),
-            Code::Unimplemented => return Err(status),
-            Code::Unknown => return Err(status),
-        };
-
-        Ok(page_api::GetPageResponse {
-            request_id,
-            status_code,
-            reason: Some(status.message().to_string()),
-            page_images: Vec::new(),
-        }
-        .into())
-    }
 }
 
 impl From<PageStreamError> for tonic::Status {
@@ -3438,8 +3384,8 @@ impl GrpcPageServiceHandler {
 
     /// Processes a GetPage batch request, via the GetPages bidirectional streaming RPC.
     ///
-    /// NB: errors will terminate the stream. Per-request errors should return a GetPageResponse
-    /// with an appropriate status code instead.
+    /// NB: errors returned from here are intercepted in get_pages(), and may be converted to a
+    /// GetPageResponse with an appropriate status code to avoid terminating the stream.
     ///
     /// TODO: get_vectored() currently enforces a batch limit of 32. Postgres will typically send
     /// batches up to effective_io_concurrency = 100. Either we have to accept large batches, or
@@ -3456,7 +3402,7 @@ impl GrpcPageServiceHandler {
         let ctx = ctx.with_scope_page_service_pagestream(&timeline);
 
         // Validate the request, decorate the span, and convert it to a Pagestream request.
-        let req: page_api::GetPageRequest = req.try_into()?;
+        let req = page_api::GetPageRequest::try_from(req)?;
 
         span_record!(
             req_id = %req.request_id,
@@ -3467,7 +3413,7 @@ impl GrpcPageServiceHandler {
         );
 
         let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn(); // hold guard
-        let effective_lsn = match PageServerHandler::effective_request_lsn(
+        let effective_lsn = PageServerHandler::effective_request_lsn(
             &timeline,
             timeline.get_last_record_lsn(),
             req.read_lsn.request_lsn,
@@ -3475,10 +3421,7 @@ impl GrpcPageServiceHandler {
                 .not_modified_since_lsn
                 .unwrap_or(req.read_lsn.request_lsn),
             &latest_gc_cutoff_lsn,
-        ) {
-            Ok(lsn) => lsn,
-            Err(err) => return err.into_get_page_response(req.request_id),
-        };
+        )?;
 
         let mut batch = SmallVec::with_capacity(req.block_numbers.len());
         for blkno in req.block_numbers {
@@ -3535,7 +3478,7 @@ impl GrpcPageServiceHandler {
                         "unexpected response: {resp:?}"
                     )));
                 }
-                Err(err) => return err.err.into_get_page_response(req.request_id),
+                Err(err) => return Err(err.err.into()),
             };
         }
 
@@ -3601,44 +3544,43 @@ impl proto::PageService for GrpcPageServiceHandler {
         let timeline = self.get_request_timeline(&req).await?;
         let ctx = self.ctx.with_scope_timeline(&timeline);
 
-        // Validate the request, decorate the span, and wait for the LSN to arrive.
-        //
-        // TODO: this requires a read LSN, is that ok?
+        // Validate the request and decorate the span.
         Self::ensure_shard_zero(&timeline)?;
         if timeline.is_archived() == Some(true) {
             return Err(tonic::Status::failed_precondition("timeline is archived"));
         }
-        let req: page_api::GetBaseBackupRequest = req.into_inner().try_into()?;
+        let req: page_api::GetBaseBackupRequest = req.into_inner().into();
 
-        span_record!(lsn=%req.read_lsn);
+        span_record!(lsn=?req.lsn);
 
-        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
-        timeline
-            .wait_lsn(
-                req.read_lsn.request_lsn,
-                WaitLsnWaiter::PageService,
-                WaitLsnTimeout::Default,
-                &ctx,
-            )
-            .await?;
-        timeline
-            .check_lsn_is_in_scope(req.read_lsn.request_lsn, &latest_gc_cutoff_lsn)
-            .map_err(|err| {
-                tonic::Status::invalid_argument(format!("invalid basebackup LSN: {err}"))
-            })?;
+        // Wait for the LSN to arrive, if given.
+        if let Some(lsn) = req.lsn {
+            let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
+            timeline
+                .wait_lsn(
+                    lsn,
+                    WaitLsnWaiter::PageService,
+                    WaitLsnTimeout::Default,
+                    &ctx,
+                )
+                .await?;
+            timeline
+                .check_lsn_is_in_scope(lsn, &latest_gc_cutoff_lsn)
+                .map_err(|err| {
+                    tonic::Status::invalid_argument(format!("invalid basebackup LSN: {err}"))
+                })?;
+        }
 
         // Spawn a task to run the basebackup.
-        //
-        // TODO: do we need to support full base backups, for debugging?
         let span = Span::current();
         let (mut simplex_read, mut simplex_write) = tokio::io::simplex(CHUNK_SIZE);
         let jh = tokio::spawn(async move {
             let result = basebackup::send_basebackup_tarball(
                 &mut simplex_write,
                 &timeline,
-                Some(req.read_lsn.request_lsn),
+                req.lsn,
                 None,
-                false,
+                req.full,
                 req.replica,
                 &ctx,
             )
@@ -3652,20 +3594,21 @@ impl proto::PageService for GrpcPageServiceHandler {
 
         // Emit chunks of size CHUNK_SIZE.
         let chunks = async_stream::try_stream! {
-            let mut chunk = BytesMut::with_capacity(CHUNK_SIZE);
             loop {
-                let n = simplex_read.read_buf(&mut chunk).await.map_err(|err| {
-                    tonic::Status::internal(format!("failed to read basebackup chunk: {err}"))
-                })?;
-
-                // If we read 0 bytes, either the chunk is full or the stream is closed.
-                if n == 0 {
-                    if chunk.is_empty() {
-                        break;
+                let mut chunk = BytesMut::with_capacity(CHUNK_SIZE).limit(CHUNK_SIZE);
+                loop {
+                    let n = simplex_read.read_buf(&mut chunk).await.map_err(|err| {
+                        tonic::Status::internal(format!("failed to read basebackup chunk: {err}"))
+                    })?;
+                    if n == 0 {
+                        break; // full chunk or closed stream
                     }
-                    yield proto::GetBaseBackupResponseChunk::from(chunk.clone().freeze());
-                    chunk.clear();
                 }
+                let chunk = chunk.into_inner().freeze();
+                if chunk.is_empty() {
+                    break;
+                }
+                yield proto::GetBaseBackupResponseChunk::from(chunk);
             }
             // Wait for the basebackup task to exit and check for errors.
             jh.await.map_err(|err| {
@@ -3742,9 +3685,16 @@ impl proto::PageService for GrpcPageServiceHandler {
                 .await?
                 .downgrade();
             while let Some(req) = reqs.message().await? {
-                yield Self::get_page(&ctx, &timeline, req, io_concurrency.clone())
+                let req_id = req.request_id;
+                let result = Self::get_page(&ctx, &timeline, req, io_concurrency.clone())
                     .instrument(span.clone()) // propagate request span
-                    .await?
+                    .await;
+                yield match result {
+                    Ok(resp) => resp,
+                    // Convert per-request errors to GetPageResponses as appropriate, or terminate
+                    // the stream with a tonic::Status.
+                    Err(err) => page_api::GetPageResponse::try_from_status(err, req_id)?.into(),
+                }
             }
         };
 
