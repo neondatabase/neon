@@ -512,9 +512,9 @@ _PG_init(void)
 
 	DefineCustomIntVariable("neon.pgstat_file_size_limit",
 							"Maximal size of pgstat.stat file saved in Neon storage",
-							"Zero value disables persisting pgstat.stat file",
+							NULL,
 							&neon_pgstat_file_size_limit,
-							0, 0, 1000000, /* disabled by default */
+							128, 0, INT_MAX, /* disabled by default */
 							PGC_SIGHUP,
 							GUC_UNIT_KB,
 							NULL, NULL, NULL);
