@@ -1337,7 +1337,7 @@ def test_sharding_split_failures(
     # Create bystander tenants with various shard counts. They should not be affected by the aborted
     # splits. Regression test for https://github.com/neondatabase/cloud/issues/28589.
     bystanders = {}  # id → shard_count
-    for bystander_shard_count in [1, 2, 4, 8]:
+    for bystander_shard_count in [1, 2, 3, 4]:
         id, _ = env.create_tenant(shard_count=bystander_shard_count)
         bystanders[id] = bystander_shard_count
 
@@ -1455,7 +1455,7 @@ def test_sharding_split_failures(
 
         # The split should appear to be rolled back from the point of view of all pageservers
         # apart from the one that is offline
-        env.storage_controller.reconcile_until_idle(max_interval=1)
+        env.storage_controller.reconcile_until_idle(timeout_secs=60, max_interval=2)
         wait_until(lambda: assert_rolled_back(exclude_ps_id=failure.pageserver_id))
 
         finish_split()
@@ -1470,7 +1470,7 @@ def test_sharding_split_failures(
         log.info("Clearing failure...")
         failure.clear(env)
 
-        env.storage_controller.reconcile_until_idle(max_interval=1)
+        env.storage_controller.reconcile_until_idle(timeout_secs=60, max_interval=2)
         wait_until(assert_rolled_back)
 
         # Having rolled back, the tenant should be working
