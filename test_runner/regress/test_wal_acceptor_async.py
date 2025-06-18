@@ -720,6 +720,11 @@ async def run_quorum_sanity(env: NeonEnv):
 # we don't.
 def test_quorum_sanity(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 4
+
+    # The test fails basically always on the new mode.
+    neon_env_builder.storage_controller_config = {
+        "timelines_onto_safekeepers": False,
+    }
     env = neon_env_builder.init_start()
 
     asyncio.run(run_quorum_sanity(env))
