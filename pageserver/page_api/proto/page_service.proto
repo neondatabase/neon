@@ -108,6 +108,8 @@ message GetBaseBackupRequest {
   uint64 lsn = 1;
   // If true, logical replication slots will not be created.
   bool replica = 2;
+  // If true, include relation files in the base backup. Mainly for debugging and tests.
+  bool full = 3;
 }
 
 // Base backup response chunk, returned as an ordered stream.
