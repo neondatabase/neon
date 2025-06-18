@@ -3,7 +3,6 @@ use std::{io::Write, os::unix::fs::OpenOptionsExt, path::Path, time::Duration};
 use anyhow::{Context, Result, bail};
 use compute_api::responses::TlsConfig;
 use ring::digest;
-use x509_cert::Certificate;
 
 #[derive(Clone, Copy)]
 pub struct CertDigest(digest::Digest);
@@ -105,7 +104,10 @@ pub fn update_key_path_blocking(pg_data: &Path, key_pair: &KeyPair) -> Result<()
 }
 
 fn verify_key_cert(key: &str, cert: &str) -> Result<()> {
+    use x509_cert::Certificate;
     use x509_cert::der::oid::db::rfc5912::ECDSA_WITH_SHA_256;
+    use x509_cert::der::oid::db::rfc8410::ID_ED_25519;
+    use x509_cert::der::pem;
 
     let certs = Certificate::load_pem_chain(cert.as_bytes())
         .context("decoding PEM encoded certificates")?;
@@ -116,22 +118,30 @@ fn verify_key_cert(key: &str, cert: &str) -> Result<()> {
         bail!("no certificates found");
     };
 
+    let pubkey = cert
+        .tbs_certificate
+        .subject_public_key_info
+        .subject_public_key
+        .raw_bytes();
+
     match cert.signature_algorithm.oid {
         ECDSA_WITH_SHA_256 => {
             let key = p256::SecretKey::from_sec1_pem(key).context("parse key")?;
-
-            let a = key.public_key().to_sec1_bytes();
-            let b = cert
-                .tbs_certificate
-                .subject_public_key_info
-                .subject_public_key
-                .raw_bytes();
-
-            if *a != *b {
+            if *key.public_key().to_sec1_bytes() != *pubkey {
                 bail!("private key file does not match certificate")
             }
         }
-        _ => bail!("unknown TLS key type"),
+        ID_ED_25519 => {
+            use ring::signature::{Ed25519KeyPair, KeyPair};
+
+            let (_, bytes) = pem::decode_vec(key.as_bytes())
+                .map_err(|_| anyhow::anyhow!("invalid key encoding"))?;
+            let key = Ed25519KeyPair::from_pkcs8_maybe_unchecked(&bytes).context("parse key")?;
+            if *key.public_key().as_ref() != *pubkey {
+                bail!("private key file does not match certificate")
+            }
+        }
+        oid => bail!("unknown TLS key type: {oid}"),
     }
 
     Ok(())

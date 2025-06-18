@@ -54,7 +54,6 @@ use compute_api::requests::{
 };
 use compute_api::responses::{
     ComputeConfig, ComputeCtlConfig, ComputeStatus, ComputeStatusResponse, TerminateResponse,
-    TlsConfig,
 };
 use compute_api::spec::{
     Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PageserverProtocol,
@@ -213,8 +212,13 @@ impl ComputeControlPlane {
         let internal_http_port = internal_http_port.unwrap_or_else(|| external_http_port + 1);
         let compute_ctl_config = ComputeCtlConfig {
             jwks: Self::create_jwks_from_pem(&self.env.read_public_key()?)?,
-            tls: None::<TlsConfig>,
+            tls: self.env.get_tls_config()?,
         };
+        let mut features = vec![];
+        if compute_ctl_config.tls.is_some() {
+            features.push(ComputeFeature::TlsExperimental);
+        }
+
         let ep = Arc::new(Endpoint {
             endpoint_id: endpoint_id.to_owned(),
             pg_address: SocketAddr::new(IpAddr::from(Ipv4Addr::LOCALHOST), pg_port),
@@ -241,7 +245,7 @@ impl ComputeControlPlane {
             drop_subscriptions_before_start,
             grpc,
             reconfigure_concurrency: 1,
-            features: vec![],
+            features: features.clone(),
             cluster: None,
             compute_ctl_config: compute_ctl_config.clone(),
             privileged_role_name: privileged_role_name.clone(),
@@ -263,7 +267,7 @@ impl ComputeControlPlane {
                 skip_pg_catalog_updates,
                 drop_subscriptions_before_start,
                 reconfigure_concurrency: 1,
-                features: vec![],
+                features,
                 cluster: None,
                 compute_ctl_config,
                 privileged_role_name,

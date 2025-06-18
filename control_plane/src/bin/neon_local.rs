@@ -1090,6 +1090,7 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
             storage_controller: None,
             control_plane_hooks_api: None,
             generate_local_ssl_certs: false,
+            generate_compute_ssl_certs: false,
         }
     };
 

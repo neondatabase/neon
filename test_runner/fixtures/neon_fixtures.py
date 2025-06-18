@@ -506,6 +506,8 @@ class NeonEnvBuilder:
         # Flag to use https listener in storage broker, generate local ssl certs,
         # and force pageservers and safekeepers to use https for storage broker api.
         self.use_https_storage_broker_api: bool = False
+        # Flag to enable TLS for computes
+        self.use_compute_tls: bool = False
 
         self.pageserver_virtual_file_io_engine: str | None = pageserver_virtual_file_io_engine
         self.pageserver_get_vectored_concurrent_io: str | None = (
@@ -1112,11 +1114,13 @@ class NeonEnv:
         self.initial_tenant = config.initial_tenant
         self.initial_timeline = config.initial_timeline
 
+        self.generate_compute_ssl_certs = config.use_compute_tls
         self.generate_local_ssl_certs = (
             config.use_https_pageserver_api
             or config.use_https_safekeeper_api
             or config.use_https_storage_controller_api
             or config.use_https_storage_broker_api
+            or config.use_compute_tls
         )
         self.ssl_ca_file = (
             self.repo_dir.joinpath("rootCA.crt") if self.generate_local_ssl_certs else None
@@ -1199,6 +1203,7 @@ class NeonEnv:
                 "listen_addr": f"127.0.0.1:{self.port_distributor.get_port()}",
             },
             "generate_local_ssl_certs": self.generate_local_ssl_certs,
+            "generate_compute_ssl_certs": self.generate_compute_ssl_certs,
         }
 
         if config.use_https_storage_broker_api:
