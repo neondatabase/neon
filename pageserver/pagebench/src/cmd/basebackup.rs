@@ -41,7 +41,7 @@ pub(crate) struct Args {
     #[clap(long, default_value = "1")]
     num_clients: NonZeroUsize,
     #[clap(long)]
-    compression: bool,
+    no_compression: bool,
     #[clap(long)]
     runtime: Option<humantime::Duration>,
     #[clap(long)]
@@ -163,10 +163,10 @@ async fn main_impl(
 
         let client: Box<dyn Client> = match connurl.scheme() {
             "postgresql" | "postgres" => Box::new(
-                LibpqClient::new(&args.page_service_connstring, tl, args.compression).await?,
+                LibpqClient::new(&args.page_service_connstring, tl, !args.no_compression).await?,
             ),
             "grpc" => Box::new(
-                GrpcClient::new(&args.page_service_connstring, tl, args.compression).await?,
+                GrpcClient::new(&args.page_service_connstring, tl, !args.no_compression).await?,
             ),
             scheme => return Err(anyhow!("invalid scheme {scheme}")),
         };
