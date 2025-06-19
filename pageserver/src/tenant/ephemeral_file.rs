@@ -157,8 +157,6 @@ impl std::ops::Deref for TempVirtualFileCoOwnedByEphemeralFileAndBufferedWriter 
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum EphemeralFileWriteError {
-    #[error("{0}")]
-    TooLong(String),
     #[error("cancelled")]
     Cancelled,
 }
@@ -212,15 +210,6 @@ impl EphemeralFile {
         srcbuf: &[u8],
         ctx: &RequestContext,
     ) -> Result<(u64, Option<owned_buffers_io::write::FlushControl>), EphemeralFileWriteError> {
-        let pos = self.bytes_written.load(Ordering::Acquire);
-
-        let new_bytes_written = pos.checked_add(srcbuf.len().into_u64()).ok_or_else(|| {
-            EphemeralFileWriteError::TooLong(format!(
-                "write would grow EphemeralFile beyond u64::MAX: len={pos} writen={srcbuf_len}",
-                srcbuf_len = srcbuf.len(),
-            ))
-        })?;
-
         let mut writer = self.buffered_writer.write().await;
 
         let (nwritten, control) = writer
@@ -235,11 +224,13 @@ impl EphemeralFile {
             "buffered writer has no short writes"
         );
 
-        self.bytes_written
-            .store(new_bytes_written, Ordering::Release);
+        // There's no realistic risk of overflow here. We won't have exabytes sized files on disk.
+        let pos = self
+            .bytes_written
+            .fetch_add(srcbuf.len().into_u64(), Ordering::AcqRel);
 
         let mut resource_units = self.resource_units.lock().unwrap();
-        resource_units.maybe_publish_size(new_bytes_written);
+        resource_units.maybe_publish_size(self.bytes_written.load(Ordering::Relaxed));
 
         Ok((pos, control))
     }
