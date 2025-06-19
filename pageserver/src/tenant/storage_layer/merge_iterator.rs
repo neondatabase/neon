@@ -402,9 +402,9 @@ impl<'a> MergeIterator<'a> {
 mod tests {
     use itertools::Itertools;
     use pageserver_api::key::Key;
-    #[cfg(feature = "testing")]
-    use pageserver_api::record::NeonWalRecord;
     use utils::lsn::Lsn;
+    #[cfg(feature = "testing")]
+    use wal_decoder::models::record::NeonWalRecord;
 
     use super::*;
     use crate::DEFAULT_PG_VERSION;

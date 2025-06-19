@@ -6094,8 +6094,6 @@ mod tests {
     #[cfg(feature = "testing")]
     use pageserver_api::keyspace::KeySpaceRandomAccum;
     use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
-    #[cfg(feature = "testing")]
-    use pageserver_api::record::NeonWalRecord;
     use pageserver_compaction::helpers::overlaps_with;
     #[cfg(feature = "testing")]
     use rand::SeedableRng;
@@ -6116,6 +6114,8 @@ mod tests {
     use timeline::{CompactOptions, DeltaLayerTestDesc, VersionedKeySpaceQuery};
     use utils::id::TenantId;
     use utils::shard::{ShardCount, ShardNumber};
+    #[cfg(feature = "testing")]
+    use wal_decoder::models::record::NeonWalRecord;
     use wal_decoder::models::value::Value;
 
     use super::*;
