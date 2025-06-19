@@ -148,6 +148,9 @@ def test_sql_exporter_metrics_smoke(
     endpoint.respec(skip_pg_catalog_updates=False)
     endpoint.start()
 
+    # Create dblink extension for the test queries
+    endpoint.safe_psql("CREATE EXTENSION IF NOT EXISTS dblink;")
+
     # Extract all the SQL queries from the sql_exporter config files, and run
     # them.
     collector = cast(
@@ -398,6 +401,9 @@ def test_sql_exporter_metrics_e2e(
     endpoint = env.endpoints.create("main")
     endpoint.respec(skip_pg_catalog_updates=False)
     endpoint.start()
+
+    # Create dblink extension for the test queries
+    endpoint.safe_psql("CREATE EXTENSION IF NOT EXISTS dblink;")
 
     if exporter == SqlExporterProcess.COMPUTE:
         stem_suffix = ""
