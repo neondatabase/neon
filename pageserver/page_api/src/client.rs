@@ -83,6 +83,7 @@ impl Client {
         timeline_id: TimelineId,
         shard_id: ShardIndex,
         auth_header: Option<String>,
+        compression: Option<tonic::codec::CompressionEncoding>,
     ) -> anyhow::Result<Self> {
         let endpoint: tonic::transport::Endpoint = into_endpoint
             .try_into()
@@ -90,7 +91,15 @@ impl Client {
         let channel = endpoint.connect().await?;
         let auth = AuthInterceptor::new(tenant_id, timeline_id, auth_header, shard_id)
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        let client = proto::PageServiceClient::with_interceptor(channel, auth);
+        let mut client = proto::PageServiceClient::with_interceptor(channel, auth);
+
+        if let Some(compression) = compression {
+            // TODO: benchmark this (including network latency).
+            // TODO: consider enabling compression by default.
+            client = client
+                .accept_compressed(compression)
+                .send_compressed(compression);
+        }
 
         Ok(Self { client })
     }
