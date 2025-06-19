@@ -1005,12 +1005,12 @@ impl ComputeNode {
     fn try_get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
 
-        // Detect the protocol scheme. If the URL doesn't parse, just assume libpq, for backwards
-        // compability.
+        // Detect the protocol scheme. If the URL doesn't have a scheme, assume libpq.
         let shard0_connstr = spec.pageserver_connstr.split(',').next().unwrap();
         let scheme = match Url::parse(shard0_connstr) {
             Ok(url) => url.scheme().to_lowercase().to_string(),
-            Err(_) => "postgresql".to_string(),
+            Err(url::ParseError::RelativeUrlWithoutBase) => "postgresql".to_string(),
+            Err(err) => return Err(anyhow!("invalid connstring URL: {err}")),
         };
 
         let started = Instant::now();
