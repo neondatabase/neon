@@ -6,13 +6,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use anyhow::ensure;
+use anyhow::{anyhow, ensure};
 use futures::TryStreamExt as _;
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api::ForceAwaitLogicalSize;
 use pageserver_client::page_service::BasebackupRequest;
 use pageserver_page_api as page_api;
 use rand::prelude::*;
+use reqwest::Url;
 use tokio::io::AsyncRead;
 use tokio::sync::Barrier;
 use tokio::task::JoinSet;
@@ -26,23 +27,16 @@ use utils::lsn::Lsn;
 use crate::util::tokio_thread_local_stats::AllThreadLocalStats;
 use crate::util::{request_stats, tokio_thread_local_stats};
 
-#[derive(clap::ValueEnum, Clone, Debug)]
-enum Protocol {
-    Libpq,
-    Grpc,
-}
-
 /// basebackup@LatestLSN
 #[derive(clap::Parser)]
 pub(crate) struct Args {
     #[clap(long, default_value = "http://localhost:9898")]
     mgmt_api_endpoint: String,
-    #[clap(long, default_value = "postgres://postgres@localhost:64000")]
+    /// The Pageserver to connect to. Use postgresql:// for libpq, or grpc:// for gRPC.
+    #[clap(long, default_value = "postgresql://postgres@localhost:64000")]
     page_service_connstring: String,
     #[clap(long)]
     pageserver_jwt: Option<String>,
-    #[clap(long, value_enum, default_value = "libpq")]
-    protocol: Protocol,
     #[clap(long, default_value = "1")]
     num_clients: NonZeroUsize,
     #[clap(long, default_value = "1.0")]
@@ -161,13 +155,18 @@ async fn main_impl(
 
     let mut work_senders = HashMap::new();
     let mut tasks = Vec::new();
+    let connstr = &args.page_service_connstring;
+    let connurl = Url::parse(connstr)?;
     for tl in &timelines {
         let (sender, receiver) = tokio::sync::mpsc::channel(1); // TODO: not sure what the implications of this are
         work_senders.insert(tl, sender);
-        let client: Box<dyn Client> = match args.protocol {
-            Protocol::Libpq => Box::new(LibpqClient::new(&args.page_service_connstring).await?),
-            Protocol::Grpc => Box::new(GrpcClient::new(&args.page_service_connstring).await?),
+
+        let client: Box<dyn Client> = match connurl.scheme() {
+            "postgresql" | "postgres" => Box::new(LibpqClient::new(connstr).await?),
+            "grpc" => Box::new(GrpcClient::new(connstr).await?),
+            scheme => return Err(anyhow!("invalid scheme {scheme}")),
         };
+
         tasks.push(tokio::spawn(run_worker(
             args,
             client,
