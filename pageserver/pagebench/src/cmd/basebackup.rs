@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use anyhow::{anyhow, ensure};
+use anyhow::anyhow;
 use futures::TryStreamExt as _;
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api::ForceAwaitLogicalSize;
@@ -23,6 +23,7 @@ use tonic::async_trait;
 use tracing::{info, instrument};
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
+use utils::shard::ShardIndex;
 
 use crate::util::tokio_thread_local_stats::AllThreadLocalStats;
 use crate::util::{request_stats, tokio_thread_local_stats};
@@ -155,22 +156,23 @@ async fn main_impl(
 
     let mut work_senders = HashMap::new();
     let mut tasks = Vec::new();
-    let connstr = &args.page_service_connstring;
-    let connurl = Url::parse(connstr)?;
-    for tl in &timelines {
+    let connurl = Url::parse(&args.page_service_connstring)?;
+    for &tl in &timelines {
         let (sender, receiver) = tokio::sync::mpsc::channel(1); // TODO: not sure what the implications of this are
         work_senders.insert(tl, sender);
 
         let client: Box<dyn Client> = match connurl.scheme() {
-            "postgresql" | "postgres" => Box::new(LibpqClient::new(connstr).await?),
-            "grpc" => Box::new(GrpcClient::new(connstr).await?),
+            "postgresql" | "postgres" => Box::new(
+                LibpqClient::new(&args.page_service_connstring, tl, args.compression).await?,
+            ),
+            "grpc" => Box::new(
+                GrpcClient::new(&args.page_service_connstring, tl, args.compression).await?,
+            ),
             scheme => return Err(anyhow!("invalid scheme {scheme}")),
         };
 
         tasks.push(tokio::spawn(run_worker(
-            args,
             client,
-            *tl,
             Arc::clone(&start_work_barrier),
             receiver,
             Arc::clone(&all_work_done_barrier),
@@ -233,9 +235,7 @@ struct Work {
 
 #[instrument(skip_all)]
 async fn run_worker(
-    args: &'static Args,
     mut client: Box<dyn Client>,
-    timeline: TenantTimelineId,
     start_work_barrier: Arc<Barrier>,
     mut work: tokio::sync::mpsc::Receiver<Work>,
     all_work_done_barrier: Arc<Barrier>,
@@ -245,10 +245,7 @@ async fn run_worker(
 
     while let Some(Work { lsn }) = work.recv().await {
         let start = Instant::now();
-        let stream = client
-            .basebackup(timeline, lsn, args.compression)
-            .await
-            .unwrap();
+        let stream = client.basebackup(lsn).await.unwrap();
 
         let size = futures::io::copy(stream.compat(), &mut tokio::io::sink().compat_write())
             .await
@@ -269,21 +266,28 @@ async fn run_worker(
 trait Client: Send {
     async fn basebackup(
         &mut self,
-        ttid: TenantTimelineId,
         lsn: Option<Lsn>,
-        gzip: bool,
     ) -> anyhow::Result<Pin<Box<dyn AsyncRead + Send + 'static>>>;
 }
 
 /// A libpq-based Pageserver client.
 struct LibpqClient {
     inner: pageserver_client::page_service::Client,
+    ttid: TenantTimelineId,
+    compression: bool,
 }
 
 impl LibpqClient {
-    async fn new(connstring: &str) -> anyhow::Result<Self> {
-        let inner = pageserver_client::page_service::Client::new(connstring.to_string()).await?;
-        Ok(Self { inner })
+    async fn new(
+        connstring: &str,
+        ttid: TenantTimelineId,
+        compression: bool,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            inner: pageserver_client::page_service::Client::new(connstring.to_string()).await?,
+            ttid,
+            compression,
+        })
     }
 }
 
@@ -291,15 +295,13 @@ impl LibpqClient {
 impl Client for LibpqClient {
     async fn basebackup(
         &mut self,
-        ttid: TenantTimelineId,
         lsn: Option<Lsn>,
-        gzip: bool,
     ) -> anyhow::Result<Pin<Box<dyn AsyncRead + Send + 'static>>> {
         let req = BasebackupRequest {
-            tenant_id: ttid.tenant_id,
-            timeline_id: ttid.timeline_id,
+            tenant_id: self.ttid.tenant_id,
+            timeline_id: self.ttid.timeline_id,
             lsn,
-            gzip,
+            gzip: self.compression,
         };
         let stream = self.inner.basebackup(&req).await?;
         Ok(Box::pin(StreamReader::new(
@@ -308,14 +310,26 @@ impl Client for LibpqClient {
     }
 }
 
-/// A gRPC client using the raw, no-frills gRPC client.
+/// A gRPC Pageserver client.
 struct GrpcClient {
-    inner: page_api::proto::PageServiceClient<tonic::transport::Channel>,
+    inner: page_api::Client,
 }
 
 impl GrpcClient {
-    async fn new(connstring: &str) -> anyhow::Result<Self> {
-        let inner = page_api::proto::PageServiceClient::connect(connstring.to_string()).await?;
+    async fn new(
+        connstring: &str,
+        ttid: TenantTimelineId,
+        compression: bool,
+    ) -> anyhow::Result<Self> {
+        let inner = page_api::Client::new(
+            connstring.to_string(),
+            ttid.tenant_id,
+            ttid.timeline_id,
+            ShardIndex::unsharded(),
+            None,
+            compression.then_some(tonic::codec::CompressionEncoding::Zstd),
+        )
+        .await?;
         Ok(Self { inner })
     }
 }
@@ -324,30 +338,16 @@ impl GrpcClient {
 impl Client for GrpcClient {
     async fn basebackup(
         &mut self,
-        ttid: TenantTimelineId,
         lsn: Option<Lsn>,
-        gzip: bool,
     ) -> anyhow::Result<Pin<Box<dyn AsyncRead + Send + 'static>>> {
-        // TODO: support gzip compression.
-        ensure!(!gzip, "gRPC client does not support gzip compression yet");
-
-        let req = page_api::proto::GetBaseBackupRequest {
-            lsn: lsn.unwrap_or(Lsn(0)).0,
+        let req = page_api::GetBaseBackupRequest {
+            lsn,
             replica: false,
             full: false,
         };
-        let mut req = tonic::Request::new(req);
-        let metadata = req.metadata_mut();
-        metadata.insert("neon-tenant-id", ttid.tenant_id.to_string().try_into()?);
-        metadata.insert("neon-timeline-id", ttid.timeline_id.to_string().try_into()?);
-        metadata.insert("neon-shard-id", "0000".try_into()?);
-
-        let resp = self.inner.get_base_backup(req).await?;
-        let stream = resp.into_inner();
+        let stream = self.inner.get_base_backup(req).await?;
         Ok(Box::pin(StreamReader::new(
-            stream
-                .map_ok(|chunk| chunk.chunk)
-                .map_err(std::io::Error::other),
+            stream.map_err(std::io::Error::other),
         )))
     }
 }
