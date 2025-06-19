@@ -41,7 +41,7 @@ use postgres_backend::{
     AuthType, PostgresBackend, PostgresBackendReader, QueryError, is_expected_io_error,
 };
 use postgres_ffi::BLCKSZ;
-use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
+use postgres_ffi_types::constants::DEFAULTTABLESPACE_OID;
 use pq_proto::framed::ConnectionError;
 use pq_proto::{BeMessage, FeMessage, FeStartupPacket, RowDescriptor};
 use smallvec::{SmallVec, smallvec};

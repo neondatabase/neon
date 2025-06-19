@@ -56,8 +56,6 @@ use pageserver_api::models::{
 };
 use pageserver_api::reltag::{BlockNumber, RelTag};
 use pageserver_api::shard::{ShardIdentity, ShardIndex, ShardNumber, TenantShardId};
-#[cfg(test)]
-use pageserver_api::value::Value;
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::v14::xlog_utils;
 use postgres_ffi::{WAL_SEGMENT_SIZE, to_pg_timestamp};
@@ -81,6 +79,8 @@ use utils::seqwait::SeqWait;
 use utils::simple_rcu::{Rcu, RcuReadGuard};
 use utils::sync::gate::{Gate, GateGuard};
 use utils::{completion, critical, fs_ext, pausable_failpoint};
+#[cfg(test)]
+use wal_decoder::models::value::Value;
 use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
 use self::delete::DeleteTimelineFlow;
@@ -5207,7 +5207,11 @@ impl Timeline {
         }
 
         let (dense_ks, sparse_ks) = self.collect_keyspace(lsn, ctx).await?;
-        let dense_partitioning = dense_ks.partition(&self.shard_identity, partition_size);
+        let dense_partitioning = dense_ks.partition(
+            &self.shard_identity,
+            partition_size,
+            postgres_ffi::BLCKSZ as u64,
+        );
         let sparse_partitioning = SparseKeyPartitioning {
             parts: vec![sparse_ks],
         }; // no partitioning for metadata keys for now
@@ -7590,11 +7594,11 @@ mod tests {
     use std::sync::Arc;
 
     use pageserver_api::key::Key;
-    use pageserver_api::value::Value;
     use std::iter::Iterator;
     use tracing::Instrument;
     use utils::id::TimelineId;
     use utils::lsn::Lsn;
+    use wal_decoder::models::value::Value;
 
     use super::HeatMapTimeline;
     use crate::context::RequestContextBuilder;

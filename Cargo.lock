@@ -4334,6 +4334,7 @@ dependencies = [
  "postgres_backend",
  "postgres_connection",
  "postgres_ffi",
+ "postgres_ffi_types",
  "postgres_initdb",
  "posthog_client_lite",
  "pprof",
@@ -4403,7 +4404,7 @@ dependencies = [
  "nix 0.30.1",
  "once_cell",
  "postgres_backend",
- "postgres_ffi",
+ "postgres_ffi_types",
  "rand 0.8.5",
  "remote_storage",
  "reqwest",
@@ -4892,12 +4893,21 @@ dependencies = [
  "memoffset 0.9.0",
  "once_cell",
  "postgres",
+ "postgres_ffi_types",
  "pprof",
  "regex",
  "serde",
  "thiserror 1.0.69",
  "tracing",
  "utils",
+]
+
+[[package]]
+name = "postgres_ffi_types"
+version = "0.1.0"
+dependencies = [
+ "thiserror 1.0.69",
+ "workspace_hack",
 ]
 
 [[package]]
@@ -8161,6 +8171,7 @@ dependencies = [
  "futures",
  "pageserver_api",
  "postgres_ffi",
+ "postgres_ffi_types",
  "pprof",
  "prost 0.13.5",
  "remote_storage",

@@ -22,6 +22,7 @@ members = [
     "libs/http-utils",
     "libs/pageserver_api",
     "libs/postgres_ffi",
+    "libs/postgres_ffi_types",
     "libs/safekeeper_api",
     "libs/desim",
     "libs/neon-shmem",
@@ -259,6 +260,7 @@ pageserver_page_api = { path = "./pageserver/page_api" }
 postgres_backend = { version = "0.1", path = "./libs/postgres_backend/" }
 postgres_connection = { version = "0.1", path = "./libs/postgres_connection/" }
 postgres_ffi = { version = "0.1", path = "./libs/postgres_ffi/" }
+postgres_ffi_types = { version = "0.1", path = "./libs/postgres_ffi_types/" }
 postgres_initdb = { path = "./libs/postgres_initdb" }
 posthog_client_lite = { version = "0.1", path = "./libs/posthog_client_lite" }
 pq_proto = { version = "0.1", path = "./libs/pq_proto/" }

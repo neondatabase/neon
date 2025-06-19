@@ -8,8 +8,14 @@ use crate::reltag::RelTag;
 
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use postgres_ffi::BLCKSZ;
 use utils::lsn::Lsn;
+
+/// Block size.
+///
+/// XXX: We assume 8k block size in the SLRU fetch API. It's not great to hardcode
+/// that in the protocol, because Postgres supports different block sizes as a compile
+/// time option.
+const BLCKSZ: usize = 8192;
 
 // Wrapped in libpq CopyData
 #[derive(PartialEq, Eq, Debug)]
@@ -443,7 +449,7 @@ impl PagestreamBeMessage {
 
                     Self::GetSlruSegment(resp) => {
                         bytes.put_u8(Tag::GetSlruSegment as u8);
-                        bytes.put_u32((resp.segment.len() / BLCKSZ as usize) as u32);
+                        bytes.put_u32((resp.segment.len() / BLCKSZ) as u32);
                         bytes.put(&resp.segment[..]);
                     }
 
@@ -520,7 +526,7 @@ impl PagestreamBeMessage {
                         bytes.put_u64(resp.req.hdr.not_modified_since.0);
                         bytes.put_u8(resp.req.kind);
                         bytes.put_u32(resp.req.segno);
-                        bytes.put_u32((resp.segment.len() / BLCKSZ as usize) as u32);
+                        bytes.put_u32((resp.segment.len() / BLCKSZ) as u32);
                         bytes.put(&resp.segment[..]);
                     }
 
@@ -662,7 +668,7 @@ impl PagestreamBeMessage {
                     let kind = buf.read_u8()?;
                     let segno = buf.read_u32::<BigEndian>()?;
                     let n_blocks = buf.read_u32::<BigEndian>()?;
-                    let mut segment = vec![0; n_blocks as usize * BLCKSZ as usize];
+                    let mut segment = vec![0; n_blocks as usize * BLCKSZ];
                     buf.read_exact(&mut segment)?;
                     Self::GetSlruSegment(PagestreamGetSlruSegmentResponse {
                         req: PagestreamGetSlruSegmentRequest {
