@@ -1004,10 +1004,17 @@ impl ComputeNode {
     #[instrument(skip_all, fields(%lsn))]
     fn try_get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
+
+        // Detect the protocol scheme. If the URL doesn't parse, just assume libpq, for backwards
+        // compability.
         let shard0_connstr = spec.pageserver_connstr.split(',').next().unwrap();
+        let scheme = match Url::parse(shard0_connstr) {
+            Ok(url) => url.scheme().to_lowercase().to_string(),
+            Err(_) => "postgresql".to_string(),
+        };
 
         let started = Instant::now();
-        let (connected, size) = match Url::parse(shard0_connstr)?.scheme() {
+        let (connected, size) = match scheme.as_str() {
             "postgresql" | "postgres" => self.try_get_basebackup_libpq(spec, lsn)?,
             "grpc" => self.try_get_basebackup_grpc(spec, lsn)?,
             scheme => return Err(anyhow!("unknown URL scheme {scheme}")),
