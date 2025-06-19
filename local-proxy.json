@@ -1,0 +1,11 @@
+{
+    "jwks": [
+        {
+            "id": "1",
+            "role_names": ["authenticated"],
+            "jwks_url": "https://adapted-gorilla-88.clerk.accounts.dev/.well-known/jwks.json",
+            "provider_name": "foo",
+            "jwt_audience": null
+        }
+    ]
+}
