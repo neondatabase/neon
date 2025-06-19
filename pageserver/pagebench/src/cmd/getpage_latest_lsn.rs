@@ -613,7 +613,7 @@ impl Client for LibpqClient {
     }
 }
 
-/// A gRPC client using the raw, no-frills gRPC client.
+/// A gRPC Pageserver client.
 struct GrpcClient {
     req_tx: tokio::sync::mpsc::Sender<page_api::GetPageRequest>,
     resp_rx: Pin<Box<dyn Stream<Item = Result<page_api::GetPageResponse, tonic::Status>> + Send>>,
