@@ -1902,12 +1902,7 @@ impl Timeline {
             return;
         };
 
-        let Some(current_size) = open_layer.try_len() else {
-            // Unexpected: since we hold the write guard, nobody else should be writing to this layer, so
-            // read lock to get size should always succeed.
-            tracing::warn!("Lock conflict while reading size of open layer");
-            return;
-        };
+        let current_size = open_layer.len();
 
         let current_lsn = self.get_last_record_lsn();
 

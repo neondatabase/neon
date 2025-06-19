@@ -166,7 +166,7 @@ pub(crate) enum EphemeralFileWriteError {
 impl EphemeralFile {
     pub(crate) fn len(&self) -> u64 {
         // TODO(vlad): The value returned here is not always correct if
-        // we have more tnat one concurrent writer. Writes are always
+        // we have more than one concurrent writer. Writes are always
         // sequenced, but we could grab the buffered writer lock if we wanted
         // to.
         self.bytes_written.load(Ordering::Acquire)

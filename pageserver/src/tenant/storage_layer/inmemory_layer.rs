@@ -374,8 +374,8 @@ impl InMemoryLayer {
         }
     }
 
-    pub(crate) fn try_len(&self) -> Option<u64> {
-        Some(self.file.len())
+    pub(crate) fn len(&self) -> u64 {
+        self.file.len()
     }
 
     pub(crate) fn assert_writable(&self) {
