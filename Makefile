@@ -176,31 +176,11 @@ postgres-check-%: postgres-%
 
 .PHONY: neon-pg-ext-%
 neon-pg-ext-%: postgres-%
-	+@echo "Compiling neon $*"
-	mkdir -p $(BUILD_DIR)/neon-$*
+	+@echo "Compiling neon-specific Postgres extensions for $*"
+	mkdir -p $(BUILD_DIR)/pgxn-$*
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
-		-C $(BUILD_DIR)/neon-$* \
-		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile install
-	+@echo "Compiling neon_walredo $*"
-	mkdir -p $(BUILD_DIR)/neon-walredo-$*
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
-		-C $(BUILD_DIR)/neon-walredo-$* \
-		-f $(ROOT_PROJECT_DIR)/pgxn/neon_walredo/Makefile install
-	+@echo "Compiling neon_rmgr $*"
-	mkdir -p $(BUILD_DIR)/neon-rmgr-$*
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
-		-C $(BUILD_DIR)/neon-rmgr-$* \
-		-f $(ROOT_PROJECT_DIR)/pgxn/neon_rmgr/Makefile install
-	+@echo "Compiling neon_test_utils $*"
-	mkdir -p $(BUILD_DIR)/neon-test-utils-$*
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
-		-C $(BUILD_DIR)/neon-test-utils-$* \
-		-f $(ROOT_PROJECT_DIR)/pgxn/neon_test_utils/Makefile install
-	+@echo "Compiling neon_utils $*"
-	mkdir -p $(BUILD_DIR)/neon-utils-$*
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
-		-C $(BUILD_DIR)/neon-utils-$* \
-		-f $(ROOT_PROJECT_DIR)/pgxn/neon_utils/Makefile install
+		-C $(BUILD_DIR)/pgxn-$*\
+		-f $(ROOT_PROJECT_DIR)/pgxn/Makefile  install
 
 # Build walproposer as a static library. walproposer source code is located
 # in the pgxn/neon directory.
