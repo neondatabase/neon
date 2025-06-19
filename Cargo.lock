@@ -4472,7 +4472,7 @@ dependencies = [
  "bytes",
  "futures",
  "pageserver_api",
- "postgres_ffi",
+ "postgres_ffi_types",
  "prost 0.13.5",
  "thiserror 1.0.69",
  "tokio",
