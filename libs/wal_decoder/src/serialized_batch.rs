@@ -1,4 +1,4 @@
-//! This module implements batch type for serialized [`pageserver_api::value::Value`]
+//! This module implements batch type for serialized [`crate::models::value::Value`]
 //! instances. Each batch contains a raw buffer (serialized values)
 //! and a list of metadata for each (key, LSN) tuple present in the batch.
 //!
