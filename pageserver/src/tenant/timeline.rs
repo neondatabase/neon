@@ -3422,10 +3422,6 @@ impl Timeline {
         // TenantShard::create_timeline will wait for these uploads to happen before returning, or
         // on retry.
 
-        // Now that we have the full layer map, we may calculate the visibility of layers within it (a global scan)
-        drop(guard); // drop write lock, update_layer_visibility will take a read lock.
-        self.update_layer_visibility().await?;
-
         info!(
             "loaded layer map with {} layers at {}, total physical size: {}",
             num_layers, disk_consistent_lsn, total_physical_size
@@ -5939,7 +5935,7 @@ impl Drop for Timeline {
             if let Ok(mut gc_info) = ancestor.gc_info.write() {
                 if !gc_info.remove_child_not_offloaded(self.timeline_id) {
                     tracing::error!(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id,
-                        "Couldn't remove retain_lsn entry from offloaded timeline's parent: already removed");
+                        "Couldn't remove retain_lsn entry from timeline's parent on drop: already removed");
                 }
             }
         }
