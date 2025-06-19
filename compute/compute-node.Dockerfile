@@ -173,9 +173,6 @@ RUN cd postgres && \
     eval $CONFIGURE_CMD && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s install && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C contrib/ install && \
-    # Install headers
-    make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/include install && \
-    make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/interfaces/libpq install && \
     # Enable some of contrib extensions
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/autoinc.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/dblink.control && \
