@@ -38,7 +38,7 @@ fn murmurhash32(mut h: u32) -> u32 {
     h
 }
 
-#[derive(serde::Serialize, Clone, Copy, Debug)]
+#[derive(serde::Serialize, Clone, Copy, Debug, PartialEq)]
 enum KeyLayout {
     /// Sequential unique keys
     Sequential,
@@ -54,7 +54,7 @@ enum WriteDelta {
     No,
 }
 
-#[derive(serde::Serialize, Clone, Copy, Debug)]
+#[derive(serde::Serialize, Clone, Copy, Debug, PartialEq)]
 enum ConcurrentReads {
     Yes,
     No,
@@ -68,8 +68,8 @@ async fn ingest(
     write_delta: WriteDelta,
     concurrent_reads: ConcurrentReads,
 ) -> anyhow::Result<()> {
-    if matches!(concurrent_reads, ConcurrentReads::Yes) {
-        assert!(matches!(key_layout, KeyLayout::Sequential));
+    if concurrent_reads == ConcurrentReads::Yes {
+        assert_eq!(key_layout, KeyLayout::Sequential);
     }
 
     let mut lsn = utils::lsn::Lsn(1000);
@@ -110,7 +110,7 @@ async fn ingest(
     const READ_BATCH_SIZE: u32 = 32;
     let (tx, mut rx) = tokio::sync::watch::channel::<Option<Key>>(None);
     let reader_cancel = CancellationToken::new();
-    let reader_handle = if matches!(concurrent_reads, ConcurrentReads::Yes) {
+    let reader_handle = if concurrent_reads == ConcurrentReads::Yes {
         Some(tokio::task::spawn({
             let cancel = reader_cancel.clone();
             let layer = layer.clone();
@@ -209,7 +209,7 @@ async fn ingest(
     }
     layer.freeze(lsn + 1).await;
 
-    if matches!(write_delta, WriteDelta::Yes) {
+    if write_delta == WriteDelta::Yes {
         let l0_flush_state = L0FlushGlobalState::new(L0FlushConfig::Direct {
             max_concurrency: NonZeroUsize::new(1).unwrap(),
         });
@@ -353,9 +353,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                     write_delta,
                 } = param;
 
-                if !matches!(key_layout, KeyLayout::Sequential)
-                    && matches!(concurrent_reads, ConcurrentReads::Yes)
-                {
+                if key_layout != KeyLayout::Sequential && concurrent_reads == ConcurrentReads::Yes {
                     continue;
                 }
 
