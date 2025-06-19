@@ -18,7 +18,6 @@ use pageserver_api::config::GetVectoredConcurrentIo;
 use pageserver_api::key::Key;
 use pageserver_api::models::virtual_file::IoMode;
 use pageserver_api::shard::TenantShardId;
-use strum::IntoEnumIterator;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use utils::bin_ser::BeSer;
@@ -48,7 +47,7 @@ enum KeyLayout {
     RandomReuse(u32),
 }
 
-#[derive(serde::Serialize, Clone, Copy, Debug)]
+#[derive(serde::Serialize, Clone, Copy, Debug, PartialEq)]
 enum WriteDelta {
     Yes,
     No,
