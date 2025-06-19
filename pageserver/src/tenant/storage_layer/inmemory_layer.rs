@@ -564,6 +564,9 @@ impl InMemoryLayer {
     ///
     /// Errors are not retryable, the [`InMemoryLayer`] must be discarded, and not be read from.
     /// The reason why it's not retryable is that the [`EphemeralFile`] writes are not retryable.
+    ///
+    /// This method shall not be called concurrently. We enforce this property via [`crate::tenant::Timeline::write_lock`].
+    ///
     /// TODO: it can be made retryable if we aborted the process on EphemeralFile write errors.
     pub async fn put_batch(
         &self,
