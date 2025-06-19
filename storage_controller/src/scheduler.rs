@@ -825,6 +825,7 @@ impl Scheduler {
         struct AzScore {
             home_shard_count: usize,
             scheduleable: bool,
+            node_count: usize,
         }
 
         let mut azs: HashMap<&AvailabilityZone, AzScore> = HashMap::new();
@@ -832,6 +833,7 @@ impl Scheduler {
             let az = azs.entry(&node.az).or_default();
             az.home_shard_count += node.home_shard_count;
             az.scheduleable |= matches!(node.may_schedule, MaySchedule::Yes(_));
+            az.node_count += 1;
         }
 
         // If any AZs are schedulable, then filter out the non-schedulable ones (i.e. AZs where
@@ -843,7 +845,7 @@ impl Scheduler {
         // Find the AZ with the lowest number of shards currently allocated
         Some(
             azs.into_iter()
-                .min_by_key(|i| (i.1.home_shard_count, i.0))
+                .min_by_key(|i| (i.1.home_shard_count / i.1.node_count, i.0))
                 .unwrap()
                 .0
                 .clone(),
