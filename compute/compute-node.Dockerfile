@@ -1634,18 +1634,7 @@ FROM pg-build AS neon-ext-build
 ARG PG_VERSION
 
 COPY pgxn/ pgxn/
-RUN make -j $(getconf _NPROCESSORS_ONLN) \
-        -C pgxn/neon \
-        -s install && \
-    make -j $(getconf _NPROCESSORS_ONLN) \
-        -C pgxn/neon_utils \
-        -s install && \
-    make -j $(getconf _NPROCESSORS_ONLN) \
-        -C pgxn/neon_test_utils \
-        -s install && \
-    make -j $(getconf _NPROCESSORS_ONLN) \
-        -C pgxn/neon_rmgr \
-        -s install
+RUN make -j $(getconf _NPROCESSORS_ONLN) -C pgxn -s install-compute
 
 #########################################################################################
 #
