@@ -39,8 +39,8 @@ pub(crate) struct Args {
     pageserver_jwt: Option<String>,
     #[clap(long, default_value = "1")]
     num_clients: NonZeroUsize,
-    #[clap(long, default_value = "1.0")]
-    gzip_probability: f64,
+    #[clap(long)]
+    compression: bool,
     #[clap(long)]
     runtime: Option<humantime::Duration>,
     #[clap(long)]
@@ -185,13 +185,7 @@ async fn main_impl(
                 let mut rng = rand::thread_rng();
                 let target = all_targets.choose(&mut rng).unwrap();
                 let lsn = target.lsn_range.clone().map(|r| rng.gen_range(r));
-                (
-                    target.timeline,
-                    Work {
-                        lsn,
-                        gzip: rng.gen_bool(args.gzip_probability),
-                    },
-                )
+                (target.timeline, Work { lsn })
             };
             let sender = work_senders.get(&timeline).unwrap();
             // TODO: what if this blocks?
@@ -235,12 +229,11 @@ async fn main_impl(
 #[derive(Copy, Clone)]
 struct Work {
     lsn: Option<Lsn>,
-    gzip: bool,
 }
 
 #[instrument(skip_all)]
 async fn run_worker(
-    _args: &'static Args,
+    args: &'static Args,
     mut client: Box<dyn Client>,
     timeline: TenantTimelineId,
     start_work_barrier: Arc<Barrier>,
@@ -250,9 +243,12 @@ async fn run_worker(
 ) {
     start_work_barrier.wait().await;
 
-    while let Some(Work { lsn, gzip }) = work.recv().await {
+    while let Some(Work { lsn }) = work.recv().await {
         let start = Instant::now();
-        let stream = client.basebackup(timeline, lsn, gzip).await.unwrap();
+        let stream = client
+            .basebackup(timeline, lsn, args.compression)
+            .await
+            .unwrap();
 
         let size = futures::io::copy(stream.compat(), &mut tokio::io::sink().compat_write())
             .await
