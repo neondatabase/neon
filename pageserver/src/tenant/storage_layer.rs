@@ -271,25 +271,22 @@ impl VectoredValueReconstructState {
                 .wait_completion()
                 // we rely on the caller to poll us to completion, so this is not a bail point
                 .await;
-            // Force not bailing early by wrapping the code into a closure.
-            #[allow(clippy::redundant_closure_call)]
-            let _: () = (|| {
-                match (&mut res, value_recv_res) {
-                    (Err(_), _) => {
-                        // We've already failed, no need to process more.
-                    }
-                    (Ok(_), Err(_wait_err)) => {
-                        // This shouldn't happen - likely the sidecar task panicked.
-                        unreachable!();
-                    }
-                    (Ok(_), Ok(Err(err))) => {
-                        let err: std::io::Error = err;
-                        res = Err(err);
-                    }
-                    (Ok(_ok), Ok(Ok(OnDiskValue::RawImage(_img)))) => {}
-                    (Ok(_ok), Ok(Ok(OnDiskValue::WalRecordOrImage(_buf)))) => {}
+
+            match (&mut res, value_recv_res) {
+                (Err(_), _) => {
+                    // We've already failed, no need to process more.
                 }
-            })();
+                (Ok(_), Err(_wait_err)) => {
+                    // This shouldn't happen - likely the sidecar task panicked.
+                    unreachable!();
+                }
+                (Ok(_), Ok(Err(err))) => {
+                    let err: std::io::Error = err;
+                    res = Err(err);
+                }
+                (Ok(_ok), Ok(Ok(OnDiskValue::RawImage(_img)))) => {}
+                (Ok(_ok), Ok(Ok(OnDiskValue::WalRecordOrImage(_buf)))) => {}
+            }
         }
 
         res
