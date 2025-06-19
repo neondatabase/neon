@@ -267,7 +267,7 @@ trait Client: Send {
     async fn basebackup(
         &mut self,
         lsn: Option<Lsn>,
-    ) -> anyhow::Result<Pin<Box<dyn AsyncRead + Send + 'static>>>;
+    ) -> anyhow::Result<Pin<Box<dyn AsyncRead + Send>>>;
 }
 
 /// A libpq-based Pageserver client.
