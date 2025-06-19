@@ -824,7 +824,7 @@ async fn evict_and_wait_does_not_wait_for_download() {
 #[tokio::test(start_paused = true)]
 async fn eviction_cancellation_on_drop() {
     use bytes::Bytes;
-    use pageserver_api::value::Value;
+    use wal_decoder::models::value::Value;
 
     // this is the runtime on which Layer spawns the blocking tasks on
     let handle = tokio::runtime::Handle::current();

@@ -2,16 +2,16 @@ use anyhow::Context;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::BytesMut;
 use pageserver_api::key::Key;
-use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::SlruKind;
-use postgres_ffi::relfile_utils::VISIBILITYMAP_FORKNUM;
 use postgres_ffi::v14::nonrelfile_utils::{
     mx_offset_to_flags_bitshift, mx_offset_to_flags_offset, mx_offset_to_member_offset,
     transaction_id_set_status,
 };
 use postgres_ffi::{BLCKSZ, pg_constants};
+use postgres_ffi_types::forknum::VISIBILITYMAP_FORKNUM;
 use tracing::*;
 use utils::lsn::Lsn;
+use wal_decoder::models::record::NeonWalRecord;
 
 /// Can this request be served by neon redo functions
 /// or we need to pass it to wal-redo postgres process?

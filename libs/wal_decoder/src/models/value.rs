@@ -10,7 +10,7 @@
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use crate::record::NeonWalRecord;
+use crate::models::record::NeonWalRecord;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Value {

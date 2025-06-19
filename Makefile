@@ -167,13 +167,6 @@ postgres-%: postgres-configure-% \
 	+@echo "Compiling test_decoding $*"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/test_decoding install
 
-.PHONY: postgres-clean-%
-postgres-clean-%:
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$* MAKELEVEL=0 clean
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pg_buffercache clean
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pageinspect clean
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/src/interfaces/libpq clean
-
 .PHONY: postgres-check-%
 postgres-check-%: postgres-%
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$* MAKELEVEL=0 check
@@ -205,21 +198,6 @@ neon-pg-ext-%: postgres-%
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
 		-C $(POSTGRES_INSTALL_DIR)/build/neon-utils-$* \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon_utils/Makefile install
-
-.PHONY: neon-pg-clean-ext-%
-neon-pg-clean-ext-%:
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config \
-	-C $(POSTGRES_INSTALL_DIR)/build/neon-$* \
-	-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile clean
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config \
-	-C $(POSTGRES_INSTALL_DIR)/build/neon-walredo-$* \
-	-f $(ROOT_PROJECT_DIR)/pgxn/neon_walredo/Makefile clean
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config \
-	-C $(POSTGRES_INSTALL_DIR)/build/neon-test-utils-$* \
-	-f $(ROOT_PROJECT_DIR)/pgxn/neon_test_utils/Makefile clean
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config \
-	-C $(POSTGRES_INSTALL_DIR)/build/neon-utils-$* \
-	-f $(ROOT_PROJECT_DIR)/pgxn/neon_utils/Makefile clean
 
 # Build walproposer as a static library. walproposer source code is located
 # in the pgxn/neon directory.
@@ -253,25 +231,12 @@ ifeq ($(UNAME_S),Linux)
 		pg_crc32c.o
 endif
 
-.PHONY: walproposer-lib-clean
-walproposer-lib-clean:
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v17/bin/pg_config \
-		-C $(POSTGRES_INSTALL_DIR)/build/walproposer-lib \
-		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile clean
-
 .PHONY: neon-pg-ext
 neon-pg-ext: \
 	neon-pg-ext-v14 \
 	neon-pg-ext-v15 \
 	neon-pg-ext-v16 \
 	neon-pg-ext-v17
-
-.PHONY: neon-pg-clean-ext
-neon-pg-clean-ext: \
-	neon-pg-clean-ext-v14 \
-	neon-pg-clean-ext-v15 \
-	neon-pg-clean-ext-v16 \
-	neon-pg-clean-ext-v17
 
 # shorthand to build all Postgres versions
 .PHONY: postgres
@@ -288,25 +253,12 @@ postgres-headers: \
 	postgres-headers-v16 \
 	postgres-headers-v17
 
-.PHONY: postgres-clean
-postgres-clean: \
-	postgres-clean-v14 \
-	postgres-clean-v15 \
-	postgres-clean-v16 \
-	postgres-clean-v17
-
 .PHONY: postgres-check
 postgres-check: \
 	postgres-check-v14 \
 	postgres-check-v15 \
 	postgres-check-v16 \
 	postgres-check-v17
-
-# This doesn't remove the effects of 'configure'.
-.PHONY: clean
-clean: postgres-clean neon-pg-clean-ext
-	$(MAKE) -C compute clean
-	$(CARGO_CMD_PREFIX) cargo clean
 
 # This removes everything
 .PHONY: distclean

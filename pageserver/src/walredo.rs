@@ -32,12 +32,12 @@ use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use pageserver_api::key::Key;
 use pageserver_api::models::{WalRedoManagerProcessStatus, WalRedoManagerStatus};
-use pageserver_api::record::NeonWalRecord;
 use pageserver_api::shard::TenantShardId;
 use tracing::*;
 use utils::lsn::Lsn;
 use utils::sync::gate::GateError;
 use utils::sync::heavier_once_cell;
+use wal_decoder::models::record::NeonWalRecord;
 
 use crate::config::PageServerConf;
 use crate::metrics::{
@@ -571,11 +571,11 @@ mod tests {
 
     use bytes::Bytes;
     use pageserver_api::key::Key;
-    use pageserver_api::record::NeonWalRecord;
     use pageserver_api::shard::TenantShardId;
     use tracing::Instrument;
     use utils::id::TenantId;
     use utils::lsn::Lsn;
+    use wal_decoder::models::record::NeonWalRecord;
 
     use super::PostgresRedoManager;
     use crate::config::PageServerConf;

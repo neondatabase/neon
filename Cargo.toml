@@ -22,6 +22,7 @@ members = [
     "libs/http-utils",
     "libs/pageserver_api",
     "libs/postgres_ffi",
+    "libs/postgres_ffi_types",
     "libs/safekeeper_api",
     "libs/desim",
     "libs/neon-shmem",
@@ -199,7 +200,7 @@ tokio-tar = "0.3"
 tokio-util = { version = "0.7.10", features = ["io", "rt"] }
 toml = "0.8"
 toml_edit = "0.22"
-tonic = { version = "0.13.1", default-features = false, features = ["channel", "codegen", "prost", "router", "server", "tls-ring", "tls-native-roots"] }
+tonic = { version = "0.13.1", default-features = false, features = ["channel", "codegen", "gzip", "prost", "router", "server", "tls-ring", "tls-native-roots", "zstd"] }
 tonic-reflection = { version = "0.13.1", features = ["server"] }
 tower = { version = "0.5.2", default-features = false }
 tower-http = { version = "0.6.2", features = ["auth", "request-id", "trace"] }
@@ -259,6 +260,7 @@ pageserver_page_api = { path = "./pageserver/page_api" }
 postgres_backend = { version = "0.1", path = "./libs/postgres_backend/" }
 postgres_connection = { version = "0.1", path = "./libs/postgres_connection/" }
 postgres_ffi = { version = "0.1", path = "./libs/postgres_ffi/" }
+postgres_ffi_types = { version = "0.1", path = "./libs/postgres_ffi_types/" }
 postgres_initdb = { path = "./libs/postgres_initdb" }
 posthog_client_lite = { version = "0.1", path = "./libs/posthog_client_lite" }
 pq_proto = { version = "0.1", path = "./libs/pq_proto/" }
