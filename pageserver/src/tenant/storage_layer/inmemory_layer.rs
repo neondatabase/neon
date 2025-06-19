@@ -647,7 +647,7 @@ impl InMemoryLayer {
         self.opened_at
     }
 
-    pub(crate) async fn tick(&self) -> Option<u64> {
+    pub(crate) fn tick(&self) -> Option<u64> {
         self.file.tick()
     }
 

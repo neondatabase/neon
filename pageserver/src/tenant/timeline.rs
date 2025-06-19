@@ -1906,7 +1906,7 @@ impl Timeline {
 
         let current_lsn = self.get_last_record_lsn();
 
-        let checkpoint_distance_override = open_layer.tick().await;
+        let checkpoint_distance_override = open_layer.tick();
 
         if let Some(size_override) = checkpoint_distance_override {
             if current_size > size_override {
