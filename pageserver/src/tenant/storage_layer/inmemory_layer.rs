@@ -69,6 +69,12 @@ pub struct InMemoryLayer {
     ///
     /// We use a separate lock for the index to reduce the critical section
     /// during which reads cannot be planned.
+    ///
+    /// Note that the file backing [`InMemoryLayer::file`] is append-only,
+    /// so it is not necessary to hold a lock on the index while reading or writing from the file.
+    /// In particular:
+    /// 1. It is safe to read and release [`InMemoryLayer::index`] before reading from [`InMemoryLayer::file`].
+    /// 2. It is safe to write to [`InMemoryLayer::file`] before locking and updating [`InMemoryLayer::index`].
     index: RwLock<BTreeMap<CompactKey, VecMap<Lsn, IndexEntry>>>,
 
     /// Wrapper for the actual on-disk file. Uses interior mutability for concurrent reads/writes.
