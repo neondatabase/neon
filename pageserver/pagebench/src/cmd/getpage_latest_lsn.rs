@@ -18,10 +18,10 @@ use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::TenantShardId;
 use pageserver_page_api as page_api;
 use rand::prelude::*;
-use reqwest::Url;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
+use url::Url;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
 use utils::shard::ShardIndex;
@@ -324,8 +324,12 @@ async fn main_impl(
                 .unwrap();
 
         Box::pin(async move {
-            let connurl = Url::parse(&args.page_service_connstring).unwrap();
-            let client: Box<dyn Client> = match connurl.scheme() {
+            let scheme = match Url::parse(&args.page_service_connstring) {
+                Ok(url) => url.scheme().to_lowercase().to_string(),
+                Err(url::ParseError::RelativeUrlWithoutBase) => "postgresql".to_string(),
+                Err(err) => panic!("invalid connstring: {err}"),
+            };
+            let client: Box<dyn Client> = match scheme.as_str() {
                 "postgresql" | "postgres" => {
                     assert!(!args.compression, "libpq does not support compression");
                     Box::new(

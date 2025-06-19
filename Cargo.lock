@@ -4255,6 +4255,7 @@ dependencies = [
  "tokio-util",
  "tonic 0.13.1",
  "tracing",
+ "url",
  "utils",
  "workspace_hack",
 ]
