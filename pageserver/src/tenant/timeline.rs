@@ -7361,7 +7361,7 @@ impl TimelineWriter<'_> {
             .tl
             .get_layer_for_write(at, &self.write_guard, ctx)
             .await?;
-        let initial_size = layer.size().await?;
+        let initial_size = layer.len();
 
         let last_freeze_at = self.last_freeze_at.load();
         self.write_guard.replace(TimelineWriterState::new(

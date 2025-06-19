@@ -523,11 +523,6 @@ impl std::fmt::Display for InMemoryLayer {
 }
 
 impl InMemoryLayer {
-    /// Get layer size.
-    pub async fn size(&self) -> Result<u64> {
-        Ok(self.file.len())
-    }
-
     pub fn estimated_in_mem_size(&self) -> u64 {
         self.estimated_in_mem_size.load(AtomicOrdering::Relaxed)
     }
