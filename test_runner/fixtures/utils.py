@@ -197,8 +197,7 @@ def print_gc_result(row: dict[str, Any]):
     log.info("GC duration {elapsed} ms".format_map(row))
     log.info(
         (
-            "  total: {layers_total}, needed_by_cutoff {layers_needed_by_cutoff}, needed_by_pitr {layers_needed_by_pitr}"
-            " needed_by_branches: {layers_needed_by_branches}, not_updated: {layers_not_updated}, removed: {layers_removed}"
+            "  eligible: {layers_eligible}, not_updated: {layers_not_updated}, removed: {layers_removed}"
         ).format_map(row)
     )
 
