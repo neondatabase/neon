@@ -339,6 +339,7 @@ impl Client for GrpcClient {
         let req = page_api::proto::GetBaseBackupRequest {
             lsn: lsn.unwrap_or(Lsn(0)).0,
             replica: false,
+            full: false,
         };
         let mut req = tonic::Request::new(req);
         let metadata = req.metadata_mut();
