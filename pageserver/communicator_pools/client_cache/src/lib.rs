@@ -6,7 +6,6 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
-use uuid;
 
 #[async_trait]
 pub trait PooledClientFactory<T>: Send + Sync + 'static {
@@ -18,6 +17,7 @@ pub trait PooledClientFactory<T>: Send + Sync + 'static {
 }
 
 /// A pooled gRPC client with capacity tracking and error handling.
+#[allow(dead_code)]
 pub struct ClientCache<T> {
     inner: Mutex<Inner<T>>,
 
@@ -39,6 +39,7 @@ pub struct ClientCache<T> {
     client_semaphore: Arc<Semaphore>,
 }
 
+#[allow(dead_code)]
 struct Inner<T> {
     entries: HashMap<uuid::Uuid, CacheEntry<T>>,
     pq: PriorityQueue<uuid::Uuid, usize>,
@@ -49,6 +50,7 @@ struct Inner<T> {
     in_progress: usize,
 }
 
+#[allow(dead_code)]
 struct CacheEntry<T> {
     client: T,
     active_consumers: usize,
@@ -57,6 +59,7 @@ struct CacheEntry<T> {
 }
 
 /// A client borrowed from the pool.
+#[allow(dead_code)]
 pub struct PooledClient<T> {
     pub client: T,
     pool: Arc<ClientCache<T>>,

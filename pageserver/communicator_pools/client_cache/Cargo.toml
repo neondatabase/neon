@@ -4,16 +4,17 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 bytes.workspace = true
-tonic.workspace = true
-hyper-util = "0.1.9"
+futures.workspace = true
+hyper-util.workspace = true
 http.workspace = true
+priority-queue = "2.3.1"
+rand.workspace = true
+tonic.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tower.workspace = true
-futures.workspace = true
 uuid.workspace = true
-priority-queue = "2.3.1"
-rand.workspace = true
-async-trait.workspace = true
+workspace_hack.workspace = true
 
