@@ -167,14 +167,6 @@ static XLogReaderState *reader_state;
 #include <sys/syscall.h>
 #include <errno.h>
 
-#ifdef __NR_close_range
-static int
-close_range_syscall(unsigned int start_fd, unsigned int count, unsigned int flags)
-{
-    return syscall(__NR_close_range, start_fd, count, flags);
-}
-#endif
-
 static PgSeccompRule allowed_syscalls[] =
 {
 	/* Hard requirements */
@@ -217,23 +209,24 @@ enter_seccomp_mode(void)
 	 * it potentially leaked to us, _before_ we start processing potentially dangerous
 	 * wal records. See the comment in the Rust code that launches this process.
 	 */
+#define START_FD 3
 #ifdef __NR_close_range
-	if (close_range_syscall(3, ~0U, 0) != 0)
+	if (syscall(__NR_close_range, START_FD, ~0U, 0) != 0)
 		ereport(FATAL,
 				(errcode(ERRCODE_SYSTEM_ERROR),
-				 errmsg("seccomp: could not close files >= fd 3")));
+				 errmsg("seccomp: could not close files >= fd START_FD")));
 #else
-#ifdef NO_CLOSE_RANGE
-// close_range can return EINVAL (not our case, as start_fd and end_fd are hardcoded.
-// It doesn't return any other erorrs if CLOSE_RANGE_UNSHARE is set (it isn't in our case)
-// So we don't report any errors
-#warning "__NR_close_range unavailable, using suboptimal implementation"
-	int fd;
-    for (fd = 3; fd <= INT_MAX; ++fd)
-		close(fd);
-#else
-#error "__NR_close_range syscall not defined, NO_CLOSE_RANGE not defined either"
-#endif
+	// close_range can return EINVAL -- not our case as start_fd and end_fd are hardcoded.
+	// It doesn't return any other errors if CLOSE_RANGE_UNSHARE is not set so we don't
+	// report any errors here
+	#ifdef NO_CLOSE_RANGE
+		#warning "__NR_close_range unavailable, using suboptimal implementation"
+		int fd;
+		for (fd = START_FD; fd <= INT_MAX; ++fd)
+			close(fd);
+	#else
+		#error "__NR_close_range syscall not defined, NO_CLOSE_RANGE not defined either"
+	#endif
 #endif
 
 #ifdef MALLOC_NO_MMAP
