@@ -1237,7 +1237,7 @@ dependencies = [
 
 [[package]]
 name = "client_cache"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -5681,7 +5681,7 @@ checksum = "e3a8614ee435691de62bcffcf4a66d91b3594bf1428a5722e79103249a095690"
 
 [[package]]
 name = "request_tracker"
-version = "0.1.0"
+version = "0.0.0"
 
 [[package]]
 name = "reqwest"
