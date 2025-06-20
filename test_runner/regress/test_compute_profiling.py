@@ -27,7 +27,9 @@ def load_profile_pb2():
     h = hashlib.sha512()
     h.update(response.content)
     if h.hexdigest() != PROFILE_PB2_SHA512SUM:
-        raise ValueError(f"Downloaded profile_pb2.py does not match expected SHA512 checksum: {PROFILE_PB2_SHA512SUM}")
+        raise ValueError(
+            f"Downloaded profile_pb2.py does not match expected SHA512 checksum: {PROFILE_PB2_SHA512SUM}"
+        )
     else:
         log.info("Downloaded profile_pb2.py matches expected SHA512 checksum, all good.")
 
@@ -46,8 +48,10 @@ def load_profile_pb2():
 
     return profile_pb2, tmpdir  # Return the module and tempdir so it doesn't get GC'd
 
+
 profile_pb2, _tmp = load_profile_pb2()
 profile = profile_pb2.Profile()
+
 
 def _start_profiling_cpu(client: EndpointHttpClient, event: threading.Event):
     """
@@ -63,6 +67,7 @@ def _start_profiling_cpu(client: EndpointHttpClient, event: threading.Event):
     except Exception as e:
         log.error(f"Error starting CPU profiling: {e}")
         raise
+
 
 def test_compute_profiling_cpu(neon_simple_env: NeonEnv):
     env = neon_simple_env
@@ -80,19 +85,29 @@ def test_compute_profiling_cpu(neon_simple_env: NeonEnv):
         assert len(profile.location) > 0, "No locations found in CPU profiling data"
         assert len(profile.function) > 0, "No functions found in CPU profiling data"
         assert len(profile.string_table) > 0, "No string tables found in CPU profiling data"
-        for string in ['PostgresMain', 'ServerLoop', 'BackgroundWorkerMain', 'pq_recvbuf', 'pq_getbyte']:
-            assert string in profile.string_table, f"Expected function '{string}' not found in string table"
+        for string in [
+            "PostgresMain",
+            "ServerLoop",
+            "BackgroundWorkerMain",
+            "pq_recvbuf",
+            "pq_getbyte",
+        ]:
+            assert string in profile.string_table, (
+                f"Expected function '{string}' not found in string table"
+            )
 
     thread = threading.Thread(target=_wait_and_assert_cpu_profiling)
     thread.start()
 
     def insert_rows():
-        event.wait() # Wait for profiling to be ready to start
+        event.wait()  # Wait for profiling to be ready to start
         lfc_conn = endpoint.connect(dbname="profiling_test")
         lfc_cur = lfc_conn.cursor()
         n_records = 10000
         log.info(f"Inserting {n_records} rows")
-        lfc_cur.execute("create table t(pk integer primary key, payload text default repeat('?', 128))")
+        lfc_cur.execute(
+            "create table t(pk integer primary key, payload text default repeat('?', 128))"
+        )
         lfc_cur.execute(f"insert into t (pk) values (generate_series(1,{n_records}))")
         log.info(f"Inserted {n_records} rows")
 
@@ -104,5 +119,3 @@ def test_compute_profiling_cpu(neon_simple_env: NeonEnv):
 
     endpoint.stop()
     endpoint.start()
-
-

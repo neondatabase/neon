@@ -94,12 +94,17 @@ class EndpointHttpClient(requests.Session):
 
         wait_until(offloaded)
 
-    def profile_cpu(self, sampling_frequency: int, timeout_seconds: int, should_stop: bool) -> bytes:
+    def profile_cpu(
+        self, sampling_frequency: int, timeout_seconds: int, should_stop: bool
+    ) -> bytes:
         should_stop_str = "false"
         if should_stop:
             should_stop_str = "true"
 
-        res = self.get(f"http://localhost:{self.external_port}/profile/cpu?sampling_frequency={sampling_frequency}&timeout_seconds={timeout_seconds}&should_stop={should_stop_str}", auth=self.auth)
+        res = self.get(
+            f"http://localhost:{self.external_port}/profile/cpu?sampling_frequency={sampling_frequency}&timeout_seconds={timeout_seconds}&should_stop={should_stop_str}",
+            auth=self.auth,
+        )
         res.raise_for_status()
         return res.content
 
