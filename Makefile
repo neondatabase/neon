@@ -4,6 +4,13 @@ ROOT_PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 # managers.
 POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install/
 
+# Extra flags to pass to `cargo build`. `--locked` and `--features testing` are
+# popular examples.
+#
+# You can also set CARGO_PROFILE to override the cargo profile to use. By default,
+# it is derived from BUILD_TYPE.
+CARGO_BUILD_FLAGS ?=
+
 # All intermediate build artifacts are stored here.
 BUILD_DIR := build
 
@@ -20,12 +27,12 @@ ifeq ($(BUILD_TYPE),release)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl
 	PG_CFLAGS += -O2 -g3 $(CFLAGS)
 	PG_LDFLAGS = $(LDFLAGS)
-	# Unfortunately, `--profile=...` is a nightly feature
-	CARGO_BUILD_FLAGS += --release
+	CARGO_PROFILE ?= --profile=release
 else ifeq ($(BUILD_TYPE),debug)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
 	PG_CFLAGS += -O0 -g3 $(CFLAGS)
 	PG_LDFLAGS = $(LDFLAGS)
+	CARGO_PROFILE ?= --profile=dev
 else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
@@ -97,7 +104,7 @@ all: neon postgres neon-pg-ext
 .PHONY: neon
 neon: postgres-headers walproposer-lib cargo-target-dir
 	+@echo "Compiling Neon"
-	$(CARGO_CMD_PREFIX) cargo build $(CARGO_BUILD_FLAGS)
+	$(CARGO_CMD_PREFIX) cargo build $(CARGO_BUILD_FLAGS) $(CARGO_PROFILE)
 .PHONY: cargo-target-dir
 cargo-target-dir:
 	# https://github.com/rust-lang/cargo/issues/14281
