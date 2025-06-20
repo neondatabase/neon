@@ -191,7 +191,7 @@ jobs:
       - name: Build all
         if: steps.cache_pg_14.outputs.cache-hit != 'true'
         # Note: the Makefile picks up BUILD_TYPE and CARGO_PROFILE from the env variables
-        run: mold -run make ${make_vars} all -j$(nproc) CARGO_BUILD_FLAGS=$(CARGO_FLAGS)
+        run: mold -run make ${make_vars} all -j$(nproc) CARGO_BUILD_FLAGS="$CARGO_FLAGS"
 
       - name: Build walproposer-lib
         run: mold -run make ${make_vars} walproposer-lib -j$(nproc)
