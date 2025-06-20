@@ -466,6 +466,8 @@ pub struct Config {
     pub timelines_onto_safekeepers: bool,
 
     pub use_local_compute_notifications: bool,
+
+    pub kick_secondary_downloads: bool,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -2060,6 +2062,7 @@ impl Service {
                             &tenant_shard.shard,
                             &tenant_shard.config,
                             &PlacementPolicy::Attached(0),
+                            tenant_shard.intent.get_secondary().len(),
                         )),
                     },
                 )]);
@@ -5601,7 +5604,15 @@ impl Service {
             for parent_id in parent_ids {
                 let child_ids = parent_id.split(new_shard_count);
 
-                let (pageserver, generation, policy, parent_ident, config, preferred_az) = {
+                let (
+                    pageserver,
+                    generation,
+                    policy,
+                    parent_ident,
+                    config,
+                    preferred_az,
+                    secondary_count,
+                ) = {
                     let mut old_state = tenants
                         .remove(&parent_id)
                         .expect("It was present, we just split it");
@@ -5621,6 +5632,7 @@ impl Service {
                         old_state.shard,
                         old_state.config.clone(),
                         old_state.preferred_az().cloned(),
+                        old_state.intent.get_secondary().len(),
                     )
                 };
 
@@ -5642,6 +5654,7 @@ impl Service {
                                 &child_shard,
                                 &config,
                                 &policy,
+                                secondary_count,
                             )),
                         },
                     );
@@ -8342,8 +8355,8 @@ impl Service {
                             "Skipping migration of {tenant_shard_id} to {node} because secondary isn't ready: {progress:?}"
                         );
 
-                        #[cfg(feature = "testing")]
-                        if progress.heatmap_mtime.is_none() {
+                        if self.config.kick_secondary_downloads && progress.heatmap_mtime.is_none()
+                        {
                             // No heatmap might mean the attached location has never uploaded one, or that
                             // the secondary download hasn't happened yet.  This is relatively unusual in the field,
                             // but fairly common in tests.
@@ -8367,7 +8380,6 @@ impl Service {
     /// happens on multi-minute timescales in the field, which is fine because optimisation is meant
     /// to be a lazy background thing. However, when testing, it is not practical to wait around, so
     /// we have this helper to move things along faster.
-    #[cfg(feature = "testing")]
     async fn kick_secondary_download(&self, tenant_shard_id: TenantShardId) {
         let (attached_node, secondaries) = {
             let locked = self.inner.read().unwrap();
