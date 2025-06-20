@@ -80,15 +80,42 @@ fn list_children_processes(parent_pid: Pid) -> Result<Vec<Pid>, Box<dyn std::err
         .collect())
 }
 
+/// The options for generating a pprof profile using the `perf` tool.
 #[derive(Debug)]
 pub struct ProfileGenerationOptions<'a, S: AsRef<str>> {
+    /// If set to `true`, the `perf` command will be run with `sudo`.
+    /// This is useful for profiling processes that require elevated
+    /// privileges.
+    /// If `false`, the command will be run without `sudo`.
     pub run_with_sudo: bool,
+    /// The path to the `perf` binary. If `None`, it defaults to "perf",
+    /// so it will look for `perf` in the system's `PATH`.
     pub perf_binary_path: Option<&'a Path>,
+    /// The PID of the process to profile. This can be the main process
+    /// or a child process. For targeting postgres, this should be the
+    /// PID of the main postgres process.
     pub process_pid: Pid,
+    /// If set to `true`, the `perf` command will follow forks.
+    /// This means that it will continue to profile child processes
+    /// that are created by the main process after it has already
+    /// started profiling.
     pub follow_forks: bool,
+    /// The sampling frequency in Hz. If `None`, it defaults to 99 Hz.
+    /// This is the frequency at which stack traces will be sampled.
     pub sampling_frequency: Option<u32>,
+    /// A list of symbols to block from the profiling output.
+    /// This is useful for filtering out noise from the profiling data,
+    /// such as system libraries or other irrelevant symbols.
     pub blocklist_symbols: &'a [S],
+    /// The duration for which the profiling should run.
+    /// This is the maximum time the profiling will run before it is
+    /// stopped. If the profiling is not stopped manually, it will run
+    /// for this duration.
     pub timeout: std::time::Duration,
+    /// An optional channel receiver that can be used to signal the
+    /// profiling to stop early. If provided, the profiling will stop
+    /// when a message is received on this channel or when the timeout
+    /// is reached, whichever comes first.
     pub should_stop: Option<crossbeam_channel::Receiver<()>>,
 }
 
@@ -241,7 +268,7 @@ pub fn generate_pprof_using_perf<S: AsRef<str>>(
     Ok(pprof_data)
 }
 
-pub fn archive_bytes<W: Write>(
+fn archive_bytes<W: Write>(
     bytes: &[u8],
     output: &mut W,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -390,13 +417,3 @@ pub fn generate_pprof_from_collapsed<S: AsRef<str>>(
         protobuf_encoded
     }))
 }
-
-// perf_data_to_pprof::generate_pprof_using_perf(
-//     None,
-//     args.target_pid.into(),
-//     true,
-//     None,
-//     std::time::Duration::from_secs(args.timeout_seconds.unwrap_or(5)),
-//     Some(rx),
-// )?
-// .write_to_file(&args.pprof_output)?;

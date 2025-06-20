@@ -1,3 +1,10 @@
+//! Contains the route for profiling the compute.
+//!
+//! Profiling the compute means generating a pprof profile of the
+//! postgres processes.
+//!
+//! The profiling is done using the `perf` tool, which is expected to be
+//! available at `/usr/bin/perf`.
 use std::sync::atomic::Ordering;
 
 use axum::body::Body;
@@ -17,6 +24,7 @@ fn default_timeout_seconds() -> u8 {
     5
 }
 
+/// Request parameters for profiling the compute.
 #[derive(Debug, Copy, Clone, serde::Deserialize)]
 pub(in crate::http) struct ProfileRequest {
     #[serde(default = "default_sampling_frequency")]
@@ -45,7 +53,7 @@ fn create_response<B: Into<Body>>(status: StatusCode, body: B) -> Response {
     r
 }
 
-/// Profile the compute.
+/// The HTTP request handler for profiling the compute.
 pub(in crate::http) async fn profile(Query(request): Query<ProfileRequest>) -> Response {
     static CANCEL_CHANNEL: Lazy<Mutex<Option<crossbeam_channel::Sender<()>>>> =
         Lazy::new(|| Mutex::new(None));

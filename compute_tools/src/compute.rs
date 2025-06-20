@@ -364,6 +364,8 @@ fn maybe_cgexec(cmd: &str) -> Command {
     }
 }
 
+/// A handle to the Postgres process that is running in the compute
+/// node.
 pub struct PostgresHandle {
     postgres: std::process::Child,
     log_collector: tokio::task::JoinHandle<Result<()>>,
