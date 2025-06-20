@@ -50,7 +50,7 @@ where
             as usize;
 
         size
-    }
+    }	
 
     pub fn new(
         buckets: &'a mut [MaybeUninit<Bucket<K, V>>],
@@ -160,6 +160,33 @@ where
 		self.alloc_limit != INVALID_POS
 	}
 
+
+	// TODO(quantumish): How does this interact with an ongoing shrink?
+	pub fn clear(&mut self) {
+		for i in 0..self.buckets.len() {
+            self.buckets[i] = Bucket {
+                next: if i < self.buckets.len() - 1 {
+                    i as u32 + 1
+                } else {
+                    INVALID_POS
+                },
+				prev: if i > 0 {
+					PrevPos::Chained(i as u32 - 1)
+				} else {
+					PrevPos::First(INVALID_POS)
+				},
+                inner: None,
+            }
+        }
+
+        for i in 0..self.dictionary.len() {
+            self.dictionary[i] = INVALID_POS;
+        }
+
+		self.buckets_in_use = 0;
+		self.alloc_limit = INVALID_POS;
+	}
+	
     pub fn entry_at_bucket(&mut self, pos: usize) -> Option<OccupiedEntry<'a, '_, K, V>> {
 		if pos >= self.buckets.len() {
 			return None;

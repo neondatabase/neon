@@ -3843,9 +3843,11 @@ checksum = "e5ce46fe64a9d73be07dcbe690a38ce1b293be448fd8ce1e6c1b8062c9f72c6a"
 name = "neon-shmem"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "nix 0.30.1",
  "rand 0.9.1",
  "rand_distr 0.5.1",
+ "rustc-hash 1.1.0",
  "tempfile",
  "thiserror 1.0.69",
  "workspace_hack",

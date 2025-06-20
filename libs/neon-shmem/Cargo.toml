@@ -8,10 +8,22 @@ license.workspace = true
 thiserror.workspace = true
 nix.workspace = true
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }
+rustc-hash = { version = "2.1.1" }
 
 [dev-dependencies]
+criterion = { workspace = true, features = ["html_reports"] }
 rand = "0.9.1"
 rand_distr = "0.5.1"
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+ahash.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tempfile = "3.14.0"
+
+[[bench]]
+name = "hmap_resize"
+harness = false
+
+[[bin]]
+name = "hmap_test"
+path = "main.rs"
