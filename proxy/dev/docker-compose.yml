@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  proxy-postgres:
+    image: postgres:17-bookworm
+    container_name: proxy-postgres
+    environment:
+      POSTGRES_PASSWORD: proxy-postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./sql:/docker-entrypoint-initdb.d
