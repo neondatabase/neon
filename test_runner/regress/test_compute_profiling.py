@@ -1,24 +1,19 @@
-
-import random
 import threading
-import time
-from google.protobuf.text_format import MessageToString
-from google.protobuf.message import Message
-from enum import Enum
 
-import pytest
 from fixtures.endpoint.http import EndpointHttpClient
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
-from fixtures.utils import USE_LFC
-from prometheus_client.parser import text_string_to_metric_families as prom_parse_impl
+from google.protobuf.message import Message
+
 
 def load_profile_pb2():
-    import requests
     import base64
-    import tempfile
-    import os
+    import hashlib
     import importlib.util
+    import os
+    import tempfile
+
+    import requests
 
     # URL to profile_pb2.py
     PROFILE_PB2_URL = "https://android.googlesource.com/platform/prebuilts/simpleperf/+/6d625d0eb9c0602532a52e8eb87363f2ea6da73e/profile_pb2.py?format=TEXT"
@@ -29,7 +24,6 @@ def load_profile_pb2():
     response.raise_for_status()
 
     # Confirm the content is expected, the one we trust.
-    import hashlib
     h = hashlib.sha512()
     h.update(response.content)
     if h.hexdigest() != PROFILE_PB2_SHA512SUM:
