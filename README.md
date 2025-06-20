@@ -71,6 +71,10 @@ If you get errors about missing `m4` you may have to install it manually:
 brew install m4
 brew link --force m4
 ```
+If you get errors about `configure: error: ICU library not found`
+```sh
+brew install pkg-config
+```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
 ```
