@@ -5,9 +5,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use anyhow::anyhow;
 use flate2::{Compression, write::GzEncoder};
 use inferno::collapse::Collapse;
-use nix::libc::kill;
+use nix::{
+    libc::{kill, pid_t},
+    unistd::Pid,
+};
 
 const SUDO_PATH: &str = "/usr/bin/sudo";
 
@@ -18,10 +22,7 @@ pub struct PprofData(pub(crate) Vec<u8>);
 
 impl PprofData {
     /// Dumps the pprof data to a file.
-    pub fn write_to_file(
-        &self,
-        path: &PathBuf,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    pub fn write_to_file(&self, path: &PathBuf) -> anyhow::Result<()> {
         let mut file = std::fs::File::create(path)?;
         file.write_all(&self.0)?;
         Ok(())
@@ -42,37 +43,13 @@ impl DerefMut for PprofData {
     }
 }
 
-#[repr(transparent)]
-#[derive(Debug, Copy, Clone)]
-pub struct Pid(u32);
-
-impl From<u32> for Pid {
-    fn from(pid: u32) -> Self {
-        Pid(pid)
-    }
-}
-
-impl Deref for Pid {
-    type Target = u32;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for Pid {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
 /// Returns a list of child processes for a given parent process ID.
-fn list_children_processes(parent_pid: Pid) -> Result<Vec<Pid>, Box<dyn std::error::Error>> {
+fn list_children_processes(parent_pid: Pid) -> anyhow::Result<Vec<Pid>> {
     Ok(procfs::process::all_processes()?
         .filter_map(|proc| {
             if let Ok(stat) = proc.ok()?.stat() {
-                if stat.ppid as u32 == parent_pid.0 {
-                    return Some(Pid(stat.pid as u32));
+                if stat.ppid == parent_pid.as_raw() {
+                    return Some(Pid::from_raw(stat.pid));
                 }
             }
             None
@@ -135,12 +112,12 @@ pub struct ProfileGenerationOptions<'a, S: AsRef<str>> {
 #[allow(unsafe_code)]
 pub fn generate_pprof_using_perf<S: AsRef<str>>(
     options: ProfileGenerationOptions<S>,
-) -> std::result::Result<PprofData, Box<dyn std::error::Error>> {
+) -> anyhow::Result<PprofData> {
     let pids = list_children_processes(options.process_pid)
         .unwrap_or_default()
         .into_iter()
         .chain(std::iter::once(options.process_pid))
-        .map(|pid| pid.0.to_string())
+        .map(|pid| pid.to_string())
         .collect::<Vec<String>>()
         .join(",");
 
@@ -226,17 +203,13 @@ pub fn generate_pprof_using_perf<S: AsRef<str>>(
 
     let perf_script_output = perf_script_command.wait_with_output()?;
     if !perf_script_output.status.success() {
-        return Err(Box::new(std::io::Error::other(
-            "perf script command failed",
-        )));
+        return Err(anyhow!("perf script command failed"));
     }
 
     let perf_script_output = perf_script_output.stdout;
     let perf_output_str = String::from_utf8(perf_script_output)?;
     if perf_output_str.is_empty() {
-        return Err(Box::new(std::io::Error::other(
-            "perf script output is empty",
-        )));
+        return Err(anyhow!("perf script output is empty"));
     }
 
     // Step 2: Collapse the stack traces into a folded stack trace
@@ -257,21 +230,14 @@ pub fn generate_pprof_using_perf<S: AsRef<str>>(
         .map_err(|e| Box::new(std::io::Error::other(e)))?;
 
     if collapsed.is_empty() {
-        return Err(Box::new(std::io::Error::other(
-            "collapsed stack trace is empty",
-        )));
+        return Err(anyhow!("collapsed stack trace is empty"));
     }
 
     // Step 3: Generate pprof profile from collapsed stack trace
-    let pprof_data = generate_pprof_from_collapsed(&collapsed, options.blocklist_symbols, false)?;
-
-    Ok(pprof_data)
+    generate_pprof_from_collapsed(&collapsed, options.blocklist_symbols, false)
 }
 
-fn archive_bytes<W: Write>(
-    bytes: &[u8],
-    output: &mut W,
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
+fn archive_bytes<W: Write>(bytes: &[u8], output: &mut W) -> anyhow::Result<()> {
     let mut encoder = GzEncoder::new(output, Compression::default());
 
     encoder.write_all(bytes)?;
@@ -282,7 +248,7 @@ fn archive_bytes<W: Write>(
 
 /// Returns the executable path for a given process ID.
 fn get_exe_from_pid(pid: Pid, fallback_name: &str) -> String {
-    let proc = match procfs::process::Process::new(pid.0 as i32) {
+    let proc = match procfs::process::Process::new(pid.as_raw()) {
         Ok(proc) => proc,
         Err(_) => {
             return fallback_name.to_owned();
@@ -300,7 +266,7 @@ pub fn generate_pprof_from_collapsed<S: AsRef<str>>(
     collapsed_bytes: &[u8],
     blocklist_symbols: &[S],
     archive: bool,
-) -> Result<PprofData, Box<dyn std::error::Error>> {
+) -> anyhow::Result<PprofData> {
     use pprof::protos::Message;
     use pprof::protos::profile::{Function, Line, Location, Profile, Sample, ValueType};
 
@@ -339,7 +305,8 @@ pub fn generate_pprof_from_collapsed<S: AsRef<str>>(
         let mapping_id = *mapping_map
             .entry(binary_name.to_string())
             .or_insert_with(|| {
-                let exe = get_exe_from_pid(Pid(pid.parse::<u32>().unwrap_or(0)), "unknown");
+                let exe =
+                    get_exe_from_pid(Pid::from_raw(pid.parse::<pid_t>().unwrap_or(0)), "unknown");
                 let id = profile.mapping.len() as u64 + 1;
                 profile.string_table.push(exe);
                 profile.mapping.push(pprof::protos::profile::Mapping {

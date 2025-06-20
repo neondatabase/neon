@@ -5,12 +5,14 @@
 //!
 //! The profiling is done using the `perf` tool, which is expected to be
 //! available at `/usr/bin/perf`.
+use std::io::Read;
 use std::sync::atomic::Ordering;
 
 use axum::body::Body;
 use axum::extract::Query;
 use axum::response::{IntoResponse, Response};
 use http::StatusCode;
+use nix::unistd::Pid;
 use once_cell::sync::Lazy;
 use tokio::sync::Mutex;
 
@@ -103,12 +105,12 @@ pub(in crate::http) async fn profile(Query(request): Query<ProfileRequest>) -> R
     }
 
     tracing::info!("Profiling will start with parameters: {request:?}");
-    let pg_pid = crate::compute::PG_PID.load(Ordering::SeqCst);
+    let pg_pid = Pid::from_raw(crate::compute::PG_PID.load(Ordering::SeqCst) as _);
 
     let options = crate::profiling::ProfileGenerationOptions {
         run_with_sudo: true,
         perf_binary_path: Some(PERF_BINARY_PATH.as_ref()),
-        process_pid: pg_pid.into(),
+        process_pid: pg_pid,
         follow_forks: true,
         sampling_frequency: Some(request.sampling_frequency as u32),
         blocklist_symbols: &["libc", "libgcc", "pthread", "vdso"],
@@ -128,17 +130,15 @@ pub(in crate::http) async fn profile(Query(request): Query<ProfileRequest>) -> R
 
     tracing::info!("Profiling has completed successfully.");
 
-    let mut r = StatusCode::OK.into_response();
-
-    *r.body_mut() = pprof_data.0.into();
-    r.headers_mut().insert(
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
         http::header::CONTENT_TYPE,
         http::HeaderValue::from_static("application/octet-stream"),
     );
-    r.headers_mut().insert(
+    headers.insert(
         http::header::CONTENT_DISPOSITION,
         http::HeaderValue::from_static("attachment; filename=\"profile.pb\""),
     );
 
-    r
+    (headers, pprof_data.0).into_response()
 }
