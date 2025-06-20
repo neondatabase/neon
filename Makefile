@@ -18,10 +18,17 @@ ifeq ($(BUILD_TYPE),release)
 	PG_LDFLAGS = $(LDFLAGS)
 	# Unfortunately, `--profile=...` is a nightly feature
 	CARGO_BUILD_FLAGS += --release
+	# NEON_CARGO_ARTIFACT_TARGET_DIR is the directory where `cargo build` places
+	# the final build artifacts. There is unfortunately no easy way of changing
+	# it to a fully predictable path, nor to extract the path with a simple
+	# command. See https://github.com/rust-lang/cargo/issues/9661 and
+	# https://github.com/rust-lang/cargo/issues/6790.
+	NEON_CARGO_ARTIFACT_TARGET_DIR = $(ROOT_PROJECT_DIR)/target/release
 else ifeq ($(BUILD_TYPE),debug)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
 	PG_CFLAGS += -O0 -g3 $(CFLAGS)
 	PG_LDFLAGS = $(LDFLAGS)
+	NEON_CARGO_ARTIFACT_TARGET_DIR = $(ROOT_PROJECT_DIR)/target/debug
 else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
@@ -94,6 +101,7 @@ all: neon postgres neon-pg-ext
 neon: postgres-headers walproposer-lib cargo-target-dir
 	+@echo "Compiling Neon"
 	$(CARGO_CMD_PREFIX) cargo build $(CARGO_BUILD_FLAGS)
+
 .PHONY: cargo-target-dir
 cargo-target-dir:
 	# https://github.com/rust-lang/cargo/issues/14281
@@ -172,32 +180,13 @@ postgres-check-%: postgres-%
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$* MAKELEVEL=0 check
 
 .PHONY: neon-pg-ext-%
-neon-pg-ext-%: postgres-%
-	+@echo "Compiling neon $*"
-	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-$*
+neon-pg-ext-%: postgres-% cargo-target-dir
+	+@echo "Compiling neon-specific Postgres extensions for $*"
+	mkdir -p $(POSTGRES_INSTALL_DIR)/build/pgxn-$*
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
-		-C $(POSTGRES_INSTALL_DIR)/build/neon-$* \
-		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile install
-	+@echo "Compiling neon_walredo $*"
-	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-walredo-$*
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
-		-C $(POSTGRES_INSTALL_DIR)/build/neon-walredo-$* \
-		-f $(ROOT_PROJECT_DIR)/pgxn/neon_walredo/Makefile install
-	+@echo "Compiling neon_rmgr $*"
-	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-rmgr-$*
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
-		-C $(POSTGRES_INSTALL_DIR)/build/neon-rmgr-$* \
-		-f $(ROOT_PROJECT_DIR)/pgxn/neon_rmgr/Makefile install
-	+@echo "Compiling neon_test_utils $*"
-	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-test-utils-$*
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
-		-C $(POSTGRES_INSTALL_DIR)/build/neon-test-utils-$* \
-		-f $(ROOT_PROJECT_DIR)/pgxn/neon_test_utils/Makefile install
-	+@echo "Compiling neon_utils $*"
-	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-utils-$*
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
-		-C $(POSTGRES_INSTALL_DIR)/build/neon-utils-$* \
-		-f $(ROOT_PROJECT_DIR)/pgxn/neon_utils/Makefile install
+		NEON_CARGO_ARTIFACT_TARGET_DIR=$(NEON_CARGO_ARTIFACT_TARGET_DIR) \
+		-C $(POSTGRES_INSTALL_DIR)/build/pgxn-$*\
+		-f $(ROOT_PROJECT_DIR)/pgxn/Makefile  install
 
 # Build walproposer as a static library. walproposer source code is located
 # in the pgxn/neon directory.

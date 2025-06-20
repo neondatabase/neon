@@ -1,0 +1,15 @@
+[package]
+name = "communicator"
+version = "0.1.0"
+license.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+neon-shmem.workspace = true
+workspace_hack = { version = "0.1", path = "../../../workspace_hack" }
+
+[build-dependencies]
+cbindgen.workspace = true
