@@ -617,7 +617,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     // Initialize AWS clients only if s3_prefix is specified
     let (s3_client, kms_client) = if args.s3_prefix.is_some() {
         // Create AWS config with enhanced retry settings
-        let config = aws_config::defaults(BehaviorVersion::v2024_03_28())
+        let config = aws_config::defaults(BehaviorVersion::v2025_01_17())
             .retry_config(
                 aws_config::retry::RetryConfig::standard()
                     .with_max_attempts(5) // Retry up to 5 times
