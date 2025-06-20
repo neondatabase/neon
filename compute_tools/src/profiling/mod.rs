@@ -57,6 +57,45 @@ fn list_children_processes(parent_pid: Pid) -> anyhow::Result<Vec<Pid>> {
         .collect())
 }
 
+fn check_binary_runs(command: &[&str]) -> anyhow::Result<()> {
+    if command.is_empty() {
+        return Err(anyhow!("Command cannot be empty"));
+    }
+
+    // One by one the strings from the command are joined to form the
+    // word in the invocation of the binary.
+    let (first, rest) = command
+        .split_first()
+        .ok_or_else(|| anyhow!("Command must contain at least one argument (the binary name)"))?;
+
+    let mut output = std::process::Command::new(first);
+
+    for arg in rest {
+        output.arg(arg);
+    }
+
+    let output = output.output()?;
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "The command invocation is not possible: {}",
+            output.status
+        ));
+    }
+
+    Ok(())
+}
+
+fn check_perf_runs(perf_binary_path: &str, run_with_sudo: bool) -> anyhow::Result<()> {
+    let command = if run_with_sudo {
+        vec![SUDO_PATH, perf_binary_path, "version"]
+    } else {
+        vec![perf_binary_path, "version"]
+    };
+
+    check_binary_runs(&command)
+}
+
 /// The options for generating a pprof profile using the `perf` tool.
 #[derive(Debug)]
 pub struct ProfileGenerationOptions<'a, S: AsRef<str>> {
@@ -113,6 +152,17 @@ pub struct ProfileGenerationOptions<'a, S: AsRef<str>> {
 pub fn generate_pprof_using_perf<S: AsRef<str>>(
     options: ProfileGenerationOptions<S>,
 ) -> anyhow::Result<PprofData> {
+    let perf_binary_path = options
+        .perf_binary_path
+        .map_or_else(|| PathBuf::from("perf"), |p| p.to_owned());
+
+    check_perf_runs(
+        perf_binary_path
+            .to_str()
+            .ok_or(anyhow!("Couldn't reconstruct perf binary path as string."))?,
+        options.run_with_sudo,
+    )?;
+
     let pids = list_children_processes(options.process_pid)
         .unwrap_or_default()
         .into_iter()
@@ -122,23 +172,18 @@ pub fn generate_pprof_using_perf<S: AsRef<str>>(
         .join(",");
 
     // Step 1: Run perf to collect stack traces
-    let perf_binary_path = options
-        .perf_binary_path
-        .map_or_else(|| PathBuf::from("perf"), |p| p.to_owned());
-
     let mut perf_record_command = if options.run_with_sudo {
         std::process::Command::new(SUDO_PATH)
     } else {
         std::process::Command::new(&perf_binary_path)
     };
 
-    let perf_record_command = if options.run_with_sudo {
-        perf_record_command.arg(&perf_binary_path)
-    } else {
-        perf_record_command.arg("record")
+    if options.run_with_sudo {
+        perf_record_command.arg(&perf_binary_path);
     };
 
     let mut perf_record_command = perf_record_command
+        .arg("record")
         // Target the specified process IDs.
         .arg("-p")
         .arg(pids)
@@ -173,7 +218,7 @@ pub fn generate_pprof_using_perf<S: AsRef<str>>(
                 .expect("Failed to capture perf output"),
         )
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()?;
 
     std::thread::spawn(move || {
@@ -203,7 +248,11 @@ pub fn generate_pprof_using_perf<S: AsRef<str>>(
 
     let perf_script_output = perf_script_command.wait_with_output()?;
     if !perf_script_output.status.success() {
-        return Err(anyhow!("perf script command failed"));
+        return Err(anyhow!(
+            "perf script command failed: {}",
+            String::from_utf8(perf_script_output.stderr)
+                .unwrap_or_else(|_| "Invalid UTF-8 output".to_string())
+        ));
     }
 
     let perf_script_output = perf_script_output.stdout;

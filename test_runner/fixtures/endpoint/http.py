@@ -112,7 +112,11 @@ class EndpointHttpClient(requests.Session):
             params=params,
             auth=self.auth,
         )
-        res.raise_for_status()
+
+        if res.status_code != 200:
+            log.error(f"Failed to profile CPU: {res.status_code} {res.text}")
+            res.raise_for_status()
+
         return res.content
 
     def database_schema(self, database: str):

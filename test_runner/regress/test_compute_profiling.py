@@ -4,53 +4,7 @@ from fixtures.endpoint.http import EndpointHttpClient
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
 from google.protobuf.message import Message
-
-
-def load_profile_pb2():
-    import base64
-    import hashlib
-    import importlib.util
-    import os
-    import tempfile
-
-    import requests
-
-    # URL to profile_pb2.py
-    PROFILE_PB2_URL = "https://android.googlesource.com/platform/prebuilts/simpleperf/+/6d625d0eb9c0602532a52e8eb87363f2ea6da73e/profile_pb2.py?format=TEXT"
-    PROFILE_PB2_SHA512SUM = "f22140b4a911177132057f5980773fbe891ef5a16924c4e2849d8cbdf27020aef1491905d8b72dc8a266e4db5748ad3171fc2579edca8f9d0b94f13ca90637f8"
-
-    # Download and decode base64-encoded content (from googlesource ?format=TEXT)
-    response = requests.get(PROFILE_PB2_URL)
-    response.raise_for_status()
-
-    # Confirm the content is expected, the one we trust.
-    h = hashlib.sha512()
-    h.update(response.content)
-    if h.hexdigest() != PROFILE_PB2_SHA512SUM:
-        raise ValueError(
-            f"Downloaded profile_pb2.py does not match expected SHA512 checksum: {PROFILE_PB2_SHA512SUM}"
-        )
-    else:
-        log.info("Downloaded profile_pb2.py matches expected SHA512 checksum, all good.")
-
-    decoded_py = base64.b64decode(response.content)
-
-    # Write to a temporary file
-    tmpdir = tempfile.TemporaryDirectory()
-    py_path = os.path.join(tmpdir.name, "profile_pb2.py")
-    with open(py_path, "wb") as f:
-        f.write(decoded_py)
-
-    # Dynamically import the module
-    spec = importlib.util.spec_from_file_location("profile_pb2", py_path)
-    profile_pb2 = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(profile_pb2)
-
-    return profile_pb2, tmpdir  # Return the module and tempdir so it doesn't get GC'd
-
-
-profile_pb2, _tmp = load_profile_pb2()
-profile = profile_pb2.Profile()
+from data import profile_pb2
 
 
 def _start_profiling_cpu(client: EndpointHttpClient, event: threading.Event):
@@ -62,6 +16,7 @@ def _start_profiling_cpu(client: EndpointHttpClient, event: threading.Event):
         event.set()
         response = client.profile_cpu(100, 5, False)
         log.info("CPU profiling finished")
+        profile = profile_pb2.Profile()
         Message.ParseFromString(profile, response)
         return profile
     except Exception as e:

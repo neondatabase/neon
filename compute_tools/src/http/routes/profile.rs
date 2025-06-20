@@ -5,7 +5,6 @@
 //!
 //! The profiling is done using the `perf` tool, which is expected to be
 //! available at `/usr/bin/perf`.
-use std::io::Read;
 use std::sync::atomic::Ordering;
 
 use axum::body::Body;
@@ -15,6 +14,8 @@ use http::StatusCode;
 use nix::unistd::Pid;
 use once_cell::sync::Lazy;
 use tokio::sync::Mutex;
+
+use crate::http::JsonResponse;
 
 const PERF_BINARY_PATH: &str = "/usr/bin/perf";
 
@@ -49,12 +50,6 @@ impl ProfileRequest {
     }
 }
 
-fn create_response<B: Into<Body>>(status: StatusCode, body: B) -> Response {
-    let mut r = status.into_response();
-    *r.body_mut() = body.into();
-    r
-}
-
 /// The HTTP request handler for profiling the compute.
 pub(in crate::http) async fn profile(Query(request): Query<ProfileRequest>) -> Response {
     static CANCEL_CHANNEL: Lazy<Mutex<Option<crossbeam_channel::Sender<()>>>> =
@@ -63,8 +58,8 @@ pub(in crate::http) async fn profile(Query(request): Query<ProfileRequest>) -> R
     tracing::info!("Profile request received: {request:?}");
 
     if let Err(e) = request.validate() {
-        return create_response(
-            StatusCode::BAD_REQUEST,
+        return JsonResponse::create_response(
+            StatusCode::BAD_GATEWAY,
             format!("Invalid request parameters: {e}"),
         );
     }
@@ -77,27 +72,33 @@ pub(in crate::http) async fn profile(Query(request): Query<ProfileRequest>) -> R
                 if let Some(old_tx) = cancel_channel.take() {
                     if let Err(e) = old_tx.send(()) {
                         tracing::error!("Failed to send cancellation signal: {e}");
-                        return create_response(
+                        return JsonResponse::create_response(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             "Failed to send cancellation signal",
                         );
                     } else {
-                        return create_response(StatusCode::OK, "Profiling stopped successfully.");
+                        return JsonResponse::create_response(
+                            StatusCode::OK,
+                            "Profiling stopped successfully.",
+                        );
                     }
                 } else {
-                    return create_response(
+                    return JsonResponse::create_response(
                         StatusCode::NO_CONTENT,
                         "Profiling is not in progress, there is nothing to stop.",
                     );
                 }
             } else if cancel_channel.is_some() {
-                return create_response(StatusCode::CONFLICT, "Profiling is already in progress.");
+                return JsonResponse::create_response(
+                    StatusCode::CONFLICT,
+                    "Profiling is already in progress.",
+                );
             } else {
                 *cancel_channel = Some(tx);
             }
         }
         Err(_) => {
-            return create_response(
+            return JsonResponse::create_response(
                 StatusCode::ALREADY_REPORTED,
                 "Another request is being processed.",
             );
@@ -108,7 +109,7 @@ pub(in crate::http) async fn profile(Query(request): Query<ProfileRequest>) -> R
     let pg_pid = Pid::from_raw(crate::compute::PG_PID.load(Ordering::SeqCst) as _);
 
     let options = crate::profiling::ProfileGenerationOptions {
-        run_with_sudo: true,
+        run_with_sudo: false,
         perf_binary_path: Some(PERF_BINARY_PATH.as_ref()),
         process_pid: pg_pid,
         follow_forks: true,
@@ -121,7 +122,7 @@ pub(in crate::http) async fn profile(Query(request): Query<ProfileRequest>) -> R
         Ok(data) => data,
         Err(e) => {
             tracing::error!("Failed to generate pprof data: {e}");
-            return create_response(
+            return JsonResponse::create_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to generate pprof data: {e}"),
             );
