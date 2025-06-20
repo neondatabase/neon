@@ -75,7 +75,7 @@ impl<T: Clone + Send + 'static> ClientCache<T> {
         max_idle_duration: Duration,
         max_total_connections: usize,
     ) -> Arc<Self> {
-        let pool = Arc::new(Self {
+        Arc::new(Self {
             inner: Mutex::new(Inner::<T> {
                 entries: HashMap::new(),
                 pq: PriorityQueue::new(),
@@ -91,13 +91,12 @@ impl<T: Clone + Send + 'static> ClientCache<T> {
             max_idle_duration,
             max_total_connections,
             client_semaphore: Arc::new(Semaphore::new(0)),
-        });
-        pool
+        })
     }
 }
 
 impl<T: Clone + Send + 'static> PooledClient<T> {
     pub fn client(&self) -> T {
-        return self.client.clone();
+        self.client.clone()
     }
 }
