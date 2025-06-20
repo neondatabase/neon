@@ -13,7 +13,6 @@ use pageserver_client::mgmt_api::ForceAwaitLogicalSize;
 use pageserver_client::page_service::BasebackupRequest;
 use pageserver_page_api as page_api;
 use rand::prelude::*;
-use reqwest::Url;
 use tokio::io::AsyncRead;
 use tokio::sync::Barrier;
 use tokio::task::JoinSet;
@@ -21,6 +20,7 @@ use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt 
 use tokio_util::io::StreamReader;
 use tonic::async_trait;
 use tracing::{info, instrument};
+use url::Url;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
 use utils::shard::ShardIndex;
@@ -156,12 +156,16 @@ async fn main_impl(
 
     let mut work_senders = HashMap::new();
     let mut tasks = Vec::new();
-    let connurl = Url::parse(&args.page_service_connstring)?;
+    let scheme = match Url::parse(&args.page_service_connstring) {
+        Ok(url) => url.scheme().to_lowercase().to_string(),
+        Err(url::ParseError::RelativeUrlWithoutBase) => "postgresql".to_string(),
+        Err(err) => return Err(anyhow!("invalid connstring: {err}")),
+    };
     for &tl in &timelines {
         let (sender, receiver) = tokio::sync::mpsc::channel(1); // TODO: not sure what the implications of this are
         work_senders.insert(tl, sender);
 
-        let client: Box<dyn Client> = match connurl.scheme() {
+        let client: Box<dyn Client> = match scheme.as_str() {
             "postgresql" | "postgres" => Box::new(
                 LibpqClient::new(&args.page_service_connstring, tl, !args.no_compression).await?,
             ),

@@ -45,7 +45,6 @@ COPY --chown=nonroot scripts/ninstall.sh scripts/ninstall.sh
 ENV BUILD_TYPE=release
 RUN set -e \
     && mold -run make -j $(nproc) -s neon-pg-ext \
-    && rm -rf pg_install/build \
     && tar -C pg_install -czf /home/nonroot/postgres_install.tar.gz .
 
 # Prepare cargo-chef recipe
