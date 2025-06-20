@@ -12,7 +12,7 @@ use bytes::Bytes;
 use camino::Utf8PathBuf;
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::KeySpaceAccum;
-use pageserver_api::models::{PagestreamGetPageRequest, PagestreamRequest};
+use pageserver_api::pagestream_api::{PagestreamGetPageRequest, PagestreamRequest};
 use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::TenantShardId;
 use pageserver_page_api::proto;

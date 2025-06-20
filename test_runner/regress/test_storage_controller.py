@@ -88,6 +88,12 @@ def test_storage_controller_smoke(
     neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
     env = neon_env_builder.init_configs()
 
+    # These bubble up from safekeepers
+    for ps in env.pageservers:
+        ps.allowed_errors.extend(
+            [".*Timeline.* has been deleted.*", ".*Timeline.*was cancelled and cannot be used"]
+        )
+
     # Start services by hand so that we can skip a pageserver (this will start + register later)
     env.broker.start()
     env.storage_controller.start()
@@ -3455,7 +3461,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
 
     assert target.get_safekeeper(fake_id) is None
 
-    assert len(target.get_safekeepers()) == 0
+    start_sks = target.get_safekeepers()
 
     sk_0 = env.safekeepers[0]
 
@@ -3477,7 +3483,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
 
     inserted = target.get_safekeeper(fake_id)
     assert inserted is not None
-    assert target.get_safekeepers() == [inserted]
+    assert target.get_safekeepers() == start_sks + [inserted]
     assert eq_safekeeper_records(body, inserted)
 
     # error out if pk is changed (unexpected)
@@ -3489,7 +3495,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     assert exc.value.status_code == 400
 
     inserted_again = target.get_safekeeper(fake_id)
-    assert target.get_safekeepers() == [inserted_again]
+    assert target.get_safekeepers() == start_sks + [inserted_again]
     assert inserted_again is not None
     assert eq_safekeeper_records(inserted, inserted_again)
 
@@ -3498,7 +3504,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     body["version"] += 1
     target.on_safekeeper_deploy(fake_id, body)
     inserted_now = target.get_safekeeper(fake_id)
-    assert target.get_safekeepers() == [inserted_now]
+    assert target.get_safekeepers() == start_sks + [inserted_now]
     assert inserted_now is not None
 
     assert eq_safekeeper_records(body, inserted_now)
@@ -3507,7 +3513,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     body["https_port"] = 123
     target.on_safekeeper_deploy(fake_id, body)
     inserted_now = target.get_safekeeper(fake_id)
-    assert target.get_safekeepers() == [inserted_now]
+    assert target.get_safekeepers() == start_sks + [inserted_now]
     assert inserted_now is not None
     assert eq_safekeeper_records(body, inserted_now)
     env.storage_controller.consistency_check()
@@ -3516,7 +3522,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     body["https_port"] = None
     target.on_safekeeper_deploy(fake_id, body)
     inserted_now = target.get_safekeeper(fake_id)
-    assert target.get_safekeepers() == [inserted_now]
+    assert target.get_safekeepers() == start_sks + [inserted_now]
     assert inserted_now is not None
     assert eq_safekeeper_records(body, inserted_now)
     env.storage_controller.consistency_check()
@@ -3634,6 +3640,9 @@ def test_timeline_delete_mid_live_migration(neon_env_builder: NeonEnvBuilder, mi
     neon_env_builder.num_pageservers = 2
     env = neon_env_builder.init_configs()
     env.start()
+
+    for ps in env.pageservers:
+        ps.allowed_errors.append(".*Timeline.* has been deleted.*")
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()

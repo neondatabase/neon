@@ -520,7 +520,7 @@ async fn import_file(
     }
 
     if file_path.starts_with("global") {
-        let spcnode = postgres_ffi::pg_constants::GLOBALTABLESPACE_OID;
+        let spcnode = postgres_ffi_types::constants::GLOBALTABLESPACE_OID;
         let dbnode = 0;
 
         match file_name.as_ref() {
@@ -553,7 +553,7 @@ async fn import_file(
             }
         }
     } else if file_path.starts_with("base") {
-        let spcnode = pg_constants::DEFAULTTABLESPACE_OID;
+        let spcnode = postgres_ffi_types::constants::DEFAULTTABLESPACE_OID;
         let dbnode: u32 = file_path
             .iter()
             .nth(1)

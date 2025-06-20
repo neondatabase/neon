@@ -13,11 +13,11 @@ use pageserver::{page_cache, virtual_file};
 use pageserver_api::key::Key;
 use pageserver_api::models::virtual_file::IoMode;
 use pageserver_api::shard::TenantShardId;
-use pageserver_api::value::Value;
 use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
 use utils::bin_ser::BeSer;
 use utils::id::{TenantId, TimelineId};
+use wal_decoder::models::value::Value;
 use wal_decoder::serialized_batch::SerializedValueBatch;
 
 // A very cheap hash for generating non-sequential keys.

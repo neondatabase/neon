@@ -34,11 +34,11 @@ pub use layer_name::{DeltaLayerName, ImageLayerName, LayerName};
 use pageserver_api::config::GetVectoredConcurrentIo;
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
-use pageserver_api::record::NeonWalRecord;
-use pageserver_api::value::Value;
 use tracing::{Instrument, info_span, trace};
 use utils::lsn::Lsn;
 use utils::sync::gate::GateGuard;
+use wal_decoder::models::record::NeonWalRecord;
+use wal_decoder::models::value::Value;
 
 use self::inmemory_layer::InMemoryLayerFileId;
 use super::PageReconstructError;

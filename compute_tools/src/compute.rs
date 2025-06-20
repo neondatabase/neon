@@ -163,6 +163,10 @@ pub struct ComputeState {
     pub lfc_prewarm_state: LfcPrewarmState,
     pub lfc_offload_state: LfcOffloadState,
 
+    /// WAL flush LSN that is set after terminating Postgres and syncing safekeepers if
+    /// mode == ComputeMode::Primary. None otherwise
+    pub terminate_flush_lsn: Option<Lsn>,
+
     pub metrics: ComputeMetrics,
 }
 
@@ -178,6 +182,7 @@ impl ComputeState {
             metrics: ComputeMetrics::default(),
             lfc_prewarm_state: LfcPrewarmState::default(),
             lfc_offload_state: LfcOffloadState::default(),
+            terminate_flush_lsn: None,
         }
     }
 
@@ -217,6 +222,46 @@ pub struct ParsedSpec {
     pub endpoint_storage_token: Option<String>,
 }
 
+impl ParsedSpec {
+    pub fn validate(&self) -> Result<(), String> {
+        // Only Primary nodes are using safekeeper_connstrings, and at the moment
+        // this method only validates that part of the specs.
+        if self.spec.mode != ComputeMode::Primary {
+            return Ok(());
+        }
+
+        // While it seems like a good idea to check for an odd number of entries in
+        // the safekeepers connection string, changes to the list of safekeepers might
+        // incur appending a new server to a list of 3, in which case a list of 4
+        // entries is okay in production.
+        //
+        // Still we want unique entries, and at least one entry in the vector
+        if self.safekeeper_connstrings.is_empty() {
+            return Err(String::from("safekeeper_connstrings is empty"));
+        }
+
+        // check for uniqueness of the connection strings in the set
+        let mut connstrings = self.safekeeper_connstrings.clone();
+
+        connstrings.sort();
+        let mut previous = &connstrings[0];
+
+        for current in connstrings.iter().skip(1) {
+            // duplicate entry?
+            if current == previous {
+                return Err(format!(
+                    "duplicate entry in safekeeper_connstrings: {}!",
+                    current,
+                ));
+            }
+
+            previous = current;
+        }
+
+        Ok(())
+    }
+}
+
 impl TryFrom<ComputeSpec> for ParsedSpec {
     type Error = String;
     fn try_from(spec: ComputeSpec) -> Result<Self, String> {
@@ -246,6 +291,7 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
         } else {
             spec.safekeeper_connstrings.clone()
         };
+
         let storage_auth_token = spec.storage_auth_token.clone();
         let tenant_id: TenantId = if let Some(tenant_id) = spec.tenant_id {
             tenant_id
@@ -280,7 +326,7 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             .clone()
             .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_token"));
 
-        Ok(ParsedSpec {
+        let res = ParsedSpec {
             spec,
             pageserver_connstr,
             safekeeper_connstrings,
@@ -289,7 +335,11 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             timeline_id,
             endpoint_storage_addr,
             endpoint_storage_token,
-        })
+        };
+
+        // Now check validity of the parsed specification
+        res.validate()?;
+        Ok(res)
     }
 }
 
@@ -486,12 +536,21 @@ impl ComputeNode {
         // Reap the postgres process
         delay_exit |= this.cleanup_after_postgres_exit()?;
 
+        // /terminate returns LSN. If we don't sleep at all, connection will break and we
+        // won't get result. If we sleep too much, tests will take significantly longer
+        // and Github Action run will error out
+        let sleep_duration = if delay_exit {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_millis(300)
+        };
+
         // If launch failed, keep serving HTTP requests for a while, so the cloud
         // control plane can get the actual error.
         if delay_exit {
             info!("giving control plane 30s to collect the error before shutdown");
-            std::thread::sleep(Duration::from_secs(30));
         }
+        std::thread::sleep(sleep_duration);
         Ok(exit_code)
     }
 
@@ -863,20 +922,25 @@ impl ComputeNode {
         // Maybe sync safekeepers again, to speed up next startup
         let compute_state = self.state.lock().unwrap().clone();
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
-        if matches!(pspec.spec.mode, compute_api::spec::ComputeMode::Primary) {
+        let lsn = if matches!(pspec.spec.mode, compute_api::spec::ComputeMode::Primary) {
             info!("syncing safekeepers on shutdown");
             let storage_auth_token = pspec.storage_auth_token.clone();
             let lsn = self.sync_safekeepers(storage_auth_token)?;
-            info!("synced safekeepers at lsn {lsn}");
-        }
+            info!(%lsn, "synced safekeepers");
+            Some(lsn)
+        } else {
+            info!("not primary, not syncing safekeepers");
+            None
+        };
 
         let mut delay_exit = false;
         let mut state = self.state.lock().unwrap();
-        if state.status == ComputeStatus::TerminationPending {
+        state.terminate_flush_lsn = lsn;
+        if let ComputeStatus::TerminationPending { mode } = state.status {
             state.status = ComputeStatus::Terminated;
             self.state_changed.notify_all();
             // we were asked to terminate gracefully, don't exit to avoid restart
-            delay_exit = true
+            delay_exit = mode == compute_api::responses::TerminateMode::Fast
         }
         drop(state);
 
@@ -1747,7 +1811,7 @@ impl ComputeNode {
 
                             // exit loop
                             ComputeStatus::Failed
-                            | ComputeStatus::TerminationPending
+                            | ComputeStatus::TerminationPending { .. }
                             | ComputeStatus::Terminated => break 'cert_update,
 
                             // wait
@@ -2256,8 +2320,6 @@ pub fn forward_termination_signal(dev_mode: bool) {
     }
 
     if !dev_mode {
-        info!("not in dev mode, terminating pgbouncer");
-
         //  Terminate pgbouncer with SIGKILL
         match pid_file::read(PGBOUNCER_PIDFILE.into()) {
             Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
@@ -2289,25 +2351,27 @@ pub fn forward_termination_signal(dev_mode: bool) {
                 error!("error reading pgbouncer pid file: {}", e);
             }
         }
-    }
 
-    // Terminate local_proxy
-    match pid_file::read("/etc/local_proxy/pid".into()) {
-        Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
-            info!("sending SIGTERM to local_proxy process pid: {}", pid);
-            if let Err(e) = kill(pid, Signal::SIGTERM) {
-                error!("failed to terminate local_proxy: {}", e);
+        // Terminate local_proxy
+        match pid_file::read("/etc/local_proxy/pid".into()) {
+            Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
+                info!("sending SIGTERM to local_proxy process pid: {}", pid);
+                if let Err(e) = kill(pid, Signal::SIGTERM) {
+                    error!("failed to terminate local_proxy: {}", e);
+                }
+            }
+            Ok(pid_file::PidFileRead::NotHeldByAnyProcess(_)) => {
+                info!("local_proxy PID file exists but process not running");
+            }
+            Ok(pid_file::PidFileRead::NotExist) => {
+                info!("local_proxy PID file not found, process may not be running");
+            }
+            Err(e) => {
+                error!("error reading local_proxy PID file: {}", e);
             }
         }
-        Ok(pid_file::PidFileRead::NotHeldByAnyProcess(_)) => {
-            info!("local_proxy PID file exists but process not running");
-        }
-        Ok(pid_file::PidFileRead::NotExist) => {
-            info!("local_proxy PID file not found, process may not be running");
-        }
-        Err(e) => {
-            error!("error reading local_proxy PID file: {}", e);
-        }
+    } else {
+        info!("Skipping pgbouncer and local_proxy termination because in dev mode");
     }
 
     let pg_pid = PG_PID.load(Ordering::SeqCst);
@@ -2340,5 +2404,23 @@ impl<T: 'static> JoinSetExt<T> for tokio::task::JoinSet<T> {
             let _e = sp.enter();
             f()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::File;
+
+    use super::*;
+
+    #[test]
+    fn duplicate_safekeeper_connstring() {
+        let file = File::open("tests/cluster_spec.json").unwrap();
+        let spec: ComputeSpec = serde_json::from_reader(file).unwrap();
+
+        match ParsedSpec::try_from(spec.clone()) {
+            Ok(_p) => panic!("Failed to detect duplicate entry"),
+            Err(e) => assert!(e.starts_with("duplicate entry in safekeeper_connstrings:")),
+        };
     }
 }

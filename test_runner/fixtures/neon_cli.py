@@ -497,6 +497,7 @@ class NeonLocalCli(AbstractNeonCli):
         tenant_id: TenantId,
         pg_version: PgVersion,
         endpoint_id: str | None = None,
+        grpc: bool | None = None,
         hot_standby: bool = False,
         lsn: Lsn | None = None,
         pageserver_id: int | None = None,
@@ -521,6 +522,8 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["--external-http-port", str(external_http_port)])
         if internal_http_port is not None:
             args.extend(["--internal-http-port", str(internal_http_port)])
+        if grpc:
+            args.append("--grpc")
         if endpoint_id is not None:
             args.append(endpoint_id)
         if hot_standby:
@@ -620,7 +623,7 @@ class NeonLocalCli(AbstractNeonCli):
         destroy=False,
         check_return_code=True,
         mode: str | None = None,
-    ) -> subprocess.CompletedProcess[str]:
+    ) -> tuple[Lsn | None, subprocess.CompletedProcess[str]]:
         args = [
             "endpoint",
             "stop",
@@ -632,7 +635,11 @@ class NeonLocalCli(AbstractNeonCli):
         if endpoint_id is not None:
             args.append(endpoint_id)
 
-        return self.raw_cli(args, check_return_code=check_return_code)
+        proc = self.raw_cli(args, check_return_code=check_return_code)
+        log.debug(f"endpoint stop stdout: {proc.stdout}")
+        lsn_str = proc.stdout.split()[-1]
+        lsn: Lsn | None = None if lsn_str == "null" else Lsn(lsn_str)
+        return lsn, proc
 
     def mappings_map_branch(
         self, name: str, tenant_id: TenantId, timeline_id: TimelineId
