@@ -4438,7 +4438,7 @@ def test_attached_0_graceful_migration(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_pageservers = 4
     neon_env_builder.num_azs = 2
 
-    neon_env_builder.disable_kick_secondary_downloads = False
+    neon_env_builder.disable_kick_secondary_downloads = True
 
     env = neon_env_builder.init_start()
 

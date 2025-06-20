@@ -2062,6 +2062,7 @@ impl Service {
                             &tenant_shard.shard,
                             &tenant_shard.config,
                             &PlacementPolicy::Attached(0),
+                            tenant_shard.intent.get_secondary().len(),
                         )),
                     },
                 )]);
@@ -5603,7 +5604,15 @@ impl Service {
             for parent_id in parent_ids {
                 let child_ids = parent_id.split(new_shard_count);
 
-                let (pageserver, generation, policy, parent_ident, config, preferred_az) = {
+                let (
+                    pageserver,
+                    generation,
+                    policy,
+                    parent_ident,
+                    config,
+                    preferred_az,
+                    secondary_count,
+                ) = {
                     let mut old_state = tenants
                         .remove(&parent_id)
                         .expect("It was present, we just split it");
@@ -5623,6 +5632,7 @@ impl Service {
                         old_state.shard,
                         old_state.config.clone(),
                         old_state.preferred_az().cloned(),
+                        old_state.intent.get_secondary().len(),
                     )
                 };
 
@@ -5644,6 +5654,7 @@ impl Service {
                                 &child_shard,
                                 &config,
                                 &policy,
+                                secondary_count,
                             )),
                         },
                     );
@@ -8344,10 +8355,6 @@ impl Service {
                             "Skipping migration of {tenant_shard_id} to {node} because secondary isn't ready: {progress:?}"
                         );
 
-                        tracing::info!(
-                            "Kick secondary downloads: {}",
-                            self.config.kick_secondary_downloads
-                        );
                         if self.config.kick_secondary_downloads && progress.heatmap_mtime.is_none()
                         {
                             // No heatmap might mean the attached location has never uploaded one, or that

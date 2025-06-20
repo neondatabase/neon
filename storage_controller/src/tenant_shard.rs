@@ -1381,8 +1381,13 @@ impl TenantShard {
                 .generation
                 .expect("Attempted to enter attached state without a generation");
 
-            let wanted_conf =
-                attached_location_conf(generation, &self.shard, &self.config, &self.policy);
+            let wanted_conf = attached_location_conf(
+                generation,
+                &self.shard,
+                &self.config,
+                &self.policy,
+                self.intent.get_secondary().len(),
+            );
             match self.observed.locations.get(&node_id) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {}
                 Some(_) | None => {
