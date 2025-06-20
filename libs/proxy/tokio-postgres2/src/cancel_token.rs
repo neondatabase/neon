@@ -7,16 +7,14 @@ use crate::config::SslMode;
 use crate::tls::{MakeTlsConnect, TlsConnect};
 use crate::{Error, cancel_query, cancel_query_raw};
 
-/// The capability to request cancellation of in-progress queries on a
-/// connection.
+/// A cancellation token that allows easy cancellation of a query.
 #[derive(Clone)]
 pub struct CancelToken {
     pub socket_config: SocketConfig,
     pub raw: RawCancelToken,
 }
 
-/// The capability to request cancellation of in-progress queries on a
-/// connection.
+/// A raw cancellation token that allows cancellation of a query, given a fresh connection to postgres.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawCancelToken {
     pub ssl_mode: SslMode,
