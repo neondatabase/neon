@@ -42,7 +42,6 @@ use pageserver_api::config::MaxVectoredReadBytes;
 use pageserver_api::key::{DBDIR_KEY, KEY_SIZE, Key};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
-use pageserver_api::value::Value;
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
@@ -52,6 +51,7 @@ use utils::bin_ser::BeSer;
 use utils::bin_ser::SerializeError;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
+use wal_decoder::models::value::Value;
 
 use super::errors::PutError;
 use super::layer_name::ImageLayerName;
@@ -1232,10 +1232,10 @@ mod test {
     use itertools::Itertools;
     use pageserver_api::key::Key;
     use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
-    use pageserver_api::value::Value;
     use utils::generation::Generation;
     use utils::id::{TenantId, TimelineId};
     use utils::lsn::Lsn;
+    use wal_decoder::models::value::Value;
 
     use super::{ImageLayerIterator, ImageLayerWriter};
     use crate::DEFAULT_PG_VERSION;

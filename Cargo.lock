@@ -4255,6 +4255,7 @@ dependencies = [
  "tokio-util",
  "tonic 0.13.1",
  "tracing",
+ "url",
  "utils",
  "workspace_hack",
 ]
@@ -4334,6 +4335,7 @@ dependencies = [
  "postgres_backend",
  "postgres_connection",
  "postgres_ffi",
+ "postgres_ffi_types",
  "postgres_initdb",
  "posthog_client_lite",
  "pprof",
@@ -4403,7 +4405,7 @@ dependencies = [
  "nix 0.30.1",
  "once_cell",
  "postgres_backend",
- "postgres_ffi",
+ "postgres_ffi_types",
  "rand 0.8.5",
  "remote_storage",
  "reqwest",
@@ -4465,11 +4467,16 @@ dependencies = [
 name = "pageserver_page_api"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bytes",
+ "futures",
  "pageserver_api",
  "postgres_ffi",
  "prost 0.13.5",
+ "strum",
+ "strum_macros",
  "thiserror 1.0.69",
+ "tokio",
  "tonic 0.13.1",
  "tonic-build",
  "utils",
@@ -4889,12 +4896,21 @@ dependencies = [
  "memoffset 0.9.0",
  "once_cell",
  "postgres",
+ "postgres_ffi_types",
  "pprof",
  "regex",
  "serde",
  "thiserror 1.0.69",
  "tracing",
  "utils",
+]
+
+[[package]]
+name = "postgres_ffi_types"
+version = "0.1.0"
+dependencies = [
+ "thiserror 1.0.69",
+ "workspace_hack",
 ]
 
 [[package]]
@@ -7558,6 +7574,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bytes",
+ "flate2",
  "h2 0.4.4",
  "http 1.1.0",
  "http-body 1.0.0",
@@ -7577,6 +7594,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+ "zstd",
 ]
 
 [[package]]
@@ -8156,6 +8174,7 @@ dependencies = [
  "futures",
  "pageserver_api",
  "postgres_ffi",
+ "postgres_ffi_types",
  "pprof",
  "prost 0.13.5",
  "remote_storage",

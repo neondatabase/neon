@@ -496,7 +496,7 @@ impl WalRedoManager {
         key: pageserver_api::key::Key,
         lsn: Lsn,
         base_img: Option<(Lsn, bytes::Bytes)>,
-        records: Vec<(Lsn, pageserver_api::record::NeonWalRecord)>,
+        records: Vec<(Lsn, wal_decoder::models::record::NeonWalRecord)>,
         pg_version: u32,
         redo_attempt_type: RedoAttemptType,
     ) -> Result<bytes::Bytes, walredo::Error> {
@@ -1859,6 +1859,29 @@ impl TenantShard {
             }
         }
 
+        // At this point we've initialized all timelines and are tracking them.
+        // Now compute the layer visibility for all (not offloaded) timelines.
+        let compute_visiblity_for = {
+            let timelines_accessor = self.timelines.lock().unwrap();
+            let mut timelines_offloaded_accessor = self.timelines_offloaded.lock().unwrap();
+
+            timelines_offloaded_accessor.extend(offloaded_timelines_list.into_iter());
+
+            // Before activation, populate each Timeline's GcInfo with information about its children
+            self.initialize_gc_info(&timelines_accessor, &timelines_offloaded_accessor, None);
+
+            timelines_accessor.values().cloned().collect::<Vec<_>>()
+        };
+
+        for tl in compute_visiblity_for {
+            tl.update_layer_visibility().await.with_context(|| {
+                format!(
+                    "failed initial timeline visibility computation {} for tenant {}",
+                    tl.timeline_id, self.tenant_shard_id
+                )
+            })?;
+        }
+
         // Walk through deleted timelines, resume deletion
         for (timeline_id, index_part, remote_timeline_client) in timelines_to_resume_deletions {
             remote_timeline_client
@@ -1877,10 +1900,6 @@ impl TenantShard {
             .await
             .context("resume_deletion")
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
-        }
-        {
-            let mut offloaded_timelines_accessor = self.timelines_offloaded.lock().unwrap();
-            offloaded_timelines_accessor.extend(offloaded_timelines_list.into_iter());
         }
 
         // Stash the preloaded tenant manifest, and upload a new manifest if changed.
@@ -3448,9 +3467,6 @@ impl TenantShard {
             let timelines_to_activate = timelines_accessor
                 .values()
                 .filter(|timeline| !(timeline.is_broken() || timeline.is_stopping()));
-
-            // Before activation, populate each Timeline's GcInfo with information about its children
-            self.initialize_gc_info(&timelines_accessor, &timelines_offloaded_accessor, None);
 
             // Spawn gc and compaction loops. The loops will shut themselves
             // down when they notice that the tenant is inactive.
@@ -5836,10 +5852,10 @@ pub(crate) mod harness {
     use once_cell::sync::OnceCell;
     use pageserver_api::key::Key;
     use pageserver_api::models::ShardParameters;
-    use pageserver_api::record::NeonWalRecord;
     use pageserver_api::shard::ShardIndex;
     use utils::id::TenantId;
     use utils::logging;
+    use wal_decoder::models::record::NeonWalRecord;
 
     use super::*;
     use crate::deletion_queue::mock::MockDeletionQueue;
@@ -6094,9 +6110,6 @@ mod tests {
     #[cfg(feature = "testing")]
     use pageserver_api::keyspace::KeySpaceRandomAccum;
     use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
-    #[cfg(feature = "testing")]
-    use pageserver_api::record::NeonWalRecord;
-    use pageserver_api::value::Value;
     use pageserver_compaction::helpers::overlaps_with;
     #[cfg(feature = "testing")]
     use rand::SeedableRng;
@@ -6117,6 +6130,9 @@ mod tests {
     use timeline::{CompactOptions, DeltaLayerTestDesc, VersionedKeySpaceQuery};
     use utils::id::TenantId;
     use utils::shard::{ShardCount, ShardNumber};
+    #[cfg(feature = "testing")]
+    use wal_decoder::models::record::NeonWalRecord;
+    use wal_decoder::models::value::Value;
 
     use super::*;
     use crate::DEFAULT_PG_VERSION;

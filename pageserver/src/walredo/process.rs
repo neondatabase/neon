@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bytes::Bytes;
-use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::TenantShardId;
 use postgres_ffi::BLCKSZ;
@@ -18,6 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{Instrument, debug, error, instrument};
 use utils::lsn::Lsn;
 use utils::poison::Poison;
+use wal_decoder::models::record::NeonWalRecord;
 
 use self::no_leak_child::NoLeakChild;
 use crate::config::PageServerConf;

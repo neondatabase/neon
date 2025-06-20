@@ -12,6 +12,7 @@ pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LI
 pub const DEFAULT_GRPC_LISTEN_PORT: u16 = 51051; // storage-broker already uses 50051
 
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::str::FromStr;
 use std::time::Duration;
@@ -24,16 +25,17 @@ use utils::logging::LogFormat;
 use crate::models::{ImageCompressionAlgorithm, LsnLease};
 
 // Certain metadata (e.g. externally-addressable name, AZ) is delivered
-// as a separate structure.  This information is not neeed by the pageserver
+// as a separate structure.  This information is not needed by the pageserver
 // itself, it is only used for registering the pageserver with the control
 // plane and/or storage controller.
-//
 #[derive(PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NodeMetadata {
     #[serde(rename = "host")]
     pub postgres_host: String,
     #[serde(rename = "port")]
     pub postgres_port: u16,
+    pub grpc_host: Option<String>,
+    pub grpc_port: Option<u16>,
     pub http_host: String,
     pub http_port: u16,
     pub https_port: Option<u16>,
@@ -42,6 +44,23 @@ pub struct NodeMetadata {
     // use in this type: this type intentionally only names fields that require.
     #[serde(flatten)]
     pub other: HashMap<String, serde_json::Value>,
+}
+
+impl Display for NodeMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "postgresql://{}:{} ",
+            self.postgres_host, self.postgres_port
+        )?;
+        if let Some(grpc_host) = &self.grpc_host {
+            let grpc_port = self.grpc_port.unwrap_or_default();
+            write!(f, "grpc://{grpc_host}:{grpc_port} ")?;
+        }
+        write!(f, "http://{}:{} ", self.http_host, self.http_port)?;
+        write!(f, "other:{:?}", self.other)?;
+        Ok(())
+    }
 }
 
 /// PostHog integration config.
@@ -337,16 +356,21 @@ pub struct TimelineImportConfig {
 pub struct BasebackupCacheConfig {
     #[serde(with = "humantime_serde")]
     pub cleanup_period: Duration,
-    // FIXME: Support max_size_bytes.
-    // pub max_size_bytes: usize,
-    pub max_size_entries: i64,
+    /// Maximum total size of basebackup cache entries on disk in bytes.
+    /// The cache may slightly exceed this limit because we do not know
+    /// the exact size of the cache entry untill it's written to disk.
+    pub max_total_size_bytes: u64,
+    // TODO(diko): support max_entry_size_bytes.
+    // pub max_entry_size_bytes: u64,
+    pub max_size_entries: usize,
 }
 
 impl Default for BasebackupCacheConfig {
     fn default() -> Self {
         Self {
             cleanup_period: Duration::from_secs(60),
-            // max_size_bytes: 1024 * 1024 * 1024, // 1 GiB
+            max_total_size_bytes: 1024 * 1024 * 1024, // 1 GiB
+            // max_entry_size_bytes: 16 * 1024 * 1024,   // 16 MiB
             max_size_entries: 1000,
         }
     }
@@ -792,7 +816,7 @@ pub mod tenant_conf_defaults {
     // By default ingest enough WAL for two new L0 layers before checking if new image
     // image layers should be created.
     pub const DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD: u8 = 2;
-    pub const DEFAULT_GC_COMPACTION_ENABLED: bool = false;
+    pub const DEFAULT_GC_COMPACTION_ENABLED: bool = true;
     pub const DEFAULT_GC_COMPACTION_VERIFICATION: bool = true;
     pub const DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB: u64 = 5 * 1024 * 1024; // 5GB
     pub const DEFAULT_GC_COMPACTION_RATIO_PERCENT: u64 = 100;

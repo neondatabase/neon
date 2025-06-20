@@ -4,11 +4,23 @@ File with secondary->primary promotion testing.
 This far, only contains a test that we don't break and that the data is persisted.
 """
 
+from typing import cast
+
 import psycopg2
+from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import Endpoint, NeonEnv, wait_replica_caughtup
 from fixtures.pg_version import PgVersion
 from pytest import raises
+
+
+def stop_and_check_lsn(ep: Endpoint, expected_lsn: Lsn | None):
+    ep.stop(mode="immediate-terminate")
+    lsn = ep.terminate_flush_lsn
+    if expected_lsn is not None:
+        assert lsn >= expected_lsn, f"{expected_lsn=} < {lsn=}"
+    else:
+        assert lsn == expected_lsn, f"{expected_lsn=} != {lsn=}"
 
 
 def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
@@ -37,7 +49,9 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
                    pg_current_wal_flush_lsn()
             """
         )
-        log.info(f"Primary: Current LSN after workload is {primary_cur.fetchone()}")
+        lsn_triple = cast("tuple[str, str, str]", primary_cur.fetchone())
+        log.info(f"Primary: Current LSN after workload is {lsn_triple}")
+        expected_primary_lsn: Lsn = Lsn(lsn_triple[2])
         primary_cur.execute("show neon.safekeepers")
         safekeepers = primary_cur.fetchall()[0][0]
 
@@ -57,7 +71,7 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
         secondary_cur.execute("select count(*) from t")
         assert secondary_cur.fetchone() == (100,)
 
-    primary.stop_and_destroy(mode="immediate")
+    stop_and_check_lsn(primary, expected_primary_lsn)
 
     # Reconnect to the secondary to make sure we get a read-write connection
     promo_conn = secondary.connect()
@@ -109,9 +123,10 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
 
     # wait_for_last_flush_lsn(env, secondary, env.initial_tenant, env.initial_timeline)
 
-    secondary.stop_and_destroy()
+    # secondaries don't sync safekeepers on finish so LSN will be None
+    stop_and_check_lsn(secondary, None)
 
-    primary = env.endpoints.create_start(branch_name="main", endpoint_id="primary")
+    primary = env.endpoints.create_start(branch_name="main", endpoint_id="primary2")
 
     with primary.connect() as new_primary:
         new_primary_cur = new_primary.cursor()
@@ -122,7 +137,9 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
                    pg_current_wal_flush_lsn()
             """
         )
-        log.info(f"New primary: Boot LSN is {new_primary_cur.fetchone()}")
+        lsn_triple = cast("tuple[str, str, str]", new_primary_cur.fetchone())
+        expected_primary_lsn = Lsn(lsn_triple[2])
+        log.info(f"New primary: Boot LSN is {lsn_triple}")
 
         new_primary_cur.execute("select count(*) from t")
         assert new_primary_cur.fetchone() == (200,)
@@ -130,4 +147,4 @@ def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
         new_primary_cur.execute("select count(*) from t")
         assert new_primary_cur.fetchone() == (300,)
 
-    primary.stop(mode="immediate")
+    stop_and_check_lsn(primary, expected_primary_lsn)

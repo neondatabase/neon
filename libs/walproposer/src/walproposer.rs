@@ -144,7 +144,7 @@ pub trait ApiImpl {
         todo!()
     }
 
-    fn finish_sync_safekeepers(&self, _lsn: u64) {
+    fn finish_sync_safekeepers(&self, _lsn: u64) -> ! {
         todo!()
     }
 
@@ -469,7 +469,7 @@ mod tests {
             true
         }
 
-        fn finish_sync_safekeepers(&self, lsn: u64) {
+        fn finish_sync_safekeepers(&self, lsn: u64) -> ! {
             self.sync_channel.send(lsn).unwrap();
             panic!("sync safekeepers finished at lsn={}", lsn);
         }

@@ -75,6 +75,7 @@
 pub mod binary;
 
 mod auth;
+mod batch;
 mod cache;
 mod cancellation;
 mod compute;

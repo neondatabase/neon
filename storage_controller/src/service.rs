@@ -466,6 +466,10 @@ pub struct Config {
     pub timelines_onto_safekeepers: bool,
 
     pub use_local_compute_notifications: bool,
+
+    /// Number of safekeepers to choose for a timeline when creating it.
+    /// Safekeepers will be choosen from different availability zones.
+    pub timeline_safekeeper_count: i64,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -1683,6 +1687,8 @@ impl Service {
                     None,
                     "".to_string(),
                     123,
+                    None,
+                    None,
                     AvailabilityZone("test_az".to_string()),
                     false,
                 )
@@ -7254,6 +7260,12 @@ impl Service {
             ));
         }
 
+        if register_req.listen_grpc_addr.is_some() != register_req.listen_grpc_port.is_some() {
+            return Err(ApiError::BadRequest(anyhow::anyhow!(
+                "must specify both gRPC address and port"
+            )));
+        }
+
         // Ordering: we must persist the new node _before_ adding it to in-memory state.
         // This ensures that before we use it for anything or expose it via any external
         // API, it is guaranteed to be available after a restart.
@@ -7264,6 +7276,8 @@ impl Service {
             register_req.listen_https_port,
             register_req.listen_pg_addr,
             register_req.listen_pg_port,
+            register_req.listen_grpc_addr,
+            register_req.listen_grpc_port,
             register_req.availability_zone_id.clone(),
             self.config.use_https_pageserver_api,
         );
@@ -8768,15 +8782,22 @@ impl Service {
         let waiter_count = waiters.len();
         match self.await_waiters(waiters, RECONCILE_TIMEOUT).await {
             Ok(()) => {}
-            Err(ReconcileWaitError::Failed(_, reconcile_error))
-                if matches!(*reconcile_error, ReconcileError::Cancel) =>
-            {
-                // Ignore reconciler cancel errors: this reconciler might have shut down
-                // because some other change superceded it.  We will return a nonzero number,
-                // so the caller knows they might have to call again to quiesce the system.
-            }
             Err(e) => {
-                return Err(e);
+                if let ReconcileWaitError::Failed(_, reconcile_error) = &e {
+                    match **reconcile_error {
+                        ReconcileError::Cancel
+                        | ReconcileError::Remote(mgmt_api::Error::Cancelled) => {
+                            // Ignore reconciler cancel errors: this reconciler might have shut down
+                            // because some other change superceded it.  We will return a nonzero number,
+                            // so the caller knows they might have to call again to quiesce the system.
+                        }
+                        _ => {
+                            return Err(e);
+                        }
+                    }
+                } else {
+                    return Err(e);
+                }
             }
         };
 

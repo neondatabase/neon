@@ -8,8 +8,8 @@ use pageserver_api::key::rel_block_to_key;
 use pageserver_api::reltag::{RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::pg_constants;
-use postgres_ffi::relfile_utils::VISIBILITYMAP_FORKNUM;
 use postgres_ffi::walrecord::*;
+use postgres_ffi_types::forknum::VISIBILITYMAP_FORKNUM;
 use utils::lsn::Lsn;
 
 use crate::models::*;

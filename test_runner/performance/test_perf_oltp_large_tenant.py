@@ -31,7 +31,9 @@ def get_custom_scripts(
     return rv
 
 
-def run_test_pgbench(env: PgCompare, custom_scripts: str, duration: int):
+def run_test_pgbench(
+    env: PgCompare, custom_scripts: str, duration: int, clients: int = 500, jobs: int = 100
+):
     password = env.pg.default_options.get("password", None)
     options = env.pg.default_options.get("options", "")
     # drop password from the connection string by passing password=None and set password separately
@@ -46,8 +48,8 @@ def run_test_pgbench(env: PgCompare, custom_scripts: str, duration: int):
         "-n",  # no explicit vacuum before the test - we want to rely on auto-vacuum
         "-M",
         "prepared",
-        "--client=500",
-        "--jobs=100",
+        f"--client={clients}",
+        f"--jobs={jobs}",
         f"-T{duration}",
         "-P60",  # progress every minute
         "--progress-timestamp",
@@ -162,6 +164,12 @@ def test_perf_oltp_large_tenant_pgbench(
     remote_compare: PgCompare, custom_scripts: str, duration: int
 ):
     run_test_pgbench(remote_compare, custom_scripts, duration)
+
+
+@pytest.mark.parametrize("duration", get_durations_matrix())
+@pytest.mark.remote_cluster
+def test_perf_oltp_large_tenant_growth(remote_compare: PgCompare, duration: int):
+    run_test_pgbench(remote_compare, " ".join(get_custom_scripts()), duration, 35, 35)
 
 
 @pytest.mark.remote_cluster

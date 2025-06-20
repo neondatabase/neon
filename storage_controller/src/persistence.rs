@@ -2125,6 +2125,8 @@ pub(crate) struct NodePersistence {
     pub(crate) availability_zone_id: String,
     pub(crate) listen_https_port: Option<i32>,
     pub(crate) lifecycle: String,
+    pub(crate) listen_grpc_addr: Option<String>,
+    pub(crate) listen_grpc_port: Option<i32>,
 }
 
 /// Tenant metadata health status that are stored durably.

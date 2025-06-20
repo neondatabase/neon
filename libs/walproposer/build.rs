@@ -13,22 +13,24 @@ fn main() -> anyhow::Result<()> {
     // Tell cargo to invalidate the built crate whenever the wrapper changes
     println!("cargo:rerun-if-changed=bindgen_deps.h");
 
+    let root_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
     // Finding the location of built libraries and Postgres C headers:
     // - if POSTGRES_INSTALL_DIR is set look into it, otherwise look into `<project_root>/pg_install`
     // - if there's a `bin/pg_config` file use it for getting include server, otherwise use `<project_root>/pg_install/{PG_MAJORVERSION}/include/postgresql/server`
     let pg_install_dir = if let Some(postgres_install_dir) = env::var_os("POSTGRES_INSTALL_DIR") {
         postgres_install_dir.into()
     } else {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../pg_install")
+        root_path.join("pg_install")
     };
 
     let pg_install_abs = std::fs::canonicalize(pg_install_dir)?;
-    let walproposer_lib_dir = pg_install_abs.join("build/walproposer-lib");
+    let walproposer_lib_dir = root_path.join("build/walproposer-lib");
     let walproposer_lib_search_str = walproposer_lib_dir
         .to_str()
         .ok_or(anyhow!("Bad non-UTF path"))?;
 
-    let pgxn_neon = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../pgxn/neon");
+    let pgxn_neon = root_path.join("pgxn/neon");
     let pgxn_neon = std::fs::canonicalize(pgxn_neon)?;
     let pgxn_neon = pgxn_neon.to_str().ok_or(anyhow!("Bad non-UTF path"))?;
 

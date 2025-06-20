@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use pageserver_api::key::{KEY_SIZE, Key};
-use pageserver_api::value::Value;
 use tokio_util::sync::CancellationToken;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
 use utils::shard::TenantShardId;
+use wal_decoder::models::value::Value;
 
 use super::errors::PutError;
 use super::layer::S3_UPLOAD_LIMIT;
