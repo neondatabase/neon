@@ -59,7 +59,8 @@ pub struct PostHogConfig {
     pub public_api_url: String,
     /// Refresh interval for the feature flag spec
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub refresh_interval_seconds: Option<u64>,
+    #[serde(with = "humantime_serde")]
+    pub refresh_interval: Option<Duration>,
 }
 
 /// `pageserver.toml`
