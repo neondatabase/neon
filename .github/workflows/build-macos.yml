@@ -144,7 +144,7 @@ jobs:
         id: cache_walproposer_lib
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
-          path: pg_install/build/walproposer-lib
+          path: build/walproposer-lib
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-walproposer_lib-v17-${{ steps.pg_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Checkout submodule vendor/postgres-v17
@@ -169,11 +169,11 @@ jobs:
         run:
           make walproposer-lib -j$(sysctl -n hw.ncpu)
 
-      - name: Upload "pg_install/build/walproposer-lib" artifact
+      - name: Upload "build/walproposer-lib" artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: pg_install--build--walproposer-lib
-          path: pg_install/build/walproposer-lib
+          name: build--walproposer-lib
+          path: build/walproposer-lib
           # The artifact is supposed to be used by the next job in the same workflow,
           # so there’s no need to store it for too long.
           retention-days: 1
@@ -226,11 +226,11 @@ jobs:
           name: pg_install--v17
           path: pg_install/v17
 
-      - name: Download "pg_install/build/walproposer-lib" artifact
+      - name: Download "build/walproposer-lib" artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: pg_install--build--walproposer-lib
-          path: pg_install/build/walproposer-lib
+          name: build--walproposer-lib
+          path: build/walproposer-lib
 
       # `actions/download-artifact` doesn't preserve permissions:
       # https://github.com/actions/download-artifact?tab=readme-ov-file#permission-loss
