@@ -315,13 +315,15 @@ impl PoolingBackend {
         config
             .user(&conn_info.user_info.user)
             .dbname(&conn_info.dbname);
-            // .set_param(
-            //     "options",
-            //     &format!(
-            //         "-c pg_session_jwt.jwk={}",
-            //         serde_json::to_string(&jwk).expect("serializing jwk to json should not fail")
-            //     ),
-            // );
+        if !disable_pg_session_jwt {
+            config.set_param(
+                "options",
+                &format!(
+                    "-c pg_session_jwt.jwk={}",
+                    serde_json::to_string(&jwk).expect("serializing jwk to json should not fail")
+                ),
+            );
+        }
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let (client, connection) = config.connect(&postgres_client::NoTls).await?;
@@ -345,11 +347,14 @@ impl PoolingBackend {
             let (client, mut discard) = handle.inner();
             debug!("setting up backend session state");
 
-            // // initiates the auth session
-            // if let Err(e) = client.batch_execute("select auth.init();").await {
-            //     discard.discard();
-            //     return Err(e.into());
-            // }
+            // initiates the auth session
+            if !disable_pg_session_jwt {
+                if let Err(e) = client.batch_execute("select auth.init();").await {
+                    discard.discard();
+                    return Err(e.into());
+                }
+            }
+
 
             info!("backend session state initialized");
         }
