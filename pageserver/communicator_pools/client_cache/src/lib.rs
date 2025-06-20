@@ -1,22 +1,21 @@
+use async_trait::async_trait;
+use priority_queue::PriorityQueue;
 use std::{
     collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
-use priority_queue::PriorityQueue;
-use tokio::{
-    sync::{Mutex, OwnedSemaphorePermit, Semaphore},
-};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use uuid;
-use async_trait::async_trait;
-
 
 #[async_trait]
 pub trait PooledClientFactory<T>: Send + Sync + 'static {
     /// Create a new pooled item.
-    async fn create(&self, connect_timeout: Duration) ->  Result<Result<T, tonic::Status>, tokio::time::error::Elapsed>;
+    async fn create(
+        &self,
+        connect_timeout: Duration,
+    ) -> Result<Result<T, tonic::Status>, tokio::time::error::Elapsed>;
 }
-
 
 /// A pooled gRPC client with capacity tracking and error handling.
 pub struct ClientCache<T> {
@@ -56,7 +55,6 @@ struct CacheEntry<T> {
     consecutive_errors: usize,
     last_used: Instant,
 }
-
 
 /// A client borrowed from the pool.
 pub struct PooledClient<T> {
@@ -103,6 +101,3 @@ impl<T: Clone + Send + 'static> PooledClient<T> {
         return self.client.clone();
     }
 }
-
-
-
