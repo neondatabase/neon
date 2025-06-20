@@ -80,6 +80,18 @@ fn list_children_processes(parent_pid: Pid) -> Result<Vec<Pid>, Box<dyn std::err
         .collect())
 }
 
+#[derive(Debug)]
+pub struct ProfileGenerationOptions<'a, S: AsRef<str>> {
+    pub run_with_sudo: bool,
+    pub perf_binary_path: Option<&'a Path>,
+    pub process_pid: Pid,
+    pub follow_forks: bool,
+    pub sampling_frequency: Option<u32>,
+    pub blocklist_symbols: &'a [S],
+    pub timeout: std::time::Duration,
+    pub should_stop: Option<crossbeam_channel::Receiver<()>>,
+}
+
 /// Run perf against a process with the given name and generate a pprof
 /// profile from the output.
 ///
@@ -95,33 +107,28 @@ fn list_children_processes(parent_pid: Pid) -> Result<Vec<Pid>, Box<dyn std::err
 /// the system's `PATH`.
 #[allow(unsafe_code)]
 pub fn generate_pprof_using_perf<S: AsRef<str>>(
-    run_with_sudo: bool,
-    perf_binary_path: Option<&Path>,
-    process_pid: Pid,
-    follow_forks: bool,
-    sampling_frequency: Option<u32>,
-    blocklist_symbols: &[S],
-    timeout: std::time::Duration,
-    should_stop: Option<crossbeam_channel::Receiver<()>>,
+    options: ProfileGenerationOptions<S>,
 ) -> std::result::Result<PprofData, Box<dyn std::error::Error>> {
-    let pids = list_children_processes(process_pid)
+    let pids = list_children_processes(options.process_pid)
         .unwrap_or_default()
         .into_iter()
-        .chain(std::iter::once(process_pid))
+        .chain(std::iter::once(options.process_pid))
         .map(|pid| pid.0.to_string())
         .collect::<Vec<String>>()
         .join(",");
 
     // Step 1: Run perf to collect stack traces
-    let perf_binary_path = perf_binary_path.map_or_else(|| PathBuf::from("perf"), |p| p.to_owned());
+    let perf_binary_path = options
+        .perf_binary_path
+        .map_or_else(|| PathBuf::from("perf"), |p| p.to_owned());
 
-    let mut perf_record_command = if run_with_sudo {
+    let mut perf_record_command = if options.run_with_sudo {
         std::process::Command::new(SUDO_PATH)
     } else {
         std::process::Command::new(&perf_binary_path)
     };
 
-    let perf_record_command = if run_with_sudo {
+    let perf_record_command = if options.run_with_sudo {
         perf_record_command.arg(&perf_binary_path)
     } else {
         perf_record_command.arg("record")
@@ -133,12 +140,12 @@ pub fn generate_pprof_using_perf<S: AsRef<str>>(
         .arg(pids)
         // Specify the sampling frequency or default to 99 Hz.
         .arg("-F")
-        .arg(sampling_frequency.unwrap_or(99).to_string())
+        .arg(options.sampling_frequency.unwrap_or(99).to_string())
         // Enable call-graph (stack chain/backtrace) recording for both
         // kernel space and user space.
         .arg("-g");
 
-    if follow_forks {
+    if options.follow_forks {
         perf_record_command = perf_record_command.arg("--inherit");
     }
 
@@ -169,17 +176,17 @@ pub fn generate_pprof_using_perf<S: AsRef<str>>(
         use crossbeam_channel::{after, select};
         use nix::sys::signal::Signal;
 
-        if let Some(rx) = should_stop {
+        if let Some(rx) = options.should_stop {
             select! {
                 recv(rx) -> _ => {
                     println!("Received shutdown signal, stopping perf...");
                 }
-                recv(after(timeout)) -> _ => {
+                recv(after(options.timeout)) -> _ => {
                     println!("Timeout reached, stopping perf...");
                 }
             }
         } else {
-            std::thread::sleep(timeout);
+            std::thread::sleep(options.timeout);
         }
 
         // SAFETY:
@@ -206,13 +213,16 @@ pub fn generate_pprof_using_perf<S: AsRef<str>>(
     }
 
     // Step 2: Collapse the stack traces into a folded stack trace
-    let mut options = inferno::collapse::perf::Options::default();
-    options.annotate_jit = true; // Enable JIT annotation if needed
-    options.annotate_kernel = true; // Enable kernel annotation if needed
-    options.include_addrs = true; // Include addresses in the output
-    options.include_pid = true; // Include PIDs in the output
-    options.include_tid = true; // Include TIDs in the output
-    let mut folder = inferno::collapse::perf::Folder::from(options);
+    let mut folder = {
+        let mut options = inferno::collapse::perf::Options::default();
+        options.annotate_jit = true; // Enable JIT annotation if needed
+        options.annotate_kernel = true; // Enable kernel annotation if needed
+        options.include_addrs = true; // Include addresses in the output
+        options.include_pid = true; // Include PIDs in the output
+        options.include_tid = true; // Include TIDs in the output
+        inferno::collapse::perf::Folder::from(options)
+    };
+
     let mut collapsed = Vec::new();
 
     folder
@@ -226,7 +236,7 @@ pub fn generate_pprof_using_perf<S: AsRef<str>>(
     }
 
     // Step 3: Generate pprof profile from collapsed stack trace
-    let pprof_data = generate_pprof_from_collapsed(&collapsed, blocklist_symbols, false)?;
+    let pprof_data = generate_pprof_from_collapsed(&collapsed, options.blocklist_symbols, false)?;
 
     Ok(pprof_data)
 }

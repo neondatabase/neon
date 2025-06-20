@@ -97,16 +97,17 @@ pub(in crate::http) async fn profile(Query(request): Query<ProfileRequest>) -> R
     tracing::info!("Profiling will start with parameters: {request:?}");
     let pg_pid = crate::compute::PG_PID.load(Ordering::SeqCst);
 
-    let pprof_data = match crate::profiling::generate_pprof_using_perf(
-        true,
-        Some(PERF_BINARY_PATH.as_ref()),
-        pg_pid.into(),
-        true,
-        Some(request.sampling_frequency as u32),
-        &["libc", "libgcc", "pthread", "vdso"],
-        std::time::Duration::from_secs(request.timeout_seconds as u64),
-        Some(rx),
-    ) {
+    let options = crate::profiling::ProfileGenerationOptions {
+        run_with_sudo: true,
+        perf_binary_path: Some(PERF_BINARY_PATH.as_ref()),
+        process_pid: pg_pid.into(),
+        follow_forks: true,
+        sampling_frequency: Some(request.sampling_frequency as u32),
+        blocklist_symbols: &["libc", "libgcc", "pthread", "vdso"],
+        timeout: std::time::Duration::from_secs(request.timeout_seconds as u64),
+        should_stop: Some(rx),
+    };
+    let pprof_data = match crate::profiling::generate_pprof_using_perf(options) {
         Ok(data) => data,
         Err(e) => {
             tracing::error!("Failed to generate pprof data: {e}");

@@ -364,7 +364,7 @@ fn maybe_cgexec(cmd: &str) -> Command {
     }
 }
 
-struct PostgresHandle {
+pub struct PostgresHandle {
     postgres: std::process::Child,
     log_collector: tokio::task::JoinHandle<Result<()>>,
 }
