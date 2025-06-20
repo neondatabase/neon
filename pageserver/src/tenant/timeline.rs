@@ -6543,6 +6543,8 @@ impl Timeline {
 
         debug!("retain_lsns: {:?}", retain_lsns);
 
+        let max_retain_lsn = retain_lsns.iter().max();
+
         // Scan all layers in the timeline (remote or on-disk).
         //
         // Garbage collect the layer if all conditions are satisfied:
@@ -6589,9 +6591,7 @@ impl Timeline {
                 // might be referenced by child branches forever.
                 // We can track this in child timeline GC and delete parent layers when
                 // they are no longer needed. This might be complicated with long inheritance chains.
-                //
-                // TODO Vec is not a great choice for `retain_lsns`
-                for retain_lsn in &retain_lsns {
+                if let Some(retain_lsn) = max_retain_lsn {
                     // start_lsn is inclusive
                     if &l.get_lsn_range().start <= retain_lsn {
                         debug!(
