@@ -7,7 +7,6 @@ use anyhow::anyhow;
 use futures::FutureExt;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use postgres_client::RawCancelToken;
-use postgres_client::tls::MakeTlsConnect;
 use redis::{Cmd, FromRedisValue, Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -18,7 +17,6 @@ use tracing::{debug, error, info};
 use crate::auth::AuthError;
 use crate::auth::backend::ComputeUserInfo;
 use crate::batch::{BatchQueue, QueueProcessing};
-use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::control_plane::ControlPlaneApi;
 use crate::error::ReportableError;
@@ -144,7 +142,6 @@ impl QueueProcessing for CancellationProcessor {
 ///
 /// If `CancellationPublisher` is available, cancel request will be used to publish the cancellation key to other proxy instances.
 pub struct CancellationHandler {
-    compute_config: &'static ComputeConfig,
     // rate limiter of cancellation requests
     limiter: Arc<std::sync::Mutex<LeakyBucketRateLimiter<IpSubnetKey>>>,
     tx: OnceLock<BatchQueue<CancellationProcessor>>, // send messages to the redis KV client task
@@ -187,9 +184,8 @@ impl ReportableError for CancelError {
 }
 
 impl CancellationHandler {
-    pub fn new(compute_config: &'static ComputeConfig) -> Self {
+    pub fn new() -> Self {
         Self {
-            compute_config,
             tx: OnceLock::new(),
             limiter: Arc::new(std::sync::Mutex::new(
                 LeakyBucketRateLimiter::<IpSubnetKey>::new_with_shards(
@@ -332,7 +328,7 @@ impl CancellationHandler {
                 kind: crate::metrics::CancellationOutcome::Found,
             });
         info!("cancelling query per user's request using key {key}");
-        cancel_closure.try_cancel_query(self.compute_config).await
+        cancel_closure.try_cancel_query().await
     }
 }
 
@@ -362,19 +358,9 @@ impl CancelClosure {
         }
     }
     /// Cancels the query running on user's compute node.
-    pub(crate) async fn try_cancel_query(
-        &self,
-        compute_config: &ComputeConfig,
-    ) -> Result<(), CancelError> {
+    pub(crate) async fn try_cancel_query(&self) -> Result<(), CancelError> {
         let socket = TcpStream::connect(self.socket_addr).await?;
-
-        let tls = <_ as MakeTlsConnect<tokio::net::TcpStream>>::make_tls_connect(
-            compute_config,
-            &self.hostname,
-        )
-        .map_err(|e| CancelError::IO(std::io::Error::other(e.to_string())))?;
-
-        self.cancel_token.cancel_query_raw(socket, tls).await?;
+        self.cancel_token.cancel_query_raw(socket).await?;
         debug!("query was cancelled");
         Ok(())
     }
@@ -399,7 +385,6 @@ impl Session {
         session_id: uuid::Uuid,
         cancel: tokio::sync::oneshot::Receiver<Infallible>,
         cancel_closure: &CancelClosure,
-        compute_config: &ComputeConfig,
     ) {
         futures::future::select(
             std::pin::pin!(self.maintain_redis_cancel_key(cancel_closure)),
@@ -407,11 +392,7 @@ impl Session {
         )
         .await;
 
-        if let Err(err) = cancel_closure
-            .try_cancel_query(compute_config)
-            .boxed()
-            .await
-        {
+        if let Err(err) = cancel_closure.try_cancel_query().boxed().await {
             tracing::warn!(
                 ?session_id,
                 ?err,

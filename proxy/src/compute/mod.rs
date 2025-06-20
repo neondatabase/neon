@@ -329,7 +329,6 @@ impl ConnectInfo {
         let cancel_closure = CancelClosure::new(
             socket_addr,
             RawCancelToken {
-                ssl_mode: self.ssl_mode,
                 process_id,
                 secret_key,
             },

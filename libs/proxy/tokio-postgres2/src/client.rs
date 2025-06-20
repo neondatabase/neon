@@ -167,6 +167,7 @@ pub struct SocketConfig {
     pub host: Host,
     pub port: u16,
     pub connect_timeout: Option<Duration>,
+    pub ssl_mode: SslMode,
 }
 
 /// An asynchronous PostgreSQL client.
@@ -178,7 +179,6 @@ pub struct Client {
     cached_typeinfo: CachedTypeInfo,
 
     socket_config: SocketConfig,
-    ssl_mode: SslMode,
     process_id: i32,
     secret_key: i32,
 }
@@ -188,7 +188,6 @@ impl Client {
         sender: mpsc::UnboundedSender<FrontendMessage>,
         receiver: mpsc::Receiver<BackendMessages>,
         socket_config: SocketConfig,
-        ssl_mode: SslMode,
         process_id: i32,
         secret_key: i32,
     ) -> Client {
@@ -206,7 +205,6 @@ impl Client {
             cached_typeinfo: Default::default(),
 
             socket_config,
-            ssl_mode,
             process_id,
             secret_key,
         }
@@ -334,7 +332,6 @@ impl Client {
         CancelToken {
             socket_config: self.socket_config.clone(),
             raw: RawCancelToken {
-                ssl_mode: self.ssl_mode,
                 process_id: self.process_id,
                 secret_key: self.secret_key,
             },

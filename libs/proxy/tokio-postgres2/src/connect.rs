@@ -57,6 +57,7 @@ where
         host: host.clone(),
         port,
         connect_timeout: config.connect_timeout,
+        ssl_mode: config.ssl_mode,
     };
 
     let (client_tx, conn_rx) = mpsc::unbounded_channel();
@@ -65,7 +66,6 @@ where
         client_tx,
         client_rx,
         socket_config,
-        config.ssl_mode,
         process_id,
         secret_key,
     );

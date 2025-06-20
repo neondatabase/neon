@@ -391,7 +391,7 @@ pub async fn run() -> anyhow::Result<()> {
         .as_ref()
         .map(|redis_publisher| RedisKVClient::new(redis_publisher.clone(), redis_rps_limit));
 
-    let cancellation_handler = Arc::new(CancellationHandler::new(&config.connect_to_compute));
+    let cancellation_handler = Arc::new(CancellationHandler::new());
 
     let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new_with_shards(
         RateBucketInfo::to_leaky_bucket(&args.endpoint_rps_limit)

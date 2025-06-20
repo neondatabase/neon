@@ -241,12 +241,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let (cancel_on_shutdown, cancel) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         session
-            .maintain_cancel_key(
-                session_id,
-                cancel,
-                &node.cancel_closure,
-                &config.connect_to_compute,
-            )
+            .maintain_cancel_key(session_id, cancel, &node.cancel_closure)
             .await;
     });
 

@@ -201,7 +201,7 @@ pub async fn run() -> anyhow::Result<()> {
         auth_backend,
         http_listener,
         shutdown.clone(),
-        Arc::new(CancellationHandler::new(&config.connect_to_compute)),
+        Arc::new(CancellationHandler::new()),
         endpoint_rate_limiter,
     );
 
