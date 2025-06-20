@@ -259,6 +259,8 @@ pageserver_api = { version = "0.1", path = "./libs/pageserver_api/" }
 pageserver_client = { path = "./pageserver/client" }
 pageserver_compaction = { version = "0.1", path = "./pageserver/compaction/" }
 pageserver_page_api = { path = "./pageserver/page_api" }
+client_cache = { path = "./pageserver/communicator_pools/client_cache" }
+request_tracker = { path = "./pageserver/communicator_pools/request_tracker" }
 postgres_backend = { version = "0.1", path = "./libs/postgres_backend/" }
 postgres_connection = { version = "0.1", path = "./libs/postgres_connection/" }
 postgres_ffi = { version = "0.1", path = "./libs/postgres_ffi/" }

@@ -718,7 +718,7 @@ dependencies = [
  "sync_wrapper 1.0.1",
  "tokio",
  "tokio-tungstenite 0.26.1",
- "tower",
+ "tower 0.5.2",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -764,7 +764,7 @@ dependencies = [
  "serde",
  "serde_html_form",
  "serde_path_to_error",
- "tower",
+ "tower 0.5.2",
  "tower-layer",
  "tower-service",
 ]
@@ -1249,7 +1249,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tonic 0.13.1",
- "tower",
+ "tower 0.5.2",
  "uuid",
  "workspace_hack",
 ]
@@ -1353,7 +1353,7 @@ dependencies = [
  "tokio-postgres",
  "tokio-stream",
  "tokio-util",
- "tower",
+ "tower 0.5.2",
  "tower-http",
  "tower-otel",
  "tracing",
@@ -2084,7 +2084,7 @@ dependencies = [
  "test-log",
  "tokio",
  "tokio-util",
- "tower",
+ "tower 0.5.2",
  "tracing",
  "utils",
  "workspace_hack",
@@ -3019,9 +3019,9 @@ dependencies = [
 
 [[package]]
 name = "hyper-util"
-version = "0.1.10"
+version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df2dcfbe0677734ab2f3ffa7fa7bfd4706bfdc1ef393f2ee30184aed67e631b4"
+checksum = "cde7055719c54e36e95e8719f95883f22072a48ede39db7fc17a4e1d5281e9b9"
 dependencies = [
  "bytes",
  "futures-channel",
@@ -3032,6 +3032,7 @@ dependencies = [
  "pin-project-lite",
  "socket2",
  "tokio",
+ "tower 0.4.13",
  "tower-service",
  "tracing",
 ]
@@ -4392,7 +4393,7 @@ dependencies = [
  "toml_edit",
  "tonic 0.13.1",
  "tonic-reflection",
- "tower",
+ "tower 0.5.2",
  "tracing",
  "tracing-utils",
  "twox-hash",
@@ -7626,7 +7627,7 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.2",
  "tokio-stream",
- "tower",
+ "tower 0.5.2",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -7658,6 +7659,21 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic 0.13.1",
+]
+
+[[package]]
+name = "tower"
+version = "0.4.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8fa9be0de6cf49e536ce1851f987bd21a43b771b09473c3549a6c853db37c1c"
+dependencies = [
+ "futures-core",
+ "futures-util",
+ "pin-project",
+ "pin-project-lite",
+ "tokio",
+ "tower-layer",
+ "tower-service",
 ]
 
 [[package]]
@@ -8704,7 +8720,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "toml_edit",
- "tower",
+ "tower 0.5.2",
  "tracing",
  "tracing-core",
  "tracing-log",
