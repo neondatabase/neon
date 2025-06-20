@@ -101,8 +101,15 @@ class EndpointHttpClient(requests.Session):
         if should_stop:
             should_stop_str = "true"
 
+        url = f"http://localhost:{self.external_port}/profile/cpu"
+        params = {
+            "sampling_frequency": sampling_frequency,
+            "timeout_seconds": timeout_seconds,
+            "should_stop": should_stop_str,
+        }
         res = self.get(
-            f"http://localhost:{self.external_port}/profile/cpu?sampling_frequency={sampling_frequency}&timeout_seconds={timeout_seconds}&should_stop={should_stop_str}",
+            url,
+            params=params,
             auth=self.auth,
         )
         res.raise_for_status()
