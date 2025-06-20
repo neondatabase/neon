@@ -256,6 +256,7 @@ impl PoolingBackend {
         &self,
         ctx: &RequestContext,
         conn_info: ConnInfo,
+        disable_pg_session_jwt: bool,
     ) -> Result<Client<postgres_client::Client>, HttpConnError> {
         if let Some(client) = self.local_pool.get(ctx, &conn_info)? {
             return Ok(client);
@@ -277,25 +278,25 @@ impl PoolingBackend {
                 .expect("semaphore should never be closed");
 
             // check again for race
-            if !self.local_pool.initialized(&conn_info) {
-                // local_backend
-                //     .compute_ctl
-                //     .install_extension(&ExtensionInstallRequest {
-                //         extension: EXT_NAME,
-                //         database: conn_info.dbname.clone(),
-                //         version: EXT_VERSION,
-                //     })
-                //     .await?;
+            if !self.local_pool.initialized(&conn_info) && !disable_pg_session_jwt {
+                local_backend
+                    .compute_ctl
+                    .install_extension(&ExtensionInstallRequest {
+                        extension: EXT_NAME,
+                        database: conn_info.dbname.clone(),
+                        version: EXT_VERSION,
+                    })
+                    .await?;
 
-                // local_backend
-                //     .compute_ctl
-                //     .grant_role(&SetRoleGrantsRequest {
-                //         schema: EXT_SCHEMA,
-                //         privileges: vec![Privilege::Usage],
-                //         database: conn_info.dbname.clone(),
-                //         role: conn_info.user_info.user.clone(),
-                //     })
-                //     .await?;
+                local_backend
+                    .compute_ctl
+                    .grant_role(&SetRoleGrantsRequest {
+                        schema: EXT_SCHEMA,
+                        privileges: vec![Privilege::Usage],
+                        database: conn_info.dbname.clone(),
+                        role: conn_info.user_info.user.clone(),
+                    })
+                    .await?;
 
                 self.local_pool.set_initialized(&conn_info);
             }

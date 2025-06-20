@@ -153,14 +153,23 @@ docker run \
 ```
 
 ```sh
-cargo run --bin proxy -- --is-auth-broker true -c server.crt -k server.key --wss 0.0.0.0:8080 --http 0.0.0.0:7002 --auth-backend cplane-v1
+cargo run --bin local_proxy -- \
+  --disable_pg_session_jwt true \
+  --http 0.0.0.0:7432
 ```
 
 ```sh
-cargo run --bin local_proxy -- --http 0.0.0.0:7432
+cargo run --bin proxy -- \
+  --is-auth-broker true \
+  -c server.crt -k server.key \
+  --wss 0.0.0.0:7002 \
+  --http 0.0.0.0:8080 \
+  --auth-backend cplane-v1
 ```
+
+
 
 ```sh
 export NEON_JWT="..."
-curl -k "https://127.0.0.1:8080/sql" -H "Authorization: Bearer $NEON_JWT" -H "neon-connection-string: postgresql://authenticated@foo.local.neon.build/database" -d '{"query":"select 1","params":[]}'
+curl -k "https://127.0.0.1:8080/sql" -H "Authorization: Bearer $NEON_JWT" -H "neon-connection-string: postgresql://authenticator@foo.local.neon.build/database" -d '{"query":"select 1","params":[]}'
 ```

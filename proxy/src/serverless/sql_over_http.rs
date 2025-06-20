@@ -731,9 +731,11 @@ async fn handle_db_inner(
                 ComputeCredentialKeys::JwtPayload(payload)
                     if backend.auth_backend.is_local_proxy() =>
                 {
-                    let mut client = backend.connect_to_local_postgres(ctx, conn_info).await?;
-                    let (cli_inner, _dsc) = client.client_inner();
-                    cli_inner.set_jwt_session(&payload).await?;
+                    let mut client = backend.connect_to_local_postgres(ctx, conn_info, config.disable_pg_session_jwt).await?;
+                    if !config.disable_pg_session_jwt {
+                        let (cli_inner, _dsc) = client.client_inner();
+                        cli_inner.set_jwt_session(&payload).await?;
+                    }
                     Client::Local(client)
                 }
                 _ => {
