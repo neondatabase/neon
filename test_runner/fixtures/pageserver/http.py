@@ -1233,7 +1233,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             )
         self.verbose_error(res)
 
-    def evaluate_feature_flag_boolean(self, tenant_id: TenantId, flag: str) -> str | None:
+    def evaluate_feature_flag_boolean(self, tenant_id: TenantId, flag: str) -> Any:
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/feature_flag",
             params={"flag": flag, "as": "boolean"},
@@ -1241,7 +1241,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         self.verbose_error(res)
         return res.json()
 
-    def evaluate_feature_flag_multivariate(self, tenant_id: TenantId, flag: str) -> str | None:
+    def evaluate_feature_flag_multivariate(self, tenant_id: TenantId, flag: str) -> Any:
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/feature_flag",
             params={"flag": flag, "as": "multivariate"},
