@@ -542,6 +542,33 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) OPTFLAGS="" && \
 
 #########################################################################################
 #
+# Layer "pg_tpcds-build"
+# compile pg_tpcds extension
+#
+#########################################################################################
+FROM build-deps AS pg_tpcds-src
+ARG PG_VERSION
+WORKDIR /ext-src/
+
+RUN case "${PG_VERSION:?}" in \
+    "v14" ) \
+        echo "Skipping pg_tpcds for PG_VERSION=$PG_VERSION" && exit 0 ;; \
+    * ) \
+        git clone --recurse-submodules --depth 1 https://github.com/neondatabase-labs/pg_tpcds.git pg_tpcds-src ;; \
+    esac
+
+FROM pg-build AS pg_tpcds-build
+COPY --from=pg_tpcds-src /ext-src/ /ext-src/
+WORKDIR /ext-src/
+RUN if [ -d pg_tpcds-src ]; then \
+        cd pg_tpcds-src && \
+        cmake -Bbuild && \
+        cmake --build build --target install && \
+        echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_tpcds.control; \
+    fi
+
+#########################################################################################
+#
 # Layer "pgjwt-build"
 # compile pgjwt extension
 #
@@ -1721,6 +1748,7 @@ COPY --from=pg_duckdb-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_repack-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgaudit-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgauditlogtofile-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg_tpcds-build /usr/local/pgsql/ /usr/local/pgsql/
 
 #########################################################################################
 #
