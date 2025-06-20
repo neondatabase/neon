@@ -4,12 +4,11 @@ ROOT_PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 # managers.
 POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install/
 
-# Extra flags to pass to `cargo build`. `--locked` and `--features testing` are
-# popular examples.
+# CARGO_BUILD_FLAGS: Extra flags to pass to `cargo build`. `--locked`
+# and `--features testing` are popular examples.
 #
-# You can also set CARGO_PROFILE to override the cargo profile to use. By default,
-# it is derived from BUILD_TYPE.
-CARGO_BUILD_FLAGS ?=
+# CARGO_PROFILE: You can also set to override the cargo profile to
+# use. By default, it is derived from BUILD_TYPE.
 
 # All intermediate build artifacts are stored here.
 BUILD_DIR := build
