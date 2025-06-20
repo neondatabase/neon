@@ -150,8 +150,6 @@ postgres-%: postgres-configure-% \
 		  postgres-headers-% # to prevent `make install` conflicts with neon's `postgres-headers`
 	+@echo "Compiling PostgreSQL $*"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$* MAKELEVEL=0 install
-	+@echo "Compiling libpq $*"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/src/interfaces/libpq install
 	+@echo "Compiling pg_prewarm $*"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pg_prewarm install
 	+@echo "Compiling pg_buffercache $*"
