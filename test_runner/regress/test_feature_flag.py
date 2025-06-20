@@ -12,12 +12,9 @@ if TYPE_CHECKING:
 def test_feature_flag(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     env.pageserver.http_client().force_override_feature_flag("test-feature-flag", "true")
-    assert (
-        env.pageserver.http_client().evaluate_feature_flag_boolean(
-            env.initial_tenant, "test-feature-flag"
-        )["result"]["Ok"]
-        == True
-    )
+    assert env.pageserver.http_client().evaluate_feature_flag_boolean(
+        env.initial_tenant, "test-feature-flag"
+    )["result"]["Ok"]
     assert (
         env.pageserver.http_client().evaluate_feature_flag_multivariate(
             env.initial_tenant, "test-feature-flag"
