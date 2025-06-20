@@ -609,7 +609,8 @@ impl Service {
         Ok(())
     }
 
-    /// Choose safekeepers for the new timeline: 3 in different azs.
+    /// Choose safekeepers for the new timeline in different azs.
+    /// 3 are choosen by default, but may be configured via config (for testing).
     pub(crate) async fn safekeepers_for_new_timeline(
         &self,
     ) -> Result<Vec<SafekeeperInfo>, ApiError> {
