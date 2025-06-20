@@ -392,7 +392,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
         if true {
             return Ok(vec![AuthRule {
                 id: "1".into(),
-                jwks_url: "https://adapted-gorilla-88.clerk.accounts.dev/.well-known/jwks.json"
+                jwks_url: "https://climbing-minnow-11.clerk.accounts.dev/.well-known/jwks.json"
                     .parse()
                     .expect("url is valid"),
                 audience: None,

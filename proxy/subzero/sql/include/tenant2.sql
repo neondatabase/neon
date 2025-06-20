@@ -11,8 +11,8 @@ INSERT INTO tenant2.items (name) VALUES
     ('tenant2 item 3');
 
 
-CREATE ROLE tenant2_role NOINHERIT;
-GRANT ROLE tenant2_role TO authenticator;
+CREATE ROLE tenant2_role NOLOGIN;
+GRANT tenant2_role TO authenticator;
 
 GRANT USAGE ON SCHEMA tenant2 TO tenant2_role;
 GRANT ALL ON ALL TABLES IN SCHEMA tenant2 TO tenant2_role;

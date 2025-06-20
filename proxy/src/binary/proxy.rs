@@ -26,7 +26,7 @@ use crate::auth::backend::{ConsoleRedirectBackend, MaybeOwned};
 use crate::cancellation::{CancellationHandler, handle_cancel_messages};
 use crate::config::{
     self, AuthenticationConfig, CacheOptions, ComputeConfig, HttpConfig, ProjectInfoCacheOptions,
-    ProxyConfig, ProxyProtocolV2, remote_storage_from_toml,
+    ProxyConfig, ProxyProtocolV2, remote_storage_from_toml, RestConfig,
 };
 use crate::context::parquet::ParquetUploadArgs;
 use crate::http::health_server::AppMetrics;
@@ -233,6 +233,10 @@ struct ProxyCliArgs {
 
     #[clap(flatten)]
     pg_sni_router: PgSniRouterArgs,
+
+    /// if this is not local proxy, this toggles whether we accept Postgres REST requests
+    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    is_rest_broker: bool,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -689,6 +693,10 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         timeout: Duration::from_secs(2),
     };
 
+    let rest_config = RestConfig {
+        is_rest_broker: args.is_rest_broker,
+    };
+
     let config = ProxyConfig {
         tls_config,
         metric_collection,
@@ -701,6 +709,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         connect_compute_locks,
         connect_to_compute: compute_config,
         disable_pg_session_jwt: false,
+        rest_config,
     };
 
     let config = Box::leak(Box::new(config));

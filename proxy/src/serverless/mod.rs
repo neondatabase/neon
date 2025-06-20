@@ -12,6 +12,7 @@ mod http_util;
 mod json;
 mod local_conn_pool;
 mod sql_over_http;
+mod rest;
 mod websocket;
 
 use std::net::{IpAddr, SocketAddr};
@@ -496,6 +497,30 @@ async fn request_handler(
             .status(StatusCode::OK) // 204 is also valid, but see: https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods/OPTIONS#status_code
             .body(Empty::new().map_err(|x| match x {}).boxed())
             .map_err(|e| ApiError::InternalServerError(e.into()))
+    } else if config.rest_config.is_rest_broker && request.uri().path().starts_with("/rest")  {
+        let ctx = RequestContext::new(
+            session_id,
+            conn_info,
+            crate::metrics::Protocol::Http,
+            &config.region,
+        );
+        let span = ctx.span();
+
+        let testodrome_id = request
+            .headers()
+            .get("X-Neon-Query-ID")
+            .and_then(|value| value.to_str().ok())
+            .map(|s| s.to_string());
+
+        if let Some(query_id) = testodrome_id {
+            info!(parent: &ctx.span(), "testodrome query ID: {query_id}");
+            ctx.set_testodrome_id(query_id.into());
+        }
+
+        rest::handle(config, ctx, request, backend, http_cancellation_token)
+            .instrument(span)
+            .await
+        
     } else {
         json_response(StatusCode::BAD_REQUEST, "query is not supported")
     }

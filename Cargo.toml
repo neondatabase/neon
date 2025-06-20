@@ -203,6 +203,7 @@ tonic = { version = "0.13.1", default-features = false, features = ["channel", "
 tonic-reflection = { version = "0.13.1", features = ["server"] }
 tower = { version = "0.5.2", default-features = false }
 tower-http = { version = "0.6.2", features = ["auth", "request-id", "trace"] }
+subzero-core = { version = "3.0.1", path = "../subzero/core" }
 
 # This revision uses opentelemetry 0.27. There's no tag for it.
 tower-otel = { git = "https://github.com/mattiapenati/tower-otel", rev = "56a7321053bcb72443888257b622ba0d43a11fcd" }

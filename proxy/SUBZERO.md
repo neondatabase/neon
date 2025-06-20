@@ -17,16 +17,24 @@ docker compose up -f subzero/docker-compose.yml -d
 bring up the local proxy (but disable pg_session_jwt extension installation)
 ```sh
 cargo run --bin local_proxy -- \
-  --disable_pg_session_jwt true \
+  --disable-pg-session-jwt \
+  --config-path proxy/subzero/local_proxy.json \
   --http 0.0.0.0:7432
 ```
 
 bring up the proxy (auth broker) which also handles the /rest routes handled by subzero code
 ```sh
-cargo run --bin proxy -- \
+LOGFMT=text cargo run --bin proxy -- \
   --is-auth-broker true \
-  -c server.crt -k server.key \
-  --wss 0.0.0.0:7002 \
-  --http 0.0.0.0:8080 \
+  --is-rest-broker true \
+   -c server.crt -k server.key \
+  --wss 0.0.0.0:8080 \
+  --http 0.0.0.0:7002 \
   --auth-backend cplane-v1
+```
+
+```sh
+curl -k -i \
+  -H "Authorization: Bearer $NEON_JWT" \
+  "https://127.0.0.1:8080/rest/v1/items"
 ```

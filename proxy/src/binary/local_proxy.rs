@@ -24,7 +24,7 @@ use crate::auth::backend::local::{JWKS_ROLE_MAP, LocalBackend};
 use crate::auth::{self};
 use crate::cancellation::CancellationHandler;
 use crate::config::{
-    self, AuthenticationConfig, ComputeConfig, HttpConfig, ProxyConfig, RetryConfig,
+    self, AuthenticationConfig, ComputeConfig, HttpConfig, ProxyConfig, RetryConfig, RestConfig,
 };
 use crate::control_plane::locks::ApiLocks;
 use crate::control_plane::messages::{EndpointJwksResponse, JwksSettings};
@@ -281,6 +281,9 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
             is_auth_broker: false,
             accept_jwts: true,
             console_redirect_confirmation_timeout: Duration::ZERO,
+        },
+        rest_config: RestConfig {
+            is_rest_broker: false,
         },
         proxy_protocol_v2: config::ProxyProtocolV2::Rejected,
         handshake_timeout: Duration::from_secs(10),

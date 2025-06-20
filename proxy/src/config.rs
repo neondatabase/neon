@@ -21,6 +21,7 @@ pub struct ProxyConfig {
     pub metric_collection: Option<MetricCollectionConfig>,
     pub http_config: HttpConfig,
     pub authentication_config: AuthenticationConfig,
+    pub rest_config: RestConfig,
     pub proxy_protocol_v2: ProxyProtocolV2,
     pub region: String,
     pub handshake_timeout: Duration,
@@ -69,6 +70,10 @@ pub struct AuthenticationConfig {
     pub is_auth_broker: bool,
     pub accept_jwts: bool,
     pub console_redirect_confirmation_timeout: tokio::time::Duration,
+}
+
+pub struct RestConfig {
+    pub is_rest_broker: bool,
 }
 
 #[derive(Debug)]

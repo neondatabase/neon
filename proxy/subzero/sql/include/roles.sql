@@ -1,11 +1,11 @@
-CREATE ROLE authenticator LOGIN NOINHERIT;
-CREATE ROLE anonymous noinherit;
-GRANT ROLE anonymous TO authenticator;
+CREATE ROLE authenticator LOGIN NOINHERIT NOCREATEDB NOCREATEROLE NOSUPERUSER;
+CREATE ROLE anon NOLOGIN;
+GRANT anon TO authenticator;
 
 -- reloadable config options
 -- these settings will override the values in configs/no-defaults.config, so they must be different
 -- ALTER ROLE authenticator SET pgrst.db_aggregates_enabled = 'false';
-ALTER ROLE authenticator SET pgrst.db_anon_role = 'anonymous';
+ALTER ROLE authenticator SET pgrst.db_anon_role = 'anon';
 ALTER ROLE authenticator SET pgrst.db_extra_search_path = 'public, extensions';
 ALTER ROLE authenticator SET pgrst.db_max_rows = '500';
 -- ALTER ROLE authenticator SET pgrst.db_plan_enabled = 'false';

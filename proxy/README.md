@@ -159,11 +159,11 @@ cargo run --bin local_proxy -- \
 ```
 
 ```sh
-cargo run --bin proxy -- \
+LOGFMT=text cargo run --bin proxy -- \
   --is-auth-broker true \
   -c server.crt -k server.key \
-  --wss 0.0.0.0:7002 \
-  --http 0.0.0.0:8080 \
+  --wss 0.0.0.0:8080 \
+  --http 0.0.0.0:7002 \
   --auth-backend cplane-v1
 ```
 
@@ -171,5 +171,8 @@ cargo run --bin proxy -- \
 
 ```sh
 export NEON_JWT="..."
-curl -k "https://127.0.0.1:8080/sql" -H "Authorization: Bearer $NEON_JWT" -H "neon-connection-string: postgresql://authenticator@foo.local.neon.build/database" -d '{"query":"select 1","params":[]}'
+curl -k "http://127.0.0.1:8080/sql" \
+  -H "Authorization: Bearer $NEON_JWT" \
+  -H "neon-connection-string: postgresql://authenticator@foo.local.neon.build/database" \
+  -d '{"query":"select 1","params":[]}'
 ```
