@@ -459,7 +459,7 @@ impl GetPageResponse {
 /// These are effectively equivalent to gRPC statuses. However, we use a bidirectional stream
 /// (potentially shared by many backends), and a gRPC status response would terminate the stream so
 /// we send GetPageResponse messages with these codes instead.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, strum_macros::Display)]
 pub enum GetPageStatusCode {
     /// Unknown status. For forwards compatibility: used when an older client version receives a new
     /// status code from a newer server version.
