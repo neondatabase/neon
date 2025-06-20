@@ -207,6 +207,12 @@ struct Cli {
     /// the compute notification directly (instead of via control plane).
     #[arg(long, default_value = "false")]
     use_local_compute_notifications: bool,
+
+    /// When set, actively checks and initiates heatmap downloads/uploads during reconciliation.
+    /// This speed up migrations by avoiding the default wait for the heatmap download interval.
+    /// Primarily useful for testing to reduce test execution time.
+    #[arg(long, default_value = "false")]
+    kick_secondary_downloads: bool,
 }
 
 enum StrictMode {
@@ -433,6 +439,7 @@ async fn async_main() -> anyhow::Result<()> {
         ssl_ca_certs,
         timelines_onto_safekeepers: args.timelines_onto_safekeepers,
         use_local_compute_notifications: args.use_local_compute_notifications,
+        kick_secondary_downloads: args.kick_secondary_downloads,
     };
 
     // Validate that we can connect to the database

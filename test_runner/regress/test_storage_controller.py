@@ -4429,6 +4429,8 @@ def test_attached_0_graceful_migration(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_pageservers = 4
     neon_env_builder.num_azs = 2
 
+    neon_env_builder.disable_kick_secondary_downloads = False
+
     env = neon_env_builder.init_start()
 
     # It is default, but we want to ensure that there are no secondary locations requested
@@ -4451,14 +4453,23 @@ def test_attached_0_graceful_migration(neon_env_builder: NeonEnvBuilder):
         dst_ps.id,
         config=StorageControllerMigrationConfig(prewarm=True),
     )
-    env.storage_controller.reconcile_until_idle()
+
+    def tenant_shard_migrated():
+        src_locations = src_ps.http_client().tenant_list_locations()["tenant_shards"]
+        assert len(src_locations) == 0
+        log.info(f"Tenant shard migrated from {src_ps.id}")
+        dst_locations = dst_ps.http_client().tenant_list_locations()["tenant_shards"]
+        assert len(dst_locations) == 1
+        assert dst_locations[0][1]["mode"] == "AttachedSingle"
+        log.info(f"Tenant shard migrated to {dst_ps.id}")
 
     # After all we expect that tenant shard exists only on dst node.
-    src_locations = src_ps.http_client().tenant_list_locations()["tenant_shards"]
-    assert len(src_locations) == 0
-    dst_locations = dst_ps.http_client().tenant_list_locations()["tenant_shards"]
-    assert len(dst_locations) == 1
-    assert dst_locations[0][1]["mode"] == "AttachedSingle"
+    # We wait so long because [`DEFAULT_HEATMAP_PERIOD`] and [`DEFAULT_DOWNLOAD_INTERVAL`]
+    # are set to 60 seconds by default.
+    #
+    # TODO: we should consider making these configurable, so the test can run faster.
+    wait_until(tenant_shard_migrated, timeout=180, interval=5, status_interval=10)
+    log.info("Tenant shard migrated successfully")
 
 
 @run_only_on_default_postgres("this is like a 'unit test' against storcon db")

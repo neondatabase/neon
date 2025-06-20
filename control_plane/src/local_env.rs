@@ -209,6 +209,8 @@ pub struct NeonStorageControllerConf {
     pub use_https_safekeeper_api: bool,
 
     pub use_local_compute_notifications: bool,
+
+    pub kick_secondary_downloads: bool,
 }
 
 impl NeonStorageControllerConf {
@@ -239,6 +241,7 @@ impl Default for NeonStorageControllerConf {
             timelines_onto_safekeepers: false,
             use_https_safekeeper_api: false,
             use_local_compute_notifications: true,
+            kick_secondary_downloads: true,
         }
     }
 }

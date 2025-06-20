@@ -453,6 +453,7 @@ class NeonEnvBuilder:
         pageserver_get_vectored_concurrent_io: str | None = None,
         pageserver_tracing_config: PageserverTracingConfig | None = None,
         pageserver_import_config: PageserverImportConfig | None = None,
+        disable_kick_secondary_downloads: bool = False,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -511,6 +512,8 @@ class NeonEnvBuilder:
 
         self.pageserver_tracing_config = pageserver_tracing_config
         self.pageserver_import_config = pageserver_import_config
+
+        self.disable_kick_secondary_downloads = disable_kick_secondary_downloads
 
         self.pageserver_default_tenant_config_compaction_algorithm: dict[str, Any] | None = (
             pageserver_default_tenant_config_compaction_algorithm
@@ -1218,6 +1221,12 @@ class NeonEnv:
                 cfg["storage_controller"]["use_local_compute_notifications"] = False
             else:
                 cfg["storage_controller"] = {"use_local_compute_notifications": False}
+
+        if config.disable_kick_secondary_downloads:
+            if "storage_controller" in cfg:
+                cfg["storage_controller"]["kick_secondary_downloads"] = False
+            else:
+                cfg["storage_controller"] = {"kick_secondary_downloads": False}
 
         # Create config for pageserver
         http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
