@@ -18,7 +18,7 @@ PG_CONFIG = pg_config
 
 subdirs = neon neon_rmgr neon_walredo neon_utils neon_test_utils
 
-.PHONY: install compute-compute storage-compute $(subdirs)
+.PHONY: install install-compute install-storage $(subdirs)
 install: $(subdirs)
 install-compute: neon neon_utils neon_test_utils neon_rmgr
 install-storage: neon_rmgr neon_walredo
