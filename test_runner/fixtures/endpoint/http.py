@@ -94,6 +94,31 @@ class EndpointHttpClient(requests.Session):
 
         wait_until(offloaded)
 
+    def profile_cpu(
+        self, sampling_frequency: int, timeout_seconds: int, should_stop: bool
+    ) -> bytes:
+        should_stop_str = "false"
+        if should_stop:
+            should_stop_str = "true"
+
+        url = f"http://localhost:{self.external_port}/profile/cpu"
+        params = {
+            "sampling_frequency": sampling_frequency,
+            "timeout_seconds": timeout_seconds,
+            "should_stop": should_stop_str,
+        }
+        res = self.get(
+            url,
+            params=params,
+            auth=self.auth,
+        )
+
+        if res.status_code != 200:
+            log.error(f"Failed to profile CPU: {res.status_code} {res.text}")
+            res.raise_for_status()
+
+        return res.content
+
     def database_schema(self, database: str):
         res = self.get(
             f"http://localhost:{self.external_port}/database_schema?database={urllib.parse.quote(database, safe='')}",
