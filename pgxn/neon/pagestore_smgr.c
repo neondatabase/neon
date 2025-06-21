@@ -109,6 +109,7 @@ typedef enum
 } UnloggedBuildPhase;
 
 static NRelFileInfo unlogged_build_rel_info;
+static RelKindEntry* unlogged_build_rel_entry;
 static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 
 static bool neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id);
@@ -884,6 +885,7 @@ neon_unlink(NRelFileInfoBackend rinfo, ForkNumber forkNum, bool isRedo)
 	if (!NRelFileInfoBackendIsTemp(rinfo))
 	{
 		forget_cached_relsize(InfoFromNInfoB(rinfo), forkNum);
+		forget_cached_relkind(InfoFromNInfoB(rinfo));
 	}
 }
 
@@ -1592,30 +1594,40 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 #endif
 {
 	XLogRecPtr	lsn;
+	RelKindEntry *entry;
+	bool unlogged;
+	uint8 flags = 0;
 
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
-#ifndef DEBUG_COMPARE_LOCAL
-			/* This is a bit tricky. Check if the relation exists locally */
-			if (mdexists(reln, forknum))
-#else
-			if (mdexists(reln, INIT_FORKNUM))
-#endif
+			entry = get_cached_relkind(InfoFromSMgrRel(reln), &flags);
+			if (entry)
 			{
-				/* It exists locally. Guess it's unlogged then. */
+				/* We do not know relation persistence: let's determine it */
+#ifndef DEBUG_COMPARE_LOCAL
+				/* This is a bit tricky. Check if the relation exists locally */
+				unlogged = mdexists(reln, forknum);
+#else
+				unlogged = mdexists(reln, INIT_FORKNUM);
+#endif
+				store_cached_relkind(entry, unlogged ? RELKIND_UNLOGGED : 0);
+			}
+			else
+			{
+				unlogged = (flags & (RELKIND_UNLOGGED_BUILD|RELKIND_UNLOGGED)) != 0;
+			}
+			if (unlogged)
+			{
 #if PG_MAJORVERSION_NUM >= 17
 				mdwritev(reln, forknum, blocknum, &buffer, 1, skipFsync);
 #else
 				mdwrite(reln, forknum, blocknum, buffer, skipFsync);
 #endif
-				/*
-				 * We could set relpersistence now that we have determined
-				 * that it's local. But we don't dare to do it, because that
-				 * would immediately allow reads as well, which shouldn't
-				 * happen. We could cache it with a different 'relpersistence'
-				 * value, but this isn't performance critical.
-				 */
+				if (flags & RELKIND_UNLOGGED_BUILD)
+				{
+					unlock_cached_relkind();
+				}
 				return;
 			}
 			break;
@@ -1674,26 +1686,37 @@ static void
 neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 			 const void **buffers, BlockNumber nblocks, bool skipFsync)
 {
+	RelKindEntry *entry;
+	bool unlogged;
+	uint8 flags = 0;
+
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
+			entry = get_cached_relkind(InfoFromSMgrRel(reln), &flags);
+			if (entry)
+			{
+				/* We do not know relation persistence: let's determine it */
 #ifndef DEBUG_COMPARE_LOCAL
-			/* This is a bit tricky. Check if the relation exists locally */
-			if (mdexists(reln, forknum))
+				/* This is a bit tricky. Check if the relation exists locally */
+				unlogged = mdexists(reln, forknum);
 #else
-			if (mdexists(reln, INIT_FORKNUM))
+				unlogged = mdexists(reln, INIT_FORKNUM);
 #endif
+				store_cached_relkind(entry, unlogged ? RELKIND_UNLOGGED : 0);
+			}
+			else
+			{
+				unlogged = (flags & (RELKIND_UNLOGGED_BUILD|RELKIND_UNLOGGED)) != 0;
+			}
+			if (unlogged)
 			{
 				/* It exists locally. Guess it's unlogged then. */
 				mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
-
-				/*
-				 * We could set relpersistence now that we have determined
-				 * that it's local. But we don't dare to do it, because that
-				 * would immediately allow reads as well, which shouldn't
-				 * happen. We could cache it with a different 'relpersistence'
-				 * value, but this isn't performance critical.
-				 */
+				if (flags & RELKIND_UNLOGGED_BUILD)
+				{
+					unlock_cached_relkind();
+				}
 				return;
 			}
 			break;
@@ -1977,6 +2000,7 @@ neon_start_unlogged_build(SMgrRelation reln)
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
 			unlogged_build_rel_info = InfoFromSMgrRel(reln);
+			unlogged_build_rel_entry = set_cached_relkind(unlogged_build_rel_info, RELKIND_UNLOGGED|RELKIND_UNLOGGED_BUILD);
 			unlogged_build_phase = UNLOGGED_BUILD_NOT_PERMANENT;
 #ifdef DEBUG_COMPARE_LOCAL
 			if (!IsParallelWorker())
@@ -1998,6 +2022,7 @@ neon_start_unlogged_build(SMgrRelation reln)
 #endif
 
 	unlogged_build_rel_info = InfoFromSMgrRel(reln);
+	unlogged_build_rel_entry = set_cached_relkind(unlogged_build_rel_info, RELKIND_UNLOGGED_BUILD);
 	unlogged_build_phase = UNLOGGED_BUILD_PHASE_1;
 
 	/*
@@ -2015,6 +2040,15 @@ neon_start_unlogged_build(SMgrRelation reln)
 		mdcreate(reln, INIT_FORKNUM, true);
 #endif
 	}
+}
+
+static void
+unlogged_build_cleanup(void)
+{
+	NRelFileInfoInvalidate(unlogged_build_rel_info);
+	unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+	unpin_cached_relkind(unlogged_build_rel_entry);
+	unlogged_build_rel_entry = NULL;
 }
 
 /*
@@ -2043,8 +2077,7 @@ neon_finish_unlogged_build_phase_1(SMgrRelation reln)
 	 */
 	if (IsParallelWorker())
 	{
-		NRelFileInfoInvalidate(unlogged_build_rel_info);
-		unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+		unlogged_build_cleanup();
 	}
 	else
 		unlogged_build_phase = UNLOGGED_BUILD_PHASE_2;
@@ -2096,6 +2129,8 @@ neon_end_unlogged_build(SMgrRelation reln)
 								InfoFromNInfoB(rinfob),
 								MAIN_FORKNUM);
 
+		clear_cached_relkind_flags(unlogged_build_rel_entry, RELKIND_UNLOGGED_BUILD);
+
 		/* Remove local copy */
 		for (int forknum = 0; forknum <= MAX_FORKNUM; forknum++)
 		{
@@ -2116,8 +2151,7 @@ neon_end_unlogged_build(SMgrRelation reln)
 		mdunlink(rinfob, INIT_FORKNUM, true);
 #endif
 	}
-	NRelFileInfoInvalidate(unlogged_build_rel_info);
-	unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+	unlogged_build_cleanup();
 }
 
 #define STRPREFIX(str, prefix) (strncmp(str, prefix, strlen(prefix)) == 0)
@@ -2189,8 +2223,7 @@ AtEOXact_neon(XactEvent event, void *arg)
 			 * Forget about any build we might have had in progress. The local
 			 * file will be unlinked by smgrDoPendingDeletes()
 			 */
-			NRelFileInfoInvalidate(unlogged_build_rel_info);
-			unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+			unlogged_build_cleanup();
 			break;
 
 		case XACT_EVENT_COMMIT:
@@ -2201,8 +2234,7 @@ AtEOXact_neon(XactEvent event, void *arg)
 		case XACT_EVENT_PRE_PREPARE:
 			if (unlogged_build_phase != UNLOGGED_BUILD_NOT_IN_PROGRESS)
 			{
-				NRelFileInfoInvalidate(unlogged_build_rel_info);
-				unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+				unlogged_build_cleanup();
 				ereport(ERROR,
 						(errcode(ERRCODE_INTERNAL_ERROR),
 						 (errmsg(NEON_TAG "unlogged index build was not properly finished"))));
