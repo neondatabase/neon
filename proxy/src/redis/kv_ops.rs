@@ -5,11 +5,9 @@ use redis::aio::ConnectionLike;
 use redis::{Cmd, FromRedisValue, Pipeline, RedisResult};
 
 use super::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
-use crate::rate_limiter::{GlobalRateLimiter, RateBucketInfo};
 
 pub struct RedisKVClient {
     client: ConnectionWithCredentialsProvider,
-    limiter: GlobalRateLimiter,
 }
 
 #[allow(async_fn_in_trait)]
@@ -30,11 +28,8 @@ impl Queryable for Cmd {
 }
 
 impl RedisKVClient {
-    pub fn new(client: ConnectionWithCredentialsProvider, info: &'static [RateBucketInfo]) -> Self {
-        Self {
-            client,
-            limiter: GlobalRateLimiter::new(info.into()),
-        }
+    pub fn new(client: ConnectionWithCredentialsProvider) -> Self {
+        Self { client }
     }
 
     pub async fn try_connect(&mut self) -> anyhow::Result<()> {
@@ -49,11 +44,6 @@ impl RedisKVClient {
         &mut self,
         q: &impl Queryable,
     ) -> anyhow::Result<T> {
-        if !self.limiter.check() {
-            tracing::info!("Rate limit exceeded. Skipping query");
-            return Err(anyhow::anyhow!("Rate limit exceeded"));
-        }
-
         let e = match q.query(&mut self.client).await {
             Ok(t) => return Ok(t),
             Err(e) => e,
