@@ -36,7 +36,10 @@ impl FeatureResolverBackgroundLoop {
         // Main loop of updating the feature flags.
         handle.spawn(
             async move {
-                tracing::info!("Starting PostHog feature resolver");
+                tracing::info!(
+                    "Starting PostHog feature resolver with refresh period: {:?}",
+                    refresh_period
+                );
                 let mut ticker = tokio::time::interval(refresh_period);
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
