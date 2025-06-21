@@ -583,7 +583,7 @@ fn start_pageserver(
             deletion_queue_client,
             l0_flush_global_state,
             basebackup_prepare_sender,
-            feature_resolver,
+            feature_resolver: feature_resolver.clone(),
         },
         shutdown_pageserver.clone(),
     );
@@ -715,6 +715,7 @@ fn start_pageserver(
                 disk_usage_eviction_state,
                 deletion_queue.new_client(),
                 secondary_controller,
+                feature_resolver,
             )
             .context("Failed to initialize router state")?,
         );
