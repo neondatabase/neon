@@ -82,7 +82,7 @@ typedef PGAlignedBlock PGIOAlignedBlock;
  * read, compare the versions we read from local disk and Page Server,
  * and Assert that they are identical.
  */
-/* #define DEBUG_COMPARE_LOCAL */
+#define DEBUG_COMPARE_LOCAL
 
 #ifdef DEBUG_COMPARE_LOCAL
 #include "access/nbtree.h"
@@ -1519,6 +1519,8 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 #ifdef DEBUG_COMPARE_LOCAL
 	compare_with_localv(reln, forknum, blocknum, buffers, nblocks, request_lsns, read_pages);
 	memset(read_pages, 0, sizeof(read_pages));
+	if (prefetch_result == nblocks)
+		neon_log(DEBUG5, "Prefetch hit");
 #else
 	if (prefetch_result == nblocks)
 		return;
