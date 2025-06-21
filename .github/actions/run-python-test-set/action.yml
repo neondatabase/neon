@@ -219,7 +219,7 @@ runs:
 
     - name: Upload compatibility snapshot
       # Note, that we use `github.base_ref` which is a target branch for a PR
-      if: github.event_name == 'pull_request' && github.base_ref == 'release'
+      if: (github.event_name == 'pull_request' && github.base_ref == 'release') || github.ref_name == 'main'
       uses: ./.github/actions/upload
       with:
         name: compatibility-snapshot-${{ runner.arch }}-${{ inputs.build_type }}-pg${{ inputs.pg_version }}
