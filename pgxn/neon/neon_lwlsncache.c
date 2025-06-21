@@ -11,6 +11,9 @@
 #include "utils/guc.h"
 #include "utils/hsearch.h"
 
+#if PG_MAJORVERSION_NUM > 14
+#include "access/xlogrecovery.h"
+#endif
 
 
 typedef struct LastWrittenLsnCacheEntry
@@ -24,14 +27,20 @@ typedef struct LastWrittenLsnCacheEntry
 typedef struct LwLsnCacheCtl {
 	int lastWrittenLsnCacheSize;
 	/*
-	* Maximal last written LSN for pages not present in lastWrittenLsnCache
-	*/
-	XLogRecPtr  maxLastWrittenLsn;
+	 * Highest (most recent) last written LSN, for pages not present in
+	 * lastWrittenLsnCache
+	 */
+	XLogRecPtr  maxLastWrittenLsnData;
 
 	/*
-	* Double linked list to implement LRU replacement policy for last written LSN cache.
-	* Access to this list as well as to last written LSN cache is protected by 'LastWrittenLsnLock'.
-	*/
+	 * Maximal last written LSN for metadata, not present in lastWrittenLsnCache
+	 */
+	XLogRecPtr  maxLastWrittenLsnMetadata;
+
+	/*
+	 * Double linked list to implement LRU replacement policy for last written LSN cache.
+	 * Access to this list as well as to last written LSN cache is protected by 'LastWrittenLsnLock'.
+	 */
 	dlist_head lastWrittenLsnLRU;
 } LwLsnCacheCtl;
 
@@ -108,19 +117,20 @@ init_lwlsncache(void)
 	#else
 	shmemrequest();
 	#endif
-	
-	prev_set_lwlsn_block_range_hook = set_lwlsn_block_range_hook;
-	set_lwlsn_block_range_hook = neon_set_lwlsn_block_range;
-	prev_set_lwlsn_block_v_hook = set_lwlsn_block_v_hook;
-	set_lwlsn_block_v_hook = neon_set_lwlsn_block_v;
-	prev_set_lwlsn_block_hook = set_lwlsn_block_hook;
-	set_lwlsn_block_hook = neon_set_lwlsn_block;
-	prev_set_max_lwlsn_hook = set_max_lwlsn_hook;
-	set_max_lwlsn_hook = neon_set_max_lwlsn;
-	prev_set_lwlsn_relation_hook = set_lwlsn_relation_hook;
-	set_lwlsn_relation_hook = neon_set_lwlsn_relation;
-	prev_set_lwlsn_db_hook = set_lwlsn_db_hook;
-	set_lwlsn_db_hook = neon_set_lwlsn_db;
+
+#define SET_HOOK(name) do { \
+	prev_##name##_hook = name##_hook; \
+	name##_hook = neon_##name; \
+} while (false)
+
+	SET_HOOK(set_lwlsn_block_range);
+	SET_HOOK(set_lwlsn_block_v);
+	SET_HOOK(set_lwlsn_block);
+	SET_HOOK(set_max_lwlsn);
+	SET_HOOK(set_lwlsn_relation);
+	SET_HOOK(set_lwlsn_db);
+
+#undef SET_HOOK
 }
 
 
@@ -139,24 +149,34 @@ static void shmemrequest(void) {
 
 static void shmeminit(void) {
 	static HASHCTL info;
-	bool found;
+	bool found = true;
+
 	if (lwlsn_cache_size > 0)
 	{
 		info.keysize = sizeof(BufferTag);
 		info.entrysize = sizeof(LastWrittenLsnCacheEntry);
+
 		lastWrittenLsnCache = ShmemInitHash("last_written_lsn_cache",
-			lwlsn_cache_size, lwlsn_cache_size,
-										&info,
-										HASH_ELEM | HASH_BLOBS);
-		LwLsnCache = ShmemInitStruct("neon/LwLsnCacheCtl", sizeof(LwLsnCacheCtl), &found);
-		// Now set the size in the struct
-		LwLsnCache->lastWrittenLsnCacheSize = lwlsn_cache_size;
-		if (found) {
-			return;
-		}
+											lwlsn_cache_size, lwlsn_cache_size,
+											&info,
+											HASH_ELEM | HASH_BLOBS);
+		LwLsnCache = ShmemInitStruct("neon/LwLsnCacheCtl",
+									 sizeof(LwLsnCacheCtl), &found);
 	}
-	dlist_init(&LwLsnCache->lastWrittenLsnLRU);
-    LwLsnCache->maxLastWrittenLsn = GetRedoRecPtr();
+
+	/* initialize the shmem struct if we allocated it */
+	if (!found) {
+		XLogRecPtr redoPtr;
+		LwLsnCache->lastWrittenLsnCacheSize = lwlsn_cache_size;
+
+		dlist_init(&LwLsnCache->lastWrittenLsnLRU);
+
+		redoPtr = GetRedoRecPtr();
+
+		LwLsnCache->maxLastWrittenLsnMetadata = redoPtr;
+		LwLsnCache->maxLastWrittenLsnData = redoPtr;
+	}
+
 	if (prev_shmem_startup_hook) {
 		prev_shmem_startup_hook();
 	}
@@ -180,17 +200,18 @@ neon_get_lwlsn(NRelFileInfo rlocator, ForkNumber forknum, BlockNumber blkno)
 
 	LWLockAcquire(LastWrittenLsnLock, LW_SHARED);
 
-	/* Maximal last written LSN among all non-cached pages */
-	lsn = LwLsnCache->maxLastWrittenLsn;
-
-	if (NInfoGetRelNumber(rlocator) != InvalidOid)
+	if (NInfoGetRelNumber(rlocator) != InvalidOid) /* data page*/
 	{
 		BufferTag key;
 		Oid spcOid = NInfoGetSpcOid(rlocator);
 		Oid dbOid = NInfoGetDbOid(rlocator);
 		Oid relNumber = NInfoGetRelNumber(rlocator);
+
 		BufTagInit(key,  relNumber, forknum, blkno, spcOid, dbOid);
-		
+
+		/* Maximal last written LSN among all non-cached data pages */
+		lsn = LwLsnCache->maxLastWrittenLsnData;
+
 		entry = hash_search(lastWrittenLsnCache, &key, HASH_FIND, NULL);
 		if (entry != NULL)
 			lsn = entry->lsn;
@@ -212,9 +233,13 @@ neon_get_lwlsn(NRelFileInfo rlocator, ForkNumber forknum, BlockNumber blkno)
 			 lsn = SetLastWrittenLSNForBlockRangeInternal(lsn, rlocator, forknum, blkno, 1);
 		}
 	}
-	else
+	else /* metadata */
 	{
 		HASH_SEQ_STATUS seq;
+		/* Maximal last written LSN for metadata */
+		lsn = Max(LwLsnCache->maxLastWrittenLsnMetadata,
+				  LwLsnCache->maxLastWrittenLsnData);
+
 		/* Find maximum of all cached LSNs */
 		hash_seq_init(&seq, lastWrittenLsnCache);
 		while ((entry = (LastWrittenLsnCacheEntry *) hash_seq_search(&seq)) != NULL)
@@ -230,7 +255,8 @@ neon_get_lwlsn(NRelFileInfo rlocator, ForkNumber forknum, BlockNumber blkno)
 
 static void neon_set_max_lwlsn(XLogRecPtr lsn) {
 	LWLockAcquire(LastWrittenLsnLock, LW_EXCLUSIVE);
-	LwLsnCache->maxLastWrittenLsn = lsn;
+	LwLsnCache->maxLastWrittenLsnMetadata = lsn;
+	LwLsnCache->maxLastWrittenLsnData = lsn;
 	LWLockRelease(LastWrittenLsnLock);
 }
 
@@ -291,7 +317,7 @@ neon_get_lwlsn_v(NRelFileInfo relfilenode, ForkNumber forknum,
 			LWLockRelease(LastWrittenLsnLock);
 			LWLockAcquire(LastWrittenLsnLock, LW_EXCLUSIVE);
 
-			lsn = LwLsnCache->maxLastWrittenLsn;
+			lsn = LwLsnCache->maxLastWrittenLsnData;
 
 			for (int i = 0; i < nblocks; i++)
 			{
@@ -306,7 +332,8 @@ neon_get_lwlsn_v(NRelFileInfo relfilenode, ForkNumber forknum,
 	else
 	{
 		HASH_SEQ_STATUS seq;
-		lsn = LwLsnCache->maxLastWrittenLsn;
+		Assert(nblocks == 1);
+		lsn = LwLsnCache->maxLastWrittenLsnMetadata;
 		/* Find maximum of all cached LSNs */
 		hash_seq_init(&seq, lastWrittenLsnCache);
 		while ((entry = (LastWrittenLsnCacheEntry *) hash_seq_search(&seq)) != NULL)
@@ -334,10 +361,10 @@ SetLastWrittenLSNForBlockRangeInternal(XLogRecPtr lsn,
 {
 	if (NInfoGetRelNumber(rlocator) == InvalidOid)
 	{
-		if (lsn > LwLsnCache->maxLastWrittenLsn)
-		LwLsnCache->maxLastWrittenLsn = lsn;
+		if (lsn > LwLsnCache->maxLastWrittenLsnMetadata)
+			LwLsnCache->maxLastWrittenLsnMetadata = lsn;
 		else
-			lsn = LwLsnCache->maxLastWrittenLsn;
+			lsn = LwLsnCache->maxLastWrittenLsnMetadata;
 	}
 	else
 	{
@@ -369,10 +396,19 @@ SetLastWrittenLSNForBlockRangeInternal(XLogRecPtr lsn,
 				if (hash_get_num_entries(lastWrittenLsnCache) > LwLsnCache->lastWrittenLsnCacheSize)
 				{
 					/* Replace least recently used entry */
-					LastWrittenLsnCacheEntry* victim = dlist_container(LastWrittenLsnCacheEntry, lru_node, dlist_pop_head_node(&LwLsnCache->lastWrittenLsnLRU));
+					LastWrittenLsnCacheEntry* victim = NULL;
+					victim = dlist_container(LastWrittenLsnCacheEntry, lru_node, dlist_pop_head_node(&LwLsnCache->lastWrittenLsnLRU));
+
+					while (!XLogRecordReplayFinished(victim->lsn))
+					{
+						/* in recovery, we don't allow eviction of entries with the LSN of a record that has yet to be returned */
+						dlist_push_tail(&LwLsnCache->lastWrittenLsnLRU, &entry->lru_node);
+						victim = dlist_container(LastWrittenLsnCacheEntry, lru_node, dlist_pop_head_node(&LwLsnCache->lastWrittenLsnLRU));
+					}
+
 					/* Adjust max LSN for not cached relations/chunks if needed */
-					if (victim->lsn > LwLsnCache->maxLastWrittenLsn)
-					LwLsnCache->maxLastWrittenLsn = victim->lsn;
+					if (victim->lsn > LwLsnCache->maxLastWrittenLsnMetadata)
+						LwLsnCache->maxLastWrittenLsnMetadata = victim->lsn;
 
 					hash_search(lastWrittenLsnCache, victim, HASH_REMOVE, NULL);
 				}
@@ -433,6 +469,13 @@ neon_set_lwlsn_block_v(const XLogRecPtr *lsns, NRelFileInfo relfilenode,
 	Oid dbOid = NInfoGetDbOid(relfilenode);
 	Oid relNumber = NInfoGetRelNumber(relfilenode);
 
+	/*
+	 * We ignore the operation when the input is invalid:
+	 *  - we must have gotten LSNs to set
+	 *  - we must have pages to write
+	 *  - the cache must be enabled
+	 *  - we must be processing a data page, not a metadata request
+	 */
 	if (lsns == NULL || nblocks == 0 || LwLsnCache->lastWrittenLsnCacheSize == 0 ||
 		NInfoGetRelNumber(relfilenode) == InvalidOid)
 		return InvalidXLogRecPtr;
@@ -466,10 +509,25 @@ neon_set_lwlsn_block_v(const XLogRecPtr *lsns, NRelFileInfo relfilenode,
 			if (hash_get_num_entries(lastWrittenLsnCache) > LwLsnCache->lastWrittenLsnCacheSize)
 			{
 				/* Replace least recently used entry */
-				LastWrittenLsnCacheEntry* victim = dlist_container(LastWrittenLsnCacheEntry, lru_node, dlist_pop_head_node(&LwLsnCache->lastWrittenLsnLRU));
+				LastWrittenLsnCacheEntry* victim = dlist_container(LastWrittenLsnCacheEntry, lru_node,
+																   dlist_pop_head_node(&LwLsnCache->lastWrittenLsnLRU));
+
+				/*
+				 * If replay is still working on this LSN, we can't evict the
+				 * page. Therefore, we must find a different victim, and return
+				 * the one we just found to the pool.
+				 */
+				while (!XLogRecordReplayFinished(victim->lsn))
+				{
+					dlist_push_tail(&LwLsnCache->lastWrittenLsnLRU,
+									&entry->lru_node);
+					victim = dlist_container(LastWrittenLsnCacheEntry, lru_node,
+											 dlist_pop_head_node(&LwLsnCache->lastWrittenLsnLRU));
+				}
+
 				/* Adjust max LSN for not cached relations/chunks if needed */
-				if (victim->lsn > LwLsnCache->maxLastWrittenLsn)
-					LwLsnCache->maxLastWrittenLsn = victim->lsn;
+				if (victim->lsn > LwLsnCache->maxLastWrittenLsnData)
+					LwLsnCache->maxLastWrittenLsnData = victim->lsn;
 
 				hash_search(lastWrittenLsnCache, victim, HASH_REMOVE, NULL);
 			}
