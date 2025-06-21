@@ -21,6 +21,7 @@ use postgres::error::SqlState;
 use remote_storage::{DownloadError, RemotePath};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::ops::ControlFlow;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -53,7 +54,6 @@ use crate::rsyslog::{
 use crate::spec::*;
 use crate::swap::resize_swap;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
-use crate::tls::watch_cert_for_changes;
 use crate::{config, extension_server, local_proxy};
 
 pub static SYNC_SAFEKEEPERS_PID: AtomicU32 = AtomicU32::new(0);
@@ -652,10 +652,11 @@ impl ComputeNode {
         let mut pre_tasks = tokio::task::JoinSet::new();
 
         // Make sure TLS certificates are properly loaded and in the right place.
-        if self.compute_ctl_config.tls.is_some() {
+        if let Some(tls) = &self.compute_ctl_config.tls {
             let this = self.clone();
-            pre_tasks.spawn(async move {
-                this.watch_cert_for_changes().await;
+            let tls = tls.clone();
+            pre_tasks.spawn_blocking(move || {
+                this.watch_cert_for_changes(tls);
 
                 Ok::<(), anyhow::Error>(())
             });
@@ -1606,11 +1607,7 @@ impl ComputeNode {
                 .clone(),
         );
 
-        let mut tls_config = None::<TlsConfig>;
-        if spec.features.contains(&ComputeFeature::TlsExperimental) {
-            tls_config = self.compute_ctl_config.tls.clone();
-        }
-
+        let tls_config = self.tls_config(&spec);
         let max_concurrent_connections = self.max_service_connections(compute_state, &spec);
 
         // Merge-apply spec & changes to PostgreSQL state.
@@ -1743,10 +1740,26 @@ impl ComputeNode {
 
         let unknown_op = "unknown".to_string();
         let op_id = spec.operation_uuid.as_ref().unwrap_or(&unknown_op);
-        info!(
-            "finished reconfiguration of compute node for operation {}",
-            op_id
-        );
+        info!("finished reconfiguration of compute node for operation {op_id}");
+
+        Ok(())
+    }
+
+    /// Tell postgres/pgbouncer/local_proxy to reload their configurations.
+    #[instrument(skip_all)]
+    pub fn reload(&self, spec: ComputeSpec) -> Result<()> {
+        let rt = tokio::runtime::Handle::current();
+        if spec.pgbouncer_settings.is_some() {
+            rt.block_on(reload_pgbouncer())?;
+        }
+        if spec.local_proxy_config.is_some() {
+            local_proxy::reload()?;
+        }
+        self.pg_reload_conf()?;
+
+        let unknown_op = "unknown".to_string();
+        let op_id = spec.operation_uuid.as_ref().unwrap_or(&unknown_op);
+        info!("finished reload of compute node for operation {op_id}");
 
         Ok(())
     }
@@ -1785,53 +1798,107 @@ impl ComputeNode {
         Ok(())
     }
 
-    pub async fn watch_cert_for_changes(self: Arc<Self>) {
-        // update status on cert renewal
-        if let Some(tls_config) = &self.compute_ctl_config.tls {
-            let tls_config = tls_config.clone();
+    pub fn watch_cert_for_changes(self: Arc<Self>, tls_config: TlsConfig) {
+        // wait until the cert exists.
+        let mut digest = crate::tls::compute_digest(&tls_config.cert_path);
+        info!("TLS certificates found");
 
-            // wait until the cert exists.
-            let mut cert_watch = watch_cert_for_changes(tls_config.cert_path.clone()).await;
+        // ensure the keys are saved before continuing.
+        let (key, crt) = crate::tls::load_certs_blocking(&tls_config);
+        while let Err(e) =
+            crate::tls::update_key_path_blocking(Path::new(&self.params.pgdata), &key, &crt)
+        {
+            error!("could not save TLS certificates: {e}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
 
-            tokio::task::spawn_blocking(move || {
-                let handle = tokio::runtime::Handle::current();
-                'cert_update: loop {
-                    // let postgres/pgbouncer/local_proxy know the new cert/key exists.
-                    // we need to wait until it's configurable first.
+        // spawn a thread for the permanent cert tracking task
+        let handle = tokio::runtime::Handle::current();
+        std::thread::spawn(move || {
+            let _rt = handle.enter();
+            let pgdata_path = Path::new(&self.params.pgdata);
 
-                    let mut state = self.state.lock().unwrap();
-                    'status_update: loop {
-                        match state.status {
-                            // let's update the state to config pending
-                            ComputeStatus::ConfigurationPending | ComputeStatus::Running => {
-                                state.set_status(
-                                    ComputeStatus::ConfigurationPending,
-                                    &self.state_changed,
-                                );
-                                break 'status_update;
-                            }
+            while let ControlFlow::Continue(()) =
+                self.reload_on_cert_changed(pgdata_path, &tls_config)
+            {
+                // wait for new certificates
+                digest = crate::tls::wait_until_cert_changed(digest, &tls_config.cert_path);
 
-                            // exit loop
-                            ComputeStatus::Failed
-                            | ComputeStatus::TerminationPending { .. }
-                            | ComputeStatus::Terminated => break 'cert_update,
+                info!("TLS certificates renewed");
+            }
+        });
+    }
 
-                            // wait
-                            ComputeStatus::Init
-                            | ComputeStatus::Configuration
-                            | ComputeStatus::Empty => {
-                                state = self.state_changed.wait(state).unwrap();
-                            }
-                        }
-                    }
+    /// Update certificate files and trigger a reload.
+    pub fn reload_on_cert_changed(
+        &self,
+        pgdata_path: &Path,
+        tls_config: &TlsConfig,
+    ) -> ControlFlow<()> {
+        let (key, crt) = crate::tls::load_certs_blocking(tls_config);
+
+        // we need to wait until it's running before we trigger a reload
+        let mut state = self.state.lock().unwrap();
+        loop {
+            match state.status {
+                // A reconfiguration was already requested, there's no need to update it.
+                ComputeStatus::ConfigurationPending => {
+                    info!("configuration already queued, skipping TLS reconfiguration");
+                    return ControlFlow::Continue(());
+                }
+
+                // Reload TLS for the running compute
+                ComputeStatus::Running => {
+                    info!("reloading compute due to TLS certificate renewal");
+
+                    // transition to the reloading state.
+                    state.set_status(ComputeStatus::Reloading, &self.state_changed);
+                    let spec = state.pspec.as_ref().unwrap().spec.clone();
+                    // unlock while reloading, so we don't block other tasks.
+                    // they shouldn't touch the status, but at least they can read it :)
                     drop(state);
 
-                    // wait for a new certificate update
-                    if handle.block_on(cert_watch.changed()).is_err() {
-                        break;
+                    // postgres requires the keyfile to be in a secure file,
+                    // currently too complicated to ensure that at the VM level,
+                    // so we just copy them to another file instead. :shrug:
+                    //
+                    // We do this while holding the `Reloading` state to ensure that no other concurrent reloads occur
+                    // until we finish this update.
+                    let res = crate::tls::update_key_path_blocking(pgdata_path, &key, &crt);
+                    let res = res.and_then(|()| self.reload(spec));
+
+                    state = self.state.lock().unwrap();
+                    assert_eq!(
+                        state.status,
+                        ComputeStatus::Reloading,
+                        "no other task should modify the status while reloading"
+                    );
+
+                    // set back to running.
+                    state.set_status(ComputeStatus::Running, &self.state_changed);
+
+                    if let Err(e) = res {
+                        error!("could not reload compute node: {}", e);
+                        continue;
                     }
+
+                    info!("compute node reloaded");
+                    return ControlFlow::Continue(());
                 }
-            });
+
+                // exit loop
+                ComputeStatus::Failed
+                | ComputeStatus::TerminationPending { .. }
+                | ComputeStatus::Terminated => return ControlFlow::Break(()),
+
+                // wait
+                ComputeStatus::Init
+                | ComputeStatus::Configuration
+                | ComputeStatus::Reloading
+                | ComputeStatus::Empty => {
+                    state = self.state_changed.wait(state).unwrap();
+                }
+            }
         }
     }
 

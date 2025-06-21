@@ -3,42 +3,43 @@ use std::{io::Write, os::unix::fs::OpenOptionsExt, path::Path, time::Duration};
 use anyhow::{Context, Result, bail};
 use compute_api::responses::TlsConfig;
 use ring::digest;
-use x509_cert::Certificate;
 
 #[derive(Clone, Copy)]
 pub struct CertDigest(digest::Digest);
 
-pub async fn watch_cert_for_changes(cert_path: String) -> tokio::sync::watch::Receiver<CertDigest> {
-    let mut digest = compute_digest(&cert_path).await;
-    let (tx, rx) = tokio::sync::watch::channel(digest);
-    tokio::spawn(async move {
-        while !tx.is_closed() {
-            let new_digest = compute_digest(&cert_path).await;
-            if digest.0.as_ref() != new_digest.0.as_ref() {
-                digest = new_digest;
-                _ = tx.send(digest);
-            }
-
-            tokio::time::sleep(Duration::from_secs(60)).await
-        }
-    });
-    rx
+impl PartialEq for CertDigest {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.as_ref() == other.0.as_ref()
+    }
 }
 
-async fn compute_digest(cert_path: &str) -> CertDigest {
+pub fn wait_until_cert_changed(digest: CertDigest, cert_path: &str) -> CertDigest {
     loop {
-        match try_compute_digest(cert_path).await {
+        let new_digest = compute_digest(cert_path);
+        if digest != new_digest {
+            break new_digest;
+        }
+
+        // Wait a while before checking the certificates.
+        // We renew on a daily basis, so there's no rush.
+        std::thread::sleep(Duration::from_secs(60));
+    }
+}
+
+pub fn compute_digest(cert_path: &str) -> CertDigest {
+    loop {
+        match try_compute_digest(cert_path) {
             Ok(d) => break d,
             Err(e) => {
                 tracing::error!("could not read cert file {e:?}");
-                tokio::time::sleep(Duration::from_secs(1)).await
+                std::thread::sleep(Duration::from_secs(1))
             }
         }
     }
 }
 
-async fn try_compute_digest(cert_path: &str) -> Result<CertDigest> {
-    let data = tokio::fs::read(cert_path).await?;
+fn try_compute_digest(cert_path: &str) -> Result<CertDigest> {
+    let data = std::fs::read(cert_path)?;
     // sha256 is extremely collision resistent. can safely assume the digest to be unique
     Ok(CertDigest(digest::digest(&digest::SHA256, &data)))
 }
@@ -46,28 +47,32 @@ async fn try_compute_digest(cert_path: &str) -> Result<CertDigest> {
 pub const SERVER_CRT: &str = "server.crt";
 pub const SERVER_KEY: &str = "server.key";
 
-pub fn update_key_path_blocking(pg_data: &Path, tls_config: &TlsConfig) {
+pub fn load_certs_blocking(tls_config: &TlsConfig) -> (String, String) {
     loop {
-        match try_update_key_path_blocking(pg_data, tls_config) {
-            Ok(()) => break,
+        match try_load_certs_blocking(tls_config) {
+            Ok((key, crt)) => break (key, crt),
             Err(e) => {
-                tracing::error!(error = ?e, "could not create key file");
+                tracing::error!(error = ?e, "could not load certs");
                 std::thread::sleep(Duration::from_secs(1))
             }
         }
     }
 }
 
-// Postgres requires the keypath be "secure". This means
-// 1. Owned by the postgres user.
-// 2. Have permission 600.
-fn try_update_key_path_blocking(pg_data: &Path, tls_config: &TlsConfig) -> Result<()> {
+fn try_load_certs_blocking(tls_config: &TlsConfig) -> Result<(String, String)> {
     let key = std::fs::read_to_string(&tls_config.key_path)?;
     let crt = std::fs::read_to_string(&tls_config.cert_path)?;
 
     // to mitigate a race condition during renewal.
     verify_key_cert(&key, &crt)?;
 
+    Ok((key, crt))
+}
+
+// Postgres requires the keypath be "secure". This means
+// 1. Owned by the postgres user.
+// 2. Have permission 600.
+pub fn update_key_path_blocking(pg_data: &Path, key: &str, crt: &str) -> Result<()> {
     let mut key_file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -82,6 +87,9 @@ fn try_update_key_path_blocking(pg_data: &Path, tls_config: &TlsConfig) -> Resul
         .mode(0o600)
         .open(pg_data.join(SERVER_CRT))?;
 
+    // There's a chance that postgres/pgbouncer/local_proxy reloads halfway between
+    // these writes and reads the wrong keys to the wrong certs.
+    // Not sure how to prevent that.
     key_file.write_all(key.as_bytes())?;
     crt_file.write_all(crt.as_bytes())?;
 
@@ -89,7 +97,10 @@ fn try_update_key_path_blocking(pg_data: &Path, tls_config: &TlsConfig) -> Resul
 }
 
 fn verify_key_cert(key: &str, cert: &str) -> Result<()> {
+    use x509_cert::Certificate;
     use x509_cert::der::oid::db::rfc5912::ECDSA_WITH_SHA_256;
+    use x509_cert::der::oid::db::rfc8410::ID_ED_25519;
+    use x509_cert::der::pem;
 
     let certs = Certificate::load_pem_chain(cert.as_bytes())
         .context("decoding PEM encoded certificates")?;
@@ -100,22 +111,30 @@ fn verify_key_cert(key: &str, cert: &str) -> Result<()> {
         bail!("no certificates found");
     };
 
+    let pubkey = cert
+        .tbs_certificate
+        .subject_public_key_info
+        .subject_public_key
+        .raw_bytes();
+
     match cert.signature_algorithm.oid {
         ECDSA_WITH_SHA_256 => {
             let key = p256::SecretKey::from_sec1_pem(key).context("parse key")?;
-
-            let a = key.public_key().to_sec1_bytes();
-            let b = cert
-                .tbs_certificate
-                .subject_public_key_info
-                .subject_public_key
-                .raw_bytes();
-
-            if *a != *b {
+            if *key.public_key().to_sec1_bytes() != *pubkey {
                 bail!("private key file does not match certificate")
             }
         }
-        _ => bail!("unknown TLS key type"),
+        ID_ED_25519 => {
+            use ring::signature::{Ed25519KeyPair, KeyPair};
+
+            let (_, bytes) = pem::decode_vec(key.as_bytes())
+                .map_err(|_| anyhow::anyhow!("invalid key encoding"))?;
+            let key = Ed25519KeyPair::from_pkcs8_maybe_unchecked(&bytes).context("parse key")?;
+            if *key.public_key().as_ref() != *pubkey {
+                bail!("private key file does not match certificate")
+            }
+        }
+        oid => bail!("unknown TLS key type: {oid}"),
     }
 
     Ok(())

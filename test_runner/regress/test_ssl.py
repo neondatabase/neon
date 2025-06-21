@@ -234,3 +234,20 @@ def test_storage_broker_https_api(neon_env_builder: NeonEnvBuilder):
     workload.init()
     workload.write_rows(10)
     workload.validate()
+
+
+def test_compute_tls(
+    neon_env_builder: NeonEnvBuilder,
+):
+    neon_env_builder.use_compute_tls = True
+    env = neon_env_builder.init_start()
+
+    env.create_branch("test_startup")
+
+    with env.endpoints.create_start("test_startup") as endpoint:
+        res = endpoint.safe_psql(
+            "select ssl from pg_stat_ssl where pid = pg_backend_pid();",
+            sslmode="verify-full",
+            sslrootcert=env.ssl_ca_file,
+        )
+        assert res == [(True,)]

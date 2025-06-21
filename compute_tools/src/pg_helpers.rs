@@ -428,13 +428,7 @@ fn update_pgbouncer_ini(
     Ok(())
 }
 
-/// Tune pgbouncer.
-/// 1. Apply new config using pgbouncer admin console
-/// 2. Add new values to pgbouncer.ini to preserve them after restart
-pub async fn tune_pgbouncer(
-    mut pgbouncer_config: IndexMap<String, String>,
-    tls_config: Option<TlsConfig>,
-) -> Result<()> {
+async fn connect() -> Result<tokio_postgres::Client> {
     let pgbouncer_connstr = if std::env::var_os("AUTOSCALING").is_some() {
         // for VMs use pgbouncer specific way to connect to
         // pgbouncer admin console without password
@@ -480,6 +474,18 @@ pub async fn tune_pgbouncer(
         }
     };
 
+    Ok(client)
+}
+
+/// Tune pgbouncer.
+/// 1. Apply new config to pgbouncer.ini
+/// 2. Notify pgbouncer to reload
+pub async fn tune_pgbouncer(
+    mut pgbouncer_config: IndexMap<String, String>,
+    tls_config: Option<TlsConfig>,
+) -> Result<()> {
+    let client = connect().await?;
+
     if let Some(tls_config) = tls_config {
         // pgbouncer starts in a half-ok state if it cannot find these files.
         // It will default to client_tls_sslmode=deny, which causes proxy to error.
@@ -514,7 +520,19 @@ pub async fn tune_pgbouncer(
 
     if let Err(err) = client.simple_query("RELOAD").await {
         // Don't fail on error, just print it into log
-        error!("Failed to apply pgbouncer setting change,  {err}",);
+        error!("Failed to apply pgbouncer setting change: {err}",);
+    };
+
+    Ok(())
+}
+
+/// Reload pgbouncer.
+pub async fn reload_pgbouncer() -> Result<()> {
+    let client = connect().await?;
+
+    if let Err(err) = client.simple_query("RELOAD").await {
+        // Don't fail on error, just print it into log
+        error!("Failed to apply pgbouncer setting change: {err}",);
     };
 
     Ok(())
