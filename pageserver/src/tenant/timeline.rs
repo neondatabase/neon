@@ -2151,12 +2151,13 @@ impl Timeline {
         // Regardless of whether we're going to try_freeze_and_flush
         // or not, stop ingesting any more data.
         let walreceiver = self.walreceiver.lock().unwrap().take();
-        tracing::debug!(
+        tracing::info!(
             is_some = walreceiver.is_some(),
             "Waiting for WalReceiverManager..."
         );
         if let Some(walreceiver) = walreceiver {
             walreceiver.shutdown().await;
+            tracing::info!("WalReceiverManager shut down");
         }
         // ... and inform any waiters for newer LSNs that there won't be any.
         self.last_record_lsn.shutdown();
@@ -2253,6 +2254,7 @@ impl Timeline {
         // As documented in remote_client.stop()'s doc comment, it's our responsibility
         // to shut down the upload queue tasks.
         // TODO: fix that, task management should be encapsulated inside remote_client.
+        tracing::info!("Waiting for remote uploads tasks...");
         task_mgr::shutdown_tasks(
             Some(TaskKind::RemoteUploadTask),
             Some(self.tenant_shard_id),
@@ -2261,12 +2263,13 @@ impl Timeline {
         .await;
 
         // TODO: work toward making this a no-op. See this function's doc comment for more context.
-        tracing::debug!("Waiting for tasks...");
+        tracing::info!("Waiting for tasks...");
         task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), Some(self.timeline_id)).await;
 
         {
             // Allow any remaining in-memory layers to do cleanup -- until that, they hold the gate
             // open.
+            tracing::info!("Waiting for layer manager shutdown...");
             let mut write_guard = self.write_lock.lock().await;
             self.layers
                 .write(LayerManagerLockHolder::Shutdown)
@@ -2278,6 +2281,7 @@ impl Timeline {
         //
         // TODO: once above shutdown_tasks is a no-op, we can close the gate before calling shutdown_tasks
         // and use a TBD variant of shutdown_tasks that asserts that there were no tasks left.
+        tracing::info!("Waiting for timeline gate close...");
         self.gate.close().await;
 
         self.metrics.shutdown();
