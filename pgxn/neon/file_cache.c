@@ -116,13 +116,20 @@ typedef enum FileCacheBlockState
 	REQUESTED    /* some other backend is waiting for block to be loaded */
 } FileCacheBlockState;
 
+typedef enum RelationKind
+{
+	RELKIND_UNKNOWN,
+	RELKIND_HEAP,
+	RELKIND_INDEX
+} RelationKind;
 
 typedef struct FileCacheEntry
 {
 	BufferTag	key;
 	uint32		hash;
 	uint32		offset;
-	uint32		access_count;
+	uint32		access_count:30;
+	uint32		relkind:2;
 	dlist_node	list_node;		/* LRU/holes list node */
 	uint32		state[FLEXIBLE_ARRAY_MEMBER]; /* two bits per block */
 } FileCacheEntry;
@@ -491,6 +498,7 @@ lfc_change_limit_hook(int newval, void *extra)
 		hole->hash = hash;
 		hole->offset = offset;
 		hole->access_count = 0;
+		hole->relkind = RELKIND_UNKNOWN;
 		CriticalAssert(!found);
 		dlist_push_tail(&lfc_ctl->holes, &hole->list_node);
 
@@ -1450,6 +1458,7 @@ lfc_init_new_entry(FileCacheEntry* entry, uint32 hash)
 	}
 
 	entry->access_count = 1;
+	entry->relkind = RELKIND_UNKNOWN;
 	entry->hash = hash;
 	lfc_ctl->pinned += 1;
 
@@ -1644,7 +1653,7 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	uint64		generation;
 	uint32		entry_offset;
 	int			buf_offset = 0;
-
+	RelationKind relkind = RELKIND_UNKNOWN;
 	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
 		return;
 
@@ -1661,7 +1670,27 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		return;
 	}
 	generation = lfc_ctl->generation;
-
+	for (int i = 0; i < nblocks; i++)
+	{
+		Page page = (Page)buffers[i];
+		if (!PageIsNew(page))
+		{
+			RelationKind pagekind = PageGetSpecialSize(page) != 0 ? RELKIND_INDEX : RELKIND_HEAP;
+			if (relkind == RELKIND_UNKNOWN)
+			{
+				relkind = pagekind;
+			}
+			else
+			{
+				if (relkind != pagekind)
+				{
+					ereport(PANIC,
+							(errmsg("Inconsistent writing page %u %u/%u/%u.%u to LFC", blkno+i, RelFileInfoFmt(rinfo), forkNum),
+							 errbacktrace()));
+				}
+			}
+		}
+	}
 	/*
 	 * For every chunk that has blocks we're interested in, we
 	 * 1. get the chunk header
@@ -1711,6 +1740,12 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				lfc_ctl->pinned += 1;
 				dlist_delete(&entry->list_node);
 			}
+			if (entry->relkind != RELKIND_UNKNOWN && entry->relkind != relkind)
+			{
+				ereport(PANIC,
+						(errmsg("Writing unexpected page %u %u/%u/%u.%u to LFC", blkno, RelFileInfoFmt(rinfo), forkNum),
+						 errbacktrace()));
+			}
 		}
 		else
 		{
@@ -1728,6 +1763,7 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		}
 
 		entry_offset = entry->offset;
+		entry->relkind = relkind;
 
 		for (int i = 0; i < blocks_in_chunk; i++)
 		{
