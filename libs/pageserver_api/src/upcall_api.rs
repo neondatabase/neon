@@ -23,22 +23,12 @@ pub struct ReAttachRequest {
     pub register: Option<NodeRegisterRequest>,
 }
 
-fn default_mode() -> LocationConfigMode {
-    LocationConfigMode::AttachedSingle
-}
-
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ReAttachResponseTenant {
     pub id: TenantShardId,
     /// Mandatory if LocationConfigMode is None or set to an Attached* mode
     pub r#gen: Option<u32>,
-
-    /// Default value only for backward compat: this field should be set
-    #[serde(default = "default_mode")]
     pub mode: LocationConfigMode,
-
-    // Default value only for backward compat: this field should be set
-    #[serde(default = "ShardStripeSize::default")]
     pub stripe_size: ShardStripeSize,
 }
 #[derive(Serialize, Deserialize)]

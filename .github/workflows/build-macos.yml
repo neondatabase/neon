@@ -110,7 +110,7 @@ jobs:
 
   build-walproposer-lib:
     if: |
-      inputs.pg_versions != '[]' || inputs.rebuild_everything ||
+      contains(inputs.pg_versions, 'v17') || inputs.rebuild_everything ||
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
       github.ref_name == 'main'
