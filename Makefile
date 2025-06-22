@@ -17,8 +17,8 @@ BUILD_TYPE ?= debug
 WITH_SANITIZERS ?= no
 PG_CFLAGS = -fsigned-char
 ifeq ($(BUILD_TYPE),release)
-	PG_CONFIGURE_OPTS = --enable-debug --with-openssl
-	PG_CFLAGS += -O2 -g3 $(CFLAGS)
+	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
+	PG_CFLAGS += -O0 -g3 $(CFLAGS)
 	PG_LDFLAGS = $(LDFLAGS)
 	# Unfortunately, `--profile=...` is a nightly feature
 	CARGO_BUILD_FLAGS += --release
