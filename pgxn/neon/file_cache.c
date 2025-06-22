@@ -1740,11 +1740,15 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				lfc_ctl->pinned += 1;
 				dlist_delete(&entry->list_node);
 			}
-			if (entry->relkind != RELKIND_UNKNOWN && entry->relkind != relkind)
+			if (relkind != RELKIND_UNKNOWN)
 			{
-				ereport(PANIC,
-						(errmsg("Writing unexpected page %u %u/%u/%u.%u to LFC", blkno, RelFileInfoFmt(rinfo), forkNum),
-						 errbacktrace()));
+				if (entry->relkind != RELKIND_UNKNOWN && entry->relkind != relkind)
+				{
+					ereport(PANIC,
+							(errmsg("Writing unexpected page %u %u/%u/%u.%u to LFC", blkno, RelFileInfoFmt(rinfo), forkNum),
+							 errbacktrace()));
+				}
+				entry->relkind = relkind;
 			}
 		}
 		else
@@ -1760,10 +1764,10 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				nblocks -= blocks_in_chunk;
 				continue;
 			}
+			entry->relkind = RELKIND_UNKNOWN;
 		}
 
 		entry_offset = entry->offset;
-		entry->relkind = relkind;
 
 		for (int i = 0; i < blocks_in_chunk; i++)
 		{
