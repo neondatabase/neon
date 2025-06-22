@@ -25,7 +25,9 @@ def test_gc_blocking_by_timeline(neon_env_builder: NeonEnvBuilder, sharded: bool
         initial_tenant_shard_count=2 if sharded else None,
     )
     for ps in env.pageservers:
-        ps.allowed_errors.append(".*Timeline.* has been deleted.*")
+        ps.allowed_errors.extend(
+            [".*Timeline.* has been deleted.*", ".*Timeline.*was cancelled and cannot be used"]
+        )
 
     if sharded:
         http = env.storage_controller.pageserver_api()
