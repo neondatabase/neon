@@ -548,9 +548,9 @@ pub fn downgrade_v10_to_v9(state: &TimelinePersistentState) -> TimelinePersisten
 mod tests {
     use std::str::FromStr;
 
+    use postgres_versioninfo::PgMajorVersion;
     use utils::Hex;
     use utils::id::NodeId;
-    use postgres_versioninfo::PgMajorVersion;
 
     use super::*;
     use crate::control_file_upgrade::PersistedPeerInfo;
@@ -588,7 +588,7 @@ mod tests {
             0x2a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             // epoch
             0x2b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // pg_version
+            // pg_version = 140000
             0xE0, 0x22, 0x02, 0x00,
             // system_id
             0x21, 0x43, 0x65, 0x87, 0x78, 0x56, 0x34, 0x12,
