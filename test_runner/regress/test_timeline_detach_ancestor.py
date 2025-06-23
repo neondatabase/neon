@@ -1099,7 +1099,9 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
 
     for ps in env.pageservers:
         ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
-        ps.allowed_errors.append(".*Timeline.* has been deleted.*")
+        ps.allowed_errors.extend(
+            [".*Timeline.* has been deleted.*", ".*Timeline.*was cancelled and cannot be used"]
+        )
 
     pageservers = dict((int(p.id), p) for p in env.pageservers)
 
@@ -1221,7 +1223,9 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
 
     for ps in env.pageservers:
         ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
-        ps.allowed_errors.append(".*Timeline.* has been deleted.*")
+        ps.allowed_errors.extend(
+            [".*Timeline.* has been deleted.*", ".*Timeline.*was cancelled and cannot be used"]
+        )
 
     pageservers = dict((int(p.id), p) for p in env.pageservers)
 
