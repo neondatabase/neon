@@ -1563,6 +1563,7 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) && \
 FROM build-deps AS pgaudit-src
 ARG PG_VERSION
 WORKDIR /ext-src
+COPY "compute/patches/pgaudit-parallel_workers-${PG_VERSION}.patch" .
 RUN case "${PG_VERSION}" in \
     "v14") \
     export PGAUDIT_VERSION=1.6.3 \
@@ -1585,7 +1586,8 @@ RUN case "${PG_VERSION}" in \
     esac && \
     wget https://github.com/pgaudit/pgaudit/archive/refs/tags/${PGAUDIT_VERSION}.tar.gz -O pgaudit.tar.gz && \
     echo "${PGAUDIT_CHECKSUM} pgaudit.tar.gz" | sha256sum --check && \
-    mkdir pgaudit-src && cd pgaudit-src && tar xzf ../pgaudit.tar.gz --strip-components=1 -C .
+    mkdir pgaudit-src && cd pgaudit-src && tar xzf ../pgaudit.tar.gz --strip-components=1 -C . && \
+    patch -p1 < "/ext-src/pgaudit-parallel_workers-${PG_VERSION}.patch"
 
 FROM pg-build AS pgaudit-build
 COPY --from=pgaudit-src /ext-src/ /ext-src/
