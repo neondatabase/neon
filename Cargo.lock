@@ -6131,6 +6131,7 @@ dependencies = [
  "postgres-protocol",
  "postgres_backend",
  "postgres_ffi",
+ "postgres_versioninfo",
  "pprof",
  "pq_proto",
  "rand 0.8.5",

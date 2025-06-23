@@ -1748,7 +1748,7 @@ mod tests {
                 }]),
             },
             server: ServerInfo {
-                pg_version: 14,
+                pg_version: 140000,
                 system_id: 0x1234567887654321,
                 wal_seg_size: 0x12345678,
             },

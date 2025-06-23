@@ -399,7 +399,7 @@ pub enum TimelineCreateRequestMode {
         // inherits the ancestor's pg_version. Earlier code wasn't
         // using a flattened enum, so, it was an accepted field, and
         // we continue to accept it by having it here.
-        pg_version: Option<u32>,
+        pg_version: Option<PgMajorVersion>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         read_only: bool,
     },
