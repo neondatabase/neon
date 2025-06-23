@@ -2,6 +2,7 @@
 use std::vec;
 
 use anyhow::{Result, bail};
+use postgres_versioninfo::{PgMajorVersion, PgVersionId};
 use pq_proto::SystemId;
 use safekeeper_api::membership::{Configuration, INVALID_GENERATION};
 use safekeeper_api::{ServerInfo, Term};
@@ -46,7 +47,7 @@ struct SafeKeeperStateV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerInfoV2 {
     /// Postgres server version
-    pub pg_version: u32,
+    pub pg_version: PgVersionId,
     pub system_id: SystemId,
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
@@ -75,7 +76,7 @@ pub struct SafeKeeperStateV2 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerInfoV3 {
     /// Postgres server version
-    pub pg_version: u32,
+    pub pg_version: PgVersionId,
     pub system_id: SystemId,
     #[serde(with = "hex")]
     pub tenant_id: TenantId,
@@ -563,7 +564,7 @@ mod tests {
                 epoch: 43,
             },
             server: ServerInfoV2 {
-                pg_version: 14,
+                pg_version: PgVersionId::from(PgMajorVersion::PG14),
                 system_id: 0x1234567887654321,
                 tenant_id,
                 timeline_id,
@@ -626,7 +627,7 @@ mod tests {
                 }]),
             },
             server: ServerInfoV2 {
-                pg_version: 14,
+                pg_version: PgVersionId::from(PgMajorVersion::PG14),
                 system_id: 0x1234567887654321,
                 tenant_id,
                 timeline_id,
@@ -675,7 +676,7 @@ mod tests {
                 }]),
             },
             server: ServerInfoV3 {
-                pg_version: 14,
+                pg_version: PgVersionId::from(PgMajorVersion::PG14),
                 system_id: 0x1234567887654321,
                 tenant_id,
                 timeline_id,
@@ -731,7 +732,7 @@ mod tests {
                 }]),
             },
             server: ServerInfo {
-                pg_version: 14,
+                pg_version: PgVersionId::from(PgMajorVersion::PG14),
                 system_id: 0x1234567887654321,
                 wal_seg_size: 0x12345678,
             },

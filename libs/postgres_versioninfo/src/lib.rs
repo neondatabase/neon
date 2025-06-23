@@ -2,6 +2,8 @@ use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
+/// An enum with one variant for each major version of PostgreSQL that we support.
+///
 #[derive(Debug, Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Deserialize_repr, Serialize_repr)]
 #[repr(u32)]
 pub enum PgMajorVersion {
@@ -9,11 +11,13 @@ pub enum PgMajorVersion {
     PG15 = 15,
     PG16 = 16,
     PG17 = 17,
+    // !!! When you add a new PgMajorVersion, don't forget to update PgMajorVersion::ALL
 }
 
 pub type PgVersionId = u32;
 
 impl PgMajorVersion {
+    /// Get the numerical representation of the represented Major Version
     pub const fn major_version_num(&self) -> u32 {
         match self {
             PgMajorVersion::PG14 => 14,
@@ -23,6 +27,10 @@ impl PgMajorVersion {
         }
     }
 
+    /// Get the contents of this version's PG_VERSION file.
+    ///
+    /// The PG_VERSION file is used to determine the PostgreSQL version that currently
+    /// owns the data in a PostgreSQL data directory.
     pub fn versionfile_string(&self) -> String {
         match self {
             PgMajorVersion::PG17 => "17\x0A".to_string(),
@@ -32,6 +40,10 @@ impl PgMajorVersion {
         }
     }
 
+    /// Get the v{version} string of this major PostgreSQL version.
+    ///
+    /// Because this was hand-coded in various places, this was moved into a shared
+    /// implementation.
     pub fn v_str(&self) -> String {
         match self {
             PgMajorVersion::PG17 => "v17".to_string(),
@@ -41,14 +53,13 @@ impl PgMajorVersion {
         }
     }
 
-    pub const fn all() -> [PgMajorVersion; 4] {
-        [
-            PgMajorVersion::PG14,
-            PgMajorVersion::PG15,
-            PgMajorVersion::PG16,
-            PgMajorVersion::PG17,
-        ]
-    }
+    /// All currently supported major versions of PostgreSQL.
+    pub const ALL: [PgMajorVersion; 4] = [
+        PgMajorVersion::PG14,
+        PgMajorVersion::PG15,
+        PgMajorVersion::PG16,
+        PgMajorVersion::PG17,
+    ];
 }
 
 impl Display for PgMajorVersion {

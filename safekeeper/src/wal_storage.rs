@@ -18,7 +18,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use futures::future::BoxFuture;
 use postgres_ffi::v14::xlog_utils::{IsPartialXLogFileName, IsXLogFileName, XLogFromFileName};
 use postgres_ffi::waldecoder::WalStreamDecoder;
-use postgres_ffi::{PG_TLI, PgMajorVersion, XLogFileName, XLogSegNo, dispatch_pgversion};
+use postgres_ffi::{PG_TLI, XLogFileName, XLogSegNo, dispatch_pgversion};
+use postgres_versioninfo::{PgMajorVersion, PgVersionId};
 use pq_proto::SystemId;
 use remote_storage::RemotePath;
 use std::sync::Arc;
@@ -92,7 +93,7 @@ pub struct PhysicalStorage {
 
     /// Size of WAL segment in bytes.
     wal_seg_size: usize,
-    pg_version: u32,
+    pg_version: PgVersionId,
     system_id: u64,
 
     /// Written to disk, but possibly still in the cache and not fully persisted.

@@ -1627,7 +1627,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_zeroed_checkpoint_decodes_correctly() -> Result<(), anyhow::Error> {
-        for i in PgMajorVersion::all() {
+        for i in PgMajorVersion::ALL {
             dispatch_pgversion!(i, {
                 pgv::CheckPoint::decode(&pgv::ZERO_CHECKPOINT)?;
             });
