@@ -470,6 +470,9 @@ pub struct Config {
     /// Number of safekeepers to choose for a timeline when creating it.
     /// Safekeepers will be choosen from different availability zones.
     pub timeline_safekeeper_count: i64,
+
+    #[cfg(feature = "testing")]
+    pub kick_secondary_downloads: bool,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -2064,6 +2067,7 @@ impl Service {
                             &tenant_shard.shard,
                             &tenant_shard.config,
                             &PlacementPolicy::Attached(0),
+                            tenant_shard.intent.get_secondary().len(),
                         )),
                     },
                 )]);
@@ -5605,7 +5609,15 @@ impl Service {
             for parent_id in parent_ids {
                 let child_ids = parent_id.split(new_shard_count);
 
-                let (pageserver, generation, policy, parent_ident, config, preferred_az) = {
+                let (
+                    pageserver,
+                    generation,
+                    policy,
+                    parent_ident,
+                    config,
+                    preferred_az,
+                    secondary_count,
+                ) = {
                     let mut old_state = tenants
                         .remove(&parent_id)
                         .expect("It was present, we just split it");
@@ -5625,6 +5637,7 @@ impl Service {
                         old_state.shard,
                         old_state.config.clone(),
                         old_state.preferred_az().cloned(),
+                        old_state.intent.get_secondary().len(),
                     )
                 };
 
@@ -5646,6 +5659,7 @@ impl Service {
                                 &child_shard,
                                 &config,
                                 &policy,
+                                secondary_count,
                             )),
                         },
                     );
@@ -8373,6 +8387,11 @@ impl Service {
     /// we have this helper to move things along faster.
     #[cfg(feature = "testing")]
     async fn kick_secondary_download(&self, tenant_shard_id: TenantShardId) {
+        if !self.config.kick_secondary_downloads {
+            // No-op if kick_secondary_downloads functionaliuty is not configured
+            return;
+        }
+
         let (attached_node, secondaries) = {
             let locked = self.inner.read().unwrap();
             let Some(shard) = locked.tenants.get(&tenant_shard_id) else {

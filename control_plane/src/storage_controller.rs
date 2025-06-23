@@ -557,6 +557,10 @@ impl StorageController {
             args.push("--use-local-compute-notifications".to_string());
         }
 
+        if let Some(value) = self.config.kick_secondary_downloads {
+            args.push(format!("--kick-secondary-downloads={value}"));
+        }
+
         if let Some(ssl_ca_file) = self.env.ssl_ca_cert_path() {
             args.push(format!("--ssl-ca-file={}", ssl_ca_file.to_str().unwrap()));
         }

@@ -5,6 +5,9 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use camino::Utf8PathBuf;
+
+#[cfg(feature = "testing")]
+use clap::ArgAction;
 use clap::Parser;
 use futures::future::OptionFuture;
 use http_utils::tls_certs::ReloadingCertificateResolver;
@@ -213,6 +216,13 @@ struct Cli {
     /// This option exists primarily for testing purposes.
     #[arg(long, default_value = "3", value_parser = clap::value_parser!(i64).range(1..))]
     timeline_safekeeper_count: i64,
+
+    /// When set, actively checks and initiates heatmap downloads/uploads during reconciliation.
+    /// This speed up migrations by avoiding the default wait for the heatmap download interval.
+    /// Primarily useful for testing to reduce test execution time.
+    #[cfg(feature = "testing")]
+    #[arg(long, default_value = "true", action=ArgAction::Set)]
+    kick_secondary_downloads: bool,
 }
 
 enum StrictMode {
@@ -445,6 +455,8 @@ async fn async_main() -> anyhow::Result<()> {
         timelines_onto_safekeepers: args.timelines_onto_safekeepers,
         use_local_compute_notifications: args.use_local_compute_notifications,
         timeline_safekeeper_count: args.timeline_safekeeper_count,
+        #[cfg(feature = "testing")]
+        kick_secondary_downloads: args.kick_secondary_downloads,
     };
 
     // Validate that we can connect to the database
