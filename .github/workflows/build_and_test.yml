@@ -294,8 +294,8 @@ jobs:
         run: |
           poetry run ./scripts/benchmark_durations.py "${TEST_RESULT_CONNSTR}" \
                                                       --days 10 \
-                                                      --output /tmp/benchmark_durations.json
-          echo "json=$(jq --compact-output '.' /tmp/benchmark_durations.json)" >> $GITHUB_OUTPUT
+                                                      --output /__w/_temp/benchmark_durations.json
+          echo "json=$(jq --compact-output '.' /__w/_temp/benchmark_durations.json)" >> $GITHUB_OUTPUT
 
   benchmarks:
     # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `deploy` in PRs
@@ -471,32 +471,32 @@ jobs:
         uses: ./.github/actions/download
         with:
           name: neon-${{ runner.os }}-${{ runner.arch }}-${{ matrix.build_type }}-artifact
-          path: /tmp/neon
+          path: /__w/_temp/neon
           aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
       - name: Get coverage artifact
         uses: ./.github/actions/download
         with:
           name: coverage-data-artifact
-          path: /tmp/coverage
+          path: /__w/_temp/coverage
           aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
       - name: Merge coverage data
-        run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
+        run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/__w/_temp/coverage merge
 
       - name: Build coverage report
         env:
           COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          scripts/coverage --dir=/tmp/coverage \
+          scripts/coverage --dir=/__w/_temp/coverage \
             report \
-            --input-objects=/tmp/coverage/binaries.list \
+            --input-objects=/__w/_temp/coverage/binaries.list \
             --commit-url=${COMMIT_URL} \
             --format=github
 
-          scripts/coverage --dir=/tmp/coverage \
+          scripts/coverage --dir=/__w/_temp/coverage \
             report \
-            --input-objects=/tmp/coverage/binaries.list \
+            --input-objects=/__w/_temp/coverage/binaries.list \
             --format=lcov
 
       - name: Build coverage report NEW
@@ -511,7 +511,7 @@ jobs:
           CURRENT="${COMMIT_SHA}"
           BASELINE="$(git merge-base $BASE_SHA $CURRENT)"
 
-          cp /tmp/coverage/report/lcov.info ./${CURRENT}.info
+          cp /__w/_temp/coverage/report/lcov.info ./${CURRENT}.info
 
           GENHTML_ARGS="--ignore-errors path,unmapped,empty --synthesize-missing --demangle-cpp rustfilt --output-directory lcov-html ${CURRENT}.info"
 

@@ -6,13 +6,13 @@ runs:
   steps:
     - name: Merge coverage data
       shell: bash -euxo pipefail {0}
-      run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
+      run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/__w/_temp/coverage merge
 
     - name: Download previous coverage data into the same directory
       uses: ./.github/actions/download
       with:
         name: coverage-data-artifact
-        path: /tmp/coverage
+        path: /__w/_temp/coverage
         skip-if-does-not-exist: true # skip if there's no previous coverage to download
         aws-oidc-role-arn: ${{ inputs.aws-oidc-role-arn }}
 
@@ -20,5 +20,5 @@ runs:
       uses: ./.github/actions/upload
       with:
         name: coverage-data-artifact
-        path: /tmp/coverage
+        path: /__w/_temp/coverage
         aws-oidc-role-arn: ${{ inputs.aws-oidc-role-arn }}

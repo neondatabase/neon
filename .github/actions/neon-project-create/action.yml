@@ -40,11 +40,11 @@ inputs:
   psql_path:
     description: 'Path to psql binary - it is caller responsibility to provision the psql binary'
     required: false
-    default: '/tmp/neon/pg_install/v16/bin/psql'
+    default: '/__w/_temp/neon/pg_install/v16/bin/psql'
   libpq_lib_path:
     description: 'Path to directory containing libpq library - it is caller responsibility to provision the libpq library'
     required: false
-    default: '/tmp/neon/pg_install/v16/lib'
+    default: '/__w/_temp/neon/pg_install/v16/lib'
   project_settings:
     description: 'A JSON object with project settings'
     required: false
@@ -83,7 +83,7 @@ runs:
               \"settings\": ${PROJECT_SETTINGS}
             }
           }")
-        
+
         code=${res: -3}
         if [[ ${code} -ge 400 ]]; then
           echo Request failed with error code ${code}
@@ -135,7 +135,7 @@ runs:
             -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${ADMIN_API_KEY}" \
             -d "{\"scheduling\": \"Essential\"}"
         fi
-        
+
 
       env:
         API_HOST: ${{ inputs.api_host }}

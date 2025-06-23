@@ -33,7 +33,7 @@ runs:
       shell: bash -euxo pipefail {0}
       env:
         TARGET: ${{ inputs.path }}
-        ARCHIVE: /tmp/downloads/${{ inputs.name }}.tar.zst
+        ARCHIVE: /__w/_temp/downloads/${{ inputs.name }}.tar.zst
         SKIP_IF_DOES_NOT_EXIST: ${{ inputs.skip-if-does-not-exist }}
         PREFIX: artifacts/${{ inputs.prefix || format('{0}/{1}/{2}', github.event.pull_request.head.sha || github.sha, github.run_id, github.run_attempt) }}
       run: |
@@ -61,7 +61,7 @@ runs:
       shell: bash -euxo pipefail {0}
       env:
         TARGET: ${{ inputs.path }}
-        ARCHIVE: /tmp/downloads/${{ inputs.name }}.tar.zst
+        ARCHIVE: /__w/_temp/downloads/${{ inputs.name }}.tar.zst
       run: |
         mkdir -p ${TARGET}
         time tar -xf ${ARCHIVE} -C ${TARGET}

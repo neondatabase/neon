@@ -27,8 +27,8 @@ permissions:
 jobs:
   regress:
     env:
-      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      TEST_OUTPUT: /tmp/test_output
+      POSTGRES_DISTRIB_DIR: /__w/_temp/neon/pg_install
+      TEST_OUTPUT: /__w/_temp/test_output
       BUILD_TYPE: remote
     strategy:
       fail-fast: false
@@ -63,7 +63,7 @@ jobs:
           LIBS=timescaledb:rag_bge_small_en_v15,rag_jina_reranker_v1_tiny_en:$ULID
           settings=$(jq -c -n --arg libs $LIBS '{preload_libraries:{use_defaults:false,enabled_libraries:($libs| split(":"))}}')
           echo settings=$settings >> $GITHUB_OUTPUT
-          
+
       - name: Create Neon Project
         id: create-neon-project
         uses: ./.github/actions/neon-project-create
