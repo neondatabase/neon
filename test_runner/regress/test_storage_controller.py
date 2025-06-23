@@ -2535,7 +2535,11 @@ def test_storage_controller_node_deletion(
         wait_until(assert_victim_evacuated)
 
     # The node should be gone from the list API
-    assert victim.id not in [n["id"] for n in env.storage_controller.node_list()]
+    def check_node_gone():
+        node_ids = [n["id"] for n in env.storage_controller.node_list()]
+        assert victim.id not in node_ids
+
+    wait_until(check_node_gone)
 
     # No tenants should refer to the node in their intent
     for tenant_id in tenant_ids:
@@ -3115,7 +3119,7 @@ def test_ps_unavailable_after_delete(neon_env_builder: NeonEnvBuilder):
     env.storage_controller.node_delete(ps.id)
 
     # After deletion, the node count must be reduced
-    assert_nodes_count(2)
+    wait_until(lambda: assert_nodes_count(2))
 
     # Running pageserver CLI init in a separate thread
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:

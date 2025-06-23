@@ -30,11 +30,18 @@ pub(crate) enum OperationError {
     FinalizeError(Cow<'static, str>),
     #[error("Operation cancelled")]
     Cancelled,
+    #[error("Impossible constraint error: {0}")]
+    ImpossibleConstraint(Cow<'static, str>),
 }
 
 pub(crate) struct OperationHandler {
     pub(crate) operation: Operation,
     #[allow(unused)]
+    pub(crate) cancel: CancellationToken,
+}
+
+pub(crate) struct NodeDeletionHandler {
+    pub(crate) node_id: NodeId,
     pub(crate) cancel: CancellationToken,
 }
 

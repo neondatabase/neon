@@ -65,12 +65,22 @@ enum Command {
         #[arg(long)]
         scheduling: Option<NodeSchedulingPolicy>,
     },
-    // Set a node status as deleted.
-    NodeDelete {
+    /// Start deletion of the specified pageserver.
+    /// The deletion is complete when the storage controller
+    NodeStartDelete {
         #[arg(long)]
         node_id: NodeId,
     },
+    /// Cancel deletion of the specified pageserver and wait for `timeout`
+    /// for the operation to be canceled. May be retried.
+    NodeCancelDelete {
+        #[arg(long)]
+        node_id: NodeId,
+        #[arg(long)]
+        timeout: humantime::Duration,
+    },
     /// Delete a tombstone of node from the storage controller.
+    /// This is used when we want to allow the node to be re-registered.
     NodeDeleteTombstone {
         #[arg(long)]
         node_id: NodeId,
@@ -911,10 +921,37 @@ async fn main() -> anyhow::Result<()> {
                 .dispatch::<(), ()>(Method::POST, format!("debug/v1/node/{node_id}/drop"), None)
                 .await?;
         }
-        Command::NodeDelete { node_id } => {
+        Command::NodeStartDelete { node_id } => {
             storcon_client
-                .dispatch::<(), ()>(Method::DELETE, format!("control/v1/node/{node_id}"), None)
+                .dispatch::<(), ()>(
+                    Method::PUT,
+                    format!("control/v1/node/{node_id}/delete"),
+                    None,
+                )
                 .await?;
+            println!("Delete started for {node_id}");
+        }
+        Command::NodeCancelDelete { node_id, timeout } => {
+            storcon_client
+                .dispatch::<(), ()>(
+                    Method::DELETE,
+                    format!("control/v1/node/{node_id}/delete"),
+                    None,
+                )
+                .await?;
+
+            println!("Waiting for node {node_id} to quiesce on scheduling policy ...");
+
+            let final_policy =
+                wait_for_scheduling_policy(storcon_client, node_id, *timeout, |sched| {
+                    use NodeSchedulingPolicy::*;
+                    matches!(sched, Active)
+                })
+                .await?;
+
+            println!(
+                "Delete was cancelled for node {node_id}. Schedulling policy is now {final_policy:?}"
+            );
         }
         Command::NodeDeleteTombstone { node_id } => {
             storcon_client
