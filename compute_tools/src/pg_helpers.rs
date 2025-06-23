@@ -553,7 +553,7 @@ pub async fn reload_pgbouncer() -> Result<()> {
     if let Err(err) = client.simple_query("RELOAD").await {
         // Don't fail on error, just print it into log
         error!("Failed to apply pgbouncer setting change: {err}",);
-    };
+    }
 
     Ok(())
 }
