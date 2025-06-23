@@ -3544,8 +3544,9 @@ impl proto::PageService for GrpcPageServiceHandler {
         &self,
         req: tonic::Request<proto::GetBaseBackupRequest>,
     ) -> Result<tonic::Response<Self::GetBaseBackupStream>, tonic::Status> {
-        // Send 64 KB chunks to avoid large memory allocations.
-        const CHUNK_SIZE: usize = 64 * 1024;
+        // Send chunks of 256 KB to avoid large memory allocations. pagebench basebackup shows this
+        // to be the sweet spot where throughput is saturated.
+        const CHUNK_SIZE: usize = 256 * 1024;
 
         let timeline = self.get_request_timeline(&req).await?;
         let ctx = self.ctx.with_scope_timeline(&timeline);
