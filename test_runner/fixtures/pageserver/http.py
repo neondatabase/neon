@@ -1228,7 +1228,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         else:
             res = self.put(
                 f"http://localhost:{self.port}/v1/feature_flag/{flag}",
-                json={"value": value},
+                params={"value": value},
             )
         self.verbose_error(res)
 
