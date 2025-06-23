@@ -3679,7 +3679,7 @@ async fn tenant_evaluate_feature_flag(
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
-    let flag: String = must_parse_query_param(&request, "flag")?;
+    let flag: String = parse_request_param(&request, "flag_key")?;
     let as_type: Option<String> = parse_query_param(&request, "as")?;
 
     let state = get_state(&request);
@@ -3717,7 +3717,9 @@ async fn force_override_feature_flag_for_testing_put(
     request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
-    let flag: String = must_parse_query_param(&request, "flag")?;
+    check_permission(&request, None)?;
+
+    let flag: String = parse_request_param(&request, "flag_key")?;
     let value: String = must_parse_query_param(&request, "value")?;
     let state = get_state(&request);
     state
@@ -3730,7 +3732,9 @@ async fn force_override_feature_flag_for_testing_delete(
     request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
-    let flag: String = must_parse_query_param(&request, "flag")?;
+    check_permission(&request, None)?;
+
+    let flag: String = parse_request_param(&request, "flag_key")?;
     let state = get_state(&request);
     state
         .feature_resolver
@@ -4114,13 +4118,13 @@ pub fn make_router(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/activate_post_import",
             |r| api_handler(r, activate_post_import_handler),
         )
-        .get("/v1/tenant/:tenant_shard_id/feature_flag", |r| {
+        .get("/v1/tenant/:tenant_shard_id/feature_flag/:flag_key", |r| {
             api_handler(r, tenant_evaluate_feature_flag)
         })
-        .put("/v1/feature_flag", |r| {
+        .put("/v1/feature_flag/:flag_key", |r| {
             testing_api_handler("force override feature flag - put", r, force_override_feature_flag_for_testing_put)
         })
-        .delete("/v1/feature_flag", |r| {
+        .delete("/v1/feature_flag/:flag_key", |r| {
             testing_api_handler("force override feature flag - delete", r, force_override_feature_flag_for_testing_delete)
         })
         .any(handler_404))
