@@ -5,7 +5,10 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use camino::Utf8PathBuf;
-use clap::{ArgAction, Parser};
+
+#[cfg(feature = "testing")]
+use clap::ArgAction;
+use clap::Parser;
 use futures::future::OptionFuture;
 use http_utils::tls_certs::ReloadingCertificateResolver;
 use hyper0::Uri;
