@@ -4219,7 +4219,6 @@ class Endpoint(PgProtocol, LogUtils):
         pageserver_id: int | None = None,
         allow_multiple: bool = False,
         update_catalog: bool = False,
-        grpc: bool = False,
     ) -> Self:
         """
         Create a new Postgres endpoint.
@@ -4312,7 +4311,6 @@ class Endpoint(PgProtocol, LogUtils):
         basebackup_request_tries: int | None = None,
         timeout: str | None = None,
         env: dict[str, str] | None = None,
-        grpc: bool = False,
     ) -> Self:
         """
         Start the Postgres instance.
@@ -4337,7 +4335,6 @@ class Endpoint(PgProtocol, LogUtils):
             basebackup_request_tries=basebackup_request_tries,
             timeout=timeout,
             env=env,
-            grpc=grpc,
         )
         self._running.release(1)
         self.log_config_value("shared_buffers")
@@ -4408,14 +4405,14 @@ class Endpoint(PgProtocol, LogUtils):
     def is_running(self):
         return self._running._value > 0
 
-    def reconfigure(self, pageserver_id: int | None = None, grpc: bool = False, safekeepers: list[int] | None = None):
+    def reconfigure(self, pageserver_id: int | None = None, safekeepers: list[int] | None = None):
         assert self.endpoint_id is not None
         # If `safekeepers` is not None, they are remember them as active and use
         # in the following commands.
         if safekeepers is not None:
             self.active_safekeepers = safekeepers
         self.env.neon_cli.endpoint_reconfigure(
-            self.endpoint_id, self.tenant_id, pageserver_id, grpc, self.active_safekeepers
+            self.endpoint_id, self.tenant_id, pageserver_id, self.active_safekeepers
         )
 
     def respec(self, **kwargs: Any) -> None:
@@ -4553,7 +4550,6 @@ class Endpoint(PgProtocol, LogUtils):
         pageserver_id: int | None = None,
         allow_multiple: bool = False,
         basebackup_request_tries: int | None = None,
-        grpc: bool = False,
     ) -> Self:
         """
         Create an endpoint, apply config, and start Postgres.
@@ -4569,13 +4565,11 @@ class Endpoint(PgProtocol, LogUtils):
             lsn=lsn,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
-            grpc=grpc,
         ).start(
             remote_ext_base_url=remote_ext_base_url,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
             basebackup_request_tries=basebackup_request_tries,
-            grpc=grpc,
         )
 
         return self
@@ -4660,7 +4654,6 @@ class EndpointFactory:
         remote_ext_base_url: str | None = None,
         pageserver_id: int | None = None,
         basebackup_request_tries: int | None = None,
-        grpc: bool = False,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -4682,7 +4675,6 @@ class EndpointFactory:
             remote_ext_base_url=remote_ext_base_url,
             pageserver_id=pageserver_id,
             basebackup_request_tries=basebackup_request_tries,
-            grpc=grpc,
         )
 
     def create(
@@ -4696,7 +4688,6 @@ class EndpointFactory:
         config_lines: list[str] | None = None,
         pageserver_id: int | None = None,
         update_catalog: bool = False,
-        grpc: bool = False,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -4720,7 +4711,6 @@ class EndpointFactory:
             config_lines=config_lines,
             pageserver_id=pageserver_id,
             update_catalog=update_catalog,
-            grpc=grpc,
         )
 
     def stop_all(self, fail_on_error=True) -> Self:
