@@ -54,7 +54,7 @@ impl<'a, K, V, S> HashMapInit<'a, K, V, S> {
 
     pub fn attach_reader(self) -> HashMapAccess<'a, K, V, S> {
         // no difference to attach_writer currently
-        self.attach_writer()
+         self.attach_writer()
     }
 }
 
@@ -132,10 +132,18 @@ where
         ptr = unsafe { ptr.add(size_of::<HashMapShared<K, V>>()) };
 
         // carve out the buckets
-        ptr = unsafe { ptr.byte_add(ptr.align_offset(align_of::<core::Bucket<K, V>>())) };
-        let buckets_ptr = ptr;
-        ptr = unsafe { ptr.add(size_of::<core::Bucket<K, V>>() * num_buckets as usize) };
+        ptr = unsafe { ptr.byte_add(ptr.align_offset(align_of::<core::LinkedKey<K>>())) };
+        let keys_ptr = ptr;
+        ptr = unsafe { ptr.add(size_of::<core::LinkedKey<K>>() * num_buckets as usize) };
+		
+        ptr = unsafe { ptr.byte_add(ptr.align_offset(align_of::<Option<V>>())) };
+        let vals_ptr = ptr;
+        ptr = unsafe { ptr.add(size_of::<Option<V>>() * num_buckets as usize) };
 
+		ptr = unsafe { ptr.byte_add(ptr.align_offset(align_of::<PrevPos>())) };
+        let prevs_ptr = ptr;
+        ptr = unsafe { ptr.add(size_of::<PrevPos>() * num_buckets as usize) };
+		
         // use remaining space for the dictionary
         ptr = unsafe { ptr.byte_add(ptr.align_offset(align_of::<u32>())) };
         assert!(ptr.addr() < end_ptr.addr());
@@ -143,12 +151,16 @@ where
         let dictionary_size = unsafe { end_ptr.byte_offset_from(ptr) / size_of::<u32>() as isize };
         assert!(dictionary_size > 0);
 
-        let buckets =
-            unsafe { std::slice::from_raw_parts_mut(buckets_ptr.cast(), num_buckets as usize) };
+        let keys =
+            unsafe { std::slice::from_raw_parts_mut(keys_ptr.cast(), num_buckets as usize) };
+		let vals =
+            unsafe { std::slice::from_raw_parts_mut(vals_ptr.cast(), num_buckets as usize) };
+		let prevs =
+            unsafe { std::slice::from_raw_parts_mut(prevs_ptr.cast(), num_buckets as usize) };
         let dictionary = unsafe {
             std::slice::from_raw_parts_mut(dictionary_ptr.cast(), dictionary_size as usize)
         };
-        let hashmap = CoreHashMap::new(buckets, dictionary);
+        let hashmap = CoreHashMap::new(keys, vals, prevs, dictionary);
         unsafe {
             std::ptr::write(shared_ptr, HashMapShared { inner: hashmap });
         }
@@ -206,22 +218,22 @@ where
     /// iterate through the hash map. (An Iterator might be nicer. The communicator's
     /// clock algorithm needs to _slowly_ iterate through all buckets with its clock hand,
     /// without holding a lock. If we switch to an Iterator, it must not hold the lock.)
-    pub fn get_at_bucket(&self, pos: usize) -> Option<&(K, V)> {
+    pub fn get_at_bucket(&self, pos: usize) -> Option<(&K, &V)> {
         let map = unsafe { self.shared_ptr.as_ref() }.unwrap();
 
-        if pos >= map.inner.buckets.len() {
+        if pos >= map.inner.keys.len() {
             return None;
         }
-        let bucket = &map.inner.buckets[pos];
-        bucket.inner.as_ref()
+        let key = &map.inner.keys[pos];
+		key.inner.as_ref().map(|k| (k, map.inner.vals[pos].as_ref().unwrap()))
     }
 
     pub fn get_bucket_for_value(&self, val_ptr: *const V) -> usize {
         let map = unsafe { self.shared_ptr.as_ref() }.unwrap();
 
-        let origin = map.inner.buckets.as_ptr();
+        let origin = map.inner.vals.as_ptr();
         let idx = (val_ptr as usize - origin as usize) / (size_of::<V>() as usize);
-        assert!(idx < map.inner.buckets.len());
+        assert!(idx < map.inner.vals.len());
 
         idx
     }
@@ -243,23 +255,28 @@ where
 	fn rehash_dict(
 		&mut self,
 		inner: &mut CoreHashMap<'a, K, V>,
-		buckets_ptr: *mut core::Bucket<K, V>,
+		keys_ptr: *mut core::LinkedKey<K>,
 		end_ptr: *mut u8,
 		num_buckets: u32,
 		rehash_buckets: u32,
 	) {
 		// Recalculate the dictionary
-        let buckets;
+        let keys;
         let dictionary;
         unsafe {
-            let buckets_end_ptr = buckets_ptr.add(num_buckets as usize);
-            let dictionary_ptr: *mut u32 = buckets_end_ptr
-                .byte_add(buckets_end_ptr.align_offset(align_of::<u32>()))
+            let keys_end_ptr = keys_ptr.add(num_buckets as usize);
+			
+            let ptr: *mut u8 = (keys_end_ptr as *mut u8)
+				.add(size_of::<Option<V>>() * num_buckets as usize);
+			let buckets_end_ptr = ptr.byte_add(ptr.align_offset(align_of::<PrevPos>()))
+				.add(size_of::<PrevPos>() * num_buckets as usize);
+			let dictionary_ptr: *mut u32 = buckets_end_ptr
+				.byte_add(buckets_end_ptr.align_offset(align_of::<u32>()))
                 .cast();
             let dictionary_size: usize =
                 end_ptr.byte_offset_from(buckets_end_ptr) as usize / size_of::<u32>();
 
-            buckets = std::slice::from_raw_parts_mut(buckets_ptr, num_buckets as usize);
+            keys = std::slice::from_raw_parts_mut(keys_ptr, num_buckets as usize);
             dictionary = std::slice::from_raw_parts_mut(dictionary_ptr, dictionary_size);
         }
         for i in 0..dictionary.len() {
@@ -267,19 +284,19 @@ where
         }
 
         for i in 0..rehash_buckets as usize {
-            if buckets[i].inner.is_none() {
+            if keys[i].inner.is_none() {
                 continue;
             }
 
-			let hash = self.hasher.hash_one(&buckets[i].inner.as_ref().unwrap().0);
+			let hash = self.hasher.hash_one(&keys[i].inner.as_ref().unwrap());
             let pos: usize = (hash % dictionary.len() as u64) as usize;
-            buckets[i].next = dictionary[pos];
+            keys[i].next = dictionary[pos];
             dictionary[pos] = i as u32;
         }
 
         // Finally, update the CoreHashMap struct
         inner.dictionary = dictionary;
-        inner.buckets = buckets;
+        inner.keys = keys;
 	}
 
 		/// Rehash the map. Intended for benchmarking only.
@@ -294,133 +311,133 @@ where
 		let num_buckets = inner.get_num_buckets() as u32;
 		let size_bytes = HashMapInit::<K, V, S>::estimate_size(num_buckets);
 		let end_ptr: *mut u8 = unsafe { shmem_handle.data_ptr.as_ptr().add(size_bytes) };
-        let buckets_ptr = inner.buckets.as_mut_ptr();
-		self.rehash_dict(inner, buckets_ptr, end_ptr, num_buckets, num_buckets);
+        let keys_ptr = inner.keys.as_mut_ptr();
+		self.rehash_dict(inner, keys_ptr, end_ptr, num_buckets, num_buckets);
 	}
 
 	
-    /// Grow
-    ///
-    /// 1. grow the underlying shared memory area
-    /// 2. Initialize new buckets. This overwrites the current dictionary
-    /// 3. Recalculate the dictionary
-    pub fn grow(&mut self, num_buckets: u32) -> Result<(), crate::shmem::Error> {
-        let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
-        let inner = &mut map.inner;
-        let old_num_buckets = inner.buckets.len() as u32;
+    // /// Grow
+    // ///
+    // /// 1. grow the underlying shared memory area
+    // /// 2. Initialize new buckets. This overwrites the current dictionary
+    // /// 3. Recalculate the dictionary
+    // pub fn grow(&mut self, num_buckets: u32) -> Result<(), crate::shmem::Error> {
+    //     let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+    //     let inner = &mut map.inner;
+    //     let old_num_buckets = inner.buckets.len() as u32;
 
-        if num_buckets < old_num_buckets {
-            panic!("grow called with a smaller number of buckets");
-        }
-        if num_buckets == old_num_buckets {
-            return Ok(());
-        }
-        let shmem_handle = self
-            .shmem_handle
-            .as_ref()
-            .expect("grow called on a fixed-size hash table");
+    //     if num_buckets < old_num_buckets {
+    //         panic!("grow called with a smaller number of buckets");
+    //     }
+    //     if num_buckets == old_num_buckets {
+    //         return Ok(());
+    //     }
+    //     let shmem_handle = self
+    //         .shmem_handle
+    //         .as_ref()
+    //         .expect("grow called on a fixed-size hash table");
 
-        let size_bytes = HashMapInit::<K, V, S>::estimate_size(num_buckets);
-        shmem_handle.set_size(size_bytes)?;
-        let end_ptr: *mut u8 = unsafe { shmem_handle.data_ptr.as_ptr().add(size_bytes) };
+    //     let size_bytes = HashMapInit::<K, V, S>::estimate_size(num_buckets);
+    //     shmem_handle.set_size(size_bytes)?;
+    //     let end_ptr: *mut u8 = unsafe { shmem_handle.data_ptr.as_ptr().add(size_bytes) };
 
-        // Initialize new buckets. The new buckets are linked to the free list. NB: This overwrites
-        // the dictionary!
-        let buckets_ptr = inner.buckets.as_mut_ptr();
-        unsafe {
-            for i in old_num_buckets..num_buckets {
-                let bucket_ptr = buckets_ptr.add(i as usize);
-                bucket_ptr.write(core::Bucket {
-                    next: if i < num_buckets-1 {
-                        i as u32 + 1
-                    } else {
-                        inner.free_head
-                    },
-					prev: if i > 0 {
-						PrevPos::Chained(i as u32 - 1)
-					} else {
-						PrevPos::First(INVALID_POS)
-					},
-                    inner: None,
-                });
-            }
-        }
+    //     // Initialize new buckets. The new buckets are linked to the free list. NB: This overwrites
+    //     // the dictionary!
+    //     let keys_ptr = inner.keys.as_mut_ptr();
+    //     unsafe {
+    //         for i in old_num_buckets..num_buckets {
+    //             let bucket_ptr = buckets_ptr.add(i as usize);
+    //             bucket_ptr.write(core::Bucket {
+    //                 next: if i < num_buckets-1 {
+    //                     i as u32 + 1
+    //                 } else {
+    //                     inner.free_head
+    //                 },
+	// 				prev: if i > 0 {
+	// 					PrevPos::Chained(i as u32 - 1)
+	// 				} else {
+	// 					PrevPos::First(INVALID_POS)
+	// 				},
+    //                 inner: None,
+    //             });
+    //         }
+    //     }
 
-		self.rehash_dict(inner, buckets_ptr, end_ptr, num_buckets, old_num_buckets);
-        inner.free_head = old_num_buckets;
+	// 	self.rehash_dict(inner, keys_ptr, end_ptr, num_buckets, old_num_buckets);
+    //     inner.free_head = old_num_buckets;
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
-	/// Begin a shrink, limiting all new allocations to be in buckets with index less than `num_buckets`. 
-	pub fn begin_shrink(&mut self, num_buckets: u32) {
-		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
-		if num_buckets > map.inner.get_num_buckets() as u32 {
-            panic!("shrink called with a larger number of buckets");
-        }
-		_ = self
-            .shmem_handle
-            .as_ref()
-            .expect("shrink called on a fixed-size hash table");
-		map.inner.alloc_limit = num_buckets;
-	}
+	// /// Begin a shrink, limiting all new allocations to be in buckets with index less than `num_buckets`. 
+// 	pub fn begin_shrink(&mut self, num_buckets: u32) {
+// 		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+// 		if num_buckets > map.inner.get_num_buckets() as u32 {
+//             panic!("shrink called with a larger number of buckets");
+//         }
+// 		_ = self
+//             .shmem_handle
+//             .as_ref()
+//             .expect("shrink called on a fixed-size hash table");
+// 		map.inner.alloc_limit = num_buckets;
+// 	}
 
-	/// Complete a shrink after caller has evicted entries, removing the unused buckets and rehashing.
-	pub fn finish_shrink(&mut self) -> Result<(), crate::shmem::Error> {
-		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
-		let inner = &mut map.inner;
-		if !inner.is_shrinking() {
-			panic!("called finish_shrink when no shrink is in progress");
-		}
+// 	/// Complete a shrink after caller has evicted entries, removing the unused buckets and rehashing.
+// 	pub fn finish_shrink(&mut self) -> Result<(), crate::shmem::Error> {
+// 		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+// 		let inner = &mut map.inner;
+// 		if !inner.is_shrinking() {
+// 			panic!("called finish_shrink when no shrink is in progress");
+// 		}
 
-		let num_buckets = inner.alloc_limit; 
+// 		let num_buckets = inner.alloc_limit; 
 
-		if inner.get_num_buckets() == num_buckets as usize {
-            return Ok(());
-        }
+// 		if inner.get_num_buckets() == num_buckets as usize {
+//             return Ok(());
+//         }
 		
-		for i in (num_buckets as usize)..inner.buckets.len() {
-			if inner.buckets[i].inner.is_some() {
-				// TODO(quantumish) Do we want to treat this as a violation of an invariant
-				// or a legitimate error the caller can run into? Originally I thought this
-				// could return something like a UnevictedError(index) as soon as it runs
-				// into something (that way a caller could clear their soon-to-be-shrinked 
-				// buckets by repeatedly trying to call `finish_shrink`). 
-				//
-				// Would require making a wider error type enum with this and shmem errors.
-				panic!("unevicted entries in shrinked space")
-			}
-			match inner.buckets[i].prev {
-				PrevPos::First(_) => {
-					let next_pos = inner.buckets[i].next;
-					inner.free_head = next_pos;
-					if next_pos != INVALID_POS {
-						inner.buckets[next_pos as usize].prev = PrevPos::First(INVALID_POS);
-					}
-				},
-				PrevPos::Chained(j) => {
-					let next_pos = inner.buckets[i].next;
-					inner.buckets[j as usize].next = next_pos;
-					if next_pos != INVALID_POS {
-						inner.buckets[next_pos as usize].prev = PrevPos::Chained(j);
-					}
-				}
-			}
-		}
+// 		for i in (num_buckets as usize)..inner.buckets.len() {
+// 			if inner.buckets[i].inner.is_some() {
+// 				// TODO(quantumish) Do we want to treat this as a violation of an invariant
+// 				// or a legitimate error the caller can run into? Originally I thought this
+// 				// could return something like a UnevictedError(index) as soon as it runs
+// 				// into something (that way a caller could clear their soon-to-be-shrinked 
+// 				// buckets by repeatedly trying to call `finish_shrink`). 
+// 				//
+// 				// Would require making a wider error type enum with this and shmem errors.
+// 				panic!("unevicted entries in shrinked space")
+// 			}
+// 			match inner.buckets[i].prev {
+// 				PrevPos::First(_) => {
+// 					let next_pos = inner.buckets[i].next;
+// 					inner.free_head = next_pos;
+// 					if next_pos != INVALID_POS {
+// 						inner.buckets[next_pos as usize].prev = PrevPos::First(INVALID_POS);
+// 					}
+// 				},
+// 				PrevPos::Chained(j) => {
+// 					let next_pos = inner.buckets[i].next;
+// 					inner.buckets[j as usize].next = next_pos;
+// 					if next_pos != INVALID_POS {
+// 						inner.buckets[next_pos as usize].prev = PrevPos::Chained(j);
+// 					}
+// 				}
+// 			}
+// 		}
 
-        let shmem_handle = self
-            .shmem_handle
-            .as_ref()
-            .expect("shrink called on a fixed-size hash table");
+//         let shmem_handle = self
+//             .shmem_handle
+//             .as_ref()
+//             .expect("shrink called on a fixed-size hash table");
 
-		let size_bytes = HashMapInit::<K, V, S>::estimate_size(num_buckets);
-        shmem_handle.set_size(size_bytes)?;
-        let end_ptr: *mut u8 = unsafe { shmem_handle.data_ptr.as_ptr().add(size_bytes) };
-		let buckets_ptr = inner.buckets.as_mut_ptr();
-		self.rehash_dict(inner, buckets_ptr, end_ptr, num_buckets, num_buckets);
-		inner.alloc_limit = INVALID_POS;
+// 		let size_bytes = HashMapInit::<K, V, S>::estimate_size(num_buckets);
+//         shmem_handle.set_size(size_bytes)?;
+//         let end_ptr: *mut u8 = unsafe { shmem_handle.data_ptr.as_ptr().add(size_bytes) };
+// 		let buckets_ptr = inner.buckets.as_mut_ptr();
+// 		self.rehash_dict(inner, buckets_ptr, end_ptr, num_buckets, num_buckets);
+// 		inner.alloc_limit = INVALID_POS;
 		
-		Ok(())
-	}
+// 		Ok(())
+// 	}
 
 }

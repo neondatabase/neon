@@ -11,15 +11,22 @@ use crate::hash::entry::{Entry, OccupiedEntry, PrevPos, VacantEntry};
 pub(crate) const INVALID_POS: u32 = u32::MAX;
 
 // Bucket
-pub(crate) struct Bucket<K, V> {
-    pub(crate) next: u32,
-	pub(crate) prev: PrevPos,
-    pub(crate) inner: Option<(K, V)>,
+// pub(crate) struct Bucket<K, V> {
+//     pub(crate) next: u32,
+// 	pub(crate) prev: PrevPos,
+//     pub(crate) inner: Option<(K, V)>,
+// }
+
+pub(crate) struct LinkedKey<K> {
+	pub(crate) inner: Option<K>,
+	pub(crate) next: u32,	
 }
 
 pub(crate) struct CoreHashMap<'a, K, V> {
     pub(crate) dictionary: &'a mut [u32],
-    pub(crate) buckets: &'a mut [Bucket<K, V>],
+    pub(crate) keys: &'a mut [LinkedKey<K>],
+	pub(crate) vals: &'a mut [Option<V>],
+	pub(crate) prevs: &'a mut [PrevPos],
     pub(crate) free_head: u32,
 
     pub(crate) _user_list_head: u32,
@@ -43,7 +50,8 @@ where
         let mut size = 0;
 
         // buckets
-        size += size_of::<Bucket<K, V>>() * num_buckets as usize;
+        size += (size_of::<LinkedKey<K>>() + size_of::<Option<V>>() + size_of::<PrevPos>())
+			* num_buckets as usize;
 
         // dictionary
         size += (f32::ceil((size_of::<u32>() * num_buckets as usize) as f32 / Self::FILL_FACTOR))
@@ -53,41 +61,54 @@ where
     }	
 
     pub fn new(
-        buckets: &'a mut [MaybeUninit<Bucket<K, V>>],
+        keys: &'a mut [MaybeUninit<LinkedKey<K>>],
+		vals: &'a mut [MaybeUninit<Option<V>>],
+		prevs: &'a mut [MaybeUninit<PrevPos>],
         dictionary: &'a mut [MaybeUninit<u32>],
     ) -> CoreHashMap<'a, K, V> {
         // Initialize the buckets
-        for i in 0..buckets.len() {
-            buckets[i].write(Bucket {
-                next: if i < buckets.len() - 1 {
+        for i in 0..keys.len() {
+            keys[i].write(LinkedKey {
+				next: if i < keys.len() - 1 {
                     i as u32 + 1
                 } else {
                     INVALID_POS
                 },
-				prev: if i > 0 {
-					PrevPos::Chained(i as u32 - 1)
-				} else {
-					PrevPos::First(INVALID_POS)
-				},
-                inner: None,
-            });
-        }
-
+				inner: None,
+			});
+		}
+		for i in 0..vals.len() {
+            vals[i].write(None);
+		}
+		for i in 0..prevs.len() {
+			prevs[i].write(if i > 0 {
+				PrevPos::Chained(i as u32 - 1)
+			} else {
+				PrevPos::First(INVALID_POS)
+			});
+		}
+			
         // Initialize the dictionary
         for i in 0..dictionary.len() {
             dictionary[i].write(INVALID_POS);
         }
 
         // TODO: use std::slice::assume_init_mut() once it stabilizes
-        let buckets =
-            unsafe { std::slice::from_raw_parts_mut(buckets.as_mut_ptr().cast(), buckets.len()) };
+        let keys =
+            unsafe { std::slice::from_raw_parts_mut(keys.as_mut_ptr().cast(), keys.len()) };
+		let vals =
+            unsafe { std::slice::from_raw_parts_mut(vals.as_mut_ptr().cast(), vals.len()) };
+		let prevs =
+            unsafe { std::slice::from_raw_parts_mut(prevs.as_mut_ptr().cast(), prevs.len()) };
         let dictionary = unsafe {
             std::slice::from_raw_parts_mut(dictionary.as_mut_ptr().cast(), dictionary.len())
         };
 
         CoreHashMap {
             dictionary,
-            buckets,
+            keys,
+			vals,
+			prevs,
             free_head: 0,
             buckets_in_use: 0,
             _user_list_head: INVALID_POS,
@@ -102,12 +123,12 @@ where
                 return None;
             }
 
-            let bucket = &self.buckets[next as usize];
-            let (bucket_key, bucket_value) = bucket.inner.as_ref().expect("entry is in use");
+            let keylink = &self.keys[next as usize];
+            let bucket_key = keylink.inner.as_ref().expect("entry is in use");
             if bucket_key == key {
-                return Some(&bucket_value);
+                return Some(self.vals[next as usize].as_ref().unwrap());
             }
-            next = bucket.next;
+            next = keylink.next;
         }
     }
 
@@ -127,8 +148,8 @@ where
         let mut prev_pos = PrevPos::First(dict_pos as u32);
         let mut next = first;
         loop {
-            let bucket = &mut self.buckets[next as usize];
-            let (bucket_key, _bucket_value) = bucket.inner.as_mut().expect("entry is in use");
+            let keylink = &mut self.keys[next as usize];
+            let bucket_key = keylink.inner.as_mut().expect("entry is in use");
             if *bucket_key == key {
                 // found existing entry
                 return Entry::Occupied(OccupiedEntry {
@@ -139,7 +160,7 @@ where
                 });
             }
 
-            if bucket.next == INVALID_POS {
+            if keylink.next == INVALID_POS {
                 // No existing entry
                 return Entry::Vacant(VacantEntry {
                     map: self,
@@ -148,12 +169,12 @@ where
                 });
             }
             prev_pos = PrevPos::Chained(next);
-            next = bucket.next;
+            next = keylink.next;
         }
     }
 
     pub fn get_num_buckets(&self) -> usize {
-        self.buckets.len()
+        self.keys.len()
     }
 
 	pub fn is_shrinking(&self) -> bool {
@@ -163,21 +184,26 @@ where
 
 	// TODO(quantumish): How does this interact with an ongoing shrink?
 	pub fn clear(&mut self) {
-		for i in 0..self.buckets.len() {
-            self.buckets[i] = Bucket {
-                next: if i < self.buckets.len() - 1 {
+		for i in 0..self.keys.len() {
+            self.keys[i] = LinkedKey {
+                next: if i < self.keys.len() - 1 {
                     i as u32 + 1
                 } else {
                     INVALID_POS
-                },
-				prev: if i > 0 {
-					PrevPos::Chained(i as u32 - 1)
-				} else {
-					PrevPos::First(INVALID_POS)
-				},
+                },				
                 inner: None,
             }
         }
+		for i in 0..self.prevs.len() {
+			self.prevs[i] = if i > 0 {
+				PrevPos::Chained(i as u32 - 1)
+			} else {
+				PrevPos::First(INVALID_POS)
+			}
+		}
+		for i in 0..self.vals.len() {
+			self.vals[i] = None;
+		}
 
         for i in 0..self.dictionary.len() {
             self.dictionary[i] = INVALID_POS;
@@ -188,14 +214,14 @@ where
 	}
 	
     pub fn entry_at_bucket(&mut self, pos: usize) -> Option<OccupiedEntry<'a, '_, K, V>> {
-		if pos >= self.buckets.len() {
+		if pos >= self.keys.len() {
 			return None;
 		}
 
-		let prev = self.buckets[pos].prev;
-		let entry = self.buckets[pos].inner.as_ref();
+		let prev = self.prevs[pos];
+		let entry = self.keys[pos].inner.as_ref();
 		match entry {
-			Some((key, _)) => Some(OccupiedEntry {
+			Some(key) => Some(OccupiedEntry {
 				_key: key.clone(),
 				bucket_pos: pos as u32,
 				prev_pos: prev,
@@ -212,9 +238,9 @@ where
 		// Find the first bucket we're *allowed* to use.
 		let mut prev = PrevPos::First(self.free_head);
 		while pos != INVALID_POS && pos >= self.alloc_limit {
-			let bucket = &mut self.buckets[pos as usize];
+			let keylink = &mut self.keys[pos as usize];
 			prev = PrevPos::Chained(pos);
-			pos = bucket.next;
+			pos = keylink.next;
 		}
 		if pos == INVALID_POS {
 			return Err(FullError());
@@ -223,26 +249,27 @@ where
 		// Repair the freelist.
 		match prev {
 			PrevPos::First(_) => {
-				let next_pos = self.buckets[pos as usize].next;
-				self.free_head = next_pos;				
+				let next_pos = self.keys[pos as usize].next;
+				self.free_head = next_pos;		
 				if next_pos != INVALID_POS {
-					self.buckets[next_pos as usize].prev = PrevPos::First(dict_pos);
+					self.prevs[next_pos as usize] = PrevPos::First(dict_pos);
 				}
 			}
 			PrevPos::Chained(p) => if p != INVALID_POS {
-				let next_pos = self.buckets[pos as usize].next;
-				self.buckets[p as usize].next = next_pos;
+				let next_pos = self.keys[pos as usize].next;
+				self.keys[p as usize].next = next_pos;
 				if next_pos != INVALID_POS {
-					self.buckets[next_pos as usize].prev = PrevPos::Chained(p);
+					self.prevs[next_pos as usize] = PrevPos::Chained(p);
 				}
 			},
 		}
 
 		// Initialize the bucket.
-		let bucket = &mut self.buckets[pos as usize];
+		let keylink = &mut self.keys[pos as usize];
 		self.buckets_in_use += 1;
-        bucket.next = INVALID_POS;
-        bucket.inner = Some((key, value));
+        keylink.next = INVALID_POS;		
+        keylink.inner = Some(key);
+		self.vals[pos as usize] = Some(value);
 
         return Ok(pos);
     }
