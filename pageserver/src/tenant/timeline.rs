@@ -816,7 +816,7 @@ impl From<layer_manager::Shutdown> for FlushLayerError {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub(crate) enum GetVectoredError {
+pub enum GetVectoredError {
     #[error("timeline shutting down")]
     Cancelled,
 
@@ -849,7 +849,7 @@ impl From<GetReadyAncestorError> for GetVectoredError {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub(crate) enum GetReadyAncestorError {
+pub enum GetReadyAncestorError {
     #[error("ancestor LSN wait error")]
     AncestorLsnTimeout(#[from] WaitLsnError),
 
@@ -939,7 +939,7 @@ impl std::fmt::Debug for Timeline {
 }
 
 #[derive(thiserror::Error, Debug, Clone)]
-pub(crate) enum WaitLsnError {
+pub enum WaitLsnError {
     // Called on a timeline which is shutting down
     #[error("Shutdown")]
     Shutdown,
@@ -1902,16 +1902,11 @@ impl Timeline {
             return;
         };
 
-        let Some(current_size) = open_layer.try_len() else {
-            // Unexpected: since we hold the write guard, nobody else should be writing to this layer, so
-            // read lock to get size should always succeed.
-            tracing::warn!("Lock conflict while reading size of open layer");
-            return;
-        };
+        let current_size = open_layer.len();
 
         let current_lsn = self.get_last_record_lsn();
 
-        let checkpoint_distance_override = open_layer.tick().await;
+        let checkpoint_distance_override = open_layer.tick();
 
         if let Some(size_override) = checkpoint_distance_override {
             if current_size > size_override {
@@ -7372,7 +7367,7 @@ impl TimelineWriter<'_> {
             .tl
             .get_layer_for_write(at, &self.write_guard, ctx)
             .await?;
-        let initial_size = layer.size().await?;
+        let initial_size = layer.len();
 
         let last_freeze_at = self.last_freeze_at.load();
         self.write_guard.replace(TimelineWriterState::new(

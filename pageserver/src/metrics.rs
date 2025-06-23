@@ -3426,7 +3426,7 @@ impl TimelineMetrics {
     pub fn dec_frozen_layer(&self, layer: &InMemoryLayer) {
         assert!(matches!(layer.info(), InMemoryLayerInfo::Frozen { .. }));
         let labels = self.make_frozen_layer_labels(layer);
-        let size = layer.try_len().expect("frozen layer should have no writer");
+        let size = layer.len();
         TIMELINE_LAYER_COUNT
             .get_metric_with_label_values(&labels)
             .unwrap()
@@ -3441,7 +3441,7 @@ impl TimelineMetrics {
     pub fn inc_frozen_layer(&self, layer: &InMemoryLayer) {
         assert!(matches!(layer.info(), InMemoryLayerInfo::Frozen { .. }));
         let labels = self.make_frozen_layer_labels(layer);
-        let size = layer.try_len().expect("frozen layer should have no writer");
+        let size = layer.len();
         TIMELINE_LAYER_COUNT
             .get_metric_with_label_values(&labels)
             .unwrap()
