@@ -98,7 +98,7 @@ pub(super) async fn init(
         .integrated_cache_init_struct
         .worker_process_init(last_lsn, file_cache);
 
-    let mut request_tracker = ShardedRequestTracker::new();
+    let request_tracker = ShardedRequestTracker::new();
     request_tracker.update_shard_map(shard_map,
         None,
         tenant_id,

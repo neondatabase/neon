@@ -5,7 +5,6 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::io::Error;
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -26,8 +25,6 @@ use url::Url;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
 use utils::shard::ShardIndex;
-
-use tonic::transport::Channel;
 
 use axum::Router;
 use axum::body::Body;

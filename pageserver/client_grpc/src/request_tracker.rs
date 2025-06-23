@@ -15,7 +15,7 @@ use tonic::{transport::{Channel}, Request};
 use crate::ClientCacheOptions;
 use crate::PageserverClientAggregateMetrics;
 use tokio::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 
 use utils::shard::ShardIndex;
 
@@ -313,7 +313,7 @@ impl RequestTracker {
         req: GetPageRequest,
     ) -> Result<GetPageResponse, tonic::Status> {
         loop {
-            let mut request = req.clone();
+            let request = req.clone();
             // Increment cur_id
             //let request_id = self.cur_id.fetch_add(1, Ordering::SeqCst) + 1;
             let request_id = request.request_id;
@@ -531,7 +531,7 @@ impl ShardedRequestTracker {
     ) -> Result<u64, tonic::Status> {
         let shard_index = ShardIndex::unsharded();
         let inner = self.inner.lock().await;
-        let mut tracker: RequestTracker;
+        let tracker: RequestTracker;
         if let Some(t) = inner.trackers.get(&shard_index) {
             tracker = t.clone();
         } else {
@@ -552,7 +552,7 @@ impl ShardedRequestTracker {
     ) -> Result<u32, tonic::Status> {
         let shard_index = ShardIndex::unsharded();
         let inner = self.inner.lock().await;
-        let mut tracker: RequestTracker;
+        let tracker: RequestTracker;
         if let Some(t) = inner.trackers.get(&shard_index) {
             tracker = t.clone();
         } else {
@@ -573,7 +573,7 @@ impl ShardedRequestTracker {
     ) -> Result<bool, tonic::Status> {
         let shard_index = ShardIndex::unsharded();
         let inner = self.inner.lock().await;
-        let mut tracker: RequestTracker;
+        let tracker: RequestTracker;
         if let Some(t) = inner.trackers.get(&shard_index) {
             tracker = t.clone();
         } else {

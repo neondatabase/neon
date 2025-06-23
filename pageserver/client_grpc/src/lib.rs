@@ -25,11 +25,6 @@ pub mod request_tracker;
 use tonic::transport::Channel;
 
 use metrics::{IntCounterVec, core::Collector};
-use crate::client_cache::{PooledItemFactory};
-
-use tokio::sync::mpsc;
-use async_trait::async_trait;
-
 
 #[derive(Error, Debug)]
 pub enum PageserverClientError {

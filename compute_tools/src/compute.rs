@@ -30,7 +30,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use std::{env, fs};
-use tokio::io::AsyncReadExt;
 use tokio::spawn;
 use tokio_util::io::StreamReader;
 use tracing::{Instrument, debug, error, info, instrument, warn};
