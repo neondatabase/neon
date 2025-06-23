@@ -100,8 +100,8 @@ ARG BULLSEYE_SLIM_SHA=sha256:e831d9a884d63734fe3dd9c491ed9a5a3d4c6a6d32c5b14f206
 # If var will match one the known images, we will replace it with the known sha.
 # If no match, than value will be unaffected, and will process with no-pinned image.
 ARG BASE_IMAGE_SHA=debian:${DEBIAN_FLAVOR}
-ARG BASE_IMAGE_SHA=${BASE_IMAGE_SHA/debian:bookworm-slim/debian@$BOOKWORM_SLIM_SHA}
-ARG BASE_IMAGE_SHA=${BASE_IMAGE_SHA/debian:bullseye-slim/debian@$BULLSEYE_SLIM_SHA}
+ARG BASE_IMAGE_SHA=${BASE_IMAGE_SHA/debian:-bookworm-slim/debian@$BOOKWORM_SLIM_SHA}
+ARG BASE_IMAGE_SHA=${BASE_IMAGE_SHA/debian:-bullseye-slim/debian@$BULLSEYE_SLIM_SHA}
 
 # By default, build all PostgreSQL extensions. For quick local testing when you don't
 # care about the extensions, pass EXTENSIONS=none or EXTENSIONS=minimal
