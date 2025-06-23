@@ -118,7 +118,7 @@ jobs:
         run: |
           CARGO_FLAGS="--locked --features testing"
           if [[ $BUILD_TYPE == "debug" && $ARCH == 'x64' ]]; then
-            cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
+            cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/__w/_temp/coverage run"
             CARGO_PROFILE=""
           elif [[ $BUILD_TYPE == "debug" ]]; then
             cov_prefix=""
@@ -209,23 +209,23 @@ jobs:
           SANITIZERS: ${{ inputs.sanitizers }}
         run: |
           # Install target binaries
-          mkdir -p /tmp/neon/bin/
+          mkdir -p /__w/_temp/neon/bin/
           binaries=$(
             ${cov_prefix} cargo metadata $CARGO_FLAGS --format-version=1 --no-deps |
             jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name'
           )
           for bin in $binaries; do
             SRC=target/$BUILD_TYPE/$bin
-            DST=/tmp/neon/bin/$bin
+            DST=/__w/_temp/neon/bin/$bin
             cp "$SRC" "$DST"
           done
 
           # Install test executables and write list of all binaries (for code coverage)
           if [[ $BUILD_TYPE == "debug" && $ARCH == 'x64' && $SANITIZERS != 'enabled' ]]; then
             # Keep bloated coverage data files away from the rest of the artifact
-            mkdir -p /tmp/coverage/
+            mkdir -p /__w/_temp/coverage/
 
-            mkdir -p /tmp/neon/test_bin/
+            mkdir -p /__w/_temp/neon/test_bin/
 
             test_exe_paths=$(
               ${cov_prefix} cargo test $CARGO_FLAGS $CARGO_PROFILE --message-format=json --no-run |
@@ -233,16 +233,16 @@ jobs:
             )
             for bin in $test_exe_paths; do
               SRC=$bin
-              DST=/tmp/neon/test_bin/$(basename $bin)
+              DST=/__w/_temp/neon/test_bin/$(basename $bin)
 
               # We don't need debug symbols for code coverage, so strip them out to make
               # the artifact smaller.
               strip "$SRC" -o "$DST"
-              echo "$DST" >> /tmp/coverage/binaries.list
+              echo "$DST" >> /__w/_temp/coverage/binaries.list
             done
 
             for bin in $binaries; do
-              echo "/tmp/neon/bin/$bin" >> /tmp/coverage/binaries.list
+              echo "/__w/_temp/neon/bin/$bin" >> /__w/_temp/coverage/binaries.list
             done
           fi
 
@@ -300,24 +300,24 @@ jobs:
             build/*/src/test/regress/pg_regress \
             build/*/src/test/isolation/isolationtester \
             build/*/src/test/isolation/pg_isolation_regress \
-            | tar  x -C /tmp/neon
+            | tar  x -C /__w/_temp/neon
 
       - name: Upload Neon artifact
         uses: ./.github/actions/upload
         with:
           name: neon-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}${{ inputs.sanitizers == 'enabled' && '-sanitized' || '' }}-artifact
-          path: /tmp/neon
+          path: /__w/_temp/neon
           aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
       - name: Check diesel schema
         if: inputs.build-type == 'release' && inputs.arch == 'x64'
         env:
           DATABASE_URL: postgresql://localhost:1235/storage_controller
-          POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+          POSTGRES_DISTRIB_DIR: /__w/_temp/neon/pg_install
         run: |
           export ASAN_OPTIONS=detect_leaks=0
-          /tmp/neon/bin/neon_local init
-          /tmp/neon/bin/neon_local storage_controller start
+          /__w/_temp/neon/bin/neon_local init
+          /__w/_temp/neon/bin/neon_local storage_controller start
 
           diesel print-schema > storage_controller/src/schema.rs
 
@@ -328,7 +328,7 @@ jobs:
             exit 1
           fi
 
-          /tmp/neon/bin/neon_local storage_controller stop
+          /__w/_temp/neon/bin/neon_local storage_controller stop
 
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
       - name: Merge and upload coverage data

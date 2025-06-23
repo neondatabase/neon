@@ -27,7 +27,7 @@ runs:
       shell: bash -euxo pipefail {0}
       env:
         SOURCE: ${{ inputs.path }}
-        ARCHIVE: /tmp/uploads/${{ inputs.name }}.tar.zst
+        ARCHIVE: /__w/_temp/uploads/${{ inputs.name }}.tar.zst
         SKIP_IF_DOES_NOT_EXIST: ${{ inputs.skip-if-does-not-exist }}
       run: |
         mkdir -p $(dirname $ARCHIVE)
@@ -69,7 +69,7 @@ runs:
       shell: bash -euxo pipefail {0}
       env:
         SOURCE: ${{ inputs.path }}
-        ARCHIVE: /tmp/uploads/${{ inputs.name }}.tar.zst
+        ARCHIVE: /__w/_temp/uploads/${{ inputs.name }}.tar.zst
         PREFIX: artifacts/${{ inputs.prefix || format('{0}/{1}/{2}', github.event.pull_request.head.sha || github.sha, github.run_id , github.run_attempt) }}
       run: |
         BUCKET=neon-github-public-dev
