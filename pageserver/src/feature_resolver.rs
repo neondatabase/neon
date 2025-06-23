@@ -31,6 +31,13 @@ impl FeatureResolver {
         }
     }
 
+    pub fn update(&self, spec: String) -> anyhow::Result<()> {
+        if let Some(inner) = &self.inner {
+            inner.update(spec)?;
+        }
+        Ok(())
+    }
+
     pub fn spawn(
         conf: &PageServerConf,
         shutdown_pageserver: CancellationToken,

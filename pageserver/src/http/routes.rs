@@ -3742,6 +3742,20 @@ async fn force_override_feature_flag_for_testing_delete(
     json_response(StatusCode::OK, ())
 }
 
+async fn update_feature_flag_spec(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+    let body = json_request(&mut request).await?;
+    let state = get_state(&request);
+    state
+        .feature_resolver
+        .update(body)
+        .map_err(ApiError::InternalServerError)?;
+    json_response(StatusCode::OK, ())
+}
+
 /// Common functionality of all the HTTP API handlers.
 ///
 /// - Adds a tracing span to each request (by `request_span`)
@@ -4126,6 +4140,9 @@ pub fn make_router(
         })
         .delete("/v1/feature_flag/:flag_key", |r| {
             testing_api_handler("force override feature flag - delete", r, force_override_feature_flag_for_testing_delete)
+        })
+        .post("/v1/feature_flag_spec", |r| {
+            api_handler(r, update_feature_flag_spec)
         })
         .any(handler_404))
 }

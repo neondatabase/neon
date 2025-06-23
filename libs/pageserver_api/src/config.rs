@@ -63,7 +63,8 @@ impl Display for NodeMetadata {
     }
 }
 
-/// PostHog integration config.
+/// PostHog integration config. This is used in pageserver, storcon, and neon_local.
+/// Ensure backward compatibility when adding new fields.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PostHogConfig {
     /// PostHog project ID
@@ -76,7 +77,9 @@ pub struct PostHogConfig {
     pub private_api_url: String,
     /// Public API URL
     pub public_api_url: String,
-    /// Refresh interval for the feature flag spec
+    /// Refresh interval for the feature flag spec.
+    /// The storcon will push the feature flag spec to the pageserver. If the pageserver does not receive
+    /// the spec for `refresh_interval`, it will fetch the spec from the PostHog API.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
     pub refresh_interval: Option<Duration>,

@@ -12,6 +12,7 @@ use std::{env, fs};
 
 use anyhow::{Context, bail};
 use clap::ValueEnum;
+use pageserver_api::config::PostHogConfig;
 use pem::Pem;
 use postgres_backend::AuthType;
 use reqwest::{Certificate, Url};
@@ -212,6 +213,8 @@ pub struct NeonStorageControllerConf {
 
     pub timeline_safekeeper_count: Option<i64>,
 
+    pub posthog_config: Option<PostHogConfig>,
+
     pub kick_secondary_downloads: Option<bool>,
 }
 
@@ -244,6 +247,7 @@ impl Default for NeonStorageControllerConf {
             use_https_safekeeper_api: false,
             use_local_compute_notifications: true,
             timeline_safekeeper_count: None,
+            posthog_config: None,
             kick_secondary_downloads: None,
         }
     }
