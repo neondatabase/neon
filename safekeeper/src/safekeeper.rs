@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use postgres_ffi::{MAX_SEND_SIZE, TimeLineID};
+use postgres_versioninfo::{PgMajorVersion, PgVersionId};
 use pq_proto::SystemId;
 use safekeeper_api::membership::{
     INVALID_GENERATION, MemberSet, SafekeeperGeneration as Generation, SafekeeperId,
@@ -29,7 +30,7 @@ use crate::{control_file, wal_storage};
 
 pub const SK_PROTO_VERSION_2: u32 = 2;
 pub const SK_PROTO_VERSION_3: u32 = 3;
-pub const UNKNOWN_SERVER_VERSION: u32 = 0;
+pub const UNKNOWN_SERVER_VERSION: PgVersionId = PgVersionId::UNKNOWN;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TermLsn {
@@ -220,7 +221,7 @@ pub struct ProposerGreeting {
     pub timeline_id: TimelineId,
     pub mconf: membership::Configuration,
     /// Postgres server version
-    pub pg_version: u32,
+    pub pg_version: PgVersionId,
     pub system_id: SystemId,
     pub wal_seg_size: u32,
 }
@@ -231,7 +232,7 @@ pub struct ProposerGreetingV2 {
     /// proposer-acceptor protocol version
     pub protocol_version: u32,
     /// Postgres server version
-    pub pg_version: u32,
+    pub pg_version: PgVersionId,
     pub proposer_id: PgUuid,
     pub system_id: SystemId,
     pub timeline_id: TimelineId,
@@ -513,7 +514,7 @@ impl ProposerAcceptorMessage {
                         tenant_id,
                         timeline_id,
                         mconf,
-                        pg_version,
+                        pg_version: PgVersionId::from_full_pg_version(pg_version),
                         system_id,
                         wal_seg_size,
                     };
@@ -963,7 +964,8 @@ where
          * because safekeepers parse WAL headers and the format
          * may change between versions.
          */
-        if msg.pg_version / 10000 != self.state.server.pg_version / 10000
+        if PgMajorVersion::try_from(msg.pg_version).unwrap()
+            != PgMajorVersion::try_from(self.state.server.pg_version).unwrap()
             && self.state.server.pg_version != UNKNOWN_SERVER_VERSION
         {
             bail!(
@@ -1750,7 +1752,7 @@ mod tests {
                 }]),
             },
             server: ServerInfo {
-                pg_version: 140000,
+                pg_version: PgVersionId::from_full_pg_version(140000),
                 system_id: 0x1234567887654321,
                 wal_seg_size: 0x12345678,
             },
