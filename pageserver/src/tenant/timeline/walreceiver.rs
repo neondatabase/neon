@@ -106,11 +106,12 @@ impl WalReceiver {
                     match loop_step_result {
                         Ok(()) => continue,
                         Err(_cancelled) => {
-                            trace!("Connection manager loop ended, shutting down");
+                            info!("Connection manager loop ended, shutting down");
                             break;
                         }
                     }
                 }
+                info!("Awaiting connection manager state shutdown ...");
                 connection_manager_state.shutdown().await;
                 *loop_status.write().unwrap() = None;
                 info!("task exits");
@@ -128,7 +129,7 @@ impl WalReceiver {
     #[instrument(skip_all, level = tracing::Level::DEBUG)]
     pub async fn shutdown(self) {
         debug_assert_current_span_has_tenant_and_timeline_id();
-        debug!("cancelling walreceiver tasks");
+        info!("cancelling walreceiver tasks");
         self.cancel.cancel();
         match self.task.await {
             Ok(()) => debug!("Shutdown success"),
