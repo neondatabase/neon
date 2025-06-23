@@ -1,7 +1,6 @@
 {
   collector_name: 'neon_collector',
   metrics: [
-    import 'sql_exporter/autovacuum_stats.libsonnet',
     import 'sql_exporter/checkpoints_req.libsonnet',
     import 'sql_exporter/checkpoints_timed.libsonnet',
     import 'sql_exporter/compute_backpressure_throttling_seconds_total.libsonnet',
@@ -18,6 +17,7 @@
     import 'sql_exporter/file_cache_read_wait_seconds_sum.libsonnet',
     import 'sql_exporter/file_cache_write_wait_seconds_bucket.libsonnet',
     import 'sql_exporter/file_cache_write_wait_seconds_count.libsonnet',
+    import 'sql_exporter/frozen_xid_age.libsonnet',
     import 'sql_exporter/file_cache_write_wait_seconds_sum.libsonnet',
     import 'sql_exporter/getpage_prefetch_discards_total.libsonnet',
     import 'sql_exporter/getpage_prefetch_misses_total.libsonnet',
@@ -40,6 +40,7 @@
     import 'sql_exporter/lfc_writes.libsonnet',
     import 'sql_exporter/logical_slot_restart_lsn.libsonnet',
     import 'sql_exporter/max_cluster_size.libsonnet',
+    import 'sql_exporter/min_mxid_age.libsonnet',
     import 'sql_exporter/pageserver_disconnects_total.libsonnet',
     import 'sql_exporter/pageserver_requests_sent_total.libsonnet',
     import 'sql_exporter/pageserver_send_flushes_total.libsonnet',
