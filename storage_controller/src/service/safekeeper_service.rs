@@ -1,3 +1,4 @@
+use std::cmp::max;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -608,7 +609,8 @@ impl Service {
         Ok(())
     }
 
-    /// Choose safekeepers for the new timeline: 3 in different azs.
+    /// Choose safekeepers for the new timeline in different azs.
+    /// 3 are choosen by default, but may be configured via config (for testing).
     pub(crate) async fn safekeepers_for_new_timeline(
         &self,
     ) -> Result<Vec<SafekeeperInfo>, ApiError> {
@@ -651,18 +653,14 @@ impl Service {
             )
         });
         // Number of safekeepers in different AZs we are looking for
-        let wanted_count = match all_safekeepers.len() {
-            0 => {
-                return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                    "couldn't find any active safekeeper for new timeline",
-                )));
-            }
-            // Have laxer requirements on testig mode as we don't want to
-            // spin up three safekeepers for every single test
-            #[cfg(feature = "testing")]
-            1 | 2 => all_safekeepers.len(),
-            _ => 3,
-        };
+        let mut wanted_count = self.config.timeline_safekeeper_count as usize;
+        // TODO(diko): remove this when `timeline_safekeeper_count` option is in the release
+        // branch and is specified in tests/neon_local config.
+        if cfg!(feature = "testing") && all_safekeepers.len() < wanted_count {
+            // In testing mode, we can have less safekeepers than the config says
+            wanted_count = max(all_safekeepers.len(), 1);
+        }
+
         let mut sks = Vec::new();
         let mut azs = HashSet::new();
         for (_sk_util, sk_info, az_id) in all_safekeepers.iter() {

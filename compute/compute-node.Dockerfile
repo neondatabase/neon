@@ -77,9 +77,6 @@
 # build_and_test.yml github workflow for how that's done.
 
 ARG PG_VERSION
-ARG REPOSITORY=ghcr.io/neondatabase
-ARG IMAGE=build-tools
-ARG TAG=pinned
 ARG BUILD_TAG
 ARG DEBIAN_VERSION=bookworm
 ARG DEBIAN_FLAVOR=${DEBIAN_VERSION}-slim
@@ -150,6 +147,7 @@ RUN case $DEBIAN_VERSION in \
     zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget ca-certificates pkg-config libssl-dev \
     libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd curl unzip g++ \
     libclang-dev \
+    jsonnet \
     $VERSION_INSTALLS \
     && apt clean && rm -rf /var/lib/apt/lists/* && \
     useradd -ms /bin/bash nonroot -b /home
@@ -1634,18 +1632,7 @@ FROM pg-build AS neon-ext-build
 ARG PG_VERSION
 
 COPY pgxn/ pgxn/
-RUN make -j $(getconf _NPROCESSORS_ONLN) \
-        -C pgxn/neon \
-        -s install && \
-    make -j $(getconf _NPROCESSORS_ONLN) \
-        -C pgxn/neon_utils \
-        -s install && \
-    make -j $(getconf _NPROCESSORS_ONLN) \
-        -C pgxn/neon_test_utils \
-        -s install && \
-    make -j $(getconf _NPROCESSORS_ONLN) \
-        -C pgxn/neon_rmgr \
-        -s install
+RUN make -j $(getconf _NPROCESSORS_ONLN) -C pgxn -s install-compute
 
 #########################################################################################
 #
@@ -1735,7 +1722,7 @@ FROM extensions-${EXTENSIONS} AS neon-pg-ext-build
 # Compile the Neon-specific `compute_ctl`, `fast_import`, and `local_proxy` binaries
 #
 #########################################################################################
-FROM $REPOSITORY/$IMAGE:$TAG AS compute-tools
+FROM build-deps-with-cargo AS compute-tools
 ARG BUILD_TAG
 ENV BUILD_TAG=$BUILD_TAG
 
@@ -1745,7 +1732,7 @@ COPY --chown=nonroot . .
 RUN --mount=type=cache,uid=1000,target=/home/nonroot/.cargo/registry \
     --mount=type=cache,uid=1000,target=/home/nonroot/.cargo/git \
     --mount=type=cache,uid=1000,target=/home/nonroot/target \
-    mold -run cargo build --locked --profile release-line-debug-size-lto --bin compute_ctl --bin fast_import --bin local_proxy && \
+    cargo build --locked --profile release-line-debug-size-lto --bin compute_ctl --bin fast_import --bin local_proxy && \
     mkdir target-bin && \
     cp target/release-line-debug-size-lto/compute_ctl \
        target/release-line-debug-size-lto/fast_import \
@@ -1839,10 +1826,11 @@ RUN rm /usr/local/pgsql/lib/lib*.a
 # Preprocess the sql_exporter configuration files
 #
 #########################################################################################
-FROM $REPOSITORY/$IMAGE:$TAG AS sql_exporter_preprocessor
+FROM build-deps AS sql_exporter_preprocessor
 ARG PG_VERSION
 
 USER nonroot
+WORKDIR /home/nonroot
 
 COPY --chown=nonroot compute compute
 

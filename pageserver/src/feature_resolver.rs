@@ -12,6 +12,8 @@ use utils::id::TenantId;
 
 use crate::{config::PageServerConf, metrics::FEATURE_FLAG_EVALUATION};
 
+const DEFAULT_POSTHOG_REFRESH_INTERVAL: Duration = Duration::from_secs(600);
+
 #[derive(Clone)]
 pub struct FeatureResolver {
     inner: Option<Arc<FeatureResolverBackgroundLoop>>,
@@ -139,10 +141,13 @@ impl FeatureResolver {
                 }
                 tenants
             };
-            // TODO: make refresh period configurable
-            inner
-                .clone()
-                .spawn(handle, Duration::from_secs(60), fake_tenants);
+            inner.clone().spawn(
+                handle,
+                posthog_config
+                    .refresh_interval
+                    .unwrap_or(DEFAULT_POSTHOG_REFRESH_INTERVAL),
+                fake_tenants,
+            );
             Ok(FeatureResolver {
                 inner: Some(inner),
                 internal_properties: Some(internal_properties),

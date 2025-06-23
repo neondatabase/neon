@@ -76,6 +76,10 @@ pub struct PostHogConfig {
     pub private_api_url: String,
     /// Public API URL
     pub public_api_url: String,
+    /// Refresh interval for the feature flag spec
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "humantime_serde")]
+    pub refresh_interval: Option<Duration>,
 }
 
 /// `pageserver.toml`
@@ -816,7 +820,7 @@ pub mod tenant_conf_defaults {
     // By default ingest enough WAL for two new L0 layers before checking if new image
     // image layers should be created.
     pub const DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD: u8 = 2;
-    pub const DEFAULT_GC_COMPACTION_ENABLED: bool = false;
+    pub const DEFAULT_GC_COMPACTION_ENABLED: bool = true;
     pub const DEFAULT_GC_COMPACTION_VERIFICATION: bool = true;
     pub const DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB: u64 = 5 * 1024 * 1024; // 5GB
     pub const DEFAULT_GC_COMPACTION_RATIO_PERCENT: u64 = 100;

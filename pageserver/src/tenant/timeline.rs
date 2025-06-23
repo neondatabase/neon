@@ -816,7 +816,7 @@ impl From<layer_manager::Shutdown> for FlushLayerError {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub(crate) enum GetVectoredError {
+pub enum GetVectoredError {
     #[error("timeline shutting down")]
     Cancelled,
 
@@ -849,7 +849,7 @@ impl From<GetReadyAncestorError> for GetVectoredError {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub(crate) enum GetReadyAncestorError {
+pub enum GetReadyAncestorError {
     #[error("ancestor LSN wait error")]
     AncestorLsnTimeout(#[from] WaitLsnError),
 
@@ -939,7 +939,7 @@ impl std::fmt::Debug for Timeline {
 }
 
 #[derive(thiserror::Error, Debug, Clone)]
-pub(crate) enum WaitLsnError {
+pub enum WaitLsnError {
     // Called on a timeline which is shutting down
     #[error("Shutdown")]
     Shutdown,
@@ -1902,16 +1902,11 @@ impl Timeline {
             return;
         };
 
-        let Some(current_size) = open_layer.try_len() else {
-            // Unexpected: since we hold the write guard, nobody else should be writing to this layer, so
-            // read lock to get size should always succeed.
-            tracing::warn!("Lock conflict while reading size of open layer");
-            return;
-        };
+        let current_size = open_layer.len();
 
         let current_lsn = self.get_last_record_lsn();
 
-        let checkpoint_distance_override = open_layer.tick().await;
+        let checkpoint_distance_override = open_layer.tick();
 
         if let Some(size_override) = checkpoint_distance_override {
             if current_size > size_override {
@@ -6547,7 +6542,7 @@ impl Timeline {
 
         debug!("retain_lsns: {:?}", retain_lsns);
 
-        let mut layers_to_remove = Vec::new();
+        let max_retain_lsn = retain_lsns.iter().max();
 
         // Scan all layers in the timeline (remote or on-disk).
         //
@@ -6557,108 +6552,110 @@ impl Timeline {
         // 3. it doesn't need to be retained for 'retain_lsns';
         // 4. it does not need to be kept for LSNs holding valid leases.
         // 5. newer on-disk image layers cover the layer's whole key range
-        //
-        // TODO holding a write lock is too agressive and avoidable
-        let mut guard = self
-            .layers
-            .write(LayerManagerLockHolder::GarbageCollection)
-            .await;
-        let layers = guard.layer_map()?;
-        'outer: for l in layers.iter_historic_layers() {
-            result.layers_total += 1;
+        let layers_to_remove = {
+            let mut layers_to_remove = Vec::new();
 
-            // 1. Is it newer than GC horizon cutoff point?
-            if l.get_lsn_range().end > space_cutoff {
-                info!(
-                    "keeping {} because it's newer than space_cutoff {}",
-                    l.layer_name(),
-                    space_cutoff,
-                );
-                result.layers_needed_by_cutoff += 1;
-                continue 'outer;
-            }
+            let guard = self
+                .layers
+                .read(LayerManagerLockHolder::GarbageCollection)
+                .await;
+            let layers = guard.layer_map()?;
+            'outer: for l in layers.iter_historic_layers() {
+                result.layers_total += 1;
 
-            // 2. It is newer than PiTR cutoff point?
-            if l.get_lsn_range().end > time_cutoff {
-                info!(
-                    "keeping {} because it's newer than time_cutoff {}",
-                    l.layer_name(),
-                    time_cutoff,
-                );
-                result.layers_needed_by_pitr += 1;
-                continue 'outer;
-            }
-
-            // 3. Is it needed by a child branch?
-            // NOTE With that we would keep data that
-            // might be referenced by child branches forever.
-            // We can track this in child timeline GC and delete parent layers when
-            // they are no longer needed. This might be complicated with long inheritance chains.
-            //
-            // TODO Vec is not a great choice for `retain_lsns`
-            for retain_lsn in &retain_lsns {
-                // start_lsn is inclusive
-                if &l.get_lsn_range().start <= retain_lsn {
-                    info!(
-                        "keeping {} because it's still might be referenced by child branch forked at {} is_dropped: xx is_incremental: {}",
+                // 1. Is it newer than GC horizon cutoff point?
+                if l.get_lsn_range().end > space_cutoff {
+                    debug!(
+                        "keeping {} because it's newer than space_cutoff {}",
                         l.layer_name(),
-                        retain_lsn,
-                        l.is_incremental(),
+                        space_cutoff,
                     );
-                    result.layers_needed_by_branches += 1;
+                    result.layers_needed_by_cutoff += 1;
                     continue 'outer;
                 }
-            }
 
-            // 4. Is there a valid lease that requires us to keep this layer?
-            if let Some(lsn) = &max_lsn_with_valid_lease {
-                // keep if layer start <= any of the lease
-                if &l.get_lsn_range().start <= lsn {
-                    info!(
-                        "keeping {} because there is a valid lease preventing GC at {}",
+                // 2. It is newer than PiTR cutoff point?
+                if l.get_lsn_range().end > time_cutoff {
+                    debug!(
+                        "keeping {} because it's newer than time_cutoff {}",
                         l.layer_name(),
-                        lsn,
+                        time_cutoff,
                     );
-                    result.layers_needed_by_leases += 1;
+                    result.layers_needed_by_pitr += 1;
                     continue 'outer;
                 }
+
+                // 3. Is it needed by a child branch?
+                // NOTE With that we would keep data that
+                // might be referenced by child branches forever.
+                // We can track this in child timeline GC and delete parent layers when
+                // they are no longer needed. This might be complicated with long inheritance chains.
+                if let Some(retain_lsn) = max_retain_lsn {
+                    // start_lsn is inclusive
+                    if &l.get_lsn_range().start <= retain_lsn {
+                        debug!(
+                            "keeping {} because it's still might be referenced by child branch forked at {} is_dropped: xx is_incremental: {}",
+                            l.layer_name(),
+                            retain_lsn,
+                            l.is_incremental(),
+                        );
+                        result.layers_needed_by_branches += 1;
+                        continue 'outer;
+                    }
+                }
+
+                // 4. Is there a valid lease that requires us to keep this layer?
+                if let Some(lsn) = &max_lsn_with_valid_lease {
+                    // keep if layer start <= any of the lease
+                    if &l.get_lsn_range().start <= lsn {
+                        debug!(
+                            "keeping {} because there is a valid lease preventing GC at {}",
+                            l.layer_name(),
+                            lsn,
+                        );
+                        result.layers_needed_by_leases += 1;
+                        continue 'outer;
+                    }
+                }
+
+                // 5. Is there a later on-disk layer for this relation?
+                //
+                // The end-LSN is exclusive, while disk_consistent_lsn is
+                // inclusive. For example, if disk_consistent_lsn is 100, it is
+                // OK for a delta layer to have end LSN 101, but if the end LSN
+                // is 102, then it might not have been fully flushed to disk
+                // before crash.
+                //
+                // For example, imagine that the following layers exist:
+                //
+                // 1000      - image (A)
+                // 1000-2000 - delta (B)
+                // 2000      - image (C)
+                // 2000-3000 - delta (D)
+                // 3000      - image (E)
+                //
+                // If GC horizon is at 2500, we can remove layers A and B, but
+                // we cannot remove C, even though it's older than 2500, because
+                // the delta layer 2000-3000 depends on it.
+                if !layers
+                    .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))
+                {
+                    debug!("keeping {} because it is the latest layer", l.layer_name());
+                    result.layers_not_updated += 1;
+                    continue 'outer;
+                }
+
+                // We didn't find any reason to keep this file, so remove it.
+                info!(
+                    "garbage collecting {} is_dropped: xx is_incremental: {}",
+                    l.layer_name(),
+                    l.is_incremental(),
+                );
+                layers_to_remove.push(l);
             }
 
-            // 5. Is there a later on-disk layer for this relation?
-            //
-            // The end-LSN is exclusive, while disk_consistent_lsn is
-            // inclusive. For example, if disk_consistent_lsn is 100, it is
-            // OK for a delta layer to have end LSN 101, but if the end LSN
-            // is 102, then it might not have been fully flushed to disk
-            // before crash.
-            //
-            // For example, imagine that the following layers exist:
-            //
-            // 1000      - image (A)
-            // 1000-2000 - delta (B)
-            // 2000      - image (C)
-            // 2000-3000 - delta (D)
-            // 3000      - image (E)
-            //
-            // If GC horizon is at 2500, we can remove layers A and B, but
-            // we cannot remove C, even though it's older than 2500, because
-            // the delta layer 2000-3000 depends on it.
-            if !layers
-                .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))
-            {
-                info!("keeping {} because it is the latest layer", l.layer_name());
-                result.layers_not_updated += 1;
-                continue 'outer;
-            }
-
-            // We didn't find any reason to keep this file, so remove it.
-            info!(
-                "garbage collecting {} is_dropped: xx is_incremental: {}",
-                l.layer_name(),
-                l.is_incremental(),
-            );
-            layers_to_remove.push(l);
-        }
+            layers_to_remove
+        };
 
         if !layers_to_remove.is_empty() {
             // Persist the new GC cutoff value before we actually remove anything.
@@ -6674,15 +6671,19 @@ impl Timeline {
                     }
                 })?;
 
+            let mut guard = self
+                .layers
+                .write(LayerManagerLockHolder::GarbageCollection)
+                .await;
+
             let gc_layers = layers_to_remove
                 .iter()
-                .map(|x| guard.get_from_desc(x))
+                .flat_map(|desc| guard.try_get_from_key(&desc.key()).cloned())
                 .collect::<Vec<Layer>>();
 
             result.layers_removed = gc_layers.len() as u64;
 
             self.remote_client.schedule_gc_update(&gc_layers)?;
-
             guard.open_mut()?.finish_gc_timeline(&gc_layers);
 
             #[cfg(feature = "testing")]
@@ -7370,7 +7371,7 @@ impl TimelineWriter<'_> {
             .tl
             .get_layer_for_write(at, &self.write_guard, ctx)
             .await?;
-        let initial_size = layer.size().await?;
+        let initial_size = layer.len();
 
         let last_freeze_at = self.last_freeze_at.load();
         self.write_guard.replace(TimelineWriterState::new(

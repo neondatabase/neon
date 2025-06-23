@@ -489,7 +489,9 @@ class NeonEnvBuilder:
         self.config_init_force: str | None = None
         self.top_output_dir = top_output_dir
         self.control_plane_hooks_api: str | None = None
-        self.storage_controller_config: dict[Any, Any] | None = None
+        self.storage_controller_config: dict[Any, Any] | None = {
+            "timelines_onto_safekeepers": True,
+        }
 
         # Flag to enable https listener in pageserver, generate local ssl certs,
         # and force storage controller to use https for pageserver api.
@@ -4908,6 +4910,9 @@ class Safekeeper(LogUtils):
         src_ids = [sk.id for sk in srcs]
         log.info(f"finished pulling timeline from {src_ids} to {self.id}")
         return res
+
+    def safekeeper_id(self) -> SafekeeperId:
+        return SafekeeperId(self.id, "localhost", self.port.pg_tenant_only)
 
     @property
     def data_dir(self) -> Path:

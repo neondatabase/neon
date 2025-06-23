@@ -121,7 +121,7 @@ impl Client {
     pub async fn get_base_backup(
         &mut self,
         req: model::GetBaseBackupRequest,
-    ) -> Result<impl Stream<Item = Result<Bytes, tonic::Status>>, tonic::Status> {
+    ) -> Result<impl Stream<Item = Result<Bytes, tonic::Status>> + 'static, tonic::Status> {
         let proto_req = proto::GetBaseBackupRequest::from(req);
 
         let response_stream: Streaming<proto::GetBaseBackupResponseChunk> =

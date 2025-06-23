@@ -173,7 +173,11 @@ def test_pg_regress(
     (runpath / "testtablespace").mkdir(parents=True)
 
     # Compute all the file locations that pg_regress will need.
-    build_path = pg_distrib_dir / f"build/{env.pg_version.v_prefixed}/src/test/regress"
+    #
+    # XXX: We assume that the `build` directory is a sibling of the
+    # pg_distrib_dir.  That is the default when you check out the
+    # repository; `build` and `pg_install` are created side by side.
+    build_path = pg_distrib_dir / f"../build/{env.pg_version.v_prefixed}/src/test/regress"
     src_path = base_dir / f"vendor/postgres-{env.pg_version.v_prefixed}/src/test/regress"
     bindir = pg_distrib_dir / f"v{env.pg_version}/bin"
     schedule = src_path / "parallel_schedule"
@@ -250,7 +254,11 @@ def test_isolation(
     (runpath / "testtablespace").mkdir(parents=True)
 
     # Compute all the file locations that pg_isolation_regress will need.
-    build_path = pg_distrib_dir / f"build/{env.pg_version.v_prefixed}/src/test/isolation"
+    #
+    # XXX: We assume that the `build` directory is a sibling of the
+    # pg_distrib_dir.  That is the default when you check out the
+    # repository; `build` and `pg_install` are created side by side.
+    build_path = pg_distrib_dir / f"../build/{env.pg_version.v_prefixed}/src/test/isolation"
     src_path = base_dir / f"vendor/postgres-{env.pg_version.v_prefixed}/src/test/isolation"
     bindir = pg_distrib_dir / f"v{env.pg_version}/bin"
     schedule = src_path / "isolation_schedule"
@@ -314,8 +322,11 @@ def test_sql_regress(
     (runpath / "testtablespace").mkdir(parents=True)
 
     # Compute all the file locations that pg_regress will need.
-    # This test runs neon specific tests
-    build_path = pg_distrib_dir / f"build/v{env.pg_version}/src/test/regress"
+    #
+    # XXX: We assume that the `build` directory is a sibling of the
+    # pg_distrib_dir.  That is the default when you check out the
+    # repository; `build` and `pg_install` are created side by side.
+    build_path = pg_distrib_dir / f"../build/{env.pg_version.v_prefixed}/src/test/regress"
     src_path = base_dir / "test_runner/sql_regress"
     bindir = pg_distrib_dir / f"v{env.pg_version}/bin"
     schedule = src_path / "parallel_schedule"
