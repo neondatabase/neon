@@ -226,9 +226,9 @@ fn decode_interpret_main(bench: &BenchmarkData, shards: &[ShardIdentity]) {
 
 fn decode_interpret(bench: &BenchmarkData, shard: &[ShardIdentity]) -> anyhow::Result<()> {
     let mut decoder = WalStreamDecoder::new(bench.meta.start_lsn, bench.meta.pg_version);
-    let xlogoff: usize = bench.meta.start_lsn.segment_offset(WAL_SEGMENT_SIZE);
+    let xlogoff = bench.meta.start_lsn.segment_offset(WAL_SEGMENT_SIZE);
 
-    for chunk in bench.wal[xlogoff..].chunks(MAX_SEND_SIZE) {
+    for chunk in bench.wal[xlogoff as usize..].chunks(MAX_SEND_SIZE) {
         decoder.feed_bytes(chunk);
         while let Some((lsn, recdata)) = decoder.poll_decode().unwrap() {
             assert!(lsn.is_aligned());

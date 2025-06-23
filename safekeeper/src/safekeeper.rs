@@ -1439,7 +1439,7 @@ mod tests {
 
     fn test_sk_state() -> TimelinePersistentState {
         let mut state = TimelinePersistentState::empty();
-        state.server.wal_seg_size = WAL_SEGMENT_SIZE as u32;
+        state.server.wal_seg_size = WAL_SEGMENT_SIZE;
         state.tenant_id = TenantId::from([1u8; 16]);
         state.timeline_id = TimelineId::from([1u8; 16]);
         state

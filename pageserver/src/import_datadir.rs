@@ -301,7 +301,7 @@ async fn import_wal(
 
         use std::io::Read;
         let nread = file.read_to_end(&mut buf)?;
-        if nread != WAL_SEGMENT_SIZE - offset {
+        if nread != WAL_SEGMENT_SIZE as usize - offset as usize {
             // Maybe allow this for .partial files?
             error!("read only {} bytes from WAL file", nread);
         }
@@ -455,7 +455,7 @@ pub async fn import_wal_from_tar(
             }
         };
 
-        waldecoder.feed_bytes(&bytes[offset..]);
+        waldecoder.feed_bytes(&bytes[offset as usize..]);
 
         let mut modification = tline.begin_modification(last_lsn);
         while last_lsn <= end_lsn {

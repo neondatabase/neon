@@ -103,7 +103,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     let server_info = ServerInfo {
         pg_version: request_data.pg_version,
         system_id: request_data.system_id.unwrap_or(0),
-        wal_seg_size: request_data.wal_seg_size.unwrap_or(WAL_SEGMENT_SIZE as u32),
+        wal_seg_size: request_data.wal_seg_size.unwrap_or(WAL_SEGMENT_SIZE),
     };
     let global_timelines = get_global_timelines(&request);
     global_timelines

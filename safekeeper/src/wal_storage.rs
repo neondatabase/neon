@@ -28,7 +28,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tracing::*;
 use utils::crashsafe::durable_rename;
 use utils::id::TenantTimelineId;
-use utils::lsn::Lsn;
+use utils::lsn::{Lsn, SegmentSize};
 
 use crate::metrics::{
     REMOVED_WAL_SEGMENTS, WAL_STORAGE_OPERATION_SECONDS, WalStorageMetrics, time_io_closure,
@@ -92,7 +92,7 @@ pub struct PhysicalStorage {
     no_sync: bool,
 
     /// Size of WAL segment in bytes.
-    wal_seg_size: usize,
+    wal_seg_size: SegmentSize,
     pg_version: PgVersionId,
     system_id: u64,
 
@@ -170,7 +170,7 @@ impl PhysicalStorage {
         state: &TimelinePersistentState,
         no_sync: bool,
     ) -> Result<PhysicalStorage> {
-        let wal_seg_size = state.server.wal_seg_size as usize;
+        let wal_seg_size = state.server.wal_seg_size;
 
         // Find out where stored WAL ends, starting at commit_lsn which is a
         // known recent record boundary (unless we don't have WAL at all).
@@ -315,7 +315,12 @@ impl PhysicalStorage {
 
     /// Write WAL bytes, which are known to be located in a single WAL segment. Returns true if the
     /// segment was completed, closed, and flushed to disk.
-    async fn write_in_segment(&mut self, segno: u64, xlogoff: usize, buf: &[u8]) -> Result<bool> {
+    async fn write_in_segment(
+        &mut self,
+        segno: u64,
+        xlogoff: SegmentSize,
+        buf: &[u8],
+    ) -> Result<bool> {
         let mut file = if let Some(file) = self.file.take() {
             file
         } else {
@@ -331,7 +336,7 @@ impl PhysicalStorage {
         // syscall, but needed in case of async). It does *not* fsyncs the file.
         file.flush().await?;
 
-        if xlogoff + buf.len() == self.wal_seg_size {
+        if xlogoff as usize + buf.len() == self.wal_seg_size as usize {
             // If we reached the end of a WAL segment, flush and close it.
             self.fdatasync_file(&file).await?;
 
@@ -372,8 +377,8 @@ impl PhysicalStorage {
             let segno = self.write_lsn.segment_number(self.wal_seg_size);
 
             // If crossing a WAL boundary, only write up until we reach wal segment size.
-            let bytes_write = if xlogoff + buf.len() > self.wal_seg_size {
-                self.wal_seg_size - xlogoff
+            let bytes_write = if xlogoff as usize + buf.len() > self.wal_seg_size as usize {
+                (self.wal_seg_size - xlogoff) as usize
             } else {
                 buf.len()
             };
@@ -604,7 +609,7 @@ impl Storage for PhysicalStorage {
 /// Remove all WAL segments in timeline_dir that match the given predicate.
 async fn remove_segments_from_disk(
     timeline_dir: &Utf8Path,
-    wal_seg_size: usize,
+    wal_seg_size: SegmentSize,
     remove_predicate: impl Fn(XLogSegNo) -> bool,
 ) -> Result<()> {
     let _timer = WAL_STORAGE_OPERATION_SECONDS
@@ -645,7 +650,7 @@ async fn remove_segments_from_disk(
 pub struct WalReader {
     remote_path: RemotePath,
     timeline_dir: Utf8PathBuf,
-    wal_seg_size: usize,
+    wal_seg_size: SegmentSize,
     pos: Lsn,
     wal_segment: Option<Pin<Box<dyn AsyncRead + Send + Sync>>>,
 
@@ -683,7 +688,7 @@ impl WalReader {
         if start_pos
             < state
                 .timeline_start_lsn
-                .segment_lsn(state.server.wal_seg_size as usize)
+                .segment_lsn(state.server.wal_seg_size)
         {
             bail!(
                 "Requested streaming from {}, which is before the start of the timeline {}, and also doesn't start at the first segment of that timeline",
@@ -695,7 +700,7 @@ impl WalReader {
         Ok(Self {
             remote_path: remote_timeline_path(ttid)?,
             timeline_dir,
-            wal_seg_size: state.server.wal_seg_size as usize,
+            wal_seg_size: state.server.wal_seg_size,
             pos: start_pos,
             wal_segment: None,
             wal_backup,
@@ -743,12 +748,14 @@ impl WalReader {
             // How many bytes may we consume in total?
             let tl_start_seg_offset = self.timeline_start_lsn.segment_offset(self.wal_seg_size);
 
-            debug_assert!(seg_bytes.len() > pos_seg_offset);
-            debug_assert!(seg_bytes.len() > tl_start_seg_offset);
+            debug_assert!(seg_bytes.len() > pos_seg_offset as usize);
+            debug_assert!(seg_bytes.len() > tl_start_seg_offset as usize);
 
             // Copy as many bytes as possible into the buffer
-            let len = (tl_start_seg_offset - pos_seg_offset).min(buf.len());
-            buf[0..len].copy_from_slice(&seg_bytes[pos_seg_offset..pos_seg_offset + len]);
+            let len = ((tl_start_seg_offset - pos_seg_offset) as usize).min(buf.len());
+            buf[0..len].copy_from_slice(
+                &seg_bytes[pos_seg_offset as usize..pos_seg_offset as usize + len],
+            );
 
             self.pos += len as u64;
 
@@ -770,7 +777,7 @@ impl WalReader {
         // How much to read and send in message? We cannot cross the WAL file
         // boundary, and we don't want send more than provided buffer.
         let xlogoff = self.pos.segment_offset(self.wal_seg_size);
-        let send_size = min(buf.len(), self.wal_seg_size - xlogoff);
+        let send_size = min(buf.len(), (self.wal_seg_size - xlogoff) as usize);
 
         // Read some data from the file.
         let buf = &mut buf[0..send_size];
@@ -831,7 +838,7 @@ impl WalReader {
 pub(crate) async fn open_wal_file(
     timeline_dir: &Utf8Path,
     segno: XLogSegNo,
-    wal_seg_size: usize,
+    wal_seg_size: SegmentSize,
 ) -> Result<(tokio::fs::File, bool)> {
     let (wal_file_path, wal_file_partial_path) = wal_file_paths(timeline_dir, segno, wal_seg_size);
 
@@ -858,7 +865,7 @@ pub(crate) async fn open_wal_file(
 pub fn wal_file_paths(
     timeline_dir: &Utf8Path,
     segno: XLogSegNo,
-    wal_seg_size: usize,
+    wal_seg_size: SegmentSize,
 ) -> (Utf8PathBuf, Utf8PathBuf) {
     let wal_file_name = XLogFileName(PG_TLI, segno, wal_seg_size);
     let wal_file_path = timeline_dir.join(wal_file_name.clone());

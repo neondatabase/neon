@@ -9,7 +9,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tracing::{info, warn};
 use utils::id::TenantTimelineId;
-use utils::lsn::Lsn;
+use utils::lsn::{Lsn, SegmentSize};
 
 use crate::GlobalTimelines;
 use crate::control_file::FileStorage;
@@ -100,7 +100,7 @@ pub async fn handle_request(
         }
     }
 
-    let wal_seg_size = state.server.wal_seg_size as usize;
+    let wal_seg_size = state.server.wal_seg_size;
     if wal_seg_size == 0 {
         bail!("wal_seg_size is not set");
     }
@@ -171,7 +171,7 @@ pub async fn handle_request(
 
 async fn copy_disk_segments(
     tli: &WalResidentTimeline,
-    wal_seg_size: usize,
+    wal_seg_size: SegmentSize,
     start_lsn: Lsn,
     end_lsn: Lsn,
     tli_dir_path: &Utf8PathBuf,

@@ -831,7 +831,7 @@ impl Collector for TimelineCollector {
             if tli.last_removed_segno != 0 {
                 let segno_count = tli
                     .flush_lsn
-                    .segment_number(tli.persisted_state.server.wal_seg_size as usize)
+                    .segment_number(tli.persisted_state.server.wal_seg_size)
                     - tli.last_removed_segno;
                 let disk_usage_bytes = segno_count * tli.persisted_state.server.wal_seg_size as u64;
                 self.disk_usage

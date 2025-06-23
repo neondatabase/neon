@@ -152,7 +152,7 @@ impl TimelinePersistentState {
             ServerInfo {
                 pg_version: PgVersionId::from(PgMajorVersion::PG17),
                 system_id: 0, /* Postgres system identifier */
-                wal_seg_size: WAL_SEGMENT_SIZE as u32,
+                wal_seg_size: WAL_SEGMENT_SIZE,
             },
             Lsn::INVALID,
             Lsn::INVALID,

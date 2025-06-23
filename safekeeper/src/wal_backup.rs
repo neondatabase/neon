@@ -23,7 +23,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::id::{NodeId, TenantTimelineId};
-use utils::lsn::Lsn;
+use utils::lsn::{Lsn, SegmentSize};
 use utils::{backoff, pausable_failpoint};
 
 use crate::metrics::{BACKED_UP_SEGMENTS, BACKUP_ERRORS, WAL_BACKUP_TASKS};
@@ -52,7 +52,7 @@ impl WalBackupTaskHandle {
 
 /// Do we have anything to upload to S3, i.e. should safekeepers run backup activity?
 pub(crate) fn is_wal_backup_required(
-    wal_seg_size: usize,
+    wal_seg_size: SegmentSize,
     num_computes: usize,
     state: &StateSnapshot,
 ) -> bool {
@@ -210,7 +210,7 @@ impl WalBackup {
 struct WalBackupTask {
     timeline: WalResidentTimeline,
     timeline_dir: Utf8PathBuf,
-    wal_seg_size: usize,
+    wal_seg_size: SegmentSize,
     parallel_jobs: usize,
     commit_lsn_watch_rx: watch::Receiver<Lsn>,
     storage: Arc<GenericRemoteStorage>,
@@ -338,7 +338,7 @@ async fn backup_lsn_range(
     storage: Arc<GenericRemoteStorage>,
     backup_lsn: &mut Lsn,
     end_lsn: Lsn,
-    wal_seg_size: usize,
+    wal_seg_size: SegmentSize,
     timeline_dir: &Utf8Path,
     parallel_jobs: usize,
 ) -> Result<()> {
@@ -461,12 +461,12 @@ impl Segment {
         remote_timeline_path.join(self.object_name())
     }
 
-    pub fn size(self) -> usize {
-        (u64::from(self.end_lsn) - u64::from(self.start_lsn)) as usize
+    pub fn size(self) -> SegmentSize {
+        (u64::from(self.end_lsn) - u64::from(self.start_lsn)) as SegmentSize
     }
 }
 
-fn get_segments(start: Lsn, end: Lsn, seg_size: usize) -> Vec<Segment> {
+fn get_segments(start: Lsn, end: Lsn, seg_size: SegmentSize) -> Vec<Segment> {
     let first_seg = start.segment_number(seg_size);
     let last_seg = end.segment_number(seg_size);
 
@@ -484,7 +484,7 @@ async fn backup_object(
     storage: &GenericRemoteStorage,
     source_file: &Utf8Path,
     target_file: &RemotePath,
-    size: usize,
+    size: SegmentSize,
 ) -> Result<()> {
     let file = File::open(&source_file)
         .await
@@ -495,7 +495,7 @@ async fn backup_object(
     let cancel = CancellationToken::new();
 
     storage
-        .upload_storage_object(file, size, target_file, &cancel)
+        .upload_storage_object(file, size as usize, target_file, &cancel)
         .await
 }
 
@@ -503,7 +503,7 @@ pub(crate) async fn backup_partial_segment(
     storage: &GenericRemoteStorage,
     source_file: &Utf8Path,
     target_file: &RemotePath,
-    size: usize,
+    size: SegmentSize,
 ) -> Result<()> {
     let file = File::open(&source_file)
         .await
@@ -519,7 +519,7 @@ pub(crate) async fn backup_partial_segment(
     storage
         .upload(
             file,
-            size,
+            size as usize,
             target_file,
             Some(StorageMetadata::from([("sk_type", "partial_segment")])),
             &cancel,
@@ -647,7 +647,7 @@ pub async fn delete_objects(storage: &GenericRemoteStorage, paths: &[RemotePath]
 /// Copy segments from one timeline to another. Used in copy_timeline.
 pub async fn copy_s3_segments(
     storage: &GenericRemoteStorage,
-    wal_seg_size: usize,
+    wal_seg_size: SegmentSize,
     src_ttid: &TenantTimelineId,
     dst_ttid: &TenantTimelineId,
     from_segment: XLogSegNo,
