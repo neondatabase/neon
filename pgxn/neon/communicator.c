@@ -1612,7 +1612,8 @@ nm_unpack_response(StringInfo s)
 				msgtext = pq_getmsgrawstring(s);
 				msglen = strlen(msgtext);
 
-				msg_resp = palloc0(sizeof(NeonErrorResponse) + msglen + 1);
+				/* allocate in top memory context because error responses can be also stored in prefetch ring as well as getpage responses */
+				msg_resp = MemoryContextAllocZero(TopMemoryContext, sizeof(NeonErrorResponse) + msglen + 1);
 				msg_resp->req = resp_hdr;
 				memcpy(msg_resp->message, msgtext, msglen + 1);
 				pq_getmsgend(s);
