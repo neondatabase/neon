@@ -446,6 +446,12 @@ communicator_prefetch_pump_state(void)
 		if (response == NULL)
 			break;
 
+		if (response->tag != T_NeonGetPageResponse && response->tag != T_NeonErrorResponse)
+		{
+			neon_shard_log(slot->shard_no, ERROR, "Unexpected prefetch response %d, ring_receive=%ld, ring_flush=%ld, ring_unused=%ld",
+				 response->tag, MyPState->ring_receive, MyPState->ring_flush, MyPState->ring_unused);
+		}
+
 		/* The slot should still be valid */
 		if (slot->status != PRFS_REQUESTED ||
 			slot->response != NULL ||
@@ -749,6 +755,12 @@ prefetch_read(PrefetchRequest *slot)
 						   "Incorrect prefetch slot state after receive: status=%d response=%p my=%lu receive=%lu",
 						   slot->status, slot->response,
 						   (long) slot->my_ring_index, (long) MyPState->ring_receive);
+
+		if (response->tag != T_NeonGetPageResponse && response->tag != T_NeonErrorResponse)
+		{
+			neon_shard_log(shard_no, ERROR, "Unexpected prefetch response %d, ring_receive=%ld, ring_flush=%ld, ring_unused=%ld",
+				 response->tag, MyPState->ring_receive, MyPState->ring_flush, MyPState->ring_unused);
+		}
 
 		/* update prefetch state */
 		MyPState->n_responses_buffered += 1;
@@ -1388,13 +1400,13 @@ page_server_request(void const *req)
 	{
 		PG_TRY();
 		{
+			consume_prefetch_responses();
 			while (!page_server->send(shard_no, (NeonRequest *) req)
 				   || !page_server->flush(shard_no))
 			{
 				/* do nothing */
 			}
 			MyNeonCounters->pageserver_open_requests++;
-			consume_prefetch_responses();
 			resp = page_server->receive(shard_no);
 			MyNeonCounters->pageserver_open_requests--;
 		}
@@ -2384,12 +2396,11 @@ communicator_read_slru_segment(SlruKind kind, int64 segno, neon_request_lsns *re
 		.segno = segno
 	};
 
+	consume_prefetch_responses();
+
 	do
 	{
 		while (!page_server->send(shard_no, &request.hdr) || !page_server->flush(shard_no));
-
-		consume_prefetch_responses();
-
 		resp = page_server->receive(shard_no);
 	} while (resp == NULL);
 

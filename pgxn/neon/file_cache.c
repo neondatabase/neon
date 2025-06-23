@@ -1685,7 +1685,7 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				if (relkind != pagekind)
 				{
 					ereport(PANIC,
-							(errmsg("Inconsistent writing page %u %u/%u/%u.%u to LFC", blkno+i, RelFileInfoFmt(rinfo), forkNum),
+							(errmsg("Inconsistent writing %s page %u %u/%u/%u.%u to LFC", pagekind == RELKIND_INDEX ? "index" : "heap", blkno+i, RelFileInfoFmt(rinfo), forkNum),
 							 errbacktrace()));
 				}
 			}
@@ -1745,7 +1745,7 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				if (entry->relkind != RELKIND_UNKNOWN && entry->relkind != relkind)
 				{
 					ereport(PANIC,
-							(errmsg("Writing unexpected page %u %u/%u/%u.%u to LFC", blkno, RelFileInfoFmt(rinfo), forkNum),
+							(errmsg("Writing unexpected %s page %u %u/%u/%u.%u to LFC", relkind == RELKIND_INDEX ? "index" : "heap", blkno, RelFileInfoFmt(rinfo), forkNum),
 							 errbacktrace()));
 				}
 				entry->relkind = relkind;

@@ -164,7 +164,7 @@ FROM build-deps AS pg-build
 ARG PG_VERSION
 COPY vendor/postgres-${PG_VERSION:?} postgres
 RUN cd postgres && \
-    export CONFIGURE_CMD="./configure CFLAGS='-O2 -g3 -fsigned-char' --enable-debug --with-openssl --with-uuid=ossp \
+    export CONFIGURE_CMD="./configure CFLAGS='-O0 -g3 -fsigned-char' --enable-debug --enable-cassert --with-openssl --with-uuid=ossp \
     --with-icu --with-libxml --with-libxslt --with-lz4" && \
     if [ "${PG_VERSION:?}" != "v14" ]; then \
         # zstd is available only from PG15
