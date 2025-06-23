@@ -16,6 +16,15 @@ pub(crate) enum PrevPos {
     Chained(u32),
 }
 
+impl PrevPos {
+	pub fn unwrap_first(&self) -> u32 {
+		match self {
+			Self::First(i) => *i,
+			_ => panic!("not first entry in chain")
+		}
+	}
+}
+
 pub struct OccupiedEntry<'a, 'b, K, V> {
     pub(crate) map: &'b mut CoreHashMap<'a, K, V>,
     pub(crate) _key: K, // The key of the occupied entry
