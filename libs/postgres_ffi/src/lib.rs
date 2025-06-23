@@ -204,12 +204,7 @@ macro_rules! enum_pgversion {
             $($variant $(($crate::$md::$p::$t))?),+
         }
         impl $name {
-            pub fn pg_version(&self) -> u32 {
-                enum_pgversion_dispatch!(self, $name, _ign, {
-                    pgv::bindings::PG_MAJORVERSION_NUM
-                })
-            }
-            pub fn pgversion(&self) -> PgMajorVersion {
+            pub fn pg_version(&self) -> PgMajorVersion {
                 enum_pgversion_dispatch!(self, $name, _ign, {
                     pgv::bindings::MY_PGVERSION
                 })
