@@ -670,7 +670,7 @@ jobs:
                                              ghcr.io/neondatabase/neon:${{ needs.meta.outputs.build-tag }}-bookworm-arm64
 
   compute-node-image-arch:
-    needs: [ check-permissions, build-build-tools-image, meta ]
+    needs: [ check-permissions, meta ]
     if: ${{ contains(fromJSON('["push-main", "pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
@@ -743,7 +743,6 @@ jobs:
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             PG_VERSION=${{ matrix.version.pg }}
             BUILD_TAG=${{ needs.meta.outputs.release-tag || needs.meta.outputs.build-tag }}
-            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-${{ matrix.version.debian }}
             DEBIAN_VERSION=${{ matrix.version.debian }}
           provenance: false
           push: true
@@ -763,7 +762,6 @@ jobs:
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             PG_VERSION=${{ matrix.version.pg }}
             BUILD_TAG=${{ needs.meta.outputs.release-tag || needs.meta.outputs.build-tag }}
-            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-${{ matrix.version.debian }}
             DEBIAN_VERSION=${{ matrix.version.debian }}
           provenance: false
           push: true
