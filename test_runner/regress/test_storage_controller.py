@@ -3643,7 +3643,7 @@ def test_timeline_delete_mid_live_migration(neon_env_builder: NeonEnvBuilder, mi
 
     for ps in env.pageservers:
         ps.allowed_errors.extend(
-            [".*Timeline.* has been deleted.*.*Timeline.*was cancelled and cannot be used"]
+            [".*Timeline.* has been deleted.*", ".*Timeline.*was cancelled and cannot be used"]
         )
 
     tenant_id = TenantId.generate()
