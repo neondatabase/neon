@@ -212,7 +212,7 @@ pub struct NeonStorageControllerConf {
 
     pub timeline_safekeeper_count: Option<i64>,
 
-    pub kick_secondary_downloads: bool,
+    pub kick_secondary_downloads: Option<bool>,
 }
 
 impl NeonStorageControllerConf {
@@ -244,7 +244,7 @@ impl Default for NeonStorageControllerConf {
             use_https_safekeeper_api: false,
             use_local_compute_notifications: true,
             timeline_safekeeper_count: None,
-            kick_secondary_downloads: false,
+            kick_secondary_downloads: None,
         }
     }
 }

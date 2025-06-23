@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use camino::Utf8PathBuf;
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use futures::future::OptionFuture;
 use http_utils::tls_certs::ReloadingCertificateResolver;
 use hyper0::Uri;
@@ -218,7 +218,7 @@ struct Cli {
     /// This speed up migrations by avoiding the default wait for the heatmap download interval.
     /// Primarily useful for testing to reduce test execution time.
     #[cfg(feature = "testing")]
-    #[arg(long, default_value = "true")]
+    #[arg(long, default_value = "true", action=ArgAction::Set)]
     kick_secondary_downloads: bool,
 }
 
