@@ -61,8 +61,10 @@ pub(crate) struct LocationConf {
     /// The detailed shard identity.  This structure is already scoped within
     /// a TenantShardId, but we need the full ShardIdentity to enable calculating
     /// key->shard mappings.
-    // TODO(vlad): Remove this default once all configs have a shard identity on disk.
-    #[serde(default = "ShardIdentity::unsharded")]
+    ///
+    /// NB: we store this even for unsharded tenants, so that we agree with storcon on the intended
+    /// stripe size. Otherwise, a split request that does not specify a stripe size may use a
+    /// different default than storcon, which can lead to incorrect stripe sizes and corruption.
     pub(crate) shard: ShardIdentity,
 
     /// The pan-cluster tenant configuration, the same on all locations

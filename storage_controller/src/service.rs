@@ -467,6 +467,10 @@ pub struct Config {
 
     pub use_local_compute_notifications: bool,
 
+    /// Number of safekeepers to choose for a timeline when creating it.
+    /// Safekeepers will be choosen from different availability zones.
+    pub timeline_safekeeper_count: i64,
+
     pub kick_secondary_downloads: bool,
 }
 

@@ -24,7 +24,7 @@ The value to place in the `aud` claim.
 
 @final
 class ComputeClaimsScope(StrEnum):
-    ADMIN = "admin"
+    ADMIN = "compute_ctl:admin"
 
 
 @final

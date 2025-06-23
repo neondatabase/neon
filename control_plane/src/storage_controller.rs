@@ -632,6 +632,10 @@ impl StorageController {
             args.push("--timelines-onto-safekeepers".to_string());
         }
 
+        if let Some(sk_cnt) = self.config.timeline_safekeeper_count {
+            args.push(format!("--timeline-safekeeper-count={sk_cnt}"));
+        }
+
         println!("Starting storage controller");
 
         background_process::start_process(
