@@ -46,11 +46,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use base64::Engine;
+use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use compute_api::requests::{
     COMPUTE_AUDIENCE, ComputeClaims, ComputeClaimsScope, ConfigurationRequest,
 };
 use compute_api::responses::{
-    ComputeConfig, ComputeCtlConfig, ComputeStatus, ComputeStatusResponse, TlsConfig,
+    ComputeConfig, ComputeCtlConfig, ComputeStatus, ComputeStatusResponse, TerminateResponse,
+    TlsConfig,
 };
 use compute_api::spec::{
     Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PgIdent,
@@ -87,6 +90,7 @@ pub struct EndpointConf {
     external_http_port: u16,
     internal_http_port: u16,
     pg_version: u32,
+    grpc: bool,
     skip_pg_catalog_updates: bool,
     reconfigure_concurrency: usize,
     drop_subscriptions_before_start: bool,
@@ -164,7 +168,7 @@ impl ComputeControlPlane {
                     public_key_use: Some(PublicKeyUse::Signature),
                     key_operations: Some(vec![KeyOperations::Verify]),
                     key_algorithm: Some(KeyAlgorithm::EdDSA),
-                    key_id: Some(base64::encode_config(key_hash, base64::URL_SAFE_NO_PAD)),
+                    key_id: Some(BASE64_URL_SAFE_NO_PAD.encode(key_hash)),
                     x509_url: None::<String>,
                     x509_chain: None::<Vec<String>>,
                     x509_sha1_fingerprint: None::<String>,
@@ -173,7 +177,7 @@ impl ComputeControlPlane {
                 algorithm: AlgorithmParameters::OctetKeyPair(OctetKeyPairParameters {
                     key_type: OctetKeyPairType::OctetKeyPair,
                     curve: EllipticCurve::Ed25519,
-                    x: base64::encode_config(public_key, base64::URL_SAFE_NO_PAD),
+                    x: BASE64_URL_SAFE_NO_PAD.encode(public_key),
                 }),
             }],
         })
@@ -190,6 +194,7 @@ impl ComputeControlPlane {
         internal_http_port: Option<u16>,
         pg_version: u32,
         mode: ComputeMode,
+        grpc: bool,
         skip_pg_catalog_updates: bool,
         drop_subscriptions_before_start: bool,
     ) -> Result<Arc<Endpoint>> {
@@ -224,6 +229,7 @@ impl ComputeControlPlane {
             // we also skip catalog updates in the cloud.
             skip_pg_catalog_updates,
             drop_subscriptions_before_start,
+            grpc,
             reconfigure_concurrency: 1,
             features: vec![],
             cluster: None,
@@ -242,6 +248,7 @@ impl ComputeControlPlane {
                 internal_http_port,
                 pg_port,
                 pg_version,
+                grpc,
                 skip_pg_catalog_updates,
                 drop_subscriptions_before_start,
                 reconfigure_concurrency: 1,
@@ -296,6 +303,8 @@ pub struct Endpoint {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
     pub mode: ComputeMode,
+    /// If true, the endpoint should use gRPC to communicate with Pageservers.
+    pub grpc: bool,
 
     // port and address of the Postgres server and `compute_ctl`'s HTTP APIs
     pub pg_address: SocketAddr,
@@ -333,16 +342,37 @@ pub enum EndpointStatus {
 
 impl Display for EndpointStatus {
     fn fmt(&self, writer: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let s = match self {
+        writer.write_str(match self {
             Self::Running => "running",
             Self::Stopped => "stopped",
             Self::Crashed => "crashed",
             Self::RunningNoPidfile => "running, no pidfile",
-        };
-        write!(writer, "{}", s)
+        })
     }
 }
 
+#[derive(Default, Clone, Copy, clap::ValueEnum)]
+pub enum EndpointTerminateMode {
+    #[default]
+    /// Use pg_ctl stop -m fast
+    Fast,
+    /// Use pg_ctl stop -m immediate
+    Immediate,
+    /// Use /terminate?mode=immediate
+    ImmediateTerminate,
+}
+
+impl std::fmt::Display for EndpointTerminateMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match &self {
+            EndpointTerminateMode::Fast => "fast",
+            EndpointTerminateMode::Immediate => "immediate",
+            EndpointTerminateMode::ImmediateTerminate => "immediate-terminate",
+        })
+    }
+}
+
+/// Protocol used to connect to a Pageserver.
 #[derive(Clone, Copy, Debug)]
 pub enum PageserverProtocol {
     Libpq,
@@ -400,6 +430,7 @@ impl Endpoint {
             mode: conf.mode,
             tenant_id: conf.tenant_id,
             pg_version: conf.pg_version,
+            grpc: conf.grpc,
             skip_pg_catalog_updates: conf.skip_pg_catalog_updates,
             reconfigure_concurrency: conf.reconfigure_concurrency,
             drop_subscriptions_before_start: conf.drop_subscriptions_before_start,
@@ -681,6 +712,7 @@ impl Endpoint {
         shard_stripe_size: usize,
         create_test_user: bool,
         start_timeout: Duration,
+        dev: bool,
     ) -> Result<()> {
         if self.status() == EndpointStatus::Running {
             anyhow::bail!("The endpoint is already running");
@@ -851,6 +883,10 @@ impl Endpoint {
             cmd.args(["--remote-ext-base-url", remote_ext_base_url]);
         }
 
+        if dev {
+            cmd.arg("--dev");
+        }
+
         let child = cmd.spawn()?;
         // set up a scopeguard to kill & wait for the child in case we panic or bail below
         let child = scopeguard::guard(child, |mut child| {
@@ -903,7 +939,7 @@ impl Endpoint {
                         ComputeStatus::Empty
                         | ComputeStatus::ConfigurationPending
                         | ComputeStatus::Configuration
-                        | ComputeStatus::TerminationPending
+                        | ComputeStatus::TerminationPending { .. }
                         | ComputeStatus::Terminated => {
                             bail!("unexpected compute status: {:?}", state.status)
                         }
@@ -1025,8 +1061,27 @@ impl Endpoint {
         }
     }
 
-    pub fn stop(&self, mode: &str, destroy: bool) -> Result<()> {
-        self.pg_ctl(&["-m", mode, "stop"], &None)?;
+    pub async fn stop(
+        &self,
+        mode: EndpointTerminateMode,
+        destroy: bool,
+    ) -> Result<TerminateResponse> {
+        // pg_ctl stop is fast but doesn't allow us to collect LSN. /terminate is
+        // slow, and test runs time out. Solution: special mode "immediate-terminate"
+        // which uses /terminate
+        let response = if let EndpointTerminateMode::ImmediateTerminate = mode {
+            let ip = self.external_http_address.ip();
+            let port = self.external_http_address.port();
+            let url = format!("http://{ip}:{port}/terminate?mode=immediate");
+            let token = self.generate_jwt(Some(ComputeClaimsScope::Admin))?;
+            let request = reqwest::Client::new().post(url).bearer_auth(token);
+            let response = request.send().await.context("/terminate")?;
+            let text = response.text().await.context("/terminate result")?;
+            serde_json::from_str(&text).with_context(|| format!("deserializing {text}"))?
+        } else {
+            self.pg_ctl(&["-m", &mode.to_string(), "stop"], &None)?;
+            TerminateResponse { lsn: None }
+        };
 
         // Also wait for the compute_ctl process to die. It might have some
         // cleanup work to do after postgres stops, like syncing safekeepers,
@@ -1036,7 +1091,7 @@ impl Endpoint {
         // waiting. Sometimes we do *not* want this cleanup: tests intentionally
         // do stop when majority of safekeepers is down, so sync-safekeepers
         // would hang otherwise. This could be a separate flag though.
-        let send_sigterm = destroy || mode == "immediate";
+        let send_sigterm = destroy || !matches!(mode, EndpointTerminateMode::Fast);
         self.wait_for_compute_ctl_to_exit(send_sigterm)?;
         if destroy {
             println!(
@@ -1045,7 +1100,7 @@ impl Endpoint {
             );
             std::fs::remove_dir_all(self.endpoint_path())?;
         }
-        Ok(())
+        Ok(response)
     }
 
     pub fn connstr(&self, user: &str, db_name: &str) -> String {

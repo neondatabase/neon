@@ -23,6 +23,7 @@ use pageserver::deletion_queue::DeletionQueue;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::feature_resolver::FeatureResolver;
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
+use pageserver::page_service::GrpcPageServiceHandler;
 use pageserver::task_mgr::{
     BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
 };
@@ -572,7 +573,8 @@ fn start_pageserver(
         tokio::sync::mpsc::unbounded_channel();
     let deletion_queue_client = deletion_queue.new_client();
     let background_purges = mgr::BackgroundPurges::default();
-    let tenant_manager = BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
+
+    let tenant_manager = mgr::init(
         conf,
         background_purges.clone(),
         TenantSharedResources {
@@ -583,10 +585,10 @@ fn start_pageserver(
             basebackup_prepare_sender,
             feature_resolver,
         },
-        order,
         shutdown_pageserver.clone(),
-    ))?;
+    );
     let tenant_manager = Arc::new(tenant_manager);
+    BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(tenant_manager.clone(), order))?;
 
     let basebackup_cache = BasebackupCache::spawn(
         BACKGROUND_RUNTIME.handle(),
@@ -814,7 +816,7 @@ fn start_pageserver(
     // necessary?
     let mut page_service_grpc = None;
     if let Some(grpc_listener) = grpc_listener {
-        page_service_grpc = Some(page_service::spawn_grpc(
+        page_service_grpc = Some(GrpcPageServiceHandler::spawn(
             tenant_manager.clone(),
             grpc_auth,
             otel_guard.as_ref().map(|g| g.dispatch.clone()),

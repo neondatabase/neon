@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use pageserver_api::config::NodeMetadata;
 use posthog_client_lite::{
     CaptureEvent, FeatureResolverBackgroundLoop, PostHogClientConfig, PostHogEvaluationError,
     PostHogFlagFilterPropertyValue,
@@ -10,6 +11,8 @@ use tokio_util::sync::CancellationToken;
 use utils::id::TenantId;
 
 use crate::{config::PageServerConf, metrics::FEATURE_FLAG_EVALUATION};
+
+const DEFAULT_POSTHOG_REFRESH_INTERVAL: Duration = Duration::from_secs(600);
 
 #[derive(Clone)]
 pub struct FeatureResolver {
@@ -86,7 +89,35 @@ impl FeatureResolver {
                         }
                     }
                 }
-                // TODO: add pageserver URL.
+                // TODO: move this to a background task so that we don't block startup in case of slow disk
+                let metadata_path = conf.metadata_path();
+                match std::fs::read_to_string(&metadata_path) {
+                    Ok(metadata_str) => match serde_json::from_str::<NodeMetadata>(&metadata_str) {
+                        Ok(metadata) => {
+                            properties.insert(
+                                "hostname".to_string(),
+                                PostHogFlagFilterPropertyValue::String(metadata.http_host),
+                            );
+                            if let Some(cplane_region) = metadata.other.get("region_id") {
+                                if let Some(cplane_region) = cplane_region.as_str() {
+                                    // This region contains the cell number
+                                    properties.insert(
+                                        "neon_region".to_string(),
+                                        PostHogFlagFilterPropertyValue::String(
+                                            cplane_region.to_string(),
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to parse metadata.json: {}", e);
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("Failed to read metadata.json: {}", e);
+                    }
+                }
                 Arc::new(properties)
             };
             let fake_tenants = {
@@ -110,10 +141,13 @@ impl FeatureResolver {
                 }
                 tenants
             };
-            // TODO: make refresh period configurable
-            inner
-                .clone()
-                .spawn(handle, Duration::from_secs(60), fake_tenants);
+            inner.clone().spawn(
+                handle,
+                posthog_config
+                    .refresh_interval
+                    .unwrap_or(DEFAULT_POSTHOG_REFRESH_INTERVAL),
+                fake_tenants,
+            );
             Ok(FeatureResolver {
                 inner: Some(inner),
                 internal_properties: Some(internal_properties),

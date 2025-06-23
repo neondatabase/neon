@@ -9,7 +9,7 @@ use std::ops::{Deref, Range};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::layer_manager::LayerManager;
+use super::layer_manager::{LayerManagerLockHolder, LayerManagerReadGuard};
 use super::{
     CompactFlags, CompactOptions, CompactionError, CreateImageLayersError, DurationRecorder,
     GetVectoredError, ImageLayerCreationMode, LastImageLayerCreationStatus, RecordedDuration,
@@ -29,9 +29,7 @@ use pageserver_api::config::tenant_conf_defaults::DEFAULT_CHECKPOINT_DISTANCE;
 use pageserver_api::key::{KEY_SIZE, Key};
 use pageserver_api::keyspace::{KeySpace, ShardedRange};
 use pageserver_api::models::{CompactInfoResponse, CompactKeyRange};
-use pageserver_api::record::NeonWalRecord;
 use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
-use pageserver_api::value::Value;
 use pageserver_compaction::helpers::{fully_contains, overlaps_with};
 use pageserver_compaction::interface::*;
 use serde::Serialize;
@@ -41,6 +39,8 @@ use tracing::{Instrument, debug, error, info, info_span, trace, warn};
 use utils::critical;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
+use wal_decoder::models::record::NeonWalRecord;
+use wal_decoder::models::value::Value;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
@@ -62,7 +62,7 @@ use crate::tenant::storage_layer::{
 use crate::tenant::tasks::log_compaction_error;
 use crate::tenant::timeline::{
     DeltaLayerWriter, ImageLayerCreationOutcome, ImageLayerWriter, IoConcurrency, Layer,
-    ResidentLayer, drop_rlock,
+    ResidentLayer, drop_layer_manager_rlock,
 };
 use crate::tenant::{DeltaLayer, MaybeOffloaded};
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
@@ -314,7 +314,10 @@ impl GcCompactionQueue {
             .unwrap_or(Lsn::INVALID);
 
         let layers = {
-            let guard = timeline.layers.read().await;
+            let guard = timeline
+                .layers
+                .read(LayerManagerLockHolder::GetLayerMapInfo)
+                .await;
             let layer_map = guard.layer_map()?;
             layer_map.iter_historic_layers().collect_vec()
         };
@@ -408,7 +411,10 @@ impl GcCompactionQueue {
         timeline: &Arc<Timeline>,
         lsn: Lsn,
     ) -> Result<u64, CompactionError> {
-        let guard = timeline.layers.read().await;
+        let guard = timeline
+            .layers
+            .read(LayerManagerLockHolder::GetLayerMapInfo)
+            .await;
         let layer_map = guard.layer_map()?;
         let layers = layer_map.iter_historic_layers().collect_vec();
         let mut size = 0;
@@ -851,7 +857,7 @@ impl KeyHistoryRetention {
         }
         let layer_generation;
         {
-            let guard = tline.layers.read().await;
+            let guard = tline.layers.read(LayerManagerLockHolder::Compaction).await;
             if !guard.contains_key(key) {
                 return false;
             }
@@ -1282,7 +1288,10 @@ impl Timeline {
             // We do the repartition on the L0-L1 boundary. All data below the boundary
             // are compacted by L0 with low read amplification, thus making the `repartition`
             // function run fast.
-            let guard = self.layers.read().await;
+            let guard = self
+                .layers
+                .read(LayerManagerLockHolder::GetLayerMapInfo)
+                .await;
             guard
                 .all_persistent_layers()
                 .iter()
@@ -1461,7 +1470,7 @@ impl Timeline {
         let latest_gc_cutoff = self.get_applied_gc_cutoff_lsn();
         let pitr_cutoff = self.gc_info.read().unwrap().cutoffs.time;
 
-        let layers = self.layers.read().await;
+        let layers = self.layers.read(LayerManagerLockHolder::Compaction).await;
         let layers_iter = layers.layer_map()?.iter_historic_layers();
         let (layers_total, mut layers_checked) = (layers_iter.len(), 0);
         for layer_desc in layers_iter {
@@ -1722,7 +1731,10 @@ impl Timeline {
         // are implicitly left visible, because LayerVisibilityHint's default is Visible, and we never modify it here.
         // Note that L0 deltas _can_ be covered by image layers, but we consider them 'visible' because we anticipate that
         // they will be subject to L0->L1 compaction in the near future.
-        let layer_manager = self.layers.read().await;
+        let layer_manager = self
+            .layers
+            .read(LayerManagerLockHolder::GetLayerMapInfo)
+            .await;
         let layer_map = layer_manager.layer_map()?;
 
         let readable_points = {
@@ -1775,7 +1787,7 @@ impl Timeline {
             };
 
             let begin = tokio::time::Instant::now();
-            let phase1_layers_locked = self.layers.read().await;
+            let phase1_layers_locked = self.layers.read(LayerManagerLockHolder::Compaction).await;
             let now = tokio::time::Instant::now();
             stats.read_lock_acquisition_micros =
                 DurationRecorder::Recorded(RecordedDuration(now - begin), now);
@@ -1803,7 +1815,7 @@ impl Timeline {
     /// Level0 files first phase of compaction, explained in the [`Self::compact_legacy`] comment.
     async fn compact_level0_phase1<'a>(
         self: &'a Arc<Self>,
-        guard: tokio::sync::RwLockReadGuard<'a, LayerManager>,
+        guard: LayerManagerReadGuard<'a>,
         mut stats: CompactLevel0Phase1StatsBuilder,
         target_file_size: u64,
         force_compaction_ignore_threshold: bool,
@@ -2029,7 +2041,7 @@ impl Timeline {
             holes
         };
         stats.read_lock_held_compute_holes_micros = stats.read_lock_held_key_sort_micros.till_now();
-        drop_rlock(guard);
+        drop_layer_manager_rlock(guard);
 
         if self.cancel.is_cancelled() {
             return Err(CompactionError::ShuttingDown);
@@ -2469,7 +2481,7 @@ impl Timeline {
 
         // Find the top of the historical layers
         let end_lsn = {
-            let guard = self.layers.read().await;
+            let guard = self.layers.read(LayerManagerLockHolder::Compaction).await;
             let layers = guard.layer_map()?;
 
             let l0_deltas = layers.level0_deltas();
@@ -3008,7 +3020,7 @@ impl Timeline {
         }
         split_key_ranges.sort();
         let all_layers = {
-            let guard = self.layers.read().await;
+            let guard = self.layers.read(LayerManagerLockHolder::Compaction).await;
             let layer_map = guard.layer_map()?;
             layer_map.iter_historic_layers().collect_vec()
         };
@@ -3112,12 +3124,12 @@ impl Timeline {
                 .await?;
             let jobs_len = jobs.len();
             for (idx, job) in jobs.into_iter().enumerate() {
-                info!(
-                    "running enhanced gc bottom-most compaction, sub-compaction {}/{}",
-                    idx + 1,
-                    jobs_len
-                );
+                let sub_compaction_progress = format!("{}/{}", idx + 1, jobs_len);
                 self.compact_with_gc_inner(cancel, job, ctx, yield_for_l0)
+                    .instrument(info_span!(
+                        "sub_compaction",
+                        sub_compaction_progress = sub_compaction_progress
+                    ))
                     .await?;
             }
             if jobs_len == 0 {
@@ -3185,7 +3197,10 @@ impl Timeline {
         // 1. If a layer is in the selection, all layers below it are in the selection.
         // 2. Inferred from (1), for each key in the layer selection, the value can be reconstructed only with the layers in the layer selection.
         let job_desc = {
-            let guard = self.layers.read().await;
+            let guard = self
+                .layers
+                .read(LayerManagerLockHolder::GarbageCollection)
+                .await;
             let layers = guard.layer_map()?;
             let gc_info = self.gc_info.read().unwrap();
             let mut retain_lsns_below_horizon = Vec::new();
@@ -3956,7 +3971,10 @@ impl Timeline {
 
         // First, do a sanity check to ensure the newly-created layer map does not contain overlaps.
         let all_layers = {
-            let guard = self.layers.read().await;
+            let guard = self
+                .layers
+                .read(LayerManagerLockHolder::GarbageCollection)
+                .await;
             let layer_map = guard.layer_map()?;
             layer_map.iter_historic_layers().collect_vec()
         };
@@ -4020,7 +4038,10 @@ impl Timeline {
             let update_guard = self.gc_compaction_layer_update_lock.write().await;
             // Acquiring the update guard ensures current read operations end and new read operations are blocked.
             // TODO: can we use `latest_gc_cutoff` Rcu to achieve the same effect?
-            let mut guard = self.layers.write().await;
+            let mut guard = self
+                .layers
+                .write(LayerManagerLockHolder::GarbageCollection)
+                .await;
             guard
                 .open_mut()?
                 .finish_gc_compaction(&layer_selection, &compact_to, &self.metrics);
@@ -4088,7 +4109,11 @@ impl TimelineAdaptor {
 
     pub async fn flush_updates(&mut self) -> Result<(), CompactionError> {
         let layers_to_delete = {
-            let guard = self.timeline.layers.read().await;
+            let guard = self
+                .timeline
+                .layers
+                .read(LayerManagerLockHolder::Compaction)
+                .await;
             self.layers_to_delete
                 .iter()
                 .map(|x| guard.get_from_desc(x))
@@ -4133,7 +4158,11 @@ impl CompactionJobExecutor for TimelineAdaptor {
     ) -> anyhow::Result<Vec<OwnArc<PersistentLayerDesc>>> {
         self.flush_updates().await?;
 
-        let guard = self.timeline.layers.read().await;
+        let guard = self
+            .timeline
+            .layers
+            .read(LayerManagerLockHolder::Compaction)
+            .await;
         let layer_map = guard.layer_map()?;
 
         let result = layer_map
@@ -4172,7 +4201,11 @@ impl CompactionJobExecutor for TimelineAdaptor {
         // this is a lot more complex than a simple downcast...
         if layer.is_delta() {
             let l = {
-                let guard = self.timeline.layers.read().await;
+                let guard = self
+                    .timeline
+                    .layers
+                    .read(LayerManagerLockHolder::Compaction)
+                    .await;
                 guard.get_from_desc(layer)
             };
             let result = l.download_and_keep_resident(ctx).await?;

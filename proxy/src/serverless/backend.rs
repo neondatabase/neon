@@ -21,9 +21,8 @@ use super::conn_pool_lib::{Client, ConnInfo, EndpointConnPool, GlobalConnPool};
 use super::http_conn_pool::{self, HttpConnPool, Send, poll_http2_client};
 use super::local_conn_pool::{self, EXT_NAME, EXT_SCHEMA, EXT_VERSION, LocalConnPool};
 use crate::auth::backend::local::StaticAuthRules;
-use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
+use crate::auth::backend::{ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo};
 use crate::auth::{self, AuthError};
-use crate::compute;
 use crate::compute_ctl::{
     ComputeCtlError, ExtensionInstallRequest, Privilege, SetRoleGrantsRequest,
 };
@@ -35,7 +34,7 @@ use crate::control_plane::errors::{GetAuthInfoError, WakeComputeError};
 use crate::control_plane::locks::ApiLocks;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::intern::EndpointIdInt;
-use crate::pglb::connect_compute::ConnectMechanism;
+use crate::proxy::connect_compute::ConnectMechanism;
 use crate::proxy::retry::{CouldRetry, ShouldRetryWakeCompute};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::types::{EndpointId, Host, LOCAL_PROXY_SUFFIX};
@@ -69,17 +68,20 @@ impl PoolingBackend {
             self.config.authentication_config.is_vpc_acccess_proxy,
         )?;
 
-        let ep = EndpointIdInt::from(&user_info.endpoint);
-        let rate_limit_config = None;
-        if !self.endpoint_rate_limiter.check(ep, rate_limit_config, 1) {
-            return Err(AuthError::too_many_connections());
-        }
+        access_control.connection_attempt_rate_limit(
+            ctx,
+            &user_info.endpoint,
+            &self.endpoint_rate_limiter,
+        )?;
+
         let role_access = backend.get_role_secret(ctx).await?;
         let Some(secret) = role_access.secret else {
             // If we don't have an authentication secret, for the http flow we can just return an error.
             info!("authentication info not found");
             return Err(AuthError::password_failed(&*user_info.user));
         };
+
+        let ep = EndpointIdInt::from(&user_info.endpoint);
         let auth_outcome = crate::auth::validate_password_and_exchange(
             &self.config.authentication_config.thread_pool,
             ep,
@@ -181,14 +183,15 @@ impl PoolingBackend {
         let conn_id = uuid::Uuid::new_v4();
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
-        let backend = self.auth_backend.as_ref().map(|()| keys);
-        crate::pglb::connect_compute::connect_to_compute(
+        let backend = self.auth_backend.as_ref().map(|()| keys.info);
+        crate::proxy::connect_compute::connect_to_compute(
             ctx,
             &TokioMechanism {
                 conn_id,
                 conn_info,
                 pool: self.pool.clone(),
                 locks: &self.config.connect_compute_locks,
+                keys: keys.keys,
             },
             &backend,
             self.config.wake_compute_retry_config,
@@ -215,18 +218,15 @@ impl PoolingBackend {
         let conn_id = uuid::Uuid::new_v4();
         tracing::Span::current().record("conn_id", display(conn_id));
         debug!(%conn_id, "pool: opening a new connection '{conn_info}'");
-        let backend = self.auth_backend.as_ref().map(|()| ComputeCredentials {
-            info: ComputeUserInfo {
-                user: conn_info.user_info.user.clone(),
-                endpoint: EndpointId::from(format!(
-                    "{}{LOCAL_PROXY_SUFFIX}",
-                    conn_info.user_info.endpoint.normalize()
-                )),
-                options: conn_info.user_info.options.clone(),
-            },
-            keys: crate::auth::backend::ComputeCredentialKeys::None,
+        let backend = self.auth_backend.as_ref().map(|()| ComputeUserInfo {
+            user: conn_info.user_info.user.clone(),
+            endpoint: EndpointId::from(format!(
+                "{}{LOCAL_PROXY_SUFFIX}",
+                conn_info.user_info.endpoint.normalize()
+            )),
+            options: conn_info.user_info.options.clone(),
         });
-        crate::pglb::connect_compute::connect_to_compute(
+        crate::proxy::connect_compute::connect_to_compute(
             ctx,
             &HyperMechanism {
                 conn_id,
@@ -305,12 +305,13 @@ impl PoolingBackend {
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "local_pool: opening a new connection '{conn_info}'");
 
-        let mut node_info = local_backend.node_info.clone();
-
         let (key, jwk) = create_random_jwk();
 
-        let config = node_info
-            .config
+        let mut config = local_backend
+            .node_info
+            .conn_info
+            .to_postgres_client_config();
+        config
             .user(&conn_info.user_info.user)
             .dbname(&conn_info.dbname)
             .set_param(
@@ -322,7 +323,7 @@ impl PoolingBackend {
             );
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let (client, connection) = config.connect(postgres_client::NoTls).await?;
+        let (client, connection) = config.connect(&postgres_client::NoTls).await?;
         drop(pause);
 
         let pid = client.get_process_id();
@@ -336,7 +337,7 @@ impl PoolingBackend {
             connection,
             key,
             conn_id,
-            node_info.aux.clone(),
+            local_backend.node_info.aux.clone(),
         );
 
         {
@@ -495,6 +496,7 @@ struct TokioMechanism {
     pool: Arc<GlobalConnPool<postgres_client::Client, EndpointConnPool<postgres_client::Client>>>,
     conn_info: ConnInfo,
     conn_id: uuid::Uuid,
+    keys: ComputeCredentialKeys,
 
     /// connect_to_compute concurrency lock
     locks: &'static ApiLocks<Host>,
@@ -512,19 +514,20 @@ impl ConnectMechanism for TokioMechanism {
         node_info: &CachedNodeInfo,
         compute_config: &ComputeConfig,
     ) -> Result<Self::Connection, Self::ConnectError> {
-        let host = node_info.config.get_host();
-        let permit = self.locks.get_permit(&host).await?;
+        let permit = self.locks.get_permit(&node_info.conn_info.host).await?;
 
-        let mut config = (*node_info.config).clone();
+        let mut config = node_info.conn_info.to_postgres_client_config();
         let config = config
             .user(&self.conn_info.user_info.user)
             .dbname(&self.conn_info.dbname)
             .connect_timeout(compute_config.timeout);
 
-        let mk_tls =
-            crate::tls::postgres_rustls::MakeRustlsConnect::new(compute_config.tls.clone());
+        if let ComputeCredentialKeys::AuthKeys(auth_keys) = self.keys {
+            config.auth_keys(auth_keys);
+        }
+
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let res = config.connect(mk_tls).await;
+        let res = config.connect(compute_config).await;
         drop(pause);
         let (client, connection) = permit.release_result(res)?;
 
@@ -548,8 +551,6 @@ impl ConnectMechanism for TokioMechanism {
             node_info.aux.clone(),
         ))
     }
-
-    fn update_connect_config(&self, _config: &mut compute::ConnCfg) {}
 }
 
 struct HyperMechanism {
@@ -573,20 +574,20 @@ impl ConnectMechanism for HyperMechanism {
         node_info: &CachedNodeInfo,
         config: &ComputeConfig,
     ) -> Result<Self::Connection, Self::ConnectError> {
-        let host_addr = node_info.config.get_host_addr();
-        let host = node_info.config.get_host();
-        let permit = self.locks.get_permit(&host).await?;
+        let host_addr = node_info.conn_info.host_addr;
+        let host = &node_info.conn_info.host;
+        let permit = self.locks.get_permit(host).await?;
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
 
-        let tls = if node_info.config.get_ssl_mode() == SslMode::Disable {
+        let tls = if node_info.conn_info.ssl_mode == SslMode::Disable {
             None
         } else {
             Some(&config.tls)
         };
 
-        let port = node_info.config.get_port();
-        let res = connect_http2(host_addr, &host, port, config.timeout, tls).await;
+        let port = node_info.conn_info.port;
+        let res = connect_http2(host_addr, host, port, config.timeout, tls).await;
         drop(pause);
         let (client, connection) = permit.release_result(res)?;
 
@@ -609,8 +610,6 @@ impl ConnectMechanism for HyperMechanism {
             node_info.aux.clone(),
         ))
     }
-
-    fn update_connect_config(&self, _config: &mut compute::ConnCfg) {}
 }
 
 async fn connect_http2(

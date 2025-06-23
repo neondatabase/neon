@@ -105,17 +105,17 @@ pg_settings:
         # Neon hot standby ignores pages that are not in the shared_buffers
         recovery_prefetch: "off"
     16:
-      common:
+      common: {}
       replica:
         # prefetching of blocks referenced in WAL doesn't make sense for us
         # Neon hot standby ignores pages that are not in the shared_buffers
         recovery_prefetch: "off"
     15:
-      common:
+      common: {}
       replica:
         # prefetching of blocks referenced in WAL doesn't make sense for us
         # Neon hot standby ignores pages that are not in the shared_buffers
         recovery_prefetch: "off"
     14:
-      common:
-      replica:
+      common: {}
+      replica: {}

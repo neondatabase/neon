@@ -67,12 +67,12 @@ use once_cell::sync::Lazy;
 use pageserver::config::PageServerConf;
 use pageserver::walredo::{PostgresRedoManager, RedoAttemptType};
 use pageserver_api::key::Key;
-use pageserver_api::record::NeonWalRecord;
 use pageserver_api::shard::TenantShardId;
 use tokio::sync::Barrier;
 use tokio::task::JoinSet;
 use utils::id::TenantId;
 use utils::lsn::Lsn;
+use wal_decoder::models::record::NeonWalRecord;
 
 fn bench(c: &mut Criterion) {
     macro_rules! bench_group {

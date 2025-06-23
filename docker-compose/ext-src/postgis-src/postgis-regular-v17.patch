@@ -125,7 +125,7 @@ index 7a36b65..ad78fc7 100644
  DROP SCHEMA tm CASCADE;
 +
 diff --git a/regress/core/tests.mk b/regress/core/tests.mk
-index 9e05244..a63a3e1 100644
+index 90987df..74fe3f1 100644
 --- a/regress/core/tests.mk
 +++ b/regress/core/tests.mk
 @@ -16,14 +16,13 @@ POSTGIS_PGSQL_VERSION=170
@@ -168,16 +168,6 @@ index 9e05244..a63a3e1 100644
  	$(top_srcdir)/regress/core/wkb \
  	$(top_srcdir)/regress/core/wkt \
  	$(top_srcdir)/regress/core/wmsservers \
-@@ -143,8 +139,7 @@ TESTS += \
- 	$(top_srcdir)/regress/core/oriented_envelope \
- 	$(top_srcdir)/regress/core/point_coordinates \
- 	$(top_srcdir)/regress/core/out_geojson \
--  $(top_srcdir)/regress/core/wrapx \
--	$(top_srcdir)/regress/core/computed_columns
-+  $(top_srcdir)/regress/core/wrapx 
- 
- # Slow slow tests
- TESTS_SLOW = \
 diff --git a/regress/loader/tests.mk b/regress/loader/tests.mk
 index ac4f8ad..4bad4fc 100644
 --- a/regress/loader/tests.mk

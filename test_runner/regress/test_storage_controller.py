@@ -88,6 +88,12 @@ def test_storage_controller_smoke(
     neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
     env = neon_env_builder.init_configs()
 
+    # These bubble up from safekeepers
+    for ps in env.pageservers:
+        ps.allowed_errors.extend(
+            [".*Timeline.* has been deleted.*", ".*Timeline.*was cancelled and cannot be used"]
+        )
+
     # Start services by hand so that we can skip a pageserver (this will start + register later)
     env.broker.start()
     env.storage_controller.start()
@@ -2956,7 +2962,7 @@ def test_storage_controller_leadership_transfer_during_split(
         env.storage_controller.allowed_errors.extend(
             [".*Unexpected child shard count.*", ".*Enqueuing background abort.*"]
         )
-        pause_failpoint = "shard-split-pre-complete"
+        pause_failpoint = "shard-split-pre-complete-pause"
         env.storage_controller.configure_failpoints((pause_failpoint, "pause"))
 
         split_fut = executor.submit(
@@ -3003,7 +3009,7 @@ def test_storage_controller_leadership_transfer_during_split(
         env.storage_controller.request(
             "PUT",
             f"http://127.0.0.1:{storage_controller_1_port}/debug/v1/failpoints",
-            json=[{"name": "shard-split-pre-complete", "actions": "off"}],
+            json=[{"name": pause_failpoint, "actions": "off"}],
             headers=env.storage_controller.headers(TokenScope.ADMIN),
         )
 
@@ -3091,6 +3097,58 @@ def test_storage_controller_ps_restarted_during_drain(neon_env_builder: NeonEnvB
 
     # allow for small delay between actually having cancelled and being able reconfigure again
     wait_until(reconfigure_node_again)
+
+
+def test_ps_unavailable_after_delete(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_pageservers = 3
+
+    env = neon_env_builder.init_start()
+
+    def assert_nodes_count(n: int):
+        nodes = env.storage_controller.node_list()
+        assert len(nodes) == n
+
+    # Nodes count must remain the same before deletion
+    assert_nodes_count(3)
+
+    ps = env.pageservers[0]
+    env.storage_controller.node_delete(ps.id)
+
+    # After deletion, the node count must be reduced
+    assert_nodes_count(2)
+
+    # Running pageserver CLI init in a separate thread
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        log.info("Restarting tombstoned pageserver...")
+        ps.stop()
+        ps_start_fut = executor.submit(lambda: ps.start(await_active=False))
+
+        # After deleted pageserver restart, the node count must remain the same
+        assert_nodes_count(2)
+
+        tombstones = env.storage_controller.tombstone_list()
+        assert len(tombstones) == 1 and tombstones[0]["id"] == ps.id
+
+        env.storage_controller.tombstone_delete(ps.id)
+
+        tombstones = env.storage_controller.tombstone_list()
+        assert len(tombstones) == 0
+
+        # Wait for the pageserver start operation to complete.
+        # If it fails with an exception, we try restarting the pageserver since the failure
+        # may be due to the storage controller refusing to register the node.
+        # However, if we get a TimeoutError that means the pageserver is completely hung,
+        # which is an unexpected failure mode that we'll let propagate up.
+        try:
+            ps_start_fut.result(timeout=20)
+        except TimeoutError:
+            raise
+        except Exception:
+            log.info("Restarting deleted pageserver...")
+            ps.restart()
+
+        # Finally, the node can be registered again after tombstone is deleted
+        wait_until(lambda: assert_nodes_count(3))
 
 
 def test_storage_controller_timeline_crud_race(neon_env_builder: NeonEnvBuilder):
@@ -3403,7 +3461,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
 
     assert target.get_safekeeper(fake_id) is None
 
-    assert len(target.get_safekeepers()) == 0
+    start_sks = target.get_safekeepers()
 
     sk_0 = env.safekeepers[0]
 
@@ -3425,7 +3483,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
 
     inserted = target.get_safekeeper(fake_id)
     assert inserted is not None
-    assert target.get_safekeepers() == [inserted]
+    assert target.get_safekeepers() == start_sks + [inserted]
     assert eq_safekeeper_records(body, inserted)
 
     # error out if pk is changed (unexpected)
@@ -3437,7 +3495,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     assert exc.value.status_code == 400
 
     inserted_again = target.get_safekeeper(fake_id)
-    assert target.get_safekeepers() == [inserted_again]
+    assert target.get_safekeepers() == start_sks + [inserted_again]
     assert inserted_again is not None
     assert eq_safekeeper_records(inserted, inserted_again)
 
@@ -3446,7 +3504,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     body["version"] += 1
     target.on_safekeeper_deploy(fake_id, body)
     inserted_now = target.get_safekeeper(fake_id)
-    assert target.get_safekeepers() == [inserted_now]
+    assert target.get_safekeepers() == start_sks + [inserted_now]
     assert inserted_now is not None
 
     assert eq_safekeeper_records(body, inserted_now)
@@ -3455,7 +3513,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     body["https_port"] = 123
     target.on_safekeeper_deploy(fake_id, body)
     inserted_now = target.get_safekeeper(fake_id)
-    assert target.get_safekeepers() == [inserted_now]
+    assert target.get_safekeepers() == start_sks + [inserted_now]
     assert inserted_now is not None
     assert eq_safekeeper_records(body, inserted_now)
     env.storage_controller.consistency_check()
@@ -3464,7 +3522,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     body["https_port"] = None
     target.on_safekeeper_deploy(fake_id, body)
     inserted_now = target.get_safekeeper(fake_id)
-    assert target.get_safekeepers() == [inserted_now]
+    assert target.get_safekeepers() == start_sks + [inserted_now]
     assert inserted_now is not None
     assert eq_safekeeper_records(body, inserted_now)
     env.storage_controller.consistency_check()
@@ -3582,6 +3640,9 @@ def test_timeline_delete_mid_live_migration(neon_env_builder: NeonEnvBuilder, mi
     neon_env_builder.num_pageservers = 2
     env = neon_env_builder.init_configs()
     env.start()
+
+    for ps in env.pageservers:
+        ps.allowed_errors.append(".*Timeline.* has been deleted.*")
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()

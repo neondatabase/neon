@@ -146,6 +146,7 @@ impl NeonControlPlaneClient {
                     public_access_blocked: block_public_connections,
                     vpc_access_blocked: block_vpc_connections,
                 },
+                rate_limits: body.rate_limits,
             })
         }
         .inspect_err(|e| tracing::debug!(error = ?e))
@@ -261,24 +262,18 @@ impl NeonControlPlaneClient {
                 Some(_) => SslMode::Require,
                 None => SslMode::Disable,
             };
-            let host_name = match body.server_name {
-                Some(host) => host,
-                None => host.to_owned(),
+            let host = match body.server_name {
+                Some(host) => host.into(),
+                None => host.into(),
             };
 
-            // Don't set anything but host and port! This config will be cached.
-            // We'll set username and such later using the startup message.
-            // TODO: add more type safety (in progress).
-            let mut config = compute::ConnCfg::new(host_name, port);
-
-            if let Some(addr) = host_addr {
-                config.set_host_addr(addr);
-            }
-
-            config.ssl_mode(ssl_mode);
-
             let node = NodeInfo {
-                config,
+                conn_info: compute::ConnectInfo {
+                    host_addr,
+                    host,
+                    port,
+                    ssl_mode,
+                },
                 aux: body.aux,
             };
 
@@ -318,6 +313,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
             allowed_ips: Arc::new(auth_info.allowed_ips),
             allowed_vpce: Arc::new(auth_info.allowed_vpc_endpoint_ids),
             flags: auth_info.access_blocker_flags,
+            rate_limits: auth_info.rate_limits,
         };
         let role_control = RoleAccessControl {
             secret: auth_info.secret,
@@ -363,6 +359,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
             allowed_ips: Arc::new(auth_info.allowed_ips),
             allowed_vpce: Arc::new(auth_info.allowed_vpc_endpoint_ids),
             flags: auth_info.access_blocker_flags,
+            rate_limits: auth_info.rate_limits,
         };
         let role_control = RoleAccessControl {
             secret: auth_info.secret,

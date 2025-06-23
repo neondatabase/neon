@@ -129,6 +129,18 @@ class NeonAPI:
 
         return cast("dict[str, Any]", resp.json())
 
+    def get_project_limits(self, project_id: str) -> dict[str, Any]:
+        resp = self.__request(
+            "GET",
+            f"/projects/{project_id}/limits",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
     def delete_project(
         self,
         project_id: str,

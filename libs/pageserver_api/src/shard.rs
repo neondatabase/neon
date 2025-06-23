@@ -35,7 +35,7 @@ use std::hash::{Hash, Hasher};
 
 #[doc(inline)]
 pub use ::utils::shard::*;
-use postgres_ffi::relfile_utils::INIT_FORKNUM;
+use postgres_ffi_types::forknum::INIT_FORKNUM;
 use serde::{Deserialize, Serialize};
 
 use crate::key::Key;

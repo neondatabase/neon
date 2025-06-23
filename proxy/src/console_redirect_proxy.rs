@@ -11,13 +11,12 @@ use crate::config::{ProxyConfig, ProxyProtocolV2};
 use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
-use crate::pglb::connect_compute::{TcpMechanism, connect_to_compute};
 use crate::pglb::handshake::{HandshakeData, handshake};
 use crate::pglb::passthrough::ProxyPassthrough;
 use crate::protocol2::{ConnectHeader, ConnectionInfo, read_proxy_protocol};
-use crate::proxy::{
-    ClientRequestError, ErrorSource, prepare_client_connection, run_until_cancelled,
-};
+use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
+use crate::proxy::{ClientRequestError, ErrorSource, prepare_client_connection};
+use crate::util::run_until_cancelled;
 
 pub async fn task_main(
     config: &'static ProxyConfig,
@@ -121,7 +120,7 @@ pub async fn task_main(
                 Ok(Some(p)) => {
                     ctx.set_success();
                     let _disconnect = ctx.log_connect();
-                    match p.proxy_pass(&config.connect_to_compute).await {
+                    match p.proxy_pass().await {
                         Ok(()) => {}
                         Err(ErrorSource::Client(e)) => {
                             error!(
@@ -210,20 +209,20 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     ctx.set_db_options(params.clone());
 
-    let (node_info, user_info, _ip_allowlist) = match backend
+    let (node_info, mut auth_info, user_info) = match backend
         .authenticate(ctx, &config.authentication_config, &mut stream)
         .await
     {
         Ok(auth_result) => auth_result,
         Err(e) => Err(stream.throw_error(e, Some(ctx)).await)?,
     };
+    auth_info.set_startup_params(&params, true);
 
     let node = connect_to_compute(
         ctx,
         &TcpMechanism {
             user_info,
-            params_compat: true,
-            params: &params,
+            auth: auth_info,
             locks: &config.connect_compute_locks,
         },
         &node_info,
@@ -233,22 +232,35 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     .or_else(|e| async { Err(stream.throw_error(e, Some(ctx)).await) })
     .await?;
 
-    let cancellation_handler_clone = Arc::clone(&cancellation_handler);
-    let session = cancellation_handler_clone.get_key();
-
-    session.write_cancel_key(node.cancel_closure.clone())?;
+    let session = cancellation_handler.get_key();
 
     prepare_client_connection(&node, *session.key(), &mut stream);
     let stream = stream.flush_and_into_inner().await?;
 
+    let session_id = ctx.session_id();
+    let (cancel_on_shutdown, cancel) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        session
+            .maintain_cancel_key(
+                session_id,
+                cancel,
+                &node.cancel_closure,
+                &config.connect_to_compute,
+            )
+            .await;
+    });
+
     Ok(Some(ProxyPassthrough {
         client: stream,
-        aux: node.aux.clone(),
+        compute: node.stream,
+
+        aux: node.aux,
         private_link_id: None,
-        compute: node,
-        session_id: ctx.session_id(),
-        cancel: session,
+
+        _cancel_on_shutdown: cancel_on_shutdown,
+
         _req: request_gauge,
         _conn: conn_gauge,
+        _db_conn: node.guage,
     }))
 }

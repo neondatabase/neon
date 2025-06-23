@@ -51,6 +51,7 @@ use secondary::heatmap::{HeatMapTenant, HeatMapTimeline};
 use storage_broker::BrokerClientChannel;
 use timeline::compaction::{CompactionOutcome, GcCompactionQueue};
 use timeline::import_pgdata::ImportingTimeline;
+use timeline::layer_manager::LayerManagerLockHolder;
 use timeline::offload::{OffloadError, offload_timeline};
 use timeline::{
     CompactFlags, CompactOptions, CompactionError, PreviousHeatmap, ShutdownMode, import_pgdata,
@@ -89,7 +90,8 @@ use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::{
     BROKEN_TENANTS_SET, CIRCUIT_BREAKERS_BROKEN, CIRCUIT_BREAKERS_UNBROKEN, CONCURRENT_INITDBS,
     INITDB_RUN_TIME, INITDB_SEMAPHORE_ACQUISITION_TIME, TENANT, TENANT_OFFLOADED_TIMELINES,
-    TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC, remove_tenant_metrics,
+    TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC, TIMELINE_STATE_METRIC,
+    remove_tenant_metrics,
 };
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::LocationMode;
@@ -494,7 +496,7 @@ impl WalRedoManager {
         key: pageserver_api::key::Key,
         lsn: Lsn,
         base_img: Option<(Lsn, bytes::Bytes)>,
-        records: Vec<(Lsn, pageserver_api::record::NeonWalRecord)>,
+        records: Vec<(Lsn, wal_decoder::models::record::NeonWalRecord)>,
         pg_version: u32,
         redo_attempt_type: RedoAttemptType,
     ) -> Result<bytes::Bytes, walredo::Error> {
@@ -544,6 +546,28 @@ pub struct OffloadedTimeline {
 
     /// Part of the `OffloadedTimeline` object's lifecycle: this needs to be set before we drop it
     pub deleted_from_ancestor: AtomicBool,
+
+    _metrics_guard: OffloadedTimelineMetricsGuard,
+}
+
+/// Increases the offloaded timeline count metric when created, and decreases when dropped.
+struct OffloadedTimelineMetricsGuard;
+
+impl OffloadedTimelineMetricsGuard {
+    fn new() -> Self {
+        TIMELINE_STATE_METRIC
+            .with_label_values(&["offloaded"])
+            .inc();
+        Self
+    }
+}
+
+impl Drop for OffloadedTimelineMetricsGuard {
+    fn drop(&mut self) {
+        TIMELINE_STATE_METRIC
+            .with_label_values(&["offloaded"])
+            .dec();
+    }
 }
 
 impl OffloadedTimeline {
@@ -576,6 +600,8 @@ impl OffloadedTimeline {
 
             delete_progress: timeline.delete_progress.clone(),
             deleted_from_ancestor: AtomicBool::new(false),
+
+            _metrics_guard: OffloadedTimelineMetricsGuard::new(),
         })
     }
     fn from_manifest(tenant_shard_id: TenantShardId, manifest: &OffloadedTimelineManifest) -> Self {
@@ -595,6 +621,7 @@ impl OffloadedTimeline {
             archived_at,
             delete_progress: TimelineDeleteProgress::default(),
             deleted_from_ancestor: AtomicBool::new(false),
+            _metrics_guard: OffloadedTimelineMetricsGuard::new(),
         }
     }
     fn manifest(&self) -> OffloadedTimelineManifest {
@@ -1289,7 +1316,7 @@ impl TenantShard {
                         ancestor.is_some()
                             || timeline
                                 .layers
-                                .read()
+                                .read(LayerManagerLockHolder::LoadLayerMap)
                                 .await
                                 .layer_map()
                                 .expect(
@@ -1832,6 +1859,29 @@ impl TenantShard {
             }
         }
 
+        // At this point we've initialized all timelines and are tracking them.
+        // Now compute the layer visibility for all (not offloaded) timelines.
+        let compute_visiblity_for = {
+            let timelines_accessor = self.timelines.lock().unwrap();
+            let mut timelines_offloaded_accessor = self.timelines_offloaded.lock().unwrap();
+
+            timelines_offloaded_accessor.extend(offloaded_timelines_list.into_iter());
+
+            // Before activation, populate each Timeline's GcInfo with information about its children
+            self.initialize_gc_info(&timelines_accessor, &timelines_offloaded_accessor, None);
+
+            timelines_accessor.values().cloned().collect::<Vec<_>>()
+        };
+
+        for tl in compute_visiblity_for {
+            tl.update_layer_visibility().await.with_context(|| {
+                format!(
+                    "failed initial timeline visibility computation {} for tenant {}",
+                    tl.timeline_id, self.tenant_shard_id
+                )
+            })?;
+        }
+
         // Walk through deleted timelines, resume deletion
         for (timeline_id, index_part, remote_timeline_client) in timelines_to_resume_deletions {
             remote_timeline_client
@@ -1850,10 +1900,6 @@ impl TenantShard {
             .await
             .context("resume_deletion")
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
-        }
-        {
-            let mut offloaded_timelines_accessor = self.timelines_offloaded.lock().unwrap();
-            offloaded_timelines_accessor.extend(offloaded_timelines_list.into_iter());
         }
 
         // Stash the preloaded tenant manifest, and upload a new manifest if changed.
@@ -2617,7 +2663,7 @@ impl TenantShard {
         }
         let layer_names = tline
             .layers
-            .read()
+            .read(LayerManagerLockHolder::Testing)
             .await
             .layer_map()
             .unwrap()
@@ -3132,7 +3178,12 @@ impl TenantShard {
 
         for timeline in &compact {
             // Collect L0 counts. Can't await while holding lock above.
-            if let Ok(lm) = timeline.layers.read().await.layer_map() {
+            if let Ok(lm) = timeline
+                .layers
+                .read(LayerManagerLockHolder::Compaction)
+                .await
+                .layer_map()
+            {
                 l0_counts.insert(timeline.timeline_id, lm.level0_deltas().len());
             }
         }
@@ -3416,9 +3467,6 @@ impl TenantShard {
             let timelines_to_activate = timelines_accessor
                 .values()
                 .filter(|timeline| !(timeline.is_broken() || timeline.is_stopping()));
-
-            // Before activation, populate each Timeline's GcInfo with information about its children
-            self.initialize_gc_info(&timelines_accessor, &timelines_offloaded_accessor, None);
 
             // Spawn gc and compaction loops. The loops will shut themselves
             // down when they notice that the tenant is inactive.
@@ -4874,7 +4922,7 @@ impl TenantShard {
         }
         let layer_names = tline
             .layers
-            .read()
+            .read(LayerManagerLockHolder::Testing)
             .await
             .layer_map()
             .unwrap()
@@ -5804,10 +5852,10 @@ pub(crate) mod harness {
     use once_cell::sync::OnceCell;
     use pageserver_api::key::Key;
     use pageserver_api::models::ShardParameters;
-    use pageserver_api::record::NeonWalRecord;
     use pageserver_api::shard::ShardIndex;
     use utils::id::TenantId;
     use utils::logging;
+    use wal_decoder::models::record::NeonWalRecord;
 
     use super::*;
     use crate::deletion_queue::mock::MockDeletionQueue;
@@ -6062,9 +6110,6 @@ mod tests {
     #[cfg(feature = "testing")]
     use pageserver_api::keyspace::KeySpaceRandomAccum;
     use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
-    #[cfg(feature = "testing")]
-    use pageserver_api::record::NeonWalRecord;
-    use pageserver_api::value::Value;
     use pageserver_compaction::helpers::overlaps_with;
     #[cfg(feature = "testing")]
     use rand::SeedableRng;
@@ -6085,6 +6130,9 @@ mod tests {
     use timeline::{CompactOptions, DeltaLayerTestDesc, VersionedKeySpaceQuery};
     use utils::id::TenantId;
     use utils::shard::{ShardCount, ShardNumber};
+    #[cfg(feature = "testing")]
+    use wal_decoder::models::record::NeonWalRecord;
+    use wal_decoder::models::value::Value;
 
     use super::*;
     use crate::DEFAULT_PG_VERSION;
@@ -6944,7 +6992,7 @@ mod tests {
             .await?;
         make_some_layers(tline.as_ref(), Lsn(0x20), &ctx).await?;
 
-        let layer_map = tline.layers.read().await;
+        let layer_map = tline.layers.read(LayerManagerLockHolder::Testing).await;
         let level0_deltas = layer_map
             .layer_map()?
             .level0_deltas()
@@ -7180,7 +7228,7 @@ mod tests {
         let lsn = Lsn(0x10);
         let inserted = bulk_insert_compact_gc(&tenant, &tline, &ctx, lsn, 50, 10000).await?;
 
-        let guard = tline.layers.read().await;
+        let guard = tline.layers.read(LayerManagerLockHolder::Testing).await;
         let lm = guard.layer_map()?;
 
         lm.dump(true, &ctx).await?;
@@ -8208,12 +8256,23 @@ mod tests {
             tline.freeze_and_flush().await?; // force create a delta layer
         }
 
-        let before_num_l0_delta_files =
-            tline.layers.read().await.layer_map()?.level0_deltas().len();
+        let before_num_l0_delta_files = tline
+            .layers
+            .read(LayerManagerLockHolder::Testing)
+            .await
+            .layer_map()?
+            .level0_deltas()
+            .len();
 
         tline.compact(&cancel, EnumSet::default(), &ctx).await?;
 
-        let after_num_l0_delta_files = tline.layers.read().await.layer_map()?.level0_deltas().len();
+        let after_num_l0_delta_files = tline
+            .layers
+            .read(LayerManagerLockHolder::Testing)
+            .await
+            .layer_map()?
+            .level0_deltas()
+            .len();
 
         assert!(
             after_num_l0_delta_files < before_num_l0_delta_files,

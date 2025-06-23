@@ -14,7 +14,7 @@ use std::{io, str};
 
 use anyhow::{Context as _, anyhow, bail};
 use async_compression::tokio::write::GzipEncoder;
-use bytes::{Buf, BufMut as _, BytesMut};
+use bytes::{Buf as _, BufMut as _, BytesMut};
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
 use itertools::Itertools;
@@ -25,12 +25,13 @@ use pageserver_api::config::{
     PageServiceProtocolPipelinedBatchingStrategy, PageServiceProtocolPipelinedExecutionStrategy,
 };
 use pageserver_api::key::rel_block_to_key;
-use pageserver_api::models::{
-    self, PageTraceEvent, PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
+use pageserver_api::models::{PageTraceEvent, TenantState};
+use pageserver_api::pagestream_api::{
+    self, PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
     PagestreamErrorResponse, PagestreamExistsRequest, PagestreamExistsResponse,
     PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetSlruSegmentRequest,
     PagestreamGetSlruSegmentResponse, PagestreamNblocksRequest, PagestreamNblocksResponse,
-    PagestreamProtocolVersion, PagestreamRequest, TenantState,
+    PagestreamProtocolVersion, PagestreamRequest,
 };
 use pageserver_api::reltag::SlruKind;
 use pageserver_api::shard::TenantShardId;
@@ -40,7 +41,7 @@ use postgres_backend::{
     AuthType, PostgresBackend, PostgresBackendReader, QueryError, is_expected_io_error,
 };
 use postgres_ffi::BLCKSZ;
-use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
+use postgres_ffi_types::constants::DEFAULTTABLESPACE_OID;
 use pq_proto::framed::ConnectionError;
 use pq_proto::{BeMessage, FeMessage, FeStartupPacket, RowDescriptor};
 use smallvec::{SmallVec, smallvec};
@@ -167,99 +168,6 @@ pub fn spawn(
     ));
 
     Listener { cancel, task }
-}
-
-/// Spawns a gRPC server for the page service.
-///
-/// TODO: move this onto GrpcPageServiceHandler::spawn().
-/// TODO: this doesn't support TLS. We need TLS reloading via ReloadingCertificateResolver, so we
-/// need to reimplement the TCP+TLS accept loop ourselves.
-pub fn spawn_grpc(
-    tenant_manager: Arc<TenantManager>,
-    auth: Option<Arc<SwappableJwtAuth>>,
-    perf_trace_dispatch: Option<Dispatch>,
-    get_vectored_concurrent_io: GetVectoredConcurrentIo,
-    listener: std::net::TcpListener,
-) -> anyhow::Result<CancellableTask> {
-    let cancel = CancellationToken::new();
-    let ctx = RequestContextBuilder::new(TaskKind::PageRequestHandler)
-        .download_behavior(DownloadBehavior::Download)
-        .perf_span_dispatch(perf_trace_dispatch)
-        .detached_child();
-    let gate = Gate::default();
-
-    // Set up the TCP socket. We take a preconfigured TcpListener to bind the
-    // port early during startup.
-    let incoming = {
-        let _runtime = COMPUTE_REQUEST_RUNTIME.enter(); // required by TcpListener::from_std
-        listener.set_nonblocking(true)?;
-        tonic::transport::server::TcpIncoming::from(tokio::net::TcpListener::from_std(listener)?)
-            .with_nodelay(Some(GRPC_TCP_NODELAY))
-            .with_keepalive(Some(GRPC_TCP_KEEPALIVE_TIME))
-    };
-
-    // Set up the gRPC server.
-    //
-    // TODO: consider tuning window sizes.
-    let mut server = tonic::transport::Server::builder()
-        .http2_keepalive_interval(Some(GRPC_HTTP2_KEEPALIVE_INTERVAL))
-        .http2_keepalive_timeout(Some(GRPC_HTTP2_KEEPALIVE_TIMEOUT))
-        .max_concurrent_streams(Some(GRPC_MAX_CONCURRENT_STREAMS));
-
-    // Main page service stack. Uses a mix of Tonic interceptors and Tower layers:
-    //
-    // * Interceptors: can inspect and modify the gRPC request. Sync code only, runs before service.
-    //
-    // * Layers: allow async code, can run code after the service response. However, only has access
-    //   to the raw HTTP request/response, not the gRPC types.
-    let page_service_handler = GrpcPageServiceHandler {
-        tenant_manager,
-        ctx,
-        gate_guard: gate.enter().expect("gate was just created"),
-        get_vectored_concurrent_io,
-    };
-
-    let observability_layer = ObservabilityLayer;
-    let mut tenant_interceptor = TenantMetadataInterceptor;
-    let mut auth_interceptor = TenantAuthInterceptor::new(auth);
-
-    let page_service = tower::ServiceBuilder::new()
-        // Create tracing span and record request start time.
-        .layer(observability_layer)
-        // Intercept gRPC requests.
-        .layer(tonic::service::InterceptorLayer::new(move |mut req| {
-            // Extract tenant metadata.
-            req = tenant_interceptor.call(req)?;
-            // Authenticate tenant JWT token.
-            req = auth_interceptor.call(req)?;
-            Ok(req)
-        }))
-        .service(proto::PageServiceServer::new(page_service_handler));
-    let server = server.add_service(page_service);
-
-    // Reflection service for use with e.g. grpcurl.
-    let reflection_service = tonic_reflection::server::Builder::configure()
-        .register_encoded_file_descriptor_set(proto::FILE_DESCRIPTOR_SET)
-        .build_v1()?;
-    let server = server.add_service(reflection_service);
-
-    // Spawn server task.
-    let task_cancel = cancel.clone();
-    let task = COMPUTE_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
-        "grpc listener",
-        async move {
-            let result = server
-                .serve_with_incoming_shutdown(incoming, task_cancel.cancelled())
-                .await;
-            if result.is_ok() {
-                // TODO: revisit shutdown logic once page service is implemented.
-                gate.close().await;
-            }
-            result
-        },
-    ));
-
-    Ok(CancellableTask { task, cancel })
 }
 
 impl Listener {
@@ -716,60 +624,6 @@ enum PageStreamError {
     BadRequest(Cow<'static, str>),
 }
 
-impl PageStreamError {
-    /// Converts a PageStreamError into a proto::GetPageResponse with the appropriate status
-    /// code, or a gRPC status if it should terminate the stream (e.g. shutdown). This is a
-    /// convenience method for use from a get_pages gRPC stream.
-    #[allow(clippy::result_large_err)]
-    fn into_get_page_response(
-        self,
-        request_id: page_api::RequestID,
-    ) -> Result<proto::GetPageResponse, tonic::Status> {
-        use page_api::GetPageStatusCode;
-        use tonic::Code;
-
-        // We dispatch to Into<tonic::Status> first, and then map it to a GetPageResponse.
-        let status: tonic::Status = self.into();
-        let status_code = match status.code() {
-            // We shouldn't see an OK status here, because we're emitting an error.
-            Code::Ok => {
-                debug_assert_ne!(status.code(), Code::Ok);
-                return Err(tonic::Status::internal(format!(
-                    "unexpected OK status: {status:?}",
-                )));
-            }
-
-            // These are per-request errors, returned as GetPageResponses.
-            Code::AlreadyExists => GetPageStatusCode::InvalidRequest,
-            Code::DataLoss => GetPageStatusCode::InternalError,
-            Code::FailedPrecondition => GetPageStatusCode::InvalidRequest,
-            Code::InvalidArgument => GetPageStatusCode::InvalidRequest,
-            Code::Internal => GetPageStatusCode::InternalError,
-            Code::NotFound => GetPageStatusCode::NotFound,
-            Code::OutOfRange => GetPageStatusCode::InvalidRequest,
-            Code::ResourceExhausted => GetPageStatusCode::SlowDown,
-
-            // These should terminate the stream.
-            Code::Aborted => return Err(status),
-            Code::Cancelled => return Err(status),
-            Code::DeadlineExceeded => return Err(status),
-            Code::PermissionDenied => return Err(status),
-            Code::Unauthenticated => return Err(status),
-            Code::Unavailable => return Err(status),
-            Code::Unimplemented => return Err(status),
-            Code::Unknown => return Err(status),
-        };
-
-        Ok(page_api::GetPageResponse {
-            request_id,
-            status_code,
-            reason: Some(status.message().to_string()),
-            page_images: Vec::new(),
-        }
-        .into())
-    }
-}
-
 impl From<PageStreamError> for tonic::Status {
     fn from(err: PageStreamError) -> Self {
         use tonic::Code;
@@ -859,7 +713,7 @@ struct BatchedGetPageRequest {
 
 #[cfg(feature = "testing")]
 struct BatchedTestRequest {
-    req: models::PagestreamTestRequest,
+    req: pagestream_api::PagestreamTestRequest,
     timer: SmgrOpTimer,
 }
 
@@ -873,13 +727,13 @@ enum BatchedFeMessage {
         span: Span,
         timer: SmgrOpTimer,
         shard: WeakHandle<TenantManagerTypes>,
-        req: models::PagestreamExistsRequest,
+        req: PagestreamExistsRequest,
     },
     Nblocks {
         span: Span,
         timer: SmgrOpTimer,
         shard: WeakHandle<TenantManagerTypes>,
-        req: models::PagestreamNblocksRequest,
+        req: PagestreamNblocksRequest,
     },
     GetPage {
         span: Span,
@@ -891,13 +745,13 @@ enum BatchedFeMessage {
         span: Span,
         timer: SmgrOpTimer,
         shard: WeakHandle<TenantManagerTypes>,
-        req: models::PagestreamDbSizeRequest,
+        req: PagestreamDbSizeRequest,
     },
     GetSlruSegment {
         span: Span,
         timer: SmgrOpTimer,
         shard: WeakHandle<TenantManagerTypes>,
-        req: models::PagestreamGetSlruSegmentRequest,
+        req: PagestreamGetSlruSegmentRequest,
     },
     #[cfg(feature = "testing")]
     Test {
@@ -2590,10 +2444,9 @@ impl PageServerHandler {
                 .map(|(req, res)| {
                     res.map(|page| {
                         (
-                            PagestreamBeMessage::GetPage(models::PagestreamGetPageResponse {
-                                req: req.req,
-                                page,
-                            }),
+                            PagestreamBeMessage::GetPage(
+                                pagestream_api::PagestreamGetPageResponse { req: req.req, page },
+                            ),
                             req.timer,
                             req.ctx,
                         )
@@ -2660,7 +2513,7 @@ impl PageServerHandler {
                 .map(|(req, res)| {
                     res.map(|()| {
                         (
-                            PagestreamBeMessage::Test(models::PagestreamTestResponse {
+                            PagestreamBeMessage::Test(pagestream_api::PagestreamTestResponse {
                                 req: req.req.clone(),
                             }),
                             req.timer,
@@ -3366,6 +3219,108 @@ pub struct GrpcPageServiceHandler {
 }
 
 impl GrpcPageServiceHandler {
+    /// Spawns a gRPC server for the page service.
+    ///
+    /// TODO: this doesn't support TLS. We need TLS reloading via ReloadingCertificateResolver, so we
+    /// need to reimplement the TCP+TLS accept loop ourselves.
+    pub fn spawn(
+        tenant_manager: Arc<TenantManager>,
+        auth: Option<Arc<SwappableJwtAuth>>,
+        perf_trace_dispatch: Option<Dispatch>,
+        get_vectored_concurrent_io: GetVectoredConcurrentIo,
+        listener: std::net::TcpListener,
+    ) -> anyhow::Result<CancellableTask> {
+        let cancel = CancellationToken::new();
+        let ctx = RequestContextBuilder::new(TaskKind::PageRequestHandler)
+            .download_behavior(DownloadBehavior::Download)
+            .perf_span_dispatch(perf_trace_dispatch)
+            .detached_child();
+        let gate = Gate::default();
+
+        // Set up the TCP socket. We take a preconfigured TcpListener to bind the
+        // port early during startup.
+        let incoming = {
+            let _runtime = COMPUTE_REQUEST_RUNTIME.enter(); // required by TcpListener::from_std
+            listener.set_nonblocking(true)?;
+            tonic::transport::server::TcpIncoming::from(tokio::net::TcpListener::from_std(
+                listener,
+            )?)
+            .with_nodelay(Some(GRPC_TCP_NODELAY))
+            .with_keepalive(Some(GRPC_TCP_KEEPALIVE_TIME))
+        };
+
+        // Set up the gRPC server.
+        //
+        // TODO: consider tuning window sizes.
+        let mut server = tonic::transport::Server::builder()
+            .http2_keepalive_interval(Some(GRPC_HTTP2_KEEPALIVE_INTERVAL))
+            .http2_keepalive_timeout(Some(GRPC_HTTP2_KEEPALIVE_TIMEOUT))
+            .max_concurrent_streams(Some(GRPC_MAX_CONCURRENT_STREAMS));
+
+        // Main page service stack. Uses a mix of Tonic interceptors and Tower layers:
+        //
+        // * Interceptors: can inspect and modify the gRPC request. Sync code only, runs before service.
+        //
+        // * Layers: allow async code, can run code after the service response. However, only has access
+        //   to the raw HTTP request/response, not the gRPC types.
+        let page_service_handler = GrpcPageServiceHandler {
+            tenant_manager,
+            ctx,
+            gate_guard: gate.enter().expect("gate was just created"),
+            get_vectored_concurrent_io,
+        };
+
+        let observability_layer = ObservabilityLayer;
+        let mut tenant_interceptor = TenantMetadataInterceptor;
+        let mut auth_interceptor = TenantAuthInterceptor::new(auth);
+
+        let page_service = tower::ServiceBuilder::new()
+            // Create tracing span and record request start time.
+            .layer(observability_layer)
+            // Intercept gRPC requests.
+            .layer(tonic::service::InterceptorLayer::new(move |mut req| {
+                // Extract tenant metadata.
+                req = tenant_interceptor.call(req)?;
+                // Authenticate tenant JWT token.
+                req = auth_interceptor.call(req)?;
+                Ok(req)
+            }))
+            // Run the page service.
+            .service(
+                proto::PageServiceServer::new(page_service_handler)
+                    // Support both gzip and zstd compression. The client decides what to use.
+                    .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+                    .accept_compressed(tonic::codec::CompressionEncoding::Zstd)
+                    .send_compressed(tonic::codec::CompressionEncoding::Gzip)
+                    .send_compressed(tonic::codec::CompressionEncoding::Zstd),
+            );
+        let server = server.add_service(page_service);
+
+        // Reflection service for use with e.g. grpcurl.
+        let reflection_service = tonic_reflection::server::Builder::configure()
+            .register_encoded_file_descriptor_set(proto::FILE_DESCRIPTOR_SET)
+            .build_v1()?;
+        let server = server.add_service(reflection_service);
+
+        // Spawn server task.
+        let task_cancel = cancel.clone();
+        let task = COMPUTE_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
+            "grpc listener",
+            async move {
+                let result = server
+                    .serve_with_incoming_shutdown(incoming, task_cancel.cancelled())
+                    .await;
+                if result.is_ok() {
+                    // TODO: revisit shutdown logic once page service is implemented.
+                    gate.close().await;
+                }
+                result
+            },
+        ));
+
+        Ok(CancellableTask { task, cancel })
+    }
+
     /// Errors if the request is executed on a non-zero shard. Only shard 0 has a complete view of
     /// relations and their sizes, as well as SLRU segments and similar data.
     #[allow(clippy::result_large_err)]
@@ -3436,8 +3391,8 @@ impl GrpcPageServiceHandler {
 
     /// Processes a GetPage batch request, via the GetPages bidirectional streaming RPC.
     ///
-    /// NB: errors will terminate the stream. Per-request errors should return a GetPageResponse
-    /// with an appropriate status code instead.
+    /// NB: errors returned from here are intercepted in get_pages(), and may be converted to a
+    /// GetPageResponse with an appropriate status code to avoid terminating the stream.
     ///
     /// TODO: get_vectored() currently enforces a batch limit of 32. Postgres will typically send
     /// batches up to effective_io_concurrency = 100. Either we have to accept large batches, or
@@ -3454,7 +3409,7 @@ impl GrpcPageServiceHandler {
         let ctx = ctx.with_scope_page_service_pagestream(&timeline);
 
         // Validate the request, decorate the span, and convert it to a Pagestream request.
-        let req: page_api::GetPageRequest = req.try_into()?;
+        let req = page_api::GetPageRequest::try_from(req)?;
 
         span_record!(
             req_id = %req.request_id,
@@ -3465,7 +3420,7 @@ impl GrpcPageServiceHandler {
         );
 
         let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn(); // hold guard
-        let effective_lsn = match PageServerHandler::effective_request_lsn(
+        let effective_lsn = PageServerHandler::effective_request_lsn(
             &timeline,
             timeline.get_last_record_lsn(),
             req.read_lsn.request_lsn,
@@ -3473,10 +3428,7 @@ impl GrpcPageServiceHandler {
                 .not_modified_since_lsn
                 .unwrap_or(req.read_lsn.request_lsn),
             &latest_gc_cutoff_lsn,
-        ) {
-            Ok(lsn) => lsn,
-            Err(err) => return err.into_get_page_response(req.request_id),
-        };
+        )?;
 
         let mut batch = SmallVec::with_capacity(req.block_numbers.len());
         for blkno in req.block_numbers {
@@ -3533,7 +3485,7 @@ impl GrpcPageServiceHandler {
                         "unexpected response: {resp:?}"
                     )));
                 }
-                Err(err) => return err.err.into_get_page_response(req.request_id),
+                Err(err) => return Err(err.err.into()),
             };
         }
 
@@ -3587,21 +3539,19 @@ impl proto::PageService for GrpcPageServiceHandler {
         Ok(tonic::Response::new(resp.into()))
     }
 
-    // TODO: ensure clients use gzip compression for the stream.
     #[instrument(skip_all, fields(lsn))]
     async fn get_base_backup(
         &self,
         req: tonic::Request<proto::GetBaseBackupRequest>,
     ) -> Result<tonic::Response<Self::GetBaseBackupStream>, tonic::Status> {
-        // Send 64 KB chunks to avoid large memory allocations.
-        const CHUNK_SIZE: usize = 64 * 1024;
+        // Send chunks of 256 KB to avoid large memory allocations. pagebench basebackup shows this
+        // to be the sweet spot where throughput is saturated.
+        const CHUNK_SIZE: usize = 256 * 1024;
 
         let timeline = self.get_request_timeline(&req).await?;
         let ctx = self.ctx.with_scope_timeline(&timeline);
 
-        // Validate the request, decorate the span, and wait for the LSN to arrive.
-        //
-        // TODO: this requires a read LSN, is that ok?
+        // Validate the request and decorate the span.
         Self::ensure_shard_zero(&timeline)?;
         if timeline.is_archived() == Some(true) {
             return Err(tonic::Status::failed_precondition("timeline is archived"));
@@ -3610,6 +3560,7 @@ impl proto::PageService for GrpcPageServiceHandler {
 
         span_record!(lsn=?req.lsn);
 
+        // Wait for the LSN to arrive, if given.
         if let Some(lsn) = req.lsn {
             let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
             timeline
@@ -3628,9 +3579,6 @@ impl proto::PageService for GrpcPageServiceHandler {
         }
 
         // Spawn a task to run the basebackup.
-        //
-        // TODO: do we need to support full base backups, for debugging? This also requires passing
-        // the prev_lsn parameter.
         let span = Span::current();
         let (mut simplex_read, mut simplex_write) = tokio::io::simplex(CHUNK_SIZE);
         let jh = tokio::spawn(async move {
@@ -3639,7 +3587,7 @@ impl proto::PageService for GrpcPageServiceHandler {
                 &timeline,
                 req.lsn,
                 None,
-                false,
+                req.full,
                 req.replica,
                 &ctx,
             )
@@ -3744,9 +3692,16 @@ impl proto::PageService for GrpcPageServiceHandler {
                 .await?
                 .downgrade();
             while let Some(req) = reqs.message().await? {
-                yield Self::get_page(&ctx, &timeline, req, io_concurrency.clone())
+                let req_id = req.request_id;
+                let result = Self::get_page(&ctx, &timeline, req, io_concurrency.clone())
                     .instrument(span.clone()) // propagate request span
-                    .await?
+                    .await;
+                yield match result {
+                    Ok(resp) => resp,
+                    // Convert per-request errors to GetPageResponses as appropriate, or terminate
+                    // the stream with a tonic::Status.
+                    Err(err) => page_api::GetPageResponse::try_from_status(err, req_id)?.into(),
+                }
             }
         };
 

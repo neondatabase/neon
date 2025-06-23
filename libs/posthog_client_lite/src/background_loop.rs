@@ -36,7 +36,10 @@ impl FeatureResolverBackgroundLoop {
         // Main loop of updating the feature flags.
         handle.spawn(
             async move {
-                tracing::info!("Starting PostHog feature resolver");
+                tracing::info!(
+                    "Starting PostHog feature resolver with refresh period: {:?}",
+                    refresh_period
+                );
                 let mut ticker = tokio::time::interval(refresh_period);
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
@@ -55,9 +58,16 @@ impl FeatureResolverBackgroundLoop {
                             continue;
                         }
                     };
-                    let feature_store = FeatureStore::new_with_flags(resp.flags);
-                    this.feature_store.store(Arc::new(feature_store));
-                    tracing::info!("Feature flag updated");
+                    let project_id = this.posthog_client.config.project_id.parse::<u64>().ok();
+                    match FeatureStore::new_with_flags(resp.flags, project_id) {
+                        Ok(feature_store) => {
+                            this.feature_store.store(Arc::new(feature_store));
+                            tracing::info!("Feature flag updated");
+                        }
+                        Err(e) => {
+                            tracing::warn!("Cannot process feature flag spec: {}", e);
+                        }
+                    }
                 }
                 tracing::info!("PostHog feature resolver stopped");
             }

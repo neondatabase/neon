@@ -70,23 +70,15 @@ pub struct InMemoryLayer {
     /// We use a separate lock for the index to reduce the critical section
     /// during which reads cannot be planned.
     ///
-    /// If you need access to both the index and the underlying file at the same time,
-    /// respect the following locking order to avoid deadlocks:
-    /// 1. [`InMemoryLayer::inner`]
-    /// 2. [`InMemoryLayer::index`]
-    ///
-    /// Note that the file backing [`InMemoryLayer::inner`] is append-only,
-    /// so it is not necessary to hold simultaneous locks on index.
-    /// This avoids holding index locks across IO, and is crucial for avoiding read tail latency.
+    /// Note that the file backing [`InMemoryLayer::file`] is append-only,
+    /// so it is not necessary to hold a lock on the index while reading or writing from the file.
     /// In particular:
-    /// 1. It is safe to read and release [`InMemoryLayer::index`] before locking and reading from [`InMemoryLayer::inner`].
-    /// 2. It is safe to write and release [`InMemoryLayer::inner`] before locking and updating [`InMemoryLayer::index`].
+    /// 1. It is safe to read and release [`InMemoryLayer::index`] before reading from [`InMemoryLayer::file`].
+    /// 2. It is safe to write to [`InMemoryLayer::file`] before locking and updating [`InMemoryLayer::index`].
     index: RwLock<BTreeMap<CompactKey, VecMap<Lsn, IndexEntry>>>,
 
-    /// The above fields never change, except for `end_lsn`, which is only set once,
-    /// and `index` (see rationale there).
-    /// All other changing parts are in `inner`, and protected by a mutex.
-    inner: RwLock<InMemoryLayerInner>,
+    /// Wrapper for the actual on-disk file. Uses interior mutability for concurrent reads/writes.
+    file: EphemeralFile,
 
     estimated_in_mem_size: AtomicU64,
 }
@@ -96,18 +88,8 @@ impl std::fmt::Debug for InMemoryLayer {
         f.debug_struct("InMemoryLayer")
             .field("start_lsn", &self.start_lsn)
             .field("end_lsn", &self.end_lsn)
-            .field("inner", &self.inner)
             .finish()
     }
-}
-
-pub struct InMemoryLayerInner {
-    /// The values are stored in a serialized format in this file.
-    /// Each serialized Value is preceded by a 'u32' length field.
-    /// PerSeg::page_versions map stores offsets into this file.
-    file: EphemeralFile,
-
-    resource_units: GlobalResourceUnits,
 }
 
 /// Support the same max blob length as blob_io, because ultimately
@@ -258,12 +240,6 @@ struct IndexEntryUnpacked {
     pos: u64,
 }
 
-impl std::fmt::Debug for InMemoryLayerInner {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("InMemoryLayerInner").finish()
-    }
-}
-
 /// State shared by all in-memory (ephemeral) layers.  Updated infrequently during background ticks in Timeline,
 /// to minimize contention.
 ///
@@ -280,7 +256,7 @@ pub(crate) struct GlobalResources {
 }
 
 // Per-timeline RAII struct for its contribution to [`GlobalResources`]
-struct GlobalResourceUnits {
+pub(crate) struct GlobalResourceUnits {
     // How many dirty bytes have I added to the global dirty_bytes: this guard object is responsible
     // for decrementing the global counter by this many bytes when dropped.
     dirty_bytes: u64,
@@ -292,7 +268,7 @@ impl GlobalResourceUnits {
     // updated when the Timeline "ticks" in the background.
     const MAX_SIZE_DRIFT: u64 = 10 * 1024 * 1024;
 
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         GLOBAL_RESOURCES
             .dirty_layers
             .fetch_add(1, AtomicOrdering::Relaxed);
@@ -304,7 +280,7 @@ impl GlobalResourceUnits {
     ///
     /// Returns the effective layer size limit that should be applied, if any, to keep
     /// the total number of dirty bytes below the configured maximum.
-    fn publish_size(&mut self, size: u64) -> Option<u64> {
+    pub(crate) fn publish_size(&mut self, size: u64) -> Option<u64> {
         let new_global_dirty_bytes = match size.cmp(&self.dirty_bytes) {
             Ordering::Equal => GLOBAL_RESOURCES.dirty_bytes.load(AtomicOrdering::Relaxed),
             Ordering::Greater => {
@@ -349,7 +325,7 @@ impl GlobalResourceUnits {
 
     // Call publish_size if the input size differs from last published size by more than
     // the drift limit
-    fn maybe_publish_size(&mut self, size: u64) {
+    pub(crate) fn maybe_publish_size(&mut self, size: u64) {
         let publish = match size.cmp(&self.dirty_bytes) {
             Ordering::Equal => false,
             Ordering::Greater => size - self.dirty_bytes > Self::MAX_SIZE_DRIFT,
@@ -398,8 +374,8 @@ impl InMemoryLayer {
         }
     }
 
-    pub(crate) fn try_len(&self) -> Option<u64> {
-        self.inner.try_read().map(|i| i.file.len()).ok()
+    pub(crate) fn len(&self) -> u64 {
+        self.file.len()
     }
 
     pub(crate) fn assert_writable(&self) {
@@ -430,7 +406,7 @@ impl InMemoryLayer {
 
     // Look up the keys in the provided keyspace and update
     // the reconstruct state with whatever is found.
-    pub(crate) async fn get_values_reconstruct_data(
+    pub async fn get_values_reconstruct_data(
         self: &Arc<InMemoryLayer>,
         keyspace: KeySpace,
         lsn_range: Range<Lsn>,
@@ -479,14 +455,13 @@ impl InMemoryLayer {
                 }
             }
         }
-        drop(index); // release the lock before we spawn the IO; if it's serial-mode IO we will deadlock on the read().await below
+        drop(index); // release the lock before we spawn the IO
         let read_from = Arc::clone(self);
         let read_ctx = ctx.attached_child();
         reconstruct_state
             .spawn_io(async move {
-                let inner = read_from.inner.read().await;
                 let f = vectored_dio_read::execute(
-                    &inner.file,
+                    &read_from.file,
                     reads
                         .iter()
                         .flat_map(|(_, value_reads)| value_reads.iter().map(|v| &v.read)),
@@ -518,7 +493,6 @@ impl InMemoryLayer {
                 // This is kinda forced for InMemoryLayer because we need to inner.read() anyway,
                 // but it's less obvious for DeltaLayer and ImageLayer. So, keep this explicit
                 // drop for consistency among all three layer types.
-                drop(inner);
                 drop(read_from);
             })
             .await;
@@ -549,12 +523,6 @@ impl std::fmt::Display for InMemoryLayer {
 }
 
 impl InMemoryLayer {
-    /// Get layer size.
-    pub async fn size(&self) -> Result<u64> {
-        let inner = self.inner.read().await;
-        Ok(inner.file.len())
-    }
-
     pub fn estimated_in_mem_size(&self) -> u64 {
         self.estimated_in_mem_size.load(AtomicOrdering::Relaxed)
     }
@@ -587,10 +555,7 @@ impl InMemoryLayer {
             end_lsn: OnceLock::new(),
             opened_at: Instant::now(),
             index: RwLock::new(BTreeMap::new()),
-            inner: RwLock::new(InMemoryLayerInner {
-                file,
-                resource_units: GlobalResourceUnits::new(),
-            }),
+            file,
             estimated_in_mem_size: AtomicU64::new(0),
         })
     }
@@ -599,41 +564,37 @@ impl InMemoryLayer {
     ///
     /// Errors are not retryable, the [`InMemoryLayer`] must be discarded, and not be read from.
     /// The reason why it's not retryable is that the [`EphemeralFile`] writes are not retryable.
+    ///
+    /// This method shall not be called concurrently. We enforce this property via [`crate::tenant::Timeline::write_lock`].
+    ///
     /// TODO: it can be made retryable if we aborted the process on EphemeralFile write errors.
     pub async fn put_batch(
         &self,
         serialized_batch: SerializedValueBatch,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let (base_offset, metadata) = {
-            let mut inner = self.inner.write().await;
-            self.assert_writable();
+        self.assert_writable();
 
-            let base_offset = inner.file.len();
+        let base_offset = self.file.len();
 
-            let SerializedValueBatch {
-                raw,
-                metadata,
-                max_lsn: _,
-                len: _,
-            } = serialized_batch;
+        let SerializedValueBatch {
+            raw,
+            metadata,
+            max_lsn: _,
+            len: _,
+        } = serialized_batch;
 
-            // Write the batch to the file
-            inner.file.write_raw(&raw, ctx).await?;
-            let new_size = inner.file.len();
+        // Write the batch to the file
+        self.file.write_raw(&raw, ctx).await?;
+        let new_size = self.file.len();
 
-            let expected_new_len = base_offset
-                .checked_add(raw.len().into_u64())
-                // write_raw would error if we were to overflow u64.
-                // also IndexEntry and higher levels in
-                //the code don't allow the file to grow that large
-                .unwrap();
-            assert_eq!(new_size, expected_new_len);
-
-            inner.resource_units.maybe_publish_size(new_size);
-
-            (base_offset, metadata)
-        };
+        let expected_new_len = base_offset
+            .checked_add(raw.len().into_u64())
+            // write_raw would error if we were to overflow u64.
+            // also IndexEntry and higher levels in
+            //the code don't allow the file to grow that large
+            .unwrap();
+        assert_eq!(new_size, expected_new_len);
 
         // Update the index with the new entries
         let mut index = self.index.write().await;
@@ -686,10 +647,8 @@ impl InMemoryLayer {
         self.opened_at
     }
 
-    pub(crate) async fn tick(&self) -> Option<u64> {
-        let mut inner = self.inner.write().await;
-        let size = inner.file.len();
-        inner.resource_units.publish_size(size)
+    pub(crate) fn tick(&self) -> Option<u64> {
+        self.file.tick()
     }
 
     pub(crate) async fn put_tombstones(&self, _key_ranges: &[(Range<Key>, Lsn)]) -> Result<()> {
@@ -753,12 +712,6 @@ impl InMemoryLayer {
         gate: &utils::sync::gate::Gate,
         cancel: CancellationToken,
     ) -> Result<Option<(PersistentLayerDesc, Utf8PathBuf)>> {
-        // Grab the lock in read-mode. We hold it over the I/O, but because this
-        // layer is not writeable anymore, no one should be trying to acquire the
-        // write lock on it, so we shouldn't block anyone. See the comment on
-        // [`InMemoryLayer::freeze`] to understand how locking between the append path
-        // and layer flushing works.
-        let inner = self.inner.read().await;
         let index = self.index.read().await;
 
         use l0_flush::Inner;
@@ -793,7 +746,7 @@ impl InMemoryLayer {
 
         match l0_flush_global_state {
             l0_flush::Inner::Direct { .. } => {
-                let file_contents = inner.file.load_to_io_buf(ctx).await?;
+                let file_contents = self.file.load_to_io_buf(ctx).await?;
                 let file_contents = file_contents.freeze();
 
                 for (key, vec_map) in index.iter() {

@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use camino::Utf8PathBuf;
+use pageserver_api::config::{DEFAULT_GRPC_LISTEN_PORT, DEFAULT_HTTP_LISTEN_PORT};
 use pageserver_api::models::{self, TenantInfo, TimelineInfo};
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
@@ -252,9 +253,10 @@ impl PageServerNode {
         // the storage controller
         let metadata_path = datadir.join("metadata.json");
 
-        let (_http_host, http_port) =
+        let http_host = "localhost".to_string();
+        let (_, http_port) =
             parse_host_port(&self.conf.listen_http_addr).expect("Unable to parse listen_http_addr");
-        let http_port = http_port.unwrap_or(9898);
+        let http_port = http_port.unwrap_or(DEFAULT_HTTP_LISTEN_PORT);
 
         let https_port = match self.conf.listen_https_addr.as_ref() {
             Some(https_addr) => {
@@ -265,12 +267,11 @@ impl PageServerNode {
             None => None,
         };
 
-        let mut grpc_host = None;
-        let mut grpc_port = None;
+        let (mut grpc_host, mut grpc_port) = (None, None);
         if let Some(grpc_addr) = &self.conf.listen_grpc_addr {
             let (_, port) = parse_host_port(grpc_addr).expect("Unable to parse listen_grpc_addr");
             grpc_host = Some("localhost".to_string());
-            grpc_port = Some(port.unwrap_or(51051));
+            grpc_port = Some(port.unwrap_or(DEFAULT_GRPC_LISTEN_PORT));
         }
 
         // Intentionally hand-craft JSON: this acts as an implicit format compat test
@@ -283,7 +284,7 @@ impl PageServerNode {
                 postgres_port: self.pg_connection_config.port(),
                 grpc_host,
                 grpc_port,
-                http_host: "localhost".to_string(),
+                http_host,
                 http_port,
                 https_port,
                 other: HashMap::from([(
@@ -644,5 +645,17 @@ impl PageServerNode {
         }
 
         Ok(())
+    }
+    pub async fn timeline_info(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        force_await_logical_size: mgmt_api::ForceAwaitLogicalSize,
+    ) -> anyhow::Result<TimelineInfo> {
+        let timeline_info = self
+            .http_client
+            .timeline_info(tenant_shard_id, timeline_id, force_await_logical_size)
+            .await?;
+        Ok(timeline_info)
     }
 }

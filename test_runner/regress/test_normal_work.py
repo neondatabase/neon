@@ -64,6 +64,11 @@ def test_normal_work(
     """
 
     neon_env_builder.num_safekeepers = num_safekeepers
+
+    if safekeeper_proto_version == 2:
+        neon_env_builder.storage_controller_config = {
+            "timelines_onto_safekeepers": False,
+        }
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 

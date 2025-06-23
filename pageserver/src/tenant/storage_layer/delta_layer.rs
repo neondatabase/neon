@@ -44,7 +44,6 @@ use pageserver_api::key::{DBDIR_KEY, KEY_SIZE, Key};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
-use pageserver_api::value::Value;
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 use tokio_epoll_uring::IoBuf;
@@ -54,6 +53,7 @@ use utils::bin_ser::BeSer;
 use utils::bin_ser::SerializeError;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
+use wal_decoder::models::value::Value;
 
 use super::errors::PutError;
 use super::{
@@ -1306,7 +1306,7 @@ impl DeltaLayerInner {
                     // is it an image or will_init walrecord?
                     // FIXME: this could be handled by threading the BlobRef to the
                     // VectoredReadBuilder
-                    let will_init = pageserver_api::value::ValueBytes::will_init(&data)
+                    let will_init = wal_decoder::models::value::ValueBytes::will_init(&data)
                         .inspect_err(|_e| {
                             #[cfg(feature = "testing")]
                             tracing::error!(data=?utils::Hex(&data), err=?_e, %key, %lsn, "failed to parse will_init out of serialized value");
@@ -1369,7 +1369,7 @@ impl DeltaLayerInner {
                     format!(" img {} bytes", img.len())
                 }
                 Value::WalRecord(rec) => {
-                    let wal_desc = pageserver_api::record::describe_wal_record(&rec)?;
+                    let wal_desc = wal_decoder::models::record::describe_wal_record(&rec)?;
                     format!(
                         " rec {} bytes will_init: {} {}",
                         buf.len(),
@@ -1624,7 +1624,6 @@ pub(crate) mod test {
 
     use bytes::Bytes;
     use itertools::MinMaxResult;
-    use pageserver_api::value::Value;
     use rand::prelude::{SeedableRng, SliceRandom, StdRng};
     use rand::{Rng, RngCore};
 
@@ -1635,6 +1634,7 @@ pub(crate) mod test {
     use crate::tenant::disk_btree::tests::TestDisk;
     use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
     use crate::tenant::storage_layer::{Layer, ResidentLayer};
+    use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
     use crate::tenant::{TenantShard, Timeline};
 
     /// Construct an index for a fictional delta layer and and then
@@ -1987,7 +1987,7 @@ pub(crate) mod test {
     #[tokio::test]
     async fn copy_delta_prefix_smoke() {
         use bytes::Bytes;
-        use pageserver_api::record::NeonWalRecord;
+        use wal_decoder::models::record::NeonWalRecord;
 
         let h = crate::tenant::harness::TenantHarness::create("truncate_delta_smoke")
             .await
@@ -2002,7 +2002,7 @@ pub(crate) mod test {
 
         let initdb_layer = timeline
             .layers
-            .read()
+            .read(crate::tenant::timeline::layer_manager::LayerManagerLockHolder::Testing)
             .await
             .likely_resident_layers()
             .next()
@@ -2078,7 +2078,7 @@ pub(crate) mod test {
 
         let new_layer = timeline
             .layers
-            .read()
+            .read(LayerManagerLockHolder::Testing)
             .await
             .likely_resident_layers()
             .find(|&x| x != &initdb_layer)

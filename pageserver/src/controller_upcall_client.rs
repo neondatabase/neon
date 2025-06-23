@@ -159,14 +159,7 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
                 Ok(m) => {
                     // Since we run one time at startup, be generous in our logging and
                     // dump all metadata.
-                    tracing::info!(
-                        "Loaded node metadata: postgres {}:{}, http {}:{}, other fields: {:?}",
-                        m.postgres_host,
-                        m.postgres_port,
-                        m.http_host,
-                        m.http_port,
-                        m.other
-                    );
+                    tracing::info!("Loaded node metadata: {m}");
 
                     let az_id = {
                         let az_id_from_metadata = m

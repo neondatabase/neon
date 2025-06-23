@@ -28,6 +28,7 @@ axum.workspace = true
 http.workspace = true
 metrics.workspace = true
 tonic.workspace = true
+url.workspace = true
 
 pageserver_client.workspace = true
 pageserver_client_grpc.workspace = true

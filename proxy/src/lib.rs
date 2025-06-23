@@ -75,6 +75,7 @@
 pub mod binary;
 
 mod auth;
+mod batch;
 mod cache;
 mod cancellation;
 mod compute;
@@ -106,4 +107,5 @@ mod tls;
 mod types;
 mod url;
 mod usage_metrics;
+mod util;
 mod waiters;

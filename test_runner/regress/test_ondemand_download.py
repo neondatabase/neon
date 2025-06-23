@@ -671,6 +671,12 @@ def test_layer_download_cancelled_by_config_location(neon_env_builder: NeonEnvBu
     """
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
 
+    # On the new mode, the test runs into a cancellation issue, i.e. the walproposer can't shut down
+    # as it is hang-waiting on the timeline_checkpoint call in WalIngest::new.
+    neon_env_builder.storage_controller_config = {
+        "timelines_onto_safekeepers": False,
+    }
+
     # turn off background tasks so that they don't interfere with the downloads
     env = neon_env_builder.init_start(
         initial_tenant_conf={

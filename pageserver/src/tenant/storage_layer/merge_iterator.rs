@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use anyhow::bail;
 use pageserver_api::key::Key;
-use pageserver_api::value::Value;
 use utils::lsn::Lsn;
+use wal_decoder::models::value::Value;
 
 use super::delta_layer::{DeltaLayerInner, DeltaLayerIterator};
 use super::image_layer::{ImageLayerInner, ImageLayerIterator};
@@ -402,9 +402,9 @@ impl<'a> MergeIterator<'a> {
 mod tests {
     use itertools::Itertools;
     use pageserver_api::key::Key;
-    #[cfg(feature = "testing")]
-    use pageserver_api::record::NeonWalRecord;
     use utils::lsn::Lsn;
+    #[cfg(feature = "testing")]
+    use wal_decoder::models::record::NeonWalRecord;
 
     use super::*;
     use crate::DEFAULT_PG_VERSION;
@@ -436,7 +436,6 @@ mod tests {
     #[tokio::test]
     async fn merge_in_between() {
         use bytes::Bytes;
-        use pageserver_api::value::Value;
 
         let harness = TenantHarness::create("merge_iterator_merge_in_between")
             .await
@@ -501,7 +500,6 @@ mod tests {
     #[tokio::test]
     async fn delta_merge() {
         use bytes::Bytes;
-        use pageserver_api::value::Value;
 
         let harness = TenantHarness::create("merge_iterator_delta_merge")
             .await
@@ -578,7 +576,6 @@ mod tests {
     #[tokio::test]
     async fn delta_image_mixed_merge() {
         use bytes::Bytes;
-        use pageserver_api::value::Value;
 
         let harness = TenantHarness::create("merge_iterator_delta_image_mixed_merge")
             .await
