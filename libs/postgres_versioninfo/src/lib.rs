@@ -16,6 +16,7 @@ pub enum PgMajorVersion {
 }
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+#[repr(transparent)]
 pub struct PgVersionId(u32);
 
 impl PgVersionId {
