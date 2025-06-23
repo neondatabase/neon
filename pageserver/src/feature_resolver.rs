@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use arc_swap::ArcSwap;
 use pageserver_api::config::NodeMetadata;
 use posthog_client_lite::{
     CaptureEvent, FeatureResolverBackgroundLoop, PostHogClientConfig, PostHogEvaluationError,
@@ -18,6 +19,7 @@ const DEFAULT_POSTHOG_REFRESH_INTERVAL: Duration = Duration::from_secs(600);
 pub struct FeatureResolver {
     inner: Option<Arc<FeatureResolverBackgroundLoop>>,
     internal_properties: Option<Arc<HashMap<String, PostHogFlagFilterPropertyValue>>>,
+    force_overrides_for_testing: Arc<ArcSwap<HashMap<String, String>>>,
 }
 
 impl FeatureResolver {
@@ -25,6 +27,7 @@ impl FeatureResolver {
         Self {
             inner: None,
             internal_properties: None,
+            force_overrides_for_testing: Arc::new(ArcSwap::new(Arc::new(HashMap::new()))),
         }
     }
 
@@ -151,11 +154,13 @@ impl FeatureResolver {
             Ok(FeatureResolver {
                 inner: Some(inner),
                 internal_properties: Some(internal_properties),
+                force_overrides_for_testing: Arc::new(ArcSwap::new(Arc::new(HashMap::new()))),
             })
         } else {
             Ok(FeatureResolver {
                 inner: None,
                 internal_properties: None,
+                force_overrides_for_testing: Arc::new(ArcSwap::new(Arc::new(HashMap::new()))),
             })
         }
     }
@@ -195,6 +200,11 @@ impl FeatureResolver {
         flag_key: &str,
         tenant_id: TenantId,
     ) -> Result<String, PostHogEvaluationError> {
+        let force_overrides = self.force_overrides_for_testing.load();
+        if let Some(value) = force_overrides.get(flag_key) {
+            return Ok(value.clone());
+        }
+
         if let Some(inner) = &self.inner {
             let res = inner.feature_store().evaluate_multivariate(
                 flag_key,
@@ -233,6 +243,15 @@ impl FeatureResolver {
         flag_key: &str,
         tenant_id: TenantId,
     ) -> Result<(), PostHogEvaluationError> {
+        let force_overrides = self.force_overrides_for_testing.load();
+        if let Some(value) = force_overrides.get(flag_key) {
+            return if value == "true" {
+                Ok(())
+            } else {
+                Err(PostHogEvaluationError::NoConditionGroupMatched)
+            };
+        }
+
         if let Some(inner) = &self.inner {
             let res = inner.feature_store().evaluate_boolean(
                 flag_key,
@@ -264,8 +283,22 @@ impl FeatureResolver {
             inner.feature_store().is_feature_flag_boolean(flag_key)
         } else {
             Err(PostHogEvaluationError::NotAvailable(
-                "PostHog integration is not enabled".to_string(),
+                "PostHog integration is not enabled, cannot auto-determine the flag type"
+                    .to_string(),
             ))
         }
+    }
+
+    /// Force override a feature flag for testing. This is only for testing purposes. Assume the caller only call it
+    /// from a single thread so it won't race.
+    pub fn force_override_for_testing(&self, flag_key: &str, value: Option<&str>) {
+        let mut force_overrides = self.force_overrides_for_testing.load().as_ref().clone();
+        if let Some(value) = value {
+            force_overrides.insert(flag_key.to_string(), value.to_string());
+        } else {
+            force_overrides.remove(flag_key);
+        }
+        self.force_overrides_for_testing
+            .store(Arc::new(force_overrides));
     }
 }

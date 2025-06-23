@@ -59,6 +59,7 @@ use crate::config::PageServerConf;
 use crate::context;
 use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
 use crate::deletion_queue::DeletionQueueClient;
+use crate::feature_resolver::FeatureResolver;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::LocationConf;
@@ -107,6 +108,7 @@ pub struct State {
     deletion_queue_client: DeletionQueueClient,
     secondary_controller: SecondaryController,
     latest_utilization: tokio::sync::Mutex<Option<(std::time::Instant, bytes::Bytes)>>,
+    feature_resolver: FeatureResolver,
 }
 
 impl State {
@@ -120,6 +122,7 @@ impl State {
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
         deletion_queue_client: DeletionQueueClient,
         secondary_controller: SecondaryController,
+        feature_resolver: FeatureResolver,
     ) -> anyhow::Result<Self> {
         let allowlist_routes = &[
             "/v1/status",
@@ -140,6 +143,7 @@ impl State {
             deletion_queue_client,
             secondary_controller,
             latest_utilization: Default::default(),
+            feature_resolver,
         })
     }
 }
@@ -3675,8 +3679,8 @@ async fn tenant_evaluate_feature_flag(
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
-    let flag: String = must_parse_query_param(&request, "flag")?;
-    let as_type: String = must_parse_query_param(&request, "as")?;
+    let flag: String = parse_request_param(&request, "flag_key")?;
+    let as_type: Option<String> = parse_query_param(&request, "as")?;
 
     let state = get_state(&request);
 
@@ -3685,11 +3689,11 @@ async fn tenant_evaluate_feature_flag(
             .tenant_manager
             .get_attached_tenant_shard(tenant_shard_id)?;
         let properties = tenant.feature_resolver.collect_properties(tenant_shard_id.tenant_id);
-        if as_type == "boolean" {
+        if as_type.as_deref() == Some("boolean") {
             let result = tenant.feature_resolver.evaluate_boolean(&flag, tenant_shard_id.tenant_id);
             let result = result.map(|_| true).map_err(|e| e.to_string());
             json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
-        } else if as_type == "multivariate" {
+        } else if as_type.as_deref() == Some("multivariate") {
             let result = tenant.feature_resolver.evaluate_multivariate(&flag, tenant_shard_id.tenant_id).map_err(|e| e.to_string());
             json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
         } else {
@@ -3707,6 +3711,35 @@ async fn tenant_evaluate_feature_flag(
     }
     .instrument(info_span!("tenant_evaluate_feature_flag", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
     .await
+}
+
+async fn force_override_feature_flag_for_testing_put(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+
+    let flag: String = parse_request_param(&request, "flag_key")?;
+    let value: String = must_parse_query_param(&request, "value")?;
+    let state = get_state(&request);
+    state
+        .feature_resolver
+        .force_override_for_testing(&flag, Some(&value));
+    json_response(StatusCode::OK, ())
+}
+
+async fn force_override_feature_flag_for_testing_delete(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+
+    let flag: String = parse_request_param(&request, "flag_key")?;
+    let state = get_state(&request);
+    state
+        .feature_resolver
+        .force_override_for_testing(&flag, None);
+    json_response(StatusCode::OK, ())
 }
 
 /// Common functionality of all the HTTP API handlers.
@@ -4085,8 +4118,14 @@ pub fn make_router(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/activate_post_import",
             |r| api_handler(r, activate_post_import_handler),
         )
-        .get("/v1/tenant/:tenant_shard_id/feature_flag", |r| {
+        .get("/v1/tenant/:tenant_shard_id/feature_flag/:flag_key", |r| {
             api_handler(r, tenant_evaluate_feature_flag)
+        })
+        .put("/v1/feature_flag/:flag_key", |r| {
+            testing_api_handler("force override feature flag - put", r, force_override_feature_flag_for_testing_put)
+        })
+        .delete("/v1/feature_flag/:flag_key", |r| {
+            testing_api_handler("force override feature flag - delete", r, force_override_feature_flag_for_testing_delete)
         })
         .any(handler_404))
 }
