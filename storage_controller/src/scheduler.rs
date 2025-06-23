@@ -842,10 +842,20 @@ impl Scheduler {
             azs.retain(|_, i| i.scheduleable);
         }
 
+        // We will multiply up shard counts by the max node count for scoring, before dividing
+        // by per-node max node count, to get a normalized score that doesn't collapse to zero
+        // when the absolute shard count is less than the node count.
+        let max_node_count = azs.values().map(|i| i.node_count).max().unwrap_or(0);
+
         // Find the AZ with the lowest number of shards currently allocated
         Some(
             azs.into_iter()
-                .min_by_key(|i| (i.1.home_shard_count / i.1.node_count, i.0))
+                .min_by_key(|i| {
+                    (
+                        (i.1.home_shard_count * max_node_count) / i.1.node_count,
+                        i.0,
+                    )
+                })
                 .unwrap()
                 .0
                 .clone(),
