@@ -2,7 +2,7 @@
 
 ## Setup
 
-In the root of the proxy folder, run:
+In the root of the repo folder, run:
 
 Let's create self-signed certificate by running:
 ```sh
@@ -11,14 +11,13 @@ openssl req -new -x509 -days 365 -nodes -text -out server.crt -keyout server.key
 
 bring up the database using docker compose
 ```sh
-docker compose up -f subzero/docker-compose.yml -d
+docker compose up -f proxy/subzero/docker-compose.yml -d
 ```
 
 bring up the local proxy (but disable pg_session_jwt extension installation)
 ```sh
 cargo run --bin local_proxy -- \
   --disable-pg-session-jwt \
-  --config-path proxy/subzero/local_proxy.json \
   --http 0.0.0.0:7432
 ```
 

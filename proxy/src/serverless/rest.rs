@@ -4,6 +4,7 @@ use bytes::Bytes;
 use http::Method;
 use http::header::AUTHORIZATION;
 use http_body_util::combinators::BoxBody;
+use http_body_util::Full;
 use http_body_util::{BodyExt};
 use http_utils::error::ApiError;
 use hyper::body::Incoming;
@@ -611,7 +612,7 @@ async fn handle_rest_inner(
 
     let local_proxy_uri = ::http::Uri::from_static("http://proxy.local/sql");
 
-    let (mut parts, body) = request.into_parts();
+    let (parts, _originial_body) = request.into_parts();
     let mut req = Request::builder().method(Method::POST).uri(local_proxy_uri);
 
     // todo(conradludgate): maybe auth-broker should parse these and re-serialize
@@ -630,14 +631,18 @@ async fn handle_rest_inner(
     req = req.header(&NEON_REQUEST_ID, uuid_to_header_value(ctx.session_id()));
     req = req.header(&CONN_STRING, HeaderValue::from_str(connection_string).unwrap());
     
-    // let new_body: String = json!({
-    //     "query": "select 1 as one",
-    //     "params": [],
-    // }).to_string();
+    let body: String = json!({
+        "query": "select 1 as one",
+        "params": [],
+    }).to_string();
+
+    let body_boxed = Full::new(Bytes::from(body))
+        .map_err(|never| match never {}) // Convert Infallible to hyper::Error
+        .boxed();
     
     
     let req = req
-        .body(body)
+        .body(body_boxed)
         .expect("all headers and params received via hyper should be valid for request");
 
     // todo: map body to count egress
