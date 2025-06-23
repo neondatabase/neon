@@ -471,6 +471,7 @@ pub struct Config {
     /// Safekeepers will be choosen from different availability zones.
     pub timeline_safekeeper_count: i64,
 
+    #[cfg(feature = "testing")]
     pub kick_secondary_downloads: bool,
 }
 
@@ -8359,8 +8360,8 @@ impl Service {
                             "Skipping migration of {tenant_shard_id} to {node} because secondary isn't ready: {progress:?}"
                         );
 
-                        if self.config.kick_secondary_downloads && progress.heatmap_mtime.is_none()
-                        {
+                        #[cfg(feature = "testing")]
+                        if progress.heatmap_mtime.is_none() {
                             // No heatmap might mean the attached location has never uploaded one, or that
                             // the secondary download hasn't happened yet.  This is relatively unusual in the field,
                             // but fairly common in tests.
@@ -8384,7 +8385,13 @@ impl Service {
     /// happens on multi-minute timescales in the field, which is fine because optimisation is meant
     /// to be a lazy background thing. However, when testing, it is not practical to wait around, so
     /// we have this helper to move things along faster.
+    #[cfg(feature = "testing")]
     async fn kick_secondary_download(&self, tenant_shard_id: TenantShardId) {
+        if !self.config.kick_secondary_downloads {
+            // No-op if kick_secondary_downloads functionaliuty is not configured
+            return;
+        }
+
         let (attached_node, secondaries) = {
             let locked = self.inner.read().unwrap();
             let Some(shard) = locked.tenants.get(&tenant_shard_id) else {

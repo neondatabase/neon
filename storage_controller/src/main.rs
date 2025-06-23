@@ -217,7 +217,8 @@ struct Cli {
     /// When set, actively checks and initiates heatmap downloads/uploads during reconciliation.
     /// This speed up migrations by avoiding the default wait for the heatmap download interval.
     /// Primarily useful for testing to reduce test execution time.
-    #[arg(long, default_value = "false")]
+    #[cfg(feature = "testing")]
+    #[arg(long, default_value = "true")]
     kick_secondary_downloads: bool,
 }
 
@@ -451,6 +452,7 @@ async fn async_main() -> anyhow::Result<()> {
         timelines_onto_safekeepers: args.timelines_onto_safekeepers,
         use_local_compute_notifications: args.use_local_compute_notifications,
         timeline_safekeeper_count: args.timeline_safekeeper_count,
+        #[cfg(feature = "testing")]
         kick_secondary_downloads: args.kick_secondary_downloads,
     };
 

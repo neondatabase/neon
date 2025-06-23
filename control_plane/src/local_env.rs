@@ -244,7 +244,7 @@ impl Default for NeonStorageControllerConf {
             use_https_safekeeper_api: false,
             use_local_compute_notifications: true,
             timeline_safekeeper_count: None,
-            kick_secondary_downloads: true,
+            kick_secondary_downloads: false,
         }
     }
 }
