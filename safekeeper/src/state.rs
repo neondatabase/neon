@@ -7,6 +7,7 @@ use std::time::SystemTime;
 
 use anyhow::{Result, bail};
 use postgres_ffi::WAL_SEGMENT_SIZE;
+use postgres_versioninfo::PgVersionId;
 use safekeeper_api::membership::Configuration;
 use safekeeper_api::models::{TimelineMembershipSwitchResponse, TimelineTermBumpResponse};
 use safekeeper_api::{INITIAL_TERM, ServerInfo, Term};
@@ -149,7 +150,7 @@ impl TimelinePersistentState {
             &TenantTimelineId::empty(),
             Configuration::empty(),
             ServerInfo {
-                pg_version: 170000, /* Postgres server version (major * 10000) */
+                pg_version: PgVersionId::from_full_pg_version(170000), /* Postgres server version (major * 10000) */
                 system_id: 0,       /* Postgres system identifier */
                 wal_seg_size: WAL_SEGMENT_SIZE as u32,
             },

@@ -1,3 +1,4 @@
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
@@ -14,7 +15,51 @@ pub enum PgMajorVersion {
     // !!! When you add a new PgMajorVersion, don't forget to update PgMajorVersion::ALL
 }
 
-pub type PgVersionId = u32;
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+pub struct PgVersionId(u32);
+
+impl PgVersionId {
+    pub const UNKNOWN: PgVersionId = PgVersionId(0);
+
+    pub fn from_full_pg_version(version: u32) -> PgVersionId {
+        match version {
+            0 => PgVersionId(version), // unknown version
+            140000..180000 => PgVersionId(version),
+            _ => panic!("Invalid full PostgreSQL version ID {version}"),
+        }
+    }
+}
+
+impl Display for PgVersionId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        u32::fmt(&self.0, f)
+    }
+}
+
+impl Serialize for PgVersionId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        u32::serialize(&self.0, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PgVersionId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        u32::deserialize(deserializer).map(PgVersionId)
+    }
+
+    fn deserialize_in_place<D>(deserializer: D, place: &mut Self) -> Result<(), D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        u32::deserialize_in_place(deserializer, &mut place.0)
+    }
+}
 
 impl PgMajorVersion {
     /// Get the numerical representation of the represented Major Version
@@ -89,13 +134,13 @@ impl TryFrom<PgVersionId> for PgMajorVersion {
     type Error = InvalidPgVersion;
 
     fn try_from(value: PgVersionId) -> Result<Self, Self::Error> {
-        Ok(match value / 10000 {
+        Ok(match value.0 / 10000 {
             14 => PgMajorVersion::PG14,
             15 => PgMajorVersion::PG15,
             16 => PgMajorVersion::PG16,
             17 => PgMajorVersion::PG17,
             _ => {
-                panic!("invalid pg version ID {value}");
+                panic!("Unknown PgVersionId: {value}");
             }
         })
     }
@@ -103,7 +148,7 @@ impl TryFrom<PgVersionId> for PgMajorVersion {
 
 impl From<PgMajorVersion> for PgVersionId {
     fn from(value: PgMajorVersion) -> Self {
-        ((value as u32) * 10000) as PgVersionId
+        PgVersionId((value as u32) * 10000)
     }
 }
 
