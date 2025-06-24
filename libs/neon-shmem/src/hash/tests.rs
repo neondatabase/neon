@@ -38,11 +38,9 @@ impl<'a> From<&'a [u8]> for TestKey {
 }
 
 fn test_inserts<K: Into<TestKey> + Copy>(keys: &[K]) {	
-    const MAX_MEM_SIZE: usize = 10000000;
-    let shmem = ShmemHandle::new("test_inserts", 0, MAX_MEM_SIZE).unwrap();
-
-    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(100000, shmem);
-    let mut w = init_struct.attach_writer();
+    let mut w = HashMapInit::<TestKey, usize>::new_resizeable_named(
+		100000, 120000, "test_inserts"
+	).attach_writer();
 
     for (idx, k) in keys.iter().enumerate() {
 		let hash = w.get_hash_value(&(*k).into());
@@ -193,24 +191,23 @@ fn do_shrink(
 	to: u32
 ) {
 	writer.begin_shrink(to);
-	for i in to..from {
-		if let Some(entry) = writer.entry_at_bucket(i as usize) {
-			shadow.remove(&entry._key);
-			entry.remove();
+	while writer.get_num_buckets_in_use() > to as usize {
+		let (k, _) = shadow.pop_first().unwrap();
+		let hash = writer.get_hash_value(&k);
+		let entry = writer.entry_with_hash(k, hash);
+		if let Entry::Occupied(mut e) = entry {
+			e.remove();
 		}
 	}
 	writer.finish_shrink().unwrap();
-
 }
 
 #[test]
 fn random_ops() {
-    let shmem = ShmemHandle::new("test_inserts", 0, 10000000).unwrap();
-
-    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(100000, shmem);
-    let mut writer = init_struct.attach_writer();
+	let mut writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
+		100000, 120000, "test_random"
+	).attach_writer();
     let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();
-
 	
     let distribution = Zipf::new(u128::MAX as f64, 1.1).unwrap();
     let mut rng = rand::rng();
@@ -227,11 +224,25 @@ fn random_ops() {
     }
 }
 
+
+#[test]
+fn test_shuffle() {
+    let mut writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
+		1000, 1200, "test_shuf"
+	).attach_writer();
+    let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();
+    let mut rng = rand::rng();
+
+    do_random_ops(10000, 1000, 0.75, &mut writer, &mut shadow, &mut rng);
+    writer.shuffle();
+	do_random_ops(10000, 1000, 0.75, &mut writer, &mut shadow, &mut rng);
+}
+
 #[test]
 fn test_grow() {
-    let shmem = ShmemHandle::new("test_grow", 0, 10000000).unwrap();
-    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(1000, shmem);
-    let mut writer = init_struct.attach_writer();
+    let mut writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
+		1000, 2000, "test_grow"
+	).attach_writer();
     let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();
     let mut rng = rand::rng();
 
@@ -242,9 +253,9 @@ fn test_grow() {
 
 #[test]
 fn test_shrink() {
-    let shmem = ShmemHandle::new("test_shrink", 0, 10000000).unwrap();
-    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(1500, shmem);
-    let mut writer = init_struct.attach_writer();
+    let mut writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
+		1500, 2000, "test_shrink"
+	).attach_writer();
     let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();
     let mut rng = rand::rng();
 	
@@ -257,9 +268,9 @@ fn test_shrink() {
 
 #[test]
 fn test_shrink_grow_seq() {
-    let shmem = ShmemHandle::new("test_shrink_grow_seq", 0, 10000000).unwrap();
-    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(1500, shmem);
-    let mut writer = init_struct.attach_writer();
+    let mut writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
+		1000, 20000, "test_grow_seq"
+	).attach_writer();
     let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();
     let mut rng = rand::rng();
 
@@ -281,9 +292,9 @@ fn test_shrink_grow_seq() {
 
 #[test]
 fn test_bucket_ops() {
-	let shmem = ShmemHandle::new("test_bucket_ops", 0, 10000000).unwrap();
-    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(1000, shmem);
-	let mut writer = init_struct.attach_writer();
+	let mut writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
+		1000, 1200, "test_bucket_ops"
+	).attach_writer();
 	let hash = writer.get_hash_value(&1.into());
 	match writer.entry_with_hash(1.into(), hash) {
 		Entry::Occupied(mut e) => { e.insert(2); },
@@ -307,9 +318,9 @@ fn test_bucket_ops() {
 
 #[test]
 fn test_shrink_zero() {
-	let shmem = ShmemHandle::new("test_shrink_zero", 0, 10000000).unwrap();
-    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(1500, shmem);
-	let mut writer = init_struct.attach_writer();
+	let mut writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
+		1500, 2000, "test_shrink_zero"
+	).attach_writer();
 	writer.begin_shrink(0);
 	for i in 0..1500 {
 		writer.entry_at_bucket(i).map(|x| x.remove());
@@ -336,27 +347,27 @@ fn test_shrink_zero() {
 #[test]
 #[should_panic]
 fn test_grow_oom() {
-    let shmem = ShmemHandle::new("test_grow_oom", 0, 500).unwrap();
-    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(5, shmem);
-    let mut writer = init_struct.attach_writer();
+    let mut writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
+		1500, 2000, "test_grow_oom"
+	).attach_writer();
 	writer.grow(20000).unwrap();
 }
 
 #[test]
 #[should_panic]
 fn test_shrink_bigger() {
-    let shmem = ShmemHandle::new("test_shrink_bigger", 0, 10000000).unwrap();
-    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(1500, shmem);
-    let mut writer = init_struct.attach_writer();
+    let mut writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
+		1500, 2500, "test_shrink_bigger"
+	).attach_writer();
 	writer.begin_shrink(2000);
 }
 
 #[test]
 #[should_panic]
 fn test_shrink_early_finish() {
-    let shmem = ShmemHandle::new("test_shrink_early_finish", 0, 10000000).unwrap();
-    let init_struct = HashMapInit::<TestKey, usize>::init_in_shmem(1500, shmem);
-    let mut writer = init_struct.attach_writer();
+    let mut writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
+		1500, 2500, "test_shrink_early_finish"
+	).attach_writer();
 	writer.finish_shrink().unwrap();
 }
 
@@ -364,7 +375,7 @@ fn test_shrink_early_finish() {
 #[should_panic]
 fn test_shrink_fixed_size() {
 	let mut area = [MaybeUninit::uninit(); 10000];
-    let init_struct = HashMapInit::<TestKey, usize>::init_in_fixed_area(3, &mut area);
+    let init_struct = HashMapInit::<TestKey, usize>::with_fixed(3, &mut area);
     let mut writer = init_struct.attach_writer();
 	writer.begin_shrink(1);
 }
