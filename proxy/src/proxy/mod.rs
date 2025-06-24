@@ -358,6 +358,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         ctx,
         &TcpMechanism {
             locks: &config.connect_compute_locks,
+            direct: false,
         },
         &auth::Backend::ControlPlane(cplane, creds.info.clone()),
         config.wake_compute_retry_config,

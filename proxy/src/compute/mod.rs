@@ -288,6 +288,7 @@ impl ConnectInfo {
     async fn connect_raw(
         &self,
         config: &ComputeConfig,
+        direct: bool,
     ) -> Result<(SocketAddr, MaybeTlsStream<TcpStream, RustlsStream>), TlsError> {
         let timeout = config.timeout;
 
@@ -330,7 +331,7 @@ impl ConnectInfo {
         match connect_once(&*addrs).await {
             Ok((sockaddr, stream)) => Ok((
                 sockaddr,
-                tls::connect_tls(stream, self.ssl_mode, config, host).await?,
+                tls::connect_tls(stream, self.ssl_mode, config, host, direct).await?,
             )),
             Err(err) => {
                 warn!("couldn't connect to compute node at {host}:{port}: {err}");
@@ -373,9 +374,10 @@ impl ConnectInfo {
         ctx: &RequestContext,
         aux: &MetricsAuxInfo,
         config: &ComputeConfig,
+        direct: bool,
     ) -> Result<ComputeConnection, ConnectionError> {
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let (socket_addr, stream) = self.connect_raw(config).await?;
+        let (socket_addr, stream) = self.connect_raw(config, direct).await?;
         drop(pause);
 
         tracing::Span::current().record("compute_id", tracing::field::display(&aux.compute_id));

@@ -32,6 +32,7 @@ pub async fn connect_tls<S, T>(
     mode: SslMode,
     tls: &T,
     host: &str,
+    direct: bool,
 ) -> Result<MaybeTlsStream<S, T::Stream>, TlsError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -46,7 +47,7 @@ where
         SslMode::Prefer | SslMode::Require => {}
     }
 
-    if !request_tls(&mut stream).await? {
+    if !direct && !request_tls(&mut stream).await? {
         if SslMode::Require == mode {
             return Err(TlsError::Required);
         }

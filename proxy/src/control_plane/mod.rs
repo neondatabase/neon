@@ -77,8 +77,9 @@ impl NodeInfo {
         &self,
         ctx: &RequestContext,
         config: &ComputeConfig,
+        direct: bool,
     ) -> Result<compute::ComputeConnection, compute::ConnectionError> {
-        self.conn_info.connect(ctx, &self.aux, config).await
+        self.conn_info.connect(ctx, &self.aux, config, direct).await
     }
 }
 
