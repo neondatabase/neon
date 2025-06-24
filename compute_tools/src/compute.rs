@@ -405,7 +405,7 @@ impl ComputeNode {
         // that can affect `compute_ctl` and prevent it from properly configuring the database schema.
         // Unset them via connection string options before connecting to the database.
         // N.B. keep it in sync with `ZENITH_OPTIONS` in `get_maintenance_client()`.
-        const EXTRA_OPTIONS: &str = "-c role=cloud_admin -c default_transaction_read_only=off -c search_path=public -c statement_timeout=0";
+        const EXTRA_OPTIONS: &str = "-c role=cloud_admin -c default_transaction_read_only=off -c search_path=public -c statement_timeout=0 -c pgaudit.log=none";
         let options = match conn_conf.get_options() {
             // Allow the control plane to override any options set by the
             // compute
