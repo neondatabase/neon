@@ -23,6 +23,7 @@ use std::ops::{ControlFlow, Deref, Range};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
+use tokio::sync::mpsc::error::TrySendError;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -110,8 +111,9 @@ use crate::feature_resolver::FeatureResolver;
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::l0_flush::{self, L0FlushGlobalState};
 use crate::metrics::{
-    DELTAS_PER_READ_GLOBAL, LAYERS_PER_READ_AMORTIZED_GLOBAL, LAYERS_PER_READ_BATCH_GLOBAL,
-    LAYERS_PER_READ_GLOBAL, ScanLatencyOngoingRecording, TimelineMetrics,
+    BASEBACKUP_CACHE_PREPARE_QUEUE_SIZE, DELTAS_PER_READ_GLOBAL, LAYERS_PER_READ_AMORTIZED_GLOBAL,
+    LAYERS_PER_READ_BATCH_GLOBAL, LAYERS_PER_READ_GLOBAL, ScanLatencyOngoingRecording,
+    TimelineMetrics,
 };
 use crate::page_service::TenantManagerTypes;
 use crate::pgdatadir_mapping::{
@@ -2528,9 +2530,21 @@ impl Timeline {
                 timeline_id: self.timeline_id,
                 lsn,
             });
-        if let Err(e) = res {
-            // May happen during shutdown, it's not critical.
-            info!("Failed to send shutdown checkpoint: {e:#}");
+        match res {
+            Ok(_) => {
+                BASEBACKUP_CACHE_PREPARE_QUEUE_SIZE.inc();
+            }
+            Err(e) => {
+                match e {
+                    TrySendError::Full(_) => {
+                        warn!("Basebackup prepare queue is full, dropping request");
+                    }
+                    TrySendError::Closed(_) => {
+                        // May happen during shutdown, it's not critical.
+                        info!("Basebackup prepare channel is closed, dropping request");
+                    }
+                }
+            }
         }
     }
 }

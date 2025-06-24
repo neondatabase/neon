@@ -20,8 +20,8 @@ use crate::{
     basebackup::send_basebackup_tarball,
     context::{DownloadBehavior, RequestContext},
     metrics::{
-        BASEBACKUP_CACHE_ENTRIES, BASEBACKUP_CACHE_PREPARE, BASEBACKUP_CACHE_READ,
-        BASEBACKUP_CACHE_SIZE,
+        BASEBACKUP_CACHE_ENTRIES, BASEBACKUP_CACHE_PREPARE, BASEBACKUP_CACHE_PREPARE_QUEUE_SIZE,
+        BASEBACKUP_CACHE_READ, BASEBACKUP_CACHE_SIZE,
     },
     task_mgr::TaskKind,
     tenant::{
@@ -367,6 +367,7 @@ impl BackgroundTask {
         loop {
             tokio::select! {
                 Some(req) = prepare_receiver.recv() => {
+                    BASEBACKUP_CACHE_PREPARE_QUEUE_SIZE.dec();
                     if let Err(err) = self.prepare_basebackup(
                         req.tenant_shard_id,
                         req.timeline_id,
