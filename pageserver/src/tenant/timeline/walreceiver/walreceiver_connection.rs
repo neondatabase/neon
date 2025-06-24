@@ -368,8 +368,7 @@ pub(super) async fn handle_walreceiver_connection(
                         match raw_wal_start_lsn.cmp(&expected_wal_start) {
                             std::cmp::Ordering::Greater => {
                                 let msg = format!(
-                                    "Gap in streamed WAL: [{}, {})",
-                                    expected_wal_start, raw_wal_start_lsn
+                                    "Gap in streamed WAL: [{expected_wal_start}, {raw_wal_start_lsn})"
                                 );
                                 critical!("{msg}");
                                 return Err(WalReceiverError::Other(anyhow!(msg)));

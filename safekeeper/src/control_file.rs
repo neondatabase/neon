@@ -207,14 +207,12 @@ impl Storage for FileStorage {
 
         control_partial.write_all(&buf).await.with_context(|| {
             format!(
-                "failed to write safekeeper state into control file at: {}",
-                control_partial_path
+                "failed to write safekeeper state into control file at: {control_partial_path}"
             )
         })?;
         control_partial.flush().await.with_context(|| {
             format!(
-                "failed to flush safekeeper state into control file at: {}",
-                control_partial_path
+                "failed to flush safekeeper state into control file at: {control_partial_path}"
             )
         })?;
 

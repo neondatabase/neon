@@ -29,7 +29,7 @@ impl ShutdownSignals {
                 SIGINT => Signal::Interrupt,
                 SIGTERM => Signal::Terminate,
                 SIGQUIT => Signal::Quit,
-                other => panic!("unknown signal: {}", other),
+                other => panic!("unknown signal: {other}"),
             };
 
             handler(signal)?;

@@ -228,7 +228,7 @@ pub fn main() -> Result<()> {
         let lsn_max = lsn_map.len();
 
         if key_start >= key_end {
-            panic!("Invalid key range {}-{}", key_start, key_end);
+            panic!("Invalid key range {key_start}-{key_end}");
         }
 
         let lsn_start = *lsn_map.get(&lsnr.start).unwrap();
@@ -250,7 +250,7 @@ pub fn main() -> Result<()> {
                 ymargin = 0.05;
                 fill = Fill::Color(rgb(0, 0, 0));
             }
-            Ordering::Greater => panic!("Invalid lsn range {}-{}", lsn_start, lsn_end),
+            Ordering::Greater => panic!("Invalid lsn range {lsn_start}-{lsn_end}"),
         }
 
         println!(
@@ -287,10 +287,10 @@ pub fn main() -> Result<()> {
         );
     }
 
-    println!("{}", EndSvg);
+    println!("{EndSvg}");
 
-    eprintln!("num_images: {}", num_images);
-    eprintln!("num_deltas: {}", num_deltas);
+    eprintln!("num_images: {num_images}");
+    eprintln!("num_deltas: {num_deltas}");
 
     Ok(())
 }

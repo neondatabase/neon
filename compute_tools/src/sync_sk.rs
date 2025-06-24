@@ -27,7 +27,7 @@ pub async fn ping_safekeeper(
     let (client, conn) = config.connect(tokio_postgres::NoTls).await?;
     tokio::spawn(async move {
         if let Err(e) = conn.await {
-            eprintln!("connection error: {}", e);
+            eprintln!("connection error: {e}");
         }
     });
 

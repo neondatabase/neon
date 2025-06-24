@@ -23,7 +23,7 @@ pub enum ScheduleError {
 
 impl From<ScheduleError> for ApiError {
     fn from(value: ScheduleError) -> Self {
-        ApiError::Conflict(format!("Scheduling error: {}", value))
+        ApiError::Conflict(format!("Scheduling error: {value}"))
     }
 }
 
@@ -903,7 +903,7 @@ impl Scheduler {
     /// rigorously updating them on every change.
     pub(crate) fn update_metrics(&self) {
         for (node_id, node) in &self.nodes {
-            let node_id_str = format!("{}", node_id);
+            let node_id_str = format!("{node_id}");
             let label_group = NodeLabelGroup {
                 az: &node.az.0,
                 node_id: &node_id_str,
@@ -1326,7 +1326,7 @@ mod tests {
                 .map(|(node_id, node)| (node_id, node.home_shard_count))
                 .collect::<Vec<_>>();
             node_home_counts.sort_by_key(|i| i.0);
-            eprintln!("Selected {}, vs nodes {:?}", preferred_az, node_home_counts);
+            eprintln!("Selected {preferred_az}, vs nodes {node_home_counts:?}");
 
             let tenant_shard_id = TenantShardId {
                 tenant_id: TenantId::generate(),

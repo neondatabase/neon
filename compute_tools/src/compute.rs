@@ -250,8 +250,7 @@ impl ParsedSpec {
             // duplicate entry?
             if current == previous {
                 return Err(format!(
-                    "duplicate entry in safekeeper_connstrings: {}!",
-                    current,
+                    "duplicate entry in safekeeper_connstrings: {current}!",
                 ));
             }
 
@@ -410,7 +409,7 @@ impl ComputeNode {
         let options = match conn_conf.get_options() {
             // Allow the control plane to override any options set by the
             // compute
-            Some(options) => format!("{} {}", EXTRA_OPTIONS, options),
+            Some(options) => format!("{EXTRA_OPTIONS} {options}"),
             None => EXTRA_OPTIONS.to_string(),
         };
         conn_conf.options(&options);
@@ -1127,7 +1126,7 @@ impl ComputeNode {
         let sk_configs = sk_connstrs.into_iter().map(|connstr| {
             // Format connstr
             let id = connstr.clone();
-            let connstr = format!("postgresql://no_user@{}", connstr);
+            let connstr = format!("postgresql://no_user@{connstr}");
             let options = format!(
                 "-c timeline_id={} tenant_id={}",
                 pspec.timeline_id, pspec.tenant_id
@@ -1490,7 +1489,7 @@ impl ComputeNode {
                 let (mut client, connection) = conf.connect(NoTls).await?;
                 tokio::spawn(async move {
                     if let Err(e) = connection.await {
-                        eprintln!("connection error: {}", e);
+                        eprintln!("connection error: {e}");
                     }
                 });
 
@@ -1633,7 +1632,7 @@ impl ComputeNode {
                 Ok((mut client, connection)) => {
                     tokio::spawn(async move {
                         if let Err(e) = connection.await {
-                            eprintln!("connection error: {}", e);
+                            eprintln!("connection error: {e}");
                         }
                     });
                     if let Err(e) = handle_migrations(&mut client).await {
@@ -1937,7 +1936,7 @@ impl ComputeNode {
         let (client, connection) = connect_result.unwrap();
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("connection error: {}", e);
+                eprintln!("connection error: {e}");
             }
         });
         let result = client
@@ -2106,7 +2105,7 @@ LIMIT 100",
             db_client
                 .simple_query(&query)
                 .await
-                .with_context(|| format!("Failed to execute query: {}", query))?;
+                .with_context(|| format!("Failed to execute query: {query}"))?;
         }
 
         Ok(())
@@ -2133,7 +2132,7 @@ LIMIT 100",
         let version: Option<ExtVersion> = db_client
             .query_opt(version_query, &[&ext_name])
             .await
-            .with_context(|| format!("Failed to execute query: {}", version_query))?
+            .with_context(|| format!("Failed to execute query: {version_query}"))?
             .map(|row| row.get(0));
 
         // sanitize the inputs as postgres idents.
@@ -2148,14 +2147,14 @@ LIMIT 100",
             db_client
                 .simple_query(&query)
                 .await
-                .with_context(|| format!("Failed to execute query: {}", query))?;
+                .with_context(|| format!("Failed to execute query: {query}"))?;
         } else {
             let query =
                 format!("CREATE EXTENSION IF NOT EXISTS {ext_name} WITH VERSION {quoted_version}");
             db_client
                 .simple_query(&query)
                 .await
-                .with_context(|| format!("Failed to execute query: {}", query))?;
+                .with_context(|| format!("Failed to execute query: {query}"))?;
         }
 
         Ok(ext_version)

@@ -243,8 +243,7 @@ unsafe impl<A: Alignment> bytes::BufMut for AlignedBufferMut<A> {
 #[cold]
 fn panic_advance(idx: usize, len: usize) -> ! {
     panic!(
-        "advance out of bounds: the len is {} but advancing by {}",
-        len, idx
+        "advance out of bounds: the len is {len} but advancing by {idx}"
     );
 }
 

@@ -1730,7 +1730,7 @@ impl SmgrOpFlushInProgress {
     pub(crate) async fn measure<Fut, O>(
         self,
         started_at: Instant,
-        mut fut: Fut,
+        fut: Fut,
         socket_fd: RawFd,
     ) -> O
     where

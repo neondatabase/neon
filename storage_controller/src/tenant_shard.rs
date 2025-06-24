@@ -3008,21 +3008,18 @@ pub(crate) mod tests {
 
             if attachments_in_wrong_az > 0 {
                 violations.push(format!(
-                    "{} attachments scheduled to the incorrect AZ",
-                    attachments_in_wrong_az
+                    "{attachments_in_wrong_az} attachments scheduled to the incorrect AZ"
                 ));
             }
 
             if secondaries_in_wrong_az > 0 {
                 violations.push(format!(
-                    "{} secondaries scheduled to the incorrect AZ",
-                    secondaries_in_wrong_az
+                    "{secondaries_in_wrong_az} secondaries scheduled to the incorrect AZ"
                 ));
             }
 
             eprintln!(
-                "attachments_in_wrong_az={} secondaries_in_wrong_az={}",
-                attachments_in_wrong_az, secondaries_in_wrong_az
+                "attachments_in_wrong_az={attachments_in_wrong_az} secondaries_in_wrong_az={secondaries_in_wrong_az}"
             );
 
             for (node_id, stats) in &node_stats {
