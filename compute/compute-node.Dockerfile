@@ -77,9 +77,6 @@
 # build_and_test.yml github workflow for how that's done.
 
 ARG PG_VERSION
-ARG REPOSITORY=ghcr.io/neondatabase
-ARG IMAGE=build-tools
-ARG TAG=pinned
 ARG BUILD_TAG
 ARG DEBIAN_VERSION=bookworm
 ARG DEBIAN_FLAVOR=${DEBIAN_VERSION}-slim
@@ -149,8 +146,11 @@ RUN case $DEBIAN_VERSION in \
     ninja-build git autoconf automake libtool build-essential bison flex libreadline-dev \
     zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget ca-certificates pkg-config libssl-dev \
     libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd curl unzip g++ \
+    libclang-dev \
+    jsonnet \
     $VERSION_INSTALLS \
-    && apt clean && rm -rf /var/lib/apt/lists/*
+    && apt clean && rm -rf /var/lib/apt/lists/* && \
+    useradd -ms /bin/bash nonroot -b /home
 
 #########################################################################################
 #
@@ -1057,17 +1057,10 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) && \
 
 #########################################################################################
 #
-# Layer "pg build with nonroot user and cargo installed"
-# This layer is base and common for layers with `pgrx`
+# Layer "build-deps with Rust toolchain installed"
 #
 #########################################################################################
-FROM pg-build AS pg-build-nonroot-with-cargo
-ARG PG_VERSION
-
-RUN apt update && \
-    apt install --no-install-recommends --no-install-suggests -y curl libclang-dev && \
-    apt clean && rm -rf /var/lib/apt/lists/* && \
-    useradd -ms /bin/bash nonroot -b /home
+FROM build-deps AS build-deps-with-cargo
 
 ENV HOME=/home/nonroot
 ENV PATH="/home/nonroot/.cargo/bin:$PATH"
@@ -1084,11 +1077,27 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
 
 #########################################################################################
 #
+# Layer "pg-build with Rust toolchain installed"
+# This layer is base and common for layers with `pgrx`
+#
+#########################################################################################
+FROM pg-build AS pg-build-with-cargo
+ARG PG_VERSION
+
+ENV HOME=/home/nonroot
+ENV PATH="/home/nonroot/.cargo/bin:$PATH"
+USER nonroot
+WORKDIR /home/nonroot
+
+COPY --from=build-deps-with-cargo /home/nonroot /home/nonroot
+
+#########################################################################################
+#
 # Layer "rust extensions"
 # This layer is used to build `pgrx` deps
 #
 #########################################################################################
-FROM pg-build-nonroot-with-cargo AS rust-extensions-build
+FROM pg-build-with-cargo AS rust-extensions-build
 ARG PG_VERSION
 
 RUN case "${PG_VERSION:?}" in \
@@ -1110,7 +1119,7 @@ USER root
 # and eventually get merged with `rust-extensions-build`
 #
 #########################################################################################
-FROM pg-build-nonroot-with-cargo AS rust-extensions-build-pgrx12
+FROM pg-build-with-cargo AS rust-extensions-build-pgrx12
 ARG PG_VERSION
 
 RUN cargo install --locked --version 0.12.9 cargo-pgrx && \
@@ -1127,7 +1136,7 @@ USER root
 # and eventually get merged with `rust-extensions-build`
 #
 #########################################################################################
-FROM pg-build-nonroot-with-cargo AS rust-extensions-build-pgrx14
+FROM pg-build-with-cargo AS rust-extensions-build-pgrx14
 ARG PG_VERSION
 
 RUN cargo install --locked --version 0.14.1 cargo-pgrx && \
@@ -1144,10 +1153,12 @@ USER root
 
 FROM build-deps AS pgrag-src
 ARG PG_VERSION
-
 WORKDIR /ext-src
+COPY compute/patches/onnxruntime.patch .
+
 RUN wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.18.1.tar.gz -O onnxruntime.tar.gz && \
     mkdir onnxruntime-src && cd onnxruntime-src && tar xzf ../onnxruntime.tar.gz --strip-components=1 -C . && \
+    patch -p1 < /ext-src/onnxruntime.patch && \
     echo "#nothing to test here" > neon-test.sh
 
 RUN wget https://github.com/neondatabase-labs/pgrag/archive/refs/tags/v0.1.2.tar.gz -O pgrag.tar.gz &&  \
@@ -1621,18 +1632,7 @@ FROM pg-build AS neon-ext-build
 ARG PG_VERSION
 
 COPY pgxn/ pgxn/
-RUN make -j $(getconf _NPROCESSORS_ONLN) \
-        -C pgxn/neon \
-        -s install && \
-    make -j $(getconf _NPROCESSORS_ONLN) \
-        -C pgxn/neon_utils \
-        -s install && \
-    make -j $(getconf _NPROCESSORS_ONLN) \
-        -C pgxn/neon_test_utils \
-        -s install && \
-    make -j $(getconf _NPROCESSORS_ONLN) \
-        -C pgxn/neon_rmgr \
-        -s install
+RUN make -j $(getconf _NPROCESSORS_ONLN) -C pgxn -s install-compute
 
 #########################################################################################
 #
@@ -1722,7 +1722,7 @@ FROM extensions-${EXTENSIONS} AS neon-pg-ext-build
 # Compile the Neon-specific `compute_ctl`, `fast_import`, and `local_proxy` binaries
 #
 #########################################################################################
-FROM $REPOSITORY/$IMAGE:$TAG AS compute-tools
+FROM build-deps-with-cargo AS compute-tools
 ARG BUILD_TAG
 ENV BUILD_TAG=$BUILD_TAG
 
@@ -1732,7 +1732,7 @@ COPY --chown=nonroot . .
 RUN --mount=type=cache,uid=1000,target=/home/nonroot/.cargo/registry \
     --mount=type=cache,uid=1000,target=/home/nonroot/.cargo/git \
     --mount=type=cache,uid=1000,target=/home/nonroot/target \
-    mold -run cargo build --locked --profile release-line-debug-size-lto --bin compute_ctl --bin fast_import --bin local_proxy && \
+    cargo build --locked --profile release-line-debug-size-lto --bin compute_ctl --bin fast_import --bin local_proxy && \
     mkdir target-bin && \
     cp target/release-line-debug-size-lto/compute_ctl \
        target/release-line-debug-size-lto/fast_import \
@@ -1826,10 +1826,11 @@ RUN rm /usr/local/pgsql/lib/lib*.a
 # Preprocess the sql_exporter configuration files
 #
 #########################################################################################
-FROM $REPOSITORY/$IMAGE:$TAG AS sql_exporter_preprocessor
+FROM build-deps AS sql_exporter_preprocessor
 ARG PG_VERSION
 
 USER nonroot
+WORKDIR /home/nonroot
 
 COPY --chown=nonroot compute compute
 

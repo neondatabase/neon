@@ -29,9 +29,7 @@ use pageserver_api::config::tenant_conf_defaults::DEFAULT_CHECKPOINT_DISTANCE;
 use pageserver_api::key::{KEY_SIZE, Key};
 use pageserver_api::keyspace::{KeySpace, ShardedRange};
 use pageserver_api::models::{CompactInfoResponse, CompactKeyRange};
-use pageserver_api::record::NeonWalRecord;
 use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
-use pageserver_api::value::Value;
 use pageserver_compaction::helpers::{fully_contains, overlaps_with};
 use pageserver_compaction::interface::*;
 use serde::Serialize;
@@ -41,6 +39,8 @@ use tracing::{Instrument, debug, error, info, info_span, trace, warn};
 use utils::critical;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
+use wal_decoder::models::record::NeonWalRecord;
+use wal_decoder::models::value::Value;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
@@ -977,7 +977,7 @@ impl KeyHistoryRetention {
             tline
                 .reconstruct_value(key, lsn, data, RedoAttemptType::GcCompaction)
                 .await
-                .with_context(|| format!("verification failed for key {} at lsn {}", key, lsn))?;
+                .with_context(|| format!("verification failed for key {key} at lsn {lsn}"))?;
 
             Ok(())
         }
@@ -2647,15 +2647,15 @@ impl Timeline {
             use std::fmt::Write;
             let mut output = String::new();
             if let Some((key, _, _)) = replay_history.first() {
-                write!(output, "key={} ", key).unwrap();
+                write!(output, "key={key} ").unwrap();
                 let mut cnt = 0;
                 for (_, lsn, val) in replay_history {
                     if val.is_image() {
-                        write!(output, "i@{} ", lsn).unwrap();
+                        write!(output, "i@{lsn} ").unwrap();
                     } else if val.will_init() {
-                        write!(output, "di@{} ", lsn).unwrap();
+                        write!(output, "di@{lsn} ").unwrap();
                     } else {
-                        write!(output, "d@{} ", lsn).unwrap();
+                        write!(output, "d@{lsn} ").unwrap();
                     }
                     cnt += 1;
                     if cnt >= 128 {

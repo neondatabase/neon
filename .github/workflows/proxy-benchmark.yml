@@ -1,0 +1,83 @@
+name: Periodic proxy performance test on unit-perf hetzner runner
+
+on:
+  push: # TODO: remove after testing
+    branches:
+      - test-proxy-bench # Runs on pushes to branches starting with test-proxy-bench
+  # schedule:
+    # * is a special character in YAML so you have to quote this string
+    #        ┌───────────── minute (0 - 59)
+    #        │ ┌───────────── hour (0 - 23)
+    #        │ │ ┌───────────── day of the month (1 - 31)
+    #        │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
+    #        │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
+    # - cron: '0 5 * * *' # Runs at 5 UTC once a day
+  workflow_dispatch: # adds an ability to run this manually
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run_periodic_proxybench_test:
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
+      pull-requests: write
+    runs-on: [self-hosted, unit-perf]
+    timeout-minutes: 60  # 1h timeout
+    container:
+      image: ghcr.io/neondatabase/build-tools:pinned-bookworm
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --init
+    steps:
+    - name: Checkout proxy-bench Repo
+      uses: actions/checkout@v4
+      with:
+        repository: neondatabase/proxy-bench
+        path: proxy-bench
+
+    - name: Set up the environment which depends on $RUNNER_TEMP on nvme drive
+      id: set-env
+      shell: bash -euxo pipefail {0}
+      run: |
+        PROXY_BENCH_PATH=$(realpath ./proxy-bench)
+        {
+          echo "PROXY_BENCH_PATH=$PROXY_BENCH_PATH"
+          echo "NEON_DIR=${RUNNER_TEMP}/neon"
+          echo "TEST_OUTPUT=${PROXY_BENCH_PATH}/test_output"
+          echo ""
+        } >> "$GITHUB_ENV"
+
+    - name: Run proxy-bench
+      run: ./${PROXY_BENCH_PATH}/run.sh
+
+    - name: Ingest Bench Results # neon repo script
+      if: success()
+      run: |
+        mkdir -p $TEST_OUTPUT
+        python $NEON_DIR/scripts/proxy_bench_results_ingest.py --out $TEST_OUTPUT
+
+    - name: Push Metrics to Proxy perf database
+      if: success()
+      env:
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PROXY_TEST_RESULT_CONNSTR }}"
+        REPORT_FROM: $TEST_OUTPUT
+      run: $NEON_DIR/scripts/generate_and_push_perf_report.sh
+
+    - name: Docker cleanup
+      run: docker compose down
+
+    - name: Notify Failure
+      if: failure()
+      run: echo "Proxy bench job failed" && exit 1

@@ -12,6 +12,7 @@ use postgres_protocol2::message::frontend;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+use crate::cancel_token::RawCancelToken;
 use crate::codec::{BackendMessages, FrontendMessage};
 use crate::config::{Host, SslMode};
 use crate::query::RowStream;
@@ -331,10 +332,12 @@ impl Client {
     /// connection associated with this client.
     pub fn cancel_token(&self) -> CancelToken {
         CancelToken {
-            socket_config: Some(self.socket_config.clone()),
-            ssl_mode: self.ssl_mode,
-            process_id: self.process_id,
-            secret_key: self.secret_key,
+            socket_config: self.socket_config.clone(),
+            raw: RawCancelToken {
+                ssl_mode: self.ssl_mode,
+                process_id: self.process_id,
+                secret_key: self.secret_key,
+            },
         }
     }
 

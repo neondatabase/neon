@@ -16,6 +16,7 @@ pub static COMPUTE_AUDIENCE: &str = "compute";
 pub enum ComputeClaimsScope {
     /// An admin-scoped token allows access to all of `compute_ctl`'s authorized
     /// facilities.
+    #[serde(rename = "compute_ctl:admin")]
     Admin,
 }
 
@@ -24,7 +25,7 @@ impl FromStr for ComputeClaimsScope {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "admin" => Ok(ComputeClaimsScope::Admin),
+            "compute_ctl:admin" => Ok(ComputeClaimsScope::Admin),
             _ => Err(anyhow::anyhow!("invalid compute claims scope \"{s}\"")),
         }
     }
@@ -79,4 +80,24 @@ pub struct SetRoleGrantsRequest {
     pub schema: PgIdent,
     pub privileges: Vec<Privilege>,
     pub role: PgIdent,
+}
+
+#[cfg(test)]
+mod test {
+    use std::str::FromStr;
+
+    use crate::requests::ComputeClaimsScope;
+
+    /// Confirm that whether we parse the scope by string or through serde, the
+    /// same values parse to the same enum variant.
+    #[test]
+    fn compute_request_scopes() {
+        const ADMIN_SCOPE: &str = "compute_ctl:admin";
+
+        let from_serde: ComputeClaimsScope =
+            serde_json::from_str(&format!("\"{ADMIN_SCOPE}\"")).unwrap();
+        let from_str = ComputeClaimsScope::from_str(ADMIN_SCOPE).unwrap();
+
+        assert_eq!(from_serde, from_str);
+    }
 }

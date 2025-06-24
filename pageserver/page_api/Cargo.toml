@@ -5,11 +5,16 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 bytes.workspace = true
+futures.workspace = true
 pageserver_api.workspace = true
 postgres_ffi.workspace = true
 prost.workspace = true
+strum.workspace = true
+strum_macros.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tonic.workspace = true
 utils.workspace = true
 workspace_hack.workspace = true

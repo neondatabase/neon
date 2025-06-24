@@ -10,14 +10,14 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bytes::Bytes;
-use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::TenantShardId;
-use postgres_ffi::BLCKSZ;
+use postgres_ffi::{BLCKSZ, PgMajorVersion};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{Instrument, debug, error, instrument};
 use utils::lsn::Lsn;
 use utils::poison::Poison;
+use wal_decoder::models::record::NeonWalRecord;
 
 use self::no_leak_child::NoLeakChild;
 use crate::config::PageServerConf;
@@ -54,11 +54,11 @@ impl WalRedoProcess {
     //
     // Start postgres binary in special WAL redo mode.
     //
-    #[instrument(skip_all,fields(pg_version=pg_version))]
+    #[instrument(skip_all,fields(pg_version=pg_version.major_version_num()))]
     pub(crate) fn launch(
         conf: &'static PageServerConf,
         tenant_shard_id: TenantShardId,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
     ) -> anyhow::Result<Self> {
         crate::span::debug_assert_current_span_has_tenant_id();
 

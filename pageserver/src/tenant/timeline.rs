@@ -56,11 +56,9 @@ use pageserver_api::models::{
 };
 use pageserver_api::reltag::{BlockNumber, RelTag};
 use pageserver_api::shard::{ShardIdentity, ShardIndex, ShardNumber, TenantShardId};
-#[cfg(test)]
-use pageserver_api::value::Value;
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::v14::xlog_utils;
-use postgres_ffi::{WAL_SEGMENT_SIZE, to_pg_timestamp};
+use postgres_ffi::{PgMajorVersion, WAL_SEGMENT_SIZE, to_pg_timestamp};
 use rand::Rng;
 use remote_storage::DownloadError;
 use serde_with::serde_as;
@@ -81,6 +79,8 @@ use utils::seqwait::SeqWait;
 use utils::simple_rcu::{Rcu, RcuReadGuard};
 use utils::sync::gate::{Gate, GateGuard};
 use utils::{completion, critical, fs_ext, pausable_failpoint};
+#[cfg(test)]
+use wal_decoder::models::value::Value;
 use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
 use self::delete::DeleteTimelineFlow;
@@ -178,7 +178,7 @@ pub enum LastImageLayerCreationStatus {
 
 impl std::fmt::Display for ImageLayerCreationMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 
@@ -225,7 +225,7 @@ pub struct Timeline {
     /// to shards, and is constant through the lifetime of this Timeline.
     shard_identity: ShardIdentity,
 
-    pub pg_version: u32,
+    pub pg_version: PgMajorVersion,
 
     /// The tuple has two elements.
     /// 1. `LayerFileManager` keeps track of the various physical representations of the layer files (inmem, local, remote).
@@ -632,7 +632,7 @@ pub enum ReadPathLayerId {
 impl std::fmt::Display for ReadPathLayerId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ReadPathLayerId::PersistentLayer(key) => write!(f, "{}", key),
+            ReadPathLayerId::PersistentLayer(key) => write!(f, "{key}"),
             ReadPathLayerId::InMemoryLayer(range) => {
                 write!(f, "in-mem {}..{}", range.start, range.end)
             }
@@ -708,7 +708,7 @@ impl MissingKeyError {
 
 impl std::fmt::Debug for MissingKeyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self)
+        write!(f, "{self}")
     }
 }
 
@@ -721,19 +721,19 @@ impl std::fmt::Display for MissingKeyError {
         )?;
 
         if let Some(ref ancestor_lsn) = self.ancestor_lsn {
-            write!(f, ", ancestor {}", ancestor_lsn)?;
+            write!(f, ", ancestor {ancestor_lsn}")?;
         }
 
         if let Some(ref query) = self.query {
-            write!(f, ", query {}", query)?;
+            write!(f, ", query {query}")?;
         }
 
         if let Some(ref read_path) = self.read_path {
-            write!(f, "\n{}", read_path)?;
+            write!(f, "\n{read_path}")?;
         }
 
         if let Some(ref backtrace) = self.backtrace {
-            write!(f, "\n{}", backtrace)?;
+            write!(f, "\n{backtrace}")?;
         }
 
         Ok(())
@@ -816,7 +816,7 @@ impl From<layer_manager::Shutdown> for FlushLayerError {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub(crate) enum GetVectoredError {
+pub enum GetVectoredError {
     #[error("timeline shutting down")]
     Cancelled,
 
@@ -849,7 +849,7 @@ impl From<GetReadyAncestorError> for GetVectoredError {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub(crate) enum GetReadyAncestorError {
+pub enum GetReadyAncestorError {
     #[error("ancestor LSN wait error")]
     AncestorLsnTimeout(#[from] WaitLsnError),
 
@@ -939,7 +939,7 @@ impl std::fmt::Debug for Timeline {
 }
 
 #[derive(thiserror::Error, Debug, Clone)]
-pub(crate) enum WaitLsnError {
+pub enum WaitLsnError {
     // Called on a timeline which is shutting down
     #[error("Shutdown")]
     Shutdown,
@@ -1902,16 +1902,11 @@ impl Timeline {
             return;
         };
 
-        let Some(current_size) = open_layer.try_len() else {
-            // Unexpected: since we hold the write guard, nobody else should be writing to this layer, so
-            // read lock to get size should always succeed.
-            tracing::warn!("Lock conflict while reading size of open layer");
-            return;
-        };
+        let current_size = open_layer.len();
 
         let current_lsn = self.get_last_record_lsn();
 
-        let checkpoint_distance_override = open_layer.tick().await;
+        let checkpoint_distance_override = open_layer.tick();
 
         if let Some(size_override) = checkpoint_distance_override {
             if current_size > size_override {
@@ -2918,7 +2913,7 @@ impl Timeline {
         shard_identity: ShardIdentity,
         walredo_mgr: Option<Arc<super::WalRedoManager>>,
         resources: TimelineResources,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         state: TimelineState,
         attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
         create_idempotency: crate::tenant::CreateTimelineIdempotency,
@@ -3421,10 +3416,6 @@ impl Timeline {
         self.remote_client.schedule_barrier()?;
         // TenantShard::create_timeline will wait for these uploads to happen before returning, or
         // on retry.
-
-        // Now that we have the full layer map, we may calculate the visibility of layers within it (a global scan)
-        drop(guard); // drop write lock, update_layer_visibility will take a read lock.
-        self.update_layer_visibility().await?;
 
         info!(
             "loaded layer map with {} layers at {}, total physical size: {}",
@@ -5211,7 +5202,11 @@ impl Timeline {
         }
 
         let (dense_ks, sparse_ks) = self.collect_keyspace(lsn, ctx).await?;
-        let dense_partitioning = dense_ks.partition(&self.shard_identity, partition_size);
+        let dense_partitioning = dense_ks.partition(
+            &self.shard_identity,
+            partition_size,
+            postgres_ffi::BLCKSZ as u64,
+        );
         let sparse_partitioning = SparseKeyPartitioning {
             parts: vec![sparse_ks],
         }; // no partitioning for metadata keys for now
@@ -5939,7 +5934,7 @@ impl Drop for Timeline {
             if let Ok(mut gc_info) = ancestor.gc_info.write() {
                 if !gc_info.remove_child_not_offloaded(self.timeline_id) {
                     tracing::error!(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id,
-                        "Couldn't remove retain_lsn entry from offloaded timeline's parent: already removed");
+                        "Couldn't remove retain_lsn entry from timeline's parent on drop: already removed");
                 }
             }
         }
@@ -6543,7 +6538,7 @@ impl Timeline {
 
         debug!("retain_lsns: {:?}", retain_lsns);
 
-        let mut layers_to_remove = Vec::new();
+        let max_retain_lsn = retain_lsns.iter().max();
 
         // Scan all layers in the timeline (remote or on-disk).
         //
@@ -6553,108 +6548,110 @@ impl Timeline {
         // 3. it doesn't need to be retained for 'retain_lsns';
         // 4. it does not need to be kept for LSNs holding valid leases.
         // 5. newer on-disk image layers cover the layer's whole key range
-        //
-        // TODO holding a write lock is too agressive and avoidable
-        let mut guard = self
-            .layers
-            .write(LayerManagerLockHolder::GarbageCollection)
-            .await;
-        let layers = guard.layer_map()?;
-        'outer: for l in layers.iter_historic_layers() {
-            result.layers_total += 1;
+        let layers_to_remove = {
+            let mut layers_to_remove = Vec::new();
 
-            // 1. Is it newer than GC horizon cutoff point?
-            if l.get_lsn_range().end > space_cutoff {
-                info!(
-                    "keeping {} because it's newer than space_cutoff {}",
-                    l.layer_name(),
-                    space_cutoff,
-                );
-                result.layers_needed_by_cutoff += 1;
-                continue 'outer;
-            }
+            let guard = self
+                .layers
+                .read(LayerManagerLockHolder::GarbageCollection)
+                .await;
+            let layers = guard.layer_map()?;
+            'outer: for l in layers.iter_historic_layers() {
+                result.layers_total += 1;
 
-            // 2. It is newer than PiTR cutoff point?
-            if l.get_lsn_range().end > time_cutoff {
-                info!(
-                    "keeping {} because it's newer than time_cutoff {}",
-                    l.layer_name(),
-                    time_cutoff,
-                );
-                result.layers_needed_by_pitr += 1;
-                continue 'outer;
-            }
-
-            // 3. Is it needed by a child branch?
-            // NOTE With that we would keep data that
-            // might be referenced by child branches forever.
-            // We can track this in child timeline GC and delete parent layers when
-            // they are no longer needed. This might be complicated with long inheritance chains.
-            //
-            // TODO Vec is not a great choice for `retain_lsns`
-            for retain_lsn in &retain_lsns {
-                // start_lsn is inclusive
-                if &l.get_lsn_range().start <= retain_lsn {
-                    info!(
-                        "keeping {} because it's still might be referenced by child branch forked at {} is_dropped: xx is_incremental: {}",
+                // 1. Is it newer than GC horizon cutoff point?
+                if l.get_lsn_range().end > space_cutoff {
+                    debug!(
+                        "keeping {} because it's newer than space_cutoff {}",
                         l.layer_name(),
-                        retain_lsn,
-                        l.is_incremental(),
+                        space_cutoff,
                     );
-                    result.layers_needed_by_branches += 1;
+                    result.layers_needed_by_cutoff += 1;
                     continue 'outer;
                 }
-            }
 
-            // 4. Is there a valid lease that requires us to keep this layer?
-            if let Some(lsn) = &max_lsn_with_valid_lease {
-                // keep if layer start <= any of the lease
-                if &l.get_lsn_range().start <= lsn {
-                    info!(
-                        "keeping {} because there is a valid lease preventing GC at {}",
+                // 2. It is newer than PiTR cutoff point?
+                if l.get_lsn_range().end > time_cutoff {
+                    debug!(
+                        "keeping {} because it's newer than time_cutoff {}",
                         l.layer_name(),
-                        lsn,
+                        time_cutoff,
                     );
-                    result.layers_needed_by_leases += 1;
+                    result.layers_needed_by_pitr += 1;
                     continue 'outer;
                 }
+
+                // 3. Is it needed by a child branch?
+                // NOTE With that we would keep data that
+                // might be referenced by child branches forever.
+                // We can track this in child timeline GC and delete parent layers when
+                // they are no longer needed. This might be complicated with long inheritance chains.
+                if let Some(retain_lsn) = max_retain_lsn {
+                    // start_lsn is inclusive
+                    if &l.get_lsn_range().start <= retain_lsn {
+                        debug!(
+                            "keeping {} because it's still might be referenced by child branch forked at {} is_dropped: xx is_incremental: {}",
+                            l.layer_name(),
+                            retain_lsn,
+                            l.is_incremental(),
+                        );
+                        result.layers_needed_by_branches += 1;
+                        continue 'outer;
+                    }
+                }
+
+                // 4. Is there a valid lease that requires us to keep this layer?
+                if let Some(lsn) = &max_lsn_with_valid_lease {
+                    // keep if layer start <= any of the lease
+                    if &l.get_lsn_range().start <= lsn {
+                        debug!(
+                            "keeping {} because there is a valid lease preventing GC at {}",
+                            l.layer_name(),
+                            lsn,
+                        );
+                        result.layers_needed_by_leases += 1;
+                        continue 'outer;
+                    }
+                }
+
+                // 5. Is there a later on-disk layer for this relation?
+                //
+                // The end-LSN is exclusive, while disk_consistent_lsn is
+                // inclusive. For example, if disk_consistent_lsn is 100, it is
+                // OK for a delta layer to have end LSN 101, but if the end LSN
+                // is 102, then it might not have been fully flushed to disk
+                // before crash.
+                //
+                // For example, imagine that the following layers exist:
+                //
+                // 1000      - image (A)
+                // 1000-2000 - delta (B)
+                // 2000      - image (C)
+                // 2000-3000 - delta (D)
+                // 3000      - image (E)
+                //
+                // If GC horizon is at 2500, we can remove layers A and B, but
+                // we cannot remove C, even though it's older than 2500, because
+                // the delta layer 2000-3000 depends on it.
+                if !layers
+                    .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))
+                {
+                    debug!("keeping {} because it is the latest layer", l.layer_name());
+                    result.layers_not_updated += 1;
+                    continue 'outer;
+                }
+
+                // We didn't find any reason to keep this file, so remove it.
+                info!(
+                    "garbage collecting {} is_dropped: xx is_incremental: {}",
+                    l.layer_name(),
+                    l.is_incremental(),
+                );
+                layers_to_remove.push(l);
             }
 
-            // 5. Is there a later on-disk layer for this relation?
-            //
-            // The end-LSN is exclusive, while disk_consistent_lsn is
-            // inclusive. For example, if disk_consistent_lsn is 100, it is
-            // OK for a delta layer to have end LSN 101, but if the end LSN
-            // is 102, then it might not have been fully flushed to disk
-            // before crash.
-            //
-            // For example, imagine that the following layers exist:
-            //
-            // 1000      - image (A)
-            // 1000-2000 - delta (B)
-            // 2000      - image (C)
-            // 2000-3000 - delta (D)
-            // 3000      - image (E)
-            //
-            // If GC horizon is at 2500, we can remove layers A and B, but
-            // we cannot remove C, even though it's older than 2500, because
-            // the delta layer 2000-3000 depends on it.
-            if !layers
-                .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))
-            {
-                info!("keeping {} because it is the latest layer", l.layer_name());
-                result.layers_not_updated += 1;
-                continue 'outer;
-            }
-
-            // We didn't find any reason to keep this file, so remove it.
-            info!(
-                "garbage collecting {} is_dropped: xx is_incremental: {}",
-                l.layer_name(),
-                l.is_incremental(),
-            );
-            layers_to_remove.push(l);
-        }
+            layers_to_remove
+        };
 
         if !layers_to_remove.is_empty() {
             // Persist the new GC cutoff value before we actually remove anything.
@@ -6670,15 +6667,19 @@ impl Timeline {
                     }
                 })?;
 
+            let mut guard = self
+                .layers
+                .write(LayerManagerLockHolder::GarbageCollection)
+                .await;
+
             let gc_layers = layers_to_remove
                 .iter()
-                .map(|x| guard.get_from_desc(x))
+                .flat_map(|desc| guard.try_get_from_key(&desc.key()).cloned())
                 .collect::<Vec<Layer>>();
 
             result.layers_removed = gc_layers.len() as u64;
 
             self.remote_client.schedule_gc_update(&gc_layers)?;
-
             guard.open_mut()?.finish_gc_timeline(&gc_layers);
 
             #[cfg(feature = "testing")]
@@ -7178,9 +7179,7 @@ impl Timeline {
         if let Some(end) = layer_end_lsn {
             assert!(
                 end <= last_record_lsn,
-                "advance last record lsn before inserting a layer, end_lsn={}, last_record_lsn={}",
-                end,
-                last_record_lsn,
+                "advance last record lsn before inserting a layer, end_lsn={end}, last_record_lsn={last_record_lsn}",
             );
         }
 
@@ -7366,7 +7365,7 @@ impl TimelineWriter<'_> {
             .tl
             .get_layer_for_write(at, &self.write_guard, ctx)
             .await?;
-        let initial_size = layer.size().await?;
+        let initial_size = layer.len();
 
         let last_freeze_at = self.last_freeze_at.load();
         self.write_guard.replace(TimelineWriterState::new(
@@ -7594,11 +7593,12 @@ mod tests {
     use std::sync::Arc;
 
     use pageserver_api::key::Key;
-    use pageserver_api::value::Value;
+    use postgres_ffi::PgMajorVersion;
     use std::iter::Iterator;
     use tracing::Instrument;
     use utils::id::TimelineId;
     use utils::lsn::Lsn;
+    use wal_decoder::models::value::Value;
 
     use super::HeatMapTimeline;
     use crate::context::RequestContextBuilder;
@@ -7668,7 +7668,7 @@ mod tests {
             .create_test_timeline_with_layers(
                 TimelineId::generate(),
                 Lsn(0x10),
-                14,
+                PgMajorVersion::PG14,
                 &ctx,
                 Vec::new(), // in-memory layers
                 delta_layers,
@@ -7804,7 +7804,7 @@ mod tests {
             .create_test_timeline_with_layers(
                 TimelineId::generate(),
                 Lsn(0x10),
-                14,
+                PgMajorVersion::PG14,
                 &ctx,
                 Vec::new(), // in-memory layers
                 delta_layers,
@@ -7864,7 +7864,12 @@ mod tests {
 
         let (tenant, ctx) = harness.load().await;
         let timeline = tenant
-            .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+            .create_test_timeline(
+                TimelineId::generate(),
+                Lsn(0x10),
+                PgMajorVersion::PG14,
+                &ctx,
+            )
             .await
             .unwrap();
 

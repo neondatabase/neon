@@ -44,7 +44,6 @@ use pageserver_api::key::{DBDIR_KEY, KEY_SIZE, Key};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
-use pageserver_api::value::Value;
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 use tokio_epoll_uring::IoBuf;
@@ -54,6 +53,7 @@ use utils::bin_ser::BeSer;
 use utils::bin_ser::SerializeError;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
+use wal_decoder::models::value::Value;
 
 use super::errors::PutError;
 use super::{
@@ -783,7 +783,7 @@ impl DeltaLayer {
             ctx,
         )
         .await
-        .with_context(|| format!("Failed to open file '{}'", path))?;
+        .with_context(|| format!("Failed to open file '{path}'"))?;
         let file_id = page_cache::next_file_id();
         let block_reader = FileBlockReader::new(&file, file_id);
         let summary_blk = block_reader.read_blk(0, ctx).await?;
@@ -1306,7 +1306,7 @@ impl DeltaLayerInner {
                     // is it an image or will_init walrecord?
                     // FIXME: this could be handled by threading the BlobRef to the
                     // VectoredReadBuilder
-                    let will_init = pageserver_api::value::ValueBytes::will_init(&data)
+                    let will_init = wal_decoder::models::value::ValueBytes::will_init(&data)
                         .inspect_err(|_e| {
                             #[cfg(feature = "testing")]
                             tracing::error!(data=?utils::Hex(&data), err=?_e, %key, %lsn, "failed to parse will_init out of serialized value");
@@ -1369,7 +1369,7 @@ impl DeltaLayerInner {
                     format!(" img {} bytes", img.len())
                 }
                 Value::WalRecord(rec) => {
-                    let wal_desc = pageserver_api::record::describe_wal_record(&rec)?;
+                    let wal_desc = wal_decoder::models::record::describe_wal_record(&rec)?;
                     format!(
                         " rec {} bytes will_init: {} {}",
                         buf.len(),
@@ -1401,7 +1401,7 @@ impl DeltaLayerInner {
                 match val {
                     Value::Image(img) => {
                         let checkpoint = CheckPoint::decode(&img)?;
-                        println!("   CHECKPOINT: {:?}", checkpoint);
+                        println!("   CHECKPOINT: {checkpoint:?}");
                     }
                     Value::WalRecord(_rec) => {
                         println!("   unexpected walrecord value for checkpoint key");
@@ -1622,12 +1622,6 @@ impl DeltaLayerIterator<'_> {
 pub(crate) mod test {
     use std::collections::BTreeMap;
 
-    use bytes::Bytes;
-    use itertools::MinMaxResult;
-    use pageserver_api::value::Value;
-    use rand::prelude::{SeedableRng, SliceRandom, StdRng};
-    use rand::{Rng, RngCore};
-
     use super::*;
     use crate::DEFAULT_PG_VERSION;
     use crate::context::DownloadBehavior;
@@ -1637,6 +1631,11 @@ pub(crate) mod test {
     use crate::tenant::storage_layer::{Layer, ResidentLayer};
     use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
     use crate::tenant::{TenantShard, Timeline};
+    use bytes::Bytes;
+    use itertools::MinMaxResult;
+    use postgres_ffi::PgMajorVersion;
+    use rand::prelude::{SeedableRng, SliceRandom, StdRng};
+    use rand::{Rng, RngCore};
 
     /// Construct an index for a fictional delta layer and and then
     /// traverse in order to plan vectored reads for a query. Finally,
@@ -1988,7 +1987,7 @@ pub(crate) mod test {
     #[tokio::test]
     async fn copy_delta_prefix_smoke() {
         use bytes::Bytes;
-        use pageserver_api::record::NeonWalRecord;
+        use wal_decoder::models::record::NeonWalRecord;
 
         let h = crate::tenant::harness::TenantHarness::create("truncate_delta_smoke")
             .await
@@ -1996,7 +1995,7 @@ pub(crate) mod test {
         let (tenant, ctx) = h.load().await;
         let ctx = &ctx;
         let timeline = tenant
-            .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, ctx)
+            .create_test_timeline(TimelineId::generate(), Lsn(0x10), PgMajorVersion::PG14, ctx)
             .await
             .unwrap();
         let ctx = &ctx.with_scope_timeline(&timeline);

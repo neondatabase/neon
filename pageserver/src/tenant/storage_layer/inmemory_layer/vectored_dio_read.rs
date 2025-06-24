@@ -380,7 +380,7 @@ impl<B: Buffer> std::fmt::Debug for LogicalReadState<B> {
                 write!(f, "Ongoing({:?})", BufferDebug::from(b as &dyn Buffer))
             }
             LogicalReadState::Ok(b) => write!(f, "Ok({:?})", BufferDebug::from(b as &dyn Buffer)),
-            LogicalReadState::Error(e) => write!(f, "Error({:?})", e),
+            LogicalReadState::Error(e) => write!(f, "Error({e:?})"),
             LogicalReadState::Undefined => write!(f, "Undefined"),
         }
     }

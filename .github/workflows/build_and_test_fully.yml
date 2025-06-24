@@ -79,7 +79,7 @@ jobs:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       build-tag: ${{ needs.tag.outputs.build-tag }}
       build-type: ${{ matrix.build-type }}
-      rerun_failed: false
+      rerun-failed: false
       test-cfg: '[{"pg_version":"v14", "lfc_state": "with-lfc"},
                   {"pg_version":"v15", "lfc_state": "with-lfc"},
                   {"pg_version":"v16", "lfc_state": "with-lfc"},

@@ -11,7 +11,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, bail, ensure};
+use anyhow::{Context, ensure};
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
 use pageserver_api::config::{
@@ -22,6 +22,7 @@ use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
 use pem::Pem;
 use postgres_backend::AuthType;
+use postgres_ffi::PgMajorVersion;
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use reqwest::Url;
 use storage_broker::Uri;
@@ -338,20 +339,16 @@ impl PageServerConf {
     //
     // Postgres distribution paths
     //
-    pub fn pg_distrib_dir(&self, pg_version: u32) -> anyhow::Result<Utf8PathBuf> {
+    pub fn pg_distrib_dir(&self, pg_version: PgMajorVersion) -> anyhow::Result<Utf8PathBuf> {
         let path = self.pg_distrib_dir.clone();
 
-        #[allow(clippy::manual_range_patterns)]
-        match pg_version {
-            14 | 15 | 16 | 17 => Ok(path.join(format!("v{pg_version}"))),
-            _ => bail!("Unsupported postgres version: {}", pg_version),
-        }
+        Ok(path.join(pg_version.v_str()))
     }
 
-    pub fn pg_bin_dir(&self, pg_version: u32) -> anyhow::Result<Utf8PathBuf> {
+    pub fn pg_bin_dir(&self, pg_version: PgMajorVersion) -> anyhow::Result<Utf8PathBuf> {
         Ok(self.pg_distrib_dir(pg_version)?.join("bin"))
     }
-    pub fn pg_lib_dir(&self, pg_version: u32) -> anyhow::Result<Utf8PathBuf> {
+    pub fn pg_lib_dir(&self, pg_version: PgMajorVersion) -> anyhow::Result<Utf8PathBuf> {
         Ok(self.pg_distrib_dir(pg_version)?.join("lib"))
     }
 

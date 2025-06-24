@@ -155,7 +155,7 @@ pub async fn task_main(
                 Ok(Some(p)) => {
                     ctx.set_success();
                     let _disconnect = ctx.log_connect();
-                    match p.proxy_pass(&config.connect_to_compute).await {
+                    match p.proxy_pass().await {
                         Ok(()) => {}
                         Err(ErrorSource::Client(e)) => {
                             warn!(
@@ -357,27 +357,42 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let res = connect_to_compute(
         ctx,
         &TcpMechanism {
-            user_info: creds.info.clone(),
-            auth: auth_info,
             locks: &config.connect_compute_locks,
         },
-        &auth::Backend::ControlPlane(cplane, creds.info),
+        &auth::Backend::ControlPlane(cplane, creds.info.clone()),
         config.wake_compute_retry_config,
         &config.connect_to_compute,
     )
     .await;
 
-    let node = match res {
+    let mut node = match res {
         Ok(node) => node,
         Err(e) => Err(stream.throw_error(e, Some(ctx)).await)?,
     };
 
-    let cancellation_handler_clone = Arc::clone(&cancellation_handler);
-    let session = cancellation_handler_clone.get_key();
+    let pg_settings = auth_info.authenticate(ctx, &mut node, creds.info).await;
+    let pg_settings = match pg_settings {
+        Ok(pg_settings) => pg_settings,
+        Err(e) => Err(stream.throw_error(e, Some(ctx)).await)?,
+    };
 
-    session.write_cancel_key(node.cancel_closure.clone())?;
-    prepare_client_connection(&node, *session.key(), &mut stream);
+    let session = cancellation_handler.get_key();
+
+    prepare_client_connection(&pg_settings, *session.key(), &mut stream);
     let stream = stream.flush_and_into_inner().await?;
+
+    let session_id = ctx.session_id();
+    let (cancel_on_shutdown, cancel) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        session
+            .maintain_cancel_key(
+                session_id,
+                cancel,
+                &pg_settings.cancel_closure,
+                &config.connect_to_compute,
+            )
+            .await;
+    });
 
     let private_link_id = match ctx.extra() {
         Some(ConnectionInfoExtra::Aws { vpce_id }) => Some(vpce_id.clone()),
@@ -387,31 +402,34 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     Ok(Some(ProxyPassthrough {
         client: stream,
-        aux: node.aux.clone(),
+        compute: node.stream,
+
+        aux: node.aux,
         private_link_id,
-        compute: node,
-        session_id: ctx.session_id(),
-        cancel: session,
+
+        _cancel_on_shutdown: cancel_on_shutdown,
+
         _req: request_gauge,
         _conn: conn_gauge,
+        _db_conn: node.guage,
     }))
 }
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
 pub(crate) fn prepare_client_connection(
-    node: &compute::PostgresConnection,
+    settings: &compute::PostgresSettings,
     cancel_key_data: CancelKeyData,
     stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) {
     // Forward all deferred notices to the client.
-    for notice in &node.delayed_notice {
+    for notice in &settings.delayed_notice {
         stream.write_raw(notice.as_bytes().len(), b'N', |buf| {
             buf.extend_from_slice(notice.as_bytes());
         });
     }
 
     // Forward all postgres connection params to the client.
-    for (name, value) in &node.params {
+    for (name, value) in &settings.params {
         stream.write_message(BeMessage::ParameterStatus {
             name: name.as_bytes(),
             value: value.as_bytes(),
