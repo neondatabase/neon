@@ -357,24 +357,28 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let res = connect_to_compute(
         ctx,
         &TcpMechanism {
-            user_info: creds.info.clone(),
-            auth: auth_info,
             locks: &config.connect_compute_locks,
         },
-        &auth::Backend::ControlPlane(cplane, creds.info),
+        &auth::Backend::ControlPlane(cplane, creds.info.clone()),
         config.wake_compute_retry_config,
         &config.connect_to_compute,
     )
     .await;
 
-    let node = match res {
+    let mut node = match res {
         Ok(node) => node,
+        Err(e) => Err(stream.throw_error(e, Some(ctx)).await)?,
+    };
+
+    let pg_settings = auth_info.authenticate(ctx, &mut node, creds.info).await;
+    let pg_settings = match pg_settings {
+        Ok(pg_settings) => pg_settings,
         Err(e) => Err(stream.throw_error(e, Some(ctx)).await)?,
     };
 
     let session = cancellation_handler.get_key();
 
-    prepare_client_connection(&node, *session.key(), &mut stream);
+    prepare_client_connection(&pg_settings, *session.key(), &mut stream);
     let stream = stream.flush_and_into_inner().await?;
 
     let session_id = ctx.session_id();
@@ -384,7 +388,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
             .maintain_cancel_key(
                 session_id,
                 cancel,
-                &node.cancel_closure,
+                &pg_settings.cancel_closure,
                 &config.connect_to_compute,
             )
             .await;
@@ -413,19 +417,19 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
 pub(crate) fn prepare_client_connection(
-    node: &compute::PostgresConnection,
+    settings: &compute::PostgresSettings,
     cancel_key_data: CancelKeyData,
     stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) {
     // Forward all deferred notices to the client.
-    for notice in &node.delayed_notice {
+    for notice in &settings.delayed_notice {
         stream.write_raw(notice.as_bytes().len(), b'N', |buf| {
             buf.extend_from_slice(notice.as_bytes());
         });
     }
 
     // Forward all postgres connection params to the client.
-    for (name, value) in &node.params {
+    for (name, value) in &settings.params {
         stream.write_message(BeMessage::ParameterStatus {
             name: name.as_bytes(),
             value: value.as_bytes(),

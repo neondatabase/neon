@@ -218,11 +218,9 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     };
     auth_info.set_startup_params(&params, true);
 
-    let node = connect_to_compute(
+    let mut node = connect_to_compute(
         ctx,
         &TcpMechanism {
-            user_info,
-            auth: auth_info,
             locks: &config.connect_compute_locks,
         },
         &node_info,
@@ -232,9 +230,14 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     .or_else(|e| async { Err(stream.throw_error(e, Some(ctx)).await) })
     .await?;
 
+    let pg_settings = auth_info
+        .authenticate(ctx, &mut node, user_info)
+        .or_else(|e| async { Err(stream.throw_error(e, Some(ctx)).await) })
+        .await?;
+
     let session = cancellation_handler.get_key();
 
-    prepare_client_connection(&node, *session.key(), &mut stream);
+    prepare_client_connection(&pg_settings, *session.key(), &mut stream);
     let stream = stream.flush_and_into_inner().await?;
 
     let session_id = ctx.session_id();
@@ -244,7 +247,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
             .maintain_cancel_key(
                 session_id,
                 cancel,
-                &node.cancel_closure,
+                &pg_settings.cancel_closure,
                 &config.connect_to_compute,
             )
             .await;
