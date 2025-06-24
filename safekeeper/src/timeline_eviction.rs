@@ -351,9 +351,7 @@ where
             .read_exact(&mut buffer2[..bytes_read1])
             .await
             .with_context(|| {
-                format!(
-                    "failed to read {bytes_read1} bytes from reader2 at offset {offset}"
-                )
+                format!("failed to read {bytes_read1} bytes from reader2 at offset {offset}")
             })?;
         assert!(bytes_read2 == bytes_read1);
 

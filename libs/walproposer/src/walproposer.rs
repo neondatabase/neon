@@ -456,9 +456,7 @@ mod tests {
             timeout_millis: i64,
         ) -> super::WaitResult {
             let data = self.wait_events.get();
-            println!(
-                "wait_event_set, timeout_millis={timeout_millis}, res={data:?}"
-            );
+            println!("wait_event_set, timeout_millis={timeout_millis}, res={data:?}");
             super::WaitResult::Network(data.sk, data.event_mask)
         }
 

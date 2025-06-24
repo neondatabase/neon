@@ -87,12 +87,8 @@ impl BrokerClientChannel {
 pub fn parse_proto_ttid(proto_ttid: &ProtoTenantTimelineId) -> Result<TenantTimelineId, Status> {
     let tenant_id = TenantId::from_slice(&proto_ttid.tenant_id)
         .map_err(|e| Status::new(Code::InvalidArgument, format!("malformed tenant_id: {e}")))?;
-    let timeline_id = TimelineId::from_slice(&proto_ttid.timeline_id).map_err(|e| {
-        Status::new(
-            Code::InvalidArgument,
-            format!("malformed timeline_id: {e}"),
-        )
-    })?;
+    let timeline_id = TimelineId::from_slice(&proto_ttid.timeline_id)
+        .map_err(|e| Status::new(Code::InvalidArgument, format!("malformed timeline_id: {e}")))?;
     Ok(TenantTimelineId {
         tenant_id,
         timeline_id,

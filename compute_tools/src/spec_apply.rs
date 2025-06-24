@@ -933,55 +933,53 @@ async fn get_operations<'a>(
                 PerDatabasePhase::DeleteDBRoleReferences => {
                     let ctx = ctx.read().await;
 
-                    let operations =
-                        spec.delta_operations
-                            .iter()
-                            .flatten()
-                            .filter(|op| op.action == "delete_role")
-                            .filter_map(move |op| {
-                                if db.is_owned_by(&op.name) {
-                                    return None;
-                                }
-                                if !ctx.roles.contains_key(&op.name) {
-                                    return None;
-                                }
-                                let quoted = op.name.pg_quote();
-                                let new_owner = match &db {
-                                    DB::SystemDB => PgIdent::from("cloud_admin").pg_quote(),
-                                    DB::UserDB(db) => db.owner.pg_quote(),
-                                };
-                                let (escaped_role, outer_tag) = op.name.pg_quote_dollar();
+                    let operations = spec
+                        .delta_operations
+                        .iter()
+                        .flatten()
+                        .filter(|op| op.action == "delete_role")
+                        .filter_map(move |op| {
+                            if db.is_owned_by(&op.name) {
+                                return None;
+                            }
+                            if !ctx.roles.contains_key(&op.name) {
+                                return None;
+                            }
+                            let quoted = op.name.pg_quote();
+                            let new_owner = match &db {
+                                DB::SystemDB => PgIdent::from("cloud_admin").pg_quote(),
+                                DB::UserDB(db) => db.owner.pg_quote(),
+                            };
+                            let (escaped_role, outer_tag) = op.name.pg_quote_dollar();
 
-                                Some(vec![
-                                    // This will reassign all dependent objects to the db owner
-                                    Operation {
-                                        query: format!(
-                                            "REASSIGN OWNED BY {quoted} TO {new_owner}",
-                                        ),
-                                        comment: None,
-                                    },
-                                    // Revoke some potentially blocking privileges (Neon-specific currently)
-                                    Operation {
-                                        query: format!(
-                                            include_str!("sql/pre_drop_role_revoke_privileges.sql"),
-                                            // N.B. this has to be properly dollar-escaped with `pg_quote_dollar()`
-                                            role_name = escaped_role,
-                                            outer_tag = outer_tag,
-                                        ),
-                                        comment: None,
-                                    },
-                                    // This now will only drop privileges of the role
-                                    // TODO: this is obviously not 100% true because of the above case,
-                                    // there could be still some privileges that are not revoked. Maybe this
-                                    // only drops privileges that were granted *by this* role, not *to this* role,
-                                    // but this has to be checked.
-                                    Operation {
-                                        query: format!("DROP OWNED BY {quoted}"),
-                                        comment: None,
-                                    },
-                                ])
-                            })
-                            .flatten();
+                            Some(vec![
+                                // This will reassign all dependent objects to the db owner
+                                Operation {
+                                    query: format!("REASSIGN OWNED BY {quoted} TO {new_owner}",),
+                                    comment: None,
+                                },
+                                // Revoke some potentially blocking privileges (Neon-specific currently)
+                                Operation {
+                                    query: format!(
+                                        include_str!("sql/pre_drop_role_revoke_privileges.sql"),
+                                        // N.B. this has to be properly dollar-escaped with `pg_quote_dollar()`
+                                        role_name = escaped_role,
+                                        outer_tag = outer_tag,
+                                    ),
+                                    comment: None,
+                                },
+                                // This now will only drop privileges of the role
+                                // TODO: this is obviously not 100% true because of the above case,
+                                // there could be still some privileges that are not revoked. Maybe this
+                                // only drops privileges that were granted *by this* role, not *to this* role,
+                                // but this has to be checked.
+                                Operation {
+                                    query: format!("DROP OWNED BY {quoted}"),
+                                    comment: None,
+                                },
+                            ])
+                        })
+                        .flatten();
 
                     Ok(Box::new(operations))
                 }

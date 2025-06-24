@@ -486,9 +486,8 @@ async fn cmd_pgdata(
     };
 
     let superuser = "cloud_admin";
-    let destination_connstring = format!(
-        "host=localhost port={pg_port} user={superuser} dbname=neondb"
-    );
+    let destination_connstring =
+        format!("host=localhost port={pg_port} user={superuser} dbname=neondb");
 
     let pgdata_dir = workdir.join("pgdata");
     let mut proc = PostgresProcess::new(pgdata_dir.clone(), pg_bin_dir.clone(), pg_lib_dir.clone());

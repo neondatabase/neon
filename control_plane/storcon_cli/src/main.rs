@@ -1343,9 +1343,7 @@ async fn watch_tenant_shard(
         // Maybe drop out if we finished migration
         if let Some(until_migrated_to) = until_migrated_to {
             if shard.node_attached == Some(until_migrated_to) && !shard.is_reconciling {
-                println!(
-                    "Tenant shard {tenant_shard_id} is now on node {until_migrated_to}"
-                );
+                println!("Tenant shard {tenant_shard_id} is now on node {until_migrated_to}");
                 break;
             }
         }
