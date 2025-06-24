@@ -962,8 +962,8 @@ where
          * because safekeepers parse WAL headers and the format
          * may change between versions.
          */
-        if PgMajorVersion::try_from(msg.pg_version).unwrap()
-            != PgMajorVersion::try_from(self.state.server.pg_version).unwrap()
+        if PgMajorVersion::try_from(msg.pg_version)?
+            != PgMajorVersion::try_from(self.state.server.pg_version)?
             && self.state.server.pg_version != UNKNOWN_SERVER_VERSION
         {
             bail!(
