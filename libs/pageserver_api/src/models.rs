@@ -1182,7 +1182,7 @@ impl Display for ImageCompressionAlgorithm {
             ImageCompressionAlgorithm::Disabled => write!(f, "disabled"),
             ImageCompressionAlgorithm::Zstd { level } => {
                 if let Some(level) = level {
-                    write!(f, "zstd({})", level)
+                    write!(f, "zstd({level})")
                 } else {
                     write!(f, "zstd")
                 }
@@ -2011,8 +2011,7 @@ mod tests {
         let err = serde_json::from_value::<TenantConfigRequest>(config_request).unwrap_err();
         assert!(
             err.to_string().contains("unknown field `unknown_field`"),
-            "expect unknown field `unknown_field` error, got: {}",
-            err
+            "expect unknown field `unknown_field` error, got: {err}"
         );
     }
 

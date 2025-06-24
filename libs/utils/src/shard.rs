@@ -196,7 +196,7 @@ impl std::fmt::Display for TenantShardId {
 impl std::fmt::Debug for TenantShardId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Debug is the same as Display: the compact hex representation
-        write!(f, "{}", self)
+        write!(f, "{self}")
     }
 }
 
@@ -284,7 +284,7 @@ impl std::fmt::Display for ShardIndex {
 impl std::fmt::Debug for ShardIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Debug is the same as Display: the compact hex representation
-        write!(f, "{}", self)
+        write!(f, "{self}")
     }
 }
 

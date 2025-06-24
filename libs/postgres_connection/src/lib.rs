@@ -223,7 +223,7 @@ mod tests_pg_connection_config {
         assert_eq!(cfg.port(), 123);
         assert_eq!(cfg.raw_address(), "stub.host.example:123");
         assert_eq!(
-            format!("{:?}", cfg),
+            format!("{cfg:?}"),
             "PgConnectionConfig { host: Domain(\"stub.host.example\"), port: 123, password: None }"
         );
     }
@@ -239,7 +239,7 @@ mod tests_pg_connection_config {
         assert_eq!(cfg.port(), 123);
         assert_eq!(cfg.raw_address(), "[::1]:123");
         assert_eq!(
-            format!("{:?}", cfg),
+            format!("{cfg:?}"),
             "PgConnectionConfig { host: Ipv6(::1), port: 123, password: None }"
         );
     }
@@ -252,7 +252,7 @@ mod tests_pg_connection_config {
         assert_eq!(cfg.port(), 123);
         assert_eq!(cfg.raw_address(), "stub.host.example:123");
         assert_eq!(
-            format!("{:?}", cfg),
+            format!("{cfg:?}"),
             "PgConnectionConfig { host: Domain(\"stub.host.example\"), port: 123, password: Some(REDACTED-STRING) }"
         );
     }

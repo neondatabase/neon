@@ -272,8 +272,7 @@ impl ImageLayer {
 
         conf.timeline_path(&tenant_shard_id, &timeline_id)
             .join(format!(
-                "{fname}.{:x}.{TEMP_FILE_SUFFIX}",
-                filename_disambiguator
+                "{fname}.{filename_disambiguator:x}.{TEMP_FILE_SUFFIX}"
             ))
     }
 
@@ -370,7 +369,7 @@ impl ImageLayer {
             ctx,
         )
         .await
-        .with_context(|| format!("Failed to open file '{}'", path))?;
+        .with_context(|| format!("Failed to open file '{path}'"))?;
         let file_id = page_cache::next_file_id();
         let block_reader = FileBlockReader::new(&file, file_id);
         let summary_blk = block_reader.read_blk(0, ctx).await?;
@@ -1475,7 +1474,7 @@ mod test {
                     assert_eq!(l1, expect_lsn);
                     assert_eq!(&i1, i2);
                 }
-                (o1, o2) => panic!("iterators length mismatch: {:?}, {:?}", o1, o2),
+                (o1, o2) => panic!("iterators length mismatch: {o1:?}, {o2:?}"),
             }
         }
     }

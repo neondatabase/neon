@@ -783,7 +783,7 @@ impl DeltaLayer {
             ctx,
         )
         .await
-        .with_context(|| format!("Failed to open file '{}'", path))?;
+        .with_context(|| format!("Failed to open file '{path}'"))?;
         let file_id = page_cache::next_file_id();
         let block_reader = FileBlockReader::new(&file, file_id);
         let summary_blk = block_reader.read_blk(0, ctx).await?;
@@ -1401,7 +1401,7 @@ impl DeltaLayerInner {
                 match val {
                     Value::Image(img) => {
                         let checkpoint = CheckPoint::decode(&img)?;
-                        println!("   CHECKPOINT: {:?}", checkpoint);
+                        println!("   CHECKPOINT: {checkpoint:?}");
                     }
                     Value::WalRecord(_rec) => {
                         println!("   unexpected walrecord value for checkpoint key");

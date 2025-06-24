@@ -311,8 +311,7 @@ async fn do_extension_server_request(uri: Url) -> Result<Bytes, (String, String)
     let resp = reqwest::get(uri).await.map_err(|e| {
         (
             format!(
-                "could not perform remote extensions server request: {:?}",
-                e
+                "could not perform remote extensions server request: {e:?}"
             ),
             UNKNOWN_HTTP_STATUS.to_string(),
         )
@@ -323,7 +322,7 @@ async fn do_extension_server_request(uri: Url) -> Result<Bytes, (String, String)
         StatusCode::OK => match resp.bytes().await {
             Ok(resp) => Ok(resp),
             Err(e) => Err((
-                format!("could not read remote extensions server response: {:?}", e),
+                format!("could not read remote extensions server response: {e:?}"),
                 // It's fine to return and report error with status as 200 OK,
                 // because we still failed to read the response.
                 status.to_string(),
@@ -335,8 +334,7 @@ async fn do_extension_server_request(uri: Url) -> Result<Bytes, (String, String)
         )),
         _ => Err((
             format!(
-                "unexpected remote extensions server response status code: {}",
-                status
+                "unexpected remote extensions server response status code: {status}"
             ),
             status.to_string(),
         )),

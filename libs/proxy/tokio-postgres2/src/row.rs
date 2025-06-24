@@ -156,7 +156,7 @@ impl Row {
     {
         match self.get_inner(&idx) {
             Ok(ok) => ok,
-            Err(err) => panic!("error retrieving column {}: {}", idx, err),
+            Err(err) => panic!("error retrieving column {idx}: {err}"),
         }
     }
 
@@ -274,7 +274,7 @@ impl SimpleQueryRow {
     {
         match self.get_inner(&idx) {
             Ok(ok) => ok,
-            Err(err) => panic!("error retrieving column {}: {}", idx, err),
+            Err(err) => panic!("error retrieving column {idx}: {err}"),
         }
     }
 

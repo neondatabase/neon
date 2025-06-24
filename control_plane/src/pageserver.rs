@@ -121,7 +121,7 @@ impl PageServerNode {
                 .env
                 .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
                 .unwrap();
-            overrides.push(format!("control_plane_api_token='{}'", jwt_token));
+            overrides.push(format!("control_plane_api_token='{jwt_token}'"));
         }
 
         if !conf.other.contains_key("remote_storage") {

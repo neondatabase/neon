@@ -287,11 +287,11 @@ impl From<GetActiveTenantError> for ApiError {
             GetActiveTenantError::WillNotBecomeActive(TenantState::Stopping { .. }) => {
                 ApiError::ShuttingDown
             }
-            GetActiveTenantError::WillNotBecomeActive(_) => ApiError::Conflict(format!("{}", e)),
+            GetActiveTenantError::WillNotBecomeActive(_) => ApiError::Conflict(format!("{e}")),
             GetActiveTenantError::Cancelled => ApiError::ShuttingDown,
             GetActiveTenantError::NotFound(gte) => gte.into(),
             GetActiveTenantError::WaitForActiveTimeout { .. } => {
-                ApiError::ResourceUnavailable(format!("{}", e).into())
+                ApiError::ResourceUnavailable(format!("{e}").into())
             }
             GetActiveTenantError::SwitchedTenant => {
                 // in our HTTP handlers, this error doesn't happen
@@ -1015,7 +1015,7 @@ async fn get_lsn_by_timestamp_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let timestamp_raw = must_get_query_param(&request, "timestamp")?;
     let timestamp = humantime::parse_rfc3339(&timestamp_raw)
-        .with_context(|| format!("Invalid time: {:?}", timestamp_raw))
+        .with_context(|| format!("Invalid time: {timestamp_raw:?}"))
         .map_err(ApiError::BadRequest)?;
     let timestamp_pg = postgres_ffi::to_pg_timestamp(timestamp);
 
@@ -1110,7 +1110,7 @@ async fn get_timestamp_of_lsn_handler(
             json_response(StatusCode::OK, time)
         }
         None => Err(ApiError::PreconditionFailed(
-            format!("Timestamp for lsn {} not found", lsn).into(),
+            format!("Timestamp for lsn {lsn} not found").into(),
         )),
     }
 }
@@ -2421,7 +2421,7 @@ async fn timeline_offload_handler(
         }
         if let (false, reason) = timeline.can_offload() {
             return Err(ApiError::PreconditionFailed(
-                format!("Timeline::can_offload() check failed: {}", reason) .into(),
+                format!("Timeline::can_offload() check failed: {reason}") .into(),
             ));
         }
         offload_timeline(&tenant, &timeline)

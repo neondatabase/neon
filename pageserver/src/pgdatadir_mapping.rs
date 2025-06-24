@@ -1185,7 +1185,7 @@ impl Timeline {
             }
             let origin_id = k.field6 as RepOriginId;
             let origin_lsn = Lsn::des(&v)
-                .with_context(|| format!("decode replorigin value for {}: {v:?}", origin_id))?;
+                .with_context(|| format!("decode replorigin value for {origin_id}: {v:?}"))?;
             if origin_lsn != Lsn::INVALID {
                 result.insert(origin_id, origin_lsn);
             }
@@ -2440,8 +2440,7 @@ impl DatadirModification<'_> {
             if path == p {
                 assert!(
                     modifying_file.is_none(),
-                    "duplicated entries found for {}",
-                    path
+                    "duplicated entries found for {path}"
                 );
                 modifying_file = Some(content);
             } else {

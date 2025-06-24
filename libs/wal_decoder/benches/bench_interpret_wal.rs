@@ -64,7 +64,7 @@ async fn download_bench_data(
     let temp_dir_parent: Utf8PathBuf = env::current_dir().unwrap().try_into()?;
     let temp_dir = camino_tempfile::tempdir_in(temp_dir_parent)?;
 
-    eprintln!("Downloading benchmark data to {:?}", temp_dir);
+    eprintln!("Downloading benchmark data to {temp_dir:?}");
 
     let listing = client
         .list(None, ListingMode::NoDelimiter, None, cancel)
@@ -120,7 +120,7 @@ struct BenchmarkMetadata {
 }
 
 async fn load_bench_data(path: &Utf8Path, input_size: usize) -> anyhow::Result<BenchmarkData> {
-    eprintln!("Loading benchmark data from {:?}", path);
+    eprintln!("Loading benchmark data from {path:?}");
 
     let mut entries = tokio::fs::read_dir(path).await?;
     let mut ordered_segment_paths = Vec::new();

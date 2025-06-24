@@ -64,10 +64,10 @@ impl TermHistory {
         for i in 0..n_entries {
             let term = bytes
                 .get_u64_f()
-                .with_context(|| format!("TermHistory pos {} misses term", i))?;
+                .with_context(|| format!("TermHistory pos {i} misses term"))?;
             let lsn = bytes
                 .get_u64_f()
-                .with_context(|| format!("TermHistory pos {} misses lsn", i))?
+                .with_context(|| format!("TermHistory pos {i} misses lsn"))?
                 .into();
             res.push(TermLsn { term, lsn })
         }
@@ -121,9 +121,7 @@ impl TermHistory {
         if let Some(sk_th_last) = sk_th.last() {
             assert!(
                 sk_th_last.lsn <= sk_wal_end,
-                "safekeeper term history end {:?} LSN is higher than WAL end {:?}",
-                sk_th_last,
-                sk_wal_end
+                "safekeeper term history end {sk_th_last:?} LSN is higher than WAL end {sk_wal_end:?}"
             );
         }
 
@@ -438,11 +436,11 @@ impl ProposerAcceptorMessage {
         for i in 0..members_len {
             let id = buf
                 .get_u64_f()
-                .with_context(|| format!("reading member {} node_id", i))?;
-            let host = Self::get_cstr(buf).with_context(|| format!("reading member {} host", i))?;
+                .with_context(|| format!("reading member {i} node_id"))?;
+            let host = Self::get_cstr(buf).with_context(|| format!("reading member {i} host"))?;
             let pg_port = buf
                 .get_u16_f()
-                .with_context(|| format!("reading member {} port", i))?;
+                .with_context(|| format!("reading member {i} port"))?;
             let sk = SafekeeperId {
                 id: NodeId(id),
                 host,
@@ -463,12 +461,12 @@ impl ProposerAcceptorMessage {
             for i in 0..new_members_len {
                 let id = buf
                     .get_u64_f()
-                    .with_context(|| format!("reading new member {} node_id", i))?;
+                    .with_context(|| format!("reading new member {i} node_id"))?;
                 let host = Self::get_cstr(buf)
-                    .with_context(|| format!("reading new member {} host", i))?;
+                    .with_context(|| format!("reading new member {i} host"))?;
                 let pg_port = buf
                     .get_u16_f()
-                    .with_context(|| format!("reading new member {} port", i))?;
+                    .with_context(|| format!("reading new member {i} port"))?;
                 let sk = SafekeeperId {
                     id: NodeId(id),
                     host,
@@ -1508,7 +1506,7 @@ mod tests {
         let mut vote_resp = sk.process_msg(&vote_request).await;
         match vote_resp.unwrap() {
             Some(AcceptorProposerMessage::VoteResponse(resp)) => assert!(resp.vote_given),
-            r => panic!("unexpected response: {:?}", r),
+            r => panic!("unexpected response: {r:?}"),
         }
 
         // reboot...
@@ -1523,7 +1521,7 @@ mod tests {
         vote_resp = sk.process_msg(&vote_request).await;
         match vote_resp.unwrap() {
             Some(AcceptorProposerMessage::VoteResponse(resp)) => assert!(!resp.vote_given),
-            r => panic!("unexpected response: {:?}", r),
+            r => panic!("unexpected response: {r:?}"),
         }
     }
 

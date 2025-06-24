@@ -376,7 +376,7 @@ impl Level {
             FATAL => Level::Fatal,
             PANIC => Level::Panic,
             WPEVENT => Level::WPEvent,
-            _ => panic!("unknown log level {}", elevel),
+            _ => panic!("unknown log level {elevel}"),
         }
     }
 }
@@ -446,7 +446,7 @@ pub fn empty_shmem() -> crate::bindings::WalproposerShmemState {
 
 impl std::fmt::Display for Level {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 

@@ -400,7 +400,7 @@ impl RemoteStorage for LocalFs {
                         key
                     };
 
-                    let relative_key = format!("{}", relative_key);
+                    let relative_key = format!("{relative_key}");
                     if relative_key.contains(REMOTE_STORAGE_PREFIX_SEPARATOR) {
                         let first_part = relative_key
                             .split(REMOTE_STORAGE_PREFIX_SEPARATOR)
@@ -596,9 +596,7 @@ impl RemoteStorage for LocalFs {
         create_target_directory(&to_path).await?;
         fs::copy(&from_path, &to_path).await.with_context(|| {
             format!(
-                "Failed to copy file from '{from_path}' to '{to_path}'",
-                from_path = from_path,
-                to_path = to_path
+                "Failed to copy file from '{from_path}' to '{to_path}'"
             )
         })?;
         Ok(())
@@ -1183,7 +1181,7 @@ mod fs_tests {
             .write(true)
             .create_new(true)
             .open(path)?;
-        write!(file_for_writing, "{}", contents)?;
+        write!(file_for_writing, "{contents}")?;
         drop(file_for_writing);
         let file_size = path.metadata()?.len() as usize;
         Ok((

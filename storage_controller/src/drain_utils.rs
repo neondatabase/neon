@@ -62,7 +62,7 @@ pub(crate) fn validate_node_state(
     nodes: Arc<HashMap<NodeId, Node>>,
 ) -> Result<(), OperationError> {
     let node = nodes.get(node_id).ok_or(OperationError::NodeStateChanged(
-        format!("node {} was removed", node_id).into(),
+        format!("node {node_id} was removed").into(),
     ))?;
 
     let current_policy = node.get_scheduling();
@@ -70,7 +70,7 @@ pub(crate) fn validate_node_state(
         // TODO(vlad): maybe cancel pending reconciles before erroring out. need to think
         // about it
         return Err(OperationError::NodeStateChanged(
-            format!("node {} changed state to {:?}", node_id, current_policy).into(),
+            format!("node {node_id} changed state to {current_policy:?}").into(),
         ));
     }
 
@@ -145,7 +145,7 @@ impl TenantShardDrain {
 
         if !nodes.contains_key(&destination) {
             return Err(OperationError::NodeStateChanged(
-                format!("node {} was removed", destination).into(),
+                format!("node {destination} was removed").into(),
             ));
         }
 

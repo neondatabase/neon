@@ -956,8 +956,7 @@ async fn get_operations<'a>(
                                     // This will reassign all dependent objects to the db owner
                                     Operation {
                                         query: format!(
-                                            "REASSIGN OWNED BY {} TO {}",
-                                            quoted, new_owner,
+                                            "REASSIGN OWNED BY {quoted} TO {new_owner}",
                                         ),
                                         comment: None,
                                     },
@@ -977,7 +976,7 @@ async fn get_operations<'a>(
                                     // only drops privileges that were granted *by this* role, not *to this* role,
                                     // but this has to be checked.
                                     Operation {
-                                        query: format!("DROP OWNED BY {}", quoted),
+                                        query: format!("DROP OWNED BY {quoted}"),
                                         comment: None,
                                     },
                                 ])

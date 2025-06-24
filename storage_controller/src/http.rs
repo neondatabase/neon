@@ -721,9 +721,9 @@ async fn handle_tenant_timeline_passthrough(
 
     // Callers will always pass an unsharded tenant ID.  Before proxying, we must
     // rewrite this to a shard-aware shard zero ID.
-    let path = format!("{}", path);
+    let path = format!("{path}");
     let tenant_str = tenant_or_shard_id.tenant_id.to_string();
-    let tenant_shard_str = format!("{}", tenant_shard_id);
+    let tenant_shard_str = format!("{tenant_shard_id}");
     let path = path.replace(&tenant_str, &tenant_shard_str);
 
     let latency = &METRICS_REGISTRY
@@ -1539,7 +1539,7 @@ async fn handle_ready(req: Request<Body>) -> Result<Response<Body>, ApiError> {
 
 impl From<ReconcileError> for ApiError {
     fn from(value: ReconcileError) -> Self {
-        ApiError::Conflict(format!("Reconciliation error: {}", value))
+        ApiError::Conflict(format!("Reconciliation error: {value}"))
     }
 }
 

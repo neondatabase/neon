@@ -523,7 +523,7 @@ impl ApiImpl for SimulationApi {
                 // Voting bug when safekeeper disconnects after voting
                 executor::exit(1, msg.to_owned());
             }
-            panic!("unknown FATAL error from walproposer: {}", msg);
+            panic!("unknown FATAL error from walproposer: {msg}");
         }
     }
 
@@ -545,8 +545,7 @@ impl ApiImpl for SimulationApi {
         }
 
         let msg = format!(
-            "prop_elected;{};{};{};{}",
-            prop_lsn, prop_term, prev_lsn, prev_term
+            "prop_elected;{prop_lsn};{prop_term};{prev_lsn};{prev_term}"
         );
 
         debug!(msg);

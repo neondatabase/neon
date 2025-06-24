@@ -3449,7 +3449,7 @@ impl TenantShard {
             use pageserver_api::models::ActivatingFrom;
             match &*current_state {
                 TenantState::Activating(_) | TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping { .. } => {
-                    panic!("caller is responsible for calling activate() only on Loading / Attaching tenants, got {state:?}", state = current_state);
+                    panic!("caller is responsible for calling activate() only on Loading / Attaching tenants, got {current_state:?}");
                 }
                 TenantState::Attaching => {
                     *current_state = TenantState::Activating(ActivatingFrom::Attaching);
@@ -6616,7 +6616,7 @@ mod tests {
                 .put(
                     *TEST_KEY,
                     lsn,
-                    &Value::Image(test_img(&format!("foo at {}", lsn))),
+                    &Value::Image(test_img(&format!("foo at {lsn}"))),
                     ctx,
                 )
                 .await?;
@@ -6626,7 +6626,7 @@ mod tests {
                 .put(
                     *TEST_KEY,
                     lsn,
-                    &Value::Image(test_img(&format!("foo at {}", lsn))),
+                    &Value::Image(test_img(&format!("foo at {lsn}"))),
                     ctx,
                 )
                 .await?;
@@ -6640,7 +6640,7 @@ mod tests {
                 .put(
                     *TEST_KEY,
                     lsn,
-                    &Value::Image(test_img(&format!("foo at {}", lsn))),
+                    &Value::Image(test_img(&format!("foo at {lsn}"))),
                     ctx,
                 )
                 .await?;
@@ -6650,7 +6650,7 @@ mod tests {
                 .put(
                     *TEST_KEY,
                     lsn,
-                    &Value::Image(test_img(&format!("foo at {}", lsn))),
+                    &Value::Image(test_img(&format!("foo at {lsn}"))),
                     ctx,
                 )
                 .await?;
@@ -7149,7 +7149,7 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                         ctx,
                     )
                     .await?;
@@ -7437,7 +7437,7 @@ mod tests {
             .put(
                 gap_at_key,
                 current_lsn,
-                &Value::Image(test_img(&format!("{} at {}", gap_at_key, current_lsn))),
+                &Value::Image(test_img(&format!("{gap_at_key} at {current_lsn}"))),
                 &ctx,
             )
             .await?;
@@ -7476,7 +7476,7 @@ mod tests {
                 .put(
                     current_key,
                     current_lsn,
-                    &Value::Image(test_img(&format!("{} at {}", current_key, current_lsn))),
+                    &Value::Image(test_img(&format!("{current_key} at {current_lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -7584,7 +7584,7 @@ mod tests {
             while key < end_key {
                 current_lsn += 0x10;
 
-                let image_value = format!("{} at {}", child_gap_at_key, current_lsn);
+                let image_value = format!("{child_gap_at_key} at {current_lsn}");
 
                 let mut writer = parent_timeline.writer().await;
                 writer
@@ -7627,7 +7627,7 @@ mod tests {
                 .put(
                     key,
                     current_lsn,
-                    &Value::Image(test_img(&format!("{} at {}", key, current_lsn))),
+                    &Value::Image(test_img(&format!("{key} at {current_lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -7748,7 +7748,7 @@ mod tests {
                 .put(
                     test_key,
                     lsn,
-                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -7769,7 +7769,7 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                         &ctx,
                     )
                     .await?;
@@ -7783,7 +7783,7 @@ mod tests {
                 test_key.field6 = blknum as u32;
                 assert_eq!(
                     tline.get(test_key, lsn, &ctx).await?,
-                    test_img(&format!("{} at {}", blknum, last_lsn))
+                    test_img(&format!("{blknum} at {last_lsn}"))
                 );
             }
 
@@ -7829,7 +7829,7 @@ mod tests {
                 .put(
                     test_key,
                     lsn,
-                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -7858,11 +7858,11 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                         &ctx,
                     )
                     .await?;
-                println!("updating {} at {}", blknum, lsn);
+                println!("updating {blknum} at {lsn}");
                 writer.finish_write(lsn);
                 drop(writer);
                 updated[blknum] = lsn;
@@ -7873,7 +7873,7 @@ mod tests {
                 test_key.field6 = blknum as u32;
                 assert_eq!(
                     tline.get(test_key, lsn, &ctx).await?,
-                    test_img(&format!("{} at {}", blknum, last_lsn))
+                    test_img(&format!("{blknum} at {last_lsn}"))
                 );
             }
 
@@ -7926,11 +7926,11 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} {} at {}", idx, blknum, lsn))),
+                        &Value::Image(test_img(&format!("{idx} {blknum} at {lsn}"))),
                         &ctx,
                     )
                     .await?;
-                println!("updating [{}][{}] at {}", idx, blknum, lsn);
+                println!("updating [{idx}][{blknum}] at {lsn}");
                 writer.finish_write(lsn);
                 drop(writer);
                 updated[idx][blknum] = lsn;
@@ -8136,7 +8136,7 @@ mod tests {
                 .put(
                     test_key,
                     lsn,
-                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -8153,7 +8153,7 @@ mod tests {
                 test_key.field6 = (blknum * STEP) as u32;
                 assert_eq!(
                     tline.get(test_key, lsn, &ctx).await?,
-                    test_img(&format!("{} at {}", blknum, last_lsn))
+                    test_img(&format!("{blknum} at {last_lsn}"))
                 );
             }
 
@@ -8190,7 +8190,7 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                         &ctx,
                     )
                     .await?;
@@ -8443,7 +8443,7 @@ mod tests {
                 .put(
                     test_key,
                     lsn,
-                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -8463,7 +8463,7 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                         &ctx,
                     )
                     .await?;
@@ -9387,7 +9387,7 @@ mod tests {
             .map(|n| {
                 (
                     Lsn(n),
-                    vec![(key, test_img(&format!("data key at {:x}", n)))],
+                    vec![(key, test_img(&format!("data key at {n:x}")))],
                 )
             })
             .collect();

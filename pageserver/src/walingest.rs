@@ -2108,7 +2108,7 @@ mod tests {
         // Check relation content
         for blkno in 0..relsize {
             let lsn = Lsn(0x20);
-            let data = format!("foo blk {} at {}", blkno, lsn);
+            let data = format!("foo blk {blkno} at {lsn}");
             assert_eq!(
                 tline
                     .get_rel_page_at_lsn(
@@ -2142,7 +2142,7 @@ mod tests {
 
         for blkno in 0..1 {
             let lsn = Lsn(0x20);
-            let data = format!("foo blk {} at {}", blkno, lsn);
+            let data = format!("foo blk {blkno} at {lsn}");
             assert_eq!(
                 tline
                     .get_rel_page_at_lsn(
@@ -2167,7 +2167,7 @@ mod tests {
         );
         for blkno in 0..relsize {
             let lsn = Lsn(0x20);
-            let data = format!("foo blk {} at {}", blkno, lsn);
+            let data = format!("foo blk {blkno} at {lsn}");
             assert_eq!(
                 tline
                     .get_rel_page_at_lsn(
@@ -2188,7 +2188,7 @@ mod tests {
         let lsn = Lsn(0x80);
         let mut m = tline.begin_modification(lsn);
         for blkno in 0..relsize {
-            let data = format!("foo blk {} at {}", blkno, lsn);
+            let data = format!("foo blk {blkno} at {lsn}");
             walingest
                 .put_rel_page_image(&mut m, TESTREL_A, blkno, test_img(&data), &ctx)
                 .await?;
@@ -2210,7 +2210,7 @@ mod tests {
         // Check relation content
         for blkno in 0..relsize {
             let lsn = Lsn(0x80);
-            let data = format!("foo blk {} at {}", blkno, lsn);
+            let data = format!("foo blk {blkno} at {lsn}");
             assert_eq!(
                 tline
                     .get_rel_page_at_lsn(
@@ -2414,6 +2414,6 @@ mod tests {
         }
 
         let duration = started_at.elapsed();
-        println!("done in {:?}", duration);
+        println!("done in {duration:?}");
     }
 }

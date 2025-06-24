@@ -487,8 +487,7 @@ async fn cmd_pgdata(
 
     let superuser = "cloud_admin";
     let destination_connstring = format!(
-        "host=localhost port={} user={} dbname=neondb",
-        pg_port, superuser
+        "host=localhost port={pg_port} user={superuser} dbname=neondb"
     );
 
     let pgdata_dir = workdir.join("pgdata");
