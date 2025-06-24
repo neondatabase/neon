@@ -10,8 +10,8 @@ INSERT INTO test.items (name) VALUES
     ('test item 2'),
     ('test item 3');
 
-CREATE ROLE test_role NOLOGIN;
-GRANT test_role TO authenticator;
+CREATE ROLE authenticated NOLOGIN;
+GRANT authenticated TO authenticator;
 
-GRANT USAGE ON SCHEMA test TO test_role;
-GRANT ALL ON ALL TABLES IN SCHEMA test TO test_role;
+GRANT USAGE ON SCHEMA test TO authenticated;
+GRANT ALL ON ALL TABLES IN SCHEMA test TO authenticated;

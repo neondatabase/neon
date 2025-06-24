@@ -103,6 +103,8 @@ uuid.workspace = true
 x509-cert.workspace = true
 redis.workspace = true
 zerocopy.workspace = true
+subzero-core.workspace = true
+jsonpath_lib.workspace = true
 
 # jwt stuff
 jose-jwa = "0.1.2"

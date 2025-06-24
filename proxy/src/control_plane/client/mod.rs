@@ -229,7 +229,7 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
                 // temporary lock a single shard and then clear any semaphores that aren't currently checked out
                 // race conditions: if strong_count == 1, there's no way that it can increase while the shard is locked
                 // therefore releasing it is safe from race conditions
-                info!(
+                debug!( //FIXME: is anything depending on this being info?
                     name = self.name,
                     shard = i,
                     "performing epoch reclamation on api lock"

@@ -869,7 +869,7 @@ async fn handle_auth_broker_inner(
     req = req.header(&NEON_REQUEST_ID, uuid_to_header_value(ctx.session_id()));
 
     let req = req
-        .body(body.map_err(|e| e).boxed())
+        .body(body.map_err(|e| e).boxed()) //TODO: is there a potential for a regression here?
         .expect("all headers and params received via hyper should be valid for request");
 
     // todo: map body to count egress

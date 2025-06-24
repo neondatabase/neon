@@ -115,7 +115,7 @@ impl PoolingBackend {
 
         match &self.auth_backend {
             crate::auth::Backend::ControlPlane(console, ()) => {
-                self.config
+                let keys = self.config
                     .authentication_config
                     .jwks_cache
                     .check_jwt(
@@ -129,7 +129,9 @@ impl PoolingBackend {
 
                 Ok(ComputeCredentials {
                     info: user_info.clone(),
-                    keys: crate::auth::backend::ComputeCredentialKeys::None,
+                    // FIXME: why was this set to None?
+                    //keys: crate::auth::backend::ComputeCredentialKeys::None,
+                    keys,
                 })
             }
             crate::auth::Backend::Local(_) => {
