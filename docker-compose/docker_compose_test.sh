@@ -14,7 +14,19 @@
 set -eux -o pipefail
 
 export COMPOSE_FILE='docker-compose.yml'
-export COMPOSE_PROFILES=test-extensions
+if [[ ${RUN_PARALLEL:-false} = true ]]; then
+  export COMPOSE_PROFILES=parallel-test-extensions
+  READY_CONTAINER=pcomputes_are_ready
+  READY_MESSAGE="All pcomputes are started"
+  COMPUTES=$(echo pcompute{1..3})
+  PARALLEL_FLAG=-p
+else
+  export COMPOSE_PROFILES=test-extensions
+  READY_CONTAINER=compute_is_ready
+  READY_MESSAGE="accepting connections"
+  COMPUTES=compute
+  PARALLEL_FLAG=
+fi
 cd "$(dirname "${0}")"
 PSQL_OPTION="-h localhost -U cloud_admin -p 55433 -d postgres"
 
@@ -31,7 +43,6 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
     cleanup
     PG_TEST_VERSION=$((pg_version < 16 ? 16 : pg_version))
     PG_VERSION=${pg_version} PG_TEST_VERSION=${PG_TEST_VERSION} docker compose up --quiet-pull --build -d
-
     echo "wait until the compute is ready. timeout after 60s. "
     cnt=0
     while sleep 3; do
@@ -41,7 +52,7 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
             echo "timeout before the compute is ready."
             exit 1
         fi
-        if docker compose logs "compute_is_ready" | grep -q "accepting connections"; then
+        if docker compose logs ${READY_CONTAINER} | grep -q "${READY_MESSAGE}"; then
             echo "OK. The compute is ready to connect."
             echo "execute simple queries."
             docker compose exec compute /bin/bash -c "psql ${PSQL_OPTION} -c 'SELECT 1'"
@@ -50,37 +61,45 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
     done
 
     if [[ ${pg_version} -ge 16 ]]; then
-        # This is required for the pg_hint_plan test, to prevent flaky log message causing the test to fail
-        # It cannot be moved to Dockerfile now because the database directory is created after the start of the container
-        echo Adding dummy config
-        docker compose exec compute touch /var/db/postgres/compute/compute_ctl_temp_override.conf
-        # Prepare for the PostGIS test
-        docker compose exec compute mkdir -p /tmp/pgis_reg/pgis_reg_tmp
         TMPDIR=$(mktemp -d)
-        docker compose cp neon-test-extensions:/ext-src/postgis-src/raster/test "${TMPDIR}"
-        docker compose cp neon-test-extensions:/ext-src/postgis-src/regress/00-regress-install "${TMPDIR}"
-        docker compose exec compute mkdir -p /ext-src/postgis-src/raster /ext-src/postgis-src/regress /ext-src/postgis-src/regress/00-regress-install
-        docker compose cp "${TMPDIR}/test" compute:/ext-src/postgis-src/raster/test
-        docker compose cp "${TMPDIR}/00-regress-install" compute:/ext-src/postgis-src/regress
-        rm -rf "${TMPDIR}"
-        # The following block copies the files for the pg_hintplan test to the compute node for the extension test in an isolated docker-compose environment
-        TMPDIR=$(mktemp -d)
-        docker compose cp neon-test-extensions:/ext-src/pg_hint_plan-src/data "${TMPDIR}/data"
-        docker compose cp "${TMPDIR}/data" compute:/ext-src/pg_hint_plan-src/
-        rm -rf "${TMPDIR}"
-        # The following block does the same for the contrib/file_fdw test
-        TMPDIR=$(mktemp -d)
-        docker compose cp neon-test-extensions:/postgres/contrib/file_fdw/data "${TMPDIR}/data"
-        docker compose cp "${TMPDIR}/data" compute:/postgres/contrib/file_fdw/data
-        rm -rf "${TMPDIR}"
+        trap 'rm -rf ${TMPDIR}' EXIT
+        mkdir "${TMPDIR}"/{pg_hint_plan-src,file_fdw,postgis-src}
+        docker compose cp neon-test-extensions:/ext-src/postgis-src/raster/test "${TMPDIR}/postgis-src/test"
+        docker compose cp neon-test-extensions:/ext-src/postgis-src/regress/00-regress-install "${TMPDIR}/postgis-src/00-regress-install"
+        docker compose cp neon-test-extensions:/ext-src/pg_hint_plan-src/data "${TMPDIR}/pg_hint_plan-src/data"
+        docker compose cp neon-test-extensions:/postgres/contrib/file_fdw/data "${TMPDIR}/file_fdw/data"
+
+        for compute in ${COMPUTES}; do
+          # This is required for the pg_hint_plan test, to prevent flaky log message causing the test to fail
+          # It cannot be moved to Dockerfile now because the database directory is created after the start of the container
+          echo Adding dummy config on "${compute}"
+          docker compose exec "${compute}" touch /var/db/postgres/compute/compute_ctl_temp_override.conf
+          # Prepare for the PostGIS test
+          docker compose exec "${compute}" mkdir -p /tmp/pgis_reg/pgis_reg_tmp /ext-src/postgis-src/raster /ext-src/postgis-src/regress /ext-src/postgis-src/regress/00-regress-install
+          docker compose cp "${TMPDIR}/postgis-src/test" "${compute}":/ext-src/postgis-src/raster/test
+          docker compose cp "${TMPDIR}/postgis-src/00-regress-install" "${compute}":/ext-src/postgis-src/regress
+          # The following block copies the files for the pg_hintplan test to the compute node for the extension test in an isolated docker-compose environment
+          docker compose cp "${TMPDIR}/pg_hint_plan-src/data" "${compute}":/ext-src/pg_hint_plan-src/
+          # The following block does the same for the contrib/file_fdw test
+          docker compose cp "${TMPDIR}/file_fdw/data" "${compute}":/postgres/contrib/file_fdw/data
+        done
         # Apply patches
         docker compose exec -T neon-test-extensions bash -c "(cd /postgres && patch -p1)" <"../compute/patches/contrib_pg${pg_version}.patch"
+        # Add packages
+        docker compose exec neon-test-extensions bash -c "apt update; apt -y install parallel"
         # We are running tests now
         rm -f testout.txt testout_contrib.txt
+        # We want to run the longest tests first to better utilize parallelization and reduce overall test time.
+        # Tests listed in the RUN_FIRST variable will be run before others.
+        # If parallelization is not used, this environment variable will be ignored.
+
+        # XXX remove before merge
+        docker compose cp run-tests.sh neon-test-extensions:/
         docker compose exec -e USE_PGXS=1 -e SKIP=timescaledb-src,rdkit-src,pg_jsonschema-src,kq_imcx-src,wal2json_2_5-src,rag_jina_reranker_v1_tiny_en-src,rag_bge_small_en_v15-src \
-        neon-test-extensions /run-tests.sh /ext-src | tee testout.txt && EXT_SUCCESS=1 || EXT_SUCCESS=0
+        -e RUN_FIRST=hll-src,postgis-src,pgtap-src \
+        neon-test-extensions /run-tests.sh ${PARALLEL_FLAG} /ext-src | tee testout.txt && EXT_SUCCESS=1 || EXT_SUCCESS=0
         docker compose exec -e SKIP=start-scripts,postgres_fdw,ltree_plpython,jsonb_plpython,jsonb_plperl,hstore_plpython,hstore_plperl,dblink,bool_plperl \
-        neon-test-extensions /run-tests.sh /postgres/contrib | tee testout_contrib.txt && CONTRIB_SUCCESS=1 || CONTRIB_SUCCESS=0
+        neon-test-extensions /run-tests.sh ${PARALLEL_FLAG} /postgres/contrib | tee testout_contrib.txt && CONTRIB_SUCCESS=1 || CONTRIB_SUCCESS=0
         if [[ ${EXT_SUCCESS} -eq 0 || ${CONTRIB_SUCCESS} -eq 0 ]]; then
             CONTRIB_FAILED=
             FAILED=
