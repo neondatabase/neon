@@ -456,7 +456,7 @@ communicator_prefetch_pump_state(void)
 		if (slot->status != PRFS_REQUESTED ||
 			slot->response != NULL ||
 			slot->my_ring_index != MyPState->ring_receive)
-			neon_shard_log(slot->shard_no, ERROR,
+			neon_shard_log(slot->shard_no, PANIC,
 						   "Incorrect prefetch slot state after receive: status=%d response=%p my=%lu receive=%lu",
 						   slot->status, slot->response,
 						   (long) slot->my_ring_index, (long) MyPState->ring_receive);
@@ -468,6 +468,12 @@ communicator_prefetch_pump_state(void)
 		MyNeonCounters->getpage_prefetches_buffered =
 			MyPState->n_responses_buffered;
 
+		if (response->reqid != slot->reqid)
+		{
+			ereport(PANIC,
+					(errmsg(NEON_TAG "[shard %d, reqid %lx] pump state receive unexpected response with reqid %lx", slot->shard_no, slot->reqid, response->reqid),
+					 errbacktrace()));
+		}
 		/* update slot state */
 		slot->status = PRFS_RECEIVED;
 		slot->response = response;
@@ -751,7 +757,7 @@ prefetch_read(PrefetchRequest *slot)
 		if (slot->status != PRFS_REQUESTED ||
 			slot->response != NULL ||
 			slot->my_ring_index != MyPState->ring_receive)
-			neon_shard_log(shard_no, ERROR,
+			neon_shard_log(shard_no, PANIC,
 						   "Incorrect prefetch slot state after receive: status=%d response=%p my=%lu receive=%lu",
 						   slot->status, slot->response,
 						   (long) slot->my_ring_index, (long) MyPState->ring_receive);
@@ -760,6 +766,13 @@ prefetch_read(PrefetchRequest *slot)
 		{
 			neon_shard_log(shard_no, ERROR, "Unexpected prefetch response %d, ring_receive=%ld, ring_flush=%ld, ring_unused=%ld",
 				 response->tag, MyPState->ring_receive, MyPState->ring_flush, MyPState->ring_unused);
+		}
+
+		if (response->reqid != slot->reqid)
+		{
+			ereport(PANIC,
+					(errmsg(NEON_TAG "[shard %d, reqid %lx] prefetch_read receive unexpected response with reqid %lx", slot->shard_no, slot->reqid, response->reqid),
+					 errbacktrace()));
 		}
 
 		/* update prefetch state */
@@ -1624,8 +1637,7 @@ nm_unpack_response(StringInfo s)
 				msgtext = pq_getmsgrawstring(s);
 				msglen = strlen(msgtext);
 
-				/* allocate in top memory context because error responses can be also stored in prefetch ring as well as getpage responses */
-				msg_resp = MemoryContextAllocZero(TopMemoryContext, sizeof(NeonErrorResponse) + msglen + 1);
+				msg_resp = palloc0(sizeof(NeonErrorResponse) + msglen + 1);
 				msg_resp->req = resp_hdr;
 				memcpy(msg_resp->message, msgtext, msglen + 1);
 				pq_getmsgend(s);
