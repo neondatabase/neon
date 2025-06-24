@@ -502,7 +502,7 @@ async fn upload_backup_events(
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::io::BufReader;
+    use std::io::{BufRead, BufReader};
     use std::sync::{Arc, Mutex};
 
     use anyhow::Error;
@@ -676,11 +676,23 @@ mod tests {
         {
             let path = local_fs_path.join(&path_prefix).to_string();
             if entry.path().to_str().unwrap().starts_with(&path) {
-                let chunk = serde_json::from_reader(flate2::bufread::GzDecoder::new(
-                    BufReader::new(fs::File::open(entry.into_path()).unwrap()),
-                ))
-                .unwrap();
-                stored_chunks.push(chunk);
+                let file = fs::File::open(entry.into_path()).unwrap();
+                let decoder = flate2::bufread::GzDecoder::new(BufReader::new(file));
+                let reader = BufReader::new(decoder);
+
+                let mut events: Vec<Event<Extra, String>> = Vec::new();
+                for line in reader.lines() {
+                    let line = line.unwrap();
+                    if line.trim().is_empty() { continue; }
+                    let event: Event<Extra, String> = serde_json::from_str(&line).unwrap();
+                    events.push(event);
+                }
+                
+                let report = Report{
+                    events: Cow::Owned(events),
+                };
+                
+                stored_chunks.push(report);
             }
         }
         storage_test_dir.close().ok();
