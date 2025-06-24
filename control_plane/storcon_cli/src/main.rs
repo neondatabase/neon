@@ -65,6 +65,11 @@ enum Command {
         #[arg(long)]
         scheduling: Option<NodeSchedulingPolicy>,
     },
+    /// Exists for backward compatibility. Use [`Command::NodeStartDelete`] instead.
+    NodeDelete {
+        #[arg(long)]
+        node_id: NodeId,
+    },
     /// Start deletion of the specified pageserver.
     /// The deletion is complete when the storage controller
     NodeStartDelete {
@@ -921,7 +926,7 @@ async fn main() -> anyhow::Result<()> {
                 .dispatch::<(), ()>(Method::POST, format!("debug/v1/node/{node_id}/drop"), None)
                 .await?;
         }
-        Command::NodeStartDelete { node_id } => {
+        Command::NodeDelete { node_id } | Command::NodeStartDelete { node_id } => {
             storcon_client
                 .dispatch::<(), ()>(
                     Method::PUT,
