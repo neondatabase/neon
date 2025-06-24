@@ -61,6 +61,10 @@
     clippy::too_many_lines,
     clippy::unused_self
 )]
+#![allow(
+    clippy::unsafe_derive_deserialize,
+    reason = "false positive: https://github.com/rust-lang/rust-clippy/issues/15120"
+)]
 #![cfg_attr(
     any(test, feature = "testing"),
     allow(
