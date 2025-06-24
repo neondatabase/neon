@@ -462,8 +462,8 @@ impl ProposerAcceptorMessage {
                 let id = buf
                     .get_u64_f()
                     .with_context(|| format!("reading new member {i} node_id"))?;
-                let host = Self::get_cstr(buf)
-                    .with_context(|| format!("reading new member {i} host"))?;
+                let host =
+                    Self::get_cstr(buf).with_context(|| format!("reading new member {i} host"))?;
                 let pg_port = buf
                     .get_u16_f()
                     .with_context(|| format!("reading new member {i} port"))?;

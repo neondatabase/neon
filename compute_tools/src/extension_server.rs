@@ -310,9 +310,7 @@ async fn download_extension_tar(remote_ext_base_url: &Url, ext_path: &str) -> Re
 async fn do_extension_server_request(uri: Url) -> Result<Bytes, (String, String)> {
     let resp = reqwest::get(uri).await.map_err(|e| {
         (
-            format!(
-                "could not perform remote extensions server request: {e:?}"
-            ),
+            format!("could not perform remote extensions server request: {e:?}"),
             UNKNOWN_HTTP_STATUS.to_string(),
         )
     })?;
@@ -333,9 +331,7 @@ async fn do_extension_server_request(uri: Url) -> Result<Bytes, (String, String)
             status.to_string(),
         )),
         _ => Err((
-            format!(
-                "unexpected remote extensions server response status code: {status}"
-            ),
+            format!("unexpected remote extensions server response status code: {status}"),
             status.to_string(),
         )),
     }

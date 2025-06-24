@@ -9384,12 +9384,7 @@ mod tests {
         let end_lsn = Lsn(0x100);
         let image_layers = (0x20..=0x90)
             .step_by(0x10)
-            .map(|n| {
-                (
-                    Lsn(n),
-                    vec![(key, test_img(&format!("data key at {n:x}")))],
-                )
-            })
+            .map(|n| (Lsn(n), vec![(key, test_img(&format!("data key at {n:x}")))]))
             .collect();
 
         let timeline = tenant

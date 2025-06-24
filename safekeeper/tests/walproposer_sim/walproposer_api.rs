@@ -544,9 +544,7 @@ impl ApiImpl for SimulationApi {
             }
         }
 
-        let msg = format!(
-            "prop_elected;{prop_lsn};{prop_term};{prev_lsn};{prev_term}"
-        );
+        let msg = format!("prop_elected;{prop_lsn};{prop_term};{prev_lsn};{prev_term}");
 
         debug!(msg);
         self.os.log_event(msg);
