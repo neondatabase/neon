@@ -172,7 +172,7 @@ enum TaskStateUpdate<E> {
     Progress(E),
 }
 
-impl<E: Clone> TaskHandle<E> {
+impl<E: Clone + std::fmt::Debug> TaskHandle<E> {
     /// Initializes the task, starting it immediately after the creation.
     ///
     /// The second argument to `task` is a child token of `cancel_parent` ([`CancellationToken::child_token`]).
@@ -244,10 +244,30 @@ impl<E: Clone> TaskHandle<E> {
     }
 
     /// Aborts current task, waiting for it to finish.
-    async fn shutdown(self) {
-        if let Some(jh) = self.join_handle {
+    async fn shutdown(mut self) {
+        if let Some(mut jh) = self.join_handle {
             self.cancellation.cancel();
-            match jh.await {
+
+            let res = loop {
+                tokio::select! {
+                    res = &mut jh => {
+                        break res;
+                    },
+                    received = self.events_receiver.changed() => {
+                        match received {
+                            Ok(()) => {
+                                let event = self.events_receiver.borrow();
+                                tracing::info!("Received update after cancellation: {event:?}");
+                            },
+                            Err(err) => {
+                                tracing::info!("Sender dropped after cancellation: {err}");
+                            }
+                        }
+                    }
+                }
+            };
+
+            match res {
                 Ok(Ok(())) => debug!("Shutdown success"),
                 Ok(Err(e)) => error!("Shutdown task error: {e:?}"),
                 Err(je) if je.is_cancelled() => unreachable!("not used"),

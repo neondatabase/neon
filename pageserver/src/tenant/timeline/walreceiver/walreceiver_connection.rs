@@ -307,6 +307,19 @@ pub(super) async fn handle_walreceiver_connection(
     } {
         let replication_message = replication_message?;
 
+        match &replication_message {
+            ReplicationMessage::XLogData(_) => {
+                tracing::info!("Received XLogData replication message")
+            }
+            ReplicationMessage::PrimaryKeepAlive(_) => {
+                tracing::info!("Received PrimaryKeepAlive replication message")
+            }
+            ReplicationMessage::RawInterpretedWalRecords(_) => {
+                tracing::info!("Received RawInterpretedWalRecords replication message")
+            }
+            unknown => tracing::info!("Received unknown replication message: {unknown:?}"),
+        }
+
         let now = Utc::now().naive_utc();
         let last_rec_lsn_before_msg = last_rec_lsn;
 
