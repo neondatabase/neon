@@ -160,7 +160,7 @@ static XLogReaderState *reader_state;
  * fail the build deliberately rather than ifdef'ing it to ENOSYS.
  * We prefer a compile time over a runtime error for walredo.
  *
- * If, however, we need to build on old systems for development, e.g. Ubuntu 20
+ * If, however, we need to build on old systems for development, e.g. Ubuntu 20.04
  * with glibc 2.31, provide a NO_CLOSE_RANGE macro for suboptimal implementation
  */
 #include <unistd.h>
@@ -210,22 +210,27 @@ enter_seccomp_mode(void)
 	 * wal records. See the comment in the Rust code that launches this process.
 	 */
 #define START_FD 3
+#define STR(s) #s
 #ifdef __NR_close_range
 	if (syscall(__NR_close_range, START_FD, ~0U, 0) != 0)
 		ereport(FATAL,
 				(errcode(ERRCODE_SYSTEM_ERROR),
-				 errmsg("seccomp: could not close files >= fd START_FD")));
+				 errmsg("seccomp: could not close files >= " STR(START_FD))));
 #else
 	// close_range can return EINVAL -- not our case as start_fd and end_fd are hardcoded.
 	// It doesn't return any other errors if CLOSE_RANGE_UNSHARE is not set so we don't
-	// report any errors here
+	// report any errors here.
 	#ifdef NO_CLOSE_RANGE
-		#warning "__NR_close_range unavailable, using suboptimal implementation"
+		#warning
+			"__NR_close_range is not defined which means you're using kernel < 5.9."
+			"Using suboptimal implementation. Do NOT use this in production"
 		int fd;
 		for (fd = START_FD; fd <= INT_MAX; ++fd)
 			close(fd);
 	#else
-		#error "__NR_close_range syscall not defined, NO_CLOSE_RANGE not defined either"
+		#error
+			"__NR_close_range is not defined which means you're using kernel < 5.9."
+			"Define NO_CLOSE_RANGE for local development"
 	#endif
 #endif
 
