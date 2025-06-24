@@ -7,6 +7,11 @@ use utils::id::NodeId;
 pub(crate) const MAX_RECONCILES_PER_OPERATION: usize = 64;
 
 #[derive(Copy, Clone)]
+pub(crate) struct Delete {
+    pub(crate) node_id: NodeId,
+}
+
+#[derive(Copy, Clone)]
 pub(crate) struct Drain {
     pub(crate) node_id: NodeId,
 }
@@ -18,6 +23,7 @@ pub(crate) struct Fill {
 
 #[derive(Copy, Clone)]
 pub(crate) enum Operation {
+    Delete(Delete),
     Drain(Drain),
     Fill(Fill),
 }
@@ -40,9 +46,10 @@ pub(crate) struct OperationHandler {
     pub(crate) cancel: CancellationToken,
 }
 
-pub(crate) struct NodeDeletionHandler {
-    pub(crate) node_id: NodeId,
-    pub(crate) cancel: CancellationToken,
+impl Display for Delete {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "delete {}", self.node_id)
+    }
 }
 
 impl Display for Drain {
@@ -60,6 +67,7 @@ impl Display for Fill {
 impl Display for Operation {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            Operation::Delete(op) => write!(f, "{op}"),
             Operation::Drain(op) => write!(f, "{op}"),
             Operation::Fill(op) => write!(f, "{op}"),
         }
