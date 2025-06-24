@@ -750,7 +750,7 @@ impl Endpoint {
                 endpoint_storage_addr: Some(endpoint_storage_addr),
                 endpoint_storage_token: Some(endpoint_storage_token),
                 autoprewarm: false,
-                suspend_timeout_seconds: 3600, // TODO(thesuhas): Setting it to 1 hour for now, figure out how to pass it.
+                suspend_timeout_seconds: 0, // Only used in neon_local.
             };
 
             // this strange code is needed to support respec() in tests
