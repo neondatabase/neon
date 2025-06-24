@@ -683,15 +683,14 @@ mod tests {
                 let mut events: Vec<Event<Extra, String>> = Vec::new();
                 for line in reader.lines() {
                     let line = line.unwrap();
-                    if line.trim().is_empty() { continue; }
                     let event: Event<Extra, String> = serde_json::from_str(&line).unwrap();
                     events.push(event);
                 }
-                
-                let report = Report{
+
+                let report = Report {
                     events: Cow::Owned(events),
                 };
-                
+
                 stored_chunks.push(report);
             }
         }
