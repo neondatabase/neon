@@ -131,7 +131,7 @@ impl Client {
         let domain_stream = response_stream.map(|chunk_res| {
             chunk_res.and_then(|proto_chunk| {
                 proto_chunk.try_into().map_err(|e| {
-                    tonic::Status::internal(format!("Failed to convert response chunk: {}", e))
+                    tonic::Status::internal(format!("Failed to convert response chunk: {e}"))
                 })
             })
         });

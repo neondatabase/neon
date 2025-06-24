@@ -669,7 +669,7 @@ where
             }
 
             // Append dir path for each database
-            let path = format!("base/{}", dbnode);
+            let path = format!("base/{dbnode}");
             let header = new_tar_header_dir(&path)?;
             self.ar
                 .append(&header, io::empty())
@@ -677,7 +677,7 @@ where
                 .map_err(|e| BasebackupError::Client(e, "add_dbdir,base"))?;
 
             if let Some(img) = relmap_img {
-                let dst_path = format!("base/{}/PG_VERSION", dbnode);
+                let dst_path = format!("base/{dbnode}/PG_VERSION");
 
                 let pg_version_str = match self.timeline.pg_version {
                     14 | 15 => self.timeline.pg_version.to_string(),
@@ -689,7 +689,7 @@ where
                     .await
                     .map_err(|e| BasebackupError::Client(e, "add_dbdir,base/PG_VERSION"))?;
 
-                let relmap_path = format!("base/{}/pg_filenode.map", dbnode);
+                let relmap_path = format!("base/{dbnode}/pg_filenode.map");
                 let header = new_tar_header(&relmap_path, img.len() as u64)?;
                 self.ar
                     .append(&header, &img[..])
@@ -714,9 +714,9 @@ where
         let crc = crc32c::crc32c(&img[..]);
         buf.put_u32_le(crc);
         let path = if self.timeline.pg_version < 17 {
-            format!("pg_twophase/{:>08X}", xid)
+            format!("pg_twophase/{xid:>08X}")
         } else {
-            format!("pg_twophase/{:>016X}", xid)
+            format!("pg_twophase/{xid:>016X}")
         };
         let header = new_tar_header(&path, buf.len() as u64)?;
         self.ar
@@ -768,7 +768,7 @@ where
         //send wal segment
         let segno = self.lsn.segment_number(WAL_SEGMENT_SIZE);
         let wal_file_name = XLogFileName(PG_TLI, segno, WAL_SEGMENT_SIZE);
-        let wal_file_path = format!("pg_wal/{}", wal_file_name);
+        let wal_file_path = format!("pg_wal/{wal_file_name}");
         let header = new_tar_header(&wal_file_path, WAL_SEGMENT_SIZE as u64)?;
 
         let wal_seg = postgres_ffi::generate_wal_segment(

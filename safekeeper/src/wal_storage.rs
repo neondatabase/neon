@@ -841,7 +841,7 @@ pub(crate) async fn open_wal_file(
     // If that failed, try it without the .partial extension.
     let pf = tokio::fs::File::open(&wal_file_path)
         .await
-        .with_context(|| format!("failed to open WAL file {:#}", wal_file_path))
+        .with_context(|| format!("failed to open WAL file {wal_file_path:#}"))
         .map_err(|e| {
             warn!("{}", e);
             e

@@ -550,8 +550,7 @@ mod tests {
 
         assert_eq!(
             deserialized_metadata.body, expected_metadata.body,
-            "Metadata of the old version {} should be upgraded to the latest version {}",
-            METADATA_OLD_FORMAT_VERSION, METADATA_FORMAT_VERSION
+            "Metadata of the old version {METADATA_OLD_FORMAT_VERSION} should be upgraded to the latest version {METADATA_FORMAT_VERSION}"
         );
     }
 

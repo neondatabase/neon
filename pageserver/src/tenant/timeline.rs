@@ -178,7 +178,7 @@ pub enum LastImageLayerCreationStatus {
 
 impl std::fmt::Display for ImageLayerCreationMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 
@@ -632,7 +632,7 @@ pub enum ReadPathLayerId {
 impl std::fmt::Display for ReadPathLayerId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ReadPathLayerId::PersistentLayer(key) => write!(f, "{}", key),
+            ReadPathLayerId::PersistentLayer(key) => write!(f, "{key}"),
             ReadPathLayerId::InMemoryLayer(range) => {
                 write!(f, "in-mem {}..{}", range.start, range.end)
             }
@@ -708,7 +708,7 @@ impl MissingKeyError {
 
 impl std::fmt::Debug for MissingKeyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self)
+        write!(f, "{self}")
     }
 }
 
@@ -721,19 +721,19 @@ impl std::fmt::Display for MissingKeyError {
         )?;
 
         if let Some(ref ancestor_lsn) = self.ancestor_lsn {
-            write!(f, ", ancestor {}", ancestor_lsn)?;
+            write!(f, ", ancestor {ancestor_lsn}")?;
         }
 
         if let Some(ref query) = self.query {
-            write!(f, ", query {}", query)?;
+            write!(f, ", query {query}")?;
         }
 
         if let Some(ref read_path) = self.read_path {
-            write!(f, "\n{}", read_path)?;
+            write!(f, "\n{read_path}")?;
         }
 
         if let Some(ref backtrace) = self.backtrace {
-            write!(f, "\n{}", backtrace)?;
+            write!(f, "\n{backtrace}")?;
         }
 
         Ok(())
@@ -7179,9 +7179,7 @@ impl Timeline {
         if let Some(end) = layer_end_lsn {
             assert!(
                 end <= last_record_lsn,
-                "advance last record lsn before inserting a layer, end_lsn={}, last_record_lsn={}",
-                end,
-                last_record_lsn,
+                "advance last record lsn before inserting a layer, end_lsn={end}, last_record_lsn={last_record_lsn}",
             );
         }
 

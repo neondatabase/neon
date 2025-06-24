@@ -260,7 +260,7 @@ impl Default for EndpointStorageConf {
 impl NeonBroker {
     pub fn client_url(&self) -> Url {
         let url = if let Some(addr) = self.listen_https_addr {
-            format!("https://{}", addr)
+            format!("https://{addr}")
         } else {
             format!(
                 "http://{}",
@@ -733,7 +733,7 @@ impl LocalEnv {
                 let config_toml_path = dentry.path().join("pageserver.toml");
                 let config_toml: PageserverConfigTomlSubset = toml_edit::de::from_str(
                     &std::fs::read_to_string(&config_toml_path)
-                        .with_context(|| format!("read {:?}", config_toml_path))?,
+                        .with_context(|| format!("read {config_toml_path:?}"))?,
                 )
                 .context("parse pageserver.toml")?;
                 let identity_toml_path = dentry.path().join("identity.toml");
@@ -743,7 +743,7 @@ impl LocalEnv {
                 }
                 let identity_toml: IdentityTomlSubset = toml_edit::de::from_str(
                     &std::fs::read_to_string(&identity_toml_path)
-                        .with_context(|| format!("read {:?}", identity_toml_path))?,
+                        .with_context(|| format!("read {identity_toml_path:?}"))?,
                 )
                 .context("parse identity.toml")?;
                 let PageserverConfigTomlSubset {

@@ -649,7 +649,7 @@ async fn main() -> anyhow::Result<()> {
                 response
                     .new_shards
                     .iter()
-                    .map(|s| format!("{:?}", s))
+                    .map(|s| format!("{s:?}"))
                     .collect::<Vec<_>>()
                     .join(",")
             );
@@ -771,8 +771,8 @@ async fn main() -> anyhow::Result<()> {
 
             println!("Tenant {tenant_id}");
             let mut table = comfy_table::Table::new();
-            table.add_row(["Policy", &format!("{:?}", policy)]);
-            table.add_row(["Stripe size", &format!("{:?}", stripe_size)]);
+            table.add_row(["Policy", &format!("{policy:?}")]);
+            table.add_row(["Stripe size", &format!("{stripe_size:?}")]);
             table.add_row(["Config", &serde_json::to_string_pretty(&config).unwrap()]);
             println!("{table}");
             println!("Shards:");
@@ -789,7 +789,7 @@ async fn main() -> anyhow::Result<()> {
                 let secondary = shard
                     .node_secondary
                     .iter()
-                    .map(|n| format!("{}", n))
+                    .map(|n| format!("{n}"))
                     .collect::<Vec<_>>()
                     .join(",");
 
@@ -863,7 +863,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             } else {
                 // Make it obvious to the user that since they've omitted an AZ, we're clearing it
-                eprintln!("Clearing preferred AZ for tenant {}", tenant_id);
+                eprintln!("Clearing preferred AZ for tenant {tenant_id}");
             }
 
             // Construct a request that modifies all the tenant's shards
@@ -1134,8 +1134,7 @@ async fn main() -> anyhow::Result<()> {
                     Err((tenant_shard_id, from, to, error)) => {
                         failure += 1;
                         println!(
-                            "Failed to migrate {} from node {} to node {}: {}",
-                            tenant_shard_id, from, to, error
+                            "Failed to migrate {tenant_shard_id} from node {from} to node {to}: {error}"
                         );
                     }
                 }
@@ -1277,8 +1276,7 @@ async fn main() -> anyhow::Result<()> {
             concurrency,
         } => {
             let mut path = format!(
-                "/v1/tenant/{}/timeline/{}/download_heatmap_layers",
-                tenant_shard_id, timeline_id,
+                "/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/download_heatmap_layers",
             );
 
             if let Some(c) = concurrency {
@@ -1303,8 +1301,7 @@ async fn watch_tenant_shard(
 ) -> anyhow::Result<()> {
     if let Some(until_migrated_to) = until_migrated_to {
         println!(
-            "Waiting for tenant shard {} to be migrated to node {}",
-            tenant_shard_id, until_migrated_to
+            "Waiting for tenant shard {tenant_shard_id} to be migrated to node {until_migrated_to}"
         );
     }
 
@@ -1327,7 +1324,7 @@ async fn watch_tenant_shard(
             "attached: {} secondary: {} {}",
             shard
                 .node_attached
-                .map(|n| format!("{}", n))
+                .map(|n| format!("{n}"))
                 .unwrap_or("none".to_string()),
             shard
                 .node_secondary
@@ -1341,15 +1338,12 @@ async fn watch_tenant_shard(
                 "(reconciler idle)"
             }
         );
-        println!("{}", summary);
+        println!("{summary}");
 
         // Maybe drop out if we finished migration
         if let Some(until_migrated_to) = until_migrated_to {
             if shard.node_attached == Some(until_migrated_to) && !shard.is_reconciling {
-                println!(
-                    "Tenant shard {} is now on node {}",
-                    tenant_shard_id, until_migrated_to
-                );
+                println!("Tenant shard {tenant_shard_id} is now on node {until_migrated_to}");
                 break;
             }
         }

@@ -1199,7 +1199,7 @@ pub fn describe_postgres_wal_record(record: &Bytes) -> Result<String, Deserializ
                 pg_constants::XLOG_HEAP2_MULTI_INSERT => "HEAP2 MULTI_INSERT",
                 pg_constants::XLOG_HEAP2_VISIBLE => "HEAP2 VISIBLE",
                 _ => {
-                    unknown_str = format!("HEAP2 UNKNOWN_0x{:02x}", info);
+                    unknown_str = format!("HEAP2 UNKNOWN_0x{info:02x}");
                     &unknown_str
                 }
             }
@@ -1212,7 +1212,7 @@ pub fn describe_postgres_wal_record(record: &Bytes) -> Result<String, Deserializ
                 pg_constants::XLOG_HEAP_UPDATE => "HEAP UPDATE",
                 pg_constants::XLOG_HEAP_HOT_UPDATE => "HEAP HOT_UPDATE",
                 _ => {
-                    unknown_str = format!("HEAP2 UNKNOWN_0x{:02x}", info);
+                    unknown_str = format!("HEAP2 UNKNOWN_0x{info:02x}");
                     &unknown_str
                 }
             }
@@ -1223,7 +1223,7 @@ pub fn describe_postgres_wal_record(record: &Bytes) -> Result<String, Deserializ
                 pg_constants::XLOG_FPI => "XLOG FPI",
                 pg_constants::XLOG_FPI_FOR_HINT => "XLOG FPI_FOR_HINT",
                 _ => {
-                    unknown_str = format!("XLOG UNKNOWN_0x{:02x}", info);
+                    unknown_str = format!("XLOG UNKNOWN_0x{info:02x}");
                     &unknown_str
                 }
             }
@@ -1231,7 +1231,7 @@ pub fn describe_postgres_wal_record(record: &Bytes) -> Result<String, Deserializ
         rmid => {
             let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
 
-            unknown_str = format!("UNKNOWN_RM_{} INFO_0x{:02x}", rmid, info);
+            unknown_str = format!("UNKNOWN_RM_{rmid} INFO_0x{info:02x}");
             &unknown_str
         }
     };

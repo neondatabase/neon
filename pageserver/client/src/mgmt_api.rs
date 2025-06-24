@@ -508,11 +508,11 @@ impl Client {
         .expect("Cannot build URL");
 
         path.query_pairs_mut()
-            .append_pair("recurse", &format!("{}", recurse));
+            .append_pair("recurse", &format!("{recurse}"));
 
         if let Some(concurrency) = concurrency {
             path.query_pairs_mut()
-                .append_pair("concurrency", &format!("{}", concurrency));
+                .append_pair("concurrency", &format!("{concurrency}"));
         }
 
         self.request(Method::POST, path, ()).await.map(|_| ())

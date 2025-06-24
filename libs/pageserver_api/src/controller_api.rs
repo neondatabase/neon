@@ -577,8 +577,7 @@ mod test {
         let err = serde_json::from_value::<TenantCreateRequest>(create_request).unwrap_err();
         assert!(
             err.to_string().contains("unknown field `unknown_field`"),
-            "expect unknown field `unknown_field` error, got: {}",
-            err
+            "expect unknown field `unknown_field` error, got: {err}"
         );
     }
 

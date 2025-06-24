@@ -31,15 +31,15 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Error::Spawn(e) => write!(f, "Error spawning command: {:?}", e),
+            Error::Spawn(e) => write!(f, "Error spawning command: {e:?}"),
             Error::Failed { status, stderr } => write!(
                 f,
                 "Command failed with status {:?}: {}",
                 status,
                 String::from_utf8_lossy(stderr)
             ),
-            Error::WaitOutput(e) => write!(f, "Error waiting for command output: {:?}", e),
-            Error::Other(e) => write!(f, "Error: {:?}", e),
+            Error::WaitOutput(e) => write!(f, "Error waiting for command output: {e:?}"),
+            Error::Other(e) => write!(f, "Error: {e:?}"),
         }
     }
 }

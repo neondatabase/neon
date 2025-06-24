@@ -370,7 +370,7 @@ impl ComputeHook {
         let authorization_header = config
             .control_plane_jwt_token
             .clone()
-            .map(|jwt| format!("Bearer {}", jwt));
+            .map(|jwt| format!("Bearer {jwt}"));
 
         let mut client = reqwest::ClientBuilder::new().timeout(NOTIFY_REQUEST_TIMEOUT);
         for cert in &config.ssl_ca_certs {

@@ -167,7 +167,7 @@ impl StorageController {
     fn storage_controller_instance_dir(&self, instance_id: u8) -> PathBuf {
         self.env
             .base_data_dir
-            .join(format!("storage_controller_{}", instance_id))
+            .join(format!("storage_controller_{instance_id}"))
     }
 
     fn pid_file(&self, instance_id: u8) -> Utf8PathBuf {
@@ -220,7 +220,7 @@ impl StorageController {
             "-d",
             DB_NAME,
             "-p",
-            &format!("{}", postgres_port),
+            &format!("{postgres_port}"),
         ];
         let pg_lib_dir = self.get_pg_lib_dir().await.unwrap();
         let envs = [
@@ -263,7 +263,7 @@ impl StorageController {
                 "-h",
                 "localhost",
                 "-p",
-                &format!("{}", postgres_port),
+                &format!("{postgres_port}"),
                 "-U",
                 &username(),
                 "-O",
@@ -425,7 +425,7 @@ impl StorageController {
             // from `LocalEnv`'s config file (`.neon/config`).
             tokio::fs::write(
                 &pg_data_path.join("postgresql.conf"),
-                format!("port = {}\nfsync=off\n", postgres_port),
+                format!("port = {postgres_port}\nfsync=off\n"),
             )
             .await?;
 
@@ -477,7 +477,7 @@ impl StorageController {
             self.setup_database(postgres_port).await?;
         }
 
-        let database_url = format!("postgresql://localhost:{}/{DB_NAME}", postgres_port);
+        let database_url = format!("postgresql://localhost:{postgres_port}/{DB_NAME}");
 
         // We support running a startup SQL script to fiddle with the database before we launch storcon.
         // This is used by the test suite.
@@ -508,7 +508,7 @@ impl StorageController {
         drop(client);
         conn.await??;
 
-        let addr = format!("{}:{}", host, listen_port);
+        let addr = format!("{host}:{listen_port}");
         let address_for_peers = Uri::builder()
             .scheme(scheme)
             .authority(addr.clone())
@@ -810,9 +810,9 @@ impl StorageController {
             builder = builder.json(&body)
         }
         if let Some(private_key) = &self.private_key {
-            println!("Getting claims for path {}", path);
+            println!("Getting claims for path {path}");
             if let Some(required_claims) = Self::get_claims_for_path(&path)? {
-                println!("Got claims {:?} for path {}", required_claims, path);
+                println!("Got claims {required_claims:?} for path {path}");
                 let jwt_token = encode_from_key_file(&required_claims, private_key)?;
                 builder = builder.header(
                     reqwest::header::AUTHORIZATION,
