@@ -357,7 +357,7 @@ pub struct PostgresSettings {
 
 pub struct ComputeConnection {
     /// Socket connected to a compute node.
-    pub stream: MaybeTlsStream<tokio::net::TcpStream, RustlsStream>,
+    pub stream: MaybeRustlsStream,
     /// Labels for proxy's metrics.
     pub aux: MetricsAuxInfo,
     pub hostname: Host,

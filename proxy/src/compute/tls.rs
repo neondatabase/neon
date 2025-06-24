@@ -12,8 +12,6 @@ use crate::proxy::retry::CouldRetry;
 #[derive(Debug, Error)]
 pub enum TlsError {
     #[error(transparent)]
-    Dns(#[from] InvalidDnsNameError),
-    #[error(transparent)]
     Connection(#[from] std::io::Error),
     #[error("TLS required but not provided")]
     Required,
@@ -22,7 +20,6 @@ pub enum TlsError {
 impl CouldRetry for TlsError {
     fn could_retry(&self) -> bool {
         match self {
-            TlsError::Dns(_) => false,
             TlsError::Connection(err) => err.could_retry(),
             // perhaps compute didn't realise it supports TLS?
             TlsError::Required => true,
@@ -57,7 +54,6 @@ where
         return Ok(MaybeTlsStream::Raw(stream));
     }
 
-    Ok(MaybeTlsStream::Tls(
-        tls.make_tls_connect(host)?.connect(stream).boxed().await?,
-    ))
+    let c = tls.make_tls_connect(host).map_err(std::io::Error::other)?;
+    Ok(MaybeTlsStream::Tls(c.connect(stream).boxed().await?))
 }
