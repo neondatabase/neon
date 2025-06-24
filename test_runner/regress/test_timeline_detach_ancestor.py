@@ -93,7 +93,14 @@ def test_ancestor_detach_branched_from(
 
     client = env.pageserver.http_client()
 
-    with env.endpoints.create_start("main", tenant_id=env.initial_tenant) as ep:
+    # As the compute will write a pg_stat aux file record when shutting down and we check the delta layers
+    # generated in this test case, we need to disable it to avoid the test case from failing + make things
+    # more deterministic.
+    disable_pg_stat_persistence_config_line = ["neon.pgstat_file_size_limit = 0"]
+
+    with env.endpoints.create_start(
+        "main", tenant_id=env.initial_tenant, config_lines=disable_pg_stat_persistence_config_line
+    ) as ep:
         ep.safe_psql("CREATE TABLE foo (i BIGINT);")
 
         after_first_tx = wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
@@ -151,7 +158,9 @@ def test_ancestor_detach_branched_from(
         assert branch_at == recorded, "the test should not use unaligned lsns"
 
     if write_to_branch_first:
-        with env.endpoints.create_start(name, tenant_id=env.initial_tenant) as ep:
+        with env.endpoints.create_start(
+            name, tenant_id=env.initial_tenant, config_lines=disable_pg_stat_persistence_config_line
+        ) as ep:
             assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
             # make sure the ep is writable
             # with BEFORE_L0, AFTER_L0 there will be a gap in Lsns caused by accurate end_lsn on straddling layers
@@ -180,10 +189,14 @@ def test_ancestor_detach_branched_from(
         env.pageserver.stop()
         env.pageserver.start()
 
-    with env.endpoints.create_start("main", tenant_id=env.initial_tenant) as ep:
+    with env.endpoints.create_start(
+        "main", tenant_id=env.initial_tenant, config_lines=disable_pg_stat_persistence_config_line
+    ) as ep:
         assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == 16384
 
-    with env.endpoints.create_start(name, tenant_id=env.initial_tenant) as ep:
+    with env.endpoints.create_start(
+        name, tenant_id=env.initial_tenant, config_lines=disable_pg_stat_persistence_config_line
+    ) as ep:
         assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
 
     old_main_info = client.layer_map_info(env.initial_tenant, env.initial_timeline)
