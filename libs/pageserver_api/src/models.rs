@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 
 #[cfg(feature = "testing")]
 use camino::Utf8PathBuf;
+use postgres_versioninfo::PgMajorVersion;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::serde_as;
 pub use utilization::PageserverUtilization;
@@ -398,7 +399,7 @@ pub enum TimelineCreateRequestMode {
         // inherits the ancestor's pg_version. Earlier code wasn't
         // using a flattened enum, so, it was an accepted field, and
         // we continue to accept it by having it here.
-        pg_version: Option<u32>,
+        pg_version: Option<PgMajorVersion>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         read_only: bool,
     },
@@ -410,7 +411,7 @@ pub enum TimelineCreateRequestMode {
     Bootstrap {
         #[serde(default)]
         existing_initdb_timeline_id: Option<TimelineId>,
-        pg_version: Option<u32>,
+        pg_version: Option<PgMajorVersion>,
     },
 }
 
@@ -1573,7 +1574,7 @@ pub struct TimelineInfo {
     pub last_received_msg_lsn: Option<Lsn>,
     /// the timestamp (in microseconds) of the last received message
     pub last_received_msg_ts: Option<u128>,
-    pub pg_version: u32,
+    pub pg_version: PgMajorVersion,
 
     pub state: TimelineState,
 

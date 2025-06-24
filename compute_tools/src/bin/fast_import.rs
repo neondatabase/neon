@@ -29,7 +29,7 @@ use anyhow::{Context, bail};
 use aws_config::BehaviorVersion;
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Parser, Subcommand};
-use compute_tools::extension_server::{PostgresMajorVersion, get_pg_version};
+use compute_tools::extension_server::get_pg_version;
 use nix::unistd::Pid;
 use std::ops::Not;
 use tracing::{Instrument, error, info, info_span, warn};
@@ -179,12 +179,8 @@ impl PostgresProcess {
             .await
             .context("create pgdata directory")?;
 
-        let pg_version = match get_pg_version(self.pgbin.as_ref()) {
-            PostgresMajorVersion::V14 => 14,
-            PostgresMajorVersion::V15 => 15,
-            PostgresMajorVersion::V16 => 16,
-            PostgresMajorVersion::V17 => 17,
-        };
+        let pg_version = get_pg_version(self.pgbin.as_ref());
+
         postgres_initdb::do_run_initdb(postgres_initdb::RunInitdbArgs {
             superuser: initdb_user,
             locale: DEFAULT_LOCALE, // XXX: this shouldn't be hard-coded,

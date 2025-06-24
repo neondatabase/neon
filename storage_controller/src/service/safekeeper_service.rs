@@ -18,6 +18,7 @@ use pageserver_api::controller_api::{
     SafekeeperDescribeResponse, SkSchedulingPolicy, TimelineImportRequest,
 };
 use pageserver_api::models::{SafekeeperInfo, SafekeepersInfo, TimelineInfo};
+use safekeeper_api::PgVersionId;
 use safekeeper_api::membership::{MemberSet, SafekeeperGeneration, SafekeeperId};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -44,7 +45,7 @@ impl Service {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-        pg_version: u32,
+        pg_version: PgVersionId,
         timeline_persistence: &TimelinePersistence,
     ) -> Result<Vec<NodeId>, ApiError> {
         // If quorum is reached, return if we are outside of a specified timeout
@@ -219,7 +220,7 @@ impl Service {
         read_only: bool,
     ) -> Result<SafekeepersInfo, ApiError> {
         let timeline_id = timeline_info.timeline_id;
-        let pg_version = timeline_info.pg_version * 10000;
+        let pg_version = PgVersionId::from(timeline_info.pg_version);
         // Initially start_lsn is determined by last_record_lsn in pageserver
         // response as it does initdb. However, later we persist it and in sk
         // creation calls replace with the value from the timeline row if it

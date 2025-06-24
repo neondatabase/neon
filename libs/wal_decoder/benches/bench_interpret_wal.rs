@@ -10,7 +10,7 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use pageserver_api::shard::{ShardIdentity, ShardStripeSize};
 use postgres_ffi::waldecoder::WalStreamDecoder;
-use postgres_ffi::{MAX_SEND_SIZE, WAL_SEGMENT_SIZE};
+use postgres_ffi::{MAX_SEND_SIZE, PgMajorVersion, WAL_SEGMENT_SIZE};
 use pprof::criterion::{Output, PProfProfiler};
 use remote_storage::{
     DownloadOpts, GenericRemoteStorage, ListingMode, RemoteStorageConfig, RemoteStorageKind,
@@ -115,7 +115,7 @@ struct BenchmarkData {
 
 #[derive(Deserialize)]
 struct BenchmarkMetadata {
-    pg_version: u32,
+    pg_version: PgMajorVersion,
     start_lsn: Lsn,
 }
 

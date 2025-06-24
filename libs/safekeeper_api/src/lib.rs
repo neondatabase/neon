@@ -8,6 +8,8 @@ pub mod membership;
 /// Public API types
 pub mod models;
 
+pub use postgres_versioninfo::{PgMajorVersion, PgVersionId};
+
 /// Consensus logical timestamp. Note: it is a part of sk control file.
 pub type Term = u64;
 /// With this term timeline is created initially. It
@@ -20,7 +22,7 @@ pub const INITIAL_TERM: Term = 0;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerInfo {
     /// Postgres server version
-    pub pg_version: u32,
+    pub pg_version: PgVersionId,
     pub system_id: SystemId,
     pub wal_seg_size: u32,
 }

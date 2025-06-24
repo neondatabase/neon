@@ -48,7 +48,7 @@ use postgres_connection::parse_host_port;
 use safekeeper_api::membership::{SafekeeperGeneration, SafekeeperId};
 use safekeeper_api::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_SAFEKEEPER_HTTP_PORT,
-    DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
+    DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT, PgMajorVersion, PgVersionId,
 };
 use storage_broker::DEFAULT_LISTEN_ADDR as DEFAULT_BROKER_ADDR;
 use tokio::task::JoinSet;
@@ -64,7 +64,7 @@ const DEFAULT_PAGESERVER_ID: NodeId = NodeId(1);
 const DEFAULT_BRANCH_NAME: &str = "main";
 project_git_version!(GIT_VERSION);
 
-const DEFAULT_PG_VERSION: u32 = 17;
+const DEFAULT_PG_VERSION: PgMajorVersion = PgMajorVersion::PG17;
 
 const DEFAULT_PAGESERVER_CONTROL_PLANE_API: &str = "http://127.0.0.1:1234/upcall/v1/";
 
@@ -169,7 +169,7 @@ struct TenantCreateCmdArgs {
 
     #[arg(default_value_t = DEFAULT_PG_VERSION)]
     #[clap(long, help = "Postgres version to use for the initial timeline")]
-    pg_version: u32,
+    pg_version: PgMajorVersion,
 
     #[clap(
         long,
@@ -292,7 +292,7 @@ struct TimelineCreateCmdArgs {
 
     #[arg(default_value_t = DEFAULT_PG_VERSION)]
     #[clap(long, help = "Postgres version")]
-    pg_version: u32,
+    pg_version: PgMajorVersion,
 }
 
 #[derive(clap::Args)]
@@ -324,7 +324,7 @@ struct TimelineImportCmdArgs {
 
     #[arg(default_value_t = DEFAULT_PG_VERSION)]
     #[clap(long, help = "Postgres version of the backup being imported")]
-    pg_version: u32,
+    pg_version: PgMajorVersion,
 }
 
 #[derive(clap::Subcommand)]
@@ -603,7 +603,7 @@ struct EndpointCreateCmdArgs {
 
     #[arg(default_value_t = DEFAULT_PG_VERSION)]
     #[clap(long, help = "Postgres version")]
-    pg_version: u32,
+    pg_version: PgMajorVersion,
 
     /// Use gRPC to communicate with Pageservers, by generating grpc:// connstrings.
     ///
@@ -1295,7 +1295,7 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
                     },
                     new_members: None,
                 };
-                let pg_version = args.pg_version * 10000;
+                let pg_version = PgVersionId::from(args.pg_version);
                 let req = safekeeper_api::models::TimelineCreateRequest {
                     tenant_id,
                     timeline_id,

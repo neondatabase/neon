@@ -24,7 +24,7 @@ fn init_logging() {
 fn test_end_of_wal<C: crate::Crafter>(test_name: &str) {
     use crate::*;
 
-    let pg_version = PG_MAJORVERSION[1..3].parse::<u32>().unwrap();
+    let pg_version = MY_PGVERSION;
 
     // Craft some WAL
     let top_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -6,6 +6,8 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use crate::background_process;
+use crate::local_env::{LocalEnv, NeonStorageControllerConf};
 use camino::{Utf8Path, Utf8PathBuf};
 use hyper0::Uri;
 use nix::unistd::Pid;
@@ -22,6 +24,7 @@ use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use pem::Pem;
 use postgres_backend::AuthType;
 use reqwest::{Method, Response};
+use safekeeper_api::PgMajorVersion;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
@@ -30,9 +33,6 @@ use url::Url;
 use utils::auth::{Claims, Scope, encode_from_key_file};
 use utils::id::{NodeId, TenantId};
 use whoami::username;
-
-use crate::background_process;
-use crate::local_env::{LocalEnv, NeonStorageControllerConf};
 
 pub struct StorageController {
     env: LocalEnv,
@@ -48,7 +48,7 @@ pub struct StorageController {
 
 const COMMAND: &str = "storage_controller";
 
-const STORAGE_CONTROLLER_POSTGRES_VERSION: u32 = 16;
+const STORAGE_CONTROLLER_POSTGRES_VERSION: PgMajorVersion = PgMajorVersion::PG16;
 
 const DB_NAME: &str = "storage_controller";
 
@@ -184,9 +184,15 @@ impl StorageController {
     /// to other versions if that one isn't found.  Some automated tests create circumstances
     /// where only one version is available in pg_distrib_dir, such as `test_remote_extensions`.
     async fn get_pg_dir(&self, dir_name: &str) -> anyhow::Result<Utf8PathBuf> {
-        let prefer_versions = [STORAGE_CONTROLLER_POSTGRES_VERSION, 16, 15, 14];
+        const PREFER_VERSIONS: [PgMajorVersion; 5] = [
+            STORAGE_CONTROLLER_POSTGRES_VERSION,
+            PgMajorVersion::PG16,
+            PgMajorVersion::PG15,
+            PgMajorVersion::PG14,
+            PgMajorVersion::PG17,
+        ];
 
-        for v in prefer_versions {
+        for v in PREFER_VERSIONS {
             let path = Utf8PathBuf::from_path_buf(self.env.pg_dir(v, dir_name)?).unwrap();
             if tokio::fs::try_exists(&path).await? {
                 return Ok(path);

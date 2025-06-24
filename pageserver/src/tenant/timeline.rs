@@ -58,7 +58,7 @@ use pageserver_api::reltag::{BlockNumber, RelTag};
 use pageserver_api::shard::{ShardIdentity, ShardIndex, ShardNumber, TenantShardId};
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::v14::xlog_utils;
-use postgres_ffi::{WAL_SEGMENT_SIZE, to_pg_timestamp};
+use postgres_ffi::{PgMajorVersion, WAL_SEGMENT_SIZE, to_pg_timestamp};
 use rand::Rng;
 use remote_storage::DownloadError;
 use serde_with::serde_as;
@@ -225,7 +225,7 @@ pub struct Timeline {
     /// to shards, and is constant through the lifetime of this Timeline.
     shard_identity: ShardIdentity,
 
-    pub pg_version: u32,
+    pub pg_version: PgMajorVersion,
 
     /// The tuple has two elements.
     /// 1. `LayerFileManager` keeps track of the various physical representations of the layer files (inmem, local, remote).
@@ -2913,7 +2913,7 @@ impl Timeline {
         shard_identity: ShardIdentity,
         walredo_mgr: Option<Arc<super::WalRedoManager>>,
         resources: TimelineResources,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         state: TimelineState,
         attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
         create_idempotency: crate::tenant::CreateTimelineIdempotency,
@@ -7593,6 +7593,7 @@ mod tests {
     use std::sync::Arc;
 
     use pageserver_api::key::Key;
+    use postgres_ffi::PgMajorVersion;
     use std::iter::Iterator;
     use tracing::Instrument;
     use utils::id::TimelineId;
@@ -7667,7 +7668,7 @@ mod tests {
             .create_test_timeline_with_layers(
                 TimelineId::generate(),
                 Lsn(0x10),
-                14,
+                PgMajorVersion::PG14,
                 &ctx,
                 Vec::new(), // in-memory layers
                 delta_layers,
@@ -7803,7 +7804,7 @@ mod tests {
             .create_test_timeline_with_layers(
                 TimelineId::generate(),
                 Lsn(0x10),
-                14,
+                PgMajorVersion::PG14,
                 &ctx,
                 Vec::new(), // in-memory layers
                 delta_layers,
@@ -7863,7 +7864,12 @@ mod tests {
 
         let (tenant, ctx) = harness.load().await;
         let timeline = tenant
-            .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+            .create_test_timeline(
+                TimelineId::generate(),
+                Lsn(0x10),
+                PgMajorVersion::PG14,
+                &ctx,
+            )
             .await
             .unwrap();
 

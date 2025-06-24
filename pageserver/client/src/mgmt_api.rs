@@ -7,6 +7,7 @@ use detach_ancestor::AncestorDetached;
 use http_utils::error::HttpErrorBody;
 use pageserver_api::models::*;
 use pageserver_api::shard::TenantShardId;
+use postgres_versioninfo::PgMajorVersion;
 pub use reqwest::Body as ReqwestBody;
 use reqwest::{IntoUrl, Method, StatusCode, Url};
 use utils::id::{TenantId, TimelineId};
@@ -745,9 +746,11 @@ impl Client {
         timeline_id: TimelineId,
         base_lsn: Lsn,
         end_lsn: Lsn,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         basebackup_tarball: ReqwestBody,
     ) -> Result<()> {
+        let pg_version = pg_version.major_version_num();
+
         let uri = format!(
             "{}/v1/tenant/{tenant_id}/timeline/{timeline_id}/import_basebackup?base_lsn={base_lsn}&end_lsn={end_lsn}&pg_version={pg_version}",
             self.mgmt_api_endpoint,

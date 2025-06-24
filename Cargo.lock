@@ -1318,6 +1318,7 @@ dependencies = [
  "p256 0.13.2",
  "postgres",
  "postgres_initdb",
+ "postgres_versioninfo",
  "regex",
  "remote_storage",
  "reqwest",
@@ -4406,6 +4407,7 @@ dependencies = [
  "once_cell",
  "postgres_backend",
  "postgres_ffi_types",
+ "postgres_versioninfo",
  "rand 0.8.5",
  "remote_storage",
  "reqwest",
@@ -4429,6 +4431,7 @@ dependencies = [
  "futures",
  "http-utils",
  "pageserver_api",
+ "postgres_versioninfo",
  "reqwest",
  "serde",
  "thiserror 1.0.69",
@@ -4897,6 +4900,7 @@ dependencies = [
  "once_cell",
  "postgres",
  "postgres_ffi_types",
+ "postgres_versioninfo",
  "pprof",
  "regex",
  "serde",
@@ -4919,8 +4923,20 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "camino",
+ "postgres_versioninfo",
  "thiserror 1.0.69",
  "tokio",
+ "workspace_hack",
+]
+
+[[package]]
+name = "postgres_versioninfo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_repr",
+ "thiserror 1.0.69",
  "workspace_hack",
 ]
 
@@ -6115,6 +6131,7 @@ dependencies = [
  "postgres-protocol",
  "postgres_backend",
  "postgres_ffi",
+ "postgres_versioninfo",
  "pprof",
  "pq_proto",
  "rand 0.8.5",
@@ -6159,6 +6176,7 @@ dependencies = [
  "const_format",
  "pageserver_api",
  "postgres_ffi",
+ "postgres_versioninfo",
  "pq_proto",
  "serde",
  "serde_json",
@@ -6479,6 +6497,17 @@ dependencies = [
  "percent-encoding",
  "serde",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "serde_repr"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "175ee3e80ae9982737ca543e96133087cbd9a485eecc3bc4de9c1a37b47ea59c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.100",
 ]
 
 [[package]]
