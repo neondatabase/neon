@@ -1,3 +1,4 @@
+use serde::ser::SerializeTuple;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::fmt::{Display, Formatter};
@@ -128,9 +129,16 @@ impl Display for PgMajorVersion {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 #[allow(dead_code)]
 pub struct InvalidPgVersion(u32);
+
+impl Display for InvalidPgVersion {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.serialize_tuple_struct("InvalidPgVersion", 1)?
+            .serialize_element(&self.0)
+    }
+}
 
 impl TryFrom<PgVersionId> for PgMajorVersion {
     type Error = InvalidPgVersion;
@@ -141,9 +149,7 @@ impl TryFrom<PgVersionId> for PgMajorVersion {
             15 => PgMajorVersion::PG15,
             16 => PgMajorVersion::PG16,
             17 => PgMajorVersion::PG17,
-            _ => {
-                panic!("Unknown PgVersionId: {value}");
-            }
+            _ => return Err(InvalidPgVersion(value.0)),
         })
     }
 }
@@ -155,8 +161,14 @@ impl From<PgMajorVersion> for PgVersionId {
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
-#[error("PgMajorVersionParseError")]
 pub struct PgMajorVersionParseError(String);
+
+impl Display for PgMajorVersionParseError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.serialize_tuple_struct("PgMajorVersionParseError", 1)?
+            .serialize_element(&self.0)
+    }
+}
 
 impl FromStr for PgMajorVersion {
     type Err = PgMajorVersionParseError;
