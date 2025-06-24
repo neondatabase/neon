@@ -66,8 +66,7 @@ use utils::sync::gate::{Gate, GateGuard};
 use utils::{failpoint_support, pausable_failpoint};
 
 use crate::background_node_operations::{
-    Drain, Fill, MAX_RECONCILES_PER_OPERATION, NodeDeletionHandler, Operation, OperationError,
-    OperationHandler,
+    Delete, Drain, Fill, MAX_RECONCILES_PER_OPERATION, Operation, OperationError, OperationHandler,
 };
 use crate::compute_hook::{self, ComputeHook, NotifyError};
 use crate::drain_utils::{self, TenantShardDrain, TenantShardIterator};
