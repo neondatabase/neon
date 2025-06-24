@@ -24,7 +24,6 @@ pub struct TimelineCreateRequest {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
     pub mconf: Configuration,
-    /// In the PG_VERSION_NUM macro format, like 140017.
     pub pg_version: PgVersionId,
     pub system_id: Option<u64>,
     // By default WAL_SEGMENT_SIZE
