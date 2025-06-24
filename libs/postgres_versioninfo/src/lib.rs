@@ -1,4 +1,3 @@
-use serde::ser::SerializeTuple;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::fmt::{Display, Formatter};
@@ -79,12 +78,12 @@ impl PgMajorVersion {
     ///
     /// The PG_VERSION file is used to determine the PostgreSQL version that currently
     /// owns the data in a PostgreSQL data directory.
-    pub fn versionfile_string(&self) -> String {
+    pub fn versionfile_string(&self) -> &'static str {
         match self {
-            PgMajorVersion::PG17 => "17\x0A".to_string(),
-            PgMajorVersion::PG16 => "16\x0A".to_string(),
-            PgMajorVersion::PG15 => "15".to_string(),
-            PgMajorVersion::PG14 => "14".to_string(),
+            PgMajorVersion::PG14 => "14",
+            PgMajorVersion::PG15 => "15",
+            PgMajorVersion::PG16 => "16\x0A",
+            PgMajorVersion::PG17 => "17\x0A",
         }
     }
 
@@ -94,15 +93,16 @@ impl PgMajorVersion {
     /// implementation.
     pub fn v_str(&self) -> String {
         match self {
-            PgMajorVersion::PG17 => "v17".to_string(),
-            PgMajorVersion::PG16 => "v16".to_string(),
-            PgMajorVersion::PG15 => "v15".to_string(),
-            PgMajorVersion::PG14 => "v14".to_string(),
+            PgMajorVersion::PG14 => "v14",
+            PgMajorVersion::PG15 => "v15",
+            PgMajorVersion::PG16 => "v16",
+            PgMajorVersion::PG17 => "v17",
         }
+        .to_string()
     }
 
     /// All currently supported major versions of PostgreSQL.
-    pub const ALL: [PgMajorVersion; 4] = [
+    pub const ALL: &'static [PgMajorVersion] = &[
         PgMajorVersion::PG14,
         PgMajorVersion::PG15,
         PgMajorVersion::PG16,
@@ -112,20 +112,12 @@ impl PgMajorVersion {
 
 impl Display for PgMajorVersion {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PgMajorVersion::PG14 => {
-                write!(f, "PgMajorVersion::PG14")
-            }
-            PgMajorVersion::PG15 => {
-                write!(f, "PgMajorVersion::PG15")
-            }
-            PgMajorVersion::PG16 => {
-                write!(f, "PgMajorVersion::PG16")
-            }
-            PgMajorVersion::PG17 => {
-                write!(f, "PgMajorVersion::PG17")
-            }
-        }
+        f.write_str(match self {
+            PgMajorVersion::PG14 => "PgMajorVersion::PG14",
+            PgMajorVersion::PG15 => "PgMajorVersion::PG15",
+            PgMajorVersion::PG16 => "PgMajorVersion::PG16",
+            PgMajorVersion::PG17 => "PgMajorVersion::PG17",
+        })
     }
 }
 
@@ -135,8 +127,7 @@ pub struct InvalidPgVersion(u32);
 
 impl Display for InvalidPgVersion {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.serialize_tuple_struct("InvalidPgVersion", 1)?
-            .serialize_element(&self.0)
+        write!(f, "InvalidPgVersion({})", self.0)
     }
 }
 
@@ -165,8 +156,7 @@ pub struct PgMajorVersionParseError(String);
 
 impl Display for PgMajorVersionParseError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.serialize_tuple_struct("PgMajorVersionParseError", 1)?
-            .serialize_element(&self.0)
+        write!(f, "PgMajorVersionParseError({})", self.0)
     }
 }
 
@@ -174,12 +164,12 @@ impl FromStr for PgMajorVersion {
     type Err = PgMajorVersionParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "14" => Ok(PgMajorVersion::PG14),
-            "15" => Ok(PgMajorVersion::PG15),
-            "16" => Ok(PgMajorVersion::PG16),
-            "17" => Ok(PgMajorVersion::PG17),
-            _ => Err(PgMajorVersionParseError(s.to_string())),
-        }
+        Ok(match s {
+            "14" => PgMajorVersion::PG14,
+            "15" => PgMajorVersion::PG15,
+            "16" => PgMajorVersion::PG16,
+            "17" => PgMajorVersion::PG17,
+            _ => return Err(PgMajorVersionParseError(s.to_string())),
+        })
     }
 }
