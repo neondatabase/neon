@@ -8997,11 +8997,8 @@ impl Service {
                         continue;
                     }
                     Ok(None) => {
-                        tracing::info!(
-                            tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
-                            "Could not determine lag for secondary on node {dest_node_id}. Skipping reconcile."
-                        );
-                        continue;
+                        // The tenant might have just been created and the lag is not yet available.
+                        // Migrate it away is fine.
                     }
                     Err(err) => {
                         tracing::warn!(
