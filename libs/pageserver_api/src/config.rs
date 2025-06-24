@@ -367,6 +367,9 @@ pub struct BasebackupCacheConfig {
     // TODO(diko): support max_entry_size_bytes.
     // pub max_entry_size_bytes: u64,
     pub max_size_entries: usize,
+    /// Size of the channel used to send prepare requests to the basebackup cache worker.
+    /// If exceeded, new prepare requests will be dropped.
+    pub prepare_channel_size: usize,
 }
 
 impl Default for BasebackupCacheConfig {
@@ -376,6 +379,7 @@ impl Default for BasebackupCacheConfig {
             max_total_size_bytes: 1024 * 1024 * 1024, // 1 GiB
             // max_entry_size_bytes: 16 * 1024 * 1024,   // 16 MiB
             max_size_entries: 1000,
+            prepare_channel_size: 100,
         }
     }
 }

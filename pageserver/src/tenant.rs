@@ -5999,7 +5999,7 @@ pub(crate) mod harness {
         ) -> anyhow::Result<Arc<TenantShard>> {
             let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
 
-            let (basebackup_requst_sender, _) = tokio::sync::mpsc::unbounded_channel();
+            let (basebackup_requst_sender, _) = tokio::sync::mpsc::channel(1);
 
             let tenant = Arc::new(TenantShard::new(
                 TenantState::Attaching,

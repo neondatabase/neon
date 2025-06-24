@@ -569,8 +569,12 @@ fn start_pageserver(
         pageserver::l0_flush::L0FlushGlobalState::new(conf.l0_flush.clone());
 
     // Scan the local 'tenants/' directory and start loading the tenants
-    let (basebackup_prepare_sender, basebackup_prepare_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
+    let (basebackup_prepare_sender, basebackup_prepare_receiver) = tokio::sync::mpsc::channel(
+        conf.basebackup_cache_config
+            .as_ref()
+            .map(|c| c.prepare_channel_size)
+            .unwrap_or(1),
+    );
     let deletion_queue_client = deletion_queue.new_client();
     let background_purges = mgr::BackgroundPurges::default();
 

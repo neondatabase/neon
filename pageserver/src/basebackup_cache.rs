@@ -7,7 +7,7 @@ use metrics::core::{AtomicU64, GenericCounter};
 use pageserver_api::{config::BasebackupCacheConfig, models::TenantState};
 use tokio::{
     io::{AsyncWriteExt, BufWriter},
-    sync::mpsc::{UnboundedReceiver, UnboundedSender},
+    sync::mpsc::{Receiver, Sender},
 };
 use tokio_util::sync::CancellationToken;
 use utils::{
@@ -36,8 +36,8 @@ pub struct BasebackupPrepareRequest {
     pub lsn: Lsn,
 }
 
-pub type BasebackupPrepareSender = UnboundedSender<BasebackupPrepareRequest>;
-pub type BasebackupPrepareReceiver = UnboundedReceiver<BasebackupPrepareRequest>;
+pub type BasebackupPrepareSender = Sender<BasebackupPrepareRequest>;
+pub type BasebackupPrepareReceiver = Receiver<BasebackupPrepareRequest>;
 
 #[derive(Clone)]
 struct CacheEntry {

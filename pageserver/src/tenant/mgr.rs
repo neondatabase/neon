@@ -2924,9 +2924,7 @@ mod tests {
         // Invoke remove_tenant_from_memory with a cleanup hook that blocks until we manually
         // permit it to proceed: that will stick the tenant in InProgress
 
-        let (basebackup_prepare_sender, _) = tokio::sync::mpsc::unbounded_channel::<
-            crate::basebackup_cache::BasebackupPrepareRequest,
-        >();
+        let (basebackup_prepare_sender, _) = tokio::sync::mpsc::channel(1);
 
         let tenant_manager = TenantManager {
             tenants: std::sync::RwLock::new(TenantsMap::Open(tenants)),

@@ -2523,7 +2523,7 @@ impl Timeline {
 
         let res = self
             .basebackup_prepare_sender
-            .send(BasebackupPrepareRequest {
+            .try_send(BasebackupPrepareRequest {
                 tenant_shard_id: self.tenant_shard_id,
                 timeline_id: self.timeline_id,
                 lsn,
