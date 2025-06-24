@@ -399,7 +399,7 @@ async fn collect_metrics_iteration(
 
 fn create_remote_path_prefix(now: DateTime<Utc>) -> String {
     format!(
-        "year={year:04}/month={month:02}/day={day:02}/{hour:02}:{minute:02}:{second:02}Z",
+        "year={year:04}/month={month:02}/day={day:02}/hour={hour:02}/{hour:02}:{minute:02}:{second:02}Z",
         year = now.year(),
         month = now.month(),
         day = now.day(),
@@ -461,7 +461,7 @@ async fn upload_backup_events(
         real_now.second().into(),
         real_now.nanosecond(),
     ));
-    let path = format!("{path_prefix}_{id}.json.gz");
+    let path = format!("{path_prefix}_{id}.ndjson.gz");
     let remote_path = match RemotePath::from_string(&path) {
         Ok(remote_path) => remote_path,
         Err(e) => {
@@ -471,9 +471,12 @@ async fn upload_backup_events(
 
     // TODO: This is async compression from Vec to Vec. Rewrite as byte stream.
     //       Use sync compression in blocking threadpool.
-    let data = serde_json::to_vec(chunk).context("serialize metrics")?;
     let mut encoder = GzipEncoder::new(Vec::new());
-    encoder.write_all(&data).await.context("compress metrics")?;
+    for event in chunk.events.iter() {
+        let data = serde_json::to_vec(event).context("serialize metrics")?;
+        encoder.write_all(&data).await.context("compress metrics")?;
+        encoder.write_all(b"\n").await.context("compress metrics")?;
+    }
     encoder.shutdown().await.context("compress metrics")?;
     let compressed_data: Bytes = encoder.get_ref().clone().into();
     backoff::retry(
