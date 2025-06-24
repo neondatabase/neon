@@ -2215,6 +2215,11 @@ pub fn make_router(
         .post("/control/v1/node", |r| {
             named_request_span(r, handle_node_register, RequestName("control_v1_node"))
         })
+        // This endpoint is deprecated and will be removed in a future version.
+        // Use PUT /control/v1/node/:node_id/delete instead.
+        .delete("/control/v1/node/:node_id", |r| {
+            named_request_span(r, handle_node_delete, RequestName("control_v1_node_delete"))
+        })
         .get("/control/v1/node", |r| {
             named_request_span(r, handle_node_list, RequestName("control_v1_node"))
         })

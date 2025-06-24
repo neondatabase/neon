@@ -7534,7 +7534,7 @@ impl Service {
         self: &Arc<Self>,
         node_id: NodeId,
     ) -> Result<(), ApiError> {
-        let (ongoing_op, ongoing_deletion, node_available, node_policy) = {
+        let (ongoing_op, ongoing_deletion, node_policy) = {
             let locked = self.inner.read().unwrap();
             let nodes = &locked.nodes;
             let node = nodes.get(&node_id).ok_or(ApiError::NotFound(
@@ -7550,7 +7550,6 @@ impl Service {
                     .ongoing_deletion
                     .as_ref()
                     .map(|ongoing| ongoing.node_id),
-                node.is_available(),
                 node.get_scheduling(),
             )
         };
@@ -7568,12 +7567,6 @@ impl Service {
                     node_id_being_deleted
                 )
                 .into(),
-            ));
-        }
-
-        if !node_available {
-            return Err(ApiError::ResourceUnavailable(
-                format!("Node {node_id} is currently unavailable").into(),
             ));
         }
 
