@@ -12,14 +12,16 @@ pub(crate) const INVALID_POS: u32 = u32::MAX;
 
 // Bucket
 pub(crate) struct Bucket<K, V> {
-    pub(crate) next: u32,
-	pub(crate) prev: PrevPos,
+	pub(crate) next: u32,
     pub(crate) inner: Option<(K, V)>,
 }
 
 pub(crate) struct CoreHashMap<'a, K, V> {
+	/// Dictionary used to map hashes to bucket indices.	
     pub(crate) dictionary: &'a mut [u32],
+	/// Buckets containing key-value pairs.
     pub(crate) buckets: &'a mut [Bucket<K, V>],
+	/// Head of the freelist.
     pub(crate) free_head: u32,
 
     pub(crate) _user_list_head: u32,
@@ -63,12 +65,7 @@ where
                     i as u32 + 1
                 } else {
                     INVALID_POS
-                },
-				prev: if i > 0 {
-					PrevPos::Chained(i as u32 - 1)
-				} else {
-					PrevPos::First(INVALID_POS)
-				},
+                },				
                 inner: None,
             });
         }
@@ -160,8 +157,8 @@ where
 		self.alloc_limit != INVALID_POS
 	}
 
-
-	// TODO(quantumish): How does this interact with an ongoing shrink?
+	/// Clears all entries from the hashmap.
+	/// Does not reset any allocation limits, but does clear any entries beyond them.
 	pub fn clear(&mut self) {
 		for i in 0..self.buckets.len() {
             self.buckets[i] = Bucket {
@@ -169,12 +166,7 @@ where
                     i as u32 + 1
                 } else {
                     INVALID_POS
-                },
-				prev: if i > 0 {
-					PrevPos::Chained(i as u32 - 1)
-				} else {
-					PrevPos::First(INVALID_POS)
-				},
+                },				
                 inner: None,
             }
         }
@@ -184,7 +176,6 @@ where
         }
 
 		self.buckets_in_use = 0;
-		self.alloc_limit = INVALID_POS;
 	}
 	
     pub fn entry_at_bucket(&mut self, pos: usize) -> Option<OccupiedEntry<'a, '_, K, V>> {
@@ -192,13 +183,12 @@ where
 			return None;
 		}
 
-		let prev = self.buckets[pos].prev;
 		let entry = self.buckets[pos].inner.as_ref();
 		match entry {
 			Some((key, _)) => Some(OccupiedEntry {
 				_key: key.clone(),
 				bucket_pos: pos as u32,
-				prev_pos: prev,
+				prev_pos: PrevPos::Unknown,
 				map: self,
 			}),
 			_ => None,
@@ -206,7 +196,7 @@ where
     }
 
 	/// Find the position of an unused bucket via the freelist and initialize it. 
-    pub(crate) fn alloc_bucket(&mut self, key: K, value: V, dict_pos: u32) -> Result<u32, FullError> {
+    pub(crate) fn alloc_bucket(&mut self, key: K, value: V) -> Result<u32, FullError> {
         let mut pos = self.free_head;
 
 		// Find the first bucket we're *allowed* to use.
@@ -225,17 +215,12 @@ where
 			PrevPos::First(_) => {
 				let next_pos = self.buckets[pos as usize].next;
 				self.free_head = next_pos;				
-				if next_pos != INVALID_POS {
-					self.buckets[next_pos as usize].prev = PrevPos::First(dict_pos);
-				}
 			}
 			PrevPos::Chained(p) => if p != INVALID_POS {
 				let next_pos = self.buckets[pos as usize].next;
 				self.buckets[p as usize].next = next_pos;
-				if next_pos != INVALID_POS {
-					self.buckets[next_pos as usize].prev = PrevPos::Chained(p);
-				}
 			},
+			PrevPos::Unknown => unreachable!()
 		}
 
 		// Initialize the bucket.

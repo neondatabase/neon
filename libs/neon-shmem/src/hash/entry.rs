@@ -10,13 +10,19 @@ pub enum Entry<'a, 'b, K, V> {
     Vacant(VacantEntry<'a, 'b, K, V>),
 }
 
+/// Helper enum representing the previous position within a hashmap chain.
 #[derive(Clone, Copy)]
 pub(crate) enum PrevPos {
+	/// Starting index within the dictionary.  
     First(u32),
+	/// Regular index within the buckets.
     Chained(u32),
+	/// Unknown - e.g. the associated entry was retrieved by index instead of chain.
+	Unknown,
 }
 
 impl PrevPos {
+	/// Unwrap an index from a `PrevPos::First`, panicking otherwise.
 	pub fn unwrap_first(&self) -> u32 {
 		match self {
 			Self::First(i) => *i,
@@ -26,10 +32,13 @@ impl PrevPos {
 }
 
 pub struct OccupiedEntry<'a, 'b, K, V> {
-    pub(crate) map: &'b mut CoreHashMap<'a, K, V>,
-    pub(crate) _key: K, // The key of the occupied entry
+	pub(crate) map: &'b mut CoreHashMap<'a, K, V>,
+	/// The key of the occupied entry
+    pub(crate) _key: K,
+	/// The index of the previous entry in the chain.
     pub(crate) prev_pos: PrevPos,
-    pub(crate) bucket_pos: u32, // The position of the bucket in the CoreHashMap's buckets array
+	/// The position of the bucket in the CoreHashMap's buckets array.
+    pub(crate) bucket_pos: u32, 
 }
 
 impl<'a, 'b, K, V> OccupiedEntry<'a, 'b, K, V> {
@@ -65,17 +74,14 @@ impl<'a, 'b, K, V> OccupiedEntry<'a, 'b, K, V> {
             PrevPos::First(dict_pos) => self.map.dictionary[dict_pos as usize] = bucket.next,
             PrevPos::Chained(bucket_pos) => {
                 self.map.buckets[bucket_pos as usize].next = bucket.next
-            }
+            },
+			PrevPos::Unknown => panic!("can't safely remove entry with unknown previous entry"),
         }
 
         // and add it to the freelist        
-		if self.map.free_head != INVALID_POS {
-			self.map.buckets[self.map.free_head as usize].prev = PrevPos::Chained(self.bucket_pos);
-		}
         let bucket = &mut self.map.buckets[self.bucket_pos as usize];
         let old_value = bucket.inner.take();
 		bucket.next = self.map.free_head;
-		bucket.prev = PrevPos::First(INVALID_POS);
         self.map.free_head = self.bucket_pos;
         self.map.buckets_in_use -= 1;
 
@@ -91,14 +97,11 @@ pub struct VacantEntry<'a, 'b, K, V> {
 
 impl<'a, 'b, K: Clone + Hash + Eq, V> VacantEntry<'a, 'b, K, V> {
     pub fn insert(self, value: V) -> Result<&'b mut V, FullError> {
-        let pos = self.map.alloc_bucket(self.key, value, self.dict_pos)?;
+        let pos = self.map.alloc_bucket(self.key, value)?;
         if pos == INVALID_POS {
             return Err(FullError());
         }
         let bucket = &mut self.map.buckets[pos as usize];
-		if let PrevPos::First(INVALID_POS) = bucket.prev {
-			bucket.prev = PrevPos::First(self.dict_pos);
-		}
         bucket.next = self.map.dictionary[self.dict_pos as usize];
         self.map.dictionary[self.dict_pos as usize] = pos;
 

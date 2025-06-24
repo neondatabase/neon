@@ -22,16 +22,16 @@ pub mod entry;
 mod tests;
 
 use core::{CoreHashMap, INVALID_POS};
-use entry::{Entry, OccupiedEntry, PrevPos};
+use entry::{Entry, OccupiedEntry};
 
-#[derive(Debug)]
-pub struct OutOfMemoryError();
 
 pub struct HashMapInit<'a, K, V, S = rustc_hash::FxBuildHasher> {
     // Hash table can be allocated in a fixed memory area, or in a resizeable ShmemHandle.
     shmem_handle: Option<ShmemHandle>,
     shared_ptr: *mut HashMapShared<'a, K, V>,
+	shared_size: usize,
 	hasher: S,
+	num_buckets: u32,
 }
 
 pub struct HashMapAccess<'a, K, V, S = rustc_hash::FxBuildHasher> {
@@ -43,8 +43,46 @@ pub struct HashMapAccess<'a, K, V, S = rustc_hash::FxBuildHasher> {
 unsafe impl<'a, K: Sync, V: Sync, S> Sync for HashMapAccess<'a, K, V, S> {}
 unsafe impl<'a, K: Send, V: Send, S> Send for HashMapAccess<'a, K, V, S> {}
 
-impl<'a, K, V, S> HashMapInit<'a, K, V, S> {
+impl<'a, K: Clone + Hash + Eq, V, S> HashMapInit<'a, K, V, S> {
+	pub fn with_hasher(self, hasher: S) -> HashMapInit<'a, K, V, S> {
+		Self { hasher, ..self }
+	}
+	
+	pub fn estimate_size(num_buckets: u32) -> usize {
+        // add some margin to cover alignment etc.
+        CoreHashMap::<K, V>::estimate_size(num_buckets) + size_of::<HashMapShared<K, V>>() + 1000
+    }
+	
     pub fn attach_writer(self) -> HashMapAccess<'a, K, V, S> {
+		// carve out the HashMapShared struct from the area.
+        let mut ptr: *mut u8 = self.shared_ptr.cast();
+        let end_ptr: *mut u8 = unsafe { ptr.add(self.shared_size) };
+        ptr = unsafe { ptr.add(ptr.align_offset(align_of::<HashMapShared<K, V>>())) };
+        let shared_ptr: *mut HashMapShared<K, V> = ptr.cast();
+        ptr = unsafe { ptr.add(size_of::<HashMapShared<K, V>>()) };
+
+        // carve out the buckets
+        ptr = unsafe { ptr.byte_add(ptr.align_offset(align_of::<core::Bucket<K, V>>())) };
+        let buckets_ptr = ptr;
+        ptr = unsafe { ptr.add(size_of::<core::Bucket<K, V>>() * self.num_buckets as usize) };
+
+        // use remaining space for the dictionary
+        ptr = unsafe { ptr.byte_add(ptr.align_offset(align_of::<u32>())) };
+        assert!(ptr.addr() < end_ptr.addr());
+        let dictionary_ptr = ptr;
+        let dictionary_size = unsafe { end_ptr.byte_offset_from(ptr) / size_of::<u32>() as isize };
+        assert!(dictionary_size > 0);
+
+        let buckets =
+            unsafe { std::slice::from_raw_parts_mut(buckets_ptr.cast(), self.num_buckets as usize) };
+        let dictionary = unsafe {
+            std::slice::from_raw_parts_mut(dictionary_ptr.cast(), dictionary_size as usize)
+        };
+        let hashmap = CoreHashMap::new(buckets, dictionary);
+        unsafe {
+            std::ptr::write(shared_ptr, HashMapShared { inner: hashmap });
+        }
+		
         HashMapAccess {
             shmem_handle: self.shmem_handle,
             shared_ptr: self.shared_ptr,
@@ -77,88 +115,56 @@ impl<'a, K, V> HashMapInit<'a, K, V, rustc_hash::FxBuildHasher>
 where
 	K: Clone + Hash + Eq
 {
-	pub fn init_in_fixed_area(
-        num_buckets: u32,
+	pub fn with_fixed(
+		num_buckets: u32,
         area: &'a mut [MaybeUninit<u8>],
     ) -> HashMapInit<'a, K, V> {
-        Self::init_in_fixed_area_with_hasher(num_buckets, area, rustc_hash::FxBuildHasher::default())
+		Self {
+			num_buckets,
+			shmem_handle: None,
+			shared_ptr: area.as_mut_ptr().cast(),
+			shared_size: area.len(),
+			hasher: rustc_hash::FxBuildHasher::default(),
+		}		
     }
 
     /// Initialize a new hash map in the given shared memory area
-    pub fn init_in_shmem(num_buckets: u32, shmem: ShmemHandle) -> HashMapInit<'a, K, V> {
-        Self::init_in_shmem_with_hasher(num_buckets, shmem, rustc_hash::FxBuildHasher::default())
-    }
-}
-
-impl<'a, K, V, S: BuildHasher> HashMapInit<'a, K, V, S>
-where
-    K: Clone + Hash + Eq
-{
-    pub fn estimate_size(num_buckets: u32) -> usize {
-        // add some margin to cover alignment etc.
-        CoreHashMap::<K, V>::estimate_size(num_buckets) + size_of::<HashMapShared<K, V>>() + 1000
-    }
-    
-    pub fn init_in_shmem_with_hasher(num_buckets: u32, mut shmem: ShmemHandle, hasher: S) -> HashMapInit<'a, K, V, S> {
-        let size = Self::estimate_size(num_buckets);
-        shmem
+    pub fn with_shmem(num_buckets: u32, shmem: ShmemHandle) -> HashMapInit<'a, K, V> {
+		let size = Self::estimate_size(num_buckets);
+		shmem
             .set_size(size)
             .expect("could not resize shared memory area");
-
-        let ptr = unsafe { shmem.data_ptr.as_mut() };
-        Self::init_common(num_buckets, Some(shmem), ptr, size, hasher)
+		Self {
+			num_buckets,
+			shared_ptr: shmem.data_ptr.as_ptr().cast(),
+			shmem_handle: Some(shmem),
+			shared_size: size,
+			hasher: rustc_hash::FxBuildHasher::default()
+		}
     }
 
-	pub fn init_in_fixed_area_with_hasher(
-        num_buckets: u32,
-        area: &'a mut [MaybeUninit<u8>],
-		hasher: S,
-    ) -> HashMapInit<'a, K, V, S> {
-        Self::init_common(num_buckets, None, area.as_mut_ptr().cast(), area.len(), hasher)
-    }
-	
-    fn init_common(
-        num_buckets: u32,
-        shmem_handle: Option<ShmemHandle>,
-        area_ptr: *mut u8,
-        area_len: usize,
-		hasher: S,
-    ) -> HashMapInit<'a, K, V, S> {
-        // carve out the HashMapShared struct from the area.
-        let mut ptr: *mut u8 = area_ptr;
-        let end_ptr: *mut u8 = unsafe { area_ptr.add(area_len) };
-        ptr = unsafe { ptr.add(ptr.align_offset(align_of::<HashMapShared<K, V>>())) };
-        let shared_ptr: *mut HashMapShared<K, V> = ptr.cast();
-        ptr = unsafe { ptr.add(size_of::<HashMapShared<K, V>>()) };
+	pub fn new_resizeable_named(num_buckets: u32, max_buckets: u32, name: &str) -> HashMapInit<'a, K, V> {
+		let size = Self::estimate_size(num_buckets);
+		let max_size = Self::estimate_size(max_buckets);
+		let shmem = ShmemHandle::new(name, size, max_size)
+			.expect("failed to make shared memory area");
+		
+		Self {
+			num_buckets,
+			shared_ptr: shmem.data_ptr.as_ptr().cast(),
+			shmem_handle: Some(shmem),
+			shared_size: size,
+			hasher: rustc_hash::FxBuildHasher::default()
+		}
+	}
 
-        // carve out the buckets
-        ptr = unsafe { ptr.byte_add(ptr.align_offset(align_of::<core::Bucket<K, V>>())) };
-        let buckets_ptr = ptr;
-        ptr = unsafe { ptr.add(size_of::<core::Bucket<K, V>>() * num_buckets as usize) };
-
-        // use remaining space for the dictionary
-        ptr = unsafe { ptr.byte_add(ptr.align_offset(align_of::<u32>())) };
-        assert!(ptr.addr() < end_ptr.addr());
-        let dictionary_ptr = ptr;
-        let dictionary_size = unsafe { end_ptr.byte_offset_from(ptr) / size_of::<u32>() as isize };
-        assert!(dictionary_size > 0);
-
-        let buckets =
-            unsafe { std::slice::from_raw_parts_mut(buckets_ptr.cast(), num_buckets as usize) };
-        let dictionary = unsafe {
-            std::slice::from_raw_parts_mut(dictionary_ptr.cast(), dictionary_size as usize)
-        };
-        let hashmap = CoreHashMap::new(buckets, dictionary);
-        unsafe {
-            std::ptr::write(shared_ptr, HashMapShared { inner: hashmap });
-        }
-
-        HashMapInit {
-            shmem_handle,
-            shared_ptr,
-			hasher,
-        }
-    }
+	pub fn new_resizeable(num_buckets: u32, max_buckets: u32) -> HashMapInit<'a, K, V> {
+		use std::sync::atomic::{AtomicUsize, Ordering};
+		const COUNTER: AtomicUsize = AtomicUsize::new(0);
+		let val = COUNTER.fetch_add(1, Ordering::Relaxed);
+		let name = format!("neon_shmem_hmap{}", val);
+		Self::new_resizeable_named(num_buckets, max_buckets, &name)
+	}
 }
 
 impl<'a, K, V, S: BuildHasher> HashMapAccess<'a, K, V, S>
@@ -248,6 +254,8 @@ where
 		num_buckets: u32,
 		rehash_buckets: u32,
 	) {
+		inner.free_head = INVALID_POS;
+		
 		// Recalculate the dictionary
         let buckets;
         let dictionary;
@@ -268,7 +276,9 @@ where
 
         for i in 0..rehash_buckets as usize {
             if buckets[i].inner.is_none() {
-                continue;
+				buckets[i].next = inner.free_head;
+                inner.free_head = i as u32;
+				continue;
             }
 
 			let hash = self.hasher.hash_one(&buckets[i].inner.as_ref().unwrap().0);
@@ -286,19 +296,13 @@ where
 	pub fn shuffle(&mut self) {
 		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
         let inner = &mut map.inner;
-
-		let shmem_handle = self
-            .shmem_handle
-            .as_ref()
-            .expect("TODO(quantumish): make shuffle work w/ fixed-size table");
 		let num_buckets = inner.get_num_buckets() as u32;
 		let size_bytes = HashMapInit::<K, V, S>::estimate_size(num_buckets);
-		let end_ptr: *mut u8 = unsafe { shmem_handle.data_ptr.as_ptr().add(size_bytes) };
+		let end_ptr: *mut u8 = unsafe { (self.shared_ptr as *mut u8).add(size_bytes) };
         let buckets_ptr = inner.buckets.as_mut_ptr();
 		self.rehash_dict(inner, buckets_ptr, end_ptr, num_buckets, num_buckets);
 	}
 
-	
     /// Grow
     ///
     /// 1. grow the underlying shared memory area
@@ -336,11 +340,6 @@ where
                     } else {
                         inner.free_head
                     },
-					prev: if i > 0 {
-						PrevPos::Chained(i as u32 - 1)
-					} else {
-						PrevPos::First(INVALID_POS)
-					},
                     inner: None,
                 });
             }
@@ -352,7 +351,7 @@ where
         Ok(())
     }
 
-	/// Begin a shrink, limiting all new allocations to be in buckets with index less than `num_buckets`.
+	/// Begin a shrink, limiting all new allocations to be in buckets with index below `num_buckets`.
 	pub fn begin_shrink(&mut self, num_buckets: u32) {
 		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
 		if num_buckets > map.inner.get_num_buckets() as u32 {
@@ -365,6 +364,26 @@ where
 		map.inner.alloc_limit = num_buckets;
 	}
 
+	/// Returns whether a shrink operation is currently in progress.
+	pub fn is_shrinking(&self) -> bool {
+		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+        map.inner.is_shrinking()
+	}
+	
+	/// Returns how many entries need to be evicted before shrink can complete.
+    pub fn shrink_remaining(&self) -> usize {
+        let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+        let inner = &mut map.inner;
+        if !inner.is_shrinking() {
+            panic!("shrink_remaining called when no ongoing shrink")
+        } else {
+            inner.buckets_in_use
+				.checked_sub(inner.alloc_limit)
+				.unwrap_or(0)
+				as usize
+        }
+    }
+	
 	/// Complete a shrink after caller has evicted entries, removing the unused buckets and rehashing.
 	pub fn finish_shrink(&mut self) -> Result<(), crate::shmem::Error> {
 		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
@@ -377,30 +396,24 @@ where
 
 		if inner.get_num_buckets() == num_buckets as usize {
             return Ok(());
-        } else if inner.get_num_buckets() > num_buckets as usize {
+        } else if inner.buckets_in_use > num_buckets {
 			panic!("called finish_shrink before enough entries were removed");
+		}
+
+		let mut open_spots = 0;
+		let mut curr = inner.free_head;
+		while curr != INVALID_POS {
+			if curr < num_buckets {
+				open_spots += 1;
+			}
+			curr = inner.buckets[curr as usize].next;
 		}
 		
 		for i in (num_buckets as usize)..inner.buckets.len() {
-			if let Some((k, v)) = inner.buckets[i].inner.take() {				
-				inner.alloc_bucket(k, v, inner.buckets[i].prev.unwrap_first()).unwrap();
-			} else { 
-				match inner.buckets[i].prev {
-					PrevPos::First(_) => {
-						let next_pos = inner.buckets[i].next;
-						inner.free_head = next_pos;
-						if next_pos != INVALID_POS {
-							inner.buckets[next_pos as usize].prev = PrevPos::First(INVALID_POS);
-						}
-					},
-					PrevPos::Chained(j) => {
-						let next_pos = inner.buckets[i].next;
-						inner.buckets[j as usize].next = next_pos;
-						if next_pos != INVALID_POS {
-							inner.buckets[next_pos as usize].prev = PrevPos::Chained(j);
-						}
-					}
-				}
+			if let Some((k, v)) = inner.buckets[i].inner.take() {
+				// alloc bucket increases buckets in use, so need to decrease since we're just moving
+				inner.buckets_in_use -= 1;
+				inner.alloc_bucket(k, v).unwrap();
 			}
 		}
 
