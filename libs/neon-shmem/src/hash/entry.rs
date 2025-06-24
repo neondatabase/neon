@@ -5,12 +5,13 @@ use crate::hash::core::{CoreHashMap, FullError, INVALID_POS};
 use std::hash::Hash;
 use std::mem;
 
+/// View into an entry in the map (either vacant or occupied).
 pub enum Entry<'a, 'b, K, V> {
-    Occupied(OccupiedEntry<'a, 'b, K, V>),
+	Occupied(OccupiedEntry<'a, 'b, K, V>),
     Vacant(VacantEntry<'a, 'b, K, V>),
 }
 
-/// Helper enum representing the previous position within a hashmap chain.
+/// Enum representing the previous position within a chain.
 #[derive(Clone, Copy)]
 pub(crate) enum PrevPos {
 	/// Starting index within the dictionary.  
@@ -21,17 +22,9 @@ pub(crate) enum PrevPos {
 	Unknown,
 }
 
-impl PrevPos {
-	/// Unwrap an index from a `PrevPos::First`, panicking otherwise.
-	pub fn unwrap_first(&self) -> u32 {
-		match self {
-			Self::First(i) => *i,
-			_ => panic!("not first entry in chain")
-		}
-	}
-}
-
+/// View into an occupied entry within the map.
 pub struct OccupiedEntry<'a, 'b, K, V> {
+	/// Mutable reference to the map containing this entry.
 	pub(crate) map: &'b mut CoreHashMap<'a, K, V>,
 	/// The key of the occupied entry
     pub(crate) _key: K,
@@ -58,6 +51,7 @@ impl<'a, 'b, K, V> OccupiedEntry<'a, 'b, K, V> {
             .1
     }
 
+	/// Inserts a value into the entry, replacing (and returning) the existing value.
     pub fn insert(&mut self, value: V) -> V {
         let bucket = &mut self.map.buckets[self.bucket_pos as usize];
         // This assumes inner is Some, which it must be for an OccupiedEntry
@@ -65,6 +59,7 @@ impl<'a, 'b, K, V> OccupiedEntry<'a, 'b, K, V> {
         old_value
     }
 
+	/// Removes the entry from the hash map, returning the value originally stored within it.
     pub fn remove(self) -> V {
         // CoreHashMap::remove returns Option<(K, V)>. We know it's Some for an OccupiedEntry.
         let bucket = &mut self.map.buckets[self.bucket_pos as usize];
@@ -89,13 +84,18 @@ impl<'a, 'b, K, V> OccupiedEntry<'a, 'b, K, V> {
     }
 }
 
+/// An abstract view into a vacant entry within the map.
 pub struct VacantEntry<'a, 'b, K, V> {
+	/// Mutable reference to the map containing this entry.
     pub(crate) map: &'b mut CoreHashMap<'a, K, V>,
-    pub(crate) key: K, // The key to insert
+	/// The key to be inserted into this entry.
+    pub(crate) key: K,
+	/// The position within the dictionary corresponding to the key's hash.
     pub(crate) dict_pos: u32,
 }
 
 impl<'a, 'b, K: Clone + Hash + Eq, V> VacantEntry<'a, 'b, K, V> {
+	/// Insert a value into the vacant entry, finding and populating an empty bucket in the process.
     pub fn insert(self, value: V) -> Result<&'b mut V, FullError> {
         let pos = self.map.alloc_bucket(self.key, value)?;
         if pos == INVALID_POS {

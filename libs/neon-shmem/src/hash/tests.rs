@@ -303,15 +303,18 @@ fn test_bucket_ops() {
 	assert_eq!(writer.get_num_buckets_in_use(), 1);
 	assert_eq!(writer.get_num_buckets(), 1000);
 	assert_eq!(writer.get_with_hash(&1.into(), hash), Some(&2));
-	match writer.entry_with_hash(1.into(), hash) {
+	let pos = match writer.entry_with_hash(1.into(), hash) {
 		Entry::Occupied(e) => {
 			assert_eq!(e._key, 1.into());
 			let pos = e.bucket_pos as usize;
 			assert_eq!(writer.entry_at_bucket(pos).unwrap()._key, 1.into());
 			assert_eq!(writer.get_at_bucket(pos), Some(&(1.into(), 2)));
+			pos
 		},
 		Entry::Vacant(_) => { panic!("Insert didn't affect entry"); },
-	}
+	};
+	let ptr: *const usize = writer.get_with_hash(&1.into(), hash).unwrap();
+	assert_eq!(writer.get_bucket_for_value(ptr), pos);
 	writer.remove_with_hash(&1.into(), hash);
 	assert_eq!(writer.get_with_hash(&1.into(), hash), None);
 }

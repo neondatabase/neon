@@ -23,7 +23,3 @@ tempfile = "3.14.0"
 [[bench]]
 name = "hmap_resize"
 harness = false
-
-[[bin]]
-name = "hmap_test"
-path = "main.rs"

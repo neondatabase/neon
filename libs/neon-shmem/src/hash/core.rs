@@ -1,7 +1,4 @@
-//! Simple hash table with chaining
-//!
-//! # Resizing
-//!
+//! Simple hash table with chaining.
 
 use std::hash::Hash;
 use std::mem::MaybeUninit;
@@ -10,12 +7,16 @@ use crate::hash::entry::{Entry, OccupiedEntry, PrevPos, VacantEntry};
 
 pub(crate) const INVALID_POS: u32 = u32::MAX;
 
-// Bucket
+/// Fundamental storage unit within the hash table. Either empty or contains a key-value pair.
+/// Always part of a chain of some kind (either a freelist if empty or a hash chain if full).
 pub(crate) struct Bucket<K, V> {
+	/// Index of next bucket in the chain.
 	pub(crate) next: u32,
+	/// Key-value pair contained within bucket.
     pub(crate) inner: Option<(K, V)>,
 }
 
+/// Core hash table implementation.
 pub(crate) struct CoreHashMap<'a, K, V> {
 	/// Dictionary used to map hashes to bucket indices.	
     pub(crate) dictionary: &'a mut [u32],
@@ -23,15 +24,15 @@ pub(crate) struct CoreHashMap<'a, K, V> {
     pub(crate) buckets: &'a mut [Bucket<K, V>],
 	/// Head of the freelist.
     pub(crate) free_head: u32,
-
-    pub(crate) _user_list_head: u32,
 	/// Maximum index of a bucket allowed to be allocated. INVALID_POS if no limit.
 	pub(crate) alloc_limit: u32,
-
-    // metrics
+    /// The number of currently occupied buckets.
     pub(crate) buckets_in_use: u32,
+	// Unclear what the purpose of this is.
+    pub(crate) _user_list_head: u32,
 }
 
+/// Error for when there are no empty buckets left but one is needed.
 #[derive(Debug)]
 pub struct FullError();
 
@@ -41,6 +42,7 @@ where
 {
     const FILL_FACTOR: f32 = 0.60;
 
+	/// Estimate the size of data contained within the the hash map.
     pub fn estimate_size(num_buckets: u32) -> usize {
         let mut size = 0;
 
@@ -92,6 +94,7 @@ where
         }
     }
 
+	/// Get the value associated with a key (if it exists) given its hash.
     pub fn get_with_hash(&self, key: &K, hash: u64) -> Option<&V> {
         let mut next = self.dictionary[hash as usize % self.dictionary.len()];
         loop {
@@ -108,7 +111,7 @@ where
         }
     }
 
-    // all updates are done through Entry
+    /// Get the `Entry` associated with a key given hash. This should be used for updates/inserts.
     pub fn entry_with_hash(&mut self, key: K, hash: u64) -> Entry<'a, '_, K, V> {
         let dict_pos = hash as usize % self.dictionary.len();
         let first = self.dictionary[dict_pos];
@@ -149,15 +152,18 @@ where
         }
     }
 
+	/// Get number of buckets in map.
     pub fn get_num_buckets(&self) -> usize {
         self.buckets.len()
     }
 
+	/// Returns whether there is an ongoing shrink operation.
 	pub fn is_shrinking(&self) -> bool {
 		self.alloc_limit != INVALID_POS
 	}
 
 	/// Clears all entries from the hashmap.
+	///
 	/// Does not reset any allocation limits, but does clear any entries beyond them.
 	pub fn clear(&mut self) {
 		for i in 0..self.buckets.len() {
@@ -177,7 +183,8 @@ where
 
 		self.buckets_in_use = 0;
 	}
-	
+
+	/// Optionally gets the entry at an index if it is occupied.
     pub fn entry_at_bucket(&mut self, pos: usize) -> Option<OccupiedEntry<'a, '_, K, V>> {
 		if pos >= self.buckets.len() {
 			return None;
