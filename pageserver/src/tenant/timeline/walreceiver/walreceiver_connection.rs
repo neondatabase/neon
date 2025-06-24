@@ -193,7 +193,7 @@ pub(super) async fn handle_walreceiver_connection(
             debug_assert_current_span_has_tenant_and_timeline_id();
             select! {
                 connection_result = connection => match connection_result {
-                    Ok(()) => debug!("Walreceiver db connection closed"),
+                    Ok(()) => info!("Walreceiver db connection closed"),
                     Err(connection_error) => {
                         match WalReceiverError::from(connection_error) {
                             WalReceiverError::ExpectedSafekeeperError(_) => {
@@ -202,7 +202,7 @@ pub(super) async fn handle_walreceiver_connection(
                             },
                             WalReceiverError::SuccessfulCompletion(_) => {}
                             WalReceiverError::Cancelled => {
-                                debug!("Connection cancelled")
+                                info!("Connection cancelled")
                             }
                             WalReceiverError::ClosedGate => {
                                 // doesn't happen at runtime
@@ -213,7 +213,7 @@ pub(super) async fn handle_walreceiver_connection(
                         }
                     }
                 },
-                _ = connection_cancellation.cancelled() => debug!("Connection cancelled"),
+                _ = connection_cancellation.cancelled() => info!("Connection cancelled"),
             }
             drop(poller_guard);
         }
@@ -299,7 +299,7 @@ pub(super) async fn handle_walreceiver_connection(
         select! {
             biased;
             _ = cancellation.cancelled() => {
-                debug!("walreceiver interrupted");
+                info!("walreceiver interrupted");
                 None
             }
             replication_message = physical_stream.next() => replication_message,
@@ -577,7 +577,7 @@ pub(super) async fn handle_walreceiver_connection(
                 shard_number: timeline.tenant_shard_id.shard_number.0 as u32,
             };
 
-            debug!("neon_status_update {status_update:?}");
+            info!("sending neon_status_update {status_update:?}");
 
             let mut data = BytesMut::new();
             status_update.serialize(&mut data);
@@ -585,6 +585,8 @@ pub(super) async fn handle_walreceiver_connection(
                 .as_mut()
                 .zenith_status_update(data.len() as u64, &data)
                 .await?;
+
+            info!("sent neon_status_update");
         }
     }
 
