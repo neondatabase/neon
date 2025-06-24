@@ -15,6 +15,7 @@ pub enum PgMajorVersion {
     // !!! When you add a new PgMajorVersion, don't forget to update PgMajorVersion::ALL
 }
 
+/// A full PostgreSQL version ID, in MMmmbb numerical format (Major/minor/bugfix)
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct PgVersionId(u32);

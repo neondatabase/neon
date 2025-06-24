@@ -749,6 +749,8 @@ impl Client {
         pg_version: PgMajorVersion,
         basebackup_tarball: ReqwestBody,
     ) -> Result<()> {
+        let pg_version = pg_version.major_version_num();
+
         let uri = format!(
             "{}/v1/tenant/{tenant_id}/timeline/{timeline_id}/import_basebackup?base_lsn={base_lsn}&end_lsn={end_lsn}&pg_version={pg_version}",
             self.mgmt_api_endpoint,
