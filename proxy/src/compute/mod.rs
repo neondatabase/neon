@@ -86,6 +86,14 @@ pub(crate) enum ConnectionError {
 
     #[error("error acquiring resource permit: {0}")]
     TooManyConnectionAttempts(#[from] ApiLockError),
+
+    #[cfg(test)]
+    #[error("retryable: {retryable}, wakeable: {wakeable}, kind: {kind:?}")]
+    TestError {
+        retryable: bool,
+        wakeable: bool,
+        kind: crate::error::ErrorKind,
+    },
 }
 
 impl UserFacingError for ConnectionError {
@@ -96,6 +104,8 @@ impl UserFacingError for ConnectionError {
                 "Failed to acquire permit to connect to the database. Too many database connection attempts are currently ongoing.".to_owned()
             }
             ConnectionError::TlsError(_) => COULD_NOT_CONNECT.to_owned(),
+            #[cfg(test)]
+            ConnectionError::TestError { .. } => self.to_string(),
         }
     }
 }
@@ -106,6 +116,8 @@ impl ReportableError for ConnectionError {
             ConnectionError::TlsError(_) => crate::error::ErrorKind::Compute,
             ConnectionError::WakeComputeError(e) => e.get_error_kind(),
             ConnectionError::TooManyConnectionAttempts(e) => e.get_error_kind(),
+            #[cfg(test)]
+            ConnectionError::TestError { kind, .. } => *kind,
         }
     }
 }

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use http::StatusCode;
 use postgres_client::config::SslMode;
 use postgres_client::tls::{MakeTlsConnect, NoTls};
-use retry::{ShouldRetryWakeCompute, retry_after};
+use retry::retry_after;
 use rstest::rstest;
 use rustls::crypto::ring;
 use rustls::pki_types;
@@ -20,6 +20,7 @@ use tracing_test::traced_test;
 use super::retry::CouldRetry;
 use super::*;
 use crate::auth::backend::{ComputeUserInfo, MaybeOwned};
+use crate::compute::ConnectionError;
 use crate::config::{ComputeConfig, RetryConfig};
 use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
@@ -423,71 +424,37 @@ impl TestConnectMechanism {
 #[derive(Debug)]
 struct TestConnection;
 
-#[derive(Debug)]
-struct TestConnectError {
-    retryable: bool,
-    wakeable: bool,
-    kind: crate::error::ErrorKind,
-}
-
-impl ReportableError for TestConnectError {
-    fn get_error_kind(&self) -> crate::error::ErrorKind {
-        self.kind
-    }
-}
-
-impl std::fmt::Display for TestConnectError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
-    }
-}
-
-impl std::error::Error for TestConnectError {}
-
-impl CouldRetry for TestConnectError {
-    fn could_retry(&self) -> bool {
-        self.retryable
-    }
-}
-impl ShouldRetryWakeCompute for TestConnectError {
-    fn should_retry_wake_compute(&self) -> bool {
-        self.wakeable
-    }
-}
-
 #[async_trait]
 impl ConnectMechanism for TestConnectMechanism {
     type Connection = TestConnection;
-    type ConnectError = TestConnectError;
-    type Error = anyhow::Error;
 
     async fn connect_once(
         &self,
         _ctx: &RequestContext,
         _node_info: &control_plane::CachedNodeInfo,
         _config: &ComputeConfig,
-    ) -> Result<Self::Connection, Self::ConnectError> {
+    ) -> Result<Self::Connection, ConnectionError> {
         let mut counter = self.counter.lock().unwrap();
         let action = self.sequence[*counter];
         *counter += 1;
         match action {
             ConnectAction::Connect => Ok(TestConnection),
-            ConnectAction::Retry => Err(TestConnectError {
+            ConnectAction::Retry => Err(ConnectionError::TestError {
                 retryable: true,
                 wakeable: true,
                 kind: ErrorKind::Compute,
             }),
-            ConnectAction::RetryNoWake => Err(TestConnectError {
+            ConnectAction::RetryNoWake => Err(ConnectionError::TestError {
                 retryable: true,
                 wakeable: false,
                 kind: ErrorKind::Compute,
             }),
-            ConnectAction::Fail => Err(TestConnectError {
+            ConnectAction::Fail => Err(ConnectionError::TestError {
                 retryable: false,
                 wakeable: true,
                 kind: ErrorKind::Compute,
             }),
-            ConnectAction::FailNoWake => Err(TestConnectError {
+            ConnectAction::FailNoWake => Err(ConnectionError::TestError {
                 retryable: false,
                 wakeable: false,
                 kind: ErrorKind::Compute,

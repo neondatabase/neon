@@ -36,6 +36,8 @@ impl CouldRetry for compute::ConnectionError {
             compute::ConnectionError::TlsError(err) => err.could_retry(),
             compute::ConnectionError::WakeComputeError(err) => err.could_retry(),
             compute::ConnectionError::TooManyConnectionAttempts(_) => false,
+            #[cfg(test)]
+            compute::ConnectionError::TestError { retryable, .. } => *retryable,
         }
     }
 }
@@ -45,6 +47,8 @@ impl ShouldRetryWakeCompute for compute::ConnectionError {
         match self {
             // the cache entry was not checked for validity
             compute::ConnectionError::TooManyConnectionAttempts(_) => false,
+            #[cfg(test)]
+            compute::ConnectionError::TestError { wakeable, .. } => *wakeable,
             _ => true,
         }
     }
