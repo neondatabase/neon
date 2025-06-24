@@ -1618,6 +1618,8 @@ impl ComputeNode {
             tls_config = self.compute_ctl_config.tls.clone();
         }
 
+        self.update_installed_extensions_collection_interval(&spec);
+
         let max_concurrent_connections = self.max_service_connections(compute_state, &spec);
 
         // Merge-apply spec & changes to PostgreSQL state.
@@ -1682,20 +1684,7 @@ impl ComputeNode {
 
         let tls_config = self.tls_config(&spec);
 
-        // Update the interval for collecting installed extensions statistics
-        // If the value is -1, we never suspend so set the value to default collection.
-        // If the value is 0, it means default, we will just continue to use the default.
-        if spec.suspend_timeout_seconds == -1 || spec.suspend_timeout_seconds == 0 {
-            self.params.installed_extensions_collection_interval.store(
-                DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL,
-                std::sync::atomic::Ordering::SeqCst,
-            );
-        } else {
-            self.params.installed_extensions_collection_interval.store(
-                spec.suspend_timeout_seconds as u64,
-                std::sync::atomic::Ordering::SeqCst,
-            );
-        }
+        self.update_installed_extensions_collection_interval(&spec);
 
         if let Some(ref pgbouncer_settings) = spec.pgbouncer_settings {
             info!("tuning pgbouncer");
@@ -2340,6 +2329,23 @@ LIMIT 100",
     fn terminate_extension_stats_task(&self) {
         if let Some(handle) = self.extension_stats_task.lock().unwrap().take() {
             handle.abort();
+        }
+    }
+
+    fn update_installed_extensions_collection_interval(&self, spec: &ComputeSpec) {
+        // Update the interval for collecting installed extensions statistics
+        // If the value is -1, we never suspend so set the value to default collection.
+        // If the value is 0, it means default, we will just continue to use the default.
+        if spec.suspend_timeout_seconds == -1 || spec.suspend_timeout_seconds == 0 {
+            self.params.installed_extensions_collection_interval.store(
+                DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        } else {
+            self.params.installed_extensions_collection_interval.store(
+                spec.suspend_timeout_seconds as u64,
+                std::sync::atomic::Ordering::SeqCst,
+            );
         }
     }
 }
