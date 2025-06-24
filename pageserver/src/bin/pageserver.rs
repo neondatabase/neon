@@ -569,11 +569,9 @@ fn start_pageserver(
         pageserver::l0_flush::L0FlushGlobalState::new(conf.l0_flush.clone());
 
     // Scan the local 'tenants/' directory and start loading the tenants
-    let (basebackup_prepare_sender, basebackup_prepare_receiver) = tokio::sync::mpsc::channel(
-        conf.basebackup_cache_config
-            .as_ref()
-            .map(|c| c.prepare_channel_size)
-            .unwrap_or(1),
+    let (basebackup_cache, basebackup_prepare_receiver) = BasebackupCache::new(
+        conf.basebackup_cache_dir(),
+        conf.basebackup_cache_config.as_ref(),
     );
     let deletion_queue_client = deletion_queue.new_client();
     let background_purges = mgr::BackgroundPurges::default();
@@ -586,7 +584,7 @@ fn start_pageserver(
             remote_storage: remote_storage.clone(),
             deletion_queue_client,
             l0_flush_global_state,
-            basebackup_prepare_sender,
+            basebackup_cache: Arc::clone(&basebackup_cache),
             feature_resolver: feature_resolver.clone(),
         },
         shutdown_pageserver.clone(),
@@ -594,9 +592,8 @@ fn start_pageserver(
     let tenant_manager = Arc::new(tenant_manager);
     BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(tenant_manager.clone(), order))?;
 
-    let basebackup_cache = BasebackupCache::spawn(
+    basebackup_cache.spawn_background_task(
         BACKGROUND_RUNTIME.handle(),
-        conf.basebackup_cache_dir(),
         conf.basebackup_cache_config.clone(),
         basebackup_prepare_receiver,
         Arc::clone(&tenant_manager),
@@ -810,7 +807,6 @@ fn start_pageserver(
         } else {
             None
         },
-        basebackup_cache,
     );
 
     // Spawn a Pageserver gRPC server task. It will spawn separate tasks for

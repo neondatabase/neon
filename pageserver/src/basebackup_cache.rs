@@ -7,7 +7,7 @@ use metrics::core::{AtomicU64, GenericCounter};
 use pageserver_api::{config::BasebackupCacheConfig, models::TenantState};
 use tokio::{
     io::{AsyncWriteExt, BufWriter},
-    sync::mpsc::{Receiver, Sender},
+    sync::mpsc::{Receiver, Sender, error::TrySendError},
 };
 use tokio_util::sync::CancellationToken;
 use utils::{
@@ -64,37 +64,50 @@ pub struct BasebackupCache {
 
     entries: std::sync::Mutex<HashMap<TenantTimelineId, CacheEntry>>,
 
+    prepare_sender: BasebackupPrepareSender,
+
     read_hit_count: GenericCounter<AtomicU64>,
     read_miss_count: GenericCounter<AtomicU64>,
     read_err_count: GenericCounter<AtomicU64>,
 }
 
 impl BasebackupCache {
-    /// Creates a BasebackupCache and spawns the background task.
-    /// The initialization of the cache is performed in the background and does not
-    /// block the caller. The cache will return `None` for any get requests until
-    /// initialization is complete.
-    pub fn spawn(
-        runtime_handle: &tokio::runtime::Handle,
+    pub fn new(
         data_dir: Utf8PathBuf,
-        config: Option<BasebackupCacheConfig>,
-        prepare_receiver: BasebackupPrepareReceiver,
-        tenant_manager: Arc<TenantManager>,
-        cancel: CancellationToken,
-    ) -> Arc<Self> {
+        config: Option<&BasebackupCacheConfig>,
+    ) -> (Arc<Self>, BasebackupPrepareReceiver) {
+        let chan_size = config.map(|c| c.max_size_entries).unwrap_or(1);
+
+        let (prepare_sender, prepare_receiver) = tokio::sync::mpsc::channel(chan_size);
+
         let cache = Arc::new(BasebackupCache {
             data_dir,
-
             entries: std::sync::Mutex::new(HashMap::new()),
+            prepare_sender,
 
             read_hit_count: BASEBACKUP_CACHE_READ.with_label_values(&["hit"]),
             read_miss_count: BASEBACKUP_CACHE_READ.with_label_values(&["miss"]),
             read_err_count: BASEBACKUP_CACHE_READ.with_label_values(&["error"]),
         });
 
+        (cache, prepare_receiver)
+    }
+
+    /// Creates a BasebackupCache and spawns the background task.
+    /// The initialization of the cache is performed in the background and does not
+    /// block the caller. The cache will return `None` for any get requests until
+    /// initialization is complete.
+    pub fn spawn_background_task(
+        self: Arc<Self>,
+        runtime_handle: &tokio::runtime::Handle,
+        config: Option<BasebackupCacheConfig>,
+        prepare_receiver: BasebackupPrepareReceiver,
+        tenant_manager: Arc<TenantManager>,
+        cancel: CancellationToken,
+    ) {
         if let Some(config) = config {
             let background = BackgroundTask {
-                c: cache.clone(),
+                c: self,
 
                 config,
                 tenant_manager,
@@ -109,8 +122,31 @@ impl BasebackupCache {
             };
             runtime_handle.spawn(background.run(prepare_receiver));
         }
+    }
 
-        cache
+    pub fn send_prepare(&self, tenant_shard_id: TenantShardId, timeline_id: TimelineId, lsn: Lsn) {
+        let req = BasebackupPrepareRequest {
+            tenant_shard_id,
+            timeline_id,
+            lsn,
+        };
+
+        BASEBACKUP_CACHE_PREPARE_QUEUE_SIZE.inc();
+        let res = self.prepare_sender.try_send(req);
+
+        if let Err(e) = res {
+            BASEBACKUP_CACHE_PREPARE_QUEUE_SIZE.dec();
+            match e {
+                TrySendError::Full(_) => {
+                    // Basebackups are pretty rare, normally we should not hit this.
+                    tracing::warn!("Basebackup prepare queue is full, dropping request");
+                }
+                TrySendError::Closed(_) => {
+                    // Normal during shutdown, not critical.
+                    tracing::info!("Basebackup prepare channel is closed, dropping request");
+                }
+            }
+        }
     }
 
     /// Gets a basebackup entry from the cache.

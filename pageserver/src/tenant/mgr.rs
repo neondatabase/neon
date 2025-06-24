@@ -2891,15 +2891,15 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
+    use camino::Utf8PathBuf;
     use storage_broker::BrokerClientChannel;
     use tracing::Instrument;
 
     use super::super::harness::TenantHarness;
     use super::TenantsMap;
-    use crate::tenant::{
-        TenantSharedResources,
-        mgr::{BackgroundPurges, TenantManager, TenantSlot},
-    };
+    use crate::{basebackup_cache::BasebackupCache, tenant::{
+        mgr::{BackgroundPurges, TenantManager, TenantSlot}, TenantSharedResources
+    }};
 
     #[tokio::test(start_paused = true)]
     async fn shutdown_awaits_in_progress_tenant() {
@@ -2924,7 +2924,7 @@ mod tests {
         // Invoke remove_tenant_from_memory with a cleanup hook that blocks until we manually
         // permit it to proceed: that will stick the tenant in InProgress
 
-        let (basebackup_prepare_sender, _) = tokio::sync::mpsc::channel(1);
+        let (basebackup_cache, _) = BasebackupCache::new(Utf8PathBuf::new(), None);
 
         let tenant_manager = TenantManager {
             tenants: std::sync::RwLock::new(TenantsMap::Open(tenants)),
@@ -2938,7 +2938,7 @@ mod tests {
                 l0_flush_global_state: crate::l0_flush::L0FlushGlobalState::new(
                     h.conf.l0_flush.clone(),
                 ),
-                basebackup_prepare_sender,
+                basebackup_cache,
                 feature_resolver: crate::feature_resolver::FeatureResolver::new_disabled(),
             },
             cancel: tokio_util::sync::CancellationToken::new(),

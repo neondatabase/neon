@@ -23,7 +23,6 @@ use std::ops::{ControlFlow, Deref, Range};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
-use tokio::sync::mpsc::error::TrySendError;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -96,12 +95,12 @@ use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
 use super::tasks::log_compaction_error;
 use super::upload_queue::NotInitialized;
 use super::{
-    AttachedTenantConf, BasebackupPrepareSender, GcError, HeatMapTimeline, MaybeOffloaded,
+    AttachedTenantConf, GcError, HeatMapTimeline, MaybeOffloaded,
     debug_assert_current_span_has_tenant_and_timeline_id,
 };
 use crate::PERF_TRACE_TARGET;
 use crate::aux_file::AuxFileSizeEstimator;
-use crate::basebackup_cache::BasebackupPrepareRequest;
+use crate::basebackup_cache::BasebackupCache;
 use crate::config::PageServerConf;
 use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
@@ -111,9 +110,8 @@ use crate::feature_resolver::FeatureResolver;
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::l0_flush::{self, L0FlushGlobalState};
 use crate::metrics::{
-    BASEBACKUP_CACHE_PREPARE_QUEUE_SIZE, DELTAS_PER_READ_GLOBAL, LAYERS_PER_READ_AMORTIZED_GLOBAL,
-    LAYERS_PER_READ_BATCH_GLOBAL, LAYERS_PER_READ_GLOBAL, ScanLatencyOngoingRecording,
-    TimelineMetrics,
+    DELTAS_PER_READ_GLOBAL, LAYERS_PER_READ_AMORTIZED_GLOBAL, LAYERS_PER_READ_BATCH_GLOBAL,
+    LAYERS_PER_READ_GLOBAL, ScanLatencyOngoingRecording, TimelineMetrics,
 };
 use crate::page_service::TenantManagerTypes;
 use crate::pgdatadir_mapping::{
@@ -203,7 +201,7 @@ pub struct TimelineResources {
     pub pagestream_throttle_metrics: Arc<crate::metrics::tenant_throttling::Pagestream>,
     pub l0_compaction_trigger: Arc<Notify>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
-    pub basebackup_prepare_sender: BasebackupPrepareSender,
+    pub basebackup_cache: Arc<BasebackupCache>,
     pub feature_resolver: FeatureResolver,
 }
 
@@ -450,7 +448,7 @@ pub struct Timeline {
     wait_lsn_log_slow: tokio::sync::Semaphore,
 
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
-    basebackup_prepare_sender: BasebackupPrepareSender,
+    basebackup_cache: Arc<BasebackupCache>,
 
     feature_resolver: FeatureResolver,
 }
@@ -2502,6 +2500,12 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.basebackup_cache_enabled)
     }
 
+    pub(crate) async fn try_get_cached_basebackup(&self, lsn: Lsn) -> Option<tokio::fs::File> {
+        self.basebackup_cache
+            .get(self.tenant_shard_id.tenant_id, self.timeline_id, lsn)
+            .await
+    }
+
     /// Prepare basebackup for the given LSN and store it in the basebackup cache.
     /// The method is asynchronous and returns immediately.
     /// The actual basebackup preparation is performed in the background
@@ -2523,29 +2527,8 @@ impl Timeline {
             return;
         }
 
-        let res = self
-            .basebackup_prepare_sender
-            .try_send(BasebackupPrepareRequest {
-                tenant_shard_id: self.tenant_shard_id,
-                timeline_id: self.timeline_id,
-                lsn,
-            });
-        match res {
-            Ok(_) => {
-                BASEBACKUP_CACHE_PREPARE_QUEUE_SIZE.inc();
-            }
-            Err(e) => {
-                match e {
-                    TrySendError::Full(_) => {
-                        warn!("Basebackup prepare queue is full, dropping request");
-                    }
-                    TrySendError::Closed(_) => {
-                        // May happen during shutdown, it's not critical.
-                        info!("Basebackup prepare channel is closed, dropping request");
-                    }
-                }
-            }
-        }
+        self.basebackup_cache
+            .send_prepare(self.tenant_shard_id, self.timeline_id, lsn);
     }
 }
 
@@ -3102,7 +3085,7 @@ impl Timeline {
 
                 wait_lsn_log_slow: tokio::sync::Semaphore::new(1),
 
-                basebackup_prepare_sender: resources.basebackup_prepare_sender,
+                basebackup_cache: resources.basebackup_cache,
 
                 feature_resolver: resources.feature_resolver,
             };

@@ -79,7 +79,7 @@ use self::timeline::uninit::{TimelineCreateGuard, TimelineExclusionError, Uninit
 use self::timeline::{
     EvictionTaskTenantState, GcCutoffs, TimelineDeleteProgress, TimelineResources, WaitLsnError,
 };
-use crate::basebackup_cache::BasebackupPrepareSender;
+use crate::basebackup_cache::BasebackupCache;
 use crate::config::PageServerConf;
 use crate::context;
 use crate::context::RequestContextBuilder;
@@ -161,7 +161,7 @@ pub struct TenantSharedResources {
     pub remote_storage: GenericRemoteStorage,
     pub deletion_queue_client: DeletionQueueClient,
     pub l0_flush_global_state: L0FlushGlobalState,
-    pub basebackup_prepare_sender: BasebackupPrepareSender,
+    pub basebackup_cache: Arc<BasebackupCache>,
     pub feature_resolver: FeatureResolver,
 }
 
@@ -330,7 +330,7 @@ pub struct TenantShard {
     deletion_queue_client: DeletionQueueClient,
 
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
-    basebackup_prepare_sender: BasebackupPrepareSender,
+    basebackup_cache: Arc<BasebackupCache>,
 
     /// Cached logical sizes updated updated on each [`TenantShard::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
@@ -1362,7 +1362,7 @@ impl TenantShard {
             remote_storage,
             deletion_queue_client,
             l0_flush_global_state,
-            basebackup_prepare_sender,
+            basebackup_cache,
             feature_resolver,
         } = resources;
 
@@ -1379,7 +1379,7 @@ impl TenantShard {
             remote_storage.clone(),
             deletion_queue_client,
             l0_flush_global_state,
-            basebackup_prepare_sender,
+            basebackup_cache,
             feature_resolver,
         ));
 
@@ -4379,7 +4379,7 @@ impl TenantShard {
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
         l0_flush_global_state: L0FlushGlobalState,
-        basebackup_prepare_sender: BasebackupPrepareSender,
+        basebackup_cache: Arc<BasebackupCache>,
         feature_resolver: FeatureResolver,
     ) -> TenantShard {
         assert!(!attached_conf.location.generation.is_none());
@@ -4484,7 +4484,7 @@ impl TenantShard {
             ongoing_timeline_detach: std::sync::Mutex::default(),
             gc_block: Default::default(),
             l0_flush_global_state,
-            basebackup_prepare_sender,
+            basebackup_cache,
             feature_resolver,
         }
     }
@@ -5413,7 +5413,7 @@ impl TenantShard {
             pagestream_throttle_metrics: self.pagestream_throttle_metrics.clone(),
             l0_compaction_trigger: self.l0_compaction_trigger.clone(),
             l0_flush_global_state: self.l0_flush_global_state.clone(),
-            basebackup_prepare_sender: self.basebackup_prepare_sender.clone(),
+            basebackup_cache: self.basebackup_cache.clone(),
             feature_resolver: self.feature_resolver.clone(),
         }
     }
@@ -5999,7 +5999,7 @@ pub(crate) mod harness {
         ) -> anyhow::Result<Arc<TenantShard>> {
             let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
 
-            let (basebackup_requst_sender, _) = tokio::sync::mpsc::channel(1);
+            let (basebackup_cache, _) = BasebackupCache::new(Utf8PathBuf::new(), None);
 
             let tenant = Arc::new(TenantShard::new(
                 TenantState::Attaching,
@@ -6017,7 +6017,7 @@ pub(crate) mod harness {
                 self.deletion_queue.new_client(),
                 // TODO: ideally we should run all unit tests with both configs
                 L0FlushGlobalState::new(L0FlushConfig::default()),
-                basebackup_requst_sender,
+                basebackup_cache,
                 FeatureResolver::new_disabled(),
             ));
 
