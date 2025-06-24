@@ -6,7 +6,7 @@ use hyper::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use parking_lot::RwLock;
 use smol_str::ToSmolStr;
-use tracing::{Instrument, debug, error, info, info_span};
+use tracing::{Instrument, error, info, info_span};
 
 use super::AsyncRW;
 use super::backend::HttpConnError;
@@ -115,7 +115,6 @@ impl<C: ClientInnerExt + Clone> Drop for HttpConnPool<C> {
 }
 
 impl<C: ClientInnerExt + Clone> GlobalConnPool<C, HttpConnPool<C>> {
-    #[expect(unused_results)]
     pub(crate) fn get(
         self: &Arc<Self>,
         ctx: &RequestContext,
@@ -132,10 +131,13 @@ impl<C: ClientInnerExt + Clone> GlobalConnPool<C, HttpConnPool<C>> {
             return result;
         };
 
-        tracing::Span::current().record("conn_id", tracing::field::display(client.conn.conn_id));
-        debug!(
+        info!(
+            conn_id = %client.conn.conn_id,
+            compute_id = &*client.conn.aux.compute_id,
             cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
-            "pool: reusing connection '{conn_info}'"
+            query_id = ctx.get_testodrome_id().as_deref(),
+            "reusing connection: latency={}",
+            ctx.get_proxy_latency(),
         );
         ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
         ctx.success();
@@ -197,7 +199,7 @@ pub(crate) fn poll_http2_client(
     let conn_gauge = Metrics::get().proxy.db_connections.guard(ctx.protocol());
     let session_id = ctx.session_id();
 
-    let span = info_span!(parent: None, "connection", %conn_id);
+    let span = info_span!(parent: None, "connection", %conn_id, compute_id=%aux.compute_id);
     let cold_start_info = ctx.cold_start_info();
     span.in_scope(|| {
         info!(cold_start_info = cold_start_info.as_str(), %conn_info, %session_id, "new connection");
@@ -229,6 +231,8 @@ pub(crate) fn poll_http2_client(
 
     tokio::spawn(
         async move {
+            info!("new local proxy connection");
+
             let _conn_gauge = conn_gauge;
             let res = connection.await;
             match res {

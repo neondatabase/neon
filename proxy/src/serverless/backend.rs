@@ -150,11 +150,6 @@ impl PoolingBackend {
     // Wake up the destination if needed. Code here is a bit involved because
     // we reuse the code from the usual proxy and we need to prepare few structures
     // that this code expects.
-    #[tracing::instrument(skip_all, fields(
-        pid = tracing::field::Empty,
-        compute_id = tracing::field::Empty,
-        conn_id = tracing::field::Empty,
-    ))]
     pub(crate) async fn connect_to_compute(
         &self,
         ctx: &RequestContext,
@@ -174,7 +169,6 @@ impl PoolingBackend {
             return Ok(client);
         }
         let conn_id = uuid::Uuid::new_v4();
-        tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
         let backend = self.auth_backend.as_ref().map(|()| keys.info);
         let connection = crate::proxy::connect_compute::connect_to_compute(
@@ -193,10 +187,6 @@ impl PoolingBackend {
     }
 
     // Wake up the destination if needed
-    #[tracing::instrument(skip_all, fields(
-        compute_id = tracing::field::Empty,
-        conn_id = tracing::field::Empty,
-    ))]
     pub(crate) async fn connect_to_local_proxy(
         &self,
         ctx: &RequestContext,
@@ -208,7 +198,6 @@ impl PoolingBackend {
         }
 
         let conn_id = uuid::Uuid::new_v4();
-        tracing::Span::current().record("conn_id", display(conn_id));
         debug!(%conn_id, "pool: opening a new connection '{conn_info}'");
         let backend = self.auth_backend.as_ref().map(|()| ComputeUserInfo {
             user: conn_info.user_info.user.clone(),
@@ -240,10 +229,6 @@ impl PoolingBackend {
     /// # Panics
     ///
     /// Panics if called with a non-local_proxy backend.
-    #[tracing::instrument(skip_all, fields(
-        pid = tracing::field::Empty,
-        conn_id = tracing::field::Empty,
-    ))]
     pub(crate) async fn connect_to_local_postgres(
         &self,
         ctx: &RequestContext,
@@ -464,6 +449,20 @@ async fn authenticate(
     let connection = config.authenticate(compute.stream).await?;
     drop(pause);
 
+    // TODO: lots of useful info but maybe we can move it elsewhere (eg traces?)
+    info!(
+        compute_id = %compute.aux.compute_id,
+        pid = connection.process_id,
+        cold_start_info = ctx.cold_start_info().as_str(),
+        query_id = ctx.get_testodrome_id().as_deref(),
+        sslmode = ?compute.ssl_mode,
+        %conn_id,
+        "connected to compute node at {} ({}) latency={}",
+        compute.hostname,
+        compute.socket_addr,
+        ctx.get_proxy_latency(),
+    );
+
     let (client, connection) = connection.into_managed_conn(
         SocketConfig {
             host_addr: Some(compute.socket_addr.ip()),
@@ -473,8 +472,6 @@ async fn authenticate(
         },
         compute.ssl_mode,
     );
-
-    tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
 
     Ok(poll_client(
         pool.clone(),
@@ -510,14 +507,18 @@ async fn h2handshake(
         .map_err(LocalProxyConnError::H2)?;
     drop(pause);
 
-    tracing::Span::current().record(
-        "compute_id",
-        tracing::field::display(&compute.aux.compute_id),
+    // TODO: lots of useful info but maybe we can move it elsewhere (eg traces?)
+    info!(
+        compute_id = %compute.aux.compute_id,
+        cold_start_info = ctx.cold_start_info().as_str(),
+        query_id = ctx.get_testodrome_id().as_deref(),
+        sslmode = ?compute.ssl_mode,
+        %conn_id,
+        "connected to compute node at {} ({}) latency={}",
+        compute.hostname,
+        compute.socket_addr,
+        ctx.get_proxy_latency(),
     );
-
-    if let Some(query_id) = ctx.get_testodrome_id() {
-        info!("latency={}, query_id={}", ctx.get_proxy_latency(), query_id);
-    }
 
     Ok(poll_http2_client(
         pool.clone(),

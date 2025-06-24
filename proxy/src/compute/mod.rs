@@ -264,6 +264,19 @@ impl AuthInfo {
             .await?;
         drop(pause);
 
+        // TODO: lots of useful info but maybe we can move it elsewhere (eg traces?)
+        info!(
+            compute_id = %compute.aux.compute_id,
+            pid = connection.process_id,
+            cold_start_info = ctx.cold_start_info().as_str(),
+            query_id = ctx.get_testodrome_id().as_deref(),
+            sslmode = ?compute.ssl_mode,
+            "connected to compute node at {} ({}) latency={}",
+            compute.hostname,
+            compute.socket_addr,
+            ctx.get_proxy_latency(),
+        );
+
         let RawConnection {
             stream: _,
             parameters,
@@ -271,8 +284,6 @@ impl AuthInfo {
             process_id,
             secret_key,
         } = connection;
-
-        tracing::Span::current().record("pid", tracing::field::display(process_id));
 
         // NB: CancelToken is supposed to hold socket_addr, but we use connect_raw.
         // Yet another reason to rework the connection establishing code.
@@ -391,18 +402,6 @@ impl ConnectInfo {
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let (socket_addr, stream) = self.connect_raw(config, direct).await?;
         drop(pause);
-
-        tracing::Span::current().record("compute_id", tracing::field::display(&aux.compute_id));
-
-        // TODO: lots of useful info but maybe we can move it elsewhere (eg traces?)
-        info!(
-            cold_start_info = ctx.cold_start_info().as_str(),
-            "connected to compute node at {} ({socket_addr}) sslmode={:?}, latency={}, query_id={}",
-            self.host,
-            self.ssl_mode,
-            ctx.get_proxy_latency(),
-            ctx.get_testodrome_id().unwrap_or_default(),
-        );
 
         let connection = ComputeConnection {
             stream,

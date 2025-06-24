@@ -350,7 +350,7 @@ impl CancellationHandler {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CancelClosure {
     socket_addr: SocketAddr,
-    cancel_token: RawCancelToken,
+    pub cancel_token: RawCancelToken,
     hostname: String, // for pg_sni router
     user_info: ComputeUserInfo,
 }
