@@ -189,7 +189,7 @@ where
         encoder
             .shutdown()
             .await
-            .map_err(|e| BasebackupError::Server(anyhow!("gzip failure: {e}")))?;
+            .map_err(|err| BasebackupError::Client(err, "gzip"))?;
     } else {
         Basebackup {
             ar: Builder::new_non_terminated(write),
