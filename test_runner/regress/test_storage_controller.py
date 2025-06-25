@@ -4247,14 +4247,9 @@ def test_storcon_create_delete_sk_down(
         env.safekeepers[0].assert_log_contains(
             f"pulling timeline {tenant_id}/{timeline_id} from safekeeper"
         )
-        if empty_timeline == EmptyTimeline.NONEMPTY:
-            env.safekeepers[0].assert_log_contains(
-                f"pulling timeline {tenant_id}/{child_timeline_id} from safekeeper"
-            )
-        else:
-            env.safekeepers[0].assert_log_contains(
-                f"creating timeline {tenant_id}/{child_timeline_id} as it is empty on most advanced"
-            )
+        env.safekeepers[0].assert_log_contains(
+            f"pulling timeline {tenant_id}/{child_timeline_id} from safekeeper"
+        )
 
     wait_until(logged_contains_on_sk)
 

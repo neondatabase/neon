@@ -34,7 +34,7 @@ use crate::control_file::CONTROL_FILE_NAME;
 use crate::state::{EvictionState, TimelinePersistentState};
 use crate::timeline::{Timeline, TimelineError, WalResidentTimeline};
 use crate::timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline};
-use crate::wal_storage::open_wal_file;
+use crate::wal_storage::{open_wal_file, wal_file_paths};
 use crate::{GlobalTimelines, debug_dump, wal_backup};
 
 /// Stream tar archive of timeline to tx.
@@ -97,6 +97,7 @@ pub async fn stream_snapshot(
 pub struct SnapshotContext {
     pub from_segno: XLogSegNo, // including
     pub upto_segno: XLogSegNo, // including
+    pub send_segments: bool,   // if the timeline hasn't had writes yet, only send control file
     pub term: Term,
     pub last_log_term: Term,
     pub flush_lsn: Lsn,
@@ -174,23 +175,35 @@ pub async fn stream_snapshot_resident_guts(
         .await?;
     pausable_failpoint!("sk-snapshot-after-list-pausable");
 
-    let tli_dir = tli.get_timeline_dir();
-    info!(
-        "sending {} segments [{:#X}-{:#X}], term={}, last_log_term={}, flush_lsn={}",
-        bctx.upto_segno - bctx.from_segno + 1,
-        bctx.from_segno,
-        bctx.upto_segno,
-        bctx.term,
-        bctx.last_log_term,
-        bctx.flush_lsn,
-    );
-    for segno in bctx.from_segno..=bctx.upto_segno {
-        let (mut sf, is_partial) = open_wal_file(&tli_dir, segno, bctx.wal_seg_size).await?;
-        let mut wal_file_name = XLogFileName(PG_TLI, segno, bctx.wal_seg_size);
-        if is_partial {
-            wal_file_name.push_str(".partial");
+    if bctx.send_segments {
+        let tli_dir = tli.get_timeline_dir();
+        info!(
+            "sending {} segments [{:#X}-{:#X}], term={}, last_log_term={}, flush_lsn={}",
+            bctx.upto_segno - bctx.from_segno + 1,
+            bctx.from_segno,
+            bctx.upto_segno,
+            bctx.term,
+            bctx.last_log_term,
+            bctx.flush_lsn,
+        );
+        for segno in bctx.from_segno..=bctx.upto_segno {
+            let Some((mut sf, is_partial)) =
+                open_wal_file(&tli_dir, segno, bctx.wal_seg_size).await?
+            else {
+                // File is not found
+                let (wal_file_path, _wal_file_partial_path) =
+                    wal_file_paths(&tli_dir, segno, bctx.wal_seg_size);
+                tracing::warn!("couldn't find WAL segment file {wal_file_path}");
+                bail!("couldn't find WAL segment file {wal_file_path}")
+            };
+            let mut wal_file_name = XLogFileName(PG_TLI, segno, bctx.wal_seg_size);
+            if is_partial {
+                wal_file_name.push_str(".partial");
+            }
+            ar.append_file(&wal_file_name, &mut sf).await?;
         }
-        ar.append_file(&wal_file_name, &mut sf).await?;
+    } else {
+        info!("Not including any segments into the snapshot");
     }
 
     // Do the term check before ar.finish to make archive corrupted in case of
@@ -343,21 +356,21 @@ impl WalResidentTimeline {
             timeline_state.remote_consistent_lsn,
             timeline_state.backup_lsn,
         );
-        if from_lsn == Lsn::INVALID {
-            // this is possible if snapshot is called before handling first
-            // elected message
-            bail!("snapshot is called on uninitialized timeline");
+        let flush_lsn = shared_state.sk.flush_lsn();
+        let (send_segments, msg) = if from_lsn == Lsn::INVALID {
+            (false, "snapshot is called on uninitialized timeline")
         } else {
-            tracing::info!(
-                remote_consistent_lsn=%timeline_state.remote_consistent_lsn,
-                backup_lsn=%timeline_state.backup_lsn,
-                "timeline has had writes"
-            );
-        }
+            (true, "timeline is initialized")
+        };
+        tracing::info!(
+            remote_consistent_lsn=%timeline_state.remote_consistent_lsn,
+            backup_lsn=%timeline_state.backup_lsn,
+            %flush_lsn,
+            "{msg}"
+        );
         let from_segno = from_lsn.segment_number(wal_seg_size);
         let term = shared_state.sk.state().acceptor_state.term;
         let last_log_term = shared_state.sk.last_log_term();
-        let flush_lsn = shared_state.sk.flush_lsn();
         let upto_segno = flush_lsn.segment_number(wal_seg_size);
         // have some limit on max number of segments as a sanity check
         const MAX_ALLOWED_SEGS: u64 = 1000;
@@ -386,6 +399,7 @@ impl WalResidentTimeline {
         let bctx = SnapshotContext {
             from_segno,
             upto_segno,
+            send_segments,
             term,
             last_log_term,
             flush_lsn,
