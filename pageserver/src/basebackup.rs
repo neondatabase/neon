@@ -26,8 +26,7 @@ use postgres_ffi::{
 };
 use postgres_ffi_types::constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
 use postgres_ffi_types::forknum::{INIT_FORKNUM, MAIN_FORKNUM};
-use tokio::io::AsyncWrite;
-use tokio::io::{self, AsyncWriteExt as _};
+use tokio::io::{self, AsyncWrite, AsyncWriteExt as _};
 use tokio_tar::{Builder, EntryType, Header};
 use tracing::*;
 use utils::lsn::Lsn;
