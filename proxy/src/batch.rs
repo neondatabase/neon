@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::pin::pin;
 use std::sync::Mutex;
 
+use scopeguard::ScopeGuard;
 use tokio::sync::oneshot::error::TryRecvError;
 
 use crate::ext::LockExt;
@@ -78,9 +79,22 @@ impl<P: QueueProcessing> BatchQueue<P> {
             tracing::debug!(id, "batch: became leader");
             let (reqs, resps) = self.inner.lock_propagate_poison().get_batch(&processor);
 
+            // snitch incase the task gets cancelled.
+            let cancel_safety = scopeguard::guard((), |()| {
+                if !std::thread::panicking() {
+                    tracing::error!(
+                        id,
+                        "batch: leader cancelled, despite not being cancellation safe"
+                    );
+                }
+            });
+
             // apply a batch.
             // if this is cancelled, jobs will not be completed and will panic.
             let values = processor.apply(reqs).await;
+
+            // good: we didn't get cancelled.
+            ScopeGuard::into_inner(cancel_safety);
 
             if values.len() != resps.len() {
                 tracing::error!(
