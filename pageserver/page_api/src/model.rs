@@ -232,9 +232,7 @@ impl TryFrom<proto::BaseBackupCompression> for BaseBackupCompression {
 
     fn try_from(pb: proto::BaseBackupCompression) -> Result<Self, Self::Error> {
         match pb {
-            proto::BaseBackupCompression::Unknown => {
-                Err(ProtocolError::invalid("base_backup_compression", pb))
-            }
+            proto::BaseBackupCompression::Unknown => Err(ProtocolError::invalid("compression", pb)),
             proto::BaseBackupCompression::None => Ok(Self::None),
             proto::BaseBackupCompression::Gzip => Ok(Self::Gzip),
         }
@@ -246,14 +244,14 @@ impl TryFrom<i32> for BaseBackupCompression {
 
     fn try_from(compression: i32) -> Result<Self, Self::Error> {
         proto::BaseBackupCompression::try_from(compression)
-            .map_err(|_| ProtocolError::invalid("base_backup_compression", compression))
+            .map_err(|_| ProtocolError::invalid("compression", compression))
             .and_then(Self::try_from)
     }
 }
 
 impl From<BaseBackupCompression> for proto::BaseBackupCompression {
-    fn from(class: BaseBackupCompression) -> Self {
-        match class {
+    fn from(compression: BaseBackupCompression) -> Self {
+        match compression {
             BaseBackupCompression::None => Self::None,
             BaseBackupCompression::Gzip => Self::Gzip,
         }
