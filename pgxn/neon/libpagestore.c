@@ -126,7 +126,7 @@ static PagestoreShmemState *pagestore_shared;
 static uint64 pagestore_local_counter = 0;
 
 typedef enum PSConnectionState {
-	PS_Disconnected,			/* no connection yet */
+	PS_Disconnected = 1,			/* no connection yet */
 	PS_Connecting_Startup,		/* connection starting up */
 	PS_Connecting_PageStream,	/* negotiating pagestream */ 
 	PS_Connected,				/* connected, pagestream established */
@@ -373,8 +373,9 @@ get_shard_number(BufferTag *tag)
 }
 
 static inline void
-CLEANUP_AND_DISCONNECT(PageServer *shard) 
+CLEANUP_AND_DISCONNECT(PageServer *shard)
 {
+	neon_log(LOG, "Cleanup and disconnect shard %d with state %d", (int)(shard - page_servers), shard->state);
 	if (shard->wes_read)
 	{
 		FreeWaitEventSet(shard->wes_read);
@@ -395,7 +396,7 @@ CLEANUP_AND_DISCONNECT(PageServer *shard)
  * complete the connection (e.g. due to receiving an earlier cancellation
  * during connection start).
  * Returns true if successfully connected; false if the connection failed.
- * 
+ *
  * Throws errors in unrecoverable situations, or when this backend's query
  * is canceled.
  */
@@ -404,7 +405,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 {
 	PageServer *shard = &page_servers[shard_no];
 	char		connstr[MAX_PAGESERVER_CONNSTRING_SIZE];
-
+	neon_log(LOG, "Initiate connect to shard %d state %d", shard_no, shard->state);
 	/*
 	 * Get the connection string for this shard. If the shard map has been
 	 * updated since we last looked, this will also disconnect any existing
@@ -968,6 +969,7 @@ retry:
 static void
 pageserver_disconnect(shardno_t shard_no)
 {
+	neon_log(LOG, "pageserver_disconnect shard %d", shard_no);
 	/*
 	 * If the connection to any pageserver is lost, we throw away the
 	 * whole prefetch queue, even for other pageservers. It should not
@@ -1353,6 +1355,10 @@ void
 pg_init_libpagestore(void)
 {
 	pagestore_prepare_shmem();
+
+
+	for (int i = 0; i < MAX_SHARDS; i++)
+		page_servers[i].state = PS_Disconnected;
 
 	DefineCustomStringVariable("neon.pageserver_connstring",
 							   "connection string to the page server",
