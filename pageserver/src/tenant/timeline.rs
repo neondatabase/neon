@@ -4707,7 +4707,15 @@ impl Timeline {
                 let (layer, l0_count, frozen_count, frozen_size) = {
                     let layers = self.layers.read(LayerManagerLockHolder::FlushLoop).await;
                     let Ok(lm) = layers.layer_map() else {
-                        info!("dropping out of flush loop for timeline shutdown");
+                        if self.cancel.is_cancelled() {
+                            info!("dropping out of flush loop for timeline shutdown");
+                        } else {
+                            info!("dropping out of flush loop for layer map shutdown");
+                            let _ = self
+                                .layer_flush_done_tx
+                                .send_replace((flush_counter, Err(FlushLayerError::Cancelled)));
+                        }
+
                         return;
                     };
                     let l0_count = lm.level0_deltas().len();
@@ -4756,7 +4764,15 @@ impl Timeline {
                 match self.flush_frozen_layer(layer, ctx).await {
                     Ok(layer_lsn) => flushed_to_lsn = max(flushed_to_lsn, layer_lsn),
                     Err(FlushLayerError::Cancelled) => {
-                        info!("dropping out of flush loop for timeline shutdown");
+                        if self.cancel.is_cancelled() {
+                            info!("dropping out of flush loop for timeline shutdown");
+                        } else {
+                            info!("dropping out of flush loop for remote client shutdown");
+                            let _ = self
+                                .layer_flush_done_tx
+                                .send_replace((flush_counter, Err(FlushLayerError::Cancelled)));
+                        }
+
                         return;
                     }
                     err @ Err(
