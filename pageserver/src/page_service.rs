@@ -2618,7 +2618,7 @@ impl PageServerHandler {
                     && lsn.is_some()
                     && prev_lsn.is_none()
                 {
-                    timeline.try_get_cached_basebackup(lsn.unwrap()).await
+                    timeline.get_cached_basebackup(lsn.unwrap()).await
                 } else {
                     None
                 }

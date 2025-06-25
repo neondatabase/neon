@@ -159,7 +159,7 @@ impl BasebackupCache {
                         tenant_id = %tenant_shard_id.tenant_id,
                         %timeline_id,
                         %lsn,
-                        "Basebackup prepare queue is full, skipping the request"
+                        "Basebackup prepare channel is full, skipping the request"
                     );
                 }
                 TrySendError::Closed(_) => {
@@ -185,6 +185,10 @@ impl BasebackupCache {
         timeline_id: TimelineId,
         lsn: Lsn,
     ) -> Option<tokio::fs::File> {
+        if !self.is_enabled() {
+            return None;
+        }
+
         // Fast path. Check if the entry exists using the in-memory state.
         let tti = TenantTimelineId::new(tenant_id, timeline_id);
         if self.entries.lock().unwrap().get(&tti).map(|e| e.lsn) != Some(lsn) {
@@ -210,6 +214,10 @@ impl BasebackupCache {
                 None
             }
         }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.config.is_some()
     }
 
     // Private methods.

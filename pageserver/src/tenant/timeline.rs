@@ -2500,7 +2500,8 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.basebackup_cache_enabled)
     }
 
-    pub(crate) async fn try_get_cached_basebackup(&self, lsn: Lsn) -> Option<tokio::fs::File> {
+    /// Try to get a basebackup from the on-disk cache.
+    pub(crate) async fn get_cached_basebackup(&self, lsn: Lsn) -> Option<tokio::fs::File> {
         self.basebackup_cache
             .get(self.tenant_shard_id.tenant_id, self.timeline_id, lsn)
             .await
