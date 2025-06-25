@@ -63,7 +63,34 @@ use std::collections::HashMap;
 use jsonpath_lib::select;
 use url::form_urlencoded;
 
-
+static JSON_SCHEMA: &str = r#"
+    {
+        "schemas":[
+            {
+                "name":"test",
+                "objects":[
+                    {
+                        "kind":"table",
+                        "name":"items",
+                        "columns":[
+                            {
+                                "name":"id",
+                                "data_type":"integer",
+                                "primary_key":true
+                            },
+                            {
+                                "name":"name",
+                                "data_type":"text"
+                            }
+                        ],
+                        "foreign_keys":[],
+                        "permissions":[]
+                    }
+                ]
+            }
+        ]
+    }
+"#;
 
 
 pub(super) static NEON_REQUEST_ID: HeaderName = HeaderName::from_static("neon-request-id");
@@ -71,7 +98,7 @@ pub(super) static NEON_REQUEST_ID: HeaderName = HeaderName::from_static("neon-re
 static CONN_STRING: HeaderName = HeaderName::from_static("neon-connection-string");
 //static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 //static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
-//static ALLOW_POOL: HeaderName = HeaderName::from_static("neon-pool-opt-in");
+static ALLOW_POOL: HeaderName = HeaderName::from_static("neon-pool-opt-in");
 static TXN_ISOLATION_LEVEL: HeaderName = HeaderName::from_static("neon-batch-isolation-level");
 static TXN_READ_ONLY: HeaderName = HeaderName::from_static("neon-batch-read-only");
 //static TXN_DEFERRABLE: HeaderName = HeaderName::from_static("neon-batch-deferrable");
@@ -452,34 +479,7 @@ static HEADERS_TO_FORWARD: &[&HeaderName] = &[
     &AUTHORIZATION,
 ];
 
-static JSON_SCHEMA: &str = r#"
-    {
-        "schemas":[
-            {
-                "name":"test",
-                "objects":[
-                    {
-                        "kind":"table",
-                        "name":"items",
-                        "columns":[
-                            {
-                                "name":"id",
-                                "data_type":"integer",
-                                "primary_key":true
-                            },
-                            {
-                                "name":"name",
-                                "data_type":"text"
-                            }
-                        ],
-                        "foreign_keys":[],
-                        "permissions":[]
-                    }
-                ]
-            }
-        ]
-    }
-"#;
+
 
 fn content_range_header(lower: i64, upper: i64, total: Option<i64>) -> String {
     //debug!("content_range_header: lower: {}, upper: {}, total: {:?}", lower, upper, total);
@@ -836,7 +836,7 @@ async fn handle_rest_inner(
             None
         }
     };
-    
+    //TODO: check if the token is properly cached in the backend (should we cache the parsed claims?)
     // read the role from the jwt claims (and set it to the "anon" role if not present)
     let (role, authenticated) = match &jwt_claims {
         Some(claims) => match select(claims, &role_claim_path) {
@@ -988,6 +988,7 @@ async fn handle_rest_inner(
     req = req.header(&NEON_REQUEST_ID, uuid_to_header_value(ctx.session_id()));
     req = req.header(&CONN_STRING, HeaderValue::from_str(connection_string).unwrap());
     req = req.header(&TXN_ISOLATION_LEVEL, HeaderValue::from_str("ReadCommitted").unwrap());
+    req = req.header(&ALLOW_POOL, HeaderValue::from_str("true").unwrap());
     if api_request.read_only {
         req = req.header(&TXN_READ_ONLY, HeaderValue::from_str("true").unwrap());
     }

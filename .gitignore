@@ -27,3 +27,6 @@ compaction-suite-results.*
 
 # pgindent typedef lists
 *.list
+
+# various files for local testing
+/proxy/.subzero
