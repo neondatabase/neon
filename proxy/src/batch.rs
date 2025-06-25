@@ -6,8 +6,6 @@ use std::collections::BTreeMap;
 use std::pin::pin;
 use std::sync::Mutex;
 
-use futures::future::Either;
-use scopeguard::ScopeGuard;
 use tokio::sync::oneshot::error::TryRecvError;
 
 use crate::ext::LockExt;
@@ -49,37 +47,54 @@ impl<P: QueueProcessing> BatchQueue<P> {
         }
     }
 
-    pub async fn call(&self, req: P::Req) -> P::Res {
+    /// Perform a single request-response process, this may be batched internally.
+    ///
+    /// This function is not cancel safe.
+    pub async fn call<R>(
+        &self,
+        req: P::Req,
+        cancelled: impl Future<Output = R>,
+    ) -> Result<P::Res, R> {
         let (id, mut rx) = self.inner.lock_propagate_poison().register_job(req);
-        let guard = scopeguard::guard(id, move |id| {
-            let mut inner = self.inner.lock_propagate_poison();
-            if inner.queue.remove(&id).is_some() {
-                tracing::debug!("batched task cancelled before completion");
-            }
-        });
 
+        let mut cancelled = pin!(cancelled);
         let resp = loop {
             // try become the leader, or try wait for success.
-            let mut processor = match futures::future::select(rx, pin!(self.processor.lock())).await
-            {
-                // we got the resp.
-                Either::Left((resp, _)) => break resp.ok(),
-                // we are the leader.
-                Either::Right((p, rx_)) => {
-                    rx = rx_;
-                    p
-                }
+            let mut processor = tokio::select! {
+                // try become leader.
+                p = self.processor.lock() => p,
+                // wait for success.
+                resp = &mut rx => break resp.ok(),
+                // wait for cancellation.
+                cancel = cancelled.as_mut() => {
+                    let mut inner = self.inner.lock_propagate_poison();
+                    if inner.queue.remove(&id).is_some() {
+                        tracing::warn!("batched task cancelled before completion");
+                    }
+                    return Err(cancel);
+                },
             };
 
+            tracing::debug!(id, "batch: became leader");
             let (reqs, resps) = self.inner.lock_propagate_poison().get_batch(&processor);
 
             // apply a batch.
+            // if this is cancelled, jobs will not be completed and will panic.
             let values = processor.apply(reqs).await;
+
+            if values.len() != resps.len() {
+                tracing::error!(
+                    "batch: invalid response size, expected={}, got={}",
+                    resps.len(),
+                    values.len()
+                );
+            }
 
             // send response values.
             for (tx, value) in std::iter::zip(resps, values) {
-                // sender hung up but that's fine.
-                drop(tx.send(value));
+                if tx.send(value).is_err() {
+                    // sender hung up but that's fine.
+                }
             }
 
             match rx.try_recv() {
@@ -98,10 +113,9 @@ impl<P: QueueProcessing> BatchQueue<P> {
             }
         };
 
-        // already removed.
-        ScopeGuard::into_inner(guard);
+        tracing::debug!(id, "batch: job completed");
 
-        resp.expect("no response found. batch processer should not panic")
+        Ok(resp.expect("no response found. batch processer should not panic"))
     }
 }
 
@@ -125,6 +139,8 @@ impl<P: QueueProcessing> BatchQueueInner<P> {
 
         self.queue.insert(id, BatchJob { req, res: tx });
 
+        tracing::debug!(id, "batch: registered job in the queue");
+
         (id, rx)
     }
 
@@ -132,14 +148,18 @@ impl<P: QueueProcessing> BatchQueueInner<P> {
         let batch_size = p.batch_size(self.queue.len());
         let mut reqs = Vec::with_capacity(batch_size);
         let mut resps = Vec::with_capacity(batch_size);
+        let mut ids = Vec::with_capacity(batch_size);
 
         while reqs.len() < batch_size {
-            let Some((_, job)) = self.queue.pop_first() else {
+            let Some((id, job)) = self.queue.pop_first() else {
                 break;
             };
             reqs.push(job.req);
             resps.push(job.res);
+            ids.push(id);
         }
+
+        tracing::debug!(ids=?ids, "batch: acquired jobs");
 
         (reqs, resps)
     }
