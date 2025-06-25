@@ -998,7 +998,7 @@ pageserver_disconnect_shard(shardno_t shard_no)
 	 * to attach wait events to the WaitEventSets.
 	 */
 	CLEANUP_AND_DISCONNECT(shard);
-
+	neon_log(LOG, "Disconnect shard %d", shard_no);
 	shard->state = PS_Disconnected;
 }
 
