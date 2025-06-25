@@ -544,17 +544,8 @@ impl PostHogClient {
         self.config.server_api_key.starts_with("phs_")
     }
 
-    /// Fetch the feature flag specs from the server.
-    ///
-    /// This is unfortunately an undocumented API at:
-    /// - <https://posthog.com/docs/api/feature-flags#get-api-projects-project_id-feature_flags-local_evaluation>
-    /// - <https://posthog.com/docs/feature-flags/local-evaluation>
-    ///
-    /// The handling logic in [`FeatureStore`] mostly follows the Python API implementation.
-    /// See `_compute_flag_locally` in <https://github.com/PostHog/posthog-python/blob/master/posthog/client.py>
-    pub async fn get_feature_flags_local_evaluation(
-        &self,
-    ) -> anyhow::Result<LocalEvaluationResponse> {
+    /// Get the raw JSON spec, same as `get_feature_flags_local_evaluation` but without parsing.
+    pub async fn get_feature_flags_local_evaluation_raw(&self) -> anyhow::Result<String> {
         // BASE_URL/api/projects/:project_id/feature_flags/local_evaluation
         // with bearer token of self.server_api_key
         // OR
@@ -588,7 +579,22 @@ impl PostHogClient {
                 body
             ));
         }
-        Ok(serde_json::from_str(&body)?)
+        Ok(body)
+    }
+
+    /// Fetch the feature flag specs from the server.
+    ///
+    /// This is unfortunately an undocumented API at:
+    /// - <https://posthog.com/docs/api/feature-flags#get-api-projects-project_id-feature_flags-local_evaluation>
+    /// - <https://posthog.com/docs/feature-flags/local-evaluation>
+    ///
+    /// The handling logic in [`FeatureStore`] mostly follows the Python API implementation.
+    /// See `_compute_flag_locally` in <https://github.com/PostHog/posthog-python/blob/master/posthog/client.py>
+    pub async fn get_feature_flags_local_evaluation(
+        &self,
+    ) -> Result<LocalEvaluationResponse, anyhow::Error> {
+        let raw = self.get_feature_flags_local_evaluation_raw().await?;
+        Ok(serde_json::from_str(&raw)?)
     }
 
     /// Capture an event. This will only be used to report the feature flag usage back to PostHog, though
