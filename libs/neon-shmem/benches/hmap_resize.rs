@@ -129,11 +129,9 @@ fn small_benchs(c: &mut Criterion) {
 	group.bench_function("small_rehash_xxhash", |b| {
 		let ideal_filled = 4_000_000;
 		let size = 5_000_000;
-		let shmem = ShmemHandle::new("bench", 0, 1073741824 * 2).unwrap();
-		let init_struct = HashMapInit::<FileCacheKey, FileCacheEntry, _>::init_in_shmem_with_hasher(
-			size, shmem, twox_hash::xxhash64::RandomState::default(),
-		);
-		let mut writer = init_struct.attach_writer();
+		let mut writer = HashMapInit::new_resizeable(size, size * 2)
+			.with_hasher(twox_hash::xxhash64::RandomState::default())
+			.attach_writer();
 		let mut rng = rand::rng();		
 		while writer.get_num_buckets_in_use() < ideal_filled as usize {
 			let key: FileCacheKey = rng.random();
@@ -147,11 +145,9 @@ fn small_benchs(c: &mut Criterion) {
 	group.bench_function("small_rehash_ahash", |b| {
 		let ideal_filled = 4_000_000;
 		let size = 5_000_000;
-		let shmem = ShmemHandle::new("bench", 0, 1073741824 * 2).unwrap();
-		let init_struct = HashMapInit::<FileCacheKey, FileCacheEntry, _>::init_in_shmem_with_hasher(
-			size, shmem, ahash::RandomState::default()
-		);
-		let mut writer = init_struct.attach_writer();
+		let mut writer = HashMapInit::new_resizeable(size, size * 2)
+			.with_hasher(ahash::RandomState::default())
+			.attach_writer();
 		let mut rng = rand::rng();		
 		while writer.get_num_buckets_in_use() < ideal_filled as usize {
 			let key: FileCacheKey = rng.random();
@@ -164,12 +160,10 @@ fn small_benchs(c: &mut Criterion) {
 	group.bench_function("small_rehash_seahash", |b| {
 		let ideal_filled = 4_000_000;
 		let size = 5_000_000;
-		let shmem = ShmemHandle::new("bench", 0, 1073741824 * 2).unwrap();
-		let init_struct = HashMapInit::<FileCacheKey, FileCacheEntry, _>::init_in_shmem_with_hasher(
-			size, shmem, SeaRandomState::new()
-		);
-		let mut writer = init_struct.attach_writer();
-		let mut rng = rand::rng();		
+		let mut writer = HashMapInit::new_resizeable(size, size * 2)
+			.with_hasher(SeaRandomState::new())
+			.attach_writer();
+		let mut rng = rand::rng();
 		while writer.get_num_buckets_in_use() < ideal_filled as usize {
 			let key: FileCacheKey = rng.random();
 			let val = FileCacheEntry::dummy();
@@ -225,6 +219,10 @@ fn real_benchs(c: &mut Criterion) {
 		let mut writer = hashbrown::raw::RawTable::new();
 		let mut rng = rand::rng();
 		let hasher = rustc_hash::FxBuildHasher::default();
+		unsafe {
+			writer.resize(size, |(k,_)| hasher.hash_one(&k),
+						  hashbrown::raw::Fallibility::Infallible).unwrap();
+		}
 		while writer.len() < ideal_filled as usize {
 			let key: FileCacheKey = rng.random();
 			let val = FileCacheEntry::dummy();
@@ -261,7 +259,8 @@ fn real_benchs(c: &mut Criterion) {
 			let mut rng = rand::rng();
 			let hasher = rustc_hash::FxBuildHasher::default();
 			unsafe {
-				writer.resize(size, |(k,_)| hasher.hash_one(&k), hashbrown::raw::Fallibility::Infallible).unwrap();
+				writer.resize(size, |(k,_)| hasher.hash_one(&k),
+							  hashbrown::raw::Fallibility::Infallible).unwrap();
 			}
 			while writer.len() < ideal_filled as usize {
 				let key: FileCacheKey = rng.random();

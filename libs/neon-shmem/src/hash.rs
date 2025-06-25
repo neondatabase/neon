@@ -48,8 +48,14 @@ unsafe impl<'a, K: Sync, V: Sync, S> Sync for HashMapAccess<'a, K, V, S> {}
 unsafe impl<'a, K: Send, V: Send, S> Send for HashMapAccess<'a, K, V, S> {}
 
 impl<'a, K: Clone + Hash + Eq, V, S> HashMapInit<'a, K, V, S> {	
-	pub fn with_hasher(self, hasher: S) -> HashMapInit<'a, K, V, S> {
-		Self { hasher, ..self }
+	pub fn with_hasher<T: BuildHasher>(self, hasher: T) -> HashMapInit<'a, K, V, T> {
+		HashMapInit {
+			hasher,
+			shmem_handle: self.shmem_handle,
+			shared_ptr: self.shared_ptr,
+			shared_size: self.shared_size,
+			num_buckets: self.num_buckets,
+		}
 	}
 
 	/// Loosely (over)estimate the size needed to store a hash table with `num_buckets` buckets.
@@ -287,11 +293,12 @@ where
 
             buckets = std::slice::from_raw_parts_mut(buckets_ptr, num_buckets as usize);
             dictionary = std::slice::from_raw_parts_mut(dictionary_ptr, dictionary_size);
-        }
+			(dictionary_ptr, dictionary_size)
+        }		
         for i in 0..dictionary.len() {
             dictionary[i] = INVALID_POS;
         }
-
+		
         for i in 0..rehash_buckets as usize {
             if buckets[i].inner.is_none() {
 				buckets[i].next = inner.free_head;
