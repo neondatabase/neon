@@ -9,7 +9,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tracing::{info, warn};
 use utils::id::TenantTimelineId;
-use utils::lsn::{Lsn, SegmentSize};
+use utils::lsn::{Lsn, WalSegmentSize};
 
 use crate::GlobalTimelines;
 use crate::control_file::FileStorage;
@@ -171,7 +171,7 @@ pub async fn handle_request(
 
 async fn copy_disk_segments(
     tli: &WalResidentTimeline,
-    wal_seg_size: SegmentSize,
+    wal_seg_size: WalSegmentSize,
     start_lsn: Lsn,
     end_lsn: Lsn,
     tli_dir_path: &Utf8PathBuf,

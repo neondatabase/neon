@@ -6,7 +6,7 @@ use postgres_ffi::v17::waldecoder_handler::WalStreamDecoderHandler;
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use postgres_versioninfo::PgMajorVersion;
 use pprof::criterion::{Output, PProfProfiler};
-use utils::lsn::{Lsn, SegmentSize};
+use utils::lsn::{Lsn, WalSegmentSize};
 
 const KB: usize = 1024;
 
@@ -22,7 +22,7 @@ criterion_main!(benches);
 fn bench_complete_record(c: &mut Criterion) {
     let mut g = c.benchmark_group("complete_record");
     for size in [64, KB, 8 * KB, 128 * KB] {
-        let value_size = size as SegmentSize;
+        let value_size = size as WalSegmentSize;
         // Kind of weird to change the group throughput per benchmark, but it's the only way
         // to vary it per benchmark. It works.
         g.throughput(criterion::Throughput::Bytes(value_size as u64));
@@ -31,7 +31,7 @@ fn bench_complete_record(c: &mut Criterion) {
         });
     }
 
-    fn run_bench(b: &mut Bencher, size: SegmentSize) -> anyhow::Result<()> {
+    fn run_bench(b: &mut Bencher, size: WalSegmentSize) -> anyhow::Result<()> {
         const PREFIX: &CStr = c"";
         let value_size = LogicalMessageGenerator::make_value_size(size, PREFIX);
         let value = vec![1; value_size as usize];

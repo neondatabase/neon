@@ -11,7 +11,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncWriteExt};
 use tracing::{debug, info, instrument, warn};
 use utils::crashsafe::durable_rename;
-use utils::lsn::SegmentSize;
+use utils::lsn::WalSegmentSize;
 
 use crate::metrics::{
     EVICTION_EVENTS_COMPLETED, EVICTION_EVENTS_STARTED, EvictionEvent, NUM_EVICTED_TIMELINES,
@@ -277,12 +277,12 @@ async fn compare_local_segment_with_remote(
 async fn do_validation(
     mgr: &Manager,
     file: &mut File,
-    wal_seg_size: SegmentSize,
+    wal_seg_size: WalSegmentSize,
     partial: &PartialRemoteSegment,
     storage: &GenericRemoteStorage,
 ) -> anyhow::Result<()> {
     let local_size = file.metadata().await?.len();
-    if SegmentSize::try_from(local_size) != Ok(wal_seg_size) {
+    if WalSegmentSize::try_from(local_size) != Ok(wal_seg_size) {
         anyhow::bail!(
             "local segment size is invalid: found {}, expected {}",
             local_size,

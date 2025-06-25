@@ -12,7 +12,7 @@
 
 use bytes::Bytes;
 use utils::bin_ser::SerializeError;
-use utils::lsn::{Lsn, SegmentSize};
+use utils::lsn::{Lsn, WalSegmentSize};
 
 pub use postgres_versioninfo::PgMajorVersion;
 
@@ -241,7 +241,7 @@ pub use v14::xlog_utils::{
 pub const BLCKSZ: u16 = 8192;
 pub const RELSEG_SIZE: u32 = 1024 * 1024 * 1024 / (BLCKSZ as u32);
 pub const XLOG_BLCKSZ: usize = 8192;
-pub const WAL_SEGMENT_SIZE: SegmentSize = 16 * 1024 * 1024;
+pub const WAL_SEGMENT_SIZE: WalSegmentSize = 16 * 1024 * 1024;
 
 pub const MAX_SEND_SIZE: usize = XLOG_BLCKSZ * 16;
 

@@ -28,7 +28,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tracing::*;
 use utils::crashsafe::durable_rename;
 use utils::id::TenantTimelineId;
-use utils::lsn::{Lsn, SegmentSize};
+use utils::lsn::{Lsn, WalSegmentSize};
 
 use crate::metrics::{
     REMOVED_WAL_SEGMENTS, WAL_STORAGE_OPERATION_SECONDS, WalStorageMetrics, time_io_closure,
@@ -92,7 +92,7 @@ pub struct PhysicalStorage {
     no_sync: bool,
 
     /// Size of WAL segment in bytes.
-    wal_seg_size: SegmentSize,
+    wal_seg_size: WalSegmentSize,
     pg_version: PgVersionId,
     system_id: u64,
 
@@ -318,7 +318,7 @@ impl PhysicalStorage {
     async fn write_in_segment(
         &mut self,
         segno: u64,
-        xlogoff: SegmentSize,
+        xlogoff: WalSegmentSize,
         buf: &[u8],
     ) -> Result<bool> {
         let mut file = if let Some(file) = self.file.take() {
@@ -609,7 +609,7 @@ impl Storage for PhysicalStorage {
 /// Remove all WAL segments in timeline_dir that match the given predicate.
 async fn remove_segments_from_disk(
     timeline_dir: &Utf8Path,
-    wal_seg_size: SegmentSize,
+    wal_seg_size: WalSegmentSize,
     remove_predicate: impl Fn(XLogSegNo) -> bool,
 ) -> Result<()> {
     let _timer = WAL_STORAGE_OPERATION_SECONDS
@@ -650,7 +650,7 @@ async fn remove_segments_from_disk(
 pub struct WalReader {
     remote_path: RemotePath,
     timeline_dir: Utf8PathBuf,
-    wal_seg_size: SegmentSize,
+    wal_seg_size: WalSegmentSize,
     pos: Lsn,
     wal_segment: Option<Pin<Box<dyn AsyncRead + Send + Sync>>>,
 
@@ -838,7 +838,7 @@ impl WalReader {
 pub(crate) async fn open_wal_file(
     timeline_dir: &Utf8Path,
     segno: XLogSegNo,
-    wal_seg_size: SegmentSize,
+    wal_seg_size: WalSegmentSize,
 ) -> Result<(tokio::fs::File, bool)> {
     let (wal_file_path, wal_file_partial_path) = wal_file_paths(timeline_dir, segno, wal_seg_size);
 
@@ -865,7 +865,7 @@ pub(crate) async fn open_wal_file(
 pub fn wal_file_paths(
     timeline_dir: &Utf8Path,
     segno: XLogSegNo,
-    wal_seg_size: SegmentSize,
+    wal_seg_size: WalSegmentSize,
 ) -> (Utf8PathBuf, Utf8PathBuf) {
     let wal_file_name = XLogFileName(PG_TLI, segno, wal_seg_size);
     let wal_file_path = timeline_dir.join(wal_file_name.clone());

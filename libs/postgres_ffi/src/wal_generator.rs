@@ -2,7 +2,7 @@ use std::ffi::{CStr, CString};
 
 use bytes::{Bytes, BytesMut};
 use crc32c::crc32c_append;
-use utils::lsn::{Lsn, SegmentSize};
+use utils::lsn::{Lsn, WalSegmentSize};
 
 use super::bindings::{RmgrId, XLogLongPageHeaderData, XLogPageHeaderData, XLOG_PAGE_MAGIC};
 use super::xlog_utils::{
@@ -39,7 +39,7 @@ impl Record {
 
         // Construct the WAL record header.
         let mut header = XLogRecord {
-            xl_tot_len: XLOG_SIZE_OF_XLOG_RECORD + data_header.len() as SegmentSize + self.data.len() as SegmentSize,
+            xl_tot_len: XLOG_SIZE_OF_XLOG_RECORD + data_header.len() as WalSegmentSize + self.data.len() as WalSegmentSize,
             xl_xid: 0,
             xl_prev: prev_lsn.into(),
             xl_info: self.info,
@@ -234,10 +234,10 @@ impl LogicalMessageGenerator {
 
     /// Computes how large a value must be to get a record of the given size. Convenience method to
     /// construct records of pre-determined size. Panics if the record size is too small.
-    pub fn make_value_size(record_size: SegmentSize, prefix: &CStr) -> SegmentSize {
+    pub fn make_value_size(record_size: WalSegmentSize, prefix: &CStr) -> WalSegmentSize {
         let xlog_header_size = XLOG_SIZE_OF_XLOG_RECORD;
-        let lm_header_size = size_of::<XlLogicalMessage>() as SegmentSize;
-        let prefix_size = prefix.to_bytes_with_nul().len() as SegmentSize;
+        let lm_header_size = size_of::<XlLogicalMessage>() as WalSegmentSize;
+        let prefix_size = prefix.to_bytes_with_nul().len() as WalSegmentSize;
         let data_header_size = match record_size - xlog_header_size - 2 {
             0..=255 => 2,
             256..=258 => panic!("impossible record_size {record_size}"),

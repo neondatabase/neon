@@ -35,7 +35,7 @@ use std::time::SystemTime;
 use utils::bin_ser::DeserializeError;
 use utils::bin_ser::SerializeError;
 
-use utils::lsn::{Lsn, SegmentSize};
+use utils::lsn::{Lsn, WalSegmentSize};
 
 pub const XLOG_FNAME_LEN: usize = 24;
 pub const XLP_BKP_REMOVABLE: u16 = 0x0004;
@@ -43,9 +43,9 @@ pub const XLP_FIRST_IS_CONTRECORD: u16 = 0x0001;
 pub const XLP_REM_LEN_OFFS: usize = 2 + 2 + 4 + 8;
 pub const XLOG_RECORD_CRC_OFFS: usize = 4 + 4 + 8 + 1 + 1 + 2;
 
-pub const XLOG_SIZE_OF_XLOG_SHORT_PHD: SegmentSize = size_of::<XLogPageHeaderData>() as SegmentSize;
-pub const XLOG_SIZE_OF_XLOG_LONG_PHD: SegmentSize = size_of::<XLogLongPageHeaderData>() as SegmentSize;
-pub const XLOG_SIZE_OF_XLOG_RECORD: SegmentSize = size_of::<XLogRecord>() as SegmentSize;
+pub const XLOG_SIZE_OF_XLOG_SHORT_PHD: WalSegmentSize = size_of::<XLogPageHeaderData>() as WalSegmentSize;
+pub const XLOG_SIZE_OF_XLOG_LONG_PHD: WalSegmentSize = size_of::<XLogLongPageHeaderData>() as WalSegmentSize;
+pub const XLOG_SIZE_OF_XLOG_RECORD: WalSegmentSize = size_of::<XLogRecord>() as WalSegmentSize;
 #[allow(clippy::identity_op)]
 pub const SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT: usize = 1 * 2;
 
@@ -58,19 +58,19 @@ pub const SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT: usize = 1 * 2;
 /// in order to let CLOG_TRUNCATE mechanism correctly extend CLOG.
 const XID_CHECKPOINT_INTERVAL: u32 = 1024;
 
-pub fn XLogSegmentsPerXLogId(wal_segsz_bytes: SegmentSize) -> XLogSegNo {
+pub fn XLogSegmentsPerXLogId(wal_segsz_bytes: WalSegmentSize) -> XLogSegNo {
     (0x100000000u64 / wal_segsz_bytes as u64) as XLogSegNo
 }
 
 pub fn XLogSegNoOffsetToRecPtr(
     segno: XLogSegNo,
     offset: u32,
-    wal_segsz_bytes: SegmentSize,
+    wal_segsz_bytes: WalSegmentSize,
 ) -> XLogRecPtr {
     segno * (wal_segsz_bytes as u64) + (offset as u64)
 }
 
-pub fn XLogFileName(tli: TimeLineID, logSegNo: XLogSegNo, wal_segsz_bytes: SegmentSize) -> String {
+pub fn XLogFileName(tli: TimeLineID, logSegNo: XLogSegNo, wal_segsz_bytes: WalSegmentSize) -> String {
     format!(
         "{:>08X}{:>08X}{:>08X}",
         tli,
@@ -81,7 +81,7 @@ pub fn XLogFileName(tli: TimeLineID, logSegNo: XLogSegNo, wal_segsz_bytes: Segme
 
 pub fn XLogFromFileName(
     fname: &OsStr,
-    wal_seg_size: SegmentSize,
+    wal_seg_size: WalSegmentSize,
 ) -> anyhow::Result<(XLogSegNo, TimeLineID)> {
     if let Some(fname_str) = fname.to_str() {
         let tli = u32::from_str_radix(&fname_str[0..8], 16)?;
@@ -111,7 +111,7 @@ pub fn IsPartialXLogFileName(fname: &OsStr) -> bool {
 
 /// If LSN points to the beginning of the page, then shift it to first record,
 /// otherwise align on 8-bytes boundary (required for WAL records)
-pub fn normalize_lsn(lsn: Lsn, seg_sz: SegmentSize) -> Lsn {
+pub fn normalize_lsn(lsn: Lsn, seg_sz: WalSegmentSize) -> Lsn {
     if lsn.0 % XLOG_BLCKSZ as u64 == 0 {
         let hdr_size = if lsn.0 % seg_sz as u64 == 0 {
             XLOG_SIZE_OF_XLOG_LONG_PHD
@@ -227,7 +227,7 @@ pub use timestamp_conversions::{to_pg_timestamp, try_from_pg_timestamp};
 // back.
 pub fn find_end_of_wal(
     data_dir: &Path,
-    wal_seg_size: SegmentSize,
+    wal_seg_size: WalSegmentSize,
     start_lsn: Lsn, // start reading WAL at this point; must point at record start_lsn.
 ) -> anyhow::Result<Lsn> {
     let mut result = start_lsn;
@@ -438,7 +438,7 @@ pub fn generate_wal_segment(segno: u64, system_id: u64, lsn: Lsn) -> Result<Byte
     let page_off = lsn.block_offset();
     let seg_off = lsn.segment_offset(WAL_SEGMENT_SIZE);
 
-    let first_page_only = seg_off < XLOG_BLCKSZ as SegmentSize;
+    let first_page_only = seg_off < XLOG_BLCKSZ as WalSegmentSize;
     // If first records starts in the middle of the page, pretend in page header
     // there is a fake record which ends where first real record starts. This
     // makes pg_waldump etc happy.

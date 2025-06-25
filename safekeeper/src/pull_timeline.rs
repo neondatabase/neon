@@ -27,7 +27,7 @@ use tracing::{error, info, instrument};
 use utils::crashsafe::fsync_async_opt;
 use utils::id::{NodeId, TenantTimelineId};
 use utils::logging::SecretString;
-use utils::lsn::{Lsn, SegmentSize};
+use utils::lsn::{Lsn, WalSegmentSize};
 use utils::pausable_failpoint;
 
 use crate::control_file::CONTROL_FILE_NAME;
@@ -100,7 +100,7 @@ pub struct SnapshotContext {
     pub term: Term,
     pub last_log_term: Term,
     pub flush_lsn: Lsn,
-    pub wal_seg_size: SegmentSize,
+    pub wal_seg_size: WalSegmentSize,
     // used to remove WAL hold off in Drop.
     pub tli: WalResidentTimeline,
 }
