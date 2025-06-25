@@ -7412,7 +7412,7 @@ impl TimelineWriter<'_> {
 
         if let Some(wait_threshold) = wait_threshold {
             if l0_count >= wait_threshold {
-                debug!(
+                info!(
                     "layer roll waiting for flush due to compaction backpressure at {l0_count} L0 layers"
                 );
                 self.tl.wait_flush_completion(flush_id).await?;
