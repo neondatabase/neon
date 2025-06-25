@@ -33,9 +33,9 @@ use super::conn_pool_lib::{self, ConnInfo};
 use super::error::HttpCodeError;
 use super::http_util::json_response;
 use super::json::{JsonConversionError, json_to_pg_text, pg_text_row_to_json};
+use crate::auth::ComputeUserInfoParseError;
 use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
-use crate::auth::{ComputeUserInfoParseError, endpoint_sni};
-use crate::config::{AuthenticationConfig, HttpConfig, ProxyConfig, TlsConfig};
+use crate::config::{AuthenticationConfig, HttpConfig, ProxyConfig};
 use crate::context::RequestContext;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::http::{ReadBodyError, read_body_with_limit};
@@ -43,7 +43,7 @@ use crate::metrics::{HttpDirection, Metrics, SniGroup, SniKind};
 use crate::pqproto::StartupMessageParams;
 use crate::proxy::NeonOptions;
 use crate::serverless::backend::HttpConnError;
-use crate::types::{DbName, RoleName};
+use crate::types::{DbName, EndpointId, RoleName};
 use crate::usage_metrics::{MetricCounter, MetricCounterRecorder};
 use crate::util::run_until_cancelled;
 
@@ -113,8 +113,6 @@ pub(crate) enum ConnInfoError {
     MissingHostname,
     #[error("invalid hostname: {0}")]
     InvalidEndpoint(#[from] ComputeUserInfoParseError),
-    #[error("malformed endpoint")]
-    MalformedEndpoint,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -141,7 +139,6 @@ fn get_conn_info(
     config: &'static AuthenticationConfig,
     ctx: &RequestContext,
     headers: &HeaderMap,
-    tls: Option<&TlsConfig>,
 ) -> Result<ConnInfoWithAuth, ConnInfoError> {
     let connection_string = headers
         .get(&CONN_STRING)
@@ -199,17 +196,11 @@ fn get_conn_info(
         return Err(ConnInfoError::MissingCredentials(Credentials::Password));
     };
 
-    let endpoint = match connection_url.host() {
-        Some(url::Host::Domain(hostname)) => {
-            if let Some(tls) = tls {
-                endpoint_sni(hostname, &tls.common_names).ok_or(ConnInfoError::MalformedEndpoint)?
-            } else {
-                hostname
-                    .split_once('.')
-                    .map_or(hostname, |(prefix, _)| prefix)
-                    .into()
-            }
-        }
+    let endpoint: EndpointId = match connection_url.host() {
+        Some(url::Host::Domain(hostname)) => hostname
+            .split_once('.')
+            .map_or(hostname, |(prefix, _)| prefix)
+            .into(),
         Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) | None => {
             return Err(ConnInfoError::MissingHostname);
         }
@@ -638,14 +629,7 @@ async fn handle_inner(
         "handling interactive connection from client"
     );
 
-    let conn_info = get_conn_info(
-        &config.authentication_config,
-        ctx,
-        request.headers(),
-        // todo: race condition?
-        // we're unlikely to change the common names.
-        config.tls_config.load().as_deref(),
-    )?;
+    let conn_info = get_conn_info(&config.authentication_config, ctx, request.headers())?;
     info!(
         user = conn_info.conn_info.user_info.user.as_str(),
         "credentials"
