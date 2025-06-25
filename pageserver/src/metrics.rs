@@ -4447,7 +4447,7 @@ pub(crate) static BASEBACKUP_CACHE_SIZE: Lazy<UIntGauge> = Lazy::new(|| {
 pub(crate) static BASEBACKUP_CACHE_PREPARE_QUEUE_SIZE: Lazy<UIntGauge> = Lazy::new(|| {
     register_uint_gauge!(
         "pageserver_basebackup_cache_prepare_queue_size",
-        "Number of requests in the basebackup prepare prepare channel"
+        "Number of requests in the basebackup prepare channel"
     )
     .expect("failed to define a metric")
 });
