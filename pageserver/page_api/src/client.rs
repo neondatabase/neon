@@ -95,7 +95,6 @@ impl Client {
 
         if let Some(compression) = compression {
             // TODO: benchmark this (including network latency).
-            // TODO: consider enabling compression by default.
             client = client
                 .accept_compressed(compression)
                 .send_compressed(compression);

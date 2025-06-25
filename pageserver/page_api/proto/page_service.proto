@@ -110,6 +110,19 @@ message GetBaseBackupRequest {
   bool replica = 2;
   // If true, include relation files in the base backup. Mainly for debugging and tests.
   bool full = 3;
+  // Compression algorithm to use. Base backups send a compressed payload instead of using gRPC
+  // compression, so that we can cache compressed backups on the server.
+  BaseBackupCompression compression = 4;
+}
+
+// Base backup compression algorithms.
+enum BaseBackupCompression {
+  // Unknown algorithm. Used when clients send an unsupported algorithm.
+  BASE_BACKUP_COMPRESSION_UNKNOWN = 0;
+  // No compression.
+  BASE_BACKUP_COMPRESSION_NONE = 1;
+  // GZIP compression.
+  BASE_BACKUP_COMPRESSION_GZIP = 2;
 }
 
 // Base backup response chunk, returned as an ordered stream.

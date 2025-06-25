@@ -14,6 +14,7 @@ use std::fmt::Write as FmtWrite;
 use std::time::{Instant, SystemTime};
 
 use anyhow::{Context, anyhow};
+use async_compression::tokio::write::GzipEncoder;
 use bytes::{BufMut, Bytes, BytesMut};
 use fail::fail_point;
 use pageserver_api::key::{Key, rel_block_to_key};
@@ -25,8 +26,8 @@ use postgres_ffi::{
 };
 use postgres_ffi_types::constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
 use postgres_ffi_types::forknum::{INIT_FORKNUM, MAIN_FORKNUM};
-use tokio::io;
 use tokio::io::AsyncWrite;
+use tokio::io::{self, AsyncWriteExt as _};
 use tokio_tar::{Builder, EntryType, Header};
 use tracing::*;
 use utils::lsn::Lsn;
@@ -97,6 +98,7 @@ impl From<BasebackupError> for tonic::Status {
 ///  * When working without safekeepers. In this situation it is important to match the lsn
 ///    we are taking basebackup on with the lsn that is used in pageserver's walreceiver
 ///    to start the replication.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_basebackup_tarball<'a, W>(
     write: &'a mut W,
     timeline: &'a Timeline,
@@ -104,6 +106,7 @@ pub async fn send_basebackup_tarball<'a, W>(
     prev_lsn: Option<Lsn>,
     full_backup: bool,
     replica: bool,
+    gzip_level: Option<async_compression::Level>,
     ctx: &'a RequestContext,
 ) -> Result<(), BasebackupError>
 where
@@ -122,7 +125,7 @@ where
     // prev_lsn value; that happens if the timeline was just branched from
     // an old LSN and it doesn't have any WAL of its own yet. We will set
     // prev_lsn to Lsn(0) if we cannot provide the correct value.
-    let (backup_prev, backup_lsn) = if let Some(req_lsn) = req_lsn {
+    let (backup_prev, lsn) = if let Some(req_lsn) = req_lsn {
         // Backup was requested at a particular LSN. The caller should've
         // already checked that it's a valid LSN.
 
@@ -143,7 +146,7 @@ where
     };
 
     // Consolidate the derived and the provided prev_lsn values
-    let prev_lsn = if let Some(provided_prev_lsn) = prev_lsn {
+    let prev_record_lsn = if let Some(provided_prev_lsn) = prev_lsn {
         if backup_prev != Lsn(0) && backup_prev != provided_prev_lsn {
             return Err(BasebackupError::Server(anyhow!(
                 "backup_prev {backup_prev} != provided_prev_lsn {provided_prev_lsn}"
@@ -155,30 +158,55 @@ where
     };
 
     info!(
-        "taking basebackup lsn={}, prev_lsn={} (full_backup={}, replica={})",
-        backup_lsn, prev_lsn, full_backup, replica
+        "taking basebackup lsn={lsn}, prev_lsn={prev_record_lsn} \
+        (full_backup={full_backup}, replica={replica}, gzip={gzip_level:?})",
+    );
+    let span = info_span!("send_tarball", backup_lsn=%lsn);
+
+    let io_concurrency = IoConcurrency::spawn_from_conf(
+        timeline.conf.get_vectored_concurrent_io,
+        timeline
+            .gate
+            .enter()
+            .map_err(|_| BasebackupError::Shutdown)?,
     );
 
-    let basebackup = Basebackup {
-        ar: Builder::new_non_terminated(write),
-        timeline,
-        lsn: backup_lsn,
-        prev_record_lsn: prev_lsn,
-        full_backup,
-        replica,
-        ctx,
-        io_concurrency: IoConcurrency::spawn_from_conf(
-            timeline.conf.get_vectored_concurrent_io,
-            timeline
-                .gate
-                .enter()
-                .map_err(|_| BasebackupError::Shutdown)?,
-        ),
-    };
-    basebackup
+    if let Some(gzip_level) = gzip_level {
+        let mut encoder = GzipEncoder::with_quality(write, gzip_level);
+        Basebackup {
+            ar: Builder::new_non_terminated(&mut encoder),
+            timeline,
+            lsn,
+            prev_record_lsn,
+            full_backup,
+            replica,
+            ctx,
+            io_concurrency,
+        }
         .send_tarball()
-        .instrument(info_span!("send_tarball", backup_lsn=%backup_lsn))
-        .await
+        .instrument(span)
+        .await?;
+        encoder
+            .shutdown()
+            .await
+            .map_err(|e| BasebackupError::Server(anyhow!("gzip failure: {e}")))?;
+    } else {
+        Basebackup {
+            ar: Builder::new_non_terminated(write),
+            timeline,
+            lsn,
+            prev_record_lsn,
+            full_backup,
+            replica,
+            ctx,
+            io_concurrency,
+        }
+        .send_tarball()
+        .instrument(span)
+        .await?;
+    }
+
+    Ok(())
 }
 
 /// This is short-living object only for the time of tarball creation,

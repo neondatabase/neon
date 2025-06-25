@@ -1,7 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Context;
-use async_compression::tokio::write::GzipEncoder;
 use camino::{Utf8Path, Utf8PathBuf};
 use metrics::core::{AtomicU64, GenericCounter};
 use pageserver_api::{config::BasebackupCacheConfig, models::TenantState};
@@ -594,13 +593,6 @@ impl BackgroundTask {
         let file = tokio::fs::File::create(entry_tmp_path).await?;
         let mut writer = BufWriter::new(file);
 
-        let mut encoder = GzipEncoder::with_quality(
-            &mut writer,
-            // Level::Best because compression is not on the hot path of basebackup requests.
-            // The decompression is almost not affected by the compression level.
-            async_compression::Level::Best,
-        );
-
         // We may receive a request before the WAL record is applied to the timeline.
         // Wait for the requested LSN to be applied.
         timeline
@@ -613,17 +605,19 @@ impl BackgroundTask {
             .await?;
 
         send_basebackup_tarball(
-            &mut encoder,
+            &mut writer,
             timeline,
             Some(req_lsn),
             None,
             false,
             false,
+            // Level::Best because compression is not on the hot path of basebackup requests.
+            // The decompression is almost not affected by the compression level.
+            Some(async_compression::Level::Best),
             &ctx,
         )
         .await?;
 
-        encoder.shutdown().await?;
         writer.flush().await?;
         writer.into_inner().sync_all().await?;
 

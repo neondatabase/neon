@@ -13,7 +13,6 @@ use std::time::{Duration, Instant, SystemTime};
 use std::{io, str};
 
 use anyhow::{Context as _, anyhow, bail};
-use async_compression::tokio::write::GzipEncoder;
 use bytes::{Buf as _, BufMut as _, BytesMut};
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
@@ -2613,6 +2612,7 @@ impl PageServerHandler {
                 prev_lsn,
                 full_backup,
                 replica,
+                None,
                 &ctx,
             )
             .await?;
@@ -2641,31 +2641,6 @@ impl PageServerHandler {
                     .map_err(|err| {
                         BasebackupError::Client(err, "handle_basebackup_request,cached,copy")
                     })?;
-            } else if gzip {
-                let mut encoder = GzipEncoder::with_quality(
-                    &mut writer,
-                    // NOTE using fast compression because it's on the critical path
-                    //      for compute startup. For an empty database, we get
-                    //      <100KB with this method. The Level::Best compression method
-                    //      gives us <20KB, but maybe we should add basebackup caching
-                    //      on compute shutdown first.
-                    async_compression::Level::Fastest,
-                );
-                basebackup::send_basebackup_tarball(
-                    &mut encoder,
-                    &timeline,
-                    lsn,
-                    prev_lsn,
-                    full_backup,
-                    replica,
-                    &ctx,
-                )
-                .await?;
-                // shutdown the encoder to ensure the gzip footer is written
-                encoder
-                    .shutdown()
-                    .await
-                    .map_err(|e| QueryError::Disconnected(ConnectionError::Io(e)))?;
             } else {
                 basebackup::send_basebackup_tarball(
                     &mut writer,
@@ -2674,6 +2649,11 @@ impl PageServerHandler {
                     prev_lsn,
                     full_backup,
                     replica,
+                    // NB: using fast compression because it's on the critical path for compute
+                    // startup. For an empty database, we get <100KB with this method. The
+                    // Level::Best compression method gives us <20KB, but maybe we should add
+                    // basebackup caching on compute shutdown first.
+                    gzip.then_some(async_compression::Level::Fastest),
                     &ctx,
                 )
                 .await?;
@@ -3553,7 +3533,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         if timeline.is_archived() == Some(true) {
             return Err(tonic::Status::failed_precondition("timeline is archived"));
         }
-        let req: page_api::GetBaseBackupRequest = req.into_inner().into();
+        let req: page_api::GetBaseBackupRequest = req.into_inner().try_into()?;
 
         span_record!(lsn=?req.lsn);
 
@@ -3579,6 +3559,15 @@ impl proto::PageService for GrpcPageServiceHandler {
         let span = Span::current();
         let (mut simplex_read, mut simplex_write) = tokio::io::simplex(CHUNK_SIZE);
         let jh = tokio::spawn(async move {
+            let gzip_level = match req.compression {
+                page_api::BaseBackupCompression::None => None,
+                // NB: using fast compression because it's on the critical path for compute
+                // startup. For an empty database, we get <100KB with this method. The
+                // Level::Best compression method gives us <20KB, but maybe we should add
+                // basebackup caching on compute shutdown first.
+                page_api::BaseBackupCompression::Gzip => Some(async_compression::Level::Fastest),
+            };
+
             let result = basebackup::send_basebackup_tarball(
                 &mut simplex_write,
                 &timeline,
@@ -3586,6 +3575,7 @@ impl proto::PageService for GrpcPageServiceHandler {
                 None,
                 req.full,
                 req.replica,
+                gzip_level,
                 &ctx,
             )
             .instrument(span) // propagate request span
