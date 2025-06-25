@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use clashmap::ClashMap;
 use tokio::time::Instant;
-use tracing::{debug, info};
+use tracing::{debug};
 
 use super::{EndpointAccessControl, RoleAccessControl};
 use crate::auth::backend::ComputeUserInfo;

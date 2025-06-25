@@ -171,7 +171,7 @@ impl ComputeUserInfo {
 pub(crate) enum ComputeCredentialKeys {
     AuthKeys(AuthKeys),
     JwtPayload(Vec<u8>),
-    None,
+    //None,
 }
 
 impl TryFrom<ComputeUserInfoMaybeEndpoint> for ComputeUserInfo {
