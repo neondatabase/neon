@@ -80,6 +80,7 @@ pub struct PostHogConfig {
     /// Refresh interval for the feature flag spec.
     /// The storcon will push the feature flag spec to the pageserver. If the pageserver does not receive
     /// the spec for `refresh_interval`, it will fetch the spec from the PostHog API.
+    #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
     pub refresh_interval: Option<Duration>,
