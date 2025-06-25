@@ -107,7 +107,7 @@ impl<P: QueueProcessing> BatchQueue<P> {
             // send response values.
             for (tx, value) in std::iter::zip(resps, values) {
                 if tx.send(value).is_err() {
-                    // sender hung up but that's fine.
+                    // receiver hung up but that's fine.
                 }
             }
 
