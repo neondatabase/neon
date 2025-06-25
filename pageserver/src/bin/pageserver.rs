@@ -571,7 +571,7 @@ fn start_pageserver(
     // Scan the local 'tenants/' directory and start loading the tenants
     let (basebackup_cache, basebackup_prepare_receiver) = BasebackupCache::new(
         conf.basebackup_cache_dir(),
-        conf.basebackup_cache_config.as_ref(),
+        conf.basebackup_cache_config.clone(),
     );
     let deletion_queue_client = deletion_queue.new_client();
     let background_purges = mgr::BackgroundPurges::default();
@@ -594,7 +594,6 @@ fn start_pageserver(
 
     basebackup_cache.spawn_background_task(
         BACKGROUND_RUNTIME.handle(),
-        conf.basebackup_cache_config.clone(),
         basebackup_prepare_receiver,
         Arc::clone(&tenant_manager),
         shutdown_pageserver.child_token(),

@@ -61,6 +61,7 @@ struct CacheEntry {
 /// and ~1 RPS for get requests.
 pub struct BasebackupCache {
     data_dir: Utf8PathBuf,
+    config: Option<BasebackupCacheConfig>,
 
     entries: std::sync::Mutex<HashMap<TenantTimelineId, CacheEntry>>,
 
@@ -69,43 +70,54 @@ pub struct BasebackupCache {
     read_hit_count: GenericCounter<AtomicU64>,
     read_miss_count: GenericCounter<AtomicU64>,
     read_err_count: GenericCounter<AtomicU64>,
+
+    prepare_skip_count: GenericCounter<AtomicU64>,
 }
 
 impl BasebackupCache {
+    /// Create a new BasebackupCache instance.
+    /// Also returns a BasebackupPrepareReceiver which is needed to start
+    /// the background task.
+    /// The cache is initialized from the data_dir in the background task.
+    /// The cache will return `None` for any get requests until the initialization is complete.
+    /// The background task is spawned separately using [`Self::spawn_background_task`]
+    /// to avoid a circular dependency between the cache and the tenant manager.
     pub fn new(
         data_dir: Utf8PathBuf,
-        config: Option<&BasebackupCacheConfig>,
+        config: Option<BasebackupCacheConfig>,
     ) -> (Arc<Self>, BasebackupPrepareReceiver) {
-        let chan_size = config.map(|c| c.max_size_entries).unwrap_or(1);
+        let chan_size = config.as_ref().map(|c| c.max_size_entries).unwrap_or(1);
 
         let (prepare_sender, prepare_receiver) = tokio::sync::mpsc::channel(chan_size);
 
         let cache = Arc::new(BasebackupCache {
             data_dir,
+            config,
             entries: std::sync::Mutex::new(HashMap::new()),
             prepare_sender,
 
             read_hit_count: BASEBACKUP_CACHE_READ.with_label_values(&["hit"]),
             read_miss_count: BASEBACKUP_CACHE_READ.with_label_values(&["miss"]),
             read_err_count: BASEBACKUP_CACHE_READ.with_label_values(&["error"]),
+
+            prepare_skip_count: BASEBACKUP_CACHE_PREPARE.with_label_values(&["skip"]),
         });
 
         (cache, prepare_receiver)
     }
 
-    /// Creates a BasebackupCache and spawns the background task.
-    /// The initialization of the cache is performed in the background and does not
-    /// block the caller. The cache will return `None` for any get requests until
-    /// initialization is complete.
+    /// Spawns the background task.
+    /// The background task initializes the cache from the disk,
+    /// processes prepare requests, and cleans up outdated cache entries.
+    /// Noop if the cache is disabled (config is None).
     pub fn spawn_background_task(
         self: Arc<Self>,
         runtime_handle: &tokio::runtime::Handle,
-        config: Option<BasebackupCacheConfig>,
         prepare_receiver: BasebackupPrepareReceiver,
         tenant_manager: Arc<TenantManager>,
         cancel: CancellationToken,
     ) {
-        if let Some(config) = config {
+        if let Some(config) = self.config.clone() {
             let background = BackgroundTask {
                 c: self,
 
@@ -124,6 +136,9 @@ impl BasebackupCache {
         }
     }
 
+    /// Send a basebackup prepare request to the background task.
+    /// The basebackup will be prepared asynchronously, it does not block the caller.
+    /// The request will be skipped if any cache limits are exceeded.
     pub fn send_prepare(&self, tenant_shard_id: TenantShardId, timeline_id: TimelineId, lsn: Lsn) {
         let req = BasebackupPrepareRequest {
             tenant_shard_id,
@@ -136,14 +151,25 @@ impl BasebackupCache {
 
         if let Err(e) = res {
             BASEBACKUP_CACHE_PREPARE_QUEUE_SIZE.dec();
+            self.prepare_skip_count.inc();
             match e {
                 TrySendError::Full(_) => {
-                    // Basebackups are pretty rare, normally we should not hit this.
-                    tracing::warn!("Basebackup prepare queue is full, dropping request");
+                    // Basebackup prepares are pretty rare, normally we should not hit this.
+                    tracing::warn!(
+                        tenant_id = %tenant_shard_id.tenant_id,
+                        %timeline_id,
+                        %lsn,
+                        "Basebackup prepare queue is full, skipping the request"
+                    );
                 }
                 TrySendError::Closed(_) => {
                     // Normal during shutdown, not critical.
-                    tracing::info!("Basebackup prepare channel is closed, dropping request");
+                    tracing::info!(
+                        tenant_id = %tenant_shard_id.tenant_id,
+                        %timeline_id,
+                        %lsn,
+                        "Basebackup prepare channel is closed, skipping the request"
+                    );
                 }
             }
         }
