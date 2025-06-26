@@ -1,0 +1,140 @@
+openapi: "3.0.2"
+info:
+  title: Endpoint Storage API
+  description: Endpoint Storage API
+  version: "1.0"
+  license:
+    name: "Apache"
+    url: https://github.com/neondatabase/neon/blob/main/LICENSE
+servers:
+  - url: ""
+paths:
+  /status:
+    description: Healthcheck endpoint
+    get:
+      description: Healthcheck
+      security: []
+      responses:
+        "200":
+          description: OK
+
+  /{tenant_id}/{timeline_id}/{endpoint_id}/{key}:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: endpoint_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: key
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      description: Get file from blob storage
+      responses:
+        "200":
+          content:
+            application/octet-stream
+        "400":
+          description: File was not found
+        "403":
+          description: JWT does not authorize request to this route
+    put:
+      description: Insert file into blob storage. If file exists, override it
+      requestBody:
+        content:
+          application/octet-stream
+      responses:
+        "200":
+          content:
+            application/octet-stream
+        "403":
+          description: JWT does not authorize request to this route
+    delete:
+      description: Delete file from blob storage
+      responses:
+        "200":
+          description: File was successfully deleted or not found
+        "403":
+          description: JWT does not authorize request to this route
+
+  /{tenant_id}/{timeline_id}/{endpoint_id}:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: endpoint_id
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      description: Delete endpoint data from blob storage
+      responses:
+        "200":
+          description: Endpoint data was deleted
+        "403":
+          description: JWT does not authorize request to this route
+
+  /{tenant_id}/{timeline_id}:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      description: Delete timeline data from blob storage
+      responses:
+        "200":
+          description: Timeline data was deleted
+        "403":
+          description: JWT does not authorize request to this route
+
+  /{tenant_id}:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      description: Delete tenant data from blob storage
+      responses:
+        "200":
+          description: Tenant data was deleted
+        "403":
+          description: JWT does not authorize request to this route
+
+components:
+  securitySchemes:
+    JWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+security:
+  - JWT: []
