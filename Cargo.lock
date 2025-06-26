@@ -4408,6 +4408,7 @@ dependencies = [
  "postgres_backend",
  "postgres_ffi_types",
  "postgres_versioninfo",
+ "posthog_client_lite",
  "rand 0.8.5",
  "remote_storage",
  "reqwest",
