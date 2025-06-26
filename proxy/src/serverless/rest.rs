@@ -92,6 +92,13 @@ static JSON_SCHEMA: &str = r#"
     }
 "#;
 
+static DB_SCHEMA: std::sync::LazyLock<DbSchema> = std::sync::LazyLock::new(|| {
+    let mut schema = serde_json::from_str::<DbSchema>(JSON_SCHEMA)
+        .expect("Failed to parse hardcoded JSON schema");
+    schema.use_internal_permissions = false;
+    schema
+});
+
 
 pub(super) static NEON_REQUEST_ID: HeaderName = HeaderName::from_static("neon-request-id");
 
@@ -606,7 +613,7 @@ pub(crate) async fn handle(
             ctx.set_success();
 
             // Handling the error response from local proxy here
-            if config.authentication_config.is_auth_broker && r.status().is_server_error() {
+            if config.rest_config.is_rest_broker && r.status().is_server_error() {
                 let status = r.status();
 
                 let body_bytes = r
@@ -802,11 +809,7 @@ async fn handle_rest_inner(
     // hardcoded values for now, these should come from a config per tenant
     let max_http_body_size = 10 * 1024 * 1024; // 10MB limit
     let db_schemas = Vec::from(["test".to_string()]); // list of schemas available for the api
-    let mut db_schema_parsed = serde_json::from_str::<DbSchema>(JSON_SCHEMA) // database schema shape (will come from introspection)
-        .map_err(|e| RestError::SubzeroCore(JsonDeserialize {source:e }))?;
-    //let disable_internal_permissions = true; // in the context of neon we emulate postgrest (so no internal permissions checks)
-    db_schema_parsed.use_internal_permissions = false; // TODO: change the introspection query to auto set this to false depending on params
-    let db_schema = &db_schema_parsed;
+    let db_schema = &*DB_SCHEMA; // use the global static schema
     let api_prefix = "/rest/v1/";
     let db_extra_search_path = "public, extensions".to_string();
     let role_claim_key = ".role".to_string();
