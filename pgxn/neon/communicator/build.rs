@@ -2,6 +2,10 @@ use std::env;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    println!("cargo:rustc-link-lib=framework=Security");
+    println!("cargo:rustc-link-lib=framework=CoreFoundation");
+    println!("cargo:rustc-link-lib=framework=CoreServices");
+    println!("cargo:rustc-link-lib=framework=IOKit");
 
     cbindgen::generate(crate_dir).map_or_else(
         |error| match error {

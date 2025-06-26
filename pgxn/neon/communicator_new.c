@@ -661,7 +661,7 @@ retry:
 					ereport(ERROR,
 							(errcode_for_file_access(),
 							 errmsg("could not read block %lu in local cache file: %m",
-									cached_block)));
+									(unsigned long)cached_block)));
 				bytes_total += nbytes;
 			}
 		}

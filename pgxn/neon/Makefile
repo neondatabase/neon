@@ -29,6 +29,7 @@ OBJS = \
 PG_CPPFLAGS = -I$(libpq_srcdir)
 SHLIB_LINK_INTERNAL = $(libpq)
 SHLIB_LINK = -lcurl
+SHLIB_LINK += -framework Security -framework CoreFoundation -framework CoreServices -framework IOKit -framework SystemConfiguration
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S), Darwin)
