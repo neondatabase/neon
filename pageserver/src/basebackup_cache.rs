@@ -155,7 +155,7 @@ impl BasebackupCache {
             match e {
                 TrySendError::Full(_) => {
                     // Basebackup prepares are pretty rare, normally we should not hit this.
-                    tracing::warn!(
+                    tracing::info!(
                         tenant_id = %tenant_shard_id.tenant_id,
                         %timeline_id,
                         %lsn,

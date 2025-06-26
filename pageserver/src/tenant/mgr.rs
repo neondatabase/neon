@@ -2897,9 +2897,13 @@ mod tests {
 
     use super::super::harness::TenantHarness;
     use super::TenantsMap;
-    use crate::{basebackup_cache::BasebackupCache, tenant::{
-        mgr::{BackgroundPurges, TenantManager, TenantSlot}, TenantSharedResources
-    }};
+    use crate::{
+        basebackup_cache::BasebackupCache,
+        tenant::{
+            TenantSharedResources,
+            mgr::{BackgroundPurges, TenantManager, TenantSlot},
+        },
+    };
 
     #[tokio::test(start_paused = true)]
     async fn shutdown_awaits_in_progress_tenant() {
