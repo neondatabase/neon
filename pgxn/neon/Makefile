@@ -31,7 +31,7 @@ SHLIB_LINK_INTERNAL = $(libpq)
 SHLIB_LINK = -lcurl
 
 UNAME_S := $(shell uname -s)
-ifeq ($(shell uname), Darwin)
+ifeq ($(UNAME_S), Darwin)
     SHLIB_LINK += -framework Security -framework CoreFoundation -framework SystemConfiguration
 endif
 
