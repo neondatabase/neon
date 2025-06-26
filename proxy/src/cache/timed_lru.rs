@@ -54,7 +54,7 @@ pub(crate) struct TimedLru<K, V> {
 impl<K: Hash + Eq, V> Cache for TimedLru<K, V> {
     type Key = K;
     type Value = V;
-    type LookupInfo<Key> = LookupInfo<Key>;
+    type LookupInfo<Key> = Key;
 
     fn invalidate(&self, info: &Self::LookupInfo<K>) {
         self.invalidate_raw(info);
@@ -87,30 +87,24 @@ impl<K: Hash + Eq, V> TimedLru<K, V> {
 
     /// Drop an entry from the cache if it's outdated.
     #[tracing::instrument(level = "debug", fields(cache = self.name), skip_all)]
-    fn invalidate_raw(&self, info: &LookupInfo<K>) {
-        let now = Instant::now();
-
+    fn invalidate_raw(&self, key: &K) {
         // Do costly things before taking the lock.
         let mut cache = self.cache.lock();
-        let raw_entry = match cache.raw_entry_mut().from_key(&info.key) {
+        let entry = match cache.raw_entry_mut().from_key(key) {
             RawEntryMut::Vacant(_) => return,
-            RawEntryMut::Occupied(x) => x,
+            RawEntryMut::Occupied(x) => x.remove(),
         };
-
-        // Remove the entry if it was created prior to lookup timestamp.
-        let entry = raw_entry.get();
-        let (created_at, expires_at) = (entry.created_at, entry.expires_at);
-        let should_remove = created_at <= info.created_at || expires_at <= now;
-
-        if should_remove {
-            raw_entry.remove();
-        }
-
         drop(cache); // drop lock before logging
+
+        let Entry {
+            created_at,
+            expires_at,
+            ..
+        } = entry;
+
         debug!(
-            created_at = format_args!("{created_at:?}"),
-            expires_at = format_args!("{expires_at:?}"),
-            entry_removed = should_remove,
+            ?created_at,
+            ?expires_at,
             "processed a cache entry invalidation event"
         );
     }
@@ -211,10 +205,10 @@ impl<K: Hash + Eq + Clone, V: Clone> TimedLru<K, V> {
     }
 
     pub(crate) fn insert_unit(&self, key: K, value: V) -> (Option<V>, Cached<&Self, ()>) {
-        let (created_at, old) = self.insert_raw(key.clone(), value);
+        let (_, old) = self.insert_raw(key.clone(), value);
 
         let cached = Cached {
-            token: Some((self, LookupInfo { created_at, key })),
+            token: Some((self, key)),
             value: (),
         };
 
@@ -229,28 +223,9 @@ impl<K: Hash + Eq, V: Clone> TimedLru<K, V> {
         K: Borrow<Q> + Clone,
         Q: Hash + Eq + ?Sized,
     {
-        self.get_raw(key, |key, entry| {
-            let info = LookupInfo {
-                created_at: entry.created_at,
-                key: key.clone(),
-            };
-
-            Cached {
-                token: Some((self, info)),
-                value: entry.value.clone(),
-            }
+        self.get_raw(key, |key, entry| Cached {
+            token: Some((self, key.clone())),
+            value: entry.value.clone(),
         })
     }
-}
-
-/// Lookup information for key invalidation.
-pub(crate) struct LookupInfo<K> {
-    /// Time of creation of a cache [`Entry`].
-    /// We use this during invalidation lookups to prevent eviction of a newer
-    /// entry sharing the same key (it might've been inserted by a different
-    /// task after we got the entry we're trying to invalidate now).
-    created_at: Instant,
-
-    /// Search by this key.
-    key: K,
 }
