@@ -490,5 +490,29 @@ where
 		inner.alloc_limit = INVALID_POS;
 		
 		Ok(())
-	}	
+	}
+
+	#[cfg(feature = "stats")]
+	pub fn dict_len(&self) -> usize {
+		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+		map.inner.dictionary.len()
+	}
+	
+	#[cfg(feature = "stats")]
+	pub fn chain_distribution(&self) -> (Vec<(usize, usize)>, usize) {
+		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+		let mut out = Vec::new();
+		let mut max = 0;
+		for (i, d) in map.inner.dictionary.iter().enumerate() {
+			let mut curr = *d;
+			let mut len = 0;
+			while curr != INVALID_POS {
+				curr = map.inner.buckets[curr as usize].next;
+				len += 1;
+			}
+			out.push((i, len));
+			max = max.max(len);
+		}
+		(out, max)
+	}
 }
