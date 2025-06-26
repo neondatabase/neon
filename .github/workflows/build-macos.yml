@@ -94,11 +94,6 @@ jobs:
         run: |
           make "neon-pg-ext-${{ matrix.postgres-version }}" -j$(sysctl -n hw.ncpu)
 
-      - name: Get postgres headers ${{ matrix.postgres-version }}
-        if: steps.cache_pg.outputs.cache-hit != 'true'
-        run: |
-          make postgres-headers-${{ matrix.postgres-version }} -j$(sysctl -n hw.ncpu)
-
       - name: Upload "pg_install/${{ matrix.postgres-version }}" artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
