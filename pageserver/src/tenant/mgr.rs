@@ -2254,10 +2254,9 @@ impl TenantManager {
                             return ShardResolveResult::Found(tenant.clone());
                         }
                         ShardSelector::Page(key) => {
-                            // First slot we see for this tenant, calculate the expected shard number
-                            // for the key: we will use this for checking if this and subsequent
-                            // slots contain the key, rather than recalculating the hash each time.
-                            // HADRON: we need to recompute hash when the shard count changes!
+                            // Each time we find an attached slot with a different shard count,
+                            // recompute the expected shard number: during shard splits we might
+                            // have multiple shards with the old shard count.
                             if want_shard.is_none()
                                 || want_shard.unwrap().shard_count != tenant.shard_identity.count
                             {

@@ -360,11 +360,10 @@ impl<T: Types> Cache<T> {
                     // Retry on tenant manager error to handle tenant split more gracefully
                     if attempt < GET_MAX_RETRIES {
                         tracing::warn!(
-                            "Fail to resolve tennat shard in attempt {}: {:?}. Retrying...",
+                            "Fail to resolve tenant shard in attempt {}: {:?}. Retrying...",
                             attempt,
                             e
                         );
-                        self.map.clear();
                         tokio::time::sleep(RETRY_BACKOFF).await;
                         continue;
                     } else {
@@ -922,8 +921,13 @@ mod tests {
             .await
             .err()
             .expect("documented behavior: can't get new handle after shutdown");
-        // HADRON: the cache will be cleaned up upon errors
-        assert_eq!(cache.map.len(), 0, "cache is clear upon errors");
+
+        assert_eq!(cache.map.len(), 1, "next access cleans up the cache");
+
+        cache
+            .get(timeline_b.id, ShardSelector::Page(key), &mgr)
+            .await
+            .expect("we still have it");
     }
 
     fn make_relation_key_for_shard(shard: ShardNumber, params: ShardParameters) -> Key {

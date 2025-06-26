@@ -116,7 +116,9 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     # Too many frozen layers error is normal during intensive benchmarks
     ".*too many frozen layers.*",
     # Transient errors when resolving tenant shards by page service
-    ".*Fail to resolve tennat shard in attempt.*",
+    ".*Fail to resolve tenant shard in attempt.*",
+    # Expected warnings when pageserver has not refreshed GC info yet
+    ".*pitr LSN/interval not found, skipping force image creation LSN calculation.*",
     *(
         [
             r".*your platform is not a supported production platform, ignoing request for O_DIRECT; this could hide alignment bugs.*"
