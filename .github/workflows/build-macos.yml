@@ -64,9 +64,7 @@ jobs:
         id: cache_pg
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
-          path: |
-            pg_install/${{ matrix.postgres-version }}
-            build/${{ matrix.postgres-version }}
+          path: pg-build-${{ matrix.postgres-version }}.tar
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-build-${{ matrix.postgres-version }}-${{ steps.pg_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Checkout submodule vendor/postgres-${{ matrix.postgres-version }}
@@ -91,13 +89,19 @@ jobs:
         run: |
           make postgres-${{ matrix.postgres-version }} -j$(sysctl -n hw.ncpu)
 
+      # `actions/download-artifact` doesn't preserve permissions:
+      # https://github.com/actions/download-artifact?tab=readme-ov-file#permission-loss
+      # It also doesn't support symbolic links.
+      - name: Build artifact tarball
+        if: steps.cache_pg.outputs.cache-hit != 'true'
+        run: |
+          tar cf pg-build-${{ matrix.postgres-version }}.tar --exclude="*.o" pg_install build
+
       - name: Upload "pg-build--${{ matrix.postgres-version }}" artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: pg-build--${{ matrix.postgres-version }}
-          path: |
-            pg_install/${{ matrix.postgres-version }}
-            build/${{ matrix.postgres-version }}
+          path: pg-build-${{ matrix.postgres-version }}.tar
           # The artifact is supposed to be used by the next job in the same workflow,
           # so there’s no need to store it for too long.
           retention-days: 1
@@ -126,35 +130,15 @@ jobs:
         with:
           submodules: true
 
-      - name: Download "pg-build--v14" artifact
+      - name: Download "pg-build" artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: pg-build--v14
-          path: .
+          pattern: pg-build--*
+          merge-multiple: true
+          path: pg-build-tarballs
 
-      - name: Download "pg-build--v15" artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: pg-build--v15
-          path: .
-
-      - name: Download "pg-build--v16" artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: pg-build--v16
-          path: .
-
-      - name: Download "pg-build--v17" artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: pg-build--v17
-          path: .
-
-      # `actions/download-artifact` doesn't preserve permissions:
-      # https://github.com/actions/download-artifact?tab=readme-ov-file#permission-loss
-      - name: Make pg_install/v*/bin/* executable
-        run: |
-          chmod +x pg_install/v*/bin/* build/v*/src/timezone/zic
+      - name: Extract pg-build tarballs
+        run: find pg-build-tarballs -name "*.tar" -print0 | xargs -0 -n1 tar xvf
 
       # Explicitly update the rust toolchain before running 'make'. The parallel make build can
       # invoke 'cargo build' more than once in parallel, for different crates.  That's OK, 'cargo'
