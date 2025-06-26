@@ -7,8 +7,8 @@ POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install/
 # CARGO_BUILD_FLAGS: Extra flags to pass to `cargo build`. `--locked`
 # and `--features testing` are popular examples.
 #
-# CARGO_PROFILE: You can also set to override the cargo profile to
-# use. By default, it is derived from BUILD_TYPE.
+# CARGO_PROFILE: Set to override the cargo profile to use. By default,
+# it is derived from BUILD_TYPE.
 
 # All intermediate build artifacts are stored here.
 BUILD_DIR := build
