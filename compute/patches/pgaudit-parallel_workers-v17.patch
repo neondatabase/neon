@@ -1,0 +1,143 @@
+commit 8d02e4c6c5e1e8676251b0717a46054267091cb4
+Author: Tristan Partin <tristan.partin@databricks.com>
+Date:   2025-06-23 02:09:31 +0000
+
+    Disable logging in parallel workers
+    
+    When a query uses parallel workers, pgaudit will log the same query for
+    every parallel worker. This is undesireable since it can result in log
+    amplification for queries that use parallel workers.
+    
+    Signed-off-by: Tristan Partin <tristan.partin@databricks.com>
+
+diff --git a/expected/pgaudit.out b/expected/pgaudit.out
+index d696287..4b1059a 100644
+--- a/expected/pgaudit.out
++++ b/expected/pgaudit.out
+@@ -2568,6 +2568,37 @@ DROP SERVER fdw_server;
+ NOTICE:  AUDIT: SESSION,11,1,DDL,DROP SERVER,,,DROP SERVER fdw_server,<not logged>
+ DROP EXTENSION postgres_fdw;
+ NOTICE:  AUDIT: SESSION,12,1,DDL,DROP EXTENSION,,,DROP EXTENSION postgres_fdw,<not logged>
++--
++-- Test logging in parallel workers
++SET pgaudit.log = 'read';
++SET pgaudit.log_client = on;
++SET pgaudit.log_level = 'notice';
++-- Force parallel execution for testing
++SET max_parallel_workers_per_gather = 2;
++SET parallel_tuple_cost = 0;
++SET parallel_setup_cost = 0;
++SET min_parallel_table_scan_size = 0;
++SET min_parallel_index_scan_size = 0;
++-- Create table with enough data to trigger parallel execution
++CREATE TABLE parallel_test (id int, data text);
++INSERT INTO parallel_test SELECT generate_series(1, 1000), 'test data';
++SELECT count(*) FROM parallel_test;
++NOTICE:  AUDIT: SESSION,13,1,READ,SELECT,,,SELECT count(*) FROM parallel_test,<not logged>
++ count 
++-------
++  1000
++(1 row)
++
++-- Cleanup parallel test
++DROP TABLE parallel_test;
++RESET max_parallel_workers_per_gather;
++RESET parallel_tuple_cost;
++RESET parallel_setup_cost;
++RESET min_parallel_table_scan_size;
++RESET min_parallel_index_scan_size;
++RESET pgaudit.log;
++RESET pgaudit.log_client;
++RESET pgaudit.log_level;
+ -- Cleanup
+ -- Set client_min_messages up to warning to avoid noise
+ SET client_min_messages = 'warning';
+diff --git a/pgaudit.c b/pgaudit.c
+index 1764af1..0e48875 100644
+--- a/pgaudit.c
++++ b/pgaudit.c
+@@ -11,6 +11,7 @@
+ #include "postgres.h"
+ 
+ #include "access/htup_details.h"
++#include "access/parallel.h"
+ #include "access/sysattr.h"
+ #include "access/xact.h"
+ #include "access/relation.h"
+@@ -1406,7 +1407,7 @@ pgaudit_ExecutorStart_hook(QueryDesc *queryDesc, int eflags)
+ {
+     AuditEventStackItem *stackItem = NULL;
+ 
+-    if (!internalStatement)
++    if (!internalStatement && !IsParallelWorker())
+     {
+         /* Push the audit event onto the stack */
+         stackItem = stack_push();
+@@ -1489,7 +1490,7 @@ pgaudit_ExecutorCheckPerms_hook(List *rangeTabls, List *permInfos, bool abort)
+ 
+     /* Log DML if the audit role is valid or session logging is enabled */
+     if ((auditOid != InvalidOid || auditLogBitmap != 0) &&
+-        !IsAbortedTransactionBlockState())
++        !IsAbortedTransactionBlockState() && !IsParallelWorker())
+     {
+         /* If auditLogRows is on, wait for rows processed to be set */
+         if (auditLogRows && auditEventStack != NULL)
+@@ -1544,7 +1545,7 @@ pgaudit_ExecutorRun_hook(QueryDesc *queryDesc, ScanDirection direction, uint64 c
+     else
+         standard_ExecutorRun(queryDesc, direction, count, execute_once);
+ 
+-    if (auditLogRows && !internalStatement)
++    if (auditLogRows && !internalStatement && !IsParallelWorker())
+     {
+         /* Find an item from the stack by the query memory context */
+         stackItem = stack_find_context(queryDesc->estate->es_query_cxt);
+@@ -1564,7 +1565,7 @@ pgaudit_ExecutorEnd_hook(QueryDesc *queryDesc)
+     AuditEventStackItem *stackItem = NULL;
+     AuditEventStackItem *auditEventStackFull = NULL;
+ 
+-    if (auditLogRows && !internalStatement)
++    if (auditLogRows && !internalStatement && !IsParallelWorker())
+     {
+         /* Find an item from the stack by the query memory context */
+         stackItem = stack_find_context(queryDesc->estate->es_query_cxt);
+diff --git a/sql/pgaudit.sql b/sql/pgaudit.sql
+index e161f01..c873098 100644
+--- a/sql/pgaudit.sql
++++ b/sql/pgaudit.sql
+@@ -1637,6 +1637,36 @@ DROP USER MAPPING FOR regress_user1 SERVER fdw_server;
+ DROP SERVER fdw_server;
+ DROP EXTENSION postgres_fdw;
+ 
++--
++-- Test logging in parallel workers
++SET pgaudit.log = 'read';
++SET pgaudit.log_client = on;
++SET pgaudit.log_level = 'notice';
++
++-- Force parallel execution for testing
++SET max_parallel_workers_per_gather = 2;
++SET parallel_tuple_cost = 0;
++SET parallel_setup_cost = 0;
++SET min_parallel_table_scan_size = 0;
++SET min_parallel_index_scan_size = 0;
++
++-- Create table with enough data to trigger parallel execution
++CREATE TABLE parallel_test (id int, data text);
++INSERT INTO parallel_test SELECT generate_series(1, 1000), 'test data';
++
++SELECT count(*) FROM parallel_test;
++
++-- Cleanup parallel test
++DROP TABLE parallel_test;
++RESET max_parallel_workers_per_gather;
++RESET parallel_tuple_cost;
++RESET parallel_setup_cost;
++RESET min_parallel_table_scan_size;
++RESET min_parallel_index_scan_size;
++RESET pgaudit.log;
++RESET pgaudit.log_client;
++RESET pgaudit.log_level;
++
+ -- Cleanup
+ -- Set client_min_messages up to warning to avoid noise
+ SET client_min_messages = 'warning';
