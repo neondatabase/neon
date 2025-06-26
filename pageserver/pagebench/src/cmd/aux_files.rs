@@ -62,7 +62,7 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
     let tenant_shard_id = TenantShardId::unsharded(timeline.tenant_id);
     let timeline_id = timeline.timeline_id;
 
-    println!("operating on timeline {}", timeline);
+    println!("operating on timeline {timeline}");
 
     mgmt_api_client
         .set_tenant_config(&TenantConfigRequest {
@@ -75,8 +75,8 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
         let items = (0..100)
             .map(|id| {
                 (
-                    format!("pg_logical/mappings/{:03}.{:03}", batch, id),
-                    format!("{:08}", id),
+                    format!("pg_logical/mappings/{batch:03}.{id:03}"),
+                    format!("{id:08}"),
                 )
             })
             .collect::<HashMap<_, _>>();

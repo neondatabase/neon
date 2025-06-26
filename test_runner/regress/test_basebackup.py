@@ -26,6 +26,10 @@ def test_basebackup_cache(neon_env_builder: NeonEnvBuilder):
     ps = env.pageserver
     ps_http = ps.http_client()
 
+    storcon_managed_timelines = (env.storage_controller_config or {}).get(
+        "timelines_onto_safekeepers", False
+    )
+
     # 1. Check that we always hit the cache after compute restart.
     for i in range(3):
         ep.start()
@@ -33,15 +37,26 @@ def test_basebackup_cache(neon_env_builder: NeonEnvBuilder):
 
         def check_metrics(i=i):
             metrics = ps_http.get_metrics()
-            # Never miss.
-            # The first time compute_ctl sends `get_basebackup` with lsn=None, we do not cache such requests.
-            # All other requests should be a hit
-            assert (
-                metrics.query_one(
-                    "pageserver_basebackup_cache_read_total", {"result": "miss"}
-                ).value
-                == 0
-            )
+            if storcon_managed_timelines:
+                # We do not cache the initial basebackup yet,
+                # so the first compute startup should be a miss.
+                assert (
+                    metrics.query_one(
+                        "pageserver_basebackup_cache_read_total", {"result": "miss"}
+                    ).value
+                    == 1
+                )
+            else:
+                # If the timeline is not initialized on safekeeprs,
+                # the compute_ctl sends `get_basebackup` with lsn=None for the first startup.
+                # We do not use cache for such requests, so it's niether a hit nor a miss.
+                assert (
+                    metrics.query_one(
+                        "pageserver_basebackup_cache_read_total", {"result": "miss"}
+                    ).value
+                    == 0
+                )
+
             # All but the first requests are hits.
             assert (
                 metrics.query_one("pageserver_basebackup_cache_read_total", {"result": "hit"}).value
@@ -54,6 +69,11 @@ def test_basebackup_cache(neon_env_builder: NeonEnvBuilder):
                 ).value
                 == i + 1
             )
+            # There should be only one basebackup file in the cache.
+            assert metrics.query_one("pageserver_basebackup_cache_entries_total").value == 1
+            # The size of one basebackup for new DB is ~20KB.
+            size_bytes = metrics.query_one("pageserver_basebackup_cache_size_bytes").value
+            assert 10 * 1024 <= size_bytes <= 100 * 1024
 
         wait_until(check_metrics)
 

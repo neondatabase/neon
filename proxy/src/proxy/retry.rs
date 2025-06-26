@@ -99,17 +99,15 @@ impl ShouldRetryWakeCompute for postgres_client::Error {
 impl CouldRetry for compute::ConnectionError {
     fn could_retry(&self) -> bool {
         match self {
-            compute::ConnectionError::Postgres(err) => err.could_retry(),
-            compute::ConnectionError::CouldNotConnect(err) => err.could_retry(),
+            compute::ConnectionError::TlsError(err) => err.could_retry(),
             compute::ConnectionError::WakeComputeError(err) => err.could_retry(),
-            _ => false,
+            compute::ConnectionError::TooManyConnectionAttempts(_) => false,
         }
     }
 }
 impl ShouldRetryWakeCompute for compute::ConnectionError {
     fn should_retry_wake_compute(&self) -> bool {
         match self {
-            compute::ConnectionError::Postgres(err) => err.should_retry_wake_compute(),
             // the cache entry was not checked for validity
             compute::ConnectionError::TooManyConnectionAttempts(_) => false,
             _ => true,

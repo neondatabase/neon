@@ -146,8 +146,6 @@ def run_benchmark(env: NeonEnv, pg_bin: PgBin, record, duration_secs: int):
         ps_http.base_url,
         "--page-service-connstring",
         env.pageserver.connstr(password=None),
-        "--gzip-probability",
-        "1",
         "--runtime",
         f"{duration_secs}s",
         # don't specify the targets explicitly, let pagebench auto-discover them

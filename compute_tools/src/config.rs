@@ -51,7 +51,7 @@ pub fn write_postgres_conf(
 
     // Write the postgresql.conf content from the spec file as is.
     if let Some(conf) = &spec.cluster.postgresql_conf {
-        writeln!(file, "{}", conf)?;
+        writeln!(file, "{conf}")?;
     }
 
     // Add options for connecting to storage
@@ -70,7 +70,7 @@ pub fn write_postgres_conf(
         );
         // If generation is given, prepend sk list with g#number:
         if let Some(generation) = spec.safekeepers_generation {
-            write!(neon_safekeepers_value, "g#{}:", generation)?;
+            write!(neon_safekeepers_value, "g#{generation}:")?;
         }
         neon_safekeepers_value.push_str(&spec.safekeeper_connstrings.join(","));
         writeln!(
@@ -109,8 +109,8 @@ pub fn write_postgres_conf(
         tls::update_key_path_blocking(pgdata_path, tls_config);
 
         // these are the default, but good to be explicit.
-        writeln!(file, "ssl_cert_file = '{}'", SERVER_CRT)?;
-        writeln!(file, "ssl_key_file = '{}'", SERVER_KEY)?;
+        writeln!(file, "ssl_cert_file = '{SERVER_CRT}'")?;
+        writeln!(file, "ssl_key_file = '{SERVER_KEY}'")?;
     }
 
     // Locales
@@ -191,8 +191,7 @@ pub fn write_postgres_conf(
                 }
                 writeln!(
                     file,
-                    "shared_preload_libraries='{}{}'",
-                    libs, extra_shared_preload_libraries
+                    "shared_preload_libraries='{libs}{extra_shared_preload_libraries}'"
                 )?;
             } else {
                 // Typically, this should be unreacheable,
@@ -244,8 +243,7 @@ pub fn write_postgres_conf(
                 }
                 writeln!(
                     file,
-                    "shared_preload_libraries='{}{}'",
-                    libs, extra_shared_preload_libraries
+                    "shared_preload_libraries='{libs}{extra_shared_preload_libraries}'"
                 )?;
             } else {
                 // Typically, this should be unreacheable,
@@ -263,7 +261,7 @@ pub fn write_postgres_conf(
         }
     }
 
-    writeln!(file, "neon.extension_server_port={}", extension_server_port)?;
+    writeln!(file, "neon.extension_server_port={extension_server_port}")?;
 
     if spec.drop_subscriptions_before_start {
         writeln!(file, "neon.disable_logical_replication_subscribers=true")?;
@@ -291,7 +289,7 @@ where
 {
     let path = pgdata_path.join("compute_ctl_temp_override.conf");
     let mut file = File::create(path)?;
-    write!(file, "{}", options)?;
+    write!(file, "{options}")?;
 
     let res = exec();
 

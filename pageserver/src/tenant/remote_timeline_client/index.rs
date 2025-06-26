@@ -427,8 +427,8 @@ impl GcBlocking {
 
 #[cfg(test)]
 mod tests {
+    use postgres_ffi::PgMajorVersion;
     use std::str::FromStr;
-
     use utils::id::TimelineId;
 
     use super::*;
@@ -831,7 +831,7 @@ mod tests {
                 Lsn::INVALID,
                 Lsn::from_str("0/1696070").unwrap(),
                 Lsn::from_str("0/1696070").unwrap(),
-                14,
+                PgMajorVersion::PG14,
             ).with_recalculated_checksum().unwrap(),
             deleted_at: Some(parse_naive_datetime("2023-07-31T09:00:00.123000000")),
             archived_at: None,
@@ -893,7 +893,7 @@ mod tests {
                 Lsn::INVALID,
                 Lsn::from_str("0/1696070").unwrap(),
                 Lsn::from_str("0/1696070").unwrap(),
-                14,
+                PgMajorVersion::PG14,
             ).with_recalculated_checksum().unwrap(),
             deleted_at: Some(parse_naive_datetime("2023-07-31T09:00:00.123000000")),
             archived_at: Some(parse_naive_datetime("2023-04-29T09:00:00.123000000")),
@@ -957,7 +957,7 @@ mod tests {
                 Lsn::INVALID,
                 Lsn::from_str("0/1696070").unwrap(),
                 Lsn::from_str("0/1696070").unwrap(),
-                14,
+                PgMajorVersion::PG14,
             ).with_recalculated_checksum().unwrap(),
             deleted_at: None,
             lineage: Default::default(),
@@ -1033,7 +1033,7 @@ mod tests {
                 Lsn::INVALID,
                 Lsn::from_str("0/1696070").unwrap(),
                 Lsn::from_str("0/1696070").unwrap(),
-                14,
+                PgMajorVersion::PG14,
             ).with_recalculated_checksum().unwrap(),
             deleted_at: None,
             lineage: Default::default(),
@@ -1114,7 +1114,7 @@ mod tests {
                 Lsn::INVALID,
                 Lsn::from_str("0/1696070").unwrap(),
                 Lsn::from_str("0/1696070").unwrap(),
-                14,
+                PgMajorVersion::PG14,
             ).with_recalculated_checksum().unwrap(),
             deleted_at: None,
             lineage: Default::default(),
@@ -1199,7 +1199,7 @@ mod tests {
                 Lsn::INVALID,
                 Lsn::from_str("0/1696070").unwrap(),
                 Lsn::from_str("0/1696070").unwrap(),
-                14,
+                PgMajorVersion::PG14,
             ).with_recalculated_checksum().unwrap(),
             deleted_at: None,
             lineage: Default::default(),
@@ -1287,7 +1287,7 @@ mod tests {
                 Lsn::INVALID,
                 Lsn::from_str("0/1696070").unwrap(),
                 Lsn::from_str("0/1696070").unwrap(),
-                14,
+                PgMajorVersion::PG14,
             ).with_recalculated_checksum().unwrap(),
             deleted_at: None,
             lineage: Default::default(),

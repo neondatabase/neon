@@ -201,7 +201,7 @@ pub async fn run() -> anyhow::Result<()> {
         auth_backend,
         http_listener,
         shutdown.clone(),
-        Arc::new(CancellationHandler::new(&config.connect_to_compute, None)),
+        Arc::new(CancellationHandler::new(&config.connect_to_compute)),
         endpoint_rate_limiter,
     );
 
@@ -279,7 +279,6 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
         },
         proxy_protocol_v2: config::ProxyProtocolV2::Rejected,
         handshake_timeout: Duration::from_secs(10),
-        region: "local".into(),
         wake_compute_retry_config: RetryConfig::parse(RetryConfig::WAKE_COMPUTE_DEFAULT_VALUES)?,
         connect_compute_locks,
         connect_to_compute: compute_config,

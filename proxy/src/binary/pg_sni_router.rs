@@ -28,10 +28,9 @@ use crate::context::RequestContext;
 use crate::metrics::{Metrics, ThreadPoolMetrics};
 use crate::pqproto::FeStartupPacket;
 use crate::protocol2::ConnectionInfo;
-use crate::proxy::{
-    ErrorSource, TlsRequired, copy_bidirectional_client_compute, run_until_cancelled,
-};
+use crate::proxy::{ErrorSource, TlsRequired, copy_bidirectional_client_compute};
 use crate::stream::{PqStream, Stream};
+use crate::util::run_until_cancelled;
 
 project_git_version!(GIT_VERSION);
 
@@ -237,7 +236,6 @@ pub(super) async fn task_main(
                         extra: None,
                     },
                     crate::metrics::Protocol::SniRouter,
-                    "sni",
                 );
                 handle_client(ctx, dest_suffix, tls_config, compute_tls_config, socket).await
             }

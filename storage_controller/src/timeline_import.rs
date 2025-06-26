@@ -195,7 +195,7 @@ impl UpcallClient {
         let authorization_header = config
             .control_plane_jwt_token
             .clone()
-            .map(|jwt| format!("Bearer {}", jwt));
+            .map(|jwt| format!("Bearer {jwt}"));
 
         let client = reqwest::ClientBuilder::new()
             .timeout(IMPORT_COMPLETE_REQUEST_TIMEOUT)

@@ -1,0 +1,37 @@
+diff --git a/regress/core/tests.mk b/regress/core/tests.mk
+index 3abd7bc..64a9254 100644
+--- a/regress/core/tests.mk
++++ b/regress/core/tests.mk
+@@ -144,11 +144,6 @@ TESTS_SLOW = \
+ 	$(top_srcdir)/regress/core/concave_hull_hard \
+ 	$(top_srcdir)/regress/core/knn_recheck
+ 
+-ifeq ($(shell expr "$(POSTGIS_PGSQL_VERSION)" ">=" 120),1)
+-	TESTS += \
+-		$(top_srcdir)/regress/core/computed_columns
+-endif
+-
+ ifeq ($(shell expr "$(POSTGIS_GEOS_VERSION)" ">=" 30700),1)
+ 	# GEOS-3.7 adds:
+ 	# ST_FrechetDistance
+diff --git a/regress/runtest.mk b/regress/runtest.mk
+index c051f03..010e493 100644
+--- a/regress/runtest.mk
++++ b/regress/runtest.mk
+@@ -24,16 +24,6 @@ check-regress:
+ 
+ 	POSTGIS_TOP_BUILD_DIR=$(abs_top_builddir) $(PERL) $(top_srcdir)/regress/run_test.pl $(RUNTESTFLAGS) $(RUNTESTFLAGS_INTERNAL) $(TESTS)
+ 
+-	@if echo "$(RUNTESTFLAGS)" | grep -vq -- --upgrade; then \
+-		echo "Running upgrade test as RUNTESTFLAGS did not contain that"; \
+-		POSTGIS_TOP_BUILD_DIR=$(abs_top_builddir) $(PERL) $(top_srcdir)/regress/run_test.pl \
+-      --upgrade \
+-      $(RUNTESTFLAGS) \
+-      $(RUNTESTFLAGS_INTERNAL) \
+-      $(TESTS); \
+-	else \
+-		echo "Skipping upgrade test as RUNTESTFLAGS already requested upgrades"; \
+-	fi
+ 
+ check-long:
+ 	$(PERL) $(top_srcdir)/regress/run_test.pl $(RUNTESTFLAGS) $(TESTS) $(TESTS_SLOW)

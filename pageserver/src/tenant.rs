@@ -38,6 +38,7 @@ use pageserver_api::models::{
     WalRedoManagerStatus,
 };
 use pageserver_api::shard::{ShardIdentity, ShardStripeSize, TenantShardId};
+use postgres_ffi::PgMajorVersion;
 use remote_storage::{DownloadError, GenericRemoteStorage, TimeoutOrCancel};
 use remote_timeline_client::index::GcCompactionState;
 use remote_timeline_client::manifest::{
@@ -51,6 +52,7 @@ use secondary::heatmap::{HeatMapTenant, HeatMapTimeline};
 use storage_broker::BrokerClientChannel;
 use timeline::compaction::{CompactionOutcome, GcCompactionQueue};
 use timeline::import_pgdata::ImportingTimeline;
+use timeline::layer_manager::LayerManagerLockHolder;
 use timeline::offload::{OffloadError, offload_timeline};
 use timeline::{
     CompactFlags, CompactOptions, CompactionError, PreviousHeatmap, ShutdownMode, import_pgdata,
@@ -78,7 +80,7 @@ use self::timeline::uninit::{TimelineCreateGuard, TimelineExclusionError, Uninit
 use self::timeline::{
     EvictionTaskTenantState, GcCutoffs, TimelineDeleteProgress, TimelineResources, WaitLsnError,
 };
-use crate::basebackup_cache::BasebackupPrepareSender;
+use crate::basebackup_cache::BasebackupCache;
 use crate::config::PageServerConf;
 use crate::context;
 use crate::context::RequestContextBuilder;
@@ -89,7 +91,8 @@ use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::{
     BROKEN_TENANTS_SET, CIRCUIT_BREAKERS_BROKEN, CIRCUIT_BREAKERS_UNBROKEN, CONCURRENT_INITDBS,
     INITDB_RUN_TIME, INITDB_SEMAPHORE_ACQUISITION_TIME, TENANT, TENANT_OFFLOADED_TIMELINES,
-    TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC, remove_tenant_metrics,
+    TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC, TIMELINE_STATE_METRIC,
+    remove_tenant_metrics,
 };
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::LocationMode;
@@ -159,7 +162,7 @@ pub struct TenantSharedResources {
     pub remote_storage: GenericRemoteStorage,
     pub deletion_queue_client: DeletionQueueClient,
     pub l0_flush_global_state: L0FlushGlobalState,
-    pub basebackup_prepare_sender: BasebackupPrepareSender,
+    pub basebackup_cache: Arc<BasebackupCache>,
     pub feature_resolver: FeatureResolver,
 }
 
@@ -328,7 +331,7 @@ pub struct TenantShard {
     deletion_queue_client: DeletionQueueClient,
 
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
-    basebackup_prepare_sender: BasebackupPrepareSender,
+    basebackup_cache: Arc<BasebackupCache>,
 
     /// Cached logical sizes updated updated on each [`TenantShard::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
@@ -494,8 +497,8 @@ impl WalRedoManager {
         key: pageserver_api::key::Key,
         lsn: Lsn,
         base_img: Option<(Lsn, bytes::Bytes)>,
-        records: Vec<(Lsn, pageserver_api::record::NeonWalRecord)>,
-        pg_version: u32,
+        records: Vec<(Lsn, wal_decoder::models::record::NeonWalRecord)>,
+        pg_version: PgMajorVersion,
         redo_attempt_type: RedoAttemptType,
     ) -> Result<bytes::Bytes, walredo::Error> {
         match self {
@@ -544,6 +547,28 @@ pub struct OffloadedTimeline {
 
     /// Part of the `OffloadedTimeline` object's lifecycle: this needs to be set before we drop it
     pub deleted_from_ancestor: AtomicBool,
+
+    _metrics_guard: OffloadedTimelineMetricsGuard,
+}
+
+/// Increases the offloaded timeline count metric when created, and decreases when dropped.
+struct OffloadedTimelineMetricsGuard;
+
+impl OffloadedTimelineMetricsGuard {
+    fn new() -> Self {
+        TIMELINE_STATE_METRIC
+            .with_label_values(&["offloaded"])
+            .inc();
+        Self
+    }
+}
+
+impl Drop for OffloadedTimelineMetricsGuard {
+    fn drop(&mut self) {
+        TIMELINE_STATE_METRIC
+            .with_label_values(&["offloaded"])
+            .dec();
+    }
 }
 
 impl OffloadedTimeline {
@@ -576,6 +601,8 @@ impl OffloadedTimeline {
 
             delete_progress: timeline.delete_progress.clone(),
             deleted_from_ancestor: AtomicBool::new(false),
+
+            _metrics_guard: OffloadedTimelineMetricsGuard::new(),
         })
     }
     fn from_manifest(tenant_shard_id: TenantShardId, manifest: &OffloadedTimelineManifest) -> Self {
@@ -595,6 +622,7 @@ impl OffloadedTimeline {
             archived_at,
             delete_progress: TimelineDeleteProgress::default(),
             deleted_from_ancestor: AtomicBool::new(false),
+            _metrics_guard: OffloadedTimelineMetricsGuard::new(),
         }
     }
     fn manifest(&self) -> OffloadedTimelineManifest {
@@ -906,7 +934,7 @@ pub(crate) enum CreateTimelineParams {
 pub(crate) struct CreateTimelineParamsBootstrap {
     pub(crate) new_timeline_id: TimelineId,
     pub(crate) existing_initdb_timeline_id: Option<TimelineId>,
-    pub(crate) pg_version: u32,
+    pub(crate) pg_version: PgMajorVersion,
 }
 
 /// NB: See comment on [`CreateTimelineIdempotency::Branch`] for why there's no `pg_version` here.
@@ -944,7 +972,7 @@ pub(crate) enum CreateTimelineIdempotency {
     /// NB: special treatment, see comment in [`Self`].
     FailWithConflict,
     Bootstrap {
-        pg_version: u32,
+        pg_version: PgMajorVersion,
     },
     /// NB: branches always have the same `pg_version` as their ancestor.
     /// While [`pageserver_api::models::TimelineCreateRequestMode::Branch::pg_version`]
@@ -1289,7 +1317,7 @@ impl TenantShard {
                         ancestor.is_some()
                             || timeline
                                 .layers
-                                .read()
+                                .read(LayerManagerLockHolder::LoadLayerMap)
                                 .await
                                 .layer_map()
                                 .expect(
@@ -1335,7 +1363,7 @@ impl TenantShard {
             remote_storage,
             deletion_queue_client,
             l0_flush_global_state,
-            basebackup_prepare_sender,
+            basebackup_cache,
             feature_resolver,
         } = resources;
 
@@ -1352,7 +1380,7 @@ impl TenantShard {
             remote_storage.clone(),
             deletion_queue_client,
             l0_flush_global_state,
-            basebackup_prepare_sender,
+            basebackup_cache,
             feature_resolver,
         ));
 
@@ -1832,6 +1860,29 @@ impl TenantShard {
             }
         }
 
+        // At this point we've initialized all timelines and are tracking them.
+        // Now compute the layer visibility for all (not offloaded) timelines.
+        let compute_visiblity_for = {
+            let timelines_accessor = self.timelines.lock().unwrap();
+            let mut timelines_offloaded_accessor = self.timelines_offloaded.lock().unwrap();
+
+            timelines_offloaded_accessor.extend(offloaded_timelines_list.into_iter());
+
+            // Before activation, populate each Timeline's GcInfo with information about its children
+            self.initialize_gc_info(&timelines_accessor, &timelines_offloaded_accessor, None);
+
+            timelines_accessor.values().cloned().collect::<Vec<_>>()
+        };
+
+        for tl in compute_visiblity_for {
+            tl.update_layer_visibility().await.with_context(|| {
+                format!(
+                    "failed initial timeline visibility computation {} for tenant {}",
+                    tl.timeline_id, self.tenant_shard_id
+                )
+            })?;
+        }
+
         // Walk through deleted timelines, resume deletion
         for (timeline_id, index_part, remote_timeline_client) in timelines_to_resume_deletions {
             remote_timeline_client
@@ -1850,10 +1901,6 @@ impl TenantShard {
             .await
             .context("resume_deletion")
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
-        }
-        {
-            let mut offloaded_timelines_accessor = self.timelines_offloaded.lock().unwrap();
-            offloaded_timelines_accessor.extend(offloaded_timelines_list.into_iter());
         }
 
         // Stash the preloaded tenant manifest, and upload a new manifest if changed.
@@ -2495,7 +2542,7 @@ impl TenantShard {
         self: &Arc<Self>,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         ctx: &RequestContext,
     ) -> anyhow::Result<(UninitializedTimeline, RequestContext)> {
         anyhow::ensure!(
@@ -2547,7 +2594,7 @@ impl TenantShard {
         self: &Arc<Self>,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let (uninit_tl, ctx) = self
@@ -2586,7 +2633,7 @@ impl TenantShard {
         self: &Arc<Self>,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         ctx: &RequestContext,
         in_memory_layer_desc: Vec<timeline::InMemoryLayerTestDesc>,
         delta_layer_desc: Vec<timeline::DeltaLayerTestDesc>,
@@ -2617,7 +2664,7 @@ impl TenantShard {
         }
         let layer_names = tline
             .layers
-            .read()
+            .read(LayerManagerLockHolder::Testing)
             .await
             .layer_map()
             .unwrap()
@@ -2852,7 +2899,7 @@ impl TenantShard {
                     Lsn(0),
                     initdb_lsn,
                     initdb_lsn,
-                    15,
+                    PgMajorVersion::PG15,
                 );
                 this.prepare_new_timeline(
                     new_timeline_id,
@@ -3132,7 +3179,12 @@ impl TenantShard {
 
         for timeline in &compact {
             // Collect L0 counts. Can't await while holding lock above.
-            if let Ok(lm) = timeline.layers.read().await.layer_map() {
+            if let Ok(lm) = timeline
+                .layers
+                .read(LayerManagerLockHolder::Compaction)
+                .await
+                .layer_map()
+            {
                 l0_counts.insert(timeline.timeline_id, lm.level0_deltas().len());
             }
         }
@@ -3398,7 +3450,7 @@ impl TenantShard {
             use pageserver_api::models::ActivatingFrom;
             match &*current_state {
                 TenantState::Activating(_) | TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping { .. } => {
-                    panic!("caller is responsible for calling activate() only on Loading / Attaching tenants, got {state:?}", state = current_state);
+                    panic!("caller is responsible for calling activate() only on Loading / Attaching tenants, got {current_state:?}");
                 }
                 TenantState::Attaching => {
                     *current_state = TenantState::Activating(ActivatingFrom::Attaching);
@@ -3416,9 +3468,6 @@ impl TenantShard {
             let timelines_to_activate = timelines_accessor
                 .values()
                 .filter(|timeline| !(timeline.is_broken() || timeline.is_stopping()));
-
-            // Before activation, populate each Timeline's GcInfo with information about its children
-            self.initialize_gc_info(&timelines_accessor, &timelines_offloaded_accessor, None);
 
             // Spawn gc and compaction loops. The loops will shut themselves
             // down when they notice that the tenant is inactive.
@@ -4331,7 +4380,7 @@ impl TenantShard {
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
         l0_flush_global_state: L0FlushGlobalState,
-        basebackup_prepare_sender: BasebackupPrepareSender,
+        basebackup_cache: Arc<BasebackupCache>,
         feature_resolver: FeatureResolver,
     ) -> TenantShard {
         assert!(!attached_conf.location.generation.is_none());
@@ -4436,7 +4485,7 @@ impl TenantShard {
             ongoing_timeline_detach: std::sync::Mutex::default(),
             gc_block: Default::default(),
             l0_flush_global_state,
-            basebackup_prepare_sender,
+            basebackup_cache,
             feature_resolver,
         }
     }
@@ -4874,7 +4923,7 @@ impl TenantShard {
         }
         let layer_names = tline
             .layers
-            .read()
+            .read(LayerManagerLockHolder::Testing)
             .await
             .layer_map()
             .unwrap()
@@ -5042,7 +5091,7 @@ impl TenantShard {
     pub(crate) async fn bootstrap_timeline_test(
         self: &Arc<Self>,
         timeline_id: TimelineId,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         load_existing_initdb: Option<TimelineId>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
@@ -5184,7 +5233,7 @@ impl TenantShard {
     async fn bootstrap_timeline(
         self: &Arc<Self>,
         timeline_id: TimelineId,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         load_existing_initdb: Option<TimelineId>,
         ctx: &RequestContext,
     ) -> Result<CreateTimelineResult, CreateTimelineError> {
@@ -5365,7 +5414,7 @@ impl TenantShard {
             pagestream_throttle_metrics: self.pagestream_throttle_metrics.clone(),
             l0_compaction_trigger: self.l0_compaction_trigger.clone(),
             l0_flush_global_state: self.l0_flush_global_state.clone(),
-            basebackup_prepare_sender: self.basebackup_prepare_sender.clone(),
+            basebackup_cache: self.basebackup_cache.clone(),
             feature_resolver: self.feature_resolver.clone(),
         }
     }
@@ -5722,7 +5771,7 @@ impl TenantShard {
 async fn run_initdb(
     conf: &'static PageServerConf,
     initdb_target_dir: &Utf8Path,
-    pg_version: u32,
+    pg_version: PgMajorVersion,
     cancel: &CancellationToken,
 ) -> Result<(), InitdbError> {
     let initdb_bin_path = conf
@@ -5804,10 +5853,10 @@ pub(crate) mod harness {
     use once_cell::sync::OnceCell;
     use pageserver_api::key::Key;
     use pageserver_api::models::ShardParameters;
-    use pageserver_api::record::NeonWalRecord;
     use pageserver_api::shard::ShardIndex;
     use utils::id::TenantId;
     use utils::logging;
+    use wal_decoder::models::record::NeonWalRecord;
 
     use super::*;
     use crate::deletion_queue::mock::MockDeletionQueue;
@@ -5951,7 +6000,7 @@ pub(crate) mod harness {
         ) -> anyhow::Result<Arc<TenantShard>> {
             let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
 
-            let (basebackup_requst_sender, _) = tokio::sync::mpsc::unbounded_channel();
+            let (basebackup_cache, _) = BasebackupCache::new(Utf8PathBuf::new(), None);
 
             let tenant = Arc::new(TenantShard::new(
                 TenantState::Attaching,
@@ -5969,7 +6018,7 @@ pub(crate) mod harness {
                 self.deletion_queue.new_client(),
                 // TODO: ideally we should run all unit tests with both configs
                 L0FlushGlobalState::new(L0FlushConfig::default()),
-                basebackup_requst_sender,
+                basebackup_cache,
                 FeatureResolver::new_disabled(),
             ));
 
@@ -6003,7 +6052,7 @@ pub(crate) mod harness {
             lsn: Lsn,
             base_img: Option<(Lsn, Bytes)>,
             records: Vec<(Lsn, NeonWalRecord)>,
-            _pg_version: u32,
+            _pg_version: PgMajorVersion,
             _redo_attempt_type: RedoAttemptType,
         ) -> Result<Bytes, walredo::Error> {
             let records_neon = records.iter().all(|r| apply_neon::can_apply_in_neon(&r.1));
@@ -6062,9 +6111,6 @@ mod tests {
     #[cfg(feature = "testing")]
     use pageserver_api::keyspace::KeySpaceRandomAccum;
     use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
-    #[cfg(feature = "testing")]
-    use pageserver_api::record::NeonWalRecord;
-    use pageserver_api::value::Value;
     use pageserver_compaction::helpers::overlaps_with;
     #[cfg(feature = "testing")]
     use rand::SeedableRng;
@@ -6085,6 +6131,9 @@ mod tests {
     use timeline::{CompactOptions, DeltaLayerTestDesc, VersionedKeySpaceQuery};
     use utils::id::TenantId;
     use utils::shard::{ShardCount, ShardNumber};
+    #[cfg(feature = "testing")]
+    use wal_decoder::models::record::NeonWalRecord;
+    use wal_decoder::models::value::Value;
 
     use super::*;
     use crate::DEFAULT_PG_VERSION;
@@ -6175,7 +6224,7 @@ mod tests {
     async fn randomize_timeline(
         tenant: &Arc<TenantShard>,
         new_timeline_id: TimelineId,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         spec: TestTimelineSpecification,
         random: &mut rand::rngs::StdRng,
         ctx: &RequestContext,
@@ -6568,7 +6617,7 @@ mod tests {
                 .put(
                     *TEST_KEY,
                     lsn,
-                    &Value::Image(test_img(&format!("foo at {}", lsn))),
+                    &Value::Image(test_img(&format!("foo at {lsn}"))),
                     ctx,
                 )
                 .await?;
@@ -6578,7 +6627,7 @@ mod tests {
                 .put(
                     *TEST_KEY,
                     lsn,
-                    &Value::Image(test_img(&format!("foo at {}", lsn))),
+                    &Value::Image(test_img(&format!("foo at {lsn}"))),
                     ctx,
                 )
                 .await?;
@@ -6592,7 +6641,7 @@ mod tests {
                 .put(
                     *TEST_KEY,
                     lsn,
-                    &Value::Image(test_img(&format!("foo at {}", lsn))),
+                    &Value::Image(test_img(&format!("foo at {lsn}"))),
                     ctx,
                 )
                 .await?;
@@ -6602,7 +6651,7 @@ mod tests {
                 .put(
                     *TEST_KEY,
                     lsn,
-                    &Value::Image(test_img(&format!("foo at {}", lsn))),
+                    &Value::Image(test_img(&format!("foo at {lsn}"))),
                     ctx,
                 )
                 .await?;
@@ -6944,7 +6993,7 @@ mod tests {
             .await?;
         make_some_layers(tline.as_ref(), Lsn(0x20), &ctx).await?;
 
-        let layer_map = tline.layers.read().await;
+        let layer_map = tline.layers.read(LayerManagerLockHolder::Testing).await;
         let level0_deltas = layer_map
             .layer_map()?
             .level0_deltas()
@@ -7101,7 +7150,7 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                         ctx,
                     )
                     .await?;
@@ -7180,7 +7229,7 @@ mod tests {
         let lsn = Lsn(0x10);
         let inserted = bulk_insert_compact_gc(&tenant, &tline, &ctx, lsn, 50, 10000).await?;
 
-        let guard = tline.layers.read().await;
+        let guard = tline.layers.read(LayerManagerLockHolder::Testing).await;
         let lm = guard.layer_map()?;
 
         lm.dump(true, &ctx).await?;
@@ -7389,7 +7438,7 @@ mod tests {
             .put(
                 gap_at_key,
                 current_lsn,
-                &Value::Image(test_img(&format!("{} at {}", gap_at_key, current_lsn))),
+                &Value::Image(test_img(&format!("{gap_at_key} at {current_lsn}"))),
                 &ctx,
             )
             .await?;
@@ -7428,7 +7477,7 @@ mod tests {
                 .put(
                     current_key,
                     current_lsn,
-                    &Value::Image(test_img(&format!("{} at {}", current_key, current_lsn))),
+                    &Value::Image(test_img(&format!("{current_key} at {current_lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -7536,7 +7585,7 @@ mod tests {
             while key < end_key {
                 current_lsn += 0x10;
 
-                let image_value = format!("{} at {}", child_gap_at_key, current_lsn);
+                let image_value = format!("{child_gap_at_key} at {current_lsn}");
 
                 let mut writer = parent_timeline.writer().await;
                 writer
@@ -7579,7 +7628,7 @@ mod tests {
                 .put(
                     key,
                     current_lsn,
-                    &Value::Image(test_img(&format!("{} at {}", key, current_lsn))),
+                    &Value::Image(test_img(&format!("{key} at {current_lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -7700,7 +7749,7 @@ mod tests {
                 .put(
                     test_key,
                     lsn,
-                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -7721,7 +7770,7 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                         &ctx,
                     )
                     .await?;
@@ -7735,7 +7784,7 @@ mod tests {
                 test_key.field6 = blknum as u32;
                 assert_eq!(
                     tline.get(test_key, lsn, &ctx).await?,
-                    test_img(&format!("{} at {}", blknum, last_lsn))
+                    test_img(&format!("{blknum} at {last_lsn}"))
                 );
             }
 
@@ -7781,7 +7830,7 @@ mod tests {
                 .put(
                     test_key,
                     lsn,
-                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -7810,11 +7859,11 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                         &ctx,
                     )
                     .await?;
-                println!("updating {} at {}", blknum, lsn);
+                println!("updating {blknum} at {lsn}");
                 writer.finish_write(lsn);
                 drop(writer);
                 updated[blknum] = lsn;
@@ -7825,7 +7874,7 @@ mod tests {
                 test_key.field6 = blknum as u32;
                 assert_eq!(
                     tline.get(test_key, lsn, &ctx).await?,
-                    test_img(&format!("{} at {}", blknum, last_lsn))
+                    test_img(&format!("{blknum} at {last_lsn}"))
                 );
             }
 
@@ -7878,11 +7927,11 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} {} at {}", idx, blknum, lsn))),
+                        &Value::Image(test_img(&format!("{idx} {blknum} at {lsn}"))),
                         &ctx,
                     )
                     .await?;
-                println!("updating [{}][{}] at {}", idx, blknum, lsn);
+                println!("updating [{idx}][{blknum}] at {lsn}");
                 writer.finish_write(lsn);
                 drop(writer);
                 updated[idx][blknum] = lsn;
@@ -8088,7 +8137,7 @@ mod tests {
                 .put(
                     test_key,
                     lsn,
-                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -8105,7 +8154,7 @@ mod tests {
                 test_key.field6 = (blknum * STEP) as u32;
                 assert_eq!(
                     tline.get(test_key, lsn, &ctx).await?,
-                    test_img(&format!("{} at {}", blknum, last_lsn))
+                    test_img(&format!("{blknum} at {last_lsn}"))
                 );
             }
 
@@ -8142,7 +8191,7 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                         &ctx,
                     )
                     .await?;
@@ -8208,12 +8257,23 @@ mod tests {
             tline.freeze_and_flush().await?; // force create a delta layer
         }
 
-        let before_num_l0_delta_files =
-            tline.layers.read().await.layer_map()?.level0_deltas().len();
+        let before_num_l0_delta_files = tline
+            .layers
+            .read(LayerManagerLockHolder::Testing)
+            .await
+            .layer_map()?
+            .level0_deltas()
+            .len();
 
         tline.compact(&cancel, EnumSet::default(), &ctx).await?;
 
-        let after_num_l0_delta_files = tline.layers.read().await.layer_map()?.level0_deltas().len();
+        let after_num_l0_delta_files = tline
+            .layers
+            .read(LayerManagerLockHolder::Testing)
+            .await
+            .layer_map()?
+            .level0_deltas()
+            .len();
 
         assert!(
             after_num_l0_delta_files < before_num_l0_delta_files,
@@ -8384,7 +8444,7 @@ mod tests {
                 .put(
                     test_key,
                     lsn,
-                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -8404,7 +8464,7 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                         &ctx,
                     )
                     .await?;
@@ -9325,12 +9385,7 @@ mod tests {
         let end_lsn = Lsn(0x100);
         let image_layers = (0x20..=0x90)
             .step_by(0x10)
-            .map(|n| {
-                (
-                    Lsn(n),
-                    vec![(key, test_img(&format!("data key at {:x}", n)))],
-                )
-            })
+            .map(|n| (Lsn(n), vec![(key, test_img(&format!("data key at {n:x}")))]))
             .collect();
 
         let timeline = tenant

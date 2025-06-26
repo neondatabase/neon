@@ -89,7 +89,7 @@ pub fn wal_stream_connection_config(
         .set_password(args.auth_token.map(|s| s.to_owned()));
 
     if let Some(availability_zone) = args.availability_zone {
-        connstr = connstr.extend_options([format!("availability_zone={}", availability_zone)]);
+        connstr = connstr.extend_options([format!("availability_zone={availability_zone}")]);
     }
 
     Ok(connstr)

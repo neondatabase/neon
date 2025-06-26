@@ -31,6 +31,7 @@ use anyhow::Context;
 pub use azure_core::Etag;
 use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
+pub use config::TypedRemoteStorageKind;
 pub use error::{DownloadError, TimeTravelError, TimeoutOrCancel};
 use futures::StreamExt;
 use futures::stream::Stream;
@@ -440,6 +441,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
         timestamp: SystemTime,
         done_if_after: SystemTime,
         cancel: &CancellationToken,
+        complexity_limit: Option<NonZeroU32>,
     ) -> Result<(), TimeTravelError>;
 }
 
@@ -651,22 +653,23 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         timestamp: SystemTime,
         done_if_after: SystemTime,
         cancel: &CancellationToken,
+        complexity_limit: Option<NonZeroU32>,
     ) -> Result<(), TimeTravelError> {
         match self {
             Self::LocalFs(s) => {
-                s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
+                s.time_travel_recover(prefix, timestamp, done_if_after, cancel, complexity_limit)
                     .await
             }
             Self::AwsS3(s) => {
-                s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
+                s.time_travel_recover(prefix, timestamp, done_if_after, cancel, complexity_limit)
                     .await
             }
             Self::AzureBlob(s) => {
-                s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
+                s.time_travel_recover(prefix, timestamp, done_if_after, cancel, complexity_limit)
                     .await
             }
             Self::Unreliable(s) => {
-                s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
+                s.time_travel_recover(prefix, timestamp, done_if_after, cancel, complexity_limit)
                     .await
             }
         }
@@ -674,6 +677,15 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
 }
 
 impl GenericRemoteStorage {
+    pub async fn from_storage_kind(kind: TypedRemoteStorageKind) -> anyhow::Result<Self> {
+        Self::from_config(&RemoteStorageConfig {
+            storage: kind.into(),
+            timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
+            small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT,
+        })
+        .await
+    }
+
     pub async fn from_config(storage_config: &RemoteStorageConfig) -> anyhow::Result<Self> {
         let timeout = storage_config.timeout;
 

@@ -130,7 +130,7 @@ fn try_acquire_lsn_lease(
         lsn: Lsn,
     ) -> Result<Option<SystemTime>> {
         let mut client = config.connect(NoTls)?;
-        let cmd = format!("lease lsn {} {} {} ", tenant_shard_id, timeline_id, lsn);
+        let cmd = format!("lease lsn {tenant_shard_id} {timeline_id} {lsn} ");
         let res = client.simple_query(&cmd)?;
         let msg = match res.first() {
             Some(msg) => msg,

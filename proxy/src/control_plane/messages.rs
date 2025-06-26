@@ -227,12 +227,35 @@ pub(crate) struct UserFacingMessage {
 #[derive(Deserialize)]
 pub(crate) struct GetEndpointAccessControl {
     pub(crate) role_secret: Box<str>,
-    pub(crate) allowed_ips: Option<Vec<IpPattern>>,
-    pub(crate) allowed_vpc_endpoint_ids: Option<Vec<String>>,
+
     pub(crate) project_id: Option<ProjectIdInt>,
     pub(crate) account_id: Option<AccountIdInt>,
+
+    pub(crate) allowed_ips: Option<Vec<IpPattern>>,
+    pub(crate) allowed_vpc_endpoint_ids: Option<Vec<String>>,
     pub(crate) block_public_connections: Option<bool>,
     pub(crate) block_vpc_connections: Option<bool>,
+
+    #[serde(default)]
+    pub(crate) rate_limits: EndpointRateLimitConfig,
+}
+
+#[derive(Copy, Clone, Deserialize, Default)]
+pub struct EndpointRateLimitConfig {
+    pub connection_attempts: ConnectionAttemptsLimit,
+}
+
+#[derive(Copy, Clone, Deserialize, Default)]
+pub struct ConnectionAttemptsLimit {
+    pub tcp: Option<LeakyBucketSetting>,
+    pub ws: Option<LeakyBucketSetting>,
+    pub http: Option<LeakyBucketSetting>,
+}
+
+#[derive(Copy, Clone, Deserialize)]
+pub struct LeakyBucketSetting {
+    pub rps: f64,
+    pub burst: f64,
 }
 
 /// Response which holds compute node's `host:port` pair.

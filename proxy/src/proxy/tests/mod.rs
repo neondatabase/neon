@@ -19,17 +19,14 @@ use tracing_test::traced_test;
 
 use super::retry::CouldRetry;
 use super::*;
-use crate::auth::backend::{
-    ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned,
-};
+use crate::auth::backend::{ComputeUserInfo, MaybeOwned};
 use crate::config::{ComputeConfig, RetryConfig};
 use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
 use crate::control_plane::{self, CachedNodeInfo, NodeInfo, NodeInfoCache};
 use crate::error::ErrorKind;
-use crate::pglb::connect_compute::ConnectMechanism;
+use crate::proxy::connect_compute::ConnectMechanism;
 use crate::tls::client_config::compute_client_config_with_certs;
-use crate::tls::postgres_rustls::MakeRustlsConnect;
 use crate::tls::server_config::CertResolver;
 use crate::types::{BranchId, EndpointId, ProjectId};
 use crate::{sasl, scram};
@@ -72,13 +69,14 @@ struct ClientConfig<'a> {
     hostname: &'a str,
 }
 
-type TlsConnect<S> = <MakeRustlsConnect as MakeTlsConnect<S>>::TlsConnect;
+type TlsConnect<S> = <ComputeConfig as MakeTlsConnect<S>>::TlsConnect;
 
 impl ClientConfig<'_> {
     fn make_tls_connect(self) -> anyhow::Result<TlsConnect<DuplexStream>> {
-        let mut mk = MakeRustlsConnect::new(self.config);
-        let tls = MakeTlsConnect::<DuplexStream>::make_tls_connect(&mut mk, self.hostname)?;
-        Ok(tls)
+        Ok(crate::tls::postgres_rustls::make_tls_connect(
+            &self.config,
+            self.hostname,
+        )?)
     }
 }
 
@@ -201,7 +199,7 @@ async fn handshake_tls_is_enforced_by_proxy() -> anyhow::Result<()> {
         .user("john_doe")
         .dbname("earth")
         .ssl_mode(SslMode::Disable)
-        .connect_raw(server, NoTls)
+        .tls_and_authenticate(server, NoTls)
         .await
         .err() // -> Option<E>
         .context("client shouldn't be able to connect")?;
@@ -230,7 +228,7 @@ async fn handshake_tls() -> anyhow::Result<()> {
         .user("john_doe")
         .dbname("earth")
         .ssl_mode(SslMode::Require)
-        .connect_raw(server, client_config.make_tls_connect()?)
+        .tls_and_authenticate(server, client_config.make_tls_connect()?)
         .await?;
 
     proxy.await?
@@ -247,7 +245,7 @@ async fn handshake_raw() -> anyhow::Result<()> {
         .dbname("earth")
         .set_param("options", "project=generic-project-name")
         .ssl_mode(SslMode::Prefer)
-        .connect_raw(server, NoTls)
+        .tls_and_authenticate(server, NoTls)
         .await?;
 
     proxy.await?
@@ -295,7 +293,7 @@ async fn scram_auth_good(#[case] password: &str) -> anyhow::Result<()> {
         .dbname("db")
         .password(password)
         .ssl_mode(SslMode::Require)
-        .connect_raw(server, client_config.make_tls_connect()?)
+        .tls_and_authenticate(server, client_config.make_tls_connect()?)
         .await?;
 
     proxy.await?
@@ -319,7 +317,7 @@ async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
         .dbname("db")
         .password("password")
         .ssl_mode(SslMode::Require)
-        .connect_raw(server, client_config.make_tls_connect()?)
+        .tls_and_authenticate(server, client_config.make_tls_connect()?)
         .await?;
 
     proxy.await?
@@ -346,7 +344,7 @@ async fn scram_auth_mock() -> anyhow::Result<()> {
         .dbname("db")
         .password(&password) // no password will match the mocked secret
         .ssl_mode(SslMode::Require)
-        .connect_raw(server, client_config.make_tls_connect()?)
+        .tls_and_authenticate(server, client_config.make_tls_connect()?)
         .await
         .err() // -> Option<E>
         .context("client shouldn't be able to connect")?;
@@ -497,8 +495,6 @@ impl ConnectMechanism for TestConnectMechanism {
             x => panic!("expecting action {x:?}, connect is called instead"),
         }
     }
-
-    fn update_connect_config(&self, _conf: &mut compute::ConnCfg) {}
 }
 
 impl TestControlPlaneClient for TestConnectMechanism {
@@ -557,7 +553,12 @@ impl TestControlPlaneClient for TestConnectMechanism {
 
 fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {
     let node = NodeInfo {
-        config: compute::ConnCfg::new("test".to_owned(), 5432),
+        conn_info: compute::ConnectInfo {
+            host: "test".into(),
+            port: 5432,
+            ssl_mode: SslMode::Disable,
+            host_addr: None,
+        },
         aux: MetricsAuxInfo {
             endpoint_id: (&EndpointId::from("endpoint")).into(),
             project_id: (&ProjectId::from("project")).into(),
@@ -572,16 +573,13 @@ fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeIn
 
 fn helper_create_connect_info(
     mechanism: &TestConnectMechanism,
-) -> auth::Backend<'static, ComputeCredentials> {
+) -> auth::Backend<'static, ComputeUserInfo> {
     auth::Backend::ControlPlane(
         MaybeOwned::Owned(ControlPlaneClient::Test(Box::new(mechanism.clone()))),
-        ComputeCredentials {
-            info: ComputeUserInfo {
-                endpoint: "endpoint".into(),
-                user: "user".into(),
-                options: NeonOptions::parse_options_raw(""),
-            },
-            keys: ComputeCredentialKeys::Password("password".into()),
+        ComputeUserInfo {
+            endpoint: "endpoint".into(),
+            user: "user".into(),
+            options: NeonOptions::parse_options_raw(""),
         },
     )
 }
