@@ -147,7 +147,11 @@ postgres-configure-v15: $(BUILD_DIR)/v15/config.status
 .PHONY: postgres-configure-v14
 postgres-configure-v14: $(BUILD_DIR)/v14/config.status
 
-# Install the PostgreSQL header files into $(POSTGRES_INSTALL_DIR)/<version>/include
+# Install just the PostgreSQL header files into $(POSTGRES_INSTALL_DIR)/<version>/include
+#
+# This is implicitly included in the 'postgres-%' rule, but this can be handy if you
+# want to just install the headers without building PostgreSQL, e.g. for building
+# extensions.
 .PHONY: postgres-headers-%
 postgres-headers-%: postgres-configure-%
 	+@echo "Installing PostgreSQL $* headers"
