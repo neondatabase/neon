@@ -560,9 +560,15 @@ async fn async_main() -> anyhow::Result<()> {
         let cancel_bg = cancel.clone();
         let task = tokio::task::spawn(
             async move {
-                let feature_flag_service = FeatureFlagService::new(service, posthog_config);
-                let feature_flag_service = Arc::new(feature_flag_service);
-                feature_flag_service.run(cancel_bg).await
+                match FeatureFlagService::new(service, posthog_config) {
+                    Ok(feature_flag_service) => {
+                        let feature_flag_service = Arc::new(feature_flag_service);
+                        feature_flag_service.run(cancel_bg).await
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to create feature flag service: {}", e);
+                    }
+                };
             }
             .instrument(tracing::info_span!("feature_flag_service")),
         );
