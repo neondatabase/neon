@@ -69,7 +69,7 @@ pub static BUILD_TAG: Lazy<String> = Lazy::new(|| {
         .unwrap_or(BUILD_TAG_DEFAULT)
         .to_string()
 });
-const DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL: u64 = 3600;
+const DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL: u64 = 60;
 
 /// Static configuration params that don't change after startup. These mostly
 /// come from the CLI args, or are derived from them.
