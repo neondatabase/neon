@@ -1453,6 +1453,7 @@ page_server_request(void const *req)
 			 * Cancellation in this code needs to be handled better at some
 			 * point, but this currently seems fine for now.
 			 */
+			prefetch_on_ps_disconnect();
 			page_server->disconnect(shard_no);
 			MyNeonCounters->pageserver_open_requests = 0;
 
