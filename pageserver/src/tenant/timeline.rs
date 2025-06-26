@@ -2507,6 +2507,30 @@ impl Timeline {
             .await
     }
 
+    /// Convenience method to attempt fetching a basebackup for the timeline if enabled and safe for
+    /// the given request parameters.
+    ///
+    /// TODO: consider moving this onto GrpcPageServiceHandler once the libpq handler is gone.
+    pub async fn get_cached_basebackup_if_enabled(
+        &self,
+        lsn: Option<Lsn>,
+        prev_lsn: Option<Lsn>,
+        full: bool,
+        replica: bool,
+        gzip: bool,
+    ) -> Option<tokio::fs::File> {
+        if !self.is_basebackup_cache_enabled() || !self.basebackup_cache.is_enabled() {
+            return None;
+        }
+        // We have to know which LSN to fetch the basebackup for.
+        let lsn = lsn?;
+        // We only cache gzipped, non-full basebackups for primary computes with automatic prev_lsn.
+        if prev_lsn.is_some() || full || replica || !gzip {
+            return None;
+        }
+        self.get_cached_basebackup(lsn).await
+    }
+
     /// Prepare basebackup for the given LSN and store it in the basebackup cache.
     /// The method is asynchronous and returns immediately.
     /// The actual basebackup preparation is performed in the background
