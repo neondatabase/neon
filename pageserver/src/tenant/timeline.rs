@@ -4658,6 +4658,16 @@ impl Timeline {
         mut layer_flush_start_rx: tokio::sync::watch::Receiver<(u64, Lsn)>,
         ctx: &RequestContext,
     ) {
+        // Always notify waiters about the flush loop exiting since the loop might stop
+        // when the timeline hasn't been cancelled.
+        let scopeguard_rx = layer_flush_start_rx.clone();
+        scopeguard::defer! {
+            let (flush_counter, _) = *scopeguard_rx.borrow();
+            let _ = self
+                .layer_flush_done_tx
+                .send_replace((flush_counter, Err(FlushLayerError::Cancelled)));
+        }
+
         // Subscribe to L0 delta layer updates, for compaction backpressure.
         let mut watch_l0 = match self
             .layers
@@ -4687,9 +4697,6 @@ impl Timeline {
             let result = loop {
                 if self.cancel.is_cancelled() {
                     info!("dropping out of flush loop for timeline shutdown");
-                    // Note: we do not bother transmitting into [`layer_flush_done_tx`], because
-                    // anyone waiting on that will respect self.cancel as well: they will stop
-                    // waiting at the same time we as drop out of this loop.
                     return;
                 }
 
