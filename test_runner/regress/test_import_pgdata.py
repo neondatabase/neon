@@ -1002,7 +1002,7 @@ def test_fast_import_event_triggers(
         res = conn.safe_psql("SELECT count(*) FROM pg_event_trigger;")
         log.info(f"Result: {res}")
         assert res[0][0] == 1, f"Expected 1 event trigger to be imported, got: {res[0][0]}"
-        
+
         conn.safe_psql("CREATE TABLE test_drop_table (id int);")
         conn.safe_psql("DROP TABLE test_drop_table;")
 
