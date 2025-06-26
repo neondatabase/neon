@@ -2146,12 +2146,13 @@ impl Timeline {
         // Regardless of whether we're going to try_freeze_and_flush
         // or not, stop ingesting any more data.
         let walreceiver = self.walreceiver.lock().unwrap().take();
-        tracing::debug!(
+        tracing::info!(
             is_some = walreceiver.is_some(),
             "Waiting for WalReceiverManager..."
         );
         if let Some(walreceiver) = walreceiver {
             walreceiver.shutdown().await;
+            tracing::info!("WalReceiverManager shut down");
         }
         // ... and inform any waiters for newer LSNs that there won't be any.
         self.last_record_lsn.shutdown();
@@ -2248,6 +2249,7 @@ impl Timeline {
         // As documented in remote_client.stop()'s doc comment, it's our responsibility
         // to shut down the upload queue tasks.
         // TODO: fix that, task management should be encapsulated inside remote_client.
+        tracing::info!("Waiting for remote uploads tasks...");
         task_mgr::shutdown_tasks(
             Some(TaskKind::RemoteUploadTask),
             Some(self.tenant_shard_id),
@@ -2256,12 +2258,13 @@ impl Timeline {
         .await;
 
         // TODO: work toward making this a no-op. See this function's doc comment for more context.
-        tracing::debug!("Waiting for tasks...");
+        tracing::info!("Waiting for tasks...");
         task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), Some(self.timeline_id)).await;
 
         {
             // Allow any remaining in-memory layers to do cleanup -- until that, they hold the gate
             // open.
+            tracing::info!("Waiting for layer manager shutdown...");
             let mut write_guard = self.write_lock.lock().await;
             self.layers
                 .write(LayerManagerLockHolder::Shutdown)
@@ -2273,6 +2276,7 @@ impl Timeline {
         //
         // TODO: once above shutdown_tasks is a no-op, we can close the gate before calling shutdown_tasks
         // and use a TBD variant of shutdown_tasks that asserts that there were no tasks left.
+        tracing::info!("Waiting for timeline gate close...");
         self.gate.close().await;
 
         self.metrics.shutdown();
@@ -4670,6 +4674,7 @@ impl Timeline {
         };
 
         info!("started flush loop");
+
         loop {
             tokio::select! {
                 _ = self.cancel.cancelled() => {
@@ -4684,13 +4689,12 @@ impl Timeline {
             // The highest LSN to which we flushed in the loop over frozen layers
             let mut flushed_to_lsn = Lsn(0);
 
-            let result = loop {
+            // Force not bailing early by wrapping the code into a closure.
+            #[allow(clippy::redundant_closure_call)]
+            let result = (async || { loop {
                 if self.cancel.is_cancelled() {
                     info!("dropping out of flush loop for timeline shutdown");
-                    // Note: we do not bother transmitting into [`layer_flush_done_tx`], because
-                    // anyone waiting on that will respect self.cancel as well: they will stop
-                    // waiting at the same time we as drop out of this loop.
-                    return;
+                    break Err(FlushLayerError::Cancelled);
                 }
 
                 // Break to notify potential waiters as soon as we've flushed the requested LSN. If
@@ -4703,8 +4707,8 @@ impl Timeline {
                 let (layer, l0_count, frozen_count, frozen_size) = {
                     let layers = self.layers.read(LayerManagerLockHolder::FlushLoop).await;
                     let Ok(lm) = layers.layer_map() else {
-                        info!("dropping out of flush loop for timeline shutdown");
-                        return;
+                        info!("dropping out of flush loop for layer map shutdown");
+                        break Err(FlushLayerError::Cancelled);
                     };
                     let l0_count = lm.level0_deltas().len();
                     let frozen_count = lm.frozen_layers.len();
@@ -4752,8 +4756,8 @@ impl Timeline {
                 match self.flush_frozen_layer(layer, ctx).await {
                     Ok(layer_lsn) => flushed_to_lsn = max(flushed_to_lsn, layer_lsn),
                     Err(FlushLayerError::Cancelled) => {
-                        info!("dropping out of flush loop for timeline shutdown");
-                        return;
+                        info!("dropping out of flush loop for remote client shutdown");
+                        break Err(FlushLayerError::Cancelled);
                     }
                     err @ Err(
                         FlushLayerError::NotRunning(_)
@@ -4794,7 +4798,7 @@ impl Timeline {
                         }
                     }
                 }
-            };
+            }})().await;
 
             // Unsharded tenants should never advance their LSN beyond the end of the
             // highest layer they write: such gaps between layer data and the frozen LSN
@@ -7406,7 +7410,7 @@ impl TimelineWriter<'_> {
 
         if let Some(wait_threshold) = wait_threshold {
             if l0_count >= wait_threshold {
-                debug!(
+                info!(
                     "layer roll waiting for flush due to compaction backpressure at {l0_count} L0 layers"
                 );
                 self.tl.wait_flush_completion(flush_id).await?;

@@ -66,7 +66,7 @@ pub(super) async fn connection_manager_loop_step(
     } {
         Ok(()) => {}
         Err(new_state) => {
-            debug!(
+            info!(
                 ?new_state,
                 "state changed, stopping wal connection manager loop"
             );
@@ -145,7 +145,7 @@ pub(super) async fn connection_manager_loop_step(
                     }
                     TaskEvent::End(walreceiver_task_result) => {
                         match walreceiver_task_result {
-                            Ok(()) => debug!("WAL receiving task finished"),
+                            Ok(()) => info!("WAL receiving task finished"),
                             Err(e) => error!("wal receiver task finished with an error: {e:?}"),
                         }
                         connection_manager_state.drop_old_connection(false).await;
