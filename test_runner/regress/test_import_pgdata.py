@@ -1001,7 +1001,10 @@ def test_fast_import_event_triggers(
         conn = PgProtocol(dsn=f"postgresql://cloud_admin@localhost:{pg_port}/neondb")
         res = conn.safe_psql("SELECT count(*) FROM pg_event_trigger;")
         log.info(f"Result: {res}")
-        assert res[0][0] == 0, f"Neon does not support importing event triggers, got: {res[0][0]}"
+        assert res[0][0] == 1, f"Expected 1 event trigger to be imported, got: {res[0][0]}"
+        
+        conn.safe_psql("CREATE TABLE test_drop_table (id int);")
+        conn.safe_psql("DROP TABLE test_drop_table;")
 
 
 def test_fast_import_restore_to_connstring(
