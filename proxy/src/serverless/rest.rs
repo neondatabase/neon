@@ -11,8 +11,8 @@ use hyper::body::Incoming;
 use hyper::http::{HeaderName, HeaderValue};
 use hyper::{HeaderMap, Request, Response, StatusCode};
 use indexmap::IndexMap;
-
-
+use serde::{Deserialize, Deserializer};
+use super::http_conn_pool::{self, HttpConnPool, Send, poll_http2_client};
 use serde_json::{value::RawValue, Value as JsonValue};
 
 use tokio_util::sync::CancellationToken;
@@ -38,11 +38,13 @@ use crate::pqproto::StartupMessageParams;
 use crate::proxy::NeonOptions;
 use crate::serverless::backend::HttpConnError;
 use crate::types::{DbName, RoleName};
+use crate::cache::{Cached, TimedLru};
+use crate::types::{EndpointCacheKey, EndpointId};
 
 use subzero_core::{
     api::{SingleVal, ListVal, Payload},
     error::Error::{self as SubzeroCoreError, JsonDeserialize, NotFound, JwtTokenInvalid, InternalError, GucHeadersError, GucStatusError, ContentTypeError},
-    schema::DbSchema,
+    schema::{DbSchema, DbSchemaOwned},
     formatter::{
         Param,
         Param::*,
@@ -50,6 +52,7 @@ use subzero_core::{
         Snippet, SqlParam,
     },
     dynamic_statement::{param, sql, JoinIterator},
+    config::{db_schemas, db_allowed_select_functions, role_claim_key, to_tuple},
 };
 use subzero_core::{
     api::{ContentType::*, Preferences, QueryNode::*, Representation, Resolution::*, },
@@ -91,6 +94,8 @@ static JSON_SCHEMA: &str = r#"
         ]
     }
 "#;
+const INTROSPECTION_SQL: &str = include_str!("../../../../subzero/introspection/postgresql_introspection_query.sql");
+const CONFIGURATION_SQL: &str = include_str!("../../../../subzero/introspection/postgresql_configuration_query.sql");
 
 static DB_SCHEMA: std::sync::LazyLock<DbSchema> = std::sync::LazyLock::new(|| {
     let mut schema = serde_json::from_str::<DbSchema>(JSON_SCHEMA)
@@ -99,12 +104,186 @@ static DB_SCHEMA: std::sync::LazyLock<DbSchema> = std::sync::LazyLock::new(|| {
     schema
 });
 
+fn deserialize_comma_separated<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    Ok(s.split(',')
+        .map(|s| s.trim().to_string())
+        .collect())
+}
 
+#[derive(Deserialize, Debug)]
+pub struct ApiConfig {
+    
+    #[serde(default = "db_schemas", deserialize_with = "deserialize_comma_separated")]
+    pub db_schemas: Vec<String>,
+    pub db_anon_role: Option<String>,
+    pub db_max_rows: Option<String>,
+    #[serde(default = "db_allowed_select_functions")]
+    pub db_allowed_select_functions: Vec<String>,
+    #[serde(deserialize_with = "to_tuple", default)]
+    pub db_pre_request: Option<(String, String)>,
+    #[serde(default = "role_claim_key")]
+    pub role_claim_key: String,
+}
+pub(crate) type DbSchemaCache = TimedLru<EndpointCacheKey, DbSchemaOwned>;
+pub(crate) type CachedSchema = Cached<&'static DbSchemaCache, DbSchemaOwned>;
+impl DbSchemaCache {
+    pub async fn get_remote(&self,
+        endpoint_id: &EndpointCacheKey, 
+        auth_header: &HeaderValue,
+        connection_string: &str,
+        client: &mut http_conn_pool::Client<Send>,
+        ctx: &RequestContext,
+    ) -> Result<(), RestError> {
+        
+        let local_proxy_uri = ::http::Uri::from_static("http://proxy.local/sql");
+        let mut req = Request::builder().method(Method::POST).uri(local_proxy_uri);
+        req = req.header(&NEON_REQUEST_ID, uuid_to_header_value(ctx.session_id()));
+        req = req.header(&CONN_STRING, HeaderValue::from_str(connection_string).unwrap());
+        req = req.header(&TXN_ISOLATION_LEVEL, HeaderValue::from_str("ReadCommitted").unwrap());
+        req = req.header(AUTHORIZATION, auth_header);
+        //req = req.header(&ARRAY_MODE, HeaderValue::from_str("true").unwrap());
+        req = req.header(&RAW_TEXT_OUTPUT, HeaderValue::from_str("true").unwrap());
+
+        let body = json!({"query": CONFIGURATION_SQL}).to_string();
+        let body_boxed = Full::new(Bytes::from(body))
+            .map_err(|never| match never {}) // Convert Infallible to hyper::Error
+            .boxed();
+        let req = req
+        .body(body_boxed)
+        .map_err(|_| RestError::SubzeroCore(InternalError { 
+            message: "Failed to build request".to_string() 
+        }))?;
+
+        // send the request to the local proxy
+        let response = client
+            .inner
+            .inner
+            .send_request(req)
+            .await
+            .map_err(LocalProxyConnError::from)
+            .map_err(HttpConnError::from)?;
+
+        let response_status = response.status();
+
+        // Capture the response body
+        let response_body = response
+            .collect()
+            .await
+            .map_err(ReadPayloadError::from)?
+            .to_bytes();
+
+        //println!("response_body: {:?}", response_body);
+
+        let mut response_json: serde_json::Value = serde_json::from_slice(&response_body)
+            .map_err(|e| RestError::SubzeroCore(JsonDeserialize { source: e }))?;
+
+        //println!("response_json: {:?}", response_json);
+        let rows = response_json["rows"].as_array_mut()
+            .ok_or_else(|| RestError::SubzeroCore(InternalError { 
+                message: "Missing 'rows' array in second result".to_string() 
+            }))?;
+    
+        //println!("rows: {:?}", rows);
+        if rows.is_empty() {
+            return Err(RestError::SubzeroCore(InternalError { 
+                message: "No rows in second result".to_string() 
+            }));
+        }
+    
+        // Extract columns from the first (and only) row
+        let mut row = &mut rows[0];
+        let config_string = extract_string(&mut row, "config").unwrap_or_default();
+        println!("config_string: {:?}", config_string);
+        // Parse the JSON response and extract the body content efficiently
+        let api_config: ApiConfig = serde_json::from_str(&config_string)
+            .map_err(|e| RestError::SubzeroCore(JsonDeserialize { source: e }))?;
+
+        println!("api_config: {:?}", api_config);
+
+        // now that we have the api_config let's run the second INTROSPECTION_SQL query
+        let local_proxy_uri = ::http::Uri::from_static("http://proxy.local/sql");
+        let mut req = Request::builder().method(Method::POST).uri(local_proxy_uri);
+        req = req.header(&NEON_REQUEST_ID, uuid_to_header_value(ctx.session_id()));
+        req = req.header(&CONN_STRING, HeaderValue::from_str(connection_string).unwrap());
+        req = req.header(&TXN_ISOLATION_LEVEL, HeaderValue::from_str("ReadCommitted").unwrap());
+        req = req.header(AUTHORIZATION, auth_header);
+        //req = req.header(&ARRAY_MODE, HeaderValue::from_str("true").unwrap());
+        req = req.header(&RAW_TEXT_OUTPUT, HeaderValue::from_str("true").unwrap());
+        let body = json!({
+            "query": INTROSPECTION_SQL,
+            "params": [
+                api_config.db_schemas,
+                false
+            ]
+        }).to_string();
+        let body_boxed = Full::new(Bytes::from(body))
+            .map_err(|never| match never {}) // Convert Infallible to hyper::Error
+            .boxed();
+        let req = req
+        .body(body_boxed)
+        .map_err(|_| RestError::SubzeroCore(InternalError { 
+            message: "Failed to build request".to_string() 
+        }))?;
+
+        // send the request to the local proxy
+        let response = client
+            .inner
+            .inner
+            .send_request(req)
+            .await
+            .map_err(LocalProxyConnError::from)
+            .map_err(HttpConnError::from)?;
+
+        let response_status = response.status();
+
+        let response_body = response
+            .collect()
+            .await
+            .map_err(ReadPayloadError::from)?
+            .to_bytes();
+
+        //println!("second response_body: {:?}", response_body);
+
+        let mut response_json: serde_json::Value = serde_json::from_slice(&response_body)
+            .map_err(|e| RestError::SubzeroCore(JsonDeserialize { source: e }))?;
+
+        //println!("response_json: {:?}", response_json);
+        let rows = response_json["rows"].as_array_mut()
+            .ok_or_else(|| RestError::SubzeroCore(InternalError { 
+                message: "Missing 'rows' array in second result".to_string() 
+            }))?;
+    
+        //println!("rows: {:?}", rows);
+        if rows.is_empty() {
+            return Err(RestError::SubzeroCore(InternalError { 
+                message: "No rows in second result".to_string() 
+            }));
+        }
+    
+        // Extract columns from the first (and only) row
+        let mut row = &mut rows[0];
+        let json_schema = extract_string(&mut row, "json_schema").unwrap_or_default();
+        println!("json_schema: {:?}", json_schema);
+        // Parse the JSON response and extract the body content efficiently
+
+       
+        let mut schema = serde_json::from_str::<DbSchema>(&json_schema)
+            .map_err(|e| RestError::SubzeroCore(JsonDeserialize { source: e }))?;
+        schema.use_internal_permissions = false;
+
+        println!("schema!!!!!: {:?}", schema);
+        Ok(())
+    }
+}
 pub(super) static NEON_REQUEST_ID: HeaderName = HeaderName::from_static("neon-request-id");
 
 static CONN_STRING: HeaderName = HeaderName::from_static("neon-connection-string");
-//static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
-//static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
+static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
+static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
 static ALLOW_POOL: HeaderName = HeaderName::from_static("neon-pool-opt-in");
 static TXN_ISOLATION_LEVEL: HeaderName = HeaderName::from_static("neon-batch-isolation-level");
 static TXN_READ_ONLY: HeaderName = HeaderName::from_static("neon-batch-read-only");
@@ -757,11 +936,11 @@ async fn handle_inner(
     );
 
 
-    let host = request.uri().host().unwrap_or("").split('.').next().unwrap_or("");
+    let endpoint_id = request.uri().host().unwrap_or("").split('.').next().unwrap_or("");
 
     // we always use the authenticator role to connect to the database
     let autheticator_role = "authenticator";
-    let connection_string = format!("postgresql://{}@{}.local.neon.build/database", autheticator_role, host);
+    let connection_string = format!("postgresql://{}@{}.local.neon.build/database", autheticator_role, endpoint_id);
 
     let conn_info = get_conn_info(
         &config.authentication_config,
@@ -779,7 +958,7 @@ async fn handle_inner(
 
     match conn_info.auth {
         AuthData::Jwt(jwt) if config.authentication_config.is_auth_broker => {
-            handle_rest_inner(ctx, request, &connection_string, conn_info.conn_info, jwt, backend).await
+            handle_rest_inner(config, ctx, request, &connection_string, conn_info.conn_info, jwt, backend).await
         }
         _ => {
             Err(RestError::ConnInfo(ConnInfoError::MissingCredentials(Credentials::Password)))
@@ -797,6 +976,7 @@ fn extract_string(json: &mut serde_json::Value, key: &str) -> Option<String> {
 }
 
 async fn handle_rest_inner(
+    config: &'static ProxyConfig,
     ctx: &RequestContext,
     request: Request<Incoming>,
     connection_string: &str,
@@ -986,7 +1166,21 @@ async fn handle_rest_inner(
     let (main_statement, main_parameters, _) = generate(fmt_main_query(db_schema, api_request.schema_name, &api_request, &env).map_err(to_core_error)?);
     
     // now we are ready to build the request to the local proxy
+    let endpoint_cache_key = conn_info.endpoint_cache_key().unwrap();
     let mut client = backend.connect_to_local_proxy(ctx, conn_info).await?;
+
+    let _schema_ = match &config.rest_config.db_schema_cache {
+        Some(cache) => {
+            // we need the AUTH header here which we already moved from the original request
+            let auth_header = req.headers_ref().unwrap().get(AUTHORIZATION).unwrap();
+            cache.get_remote(&endpoint_cache_key, auth_header, &connection_string, &mut client, &ctx).await?
+        }
+        None => {
+            return Err(RestError::SubzeroCore(InternalError { 
+                message: "DB schema cache is not configured".to_string() 
+            }));
+        }
+    };
     
     req = req.header(&NEON_REQUEST_ID, uuid_to_header_value(ctx.session_id()));
     req = req.header(&CONN_STRING, HeaderValue::from_str(connection_string).unwrap());

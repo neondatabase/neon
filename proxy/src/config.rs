@@ -15,6 +15,7 @@ use crate::serverless::GlobalConnPoolOptions;
 use crate::serverless::cancel_set::CancelSet;
 pub use crate::tls::server_config::{TlsConfig, configure_tls};
 use crate::types::Host;
+use crate::serverless::rest::DbSchemaCache;
 
 pub struct ProxyConfig {
     pub tls_config: ArcSwapOption<TlsConfig>,
@@ -74,6 +75,7 @@ pub struct AuthenticationConfig {
 
 pub struct RestConfig {
     pub is_rest_broker: bool,
+    pub db_schema_cache: Option<DbSchemaCache>,
 }
 
 #[derive(Debug)]

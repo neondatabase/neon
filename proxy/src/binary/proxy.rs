@@ -39,6 +39,7 @@ use crate::redis::{elasticache, notifications};
 use crate::scram::threadpool::ThreadPool;
 use crate::serverless::GlobalConnPoolOptions;
 use crate::serverless::cancel_set::CancelSet;
+use crate::serverless::rest::DbSchemaCache;
 use crate::tls::client_config::compute_client_config_with_root_certs;
 #[cfg(any(test, feature = "testing"))]
 use crate::url::ApiUrl;
@@ -238,6 +239,10 @@ struct ProxyCliArgs {
     /// if this is not local proxy, this toggles whether we accept Postgres REST requests
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     is_rest_broker: bool,
+
+    /// cache for `db_schema_cache` introspection (use `size=0` to disable)
+    #[clap(long, default_value = "size=4000,ttl=1h")]
+    db_schema_cache: String,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -678,8 +683,22 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         timeout: Duration::from_secs(2),
     };
 
+    let db_schema_cache_config: CacheOptions = args.db_schema_cache.parse()?;
+    info!("Using DbSchemaCache with options={db_schema_cache_config:?}");
+
+    let db_schema_cache = if args.is_rest_broker {
+        Some(DbSchemaCache::new(
+            "db_schema_cache",
+            db_schema_cache_config.size,
+            db_schema_cache_config.ttl,
+            true,
+        ))
+    } else {
+        None
+    };
     let rest_config = RestConfig {
         is_rest_broker: args.is_rest_broker,
+        db_schema_cache,
     };
 
     let config = ProxyConfig {
