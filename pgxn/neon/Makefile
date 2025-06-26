@@ -1,6 +1,5 @@
 # pgxs/neon/Makefile
 
-
 MODULE_big = neon
 OBJS = \
 	$(WIN32RES) \

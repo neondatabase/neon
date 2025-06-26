@@ -120,4 +120,3 @@ the upstream AIO worker processes do.
 ### Compute <-> pageserver protocol
 
 The protocol between Compute and the pageserver is based on gRPC. See `protos/`.
-
