@@ -1,14 +1,11 @@
 use std::collections::BTreeMap;
 use std::collections::HashSet;
-use std::fmt::{Debug, Formatter};
-use std::mem::uninitialized;
+use std::fmt::Debug;
 use std::mem::MaybeUninit;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::hash::HashMapAccess;
 use crate::hash::HashMapInit;
 use crate::hash::Entry;
-use crate::shmem::ShmemHandle;
 
 use rand::seq::SliceRandom;
 use rand::{Rng, RngCore};
@@ -98,30 +95,6 @@ fn sparse() {
     test_inserts(&keys);
 }
 
-struct TestValue(AtomicUsize);
-
-impl TestValue {
-    fn new(val: usize) -> TestValue {
-        TestValue(AtomicUsize::new(val))
-    }
-
-    fn load(&self) -> usize {
-        self.0.load(Ordering::Relaxed)
-    }
-}
-
-impl Clone for TestValue {
-    fn clone(&self) -> TestValue {
-        TestValue::new(self.load())
-    }
-}
-
-impl Debug for TestValue {
-    fn fmt(&self, fmt: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
-        write!(fmt, "{:?}", self.load())
-    }
-}
-
 #[derive(Clone, Debug)]
 struct TestOp(TestKey, Option<usize>);
 
@@ -177,7 +150,7 @@ fn do_deletes(
 	writer: &mut HashMapAccess<TestKey, usize>,
 	shadow: &mut BTreeMap<TestKey, usize>,
 ) {
-	for i in 0..num_ops {
+	for _ in 0..num_ops {
 		let (k, _) = shadow.pop_first().unwrap();
 		let hash = writer.get_hash_value(&k);
 		writer.remove_with_hash(&k, hash);
@@ -187,7 +160,6 @@ fn do_deletes(
 fn do_shrink(
 	writer: &mut HashMapAccess<TestKey, usize>,
 	shadow: &mut BTreeMap<TestKey, usize>,
-	from: u32,
 	to: u32
 ) {
 	writer.begin_shrink(to);
@@ -195,7 +167,7 @@ fn do_shrink(
 		let (k, _) = shadow.pop_first().unwrap();
 		let hash = writer.get_hash_value(&k);
 		let entry = writer.entry_with_hash(k, hash);
-		if let Entry::Occupied(mut e) = entry {
+		if let Entry::Occupied(e) = entry {
 			e.remove();
 		}
 	}
@@ -260,7 +232,7 @@ fn test_shrink() {
     let mut rng = rand::rng();
 	
     do_random_ops(10000, 1500, 0.75, &mut writer, &mut shadow, &mut rng);
-    do_shrink(&mut writer, &mut shadow, 1500, 1000);
+    do_shrink(&mut writer, &mut shadow, 1000);
 	do_deletes(500, &mut writer, &mut shadow);
 	do_random_ops(10000, 500, 0.75, &mut writer, &mut shadow, &mut rng);
 	assert!(writer.get_num_buckets_in_use() <= 1000);
@@ -276,13 +248,13 @@ fn test_shrink_grow_seq() {
 
     do_random_ops(500, 1000, 0.1, &mut writer, &mut shadow, &mut rng);
 	eprintln!("Shrinking to 750");
-    do_shrink(&mut writer, &mut shadow, 1000, 750);
+    do_shrink(&mut writer, &mut shadow, 750);
 	do_random_ops(200, 1000, 0.5, &mut writer, &mut shadow, &mut rng);
 	eprintln!("Growing to 1500");
 	writer.grow(1500).unwrap();
 	do_random_ops(600, 1500, 0.1, &mut writer, &mut shadow, &mut rng);
 	eprintln!("Shrinking to 200");
-	do_shrink(&mut writer, &mut shadow, 1500, 200);
+	do_shrink(&mut writer, &mut shadow, 200);
 	do_deletes(100, &mut writer, &mut shadow);
 	do_random_ops(50, 1500, 0.25, &mut writer, &mut shadow, &mut rng);
 	eprintln!("Growing to 10k");

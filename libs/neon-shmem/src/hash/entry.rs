@@ -1,4 +1,4 @@
-//! Like std::collections::hash_map::Entry;
+//! Equivalent of [`std::collections::hash_map::Entry`] for this hashmap.
 
 use crate::hash::core::{CoreHashMap, FullError, INVALID_POS};
 
@@ -30,11 +30,11 @@ pub struct OccupiedEntry<'a, 'b, K, V> {
     pub(crate) _key: K,
 	/// The index of the previous entry in the chain.
     pub(crate) prev_pos: PrevPos,
-	/// The position of the bucket in the CoreHashMap's buckets array.
+	/// The position of the bucket in the [`CoreHashMap`] bucket array.
     pub(crate) bucket_pos: u32, 
 }
 
-impl<'a, 'b, K, V> OccupiedEntry<'a, 'b, K, V> {
+impl<K, V> OccupiedEntry<'_, '_, K, V> {
     pub fn get(&self) -> &V {
         &self.map.buckets[self.bucket_pos as usize]
             .inner
@@ -55,20 +55,25 @@ impl<'a, 'b, K, V> OccupiedEntry<'a, 'b, K, V> {
     pub fn insert(&mut self, value: V) -> V {
         let bucket = &mut self.map.buckets[self.bucket_pos as usize];
         // This assumes inner is Some, which it must be for an OccupiedEntry
-        let old_value = mem::replace(&mut bucket.inner.as_mut().unwrap().1, value);
-        old_value
+        mem::replace(&mut bucket.inner.as_mut().unwrap().1, value)
     }
 
 	/// Removes the entry from the hash map, returning the value originally stored within it.
+	///
+	/// # Panics
+	/// Panics if the `prev_pos` field is equal to [`PrevPos::Unknown`]. In practice, this means
+	/// the entry was obtained via calling something like [`CoreHashMap::entry_at_bucket`].
     pub fn remove(self) -> V {
         // CoreHashMap::remove returns Option<(K, V)>. We know it's Some for an OccupiedEntry.
         let bucket = &mut self.map.buckets[self.bucket_pos as usize];
 
         // unlink it from the chain
         match self.prev_pos {
-            PrevPos::First(dict_pos) => self.map.dictionary[dict_pos as usize] = bucket.next,
+            PrevPos::First(dict_pos) => {
+				self.map.dictionary[dict_pos as usize] = bucket.next;
+			},
             PrevPos::Chained(bucket_pos) => {
-                self.map.buckets[bucket_pos as usize].next = bucket.next
+                self.map.buckets[bucket_pos as usize].next = bucket.next;
             },
 			PrevPos::Unknown => panic!("can't safely remove entry with unknown previous entry"),
         }
@@ -80,7 +85,7 @@ impl<'a, 'b, K, V> OccupiedEntry<'a, 'b, K, V> {
         self.map.free_head = self.bucket_pos;
         self.map.buckets_in_use -= 1;
 
-        return old_value.unwrap().1;
+        old_value.unwrap().1
     }
 }
 
@@ -94,8 +99,11 @@ pub struct VacantEntry<'a, 'b, K, V> {
     pub(crate) dict_pos: u32,
 }
 
-impl<'a, 'b, K: Clone + Hash + Eq, V> VacantEntry<'a, 'b, K, V> {
+impl<'b, K: Clone + Hash + Eq, V> VacantEntry<'_, 'b, K, V> {
 	/// Insert a value into the vacant entry, finding and populating an empty bucket in the process.
+	///
+	/// # Errors
+	/// Will return [`FullError`] if there are no unoccupied buckets in the map.
     pub fn insert(self, value: V) -> Result<&'b mut V, FullError> {
         let pos = self.map.alloc_bucket(self.key, value)?;
         if pos == INVALID_POS {
@@ -106,6 +114,6 @@ impl<'a, 'b, K: Clone + Hash + Eq, V> VacantEntry<'a, 'b, K, V> {
         self.map.dictionary[self.dict_pos as usize] = pos;
 
         let result = &mut self.map.buckets[pos as usize].inner.as_mut().unwrap().1;
-        return Ok(result);
+        Ok(result)
     }
 }

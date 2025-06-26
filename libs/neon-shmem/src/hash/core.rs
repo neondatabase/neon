@@ -5,6 +5,7 @@ use std::mem::MaybeUninit;
 
 use crate::hash::entry::{Entry, OccupiedEntry, PrevPos, VacantEntry};
 
+/// Invalid position within the map (either within the dictionary or bucket array).
 pub(crate) const INVALID_POS: u32 = u32::MAX;
 
 /// Fundamental storage unit within the hash table. Either empty or contains a key-value pair.
@@ -18,13 +19,13 @@ pub(crate) struct Bucket<K, V> {
 
 /// Core hash table implementation.
 pub(crate) struct CoreHashMap<'a, K, V> {
-	/// Dictionary used to map hashes to bucket indices.	
+	/// Dictionary used to map hashes to bucket indices.
     pub(crate) dictionary: &'a mut [u32],
 	/// Buckets containing key-value pairs.
     pub(crate) buckets: &'a mut [Bucket<K, V>],
 	/// Head of the freelist.
     pub(crate) free_head: u32,
-	/// Maximum index of a bucket allowed to be allocated. INVALID_POS if no limit.
+	/// Maximum index of a bucket allowed to be allocated. [`INVALID_POS`] if no limit.
 	pub(crate) alloc_limit: u32,
     /// The number of currently occupied buckets.
     pub(crate) buckets_in_use: u32,
@@ -36,10 +37,7 @@ pub(crate) struct CoreHashMap<'a, K, V> {
 #[derive(Debug)]
 pub struct FullError();
 
-impl<'a, K: Hash + Eq, V> CoreHashMap<'a, K, V>
-where
-    K: Clone + Hash + Eq,
-{
+impl<'a, K: Clone + Hash + Eq, V> CoreHashMap<'a, K, V> {
     const FILL_FACTOR: f32 = 0.60;
 
 	/// Estimate the size of data contained within the the hash map.
@@ -59,7 +57,7 @@ where
     pub fn new(
         buckets: &'a mut [MaybeUninit<Bucket<K, V>>],
         dictionary: &'a mut [MaybeUninit<u32>],
-    ) -> CoreHashMap<'a, K, V> {
+    ) -> Self {
         // Initialize the buckets
         for i in 0..buckets.len() {
             buckets[i].write(Bucket {
@@ -73,8 +71,8 @@ where
         }
 
         // Initialize the dictionary
-        for i in 0..dictionary.len() {
-            dictionary[i].write(INVALID_POS);
+        for e in dictionary.iter_mut() {
+            e.write(INVALID_POS);
         }
 
         // TODO: use std::slice::assume_init_mut() once it stabilizes
@@ -84,7 +82,7 @@ where
             std::slice::from_raw_parts_mut(dictionary.as_mut_ptr().cast(), dictionary.len())
         };
 
-        CoreHashMap {
+        Self {
             dictionary,
             buckets,
             free_head: 0,
@@ -105,13 +103,13 @@ where
             let bucket = &self.buckets[next as usize];
             let (bucket_key, bucket_value) = bucket.inner.as_ref().expect("entry is in use");
             if bucket_key == key {
-                return Some(&bucket_value);
+                return Some(bucket_value);
             }
             next = bucket.next;
         }
     }
 
-    /// Get the `Entry` associated with a key given hash. This should be used for updates/inserts.
+    /// Get the [`Entry`] associated with a key given hash. This should be used for updates/inserts.
     pub fn entry_with_hash(&mut self, key: K, hash: u64) -> Entry<'a, '_, K, V> {
         let dict_pos = hash as usize % self.dictionary.len();
         let first = self.dictionary[dict_pos];
@@ -236,7 +234,7 @@ where
         bucket.next = INVALID_POS;
         bucket.inner = Some((key, value));
 
-        return Ok(pos);
+        Ok(pos)
     }
 }
 
