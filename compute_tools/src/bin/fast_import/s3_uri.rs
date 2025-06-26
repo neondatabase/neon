@@ -69,7 +69,7 @@ impl clap::builder::TypedValueParser for S3Uri {
         S3Uri::from_str(value_str).map_err(|e| {
             clap::Error::raw(
                 clap::error::ErrorKind::InvalidValue,
-                format!("Failed to parse S3 URI: {}", e),
+                format!("Failed to parse S3 URI: {e}"),
             )
         })
     }

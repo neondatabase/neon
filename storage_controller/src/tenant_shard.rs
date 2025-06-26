@@ -1381,8 +1381,13 @@ impl TenantShard {
                 .generation
                 .expect("Attempted to enter attached state without a generation");
 
-            let wanted_conf =
-                attached_location_conf(generation, &self.shard, &self.config, &self.policy);
+            let wanted_conf = attached_location_conf(
+                generation,
+                &self.shard,
+                &self.config,
+                &self.policy,
+                self.intent.get_secondary().len(),
+            );
             match self.observed.locations.get(&node_id) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {}
                 Some(_) | None => {
@@ -3003,21 +3008,18 @@ pub(crate) mod tests {
 
             if attachments_in_wrong_az > 0 {
                 violations.push(format!(
-                    "{} attachments scheduled to the incorrect AZ",
-                    attachments_in_wrong_az
+                    "{attachments_in_wrong_az} attachments scheduled to the incorrect AZ"
                 ));
             }
 
             if secondaries_in_wrong_az > 0 {
                 violations.push(format!(
-                    "{} secondaries scheduled to the incorrect AZ",
-                    secondaries_in_wrong_az
+                    "{secondaries_in_wrong_az} secondaries scheduled to the incorrect AZ"
                 ));
             }
 
             eprintln!(
-                "attachments_in_wrong_az={} secondaries_in_wrong_az={}",
-                attachments_in_wrong_az, secondaries_in_wrong_az
+                "attachments_in_wrong_az={attachments_in_wrong_az} secondaries_in_wrong_az={secondaries_in_wrong_az}"
             );
 
             for (node_id, stats) in &node_stats {

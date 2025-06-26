@@ -332,10 +332,10 @@ impl fmt::Display for DbError {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(fmt, "{}: {}", self.severity, self.message)?;
         if let Some(detail) = &self.detail {
-            write!(fmt, "\nDETAIL: {}", detail)?;
+            write!(fmt, "\nDETAIL: {detail}")?;
         }
         if let Some(hint) = &self.hint {
-            write!(fmt, "\nHINT: {}", hint)?;
+            write!(fmt, "\nHINT: {hint}")?;
         }
         Ok(())
     }
@@ -398,9 +398,9 @@ impl fmt::Display for Error {
             Kind::Io => fmt.write_str("error communicating with the server")?,
             Kind::UnexpectedMessage => fmt.write_str("unexpected message from server")?,
             Kind::Tls => fmt.write_str("error performing TLS handshake")?,
-            Kind::ToSql(idx) => write!(fmt, "error serializing parameter {}", idx)?,
-            Kind::FromSql(idx) => write!(fmt, "error deserializing column {}", idx)?,
-            Kind::Column(column) => write!(fmt, "invalid column `{}`", column)?,
+            Kind::ToSql(idx) => write!(fmt, "error serializing parameter {idx}")?,
+            Kind::FromSql(idx) => write!(fmt, "error deserializing column {idx}")?,
+            Kind::Column(column) => write!(fmt, "invalid column `{column}`")?,
             Kind::Closed => fmt.write_str("connection closed")?,
             Kind::Db => fmt.write_str("db error")?,
             Kind::Parse => fmt.write_str("error parsing response from server")?,
@@ -411,7 +411,7 @@ impl fmt::Display for Error {
             Kind::Timeout => fmt.write_str("timeout waiting for server")?,
         };
         if let Some(ref cause) = self.0.cause {
-            write!(fmt, ": {}", cause)?;
+            write!(fmt, ": {cause}")?;
         }
         Ok(())
     }

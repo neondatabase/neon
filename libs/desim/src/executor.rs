@@ -71,7 +71,7 @@ impl Runtime {
                     debug!("thread panicked: {:?}", e);
                     let mut result = ctx.result.lock();
                     if result.0 == -1 {
-                        *result = (256, format!("thread panicked: {:?}", e));
+                        *result = (256, format!("thread panicked: {e:?}"));
                     }
                 });
             }

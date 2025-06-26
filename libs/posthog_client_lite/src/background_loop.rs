@@ -1,17 +1,22 @@
 //! A background loop that fetches feature flags from PostHog and updates the feature store.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use arc_swap::ArcSwap;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span};
 
-use crate::{CaptureEvent, FeatureStore, PostHogClient, PostHogClientConfig};
+use crate::{
+    CaptureEvent, FeatureStore, LocalEvaluationResponse, PostHogClient, PostHogClientConfig,
+};
 
 /// A background loop that fetches feature flags from PostHog and updates the feature store.
 pub struct FeatureResolverBackgroundLoop {
     posthog_client: PostHogClient,
-    feature_store: ArcSwap<FeatureStore>,
+    feature_store: ArcSwap<(SystemTime, Arc<FeatureStore>)>,
     cancel: CancellationToken,
 }
 
@@ -19,8 +24,32 @@ impl FeatureResolverBackgroundLoop {
     pub fn new(config: PostHogClientConfig, shutdown_pageserver: CancellationToken) -> Self {
         Self {
             posthog_client: PostHogClient::new(config),
-            feature_store: ArcSwap::new(Arc::new(FeatureStore::new())),
+            feature_store: ArcSwap::new(Arc::new((
+                SystemTime::UNIX_EPOCH,
+                Arc::new(FeatureStore::new()),
+            ))),
             cancel: shutdown_pageserver,
+        }
+    }
+
+    /// Update the feature store with a new feature flag spec bypassing the normal refresh loop.
+    pub fn update(&self, spec: String) -> anyhow::Result<()> {
+        let resp: LocalEvaluationResponse = serde_json::from_str(&spec)?;
+        self.update_feature_store_nofail(resp, "http_propagate");
+        Ok(())
+    }
+
+    fn update_feature_store_nofail(&self, resp: LocalEvaluationResponse, source: &'static str) {
+        let project_id = self.posthog_client.config.project_id.parse::<u64>().ok();
+        match FeatureStore::new_with_flags(resp.flags, project_id) {
+            Ok(feature_store) => {
+                self.feature_store
+                    .store(Arc::new((SystemTime::now(), Arc::new(feature_store))));
+                tracing::info!("Feature flag updated from {}", source);
+            }
+            Err(e) => {
+                tracing::warn!("Cannot process feature flag spec from {}: {}", source, e);
+            }
         }
     }
 
@@ -36,13 +65,27 @@ impl FeatureResolverBackgroundLoop {
         // Main loop of updating the feature flags.
         handle.spawn(
             async move {
-                tracing::info!("Starting PostHog feature resolver");
+                tracing::info!(
+                    "Starting PostHog feature resolver with refresh period: {:?}",
+                    refresh_period
+                );
                 let mut ticker = tokio::time::interval(refresh_period);
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     tokio::select! {
                         _ = ticker.tick() => {}
                         _ = cancel.cancelled() => break
+                    }
+                    {
+                        let last_update = this.feature_store.load().0;
+                        if let Ok(elapsed) = last_update.elapsed() {
+                            if elapsed < refresh_period {
+                                tracing::debug!(
+                                    "Skipping feature flag refresh because it's too soon"
+                                );
+                                continue;
+                            }
+                        }
                     }
                     let resp = match this
                         .posthog_client
@@ -55,16 +98,7 @@ impl FeatureResolverBackgroundLoop {
                             continue;
                         }
                     };
-                    let project_id = this.posthog_client.config.project_id.parse::<u64>().ok();
-                    match FeatureStore::new_with_flags(resp.flags, project_id) {
-                        Ok(feature_store) => {
-                            this.feature_store.store(Arc::new(feature_store));
-                            tracing::info!("Feature flag updated");
-                        }
-                        Err(e) => {
-                            tracing::warn!("Cannot process feature flag spec: {}", e);
-                        }
-                    }
+                    this.update_feature_store_nofail(resp, "refresh_loop");
                 }
                 tracing::info!("PostHog feature resolver stopped");
             }
@@ -89,6 +123,6 @@ impl FeatureResolverBackgroundLoop {
     }
 
     pub fn feature_store(&self) -> Arc<FeatureStore> {
-        self.feature_store.load_full()
+        self.feature_store.load().1.clone()
     }
 }

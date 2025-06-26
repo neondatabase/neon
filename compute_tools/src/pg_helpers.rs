@@ -36,9 +36,9 @@ pub fn escape_literal(s: &str) -> String {
     let res = s.replace('\'', "''").replace('\\', "\\\\");
 
     if res.contains('\\') {
-        format!("E'{}'", res)
+        format!("E'{res}'")
     } else {
-        format!("'{}'", res)
+        format!("'{res}'")
     }
 }
 
@@ -46,7 +46,7 @@ pub fn escape_literal(s: &str) -> String {
 /// with `'{}'` is not required, as it returns a ready-to-use config string.
 pub fn escape_conf_value(s: &str) -> String {
     let res = s.replace('\'', "''").replace('\\', "\\\\");
-    format!("'{}'", res)
+    format!("'{res}'")
 }
 
 pub trait GenericOptionExt {
@@ -446,7 +446,7 @@ pub async fn tune_pgbouncer(
         let mut pgbouncer_connstr =
             "host=localhost port=6432 dbname=pgbouncer user=postgres sslmode=disable".to_string();
         if let Ok(pass) = std::env::var("PGBOUNCER_PASSWORD") {
-            pgbouncer_connstr.push_str(format!(" password={}", pass).as_str());
+            pgbouncer_connstr.push_str(format!(" password={pass}").as_str());
         }
         pgbouncer_connstr
     };
@@ -464,7 +464,7 @@ pub async fn tune_pgbouncer(
             Ok((client, connection)) => {
                 tokio::spawn(async move {
                     if let Err(e) = connection.await {
-                        eprintln!("connection error: {}", e);
+                        eprintln!("connection error: {e}");
                     }
                 });
                 break client;

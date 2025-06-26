@@ -1,7 +1,17 @@
 ROOT_PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
-# Where to install Postgres, default is ./pg_install, maybe useful for package managers
+# Where to install Postgres, default is ./pg_install, maybe useful for package
+# managers.
 POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install/
+
+# CARGO_BUILD_FLAGS: Extra flags to pass to `cargo build`. `--locked`
+# and `--features testing` are popular examples.
+#
+# CARGO_PROFILE: You can also set to override the cargo profile to
+# use. By default, it is derived from BUILD_TYPE.
+
+# All intermediate build artifacts are stored here.
+BUILD_DIR := build
 
 ICU_PREFIX_DIR := /usr/local/icu
 
@@ -16,12 +26,12 @@ ifeq ($(BUILD_TYPE),release)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl
 	PG_CFLAGS += -O2 -g3 $(CFLAGS)
 	PG_LDFLAGS = $(LDFLAGS)
-	# Unfortunately, `--profile=...` is a nightly feature
-	CARGO_BUILD_FLAGS += --release
+	CARGO_PROFILE ?= --profile=release
 else ifeq ($(BUILD_TYPE),debug)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
 	PG_CFLAGS += -O0 -g3 $(CFLAGS)
 	PG_LDFLAGS = $(LDFLAGS)
+	CARGO_PROFILE ?= --profile=dev
 else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
@@ -93,7 +103,7 @@ all: neon postgres neon-pg-ext
 .PHONY: neon
 neon: postgres-headers walproposer-lib cargo-target-dir
 	+@echo "Compiling Neon"
-	$(CARGO_CMD_PREFIX) cargo build $(CARGO_BUILD_FLAGS)
+	$(CARGO_CMD_PREFIX) cargo build $(CARGO_BUILD_FLAGS) $(CARGO_PROFILE)
 .PHONY: cargo-target-dir
 cargo-target-dir:
 	# https://github.com/rust-lang/cargo/issues/14281
@@ -104,21 +114,20 @@ cargo-target-dir:
 # Some rules are duplicated for Postgres v14 and 15. We may want to refactor
 # to avoid the duplication in the future, but it's tolerable for now.
 #
-$(POSTGRES_INSTALL_DIR)/build/%/config.status:
-
-	mkdir -p $(POSTGRES_INSTALL_DIR)
-	test -e $(POSTGRES_INSTALL_DIR)/CACHEDIR.TAG || echo "$(CACHEDIR_TAG_CONTENTS)" > $(POSTGRES_INSTALL_DIR)/CACHEDIR.TAG
+$(BUILD_DIR)/%/config.status:
+	mkdir -p $(BUILD_DIR)
+	test -e $(BUILD_DIR)/CACHEDIR.TAG || echo "$(CACHEDIR_TAG_CONTENTS)" > $(BUILD_DIR)/CACHEDIR.TAG
 
 	+@echo "Configuring Postgres $* build"
 	@test -s $(ROOT_PROJECT_DIR)/vendor/postgres-$*/configure || { \
 		echo "\nPostgres submodule not found in $(ROOT_PROJECT_DIR)/vendor/postgres-$*/, execute "; \
 		echo "'git submodule update --init --recursive --depth 2 --progress .' in project root.\n"; \
 		exit 1; }
-	mkdir -p $(POSTGRES_INSTALL_DIR)/build/$*
+	mkdir -p $(BUILD_DIR)/$*
 
 	VERSION=$*; \
 	EXTRA_VERSION=$$(cd $(ROOT_PROJECT_DIR)/vendor/postgres-$$VERSION && git rev-parse HEAD); \
-	(cd $(POSTGRES_INSTALL_DIR)/build/$$VERSION && \
+	(cd $(BUILD_DIR)/$$VERSION && \
 	env PATH="$(EXTRA_PATH_OVERRIDES):$$PATH" $(ROOT_PROJECT_DIR)/vendor/postgres-$$VERSION/configure \
 		CFLAGS='$(PG_CFLAGS)' LDFLAGS='$(PG_LDFLAGS)' \
 		$(PG_CONFIGURE_OPTS) --with-extra-version=" ($$EXTRA_VERSION)" \
@@ -130,96 +139,52 @@ $(POSTGRES_INSTALL_DIR)/build/%/config.status:
 # the "build-all-versions" entry points) where direct mention of PostgreSQL
 # versions is used.
 .PHONY: postgres-configure-v17
-postgres-configure-v17: $(POSTGRES_INSTALL_DIR)/build/v17/config.status
+postgres-configure-v17: $(BUILD_DIR)/v17/config.status
 .PHONY: postgres-configure-v16
-postgres-configure-v16: $(POSTGRES_INSTALL_DIR)/build/v16/config.status
+postgres-configure-v16: $(BUILD_DIR)/v16/config.status
 .PHONY: postgres-configure-v15
-postgres-configure-v15: $(POSTGRES_INSTALL_DIR)/build/v15/config.status
+postgres-configure-v15: $(BUILD_DIR)/v15/config.status
 .PHONY: postgres-configure-v14
-postgres-configure-v14: $(POSTGRES_INSTALL_DIR)/build/v14/config.status
+postgres-configure-v14: $(BUILD_DIR)/v14/config.status
 
 # Install the PostgreSQL header files into $(POSTGRES_INSTALL_DIR)/<version>/include
 .PHONY: postgres-headers-%
 postgres-headers-%: postgres-configure-%
 	+@echo "Installing PostgreSQL $* headers"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/src/include MAKELEVEL=0 install
+	$(MAKE) -C $(BUILD_DIR)/$*/src/include MAKELEVEL=0 install
 
 # Compile and install PostgreSQL
 .PHONY: postgres-%
 postgres-%: postgres-configure-% \
 		  postgres-headers-% # to prevent `make install` conflicts with neon's `postgres-headers`
 	+@echo "Compiling PostgreSQL $*"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$* MAKELEVEL=0 install
-	+@echo "Compiling libpq $*"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/src/interfaces/libpq install
+	$(MAKE) -C $(BUILD_DIR)/$* MAKELEVEL=0 install
 	+@echo "Compiling pg_prewarm $*"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pg_prewarm install
+	$(MAKE) -C $(BUILD_DIR)/$*/contrib/pg_prewarm install
 	+@echo "Compiling pg_buffercache $*"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pg_buffercache install
+	$(MAKE) -C $(BUILD_DIR)/$*/contrib/pg_buffercache install
 	+@echo "Compiling pg_visibility $*"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pg_visibility install
+	$(MAKE) -C $(BUILD_DIR)/$*/contrib/pg_visibility install
 	+@echo "Compiling pageinspect $*"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pageinspect install
+	$(MAKE) -C $(BUILD_DIR)/$*/contrib/pageinspect install
 	+@echo "Compiling pg_trgm $*"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pg_trgm install
+	$(MAKE) -C $(BUILD_DIR)/$*/contrib/pg_trgm install
 	+@echo "Compiling amcheck $*"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/amcheck install
+	$(MAKE) -C $(BUILD_DIR)/$*/contrib/amcheck install
 	+@echo "Compiling test_decoding $*"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/test_decoding install
-
-.PHONY: postgres-clean-%
-postgres-clean-%:
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$* MAKELEVEL=0 clean
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pg_buffercache clean
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pageinspect clean
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/src/interfaces/libpq clean
+	$(MAKE) -C $(BUILD_DIR)/$*/contrib/test_decoding install
 
 .PHONY: postgres-check-%
 postgres-check-%: postgres-%
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$* MAKELEVEL=0 check
+	$(MAKE) -C $(BUILD_DIR)/$* MAKELEVEL=0 check
 
 .PHONY: neon-pg-ext-%
 neon-pg-ext-%: postgres-%
-	+@echo "Compiling neon $*"
-	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-$*
+	+@echo "Compiling neon-specific Postgres extensions for $*"
+	mkdir -p $(BUILD_DIR)/pgxn-$*
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
-		-C $(POSTGRES_INSTALL_DIR)/build/neon-$* \
-		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile install
-	+@echo "Compiling neon_walredo $*"
-	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-walredo-$*
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
-		-C $(POSTGRES_INSTALL_DIR)/build/neon-walredo-$* \
-		-f $(ROOT_PROJECT_DIR)/pgxn/neon_walredo/Makefile install
-	+@echo "Compiling neon_rmgr $*"
-	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-rmgr-$*
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
-		-C $(POSTGRES_INSTALL_DIR)/build/neon-rmgr-$* \
-		-f $(ROOT_PROJECT_DIR)/pgxn/neon_rmgr/Makefile install
-	+@echo "Compiling neon_test_utils $*"
-	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-test-utils-$*
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
-		-C $(POSTGRES_INSTALL_DIR)/build/neon-test-utils-$* \
-		-f $(ROOT_PROJECT_DIR)/pgxn/neon_test_utils/Makefile install
-	+@echo "Compiling neon_utils $*"
-	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-utils-$*
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
-		-C $(POSTGRES_INSTALL_DIR)/build/neon-utils-$* \
-		-f $(ROOT_PROJECT_DIR)/pgxn/neon_utils/Makefile install
-
-.PHONY: neon-pg-clean-ext-%
-neon-pg-clean-ext-%:
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config \
-	-C $(POSTGRES_INSTALL_DIR)/build/neon-$* \
-	-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile clean
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config \
-	-C $(POSTGRES_INSTALL_DIR)/build/neon-walredo-$* \
-	-f $(ROOT_PROJECT_DIR)/pgxn/neon_walredo/Makefile clean
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config \
-	-C $(POSTGRES_INSTALL_DIR)/build/neon-test-utils-$* \
-	-f $(ROOT_PROJECT_DIR)/pgxn/neon_test_utils/Makefile clean
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config \
-	-C $(POSTGRES_INSTALL_DIR)/build/neon-utils-$* \
-	-f $(ROOT_PROJECT_DIR)/pgxn/neon_utils/Makefile clean
+		-C $(BUILD_DIR)/pgxn-$*\
+		-f $(ROOT_PROJECT_DIR)/pgxn/Makefile  install
 
 # Build walproposer as a static library. walproposer source code is located
 # in the pgxn/neon directory.
@@ -233,15 +198,15 @@ neon-pg-clean-ext-%:
 .PHONY: walproposer-lib
 walproposer-lib: neon-pg-ext-v17
 	+@echo "Compiling walproposer-lib"
-	mkdir -p $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
+	mkdir -p $(BUILD_DIR)/walproposer-lib
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v17/bin/pg_config COPT='$(COPT)' \
-		-C $(POSTGRES_INSTALL_DIR)/build/walproposer-lib \
+		-C $(BUILD_DIR)/walproposer-lib \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile walproposer-lib
-	cp $(POSTGRES_INSTALL_DIR)/v17/lib/libpgport.a $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
-	cp $(POSTGRES_INSTALL_DIR)/v17/lib/libpgcommon.a $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
-	$(AR) d $(POSTGRES_INSTALL_DIR)/build/walproposer-lib/libpgport.a \
+	cp $(POSTGRES_INSTALL_DIR)/v17/lib/libpgport.a $(BUILD_DIR)/walproposer-lib
+	cp $(POSTGRES_INSTALL_DIR)/v17/lib/libpgcommon.a $(BUILD_DIR)/walproposer-lib
+	$(AR) d $(BUILD_DIR)/walproposer-lib/libpgport.a \
 		pg_strong_random.o
-	$(AR) d $(POSTGRES_INSTALL_DIR)/build/walproposer-lib/libpgcommon.a \
+	$(AR) d $(BUILD_DIR)/walproposer-lib/libpgcommon.a \
 		checksum_helper.o \
 		cryptohash_openssl.o \
 		hmac_openssl.o \
@@ -249,15 +214,9 @@ walproposer-lib: neon-pg-ext-v17
 		parse_manifest.o \
 		scram-common.o
 ifeq ($(UNAME_S),Linux)
-	$(AR) d $(POSTGRES_INSTALL_DIR)/build/walproposer-lib/libpgcommon.a \
+	$(AR) d $(BUILD_DIR)/walproposer-lib/libpgcommon.a \
 		pg_crc32c.o
 endif
-
-.PHONY: walproposer-lib-clean
-walproposer-lib-clean:
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v17/bin/pg_config \
-		-C $(POSTGRES_INSTALL_DIR)/build/walproposer-lib \
-		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile clean
 
 .PHONY: neon-pg-ext
 neon-pg-ext: \
@@ -265,13 +224,6 @@ neon-pg-ext: \
 	neon-pg-ext-v15 \
 	neon-pg-ext-v16 \
 	neon-pg-ext-v17
-
-.PHONY: neon-pg-clean-ext
-neon-pg-clean-ext: \
-	neon-pg-clean-ext-v14 \
-	neon-pg-clean-ext-v15 \
-	neon-pg-clean-ext-v16 \
-	neon-pg-clean-ext-v17
 
 # shorthand to build all Postgres versions
 .PHONY: postgres
@@ -288,25 +240,12 @@ postgres-headers: \
 	postgres-headers-v16 \
 	postgres-headers-v17
 
-.PHONY: postgres-clean
-postgres-clean: \
-	postgres-clean-v14 \
-	postgres-clean-v15 \
-	postgres-clean-v16 \
-	postgres-clean-v17
-
 .PHONY: postgres-check
 postgres-check: \
 	postgres-check-v14 \
 	postgres-check-v15 \
 	postgres-check-v16 \
 	postgres-check-v17
-
-# This doesn't remove the effects of 'configure'.
-.PHONY: clean
-clean: postgres-clean neon-pg-clean-ext
-	$(MAKE) -C compute clean
-	$(CARGO_CMD_PREFIX) cargo clean
 
 # This removes everything
 .PHONY: distclean
@@ -320,7 +259,7 @@ fmt:
 
 postgres-%-pg-bsd-indent: postgres-%
 	+@echo "Compiling pg_bsd_indent"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/src/tools/pg_bsd_indent/
+	$(MAKE) -C $(BUILD_DIR)/$*/src/tools/pg_bsd_indent/
 
 # Create typedef list for the core. Note that generally it should be combined with
 # buildfarm one to cover platform specific stuff.
@@ -339,7 +278,7 @@ postgres-%-pgindent: postgres-%-pg-bsd-indent postgres-%-typedefs.list
 	cat $(ROOT_PROJECT_DIR)/vendor/postgres-$*/src/tools/pgindent/typedefs.list |\
 		cat - postgres-$*-typedefs.list | sort | uniq > postgres-$*-typedefs-full.list
 	+@echo note: you might want to run it on selected files/dirs instead.
-	INDENT=$(POSTGRES_INSTALL_DIR)/build/$*/src/tools/pg_bsd_indent/pg_bsd_indent \
+	INDENT=$(BUILD_DIR)/$*/src/tools/pg_bsd_indent/pg_bsd_indent \
 		$(ROOT_PROJECT_DIR)/vendor/postgres-$*/src/tools/pgindent/pgindent --typedefs postgres-$*-typedefs-full.list \
 		$(ROOT_PROJECT_DIR)/vendor/postgres-$*/src/ \
 		--excludes $(ROOT_PROJECT_DIR)/vendor/postgres-$*/src/tools/pgindent/exclude_file_patterns
@@ -350,9 +289,9 @@ postgres-%-pgindent: postgres-%-pg-bsd-indent postgres-%-typedefs.list
 neon-pgindent: postgres-v17-pg-bsd-indent neon-pg-ext-v17
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v17/bin/pg_config COPT='$(COPT)' \
 		FIND_TYPEDEF=$(ROOT_PROJECT_DIR)/vendor/postgres-v17/src/tools/find_typedef \
-		INDENT=$(POSTGRES_INSTALL_DIR)/build/v17/src/tools/pg_bsd_indent/pg_bsd_indent \
+		INDENT=$(BUILD_DIR)/v17/src/tools/pg_bsd_indent/pg_bsd_indent \
 		PGINDENT_SCRIPT=$(ROOT_PROJECT_DIR)/vendor/postgres-v17/src/tools/pgindent/pgindent \
-		-C $(POSTGRES_INSTALL_DIR)/build/neon-v17 \
+		-C $(BUILD_DIR)/neon-v17 \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile pgindent
 
 

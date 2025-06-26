@@ -453,6 +453,7 @@ class NeonEnvBuilder:
         pageserver_get_vectored_concurrent_io: str | None = None,
         pageserver_tracing_config: PageserverTracingConfig | None = None,
         pageserver_import_config: PageserverImportConfig | None = None,
+        storcon_kick_secondary_downloads: bool | None = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -489,7 +490,9 @@ class NeonEnvBuilder:
         self.config_init_force: str | None = None
         self.top_output_dir = top_output_dir
         self.control_plane_hooks_api: str | None = None
-        self.storage_controller_config: dict[Any, Any] | None = None
+        self.storage_controller_config: dict[Any, Any] | None = {
+            "timelines_onto_safekeepers": True,
+        }
 
         # Flag to enable https listener in pageserver, generate local ssl certs,
         # and force storage controller to use https for pageserver api.
@@ -511,6 +514,8 @@ class NeonEnvBuilder:
 
         self.pageserver_tracing_config = pageserver_tracing_config
         self.pageserver_import_config = pageserver_import_config
+
+        self.storcon_kick_secondary_downloads = storcon_kick_secondary_downloads
 
         self.pageserver_default_tenant_config_compaction_algorithm: dict[str, Any] | None = (
             pageserver_default_tenant_config_compaction_algorithm
@@ -1218,6 +1223,14 @@ class NeonEnv:
                 cfg["storage_controller"]["use_local_compute_notifications"] = False
             else:
                 cfg["storage_controller"] = {"use_local_compute_notifications": False}
+
+        if config.storcon_kick_secondary_downloads is not None:
+            # Configure whether storage controller should actively kick off secondary downloads
+            if "storage_controller" not in cfg:
+                cfg["storage_controller"] = {}
+            cfg["storage_controller"]["kick_secondary_downloads"] = (
+                config.storcon_kick_secondary_downloads
+            )
 
         # Create config for pageserver
         http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
@@ -4908,6 +4921,9 @@ class Safekeeper(LogUtils):
         src_ids = [sk.id for sk in srcs]
         log.info(f"finished pulling timeline from {src_ids} to {self.id}")
         return res
+
+    def safekeeper_id(self) -> SafekeeperId:
+        return SafekeeperId(self.id, "localhost", self.port.pg_tenant_only)
 
     @property
     def data_dir(self) -> Path:

@@ -199,7 +199,7 @@ async fn handshake_tls_is_enforced_by_proxy() -> anyhow::Result<()> {
         .user("john_doe")
         .dbname("earth")
         .ssl_mode(SslMode::Disable)
-        .connect_raw(server, NoTls)
+        .tls_and_authenticate(server, NoTls)
         .await
         .err() // -> Option<E>
         .context("client shouldn't be able to connect")?;
@@ -228,7 +228,7 @@ async fn handshake_tls() -> anyhow::Result<()> {
         .user("john_doe")
         .dbname("earth")
         .ssl_mode(SslMode::Require)
-        .connect_raw(server, client_config.make_tls_connect()?)
+        .tls_and_authenticate(server, client_config.make_tls_connect()?)
         .await?;
 
     proxy.await?
@@ -245,7 +245,7 @@ async fn handshake_raw() -> anyhow::Result<()> {
         .dbname("earth")
         .set_param("options", "project=generic-project-name")
         .ssl_mode(SslMode::Prefer)
-        .connect_raw(server, NoTls)
+        .tls_and_authenticate(server, NoTls)
         .await?;
 
     proxy.await?
@@ -293,7 +293,7 @@ async fn scram_auth_good(#[case] password: &str) -> anyhow::Result<()> {
         .dbname("db")
         .password(password)
         .ssl_mode(SslMode::Require)
-        .connect_raw(server, client_config.make_tls_connect()?)
+        .tls_and_authenticate(server, client_config.make_tls_connect()?)
         .await?;
 
     proxy.await?
@@ -317,7 +317,7 @@ async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
         .dbname("db")
         .password("password")
         .ssl_mode(SslMode::Require)
-        .connect_raw(server, client_config.make_tls_connect()?)
+        .tls_and_authenticate(server, client_config.make_tls_connect()?)
         .await?;
 
     proxy.await?
@@ -344,7 +344,7 @@ async fn scram_auth_mock() -> anyhow::Result<()> {
         .dbname("db")
         .password(&password) // no password will match the mocked secret
         .ssl_mode(SslMode::Require)
-        .connect_raw(server, client_config.make_tls_connect()?)
+        .tls_and_authenticate(server, client_config.make_tls_connect()?)
         .await
         .err() // -> Option<E>
         .context("client shouldn't be able to connect")?;

@@ -13,7 +13,6 @@ use std::time::{Duration, Instant, SystemTime};
 use std::{io, str};
 
 use anyhow::{Context as _, anyhow, bail};
-use async_compression::tokio::write::GzipEncoder;
 use bytes::{Buf as _, BufMut as _, BytesMut};
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
@@ -41,7 +40,7 @@ use postgres_backend::{
     AuthType, PostgresBackend, PostgresBackendReader, QueryError, is_expected_io_error,
 };
 use postgres_ffi::BLCKSZ;
-use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
+use postgres_ffi_types::constants::DEFAULTTABLESPACE_OID;
 use pq_proto::framed::ConnectionError;
 use pq_proto::{BeMessage, FeMessage, FeStartupPacket, RowDescriptor};
 use smallvec::{SmallVec, smallvec};
@@ -392,16 +391,14 @@ async fn page_service_conn_main(
             } else {
                 let tenant_id = conn_handler.timeline_handles.as_ref().unwrap().tenant_id();
                 Err(io_error).context(format!(
-                    "Postgres connection error for tenant_id={:?} client at peer_addr={}",
-                    tenant_id, peer_addr
+                    "Postgres connection error for tenant_id={tenant_id:?} client at peer_addr={peer_addr}"
                 ))
             }
         }
         other => {
             let tenant_id = conn_handler.timeline_handles.as_ref().unwrap().tenant_id();
             other.context(format!(
-                "Postgres query error for tenant_id={:?} client peer_addr={}",
-                tenant_id, peer_addr
+                "Postgres query error for tenant_id={tenant_id:?} client peer_addr={peer_addr}"
             ))
         }
     }
@@ -2140,8 +2137,7 @@ impl PageServerHandler {
         if request_lsn < not_modified_since {
             return Err(PageStreamError::BadRequest(
                 format!(
-                    "invalid request with request LSN {} and not_modified_since {}",
-                    request_lsn, not_modified_since,
+                    "invalid request with request LSN {request_lsn} and not_modified_since {not_modified_since}",
                 )
                 .into(),
             ));
@@ -2616,6 +2612,7 @@ impl PageServerHandler {
                 prev_lsn,
                 full_backup,
                 replica,
+                None,
                 &ctx,
             )
             .await?;
@@ -2644,31 +2641,6 @@ impl PageServerHandler {
                     .map_err(|err| {
                         BasebackupError::Client(err, "handle_basebackup_request,cached,copy")
                     })?;
-            } else if gzip {
-                let mut encoder = GzipEncoder::with_quality(
-                    &mut writer,
-                    // NOTE using fast compression because it's on the critical path
-                    //      for compute startup. For an empty database, we get
-                    //      <100KB with this method. The Level::Best compression method
-                    //      gives us <20KB, but maybe we should add basebackup caching
-                    //      on compute shutdown first.
-                    async_compression::Level::Fastest,
-                );
-                basebackup::send_basebackup_tarball(
-                    &mut encoder,
-                    &timeline,
-                    lsn,
-                    prev_lsn,
-                    full_backup,
-                    replica,
-                    &ctx,
-                )
-                .await?;
-                // shutdown the encoder to ensure the gzip footer is written
-                encoder
-                    .shutdown()
-                    .await
-                    .map_err(|e| QueryError::Disconnected(ConnectionError::Io(e)))?;
             } else {
                 basebackup::send_basebackup_tarball(
                     &mut writer,
@@ -2677,6 +2649,11 @@ impl PageServerHandler {
                     prev_lsn,
                     full_backup,
                     replica,
+                    // NB: using fast compression because it's on the critical path for compute
+                    // startup. For an empty database, we get <100KB with this method. The
+                    // Level::Best compression method gives us <20KB, but maybe we should add
+                    // basebackup caching on compute shutdown first.
+                    gzip.then_some(async_compression::Level::Fastest),
                     &ctx,
                 )
                 .await?;
@@ -3286,7 +3263,14 @@ impl GrpcPageServiceHandler {
                 Ok(req)
             }))
             // Run the page service.
-            .service(proto::PageServiceServer::new(page_service_handler));
+            .service(
+                proto::PageServiceServer::new(page_service_handler)
+                    // Support both gzip and zstd compression. The client decides what to use.
+                    .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+                    .accept_compressed(tonic::codec::CompressionEncoding::Zstd)
+                    .send_compressed(tonic::codec::CompressionEncoding::Gzip)
+                    .send_compressed(tonic::codec::CompressionEncoding::Zstd),
+            );
         let server = server.add_service(page_service);
 
         // Reflection service for use with e.g. grpcurl.
@@ -3532,14 +3516,14 @@ impl proto::PageService for GrpcPageServiceHandler {
         Ok(tonic::Response::new(resp.into()))
     }
 
-    // TODO: ensure clients use gzip compression for the stream.
     #[instrument(skip_all, fields(lsn))]
     async fn get_base_backup(
         &self,
         req: tonic::Request<proto::GetBaseBackupRequest>,
     ) -> Result<tonic::Response<Self::GetBaseBackupStream>, tonic::Status> {
-        // Send 64 KB chunks to avoid large memory allocations.
-        const CHUNK_SIZE: usize = 64 * 1024;
+        // Send chunks of 256 KB to avoid large memory allocations. pagebench basebackup shows this
+        // to be the sweet spot where throughput is saturated.
+        const CHUNK_SIZE: usize = 256 * 1024;
 
         let timeline = self.get_request_timeline(&req).await?;
         let ctx = self.ctx.with_scope_timeline(&timeline);
@@ -3549,7 +3533,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         if timeline.is_archived() == Some(true) {
             return Err(tonic::Status::failed_precondition("timeline is archived"));
         }
-        let req: page_api::GetBaseBackupRequest = req.into_inner().into();
+        let req: page_api::GetBaseBackupRequest = req.into_inner().try_into()?;
 
         span_record!(lsn=?req.lsn);
 
@@ -3575,6 +3559,15 @@ impl proto::PageService for GrpcPageServiceHandler {
         let span = Span::current();
         let (mut simplex_read, mut simplex_write) = tokio::io::simplex(CHUNK_SIZE);
         let jh = tokio::spawn(async move {
+            let gzip_level = match req.compression {
+                page_api::BaseBackupCompression::None => None,
+                // NB: using fast compression because it's on the critical path for compute
+                // startup. For an empty database, we get <100KB with this method. The
+                // Level::Best compression method gives us <20KB, but maybe we should add
+                // basebackup caching on compute shutdown first.
+                page_api::BaseBackupCompression::Gzip => Some(async_compression::Level::Fastest),
+            };
+
             let result = basebackup::send_basebackup_tarball(
                 &mut simplex_write,
                 &timeline,
@@ -3582,6 +3575,7 @@ impl proto::PageService for GrpcPageServiceHandler {
                 None,
                 req.full,
                 req.replica,
+                gzip_level,
                 &ctx,
             )
             .instrument(span) // propagate request span

@@ -191,15 +191,21 @@ pub struct GetBaseBackupRequest {
     pub replica: bool,
     /// If true, include relation files in the base backup. Mainly for debugging and tests.
     pub full: bool,
+    /// Compression algorithm to use. Base backups send a compressed payload instead of using gRPC
+    /// compression, so that we can cache compressed backups on the server.
+    pub compression: BaseBackupCompression,
 }
 
-impl From<proto::GetBaseBackupRequest> for GetBaseBackupRequest {
-    fn from(pb: proto::GetBaseBackupRequest) -> Self {
-        Self {
+impl TryFrom<proto::GetBaseBackupRequest> for GetBaseBackupRequest {
+    type Error = ProtocolError;
+
+    fn try_from(pb: proto::GetBaseBackupRequest) -> Result<Self, Self::Error> {
+        Ok(Self {
             lsn: (pb.lsn != 0).then_some(Lsn(pb.lsn)),
             replica: pb.replica,
             full: pb.full,
-        }
+            compression: pb.compression.try_into()?,
+        })
     }
 }
 
@@ -209,7 +215,52 @@ impl From<GetBaseBackupRequest> for proto::GetBaseBackupRequest {
             lsn: request.lsn.unwrap_or_default().0,
             replica: request.replica,
             full: request.full,
+            compression: request.compression.into(),
         }
+    }
+}
+
+/// Base backup compression algorithm.
+#[derive(Clone, Copy, Debug)]
+pub enum BaseBackupCompression {
+    None,
+    Gzip,
+}
+
+impl TryFrom<proto::BaseBackupCompression> for BaseBackupCompression {
+    type Error = ProtocolError;
+
+    fn try_from(pb: proto::BaseBackupCompression) -> Result<Self, Self::Error> {
+        match pb {
+            proto::BaseBackupCompression::Unknown => Err(ProtocolError::invalid("compression", pb)),
+            proto::BaseBackupCompression::None => Ok(Self::None),
+            proto::BaseBackupCompression::Gzip => Ok(Self::Gzip),
+        }
+    }
+}
+
+impl TryFrom<i32> for BaseBackupCompression {
+    type Error = ProtocolError;
+
+    fn try_from(compression: i32) -> Result<Self, Self::Error> {
+        proto::BaseBackupCompression::try_from(compression)
+            .map_err(|_| ProtocolError::invalid("compression", compression))
+            .and_then(Self::try_from)
+    }
+}
+
+impl From<BaseBackupCompression> for proto::BaseBackupCompression {
+    fn from(compression: BaseBackupCompression) -> Self {
+        match compression {
+            BaseBackupCompression::None => Self::None,
+            BaseBackupCompression::Gzip => Self::Gzip,
+        }
+    }
+}
+
+impl From<BaseBackupCompression> for i32 {
+    fn from(compression: BaseBackupCompression) -> Self {
+        proto::BaseBackupCompression::from(compression).into()
     }
 }
 
@@ -459,7 +510,7 @@ impl GetPageResponse {
 /// These are effectively equivalent to gRPC statuses. However, we use a bidirectional stream
 /// (potentially shared by many backends), and a gRPC status response would terminate the stream so
 /// we send GetPageResponse messages with these codes instead.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, strum_macros::Display)]
 pub enum GetPageStatusCode {
     /// Unknown status. For forwards compatibility: used when an older client version receives a new
     /// status code from a newer server version.

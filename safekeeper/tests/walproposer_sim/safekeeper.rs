@@ -257,7 +257,7 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
                         let estr = e.to_string();
                         if !estr.contains("finished processing START_REPLICATION") {
                             warn!("conn {:?} error: {:?}", connection_id, e);
-                            panic!("unexpected error at safekeeper: {:#}", e);
+                            panic!("unexpected error at safekeeper: {e:#}");
                         }
                         conns.remove(&connection_id);
                         break;

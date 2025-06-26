@@ -11,7 +11,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, bail, ensure};
+use anyhow::{Context, ensure};
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
 use pageserver_api::config::{
@@ -22,6 +22,7 @@ use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
 use pem::Pem;
 use postgres_backend::AuthType;
+use postgres_ffi::PgMajorVersion;
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use reqwest::Url;
 use storage_broker::Uri;
@@ -338,20 +339,16 @@ impl PageServerConf {
     //
     // Postgres distribution paths
     //
-    pub fn pg_distrib_dir(&self, pg_version: u32) -> anyhow::Result<Utf8PathBuf> {
+    pub fn pg_distrib_dir(&self, pg_version: PgMajorVersion) -> anyhow::Result<Utf8PathBuf> {
         let path = self.pg_distrib_dir.clone();
 
-        #[allow(clippy::manual_range_patterns)]
-        match pg_version {
-            14 | 15 | 16 | 17 => Ok(path.join(format!("v{pg_version}"))),
-            _ => bail!("Unsupported postgres version: {}", pg_version),
-        }
+        Ok(path.join(pg_version.v_str()))
     }
 
-    pub fn pg_bin_dir(&self, pg_version: u32) -> anyhow::Result<Utf8PathBuf> {
+    pub fn pg_bin_dir(&self, pg_version: PgMajorVersion) -> anyhow::Result<Utf8PathBuf> {
         Ok(self.pg_distrib_dir(pg_version)?.join("bin"))
     }
-    pub fn pg_lib_dir(&self, pg_version: u32) -> anyhow::Result<Utf8PathBuf> {
+    pub fn pg_lib_dir(&self, pg_version: PgMajorVersion) -> anyhow::Result<Utf8PathBuf> {
         Ok(self.pg_distrib_dir(pg_version)?.join("lib"))
     }
 
@@ -764,5 +761,24 @@ mod tests {
         let workdir = Utf8PathBuf::from("/nonexistent");
         let result = PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir);
         assert_eq!(result.is_ok(), is_valid);
+    }
+
+    #[test]
+    fn test_config_posthog_config_is_valid() {
+        let input = r#"
+            control_plane_api = "http://localhost:6666"
+
+            [posthog_config]
+            server_api_key = "phs_AAA"
+            client_api_key = "phc_BBB"
+            project_id = "000"
+            private_api_url = "https://us.posthog.com"
+            public_api_url = "https://us.i.posthog.com"
+        "#;
+        let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input)
+            .expect("posthogconfig is valid");
+        let workdir = Utf8PathBuf::from("/nonexistent");
+        PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
+            .expect("parse_and_validate");
     }
 }

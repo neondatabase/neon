@@ -48,7 +48,7 @@ use postgres_connection::parse_host_port;
 use safekeeper_api::membership::{SafekeeperGeneration, SafekeeperId};
 use safekeeper_api::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_SAFEKEEPER_HTTP_PORT,
-    DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
+    DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT, PgMajorVersion, PgVersionId,
 };
 use storage_broker::DEFAULT_LISTEN_ADDR as DEFAULT_BROKER_ADDR;
 use tokio::task::JoinSet;
@@ -64,7 +64,7 @@ const DEFAULT_PAGESERVER_ID: NodeId = NodeId(1);
 const DEFAULT_BRANCH_NAME: &str = "main";
 project_git_version!(GIT_VERSION);
 
-const DEFAULT_PG_VERSION: u32 = 17;
+const DEFAULT_PG_VERSION: PgMajorVersion = PgMajorVersion::PG17;
 
 const DEFAULT_PAGESERVER_CONTROL_PLANE_API: &str = "http://127.0.0.1:1234/upcall/v1/";
 
@@ -169,7 +169,7 @@ struct TenantCreateCmdArgs {
 
     #[arg(default_value_t = DEFAULT_PG_VERSION)]
     #[clap(long, help = "Postgres version to use for the initial timeline")]
-    pg_version: u32,
+    pg_version: PgMajorVersion,
 
     #[clap(
         long,
@@ -292,7 +292,7 @@ struct TimelineCreateCmdArgs {
 
     #[arg(default_value_t = DEFAULT_PG_VERSION)]
     #[clap(long, help = "Postgres version")]
-    pg_version: u32,
+    pg_version: PgMajorVersion,
 }
 
 #[derive(clap::Args)]
@@ -324,7 +324,7 @@ struct TimelineImportCmdArgs {
 
     #[arg(default_value_t = DEFAULT_PG_VERSION)]
     #[clap(long, help = "Postgres version of the backup being imported")]
-    pg_version: u32,
+    pg_version: PgMajorVersion,
 }
 
 #[derive(clap::Subcommand)]
@@ -603,7 +603,7 @@ struct EndpointCreateCmdArgs {
 
     #[arg(default_value_t = DEFAULT_PG_VERSION)]
     #[clap(long, help = "Postgres version")]
-    pg_version: u32,
+    pg_version: PgMajorVersion,
 
     /// Use gRPC to communicate with Pageservers, by generating grpc:// connstrings.
     ///
@@ -919,7 +919,7 @@ fn print_timeline(
             br_sym = "┗━";
         }
 
-        print!("{} @{}: ", br_sym, ancestor_lsn);
+        print!("{br_sym} @{ancestor_lsn}: ");
     }
 
     // Finally print a timeline id and name with new line
@@ -1295,7 +1295,7 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
                     },
                     new_members: None,
                 };
-                let pg_version = args.pg_version * 10000;
+                let pg_version = PgVersionId::from(args.pg_version);
                 let req = safekeeper_api::models::TimelineCreateRequest {
                     tenant_id,
                     timeline_id,
@@ -1742,7 +1742,7 @@ async fn handle_pageserver(subcmd: &PageserverCmd, env: &local_env::LocalEnv) ->
                 StopMode::Immediate => true,
             };
             if let Err(e) = get_pageserver(env, args.pageserver_id)?.stop(immediate) {
-                eprintln!("pageserver stop failed: {}", e);
+                eprintln!("pageserver stop failed: {e}");
                 exit(1);
             }
         }
@@ -1751,7 +1751,7 @@ async fn handle_pageserver(subcmd: &PageserverCmd, env: &local_env::LocalEnv) ->
             let pageserver = get_pageserver(env, args.pageserver_id)?;
             //TODO what shutdown strategy should we use here?
             if let Err(e) = pageserver.stop(false) {
-                eprintln!("pageserver stop failed: {}", e);
+                eprintln!("pageserver stop failed: {e}");
                 exit(1);
             }
 
@@ -1768,7 +1768,7 @@ async fn handle_pageserver(subcmd: &PageserverCmd, env: &local_env::LocalEnv) ->
             {
                 Ok(_) => println!("Page server is up and running"),
                 Err(err) => {
-                    eprintln!("Page server is not available: {}", err);
+                    eprintln!("Page server is not available: {err}");
                     exit(1);
                 }
             }
@@ -1805,7 +1805,7 @@ async fn handle_storage_controller(
                 },
             };
             if let Err(e) = svc.stop(stop_args).await {
-                eprintln!("stop failed: {}", e);
+                eprintln!("stop failed: {e}");
                 exit(1);
             }
         }
@@ -1827,7 +1827,7 @@ async fn handle_safekeeper(subcmd: &SafekeeperCmd, env: &local_env::LocalEnv) ->
             let safekeeper = get_safekeeper(env, args.id)?;
 
             if let Err(e) = safekeeper.start(&args.extra_opt, &args.start_timeout).await {
-                eprintln!("safekeeper start failed: {}", e);
+                eprintln!("safekeeper start failed: {e}");
                 exit(1);
             }
         }
@@ -1839,7 +1839,7 @@ async fn handle_safekeeper(subcmd: &SafekeeperCmd, env: &local_env::LocalEnv) ->
                 StopMode::Immediate => true,
             };
             if let Err(e) = safekeeper.stop(immediate) {
-                eprintln!("safekeeper stop failed: {}", e);
+                eprintln!("safekeeper stop failed: {e}");
                 exit(1);
             }
         }
@@ -1852,12 +1852,12 @@ async fn handle_safekeeper(subcmd: &SafekeeperCmd, env: &local_env::LocalEnv) ->
             };
 
             if let Err(e) = safekeeper.stop(immediate) {
-                eprintln!("safekeeper stop failed: {}", e);
+                eprintln!("safekeeper stop failed: {e}");
                 exit(1);
             }
 
             if let Err(e) = safekeeper.start(&args.extra_opt, &args.start_timeout).await {
-                eprintln!("safekeeper start failed: {}", e);
+                eprintln!("safekeeper start failed: {e}");
                 exit(1);
             }
         }
@@ -2113,7 +2113,7 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
 
     let storage = EndpointStorage::from_env(env);
     if let Err(e) = storage.stop(immediate) {
-        eprintln!("endpoint_storage stop failed: {:#}", e);
+        eprintln!("endpoint_storage stop failed: {e:#}");
     }
 
     for ps_conf in &env.pageservers {
