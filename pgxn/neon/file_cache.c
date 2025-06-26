@@ -1295,7 +1295,8 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 		if (iteration_hits != 0)
 		{
-			/* chunk offset (# of pages) into the LFC file */
+			/* chunk offset (#
+			   of pages) into the LFC file */
 			off_t	first_read_offset = (off_t) entry_offset * lfc_blocks_per_chunk;
 			int		nwrite = iov_last_used - first_block_in_chunk_read;
 			/* offset of first IOV */
@@ -1312,16 +1313,6 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			{
 				lfc_disable("read");
 				return -1;
-			}
-
-			/*
-			 * We successfully read the pages we know were valid when we
-			 * started reading; now mark those pages as read
-			 */
-			for (int i = first_block_in_chunk_read; i < iov_last_used; i++)
-			{
-				if (BITMAP_ISSET(chunk_mask, i))
-					BITMAP_SET(mask, buf_offset + i);
 			}
 		}
 
@@ -1340,6 +1331,15 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			{
 				lfc_ctl->time_read += io_time_us;
 				inc_page_cache_read_wait(io_time_us);
+				/*
+				 * We successfully read the pages we know were valid when we
+				 * started reading; now mark those pages as read
+				 */
+				for (int i = first_block_in_chunk_read; i < iov_last_used; i++)
+				{
+					if (BITMAP_ISSET(chunk_mask, i))
+						BITMAP_SET(mask, buf_offset + i);
+				}
 			}
 
 			CriticalAssert(entry->access_count > 0);
