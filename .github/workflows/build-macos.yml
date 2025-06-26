@@ -64,8 +64,10 @@ jobs:
         id: cache_pg
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
-          path: pg_install/${{ matrix.postgres-version }}
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ matrix.postgres-version }}-${{ steps.pg_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+          path: |
+            pg_install/${{ matrix.postgres-version }}
+            build/${{ matrix.postgres-version }}
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-build-${{ matrix.postgres-version }}-${{ steps.pg_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Checkout submodule vendor/postgres-${{ matrix.postgres-version }}
         if: steps.cache_pg.outputs.cache-hit != 'true'
@@ -89,11 +91,13 @@ jobs:
         run: |
           make postgres-${{ matrix.postgres-version }} -j$(sysctl -n hw.ncpu)
 
-      - name: Upload "pg_install/${{ matrix.postgres-version }}" artifact
+      - name: Upload "pg-build--${{ matrix.postgres-version }}" artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: pg_install--${{ matrix.postgres-version }}
-          path: pg_install/${{ matrix.postgres-version }}
+          name: pg-build--${{ matrix.postgres-version }}
+          path: |
+            pg_install/${{ matrix.postgres-version }}
+            build/${{ matrix.postgres-version }}
           # The artifact is supposed to be used by the next job in the same workflow,
           # so there’s no need to store it for too long.
           retention-days: 1
@@ -122,29 +126,29 @@ jobs:
         with:
           submodules: true
 
-      - name: Download "pg_install/v14" artifact
+      - name: Download "pg-build--v14" artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: pg_install--v14
-          path: pg_install/v14
+          name: pg-build--v14
+          path: .
 
-      - name: Download "pg_install/v15" artifact
+      - name: Download "pg-build--v15" artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: pg_install--v15
-          path: pg_install/v15
+          name: pg-build--v15
+          path: .
 
-      - name: Download "pg_install/v16" artifact
+      - name: Download "pg-build--v16" artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: pg_install--v16
-          path: pg_install/v16
+          name: pg-build--v16
+          path: .
 
-      - name: Download "pg_install/v17" artifact
+      - name: Download "pg-build--v17" artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: pg_install--v17
-          path: pg_install/v17
+          name: pg-build--v17
+          path: .
 
       # `actions/download-artifact` doesn't preserve permissions:
       # https://github.com/actions/download-artifact?tab=readme-ov-file#permission-loss
