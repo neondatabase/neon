@@ -199,14 +199,14 @@ where
     }
 
 	/// Get a reference to the entry containing a key given its hash.
-    pub fn entry_with_hash(&mut self, key: K, hash: u64) -> Entry<'a, '_, K, V> {
+    pub fn entry_with_hash(&self, key: K, hash: u64) -> Entry<'a, '_, K, V> {
         let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
 
         map.inner.entry_with_hash(key, hash)
     }
 
 	/// Remove a key given its hash. Does nothing if key is not present.
-    pub fn remove_with_hash(&mut self, key: &K, hash: u64) {
+    pub fn remove_with_hash(&self, key: &K, hash: u64) {
         let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
 
         match map.inner.entry_with_hash(key.clone(), hash) {
@@ -218,7 +218,7 @@ where
     }
 
 	/// Optionally return the entry for a bucket at a given index if it exists.
-    pub fn entry_at_bucket(&mut self, pos: usize) -> Option<OccupiedEntry<'a, '_, K, V>> {
+    pub fn entry_at_bucket(&self, pos: usize) -> Option<OccupiedEntry<'a, '_, K, V>> {
         let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
         map.inner.entry_at_bucket(pos)
     }
@@ -272,7 +272,7 @@ where
 	/// the `buckets` and `dictionary` slices to be as long as `num_buckets`. Resets the freelist
 	/// in the process.
 	fn rehash_dict(
-		&mut self,
+		&self,
 		inner: &mut CoreHashMap<'a, K, V>,
 		buckets_ptr: *mut core::Bucket<K, V>,
 		end_ptr: *mut u8,
@@ -331,7 +331,7 @@ where
     /// 1. Grows the underlying shared memory area
     /// 2. Initializes new buckets and overwrites the current dictionary
     /// 3. Rehashes the dictionary
-    pub fn grow(&mut self, num_buckets: u32) -> Result<(), crate::shmem::Error> {
+    pub fn grow(&self, num_buckets: u32) -> Result<(), crate::shmem::Error> {
         let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
         let inner = &mut map.inner;
         let old_num_buckets = inner.buckets.len() as u32;
@@ -408,7 +408,7 @@ where
     }
 	
 	/// Complete a shrink after caller has evicted entries, removing the unused buckets and rehashing.
-	pub fn finish_shrink(&mut self) -> Result<(), crate::shmem::Error> {
+	pub fn finish_shrink(&self) -> Result<(), crate::shmem::Error> {
 		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
 		let inner = &mut map.inner;
 		if !inner.is_shrinking() {
