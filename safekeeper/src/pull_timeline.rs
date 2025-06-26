@@ -1,5 +1,6 @@
 use std::cmp::min;
 use std::io::{self, ErrorKind};
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -95,9 +96,8 @@ pub async fn stream_snapshot(
 
 /// State needed while streaming the snapshot.
 pub struct SnapshotContext {
-    pub from_segno: XLogSegNo, // including
-    pub upto_segno: XLogSegNo, // including
-    pub send_segments: bool,   // if the timeline hasn't had writes yet, only send control file
+    /// The interval of segment numbers. If None, the timeline hasn't had writes yet, so only send the control file
+    pub from_to_segno: Option<RangeInclusive<XLogSegNo>>,
     pub term: Term,
     pub last_log_term: Term,
     pub flush_lsn: Lsn,
@@ -175,18 +175,18 @@ pub async fn stream_snapshot_resident_guts(
         .await?;
     pausable_failpoint!("sk-snapshot-after-list-pausable");
 
-    if bctx.send_segments {
+    if let Some(from_to_segno) = &bctx.from_to_segno {
         let tli_dir = tli.get_timeline_dir();
         info!(
             "sending {} segments [{:#X}-{:#X}], term={}, last_log_term={}, flush_lsn={}",
-            bctx.upto_segno - bctx.from_segno + 1,
-            bctx.from_segno,
-            bctx.upto_segno,
+            from_to_segno.end() - from_to_segno.start() + 1,
+            from_to_segno.start(),
+            from_to_segno.end(),
             bctx.term,
             bctx.last_log_term,
             bctx.flush_lsn,
         );
-        for segno in bctx.from_segno..=bctx.upto_segno {
+        for segno in from_to_segno.clone() {
             let Some((mut sf, is_partial)) =
                 open_wal_file(&tli_dir, segno, bctx.wal_seg_size).await?
             else {
@@ -396,10 +396,9 @@ impl WalResidentTimeline {
         drop(shared_state);
 
         let tli_copy = self.wal_residence_guard().await?;
+        let from_to_segno = send_segments.then_some(from_segno..=upto_segno);
         let bctx = SnapshotContext {
-            from_segno,
-            upto_segno,
-            send_segments,
+            from_to_segno,
             term,
             last_log_term,
             flush_lsn,
