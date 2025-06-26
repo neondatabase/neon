@@ -218,7 +218,8 @@ pub struct ParsedSpec {
     pub pageserver_connstr: String,
     pub safekeeper_connstrings: Vec<String>,
     pub storage_auth_token: Option<String>,
-    pub endpoint_storage_addr: Option<SocketAddr>,
+    /// k8s dns name and port
+    pub endpoint_storage_addr: Option<String>,
     pub endpoint_storage_token: Option<String>,
 }
 
@@ -313,13 +314,10 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
                 .or(Err("invalid timeline id"))?
         };
 
-        let endpoint_storage_addr: Option<SocketAddr> = spec
+        let endpoint_storage_addr: Option<String> = spec
             .endpoint_storage_addr
             .clone()
-            .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_addr"))
-            .unwrap_or_default()
-            .parse()
-            .ok();
+            .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_addr"));
         let endpoint_storage_token = spec
             .endpoint_storage_token
             .clone()
