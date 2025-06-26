@@ -154,7 +154,7 @@ jobs:
       # https://github.com/actions/download-artifact?tab=readme-ov-file#permission-loss
       - name: Make pg_install/v*/bin/* executable
         run: |
-          chmod +x pg_install/v*/bin/*
+          chmod +x pg_install/v*/bin/* build/v*/src/timezone/zic
 
       # Explicitly update the rust toolchain before running 'make'. The parallel make build can
       # invoke 'cargo build' more than once in parallel, for different crates.  That's OK, 'cargo'
