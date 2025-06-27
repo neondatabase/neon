@@ -14,6 +14,7 @@ use crate::metrics::{Metrics, NumClientConnectionsGuard};
 use crate::pglb::ClientRequestError;
 use crate::pglb::handshake::{HandshakeData, handshake};
 use crate::pglb::passthrough::ProxyPassthrough;
+use crate::pqproto::CancelKeyData;
 use crate::protocol2::{ConnectHeader, ConnectionInfo, read_proxy_protocol};
 use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
 use crate::proxy::{ErrorSource, finish_client_init};
@@ -231,23 +232,26 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         .or_else(|e| async { Err(stream.throw_error(e, Some(ctx)).await) })
         .await?;
 
-    let session = cancellation_handler.get_key();
+    // let session = cancellation_handler.get_key();
+    let pid = pg_settings.cancel_closure.cancel_token.process_id as u32;
+    let key = pg_settings.cancel_closure.cancel_token.secret_key as u32;
+    let cancel_key_data = CancelKeyData(((pid as u64) << (key as u64)).into());
 
-    finish_client_init(&pg_settings, *session.key(), &mut stream);
+    finish_client_init(&pg_settings, cancel_key_data, &mut stream);
     let stream = stream.flush_and_into_inner().await?;
 
-    let session_id = ctx.session_id();
-    let (cancel_on_shutdown, cancel) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
-        session
-            .maintain_cancel_key(
-                session_id,
-                cancel,
-                &pg_settings.cancel_closure,
-                &config.connect_to_compute,
-            )
-            .await;
-    });
+    // let session_id = ctx.session_id();
+    let (cancel_on_shutdown, _cancel) = tokio::sync::oneshot::channel();
+    // tokio::spawn(async move {
+    //     session
+    //         .maintain_cancel_key(
+    //             session_id,
+    //             cancel,
+    //             &pg_settings.cancel_closure,
+    //             &config.connect_to_compute,
+    //         )
+    //         .await;
+    // });
 
     Ok(Some(ProxyPassthrough {
         client: stream,

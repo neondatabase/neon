@@ -39,7 +39,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     config: &'static ProxyConfig,
     auth_backend: &'static auth::Backend<'static, ()>,
     ctx: &RequestContext,
-    cancellation_handler: Arc<CancellationHandler>,
+    _cancellation_handler: Arc<CancellationHandler>,
     client: &mut PqStream<Stream<S>>,
     mode: &ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
@@ -149,22 +149,25 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         client.write_message(BeMessage::AuthenticationOk);
     }
 
-    let session = cancellation_handler.get_key();
+    // let session = cancellation_handler.get_key();
+    let pid = pg_settings.cancel_closure.cancel_token.process_id as u32;
+    let key = pg_settings.cancel_closure.cancel_token.secret_key as u32;
+    let cancel_key_data = CancelKeyData(((pid as u64) << (key as u64)).into());
 
-    finish_client_init(&pg_settings, *session.key(), client);
+    finish_client_init(&pg_settings, cancel_key_data, client);
 
-    let session_id = ctx.session_id();
-    let (cancel_on_shutdown, cancel) = oneshot::channel();
-    tokio::spawn(async move {
-        session
-            .maintain_cancel_key(
-                session_id,
-                cancel,
-                &pg_settings.cancel_closure,
-                &config.connect_to_compute,
-            )
-            .await;
-    });
+    // let session_id = ctx.session_id();
+    let (cancel_on_shutdown, _cancel) = oneshot::channel();
+    // tokio::spawn(async move {
+    //     session
+    //         .maintain_cancel_key(
+    //             session_id,
+    //             cancel,
+    //             &pg_settings.cancel_closure,
+    //             &config.connect_to_compute,
+    //         )
+    //         .await;
+    // });
 
     Ok((node, cancel_on_shutdown))
 }
