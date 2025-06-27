@@ -105,6 +105,8 @@ use crate::timeline_import::{
     TimelineImportFinalizeError, TimelineImportState, UpcallClient,
 };
 
+pub use safekeeper_service::TimelineSafekeeperMigrateRequest;
+
 const WAITER_FILL_DRAIN_POLL_TIMEOUT: Duration = Duration::from_millis(500);
 
 // For operations that should be quick, like attaching a new tenant
@@ -161,6 +163,7 @@ enum TenantOperations {
     DropDetached,
     DownloadHeatmapLayers,
     TimelineLsnLease,
+    TimelineSafekeeperMigrate,
 }
 
 #[derive(Clone, strum_macros::Display)]
@@ -491,6 +494,7 @@ impl From<DatabaseError> for ApiError {
             DatabaseError::Logical(reason) | DatabaseError::Migration(reason) => {
                 ApiError::InternalServerError(anyhow::anyhow!(reason))
             }
+            DatabaseError::Cas(reason) => ApiError::Conflict(reason),
         }
     }
 }

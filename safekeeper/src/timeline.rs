@@ -190,7 +190,14 @@ impl StateSK {
         &mut self,
         to: Configuration,
     ) -> Result<TimelineMembershipSwitchResponse> {
-        self.state_mut().membership_switch(to).await
+        let result = self.state_mut().membership_switch(to).await?;
+
+        Ok(TimelineMembershipSwitchResponse {
+            previous_conf: result.previous_conf,
+            current_conf: result.current_conf,
+            term: self.state().acceptor_state.term,
+            flush_lsn: self.flush_lsn(),
+        })
     }
 
     /// Close open WAL files to release FDs.
