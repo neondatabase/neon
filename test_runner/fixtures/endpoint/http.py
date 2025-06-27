@@ -94,6 +94,31 @@ class EndpointHttpClient(requests.Session):
 
         wait_until(offloaded)
 
+    def start_profiling_cpu(
+        self, sampling_frequency: int, timeout_seconds: int
+    ) -> tuple[int, bytes]:
+        url = f"http://localhost:{self.external_port}/profile/cpu"
+        params = {
+            "sampling_frequency": sampling_frequency,
+            "timeout_seconds": timeout_seconds,
+        }
+
+        res = self.get(
+            url,
+            params=params,
+            auth=self.auth,
+        )
+
+        res.raise_for_status()
+
+        return res.status_code, res.content
+
+    def stop_profiling_cpu(self) -> int:
+        url = f"http://localhost:{self.external_port}/profile/cpu"
+        res = self.delete(url, auth=self.auth)
+        res.raise_for_status()
+        return res.status_code
+
     def database_schema(self, database: str):
         res = self.get(
             f"http://localhost:{self.external_port}/database_schema?database={urllib.parse.quote(database, safe='')}",

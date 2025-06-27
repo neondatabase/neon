@@ -22,6 +22,7 @@ axum = { version = "0.8", features = ["ws"] }
 axum-core = { version = "0.5", default-features = false, features = ["tracing"] }
 base64 = { version = "0.21" }
 base64ct = { version = "1", default-features = false, features = ["std"] }
+bitflags = { version = "2", default-features = false, features = ["std"] }
 bytes = { version = "1", features = ["serde"] }
 camino = { version = "1", default-features = false, features = ["serde1"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "wasmbind"] }
@@ -53,6 +54,7 @@ hyper-582f2526e08bb6a0 = { package = "hyper", version = "0.14", features = ["cli
 hyper-dff4ba8e3ae991db = { package = "hyper", version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "server-auto", "service"] }
 indexmap = { version = "2", features = ["serde"] }
+inferno = { version = "0.12" }
 itertools = { version = "0.12" }
 lazy_static = { version = "1", default-features = false, features = ["spin_no_std"] }
 libc = { version = "0.2", features = ["extra_traits", "use_std"] }
@@ -114,6 +116,7 @@ zstd-sys = { version = "2", default-features = false, features = ["legacy", "std
 [build-dependencies]
 ahash = { version = "0.8" }
 anyhow = { version = "1", features = ["backtrace"] }
+bitflags = { version = "2", default-features = false, features = ["std"] }
 bytes = { version = "1", features = ["serde"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "wasmbind"] }

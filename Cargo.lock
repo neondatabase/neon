@@ -1306,6 +1306,7 @@ dependencies = [
  "futures",
  "http 1.1.0",
  "indexmap 2.9.0",
+ "inferno 0.12.0",
  "itertools 0.10.5",
  "jsonwebtoken",
  "metrics",
@@ -1319,6 +1320,9 @@ dependencies = [
  "postgres",
  "postgres_initdb",
  "postgres_versioninfo",
+ "pprof 0.15.0",
+ "procfs 0.17.0",
+ "prost 0.12.6",
  "regex",
  "remote_storage",
  "reqwest",
@@ -2758,6 +2762,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "home"
+version = "0.5.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "589533453244b0995c858700322199b2becb13b627df2851f64a2775d024abcf"
+dependencies = [
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "hostname"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2860,7 +2873,7 @@ dependencies = [
  "jsonwebtoken",
  "metrics",
  "once_cell",
- "pprof",
+ "pprof 0.14.0",
  "regex",
  "routerify",
  "rustls 0.23.27",
@@ -3513,7 +3526,7 @@ version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 dependencies = [
- "spin",
+ "spin 0.9.8",
 ]
 
 [[package]]
@@ -3662,7 +3675,7 @@ checksum = "7c4b80445aeb08e832d87bf1830049a924cdc1d6b7ef40b6b9b365bff17bf8ec"
 dependencies = [
  "libc",
  "measured",
- "procfs",
+ "procfs 0.16.0",
 ]
 
 [[package]]
@@ -3707,7 +3720,7 @@ dependencies = [
  "measured",
  "measured-process",
  "once_cell",
- "procfs",
+ "procfs 0.16.0",
  "prometheus",
  "rand 0.8.5",
  "rand_distr",
@@ -4339,9 +4352,9 @@ dependencies = [
  "postgres_ffi_types",
  "postgres_initdb",
  "posthog_client_lite",
- "pprof",
+ "pprof 0.14.0",
  "pq_proto",
- "procfs",
+ "procfs 0.16.0",
  "rand 0.8.5",
  "range-set-blaze",
  "regex",
@@ -4902,7 +4915,7 @@ dependencies = [
  "postgres",
  "postgres_ffi_types",
  "postgres_versioninfo",
- "pprof",
+ "pprof 0.14.0",
  "regex",
  "serde",
  "thiserror 1.0.69",
@@ -4993,6 +5006,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "pprof"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38a01da47675efa7673b032bf8efd8214f1917d89685e07e395ab125ea42b187"
+dependencies = [
+ "aligned-vec",
+ "backtrace",
+ "cfg-if",
+ "findshlibs",
+ "inferno 0.11.21",
+ "libc",
+ "log",
+ "nix 0.26.4",
+ "once_cell",
+ "protobuf",
+ "protobuf-codegen",
+ "smallvec",
+ "spin 0.10.0",
+ "symbolic-demangle",
+ "tempfile",
+ "thiserror 2.0.11",
+]
+
+[[package]]
 name = "pprof_util"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5066,7 +5103,21 @@ dependencies = [
  "flate2",
  "hex",
  "lazy_static",
- "procfs-core",
+ "procfs-core 0.16.0",
+ "rustix",
+]
+
+[[package]]
+name = "procfs"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc5b72d8145275d844d4b5f6d4e1eef00c8cd889edb6035c21675d1bb1f45c9f"
+dependencies = [
+ "bitflags 2.8.0",
+ "chrono",
+ "flate2",
+ "hex",
+ "procfs-core 0.17.0",
  "rustix",
 ]
 
@@ -5075,6 +5126,17 @@ name = "procfs-core"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2d3554923a69f4ce04c4a754260c338f505ce22642d3830e049a399fc2059a29"
+dependencies = [
+ "bitflags 2.8.0",
+ "chrono",
+ "hex",
+]
+
+[[package]]
+name = "procfs-core"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "239df02d8349b06fc07398a3a1697b06418223b1c7725085e801e7c0fc6a12ec"
 dependencies = [
  "bitflags 2.8.0",
  "chrono",
@@ -5093,7 +5155,7 @@ dependencies = [
  "libc",
  "memchr",
  "parking_lot 0.12.1",
- "procfs",
+ "procfs 0.16.0",
  "thiserror 1.0.69",
 ]
 
@@ -5201,6 +5263,57 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4759aa0d3a6232fb8dbdb97b61de2c20047c68aca932c7ed76da9d788508d670"
 dependencies = [
  "prost 0.13.5",
+]
+
+[[package]]
+name = "protobuf"
+version = "3.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d65a1d4ddae7d8b5de68153b48f6aa3bba8cb002b243dbdbc55a5afbc98f99f4"
+dependencies = [
+ "once_cell",
+ "protobuf-support",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "protobuf-codegen"
+version = "3.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d3976825c0014bbd2f3b34f0001876604fe87e0c86cd8fa54251530f1544ace"
+dependencies = [
+ "anyhow",
+ "once_cell",
+ "protobuf",
+ "protobuf-parse",
+ "regex",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "protobuf-parse"
+version = "3.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4aeaa1f2460f1d348eeaeed86aea999ce98c1bded6f089ff8514c9d9dbdc973"
+dependencies = [
+ "anyhow",
+ "indexmap 2.9.0",
+ "log",
+ "protobuf",
+ "protobuf-support",
+ "tempfile",
+ "thiserror 1.0.69",
+ "which",
+]
+
+[[package]]
+name = "protobuf-support"
+version = "3.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e36c2f31e0a47f9280fb347ef5e461ffcd2c52dd520d8e216b52f93b0b0d7d6"
+dependencies = [
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -6133,7 +6246,7 @@ dependencies = [
  "postgres_backend",
  "postgres_ffi",
  "postgres_versioninfo",
- "pprof",
+ "pprof 0.14.0",
  "pq_proto",
  "rand 0.8.5",
  "regex",
@@ -6721,6 +6834,15 @@ name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+
+[[package]]
+name = "spin"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5fe4ccb98d9c292d56fec89a5e07da7fc4cf0dc11e156b41793132775d3e591"
+dependencies = [
+ "lock_api",
+]
 
 [[package]]
 name = "spinning_top"
@@ -8100,7 +8222,7 @@ dependencies = [
  "pem",
  "pin-project-lite",
  "postgres_connection",
- "pprof",
+ "pprof 0.14.0",
  "pq_proto",
  "rand 0.8.5",
  "regex",
@@ -8207,7 +8329,7 @@ dependencies = [
  "pageserver_api",
  "postgres_ffi",
  "postgres_ffi_types",
- "pprof",
+ "pprof 0.14.0",
  "prost 0.13.5",
  "remote_storage",
  "serde",
@@ -8391,6 +8513,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b3de34ae270483955a94f4b21bdaaeb83d508bb84a01435f393818edb0012009"
 dependencies = [
  "rustls-pki-types",
+]
+
+[[package]]
+name = "which"
+version = "4.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87ba24419a2078cd2b0f2ede2691b6c66d8e47836da3b6db8265ebad47afbfc7"
+dependencies = [
+ "either",
+ "home",
+ "once_cell",
+ "rustix",
 ]
 
 [[package]]
@@ -8632,6 +8766,7 @@ dependencies = [
  "axum-core",
  "base64 0.21.7",
  "base64ct",
+ "bitflags 2.8.0",
  "bytes",
  "camino",
  "cc",
@@ -8664,6 +8799,7 @@ dependencies = [
  "hyper 1.4.1",
  "hyper-util",
  "indexmap 2.9.0",
+ "inferno 0.12.0",
  "itertools 0.12.1",
  "lazy_static",
  "libc",
