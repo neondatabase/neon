@@ -1069,7 +1069,12 @@ impl ComputeNode {
         let reader = tokio_util::io::SyncIoBridge::new(reader);
         let mut reader = MeasuredReader::new(flate2::read::GzDecoder::new(reader));
 
-        tar::Archive::new(&mut reader).unpack(&self.params.pgdata)?;
+        // Set `ignore_zeros` so that unpack() reads the entire stream and doesn't just stop at the
+        // end-of-archive marker. If the server errors, the tar::Builder drop handler will write an
+        // end-of-archive marker before the error is emitted, and we would not see the error.
+        let mut ar = tar::Archive::new(&mut reader);
+        ar.set_ignore_zeros(true);
+        ar.unpack(&self.params.pgdata)?;
 
         Ok((connected, reader.get_byte_count()))
     }
@@ -1134,6 +1139,8 @@ impl ComputeNode {
         // Set `ignore_zeros` so that unpack() reads all the Copy data and
         // doesn't stop at the end-of-archive marker. Otherwise, if the server
         // sends an Error after finishing the tarball, we will not notice it.
+        // The tar::Builder drop handler will write an end-of-archive marker
+        // before emitting the error, and we would not see it otherwise.
         let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(&mut bufreader));
         ar.set_ignore_zeros(true);
         ar.unpack(&self.params.pgdata)?;
