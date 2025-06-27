@@ -165,6 +165,7 @@ RUN curl -fsSL \
     && rm sql_exporter.tar.gz
 
 # protobuf-compiler (protoc)
+# Keep the version the same as in compute/compute-node.Dockerfile
 ENV PROTOC_VERSION=25.1
 RUN curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-$(uname -m | sed 's/aarch64/aarch_64/g').zip" -o "protoc.zip" \
     && unzip -q protoc.zip -d protoc \
