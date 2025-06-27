@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 
 use super::layer_manager::{LayerManagerLockHolder, LayerManagerReadGuard};
 use super::{
-    CompactFlags, CompactOptions, CompactionError, CreateImageLayersError, DurationRecorder,
-    GetVectoredError, ImageLayerCreationMode, LastImageLayerCreationStatus, RecordedDuration,
-    Timeline,
+    CheckOtherForCancel, CompactFlags, CompactOptions, CompactionError, CreateImageLayersError,
+    DurationRecorder, GetVectoredError, ImageLayerCreationMode, LastImageLayerCreationStatus,
+    RecordedDuration, Timeline,
 };
 
 use crate::tenant::timeline::DeltaEntry;
@@ -1405,7 +1405,7 @@ impl Timeline {
 
             // Suppress errors when cancelled.
             Err(_) if self.cancel.is_cancelled() => {}
-            Err(err) if err.is_cancel() => {}
+            Err(err) if err.is_cancel(CheckOtherForCancel::No) => {}
 
             // Alert on critical errors that indicate data corruption.
             Err(err) if err.is_critical() => {

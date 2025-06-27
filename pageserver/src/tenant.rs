@@ -102,6 +102,7 @@ use crate::tenant::remote_timeline_client::{
     INITDB_PATH, MaybeDeletedIndexPart, remote_initdb_archive_path,
 };
 use crate::tenant::storage_layer::{DeltaLayer, ImageLayer};
+use crate::tenant::timeline::CheckOtherForCancel;
 use crate::tenant::timeline::delete::DeleteTimelineFlow;
 use crate::tenant::timeline::uninit::cleanup_timeline_directory;
 use crate::virtual_file::VirtualFile;
@@ -3313,11 +3314,11 @@ impl TenantShard {
 
     /// Trips the compaction circuit breaker if appropriate.
     pub(crate) fn maybe_trip_compaction_breaker(&self, err: &CompactionError) {
+        if err.is_cancel(CheckOtherForCancel::No /* XXX flip this to Yes so that all the Other() errors that are cancel don't trip the circuit breaker? */) {
+            return;
+        }
         match err {
-            err if err.is_cancel() => {}
-            CompactionError::ShuttingDown => (),
-            // Offload failures don't trip the circuit breaker, since they're cheap to retry and
-            // shouldn't block compaction.
+            CompactionError::ShuttingDown => unreachable!("is_cancel"),
             CompactionError::Offload(_) => {}
             CompactionError::CollectKeySpaceError(err) => {
                 // CollectKeySpaceError::Cancelled and PageRead::Cancelled are handled in `err.is_cancel` branch.
@@ -3332,7 +3333,7 @@ impl TenantShard {
                     .unwrap()
                     .fail(&CIRCUIT_BREAKERS_BROKEN, err);
             }
-            CompactionError::AlreadyRunning(_) => {}
+            CompactionError::AlreadyRunning(_) => unreachable!("is_cancel, but XXX why?"),
         }
     }
 
