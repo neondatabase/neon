@@ -374,6 +374,7 @@ fn connect_compute_total_wait() {
 #[derive(Clone, Copy, Debug)]
 enum ConnectAction {
     Wake,
+    WakeCold,
     WakeFail,
     WakeRetry,
     Connect,
@@ -504,6 +505,9 @@ impl TestControlPlaneClient for TestConnectMechanism {
         *counter += 1;
         match action {
             ConnectAction::Wake => Ok(helper_create_cached_node_info(self.cache)),
+            ConnectAction::WakeCold => Ok(CachedNodeInfo::new_uncached(
+                helper_create_uncached_node_info(),
+            )),
             ConnectAction::WakeFail => {
                 let err = control_plane::errors::ControlPlaneError::Message(Box::new(
                     ControlPlaneErrorMessage {
@@ -551,8 +555,8 @@ impl TestControlPlaneClient for TestConnectMechanism {
     }
 }
 
-fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {
-    let node = NodeInfo {
+fn helper_create_uncached_node_info() -> NodeInfo {
+    NodeInfo {
         conn_info: compute::ConnectInfo {
             host: "test".into(),
             port: 5432,
@@ -566,7 +570,11 @@ fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeIn
             compute_id: "compute".into(),
             cold_start_info: crate::control_plane::messages::ColdStartInfo::Warm,
         },
-    };
+    }
+}
+
+fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {
+    let node = helper_create_uncached_node_info();
     let (_, node2) = cache.insert_unit("key".into(), Ok(node.clone()));
     node2.map(|()| node)
 }
@@ -742,7 +750,7 @@ async fn fail_no_wake_skips_cache_invalidation() {
     let ctx = RequestContext::test();
     let mech = TestConnectMechanism::new(vec![
         ConnectAction::Wake,
-        ConnectAction::FailNoWake,
+        ConnectAction::RetryNoWake,
         ConnectAction::Connect,
     ]);
     let user = helper_create_connect_info(&mech);
@@ -788,7 +796,7 @@ async fn retry_no_wake_skips_invalidation() {
 
     let ctx = RequestContext::test();
     // Wake → RetryNoWake (retryable + NOT wakeable)
-    let mechanism = TestConnectMechanism::new(vec![Wake, RetryNoWake]);
+    let mechanism = TestConnectMechanism::new(vec![Wake, RetryNoWake, Fail]);
     let user_info = helper_create_connect_info(&mechanism);
     let cfg = config();
 
@@ -801,4 +809,45 @@ async fn retry_no_wake_skips_invalidation() {
     assert!(!logs_contain(
         "invalidating stalled compute node info cache entry"
     ));
+}
+
+#[tokio::test]
+#[traced_test]
+async fn retry_no_wake_error_fast() {
+    let _ = env_logger::try_init();
+    use ConnectAction::*;
+
+    let ctx = RequestContext::test();
+    // Wake → FailNoWake (not retryable + NOT wakeable)
+    let mechanism = TestConnectMechanism::new(vec![Wake, FailNoWake]);
+    let user_info = helper_create_connect_info(&mechanism);
+    let cfg = config();
+
+    connect_to_compute(&ctx, &mechanism, &user_info, cfg.retry, &cfg)
+        .await
+        .unwrap_err();
+    mechanism.verify();
+
+    // Because FailNoWake has wakeable=false, we must NOT see invalidate_cache
+    assert!(!logs_contain(
+        "invalidating stalled compute node info cache entry"
+    ));
+}
+
+#[tokio::test]
+#[traced_test]
+async fn retry_cold_wake_skips_invalidation() {
+    let _ = env_logger::try_init();
+    use ConnectAction::*;
+
+    let ctx = RequestContext::test();
+    // WakeCold → FailNoWake (not retryable + NOT wakeable)
+    let mechanism = TestConnectMechanism::new(vec![WakeCold, Retry, Connect]);
+    let user_info = helper_create_connect_info(&mechanism);
+    let cfg = config();
+
+    connect_to_compute(&ctx, &mechanism, &user_info, cfg.retry, &cfg)
+        .await
+        .unwrap();
+    mechanism.verify();
 }
