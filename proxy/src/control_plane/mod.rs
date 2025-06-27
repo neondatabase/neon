@@ -11,6 +11,8 @@ pub(crate) mod errors;
 
 use std::sync::Arc;
 
+use messages::EndpointRateLimitConfig;
+
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::AuthRule;
 use crate::auth::{AuthError, IpPattern, check_peer_addr_is_in_list};
@@ -18,8 +20,9 @@ use crate::cache::{Cached, TimedLru};
 use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::control_plane::messages::{ControlPlaneErrorMessage, MetricsAuxInfo};
-use crate::intern::{AccountIdInt, ProjectIdInt};
+use crate::intern::{AccountIdInt, EndpointIdInt, ProjectIdInt};
 use crate::protocol2::ConnectionInfoExtra;
+use crate::rate_limiter::{EndpointRateLimiter, LeakyBucketConfig};
 use crate::types::{EndpointCacheKey, EndpointId, RoleName};
 use crate::{compute, scram};
 
@@ -56,6 +59,8 @@ pub(crate) struct AuthInfo {
     pub(crate) account_id: Option<AccountIdInt>,
     /// Are public connections or VPC connections blocked?
     pub(crate) access_blocker_flags: AccessBlockerFlags,
+    /// The rate limits for this endpoint.
+    pub(crate) rate_limits: EndpointRateLimitConfig,
 }
 
 /// Info for establishing a connection to a compute node.
@@ -71,13 +76,9 @@ impl NodeInfo {
     pub(crate) async fn connect(
         &self,
         ctx: &RequestContext,
-        auth: &compute::AuthInfo,
         config: &ComputeConfig,
-        user_info: ComputeUserInfo,
-    ) -> Result<compute::PostgresConnection, compute::ConnectionError> {
-        self.conn_info
-            .connect(ctx, self.aux.clone(), auth, config, user_info)
-            .await
+    ) -> Result<compute::ComputeConnection, compute::ConnectionError> {
+        self.conn_info.connect(ctx, &self.aux, config).await
     }
 }
 
@@ -101,6 +102,8 @@ pub struct EndpointAccessControl {
     pub allowed_ips: Arc<Vec<IpPattern>>,
     pub allowed_vpce: Arc<Vec<String>>,
     pub flags: AccessBlockerFlags,
+
+    pub rate_limits: EndpointRateLimitConfig,
 }
 
 impl EndpointAccessControl {
@@ -135,6 +138,36 @@ impl EndpointAccessControl {
             }
         } else if self.flags.public_access_blocked {
             return Err(AuthError::NetworkNotAllowed);
+        }
+
+        Ok(())
+    }
+
+    pub fn connection_attempt_rate_limit(
+        &self,
+        ctx: &RequestContext,
+        endpoint: &EndpointId,
+        rate_limiter: &EndpointRateLimiter,
+    ) -> Result<(), AuthError> {
+        let endpoint = EndpointIdInt::from(endpoint);
+
+        let limits = &self.rate_limits.connection_attempts;
+        let config = match ctx.protocol() {
+            crate::metrics::Protocol::Http => limits.http,
+            crate::metrics::Protocol::Ws => limits.ws,
+            crate::metrics::Protocol::Tcp => limits.tcp,
+            crate::metrics::Protocol::SniRouter => return Ok(()),
+        };
+        let config = config.and_then(|config| {
+            if config.rps <= 0.0 || config.burst <= 0.0 {
+                return None;
+            }
+
+            Some(LeakyBucketConfig::new(config.rps, config.burst))
+        });
+
+        if !rate_limiter.check(endpoint, config, 1) {
+            return Err(AuthError::too_many_connections());
         }
 
         Ok(())

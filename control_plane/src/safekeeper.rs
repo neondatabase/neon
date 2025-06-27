@@ -143,7 +143,7 @@ impl SafekeeperNode {
         let id_string = id.to_string();
         // TODO: add availability_zone to the config.
         // Right now we just specify any value here and use it to check metrics in tests.
-        let availability_zone = format!("sk-{}", id_string);
+        let availability_zone = format!("sk-{id_string}");
 
         let mut args = vec![
             "-D".to_owned(),

@@ -230,7 +230,7 @@ impl ReconcilerHandle {
         // increase it before putting into the queue.
         let queued_gauge = &METRICS_REGISTRY
             .metrics_group
-            .storage_controller_safkeeper_reconciles_queued;
+            .storage_controller_safekeeper_reconciles_queued;
         let label_group = SafekeeperReconcilerLabelGroup {
             sk_az: &sk_az,
             sk_node_id: &sk_node_id,
@@ -306,7 +306,7 @@ impl SafekeeperReconciler {
 
             let queued_gauge = &METRICS_REGISTRY
                 .metrics_group
-                .storage_controller_safkeeper_reconciles_queued;
+                .storage_controller_safekeeper_reconciles_queued;
             queued_gauge.set(
                 SafekeeperReconcilerLabelGroup {
                     sk_az: &req.safekeeper.skp.availability_zone_id,
@@ -547,7 +547,7 @@ impl SafekeeperReconcilerInner {
 
                     let complete_counter = &METRICS_REGISTRY
                         .metrics_group
-                        .storage_controller_safkeeper_reconciles_complete;
+                        .storage_controller_safekeeper_reconciles_complete;
                     complete_counter.inc(SafekeeperReconcilerLabelGroup {
                         sk_az: &req.safekeeper.skp.availability_zone_id,
                         sk_node_id: &req.safekeeper.get_id().to_string(),

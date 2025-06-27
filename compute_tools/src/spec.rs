@@ -23,12 +23,12 @@ fn do_control_plane_request(
 ) -> Result<ControlPlaneConfigResponse, (bool, String, String)> {
     let resp = reqwest::blocking::Client::new()
         .get(uri)
-        .header("Authorization", format!("Bearer {}", jwt))
+        .header("Authorization", format!("Bearer {jwt}"))
         .send()
         .map_err(|e| {
             (
                 true,
-                format!("could not perform request to control plane: {:?}", e),
+                format!("could not perform request to control plane: {e:?}"),
                 UNKNOWN_HTTP_STATUS.to_string(),
             )
         })?;
@@ -39,7 +39,7 @@ fn do_control_plane_request(
             Ok(spec_resp) => Ok(spec_resp),
             Err(e) => Err((
                 true,
-                format!("could not deserialize control plane response: {:?}", e),
+                format!("could not deserialize control plane response: {e:?}"),
                 status.to_string(),
             )),
         },
@@ -62,7 +62,7 @@ fn do_control_plane_request(
         // or some internal failure happened. Doesn't make much sense to retry in this case.
         _ => Err((
             false,
-            format!("unexpected control plane response status code: {}", status),
+            format!("unexpected control plane response status code: {status}"),
             status.to_string(),
         )),
     }

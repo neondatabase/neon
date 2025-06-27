@@ -15,6 +15,8 @@ mod secret;
 mod signature;
 pub mod threadpool;
 
+use base64::Engine as _;
+use base64::prelude::BASE64_STANDARD;
 pub(crate) use exchange::{Exchange, exchange};
 use hmac::{Hmac, Mac};
 pub(crate) use key::ScramKey;
@@ -32,7 +34,7 @@ pub(crate) const METHODS_WITHOUT_PLUS: &[&str] = &[SCRAM_SHA_256];
 fn base64_decode_array<const N: usize>(input: impl AsRef<[u8]>) -> Option<[u8; N]> {
     let mut bytes = [0u8; N];
 
-    let size = base64::decode_config_slice(input, base64::STANDARD, &mut bytes).ok()?;
+    let size = BASE64_STANDARD.decode_slice(input, &mut bytes).ok()?;
     if size != N {
         return None;
     }

@@ -41,7 +41,7 @@ pub fn report_compact_sources<E: std::error::Error>(e: &E) -> impl std::fmt::Dis
             // why is E a generic parameter here? hope that rustc will see through a default
             // Error::source implementation and leave the following out if there cannot be any
             // sources:
-            Sources(self.0.source()).try_for_each(|src| write!(f, ": {}", src))
+            Sources(self.0.source()).try_for_each(|src| write!(f, ": {src}"))
         }
     }
 

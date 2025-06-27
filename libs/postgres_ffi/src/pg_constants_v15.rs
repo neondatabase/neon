@@ -1,3 +1,7 @@
+use crate::PgMajorVersion;
+
+pub const MY_PGVERSION: PgMajorVersion = PgMajorVersion::PG15;
+
 pub const XACT_XINFO_HAS_DROPPED_STATS: u32 = 1u32 << 8;
 
 pub const XLOG_DBASE_CREATE_FILE_COPY: u8 = 0x00;

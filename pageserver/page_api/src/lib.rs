@@ -18,6 +18,8 @@ pub mod proto {
     pub use page_service_server::{PageService, PageServiceServer};
 }
 
+mod client;
+pub use client::Client;
 mod model;
 
 pub use model::*;

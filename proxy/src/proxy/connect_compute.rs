@@ -2,25 +2,24 @@ use async_trait::async_trait;
 use tokio::time;
 use tracing::{debug, info, warn};
 
-use crate::auth::backend::ComputeUserInfo;
-use crate::compute::{self, AuthInfo, COULD_NOT_CONNECT, PostgresConnection};
+use crate::compute::{self, COULD_NOT_CONNECT, ComputeConnection};
 use crate::config::{ComputeConfig, RetryConfig};
 use crate::context::RequestContext;
 use crate::control_plane::errors::WakeComputeError;
 use crate::control_plane::locks::ApiLocks;
-use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
+use crate::control_plane::{self, NodeInfo};
 use crate::error::ReportableError;
 use crate::metrics::{
     ConnectOutcome, ConnectionFailureKind, Metrics, RetriesMetricGroup, RetryType,
 };
 use crate::proxy::retry::{CouldRetry, ShouldRetryWakeCompute, retry_after, should_retry};
-use crate::proxy::wake_compute::wake_compute;
+use crate::proxy::wake_compute::{WakeComputeBackend, wake_compute};
 use crate::types::Host;
 
 /// If we couldn't connect, a cached connection info might be to blame
 /// (e.g. the compute node's address might've changed at the wrong time).
 /// Invalidate the cache entry (if any) to prevent subsequent errors.
-#[tracing::instrument(name = "invalidate_cache", skip_all)]
+#[tracing::instrument(skip_all)]
 pub(crate) fn invalidate_cache(node_info: control_plane::CachedNodeInfo) -> NodeInfo {
     let is_cached = node_info.cached();
     if is_cached {
@@ -49,24 +48,14 @@ pub(crate) trait ConnectMechanism {
     ) -> Result<Self::Connection, Self::ConnectError>;
 }
 
-#[async_trait]
-pub(crate) trait WakeComputeBackend {
-    async fn wake_compute(
-        &self,
-        ctx: &RequestContext,
-    ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError>;
-}
-
 pub(crate) struct TcpMechanism {
-    pub(crate) auth: AuthInfo,
     /// connect_to_compute concurrency lock
     pub(crate) locks: &'static ApiLocks<Host>,
-    pub(crate) user_info: ComputeUserInfo,
 }
 
 #[async_trait]
 impl ConnectMechanism for TcpMechanism {
-    type Connection = PostgresConnection;
+    type Connection = ComputeConnection;
     type ConnectError = compute::ConnectionError;
     type Error = compute::ConnectionError;
 
@@ -79,13 +68,9 @@ impl ConnectMechanism for TcpMechanism {
         ctx: &RequestContext,
         node_info: &control_plane::CachedNodeInfo,
         config: &ComputeConfig,
-    ) -> Result<PostgresConnection, Self::Error> {
+    ) -> Result<ComputeConnection, Self::Error> {
         let permit = self.locks.get_permit(&node_info.conn_info.host).await?;
-        permit.release_result(
-            node_info
-                .connect(ctx, &self.auth, config, self.user_info.clone())
-                .await,
-        )
+        permit.release_result(node_info.connect(ctx, config).await)
     }
 }
 
@@ -127,7 +112,7 @@ where
     let node_info = if !node_info.cached() || !err.should_retry_wake_compute() {
         // If we just recieved this from cplane and didn't get it from cache, we shouldn't retry.
         // Do not need to retrieve a new node_info, just return the old one.
-        if should_retry(&err, num_retries, compute.retry) {
+        if !should_retry(&err, num_retries, compute.retry) {
             Metrics::get().proxy.retries_metric.observe(
                 RetriesMetricGroup {
                     outcome: ConnectOutcome::Failed,

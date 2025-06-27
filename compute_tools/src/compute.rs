@@ -20,7 +20,6 @@ use postgres::NoTls;
 use postgres::error::SqlState;
 use remote_storage::{DownloadError, RemotePath};
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -35,6 +34,7 @@ use url::Url;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 use utils::measured_stream::MeasuredReader;
+use utils::pid_file;
 
 use crate::configurator::launch_configurator;
 use crate::disk_quota::set_disk_quota;
@@ -44,6 +44,7 @@ use crate::lsn_lease::launch_lsn_lease_bg_task_for_static;
 use crate::metrics::COMPUTE_CTL_UP;
 use crate::monitor::launch_monitor;
 use crate::pg_helpers::*;
+use crate::pgbouncer::*;
 use crate::rsyslog::{
     PostgresLogsRsyslogConfig, configure_audit_rsyslog, configure_postgres_logs_export,
     launch_pgaudit_gc,
@@ -161,6 +162,10 @@ pub struct ComputeState {
     pub lfc_prewarm_state: LfcPrewarmState,
     pub lfc_offload_state: LfcOffloadState,
 
+    /// WAL flush LSN that is set after terminating Postgres and syncing safekeepers if
+    /// mode == ComputeMode::Primary. None otherwise
+    pub terminate_flush_lsn: Option<Lsn>,
+
     pub metrics: ComputeMetrics,
 }
 
@@ -176,6 +181,7 @@ impl ComputeState {
             metrics: ComputeMetrics::default(),
             lfc_prewarm_state: LfcPrewarmState::default(),
             lfc_offload_state: LfcOffloadState::default(),
+            terminate_flush_lsn: None,
         }
     }
 
@@ -211,8 +217,48 @@ pub struct ParsedSpec {
     pub pageserver_connstr: String,
     pub safekeeper_connstrings: Vec<String>,
     pub storage_auth_token: Option<String>,
-    pub endpoint_storage_addr: Option<SocketAddr>,
+    /// k8s dns name and port
+    pub endpoint_storage_addr: Option<String>,
     pub endpoint_storage_token: Option<String>,
+}
+
+impl ParsedSpec {
+    pub fn validate(&self) -> Result<(), String> {
+        // Only Primary nodes are using safekeeper_connstrings, and at the moment
+        // this method only validates that part of the specs.
+        if self.spec.mode != ComputeMode::Primary {
+            return Ok(());
+        }
+
+        // While it seems like a good idea to check for an odd number of entries in
+        // the safekeepers connection string, changes to the list of safekeepers might
+        // incur appending a new server to a list of 3, in which case a list of 4
+        // entries is okay in production.
+        //
+        // Still we want unique entries, and at least one entry in the vector
+        if self.safekeeper_connstrings.is_empty() {
+            return Err(String::from("safekeeper_connstrings is empty"));
+        }
+
+        // check for uniqueness of the connection strings in the set
+        let mut connstrings = self.safekeeper_connstrings.clone();
+
+        connstrings.sort();
+        let mut previous = &connstrings[0];
+
+        for current in connstrings.iter().skip(1) {
+            // duplicate entry?
+            if current == previous {
+                return Err(format!(
+                    "duplicate entry in safekeeper_connstrings: {current}!",
+                ));
+            }
+
+            previous = current;
+        }
+
+        Ok(())
+    }
 }
 
 impl TryFrom<ComputeSpec> for ParsedSpec {
@@ -244,6 +290,7 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
         } else {
             spec.safekeeper_connstrings.clone()
         };
+
         let storage_auth_token = spec.storage_auth_token.clone();
         let tenant_id: TenantId = if let Some(tenant_id) = spec.tenant_id {
             tenant_id
@@ -266,19 +313,16 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
                 .or(Err("invalid timeline id"))?
         };
 
-        let endpoint_storage_addr: Option<SocketAddr> = spec
+        let endpoint_storage_addr: Option<String> = spec
             .endpoint_storage_addr
             .clone()
-            .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_addr"))
-            .unwrap_or_default()
-            .parse()
-            .ok();
+            .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_addr"));
         let endpoint_storage_token = spec
             .endpoint_storage_token
             .clone()
             .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_token"));
 
-        Ok(ParsedSpec {
+        let res = ParsedSpec {
             spec,
             pageserver_connstr,
             safekeeper_connstrings,
@@ -287,7 +331,11 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             timeline_id,
             endpoint_storage_addr,
             endpoint_storage_token,
-        })
+        };
+
+        // Now check validity of the parsed specification
+        res.validate()?;
+        Ok(res)
     }
 }
 
@@ -354,14 +402,11 @@ impl ComputeNode {
         // that can affect `compute_ctl` and prevent it from properly configuring the database schema.
         // Unset them via connection string options before connecting to the database.
         // N.B. keep it in sync with `ZENITH_OPTIONS` in `get_maintenance_client()`.
-        //
-        // TODO(ololobus): we currently pass `-c default_transaction_read_only=off` from control plane
-        // as well. After rolling out this code, we can remove this parameter from control plane.
-        // In the meantime, double-passing is fine, the last value is applied.
-        // See: <https://github.com/neondatabase/cloud/blob/133dd8c4dbbba40edfbad475bf6a45073ca63faf/goapp/controlplane/internal/pkg/compute/provisioner/provisioner_common.go#L70>
-        const EXTRA_OPTIONS: &str = "-c role=cloud_admin -c default_transaction_read_only=off -c search_path=public -c statement_timeout=0";
+        const EXTRA_OPTIONS: &str = "-c role=cloud_admin -c default_transaction_read_only=off -c search_path=public -c statement_timeout=0 -c pgaudit.log=none";
         let options = match conn_conf.get_options() {
-            Some(options) => format!("{} {}", options, EXTRA_OPTIONS),
+            // Allow the control plane to override any options set by the
+            // compute
+            Some(options) => format!("{EXTRA_OPTIONS} {options}"),
             None => EXTRA_OPTIONS.to_string(),
         };
         conn_conf.options(&options);
@@ -489,12 +534,21 @@ impl ComputeNode {
         // Reap the postgres process
         delay_exit |= this.cleanup_after_postgres_exit()?;
 
+        // /terminate returns LSN. If we don't sleep at all, connection will break and we
+        // won't get result. If we sleep too much, tests will take significantly longer
+        // and Github Action run will error out
+        let sleep_duration = if delay_exit {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_millis(300)
+        };
+
         // If launch failed, keep serving HTTP requests for a while, so the cloud
         // control plane can get the actual error.
         if delay_exit {
             info!("giving control plane 30s to collect the error before shutdown");
-            std::thread::sleep(Duration::from_secs(30));
         }
+        std::thread::sleep(sleep_duration);
         Ok(exit_code)
     }
 
@@ -785,7 +839,7 @@ impl ComputeNode {
         self.spawn_extension_stats_task();
 
         if pspec.spec.autoprewarm {
-            self.prewarm_lfc();
+            self.prewarm_lfc(None);
         }
         Ok(())
     }
@@ -866,20 +920,25 @@ impl ComputeNode {
         // Maybe sync safekeepers again, to speed up next startup
         let compute_state = self.state.lock().unwrap().clone();
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
-        if matches!(pspec.spec.mode, compute_api::spec::ComputeMode::Primary) {
+        let lsn = if matches!(pspec.spec.mode, compute_api::spec::ComputeMode::Primary) {
             info!("syncing safekeepers on shutdown");
             let storage_auth_token = pspec.storage_auth_token.clone();
             let lsn = self.sync_safekeepers(storage_auth_token)?;
-            info!("synced safekeepers at lsn {lsn}");
-        }
+            info!(%lsn, "synced safekeepers");
+            Some(lsn)
+        } else {
+            info!("not primary, not syncing safekeepers");
+            None
+        };
 
         let mut delay_exit = false;
         let mut state = self.state.lock().unwrap();
-        if state.status == ComputeStatus::TerminationPending {
+        state.terminate_flush_lsn = lsn;
+        if let ComputeStatus::TerminationPending { mode } = state.status {
             state.status = ComputeStatus::Terminated;
             self.state_changed.notify_all();
             // we were asked to terminate gracefully, don't exit to avoid restart
-            delay_exit = true
+            delay_exit = mode == compute_api::responses::TerminateMode::Fast
         }
         drop(state);
 
@@ -1064,7 +1123,7 @@ impl ComputeNode {
         let sk_configs = sk_connstrs.into_iter().map(|connstr| {
             // Format connstr
             let id = connstr.clone();
-            let connstr = format!("postgresql://no_user@{}", connstr);
+            let connstr = format!("postgresql://no_user@{connstr}");
             let options = format!(
                 "-c timeline_id={} tenant_id={}",
                 pspec.timeline_id, pspec.tenant_id
@@ -1427,7 +1486,7 @@ impl ComputeNode {
                 let (mut client, connection) = conf.connect(NoTls).await?;
                 tokio::spawn(async move {
                     if let Err(e) = connection.await {
-                        eprintln!("connection error: {}", e);
+                        eprintln!("connection error: {e}");
                     }
                 });
 
@@ -1570,7 +1629,7 @@ impl ComputeNode {
                 Ok((mut client, connection)) => {
                     tokio::spawn(async move {
                         if let Err(e) = connection.await {
-                            eprintln!("connection error: {}", e);
+                            eprintln!("connection error: {e}");
                         }
                     });
                     if let Err(e) = handle_migrations(&mut client).await {
@@ -1750,7 +1809,7 @@ impl ComputeNode {
 
                             // exit loop
                             ComputeStatus::Failed
-                            | ComputeStatus::TerminationPending
+                            | ComputeStatus::TerminationPending { .. }
                             | ComputeStatus::Terminated => break 'cert_update,
 
                             // wait
@@ -1874,7 +1933,7 @@ impl ComputeNode {
         let (client, connection) = connect_result.unwrap();
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("connection error: {}", e);
+                eprintln!("connection error: {e}");
             }
         });
         let result = client
@@ -2043,7 +2102,7 @@ LIMIT 100",
             db_client
                 .simple_query(&query)
                 .await
-                .with_context(|| format!("Failed to execute query: {}", query))?;
+                .with_context(|| format!("Failed to execute query: {query}"))?;
         }
 
         Ok(())
@@ -2070,7 +2129,7 @@ LIMIT 100",
         let version: Option<ExtVersion> = db_client
             .query_opt(version_query, &[&ext_name])
             .await
-            .with_context(|| format!("Failed to execute query: {}", version_query))?
+            .with_context(|| format!("Failed to execute query: {version_query}"))?
             .map(|row| row.get(0));
 
         // sanitize the inputs as postgres idents.
@@ -2085,14 +2144,14 @@ LIMIT 100",
             db_client
                 .simple_query(&query)
                 .await
-                .with_context(|| format!("Failed to execute query: {}", query))?;
+                .with_context(|| format!("Failed to execute query: {query}"))?;
         } else {
             let query =
                 format!("CREATE EXTENSION IF NOT EXISTS {ext_name} WITH VERSION {quoted_version}");
             db_client
                 .simple_query(&query)
                 .await
-                .with_context(|| format!("Failed to execute query: {}", query))?;
+                .with_context(|| format!("Failed to execute query: {query}"))?;
         }
 
         Ok(ext_version)
@@ -2251,12 +2310,68 @@ pub async fn installed_extensions(conf: tokio_postgres::Config) -> Result<()> {
     Ok(())
 }
 
-pub fn forward_termination_signal() {
+pub fn forward_termination_signal(dev_mode: bool) {
     let ss_pid = SYNC_SAFEKEEPERS_PID.load(Ordering::SeqCst);
     if ss_pid != 0 {
         let ss_pid = nix::unistd::Pid::from_raw(ss_pid as i32);
         kill(ss_pid, Signal::SIGTERM).ok();
     }
+
+    if !dev_mode {
+        //  Terminate pgbouncer with SIGKILL
+        match pid_file::read(PGBOUNCER_PIDFILE.into()) {
+            Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
+                info!("sending SIGKILL to pgbouncer process pid: {}", pid);
+                if let Err(e) = kill(pid, Signal::SIGKILL) {
+                    error!("failed to terminate pgbouncer: {}", e);
+                }
+            }
+            // pgbouncer does not lock the pid file, so we read and kill the process directly
+            Ok(pid_file::PidFileRead::NotHeldByAnyProcess(_)) => {
+                if let Ok(pid_str) = std::fs::read_to_string(PGBOUNCER_PIDFILE) {
+                    if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                        info!(
+                            "sending SIGKILL to pgbouncer process pid: {} (from unlocked pid file)",
+                            pid
+                        );
+                        if let Err(e) = kill(Pid::from_raw(pid), Signal::SIGKILL) {
+                            error!("failed to terminate pgbouncer: {}", e);
+                        }
+                    }
+                } else {
+                    info!("pgbouncer pid file exists but process not running");
+                }
+            }
+            Ok(pid_file::PidFileRead::NotExist) => {
+                info!("pgbouncer pid file not found, process may not be running");
+            }
+            Err(e) => {
+                error!("error reading pgbouncer pid file: {}", e);
+            }
+        }
+
+        // Terminate local_proxy
+        match pid_file::read("/etc/local_proxy/pid".into()) {
+            Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
+                info!("sending SIGTERM to local_proxy process pid: {}", pid);
+                if let Err(e) = kill(pid, Signal::SIGTERM) {
+                    error!("failed to terminate local_proxy: {}", e);
+                }
+            }
+            Ok(pid_file::PidFileRead::NotHeldByAnyProcess(_)) => {
+                info!("local_proxy PID file exists but process not running");
+            }
+            Ok(pid_file::PidFileRead::NotExist) => {
+                info!("local_proxy PID file not found, process may not be running");
+            }
+            Err(e) => {
+                error!("error reading local_proxy PID file: {}", e);
+            }
+        }
+    } else {
+        info!("Skipping pgbouncer and local_proxy termination because in dev mode");
+    }
+
     let pg_pid = PG_PID.load(Ordering::SeqCst);
     if pg_pid != 0 {
         let pg_pid = nix::unistd::Pid::from_raw(pg_pid as i32);
@@ -2287,5 +2402,23 @@ impl<T: 'static> JoinSetExt<T> for tokio::task::JoinSet<T> {
             let _e = sp.enter();
             f()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::File;
+
+    use super::*;
+
+    #[test]
+    fn duplicate_safekeeper_connstring() {
+        let file = File::open("tests/cluster_spec.json").unwrap();
+        let spec: ComputeSpec = serde_json::from_reader(file).unwrap();
+
+        match ParsedSpec::try_from(spec.clone()) {
+            Ok(_p) => panic!("Failed to detect duplicate entry"),
+            Err(e) => assert!(e.starts_with("duplicate entry in safekeeper_connstrings:")),
+        };
     }
 }

@@ -34,7 +34,7 @@ use crate::control_plane::errors::{GetAuthInfoError, WakeComputeError};
 use crate::control_plane::locks::ApiLocks;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::intern::EndpointIdInt;
-use crate::pglb::connect_compute::ConnectMechanism;
+use crate::proxy::connect_compute::ConnectMechanism;
 use crate::proxy::retry::{CouldRetry, ShouldRetryWakeCompute};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::types::{EndpointId, Host, LOCAL_PROXY_SUFFIX};
@@ -68,17 +68,20 @@ impl PoolingBackend {
             self.config.authentication_config.is_vpc_acccess_proxy,
         )?;
 
-        let ep = EndpointIdInt::from(&user_info.endpoint);
-        let rate_limit_config = None;
-        if !self.endpoint_rate_limiter.check(ep, rate_limit_config, 1) {
-            return Err(AuthError::too_many_connections());
-        }
+        access_control.connection_attempt_rate_limit(
+            ctx,
+            &user_info.endpoint,
+            &self.endpoint_rate_limiter,
+        )?;
+
         let role_access = backend.get_role_secret(ctx).await?;
         let Some(secret) = role_access.secret else {
             // If we don't have an authentication secret, for the http flow we can just return an error.
             info!("authentication info not found");
             return Err(AuthError::password_failed(&*user_info.user));
         };
+
+        let ep = EndpointIdInt::from(&user_info.endpoint);
         let auth_outcome = crate::auth::validate_password_and_exchange(
             &self.config.authentication_config.thread_pool,
             ep,
@@ -181,7 +184,7 @@ impl PoolingBackend {
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
         let backend = self.auth_backend.as_ref().map(|()| keys.info);
-        crate::pglb::connect_compute::connect_to_compute(
+        crate::proxy::connect_compute::connect_to_compute(
             ctx,
             &TokioMechanism {
                 conn_id,
@@ -223,7 +226,7 @@ impl PoolingBackend {
             )),
             options: conn_info.user_info.options.clone(),
         });
-        crate::pglb::connect_compute::connect_to_compute(
+        crate::proxy::connect_compute::connect_to_compute(
             ctx,
             &HyperMechanism {
                 conn_id,

@@ -161,7 +161,7 @@ async fn publish(client: Option<BrokerClientChannel>, n_keys: u64) {
         }
     };
     let response = client.publish_safekeeper_info(Request::new(outbound)).await;
-    println!("pub response is {:?}", response);
+    println!("pub response is {response:?}");
 }
 
 #[tokio::main]

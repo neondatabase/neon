@@ -1,3 +1,4 @@
+use std::cmp::max;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -20,6 +21,7 @@ use pageserver_api::controller_api::{
     SafekeeperDescribeResponse, SkSchedulingPolicy, TimelineImportRequest,
 };
 use pageserver_api::models::{SafekeeperInfo, SafekeepersInfo, TimelineInfo};
+use safekeeper_api::PgVersionId;
 use safekeeper_api::membership::{self, MemberSet, SafekeeperGeneration};
 use safekeeper_api::models::{
     PullTimelineRequest, TimelineMembershipSwitchRequest, TimelineMembershipSwitchResponse,
@@ -32,9 +34,14 @@ use utils::id::{NodeId, TenantId, TimelineId};
 use utils::logging::SecretString;
 use utils::lsn::Lsn;
 
-use core::cmp::max;
-
 use super::Service;
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct TimelineLocateResponse {
+    pub generation: SafekeeperGeneration,
+    pub sk_set: Vec<NodeId>,
+    pub new_sk_set: Option<Vec<NodeId>>,
+}
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct TimelineSafekeeperMigrateRequest {
@@ -78,7 +85,7 @@ impl Service {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-        pg_version: u32,
+        pg_version: PgVersionId,
         timeline_persistence: &TimelinePersistence,
     ) -> Result<Vec<NodeId>, ApiError> {
         let safekeepers = self.get_safekeepers(&timeline_persistence.sk_set)?;
@@ -298,7 +305,7 @@ impl Service {
         read_only: bool,
     ) -> Result<SafekeepersInfo, ApiError> {
         let timeline_id = timeline_info.timeline_id;
-        let pg_version = timeline_info.pg_version * 10000;
+        let pg_version = PgVersionId::from(timeline_info.pg_version);
         // Initially start_lsn is determined by last_record_lsn in pageserver
         // response as it does initdb. However, later we persist it and in sk
         // creation calls replace with the value from the timeline row if it
@@ -483,6 +490,38 @@ impl Service {
         Ok(())
     }
 
+    /// Locate safekeepers for a timeline.
+    /// Return the generation, sk_set and new_sk_set if present.
+    /// If the timeline is not storcon-managed, return NotFound.
+    pub(crate) async fn tenant_timeline_locate(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Result<TimelineLocateResponse, ApiError> {
+        let timeline = self
+            .persistence
+            .get_timeline(tenant_id, timeline_id)
+            .await?;
+
+        let Some(timeline) = timeline else {
+            return Err(ApiError::NotFound(
+                anyhow::anyhow!("Timeline {}/{} not found", tenant_id, timeline_id).into(),
+            ));
+        };
+
+        Ok(TimelineLocateResponse {
+            generation: SafekeeperGeneration::new(timeline.generation as u32),
+            sk_set: timeline
+                .sk_set
+                .iter()
+                .map(|id| NodeId(*id as u64))
+                .collect(),
+            new_sk_set: timeline
+                .new_sk_set
+                .map(|sk_set| sk_set.iter().map(|id| NodeId(*id as u64)).collect()),
+        })
+    }
+
     /// Perform timeline deletion on safekeepers. Will return success: we persist the deletion into the reconciler.
     pub(super) async fn tenant_timeline_delete_safekeepers(
         self: &Arc<Self>,
@@ -656,7 +695,8 @@ impl Service {
         Ok(())
     }
 
-    /// Choose safekeepers for the new timeline: 3 in different azs.
+    /// Choose safekeepers for the new timeline in different azs.
+    /// 3 are choosen by default, but may be configured via config (for testing).
     pub(crate) async fn safekeepers_for_new_timeline(
         &self,
     ) -> Result<Vec<SafekeeperInfo>, ApiError> {
@@ -700,9 +740,8 @@ impl Service {
         });
         // Number of safekeepers in different AZs we are looking for
         let mut wanted_count = self.config.timeline_safekeeper_count as usize;
-
-        // TODO(diko): remove this when `timeline_safekeeper_count` flag is in the release
-        // branch and is used in tests.
+        // TODO(diko): remove this when `timeline_safekeeper_count` option is in the release
+        // branch and is specified in tests/neon_local config.
         if cfg!(feature = "testing") && all_safekeepers.len() < wanted_count {
             // In testing mode, we can have less safekeepers than the config says
             wanted_count = max(all_safekeepers.len(), 1);
@@ -1129,8 +1168,7 @@ impl Service {
                     "different new safekeeper set is already set in the database",
                 );
                 return Err(ApiError::Conflict(format!(
-                    "the timeline is already migrating to a different safekeeper set: {:?}",
-                    presistent_new_sk_set
+                    "the timeline is already migrating to a different safekeeper set: {presistent_new_sk_set:?}"
                 )));
             }
             // It it is the same new_sk_set, we can continue the migration (retry).

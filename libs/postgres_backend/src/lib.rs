@@ -939,7 +939,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackendReader<IO> {
                 FeMessage::CopyFail => Err(CopyStreamHandlerEnd::CopyFail),
                 FeMessage::Terminate => Err(CopyStreamHandlerEnd::Terminate),
                 _ => Err(CopyStreamHandlerEnd::from(ConnectionError::Protocol(
-                    ProtocolError::Protocol(format!("unexpected message in COPY stream {:?}", msg)),
+                    ProtocolError::Protocol(format!("unexpected message in COPY stream {msg:?}")),
                 ))),
             },
             None => Err(CopyStreamHandlerEnd::EOF),

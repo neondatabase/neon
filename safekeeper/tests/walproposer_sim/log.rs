@@ -33,7 +33,7 @@ impl FormatTime for SimClock {
 
         if let Some(clock) = clock.as_ref() {
             let now = clock.now();
-            write!(w, "[{}]", now)
+            write!(w, "[{now}]")
         } else {
             write!(w, "[?]")
         }

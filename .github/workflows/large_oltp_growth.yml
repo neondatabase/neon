@@ -1,0 +1,175 @@
+name: large oltp growth
+# workflow to grow the reuse branch of large oltp benchmark continuously (about 16 GB per run)
+
+on:
+  # uncomment to run on push for debugging your PR
+  # push:
+  #  branches: [ bodobolero/increase_large_oltp_workload ]
+
+  schedule:
+    # * is a special character in YAML so you have to quote this string
+    #        ┌───────────── minute (0 - 59)
+    #        │ ┌───────────── hour (0 - 23)
+    #        │ │  ┌───────────── day of the month (1 - 31)
+    #        │ │  │ ┌───────────── month (1 - 12 or JAN-DEC)
+    #        │ │  │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
+    - cron: '0 6 * * *'   # 06:00 UTC
+    - cron: '0 8 * * *'   # 08:00 UTC
+    - cron: '0 10 * * *'  # 10:00 UTC
+    - cron: '0 12 * * *'  # 12:00 UTC
+    - cron: '0 14 * * *'  # 14:00 UTC
+    - cron: '0 16 * * *'  # 16:00 UTC
+  workflow_dispatch: # adds ability to run this manually
+
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
+
+concurrency:
+  # Allow only one workflow globally because we need dedicated resources which only exist once
+  group: large-oltp-growth
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  oltp:
+    strategy:
+      fail-fast: false # allow other variants to continue even if one fails
+      matrix:
+        include:
+          # for now only grow the reuse branch, not the other branches.
+          - target: reuse_branch
+            custom_scripts:
+            - grow_action_blocks.sql
+            - grow_action_kwargs.sql
+            - grow_device_fingerprint_event.sql
+            - grow_edges.sql
+            - grow_hotel_rate_mapping.sql
+            - grow_ocr_pipeline_results_version.sql
+            - grow_priceline_raw_response.sql
+            - grow_relabled_transactions.sql
+            - grow_state_values.sql
+            - grow_values.sql
+            - grow_vertices.sql
+            - update_accounting_coding_body_tracking_category_selection.sql
+            - update_action_blocks.sql
+            - update_action_kwargs.sql
+            - update_denormalized_approval_workflow.sql
+            - update_device_fingerprint_event.sql
+            - update_edges.sql
+            - update_heron_transaction_enriched_log.sql
+            - update_heron_transaction_enrichment_requests.sql
+            - update_hotel_rate_mapping.sql
+            - update_incoming_webhooks.sql
+            - update_manual_transaction.sql
+            - update_ml_receipt_matching_log.sql
+            - update_ocr_pipeine_results_version.sql
+            - update_orc_pipeline_step_results.sql
+            - update_orc_pipeline_step_results_version.sql
+            - update_priceline_raw_response.sql
+            - update_quickbooks_transactions.sql
+            - update_raw_finicity_transaction.sql
+            - update_relabeled_transactions.sql
+            - update_state_values.sql
+            - update_stripe_authorization_event_log.sql
+            - update_transaction.sql
+            - update_values.sql
+            - update_vertices.sql
+      max-parallel: 1 # we want to run each growth workload sequentially (for now there is just one)
+    permissions:
+      contents: write
+      statuses: write
+      id-token: write # aws-actions/configure-aws-credentials
+    env:
+      TEST_PG_BENCH_DURATIONS_MATRIX: "1h"
+      TEST_PGBENCH_CUSTOM_SCRIPTS: ${{ join(matrix.custom_scripts, ' ') }}
+      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      PG_VERSION: 16 # pre-determined by pre-determined project
+      TEST_OUTPUT: /tmp/test_output
+      BUILD_TYPE: remote
+      PLATFORM: ${{ matrix.target }}
+
+    runs-on: [ self-hosted, us-east-2, x64 ]
+    container:
+      image: ghcr.io/neondatabase/build-tools:pinned-bookworm
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --init
+
+    steps:
+    - name: Harden the runner (Audit all outbound calls)
+      uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+      with:
+        egress-policy: audit
+
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+    - name: Configure AWS credentials # necessary to download artefacts
+      uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 18000 # 5 hours is currently max associated with IAM role
+
+    - name: Download Neon artifact
+      uses: ./.github/actions/download
+      with:
+        name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
+        path: /tmp/neon/
+        prefix: latest
+        aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+
+    - name: Set up Connection String
+      id: set-up-connstr
+      run: |
+        case "${{ matrix.target }}" in
+          reuse_branch)
+          CONNSTR=${{ secrets.BENCHMARK_LARGE_OLTP_REUSE_CONNSTR }}
+          ;;
+          *)
+          echo >&2 "Unknown target=${{ matrix.target }}"
+          exit 1
+          ;;
+        esac
+
+        CONNSTR_WITHOUT_POOLER="${CONNSTR//-pooler/}"
+
+        echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
+        echo "connstr_without_pooler=${CONNSTR_WITHOUT_POOLER}" >> $GITHUB_OUTPUT
+
+    - name: pgbench with custom-scripts
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: ${{ env.BUILD_TYPE }}
+        test_selection: performance
+        run_in_parallel: false
+        save_perf_report: true
+        extra_params: -m remote_cluster --timeout 7200 -k test_perf_oltp_large_tenant_growth
+        pg_version: ${{ env.PG_VERSION }}
+        aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+
+    - name: Create Allure report
+      id: create-allure-report
+      if: ${{ !cancelled() }}
+      uses: ./.github/actions/allure-report-generate
+      with:
+        aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+
+    - name: Post to a Slack channel
+      if: ${{ github.event.schedule && failure() }}
+      uses: slackapi/slack-github-action@fcfb566f8b0aab22203f066d80ca1d7e4b5d05b3 # v1.27.1
+      with:
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
+        slack-message: |
+          Periodic large oltp tenant growth increase: ${{ job.status }}
+          <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+          <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
+      env:
+        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

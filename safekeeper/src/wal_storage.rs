@@ -9,7 +9,7 @@
 
 use std::cmp::{max, min};
 use std::future::Future;
-use std::io::{self, SeekFrom};
+use std::io::{ErrorKind, SeekFrom};
 use std::pin::Pin;
 
 use anyhow::{Context, Result, bail};
@@ -19,6 +19,7 @@ use futures::future::BoxFuture;
 use postgres_ffi::v14::xlog_utils::{IsPartialXLogFileName, IsXLogFileName, XLogFromFileName};
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use postgres_ffi::{PG_TLI, XLogFileName, XLogSegNo, dispatch_pgversion};
+use postgres_versioninfo::{PgMajorVersion, PgVersionId};
 use pq_proto::SystemId;
 use remote_storage::RemotePath;
 use std::sync::Arc;
@@ -92,7 +93,7 @@ pub struct PhysicalStorage {
 
     /// Size of WAL segment in bytes.
     wal_seg_size: usize,
-    pg_version: u32,
+    pg_version: PgVersionId,
     system_id: u64,
 
     /// Written to disk, but possibly still in the cache and not fully persisted.
@@ -180,7 +181,7 @@ impl PhysicalStorage {
         let write_lsn = if state.commit_lsn == Lsn(0) {
             Lsn(0)
         } else {
-            let version = state.server.pg_version / 10000;
+            let version = PgMajorVersion::try_from(state.server.pg_version).unwrap();
 
             dispatch_pgversion!(
                 version,
@@ -228,7 +229,10 @@ impl PhysicalStorage {
             write_record_lsn: write_lsn,
             flush_lsn,
             flush_record_lsn: flush_lsn,
-            decoder: WalStreamDecoder::new(write_lsn, state.server.pg_version / 10000),
+            decoder: WalStreamDecoder::new(
+                write_lsn,
+                PgMajorVersion::try_from(state.server.pg_version).unwrap(),
+            ),
             file: None,
             pending_wal_truncation: true,
         })
@@ -410,7 +414,7 @@ impl Storage for PhysicalStorage {
 
         let segno = init_lsn.segment_number(self.wal_seg_size);
         let (mut file, _) = self.open_or_create(segno).await?;
-        let major_pg_version = self.pg_version / 10000;
+        let major_pg_version = PgMajorVersion::try_from(self.pg_version).unwrap();
         let wal_seg =
             postgres_ffi::generate_wal_segment(segno, self.system_id, major_pg_version, init_lsn)?;
         file.seek(SeekFrom::Start(0)).await?;
@@ -656,7 +660,7 @@ pub struct WalReader {
     // pos is in the same segment as timeline_start_lsn.
     timeline_start_lsn: Lsn,
     // integer version number of PostgreSQL, e.g. 14; 15; 16
-    pg_version: u32,
+    pg_version: PgMajorVersion,
     system_id: SystemId,
     timeline_start_segment: Option<Bytes>,
 }
@@ -699,7 +703,7 @@ impl WalReader {
             wal_backup,
             local_start_lsn: state.local_start_lsn,
             timeline_start_lsn: state.timeline_start_lsn,
-            pg_version: state.server.pg_version / 10000,
+            pg_version: PgMajorVersion::try_from(state.server.pg_version).unwrap(),
             system_id: state.server.system_id,
             timeline_start_segment: None,
         })
@@ -792,26 +796,13 @@ impl WalReader {
 
         // Try to open local file, if we may have WAL locally
         if self.pos >= self.local_start_lsn {
-            let res = open_wal_file(&self.timeline_dir, segno, self.wal_seg_size).await;
-            match res {
-                Ok((mut file, _)) => {
-                    file.seek(SeekFrom::Start(xlogoff as u64)).await?;
-                    return Ok(Box::pin(file));
-                }
-                Err(e) => {
-                    let is_not_found = e.chain().any(|e| {
-                        if let Some(e) = e.downcast_ref::<io::Error>() {
-                            e.kind() == io::ErrorKind::NotFound
-                        } else {
-                            false
-                        }
-                    });
-                    if !is_not_found {
-                        return Err(e);
-                    }
-                    // NotFound is expected, fall through to remote read
-                }
-            };
+            let res = open_wal_file(&self.timeline_dir, segno, self.wal_seg_size).await?;
+            if let Some((mut file, _)) = res {
+                file.seek(SeekFrom::Start(xlogoff as u64)).await?;
+                return Ok(Box::pin(file));
+            } else {
+                // NotFound is expected, fall through to remote read
+            }
         }
 
         // Try to open remote file, if remote reads are enabled
@@ -830,26 +821,31 @@ pub(crate) async fn open_wal_file(
     timeline_dir: &Utf8Path,
     segno: XLogSegNo,
     wal_seg_size: usize,
-) -> Result<(tokio::fs::File, bool)> {
+) -> Result<Option<(tokio::fs::File, bool)>> {
     let (wal_file_path, wal_file_partial_path) = wal_file_paths(timeline_dir, segno, wal_seg_size);
 
     // First try to open the .partial file.
     let mut partial_path = wal_file_path.to_owned();
     partial_path.set_extension("partial");
     if let Ok(opened_file) = tokio::fs::File::open(&wal_file_partial_path).await {
-        return Ok((opened_file, true));
+        return Ok(Some((opened_file, true)));
     }
 
     // If that failed, try it without the .partial extension.
-    let pf = tokio::fs::File::open(&wal_file_path)
-        .await
-        .with_context(|| format!("failed to open WAL file {:#}", wal_file_path))
+    let pf_res = tokio::fs::File::open(&wal_file_path).await;
+    if let Err(e) = &pf_res {
+        if e.kind() == ErrorKind::NotFound {
+            return Ok(None);
+        }
+    }
+    let pf = pf_res
+        .with_context(|| format!("failed to open WAL file {wal_file_path:#}"))
         .map_err(|e| {
-            warn!("{}", e);
+            warn!("{e}");
             e
         })?;
 
-    Ok((pf, false))
+    Ok(Some((pf, false)))
 }
 
 /// Helper returning full path to WAL segment file and its .partial brother.

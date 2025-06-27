@@ -372,7 +372,7 @@ impl<const N: usize> std::fmt::Debug for RelTagish<N> {
                 f.write_char('/')?;
             }
             first = false;
-            write!(f, "{}", x)
+            write!(f, "{x}")
         })
     }
 }

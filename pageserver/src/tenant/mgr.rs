@@ -51,6 +51,7 @@ use crate::tenant::config::{
 use crate::tenant::span::debug_assert_current_span_has_tenant_id;
 use crate::tenant::storage_layer::inmemory_layer;
 use crate::tenant::timeline::ShutdownMode;
+use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
 use crate::tenant::{
     AttachedTenantConf, GcError, LoadConfigError, SpawnMode, TenantShard, TenantState,
 };
@@ -128,7 +129,7 @@ pub(crate) enum ShardSelector {
 ///
 /// This represents the subset of a LocationConfig that we receive during re-attach.
 pub(crate) enum TenantStartupMode {
-    Attached((AttachmentMode, Generation)),
+    Attached((AttachmentMode, Generation, ShardStripeSize)),
     Secondary,
 }
 
@@ -142,15 +143,21 @@ impl TenantStartupMode {
         match (rart.mode, rart.r#gen) {
             (LocationConfigMode::Detached, _) => None,
             (LocationConfigMode::Secondary, _) => Some(Self::Secondary),
-            (LocationConfigMode::AttachedMulti, Some(g)) => {
-                Some(Self::Attached((AttachmentMode::Multi, Generation::new(g))))
-            }
-            (LocationConfigMode::AttachedSingle, Some(g)) => {
-                Some(Self::Attached((AttachmentMode::Single, Generation::new(g))))
-            }
-            (LocationConfigMode::AttachedStale, Some(g)) => {
-                Some(Self::Attached((AttachmentMode::Stale, Generation::new(g))))
-            }
+            (LocationConfigMode::AttachedMulti, Some(g)) => Some(Self::Attached((
+                AttachmentMode::Multi,
+                Generation::new(g),
+                rart.stripe_size,
+            ))),
+            (LocationConfigMode::AttachedSingle, Some(g)) => Some(Self::Attached((
+                AttachmentMode::Single,
+                Generation::new(g),
+                rart.stripe_size,
+            ))),
+            (LocationConfigMode::AttachedStale, Some(g)) => Some(Self::Attached((
+                AttachmentMode::Stale,
+                Generation::new(g),
+                rart.stripe_size,
+            ))),
             _ => {
                 tracing::warn!(
                     "Received invalid re-attach state for tenant {}: {rart:?}",
@@ -318,9 +325,11 @@ fn emergency_generations(
             Some((
                 *tid,
                 match &lc.mode {
-                    LocationMode::Attached(alc) => {
-                        TenantStartupMode::Attached((alc.attach_mode, alc.generation))
-                    }
+                    LocationMode::Attached(alc) => TenantStartupMode::Attached((
+                        alc.attach_mode,
+                        alc.generation,
+                        ShardStripeSize::default(),
+                    )),
                     LocationMode::Secondary(_) => TenantStartupMode::Secondary,
                 },
             ))
@@ -364,7 +373,7 @@ async fn init_load_generations(
         .iter()
         .flat_map(|(id, start_mode)| {
             match start_mode {
-                TenantStartupMode::Attached((_mode, generation)) => Some(generation),
+                TenantStartupMode::Attached((_mode, generation, _stripe_size)) => Some(generation),
                 TenantStartupMode::Secondary => None,
             }
             .map(|gen_| (*id, *gen_))
@@ -584,7 +593,7 @@ pub async fn init_tenant_mgr(
                         location_conf.mode = LocationMode::Secondary(DEFAULT_SECONDARY_CONF);
                     }
                 }
-                Some(TenantStartupMode::Attached((attach_mode, generation))) => {
+                Some(TenantStartupMode::Attached((attach_mode, generation, stripe_size))) => {
                     let old_gen_higher = match &location_conf.mode {
                         LocationMode::Attached(AttachedLocationConfig {
                             generation: old_generation,
@@ -608,7 +617,7 @@ pub async fn init_tenant_mgr(
                         // local disk content: demote to secondary rather than detaching.
                         location_conf.mode = LocationMode::Secondary(DEFAULT_SECONDARY_CONF);
                     } else {
-                        location_conf.attach_in_generation(*attach_mode, *generation);
+                        location_conf.attach_in_generation(*attach_mode, *generation, *stripe_size);
                     }
                 }
             }
@@ -1658,7 +1667,10 @@ impl TenantManager {
             let parent_timelines = timelines.keys().cloned().collect::<Vec<_>>();
             for timeline in timelines.values() {
                 tracing::info!(timeline_id=%timeline.timeline_id, "Loading list of layers to hardlink");
-                let layers = timeline.layers.read().await;
+                let layers = timeline
+                    .layers
+                    .read(LayerManagerLockHolder::GetLayerMapInfo)
+                    .await;
 
                 for layer in layers.likely_resident_layers() {
                     let relative_path = layer
@@ -2188,7 +2200,7 @@ impl TenantManager {
         selector: ShardSelector,
     ) -> ShardResolveResult {
         let tenants = self.tenants.read().unwrap();
-        let mut want_shard = None;
+        let mut want_shard: Option<ShardIndex> = None;
         let mut any_in_progress = None;
 
         match &*tenants {
@@ -2213,14 +2225,23 @@ impl TenantManager {
                             return ShardResolveResult::Found(tenant.clone());
                         }
                         ShardSelector::Page(key) => {
-                            // First slot we see for this tenant, calculate the expected shard number
-                            // for the key: we will use this for checking if this and subsequent
-                            // slots contain the key, rather than recalculating the hash each time.
-                            if want_shard.is_none() {
-                                want_shard = Some(tenant.shard_identity.get_shard_number(&key));
+                            // Each time we find an attached slot with a different shard count,
+                            // recompute the expected shard number: during shard splits we might
+                            // have multiple shards with the old shard count.
+                            if want_shard.is_none()
+                                || want_shard.unwrap().shard_count != tenant.shard_identity.count
+                            {
+                                want_shard = Some(ShardIndex {
+                                    shard_number: tenant.shard_identity.get_shard_number(&key),
+                                    shard_count: tenant.shard_identity.count,
+                                });
                             }
 
-                            if Some(tenant.shard_identity.number) == want_shard {
+                            if Some(ShardIndex {
+                                shard_number: tenant.shard_identity.number,
+                                shard_count: tenant.shard_identity.count,
+                            }) == want_shard
+                            {
                                 return ShardResolveResult::Found(tenant.clone());
                             }
                         }
@@ -2879,14 +2900,18 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
+    use camino::Utf8PathBuf;
     use storage_broker::BrokerClientChannel;
     use tracing::Instrument;
 
     use super::super::harness::TenantHarness;
     use super::TenantsMap;
-    use crate::tenant::{
-        TenantSharedResources,
-        mgr::{BackgroundPurges, TenantManager, TenantSlot},
+    use crate::{
+        basebackup_cache::BasebackupCache,
+        tenant::{
+            TenantSharedResources,
+            mgr::{BackgroundPurges, TenantManager, TenantSlot},
+        },
     };
 
     #[tokio::test(start_paused = true)]
@@ -2912,9 +2937,7 @@ mod tests {
         // Invoke remove_tenant_from_memory with a cleanup hook that blocks until we manually
         // permit it to proceed: that will stick the tenant in InProgress
 
-        let (basebackup_prepare_sender, _) = tokio::sync::mpsc::unbounded_channel::<
-            crate::basebackup_cache::BasebackupPrepareRequest,
-        >();
+        let (basebackup_cache, _) = BasebackupCache::new(Utf8PathBuf::new(), None);
 
         let tenant_manager = TenantManager {
             tenants: std::sync::RwLock::new(TenantsMap::Open(tenants)),
@@ -2928,7 +2951,7 @@ mod tests {
                 l0_flush_global_state: crate::l0_flush::L0FlushGlobalState::new(
                     h.conf.l0_flush.clone(),
                 ),
-                basebackup_prepare_sender,
+                basebackup_cache,
                 feature_resolver: crate::feature_resolver::FeatureResolver::new_disabled(),
             },
             cancel: tokio_util::sync::CancellationToken::new(),
