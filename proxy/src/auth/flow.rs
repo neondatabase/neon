@@ -116,7 +116,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, CleartextPassword> {
         )
         .await?;
 
-        if let sasl::Outcome::Success(_) = &outcome {
+        if let sasl::Outcome::Success(ComputeCredentialKeys::AuthKeys(_)) = &outcome {
             self.stream.write_message(BeMessage::AuthenticationOk);
         }
 

@@ -143,6 +143,12 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         }
     };
 
+    // If we have a password, that means we didn't validate the password and convert
+    // them into scram keys. Therefore we can only announce authentication ok now.
+    if let Some(compute::Auth::Password(_)) = auth_info.auth {
+        client.write_message(BeMessage::AuthenticationOk);
+    }
+
     let session = cancellation_handler.get_key();
 
     finish_client_init(&pg_settings, *session.key(), client);
