@@ -146,8 +146,7 @@ RUN case $DEBIAN_VERSION in \
     ninja-build git autoconf automake libtool build-essential bison flex libreadline-dev \
     zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget ca-certificates pkg-config libssl-dev \
     libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd curl unzip g++ \
-    libclang-dev \
-    jsonnet \
+    libclang-dev jsonnet protobuf-compiler \
     $VERSION_INSTALLS \
     && apt clean && rm -rf /var/lib/apt/lists/* && \
     useradd -ms /bin/bash nonroot -b /home
@@ -1170,7 +1169,7 @@ COPY --from=pgrag-src /ext-src/ /ext-src/
 # Install it using virtual environment, because Python 3.11 (the default version on Debian 12 (Bookworm)) complains otherwise
 WORKDIR /ext-src/onnxruntime-src
 RUN apt update && apt install --no-install-recommends --no-install-suggests -y \
-    python3 python3-pip python3-venv protobuf-compiler && \
+    python3 python3-pip python3-venv && \
     apt clean && rm -rf /var/lib/apt/lists/* && \
     python3 -m venv venv && \
     . venv/bin/activate && \
