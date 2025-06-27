@@ -311,7 +311,7 @@ extern "C" fn get_redo_start_lsn(wp: *mut WalProposer) -> XLogRecPtr {
     }
 }
 
-extern "C-unwind" fn finish_sync_safekeepers(wp: *mut WalProposer, lsn: XLogRecPtr) {
+unsafe extern "C-unwind" fn finish_sync_safekeepers(wp: *mut WalProposer, lsn: XLogRecPtr) -> ! {
     unsafe {
         let callback_data = (*(*wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
@@ -376,7 +376,7 @@ impl Level {
             FATAL => Level::Fatal,
             PANIC => Level::Panic,
             WPEVENT => Level::WPEvent,
-            _ => panic!("unknown log level {}", elevel),
+            _ => panic!("unknown log level {elevel}"),
         }
     }
 }
@@ -439,13 +439,14 @@ pub fn empty_shmem() -> crate::bindings::WalproposerShmemState {
         currentClusterSize: crate::bindings::pg_atomic_uint64 { value: 0 },
         shard_ps_feedback: [empty_feedback; 128],
         num_shards: 0,
+        replica_promote: false,
         min_ps_feedback: empty_feedback,
     }
 }
 
 impl std::fmt::Display for Level {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 

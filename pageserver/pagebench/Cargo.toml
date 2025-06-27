@@ -8,6 +8,8 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
 camino.workspace = true
 clap.workspace = true
 futures.workspace = true
@@ -15,14 +17,18 @@ hdrhistogram.workspace = true
 humantime.workspace = true
 humantime-serde.workspace = true
 rand.workspace = true
-reqwest.workspace=true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
 tokio-util.workspace = true
+tonic.workspace = true
+url.workspace = true
 
 pageserver_client.workspace = true
 pageserver_api.workspace = true
+pageserver_page_api.workspace = true
 utils = { path = "../../libs/utils/" }
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }

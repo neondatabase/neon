@@ -391,6 +391,7 @@ typedef struct WalproposerShmemState
 	/* last feedback from each shard */
 	PageserverFeedback shard_ps_feedback[MAX_SHARDS];
 	int			num_shards;
+	bool		replica_promote;
 
 	/* aggregated feedback with min LSNs across shards */
 	PageserverFeedback min_ps_feedback;
@@ -678,8 +679,7 @@ typedef struct walproposer_api
 	 * Finish sync safekeepers with the given LSN. This function should not
 	 * return and should exit the program.
 	 */
-	void		(*finish_sync_safekeepers) (WalProposer *wp, XLogRecPtr lsn);
-
+	void		(*finish_sync_safekeepers) (WalProposer *wp, XLogRecPtr lsn) __attribute__((noreturn)) ;
 	/*
 	 * Called after every AppendResponse from the safekeeper. Used to
 	 * propagate backpressure feedback and to confirm WAL persistence (has
@@ -805,6 +805,9 @@ typedef struct WalProposer
 	int			n_safekeepers;
 	/* Safekeepers walproposer is connecting to. */
 	Safekeeper	safekeeper[MAX_SAFEKEEPERS];
+
+	/* Current local TimeLineId in use */
+	TimeLineID	localTimeLineID;
 
 	/* WAL has been generated up to this point */
 	XLogRecPtr	availableLsn;

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use futures::{FutureExt, TryFutureExt};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info};
 
@@ -11,13 +11,13 @@ use crate::config::{ProxyConfig, ProxyProtocolV2};
 use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
+use crate::pglb::ClientRequestError;
+use crate::pglb::handshake::{HandshakeData, handshake};
+use crate::pglb::passthrough::ProxyPassthrough;
 use crate::protocol2::{ConnectHeader, ConnectionInfo, read_proxy_protocol};
 use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
-use crate::proxy::handshake::{HandshakeData, handshake};
-use crate::proxy::passthrough::ProxyPassthrough;
-use crate::proxy::{
-    ClientRequestError, ErrorSource, prepare_client_connection, run_until_cancelled,
-};
+use crate::proxy::{ErrorSource, finish_client_init};
+use crate::util::run_until_cancelled;
 
 pub async fn task_main(
     config: &'static ProxyConfig,
@@ -54,30 +54,24 @@ pub async fn task_main(
         debug!(protocol = "tcp", %session_id, "accepted new TCP connection");
 
         connections.spawn(async move {
-            let (socket, peer_addr) = match read_proxy_protocol(socket).await {
-                Err(e) => {
-                    error!("per-client task finished with an error: {e:#}");
-                    return;
+            let (socket, conn_info) = match config.proxy_protocol_v2 {
+                ProxyProtocolV2::Required => {
+                    match read_proxy_protocol(socket).await {
+                        Err(e) => {
+                            error!("per-client task finished with an error: {e:#}");
+                            return;
+                        }
+                        // our load balancers will not send any more data. let's just exit immediately
+                        Ok((_socket, ConnectHeader::Local)) => {
+                            debug!("healthcheck received");
+                            return;
+                        }
+                        Ok((socket, ConnectHeader::Proxy(info))) => (socket, info),
+                    }
                 }
-                // our load balancers will not send any more data. let's just exit immediately
-                Ok((_socket, ConnectHeader::Local)) => {
-                    debug!("healthcheck received");
-                    return;
-                }
-                Ok((_socket, ConnectHeader::Missing))
-                    if config.proxy_protocol_v2 == ProxyProtocolV2::Required =>
-                {
-                    error!("missing required proxy protocol header");
-                    return;
-                }
-                Ok((_socket, ConnectHeader::Proxy(_)))
-                    if config.proxy_protocol_v2 == ProxyProtocolV2::Rejected =>
-                {
-                    error!("proxy protocol header not supported");
-                    return;
-                }
-                Ok((socket, ConnectHeader::Proxy(info))) => (socket, info),
-                Ok((socket, ConnectHeader::Missing)) => (
+                // ignore the header - it cannot be confused for a postgres or http connection so will
+                // error later.
+                ProxyProtocolV2::Rejected => (
                     socket,
                     ConnectionInfo {
                         addr: peer_addr,
@@ -86,7 +80,7 @@ pub async fn task_main(
                 ),
             };
 
-            match socket.inner.set_nodelay(true) {
+            match socket.set_nodelay(true) {
                 Ok(()) => {}
                 Err(e) => {
                     error!(
@@ -96,12 +90,7 @@ pub async fn task_main(
                 }
             }
 
-            let ctx = RequestContext::new(
-                session_id,
-                peer_addr,
-                crate::metrics::Protocol::Tcp,
-                &config.region,
-            );
+            let ctx = RequestContext::new(session_id, conn_info, crate::metrics::Protocol::Tcp);
 
             let res = handle_client(
                 config,
@@ -127,7 +116,7 @@ pub async fn task_main(
                 Ok(Some(p)) => {
                     ctx.set_success();
                     let _disconnect = ctx.log_connect();
-                    match p.proxy_pass(&config.connect_to_compute).await {
+                    match p.proxy_pass().await {
                         Ok(()) => {}
                         Err(ErrorSource::Client(e)) => {
                             error!(
@@ -159,7 +148,7 @@ pub async fn task_main(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
+pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     config: &'static ProxyConfig,
     backend: &'static ConsoleRedirectBackend,
     ctx: &RequestContext,
@@ -216,53 +205,61 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     ctx.set_db_options(params.clone());
 
-    let (node_info, user_info, _ip_allowlist) = match backend
+    let (node_info, mut auth_info, user_info) = match backend
         .authenticate(ctx, &config.authentication_config, &mut stream)
         .await
     {
         Ok(auth_result) => auth_result,
-        Err(e) => {
-            return stream.throw_error(e, Some(ctx)).await?;
-        }
+        Err(e) => Err(stream.throw_error(e, Some(ctx)).await)?,
     };
+    auth_info.set_startup_params(&params, true);
 
     let mut node = connect_to_compute(
         ctx,
         &TcpMechanism {
-            user_info,
-            params_compat: true,
-            params: &params,
             locks: &config.connect_compute_locks,
         },
         &node_info,
         config.wake_compute_retry_config,
         &config.connect_to_compute,
     )
-    .or_else(|e| stream.throw_error(e, Some(ctx)))
+    .or_else(|e| async { Err(stream.throw_error(e, Some(ctx)).await) })
     .await?;
 
-    let cancellation_handler_clone = Arc::clone(&cancellation_handler);
-    let session = cancellation_handler_clone.get_key();
+    let pg_settings = auth_info
+        .authenticate(ctx, &mut node, &user_info)
+        .or_else(|e| async { Err(stream.throw_error(e, Some(ctx)).await) })
+        .await?;
 
-    session.write_cancel_key(node.cancel_closure.clone())?;
+    let session = cancellation_handler.get_key();
 
-    prepare_client_connection(&node, *session.key(), &mut stream).await?;
+    finish_client_init(&pg_settings, *session.key(), &mut stream);
+    let stream = stream.flush_and_into_inner().await?;
 
-    // Before proxy passing, forward to compute whatever data is left in the
-    // PqStream input buffer. Normally there is none, but our serverless npm
-    // driver in pipeline mode sends startup, password and first query
-    // immediately after opening the connection.
-    let (stream, read_buf) = stream.into_inner();
-    node.stream.write_all(&read_buf).await?;
+    let session_id = ctx.session_id();
+    let (cancel_on_shutdown, cancel) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        session
+            .maintain_cancel_key(
+                session_id,
+                cancel,
+                &pg_settings.cancel_closure,
+                &config.connect_to_compute,
+            )
+            .await;
+    });
 
     Ok(Some(ProxyPassthrough {
         client: stream,
-        aux: node.aux.clone(),
+        compute: node.stream,
+
+        aux: node.aux,
         private_link_id: None,
-        compute: node,
-        session_id: ctx.session_id(),
-        cancel: session,
+
+        _cancel_on_shutdown: cancel_on_shutdown,
+
         _req: request_gauge,
         _conn: conn_gauge,
+        _db_conn: node.guage,
     }))
 }

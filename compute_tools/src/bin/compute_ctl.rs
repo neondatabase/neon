@@ -40,7 +40,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use compute_api::responses::ComputeConfig;
 use compute_tools::compute::{
@@ -57,14 +57,14 @@ use tracing::{error, info};
 use url::Url;
 use utils::failpoint_support;
 
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 #[command(rename_all = "kebab-case")]
 struct Cli {
     #[arg(short = 'b', long, default_value = "postgres", env = "POSTGRES_PATH")]
     pub pgbin: String,
 
     /// The base URL for the remote extension storage proxy gateway.
-    #[arg(short = 'r', long)]
+    #[arg(short = 'r', long, value_parser = Self::parse_remote_ext_base_url)]
     pub remote_ext_base_url: Option<Url>,
 
     /// The port to bind the external listening HTTP server to. Clients running
@@ -124,6 +124,29 @@ struct Cli {
     /// Interval in seconds for collecting installed extensions statistics
     #[arg(long, default_value = "3600")]
     pub installed_extensions_collection_interval: u64,
+
+    /// Run in development mode, skipping VM-specific operations like process termination
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub dev: bool,
+}
+
+impl Cli {
+    /// Parse a URL from an argument. By default, this isn't necessary, but we
+    /// want to do some sanity checking.
+    fn parse_remote_ext_base_url(value: &str) -> Result<Url> {
+        // Remove extra trailing slashes, and add one. We use Url::join() later
+        // when downloading remote extensions. If the base URL is something like
+        // http://example.com/pg-ext-s3-gateway, and join() is called with
+        // something like "xyz", the resulting URL is http://example.com/xyz.
+        let value = value.trim_end_matches('/').to_owned() + "/";
+        let url = Url::parse(&value)?;
+
+        if url.query_pairs().count() != 0 {
+            bail!("parameters detected in remote extensions base URL")
+        }
+
+        Ok(url)
+    }
 }
 
 fn main() -> Result<()> {
@@ -140,7 +163,7 @@ fn main() -> Result<()> {
         .build()?;
     let _rt_guard = runtime.enter();
 
-    runtime.block_on(init())?;
+    runtime.block_on(init(cli.dev))?;
 
     // enable core dumping for all child processes
     setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
@@ -179,13 +202,13 @@ fn main() -> Result<()> {
     deinit_and_exit(exit_code);
 }
 
-async fn init() -> Result<()> {
+async fn init(dev_mode: bool) -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL).await?;
 
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGQUIT])?;
     thread::spawn(move || {
         for sig in signals.forever() {
-            handle_exit_signal(sig);
+            handle_exit_signal(sig, dev_mode);
         }
     });
 
@@ -244,20 +267,60 @@ fn deinit_and_exit(exit_code: Option<i32>) -> ! {
 /// When compute_ctl is killed, send also termination signal to sync-safekeepers
 /// to prevent leakage. TODO: it is better to convert compute_ctl to async and
 /// wait for termination which would be easy then.
-fn handle_exit_signal(sig: i32) {
+fn handle_exit_signal(sig: i32, dev_mode: bool) {
     info!("received {sig} termination signal");
-    forward_termination_signal();
+    forward_termination_signal(dev_mode);
     exit(1);
 }
 
 #[cfg(test)]
 mod test {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
+    use url::Url;
 
     use super::Cli;
 
     #[test]
     fn verify_cli() {
         Cli::command().debug_assert()
+    }
+
+    #[test]
+    fn verify_remote_ext_base_url() {
+        let cli = Cli::parse_from([
+            "compute_ctl",
+            "--pgdata=test",
+            "--connstr=test",
+            "--compute-id=test",
+            "--remote-ext-base-url",
+            "https://example.com/subpath",
+        ]);
+        assert_eq!(
+            cli.remote_ext_base_url.unwrap(),
+            Url::parse("https://example.com/subpath/").unwrap()
+        );
+
+        let cli = Cli::parse_from([
+            "compute_ctl",
+            "--pgdata=test",
+            "--connstr=test",
+            "--compute-id=test",
+            "--remote-ext-base-url",
+            "https://example.com//",
+        ]);
+        assert_eq!(
+            cli.remote_ext_base_url.unwrap(),
+            Url::parse("https://example.com").unwrap()
+        );
+
+        Cli::try_parse_from([
+            "compute_ctl",
+            "--pgdata=test",
+            "--connstr=test",
+            "--compute-id=test",
+            "--remote-ext-base-url",
+            "https://example.com?hello=world",
+        ])
+        .expect_err("URL parameters are not allowed");
     }
 }

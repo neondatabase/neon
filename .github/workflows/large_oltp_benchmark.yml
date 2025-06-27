@@ -33,11 +33,19 @@ jobs:
       fail-fast: false # allow other variants to continue even if one fails
       matrix:
         include:
+          # test only read-only custom scripts in new branch without database maintenance
+          - target: new_branch
+            custom_scripts: select_any_webhook_with_skew.sql@300 select_recent_webhook.sql@397 select_prefetch_webhook.sql@3
+            test_maintenance: false
+          # test all custom scripts in new branch with database maintenance
           - target: new_branch
             custom_scripts: insert_webhooks.sql@200 select_any_webhook_with_skew.sql@300 select_recent_webhook.sql@397 select_prefetch_webhook.sql@3 IUD_one_transaction.sql@100
+            test_maintenance: true
+          # test all custom scripts in reuse branch with database maintenance
           - target: reuse_branch
             custom_scripts: insert_webhooks.sql@200 select_any_webhook_with_skew.sql@300 select_recent_webhook.sql@397 select_prefetch_webhook.sql@3 IUD_one_transaction.sql@100
-      max-parallel: 1 # we want to run each stripe size sequentially to be able to compare the results
+            test_maintenance: true
+      max-parallel: 1 # we want to run each benchmark sequentially to not have noisy neighbors on shared storage (PS, SK)
     permissions:
       contents: write
       statuses: write
@@ -145,6 +153,7 @@ jobs:
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
 
     - name: Benchmark database maintenance
+      if: ${{ matrix.test_maintenance }}
       uses: ./.github/actions/run-python-test-set
       with:
         build_type: ${{ env.BUILD_TYPE }}

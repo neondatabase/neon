@@ -7,12 +7,13 @@
 use std::fmt;
 
 use camino::Utf8Path;
+use postgres_versioninfo::PgMajorVersion;
 
 pub struct RunInitdbArgs<'a> {
     pub superuser: &'a str,
     pub locale: &'a str,
     pub initdb_bin: &'a Utf8Path,
-    pub pg_version: u32,
+    pub pg_version: PgMajorVersion,
     pub library_search_path: &'a Utf8Path,
     pub pgdata: &'a Utf8Path,
 }
@@ -31,15 +32,15 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Error::Spawn(e) => write!(f, "Error spawning command: {:?}", e),
+            Error::Spawn(e) => write!(f, "Error spawning command: {e:?}"),
             Error::Failed { status, stderr } => write!(
                 f,
                 "Command failed with status {:?}: {}",
                 status,
                 String::from_utf8_lossy(stderr)
             ),
-            Error::WaitOutput(e) => write!(f, "Error waiting for command output: {:?}", e),
-            Error::Other(e) => write!(f, "Error: {:?}", e),
+            Error::WaitOutput(e) => write!(f, "Error waiting for command output: {e:?}"),
+            Error::Other(e) => write!(f, "Error: {e:?}"),
         }
     }
 }
@@ -79,12 +80,16 @@ pub async fn do_run_initdb(args: RunInitdbArgs<'_>) -> Result<(), Error> {
         .stderr(std::process::Stdio::piped());
 
     // Before version 14, only the libc provide was available.
-    if pg_version > 14 {
+    if pg_version > PgMajorVersion::PG14 {
         // Version 17 brought with it a builtin locale provider which only provides
         // C and C.UTF-8. While being safer for collation purposes since it is
         // guaranteed to be consistent throughout a major release, it is also more
         // performant.
-        let locale_provider = if pg_version >= 17 { "builtin" } else { "libc" };
+        let locale_provider = if pg_version >= PgMajorVersion::PG17 {
+            "builtin"
+        } else {
+            "libc"
+        };
 
         initdb_command.args(["--locale-provider", locale_provider]);
     }

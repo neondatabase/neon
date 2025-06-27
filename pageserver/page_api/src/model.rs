@@ -9,10 +9,16 @@
 //! - Use more precise datatypes, e.g. Lsn and uints shorter than 32 bits.
 //!
 //! - Validate protocol invariants, via try_from() and try_into().
+//!
+//! Validation only happens on the receiver side, i.e. when converting from Protobuf to domain
+//! types. This is where it matters -- the Protobuf types are less strict than the domain types, and
+//! receivers should expect all sorts of junk from senders. This also allows the sender to use e.g.
+//! stream combinators without dealing with errors, and avoids validating the same message twice.
+
+use std::fmt::Display;
 
 use bytes::Bytes;
 use postgres_ffi::Oid;
-use smallvec::SmallVec;
 // TODO: split out Lsn, RelTag, SlruKind, Oid and other basic types to a separate crate, to avoid
 // pulling in all of their other crate dependencies when building the client.
 use utils::lsn::Lsn;
@@ -20,7 +26,7 @@ use utils::lsn::Lsn;
 use crate::proto;
 
 /// A protocol error. Typically returned via try_from() or try_into().
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Clone, Debug)]
 pub enum ProtocolError {
     #[error("field '{0}' has invalid value '{1}'")]
     Invalid(&'static str, String),
@@ -48,7 +54,8 @@ pub struct ReadLsn {
     pub request_lsn: Lsn,
     /// If given, the caller guarantees that the page has not been modified since this LSN. Must be
     /// smaller than or equal to request_lsn. This allows the Pageserver to serve an old page
-    /// without waiting for the request LSN to arrive. Valid for all request types.
+    /// without waiting for the request LSN to arrive. If not given, the request will read at the
+    /// request_lsn and wait for it to arrive if necessary. Valid for all request types.
     ///
     /// It is undefined behaviour to make a request such that the page was, in fact, modified
     /// between request_lsn and not_modified_since_lsn. The Pageserver might detect it and return an
@@ -58,19 +65,14 @@ pub struct ReadLsn {
     pub not_modified_since_lsn: Option<Lsn>,
 }
 
-impl ReadLsn {
-    /// Validates the ReadLsn.
-    pub fn validate(&self) -> Result<(), ProtocolError> {
-        if self.request_lsn == Lsn::INVALID {
-            return Err(ProtocolError::invalid("request_lsn", self.request_lsn));
+impl Display for ReadLsn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let req_lsn = self.request_lsn;
+        if let Some(mod_lsn) = self.not_modified_since_lsn {
+            write!(f, "{req_lsn}>={mod_lsn}")
+        } else {
+            req_lsn.fmt(f)
         }
-        if self.not_modified_since_lsn > Some(self.request_lsn) {
-            return Err(ProtocolError::invalid(
-                "not_modified_since_lsn",
-                self.not_modified_since_lsn,
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -78,27 +80,31 @@ impl TryFrom<proto::ReadLsn> for ReadLsn {
     type Error = ProtocolError;
 
     fn try_from(pb: proto::ReadLsn) -> Result<Self, Self::Error> {
-        let read_lsn = Self {
+        if pb.request_lsn == 0 {
+            return Err(ProtocolError::invalid("request_lsn", pb.request_lsn));
+        }
+        if pb.not_modified_since_lsn > pb.request_lsn {
+            return Err(ProtocolError::invalid(
+                "not_modified_since_lsn",
+                pb.not_modified_since_lsn,
+            ));
+        }
+        Ok(Self {
             request_lsn: Lsn(pb.request_lsn),
             not_modified_since_lsn: match pb.not_modified_since_lsn {
                 0 => None,
                 lsn => Some(Lsn(lsn)),
             },
-        };
-        read_lsn.validate()?;
-        Ok(read_lsn)
+        })
     }
 }
 
-impl TryFrom<ReadLsn> for proto::ReadLsn {
-    type Error = ProtocolError;
-
-    fn try_from(read_lsn: ReadLsn) -> Result<Self, Self::Error> {
-        read_lsn.validate()?;
-        Ok(Self {
+impl From<ReadLsn> for proto::ReadLsn {
+    fn from(read_lsn: ReadLsn) -> Self {
+        Self {
             request_lsn: read_lsn.request_lsn.0,
             not_modified_since_lsn: read_lsn.not_modified_since_lsn.unwrap_or_default().0,
-        })
+        }
     }
 }
 
@@ -153,6 +159,15 @@ impl TryFrom<proto::CheckRelExistsRequest> for CheckRelExistsRequest {
     }
 }
 
+impl From<CheckRelExistsRequest> for proto::CheckRelExistsRequest {
+    fn from(request: CheckRelExistsRequest) -> Self {
+        Self {
+            read_lsn: Some(request.read_lsn.into()),
+            rel: Some(request.rel.into()),
+        }
+    }
+}
+
 pub type CheckRelExistsResponse = bool;
 
 impl From<proto::CheckRelExistsResponse> for CheckRelExistsResponse {
@@ -167,13 +182,18 @@ impl From<CheckRelExistsResponse> for proto::CheckRelExistsResponse {
     }
 }
 
-/// Requests a base backup at a given LSN.
+/// Requests a base backup.
 #[derive(Clone, Copy, Debug)]
 pub struct GetBaseBackupRequest {
-    /// The LSN to fetch a base backup at.
-    pub read_lsn: ReadLsn,
+    /// The LSN to fetch a base backup at. If None, uses the latest LSN known to the Pageserver.
+    pub lsn: Option<Lsn>,
     /// If true, logical replication slots will not be created.
     pub replica: bool,
+    /// If true, include relation files in the base backup. Mainly for debugging and tests.
+    pub full: bool,
+    /// Compression algorithm to use. Base backups send a compressed payload instead of using gRPC
+    /// compression, so that we can cache compressed backups on the server.
+    pub compression: BaseBackupCompression,
 }
 
 impl TryFrom<proto::GetBaseBackupRequest> for GetBaseBackupRequest {
@@ -181,23 +201,66 @@ impl TryFrom<proto::GetBaseBackupRequest> for GetBaseBackupRequest {
 
     fn try_from(pb: proto::GetBaseBackupRequest) -> Result<Self, Self::Error> {
         Ok(Self {
-            read_lsn: pb
-                .read_lsn
-                .ok_or(ProtocolError::Missing("read_lsn"))?
-                .try_into()?,
+            lsn: (pb.lsn != 0).then_some(Lsn(pb.lsn)),
             replica: pb.replica,
+            full: pb.full,
+            compression: pb.compression.try_into()?,
         })
     }
 }
 
-impl TryFrom<GetBaseBackupRequest> for proto::GetBaseBackupRequest {
+impl From<GetBaseBackupRequest> for proto::GetBaseBackupRequest {
+    fn from(request: GetBaseBackupRequest) -> Self {
+        Self {
+            lsn: request.lsn.unwrap_or_default().0,
+            replica: request.replica,
+            full: request.full,
+            compression: request.compression.into(),
+        }
+    }
+}
+
+/// Base backup compression algorithm.
+#[derive(Clone, Copy, Debug)]
+pub enum BaseBackupCompression {
+    None,
+    Gzip,
+}
+
+impl TryFrom<proto::BaseBackupCompression> for BaseBackupCompression {
     type Error = ProtocolError;
 
-    fn try_from(request: GetBaseBackupRequest) -> Result<Self, Self::Error> {
-        Ok(Self {
-            read_lsn: Some(request.read_lsn.try_into()?),
-            replica: request.replica,
-        })
+    fn try_from(pb: proto::BaseBackupCompression) -> Result<Self, Self::Error> {
+        match pb {
+            proto::BaseBackupCompression::Unknown => Err(ProtocolError::invalid("compression", pb)),
+            proto::BaseBackupCompression::None => Ok(Self::None),
+            proto::BaseBackupCompression::Gzip => Ok(Self::Gzip),
+        }
+    }
+}
+
+impl TryFrom<i32> for BaseBackupCompression {
+    type Error = ProtocolError;
+
+    fn try_from(compression: i32) -> Result<Self, Self::Error> {
+        proto::BaseBackupCompression::try_from(compression)
+            .map_err(|_| ProtocolError::invalid("compression", compression))
+            .and_then(Self::try_from)
+    }
+}
+
+impl From<BaseBackupCompression> for proto::BaseBackupCompression {
+    fn from(compression: BaseBackupCompression) -> Self {
+        match compression {
+            BaseBackupCompression::None => Self::None,
+            BaseBackupCompression::Gzip => Self::Gzip,
+        }
+    }
+}
+
+impl From<BaseBackupCompression> for i32 {
+    fn from(compression: BaseBackupCompression) -> Self {
+        proto::BaseBackupCompression::from(compression).into()
     }
 }
 
@@ -214,14 +277,9 @@ impl TryFrom<proto::GetBaseBackupResponseChunk> for GetBaseBackupResponseChunk {
     }
 }
 
-impl TryFrom<GetBaseBackupResponseChunk> for proto::GetBaseBackupResponseChunk {
-    type Error = ProtocolError;
-
-    fn try_from(chunk: GetBaseBackupResponseChunk) -> Result<Self, Self::Error> {
-        if chunk.is_empty() {
-            return Err(ProtocolError::Missing("chunk"));
-        }
-        Ok(Self { chunk })
+impl From<GetBaseBackupResponseChunk> for proto::GetBaseBackupResponseChunk {
+    fn from(chunk: GetBaseBackupResponseChunk) -> Self {
+        Self { chunk }
     }
 }
 
@@ -246,14 +304,12 @@ impl TryFrom<proto::GetDbSizeRequest> for GetDbSizeRequest {
     }
 }
 
-impl TryFrom<GetDbSizeRequest> for proto::GetDbSizeRequest {
-    type Error = ProtocolError;
-
-    fn try_from(request: GetDbSizeRequest) -> Result<Self, Self::Error> {
-        Ok(Self {
-            read_lsn: Some(request.read_lsn.try_into()?),
+impl From<GetDbSizeRequest> for proto::GetDbSizeRequest {
+    fn from(request: GetDbSizeRequest) -> Self {
+        Self {
+            read_lsn: Some(request.read_lsn.into()),
             db_oid: request.db_oid,
-        })
+        }
     }
 }
 
@@ -288,7 +344,7 @@ pub struct GetPageRequest {
     /// Multiple pages will be executed as a single batch by the Pageserver, amortizing layer access
     /// costs and parallelizing them. This may increase the latency of any individual request, but
     /// improves the overall latency and throughput of the batch as a whole.
-    pub block_numbers: SmallVec<[u32; 1]>,
+    pub block_numbers: Vec<u32>,
 }
 
 impl TryFrom<proto::GetPageRequest> for GetPageRequest {
@@ -306,25 +362,20 @@ impl TryFrom<proto::GetPageRequest> for GetPageRequest {
                 .ok_or(ProtocolError::Missing("read_lsn"))?
                 .try_into()?,
             rel: pb.rel.ok_or(ProtocolError::Missing("rel"))?.try_into()?,
-            block_numbers: pb.block_number.into(),
+            block_numbers: pb.block_number,
         })
     }
 }
 
-impl TryFrom<GetPageRequest> for proto::GetPageRequest {
-    type Error = ProtocolError;
-
-    fn try_from(request: GetPageRequest) -> Result<Self, Self::Error> {
-        if request.block_numbers.is_empty() {
-            return Err(ProtocolError::Missing("block_number"));
-        }
-        Ok(Self {
+impl From<GetPageRequest> for proto::GetPageRequest {
+    fn from(request: GetPageRequest) -> Self {
+        Self {
             request_id: request.request_id,
             request_class: request.request_class.into(),
-            read_lsn: Some(request.read_lsn.try_into()?),
+            read_lsn: Some(request.read_lsn.into()),
             rel: Some(request.rel.into()),
-            block_number: request.block_numbers.into_vec(),
-        })
+            block_number: request.block_numbers,
+        }
     }
 }
 
@@ -396,7 +447,7 @@ pub struct GetPageResponse {
     /// A string describing the status, if any.
     pub reason: Option<String>,
     /// The 8KB page images, in the same order as the request. Empty if status != OK.
-    pub page_images: SmallVec<[Bytes; 1]>,
+    pub page_images: Vec<Bytes>,
 }
 
 impl From<proto::GetPageResponse> for GetPageResponse {
@@ -405,7 +456,7 @@ impl From<proto::GetPageResponse> for GetPageResponse {
             request_id: pb.request_id,
             status_code: pb.status_code.into(),
             reason: Some(pb.reason).filter(|r| !r.is_empty()),
-            page_images: pb.page_image.into(),
+            page_images: pb.page_image,
         }
     }
 }
@@ -416,8 +467,41 @@ impl From<GetPageResponse> for proto::GetPageResponse {
             request_id: response.request_id,
             status_code: response.status_code.into(),
             reason: response.reason.unwrap_or_default(),
-            page_image: response.page_images.into_vec(),
+            page_image: response.page_images,
         }
+    }
+}
+
+impl GetPageResponse {
+    /// Attempts to represent a tonic::Status as a GetPageResponse if appropriate. Returning a
+    /// tonic::Status will terminate the GetPage stream, so per-request errors are emitted as a
+    /// GetPageResponse with a non-OK status code instead.
+    #[allow(clippy::result_large_err)]
+    pub fn try_from_status(
+        status: tonic::Status,
+        request_id: RequestID,
+    ) -> Result<Self, tonic::Status> {
+        // We shouldn't see an OK status here, because we're emitting an error.
+        debug_assert_ne!(status.code(), tonic::Code::Ok);
+        if status.code() == tonic::Code::Ok {
+            return Err(tonic::Status::internal(format!(
+                "unexpected OK status: {status:?}",
+            )));
+        }
+
+        // If we can't convert the tonic::Code to a GetPageStatusCode, this is not a per-request
+        // error and we should return a tonic::Status to terminate the stream.
+        let Ok(status_code) = status.code().try_into() else {
+            return Err(status);
+        };
+
+        // Return a GetPageResponse for the status.
+        Ok(Self {
+            request_id,
+            status_code,
+            reason: Some(status.message().to_string()),
+            page_images: Vec::new(),
+        })
     }
 }
 
@@ -426,7 +510,7 @@ impl From<GetPageResponse> for proto::GetPageResponse {
 /// These are effectively equivalent to gRPC statuses. However, we use a bidirectional stream
 /// (potentially shared by many backends), and a gRPC status response would terminate the stream so
 /// we send GetPageResponse messages with these codes instead.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, strum_macros::Display)]
 pub enum GetPageStatusCode {
     /// Unknown status. For forwards compatibility: used when an older client version receives a new
     /// status code from a newer server version.
@@ -484,8 +568,42 @@ impl From<GetPageStatusCode> for i32 {
     }
 }
 
+impl TryFrom<tonic::Code> for GetPageStatusCode {
+    type Error = tonic::Code;
+
+    fn try_from(code: tonic::Code) -> Result<Self, Self::Error> {
+        use tonic::Code;
+
+        let status_code = match code {
+            Code::Ok => Self::Ok,
+
+            // These are per-request errors, which should be returned as GetPageResponses.
+            Code::AlreadyExists => Self::InvalidRequest,
+            Code::DataLoss => Self::InternalError,
+            Code::FailedPrecondition => Self::InvalidRequest,
+            Code::InvalidArgument => Self::InvalidRequest,
+            Code::Internal => Self::InternalError,
+            Code::NotFound => Self::NotFound,
+            Code::OutOfRange => Self::InvalidRequest,
+            Code::ResourceExhausted => Self::SlowDown,
+
+            // These should terminate the stream by returning a tonic::Status.
+            Code::Aborted
+            | Code::Cancelled
+            | Code::DeadlineExceeded
+            | Code::PermissionDenied
+            | Code::Unauthenticated
+            | Code::Unavailable
+            | Code::Unimplemented
+            | Code::Unknown => return Err(code),
+        };
+        Ok(status_code)
+    }
+}
+
 // Fetches the size of a relation at a given LSN, as # of blocks. Only valid on shard 0, other
 // shards will error.
+#[derive(Clone, Copy, Debug)]
 pub struct GetRelSizeRequest {
     pub read_lsn: ReadLsn,
     pub rel: RelTag,
@@ -505,14 +623,12 @@ impl TryFrom<proto::GetRelSizeRequest> for GetRelSizeRequest {
     }
 }
 
-impl TryFrom<GetRelSizeRequest> for proto::GetRelSizeRequest {
-    type Error = ProtocolError;
-
-    fn try_from(request: GetRelSizeRequest) -> Result<Self, Self::Error> {
-        Ok(Self {
-            read_lsn: Some(request.read_lsn.try_into()?),
+impl From<GetRelSizeRequest> for proto::GetRelSizeRequest {
+    fn from(request: GetRelSizeRequest) -> Self {
+        Self {
+            read_lsn: Some(request.read_lsn.into()),
             rel: Some(request.rel.into()),
-        })
+        }
     }
 }
 
@@ -531,6 +647,7 @@ impl From<GetRelSizeResponse> for proto::GetRelSizeResponse {
 }
 
 /// Requests an SLRU segment. Only valid on shard 0, other shards will error.
+#[derive(Clone, Copy, Debug)]
 pub struct GetSlruSegmentRequest {
     pub read_lsn: ReadLsn,
     pub kind: SlruKind,
@@ -555,15 +672,13 @@ impl TryFrom<proto::GetSlruSegmentRequest> for GetSlruSegmentRequest {
     }
 }
 
-impl TryFrom<GetSlruSegmentRequest> for proto::GetSlruSegmentRequest {
-    type Error = ProtocolError;
-
-    fn try_from(request: GetSlruSegmentRequest) -> Result<Self, Self::Error> {
-        Ok(Self {
-            read_lsn: Some(request.read_lsn.try_into()?),
+impl From<GetSlruSegmentRequest> for proto::GetSlruSegmentRequest {
+    fn from(request: GetSlruSegmentRequest) -> Self {
+        Self {
+            read_lsn: Some(request.read_lsn.into()),
             kind: request.kind as u32,
             segno: request.segno,
-        })
+        }
     }
 }
 
@@ -580,14 +695,9 @@ impl TryFrom<proto::GetSlruSegmentResponse> for GetSlruSegmentResponse {
     }
 }
 
-impl TryFrom<GetSlruSegmentResponse> for proto::GetSlruSegmentResponse {
-    type Error = ProtocolError;
-
-    fn try_from(segment: GetSlruSegmentResponse) -> Result<Self, Self::Error> {
-        if segment.is_empty() {
-            return Err(ProtocolError::Missing("segment"));
-        }
-        Ok(Self { segment })
+impl From<GetSlruSegmentResponse> for proto::GetSlruSegmentResponse {
+    fn from(segment: GetSlruSegmentResponse) -> Self {
+        Self { segment }
     }
 }
 

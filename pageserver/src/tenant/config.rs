@@ -61,8 +61,10 @@ pub(crate) struct LocationConf {
     /// The detailed shard identity.  This structure is already scoped within
     /// a TenantShardId, but we need the full ShardIdentity to enable calculating
     /// key->shard mappings.
-    #[serde(default = "ShardIdentity::unsharded")]
-    #[serde(skip_serializing_if = "ShardIdentity::is_unsharded")]
+    ///
+    /// NB: we store this even for unsharded tenants, so that we agree with storcon on the intended
+    /// stripe size. Otherwise, a split request that does not specify a stripe size may use a
+    /// different default than storcon, which can lead to incorrect stripe sizes and corruption.
     pub(crate) shard: ShardIdentity,
 
     /// The pan-cluster tenant configuration, the same on all locations
@@ -149,7 +151,12 @@ impl LocationConf {
     /// For use when attaching/re-attaching: update the generation stored in this
     /// structure.  If we were in a secondary state, promote to attached (posession
     /// of a fresh generation implies this).
-    pub(crate) fn attach_in_generation(&mut self, mode: AttachmentMode, generation: Generation) {
+    pub(crate) fn attach_in_generation(
+        &mut self,
+        mode: AttachmentMode,
+        generation: Generation,
+        stripe_size: ShardStripeSize,
+    ) {
         match &mut self.mode {
             LocationMode::Attached(attach_conf) => {
                 attach_conf.generation = generation;
@@ -163,6 +170,8 @@ impl LocationConf {
                 })
             }
         }
+
+        self.shard.stripe_size = stripe_size;
     }
 
     pub(crate) fn try_from(conf: &'_ models::LocationConfig) -> anyhow::Result<Self> {

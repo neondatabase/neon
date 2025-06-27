@@ -418,7 +418,7 @@ def test_sql_exporter_metrics_e2e(
     pg_user = conn_options["user"]
     pg_dbname = conn_options["dbname"]
     pg_application_name = f"sql_exporter{stem_suffix}"
-    connstr = f"postgresql://{pg_user}@{pg_host}:{pg_port}/{pg_dbname}?sslmode=disable&application_name={pg_application_name}"
+    connstr = f"postgresql://{pg_user}@{pg_host}:{pg_port}/{pg_dbname}?sslmode=disable&application_name={pg_application_name}&pgaudit.log=none"
 
     def escape_go_filepath_match_characters(s: str) -> str:
         """
@@ -466,8 +466,13 @@ def test_perf_counters(neon_simple_env: NeonEnv):
     #
     # 1.5 is the minimum version to contain these views.
     cur.execute("CREATE EXTENSION neon VERSION '1.5'")
+    cur.execute("set neon.monitor_query_exec_time = on")
     cur.execute("SELECT * FROM neon_perf_counters")
     cur.execute("SELECT * FROM neon_backend_perf_counters")
+    cur.execute(
+        "select value from neon_backend_perf_counters where metric='query_time_seconds_count' and pid=pg_backend_pid()"
+    )
+    assert cur.fetchall()[0][0] == 2
 
 
 def collect_metric(

@@ -52,6 +52,8 @@ pub struct NodeRegisterRequest {
 
     pub listen_pg_addr: String,
     pub listen_pg_port: u16,
+    pub listen_grpc_addr: Option<String>,
+    pub listen_grpc_port: Option<u16>,
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
@@ -101,6 +103,8 @@ pub struct TenantLocateResponseShard {
 
     pub listen_pg_addr: String,
     pub listen_pg_port: u16,
+    pub listen_grpc_addr: Option<String>,
+    pub listen_grpc_port: Option<u16>,
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
@@ -152,6 +156,8 @@ pub struct NodeDescribeResponse {
 
     pub listen_pg_addr: String,
     pub listen_pg_port: u16,
+    pub listen_grpc_addr: Option<String>,
+    pub listen_grpc_port: Option<u16>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -341,6 +347,35 @@ pub enum ShardSchedulingPolicy {
 impl Default for ShardSchedulingPolicy {
     fn default() -> Self {
         Self::Active
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
+pub enum NodeLifecycle {
+    Active,
+    Deleted,
+}
+
+impl FromStr for NodeLifecycle {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(Self::Active),
+            "deleted" => Ok(Self::Deleted),
+            _ => Err(anyhow::anyhow!("Unknown node lifecycle '{s}'")),
+        }
+    }
+}
+
+impl From<NodeLifecycle> for String {
+    fn from(value: NodeLifecycle) -> String {
+        use NodeLifecycle::*;
+        match value {
+            Active => "active",
+            Deleted => "deleted",
+        }
+        .to_string()
     }
 }
 
@@ -542,8 +577,7 @@ mod test {
         let err = serde_json::from_value::<TenantCreateRequest>(create_request).unwrap_err();
         assert!(
             err.to_string().contains("unknown field `unknown_field`"),
-            "expect unknown field `unknown_field` error, got: {}",
-            err
+            "expect unknown field `unknown_field` error, got: {err}"
         );
     }
 

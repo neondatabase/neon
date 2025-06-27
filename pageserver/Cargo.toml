@@ -12,6 +12,9 @@ testing = ["fail/failpoints", "pageserver_api/testing", "wal_decoder/testing", "
 
 fuzz-read-path = ["testing"]
 
+# Enables benchmarking only APIs
+benchmarking = []
+
 [dependencies]
 anyhow.workspace = true
 arc-swap.workspace = true
@@ -34,6 +37,7 @@ fail.workspace = true
 futures.workspace = true
 hashlink.workspace = true
 hex.workspace = true
+http.workspace = true
 http-utils.workspace = true
 humantime-serde.workspace = true
 humantime.workspace = true
@@ -55,6 +59,7 @@ pin-project-lite.workspace = true
 postgres_backend.workspace = true
 postgres_connection.workspace = true
 postgres_ffi.workspace = true
+postgres_ffi_types.workspace = true
 postgres_initdb.workspace = true
 postgres-protocol.workspace = true
 postgres-types.workspace = true
@@ -93,6 +98,7 @@ tokio-util.workspace = true
 toml_edit = { workspace = true, features = [ "serde" ] }
 tonic.workspace = true
 tonic-reflection.workspace = true
+tower.workspace = true
 tracing.workspace = true
 tracing-utils.workspace = true
 url.workspace = true
@@ -124,6 +130,7 @@ harness = false
 [[bench]]
 name = "bench_ingest"
 harness = false
+required-features = ["benchmarking"]
 
 [[bench]]
 name = "upload_queue"

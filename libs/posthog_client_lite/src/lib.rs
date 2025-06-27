@@ -22,6 +22,16 @@ pub enum PostHogEvaluationError {
     Internal(String),
 }
 
+impl PostHogEvaluationError {
+    pub fn as_variant_str(&self) -> &'static str {
+        match self {
+            PostHogEvaluationError::NotAvailable(_) => "not_available",
+            PostHogEvaluationError::NoConditionGroupMatched => "no_condition_group_matched",
+            PostHogEvaluationError::Internal(_) => "internal",
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct LocalEvaluationResponse {
     pub flags: Vec<LocalEvaluationFlag>,
@@ -29,6 +39,9 @@ pub struct LocalEvaluationResponse {
 
 #[derive(Deserialize)]
 pub struct LocalEvaluationFlag {
+    #[allow(dead_code)]
+    id: u64,
+    team_id: u64,
     key: String,
     filters: LocalEvaluationFlagFilters,
     active: bool,
@@ -54,7 +67,7 @@ pub struct LocalEvaluationFlagFilterProperty {
     operator: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum PostHogFlagFilterPropertyValue {
     String(String),
@@ -97,17 +110,32 @@ impl FeatureStore {
         }
     }
 
-    pub fn new_with_flags(flags: Vec<LocalEvaluationFlag>) -> Self {
+    pub fn new_with_flags(
+        flags: Vec<LocalEvaluationFlag>,
+        project_id: Option<u64>,
+    ) -> Result<Self, &'static str> {
         let mut store = Self::new();
-        store.set_flags(flags);
-        store
+        store.set_flags(flags, project_id)?;
+        Ok(store)
     }
 
-    pub fn set_flags(&mut self, flags: Vec<LocalEvaluationFlag>) {
+    pub fn set_flags(
+        &mut self,
+        flags: Vec<LocalEvaluationFlag>,
+        project_id: Option<u64>,
+    ) -> Result<(), &'static str> {
         self.flags.clear();
         for flag in flags {
+            if let Some(project_id) = project_id {
+                if flag.team_id != project_id {
+                    return Err(
+                        "Retrieved a spec with different project id, wrong config? Discarding the feature flags.",
+                    );
+                }
+            }
             self.flags.insert(flag.key.clone(), flag);
         }
+        Ok(())
     }
 
     /// Generate a consistent hash for a user ID (e.g., tenant ID).
@@ -140,15 +168,13 @@ impl FeatureStore {
                 let PostHogFlagFilterPropertyValue::String(provided) = provided else {
                     // Left should be a string
                     return Err(PostHogEvaluationError::Internal(format!(
-                        "The left side of the condition is not a string: {:?}",
-                        provided
+                        "The left side of the condition is not a string: {provided:?}"
                     )));
                 };
                 let PostHogFlagFilterPropertyValue::List(requested) = requested else {
                     // Right should be a list of string
                     return Err(PostHogEvaluationError::Internal(format!(
-                        "The right side of the condition is not a list: {:?}",
-                        requested
+                        "The right side of the condition is not a list: {requested:?}"
                     )));
                 };
                 Ok(requested.contains(provided))
@@ -157,14 +183,12 @@ impl FeatureStore {
                 let PostHogFlagFilterPropertyValue::String(requested) = requested else {
                     // Right should be a string
                     return Err(PostHogEvaluationError::Internal(format!(
-                        "The right side of the condition is not a string: {:?}",
-                        requested
+                        "The right side of the condition is not a string: {requested:?}"
                     )));
                 };
                 let Ok(requested) = requested.parse::<f64>() else {
                     return Err(PostHogEvaluationError::Internal(format!(
-                        "Can not parse the right side of the condition as a number: {:?}",
-                        requested
+                        "Can not parse the right side of the condition as a number: {requested:?}"
                     )));
                 };
                 // Left can either be a number or a string
@@ -173,16 +197,14 @@ impl FeatureStore {
                     PostHogFlagFilterPropertyValue::String(provided) => {
                         let Ok(provided) = provided.parse::<f64>() else {
                             return Err(PostHogEvaluationError::Internal(format!(
-                                "Can not parse the left side of the condition as a number: {:?}",
-                                provided
+                                "Can not parse the left side of the condition as a number: {provided:?}"
                             )));
                         };
                         provided
                     }
                     _ => {
                         return Err(PostHogEvaluationError::Internal(format!(
-                            "The left side of the condition is not a number or a string: {:?}",
-                            provided
+                            "The left side of the condition is not a number or a string: {provided:?}"
                         )));
                     }
                 };
@@ -190,14 +212,12 @@ impl FeatureStore {
                     "lt" => Ok(provided < requested),
                     "gt" => Ok(provided > requested),
                     op => Err(PostHogEvaluationError::Internal(format!(
-                        "Unsupported operator: {}",
-                        op
+                        "Unsupported operator: {op}"
                     ))),
                 }
             }
             _ => Err(PostHogEvaluationError::Internal(format!(
-                "Unsupported operator: {}",
-                operator
+                "Unsupported operator: {operator}"
             ))),
         }
     }
@@ -345,8 +365,7 @@ impl FeatureStore {
         if let Some(flag_config) = self.flags.get(flag_key) {
             if !flag_config.active {
                 return Err(PostHogEvaluationError::NotAvailable(format!(
-                    "The feature flag is not active: {}",
-                    flag_key
+                    "The feature flag is not active: {flag_key}"
                 )));
             }
             let Some(ref multivariate) = flag_config.filters.multivariate else {
@@ -373,8 +392,7 @@ impl FeatureStore {
                         // This should not happen because the rollout percentage always adds up to 100, but just in case that PostHog
                         // returned invalid spec, we return an error.
                         return Err(PostHogEvaluationError::Internal(format!(
-                            "Rollout percentage does not add up to 100: {}",
-                            flag_key
+                            "Rollout percentage does not add up to 100: {flag_key}"
                         )));
                     }
                     GroupEvaluationResult::Unmatched => continue,
@@ -385,8 +403,7 @@ impl FeatureStore {
         } else {
             // The feature flag is not available yet
             Err(PostHogEvaluationError::NotAvailable(format!(
-                "Not found in the local evaluation spec: {}",
-                flag_key
+                "Not found in the local evaluation spec: {flag_key}"
             )))
         }
     }
@@ -412,8 +429,7 @@ impl FeatureStore {
         if let Some(flag_config) = self.flags.get(flag_key) {
             if !flag_config.active {
                 return Err(PostHogEvaluationError::NotAvailable(format!(
-                    "The feature flag is not active: {}",
-                    flag_key
+                    "The feature flag is not active: {flag_key}"
                 )));
             }
             if flag_config.filters.multivariate.is_some() {
@@ -428,8 +444,7 @@ impl FeatureStore {
                 match self.evaluate_group(group, hash_on_global_rollout_percentage, properties)? {
                     GroupEvaluationResult::MatchedAndOverride(_) => {
                         return Err(PostHogEvaluationError::Internal(format!(
-                            "Boolean flag cannot have overrides: {}",
-                            flag_key
+                            "Boolean flag cannot have overrides: {flag_key}"
                         )));
                     }
                     GroupEvaluationResult::MatchedAndEvaluate => {
@@ -443,8 +458,7 @@ impl FeatureStore {
         } else {
             // The feature flag is not available yet
             Err(PostHogEvaluationError::NotAvailable(format!(
-                "Not found in the local evaluation spec: {}",
-                flag_key
+                "Not found in the local evaluation spec: {flag_key}"
             )))
         }
     }
@@ -455,8 +469,7 @@ impl FeatureStore {
             Ok(flag_config.filters.multivariate.is_none())
         } else {
             Err(PostHogEvaluationError::NotAvailable(format!(
-                "Not found in the local evaluation spec: {}",
-                flag_key
+                "Not found in the local evaluation spec: {flag_key}"
             )))
         }
     }
@@ -497,6 +510,13 @@ pub struct PostHogClient {
     client: reqwest::Client,
 }
 
+#[derive(Serialize, Debug)]
+pub struct CaptureEvent {
+    pub event: String,
+    pub distinct_id: String,
+    pub properties: serde_json::Value,
+}
+
 impl PostHogClient {
     pub fn new(config: PostHogClientConfig) -> Self {
         let client = reqwest::Client::new();
@@ -517,23 +537,33 @@ impl PostHogClient {
         })
     }
 
-    /// Fetch the feature flag specs from the server.
-    ///
-    /// This is unfortunately an undocumented API at:
-    /// - <https://posthog.com/docs/api/feature-flags#get-api-projects-project_id-feature_flags-local_evaluation>
-    /// - <https://posthog.com/docs/feature-flags/local-evaluation>
-    ///
-    /// The handling logic in [`FeatureStore`] mostly follows the Python API implementation.
-    /// See `_compute_flag_locally` in <https://github.com/PostHog/posthog-python/blob/master/posthog/client.py>
-    pub async fn get_feature_flags_local_evaluation(
-        &self,
-    ) -> anyhow::Result<LocalEvaluationResponse> {
+    /// Check if the server API key is a feature flag secure API key. This key can only be
+    /// used to fetch the feature flag specs and can only be used on a undocumented API
+    /// endpoint.
+    fn is_feature_flag_secure_api_key(&self) -> bool {
+        self.config.server_api_key.starts_with("phs_")
+    }
+
+    /// Get the raw JSON spec, same as `get_feature_flags_local_evaluation` but without parsing.
+    pub async fn get_feature_flags_local_evaluation_raw(&self) -> anyhow::Result<String> {
         // BASE_URL/api/projects/:project_id/feature_flags/local_evaluation
         // with bearer token of self.server_api_key
-        let url = format!(
-            "{}/api/projects/{}/feature_flags/local_evaluation",
-            self.config.private_api_url, self.config.project_id
-        );
+        // OR
+        // BASE_URL/api/feature_flag/local_evaluation/
+        // with bearer token of feature flag specific self.server_api_key
+        let url = if self.is_feature_flag_secure_api_key() {
+            // The new feature local evaluation secure API token
+            format!(
+                "{}/api/feature_flag/local_evaluation",
+                self.config.private_api_url
+            )
+        } else {
+            // The old personal API token
+            format!(
+                "{}/api/projects/{}/feature_flags/local_evaluation",
+                self.config.private_api_url, self.config.project_id
+            )
+        };
         let response = self
             .client
             .get(url)
@@ -549,7 +579,22 @@ impl PostHogClient {
                 body
             ));
         }
-        Ok(serde_json::from_str(&body)?)
+        Ok(body)
+    }
+
+    /// Fetch the feature flag specs from the server.
+    ///
+    /// This is unfortunately an undocumented API at:
+    /// - <https://posthog.com/docs/api/feature-flags#get-api-projects-project_id-feature_flags-local_evaluation>
+    /// - <https://posthog.com/docs/feature-flags/local-evaluation>
+    ///
+    /// The handling logic in [`FeatureStore`] mostly follows the Python API implementation.
+    /// See `_compute_flag_locally` in <https://github.com/PostHog/posthog-python/blob/master/posthog/client.py>
+    pub async fn get_feature_flags_local_evaluation(
+        &self,
+    ) -> Result<LocalEvaluationResponse, anyhow::Error> {
+        let raw = self.get_feature_flags_local_evaluation_raw().await?;
+        Ok(serde_json::from_str(&raw)?)
     }
 
     /// Capture an event. This will only be used to report the feature flag usage back to PostHog, though
@@ -560,12 +605,12 @@ impl PostHogClient {
         &self,
         event: &str,
         distinct_id: &str,
-        properties: &HashMap<String, PostHogFlagFilterPropertyValue>,
+        properties: &serde_json::Value,
     ) -> anyhow::Result<()> {
         // PUBLIC_URL/capture/
-        // with bearer token of self.client_api_key
         let url = format!("{}/capture/", self.config.public_api_url);
-        self.client
+        let response = self
+            .client
             .post(url)
             .body(serde_json::to_string(&json!({
                 "api_key": self.config.client_api_key,
@@ -575,6 +620,39 @@ impl PostHogClient {
             }))?)
             .send()
             .await?;
+        let status = response.status();
+        let body = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "Failed to capture events: {}, {}",
+                status,
+                body
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn capture_event_batch(&self, events: &[CaptureEvent]) -> anyhow::Result<()> {
+        // PUBLIC_URL/batch/
+        let url = format!("{}/batch/", self.config.public_api_url);
+        let response = self
+            .client
+            .post(url)
+            .body(serde_json::to_string(&json!({
+                "api_key": self.config.client_api_key,
+                "batch": events,
+            }))?)
+            .send()
+            .await?;
+        let status = response.status();
+        let body = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "Failed to capture events: {}, {}",
+                status,
+                body
+            ));
+        }
         Ok(())
     }
 }
@@ -753,7 +831,7 @@ mod tests {
     fn evaluate_multivariate() {
         let mut store = FeatureStore::new();
         let response: LocalEvaluationResponse = serde_json::from_str(data()).unwrap();
-        store.set_flags(response.flags);
+        store.set_flags(response.flags, None).unwrap();
 
         // This lacks the required properties and cannot be evaluated.
         let variant =
@@ -823,7 +901,7 @@ mod tests {
 
         let mut store = FeatureStore::new();
         let response: LocalEvaluationResponse = serde_json::from_str(data()).unwrap();
-        store.set_flags(response.flags);
+        store.set_flags(response.flags, None).unwrap();
 
         // This lacks the required properties and cannot be evaluated.
         let variant = store.evaluate_boolean_inner("boolean-flag", 1.00, &HashMap::new());
@@ -879,7 +957,7 @@ mod tests {
 
         let mut store = FeatureStore::new();
         let response: LocalEvaluationResponse = serde_json::from_str(data()).unwrap();
-        store.set_flags(response.flags);
+        store.set_flags(response.flags, None).unwrap();
 
         // This lacks the required properties and cannot be evaluated.
         let variant =

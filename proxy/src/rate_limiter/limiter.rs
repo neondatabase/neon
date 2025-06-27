@@ -12,6 +12,7 @@ use rand::{Rng, SeedableRng};
 use tokio::time::{Duration, Instant};
 use tracing::info;
 
+use super::LeakyBucketConfig;
 use crate::ext::LockExt;
 use crate::intern::EndpointIdInt;
 
@@ -138,25 +139,6 @@ impl RateBucketInfo {
         Self::new(200, Duration::from_secs(600)),
     ];
 
-    // For all the sessions will be cancel key. So this limit is essentially global proxy limit.
-    pub const DEFAULT_REDIS_SET: [Self; 2] = [
-        Self::new(100_000, Duration::from_secs(1)),
-        Self::new(50_000, Duration::from_secs(10)),
-    ];
-
-    /// All of these are per endpoint-maskedip pair.
-    /// Context: 4096 rounds of pbkdf2 take about 1ms of cpu time to execute (1 milli-cpu-second or 1mcpus).
-    ///
-    /// First bucket: 1000mcpus total per endpoint-ip pair
-    /// * 4096000 requests per second with 1 hash rounds.
-    /// * 1000 requests per second with 4096 hash rounds.
-    /// * 6.8 requests per second with 600000 hash rounds.
-    pub const DEFAULT_AUTH_SET: [Self; 3] = [
-        Self::new(1000 * 4096, Duration::from_secs(1)),
-        Self::new(600 * 4096, Duration::from_secs(60)),
-        Self::new(300 * 4096, Duration::from_secs(600)),
-    ];
-
     pub fn rps(&self) -> f64 {
         (self.max_rpi as f64) / self.interval.as_secs_f64()
     }
@@ -183,6 +165,21 @@ impl RateBucketInfo {
             interval,
             max_rpi: ((max_rps as u64) * (interval.as_millis() as u64) / 1000) as u32,
         }
+    }
+
+    pub fn to_leaky_bucket(this: &[Self]) -> Option<LeakyBucketConfig> {
+        // bit of a hack - find the min rps and max rps supported and turn it into
+        // leaky bucket config instead
+
+        let mut iter = this.iter().map(|info| info.rps());
+        let first = iter.next()?;
+
+        let (min, max) = (first, first);
+        let (min, max) = iter.fold((min, max), |(min, max), rps| {
+            (f64::min(min, rps), f64::max(max, rps))
+        });
+
+        Some(LeakyBucketConfig { rps: min, max })
     }
 }
 

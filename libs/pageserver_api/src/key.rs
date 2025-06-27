@@ -4,8 +4,8 @@ use std::ops::Range;
 use anyhow::{Result, bail};
 use byteorder::{BE, ByteOrder};
 use bytes::Bytes;
-use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
-use postgres_ffi::{Oid, RepOriginId};
+use postgres_ffi_types::forknum::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
+use postgres_ffi_types::{Oid, RepOriginId};
 use serde::{Deserialize, Serialize};
 use utils::const_assert;
 
@@ -194,7 +194,7 @@ impl Key {
     /// will be rejected on the write path.
     #[allow(dead_code)]
     pub fn is_valid_key_on_write_path_strong(&self) -> bool {
-        use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
+        use postgres_ffi_types::constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
         if !self.is_i128_representable() {
             return false;
         }

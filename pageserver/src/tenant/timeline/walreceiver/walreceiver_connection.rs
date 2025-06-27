@@ -15,7 +15,7 @@ use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use postgres_ffi::v14::xlog_utils::normalize_lsn;
-use postgres_ffi::waldecoder::{WalDecodeError, WalStreamDecoder};
+use postgres_ffi::waldecoder::WalDecodeError;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use tokio::sync::watch;
@@ -31,7 +31,7 @@ use utils::lsn::Lsn;
 use utils::pageserver_feedback::PageserverFeedback;
 use utils::postgres_client::PostgresClientProtocol;
 use utils::sync::gate::GateError;
-use wal_decoder::models::{FlushUncommittedRecords, InterpretedWalRecord, InterpretedWalRecords};
+use wal_decoder::models::{FlushUncommittedRecords, InterpretedWalRecords};
 use wal_decoder::wire_format::FromWireFormat;
 
 use super::TaskStateUpdate;
@@ -275,28 +275,37 @@ pub(super) async fn handle_walreceiver_connection(
     let copy_stream = replication_client.copy_both_simple(&query).await?;
     let mut physical_stream = pin!(ReplicationStream::new(copy_stream));
 
-    let mut waldecoder = WalStreamDecoder::new(startpoint, timeline.pg_version);
+    let walingest_future = WalIngest::new(timeline.as_ref(), startpoint, &ctx);
+    let walingest_res = select! {
+        walingest_res = walingest_future => walingest_res,
+        _ = cancellation.cancelled() => {
+            // We are doing reads in WalIngest::new, and those can hang as they come from the network.
+            // Timeline cancellation hits the walreceiver cancellation token before it hits the timeline global one.
+            debug!("Connection cancelled");
+            return Err(WalReceiverError::Cancelled);
+        },
+    };
+    let mut walingest = walingest_res.map_err(|e| match e.kind {
+        crate::walingest::WalIngestErrorKind::Cancelled => WalReceiverError::Cancelled,
+        _ => WalReceiverError::Other(e.into()),
+    })?;
 
-    let mut walingest = WalIngest::new(timeline.as_ref(), startpoint, &ctx)
-        .await
-        .map_err(|e| match e.kind {
-            crate::walingest::WalIngestErrorKind::Cancelled => WalReceiverError::Cancelled,
-            _ => WalReceiverError::Other(e.into()),
-        })?;
-
-    let shard = vec![*timeline.get_shard_identity()];
-
-    let interpreted_proto_config = match protocol {
-        PostgresClientProtocol::Vanilla => None,
+    let (format, compression) = match protocol {
         PostgresClientProtocol::Interpreted {
             format,
             compression,
-        } => Some((format, compression)),
+        } => (format, compression),
+        PostgresClientProtocol::Vanilla => {
+            return Err(WalReceiverError::Other(anyhow!(
+                "Vanilla WAL receiver protocol is no longer supported for ingest"
+            )));
+        }
     };
 
     let mut expected_wal_start = startpoint;
     while let Some(replication_message) = {
         select! {
+            biased;
             _ = cancellation.cancelled() => {
                 debug!("walreceiver interrupted");
                 None
@@ -312,16 +321,6 @@ pub(super) async fn handle_walreceiver_connection(
         // Update the connection status before processing the message. If the message processing
         // fails (e.g. in walingest), we still want to know latests LSNs from the safekeeper.
         match &replication_message {
-            ReplicationMessage::XLogData(xlog_data) => {
-                connection_status.latest_connection_update = now;
-                connection_status.commit_lsn = Some(Lsn::from(xlog_data.wal_end()));
-                connection_status.streaming_lsn = Some(Lsn::from(
-                    xlog_data.wal_start() + xlog_data.data().len() as u64,
-                ));
-                if !xlog_data.data().is_empty() {
-                    connection_status.latest_wal_update = now;
-                }
-            }
             ReplicationMessage::PrimaryKeepAlive(keepalive) => {
                 connection_status.latest_connection_update = now;
                 connection_status.commit_lsn = Some(Lsn::from(keepalive.wal_end()));
@@ -352,7 +351,6 @@ pub(super) async fn handle_walreceiver_connection(
                 // were interpreted.
                 let streaming_lsn = Lsn::from(raw.streaming_lsn());
 
-                let (format, compression) = interpreted_proto_config.unwrap();
                 let batch = InterpretedWalRecords::from_wire(raw.data(), format, compression)
                     .await
                     .with_context(|| {
@@ -370,8 +368,7 @@ pub(super) async fn handle_walreceiver_connection(
                         match raw_wal_start_lsn.cmp(&expected_wal_start) {
                             std::cmp::Ordering::Greater => {
                                 let msg = format!(
-                                    "Gap in streamed WAL: [{}, {})",
-                                    expected_wal_start, raw_wal_start_lsn
+                                    "Gap in streamed WAL: [{expected_wal_start}, {raw_wal_start_lsn})"
                                 );
                                 critical!("{msg}");
                                 return Err(WalReceiverError::Other(anyhow!(msg)));
@@ -506,138 +503,6 @@ pub(super) async fn handle_walreceiver_connection(
                 expected_wal_start = streaming_lsn;
 
                 Some(streaming_lsn)
-            }
-
-            ReplicationMessage::XLogData(xlog_data) => {
-                async fn commit(
-                    modification: &mut DatadirModification<'_>,
-                    uncommitted: &mut u64,
-                    filtered: &mut u64,
-                    ctx: &RequestContext,
-                ) -> anyhow::Result<()> {
-                    let stats = modification.stats();
-                    modification.commit(ctx).await?;
-                    WAL_INGEST
-                        .records_committed
-                        .inc_by(*uncommitted - *filtered);
-                    WAL_INGEST.inc_values_committed(&stats);
-                    *uncommitted = 0;
-                    *filtered = 0;
-                    Ok(())
-                }
-
-                // Pass the WAL data to the decoder, and see if we can decode
-                // more records as a result.
-                let data = xlog_data.data();
-                let startlsn = Lsn::from(xlog_data.wal_start());
-                let endlsn = startlsn + data.len() as u64;
-
-                trace!("received XLogData between {startlsn} and {endlsn}");
-
-                WAL_INGEST.bytes_received.inc_by(data.len() as u64);
-                waldecoder.feed_bytes(data);
-
-                {
-                    let mut modification = timeline.begin_modification(startlsn);
-                    let mut uncommitted_records = 0;
-                    let mut filtered_records = 0;
-
-                    while let Some((next_record_lsn, recdata)) = waldecoder.poll_decode()? {
-                        // It is important to deal with the aligned records as lsn in getPage@LSN is
-                        // aligned and can be several bytes bigger. Without this alignment we are
-                        // at risk of hitting a deadlock.
-                        if !next_record_lsn.is_aligned() {
-                            return Err(WalReceiverError::Other(anyhow!("LSN not aligned")));
-                        }
-
-                        // Deserialize and interpret WAL record
-                        let interpreted = InterpretedWalRecord::from_bytes_filtered(
-                            recdata,
-                            &shard,
-                            next_record_lsn,
-                            modification.tline.pg_version,
-                        )?
-                        .remove(timeline.get_shard_identity())
-                        .unwrap();
-
-                        if matches!(interpreted.flush_uncommitted, FlushUncommittedRecords::Yes)
-                            && uncommitted_records > 0
-                        {
-                            // Special case: legacy PG database creations operate by reading pages from a 'template' database:
-                            // these are the only kinds of WAL record that require reading data blocks while ingesting.  Ensure
-                            // all earlier writes of data blocks are visible by committing any modification in flight.
-                            commit(
-                                &mut modification,
-                                &mut uncommitted_records,
-                                &mut filtered_records,
-                                &ctx,
-                            )
-                            .await?;
-                        }
-
-                        // Ingest the records without immediately committing them.
-                        timeline.metrics.wal_records_received.inc();
-                        let ingested = walingest
-                            .ingest_record(interpreted, &mut modification, &ctx)
-                            .await
-                            .with_context(|| {
-                                format!("could not ingest record at {next_record_lsn}")
-                            })
-                            .inspect_err(|err| {
-                                // TODO: we can't differentiate cancellation errors with
-                                // anyhow::Error, so just ignore it if we're cancelled.
-                                if !cancellation.is_cancelled() && !timeline.is_stopping() {
-                                    critical!("{err:?}")
-                                }
-                            })?;
-                        if !ingested {
-                            tracing::debug!("ingest: filtered out record @ LSN {next_record_lsn}");
-                            WAL_INGEST.records_filtered.inc();
-                            filtered_records += 1;
-                        }
-
-                        // FIXME: this cannot be made pausable_failpoint without fixing the
-                        // failpoint library; in tests, the added amount of debugging will cause us
-                        // to timeout the tests.
-                        fail_point!("walreceiver-after-ingest");
-
-                        last_rec_lsn = next_record_lsn;
-
-                        // Commit every ingest_batch_size records. Even if we filtered out
-                        // all records, we still need to call commit to advance the LSN.
-                        uncommitted_records += 1;
-                        if uncommitted_records >= ingest_batch_size
-                            || modification.approx_pending_bytes()
-                                > DatadirModification::MAX_PENDING_BYTES
-                        {
-                            commit(
-                                &mut modification,
-                                &mut uncommitted_records,
-                                &mut filtered_records,
-                                &ctx,
-                            )
-                            .await?;
-                        }
-                    }
-
-                    // Commit the remaining records.
-                    if uncommitted_records > 0 {
-                        commit(
-                            &mut modification,
-                            &mut uncommitted_records,
-                            &mut filtered_records,
-                            &ctx,
-                        )
-                        .await?;
-                    }
-                }
-
-                if !caught_up && endlsn >= end_of_wal {
-                    info!("caught up at LSN {endlsn}");
-                    caught_up = true;
-                }
-
-                Some(endlsn)
             }
 
             ReplicationMessage::PrimaryKeepAlive(keepalive) => {

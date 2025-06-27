@@ -128,6 +128,6 @@ pub fn describe_wal_record(rec: &NeonWalRecord) -> Result<String, DeserializeErr
             will_init,
             describe_postgres_wal_record(rec)?
         )),
-        _ => Ok(format!("{:?}", rec)),
+        _ => Ok(format!("{rec:?}")),
     }
 }

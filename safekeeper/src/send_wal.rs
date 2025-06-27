@@ -12,7 +12,7 @@ use futures::FutureExt;
 use itertools::Itertools;
 use parking_lot::Mutex;
 use postgres_backend::{CopyStreamHandlerEnd, PostgresBackend, PostgresBackendReader, QueryError};
-use postgres_ffi::{MAX_SEND_SIZE, TimestampTz, get_current_timestamp};
+use postgres_ffi::{MAX_SEND_SIZE, PgMajorVersion, TimestampTz, get_current_timestamp};
 use pq_proto::{BeMessage, WalSndKeepAlive, XLogDataBody};
 use safekeeper_api::Term;
 use safekeeper_api::models::{
@@ -559,7 +559,9 @@ impl SafekeeperPostgresHandler {
                 format,
                 compression,
             } => {
-                let pg_version = tli.tli.get_state().await.1.server.pg_version / 10000;
+                let pg_version =
+                    PgMajorVersion::try_from(tli.tli.get_state().await.1.server.pg_version)
+                        .unwrap();
                 let end_watch_view = end_watch.view();
                 let wal_residence_guard = tli.wal_residence_guard().await?;
                 let (tx, rx) = tokio::sync::mpsc::channel::<Batch>(2);

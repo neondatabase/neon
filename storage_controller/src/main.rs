@@ -5,17 +5,22 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use camino::Utf8PathBuf;
+
+#[cfg(feature = "testing")]
+use clap::ArgAction;
 use clap::Parser;
 use futures::future::OptionFuture;
 use http_utils::tls_certs::ReloadingCertificateResolver;
 use hyper0::Uri;
 use metrics::BuildInfo;
 use metrics::launch_timestamp::LaunchTimestamp;
+use pageserver_api::config::PostHogConfig;
 use reqwest::Certificate;
 use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
 use storage_controller::persistence::Persistence;
 use storage_controller::service::chaos_injector::ChaosInjector;
+use storage_controller::service::feature_flag::FeatureFlagService;
 use storage_controller::service::{
     Config, HEARTBEAT_INTERVAL_DEFAULT, LONG_RECONCILE_THRESHOLD_DEFAULT,
     MAX_OFFLINE_INTERVAL_DEFAULT, MAX_WARMING_UP_INTERVAL_DEFAULT,
@@ -207,6 +212,19 @@ struct Cli {
     /// the compute notification directly (instead of via control plane).
     #[arg(long, default_value = "false")]
     use_local_compute_notifications: bool,
+
+    /// Number of safekeepers to choose for a timeline when creating it.
+    /// Safekeepers will be choosen from different availability zones.
+    /// This option exists primarily for testing purposes.
+    #[arg(long, default_value = "3", value_parser = clap::value_parser!(i64).range(1..))]
+    timeline_safekeeper_count: i64,
+
+    /// When set, actively checks and initiates heatmap downloads/uploads during reconciliation.
+    /// This speed up migrations by avoiding the default wait for the heatmap download interval.
+    /// Primarily useful for testing to reduce test execution time.
+    #[cfg(feature = "testing")]
+    #[arg(long, default_value = "true", action=ArgAction::Set)]
+    kick_secondary_downloads: bool,
 }
 
 enum StrictMode {
@@ -235,6 +253,8 @@ struct Secrets {
     control_plane_jwt_token: Option<String>,
     peer_jwt_token: Option<String>,
 }
+
+const POSTHOG_CONFIG_ENV: &str = "POSTHOG_CONFIG";
 
 impl Secrets {
     const DATABASE_URL_ENV: &'static str = "DATABASE_URL";
@@ -371,6 +391,11 @@ async fn async_main() -> anyhow::Result<()> {
         StrictMode::Strict if args.use_local_compute_notifications => {
             anyhow::bail!("`--use-local-compute-notifications` is only permitted in `--dev` mode");
         }
+        StrictMode::Strict if args.timeline_safekeeper_count < 3 => {
+            anyhow::bail!(
+                "Running with less than 3 safekeepers per timeline is only permitted in `--dev` mode"
+            );
+        }
         StrictMode::Strict => {
             tracing::info!("Starting in strict mode: configuration is OK.")
         }
@@ -386,6 +411,18 @@ async fn async_main() -> anyhow::Result<()> {
             Certificate::from_pem_bundle(&buf)?
         }
         None => Vec::new(),
+    };
+
+    let posthog_config = if let Ok(json) = std::env::var(POSTHOG_CONFIG_ENV) {
+        let res: Result<PostHogConfig, _> = serde_json::from_str(&json);
+        if let Ok(config) = res {
+            Some(config)
+        } else {
+            tracing::warn!("Invalid posthog config: {json}");
+            None
+        }
+    } else {
+        None
     };
 
     let config = Config {
@@ -433,6 +470,10 @@ async fn async_main() -> anyhow::Result<()> {
         ssl_ca_certs,
         timelines_onto_safekeepers: args.timelines_onto_safekeepers,
         use_local_compute_notifications: args.use_local_compute_notifications,
+        timeline_safekeeper_count: args.timeline_safekeeper_count,
+        posthog_config: posthog_config.clone(),
+        #[cfg(feature = "testing")]
+        kick_secondary_downloads: args.kick_secondary_downloads,
     };
 
     // Validate that we can connect to the database
@@ -513,6 +554,29 @@ async fn async_main() -> anyhow::Result<()> {
         )
     });
 
+    let feature_flag_task = if let Some(posthog_config) = posthog_config {
+        let service = service.clone();
+        let cancel = CancellationToken::new();
+        let cancel_bg = cancel.clone();
+        let task = tokio::task::spawn(
+            async move {
+                match FeatureFlagService::new(service, posthog_config) {
+                    Ok(feature_flag_service) => {
+                        let feature_flag_service = Arc::new(feature_flag_service);
+                        feature_flag_service.run(cancel_bg).await
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to create feature flag service: {}", e);
+                    }
+                };
+            }
+            .instrument(tracing::info_span!("feature_flag_service")),
+        );
+        Some((task, cancel))
+    } else {
+        None
+    };
+
     // Wait until we receive a signal
     let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt())?;
     let mut sigquit = tokio::signal::unix::signal(SignalKind::quit())?;
@@ -558,6 +622,12 @@ async fn async_main() -> anyhow::Result<()> {
     if let Some((chaos_jh, chaos_cancel)) = chaos_task {
         chaos_cancel.cancel();
         chaos_jh.await.ok();
+    }
+
+    // If we were running the feature flag service, stop that so that we're not calling into Service while it shuts down
+    if let Some((feature_flag_task, feature_flag_cancel)) = feature_flag_task {
+        feature_flag_cancel.cancel();
+        feature_flag_task.await.ok();
     }
 
     service.shutdown().await;

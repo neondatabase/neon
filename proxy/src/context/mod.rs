@@ -4,7 +4,6 @@ use std::net::IpAddr;
 
 use chrono::Utc;
 use once_cell::sync::OnceCell;
-use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
 use tokio::sync::mpsc;
 use tracing::field::display;
@@ -20,6 +19,7 @@ use crate::metrics::{
     ConnectOutcome, InvalidEndpointsGroup, LatencyAccumulated, LatencyTimer, Metrics, Protocol,
     Waiting,
 };
+use crate::pqproto::StartupMessageParams;
 use crate::protocol2::{ConnectionInfo, ConnectionInfoExtra};
 use crate::types::{DbName, EndpointId, RoleName};
 
@@ -46,7 +46,6 @@ struct RequestContextInner {
     pub(crate) session_id: Uuid,
     pub(crate) protocol: Protocol,
     first_packet: chrono::DateTime<Utc>,
-    region: &'static str,
     pub(crate) span: Span,
 
     // filled in as they are discovered
@@ -94,7 +93,6 @@ impl Clone for RequestContext {
             session_id: inner.session_id,
             protocol: inner.protocol,
             first_packet: inner.first_packet,
-            region: inner.region,
             span: info_span!("background_task"),
 
             project: inner.project,
@@ -124,12 +122,7 @@ impl Clone for RequestContext {
 }
 
 impl RequestContext {
-    pub fn new(
-        session_id: Uuid,
-        conn_info: ConnectionInfo,
-        protocol: Protocol,
-        region: &'static str,
-    ) -> Self {
+    pub fn new(session_id: Uuid, conn_info: ConnectionInfo, protocol: Protocol) -> Self {
         // TODO: be careful with long lived spans
         let span = info_span!(
             "connect_request",
@@ -145,7 +138,6 @@ impl RequestContext {
             session_id,
             protocol,
             first_packet: Utc::now(),
-            region,
             span,
 
             project: None,
@@ -179,7 +171,7 @@ impl RequestContext {
         let ip = IpAddr::from([127, 0, 0, 1]);
         let addr = SocketAddr::new(ip, 5432);
         let conn_info = ConnectionInfo { addr, extra: None };
-        RequestContext::new(Uuid::now_v7(), conn_info, Protocol::Tcp, "test")
+        RequestContext::new(Uuid::now_v7(), conn_info, Protocol::Tcp)
     }
 
     pub(crate) fn console_application_name(&self) -> String {
@@ -366,6 +358,18 @@ impl RequestContext {
         LatencyTimerPause {
             ctx: self,
             start: tokio::time::Instant::now(),
+            waiting_for,
+        }
+    }
+
+    pub(crate) fn latency_timer_pause_at(
+        &self,
+        at: tokio::time::Instant,
+        waiting_for: Waiting,
+    ) -> LatencyTimerPause<'_> {
+        LatencyTimerPause {
+            ctx: self,
+            start: at,
             waiting_for,
         }
     }

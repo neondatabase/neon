@@ -23,12 +23,11 @@ use pageserver_api::key::{
 };
 use pageserver_api::keyspace::{KeySpaceRandomAccum, SparseKeySpace};
 use pageserver_api::models::RelSizeMigration;
-use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
-use pageserver_api::value::Value;
-use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
-use postgres_ffi::{BLCKSZ, Oid, RepOriginId, TimestampTz, TransactionId};
+use postgres_ffi::{BLCKSZ, PgMajorVersion, TimestampTz, TransactionId};
+use postgres_ffi_types::forknum::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
+use postgres_ffi_types::{Oid, RepOriginId};
 use serde::{Deserialize, Serialize};
 use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
@@ -36,6 +35,8 @@ use tracing::{debug, info, info_span, trace, warn};
 use utils::bin_ser::{BeSer, DeserializeError};
 use utils::lsn::Lsn;
 use utils::pausable_failpoint;
+use wal_decoder::models::record::NeonWalRecord;
+use wal_decoder::models::value::Value;
 use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
 use super::tenant::{PageReconstructError, Timeline};
@@ -431,10 +432,10 @@ impl Timeline {
                         GetVectoredError::InvalidLsn(e) => {
                             Err(anyhow::anyhow!("invalid LSN: {e:?}").into())
                         }
-                        // NB: this should never happen in practice because we limit MAX_GET_VECTORED_KEYS
+                        // NB: this should never happen in practice because we limit batch size to be smaller than max_get_vectored_keys
                         // TODO: we can prevent this error class by moving this check into the type system
-                        GetVectoredError::Oversized(err) => {
-                            Err(anyhow::anyhow!("batching oversized: {err:?}").into())
+                        GetVectoredError::Oversized(err, max) => {
+                            Err(anyhow::anyhow!("batching oversized: {err} > {max}").into())
                         }
                     };
 
@@ -471,8 +472,19 @@ impl Timeline {
 
         let rels = self.list_rels(spcnode, dbnode, version, ctx).await?;
 
+        if rels.is_empty() {
+            return Ok(0);
+        }
+
+        // Pre-deserialize the rel directory to avoid duplicated work in `get_relsize_cached`.
+        let reldir_key = rel_dir_to_key(spcnode, dbnode);
+        let buf = version.get(self, reldir_key, ctx).await?;
+        let reldir = RelDirectory::des(&buf)?;
+
         for rel in rels {
-            let n_blocks = self.get_rel_size(rel, version, ctx).await?;
+            let n_blocks = self
+                .get_rel_size_in_reldir(rel, version, Some((reldir_key, &reldir)), ctx)
+                .await?;
             total_blocks += n_blocks as usize;
         }
         Ok(total_blocks)
@@ -488,6 +500,19 @@ impl Timeline {
         version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<BlockNumber, PageReconstructError> {
+        self.get_rel_size_in_reldir(tag, version, None, ctx).await
+    }
+
+    /// Get size of a relation file. The relation must exist, otherwise an error is returned.
+    ///
+    /// See [`Self::get_rel_exists_in_reldir`] on why we need `deserialized_reldir_v1`.
+    pub(crate) async fn get_rel_size_in_reldir(
+        &self,
+        tag: RelTag,
+        version: Version<'_>,
+        deserialized_reldir_v1: Option<(Key, &RelDirectory)>,
+        ctx: &RequestContext,
+    ) -> Result<BlockNumber, PageReconstructError> {
         if tag.relnode == 0 {
             return Err(PageReconstructError::Other(
                 RelationError::InvalidRelnode.into(),
@@ -499,7 +524,9 @@ impl Timeline {
         }
 
         if (tag.forknum == FSM_FORKNUM || tag.forknum == VISIBILITYMAP_FORKNUM)
-            && !self.get_rel_exists(tag, version, ctx).await?
+            && !self
+                .get_rel_exists_in_reldir(tag, version, deserialized_reldir_v1, ctx)
+                .await?
         {
             // FIXME: Postgres sometimes calls smgrcreate() to create
             // FSM, and smgrnblocks() on it immediately afterwards,
@@ -521,10 +548,27 @@ impl Timeline {
     ///
     /// Only shard 0 has a full view of the relations. Other shards only know about relations that
     /// the shard stores pages for.
+    ///
     pub(crate) async fn get_rel_exists(
         &self,
         tag: RelTag,
         version: Version<'_>,
+        ctx: &RequestContext,
+    ) -> Result<bool, PageReconstructError> {
+        self.get_rel_exists_in_reldir(tag, version, None, ctx).await
+    }
+
+    /// Does the relation exist? With a cached deserialized `RelDirectory`.
+    ///
+    /// There are some cases where the caller loops across all relations. In that specific case,
+    /// the caller should obtain the deserialized `RelDirectory` first and then call this function
+    /// to avoid duplicated work of deserliazation. This is a hack and should be removed by introducing
+    /// a new API (e.g., `get_rel_exists_batched`).
+    pub(crate) async fn get_rel_exists_in_reldir(
+        &self,
+        tag: RelTag,
+        version: Version<'_>,
+        deserialized_reldir_v1: Option<(Key, &RelDirectory)>,
         ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
         if tag.relnode == 0 {
@@ -568,6 +612,17 @@ impl Timeline {
         // fetch directory listing (old)
 
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
+
+        if let Some((cached_key, dir)) = deserialized_reldir_v1 {
+            if cached_key == key {
+                return Ok(dir.rels.contains(&(tag.relnode, tag.forknum)));
+            } else if cfg!(test) || cfg!(feature = "testing") {
+                panic!("cached reldir key mismatch: {cached_key} != {key}");
+            } else {
+                warn!("cached reldir key mismatch: {cached_key} != {key}");
+            }
+            // Fallback to reading the directory from the datadir.
+        }
         let buf = version.get(self, key, ctx).await?;
 
         let dir = RelDirectory::des(&buf)?;
@@ -665,7 +720,8 @@ impl Timeline {
 
         let batches = keyspace.partition(
             self.get_shard_identity(),
-            Timeline::MAX_GET_VECTORED_KEYS * BLCKSZ as u64,
+            self.conf.max_get_vectored_keys.get() as u64 * BLCKSZ as u64,
+            BLCKSZ as u64,
         );
 
         let io_concurrency = IoConcurrency::spawn_from_conf(
@@ -905,7 +961,8 @@ impl Timeline {
 
             let batches = keyspace.partition(
                 self.get_shard_identity(),
-                Timeline::MAX_GET_VECTORED_KEYS * BLCKSZ as u64,
+                self.conf.max_get_vectored_keys.get() as u64 * BLCKSZ as u64,
+                BLCKSZ as u64,
             );
 
             let io_concurrency = IoConcurrency::spawn_from_conf(
@@ -1024,7 +1081,7 @@ impl Timeline {
         // fetch directory entry
         let buf = self.get(TWOPHASEDIR_KEY, lsn, ctx).await?;
 
-        if self.pg_version >= 17 {
+        if self.pg_version >= PgMajorVersion::PG17 {
             Ok(TwoPhaseDirectoryV17::des(&buf)?.xids)
         } else {
             Ok(TwoPhaseDirectory::des(&buf)?
@@ -1128,7 +1185,7 @@ impl Timeline {
             }
             let origin_id = k.field6 as RepOriginId;
             let origin_lsn = Lsn::des(&v)
-                .with_context(|| format!("decode replorigin value for {}: {v:?}", origin_id))?;
+                .with_context(|| format!("decode replorigin value for {origin_id}: {v:?}"))?;
             if origin_lsn != Lsn::INVALID {
                 result.insert(origin_id, origin_lsn);
             }
@@ -1556,7 +1613,7 @@ impl DatadirModification<'_> {
             .push((DirectoryKind::Db, MetricsUpdate::Set(0)));
         self.put(DBDIR_KEY, Value::Image(buf.into()));
 
-        let buf = if self.tline.pg_version >= 17 {
+        let buf = if self.tline.pg_version >= PgMajorVersion::PG17 {
             TwoPhaseDirectoryV17::ser(&TwoPhaseDirectoryV17 {
                 xids: HashSet::new(),
             })
@@ -1910,7 +1967,7 @@ impl DatadirModification<'_> {
     ) -> Result<(), WalIngestError> {
         // Add it to the directory entry
         let dirbuf = self.get(TWOPHASEDIR_KEY, ctx).await?;
-        let newdirbuf = if self.tline.pg_version >= 17 {
+        let newdirbuf = if self.tline.pg_version >= PgMajorVersion::PG17 {
             let mut dir = TwoPhaseDirectoryV17::des(&dirbuf)?;
             if !dir.xids.insert(xid) {
                 Err(WalIngestErrorKind::FileAlreadyExists(xid))?;
@@ -2326,7 +2383,7 @@ impl DatadirModification<'_> {
     ) -> Result<(), WalIngestError> {
         // Remove it from the directory entry
         let buf = self.get(TWOPHASEDIR_KEY, ctx).await?;
-        let newdirbuf = if self.tline.pg_version >= 17 {
+        let newdirbuf = if self.tline.pg_version >= PgMajorVersion::PG17 {
             let mut dir = TwoPhaseDirectoryV17::des(&buf)?;
 
             if !dir.xids.remove(&xid) {
@@ -2383,8 +2440,7 @@ impl DatadirModification<'_> {
             if path == p {
                 assert!(
                     modifying_file.is_none(),
-                    "duplicated entries found for {}",
-                    path
+                    "duplicated entries found for {path}"
                 );
                 modifying_file = Some(content);
             } else {

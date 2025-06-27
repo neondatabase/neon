@@ -16,6 +16,7 @@
 #if PG_MAJORVERSION_NUM >= 15
 #include "access/xlogrecovery.h"
 #endif
+#include "executor/instrument.h"
 #include "replication/logical.h"
 #include "replication/logicallauncher.h"
 #include "replication/slot.h"
@@ -32,8 +33,9 @@
 #include "extension_server.h"
 #include "file_cache.h"
 #include "neon.h"
+#include "neon_ddl_handler.h"
 #include "neon_lwlsncache.h"
-#include "control_plane_connector.h"
+#include "neon_perf_counters.h"
 #include "logical_replication_monitor.h"
 #include "unstable_extensions.h"
 #include "walsender_hooks.h"
@@ -46,6 +48,13 @@ void		_PG_init(void);
 
 
 static int  running_xacts_overflow_policy;
+static bool monitor_query_exec_time = false;
+
+static ExecutorStart_hook_type prev_ExecutorStart = NULL;
+static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
+
+static void neon_ExecutorStart(QueryDesc *queryDesc, int eflags);
+static void neon_ExecutorEnd(QueryDesc *queryDesc);
 
 #if PG_MAJORVERSION_NUM >= 16
 static shmem_startup_hook_type prev_shmem_startup_hook;
@@ -445,7 +454,7 @@ _PG_init(void)
 
 	InitUnstableExtensionsSupport();
 	InitLogicalReplicationMonitor();
-	InitControlPlaneConnector();
+	InitDDLHandler();
 
 	pg_init_extension_server();
 
@@ -467,6 +476,16 @@ _PG_init(void)
 							&disable_wal_prev_lsn_checks,
 							false,
 							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+							"neon.monitor_query_exec_time",
+							"Collect infortmation about query execution time",
+							NULL,
+							&monitor_query_exec_time,
+							false,
+							PGC_USERSET,
 							0,
 							NULL, NULL, NULL);
 
@@ -508,6 +527,11 @@ _PG_init(void)
 	EmitWarningsOnPlaceholders("neon");
 
 	ReportSearchPath();
+
+	prev_ExecutorStart = ExecutorStart_hook;
+	ExecutorStart_hook = neon_ExecutorStart;
+	prev_ExecutorEnd = ExecutorEnd_hook;
+	ExecutorEnd_hook = neon_ExecutorEnd;
 }
 
 PG_FUNCTION_INFO_V1(pg_cluster_size);
@@ -581,3 +605,55 @@ neon_shmem_startup_hook(void)
 #endif
 }
 #endif
+
+/*
+ * ExecutorStart hook: start up tracking if needed
+ */
+static void
+neon_ExecutorStart(QueryDesc *queryDesc, int eflags)
+{
+	if (prev_ExecutorStart)
+		prev_ExecutorStart(queryDesc, eflags);
+	else
+		standard_ExecutorStart(queryDesc, eflags);
+
+	if (monitor_query_exec_time)
+	{
+		/*
+		 * Set up to track total elapsed time in ExecutorRun.  Make sure the
+		 * space is allocated in the per-query context so it will go away at
+		 * ExecutorEnd.
+		 */
+		if (queryDesc->totaltime == NULL)
+		{
+			MemoryContext oldcxt;
+
+			oldcxt = MemoryContextSwitchTo(queryDesc->estate->es_query_cxt);
+			queryDesc->totaltime = InstrAlloc(1, INSTRUMENT_TIMER, false);
+			MemoryContextSwitchTo(oldcxt);
+		}
+	}
+}
+
+/*
+ * ExecutorEnd hook: store results if needed
+ */
+static void
+neon_ExecutorEnd(QueryDesc *queryDesc)
+{
+	if (monitor_query_exec_time && queryDesc->totaltime)
+	{
+		/*
+		 * Make sure stats accumulation is done.  (Note: it's okay if several
+		 * levels of hook all do this.)
+		 */
+		InstrEndLoop(queryDesc->totaltime);
+
+		inc_query_time(queryDesc->totaltime->total*1000000); /* convert to usec */
+	}
+
+	if (prev_ExecutorEnd)
+		prev_ExecutorEnd(queryDesc);
+	else
+		standard_ExecutorEnd(queryDesc);
+}

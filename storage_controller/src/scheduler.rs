@@ -23,7 +23,7 @@ pub enum ScheduleError {
 
 impl From<ScheduleError> for ApiError {
     fn from(value: ScheduleError) -> Self {
-        ApiError::Conflict(format!("Scheduling error: {}", value))
+        ApiError::Conflict(format!("Scheduling error: {value}"))
     }
 }
 
@@ -825,6 +825,7 @@ impl Scheduler {
         struct AzScore {
             home_shard_count: usize,
             scheduleable: bool,
+            node_count: usize,
         }
 
         let mut azs: HashMap<&AvailabilityZone, AzScore> = HashMap::new();
@@ -832,6 +833,7 @@ impl Scheduler {
             let az = azs.entry(&node.az).or_default();
             az.home_shard_count += node.home_shard_count;
             az.scheduleable |= matches!(node.may_schedule, MaySchedule::Yes(_));
+            az.node_count += 1;
         }
 
         // If any AZs are schedulable, then filter out the non-schedulable ones (i.e. AZs where
@@ -840,10 +842,20 @@ impl Scheduler {
             azs.retain(|_, i| i.scheduleable);
         }
 
+        // We will multiply up shard counts by the max node count for scoring, before dividing
+        // by per-node max node count, to get a normalized score that doesn't collapse to zero
+        // when the absolute shard count is less than the node count.
+        let max_node_count = azs.values().map(|i| i.node_count).max().unwrap_or(0);
+
         // Find the AZ with the lowest number of shards currently allocated
         Some(
             azs.into_iter()
-                .min_by_key(|i| (i.1.home_shard_count, i.0))
+                .min_by_key(|i| {
+                    (
+                        (i.1.home_shard_count * max_node_count) / i.1.node_count,
+                        i.0,
+                    )
+                })
                 .unwrap()
                 .0
                 .clone(),
@@ -891,7 +903,7 @@ impl Scheduler {
     /// rigorously updating them on every change.
     pub(crate) fn update_metrics(&self) {
         for (node_id, node) in &self.nodes {
-            let node_id_str = format!("{}", node_id);
+            let node_id_str = format!("{node_id}");
             let label_group = NodeLabelGroup {
                 az: &node.az.0,
                 node_id: &node_id_str,
@@ -945,6 +957,8 @@ pub(crate) mod test_utils {
                         None,
                         format!("pghost-{i}"),
                         5432 + i as u16,
+                        Some(format!("grpchost-{i}")),
+                        Some(51051 + i as u16),
                         az_iter
                             .next()
                             .cloned()
@@ -1312,7 +1326,7 @@ mod tests {
                 .map(|(node_id, node)| (node_id, node.home_shard_count))
                 .collect::<Vec<_>>();
             node_home_counts.sort_by_key(|i| i.0);
-            eprintln!("Selected {}, vs nodes {:?}", preferred_az, node_home_counts);
+            eprintln!("Selected {preferred_az}, vs nodes {node_home_counts:?}");
 
             let tenant_shard_id = TenantShardId {
                 tenant_id: TenantId::generate(),

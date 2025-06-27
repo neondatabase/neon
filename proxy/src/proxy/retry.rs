@@ -3,7 +3,7 @@ use std::io;
 
 use tokio::time;
 
-use crate::compute;
+use crate::compute::{self, PostgresError};
 use crate::config::RetryConfig;
 
 pub(crate) trait CouldRetry {
@@ -99,20 +99,26 @@ impl ShouldRetryWakeCompute for postgres_client::Error {
 impl CouldRetry for compute::ConnectionError {
     fn could_retry(&self) -> bool {
         match self {
-            compute::ConnectionError::Postgres(err) => err.could_retry(),
-            compute::ConnectionError::CouldNotConnect(err) => err.could_retry(),
+            compute::ConnectionError::TlsError(err) => err.could_retry(),
             compute::ConnectionError::WakeComputeError(err) => err.could_retry(),
-            _ => false,
+            compute::ConnectionError::TooManyConnectionAttempts(_) => false,
         }
     }
 }
 impl ShouldRetryWakeCompute for compute::ConnectionError {
     fn should_retry_wake_compute(&self) -> bool {
         match self {
-            compute::ConnectionError::Postgres(err) => err.should_retry_wake_compute(),
             // the cache entry was not checked for validity
             compute::ConnectionError::TooManyConnectionAttempts(_) => false,
             _ => true,
+        }
+    }
+}
+
+impl ShouldRetryWakeCompute for PostgresError {
+    fn should_retry_wake_compute(&self) -> bool {
+        match self {
+            PostgresError::Postgres(error) => error.should_retry_wake_compute(),
         }
     }
 }
@@ -125,8 +131,9 @@ pub(crate) fn retry_after(num_retries: u32, config: RetryConfig) -> time::Durati
 
 #[cfg(test)]
 mod tests {
-    use super::ShouldRetryWakeCompute;
     use postgres_client::error::{DbError, SqlState};
+
+    use super::ShouldRetryWakeCompute;
 
     #[test]
     fn should_retry_wake_compute_for_db_error() {

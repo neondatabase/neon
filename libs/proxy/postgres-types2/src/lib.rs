@@ -46,7 +46,7 @@ impl fmt::Display for Type {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.schema() {
             "public" | "pg_catalog" => {}
-            schema => write!(fmt, "{}.", schema)?,
+            schema => write!(fmt, "{schema}.")?,
         }
         fmt.write_str(self.name())
     }

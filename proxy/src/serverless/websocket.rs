@@ -17,7 +17,8 @@ use crate::config::ProxyConfig;
 use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::Metrics;
-use crate::proxy::{ClientMode, ErrorSource, handle_client};
+use crate::pglb::{ClientMode, handle_connection};
+use crate::proxy::ErrorSource;
 use crate::rate_limiter::EndpointRateLimiter;
 
 pin_project! {
@@ -142,7 +143,7 @@ pub(crate) async fn serve_websocket(
         .client_connections
         .guard(crate::metrics::Protocol::Ws);
 
-    let res = Box::pin(handle_client(
+    let res = Box::pin(handle_connection(
         config,
         auth_backend,
         &ctx,
@@ -167,7 +168,7 @@ pub(crate) async fn serve_websocket(
         Ok(Some(p)) => {
             ctx.set_success();
             ctx.log_connect();
-            match p.proxy_pass(&config.connect_to_compute).await {
+            match p.proxy_pass().await {
                 Ok(()) => Ok(()),
                 Err(ErrorSource::Client(err)) => Err(err).context("client"),
                 Err(ErrorSource::Compute(err)) => Err(err).context("compute"),

@@ -9,8 +9,8 @@ use utils::bin_ser::DeserializeError;
 use utils::lsn::Lsn;
 
 use crate::{
-    BLCKSZ, BlockNumber, MultiXactId, MultiXactOffset, MultiXactStatus, Oid, RepOriginId,
-    TimestampTz, TransactionId, XLOG_SIZE_OF_XLOG_RECORD, XLogRecord, pg_constants,
+    BLCKSZ, BlockNumber, MultiXactId, MultiXactOffset, MultiXactStatus, Oid, PgMajorVersion,
+    RepOriginId, TimestampTz, TransactionId, XLOG_SIZE_OF_XLOG_RECORD, XLogRecord, pg_constants,
 };
 
 #[repr(C)]
@@ -199,20 +199,17 @@ impl DecodedWALRecord {
     /// Check if this WAL record represents a legacy "copy" database creation, which populates new relations
     /// by reading other existing relations' data blocks.  This is more complex to apply than new-style database
     /// creations which simply include all the desired blocks in the WAL, so we need a helper function to detect this case.
-    pub fn is_dbase_create_copy(&self, pg_version: u32) -> bool {
+    pub fn is_dbase_create_copy(&self, pg_version: PgMajorVersion) -> bool {
         if self.xl_rmid == pg_constants::RM_DBASE_ID {
             let info = self.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
             match pg_version {
-                14 => {
+                PgMajorVersion::PG14 => {
                     // Postgres 14 database creations are always the legacy kind
                     info == crate::v14::bindings::XLOG_DBASE_CREATE
                 }
-                15 => info == crate::v15::bindings::XLOG_DBASE_CREATE_FILE_COPY,
-                16 => info == crate::v16::bindings::XLOG_DBASE_CREATE_FILE_COPY,
-                17 => info == crate::v17::bindings::XLOG_DBASE_CREATE_FILE_COPY,
-                _ => {
-                    panic!("Unsupported postgres version {pg_version}")
-                }
+                PgMajorVersion::PG15 => info == crate::v15::bindings::XLOG_DBASE_CREATE_FILE_COPY,
+                PgMajorVersion::PG16 => info == crate::v16::bindings::XLOG_DBASE_CREATE_FILE_COPY,
+                PgMajorVersion::PG17 => info == crate::v17::bindings::XLOG_DBASE_CREATE_FILE_COPY,
             }
         } else {
             false
@@ -248,7 +245,7 @@ impl DecodedWALRecord {
 pub fn decode_wal_record(
     record: Bytes,
     decoded: &mut DecodedWALRecord,
-    pg_version: u32,
+    pg_version: PgMajorVersion,
 ) -> anyhow::Result<()> {
     let mut rnode_spcnode: u32 = 0;
     let mut rnode_dbnode: u32 = 0;
@@ -1106,9 +1103,9 @@ pub struct XlClogTruncate {
 }
 
 impl XlClogTruncate {
-    pub fn decode(buf: &mut Bytes, pg_version: u32) -> XlClogTruncate {
+    pub fn decode(buf: &mut Bytes, pg_version: PgMajorVersion) -> XlClogTruncate {
         XlClogTruncate {
-            pageno: if pg_version < 17 {
+            pageno: if pg_version < PgMajorVersion::PG17 {
                 buf.get_u32_le()
             } else {
                 buf.get_u64_le() as u32
@@ -1199,7 +1196,7 @@ pub fn describe_postgres_wal_record(record: &Bytes) -> Result<String, Deserializ
                 pg_constants::XLOG_HEAP2_MULTI_INSERT => "HEAP2 MULTI_INSERT",
                 pg_constants::XLOG_HEAP2_VISIBLE => "HEAP2 VISIBLE",
                 _ => {
-                    unknown_str = format!("HEAP2 UNKNOWN_0x{:02x}", info);
+                    unknown_str = format!("HEAP2 UNKNOWN_0x{info:02x}");
                     &unknown_str
                 }
             }
@@ -1212,7 +1209,7 @@ pub fn describe_postgres_wal_record(record: &Bytes) -> Result<String, Deserializ
                 pg_constants::XLOG_HEAP_UPDATE => "HEAP UPDATE",
                 pg_constants::XLOG_HEAP_HOT_UPDATE => "HEAP HOT_UPDATE",
                 _ => {
-                    unknown_str = format!("HEAP2 UNKNOWN_0x{:02x}", info);
+                    unknown_str = format!("HEAP2 UNKNOWN_0x{info:02x}");
                     &unknown_str
                 }
             }
@@ -1223,7 +1220,7 @@ pub fn describe_postgres_wal_record(record: &Bytes) -> Result<String, Deserializ
                 pg_constants::XLOG_FPI => "XLOG FPI",
                 pg_constants::XLOG_FPI_FOR_HINT => "XLOG FPI_FOR_HINT",
                 _ => {
-                    unknown_str = format!("XLOG UNKNOWN_0x{:02x}", info);
+                    unknown_str = format!("XLOG UNKNOWN_0x{info:02x}");
                     &unknown_str
                 }
             }
@@ -1231,7 +1228,7 @@ pub fn describe_postgres_wal_record(record: &Bytes) -> Result<String, Deserializ
         rmid => {
             let info = xlogrec.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
 
-            unknown_str = format!("UNKNOWN_RM_{} INFO_0x{:02x}", rmid, info);
+            unknown_str = format!("UNKNOWN_RM_{rmid} INFO_0x{info:02x}");
             &unknown_str
         }
     };

@@ -19,7 +19,7 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use itertools::Itertools;
 use pageserver_api::controller_api::{
-    AvailabilityZone, MetadataHealthRecord, NodeSchedulingPolicy, PlacementPolicy,
+    AvailabilityZone, MetadataHealthRecord, NodeLifecycle, NodeSchedulingPolicy, PlacementPolicy,
     SafekeeperDescribeResponse, ShardSchedulingPolicy, SkSchedulingPolicy,
 };
 use pageserver_api::models::{ShardImportStatus, TenantConfig};
@@ -102,6 +102,7 @@ pub(crate) enum DatabaseOperation {
     UpdateNode,
     DeleteNode,
     ListNodes,
+    ListTombstones,
     BeginShardSplit,
     CompleteShardSplit,
     AbortShardSplit,
@@ -357,6 +358,8 @@ impl Persistence {
     }
 
     /// When a node is first registered, persist it before using it for anything
+    /// If the provided node_id already exists, it will be error.
+    /// The common case is when a node marked for deletion wants to register.
     pub(crate) async fn insert_node(&self, node: &Node) -> DatabaseResult<()> {
         let np = &node.to_persistent();
         self.with_measured_conn(DatabaseOperation::InsertNode, move |conn| {
@@ -373,19 +376,41 @@ impl Persistence {
 
     /// At startup, populate the list of nodes which our shards may be placed on
     pub(crate) async fn list_nodes(&self) -> DatabaseResult<Vec<NodePersistence>> {
-        let nodes: Vec<NodePersistence> = self
+        use crate::schema::nodes::dsl::*;
+
+        let result: Vec<NodePersistence> = self
             .with_measured_conn(DatabaseOperation::ListNodes, move |conn| {
                 Box::pin(async move {
                     Ok(crate::schema::nodes::table
+                        .filter(lifecycle.ne(String::from(NodeLifecycle::Deleted)))
                         .load::<NodePersistence>(conn)
                         .await?)
                 })
             })
             .await?;
 
-        tracing::info!("list_nodes: loaded {} nodes", nodes.len());
+        tracing::info!("list_nodes: loaded {} nodes", result.len());
 
-        Ok(nodes)
+        Ok(result)
+    }
+
+    pub(crate) async fn list_tombstones(&self) -> DatabaseResult<Vec<NodePersistence>> {
+        use crate::schema::nodes::dsl::*;
+
+        let result: Vec<NodePersistence> = self
+            .with_measured_conn(DatabaseOperation::ListTombstones, move |conn| {
+                Box::pin(async move {
+                    Ok(crate::schema::nodes::table
+                        .filter(lifecycle.eq(String::from(NodeLifecycle::Deleted)))
+                        .load::<NodePersistence>(conn)
+                        .await?)
+                })
+            })
+            .await?;
+
+        tracing::info!("list_tombstones: loaded {} nodes", result.len());
+
+        Ok(result)
     }
 
     pub(crate) async fn update_node<V>(
@@ -404,6 +429,7 @@ impl Persistence {
                 Box::pin(async move {
                     let updated = diesel::update(nodes)
                         .filter(node_id.eq(input_node_id.0 as i64))
+                        .filter(lifecycle.ne(String::from(NodeLifecycle::Deleted)))
                         .set(values)
                         .execute(conn)
                         .await?;
@@ -444,6 +470,55 @@ impl Persistence {
             input_node_id,
             listen_https_port.eq(input_https_port.map(|x| x as i32)),
         )
+        .await
+    }
+
+    /// Tombstone is a special state where the node is not deleted from the database,
+    /// but it is not available for usage.
+    /// The main reason for it is to prevent the flaky node to register.
+    pub(crate) async fn set_tombstone(&self, del_node_id: NodeId) -> DatabaseResult<()> {
+        use crate::schema::nodes::dsl::*;
+        self.update_node(
+            del_node_id,
+            lifecycle.eq(String::from(NodeLifecycle::Deleted)),
+        )
+        .await
+    }
+
+    pub(crate) async fn delete_node(&self, del_node_id: NodeId) -> DatabaseResult<()> {
+        use crate::schema::nodes::dsl::*;
+        self.with_measured_conn(DatabaseOperation::DeleteNode, move |conn| {
+            Box::pin(async move {
+                // You can hard delete a node only if it has a tombstone.
+                // So we need to check if the node has lifecycle set to deleted.
+                let node_to_delete = nodes
+                    .filter(node_id.eq(del_node_id.0 as i64))
+                    .first::<NodePersistence>(conn)
+                    .await
+                    .optional()?;
+
+                if let Some(np) = node_to_delete {
+                    let lc = NodeLifecycle::from_str(&np.lifecycle).map_err(|e| {
+                        DatabaseError::Logical(format!(
+                            "Node {del_node_id} has invalid lifecycle: {e}"
+                        ))
+                    })?;
+
+                    if lc != NodeLifecycle::Deleted {
+                        return Err(DatabaseError::Logical(format!(
+                            "Node {del_node_id} was not soft deleted before, cannot hard delete it"
+                        )));
+                    }
+
+                    diesel::delete(nodes)
+                        .filter(node_id.eq(del_node_id.0 as i64))
+                        .execute(conn)
+                        .await?;
+                }
+
+                Ok(())
+            })
+        })
         .await
     }
 
@@ -543,21 +618,6 @@ impl Persistence {
         .await
     }
 
-    pub(crate) async fn delete_node(&self, del_node_id: NodeId) -> DatabaseResult<()> {
-        use crate::schema::nodes::dsl::*;
-        self.with_measured_conn(DatabaseOperation::DeleteNode, move |conn| {
-            Box::pin(async move {
-                diesel::delete(nodes)
-                    .filter(node_id.eq(del_node_id.0 as i64))
-                    .execute(conn)
-                    .await?;
-
-                Ok(())
-            })
-        })
-        .await
-    }
-
     /// When a tenant invokes the /re-attach API, this function is responsible for doing an efficient
     /// batched increment of the generations of all tenants whose generation_pageserver is equal to
     /// the node that called /re-attach.
@@ -571,6 +631,19 @@ impl Persistence {
         let updated = self
             .with_measured_conn(DatabaseOperation::ReAttach, move |conn| {
                 Box::pin(async move {
+                    // Check if the node is not marked as deleted
+                    let deleted_node: i64 = nodes
+                        .filter(node_id.eq(input_node_id.0 as i64))
+                        .filter(lifecycle.eq(String::from(NodeLifecycle::Deleted)))
+                        .count()
+                        .get_result(conn)
+                        .await?;
+                    if deleted_node > 0 {
+                        return Err(DatabaseError::Logical(format!(
+                            "Node {input_node_id} is marked as deleted, re-attach is not allowed"
+                        )));
+                    }
+
                     let rows_updated = diesel::update(tenant_shards)
                         .filter(generation_pageserver.eq(input_node_id.0 as i64))
                         .set(generation.eq(generation + 1))
@@ -927,7 +1000,7 @@ impl Persistence {
                 .execute(conn).await?;
             if u8::try_from(updated)
                 .map_err(|_| DatabaseError::Logical(
-                    format!("Overflow existing shard count {} while splitting", updated))
+                    format!("Overflow existing shard count {updated} while splitting"))
                 )? != old_shard_count.count() {
                 // Perhaps a deletion or another split raced with this attempt to split, mutating
                 // the parent shards that we intend to split. In this case the split request should fail.
@@ -1267,8 +1340,7 @@ impl Persistence {
 
                 if inserted_updated != 1 {
                     return Err(DatabaseError::Logical(format!(
-                        "unexpected number of rows ({})",
-                        inserted_updated
+                        "unexpected number of rows ({inserted_updated})"
                     )));
                 }
 
@@ -1330,8 +1402,7 @@ impl Persistence {
                     0 => Ok(false),
                     1 => Ok(true),
                     _ => Err(DatabaseError::Logical(format!(
-                        "unexpected number of rows ({})",
-                        inserted_updated
+                        "unexpected number of rows ({inserted_updated})"
                     ))),
                 }
             })
@@ -1400,8 +1471,7 @@ impl Persistence {
                     0 => Ok(()),
                     1 => Ok(()),
                     _ => Err(DatabaseError::Logical(format!(
-                        "unexpected number of rows ({})",
-                        updated
+                        "unexpected number of rows ({updated})"
                     ))),
                 }
             })
@@ -1494,8 +1564,7 @@ impl Persistence {
                     0 => Ok(false),
                     1 => Ok(true),
                     _ => Err(DatabaseError::Logical(format!(
-                        "unexpected number of rows ({})",
-                        inserted_updated
+                        "unexpected number of rows ({inserted_updated})"
                     ))),
                 }
             })
@@ -2048,6 +2117,9 @@ pub(crate) struct NodePersistence {
     pub(crate) listen_pg_port: i32,
     pub(crate) availability_zone_id: String,
     pub(crate) listen_https_port: Option<i32>,
+    pub(crate) lifecycle: String,
+    pub(crate) listen_grpc_addr: Option<String>,
+    pub(crate) listen_grpc_port: Option<i32>,
 }
 
 /// Tenant metadata health status that are stored durably.

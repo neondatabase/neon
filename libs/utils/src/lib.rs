@@ -73,6 +73,7 @@ pub mod error;
 /// async timeout helper
 pub mod timeout;
 
+pub mod span;
 pub mod sync;
 
 pub mod failpoint_support;

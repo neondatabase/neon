@@ -856,6 +856,7 @@ impl Reconciler {
                 &self.shard,
                 &self.config,
                 &self.placement_policy,
+                self.intent.secondary.len(),
             );
             match self.observed.locations.get(&node.get_id()) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {
@@ -1235,11 +1236,11 @@ pub(crate) fn attached_location_conf(
     shard: &ShardIdentity,
     config: &TenantConfig,
     policy: &PlacementPolicy,
+    secondary_count: usize,
 ) -> LocationConfig {
     let has_secondaries = match policy {
-        PlacementPolicy::Attached(0) | PlacementPolicy::Detached | PlacementPolicy::Secondary => {
-            false
-        }
+        PlacementPolicy::Detached | PlacementPolicy::Secondary => false,
+        PlacementPolicy::Attached(0) => secondary_count > 0,
         PlacementPolicy::Attached(_) => true,
     };
 

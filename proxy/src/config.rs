@@ -7,7 +7,6 @@ use arc_swap::ArcSwapOption;
 use clap::ValueEnum;
 use remote_storage::RemoteStorageConfig;
 
-use crate::auth::backend::AuthRateLimiter;
 use crate::auth::backend::jwt::JwkCache;
 use crate::control_plane::locks::ApiLocks;
 use crate::rate_limiter::{RateBucketInfo, RateLimitAlgorithm, RateLimiterConfig};
@@ -23,7 +22,6 @@ pub struct ProxyConfig {
     pub http_config: HttpConfig,
     pub authentication_config: AuthenticationConfig,
     pub proxy_protocol_v2: ProxyProtocolV2,
-    pub region: String,
     pub handshake_timeout: Duration,
     pub wake_compute_retry_config: RetryConfig,
     pub connect_compute_locks: ApiLocks<Host>,
@@ -40,8 +38,6 @@ pub struct ComputeConfig {
 pub enum ProxyProtocolV2 {
     /// Connection will error if PROXY protocol v2 header is missing
     Required,
-    /// Connection will parse PROXY protocol v2 header, but accept the connection if it's missing.
-    Supported,
     /// Connection will error if PROXY protocol v2 header is provided
     Rejected,
 }
@@ -65,9 +61,6 @@ pub struct HttpConfig {
 pub struct AuthenticationConfig {
     pub thread_pool: Arc<ThreadPool>,
     pub scram_protocol_timeout: tokio::time::Duration,
-    pub rate_limiter_enabled: bool,
-    pub rate_limiter: AuthRateLimiter,
-    pub rate_limit_ip_subnet: u8,
     pub ip_allowlist_check_enabled: bool,
     pub is_vpc_acccess_proxy: bool,
     pub jwks_cache: JwkCache,

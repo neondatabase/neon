@@ -62,7 +62,8 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         ps.allowed_errors.extend(
             [
                 # We shut down pageservers while they might have some compaction work going on
-                ".*Compaction failed.*shutting down.*"
+                ".*Compaction failed.*shutting down.*",
+                ".*flush task cancelled.*",
             ]
         )
 

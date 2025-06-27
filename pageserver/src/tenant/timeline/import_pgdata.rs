@@ -15,6 +15,7 @@ use super::{Timeline, TimelineDeleteProgress};
 use crate::context::RequestContext;
 use crate::controller_upcall_client::{StorageControllerUpcallApi, StorageControllerUpcallClient};
 use crate::tenant::metadata::TimelineMetadata;
+use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
 
 mod flow;
 mod importbucket_client;
@@ -106,6 +107,8 @@ pub async fn doit(
                 );
             }
 
+            tracing::info!("Import plan executed. Flushing remote changes and notifying storcon");
+
             timeline
                 .remote_client
                 .schedule_index_upload_for_file_changes()?;
@@ -161,7 +164,10 @@ async fn prepare_import(
     info!("wipe the slate clean");
     {
         // TODO: do we need to hold GC lock for this?
-        let mut guard = timeline.layers.write().await;
+        let mut guard = timeline
+            .layers
+            .write(LayerManagerLockHolder::ImportPgData)
+            .await;
         assert!(
             guard.layer_map()?.open_layer.is_none(),
             "while importing, there should be no in-memory layer" // this just seems like a good place to assert it
@@ -199,8 +205,8 @@ async fn prepare_import(
         .await;
         match res {
             Ok(_) => break,
-            Err(err) => {
-                info!(?err, "indefinitely waiting for pgdata to finish");
+            Err(_err) => {
+                info!("indefinitely waiting for pgdata to finish");
                 if tokio::time::timeout(std::time::Duration::from_secs(10), cancel.cancelled())
                     .await
                     .is_ok()
