@@ -97,9 +97,10 @@ fn parse_audit_syslog_address(
         remote_plain_endpoint
     };
     // Urlify the remote_endpoint, so parsing can be done with url::Url.
-    let url_str = format!("http://{}", remote_endpoint);
-    let url = Url::parse(&url_str)
-        .map_err(|_| anyhow!("Error parsing {remote_endpoint}, expected host:port"))?;
+    let url_str = format!("http://{remote_endpoint}");
+    let url = Url::parse(&url_str).map_err(|err| {
+        anyhow!("Error parsing {remote_endpoint}, expected host:port, got {err:?}")
+    })?;
 
     let is_valid = url.scheme() == "http"
         && url.path() == "/"
