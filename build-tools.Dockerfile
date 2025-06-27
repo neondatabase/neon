@@ -179,7 +179,7 @@ RUN curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/
     && mv s5cmd /usr/local/bin/s5cmd
 
 # LLVM
-ENV LLVM_VERSION=19
+ENV LLVM_VERSION=20
 RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
     && echo "deb http://apt.llvm.org/${DEBIAN_VERSION}/ llvm-toolchain-${DEBIAN_VERSION}-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
     && apt update \
