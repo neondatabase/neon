@@ -226,7 +226,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     .await?;
 
     let pg_settings = auth_info
-        .authenticate(ctx, &mut node, user_info)
+        .authenticate(ctx, &mut node, &user_info)
         .or_else(|e| async { Err(stream.throw_error(e, Some(ctx)).await) })
         .await?;
 
