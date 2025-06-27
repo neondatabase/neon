@@ -216,8 +216,8 @@ struct Cli {
     /// Number of safekeepers to choose for a timeline when creating it.
     /// Safekeepers will be choosen from different availability zones.
     /// This option exists primarily for testing purposes.
-    #[arg(long, default_value = "3", value_parser = clap::value_parser!(i64).range(1..))]
-    timeline_safekeeper_count: i64,
+    #[arg(long, default_value = "3", value_parser = clap::value_parser!(u64).range(1..))]
+    timeline_safekeeper_count: usize,
 
     /// When set, actively checks and initiates heatmap downloads/uploads during reconciliation.
     /// This speed up migrations by avoiding the default wait for the heatmap download interval.
