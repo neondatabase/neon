@@ -137,13 +137,13 @@ get_entry(NRelFileInfo rinfo, bool* found)
 			hash_search(relkind_hash, &victim->rel, HASH_REMOVE, NULL);
 			relkind_ctl->size -= 1;
 		}
-		entry->flags = RELKIND_RAW; /* information about relation kind is not yet available */
+		entry->relkind = RELKIND_UNKNOWN; /* information about relation kind is not yet available */
 		relkind_ctl->pinned += 1;
 		entry->access_count = 1;
 	}
 	else if (entry->access_count++ == 0)
 	{
-		Assert(!(entry->flags & RELKIND_RAW)); /* unpinned entry can not be raw */
+		Assert(entry->relkind != RELKIND_UNKNOWN);
 		dlist_delete(&entry->lru_node);
 		relkind_ctl->pinned += 1;
 	}
@@ -156,7 +156,7 @@ get_entry(NRelFileInfo rinfo, bool* found)
  * Return pinned entry. It will be released by unpin_cached_relkind at the end of unlogged build.
  */
 RelKindEntry*
-set_cached_relkind(NRelFileInfo rinfo, uint8 flags)
+set_cached_relkind(NRelFileInfo rinfo, RelKind relkind)
 {
 	RelKindEntry *entry = NULL;
 	bool found;
@@ -164,7 +164,7 @@ set_cached_relkind(NRelFileInfo rinfo, uint8 flags)
 	/* Use spinlock to prevent concurrent hash modifitcation */
 	SpinLockAcquire(&relkind_ctl->mutex);
 	entry = get_entry(rinfo, &found);
-	entry->flags = flags;
+	entry->relkind = relkind;
 	SpinLockRelease(&relkind_ctl->mutex);
 	return entry;
 }
@@ -172,12 +172,12 @@ set_cached_relkind(NRelFileInfo rinfo, uint8 flags)
 /*
  * Lookup entry and create new one if not exists. This function is called by neon_write to detenmine if changes should be written to the local disk.
  * In case of overflow removes least recently used entry.
- * If entry is found and is not raw, then flags are stord in flags and NULL is returned.
+ * If entry is found and its relkind is known, then it is stored in provided location and NULL is returned.
  * If entry is not found then new one is created, pinned and returned. Entry should be updated using store_cached_relkind.
  * Shared lock is obtained if relation is involved in inlogged build.
  */
 RelKindEntry*
-get_cached_relkind(NRelFileInfo rinfo, uint8* flags)
+get_cached_relkind(NRelFileInfo rinfo, RelKind* relkind)
 {
 	RelKindEntry *entry;
 	bool found;
@@ -186,8 +186,8 @@ get_cached_relkind(NRelFileInfo rinfo, uint8* flags)
 	entry = get_entry(rinfo, &found);
 	if (found)
 	{
-		/* If entry is not raw, then there is no need to pin it */
-		if (!(entry->flags & RELKIND_RAW))
+		/* If relation persistence is known, then there is no need to pin it */
+		if (entry->relkind == RELKIND_UNKNOWN)
 		{
 			/* Fast path: normal (persistent) relation with kind stored in the cache */
 			if (--entry->access_count == 0)
@@ -195,23 +195,23 @@ get_cached_relkind(NRelFileInfo rinfo, uint8* flags)
 				dlist_push_tail(&relkind_ctl->lru, &entry->lru_node);
 			}
 		}
-		/* Need to set shared lock in case of unlogged build to prevent race condition on unlogged build end */
-		if (entry->flags & RELKIND_UNLOGGED_BUILD)
+		/* Need to set shared lock in case of unlogged build to prevent race condition at unlogged build end */
+		if (entry->relkind == RELKIND_UNLOGGED_BUILD)
 		{
 			/* Set shared lock to prevent unlinking relation files by backend completed unlogged build.
 			 * This backend will set exclsuive lock before unlinking files.
 			 * Shared locks allows other backends to perform write in parallel.
 			 */
 			LWLockAcquire(relkind_lock, LW_SHARED);
-			/* Recheck flags under lock */
-			if (!(entry->flags & RELKIND_UNLOGGED_BUILD))
+			/* Recheck relkind under lock */
+			if (entry->relkind != RELKIND_UNLOGGED_BUILD)
 			{
 				/* Unlogged build is already completed: release lock - we do not need to do any writes to local disk */
 				LWLockRelease(relkind_lock);
 			}
 		}
-		*flags = entry->flags;
-		if (!(entry->flags & RELKIND_RAW))
+		*relkind = entry->relkind;
+		if (entry->relkind != RELKIND_UNKNOWN)
 		{
 			/* We do not need this entry any more */
 			entry = NULL;
@@ -222,14 +222,13 @@ get_cached_relkind(NRelFileInfo rinfo, uint8* flags)
 }
 
 /*
- * Store relation persistence as a result of mdexists check.
- * Unpin entry.
+ * Store relation kind as a result of mdexists check. Unpin entry.
  */
 void
-store_cached_relkind(RelKindEntry* entry, uint8 flags)
+store_cached_relkind(RelKindEntry* entry, RelKind relkind)
 {
 	SpinLockAcquire(&relkind_ctl->mutex);
-	entry->flags = flags;
+	entry->relkind = relkind;
 	Assert(entry->access_count != 0);
 	if (--entry->access_count == 0)
 	{
@@ -240,16 +239,15 @@ store_cached_relkind(RelKindEntry* entry, uint8 flags)
 	SpinLockRelease(&relkind_ctl->mutex);
 }
 
-
 /*
  * Change relation persistence.
  * This operation obtains exclusiove lock, preventing any concurrent writes.
  */
 void
-clear_cached_relkind_flags(RelKindEntry* entry, uint8 flags)
+update_cached_relkind(RelKindEntry* entry, RelKind relkind)
 {
 	LWLockAcquire(relkind_lock, LW_EXCLUSIVE);
-	entry->flags &= ~flags;
+	entry->relkind = relkind;
 	LWLockRelease(relkind_lock);
 }
 
