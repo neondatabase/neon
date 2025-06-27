@@ -194,7 +194,8 @@ impl ShardIdentity {
     pub fn assert_equal(&self, other: ShardIdentity) {
         if self != &other {
             // TODO: for now, we're conservative and just log errors in production. Turn this into a
-            // real assertion when we're confident it doesn't misfire.
+            // real assertion when we're confident it doesn't misfire, and also reject requests that
+            // attempt to change it with an error response.
             critical!("shard identity mismatch: {self:?} != {other:?}");
         }
     }
