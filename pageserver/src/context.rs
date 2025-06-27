@@ -361,15 +361,22 @@ impl RequestContextBuilder {
         self
     }
 
+    pub(crate) fn cancel(mut self, cancel: CancellationToken) -> Self {
+        self.inner.cancel = cancel;
+        self
+    }
+
     pub fn root(self) -> RequestContext {
         self.inner
     }
 
-    pub fn attached_child(self) -> RequestContext {
+    pub fn attached_child(mut self) -> RequestContext {
+        self.inner.cancel = self.inner.cancel.child_token();
         self.inner
     }
 
-    pub fn detached_child(self) -> RequestContext {
+    pub fn detached_child(mut self) -> RequestContext {
+        self.inner.cancel = CancellationToken::new();
         self.inner
     }
 }
@@ -389,6 +396,7 @@ impl RequestContext {
             scope: self.scope.clone(),
             perf_span: self.perf_span.clone(),
             perf_span_dispatch: self.perf_span_dispatch.clone(),
+            cancel: self.cancel.clone(),
         }
     }
 
@@ -431,6 +439,7 @@ impl RequestContext {
         RequestContextBuilder::from(self)
             .task_kind(task_kind)
             .download_behavior(download_behavior)
+            .cancel(CancellationToken::new())
             .detached_child()
     }
 
