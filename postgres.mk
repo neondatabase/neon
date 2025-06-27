@@ -5,7 +5,7 @@
 # CI workflows and Dockerfiles can take advantage of the following
 # properties for caching:
 #
-# - Compiling the targets in this file only the PostgreSQL sources
+# - Compiling the targets in this file only builds the PostgreSQL sources
 #   under the vendor/ subdirectory, nothing else from the repository.
 # - All outputs go to POSTGRES_INSTALL_DIR (by default 'pg_install',
 #   see parent Makefile)
