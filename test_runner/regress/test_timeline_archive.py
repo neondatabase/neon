@@ -24,7 +24,6 @@ from fixtures.pageserver.utils import (
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import S3Storage, s3_storage
 from fixtures.utils import run_only_on_default_postgres, skip_in_debug_build, wait_until
-from fixtures.pageserver.utils import timeline_delete_wait_completed
 from psycopg2.errors import IoError, UndefinedTable
 
 if TYPE_CHECKING:
@@ -941,7 +940,6 @@ def test_timeline_offload_delete_race(neon_env_builder: NeonEnvBuilder):
                 "INSERT INTO foo SELECT FROM generate_series(1,512)",
             ]
         )
-        sum = endpoint.safe_psql("SELECT sum(key) from foo where key % 3 = 2")
         last_flush_lsn_upload(env, endpoint, tenant_id, child_timeline_id)
 
     assert_prefix_not_empty(
