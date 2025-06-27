@@ -305,28 +305,29 @@ extern void forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum);
  * Finally UNLOGGED_BUILD is set for unlogged build (building of GIST/SPGIST/GIN... indexes).
  * Relation itself can be logged or unlogged.
  */
-enum RelKindEntryFlags
+typedef enum
 {
-	RELKIND_UNLOGGED = 1,	/* relation is temp or unlogged */
-	RELKIND_UNLOGGED_BUILD = 2, /* unlogged index build */
-	RELKIND_RAW	= 4			/* relation persistence is not known */
-};
+	RELKIND_UNKNOWN,
+	RELKIND_PERMANENT,
+	RELKIND_UNLOGGED,
+	RELKIND_UNLOGGED_BUILD //* buildig index for permanent relation */
+} RelKind;
 
 /* utils for neon relkind cache */
 typedef struct
 {
 	NRelFileInfo rel;
-	uint8		flags;		/* See RelKindEntryFlags */
+	uint8		relkind;		/* See RelKind */
 	uint16		access_count;
 	dlist_node	lru_node;	/* LRU list node */
 } RelKindEntry;
 
 
 extern void relkind_hash_init(void);
-extern RelKindEntry* set_cached_relkind(NRelFileInfo rinfo, uint8 flags);
-extern RelKindEntry* get_cached_relkind(NRelFileInfo rinfo, uint8* flags);
-extern void store_cached_relkind(RelKindEntry* entry, uint8 flags);
-extern void clear_cached_relkind_flags(RelKindEntry* entry, uint8 flags);
+extern RelKindEntry* set_cached_relkind(NRelFileInfo rinfo, RelKind relkind);
+extern RelKindEntry* get_cached_relkind(NRelFileInfo rinfo, RelKind* relkind);
+extern void store_cached_relkind(RelKindEntry* entry, RelKind relkind);
+extern void update_cached_relkind(RelKindEntry* entry, RelKind relkind);
 extern void unpin_cached_relkind(RelKindEntry* entry);
 extern void unlock_cached_relkind(void);
 extern void forget_cached_relkind(NRelFileInfo rinfo);
