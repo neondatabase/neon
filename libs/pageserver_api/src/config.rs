@@ -420,7 +420,7 @@ impl Default for BasebackupCacheConfig {
             cleanup_period: Duration::from_secs(60),
             max_total_size_bytes: 1024 * 1024 * 1024, // 1 GiB
             // max_entry_size_bytes: 16 * 1024 * 1024,   // 16 MiB
-            max_size_entries: 1000,
+            max_size_entries: 10000,
             prepare_channel_size: 100,
         }
     }
