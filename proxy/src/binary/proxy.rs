@@ -241,7 +241,7 @@ struct ProxyCliArgs {
     is_rest_broker: bool,
 
     /// cache for `db_schema_cache` introspection (use `size=0` to disable)
-    #[clap(long, default_value = "size=4000,ttl=1h")]
+    #[clap(long, default_value = "size=1000,ttl=1h")]
     db_schema_cache: String,
 }
 
@@ -495,6 +495,17 @@ pub async fn run() -> anyhow::Result<()> {
         },
     ));
     maintenance_tasks.spawn(control_plane::mgmt::task_main(mgmt_listener));
+
+    // add a task to flush the db_schema cache every 10 minutes
+    if let Some(db_schema_cache) = &config.rest_config.db_schema_cache {
+        maintenance_tasks.spawn(async move {
+            loop {
+                    tokio::time::sleep(Duration::from_secs(600)).await;
+                    db_schema_cache.flush();
+                }
+        });
+    }
+    
 
     if let Some(metrics_config) = &config.metric_collection {
         // TODO: Add gc regardles of the metric collection being enabled.

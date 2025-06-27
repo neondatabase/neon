@@ -1,5 +1,4 @@
 use std::sync::Arc;
-
 use bytes::Bytes;
 use http::Method;
 use http::header::AUTHORIZATION;
@@ -12,7 +11,7 @@ use hyper::http::{HeaderName, HeaderValue};
 use hyper::{HeaderMap, Request, Response, StatusCode};
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer};
-use super::http_conn_pool::{self, HttpConnPool, Send, poll_http2_client};
+use super::http_conn_pool::{self, Send,};
 use serde_json::{value::RawValue, Value as JsonValue};
 
 use tokio_util::sync::CancellationToken;
@@ -38,13 +37,13 @@ use crate::pqproto::StartupMessageParams;
 use crate::proxy::NeonOptions;
 use crate::serverless::backend::HttpConnError;
 use crate::types::{DbName, RoleName};
-use crate::cache::{Cached, TimedLru};
-use crate::types::{EndpointCacheKey, EndpointId};
+use crate::cache::{TimedLru};
+use crate::types::{EndpointCacheKey};
 
 use subzero_core::{
     api::{SingleVal, ListVal, Payload},
     error::Error::{self as SubzeroCoreError, JsonDeserialize, NotFound, JwtTokenInvalid, InternalError, GucHeadersError, GucStatusError, ContentTypeError},
-    schema::{DbSchema, DbSchemaOwned},
+    schema::{DbSchema},
     formatter::{
         Param,
         Param::*,
@@ -52,57 +51,35 @@ use subzero_core::{
         Snippet, SqlParam,
     },
     dynamic_statement::{param, sql, JoinIterator},
-    config::{db_schemas, db_allowed_select_functions, role_claim_key, to_tuple},
+    config::{db_schemas, db_allowed_select_functions, role_claim_key, /*to_tuple*/},
 };
 use subzero_core::{
     api::{ContentType::*, Preferences, QueryNode::*, Representation, Resolution::*, },
     error::{*, pg_error_to_status_code},
     parser::postgrest::parse,
     permissions::{check_safe_functions},
-    api::DEFAULT_SAFE_SELECT_FUNCTIONS,
     api::ApiResponse,
 };
+use ouroboros::self_referencing;
+
+#[self_referencing]
+pub struct DbSchemaOwned {
+    schema_string: String,
+    #[covariant]
+    #[borrows(schema_string)]
+    schema: Result<DbSchema<'this>>,
+}
 use std::collections::HashMap;
 use jsonpath_lib::select;
 use url::form_urlencoded;
 
-static JSON_SCHEMA: &str = r#"
-    {
-        "schemas":[
-            {
-                "name":"test",
-                "objects":[
-                    {
-                        "kind":"table",
-                        "name":"items",
-                        "columns":[
-                            {
-                                "name":"id",
-                                "data_type":"integer",
-                                "primary_key":true
-                            },
-                            {
-                                "name":"name",
-                                "data_type":"text"
-                            }
-                        ],
-                        "foreign_keys":[],
-                        "permissions":[]
-                    }
-                ]
-            }
-        ]
-    }
-"#;
+static MAX_SCHEMA_SIZE: usize = 1024 * 1024 * 5; // 5MB
+static MAX_HTTP_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB limit
+
+static EMPTY_JSON_SCHEMA: &str = r#"{"schemas":[]}"#;
 const INTROSPECTION_SQL: &str = include_str!("../../../../subzero/introspection/postgresql_introspection_query.sql");
 const CONFIGURATION_SQL: &str = include_str!("../../../../subzero/introspection/postgresql_configuration_query.sql");
 
-static DB_SCHEMA: std::sync::LazyLock<DbSchema> = std::sync::LazyLock::new(|| {
-    let mut schema = serde_json::from_str::<DbSchema>(JSON_SCHEMA)
-        .expect("Failed to parse hardcoded JSON schema");
-    schema.use_internal_permissions = false;
-    schema
-});
 
 fn deserialize_comma_separated<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
@@ -116,28 +93,72 @@ where
 
 #[derive(Deserialize, Debug)]
 pub struct ApiConfig {
-    
     #[serde(default = "db_schemas", deserialize_with = "deserialize_comma_separated")]
     pub db_schemas: Vec<String>,
     pub db_anon_role: Option<String>,
     pub db_max_rows: Option<String>,
     #[serde(default = "db_allowed_select_functions")]
     pub db_allowed_select_functions: Vec<String>,
-    #[serde(deserialize_with = "to_tuple", default)]
-    pub db_pre_request: Option<(String, String)>,
+    //#[serde(deserialize_with = "to_tuple", default)]
+    //pub db_pre_request: Option<(String, String)>,
     #[serde(default = "role_claim_key")]
     pub role_claim_key: String,
+    pub db_extra_search_path: Option<String>,
 }
-pub(crate) type DbSchemaCache = TimedLru<EndpointCacheKey, DbSchemaOwned>;
-pub(crate) type CachedSchema = Cached<&'static DbSchemaCache, DbSchemaOwned>;
+pub(crate) type DbSchemaCache = TimedLru<EndpointCacheKey, Arc<(ApiConfig, DbSchemaOwned)>>;
 impl DbSchemaCache {
-    pub async fn get_remote(&self,
+
+    pub async fn get_local_or_remote(&self,
         endpoint_id: &EndpointCacheKey, 
         auth_header: &HeaderValue,
         connection_string: &str,
         client: &mut http_conn_pool::Client<Send>,
         ctx: &RequestContext,
-    ) -> Result<(), RestError> {
+    ) -> Result<Arc<(ApiConfig, DbSchemaOwned)>, RestError> {
+        match self.get(endpoint_id){
+            Some(entry) => {
+                Ok(entry.value)
+            }
+            None => {
+                info!("db_schema cache miss for endpoint: {:?}", endpoint_id);
+                let remote_value = self.get_remote(auth_header, connection_string, client, ctx).await;
+                let (api_config, schema_owned) = match remote_value {
+                    Ok((api_config, schema_owned)) => (api_config, schema_owned),
+                    Err(e@RestError::SchemaTooLarge(_, _)) => {
+                        // for the case where the schema is too large, we cache an empty dummy value
+                        // all the other requests will fail without triggering the introspection query
+                        let schema_owned = DbSchemaOwned::new(EMPTY_JSON_SCHEMA.to_string(), |s| {
+                            serde_json::from_str::<DbSchema>(s.as_str())
+                                .map_err(|e| JsonDeserialize { source: e })
+                        });
+                        let api_config = ApiConfig {
+                            db_schemas: vec![],
+                            db_anon_role: None,
+                            db_max_rows: None,
+                            db_allowed_select_functions: vec![],
+                            role_claim_key: "".to_string(),
+                            db_extra_search_path: None,
+                        };
+                        let value = Arc::new((api_config, schema_owned));
+                        self.insert(endpoint_id.clone(), value);
+                        return Err(e);
+                    }
+                    Err(e) => {
+                        return Err(e);
+                    }
+                };
+                let value = Arc::new((api_config, schema_owned));
+                self.insert(endpoint_id.clone(), value.clone());
+                Ok(value)
+            }
+        }
+    }
+    pub async fn get_remote(&self,
+        auth_header: &HeaderValue,
+        connection_string: &str,
+        client: &mut http_conn_pool::Client<Send>,
+        ctx: &RequestContext,
+    ) -> Result<(ApiConfig, DbSchemaOwned), RestError> {
         
         let local_proxy_uri = ::http::Uri::from_static("http://proxy.local/sql");
         let mut req = Request::builder().method(Method::POST).uri(local_proxy_uri);
@@ -168,6 +189,12 @@ impl DbSchemaCache {
             .map_err(HttpConnError::from)?;
 
         let response_status = response.status();
+        
+        if response_status != StatusCode::OK {
+            return Err(RestError::SubzeroCore(InternalError { 
+                message: "Failed to get configuration data".to_string() 
+            }));
+        }
 
         // Capture the response body
         let response_body = response
@@ -197,12 +224,12 @@ impl DbSchemaCache {
         // Extract columns from the first (and only) row
         let mut row = &mut rows[0];
         let config_string = extract_string(&mut row, "config").unwrap_or_default();
-        println!("config_string: {:?}", config_string);
+        //println!("config_string: {:?}", config_string);
         // Parse the JSON response and extract the body content efficiently
         let api_config: ApiConfig = serde_json::from_str(&config_string)
             .map_err(|e| RestError::SubzeroCore(JsonDeserialize { source: e }))?;
 
-        println!("api_config: {:?}", api_config);
+        //println!("api_config: {:?}", api_config);
 
         // now that we have the api_config let's run the second INTROSPECTION_SQL query
         let local_proxy_uri = ::http::Uri::from_static("http://proxy.local/sql");
@@ -216,8 +243,9 @@ impl DbSchemaCache {
         let body = json!({
             "query": INTROSPECTION_SQL,
             "params": [
-                api_config.db_schemas,
-                false
+                &api_config.db_schemas,
+                false, // include_roles_with_login
+                false, // use_internal_permissions
             ]
         }).to_string();
         let body_boxed = Full::new(Bytes::from(body))
@@ -239,6 +267,12 @@ impl DbSchemaCache {
             .map_err(HttpConnError::from)?;
 
         let response_status = response.status();
+
+        if response_status != StatusCode::OK {
+            return Err(RestError::SubzeroCore(InternalError { 
+                message: "Failed to get introspection data".to_string() 
+            }));
+        }
 
         let response_body = response
             .collect()
@@ -267,23 +301,39 @@ impl DbSchemaCache {
         // Extract columns from the first (and only) row
         let mut row = &mut rows[0];
         let json_schema = extract_string(&mut row, "json_schema").unwrap_or_default();
-        println!("json_schema: {:?}", json_schema);
-        // Parse the JSON response and extract the body content efficiently
+        let string_size = json_schema.len();
 
+        if string_size > MAX_SCHEMA_SIZE {
+            // return Err(RestError::SubzeroCore(InternalError { 
+            //     message: format!("Schema is too large: {} bytes, max is {} bytes", string_size, MAX_SCHEMA_SIZE) 
+            // }));
+            return Err(RestError::SchemaTooLarge(MAX_SCHEMA_SIZE, string_size));
+        }
+
+        
+
+        let schema_owned = DbSchemaOwned::new(json_schema, |s| {
+            serde_json::from_str::<DbSchema>(s.as_str())
+                .map_err(|e| JsonDeserialize { source: e })
+        });
        
-        let mut schema = serde_json::from_str::<DbSchema>(&json_schema)
-            .map_err(|e| RestError::SubzeroCore(JsonDeserialize { source: e }))?;
-        schema.use_internal_permissions = false;
-
-        println!("schema!!!!!: {:?}", schema);
-        Ok(())
+        //let schema = schema_owned.borrow_schema().as_ref().unwrap();
+        //println!("schema!!!!!: {:?}", schema);
+        // check if schema is an ok result
+        let schema = schema_owned.borrow_schema();
+        if schema.is_ok() {
+            Ok((api_config, schema_owned))
+        } else {
+            //
+            Err(RestError::SubzeroCore(SubzeroCoreError::InternalError { message: "Failed to get schema".to_string() }))
+        }
     }
 }
 pub(super) static NEON_REQUEST_ID: HeaderName = HeaderName::from_static("neon-request-id");
 
 static CONN_STRING: HeaderName = HeaderName::from_static("neon-connection-string");
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
-static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
+//static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
 static ALLOW_POOL: HeaderName = HeaderName::from_static("neon-pool-opt-in");
 static TXN_ISOLATION_LEVEL: HeaderName = HeaderName::from_static("neon-batch-isolation-level");
 static TXN_READ_ONLY: HeaderName = HeaderName::from_static("neon-batch-read-only");
@@ -538,6 +588,9 @@ pub(crate) enum RestError {
     //Cancelled(SqlOverHttpCancel),
     #[error("{0}")]
     SubzeroCore(#[source] SubzeroCoreError),
+
+    #[error("schema is too large (max is {0} bytes, current is {1} bytes)")]
+    SchemaTooLarge(usize, usize),
 }
 
 impl ReportableError for RestError {
@@ -559,6 +612,7 @@ impl ReportableError for RestError {
             RestError::JsonConversion(_) => ErrorKind::Postgres,
             //RestError::Cancelled(c) => c.get_error_kind(),
             RestError::SubzeroCore(_) => ErrorKind::User,
+            RestError::SchemaTooLarge(_, _) => ErrorKind::User,
         }
     }
 }
@@ -570,6 +624,7 @@ impl UserFacingError for RestError {
             RestError::ConnectCompute(c) => c.to_string_client(),
             RestError::ConnInfo(c) => c.to_string_client(),
             //RestError::ResponseTooLarge(_) => self.to_string(),
+            RestError::SchemaTooLarge(_, _) => self.to_string(),
             //RestError::InvalidIsolationLevel => self.to_string(),
             RestError::Postgres(p) => p.to_string_client(),
             //RestError::InternalPostgres(p) => p.to_string(),
@@ -605,6 +660,7 @@ impl HttpCodeError for RestError {
             RestError::Postgres(e) => e.get_http_status_code(),
             //RestError::InternalPostgres(_) => StatusCode::INTERNAL_SERVER_ERROR,
             RestError::JsonConversion(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            RestError::SchemaTooLarge(_, _) => StatusCode::INTERNAL_SERVER_ERROR,
             //RestError::Cancelled(_) => StatusCode::INTERNAL_SERVER_ERROR,
             RestError::SubzeroCore(e) => {
                 let status = e.status_code();
@@ -984,27 +1040,48 @@ async fn handle_rest_inner(
     jwt: String,
     backend: Arc<PoolingBackend>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, RestError> {
-    
-    
-    // hardcoded values for now, these should come from a config per tenant
-    let max_http_body_size = 10 * 1024 * 1024; // 10MB limit
-    let db_schemas = Vec::from(["test".to_string()]); // list of schemas available for the api
-    let db_schema = &*DB_SCHEMA; // use the global static schema
-    let api_prefix = "/rest/v1/";
-    let db_extra_search_path = "public, extensions".to_string();
-    let role_claim_key = ".role".to_string();
-    let role_claim_path = format!("${}", role_claim_key);
-    let db_anon_role = Some("anon".to_string());
-    //let max_rows = Some("1000".to_string());
-    let max_rows = None;
-    let db_allowed_select_functions = DEFAULT_SAFE_SELECT_FUNCTIONS.iter().map(|m| *m).collect::<Vec<_>>();
-    // end hardcoded values
 
     // validate the jwt token
     let jwt_parsed = backend
         .authenticate_with_jwt(ctx, &conn_info.user_info, jwt)
         .await
         .map_err(HttpConnError::from)?;
+    
+    let db_schema_cache = match config.rest_config.db_schema_cache.as_ref() {
+        Some(cache) => cache,
+        None => {
+            return Err(RestError::SubzeroCore(InternalError { 
+                message: "DB schema cache is not configured".to_string() 
+            }));
+        }
+    };
+    // hardcoded values for now, these should come from a config per tenant
+    
+    let api_prefix = "/rest/v1/";
+
+    let endpoint_cache_key = conn_info.endpoint_cache_key().unwrap();
+    let mut client = backend.connect_to_local_proxy(ctx, conn_info).await?;
+    let (parts, originial_body) = request.into_parts();
+    let headers_map = parts.headers;
+    let auth_header = headers_map.get(AUTHORIZATION).unwrap();
+    let entry = db_schema_cache.get_local_or_remote(&endpoint_cache_key, auth_header, &connection_string, &mut client, &ctx).await?;
+    let (api_config, db_schema_owned) = entry.as_ref();
+    let db_schema = db_schema_owned.borrow_schema().as_ref().map_err(|_| RestError::SubzeroCore(InternalError { message: "Failed to get schema".to_string() }))?;
+
+    let db_schemas = &api_config.db_schemas; // list of schemas available for the api
+    //let db_schema = &*DB_SCHEMA; // use the global static schema
+    
+    //let db_extra_search_path = "public, extensions".to_string();
+    let db_extra_search_path = &api_config.db_extra_search_path;
+    let role_claim_key = &api_config.role_claim_key;
+    let role_claim_path = format!("${}", role_claim_key);
+    let db_anon_role = &api_config.db_anon_role;
+    //let max_rows = Some("1000".to_string());
+    let max_rows = api_config.db_max_rows.as_ref().map(|s| s.as_str());
+    let db_allowed_select_functions = api_config.db_allowed_select_functions.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+    // end hardcoded values
+
+    
     
     // extract the jwt claims (we'll need them later to set the role and env)
     let jwt_claims = match jwt_parsed.keys {
@@ -1040,7 +1117,7 @@ async fn handle_rest_inner(
     }
     
     // start deconstructing the request because subzero core mostly works with &str
-    let (parts, originial_body) = request.into_parts();
+    
     let method = parts.method;
     let method_str = method.to_string();
     let path = parts.uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
@@ -1055,7 +1132,7 @@ async fn handle_rest_inner(
     }?;
     
     // pick the current schema from the headers (or the first one from config)
-    let schema_name = &current_schema(&db_schemas, &method, &parts.headers).map_err(RestError::SubzeroCore)?;
+    let schema_name = &current_schema(db_schemas, &method, &headers_map).map_err(RestError::SubzeroCore)?;
 
     // add the content-profile header to the response
     let mut response_headers = vec![];
@@ -1070,14 +1147,14 @@ async fn handle_rest_inner(
     };
     let get: Vec<(&str, &str)> = query.iter().map(|(k, v)| (&**k, &**v)).collect();
 
-    let mut headers_map = parts.headers;
+    
     let local_proxy_uri = ::http::Uri::from_static("http://proxy.local/sql");
     let mut req = Request::builder().method(Method::POST).uri(local_proxy_uri);
 
     // todo(conradludgate): maybe auth-broker should parse these and re-serialize
     // these instead just to ensure they remain normalised.
     for &h in HEADERS_TO_FORWARD {
-        if let Some(hv) = headers_map.remove(h) {
+        if let Some(hv) = headers_map.get(h) {
             req = req.header(h, hv);
         }
     }
@@ -1090,7 +1167,7 @@ async fn handle_rest_inner(
     let cookies = HashMap::new(); // TODO: add cookies
     
     // Read the request body
-    let body_bytes = read_body_with_limit(originial_body, max_http_body_size).await.map_err(ReadPayloadError::from)?;
+    let body_bytes = read_body_with_limit(originial_body, MAX_HTTP_BODY_SIZE).await.map_err(ReadPayloadError::from)?;
     let body_as_string: Option<String> = if body_bytes.is_empty() {
         None
     } else {
@@ -1151,7 +1228,7 @@ async fn handle_rest_inner(
     let mut env: HashMap<&str, &str> = HashMap::from([
         ("request.method", api_request.method),
         ("request.path", api_request.path),
-        ("search_path", &db_extra_search_path),
+        //("search_path", &db_extra_search_path),
         ("request.headers", &headers_env),
         ("request.cookies", &cookies_env),
         ("request.get", &get_env),
@@ -1161,27 +1238,13 @@ async fn handle_rest_inner(
         env.insert("role", r.into());
     }
     
+    if let Some(search_path) = db_extra_search_path {
+        env.insert("search_path", search_path);
+    }
     // generate the sql statements
     let (env_statement, env_parameters, _) = generate(fmt_env_query(&env));
     let (main_statement, main_parameters, _) = generate(fmt_main_query(db_schema, api_request.schema_name, &api_request, &env).map_err(to_core_error)?);
-    
-    // now we are ready to build the request to the local proxy
-    let endpoint_cache_key = conn_info.endpoint_cache_key().unwrap();
-    let mut client = backend.connect_to_local_proxy(ctx, conn_info).await?;
-
-    let _schema_ = match &config.rest_config.db_schema_cache {
-        Some(cache) => {
-            // we need the AUTH header here which we already moved from the original request
-            let auth_header = req.headers_ref().unwrap().get(AUTHORIZATION).unwrap();
-            cache.get_remote(&endpoint_cache_key, auth_header, &connection_string, &mut client, &ctx).await?
-        }
-        None => {
-            return Err(RestError::SubzeroCore(InternalError { 
-                message: "DB schema cache is not configured".to_string() 
-            }));
-        }
-    };
-    
+      
     req = req.header(&NEON_REQUEST_ID, uuid_to_header_value(ctx.session_id()));
     req = req.header(&CONN_STRING, HeaderValue::from_str(connection_string).unwrap());
     req = req.header(&TXN_ISOLATION_LEVEL, HeaderValue::from_str("ReadCommitted").unwrap());
