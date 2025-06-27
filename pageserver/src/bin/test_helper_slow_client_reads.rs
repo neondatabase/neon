@@ -37,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
                 not_modified_since: Lsn(23),
             },
             batch_key: 42,
-            message: format!("message {}", msg),
+            message: format!("message {msg}"),
         }));
         let Ok(res) = tokio::time::timeout(Duration::from_secs(10), fut).await else {
             eprintln!("pipe seems full");
