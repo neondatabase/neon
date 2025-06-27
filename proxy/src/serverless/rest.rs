@@ -800,7 +800,7 @@ async fn handle_rest_inner(
                 .map_err(|e| RestError::SubzeroCore(JsonDeserialize { source: e }))?;
             Some(payload)
         }
-        ComputeCredentialKeys::AuthKeys(_) => None,
+        ComputeCredentialKeys::AuthKeys(_) | ComputeCredentialKeys::Password(_) => None,
     };
 
     // read the role from the jwt claims (and set it to the "anon" role if not present)
