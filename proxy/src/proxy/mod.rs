@@ -251,7 +251,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     auth_backend: &'static auth::Backend<'static, ()>,
     ctx: &RequestContext,
     cancellation_handler: Arc<CancellationHandler>,
-    stream: S,
+    client: S,
     mode: ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     conn_gauge: NumClientConnectionsGuard<'static>,
@@ -271,12 +271,12 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let record_handshake_error = !ctx.has_private_peer_addr();
     let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
-    let do_handshake = handshake(ctx, stream, mode.handshake_tls(tls), record_handshake_error);
+    let do_handshake = handshake(ctx, client, mode.handshake_tls(tls), record_handshake_error);
 
-    let (mut stream, params) = match tokio::time::timeout(config.handshake_timeout, do_handshake)
+    let (mut client, params) = match tokio::time::timeout(config.handshake_timeout, do_handshake)
         .await??
     {
-        HandshakeData::Startup(stream, params) => (stream, params),
+        HandshakeData::Startup(client, params) => (client, params),
         HandshakeData::Cancel(cancel_key_data) => {
             // spawn a task to cancel the session, but don't wait for it
             cancellations.spawn({
@@ -305,7 +305,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     ctx.set_db_options(params.clone());
 
-    let hostname = mode.hostname(stream.get_ref());
+    let hostname = mode.hostname(client.get_ref());
 
     let common_names = tls.map(|tls| &tls.common_names);
 
@@ -317,14 +317,14 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let user_info = match result {
         Ok(user_info) => user_info,
-        Err(e) => Err(stream.throw_error(e, Some(ctx)).await)?,
+        Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
     };
 
     let user = user_info.get_user().to_owned();
     let user_info = match user_info
         .authenticate(
             ctx,
-            &mut stream,
+            &mut client,
             mode.allow_cleartext(),
             &config.authentication_config,
             endpoint_rate_limiter,
@@ -337,7 +337,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
             let app = params.get("application_name");
             let params_span = tracing::info_span!("", ?user, ?db, ?app);
 
-            return Err(stream
+            return Err(client
                 .throw_error(e, Some(ctx))
                 .instrument(params_span)
                 .await)?;
@@ -381,7 +381,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
         match res {
             Ok(n) => node = n,
-            Err(e) => return Err(stream.throw_error(e, Some(ctx)).await)?,
+            Err(e) => return Err(client.throw_error(e, Some(ctx)).await)?,
         }
 
         let auth::Backend::ControlPlane(cplane, user_info) = &backend else {
@@ -400,14 +400,14 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
                     cplane_proxy_v1.caches.node_info.invalidate(&key);
                 }
             }
-            Err(e) => Err(stream.throw_error(e, Some(ctx)).await)?,
+            Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
         }
     };
 
     let session = cancellation_handler.get_key();
 
-    prepare_client_connection(&pg_settings, *session.key(), &mut stream);
-    let stream = stream.flush_and_into_inner().await?;
+    prepare_client_connection(&pg_settings, *session.key(), &mut client);
+    let client = client.flush_and_into_inner().await?;
 
     let session_id = ctx.session_id();
     let (cancel_on_shutdown, cancel) = tokio::sync::oneshot::channel();
@@ -429,7 +429,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     };
 
     Ok(Some(ProxyPassthrough {
-        client: stream,
+        client,
         compute: node.stream,
 
         aux: node.aux,
@@ -447,25 +447,25 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 pub(crate) fn prepare_client_connection(
     settings: &compute::PostgresSettings,
     cancel_key_data: CancelKeyData,
-    stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) {
     // Forward all deferred notices to the client.
     for notice in &settings.delayed_notice {
-        stream.write_raw(notice.as_bytes().len(), b'N', |buf| {
+        client.write_raw(notice.as_bytes().len(), b'N', |buf| {
             buf.extend_from_slice(notice.as_bytes());
         });
     }
 
     // Forward all postgres connection params to the client.
     for (name, value) in &settings.params {
-        stream.write_message(BeMessage::ParameterStatus {
+        client.write_message(BeMessage::ParameterStatus {
             name: name.as_bytes(),
             value: value.as_bytes(),
         });
     }
 
-    stream.write_message(BeMessage::BackendKeyData(cancel_key_data));
-    stream.write_message(BeMessage::ReadyForQuery);
+    client.write_message(BeMessage::BackendKeyData(cancel_key_data));
+    client.write_message(BeMessage::ReadyForQuery);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
