@@ -11429,11 +11429,11 @@ mod tests {
         if left != right {
             eprintln!("---LEFT---");
             for left in left.iter() {
-                eprintln!("{}", left);
+                eprintln!("{left}");
             }
             eprintln!("---RIGHT---");
             for right in right.iter() {
-                eprintln!("{}", right);
+                eprintln!("{right}");
             }
             assert_eq!(left, right);
         }
