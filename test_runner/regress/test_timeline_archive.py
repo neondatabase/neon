@@ -996,7 +996,7 @@ def test_timeline_offload_delete_race(neon_env_builder: NeonEnvBuilder):
 
     # We can't use timeline_delete_wait_completed here as timeline status will return 404, but we want to return 404 from the deletion endpoint
     def timeline_is_missing():
-        data = {}
+        data = None
         try:
             data = dest_ps_http.timeline_delete(tenant_id, child_timeline_id)
             log.info(f"timeline delete {data}")
