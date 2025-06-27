@@ -42,7 +42,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     config: &'static ProxyConfig,
     auth_backend: &'static auth::Backend<'static, ()>,
     ctx: &RequestContext,
-    cancellation_handler: Arc<CancellationHandler>,
+    _cancellation_handler: Arc<CancellationHandler>,
     client: &mut PqStream<Stream<S>>,
     mode: &ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
@@ -114,7 +114,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     send_client_greeting(ctx, &config.greetings, client);
 
-    let auth::Backend::ControlPlane(_, user_info) = backend else {
+    let auth::Backend::ControlPlane(_, _user_info) = backend else {
         unreachable!("ensured above");
     };
 
@@ -124,33 +124,33 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         client.write_message(BeMessage::AuthenticationOk);
     }
 
-    let session = cancellation_handler.get_key();
+    // let session = cancellation_handler.get_key();
 
-    let (process_id, secret_key) =
-        forward_compute_params_to_client(ctx, *session.key(), client, &mut node.stream).await?;
-    let hostname = node.hostname.to_string();
+    let (_process_id, _secret_key) =
+        forward_compute_params_to_client(ctx, None, client, &mut node.stream).await?;
+    // let hostname = node.hostname.to_string();
 
-    let session_id = ctx.session_id();
-    let (cancel_on_shutdown, cancel) = oneshot::channel();
-    tokio::spawn(async move {
-        session
-            .maintain_cancel_key(
-                session_id,
-                cancel,
-                &CancelClosure {
-                    socket_addr: node.socket_addr,
-                    cancel_token: RawCancelToken {
-                        ssl_mode: node.ssl_mode,
-                        process_id,
-                        secret_key,
-                    },
-                    hostname,
-                    user_info,
-                },
-                &config.connect_to_compute,
-            )
-            .await;
-    });
+    // let session_id = ctx.session_id();
+    let (cancel_on_shutdown, _cancel) = oneshot::channel();
+    // tokio::spawn(async move {
+    //     session
+    //         .maintain_cancel_key(
+    //             session_id,
+    //             cancel,
+    //             &CancelClosure {
+    //                 socket_addr: node.socket_addr,
+    //                 cancel_token: RawCancelToken {
+    //                     ssl_mode: node.ssl_mode,
+    //                     process_id,
+    //                     secret_key,
+    //                 },
+    //                 hostname,
+    //                 user_info,
+    //             },
+    //             &config.connect_to_compute,
+    //         )
+    //         .await;
+    // });
 
     Ok((node, cancel_on_shutdown))
 }
@@ -200,7 +200,7 @@ pub(crate) fn send_client_greeting(
 
 pub(crate) async fn forward_compute_params_to_client(
     ctx: &RequestContext,
-    cancel_key_data: CancelKeyData,
+    cancel_key_data: Option<CancelKeyData>,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     compute: &mut StartupStream<TcpStream, RustlsStream>,
 ) -> Result<(i32, i32), ClientRequestError> {
@@ -219,9 +219,16 @@ pub(crate) async fn forward_compute_params_to_client(
         match msg {
             // Send our cancellation key data instead.
             Some(Message::BackendKeyData(body)) => {
-                client.write_message(BeMessage::BackendKeyData(cancel_key_data));
                 process_id = body.process_id();
                 secret_key = body.secret_key();
+
+                let cancel_key_data = cancel_key_data.unwrap_or_else(|| {
+                    let pid = process_id as u32;
+                    let key = secret_key as u32;
+                    CancelKeyData(((pid as u64) << 32 | (key as u64)).into())
+                });
+
+                client.write_message(BeMessage::BackendKeyData(cancel_key_data));
             }
             // Forward all postgres connection params to the client.
             Some(Message::ParameterStatus(body)) => {
