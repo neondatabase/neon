@@ -246,7 +246,9 @@ impl DeleteTimelineFlow {
                         tracing::info!("Timeline already deleted in remote storage");
                         if let TimelineOrOffloaded::Offloaded(_) = &timeline {
                             // We only supoprt this for offloaded timelines, as we don't know which state non-offloaded timelines are in.
-                            tracing::info!("Timeline with gone index part is offloaded timeline. Removing from tenant.");
+                            tracing::info!(
+                                "Timeline with gone index part is offloaded timeline. Removing from tenant."
+                            );
                             remove_maybe_offloaded_timeline_from_tenant(tenant, &timeline, &guard)
                                 .await?;
                         }
