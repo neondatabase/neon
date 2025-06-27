@@ -12,24 +12,20 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, warn};
 
-use crate::cache::Cache;
+use crate::auth;
 use crate::cancellation::{self, CancellationHandler};
 use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
 use crate::context::RequestContext;
-use crate::control_plane::client::ControlPlaneClient;
 use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
 pub use crate::pglb::copy_bidirectional::ErrorSource;
 use crate::pglb::handshake::{HandshakeData, HandshakeError, handshake};
 use crate::pglb::passthrough::ProxyPassthrough;
 use crate::protocol2::{ConnectHeader, ConnectionInfo, ConnectionInfoExtra, read_proxy_protocol};
-use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
-use crate::proxy::retry::ShouldRetryWakeCompute;
-use crate::proxy::{NeonOptions, prepare_client_connection};
+use crate::proxy::handle_client;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::Stream;
 use crate::util::run_until_cancelled;
-use crate::{auth, compute};
 
 pub const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 
@@ -120,7 +116,7 @@ pub async fn task_main(
 
             let ctx = RequestContext::new(session_id, conn_info, crate::metrics::Protocol::Tcp);
 
-            let res = handle_client(
+            let res = handle_connection(
                 config,
                 auth_backend,
                 &ctx,
@@ -184,21 +180,21 @@ pub(crate) enum ClientMode {
 
 /// Abstracts the logic of handling TCP vs WS clients
 impl ClientMode {
-    pub(crate) fn allow_cleartext(&self) -> bool {
+    pub fn allow_cleartext(&self) -> bool {
         match self {
             ClientMode::Tcp => false,
             ClientMode::Websockets { .. } => true,
         }
     }
 
-    fn hostname<'a, S>(&'a self, s: &'a Stream<S>) -> Option<&'a str> {
+    pub fn hostname<'a, S>(&'a self, s: &'a Stream<S>) -> Option<&'a str> {
         match self {
             ClientMode::Tcp => s.sni_hostname(),
             ClientMode::Websockets { hostname } => hostname.as_deref(),
         }
     }
 
-    fn handshake_tls<'a>(&self, tls: Option<&'a TlsConfig>) -> Option<&'a TlsConfig> {
+    pub fn handshake_tls<'a>(&self, tls: Option<&'a TlsConfig>) -> Option<&'a TlsConfig> {
         match self {
             ClientMode::Tcp => tls,
             // TLS is None here if using websockets, because the connection is already encrypted.
@@ -239,7 +235,7 @@ impl ReportableError for ClientRequestError {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
+pub(crate) async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin + Send>(
     config: &'static ProxyConfig,
     auth_backend: &'static auth::Backend<'static, ()>,
     ctx: &RequestContext,
@@ -298,122 +294,22 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     ctx.set_db_options(params.clone());
 
-    let hostname = mode.hostname(client.get_ref());
-
     let common_names = tls.map(|tls| &tls.common_names);
 
-    // Extract credentials which we're going to use for auth.
-    let result = auth_backend
-        .as_ref()
-        .map(|()| auth::ComputeUserInfoMaybeEndpoint::parse(ctx, &params, hostname, common_names))
-        .transpose();
+    let (node, cancel_on_shutdown) = handle_client(
+        config,
+        auth_backend,
+        ctx,
+        cancellation_handler,
+        &mut client,
+        &mode,
+        endpoint_rate_limiter,
+        common_names,
+        &params,
+    )
+    .await?;
 
-    let user_info = match result {
-        Ok(user_info) => user_info,
-        Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
-    };
-
-    let user = user_info.get_user().to_owned();
-    let user_info = match user_info
-        .authenticate(
-            ctx,
-            &mut client,
-            mode.allow_cleartext(),
-            &config.authentication_config,
-            endpoint_rate_limiter,
-        )
-        .await
-    {
-        Ok(auth_result) => auth_result,
-        Err(e) => {
-            let db = params.get("database");
-            let app = params.get("application_name");
-            let params_span = tracing::info_span!("", ?user, ?db, ?app);
-
-            return Err(client
-                .throw_error(e, Some(ctx))
-                .instrument(params_span)
-                .await)?;
-        }
-    };
-
-    let (cplane, creds) = match user_info {
-        auth::Backend::ControlPlane(cplane, creds) => (cplane, creds),
-        auth::Backend::Local(_) => unreachable!("local proxy does not run tcp proxy service"),
-    };
-    let params_compat = creds.info.options.get(NeonOptions::PARAMS_COMPAT).is_some();
-    let mut auth_info = compute::AuthInfo::with_auth_keys(creds.keys);
-    auth_info.set_startup_params(&params, params_compat);
-
-    let mut node;
-    let mut attempt = 0;
-    let connect = TcpMechanism {
-        locks: &config.connect_compute_locks,
-    };
-    let backend = auth::Backend::ControlPlane(cplane, creds.info);
-
-    // NOTE: This is messy, but should hopefully be detangled with PGLB.
-    // We wanted to separate the concerns of **connect** to compute (a PGLB operation),
-    // from **authenticate** to compute (a NeonKeeper operation).
-    //
-    // This unfortunately removed retry handling for one error case where
-    // the compute was cached, and we connected, but the compute cache was actually stale
-    // and is associated with the wrong endpoint. We detect this when the **authentication** fails.
-    // As such, we retry once here if the `authenticate` function fails and the error is valid to retry.
-    let pg_settings = loop {
-        attempt += 1;
-
-        let res = connect_to_compute(
-            ctx,
-            &connect,
-            &backend,
-            config.wake_compute_retry_config,
-            &config.connect_to_compute,
-        )
-        .await;
-
-        match res {
-            Ok(n) => node = n,
-            Err(e) => return Err(client.throw_error(e, Some(ctx)).await)?,
-        }
-
-        let auth::Backend::ControlPlane(cplane, user_info) = &backend else {
-            unreachable!("ensured above");
-        };
-
-        let res = auth_info.authenticate(ctx, &mut node, user_info).await;
-        match res {
-            Ok(pg_settings) => break pg_settings,
-            Err(e) if attempt < 2 && e.should_retry_wake_compute() => {
-                tracing::warn!(error = ?e, "retrying wake compute");
-
-                #[allow(irrefutable_let_patterns)]
-                if let ControlPlaneClient::ProxyV1(cplane_proxy_v1) = &**cplane {
-                    let key = user_info.endpoint_cache_key();
-                    cplane_proxy_v1.caches.node_info.invalidate(&key);
-                }
-            }
-            Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
-        }
-    };
-
-    let session = cancellation_handler.get_key();
-
-    prepare_client_connection(&pg_settings, *session.key(), &mut client);
     let client = client.flush_and_into_inner().await?;
-
-    let session_id = ctx.session_id();
-    let (cancel_on_shutdown, cancel) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
-        session
-            .maintain_cancel_key(
-                session_id,
-                cancel,
-                &pg_settings.cancel_closure,
-                &config.connect_to_compute,
-            )
-            .await;
-    });
 
     let private_link_id = match ctx.extra() {
         Some(ConnectionInfoExtra::Aws { vpce_id }) => Some(vpce_id.clone()),

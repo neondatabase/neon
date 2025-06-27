@@ -5,21 +5,166 @@ pub(crate) mod connect_compute;
 pub(crate) mod retry;
 pub(crate) mod wake_compute;
 
+use std::collections::HashSet;
+use std::convert::Infallible;
+use std::sync::Arc;
+
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use smol_str::{SmolStr, format_smolstr};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::oneshot;
+use tracing::Instrument;
 
-use crate::compute;
+use crate::cache::Cache;
+use crate::cancellation::CancellationHandler;
+use crate::compute::ComputeConnection;
+use crate::config::ProxyConfig;
+use crate::context::RequestContext;
+use crate::control_plane::client::ControlPlaneClient;
 pub use crate::pglb::copy_bidirectional::{ErrorSource, copy_bidirectional_client_compute};
+use crate::pglb::{ClientMode, ClientRequestError};
 use crate::pqproto::{BeMessage, CancelKeyData, StartupMessageParams};
-use crate::stream::PqStream;
+use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
+use crate::proxy::retry::ShouldRetryWakeCompute;
+use crate::rate_limiter::EndpointRateLimiter;
+use crate::stream::{PqStream, Stream};
 use crate::types::EndpointCacheKey;
+use crate::{auth, compute};
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
+    config: &'static ProxyConfig,
+    auth_backend: &'static auth::Backend<'static, ()>,
+    ctx: &RequestContext,
+    cancellation_handler: Arc<CancellationHandler>,
+    client: &mut PqStream<Stream<S>>,
+    mode: &ClientMode,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
+    common_names: Option<&HashSet<String>>,
+    params: &StartupMessageParams,
+) -> Result<(ComputeConnection, oneshot::Sender<Infallible>), ClientRequestError> {
+    let hostname = mode.hostname(client.get_ref());
+    // Extract credentials which we're going to use for auth.
+    let result = auth_backend
+        .as_ref()
+        .map(|()| auth::ComputeUserInfoMaybeEndpoint::parse(ctx, params, hostname, common_names))
+        .transpose();
+
+    let user_info = match result {
+        Ok(user_info) => user_info,
+        Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
+    };
+
+    let user = user_info.get_user().to_owned();
+    let user_info = match user_info
+        .authenticate(
+            ctx,
+            client,
+            mode.allow_cleartext(),
+            &config.authentication_config,
+            endpoint_rate_limiter,
+        )
+        .await
+    {
+        Ok(auth_result) => auth_result,
+        Err(e) => {
+            let db = params.get("database");
+            let app = params.get("application_name");
+            let params_span = tracing::info_span!("", ?user, ?db, ?app);
+
+            return Err(client
+                .throw_error(e, Some(ctx))
+                .instrument(params_span)
+                .await)?;
+        }
+    };
+
+    let (cplane, creds) = match user_info {
+        auth::Backend::ControlPlane(cplane, creds) => (cplane, creds),
+        auth::Backend::Local(_) => unreachable!("local proxy does not run tcp proxy service"),
+    };
+    let params_compat = creds.info.options.get(NeonOptions::PARAMS_COMPAT).is_some();
+    let mut auth_info = compute::AuthInfo::with_auth_keys(creds.keys);
+    auth_info.set_startup_params(params, params_compat);
+
+    let mut node;
+    let mut attempt = 0;
+    let connect = TcpMechanism {
+        locks: &config.connect_compute_locks,
+    };
+    let backend = auth::Backend::ControlPlane(cplane, creds.info);
+
+    // NOTE: This is messy, but should hopefully be detangled with PGLB.
+    // We wanted to separate the concerns of **connect** to compute (a PGLB operation),
+    // from **authenticate** to compute (a NeonKeeper operation).
+    //
+    // This unfortunately removed retry handling for one error case where
+    // the compute was cached, and we connected, but the compute cache was actually stale
+    // and is associated with the wrong endpoint. We detect this when the **authentication** fails.
+    // As such, we retry once here if the `authenticate` function fails and the error is valid to retry.
+    let pg_settings = loop {
+        attempt += 1;
+
+        // TODO: callback to pglb
+        let res = connect_to_compute(
+            ctx,
+            &connect,
+            &backend,
+            config.wake_compute_retry_config,
+            &config.connect_to_compute,
+        )
+        .await;
+
+        match res {
+            Ok(n) => node = n,
+            Err(e) => return Err(client.throw_error(e, Some(ctx)).await)?,
+        }
+
+        let auth::Backend::ControlPlane(cplane, user_info) = &backend else {
+            unreachable!("ensured above");
+        };
+
+        let res = auth_info.authenticate(ctx, &mut node, user_info).await;
+        match res {
+            Ok(pg_settings) => break pg_settings,
+            Err(e) if attempt < 2 && e.should_retry_wake_compute() => {
+                tracing::warn!(error = ?e, "retrying wake compute");
+
+                #[allow(irrefutable_let_patterns)]
+                if let ControlPlaneClient::ProxyV1(cplane_proxy_v1) = &**cplane {
+                    let key = user_info.endpoint_cache_key();
+                    cplane_proxy_v1.caches.node_info.invalidate(&key);
+                }
+            }
+            Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
+        }
+    };
+
+    let session = cancellation_handler.get_key();
+
+    finish_client_init(&pg_settings, *session.key(), client);
+
+    let session_id = ctx.session_id();
+    let (cancel_on_shutdown, cancel) = oneshot::channel();
+    tokio::spawn(async move {
+        session
+            .maintain_cancel_key(
+                session_id,
+                cancel,
+                &pg_settings.cancel_closure,
+                &config.connect_to_compute,
+            )
+            .await;
+    });
+
+    Ok((node, cancel_on_shutdown))
+}
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
-pub(crate) fn prepare_client_connection(
+pub(crate) fn finish_client_init(
     settings: &compute::PostgresSettings,
     cancel_key_data: CancelKeyData,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
