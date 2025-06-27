@@ -24,6 +24,7 @@ use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tracing::Instrument;
 
+use crate::auth::backend::ComputeCredentialKeys;
 use crate::cancellation::{CancelClosure, CancellationHandler};
 use crate::compute::{ComputeConnection, PostgresError, RustlsStream};
 use crate::config::ProxyConfig;
@@ -88,6 +89,8 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         auth::Backend::ControlPlane(cplane, creds) => (cplane, creds),
         auth::Backend::Local(_) => unreachable!("local proxy does not run tcp proxy service"),
     };
+    let unauthenticated = matches!(creds.keys, ComputeCredentialKeys::Password(_));
+
     let params_compat = creds.info.options.get(NeonOptions::PARAMS_COMPAT).is_some();
     let mut auth_info = compute::AuthInfo::with_auth_keys(creds.keys);
     auth_info.set_startup_params(params, params_compat);
@@ -114,6 +117,12 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let auth::Backend::ControlPlane(_, user_info) = backend else {
         unreachable!("ensured above");
     };
+
+    // If we have a password, that means we didn't validate the password and convert
+    // them into scram keys. Therefore we can only announce authentication ok now.
+    if unauthenticated {
+        client.write_message(BeMessage::AuthenticationOk);
+    }
 
     let session = cancellation_handler.get_key();
 
