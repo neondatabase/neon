@@ -306,7 +306,7 @@ jobs:
       statuses: write
       contents: write
       pull-requests: write
-    runs-on: [ self-hosted, unit-perf ]
+    runs-on: [ self-hosted, unit-perf-aws-arm ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
