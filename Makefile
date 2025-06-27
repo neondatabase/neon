@@ -98,7 +98,7 @@ CACHEDIR_TAG_CONTENTS := "Signature: 8a477f597d28d172789f06886806bc55"
 # Top level Makefile to build Neon and PostgreSQL
 #
 .PHONY: all
-all: neon postgres neon-pg-ext
+all: neon postgres-install neon-pg-ext
 
 ### Neon Rust bits
 #
@@ -215,12 +215,13 @@ setup-pre-commit-hook:
 # But if the caller has indicated that PostgreSQL is already
 # installed, by setting the PG_INSTALL_CACHED variable, skip it.
 ifdef PG_INSTALL_CACHED
-postgres-install:
-	+@echo "Skipping PostgreSQL installation because PG_INSTALL_CACHED is set"
+postgres-install: skip-install
+$(foreach pg_version,$(POSTGRES_VERSIONS),postgres-install-$(pg_version)): skip-install
 postgres-headers-install:
 	+@echo "Skipping installation of PostgreSQL headers because PG_INSTALL_CACHED is set"
-postgres-install-v17:
+skip-install:
 	+@echo "Skipping PostgreSQL installation because PG_INSTALL_CACHED is set"
+
 else
 include postgres.mk
 endif
