@@ -36,7 +36,7 @@ use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
-use sql_over_http::{NEON_REQUEST_ID, uuid_to_header_value};
+use http_util::{NEON_REQUEST_ID, uuid_to_header_value};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;

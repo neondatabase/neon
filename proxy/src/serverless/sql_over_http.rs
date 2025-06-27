@@ -1,6 +1,5 @@
 use std::pin::pin;
 use std::sync::Arc;
-
 use bytes::Bytes;
 use futures::future::{Either, select, try_join};
 use futures::{StreamExt, TryFutureExt};
@@ -25,20 +24,18 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 use typed_json::json;
 use url::Url;
-use uuid::Uuid;
-
 use super::backend::{LocalProxyConnError, PoolingBackend};
 use super::conn_pool::{AuthData, ConnInfoWithAuth};
 use super::conn_pool_lib::{self, ConnInfo};
-use super::error::HttpCodeError;
-use super::http_util::json_response;
+use super::error::{HttpCodeError, ConnInfoError, Credentials, ReadPayloadError};
+use super::http_util::{json_response, uuid_to_header_value, NEON_REQUEST_ID, CONN_STRING, RAW_TEXT_OUTPUT, ARRAY_MODE, ALLOW_POOL, TXN_ISOLATION_LEVEL, TXN_READ_ONLY, TXN_DEFERRABLE};
 use super::json::{JsonConversionError, json_to_pg_text, pg_text_row_to_json};
 use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
-use crate::auth::{ComputeUserInfoParseError, endpoint_sni};
+use crate::auth::{endpoint_sni};
 use crate::config::{AuthenticationConfig, HttpConfig, ProxyConfig, TlsConfig};
 use crate::context::RequestContext;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
-use crate::http::{ReadBodyError, read_body_with_limit};
+use crate::http::{read_body_with_limit};
 use crate::metrics::{HttpDirection, Metrics, SniGroup, SniKind};
 use crate::pqproto::StartupMessageParams;
 use crate::proxy::NeonOptions;
@@ -70,16 +67,6 @@ enum Payload {
     Batch(BatchQueryData),
 }
 
-pub(super) static NEON_REQUEST_ID: HeaderName = HeaderName::from_static("neon-request-id");
-
-static CONN_STRING: HeaderName = HeaderName::from_static("neon-connection-string");
-static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
-static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
-static ALLOW_POOL: HeaderName = HeaderName::from_static("neon-pool-opt-in");
-static TXN_ISOLATION_LEVEL: HeaderName = HeaderName::from_static("neon-batch-isolation-level");
-static TXN_READ_ONLY: HeaderName = HeaderName::from_static("neon-batch-read-only");
-static TXN_DEFERRABLE: HeaderName = HeaderName::from_static("neon-batch-deferrable");
-
 static HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
 
 fn bytes_to_pg_text<'de, D>(deserializer: D) -> Result<Vec<Option<String>>, D::Error>
@@ -89,52 +76,6 @@ where
     // TODO: consider avoiding the allocation here.
     let json: Vec<Value> = serde::de::Deserialize::deserialize(deserializer)?;
     Ok(json_to_pg_text(json))
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum ConnInfoError {
-    #[error("invalid header: {0}")]
-    InvalidHeader(&'static HeaderName),
-    #[error("invalid connection string: {0}")]
-    UrlParseError(#[from] url::ParseError),
-    #[error("incorrect scheme")]
-    IncorrectScheme,
-    #[error("missing database name")]
-    MissingDbName,
-    #[error("invalid database name")]
-    InvalidDbName,
-    #[error("missing username")]
-    MissingUsername,
-    #[error("invalid username: {0}")]
-    InvalidUsername(#[from] std::string::FromUtf8Error),
-    #[error("missing authentication credentials: {0}")]
-    MissingCredentials(Credentials),
-    #[error("missing hostname")]
-    MissingHostname,
-    #[error("invalid hostname: {0}")]
-    InvalidEndpoint(#[from] ComputeUserInfoParseError),
-    #[error("malformed endpoint")]
-    MalformedEndpoint,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum Credentials {
-    #[error("required password")]
-    Password,
-    #[error("required authorization bearer token in JWT format")]
-    BearerJwt,
-}
-
-impl ReportableError for ConnInfoError {
-    fn get_error_kind(&self) -> ErrorKind {
-        ErrorKind::User
-    }
-}
-
-impl UserFacingError for ConnInfoError {
-    fn to_string_client(&self) -> String {
-        self.to_string()
-    }
 }
 
 fn get_conn_info(
@@ -509,44 +450,6 @@ impl HttpCodeError for SqlOverHttpError {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum ReadPayloadError {
-    #[error("could not read the HTTP request body: {0}")]
-    Read(#[from] hyper::Error),
-    #[error("request is too large (max is {limit} bytes)")]
-    BodyTooLarge { limit: usize },
-    #[error("could not parse the HTTP request body: {0}")]
-    Parse(#[from] serde_json::Error),
-}
-
-impl From<ReadBodyError<hyper::Error>> for ReadPayloadError {
-    fn from(value: ReadBodyError<hyper::Error>) -> Self {
-        match value {
-            ReadBodyError::BodyTooLarge { limit } => Self::BodyTooLarge { limit },
-            ReadBodyError::Read(e) => Self::Read(e),
-        }
-    }
-}
-
-impl ReportableError for ReadPayloadError {
-    fn get_error_kind(&self) -> ErrorKind {
-        match self {
-            ReadPayloadError::Read(_) => ErrorKind::ClientDisconnect,
-            ReadPayloadError::BodyTooLarge { .. } => ErrorKind::User,
-            ReadPayloadError::Parse(_) => ErrorKind::User,
-        }
-    }
-}
-
-impl HttpCodeError for ReadPayloadError {
-    fn get_http_status_code(&self) -> StatusCode {
-        match self {
-            ReadPayloadError::Read(_) => StatusCode::BAD_REQUEST,
-            ReadPayloadError::BodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-            ReadPayloadError::Parse(_) => StatusCode::BAD_REQUEST,
-        }
-    }
-}
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SqlOverHttpCancel {
@@ -834,11 +737,6 @@ static HEADERS_TO_FORWARD: &[&HeaderName] = &[
     &TXN_DEFERRABLE,
 ];
 
-pub(crate) fn uuid_to_header_value(id: Uuid) -> HeaderValue {
-    let mut uuid = [0; uuid::fmt::Hyphenated::LENGTH];
-    HeaderValue::from_str(id.as_hyphenated().encode_lower(&mut uuid[..]))
-        .expect("uuid hyphenated format should be all valid header characters")
-}
 
 async fn handle_auth_broker_inner(
     ctx: &RequestContext,

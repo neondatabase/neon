@@ -3,11 +3,28 @@
 
 use anyhow::Context;
 use bytes::Bytes;
-use http::{Response, StatusCode};
+use http::{Response, StatusCode, HeaderName, HeaderValue};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use http_utils::error::ApiError;
 use serde::Serialize;
+use uuid::Uuid;
+
+// Common header names used across serverless modules
+pub(super) static NEON_REQUEST_ID: HeaderName = HeaderName::from_static("neon-request-id");
+pub(super) static CONN_STRING: HeaderName = HeaderName::from_static("neon-connection-string");
+pub(super) static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
+pub(super) static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
+pub(super) static ALLOW_POOL: HeaderName = HeaderName::from_static("neon-pool-opt-in");
+pub(super) static TXN_ISOLATION_LEVEL: HeaderName = HeaderName::from_static("neon-batch-isolation-level");
+pub(super) static TXN_READ_ONLY: HeaderName = HeaderName::from_static("neon-batch-read-only");
+pub(super) static TXN_DEFERRABLE: HeaderName = HeaderName::from_static("neon-batch-deferrable");
+
+pub(crate) fn uuid_to_header_value(id: Uuid) -> HeaderValue {
+    let mut uuid = [0; uuid::fmt::Hyphenated::LENGTH];
+    HeaderValue::from_str(id.as_hyphenated().encode_lower(&mut uuid[..]))
+        .expect("uuid hyphenated format should be all valid header characters")
+}
 
 /// Like [`ApiError::into_response`]
 pub(crate) fn api_error_into_response(this: ApiError) -> Response<BoxBody<Bytes, hyper::Error>> {
