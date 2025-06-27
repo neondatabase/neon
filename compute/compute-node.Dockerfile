@@ -115,6 +115,9 @@ ARG EXTENSIONS=all
 FROM $BASE_IMAGE_SHA AS build-deps
 ARG DEBIAN_VERSION
 
+# Keep in sync with build-tools.Dockerfile
+ENV PROTOC_VERSION=25.1
+
 # Use strict mode for bash to catch errors early
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
@@ -146,10 +149,17 @@ RUN case $DEBIAN_VERSION in \
     ninja-build git autoconf automake libtool build-essential bison flex libreadline-dev \
     zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget ca-certificates pkg-config libssl-dev \
     libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd curl unzip g++ \
-    libclang-dev jsonnet protobuf-compiler libprotobuf-dev \
+    libclang-dev \
+    jsonnet \
     $VERSION_INSTALLS \
-    && apt clean && rm -rf /var/lib/apt/lists/* && \
-    useradd -ms /bin/bash nonroot -b /home
+    && apt clean && rm -rf /var/lib/apt/lists/* \
+    && useradd -ms /bin/bash nonroot -b /home \
+    # Install protoc from binary release, since Debian's versions are too old.
+    && curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-$(uname -m | sed 's/aarch64/aarch_64/g').zip" -o "protoc.zip" \
+    && unzip -q protoc.zip -d protoc \
+    && mv protoc/bin/protoc /usr/local/bin/protoc \
+    && mv protoc/include/google /usr/local/include/google \
+    && rm -rf protoc.zip protoc
 
 #########################################################################################
 #
