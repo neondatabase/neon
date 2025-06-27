@@ -162,7 +162,7 @@ jobs:
       - name: Build walproposer-lib (only for v17)
         if: steps.cache_walproposer_lib.outputs.cache-hit != 'true'
         run:
-          make walproposer-lib -j$(sysctl -n hw.ncpu)
+          make walproposer-lib -j$(sysctl -n hw.ncpu) PG_INSTALL_CACHED=1
 
       - name: Upload "build/walproposer-lib" artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
