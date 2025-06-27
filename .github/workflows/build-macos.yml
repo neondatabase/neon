@@ -60,14 +60,12 @@ jobs:
         id: pg_rev
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-${{ matrix.postgres-version }}) | tee -a "${GITHUB_OUTPUT}"
 
-      - name: Cache postgres ${{ matrix.postgres-version }} build
+      - name: Cache "pg_install/${{ matrix.postgres-version }}"
         id: cache_pg
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
-          path: |
-            pg_install/${{ matrix.postgres-version }}
-            build/${{ matrix.postgres-version }}
-          key: v2-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-build-${{ matrix.postgres-version }}-${{ steps.pg_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+          path: pg_install/${{ matrix.postgres-version }}
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-install-${{ matrix.postgres-version }}-${{ steps.pg_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Checkout submodule vendor/postgres-${{ matrix.postgres-version }}
         if: steps.cache_pg.outputs.cache-hit != 'true'
@@ -123,40 +121,32 @@ jobs:
           echo pg_rev_v16=$(git rev-parse HEAD:vendor/postgres-v16) | tee -a "${GITHUB_OUTPUT}"
           echo pg_rev_v17=$(git rev-parse HEAD:vendor/postgres-v17) | tee -a "${GITHUB_OUTPUT}"
 
-      - name: Restore "pg-build--v14" cache
+      - name: Restore "pg_install/v14" cache
         uses: actions/cache/restore@v4
         with:
-          path: |
-            pg_install/v14
-            build/v14
-          key: v2-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-build-v14-${{ steps.pg_rev.outputs.pg_rev_v14 }}-${{ hashFiles('Makefile') }}
+          path: pg_install/v14
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-install-v14-${{ steps.pg_rev.outputs.pg_rev_v14 }}-${{ hashFiles('Makefile') }}
           fail-on-cache-miss: true
 
-      - name: Restore "pg-build--v15" cache
+      - name: Restore "pg_install/v15" cache
         uses: actions/cache/restore@v4
         with:
-          path: |
-            pg_install/v15
-            build/v15
-          key: v2-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-build-v15-${{ steps.pg_rev.outputs.pg_rev_v15 }}-${{ hashFiles('Makefile') }}
+          path: pg_install/v15
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-install-v15-${{ steps.pg_rev.outputs.pg_rev_v15 }}-${{ hashFiles('Makefile') }}
           fail-on-cache-miss: true
 
-      - name: Restore "pg-build--v16" cache
+      - name: Restore "pg_install/v16" cache
         uses: actions/cache/restore@v4
         with:
-          path: |
-            pg_install/v16
-            build/v16
-          key: v2-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-build-v16-${{ steps.pg_rev.outputs.pg_rev_v16 }}-${{ hashFiles('Makefile') }}
+          path: pg_install/v16
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-install-v16-${{ steps.pg_rev.outputs.pg_rev_v16 }}-${{ hashFiles('Makefile') }}
           fail-on-cache-miss: true
 
-      - name: Restore "pg-build--v17" cache
+      - name: Restore "pg_install/v17" cache
         uses: actions/cache/restore@v4
         with:
-          path: |
-            pg_install/v17
-            build/v17
-          key: v2-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-build-v17-${{ steps.pg_rev.outputs.pg_rev_v17 }}-${{ hashFiles('Makefile') }}
+          path: pg_install/v17
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-install-v17-${{ steps.pg_rev.outputs.pg_rev_v17 }}-${{ hashFiles('Makefile') }}
           fail-on-cache-miss: true
 
       # Explicitly update the rust toolchain before running 'make'. The parallel make build can
