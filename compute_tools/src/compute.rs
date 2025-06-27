@@ -1030,8 +1030,8 @@ impl ComputeNode {
         Ok(())
     }
 
-    /// Fetches a basebackup via gRPC. The connstring must use grpc://. Returns the connect time
-    /// and base backup size.
+    /// Fetches a basebackup via gRPC. The connstring must use grpc://. Returns the timestamp when
+    /// the connection was established, and the (compressed) size of the basebackup.
     fn try_get_basebackup_grpc(&self, spec: &ParsedSpec, lsn: Lsn) -> Result<(Instant, usize)> {
         let shard0_connstr = spec
             .pageserver_connstr
@@ -1066,21 +1066,20 @@ impl ComputeNode {
             anyhow::Ok((reader, connected))
         })?;
 
-        let reader = tokio_util::io::SyncIoBridge::new(reader);
-        let mut reader = MeasuredReader::new(flate2::read::GzDecoder::new(reader));
+        let mut reader = MeasuredReader::new(tokio_util::io::SyncIoBridge::new(reader));
 
         // Set `ignore_zeros` so that unpack() reads the entire stream and doesn't just stop at the
         // end-of-archive marker. If the server errors, the tar::Builder drop handler will write an
         // end-of-archive marker before the error is emitted, and we would not see the error.
-        let mut ar = tar::Archive::new(&mut reader);
+        let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(&mut reader));
         ar.set_ignore_zeros(true);
         ar.unpack(&self.params.pgdata)?;
 
         Ok((connected, reader.get_byte_count()))
     }
 
-    /// Fetches a basebackup via gRPC. The connstring must use postgresql://. Returns the connect
-    /// time and base backup size.
+    /// Fetches a basebackup via libpq. The connstring must use postgresql://. Returns the timestamp
+    /// when the connection was established, and the (compressed) size of the basebackup.
     fn try_get_basebackup_libpq(&self, spec: &ParsedSpec, lsn: Lsn) -> Result<(Instant, usize)> {
         let shard0_connstr = spec.pageserver_connstr.split(',').next().unwrap();
         let mut config = postgres::Config::from_str(shard0_connstr)?;
