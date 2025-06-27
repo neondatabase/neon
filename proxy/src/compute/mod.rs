@@ -165,6 +165,7 @@ impl AuthInfo {
                 ComputeCredentialKeys::AuthKeys(AuthKeys::ScramSha256(auth_keys)) => {
                     Some(Auth::Scram(Box::new(auth_keys)))
                 }
+                ComputeCredentialKeys::Password(pw) => Some(Auth::Password(pw)),
                 ComputeCredentialKeys::JwtPayload(_) => None,
             },
             server_params: StartupMessageParams::default(),
