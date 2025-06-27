@@ -1022,9 +1022,14 @@ impl Service {
             )
             .await?;
 
-        if let Some(err) = responses.iter().find_map(|res| res.as_ref().err()) {
+        if let Some((idx, err)) = responses
+            .iter()
+            .enumerate()
+            .find_map(|(idx, res)| Some((idx, res.as_ref().err()?)))
+        {
+            let sk_id = to_safekeepers[idx].get_id();
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                "pull_timeline failed: {err}"
+                "pull_timeline to {sk_id} failed: {err}",
             )));
         }
 
