@@ -4529,6 +4529,10 @@ impl TenantShard {
         Ok(toml_edit::de::from_str::<LocationConf>(&config)?)
     }
 
+    /// Stores a tenant location config to disk.
+    ///
+    /// NB: make sure to call `ShardIdentity::assert_equal` before persisting a new config, to avoid
+    /// changes to shard parameters that may result in data corruption.
     #[tracing::instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))]
     pub(super) async fn persist_tenant_config(
         conf: &'static PageServerConf,

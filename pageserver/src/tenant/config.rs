@@ -12,6 +12,7 @@
 use pageserver_api::models;
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
 use serde::{Deserialize, Serialize};
+use utils::critical;
 use utils::generation::Generation;
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -169,6 +170,16 @@ impl LocationConf {
                     attach_mode: mode,
                 })
             }
+        }
+
+        // This should never happen.
+        // TODO: turn this into a proper assertion.
+        if stripe_size != self.shard.stripe_size {
+            critical!(
+                "stripe size mismatch: {} != {}",
+                self.shard.stripe_size,
+                stripe_size,
+            );
         }
 
         self.shard.stripe_size = stripe_size;
