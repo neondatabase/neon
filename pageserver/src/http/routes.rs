@@ -1896,6 +1896,10 @@ async fn update_tenant_config_handler(
         ShardParameters::from(tenant.get_shard_identity()),
     );
 
+    tenant
+        .get_shard_identity()
+        .assert_equal(location_conf.shard); // not strictly necessary since we construct it above
+
     crate::tenant::TenantShard::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
         .await
         .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
@@ -1939,6 +1943,10 @@ async fn patch_tenant_config_handler(
         tenant.get_generation(),
         ShardParameters::from(tenant.get_shard_identity()),
     );
+
+    tenant
+        .get_shard_identity()
+        .assert_equal(location_conf.shard); // not strictly necessary since we construct it above
 
     crate::tenant::TenantShard::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
         .await
