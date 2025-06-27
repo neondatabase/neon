@@ -84,7 +84,18 @@ fn restart_rsyslog() -> Result<()> {
     Ok(())
 }
 
-fn parse_audit_syslog_address(remote_endpoint: &str) -> Result<(String, u16)> {
+fn parse_audit_syslog_address(
+    remote_plain_endpoint: &str,
+    remote_tls_endpoint: &str,
+) -> Result<(String, u16, String)> {
+    let tls;
+    let remote_endpoint = if !remote_tls_endpoint.is_empty() {
+        tls = "true".to_string();
+        remote_tls_endpoint
+    } else {
+        tls = "false".to_string();
+        remote_plain_endpoint
+    };
     // Urlify the remote_endpoint, so parsing can be done with url::Url.
     let url_str = format!("http://{}", remote_endpoint);
     let url = Url::parse(&url_str)
@@ -112,7 +123,7 @@ fn parse_audit_syslog_address(remote_endpoint: &str) -> Result<(String, u16)> {
         .port()
         .ok_or_else(|| anyhow!("Invalid port in {remote_endpoint}"))?;
 
-    Ok((host, port))
+    Ok((host, port, tls))
 }
 
 fn generate_audit_rsyslog_config(
@@ -121,6 +132,7 @@ fn generate_audit_rsyslog_config(
     project_id: &str,
     remote_syslog_host: &str,
     remote_syslog_port: u16,
+    remote_syslog_tls: &str,
 ) -> String {
     format!(
         include_str!("config_template/compute_audit_rsyslog_template.conf"),
@@ -128,7 +140,8 @@ fn generate_audit_rsyslog_config(
         endpoint_id = endpoint_id,
         project_id = project_id,
         remote_syslog_host = remote_syslog_host,
-        remote_syslog_port = remote_syslog_port
+        remote_syslog_port = remote_syslog_port,
+        remote_syslog_tls = remote_syslog_tls
     )
 }
 
@@ -137,15 +150,17 @@ pub fn configure_audit_rsyslog(
     endpoint_id: &str,
     project_id: &str,
     remote_endpoint: &str,
+    remote_tls_endpoint: &str,
 ) -> Result<()> {
-    let (remote_syslog_host, remote_syslog_port) =
-        parse_audit_syslog_address(remote_endpoint).unwrap();
+    let (remote_syslog_host, remote_syslog_port, remote_syslog_tls) =
+        parse_audit_syslog_address(remote_endpoint, remote_tls_endpoint).unwrap();
     let config_content = generate_audit_rsyslog_config(
         log_directory,
         endpoint_id,
         project_id,
         &remote_syslog_host,
         remote_syslog_port,
+        &remote_syslog_tls,
     );
 
     info!("rsyslog config_content: {}", config_content);
@@ -345,59 +360,88 @@ mod tests {
     #[test]
     fn test_parse_audit_syslog_address() {
         {
-            // host:port format
-            let parsed = parse_audit_syslog_address("collector.host.tld:5555");
+            // host:port format (plaintext)
+            let parsed = parse_audit_syslog_address("collector.host.tld:5555", "");
             assert!(parsed.is_ok());
-            assert_eq!(parsed.unwrap(), (String::from("collector.host.tld"), 5555));
-        }
-
-        {
-            // host:port format with ipv4 ip address
-            let parsed = parse_audit_syslog_address("10.0.0.1:5555");
-            assert!(parsed.is_ok());
-            assert_eq!(parsed.unwrap(), (String::from("10.0.0.1"), 5555));
-        }
-
-        {
-            // host:port format with ipv6 ip address
-            let parsed =
-                parse_audit_syslog_address("[7e60:82ed:cb2e:d617:f904:f395:aaca:e252]:5555");
             assert_eq!(
                 parsed.unwrap(),
                 (
-                    String::from("7e60:82ed:cb2e:d617:f904:f395:aaca:e252"),
-                    5555
+                    String::from("collector.host.tld"),
+                    5555,
+                    String::from("false")
                 )
             );
         }
 
         {
-            // host without port
-            let parsed = parse_audit_syslog_address("collector.host.tld");
+            // host:port format with ipv4 ip address (plaintext)
+            let parsed = parse_audit_syslog_address("10.0.0.1:5555", "");
+            assert!(parsed.is_ok());
+            assert_eq!(
+                parsed.unwrap(),
+                (String::from("10.0.0.1"), 5555, String::from("false"))
+            );
+        }
+
+        {
+            // host:port format with ipv6 ip address (plaintext)
+            let parsed =
+                parse_audit_syslog_address("[7e60:82ed:cb2e:d617:f904:f395:aaca:e252]:5555", "");
+            assert_eq!(
+                parsed.unwrap(),
+                (
+                    String::from("7e60:82ed:cb2e:d617:f904:f395:aaca:e252"),
+                    5555,
+                    String::from("false")
+                )
+            );
+        }
+
+        {
+            // Only TLS host:port defined
+            let parsed = parse_audit_syslog_address("", "tls.host.tld:5556");
+            assert_eq!(
+                parsed.unwrap(),
+                (String::from("tls.host.tld"), 5556, String::from("true"))
+            );
+        }
+
+        {
+            // tls host should take precedence, when both defined
+            let parsed = parse_audit_syslog_address("plaintext.host.tld:5555", "tls.host.tld:5556");
+            assert_eq!(
+                parsed.unwrap(),
+                (String::from("tls.host.tld"), 5556, String::from("true"))
+            );
+        }
+
+        {
+            // host without port (plaintext)
+            let parsed = parse_audit_syslog_address("collector.host.tld", "");
             assert!(parsed.is_err());
         }
 
         {
             // port without host
-            let parsed = parse_audit_syslog_address(":5555");
+            let parsed = parse_audit_syslog_address(":5555", "");
             assert!(parsed.is_err());
         }
 
         {
             // valid host with invalid port
-            let parsed = parse_audit_syslog_address("collector.host.tld:90001");
+            let parsed = parse_audit_syslog_address("collector.host.tld:90001", "");
             assert!(parsed.is_err());
         }
 
         {
             // invalid hostname with valid port
-            let parsed = parse_audit_syslog_address("-collector.host.tld:5555");
+            let parsed = parse_audit_syslog_address("-collector.host.tld:5555", "");
             assert!(parsed.is_err());
         }
 
         {
             // parse error
-            let parsed = parse_audit_syslog_address("collector.host.tld:::5555");
+            let parsed = parse_audit_syslog_address("collector.host.tld:::5555", "");
             assert!(parsed.is_err());
         }
     }
@@ -405,11 +449,13 @@ mod tests {
     #[test]
     fn test_generate_audit_rsyslog_config() {
         {
+            // plaintext version
             let log_directory = "/tmp/log".to_string();
             let endpoint_id = "ep-test-endpoint-id";
             let project_id = "test-project-id";
             let remote_syslog_host = "collector.host.tld";
             let remote_syslog_port = 5555;
+            let remote_syslog_tls = "false";
 
             let conf_str = generate_audit_rsyslog_config(
                 log_directory,
@@ -417,11 +463,38 @@ mod tests {
                 project_id,
                 remote_syslog_host,
                 remote_syslog_port,
+                remote_syslog_tls,
             );
 
+            assert!(conf_str.contains(r#"set $.remote_syslog_tls = "false";"#));
             assert!(conf_str.contains(r#"type="omfwd""#));
             assert!(conf_str.contains(r#"target="collector.host.tld""#));
             assert!(conf_str.contains(r#"port="5555""#));
+            assert!(conf_str.contains(r#"StreamDriverPermittedPeers="collector.host.tld""#));
+        }
+
+        {
+            // TLS version
+            let log_directory = "/tmp/log".to_string();
+            let endpoint_id = "ep-test-endpoint-id";
+            let project_id = "test-project-id";
+            let remote_syslog_host = "collector.host.tld";
+            let remote_syslog_port = 5556;
+            let remote_syslog_tls = "true";
+
+            let conf_str = generate_audit_rsyslog_config(
+                log_directory,
+                endpoint_id,
+                project_id,
+                remote_syslog_host,
+                remote_syslog_port,
+                remote_syslog_tls,
+            );
+
+            assert!(conf_str.contains(r#"set $.remote_syslog_tls = "true";"#));
+            assert!(conf_str.contains(r#"type="omfwd""#));
+            assert!(conf_str.contains(r#"target="collector.host.tld""#));
+            assert!(conf_str.contains(r#"port="5556""#));
             assert!(conf_str.contains(r#"StreamDriverPermittedPeers="collector.host.tld""#));
         }
     }
