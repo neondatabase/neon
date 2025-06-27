@@ -46,7 +46,7 @@ use subzero_core::{
         self as SubzeroCoreError, JsonDeserialize, NotFound, JwtTokenInvalid, InternalError, GucHeadersError, GucStatusError, ContentTypeError,
     },
     error::{pg_error_to_status_code},
-    schema::{DbSchema},
+    schema::{DbSchema, POSTGRESQL_INTROSPECTION_SQL, POSTGRESQL_CONFIGURATION_SQL},
     formatter::{Param, Param::*, postgresql::{fmt_main_query, generate}, Snippet, SqlParam},
     dynamic_statement::{param, sql, JoinIterator},
     config::{db_schemas, db_allowed_select_functions, role_claim_key, /*to_tuple*/},
@@ -57,8 +57,8 @@ use subzero_core::{
 static MAX_SCHEMA_SIZE: usize = 1024 * 1024 * 5; // 5MB
 static MAX_HTTP_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB limit
 static EMPTY_JSON_SCHEMA: &str = r#"{"schemas":[]}"#;
-const INTROSPECTION_SQL: &str = include_str!("../../../../subzero/introspection/postgresql_introspection_query.sql");
-const CONFIGURATION_SQL: &str = include_str!("../../../../subzero/introspection/postgresql_configuration_query.sql");
+const INTROSPECTION_SQL: &str = POSTGRESQL_INTROSPECTION_SQL;
+const CONFIGURATION_SQL: &str = POSTGRESQL_CONFIGURATION_SQL;
 static HEADERS_TO_FORWARD: &[&HeaderName] = &[
     &AUTHORIZATION,
 ];
