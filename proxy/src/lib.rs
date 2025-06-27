@@ -75,6 +75,13 @@
 )]
 // List of temporarily allowed lints to unblock beta/nightly.
 #![allow(unknown_lints)]
+#![expect(
+    dead_code,
+    reason = "
+    We are making minimal changes to proxy for lakebase-v2 integration. 
+    I don't want to delete code that will eventually be merged back in.
+"
+)]
 
 pub mod binary;
 
