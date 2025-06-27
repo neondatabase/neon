@@ -157,7 +157,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     // needed for RI to know what IP to send cancellation to.
     pg_settings
         .params
-        .insert("upstream_ip".to_string(), node.socket_addr.to_string());
+        .insert("upstream_ip".to_string(), node.socket_addr.ip().to_string());
 
     finish_client_init(&pg_settings, cancel_key_data, client);
 
