@@ -12,7 +12,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 use std::{io, str};
 
-use anyhow::{Context as _, anyhow, bail};
+use anyhow::{Context as _, bail};
 use bytes::{Buf as _, BufMut as _, BytesMut};
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
@@ -62,7 +62,6 @@ use utils::{failpoint_support, span_record};
 
 use crate::auth::check_permission;
 use crate::basebackup::{self, BasebackupError};
-use crate::basebackup_cache::BasebackupCache;
 use crate::config::PageServerConf;
 use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
@@ -137,7 +136,6 @@ pub fn spawn(
     perf_trace_dispatch: Option<Dispatch>,
     tcp_listener: tokio::net::TcpListener,
     tls_config: Option<Arc<rustls::ServerConfig>>,
-    basebackup_cache: Arc<BasebackupCache>,
 ) -> Listener {
     let cancel = CancellationToken::new();
     let libpq_ctx = RequestContext::todo_child(
@@ -159,7 +157,6 @@ pub fn spawn(
             conf.pg_auth_type,
             tls_config,
             conf.page_service_pipelining.clone(),
-            basebackup_cache,
             libpq_ctx,
             cancel.clone(),
         )
@@ -218,7 +215,6 @@ pub async fn libpq_listener_main(
     auth_type: AuthType,
     tls_config: Option<Arc<rustls::ServerConfig>>,
     pipelining_config: PageServicePipeliningConfig,
-    basebackup_cache: Arc<BasebackupCache>,
     listener_ctx: RequestContext,
     listener_cancel: CancellationToken,
 ) -> Connections {
@@ -262,7 +258,6 @@ pub async fn libpq_listener_main(
                     auth_type,
                     tls_config.clone(),
                     pipelining_config.clone(),
-                    Arc::clone(&basebackup_cache),
                     connection_ctx,
                     connections_cancel.child_token(),
                     gate_guard,
@@ -305,7 +300,6 @@ async fn page_service_conn_main(
     auth_type: AuthType,
     tls_config: Option<Arc<rustls::ServerConfig>>,
     pipelining_config: PageServicePipeliningConfig,
-    basebackup_cache: Arc<BasebackupCache>,
     connection_ctx: RequestContext,
     cancel: CancellationToken,
     gate_guard: GateGuard,
@@ -371,7 +365,6 @@ async fn page_service_conn_main(
         pipelining_config,
         conf.get_vectored_concurrent_io,
         perf_span_fields,
-        basebackup_cache,
         connection_ctx,
         cancel.clone(),
         gate_guard,
@@ -424,8 +417,6 @@ struct PageServerHandler {
 
     pipelining_config: PageServicePipeliningConfig,
     get_vectored_concurrent_io: GetVectoredConcurrentIo,
-
-    basebackup_cache: Arc<BasebackupCache>,
 
     gate_guard: GateGuard,
 }
@@ -912,7 +903,6 @@ impl PageServerHandler {
         pipelining_config: PageServicePipeliningConfig,
         get_vectored_concurrent_io: GetVectoredConcurrentIo,
         perf_span_fields: ConnectionPerfSpanFields,
-        basebackup_cache: Arc<BasebackupCache>,
         connection_ctx: RequestContext,
         cancel: CancellationToken,
         gate_guard: GateGuard,
@@ -926,7 +916,6 @@ impl PageServerHandler {
             cancel,
             pipelining_config,
             get_vectored_concurrent_io,
-            basebackup_cache,
             gate_guard,
         }
     }
@@ -2619,20 +2608,9 @@ impl PageServerHandler {
         } else {
             let mut writer = BufWriter::new(pgb.copyout_writer());
 
-            let cached = {
-                // Basebackup is cached only for this combination of parameters.
-                if timeline.is_basebackup_cache_enabled()
-                    && gzip
-                    && lsn.is_some()
-                    && prev_lsn.is_none()
-                {
-                    self.basebackup_cache
-                        .get(tenant_id, timeline_id, lsn.unwrap())
-                        .await
-                } else {
-                    None
-                }
-            };
+            let cached = timeline
+                .get_cached_basebackup_if_enabled(lsn, prev_lsn, full_backup, replica, gzip)
+                .await;
 
             if let Some(mut cached) = cached {
                 from_cache = true;
@@ -3568,21 +3546,41 @@ impl proto::PageService for GrpcPageServiceHandler {
                 page_api::BaseBackupCompression::Gzip => Some(async_compression::Level::Fastest),
             };
 
-            let result = basebackup::send_basebackup_tarball(
-                &mut simplex_write,
-                &timeline,
-                req.lsn,
-                None,
-                req.full,
-                req.replica,
-                gzip_level,
-                &ctx,
-            )
-            .instrument(span) // propagate request span
-            .await;
-            simplex_write.shutdown().await.map_err(|err| {
-                BasebackupError::Server(anyhow!("simplex shutdown failed: {err}"))
-            })?;
+            // Check for a cached basebackup.
+            let cached = timeline
+                .get_cached_basebackup_if_enabled(
+                    req.lsn,
+                    None,
+                    req.full,
+                    req.replica,
+                    gzip_level.is_some(),
+                )
+                .await;
+
+            let result = if let Some(mut cached) = cached {
+                // If we have a cached basebackup, send it.
+                tokio::io::copy(&mut cached, &mut simplex_write)
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| BasebackupError::Client(err, "cached,copy"))
+            } else {
+                basebackup::send_basebackup_tarball(
+                    &mut simplex_write,
+                    &timeline,
+                    req.lsn,
+                    None,
+                    req.full,
+                    req.replica,
+                    gzip_level,
+                    &ctx,
+                )
+                .instrument(span) // propagate request span
+                .await
+            };
+            simplex_write
+                .shutdown()
+                .await
+                .map_err(|err| BasebackupError::Client(err, "simplex_write"))?;
             result
         });
 
