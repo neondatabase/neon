@@ -14,11 +14,13 @@ use http_utils::tls_certs::ReloadingCertificateResolver;
 use hyper0::Uri;
 use metrics::BuildInfo;
 use metrics::launch_timestamp::LaunchTimestamp;
+use pageserver_api::config::PostHogConfig;
 use reqwest::Certificate;
 use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
 use storage_controller::persistence::Persistence;
 use storage_controller::service::chaos_injector::ChaosInjector;
+use storage_controller::service::feature_flag::FeatureFlagService;
 use storage_controller::service::{
     Config, HEARTBEAT_INTERVAL_DEFAULT, LONG_RECONCILE_THRESHOLD_DEFAULT,
     MAX_OFFLINE_INTERVAL_DEFAULT, MAX_WARMING_UP_INTERVAL_DEFAULT,
@@ -252,6 +254,8 @@ struct Secrets {
     peer_jwt_token: Option<String>,
 }
 
+const POSTHOG_CONFIG_ENV: &str = "POSTHOG_CONFIG";
+
 impl Secrets {
     const DATABASE_URL_ENV: &'static str = "DATABASE_URL";
     const PAGESERVER_JWT_TOKEN_ENV: &'static str = "PAGESERVER_JWT_TOKEN";
@@ -409,6 +413,18 @@ async fn async_main() -> anyhow::Result<()> {
         None => Vec::new(),
     };
 
+    let posthog_config = if let Ok(json) = std::env::var(POSTHOG_CONFIG_ENV) {
+        let res: Result<PostHogConfig, _> = serde_json::from_str(&json);
+        if let Ok(config) = res {
+            Some(config)
+        } else {
+            tracing::warn!("Invalid posthog config: {json}");
+            None
+        }
+    } else {
+        None
+    };
+
     let config = Config {
         pageserver_jwt_token: secrets.pageserver_jwt_token,
         safekeeper_jwt_token: secrets.safekeeper_jwt_token,
@@ -455,6 +471,7 @@ async fn async_main() -> anyhow::Result<()> {
         timelines_onto_safekeepers: args.timelines_onto_safekeepers,
         use_local_compute_notifications: args.use_local_compute_notifications,
         timeline_safekeeper_count: args.timeline_safekeeper_count,
+        posthog_config: posthog_config.clone(),
         #[cfg(feature = "testing")]
         kick_secondary_downloads: args.kick_secondary_downloads,
     };
@@ -537,6 +554,29 @@ async fn async_main() -> anyhow::Result<()> {
         )
     });
 
+    let feature_flag_task = if let Some(posthog_config) = posthog_config {
+        let service = service.clone();
+        let cancel = CancellationToken::new();
+        let cancel_bg = cancel.clone();
+        let task = tokio::task::spawn(
+            async move {
+                match FeatureFlagService::new(service, posthog_config) {
+                    Ok(feature_flag_service) => {
+                        let feature_flag_service = Arc::new(feature_flag_service);
+                        feature_flag_service.run(cancel_bg).await
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to create feature flag service: {}", e);
+                    }
+                };
+            }
+            .instrument(tracing::info_span!("feature_flag_service")),
+        );
+        Some((task, cancel))
+    } else {
+        None
+    };
+
     // Wait until we receive a signal
     let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt())?;
     let mut sigquit = tokio::signal::unix::signal(SignalKind::quit())?;
@@ -582,6 +622,12 @@ async fn async_main() -> anyhow::Result<()> {
     if let Some((chaos_jh, chaos_cancel)) = chaos_task {
         chaos_cancel.cancel();
         chaos_jh.await.ok();
+    }
+
+    // If we were running the feature flag service, stop that so that we're not calling into Service while it shuts down
+    if let Some((feature_flag_task, feature_flag_cancel)) = feature_flag_task {
+        feature_flag_cancel.cancel();
+        feature_flag_task.await.ok();
     }
 
     service.shutdown().await;

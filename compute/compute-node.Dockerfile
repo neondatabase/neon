@@ -171,9 +171,6 @@ RUN cd postgres && \
     eval $CONFIGURE_CMD && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s install && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C contrib/ install && \
-    # Install headers
-    make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/include install && \
-    make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/interfaces/libpq install && \
     # Enable some of contrib extensions
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/autoinc.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/dblink.control && \
@@ -1568,20 +1565,20 @@ ARG PG_VERSION
 WORKDIR /ext-src
 RUN case "${PG_VERSION}" in \
     "v14") \
-    export PGAUDIT_VERSION=1.6.2 \
-    export PGAUDIT_CHECKSUM=1f350d70a0cbf488c0f2b485e3a5c9b11f78ad9e3cbb95ef6904afa1eb3187eb \
+    export PGAUDIT_VERSION=1.6.3 \
+    export PGAUDIT_CHECKSUM=37a8f5a7cc8d9188e536d15cf0fdc457fcdab2547caedb54442c37f124110919 \
     ;; \
     "v15") \
-    export PGAUDIT_VERSION=1.7.0 \
-    export PGAUDIT_CHECKSUM=8f4a73e451c88c567e516e6cba7dc1e23bc91686bb6f1f77f8f3126d428a8bd8 \
+    export PGAUDIT_VERSION=1.7.1 \
+    export PGAUDIT_CHECKSUM=e9c8e6e092d82b2f901d72555ce0fe7780552f35f8985573796cd7e64b09d4ec \
     ;; \
     "v16") \
-    export PGAUDIT_VERSION=16.0 \
-    export PGAUDIT_CHECKSUM=d53ef985f2d0b15ba25c512c4ce967dce07b94fd4422c95bd04c4c1a055fe738 \
+    export PGAUDIT_VERSION=16.1 \
+    export PGAUDIT_CHECKSUM=3bae908ab70ba0c6f51224009dbcfff1a97bd6104c6273297a64292e1b921fee \
     ;; \
     "v17") \
-    export PGAUDIT_VERSION=17.0 \
-    export PGAUDIT_CHECKSUM=7d0d08d030275d525f36cd48b38c6455f1023da863385badff0cec44965bfd8c \
+    export PGAUDIT_VERSION=17.1 \
+    export PGAUDIT_CHECKSUM=9c5f37504d393486cc75d2ced83f75f5899be64fa85f689d6babb833b4361e6c \
     ;; \
     *) \
     echo "pgaudit is not supported on this PostgreSQL version" && exit 1;; \

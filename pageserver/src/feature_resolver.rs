@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use arc_swap::ArcSwap;
 use pageserver_api::config::NodeMetadata;
 use posthog_client_lite::{
-    CaptureEvent, FeatureResolverBackgroundLoop, PostHogClientConfig, PostHogEvaluationError,
+    CaptureEvent, FeatureResolverBackgroundLoop, PostHogEvaluationError,
     PostHogFlagFilterPropertyValue,
 };
 use remote_storage::RemoteStorageKind;
@@ -31,6 +31,13 @@ impl FeatureResolver {
         }
     }
 
+    pub fn update(&self, spec: String) -> anyhow::Result<()> {
+        if let Some(inner) = &self.inner {
+            inner.update(spec)?;
+        }
+        Ok(())
+    }
+
     pub fn spawn(
         conf: &PageServerConf,
         shutdown_pageserver: CancellationToken,
@@ -38,16 +45,24 @@ impl FeatureResolver {
     ) -> anyhow::Result<Self> {
         // DO NOT block in this function: make it return as fast as possible to avoid startup delays.
         if let Some(posthog_config) = &conf.posthog_config {
-            let inner = FeatureResolverBackgroundLoop::new(
-                PostHogClientConfig {
-                    server_api_key: posthog_config.server_api_key.clone(),
-                    client_api_key: posthog_config.client_api_key.clone(),
-                    project_id: posthog_config.project_id.clone(),
-                    private_api_url: posthog_config.private_api_url.clone(),
-                    public_api_url: posthog_config.public_api_url.clone(),
-                },
-                shutdown_pageserver,
-            );
+            let posthog_client_config = match posthog_config.clone().try_into_posthog_config() {
+                Ok(config) => config,
+                Err(e) => {
+                    tracing::warn!(
+                        "invalid posthog config, skipping posthog integration: {}",
+                        e
+                    );
+                    return Ok(FeatureResolver {
+                        inner: None,
+                        internal_properties: None,
+                        force_overrides_for_testing: Arc::new(ArcSwap::new(Arc::new(
+                            HashMap::new(),
+                        ))),
+                    });
+                }
+            };
+            let inner =
+                FeatureResolverBackgroundLoop::new(posthog_client_config, shutdown_pageserver);
             let inner = Arc::new(inner);
 
             // The properties shared by all tenants on this pageserver.

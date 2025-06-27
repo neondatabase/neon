@@ -762,4 +762,40 @@ mod tests {
         let result = PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir);
         assert_eq!(result.is_ok(), is_valid);
     }
+
+    #[test]
+    fn test_config_posthog_config_is_valid() {
+        let input = r#"
+            control_plane_api = "http://localhost:6666"
+
+            [posthog_config]
+            server_api_key = "phs_AAA"
+            client_api_key = "phc_BBB"
+            project_id = "000"
+            private_api_url = "https://us.posthog.com"
+            public_api_url = "https://us.i.posthog.com"
+        "#;
+        let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input)
+            .expect("posthogconfig is valid");
+        let workdir = Utf8PathBuf::from("/nonexistent");
+        PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
+            .expect("parse_and_validate");
+    }
+
+    #[test]
+    fn test_config_posthog_incomplete_config_is_valid() {
+        let input = r#"
+            control_plane_api = "http://localhost:6666"
+
+            [posthog_config]
+            server_api_key = "phs_AAA"
+            private_api_url = "https://us.posthog.com"
+            public_api_url = "https://us.i.posthog.com"
+        "#;
+        let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input)
+            .expect("posthogconfig is valid");
+        let workdir = Utf8PathBuf::from("/nonexistent");
+        PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
+            .expect("parse_and_validate");
+    }
 }

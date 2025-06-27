@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::pin;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -98,7 +99,6 @@ impl Pipeline {
 
 impl CancelKeyOp {
     fn register(&self, pipe: &mut Pipeline) {
-        #[allow(clippy::used_underscore_binding)]
         match self {
             CancelKeyOp::StoreCancelKey { key, value, expire } => {
                 let key = KeyPrefix::Cancel(*key).build_redis_key();
@@ -224,6 +224,7 @@ impl CancellationHandler {
         }
     }
 
+    /// This is not cancel safe
     async fn get_cancel_key(
         &self,
         key: CancelKeyData,
@@ -240,16 +241,21 @@ impl CancellationHandler {
         };
 
         const TIMEOUT: Duration = Duration::from_secs(5);
-        let result = timeout(TIMEOUT, tx.call((guard, op)))
-            .await
-            .map_err(|_| {
-                tracing::warn!("timed out waiting to receive GetCancelData response");
-                CancelError::RateLimit
-            })?
-            .map_err(|e| {
-                tracing::warn!("failed to receive GetCancelData response: {e}");
-                CancelError::InternalError
-            })?;
+        let result = timeout(
+            TIMEOUT,
+            tx.call((guard, op), std::future::pending::<Infallible>()),
+        )
+        .await
+        .map_err(|_| {
+            tracing::warn!("timed out waiting to receive GetCancelData response");
+            CancelError::RateLimit
+        })?
+        // cannot be cancelled
+        .unwrap_or_else(|x| match x {})
+        .map_err(|e| {
+            tracing::warn!("failed to receive GetCancelData response: {e}");
+            CancelError::InternalError
+        })?;
 
         let cancel_state_str = String::from_owned_redis_value(result).map_err(|e| {
             tracing::warn!("failed to receive GetCancelData response: {e}");
@@ -271,6 +277,8 @@ impl CancellationHandler {
     /// Will fetch IP allowlist internally.
     ///
     /// return Result primarily for tests
+    ///
+    /// This is not cancel safe
     pub(crate) async fn cancel_session<T: ControlPlaneApi>(
         &self,
         key: CancelKeyData,
@@ -394,6 +402,8 @@ impl Session {
 
     /// Ensure the cancel key is continously refreshed,
     /// but stop when the channel is dropped.
+    ///
+    /// This is not cancel safe
     pub(crate) async fn maintain_cancel_key(
         &self,
         session_id: uuid::Uuid,
@@ -401,27 +411,6 @@ impl Session {
         cancel_closure: &CancelClosure,
         compute_config: &ComputeConfig,
     ) {
-        futures::future::select(
-            std::pin::pin!(self.maintain_redis_cancel_key(cancel_closure)),
-            cancel,
-        )
-        .await;
-
-        if let Err(err) = cancel_closure
-            .try_cancel_query(compute_config)
-            .boxed()
-            .await
-        {
-            tracing::warn!(
-                ?session_id,
-                ?err,
-                "could not cancel the query in the database"
-            );
-        }
-    }
-
-    // Ensure the cancel key is continously refreshed.
-    async fn maintain_redis_cancel_key(&self, cancel_closure: &CancelClosure) -> ! {
         let Some(tx) = self.cancellation_handler.tx.get() else {
             tracing::warn!("cancellation handler is not available");
             // don't exit, as we only want to exit if cancelled externally.
@@ -431,6 +420,8 @@ impl Session {
         let closure_json = serde_json::to_string(&cancel_closure)
             .expect("serialising to json string should not fail")
             .into_boxed_str();
+
+        let mut cancel = pin!(cancel);
 
         loop {
             let guard = Metrics::get()
@@ -449,9 +440,35 @@ impl Session {
                 "registering cancellation key"
             );
 
-            if tx.call((guard, op)).await.is_ok() {
-                tokio::time::sleep(CANCEL_KEY_REFRESH).await;
+            match tx.call((guard, op), cancel.as_mut()).await {
+                Ok(Ok(_)) => {
+                    tracing::debug!(
+                        src=%self.key,
+                        dest=?cancel_closure.cancel_token,
+                        "registered cancellation key"
+                    );
+
+                    // wait before continuing.
+                    tokio::time::sleep(CANCEL_KEY_REFRESH).await;
+                }
+                // retry immediately.
+                Ok(Err(error)) => {
+                    tracing::warn!(?error, "error registering cancellation key");
+                }
+                Err(Err(_cancelled)) => break,
             }
+        }
+
+        if let Err(err) = cancel_closure
+            .try_cancel_query(compute_config)
+            .boxed()
+            .await
+        {
+            tracing::warn!(
+                ?session_id,
+                ?err,
+                "could not cancel the query in the database"
+            );
         }
     }
 }

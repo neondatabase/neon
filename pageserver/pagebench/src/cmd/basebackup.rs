@@ -317,6 +317,7 @@ impl Client for LibpqClient {
 /// A gRPC Pageserver client.
 struct GrpcClient {
     inner: page_api::Client,
+    compression: page_api::BaseBackupCompression,
 }
 
 impl GrpcClient {
@@ -331,10 +332,14 @@ impl GrpcClient {
             ttid.timeline_id,
             ShardIndex::unsharded(),
             None,
-            compression.then_some(tonic::codec::CompressionEncoding::Zstd),
+            None, // NB: uses payload compression
         )
         .await?;
-        Ok(Self { inner })
+        let compression = match compression {
+            true => page_api::BaseBackupCompression::Gzip,
+            false => page_api::BaseBackupCompression::None,
+        };
+        Ok(Self { inner, compression })
     }
 }
 
@@ -348,6 +353,7 @@ impl Client for GrpcClient {
             lsn,
             replica: false,
             full: false,
+            compression: self.compression,
         };
         let stream = self.inner.get_base_backup(req).await?;
         Ok(Box::pin(StreamReader::new(
