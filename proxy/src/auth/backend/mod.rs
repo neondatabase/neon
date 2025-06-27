@@ -174,6 +174,8 @@ impl ComputeUserInfo {
 
 #[cfg_attr(test, derive(Debug))]
 pub(crate) enum ComputeCredentialKeys {
+    /// We don't convert passwords into auth keys, we just pass passwords onto postgres.
+    Password(Vec<u8>),
     AuthKeys(AuthKeys),
     JwtPayload(Vec<u8>),
 }
@@ -244,11 +246,13 @@ async fn auth_quirks(
     let secret = if let Some(secret) = role_access.secret {
         secret
     } else {
-        // If we don't have an authentication secret, we mock one to
-        // prevent malicious probing (possible due to missing protocol steps).
-        // This mocked secret will never lead to successful authentication.
-        info!("authentication info not found, mocking it");
-        AuthSecret::Scram(scram::ServerSecret::mock(rand::random()))
+        // // If we don't have an authentication secret, we mock one to
+        // // prevent malicious probing (possible due to missing protocol steps).
+        // // This mocked secret will never lead to successful authentication.
+        // info!("authentication info not found, mocking it");
+        // AuthSecret::Scram(scram::ServerSecret::mock(rand::random()))
+
+        AuthSecret::Cleartext
     };
 
     match authenticate_with_secret(

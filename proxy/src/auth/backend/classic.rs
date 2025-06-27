@@ -45,6 +45,10 @@ pub(super) async fn authenticate(
                 server_key: secret.server_key.as_bytes(),
             }
         }
+        AuthSecret::Cleartext => {
+            ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
+            return super::hacks::authenticate_cleartext(ctx, creds, client, secret, config).await;
+        }
     };
 
     Ok(ComputeCredentials {
