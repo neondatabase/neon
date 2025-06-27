@@ -92,6 +92,7 @@
 use std::{sync::Arc, time::Duration};
 
 use once_cell::sync::Lazy;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use utils::{id::TimelineId, shard::TenantShardId};
 
@@ -117,6 +118,7 @@ pub struct RequestContext {
     scope: Scope,
     perf_span: Option<PerfSpan>,
     perf_span_dispatch: Option<Dispatch>,
+    cancel: CancellationToken,
 }
 
 #[derive(Clone)]
@@ -263,6 +265,10 @@ pub struct RequestContextBuilder {
 impl RequestContextBuilder {
     /// A new builder with default settings
     pub fn new(task_kind: TaskKind) -> Self {
+        Self::new_with_cancel(task_kind, CancellationToken::new())
+    }
+    /// A new builder with default settings, with ability to specify the cancellation token
+    pub(crate) fn new_with_cancel(task_kind: TaskKind, cancel: CancellationToken) -> Self {
         Self {
             inner: RequestContext {
                 task_kind,
@@ -273,6 +279,7 @@ impl RequestContextBuilder {
                 scope: Scope::new_global(),
                 perf_span: None,
                 perf_span_dispatch: None,
+                cancel,
             },
         }
     }
