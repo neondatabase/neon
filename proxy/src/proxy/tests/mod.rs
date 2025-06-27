@@ -3,6 +3,7 @@
 
 mod mitm;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
@@ -20,16 +21,20 @@ use tracing_test::traced_test;
 use super::retry::CouldRetry;
 use super::*;
 use crate::auth::backend::{ComputeUserInfo, MaybeOwned};
-use crate::config::{ComputeConfig, RetryConfig};
+use crate::config::{ComputeConfig, RetryConfig, TlsConfig};
+use crate::context::RequestContext;
 use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
 use crate::control_plane::{self, CachedNodeInfo, NodeInfo, NodeInfoCache};
-use crate::error::ErrorKind;
-use crate::proxy::connect_compute::ConnectMechanism;
+use crate::error::{ErrorKind, ReportableError};
+use crate::pglb::ERR_INSECURE_CONNECTION;
+use crate::pglb::handshake::{HandshakeData, handshake};
+use crate::proxy::connect_compute::{ConnectMechanism, connect_to_compute};
+use crate::stream::Stream;
 use crate::tls::client_config::compute_client_config_with_certs;
 use crate::tls::server_config::CertResolver;
 use crate::types::{BranchId, EndpointId, ProjectId};
-use crate::{sasl, scram};
+use crate::{auth, sasl, scram};
 
 /// Generate a set of TLS certificates: CA + server.
 fn generate_certs(

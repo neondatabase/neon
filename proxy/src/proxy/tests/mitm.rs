@@ -14,6 +14,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio_util::codec::{Decoder, Encoder};
 
 use super::*;
+use crate::config::TlsConfig;
+use crate::context::RequestContext;
+use crate::pglb::handshake::{HandshakeData, handshake};
 
 enum Intercept {
     None,
