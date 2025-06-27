@@ -180,7 +180,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         .await??
     {
         HandshakeData::Startup(stream, params) => (stream, params),
-        HandshakeData::Cancel(cancel_key_data) => {
+        HandshakeData::Cancel(_, cancel_key_data) => {
             // spawn a task to cancel the session, but don't wait for it
             cancellations.spawn({
                 let cancellation_handler_clone  = Arc::clone(&cancellation_handler);

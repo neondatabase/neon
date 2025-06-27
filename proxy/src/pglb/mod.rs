@@ -3,19 +3,23 @@ pub mod handshake;
 pub mod inprocess;
 pub mod passthrough;
 
+use std::net::IpAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use futures::FutureExt;
 use smol_str::ToSmolStr;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, warn};
 
-use crate::auth;
+use crate::auth::{self, Backend};
 use crate::cancellation::{self, CancellationHandler};
 use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
 use crate::context::RequestContext;
+use crate::control_plane::client::ControlPlaneClient;
 use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
 pub use crate::pglb::copy_bidirectional::ErrorSource;
@@ -266,7 +270,28 @@ pub(crate) async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin + Send>(
         .await??
     {
         HandshakeData::Startup(client, params) => (client, params),
-        HandshakeData::Cancel(cancel_key_data) => {
+        HandshakeData::Cancel(server_name, cancel_key_data) => {
+            if let Backend::ControlPlane(api, ()) = auth_backend
+                && let ControlPlaneClient::LakebaseV1(lakebase) = &**api
+            {
+                let pod_suffix = format!(".{}.pod.cluster.local", lakebase.namespace);
+
+                let pod_ip = server_name
+                    .as_deref()
+                    .and_then(|server_name| server_name.strip_suffix(&pod_suffix))
+                    .and_then(|pod_ip| IpAddr::from_str(&pod_ip.replace('-', ".")).ok());
+
+                if let Some(pod_ip) = pod_ip {
+                    cancellations.spawn(async move {
+                        let stream = TcpStream::connect((pod_ip, lakebase.port)).await?;
+                        crate::pqproto::cancel(stream, cancel_key_data).await?;
+                        anyhow::Ok(())
+                    });
+                }
+
+                return Ok(None);
+            }
+
             // spawn a task to cancel the session, but don't wait for it
             cancellations.spawn({
                 let cancellation_handler_clone = Arc::clone(&cancellation_handler);
