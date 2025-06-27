@@ -43,6 +43,8 @@ pub mod mgmt;
 pub(crate) enum AuthSecret {
     /// [SCRAM](crate::scram) authentication info.
     Scram(scram::ServerSecret),
+    /// Do not authenticate, just take the cleartext password and give it to postgres.
+    Cleartext,
 }
 
 #[derive(Default)]
