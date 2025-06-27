@@ -146,7 +146,7 @@ RUN case $DEBIAN_VERSION in \
     ninja-build git autoconf automake libtool build-essential bison flex libreadline-dev \
     zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget ca-certificates pkg-config libssl-dev \
     libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd curl unzip g++ \
-    libclang-dev jsonnet protobuf-compiler \
+    libclang-dev jsonnet protobuf-compiler libprotobuf-dev \
     $VERSION_INSTALLS \
     && apt clean && rm -rf /var/lib/apt/lists/* && \
     useradd -ms /bin/bash nonroot -b /home
