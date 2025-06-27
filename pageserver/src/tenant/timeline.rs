@@ -77,7 +77,7 @@ use utils::postgres_client::PostgresClientProtocol;
 use utils::rate_limit::RateLimit;
 use utils::seqwait::SeqWait;
 use utils::simple_rcu::{Rcu, RcuReadGuard};
-use utils::sync::gate::{Gate, GateGuard};
+use utils::sync::gate::{Gate, GateError, GateGuard};
 use utils::{completion, critical, fs_ext, pausable_failpoint};
 #[cfg(test)]
 use wal_decoder::models::value::Value;
@@ -119,6 +119,7 @@ use crate::pgdatadir_mapping::{
     MAX_AUX_FILE_V2_DELTAS, MetricsUpdate,
 };
 use crate::task_mgr::TaskKind;
+use crate::tenant::blob_io::WriteBlobError;
 use crate::tenant::config::AttachmentMode;
 use crate::tenant::gc_result::GcResult;
 use crate::tenant::layer_map::LayerMap;
@@ -133,6 +134,7 @@ use crate::tenant::storage_layer::{
 };
 use crate::tenant::tasks::BackgroundLoopKind;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
+use crate::virtual_file::owned_buffers_io::write::FlushTaskError;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 use crate::walingest::WalLagCooldown;
 use crate::walredo::RedoAttemptType;
@@ -763,7 +765,7 @@ pub(crate) enum CreateImageLayersError {
     PageReconstructError(#[source] PageReconstructError),
 
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(anyhow::Error),
 }
 
 impl From<layer_manager::Shutdown> for CreateImageLayersError {
@@ -2062,9 +2064,10 @@ impl Timeline {
         };
 
         // Signal compaction failure to avoid L0 flush stalls when it's broken.
+        // XXX this looks an awful lot like the circuit breaker code? Can we dedupe classification?
         match &result {
             Ok(_) => self.compaction_failed.store(false, AtomicOrdering::Relaxed),
-            Err(e) if e.is_cancel() => {}
+            Err(e) if e.is_cancel(CheckOtherForCancel::No /* XXX flip this to Yes so that all the Other() errors that are cancel don't trip the circuit breaker? */) => {}
             Err(CompactionError::ShuttingDown) => {
                 // Covered by the `Err(e) if e.is_cancel()` branch.
             }
@@ -5590,7 +5593,7 @@ impl Timeline {
                 self.should_check_if_image_layers_required(lsn)
             };
 
-        let mut batch_image_writer = BatchLayerWriter::new(self.conf).await?;
+        let mut batch_image_writer = BatchLayerWriter::new(self.conf);
 
         let mut all_generated = true;
 
@@ -5694,7 +5697,8 @@ impl Timeline {
                 self.cancel.clone(),
                 ctx,
             )
-            .await?;
+            .await
+            .map_err(CreateImageLayersError::Other)?;
 
             fail_point!("image-layer-writer-fail-before-finish", |_| {
                 Err(CreateImageLayersError::Other(anyhow::anyhow!(
@@ -5789,7 +5793,10 @@ impl Timeline {
             }
         }
 
-        let image_layers = batch_image_writer.finish(self, ctx).await?;
+        let image_layers = batch_image_writer
+            .finish(self, ctx)
+            .await
+            .map_err(CreateImageLayersError::Other)?;
 
         let mut guard = self.layers.write(LayerManagerLockHolder::Compaction).await;
 
@@ -5991,19 +5998,61 @@ pub(crate) enum CompactionError {
     AlreadyRunning(&'static str),
 }
 
+/// Whether [`CompactionError::is_cancel`] should inspect the
+/// [`CompactionError::Other`] anyhow Error's root cause for
+/// typical causes of cancellation.
+pub(crate) enum CheckOtherForCancel {
+    No,
+    Yes,
+}
+
 impl CompactionError {
     /// Errors that can be ignored, i.e., cancel and shutdown.
-    pub fn is_cancel(&self) -> bool {
-        matches!(
+    pub fn is_cancel(&self, check_other: CheckOtherForCancel) -> bool {
+        if matches!(
             self,
             Self::ShuttingDown
-                | Self::AlreadyRunning(_)
+                | Self::AlreadyRunning(_) // XXX why do we treat AlreadyRunning as cancel?
                 | Self::CollectKeySpaceError(CollectKeySpaceError::Cancelled)
                 | Self::CollectKeySpaceError(CollectKeySpaceError::PageRead(
                     PageReconstructError::Cancelled
                 ))
                 | Self::Offload(OffloadError::Cancelled)
-        )
+        ) {
+            return true;
+        }
+
+        let root_cause = match &check_other {
+            CheckOtherForCancel::No => return false,
+            CheckOtherForCancel::Yes => {
+                if let Self::Other(other) = self {
+                    other.root_cause()
+                } else {
+                    return false;
+                }
+            }
+        };
+
+        let upload_queue = root_cause
+            .downcast_ref::<NotInitialized>()
+            .is_some_and(|e| e.is_stopping());
+        let timeline = root_cause
+            .downcast_ref::<PageReconstructError>()
+            .is_some_and(|e| e.is_stopping());
+        let buffered_writer_flush_task_canelled = root_cause
+            .downcast_ref::<FlushTaskError>()
+            .is_some_and(|e| e.is_cancel());
+        let write_blob_cancelled = root_cause
+            .downcast_ref::<WriteBlobError>()
+            .is_some_and(|e| e.is_cancel());
+        let gate_closed = root_cause
+            .downcast_ref::<GateError>()
+            .is_some_and(|e| e.is_cancel());
+        upload_queue
+            || timeline
+            || buffered_writer_flush_task_canelled
+            || write_blob_cancelled
+            || gate_closed
     }
 
     /// Critical errors that indicate data corruption.

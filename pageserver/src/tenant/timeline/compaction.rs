@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 
 use super::layer_manager::{LayerManagerLockHolder, LayerManagerReadGuard};
 use super::{
-    CompactFlags, CompactOptions, CompactionError, CreateImageLayersError, DurationRecorder,
-    GetVectoredError, ImageLayerCreationMode, LastImageLayerCreationStatus, RecordedDuration,
-    Timeline,
+    CheckOtherForCancel, CompactFlags, CompactOptions, CompactionError, CreateImageLayersError,
+    DurationRecorder, GetVectoredError, ImageLayerCreationMode, LastImageLayerCreationStatus,
+    RecordedDuration, Timeline,
 };
 
 use crate::tenant::timeline::DeltaEntry;
@@ -1405,7 +1405,7 @@ impl Timeline {
 
             // Suppress errors when cancelled.
             Err(_) if self.cancel.is_cancelled() => {}
-            Err(err) if err.is_cancel() => {}
+            Err(err) if err.is_cancel(CheckOtherForCancel::No) => {}
 
             // Alert on critical errors that indicate data corruption.
             Err(err) if err.is_critical() => {
@@ -3531,10 +3531,7 @@ impl Timeline {
             self.get_compaction_target_size(),
             &self.gate,
             self.cancel.clone(),
-        )
-        .await
-        .context("failed to create delta layer writer")
-        .map_err(CompactionError::Other)?;
+        );
 
         #[derive(Default)]
         struct RewritingLayers {
@@ -4330,7 +4327,8 @@ impl TimelineAdaptor {
             self.timeline.cancel.clone(),
             ctx,
         )
-        .await?;
+        .await
+        .map_err(CreateImageLayersError::Other)?;
 
         fail_point!("image-layer-writer-fail-before-finish", |_| {
             Err(CreateImageLayersError::Other(anyhow::anyhow!(
@@ -4339,7 +4337,10 @@ impl TimelineAdaptor {
         });
 
         let keyspace = KeySpace {
-            ranges: self.get_keyspace(key_range, lsn, ctx).await?,
+            ranges: self
+                .get_keyspace(key_range, lsn, ctx)
+                .await
+                .map_err(CreateImageLayersError::Other)?,
         };
         // TODO set proper (stateful) start. The create_image_layer_for_rel_blocks function mostly
         let outcome = self
@@ -4358,9 +4359,13 @@ impl TimelineAdaptor {
             unfinished_image_layer,
         } = outcome
         {
-            let (desc, path) = unfinished_image_layer.finish(ctx).await?;
+            let (desc, path) = unfinished_image_layer
+                .finish(ctx)
+                .await
+                .map_err(CreateImageLayersError::Other)?;
             let image_layer =
-                Layer::finish_creating(self.timeline.conf, &self.timeline, desc, &path)?;
+                Layer::finish_creating(self.timeline.conf, &self.timeline, desc, &path)
+                    .map_err(CreateImageLayersError::Other)?;
             self.new_images.push(image_layer);
         }
 

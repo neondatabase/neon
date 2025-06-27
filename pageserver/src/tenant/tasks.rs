@@ -22,8 +22,8 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::{self, BackgroundLoopSemaphoreMetricsRecorder, TENANT_TASK_EVENTS};
 use crate::task_mgr::{self, BACKGROUND_RUNTIME, TOKIO_WORKER_THREADS, TaskKind};
 use crate::tenant::throttle::Stats;
-use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::compaction::CompactionOutcome;
+use crate::tenant::timeline::{CheckOtherForCancel, CompactionError};
 use crate::tenant::{TenantShard, TenantState};
 
 /// Semaphore limiting concurrent background tasks (across all tenants).
@@ -292,35 +292,12 @@ pub(crate) fn log_compaction_error(
     task_cancelled: bool,
     degrade_to_warning: bool,
 ) {
-    use CompactionError::*;
+    let is_cancel = err.is_cancel(CheckOtherForCancel::Yes);
 
-    use crate::tenant::PageReconstructError;
-    use crate::tenant::upload_queue::NotInitialized;
-
-    let level = match err {
-        e if e.is_cancel() => return,
-        ShuttingDown => return,
-        Offload(_) => Level::ERROR,
-        AlreadyRunning(_) => Level::ERROR,
-        CollectKeySpaceError(_) => Level::ERROR,
-        _ if task_cancelled => Level::INFO,
-        Other(err) => {
-            let root_cause = err.root_cause();
-
-            let upload_queue = root_cause
-                .downcast_ref::<NotInitialized>()
-                .is_some_and(|e| e.is_stopping());
-            let timeline = root_cause
-                .downcast_ref::<PageReconstructError>()
-                .is_some_and(|e| e.is_stopping());
-            let is_stopping = upload_queue || timeline;
-
-            if is_stopping {
-                Level::INFO
-            } else {
-                Level::ERROR
-            }
-        }
+    let level = if is_cancel || task_cancelled {
+        Level::INFO
+    } else {
+        Level::ERROR
     };
 
     if let Some((error_count, sleep_duration)) = retry_info {
