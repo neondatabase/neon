@@ -518,15 +518,14 @@ impl<C: ClientInnerExt> GlobalConnPool<C, EndpointConnPool<C>> {
                 info!("pool: cached connection '{conn_info}' is closed, opening a new one");
                 return Ok(None);
             }
-            tracing::Span::current()
-                .record("conn_id", tracing::field::display(client.get_conn_id()));
-            tracing::Span::current().record(
-                "pid",
-                tracing::field::display(client.inner.get_process_id()),
-            );
-            debug!(
+            info!(
+                conn_id = %client.get_conn_id(),
+                pid = client.inner.get_process_id(),
+                compute_id = &*client.aux.compute_id,
                 cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
-                "pool: reusing connection '{conn_info}'"
+                query_id = ctx.get_testodrome_id().as_deref(),
+                "reusing connection: latency={}",
+                ctx.get_proxy_latency(),
             );
 
             match client.get_data() {

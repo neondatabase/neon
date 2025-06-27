@@ -60,7 +60,7 @@ mod private {
         }
     }
 
-    pub struct RustlsStream<S>(Box<TlsStream<S>>);
+    pub struct RustlsStream<S>(pub Box<TlsStream<S>>);
 
     impl<S> postgres_client::tls::TlsStream for RustlsStream<S>
     where

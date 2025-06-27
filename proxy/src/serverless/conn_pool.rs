@@ -69,7 +69,7 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
     let mut session_id = ctx.session_id();
     let (tx, mut rx) = tokio::sync::watch::channel(session_id);
 
-    let span = info_span!(parent: None, "connection", %conn_id);
+    let span = info_span!(parent: None, "connection", %conn_id, pid=client.get_process_id(), compute_id=%aux.compute_id);
     let cold_start_info = ctx.cold_start_info();
     span.in_scope(|| {
         info!(cold_start_info = cold_start_info.as_str(), %conn_info, %session_id, "new connection");

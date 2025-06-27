@@ -30,7 +30,7 @@ use serde_json::value::RawValue;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, error, info, info_span, warn};
+use tracing::{Instrument, error, info, info_span, warn};
 
 use super::backend::HttpConnError;
 use super::conn_pool_lib::{
@@ -107,15 +107,13 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
                 return Ok(None);
             }
 
-            tracing::Span::current()
-                .record("conn_id", tracing::field::display(client.get_conn_id()));
-            tracing::Span::current().record(
-                "pid",
-                tracing::field::display(client.inner.get_process_id()),
-            );
-            debug!(
+            info!(
+                pid = client.inner.get_process_id(),
+                conn_id = %client.get_conn_id(),
                 cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
-                "local_pool: reusing connection '{conn_info}'"
+                query_id = ctx.get_testodrome_id().as_deref(),
+                "reusing connection: latency={}",
+                ctx.get_proxy_latency(),
             );
 
             match client.get_data() {

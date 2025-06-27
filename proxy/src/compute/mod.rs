@@ -86,6 +86,14 @@ pub(crate) enum ConnectionError {
 
     #[error("error acquiring resource permit: {0}")]
     TooManyConnectionAttempts(#[from] ApiLockError),
+
+    #[cfg(test)]
+    #[error("retryable: {retryable}, wakeable: {wakeable}, kind: {kind:?}")]
+    TestError {
+        retryable: bool,
+        wakeable: bool,
+        kind: crate::error::ErrorKind,
+    },
 }
 
 impl UserFacingError for ConnectionError {
@@ -96,6 +104,8 @@ impl UserFacingError for ConnectionError {
                 "Failed to acquire permit to connect to the database. Too many database connection attempts are currently ongoing.".to_owned()
             }
             ConnectionError::TlsError(_) => COULD_NOT_CONNECT.to_owned(),
+            #[cfg(test)]
+            ConnectionError::TestError { .. } => self.to_string(),
         }
     }
 }
@@ -106,6 +116,8 @@ impl ReportableError for ConnectionError {
             ConnectionError::TlsError(_) => crate::error::ErrorKind::Compute,
             ConnectionError::WakeComputeError(e) => e.get_error_kind(),
             ConnectionError::TooManyConnectionAttempts(e) => e.get_error_kind(),
+            #[cfg(test)]
+            ConnectionError::TestError { kind, .. } => *kind,
         }
     }
 }
@@ -252,6 +264,19 @@ impl AuthInfo {
             .await?;
         drop(pause);
 
+        // TODO: lots of useful info but maybe we can move it elsewhere (eg traces?)
+        info!(
+            compute_id = %compute.aux.compute_id,
+            pid = connection.process_id,
+            cold_start_info = ctx.cold_start_info().as_str(),
+            query_id = ctx.get_testodrome_id().as_deref(),
+            sslmode = ?compute.ssl_mode,
+            "connected to compute node at {} ({}) latency={}",
+            compute.hostname,
+            compute.socket_addr,
+            ctx.get_proxy_latency(),
+        );
+
         let RawConnection {
             stream: _,
             parameters,
@@ -259,8 +284,6 @@ impl AuthInfo {
             process_id,
             secret_key,
         } = connection;
-
-        tracing::Span::current().record("pid", tracing::field::display(process_id));
 
         // NB: CancelToken is supposed to hold socket_addr, but we use connect_raw.
         // Yet another reason to rework the connection establishing code.
@@ -288,6 +311,7 @@ impl ConnectInfo {
     async fn connect_raw(
         &self,
         config: &ComputeConfig,
+        direct: bool,
     ) -> Result<(SocketAddr, MaybeTlsStream<TcpStream, RustlsStream>), TlsError> {
         let timeout = config.timeout;
 
@@ -330,7 +354,7 @@ impl ConnectInfo {
         match connect_once(&*addrs).await {
             Ok((sockaddr, stream)) => Ok((
                 sockaddr,
-                tls::connect_tls(stream, self.ssl_mode, config, host).await?,
+                tls::connect_tls(stream, self.ssl_mode, config, host, direct).await?,
             )),
             Err(err) => {
                 warn!("couldn't connect to compute node at {host}:{port}: {err}");
@@ -357,7 +381,7 @@ pub struct PostgresSettings {
 
 pub struct ComputeConnection {
     /// Socket connected to a compute node.
-    pub stream: MaybeTlsStream<tokio::net::TcpStream, RustlsStream>,
+    pub stream: MaybeRustlsStream,
     /// Labels for proxy's metrics.
     pub aux: MetricsAuxInfo,
     pub hostname: Host,
@@ -373,22 +397,11 @@ impl ConnectInfo {
         ctx: &RequestContext,
         aux: &MetricsAuxInfo,
         config: &ComputeConfig,
+        direct: bool,
     ) -> Result<ComputeConnection, ConnectionError> {
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let (socket_addr, stream) = self.connect_raw(config).await?;
+        let (socket_addr, stream) = self.connect_raw(config, direct).await?;
         drop(pause);
-
-        tracing::Span::current().record("compute_id", tracing::field::display(&aux.compute_id));
-
-        // TODO: lots of useful info but maybe we can move it elsewhere (eg traces?)
-        info!(
-            cold_start_info = ctx.cold_start_info().as_str(),
-            "connected to compute node at {} ({socket_addr}) sslmode={:?}, latency={}, query_id={}",
-            self.host,
-            self.ssl_mode,
-            ctx.get_proxy_latency(),
-            ctx.get_testodrome_id().unwrap_or_default(),
-        );
 
         let connection = ComputeConnection {
             stream,

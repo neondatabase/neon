@@ -263,7 +263,12 @@ impl NeonControlPlaneClient {
                 None => SslMode::Disable,
             };
             let host = match body.server_name {
-                Some(host) => host.into(),
+                Some(host) => {
+                    if rustls::pki_types::DnsName::try_from_str(&host).is_err() {
+                        return Err(WakeComputeError::BadComputeAddress(host.into_boxed_str()));
+                    }
+                    host.into()
+                }
                 None => host.into(),
             };
 
