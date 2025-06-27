@@ -50,7 +50,7 @@ impl ReportableError for HandshakeError {
 
 pub(crate) enum HandshakeData<S> {
     Startup(PqStream<Stream<S>>, StartupMessageParams),
-    Cancel(CancelKeyData),
+    Cancel(Option<String>, CancelKeyData),
 }
 
 /// Establish a (most probably, secure) connection with the client.
@@ -234,8 +234,17 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 return Err(HandshakeError::ProtocolViolation);
             }
             FeStartupPacket::CancelRequest(cancel_key_data) => {
-                info!(session_type = "cancellation", "successful handshake");
-                break Ok(HandshakeData::Cancel(cancel_key_data));
+                let server_name = match stream.get_ref() {
+                    Stream::Raw { .. } => None,
+                    Stream::Tls { tls, .. } => tls.get_ref().1.server_name().map(String::from),
+                };
+
+                info!(
+                    session_type = "cancellation",
+                    server_name, "successful handshake"
+                );
+
+                break Ok(HandshakeData::Cancel(server_name, cancel_key_data));
             }
         }
     }
