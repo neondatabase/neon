@@ -299,7 +299,7 @@ where
             //
             let mut request_storage = Some(request);
             for attempt in 1.. {
-                if self.cancel.is_cancelled() {
+                if self.cancel.is_cancelled() || self.ctx.cancellation_token().is_cancelled() {
                     return Err(FlushTaskError::Cancelled);
                 }
                 let result = async {

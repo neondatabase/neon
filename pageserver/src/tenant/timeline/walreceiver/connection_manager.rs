@@ -536,9 +536,10 @@ impl ConnectionManagerState {
         let protocol = self.conf.protocol;
         let validate_wal_contiguity = self.conf.validate_wal_contiguity;
         let timeline = Arc::clone(&self.timeline);
-        let ctx = ctx.detached_child(
+        let ctx = ctx.detached_child_with_cancel(
             TaskKind::WalReceiverConnectionHandler,
             DownloadBehavior::Download,
+            self.cancel.clone()
         );
 
         let span = info_span!("connection", %node_id);

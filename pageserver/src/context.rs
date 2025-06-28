@@ -361,11 +361,6 @@ impl RequestContextBuilder {
         self
     }
 
-    pub(crate) fn cancel(mut self, cancel: CancellationToken) -> Self {
-        self.inner.cancel = cancel;
-        self
-    }
-
     pub fn root(self) -> RequestContext {
         self.inner
     }
@@ -377,6 +372,11 @@ impl RequestContextBuilder {
 
     pub fn detached_child(mut self) -> RequestContext {
         self.inner.cancel = CancellationToken::new();
+        self.inner
+    }
+
+    pub fn detached_child_with_cancel(mut self, cancel: CancellationToken) -> RequestContext {
+        self.inner.cancel = cancel;
         self.inner
     }
 }
@@ -439,8 +439,20 @@ impl RequestContext {
         RequestContextBuilder::from(self)
             .task_kind(task_kind)
             .download_behavior(download_behavior)
-            .cancel(CancellationToken::new())
             .detached_child()
+    }
+
+    /// Like [`Self::detached_child`], but with the ability to specify the cancellation token
+    pub fn detached_child_with_cancel(
+        &self,
+        task_kind: TaskKind,
+        download_behavior: DownloadBehavior,
+        cancel: CancellationToken,
+    ) -> Self {
+        RequestContextBuilder::from(self)
+            .task_kind(task_kind)
+            .download_behavior(download_behavior)
+            .detached_child_with_cancel(cancel)
     }
 
     /// Create a child of context `self` for a task that shall not outlive `self`.
@@ -618,6 +630,10 @@ impl RequestContext {
 
     pub(crate) fn has_perf_span(&self) -> bool {
         self.perf_span.is_some()
+    }
+
+    pub(crate) fn cancellation_token(&self) -> &CancellationToken {
+        &self.cancel
     }
 }
 

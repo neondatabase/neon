@@ -4441,7 +4441,7 @@ impl Timeline {
         let mut image_covered_keyspace = KeySpaceRandomAccum::new();
 
         while let Some((layer_to_read, keyspace_to_read, lsn_range)) = fringe.next_layer() {
-            if cancel.is_cancelled() {
+            if cancel.is_cancelled() || ctx.cancellation_token().is_cancelled() {
                 return Err(GetVectoredError::Cancelled);
             }
 

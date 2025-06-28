@@ -190,7 +190,11 @@ async fn download_object(
         .download(src_path, &DownloadOpts::default(), cancel)
         .await?;
 
-    pausable_failpoint!("before-downloading-layer-stream-pausable");
+    pausable_failpoint!(
+        "before-downloading-layer-stream-pausable",
+        ctx.cancellation_token()
+    )
+    .map_err(|_| DownloadError::Cancelled)?;
 
     let dst_path = destination_file.path().to_owned();
     let mut buffered = owned_buffers_io::write::BufferedWriter::<IoBufferMut, _>::new(
