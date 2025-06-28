@@ -310,7 +310,7 @@ typedef enum
 	RELKIND_UNKNOWN,
 	RELKIND_PERMANENT,
 	RELKIND_UNLOGGED,
-	RELKIND_UNLOGGED_BUILD //* buildig index for permanent relation */
+	RELKIND_UNLOGGED_BUILD /* buildig index for permanent relation */
 } RelKind;
 
 /* utils for neon relkind cache */

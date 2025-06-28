@@ -187,7 +187,7 @@ get_cached_relkind(NRelFileInfo rinfo, RelKind* relkind)
 	if (found)
 	{
 		/* If relation persistence is known, then there is no need to pin it */
-		if (entry->relkind == RELKIND_UNKNOWN)
+		if (entry->relkind != RELKIND_UNKNOWN)
 		{
 			/* Fast path: normal (persistent) relation with kind stored in the cache */
 			if (--entry->access_count == 0)
