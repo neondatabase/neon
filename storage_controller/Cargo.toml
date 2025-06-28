@@ -20,6 +20,7 @@ camino.workspace = true
 chrono.workspace = true
 clap.workspace = true
 clashmap.workspace = true
+compute_api.workspace = true
 cron.workspace = true
 fail.workspace = true
 futures.workspace = true
