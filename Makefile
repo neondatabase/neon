@@ -102,7 +102,7 @@ all: neon postgres-install neon-pg-ext
 
 ### Neon Rust bits
 #
-# The 'postgres_ffi' depends on the Postgres headers.
+# The 'postgres_ffi' crate depends on the Postgres headers.
 .PHONY: neon
 neon: postgres-headers-install walproposer-lib cargo-target-dir
 	+@echo "Compiling Neon"
