@@ -36,7 +36,7 @@ use utils::postgres_client::{ConnectionConfigArgs, wal_stream_connection_config}
 
 use super::walreceiver_connection::{WalConnectionStatus, WalReceiverError};
 use super::{TaskEvent, TaskHandle, TaskStateUpdate, WalReceiverConf};
-use crate::context::{DownloadBehavior, RequestContext};
+use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
 use crate::metrics::{
     WALRECEIVER_ACTIVE_MANAGERS, WALRECEIVER_BROKER_UPDATES, WALRECEIVER_CANDIDATES_ADDED,
     WALRECEIVER_CANDIDATES_REMOVED, WALRECEIVER_SWITCHES,
@@ -536,16 +536,17 @@ impl ConnectionManagerState {
         let protocol = self.conf.protocol;
         let validate_wal_contiguity = self.conf.validate_wal_contiguity;
         let timeline = Arc::clone(&self.timeline);
-        let ctx = ctx.detached_child_with_cancel(
-            TaskKind::WalReceiverConnectionHandler,
-            DownloadBehavior::Download,
-            self.cancel.clone()
-        );
+
+        let ctx_builder = RequestContextBuilder::from(ctx)
+            .task_kind(TaskKind::WalReceiverConnectionHandler)
+            .download_behavior(DownloadBehavior::Download);
 
         let span = info_span!("connection", %node_id);
         let connection_handle = self.spawn(move |events_sender, cancellation| {
             async move {
                 debug_assert_current_span_has_tenant_and_timeline_id();
+
+                let ctx = ctx_builder.detached_child_with_cancel(cancellation.clone());
 
                 let res = super::walreceiver_connection::handle_walreceiver_connection(
                     timeline,
