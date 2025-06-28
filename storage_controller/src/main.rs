@@ -6,9 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, anyhow};
 use camino::Utf8PathBuf;
 
-#[cfg(feature = "testing")]
-use clap::ArgAction;
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use futures::future::OptionFuture;
 use http_utils::tls_certs::ReloadingCertificateResolver;
 use hyper0::Uri;
@@ -222,8 +220,7 @@ struct Cli {
     /// When set, actively checks and initiates heatmap downloads/uploads during reconciliation.
     /// This speed up migrations by avoiding the default wait for the heatmap download interval.
     /// Primarily useful for testing to reduce test execution time.
-    #[cfg(feature = "testing")]
-    #[arg(long, default_value = "true", action=ArgAction::Set)]
+    #[arg(long, default_value = "false", action=ArgAction::Set)]
     kick_secondary_downloads: bool,
 }
 
@@ -472,7 +469,6 @@ async fn async_main() -> anyhow::Result<()> {
         use_local_compute_notifications: args.use_local_compute_notifications,
         timeline_safekeeper_count: args.timeline_safekeeper_count,
         posthog_config: posthog_config.clone(),
-        #[cfg(feature = "testing")]
         kick_secondary_downloads: args.kick_secondary_downloads,
     };
 
