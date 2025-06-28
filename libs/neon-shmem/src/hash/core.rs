@@ -34,7 +34,7 @@ pub(crate) struct CoreHashMap<'a, K, V> {
 }
 
 /// Error for when there are no empty buckets left but one is needed.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct FullError();
 
 impl<'a, K: Clone + Hash + Eq, V> CoreHashMap<'a, K, V> {
@@ -155,11 +155,6 @@ impl<'a, K: Clone + Hash + Eq, V> CoreHashMap<'a, K, V> {
         self.buckets.len()
     }
 
-	/// Returns whether there is an ongoing shrink operation.
-	pub fn is_shrinking(&self) -> bool {
-		self.alloc_limit != INVALID_POS
-	}
-
 	/// Clears all entries from the hashmap.
 	///
 	/// Does not reset any allocation limits, but does clear any entries beyond them.
@@ -174,31 +169,13 @@ impl<'a, K: Clone + Hash + Eq, V> CoreHashMap<'a, K, V> {
                 inner: None,
             }
         }
-
         for i in 0..self.dictionary.len() {
             self.dictionary[i] = INVALID_POS;
         }
 
+		self.free_head = 0;
 		self.buckets_in_use = 0;
 	}
-
-	/// Optionally gets the entry at an index if it is occupied.
-    pub fn entry_at_bucket(&mut self, pos: usize) -> Option<OccupiedEntry<'a, '_, K, V>> {
-		if pos >= self.buckets.len() {
-			return None;
-		}
-
-		let entry = self.buckets[pos].inner.as_ref();
-		match entry {
-			Some((key, _)) => Some(OccupiedEntry {
-				_key: key.clone(),
-				bucket_pos: pos as u32,
-				prev_pos: PrevPos::Unknown,
-				map: self,
-			}),
-			_ => None,
-		}		
-    }
 
 	/// Find the position of an unused bucket via the freelist and initialize it. 
     pub(crate) fn alloc_bucket(&mut self, key: K, value: V) -> Result<u32, FullError> {
@@ -225,7 +202,7 @@ impl<'a, K: Clone + Hash + Eq, V> CoreHashMap<'a, K, V> {
 				let next_pos = self.buckets[pos as usize].next;
 				self.buckets[p as usize].next = next_pos;
 			},
-			PrevPos::Unknown => unreachable!()
+			_ => unreachable!()
 		}
 
 		// Initialize the bucket.

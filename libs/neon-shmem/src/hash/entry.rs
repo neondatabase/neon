@@ -19,7 +19,7 @@ pub(crate) enum PrevPos {
 	/// Regular index within the buckets.
     Chained(u32),
 	/// Unknown - e.g. the associated entry was retrieved by index instead of chain.
-	Unknown,
+	Unknown(u64),
 }
 
 /// View into an occupied entry within the map.
@@ -31,7 +31,7 @@ pub struct OccupiedEntry<'a, 'b, K, V> {
 	/// The index of the previous entry in the chain.
     pub(crate) prev_pos: PrevPos,
 	/// The position of the bucket in the [`CoreHashMap`] bucket array.
-    pub(crate) bucket_pos: u32, 
+    pub(crate) bucket_pos: u32,
 }
 
 impl<K, V> OccupiedEntry<'_, '_, K, V> {
@@ -60,22 +60,39 @@ impl<K, V> OccupiedEntry<'_, '_, K, V> {
 
 	/// Removes the entry from the hash map, returning the value originally stored within it.
 	///
+	/// This may result in multiple bucket accesses if the entry was obtained by index as the
+	/// previous chain entry needs to be discovered in this case.
+	///
 	/// # Panics
 	/// Panics if the `prev_pos` field is equal to [`PrevPos::Unknown`]. In practice, this means
 	/// the entry was obtained via calling something like [`CoreHashMap::entry_at_bucket`].
     pub fn remove(self) -> V {
+		// If this bucket was queried by index, go ahead and follow its chain from the start.
+		let prev = if let PrevPos::Unknown(hash) = self.prev_pos {
+			let dict_idx = hash as usize % self.map.dictionary.len();
+			let mut prev = PrevPos::First(dict_idx as u32);
+			let mut curr = self.map.dictionary[dict_idx];
+			while curr != self.bucket_pos {
+				curr = self.map.buckets[curr as usize].next;
+				prev = PrevPos::Chained(curr);
+			}
+			prev 	
+		} else {
+			self.prev_pos
+		};
+		
         // CoreHashMap::remove returns Option<(K, V)>. We know it's Some for an OccupiedEntry.
         let bucket = &mut self.map.buckets[self.bucket_pos as usize];
-
+		
         // unlink it from the chain
-        match self.prev_pos {
+        match prev {
             PrevPos::First(dict_pos) => {
 				self.map.dictionary[dict_pos as usize] = bucket.next;
 			},
             PrevPos::Chained(bucket_pos) => {
                 self.map.buckets[bucket_pos as usize].next = bucket.next;
             },
-			PrevPos::Unknown => panic!("can't safely remove entry with unknown previous entry"),
+			_ => unreachable!(),			
         }
 
         // and add it to the freelist        

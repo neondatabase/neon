@@ -224,40 +224,75 @@ where
     K: Clone + Hash + Eq,
 {
 	/// Hash a key using the map's hasher.
-    pub fn get_hash_value(&self, key: &K) -> u64 {
+	#[inline]
+    fn get_hash_value(&self, key: &K) -> u64 {
 		self.hasher.hash_one(key)        
     }
 
-	/// Get a reference to the corresponding value for a key given its hash.
-    pub fn get_with_hash<'e>(&'e self, key: &K, hash: u64) -> Option<&'e V> {
+	/// Get a reference to the corresponding value for a key.
+    pub fn get<'e>(&'e self, key: &K) -> Option<&'e V> {
         let map = unsafe { self.shared_ptr.as_ref() }.unwrap();
-
+		let hash = self.get_hash_value(key);
         map.inner.get_with_hash(key, hash)
     }
 
-	/// Get a reference to the entry containing a key given its hash.
-    pub fn entry_with_hash(&mut self, key: K, hash: u64) -> Entry<'a, '_, K, V> {
+	/// Get a reference to the entry containing a key.
+    pub fn entry(&self, key: K) -> Entry<'a, '_, K, V> {
         let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
-
+		let hash = self.get_hash_value(&key);
         map.inner.entry_with_hash(key, hash)
     }
 
-	/// Remove a key given its hash. Does nothing if key is not present.
-    pub fn remove_with_hash(&mut self, key: &K, hash: u64) {
+	/// Remove a key given its hash. Returns the associated value if it existed.
+    pub fn remove(&self, key: &K) -> Option<V> {
         let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
-
+		let hash = self.get_hash_value(&key);
         match map.inner.entry_with_hash(key.clone(), hash) {
-            Entry::Occupied(e) => {
-                e.remove();
-            }
-            Entry::Vacant(_) => {}
+            Entry::Occupied(e) => Some(e.remove()),
+            Entry::Vacant(_) => None
         }
     }
 
-	/// Optionally return the entry for a bucket at a given index if it exists.
-    pub fn entry_at_bucket(&mut self, pos: usize) -> Option<OccupiedEntry<'a, '_, K, V>> {
+	/// Insert/update a key. Returns the previous associated value if it existed.
+	///
+	/// # Errors
+	/// Will return [`core::FullError`] if there is no more space left in the map.
+    pub fn insert(&self, key: K, value: V) -> Result<Option<V>, core::FullError> {
         let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
-        map.inner.entry_at_bucket(pos)
+		let hash = self.get_hash_value(&key);
+        match map.inner.entry_with_hash(key.clone(), hash) {
+            Entry::Occupied(mut e) => Ok(Some(e.insert(value))),
+            Entry::Vacant(e) => {
+				e.insert(value)?;
+				Ok(None)
+			}
+        }
+    }
+	
+	/// Optionally return the entry for a bucket at a given index if it exists.
+	///
+	/// Has more overhead than one would intuitively expect: performs both a clone of the key
+	/// due to the [`OccupiedEntry`] type owning the key and also a hash of the key in order
+	/// to enable repairing the hash chain if the entry is removed.
+    pub fn entry_at_bucket(&self, pos: usize) -> Option<OccupiedEntry<'a, '_, K, V>> {
+        let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+		let inner = &mut map.inner;
+		if pos >= inner.buckets.len() {
+			return None;
+		}
+
+		let entry = inner.buckets[pos].inner.as_ref();
+		match entry {
+			Some((key, _)) => Some(OccupiedEntry {
+				_key: key.clone(),
+				bucket_pos: pos as u32,
+				prev_pos: entry::PrevPos::Unknown(
+					self.get_hash_value(&key)
+				),
+				map: inner,
+			}),
+			_ => None,
+		}
     }
 
 	/// Returns the number of buckets in the table.
@@ -299,7 +334,7 @@ where
     }
 
 	/// Clears all entries in a table. Does not reset any shrinking operations.
-	pub fn clear(&mut self) {
+	pub fn clear(&self) {
 		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
         let inner = &mut map.inner;
         inner.clear();
@@ -353,7 +388,7 @@ where
 	}
 
 	/// Rehash the map without growing or shrinking. 
-	pub fn shuffle(&mut self) {
+	pub fn shuffle(&self) {
 		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
         let inner = &mut map.inner;
 		let num_buckets = inner.get_num_buckets() as u32;
@@ -447,14 +482,17 @@ where
 	/// - Calling this function on a map initialized with [`HashMapInit::with_fixed`].
 	/// - Calling this function on a map when no shrink operation is in progress.
 	/// - Calling this function on a map with `shrink_mode` set to [`HashMapShrinkMode::Remap`] and
-	///   [`HashMapAccess::get_num_buckets_in_use`] returns a value higher than [`HashMapAccess::shrink_goal`].
+	///   there are more buckets in use than the value returned by [`HashMapAccess::shrink_goal`].
 	///
 	/// # Errors
 	/// Returns an [`shmem::Error`] if any errors occur resizing the memory region.
-	pub fn finish_shrink(&mut self) -> Result<(), shmem::Error> {
+	pub fn finish_shrink(&self) -> Result<(), shmem::Error> {
 		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
 		let inner = &mut map.inner;
-		assert!(inner.is_shrinking(), "called finish_shrink when no shrink is in progress");
+		assert!(
+			inner.alloc_limit != INVALID_POS,
+			"called finish_shrink when no shrink is in progress"
+		);
 
 		let num_buckets = inner.alloc_limit; 
 
@@ -470,7 +508,7 @@ where
 			
 			for i in (num_buckets as usize)..inner.buckets.len() {
 				if let Some((k, v)) = inner.buckets[i].inner.take() {
-					// alloc bucket increases buckets in use, so need to decrease since we're just moving
+					// alloc_bucket increases count, so need to decrease since we're just moving
 					inner.buckets_in_use -= 1;
 					inner.alloc_bucket(k, v).unwrap();
 				}
@@ -490,29 +528,5 @@ where
 		inner.alloc_limit = INVALID_POS;
 		
 		Ok(())
-	}
-
-	#[cfg(feature = "stats")]
-	pub fn dict_len(&self) -> usize {
-		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
-		map.inner.dictionary.len()
-	}
-	
-	#[cfg(feature = "stats")]
-	pub fn chain_distribution(&self) -> (Vec<(usize, usize)>, usize) {
-		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
-		let mut out = Vec::new();
-		let mut max = 0;
-		for (i, d) in map.inner.dictionary.iter().enumerate() {
-			let mut curr = *d;
-			let mut len = 0;
-			while curr != INVALID_POS {
-				curr = map.inner.buckets[curr as usize].next;
-				len += 1;
-			}
-			out.push((i, len));
-			max = max.max(len);
-		}
-		(out, max)
 	}
 }
