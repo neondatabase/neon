@@ -3872,6 +3872,10 @@ impl TenantShard {
         &self.tenant_shard_id
     }
 
+    pub(crate) fn get_shard_identity(&self) -> ShardIdentity {
+        self.shard_identity
+    }
+
     pub(crate) fn get_shard_stripe_size(&self) -> ShardStripeSize {
         self.shard_identity.stripe_size
     }
@@ -6008,7 +6012,7 @@ pub(crate) mod harness {
                 AttachedTenantConf::try_from(LocationConf::attached_single(
                     self.tenant_conf.clone(),
                     self.generation,
-                    &ShardParameters::default(),
+                    ShardParameters::default(),
                 ))
                 .unwrap(),
                 self.shard_identity,

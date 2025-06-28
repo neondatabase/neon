@@ -3015,7 +3015,7 @@ mod tests {
         // This shard will get the even blocks
         let shard = ShardIdentity::from_params(
             ShardNumber(0),
-            &ShardParameters {
+            ShardParameters {
                 count: ShardCount(2),
                 stripe_size: ShardStripeSize(1),
             },

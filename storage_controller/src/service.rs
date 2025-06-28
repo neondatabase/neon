@@ -2582,7 +2582,7 @@ impl Service {
                 .do_initial_shard_scheduling(
                     tenant_shard_id,
                     initial_generation,
-                    &create_req.shard_parameters,
+                    create_req.shard_parameters,
                     create_req.config.clone(),
                     placement_policy.clone(),
                     preferred_az_id.as_ref(),
@@ -2639,7 +2639,7 @@ impl Service {
         &self,
         tenant_shard_id: TenantShardId,
         initial_generation: Option<Generation>,
-        shard_params: &ShardParameters,
+        shard_params: ShardParameters,
         config: TenantConfig,
         placement_policy: PlacementPolicy,
         preferred_az_id: Option<&AvailabilityZone>,

@@ -887,7 +887,7 @@ mod tests {
             .expect("we still have it");
     }
 
-    fn make_relation_key_for_shard(shard: ShardNumber, params: &ShardParameters) -> Key {
+    fn make_relation_key_for_shard(shard: ShardNumber, params: ShardParameters) -> Key {
         rel_block_to_key(
             RelTag {
                 spcnode: 1663,
@@ -917,14 +917,14 @@ mod tests {
         let child0 = Arc::new_cyclic(|myself| StubTimeline {
             gate: Default::default(),
             id: timeline_id,
-            shard: ShardIdentity::from_params(ShardNumber(0), &child_params),
+            shard: ShardIdentity::from_params(ShardNumber(0), child_params),
             per_timeline_state: PerTimelineState::default(),
             myself: myself.clone(),
         });
         let child1 = Arc::new_cyclic(|myself| StubTimeline {
             gate: Default::default(),
             id: timeline_id,
-            shard: ShardIdentity::from_params(ShardNumber(1), &child_params),
+            shard: ShardIdentity::from_params(ShardNumber(1), child_params),
             per_timeline_state: PerTimelineState::default(),
             myself: myself.clone(),
         });
@@ -937,7 +937,7 @@ mod tests {
             let handle = cache
                 .get(
                     timeline_id,
-                    ShardSelector::Page(make_relation_key_for_shard(ShardNumber(i), &child_params)),
+                    ShardSelector::Page(make_relation_key_for_shard(ShardNumber(i), child_params)),
                     &StubManager {
                         shards: vec![parent.clone()],
                     },
@@ -961,7 +961,7 @@ mod tests {
             let handle = cache
                 .get(
                     timeline_id,
-                    ShardSelector::Page(make_relation_key_for_shard(ShardNumber(i), &child_params)),
+                    ShardSelector::Page(make_relation_key_for_shard(ShardNumber(i), child_params)),
                     &StubManager {
                         shards: vec![], // doesn't matter what's in here, the cache is fully loaded
                     },
@@ -978,7 +978,7 @@ mod tests {
         let parent_handle = cache
             .get(
                 timeline_id,
-                ShardSelector::Page(make_relation_key_for_shard(ShardNumber(0), &child_params)),
+                ShardSelector::Page(make_relation_key_for_shard(ShardNumber(0), child_params)),
                 &StubManager {
                     shards: vec![parent.clone()],
                 },
@@ -995,7 +995,7 @@ mod tests {
             let handle = cache
                 .get(
                     timeline_id,
-                    ShardSelector::Page(make_relation_key_for_shard(ShardNumber(i), &child_params)),
+                    ShardSelector::Page(make_relation_key_for_shard(ShardNumber(i), child_params)),
                     &StubManager {
                         shards: vec![child0.clone(), child1.clone()], // <====== this changed compared to previous loop
                     },

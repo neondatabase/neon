@@ -136,7 +136,7 @@ impl LocationConf {
     pub(crate) fn attached_single(
         tenant_conf: pageserver_api::models::TenantConfig,
         generation: Generation,
-        shard_params: &models::ShardParameters,
+        shard_params: models::ShardParameters,
     ) -> Self {
         Self {
             mode: LocationMode::Attached(AttachedLocationConfig {
