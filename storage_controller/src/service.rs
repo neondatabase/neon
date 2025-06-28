@@ -1,5 +1,6 @@
 pub mod chaos_injector;
 mod context_iterator;
+pub mod feature_flag;
 pub(crate) mod safekeeper_reconciler;
 mod safekeeper_service;
 
@@ -25,6 +26,7 @@ use futures::stream::FuturesUnordered;
 use http_utils::error::ApiError;
 use hyper::Uri;
 use itertools::Itertools;
+use pageserver_api::config::PostHogConfig;
 use pageserver_api::controller_api::{
     AvailabilityZone, MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability,
     NodeRegisterRequest, NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy,
@@ -166,6 +168,7 @@ enum NodeOperations {
     Register,
     Configure,
     Delete,
+    DeleteTombstone,
 }
 
 /// The leadership status for the storage controller process.
@@ -259,7 +262,7 @@ fn passthrough_api_error(node: &Node, e: mgmt_api::Error) -> ApiError {
             // Presume errors receiving body are connectivity/availability issues except for decoding errors
             let src_str = err.source().map(|e| e.to_string()).unwrap_or_default();
             ApiError::ResourceUnavailable(
-                format!("{node} error receiving error body: {err} {}", src_str).into(),
+                format!("{node} error receiving error body: {err} {src_str}").into(),
             )
         }
         mgmt_api::Error::ApiError(StatusCode::NOT_FOUND, msg) => {
@@ -465,6 +468,16 @@ pub struct Config {
     pub timelines_onto_safekeepers: bool,
 
     pub use_local_compute_notifications: bool,
+
+    /// Number of safekeepers to choose for a timeline when creating it.
+    /// Safekeepers will be choosen from different availability zones.
+    pub timeline_safekeeper_count: usize,
+
+    /// PostHog integration config
+    pub posthog_config: Option<PostHogConfig>,
+
+    #[cfg(feature = "testing")]
+    pub kick_secondary_downloads: bool,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -663,7 +676,7 @@ impl std::fmt::Display for StopReconciliationsReason {
             Self::ShuttingDown => "Shutting down",
             Self::SteppingDown => "Stepping down",
         };
-        write!(writer, "{}", s)
+        write!(writer, "{s}")
     }
 }
 
@@ -1107,7 +1120,8 @@ impl Service {
         observed
     }
 
-    /// Used during [`Self::startup_reconcile`]: detach a list of unknown-to-us tenants from pageservers.
+    /// Used during [`Self::startup_reconcile`] and shard splits: detach a list of unknown-to-us
+    /// tenants from pageservers.
     ///
     /// This is safe to run in the background, because if we don't have this TenantShardId in our map of
     /// tenants, then it is probably something incompletely deleted before: we will not fight with any
@@ -1681,6 +1695,8 @@ impl Service {
                     None,
                     "".to_string(),
                     123,
+                    None,
+                    None,
                     AvailabilityZone("test_az".to_string()),
                     false,
                 )
@@ -2056,6 +2072,7 @@ impl Service {
                             &tenant_shard.shard,
                             &tenant_shard.config,
                             &PlacementPolicy::Attached(0),
+                            tenant_shard.intent.get_secondary().len(),
                         )),
                     },
                 )]);
@@ -2265,6 +2282,7 @@ impl Service {
                     // fail, and start from scratch, so it doesn't make sense for us to try and preserve
                     // the stale/multi states at this point.
                     mode: LocationConfigMode::AttachedSingle,
+                    stripe_size: shard.shard.stripe_size,
                 });
 
                 shard.generation = std::cmp::max(shard.generation, Some(new_gen));
@@ -2298,6 +2316,7 @@ impl Service {
                     id: *tenant_shard_id,
                     r#gen: None,
                     mode: LocationConfigMode::Secondary,
+                    stripe_size: shard.shard.stripe_size,
                 });
 
                 // We must not update observed, because we have no guarantee that our
@@ -5264,7 +5283,7 @@ impl Service {
             shard_params,
             result
                 .iter()
-                .map(|s| format!("{:?}", s))
+                .map(|s| format!("{s:?}"))
                 .collect::<Vec<_>>()
                 .join(",")
         );
@@ -5595,7 +5614,15 @@ impl Service {
             for parent_id in parent_ids {
                 let child_ids = parent_id.split(new_shard_count);
 
-                let (pageserver, generation, policy, parent_ident, config, preferred_az) = {
+                let (
+                    pageserver,
+                    generation,
+                    policy,
+                    parent_ident,
+                    config,
+                    preferred_az,
+                    secondary_count,
+                ) = {
                     let mut old_state = tenants
                         .remove(&parent_id)
                         .expect("It was present, we just split it");
@@ -5615,6 +5642,7 @@ impl Service {
                         old_state.shard,
                         old_state.config.clone(),
                         old_state.preferred_az().cloned(),
+                        old_state.intent.get_secondary().len(),
                     )
                 };
 
@@ -5636,6 +5664,7 @@ impl Service {
                                 &child_shard,
                                 &config,
                                 &policy,
+                                secondary_count,
                             )),
                         },
                     );
@@ -6177,7 +6206,7 @@ impl Service {
                     },
                 )
                 .await
-                .map_err(|e| ApiError::Conflict(format!("Failed to split {}: {}", parent_id, e)))?;
+                .map_err(|e| ApiError::Conflict(format!("Failed to split {parent_id}: {e}")))?;
 
             fail::fail_point!("shard-split-post-remote", |_| Err(ApiError::Conflict(
                 "failpoint".to_string()
@@ -6194,7 +6223,7 @@ impl Service {
                 response
                     .new_shards
                     .iter()
-                    .map(|s| format!("{:?}", s))
+                    .map(|s| format!("{s:?}"))
                     .collect::<Vec<_>>()
                     .join(",")
             );
@@ -6210,7 +6239,11 @@ impl Service {
             }
         }
 
-        pausable_failpoint!("shard-split-pre-complete");
+        fail::fail_point!("shard-split-pre-complete", |_| Err(ApiError::Conflict(
+            "failpoint".to_string()
+        )));
+
+        pausable_failpoint!("shard-split-pre-complete-pause");
 
         // TODO: if the pageserver restarted concurrently with our split API call,
         // the actual generation of the child shard might differ from the generation
@@ -6231,6 +6264,15 @@ impl Service {
         // Replace all the shards we just split with their children: this phase is infallible.
         let (response, child_locations, waiters) =
             self.tenant_shard_split_commit_inmem(tenant_id, new_shard_count, new_stripe_size);
+
+        // Notify all page servers to detach and clean up the old shards because they will no longer
+        // be needed. This is best-effort: if it fails, it will be cleaned up on a subsequent
+        // Pageserver re-attach/startup.
+        let shards_to_cleanup = targets
+            .iter()
+            .map(|target| (target.parent_id, target.node.get_id()))
+            .collect();
+        self.cleanup_locations(shards_to_cleanup).await;
 
         // Send compute notifications for all the new shards
         let mut failed_notifications = Vec::new();
@@ -6634,6 +6676,8 @@ impl Service {
 
     /// This is for debug/support only: assuming tenant data is already present in S3, we "create" a
     /// tenant with a very high generation number so that it will see the existing data.
+    /// It does not create timelines on safekeepers, because they might already exist on some
+    /// safekeeper set. So, the timelines are not storcon-managed after the import.
     pub(crate) async fn tenant_import(
         &self,
         tenant_id: TenantId,
@@ -6909,7 +6953,7 @@ impl Service {
     /// detaching or deleting it on pageservers.  We do not try and re-schedule any
     /// tenants that were on this node.
     pub(crate) async fn node_drop(&self, node_id: NodeId) -> Result<(), ApiError> {
-        self.persistence.delete_node(node_id).await?;
+        self.persistence.set_tombstone(node_id).await?;
 
         let mut locked = self.inner.write().unwrap();
 
@@ -7033,9 +7077,10 @@ impl Service {
         // That is safe because in Service::spawn we only use generation_pageserver if it refers to a node
         // that exists.
 
-        // 2. Actually delete the node from the database and from in-memory state
+        // 2. Actually delete the node from in-memory state and set tombstone to the database
+        // for preventing the node to register again.
         tracing::info!("Deleting node from database");
-        self.persistence.delete_node(node_id).await?;
+        self.persistence.set_tombstone(node_id).await?;
 
         Ok(())
     }
@@ -7052,6 +7097,34 @@ impl Service {
         };
 
         Ok(nodes)
+    }
+
+    pub(crate) async fn tombstone_list(&self) -> Result<Vec<Node>, ApiError> {
+        self.persistence
+            .list_tombstones()
+            .await?
+            .into_iter()
+            .map(|np| Node::from_persistent(np, false))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ApiError::InternalServerError)
+    }
+
+    pub(crate) async fn tombstone_delete(&self, node_id: NodeId) -> Result<(), ApiError> {
+        let _node_lock = trace_exclusive_lock(
+            &self.node_op_locks,
+            node_id,
+            NodeOperations::DeleteTombstone,
+        )
+        .await;
+
+        if matches!(self.get_node(node_id).await, Err(ApiError::NotFound(_))) {
+            self.persistence.delete_node(node_id).await?;
+            Ok(())
+        } else {
+            Err(ApiError::Conflict(format!(
+                "Node {node_id} is in use, consider using tombstone API first"
+            )))
+        }
     }
 
     pub(crate) async fn get_node(&self, node_id: NodeId) -> Result<Node, ApiError> {
@@ -7205,6 +7278,12 @@ impl Service {
             ));
         }
 
+        if register_req.listen_grpc_addr.is_some() != register_req.listen_grpc_port.is_some() {
+            return Err(ApiError::BadRequest(anyhow::anyhow!(
+                "must specify both gRPC address and port"
+            )));
+        }
+
         // Ordering: we must persist the new node _before_ adding it to in-memory state.
         // This ensures that before we use it for anything or expose it via any external
         // API, it is guaranteed to be available after a restart.
@@ -7215,6 +7294,8 @@ impl Service {
             register_req.listen_https_port,
             register_req.listen_pg_addr,
             register_req.listen_pg_port,
+            register_req.listen_grpc_addr,
+            register_req.listen_grpc_port,
             register_req.availability_zone_id.clone(),
             self.config.use_https_pageserver_api,
         );
@@ -7224,7 +7305,25 @@ impl Service {
         };
 
         match registration_status {
-            RegistrationStatus::New => self.persistence.insert_node(&new_node).await?,
+            RegistrationStatus::New => {
+                self.persistence.insert_node(&new_node).await.map_err(|e| {
+                    if matches!(
+                        e,
+                        crate::persistence::DatabaseError::Query(
+                            diesel::result::Error::DatabaseError(
+                                diesel::result::DatabaseErrorKind::UniqueViolation,
+                                _,
+                            )
+                        )
+                    ) {
+                        // The node can be deleted by tombstone API, and not show up in the list of nodes.
+                        // If you see this error, check tombstones first.
+                        ApiError::Conflict(format!("Node {} is already exists", new_node.get_id()))
+                    } else {
+                        ApiError::from(e)
+                    }
+                })?;
+            }
             RegistrationStatus::NeedUpdate => {
                 self.persistence
                     .update_node_on_registration(
@@ -7573,7 +7672,7 @@ impl Service {
 
         if let Some(ongoing) = ongoing_op {
             return Err(ApiError::PreconditionFailed(
-                format!("Background operation already ongoing for node: {}", ongoing).into(),
+                format!("Background operation already ongoing for node: {ongoing}").into(),
             ));
         }
 
@@ -7704,7 +7803,7 @@ impl Service {
 
         if let Some(ongoing) = ongoing_op {
             return Err(ApiError::PreconditionFailed(
-                format!("Background operation already ongoing for node: {}", ongoing).into(),
+                format!("Background operation already ongoing for node: {ongoing}").into(),
             ));
         }
 
@@ -8292,6 +8391,11 @@ impl Service {
     /// we have this helper to move things along faster.
     #[cfg(feature = "testing")]
     async fn kick_secondary_download(&self, tenant_shard_id: TenantShardId) {
+        if !self.config.kick_secondary_downloads {
+            // No-op if kick_secondary_downloads functionaliuty is not configured
+            return;
+        }
+
         let (attached_node, secondaries) = {
             let locked = self.inner.read().unwrap();
             let Some(shard) = locked.tenants.get(&tenant_shard_id) else {
@@ -8701,15 +8805,22 @@ impl Service {
         let waiter_count = waiters.len();
         match self.await_waiters(waiters, RECONCILE_TIMEOUT).await {
             Ok(()) => {}
-            Err(ReconcileWaitError::Failed(_, reconcile_error))
-                if matches!(*reconcile_error, ReconcileError::Cancel) =>
-            {
-                // Ignore reconciler cancel errors: this reconciler might have shut down
-                // because some other change superceded it.  We will return a nonzero number,
-                // so the caller knows they might have to call again to quiesce the system.
-            }
             Err(e) => {
-                return Err(e);
+                if let ReconcileWaitError::Failed(_, reconcile_error) = &e {
+                    match **reconcile_error {
+                        ReconcileError::Cancel
+                        | ReconcileError::Remote(mgmt_api::Error::Cancelled) => {
+                            // Ignore reconciler cancel errors: this reconciler might have shut down
+                            // because some other change superceded it.  We will return a nonzero number,
+                            // so the caller knows they might have to call again to quiesce the system.
+                        }
+                        _ => {
+                            return Err(e);
+                        }
+                    }
+                } else {
+                    return Err(e);
+                }
             }
         };
 
@@ -8763,7 +8874,7 @@ impl Service {
         let nodes = self.inner.read().unwrap().nodes.clone();
         let node = nodes.get(secondary).ok_or(mgmt_api::Error::ApiError(
             StatusCode::NOT_FOUND,
-            format!("Node with id {} not found", secondary),
+            format!("Node with id {secondary} not found"),
         ))?;
 
         match node
@@ -8842,8 +8953,7 @@ impl Service {
                     Err(err) => {
                         return Err(OperationError::FinalizeError(
                             format!(
-                                "Failed to finalise drain cancel of {} by setting scheduling policy to Active: {}",
-                                node_id, err
+                                "Failed to finalise drain cancel of {node_id} by setting scheduling policy to Active: {err}"
                             )
                             .into(),
                         ));
@@ -8947,8 +9057,7 @@ impl Service {
                     Err(err) => {
                         return Err(OperationError::FinalizeError(
                             format!(
-                                "Failed to finalise drain cancel of {} by setting scheduling policy to Active: {}",
-                                node_id, err
+                                "Failed to finalise drain cancel of {node_id} by setting scheduling policy to Active: {err}"
                             )
                             .into(),
                         ));
@@ -9158,8 +9267,7 @@ impl Service {
                     Err(err) => {
                         return Err(OperationError::FinalizeError(
                             format!(
-                                "Failed to finalise drain cancel of {} by setting scheduling policy to Active: {}",
-                                node_id, err
+                                "Failed to finalise drain cancel of {node_id} by setting scheduling policy to Active: {err}"
                             )
                             .into(),
                         ));
@@ -9241,8 +9349,7 @@ impl Service {
                     Err(err) => {
                         return Err(OperationError::FinalizeError(
                             format!(
-                                "Failed to finalise drain cancel of {} by setting scheduling policy to Active: {}",
-                                node_id, err
+                                "Failed to finalise drain cancel of {node_id} by setting scheduling policy to Active: {err}"
                             )
                             .into(),
                         ));

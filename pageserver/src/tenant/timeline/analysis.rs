@@ -4,6 +4,7 @@ use std::ops::Range;
 use utils::lsn::Lsn;
 
 use super::Timeline;
+use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
 
 #[derive(serde::Serialize)]
 pub(crate) struct RangeAnalysis {
@@ -24,7 +25,10 @@ impl Timeline {
 
         let num_of_l0;
         let all_layer_files = {
-            let guard = self.layers.read().await;
+            let guard = self
+                .layers
+                .read(LayerManagerLockHolder::GetLayerMapInfo)
+                .await;
             num_of_l0 = guard.layer_map().unwrap().level0_deltas().len();
             guard.all_persistent_layers()
         };

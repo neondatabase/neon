@@ -107,7 +107,7 @@ impl ChaosInjector {
         // - Skip shards doing a graceful migration already, so that we allow these to run to
         //   completion rather than only exercising the first part and then cancelling with
         //   some other chaos.
-        !matches!(shard.get_scheduling_policy(), ShardSchedulingPolicy::Active)
+        matches!(shard.get_scheduling_policy(), ShardSchedulingPolicy::Active)
             && shard.get_preferred_node().is_none()
     }
 

@@ -1,3 +1,7 @@
+use crate::PgMajorVersion;
+
+pub const MY_PGVERSION: PgMajorVersion = PgMajorVersion::PG14;
+
 pub const XLOG_DBASE_CREATE: u8 = 0x00;
 pub const XLOG_DBASE_DROP: u8 = 0x10;
 

@@ -18,6 +18,7 @@ use crate::types::{EndpointId, RoleName};
 
 #[async_trait]
 pub(crate) trait ProjectInfoCache {
+    fn invalidate_endpoint_access(&self, endpoint_id: EndpointIdInt);
     fn invalidate_endpoint_access_for_project(&self, project_id: ProjectIdInt);
     fn invalidate_endpoint_access_for_org(&self, account_id: AccountIdInt);
     fn invalidate_role_secret_for_project(&self, project_id: ProjectIdInt, role_name: RoleNameInt);
@@ -100,6 +101,13 @@ pub struct ProjectInfoCacheImpl {
 
 #[async_trait]
 impl ProjectInfoCache for ProjectInfoCacheImpl {
+    fn invalidate_endpoint_access(&self, endpoint_id: EndpointIdInt) {
+        info!("invalidating endpoint access for `{endpoint_id}`");
+        if let Some(mut endpoint_info) = self.cache.get_mut(&endpoint_id) {
+            endpoint_info.invalidate_endpoint();
+        }
+    }
+
     fn invalidate_endpoint_access_for_project(&self, project_id: ProjectIdInt) {
         info!("invalidating endpoint access for project `{project_id}`");
         let endpoints = self
@@ -356,6 +364,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::control_plane::messages::EndpointRateLimitConfig;
     use crate::control_plane::{AccessBlockerFlags, AuthSecret};
     use crate::scram::ServerSecret;
     use crate::types::ProjectId;
@@ -391,6 +400,7 @@ mod tests {
                 allowed_ips: allowed_ips.clone(),
                 allowed_vpce: Arc::new(vec![]),
                 flags: AccessBlockerFlags::default(),
+                rate_limits: EndpointRateLimitConfig::default(),
             },
             RoleAccessControl {
                 secret: secret1.clone(),
@@ -406,6 +416,7 @@ mod tests {
                 allowed_ips: allowed_ips.clone(),
                 allowed_vpce: Arc::new(vec![]),
                 flags: AccessBlockerFlags::default(),
+                rate_limits: EndpointRateLimitConfig::default(),
             },
             RoleAccessControl {
                 secret: secret2.clone(),
@@ -431,6 +442,7 @@ mod tests {
                 allowed_ips: allowed_ips.clone(),
                 allowed_vpce: Arc::new(vec![]),
                 flags: AccessBlockerFlags::default(),
+                rate_limits: EndpointRateLimitConfig::default(),
             },
             RoleAccessControl {
                 secret: secret3.clone(),

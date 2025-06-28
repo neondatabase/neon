@@ -12,6 +12,9 @@ testing = ["fail/failpoints", "pageserver_api/testing", "wal_decoder/testing", "
 
 fuzz-read-path = ["testing"]
 
+# Enables benchmarking only APIs
+benchmarking = []
+
 [dependencies]
 anyhow.workspace = true
 arc-swap.workspace = true
@@ -56,6 +59,7 @@ pin-project-lite.workspace = true
 postgres_backend.workspace = true
 postgres_connection.workspace = true
 postgres_ffi.workspace = true
+postgres_ffi_types.workspace = true
 postgres_initdb.workspace = true
 postgres-protocol.workspace = true
 postgres-types.workspace = true
@@ -126,6 +130,7 @@ harness = false
 [[bench]]
 name = "bench_ingest"
 harness = false
+required-features = ["benchmarking"]
 
 [[bench]]
 name = "upload_queue"

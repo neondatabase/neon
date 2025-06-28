@@ -32,12 +32,13 @@ use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use pageserver_api::key::Key;
 use pageserver_api::models::{WalRedoManagerProcessStatus, WalRedoManagerStatus};
-use pageserver_api::record::NeonWalRecord;
 use pageserver_api::shard::TenantShardId;
+use postgres_ffi::PgMajorVersion;
 use tracing::*;
 use utils::lsn::Lsn;
 use utils::sync::gate::GateError;
 use utils::sync::heavier_once_cell;
+use wal_decoder::models::record::NeonWalRecord;
 
 use crate::config::PageServerConf;
 use crate::metrics::{
@@ -165,7 +166,7 @@ impl PostgresRedoManager {
         lsn: Lsn,
         base_img: Option<(Lsn, Bytes)>,
         records: Vec<(Lsn, NeonWalRecord)>,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         redo_attempt_type: RedoAttemptType,
     ) -> Result<Bytes, Error> {
         if records.is_empty() {
@@ -232,7 +233,7 @@ impl PostgresRedoManager {
     /// # Cancel-Safety
     ///
     /// This method is cancellation-safe.
-    pub async fn ping(&self, pg_version: u32) -> Result<(), Error> {
+    pub async fn ping(&self, pg_version: PgMajorVersion) -> Result<(), Error> {
         self.do_with_walredo_process(pg_version, |proc| async move {
             proc.ping(Duration::from_secs(1))
                 .await
@@ -342,7 +343,7 @@ impl PostgresRedoManager {
         O,
     >(
         &self,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         closure: F,
     ) -> Result<O, Error> {
         let proc: Arc<Process> = match self.redo_process.get_or_init_detached().await {
@@ -442,7 +443,7 @@ impl PostgresRedoManager {
         base_img_lsn: Lsn,
         records: &[(Lsn, NeonWalRecord)],
         wal_redo_timeout: Duration,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         max_retry_attempts: u32,
     ) -> Result<Bytes, Error> {
         *(self.last_redo_at.lock().unwrap()) = Some(Instant::now());
@@ -571,11 +572,12 @@ mod tests {
 
     use bytes::Bytes;
     use pageserver_api::key::Key;
-    use pageserver_api::record::NeonWalRecord;
     use pageserver_api::shard::TenantShardId;
+    use postgres_ffi::PgMajorVersion;
     use tracing::Instrument;
     use utils::id::TenantId;
     use utils::lsn::Lsn;
+    use wal_decoder::models::record::NeonWalRecord;
 
     use super::PostgresRedoManager;
     use crate::config::PageServerConf;
@@ -586,7 +588,7 @@ mod tests {
         let h = RedoHarness::new().unwrap();
 
         h.manager
-            .ping(14)
+            .ping(PgMajorVersion::PG14)
             .instrument(h.span())
             .await
             .expect("ping should work");
@@ -612,7 +614,7 @@ mod tests {
                 Lsn::from_str("0/16E2408").unwrap(),
                 None,
                 short_records(),
-                14,
+                PgMajorVersion::PG14,
                 RedoAttemptType::ReadPage,
             )
             .instrument(h.span())
@@ -641,7 +643,7 @@ mod tests {
                 Lsn::from_str("0/16E2408").unwrap(),
                 None,
                 short_records(),
-                14,
+                PgMajorVersion::PG14,
                 RedoAttemptType::ReadPage,
             )
             .instrument(h.span())
@@ -663,7 +665,7 @@ mod tests {
                 Lsn::INVALID,
                 None,
                 short_records(),
-                16, /* 16 currently produces stderr output on startup, which adds a nice extra edge */
+                PgMajorVersion::PG16, /* 16 currently produces stderr output on startup, which adds a nice extra edge */
                 RedoAttemptType::ReadPage,
             )
             .instrument(h.span())

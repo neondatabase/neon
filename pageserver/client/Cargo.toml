@@ -18,6 +18,7 @@ workspace_hack = { version = "0.1", path = "../../workspace_hack" }
 tokio-postgres.workspace = true
 tokio-stream.workspace = true
 tokio.workspace = true
+postgres_versioninfo.workspace = true
 futures.workspace = true
 tokio-util.workspace = true
 anyhow.workspace = true

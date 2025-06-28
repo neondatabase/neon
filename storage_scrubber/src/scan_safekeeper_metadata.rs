@@ -265,7 +265,7 @@ async fn load_timelines_from_db(
     // so spawn it off to run on its own.
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("connection error: {}", e);
+            eprintln!("connection error: {e}");
         }
     });
 
@@ -274,7 +274,7 @@ async fn load_timelines_from_db(
             "and tenant_id in ({})",
             tenant_ids
                 .iter()
-                .map(|t| format!("'{}'", t))
+                .map(|t| format!("'{t}'"))
                 .collect::<Vec<_>>()
                 .join(", ")
         )

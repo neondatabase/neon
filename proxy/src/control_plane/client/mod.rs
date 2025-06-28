@@ -10,6 +10,7 @@ use clashmap::ClashMap;
 use tokio::time::Instant;
 use tracing::{debug, info};
 
+use super::{EndpointAccessControl, RoleAccessControl};
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::{AuthRule, FetchAuthRules, FetchAuthRulesError};
 use crate::cache::endpoints::EndpointsCache;
@@ -21,8 +22,6 @@ use crate::error::ReportableError;
 use crate::metrics::ApiLockMetrics;
 use crate::rate_limiter::{DynamicLimiter, Outcome, RateLimiterConfig, Token};
 use crate::types::EndpointId;
-
-use super::{EndpointAccessControl, RoleAccessControl};
 
 #[non_exhaustive]
 #[derive(Clone)]

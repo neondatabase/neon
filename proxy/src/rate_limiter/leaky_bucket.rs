@@ -69,9 +69,8 @@ pub struct LeakyBucketConfig {
     pub max: f64,
 }
 
-#[cfg(test)]
 impl LeakyBucketConfig {
-    pub(crate) fn new(rps: f64, max: f64) -> Self {
+    pub fn new(rps: f64, max: f64) -> Self {
         assert!(rps > 0.0, "rps must be positive");
         assert!(max > 0.0, "max must be positive");
         Self { rps, max }

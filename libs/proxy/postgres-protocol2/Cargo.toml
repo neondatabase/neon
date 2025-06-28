@@ -5,7 +5,7 @@ edition = "2024"
 license = "MIT/Apache-2.0"
 
 [dependencies]
-base64 = "0.20"
+base64.workspace = true
 byteorder.workspace = true
 bytes.workspace = true
 fallible-iterator.workspace = true

@@ -14,6 +14,8 @@ use bytes::Bytes;
 use utils::bin_ser::SerializeError;
 use utils::lsn::Lsn;
 
+pub use postgres_versioninfo::PgMajorVersion;
+
 macro_rules! postgres_ffi {
     ($version:ident) => {
         #[path = "."]
@@ -91,21 +93,22 @@ macro_rules! dispatch_pgversion {
             $version => $code,
             default = $invalid_pgver_handling,
             pgversions = [
-                14 : v14,
-                15 : v15,
-                16 : v16,
-                17 : v17,
+                $crate::PgMajorVersion::PG14 => v14,
+                $crate::PgMajorVersion::PG15 => v15,
+                $crate::PgMajorVersion::PG16 => v16,
+                $crate::PgMajorVersion::PG17 => v17,
             ]
         )
     };
     ($pgversion:expr => $code:expr,
      default = $default:expr,
-     pgversions = [$($sv:literal : $vsv:ident),+ $(,)?]) => {
-        match ($pgversion) {
+     pgversions = [$($sv:pat => $vsv:ident),+ $(,)?]) => {
+        match ($pgversion.clone().into()) {
             $($sv => {
                 use $crate::$vsv as pgv;
                 $code
             },)+
+            #[allow(unreachable_patterns)]
             _ => {
                 $default
             }
@@ -179,9 +182,9 @@ macro_rules! enum_pgversion {
             $($variant ( $crate::$md::$t )),+
         }
         impl self::$name {
-            pub fn pg_version(&self) -> u32 {
+            pub fn pg_version(&self) -> PgMajorVersion {
                 enum_pgversion_dispatch!(self, $name, _ign, {
-                    pgv::bindings::PG_MAJORVERSION_NUM
+                    pgv::bindings::MY_PGVERSION
                 })
             }
         }
@@ -195,15 +198,15 @@ macro_rules! enum_pgversion {
     };
     {name = $name:ident,
      path = $p:ident,
-     typ = $t:ident,
+     $(typ = $t:ident,)?
      pgversions = [$($variant:ident : $md:ident),+ $(,)?]} => {
         pub enum $name {
-            $($variant ($crate::$md::$p::$t)),+
+            $($variant $(($crate::$md::$p::$t))?),+
         }
         impl $name {
-            pub fn pg_version(&self) -> u32 {
+            pub fn pg_version(&self) -> PgMajorVersion {
                 enum_pgversion_dispatch!(self, $name, _ign, {
-                    pgv::bindings::PG_MAJORVERSION_NUM
+                    pgv::bindings::MY_PGVERSION
                 })
             }
         }
@@ -249,22 +252,21 @@ pub use v14::xlog_utils::{
     try_from_pg_timestamp,
 };
 
-pub fn bkpimage_is_compressed(bimg_info: u8, version: u32) -> bool {
+pub fn bkpimage_is_compressed(bimg_info: u8, version: PgMajorVersion) -> bool {
     dispatch_pgversion!(version, pgv::bindings::bkpimg_is_compressed(bimg_info))
 }
 
 pub fn generate_wal_segment(
     segno: u64,
     system_id: u64,
-    pg_version: u32,
+    pg_version: PgMajorVersion,
     lsn: Lsn,
 ) -> Result<Bytes, SerializeError> {
     assert_eq!(segno, lsn.segment_number(WAL_SEGMENT_SIZE));
 
     dispatch_pgversion!(
         pg_version,
-        pgv::xlog_utils::generate_wal_segment(segno, system_id, lsn),
-        Err(SerializeError::BadInput)
+        pgv::xlog_utils::generate_wal_segment(segno, system_id, lsn)
     )
 }
 
@@ -272,7 +274,7 @@ pub fn generate_pg_control(
     pg_control_bytes: &[u8],
     checkpoint_bytes: &[u8],
     lsn: Lsn,
-    pg_version: u32,
+    pg_version: PgMajorVersion,
 ) -> anyhow::Result<(Bytes, u64, bool)> {
     dispatch_pgversion!(
         pg_version,
@@ -352,6 +354,7 @@ pub fn fsm_logical_to_physical(addr: BlockNumber) -> BlockNumber {
 pub mod waldecoder {
     use std::num::NonZeroU32;
 
+    use crate::PgMajorVersion;
     use bytes::{Buf, Bytes, BytesMut};
     use thiserror::Error;
     use utils::lsn::Lsn;
@@ -369,7 +372,7 @@ pub mod waldecoder {
 
     pub struct WalStreamDecoder {
         pub lsn: Lsn,
-        pub pg_version: u32,
+        pub pg_version: PgMajorVersion,
         pub inputbuf: BytesMut,
         pub state: State,
     }
@@ -382,7 +385,7 @@ pub mod waldecoder {
     }
 
     impl WalStreamDecoder {
-        pub fn new(lsn: Lsn, pg_version: u32) -> WalStreamDecoder {
+        pub fn new(lsn: Lsn, pg_version: PgMajorVersion) -> WalStreamDecoder {
             WalStreamDecoder {
                 lsn,
                 pg_version,

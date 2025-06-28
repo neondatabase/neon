@@ -364,8 +364,7 @@ impl PartialBackup {
             // there should always be zero or one uploaded segment
             assert!(
                 new_segments.is_empty(),
-                "too many uploaded segments: {:?}",
-                new_segments
+                "too many uploaded segments: {new_segments:?}"
             );
         }
 

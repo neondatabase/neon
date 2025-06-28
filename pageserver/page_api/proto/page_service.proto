@@ -102,12 +102,27 @@ message CheckRelExistsResponse {
   bool exists = 1;
 }
 
-// Requests a base backup at a given LSN.
+// Requests a base backup.
 message GetBaseBackupRequest {
-  // The LSN to fetch a base backup at.
-  ReadLsn read_lsn = 1;
+  // The LSN to fetch the base backup at. 0 or absent means the latest LSN known to the Pageserver.
+  uint64 lsn = 1;
   // If true, logical replication slots will not be created.
   bool replica = 2;
+  // If true, include relation files in the base backup. Mainly for debugging and tests.
+  bool full = 3;
+  // Compression algorithm to use. Base backups send a compressed payload instead of using gRPC
+  // compression, so that we can cache compressed backups on the server.
+  BaseBackupCompression compression = 4;
+}
+
+// Base backup compression algorithms.
+enum BaseBackupCompression {
+  // Unknown algorithm. Used when clients send an unsupported algorithm.
+  BASE_BACKUP_COMPRESSION_UNKNOWN = 0;
+  // No compression.
+  BASE_BACKUP_COMPRESSION_NONE = 1;
+  // GZIP compression.
+  BASE_BACKUP_COMPRESSION_GZIP = 2;
 }
 
 // Base backup response chunk, returned as an ordered stream.

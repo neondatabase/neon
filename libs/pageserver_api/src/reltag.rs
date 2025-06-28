@@ -1,9 +1,9 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use postgres_ffi::Oid;
-use postgres_ffi::pg_constants::GLOBALTABLESPACE_OID;
-use postgres_ffi::relfile_utils::{MAIN_FORKNUM, forkname_to_number, forknumber_to_name};
+use postgres_ffi_types::Oid;
+use postgres_ffi_types::constants::GLOBALTABLESPACE_OID;
+use postgres_ffi_types::forknum::{MAIN_FORKNUM, forkname_to_number, forknumber_to_name};
 use serde::{Deserialize, Serialize};
 
 ///

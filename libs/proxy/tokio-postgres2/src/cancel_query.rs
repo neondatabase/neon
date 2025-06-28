@@ -1,5 +1,3 @@
-use std::io;
-
 use tokio::net::TcpStream;
 
 use crate::client::SocketConfig;
@@ -8,25 +6,15 @@ use crate::tls::MakeTlsConnect;
 use crate::{Error, cancel_query_raw, connect_socket};
 
 pub(crate) async fn cancel_query<T>(
-    config: Option<SocketConfig>,
+    config: SocketConfig,
     ssl_mode: SslMode,
-    mut tls: T,
+    tls: T,
     process_id: i32,
     secret_key: i32,
 ) -> Result<(), Error>
 where
     T: MakeTlsConnect<TcpStream>,
 {
-    let config = match config {
-        Some(config) => config,
-        None => {
-            return Err(Error::connect(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "unknown host",
-            )));
-        }
-    };
-
     let hostname = match &config.host {
         Host::Tcp(host) => &**host,
     };

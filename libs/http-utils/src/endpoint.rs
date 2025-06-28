@@ -582,14 +582,14 @@ pub fn attach_openapi_ui(
                             deepLinking: true,
                             showExtensions: true,
                             showCommonExtensions: true,
-                            url: "{}",
+                            url: "{spec_mount_path}",
                         }})
                         window.ui = ui;
                     }};
                 </script>
                 </body>
                 </html>
-            "#, spec_mount_path))).unwrap())
+            "#))).unwrap())
              })
         )
 }
@@ -696,7 +696,7 @@ mod tests {
         let remote_addr = SocketAddr::new(IpAddr::from_str("127.0.0.1").unwrap(), 80);
         let mut service = builder.build(remote_addr);
         if let Err(e) = poll_fn(|ctx| service.poll_ready(ctx)).await {
-            panic!("request service is not ready: {:?}", e);
+            panic!("request service is not ready: {e:?}");
         }
 
         let mut req: Request<Body> = Request::default();
@@ -716,7 +716,7 @@ mod tests {
         let remote_addr = SocketAddr::new(IpAddr::from_str("127.0.0.1").unwrap(), 80);
         let mut service = builder.build(remote_addr);
         if let Err(e) = poll_fn(|ctx| service.poll_ready(ctx)).await {
-            panic!("request service is not ready: {:?}", e);
+            panic!("request service is not ready: {e:?}");
         }
 
         let req: Request<Body> = Request::default();

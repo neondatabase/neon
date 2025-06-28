@@ -1,15 +1,17 @@
-use futures::FutureExt;
+use std::convert::Infallible;
+
 use smol_str::SmolStr;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::debug;
 use utils::measured_stream::MeasuredStream;
 
 use super::copy_bidirectional::ErrorSource;
-use crate::cancellation;
-use crate::compute::PostgresConnection;
-use crate::config::ComputeConfig;
+use crate::compute::MaybeRustlsStream;
 use crate::control_plane::messages::MetricsAuxInfo;
-use crate::metrics::{Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard};
+use crate::metrics::{
+    Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard,
+    NumDbConnectionsGuard,
+};
 use crate::stream::Stream;
 use crate::usage_metrics::{Ids, MetricCounterRecorder, USAGE_METRICS};
 
@@ -64,40 +66,20 @@ pub(crate) async fn proxy_pass(
 
 pub(crate) struct ProxyPassthrough<S> {
     pub(crate) client: Stream<S>,
-    pub(crate) compute: PostgresConnection,
+    pub(crate) compute: MaybeRustlsStream,
+
     pub(crate) aux: MetricsAuxInfo,
-    pub(crate) session_id: uuid::Uuid,
     pub(crate) private_link_id: Option<SmolStr>,
-    pub(crate) cancel: cancellation::Session,
+
+    pub(crate) _cancel_on_shutdown: tokio::sync::oneshot::Sender<Infallible>,
 
     pub(crate) _req: NumConnectionRequestsGuard<'static>,
     pub(crate) _conn: NumClientConnectionsGuard<'static>,
+    pub(crate) _db_conn: NumDbConnectionsGuard<'static>,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
-    pub(crate) async fn proxy_pass(
-        self,
-        compute_config: &ComputeConfig,
-    ) -> Result<(), ErrorSource> {
-        let res = proxy_pass(
-            self.client,
-            self.compute.stream,
-            self.aux,
-            self.private_link_id,
-        )
-        .await;
-        if let Err(err) = self
-            .compute
-            .cancel_closure
-            .try_cancel_query(compute_config)
-            .boxed()
-            .await
-        {
-            tracing::warn!(session_id = ?self.session_id, ?err, "could not cancel the query in the database");
-        }
-
-        drop(self.cancel.remove_cancel_key()); // we don't need a result. If the queue is full, we just log the error
-
-        res
+    pub(crate) async fn proxy_pass(self) -> Result<(), ErrorSource> {
+        proxy_pass(self.client, self.compute, self.aux, self.private_link_id).await
     }
 }

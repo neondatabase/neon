@@ -1,6 +1,6 @@
 # neon extension
 comment = 'cloud storage for PostgreSQL'
-default_version = '1.5'
+default_version = '1.6'
 module_pathname = '$libdir/neon'
 relocatable = true
 trusted = true

@@ -87,6 +87,28 @@ pub enum RemoteStorageKind {
     AzureContainer(AzureConfig),
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+/// Version of RemoteStorageKind which deserializes with type: LocalFs | AwsS3 | AzureContainer
+/// Needed for endpoint storage service
+pub enum TypedRemoteStorageKind {
+    LocalFs { local_path: Utf8PathBuf },
+    AwsS3(S3Config),
+    AzureContainer(AzureConfig),
+}
+
+impl From<TypedRemoteStorageKind> for RemoteStorageKind {
+    fn from(value: TypedRemoteStorageKind) -> Self {
+        match value {
+            TypedRemoteStorageKind::LocalFs { local_path } => {
+                RemoteStorageKind::LocalFs { local_path }
+            }
+            TypedRemoteStorageKind::AwsS3(v) => RemoteStorageKind::AwsS3(v),
+            TypedRemoteStorageKind::AzureContainer(v) => RemoteStorageKind::AzureContainer(v),
+        }
+    }
+}
+
 /// AWS S3 bucket coordinates and access credentials to manage the bucket contents (read and write).
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct S3Config {

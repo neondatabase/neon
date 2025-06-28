@@ -11,15 +11,18 @@ pub(crate) mod errors;
 
 use std::sync::Arc;
 
+use messages::EndpointRateLimitConfig;
+
+use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::AuthRule;
-use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
 use crate::auth::{AuthError, IpPattern, check_peer_addr_is_in_list};
 use crate::cache::{Cached, TimedLru};
 use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::control_plane::messages::{ControlPlaneErrorMessage, MetricsAuxInfo};
-use crate::intern::{AccountIdInt, ProjectIdInt};
+use crate::intern::{AccountIdInt, EndpointIdInt, ProjectIdInt};
 use crate::protocol2::ConnectionInfoExtra;
+use crate::rate_limiter::{EndpointRateLimiter, LeakyBucketConfig};
 use crate::types::{EndpointCacheKey, EndpointId, RoleName};
 use crate::{compute, scram};
 
@@ -39,10 +42,6 @@ pub mod mgmt;
 /// Auth secret which is managed by the cloud.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub(crate) enum AuthSecret {
-    #[cfg(any(test, feature = "testing"))]
-    /// Md5 hash of user's password.
-    Md5([u8; 16]),
-
     /// [SCRAM](crate::scram) authentication info.
     Scram(scram::ServerSecret),
 }
@@ -60,16 +59,14 @@ pub(crate) struct AuthInfo {
     pub(crate) account_id: Option<AccountIdInt>,
     /// Are public connections or VPC connections blocked?
     pub(crate) access_blocker_flags: AccessBlockerFlags,
+    /// The rate limits for this endpoint.
+    pub(crate) rate_limits: EndpointRateLimitConfig,
 }
 
 /// Info for establishing a connection to a compute node.
-/// This is what we get after auth succeeded, but not before!
 #[derive(Clone)]
 pub(crate) struct NodeInfo {
-    /// Compute node connection params.
-    /// It's sad that we have to clone this, but this will improve
-    /// once we migrate to a bespoke connection logic.
-    pub(crate) config: compute::ConnCfg,
+    pub(crate) conn_info: compute::ConnectInfo,
 
     /// Labels for proxy's metrics.
     pub(crate) aux: MetricsAuxInfo,
@@ -80,24 +77,8 @@ impl NodeInfo {
         &self,
         ctx: &RequestContext,
         config: &ComputeConfig,
-        user_info: ComputeUserInfo,
-    ) -> Result<compute::PostgresConnection, compute::ConnectionError> {
-        self.config
-            .connect(ctx, self.aux.clone(), config, user_info)
-            .await
-    }
-
-    pub(crate) fn reuse_settings(&mut self, other: Self) {
-        self.config.reuse_password(other.config);
-    }
-
-    pub(crate) fn set_keys(&mut self, keys: &ComputeCredentialKeys) {
-        match keys {
-            #[cfg(any(test, feature = "testing"))]
-            ComputeCredentialKeys::Password(password) => self.config.password(password),
-            ComputeCredentialKeys::AuthKeys(auth_keys) => self.config.auth_keys(*auth_keys),
-            ComputeCredentialKeys::JwtPayload(_) | ComputeCredentialKeys::None => &mut self.config,
-        };
+    ) -> Result<compute::ComputeConnection, compute::ConnectionError> {
+        self.conn_info.connect(ctx, &self.aux, config).await
     }
 }
 
@@ -121,6 +102,8 @@ pub struct EndpointAccessControl {
     pub allowed_ips: Arc<Vec<IpPattern>>,
     pub allowed_vpce: Arc<Vec<String>>,
     pub flags: AccessBlockerFlags,
+
+    pub rate_limits: EndpointRateLimitConfig,
 }
 
 impl EndpointAccessControl {
@@ -155,6 +138,36 @@ impl EndpointAccessControl {
             }
         } else if self.flags.public_access_blocked {
             return Err(AuthError::NetworkNotAllowed);
+        }
+
+        Ok(())
+    }
+
+    pub fn connection_attempt_rate_limit(
+        &self,
+        ctx: &RequestContext,
+        endpoint: &EndpointId,
+        rate_limiter: &EndpointRateLimiter,
+    ) -> Result<(), AuthError> {
+        let endpoint = EndpointIdInt::from(endpoint);
+
+        let limits = &self.rate_limits.connection_attempts;
+        let config = match ctx.protocol() {
+            crate::metrics::Protocol::Http => limits.http,
+            crate::metrics::Protocol::Ws => limits.ws,
+            crate::metrics::Protocol::Tcp => limits.tcp,
+            crate::metrics::Protocol::SniRouter => return Ok(()),
+        };
+        let config = config.and_then(|config| {
+            if config.rps <= 0.0 || config.burst <= 0.0 {
+                return None;
+            }
+
+            Some(LeakyBucketConfig::new(config.rps, config.burst))
+        });
+
+        if !rate_limiter.check(endpoint, config, 1) {
+            return Err(AuthError::too_many_connections());
         }
 
         Ok(())

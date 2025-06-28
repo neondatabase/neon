@@ -224,8 +224,7 @@ pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
         }
     }
     println!(
-        "Total delta layers {} image layers {} excess layers {}",
-        total_delta_layers, total_image_layers, total_excess_layers
+        "Total delta layers {total_delta_layers} image layers {total_image_layers} excess layers {total_excess_layers}"
     );
     Ok(())
 }

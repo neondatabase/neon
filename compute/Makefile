@@ -22,7 +22,7 @@ sql_exporter.yml: $(jsonnet_files)
 		--output-file etc/$@ \
 		--tla-str collector_name=neon_collector \
 		--tla-str collector_file=neon_collector.yml \
-		--tla-str 'connection_string=postgresql://cloud_admin@127.0.0.1:5432/postgres?sslmode=disable&application_name=sql_exporter' \
+		--tla-str 'connection_string=postgresql://cloud_admin@127.0.0.1:5432/postgres?sslmode=disable&application_name=sql_exporter&pgaudit.log=none' \
 		etc/sql_exporter.jsonnet
 
 sql_exporter_autoscaling.yml: $(jsonnet_files)
@@ -30,7 +30,7 @@ sql_exporter_autoscaling.yml: $(jsonnet_files)
 		--output-file etc/$@ \
 		--tla-str collector_name=neon_collector_autoscaling \
 		--tla-str collector_file=neon_collector_autoscaling.yml \
-		--tla-str 'connection_string=postgresql://cloud_admin@127.0.0.1:5432/postgres?sslmode=disable&application_name=sql_exporter_autoscaling' \
+		--tla-str 'connection_string=postgresql://cloud_admin@127.0.0.1:5432/postgres?sslmode=disable&application_name=sql_exporter_autoscaling&pgaudit.log=none' \
 		etc/sql_exporter.jsonnet
 
 .PHONY: clean
@@ -48,3 +48,11 @@ jsonnetfmt-test:
 .PHONY: jsonnetfmt-format
 jsonnetfmt-format:
 	jsonnetfmt --in-place $(jsonnet_files)
+
+.PHONY: manifest-schema-validation
+manifest-schema-validation: node_modules
+	node_modules/.bin/jsonschema validate -d https://json-schema.org/draft/2020-12/schema manifest.schema.json manifest.yaml
+
+node_modules: package.json
+	npm install
+	touch node_modules
