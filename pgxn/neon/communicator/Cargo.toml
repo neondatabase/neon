@@ -1,0 +1,20 @@
+[package]
+name = "communicator"
+version = "0.1.0"
+license.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["staticlib"]
+
+[features]
+# 'testing' feature is currently unused in the communicator, but we accept it for convenience of
+# calling build scripts, so that you can pass the same feature to all packages.
+testing = []
+
+[dependencies]
+neon-shmem.workspace = true
+workspace_hack = { version = "0.1", path = "../../../workspace_hack" }
+
+[build-dependencies]
+cbindgen.workspace = true

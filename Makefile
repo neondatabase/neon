@@ -30,11 +30,18 @@ ifeq ($(BUILD_TYPE),release)
 	PG_CFLAGS += -O2 -g3 $(CFLAGS)
 	PG_LDFLAGS = $(LDFLAGS)
 	CARGO_PROFILE ?= --profile=release
+	# NEON_CARGO_ARTIFACT_TARGET_DIR is the directory where `cargo build` places
+	# the final build artifacts. There is unfortunately no easy way of changing
+	# it to a fully predictable path, nor to extract the path with a simple
+	# command. See https://github.com/rust-lang/cargo/issues/9661 and
+	# https://github.com/rust-lang/cargo/issues/6790.
+	NEON_CARGO_ARTIFACT_TARGET_DIR = $(ROOT_PROJECT_DIR)/target/release
 else ifeq ($(BUILD_TYPE),debug)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
 	PG_CFLAGS += -O0 -g3 $(CFLAGS)
 	PG_LDFLAGS = $(LDFLAGS)
 	CARGO_PROFILE ?= --profile=dev
+	NEON_CARGO_ARTIFACT_TARGET_DIR = $(ROOT_PROJECT_DIR)/target/debug
 else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
@@ -102,7 +109,7 @@ all: neon postgres-install neon-pg-ext
 
 ### Neon Rust bits
 #
-# The 'postgres_ffi' depends on the Postgres headers.
+# The 'postgres_ffi' crate depends on the Postgres headers.
 .PHONY: neon
 neon: postgres-headers-install walproposer-lib cargo-target-dir
 	+@echo "Compiling Neon"
@@ -115,10 +122,13 @@ cargo-target-dir:
 	test -e target/CACHEDIR.TAG || echo "$(CACHEDIR_TAG_CONTENTS)" > target/CACHEDIR.TAG
 
 .PHONY: neon-pg-ext-%
-neon-pg-ext-%: postgres-install-%
+neon-pg-ext-%: postgres-install-% cargo-target-dir
 	+@echo "Compiling neon-specific Postgres extensions for $*"
 	mkdir -p $(BUILD_DIR)/pgxn-$*
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
+	$(MAKE) PG_CONFIG="$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config" COPT='$(COPT)' \
+		NEON_CARGO_ARTIFACT_TARGET_DIR="$(NEON_CARGO_ARTIFACT_TARGET_DIR)" \
+		CARGO_BUILD_FLAGS="$(CARGO_BUILD_FLAGS)" \
+		CARGO_PROFILE="$(CARGO_PROFILE)" \
 		-C $(BUILD_DIR)/pgxn-$*\
 		-f $(ROOT_PROJECT_DIR)/pgxn/Makefile  install
 

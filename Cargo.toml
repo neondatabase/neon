@@ -46,6 +46,7 @@ members = [
     "libs/proxy/postgres-types2",
     "libs/proxy/tokio-postgres2",
     "endpoint_storage",
+    "pgxn/neon/communicator",
 ]
 
 [workspace.package]
@@ -254,6 +255,7 @@ desim = { version = "0.1", path = "./libs/desim" }
 endpoint_storage = { version = "0.0.1", path = "./endpoint_storage/" }
 http-utils = { version = "0.1", path = "./libs/http-utils/" }
 metrics = { version = "0.1", path = "./libs/metrics/" }
+neon-shmem = { version = "0.1", path = "./libs/neon-shmem/" }
 pageserver = { path = "./pageserver" }
 pageserver_api = { version = "0.1", path = "./libs/pageserver_api/" }
 pageserver_client = { path = "./pageserver/client" }
@@ -283,6 +285,7 @@ walproposer = { version = "0.1", path = "./libs/walproposer/" }
 workspace_hack = { version = "0.1", path = "./workspace_hack/" }
 
 ## Build dependencies
+cbindgen = "0.29.0"
 criterion = "0.5.1"
 rcgen = "0.13"
 rstest = "0.18"
