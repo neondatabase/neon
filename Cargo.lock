@@ -1236,6 +1236,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "client_cache"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "http 1.1.0",
+ "hyper-util",
+ "priority-queue",
+ "rand 0.8.5",
+ "tokio",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tower 0.5.2",
+ "uuid",
+ "workspace_hack",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5050,6 +5069,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "priority-queue"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5676d703dda103cbb035b653a9f11448c0a7216c7926bd35fcb5865475d0c970"
+dependencies = [
+ "autocfg",
+ "equivalent",
+ "indexmap 2.9.0",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.94"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5667,9 +5697,16 @@ dependencies = [
 
 [[package]]
 name = "replace_with"
-version = "0.1.7"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3a8614ee435691de62bcffcf4a66d91b3594bf1428a5722e79103249a095690"
+checksum = "51743d3e274e2b18df81c4dc6caf8a5b8e15dbe799e0dca05c7617380094e884"
+
+[[package]]
+name = "request_tracker"
+version = "0.1.0"
+dependencies = [
+ "workspace_hack",
+]
 
 [[package]]
 name = "reqwest"
