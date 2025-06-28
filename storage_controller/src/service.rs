@@ -471,7 +471,7 @@ pub struct Config {
 
     /// Number of safekeepers to choose for a timeline when creating it.
     /// Safekeepers will be choosen from different availability zones.
-    pub timeline_safekeeper_count: i64,
+    pub timeline_safekeeper_count: usize,
 
     /// PostHog integration config
     pub posthog_config: Option<PostHogConfig>,
