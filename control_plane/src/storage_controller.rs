@@ -48,7 +48,7 @@ pub struct StorageController {
 
 const COMMAND: &str = "storage_controller";
 
-const STORAGE_CONTROLLER_POSTGRES_VERSION: PgMajorVersion = PgMajorVersion::PG16;
+const STORAGE_CONTROLLER_POSTGRES_VERSION: PgMajorVersion = PgMajorVersion::PG17;
 
 const DB_NAME: &str = "storage_controller";
 
