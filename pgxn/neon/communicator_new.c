@@ -662,6 +662,19 @@ retry:
 							(errcode_for_file_access(),
 							 errmsg("could not read block %lu in local cache file: %m",
 									cached_block)));
+				if (nbytes == 0)
+				{
+					/*
+					 * FIXME: if the file was concurrently truncated, I guess
+					 * this is expected. We should finish the read by calling
+					 * bcomm_finish_cache_read(), and only throw the error if
+					 * it reported success.
+					 */
+					ereport(ERROR,
+							(errcode_for_file_access(),
+							 errmsg("could not read block %lu in local cache file (unexpected EOF)",
+									cached_block)));
+				}
 				bytes_total += nbytes;
 			}
 		}
