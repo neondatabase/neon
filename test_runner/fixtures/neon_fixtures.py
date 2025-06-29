@@ -4258,7 +4258,13 @@ class Endpoint(PgProtocol, LogUtils):
         # If gRPC is enabled, use the new communicator too.
         #
         # NB: the communicator is enabled by default, so force it to false otherwise.
-        config_lines += [f"neon.enable_new_communicator={str(grpc).lower()}"]
+        #
+        # XXX: By checking for None, we enable the new communicator for all tests
+        # by default
+        if grpc or grpc is None:
+            config_lines += [f"neon.enable_new_communicator=on"]
+        else:
+            config_lines += [f"neon.enable_new_communicator=off"]
 
         # Delete file cache if it exists (and we're recreating the endpoint)
         if USE_LFC:

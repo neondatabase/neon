@@ -204,7 +204,7 @@ impl PooledItemFactory<StreamReturner> for StreamFactory {
 
 #[derive(Clone)]
 pub struct RequestTracker {
-    cur_id: Arc<AtomicU64>,
+    _cur_id: Arc<AtomicU64>,
     stream_pool: Arc<ConnectionPool<StreamReturner>>,
     unary_pool: Arc<ConnectionPool<Channel>>,
     auth_interceptor: AuthInterceptor,
@@ -220,7 +220,7 @@ impl RequestTracker {
         let cur_id = Arc::new(AtomicU64::new(0));
 
         RequestTracker {
-            cur_id: cur_id.clone(),
+            _cur_id: cur_id.clone(),
             stream_pool: stream_pool,
             unary_pool: unary_pool,
             auth_interceptor: auth_interceptor,

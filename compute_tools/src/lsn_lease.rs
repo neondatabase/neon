@@ -81,11 +81,14 @@ fn acquire_lsn_lease_with_retry(
 
             let spec = state.pspec.as_ref().expect("spec must be set");
 
-            let conn_strings = spec.pageserver_connstr.split(',');
+            spec.pageserver_conninfo.shards
+                .iter()
+                .map(|(_shardno, conninfo)| {
+                    // FIXME: for now, this requires a libpq connection, the grpc API doesn't
+                    // have a "lease" method.
+                    let connstr = conninfo.libpq_url.as_ref().expect("missing libpq URL");
 
-            conn_strings
-                .map(|connstr| {
-                    let mut config = postgres::Config::from_str(connstr).expect("Invalid connstr");
+                    let mut config = postgres::Config::from_str(&connstr).expect("Invalid connstr");
                     if let Some(storage_auth_token) = &spec.storage_auth_token {
                         config.password(storage_auth_token.clone());
                     }

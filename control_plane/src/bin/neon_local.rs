@@ -16,9 +16,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use compute_api::requests::ComputeClaimsScope;
-use compute_api::spec::ComputeMode;
+use compute_api::spec::{ComputeMode, PageserverShardConnectionInfo, PageserverConnectionInfo};
 use control_plane::broker::StorageBroker;
-use control_plane::endpoint::{ComputeControlPlane, EndpointTerminateMode, PageserverProtocol};
+use control_plane::endpoint::{ComputeControlPlane, EndpointTerminateMode};
 use control_plane::endpoint_storage::{ENDPOINT_STORAGE_DEFAULT_ADDR, EndpointStorage};
 use control_plane::local_env;
 use control_plane::local_env::{
@@ -1504,28 +1504,34 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 )?;
             }
 
-            let (pageservers, stripe_size) = if let Some(pageserver_id) = pageserver_id {
-                let conf = env.get_pageserver_conf(pageserver_id).unwrap();
-                // Use gRPC if requested.
-                let pageserver = if endpoint.grpc {
-                    let grpc_addr = conf.listen_grpc_addr.as_ref().expect("bad config");
-                    let (host, port) = parse_host_port(grpc_addr)?;
-                    let port = port.unwrap_or(DEFAULT_PAGESERVER_GRPC_PORT);
-                    (PageserverProtocol::Grpc, host, port)
-                } else {
+            let (shards, stripe_size) = if let Some(ps_id) = pageserver_id {
+                let conf = env.get_pageserver_conf(ps_id).unwrap();
+                let libpq_url = Some({
                     let (host, port) = parse_host_port(&conf.listen_pg_addr)?;
                     let port = port.unwrap_or(5432);
-                    (PageserverProtocol::Libpq, host, port)
+                    format!("postgres://no_user@{host}:{port}")
+                });
+                let grpc_url = if let Some(grpc_addr) = &conf.listen_grpc_addr {
+                    let (host, port) = parse_host_port(grpc_addr)?;
+                    let port = port.unwrap_or(DEFAULT_PAGESERVER_GRPC_PORT);
+                    Some(format!("grpc://no_user@{host}:{port}"))
+                } else {
+                    None
                 };
+                let pageserver = PageserverShardConnectionInfo {
+                    libpq_url,
+                    grpc_url,
+                };
+
                 // If caller is telling us what pageserver to use, this is not a tenant which is
                 // fully managed by storage controller, therefore not sharded.
-                (vec![pageserver], DEFAULT_STRIPE_SIZE)
+                (vec![(0, pageserver)], DEFAULT_STRIPE_SIZE)
             } else {
                 // Look up the currently attached location of the tenant, and its striping metadata,
                 // to pass these on to postgres.
                 let storage_controller = StorageController::from_env(env);
                 let locate_result = storage_controller.tenant_locate(endpoint.tenant_id).await?;
-                let pageservers = futures::future::try_join_all(
+                let shards = futures::future::try_join_all(
                     locate_result.shards.into_iter().map(|shard| async move {
                         if let ComputeMode::Static(lsn) = endpoint.mode {
                             // Initialize LSN leases for static computes.
@@ -1538,28 +1544,33 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                                 .await?;
                         }
 
-                        let pageserver = if endpoint.grpc {
-                            (
-                                PageserverProtocol::Grpc,
-                                Host::parse(&shard.listen_grpc_addr.expect("no gRPC address"))?,
-                                shard.listen_grpc_port.expect("no gRPC port"),
-                            )
+                        let libpq_host = Host::parse(&shard.listen_pg_addr)?;
+                        let libpq_port = shard.listen_pg_port;
+                        let libpq_url = Some(format!("postgres://no_user@{libpq_host}:{libpq_port}"));
+
+                        let grpc_url = if let Some(grpc_host) = shard.listen_grpc_addr {
+                            let grpc_port = shard.listen_grpc_port.expect("no gRPC port");
+                            Some(format!("grpc://no_user@{grpc_host}:{grpc_port}"))
                         } else {
-                            (
-                                PageserverProtocol::Libpq,
-                                Host::parse(&shard.listen_pg_addr)?,
-                                shard.listen_pg_port,
-                            )
+                            None
                         };
-                        anyhow::Ok(pageserver)
+                        let pageserver = PageserverShardConnectionInfo {
+                            libpq_url,
+                            grpc_url,
+                        };
+                        anyhow::Ok((shard.shard_id.shard_number.0 as u32, pageserver))
                     }),
                 )
                 .await?;
                 let stripe_size = locate_result.shard_params.stripe_size;
 
-                (pageservers, stripe_size)
+                (shards, stripe_size)
             };
-            assert!(!pageservers.is_empty());
+            assert!(!shards.is_empty());
+            let pageserver_conninfo = PageserverConnectionInfo {
+                shards: shards.into_iter().collect(),
+                prefer_grpc: endpoint.grpc,
+            };
 
             let ps_conf = env.get_pageserver_conf(DEFAULT_PAGESERVER_ID)?;
             let auth_token = if matches!(ps_conf.pg_auth_type, AuthType::NeonJWT) {
@@ -1591,7 +1602,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                     endpoint_storage_addr,
                     safekeepers_generation,
                     safekeepers,
-                    pageservers,
+                    pageserver_conninfo,
                     remote_ext_base_url.as_ref(),
                     stripe_size.0 as usize,
                     args.create_test_user,
@@ -1606,20 +1617,27 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 .endpoints
                 .get(endpoint_id.as_str())
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
-            let pageservers = if let Some(ps_id) = args.endpoint_pageserver_id {
+            let shards = if let Some(ps_id) = args.endpoint_pageserver_id {
                 let conf = env.get_pageserver_conf(ps_id)?;
-                // Use gRPC if requested.
-                let pageserver = if endpoint.grpc {
-                    let grpc_addr = conf.listen_grpc_addr.as_ref().expect("bad config");
-                    let (host, port) = parse_host_port(grpc_addr)?;
-                    let port = port.unwrap_or(DEFAULT_PAGESERVER_GRPC_PORT);
-                    (PageserverProtocol::Grpc, host, port)
-                } else {
+                let libpq_url = Some({
                     let (host, port) = parse_host_port(&conf.listen_pg_addr)?;
                     let port = port.unwrap_or(5432);
-                    (PageserverProtocol::Libpq, host, port)
+                    format!("postgres://no_user@{host}:{port}")
+                });
+                let grpc_url = if let Some(grpc_addr) = &conf.listen_grpc_addr {
+                    let (host, port) = parse_host_port(grpc_addr)?;
+                    let port = port.unwrap_or(DEFAULT_PAGESERVER_GRPC_PORT);
+                    Some(format!("grpc://no_user@{host}:{port}"))
+                } else {
+                    None
                 };
-                vec![pageserver]
+                let pageserver = PageserverShardConnectionInfo {
+                    libpq_url,
+                    grpc_url,
+                };
+                // If caller is telling us what pageserver to use, this is not a tenant which is
+                // fully managed by storage controller, therefore not sharded.
+                vec![(0, pageserver)]
             } else {
                 let storage_controller = StorageController::from_env(env);
                 storage_controller
@@ -1629,27 +1647,31 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                     .into_iter()
                     .map(|shard| {
                         // Use gRPC if requested.
-                        if endpoint.grpc {
-                            (
-                                PageserverProtocol::Grpc,
-                                Host::parse(&shard.listen_grpc_addr.expect("no gRPC address"))
-                                    .expect("bad hostname"),
-                                shard.listen_grpc_port.expect("no gRPC port"),
-                            )
+                        let libpq_host = Host::parse(&shard.listen_pg_addr).expect("bad hostname");
+                        let libpq_port = shard.listen_pg_port;
+                        let libpq_url = Some(format!("postgres://no_user@{libpq_host}:{libpq_port}"));
+
+                        let grpc_url = if let Some(grpc_host) = shard.listen_grpc_addr {
+                            let grpc_port = shard.listen_grpc_port.expect("no gRPC port");
+                            Some(format!("grpc://no_user@{grpc_host}:{grpc_port}"))
                         } else {
-                            (
-                                PageserverProtocol::Libpq,
-                                Host::parse(&shard.listen_pg_addr).expect("bad hostname"),
-                                shard.listen_pg_port,
-                            )
-                        }
+                            None
+                        };
+                        (shard.shard_id.shard_number.0 as u32, PageserverShardConnectionInfo {
+                            libpq_url,
+                            grpc_url,
+                        })
                     })
                     .collect::<Vec<_>>()
+            };
+            let pageserver_conninfo = PageserverConnectionInfo {
+                shards: shards.into_iter().collect(),
+                prefer_grpc: endpoint.grpc,
             };
             // If --safekeepers argument is given, use only the listed
             // safekeeper nodes; otherwise all from the env.
             let safekeepers = parse_safekeepers(&args.safekeepers)?;
-            endpoint.reconfigure(pageservers, None, safekeepers).await?;
+            endpoint.reconfigure(pageserver_conninfo, None, safekeepers).await?;
         }
         EndpointCmd::Stop(args) => {
             let endpoint_id = &args.endpoint_id;

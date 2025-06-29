@@ -56,9 +56,42 @@ pub fn write_postgres_conf(
 
     // Add options for connecting to storage
     writeln!(file, "# Neon storage settings")?;
-    if let Some(s) = &spec.pageserver_connstring {
-        writeln!(file, "neon.pageserver_connstring={}", escape_conf_value(s))?;
+
+    if let Some(conninfo) = &spec.pageserver_connection_info {
+        let mut libpq_urls: Option<Vec<String>> = Some(Vec::new());
+        let mut grpc_urls: Option<Vec<String>> = Some(Vec::new());
+
+        for shardno in 0..conninfo.shards.len() {
+            let info = conninfo.shards.get(&(shardno as u32))
+                .ok_or_else(|| anyhow::anyhow!("shard {shardno} missing from pageserver_connection_info shard map"))?;
+
+            if let Some(url) = &info.libpq_url {
+                if let Some(ref mut urls) = libpq_urls {
+                    urls.push(url.clone());
+                }
+            } else {
+                libpq_urls = None
+            }
+            if let Some(url) = &info.grpc_url {
+                if let Some(ref mut urls) = grpc_urls {
+                    urls.push(url.clone());
+                }
+            } else {
+                grpc_urls = None
+            }
+        }
+        if let Some(libpq_urls) = libpq_urls {
+            writeln!(file, "neon.pageserver_connstring={}", escape_conf_value(&libpq_urls.join(",")))?;
+        } else {
+            writeln!(file, "# no neon.pageserver_connstring")?;
+        }
+        if let Some(grpc_urls) = grpc_urls {
+            writeln!(file, "neon.pageserver_grpc_urls={}", escape_conf_value(&grpc_urls.join(",")))?;
+        } else {
+            writeln!(file, "# no neon.pageserver_grpc_urls")?;
+        }
     }
+
     if let Some(stripe_size) = spec.shard_stripe_size {
         writeln!(file, "neon.stripe_size={stripe_size}")?;
     }

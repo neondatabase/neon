@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use control_plane::endpoint::{ComputeControlPlane, EndpointStatus, PageserverProtocol};
+use control_plane::endpoint::{ComputeControlPlane, EndpointStatus, PageserverConnectionInfo, PageserverShardConnectionInfo};
 use control_plane::local_env::LocalEnv;
 use futures::StreamExt;
 use hyper::StatusCode;
@@ -425,27 +425,40 @@ impl ComputeHook {
             if endpoint.tenant_id == *tenant_id && endpoint.status() == EndpointStatus::Running {
                 tracing::info!("Reconfiguring endpoint {endpoint_name}");
 
-                let pageservers = shards
-                    .iter()
-                    .map(|shard| {
-                        let ps_conf = env
-                            .get_pageserver_conf(shard.node_id)
-                            .expect("Unknown pageserver");
-                        if endpoint.grpc {
-                            let addr = ps_conf.listen_grpc_addr.as_ref().expect("no gRPC address");
-                            let (host, port) = parse_host_port(addr).expect("invalid gRPC address");
-                            let port = port.unwrap_or(DEFAULT_GRPC_LISTEN_PORT);
-                            (PageserverProtocol::Grpc, host, port)
-                        } else {
-                            let (host, port) = parse_host_port(&ps_conf.listen_pg_addr)
-                                .expect("Unable to parse listen_pg_addr");
-                            (PageserverProtocol::Libpq, host, port.unwrap_or(5432))
-                        }
-                    })
-                    .collect::<Vec<_>>();
+                let mut shard_conninfos = HashMap::new();
+                for shard in shards.iter() {
+                    let ps_conf = env
+                        .get_pageserver_conf(shard.node_id)
+                        .expect("Unknown pageserver");
+
+                    let libpq_url = Some({
+                        let (host, port) = parse_host_port(&ps_conf.listen_pg_addr)
+                            .expect("Unable to parse listen_pg_addr");
+                        let port = port.unwrap_or(5432);
+                        format!("postgres://no_user@{host}:{port}")
+                    });
+                    let grpc_url = if let Some(grpc_addr) = &ps_conf.listen_grpc_addr {
+                        let (host, port) = parse_host_port(grpc_addr)
+                            .expect("invalid gRPC address");
+                        let port = port.unwrap_or(DEFAULT_GRPC_LISTEN_PORT);
+                        Some(format!("grpc://no_user@{host}:{port}"))
+                    } else {
+                        None
+                    };
+                    let pageserver = PageserverShardConnectionInfo {
+                        libpq_url,
+                        grpc_url,
+                    };
+                    shard_conninfos.insert(shard.shard_number.0 as u32, pageserver);
+                }
+
+                let pageserver_conninfo = PageserverConnectionInfo {
+                    shards: shard_conninfos,
+                    prefer_grpc: endpoint.grpc,
+                };
 
                 endpoint
-                    .reconfigure(pageservers, *stripe_size, None)
+                    .reconfigure(pageserver_conninfo, *stripe_size, None)
                     .await
                     .map_err(NotifyError::NeonLocal)?;
             }
