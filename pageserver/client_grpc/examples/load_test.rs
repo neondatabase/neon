@@ -2,15 +2,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{
-    Arc,
-    Mutex,
+    Arc, Mutex,
     atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 
+use rand::Rng;
 use tokio::task;
 use tokio::time::sleep;
-use rand::Rng;
 use tonic::Status;
 
 // Pull in your ConnectionPool and PooledItemFactory from the pageserver_client_grpc crate.
@@ -184,13 +183,13 @@ async fn main() {
     // --------------------------------------
     // 2. Pool parameters
     // --------------------------------------
-    let connect_timeout    = Duration::from_millis(500);
-    let connect_backoff    = Duration::from_millis(100);
-    let max_consumers      = 100;                 // test limit
-    let error_threshold    = 2;                 // mock never fails
-    let max_idle_duration  = Duration::from_secs(2);
-    let max_total_connections  = 3;
-    let aggregate_metrics  = None;
+    let connect_timeout = Duration::from_millis(500);
+    let connect_backoff = Duration::from_millis(100);
+    let max_consumers = 100; // test limit
+    let error_threshold = 2; // mock never fails
+    let max_idle_duration = Duration::from_secs(2);
+    let max_total_connections = 3;
+    let aggregate_metrics = None;
 
     let pool: Arc<ConnectionPool<MockConnection>> = ConnectionPool::new(
         factory,
@@ -211,10 +210,10 @@ async fn main() {
     let start_time = Instant::now();
 
     for worker_id in 0..num_workers {
-        let pool_clone   = Arc::clone(&pool);
-        let usage_clone  = Arc::clone(&usage_map);
-        let seen_clone   = Arc::clone(&seen_set);
-        let mc           = max_consumers;
+        let pool_clone = Arc::clone(&pool);
+        let usage_clone = Arc::clone(&usage_map);
+        let seen_clone = Arc::clone(&seen_set);
+        let mc = max_consumers;
 
         let handle = task::spawn(async move {
             client_worker(pool_clone, usage_clone, seen_clone, mc, worker_id).await;
@@ -229,10 +228,7 @@ async fn main() {
         let _ = handle.await;
     }
     let elapsed = Instant::now().duration_since(start_time);
-    println!(
-        "All {} workers completed in {:?}",
-        num_workers, elapsed
-    );
+    println!("All {} workers completed in {:?}", num_workers, elapsed);
 
     // --------------------------------------
     // 5. Print the total number of unique connections seen so far
@@ -289,7 +285,10 @@ async fn main() {
     // 10. Because `client_worker` asserted inside that no connection
     //     ever exceeded `max_consumers`, reaching this point means that check passed.
     // --------------------------------------
-    println!("All per-connection usage stayed within max_consumers = {}.", max_consumers);
+    println!(
+        "All per-connection usage stayed within max_consumers = {}.",
+        max_consumers
+    );
 
     println!("Load test complete; exiting cleanly.");
 }

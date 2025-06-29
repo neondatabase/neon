@@ -30,8 +30,8 @@ use http::Uri;
 use hyper_util::rt::TokioIo;
 use tower::service_fn;
 
-use tokio_util::sync::CancellationToken;
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
 
 //
 // The "TokioTcp" is flakey TCP network for testing purposes, in order
@@ -168,7 +168,10 @@ impl AsyncWrite for TokioTcp {
 #[async_trait]
 pub trait PooledItemFactory<T>: Send + Sync + 'static {
     /// Create a new pooled item.
-    async fn create(&self, connect_timeout: Duration) ->  Result<Result<T, tonic::Status>, tokio::time::error::Elapsed>;
+    async fn create(
+        &self,
+        connect_timeout: Duration,
+    ) -> Result<Result<T, tonic::Status>, tokio::time::error::Elapsed>;
 }
 
 pub struct ChannelFactory {
@@ -178,14 +181,8 @@ pub struct ChannelFactory {
     hang_rate: f64,
 }
 
-
 impl ChannelFactory {
-    pub fn new(
-        endpoint: String,
-        max_delay_ms: u64,
-        drop_rate: f64,
-        hang_rate: f64,
-    ) -> Self {
+    pub fn new(endpoint: String, max_delay_ms: u64, drop_rate: f64, hang_rate: f64) -> Self {
         ChannelFactory {
             endpoint,
             max_delay_ms,
@@ -197,7 +194,10 @@ impl ChannelFactory {
 
 #[async_trait]
 impl PooledItemFactory<Channel> for ChannelFactory {
-    async fn create(&self, connect_timeout: Duration) -> Result<Result<Channel, tonic::Status>, tokio::time::error::Elapsed> {
+    async fn create(
+        &self,
+        connect_timeout: Duration,
+    ) -> Result<Result<Channel, tonic::Status>, tokio::time::error::Elapsed> {
         let max_delay_ms = self.max_delay_ms;
         let drop_rate = self.drop_rate;
         let hang_rate = self.hang_rate;
@@ -239,7 +239,6 @@ impl PooledItemFactory<Channel> for ChannelFactory {
             }
         });
 
-
         let attempt = tokio::time::timeout(
             connect_timeout,
             Endpoint::from_shared(self.endpoint.clone())
@@ -247,25 +246,20 @@ impl PooledItemFactory<Channel> for ChannelFactory {
                 .timeout(connect_timeout)
                 .connect_with_connector(connector),
         )
-            .await;
+        .await;
         match attempt {
             Ok(Ok(channel)) => {
                 // Connection succeeded
                 Ok(Ok(channel))
             }
-            Ok(Err(e)) => {
-                Ok(Err(tonic::Status::new(
-                    tonic::Code::Unavailable,
-                    format!("Failed to connect: {}", e),
-                )))
-            }
-            Err(e) => {
-                Err(e)
-            }
+            Ok(Err(e)) => Ok(Err(tonic::Status::new(
+                tonic::Code::Unavailable,
+                format!("Failed to connect: {}", e),
+            ))),
+            Err(e) => Err(e),
         }
     }
 }
-
 
 /// A pooled gRPC client with capacity tracking and error handling.
 pub struct ConnectionPool<T> {
@@ -511,15 +505,15 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
                         let mut inner = self_clone.inner.lock().await;
                         inner.waiters += 1;
                         if inner.waiters > (inner.in_progress * self_clone.max_consumers) {
-                            if (inner.entries.len() + inner.in_progress) < self_clone.max_total_connections {
-
+                            if (inner.entries.len() + inner.in_progress)
+                                < self_clone.max_total_connections
+                            {
                                 let self_clone_spawn = Arc::clone(&self_clone);
                                 tokio::task::spawn(async move {
                                     self_clone_spawn.create_connection().await;
                                 });
                                 inner.in_progress += 1;
                             }
-
                         }
                     }
                     // Wait for a connection to become available, either because it
@@ -548,7 +542,6 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
     }
 
     async fn create_connection(&self) -> () {
-
         // Generate a random backoff to add some jitter so that connections
         // don't all retry at the same time.
         let mut backoff_delay = Duration::from_millis(
@@ -595,9 +588,7 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
                 None => {}
             }
 
-            let attempt = self.fact
-                .create(self.connect_timeout)
-                .await;
+            let attempt = self.fact.create(self.connect_timeout).await;
 
             match attempt {
                 // Connection succeeded
@@ -732,10 +723,8 @@ impl<T: Clone + Send + 'static> PooledClient<T> {
     }
     pub async fn finish(mut self, result: Result<(), tonic::Status>) {
         self.is_ok = result.is_ok();
-        self.pool.return_client(
-            self.id,
-            self.is_ok,
-            self.permit,
-        ).await;
+        self.pool
+            .return_client(self.id, self.is_ok, self.permit)
+            .await;
     }
 }

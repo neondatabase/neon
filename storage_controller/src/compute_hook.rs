@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use control_plane::endpoint::{ComputeControlPlane, EndpointStatus, PageserverConnectionInfo, PageserverShardConnectionInfo};
+use control_plane::endpoint::{
+    ComputeControlPlane, EndpointStatus, PageserverConnectionInfo, PageserverShardConnectionInfo,
+};
 use control_plane::local_env::LocalEnv;
 use futures::StreamExt;
 use hyper::StatusCode;
@@ -438,8 +440,8 @@ impl ComputeHook {
                         format!("postgres://no_user@{host}:{port}")
                     });
                     let grpc_url = if let Some(grpc_addr) = &ps_conf.listen_grpc_addr {
-                        let (host, port) = parse_host_port(grpc_addr)
-                            .expect("invalid gRPC address");
+                        let (host, port) =
+                            parse_host_port(grpc_addr).expect("invalid gRPC address");
                         let port = port.unwrap_or(DEFAULT_GRPC_LISTEN_PORT);
                         Some(format!("grpc://no_user@{host}:{port}"))
                     } else {

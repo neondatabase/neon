@@ -16,7 +16,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use compute_api::requests::ComputeClaimsScope;
-use compute_api::spec::{ComputeMode, PageserverShardConnectionInfo, PageserverConnectionInfo};
+use compute_api::spec::{ComputeMode, PageserverConnectionInfo, PageserverShardConnectionInfo};
 use control_plane::broker::StorageBroker;
 use control_plane::endpoint::{ComputeControlPlane, EndpointTerminateMode};
 use control_plane::endpoint_storage::{ENDPOINT_STORAGE_DEFAULT_ADDR, EndpointStorage};
@@ -1531,8 +1531,8 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 // to pass these on to postgres.
                 let storage_controller = StorageController::from_env(env);
                 let locate_result = storage_controller.tenant_locate(endpoint.tenant_id).await?;
-                let shards = futures::future::try_join_all(
-                    locate_result.shards.into_iter().map(|shard| async move {
+                let shards = futures::future::try_join_all(locate_result.shards.into_iter().map(
+                    |shard| async move {
                         if let ComputeMode::Static(lsn) = endpoint.mode {
                             // Initialize LSN leases for static computes.
                             let conf = env.get_pageserver_conf(shard.node_id).unwrap();
@@ -1546,7 +1546,8 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
 
                         let libpq_host = Host::parse(&shard.listen_pg_addr)?;
                         let libpq_port = shard.listen_pg_port;
-                        let libpq_url = Some(format!("postgres://no_user@{libpq_host}:{libpq_port}"));
+                        let libpq_url =
+                            Some(format!("postgres://no_user@{libpq_host}:{libpq_port}"));
 
                         let grpc_url = if let Some(grpc_host) = shard.listen_grpc_addr {
                             let grpc_port = shard.listen_grpc_port.expect("no gRPC port");
@@ -1559,8 +1560,8 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                             grpc_url,
                         };
                         anyhow::Ok((shard.shard_id.shard_number.0 as u32, pageserver))
-                    }),
-                )
+                    },
+                ))
                 .await?;
                 let stripe_size = locate_result.shard_params.stripe_size;
 
@@ -1649,7 +1650,8 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                         // Use gRPC if requested.
                         let libpq_host = Host::parse(&shard.listen_pg_addr).expect("bad hostname");
                         let libpq_port = shard.listen_pg_port;
-                        let libpq_url = Some(format!("postgres://no_user@{libpq_host}:{libpq_port}"));
+                        let libpq_url =
+                            Some(format!("postgres://no_user@{libpq_host}:{libpq_port}"));
 
                         let grpc_url = if let Some(grpc_host) = shard.listen_grpc_addr {
                             let grpc_port = shard.listen_grpc_port.expect("no gRPC port");
@@ -1657,10 +1659,13 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                         } else {
                             None
                         };
-                        (shard.shard_id.shard_number.0 as u32, PageserverShardConnectionInfo {
-                            libpq_url,
-                            grpc_url,
-                        })
+                        (
+                            shard.shard_id.shard_number.0 as u32,
+                            PageserverShardConnectionInfo {
+                                libpq_url,
+                                grpc_url,
+                            },
+                        )
                     })
                     .collect::<Vec<_>>()
             };
@@ -1671,7 +1676,9 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             // If --safekeepers argument is given, use only the listed
             // safekeeper nodes; otherwise all from the env.
             let safekeepers = parse_safekeepers(&args.safekeepers)?;
-            endpoint.reconfigure(pageserver_conninfo, None, safekeepers).await?;
+            endpoint
+                .reconfigure(pageserver_conninfo, None, safekeepers)
+                .await?;
         }
         EndpointCmd::Stop(args) => {
             let endpoint_id = &args.endpoint_id;

@@ -93,11 +93,15 @@ pub(super) async fn init(
         .worker_process_init(last_lsn, file_cache);
 
     let request_tracker = ShardedRequestTracker::new();
-    request_tracker.update_shard_map(shard_map,
-        None,
-        tenant_id,
-        timeline_id,
-        auth_token.as_deref()).await;
+    request_tracker
+        .update_shard_map(
+            shard_map,
+            None,
+            tenant_id,
+            timeline_id,
+            auth_token.as_deref(),
+        )
+        .await;
 
     let request_counters = IntCounterVec::new(
         metrics::core::Opts::new(

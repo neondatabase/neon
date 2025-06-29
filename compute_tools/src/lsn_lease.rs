@@ -81,7 +81,8 @@ fn acquire_lsn_lease_with_retry(
 
             let spec = state.pspec.as_ref().expect("spec must be set");
 
-            spec.pageserver_conninfo.shards
+            spec.pageserver_conninfo
+                .shards
                 .iter()
                 .map(|(_shardno, conninfo)| {
                     // FIXME: for now, this requires a libpq connection, the grpc API doesn't

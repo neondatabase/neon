@@ -62,8 +62,9 @@ pub fn write_postgres_conf(
         let mut grpc_urls: Option<Vec<String>> = Some(Vec::new());
 
         for shardno in 0..conninfo.shards.len() {
-            let info = conninfo.shards.get(&(shardno as u32))
-                .ok_or_else(|| anyhow::anyhow!("shard {shardno} missing from pageserver_connection_info shard map"))?;
+            let info = conninfo.shards.get(&(shardno as u32)).ok_or_else(|| {
+                anyhow::anyhow!("shard {shardno} missing from pageserver_connection_info shard map")
+            })?;
 
             if let Some(url) = &info.libpq_url {
                 if let Some(ref mut urls) = libpq_urls {
@@ -81,12 +82,20 @@ pub fn write_postgres_conf(
             }
         }
         if let Some(libpq_urls) = libpq_urls {
-            writeln!(file, "neon.pageserver_connstring={}", escape_conf_value(&libpq_urls.join(",")))?;
+            writeln!(
+                file,
+                "neon.pageserver_connstring={}",
+                escape_conf_value(&libpq_urls.join(","))
+            )?;
         } else {
             writeln!(file, "# no neon.pageserver_connstring")?;
         }
         if let Some(grpc_urls) = grpc_urls {
-            writeln!(file, "neon.pageserver_grpc_urls={}", escape_conf_value(&grpc_urls.join(",")))?;
+            writeln!(
+                file,
+                "neon.pageserver_grpc_urls={}",
+                escape_conf_value(&grpc_urls.join(","))
+            )?;
         } else {
             writeln!(file, "# no neon.pageserver_grpc_urls")?;
         }

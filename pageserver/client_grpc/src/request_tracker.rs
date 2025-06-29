@@ -7,30 +7,27 @@
 //! account. In the future, there can be multiple pageservers per shard, and RequestTracker manages
 //! load balancing between them, but that's not implemented yet.
 
-use std::sync::Arc;
-use pageserver_page_api::GetPageRequest;
-use pageserver_page_api::GetPageResponse;
-use pageserver_page_api::*;
-use pageserver_page_api::proto;
-use crate::client_cache;
-use crate::client_cache::ConnectionPool;
-use crate::client_cache::ChannelFactory;
 use crate::AuthInterceptor;
-use tonic::{transport::{Channel}, Request};
 use crate::ClientCacheOptions;
 use crate::PageserverClientAggregateMetrics;
-use std::sync::atomic::AtomicU64;
+use crate::client_cache;
+use crate::client_cache::ChannelFactory;
+use crate::client_cache::ConnectionPool;
+use pageserver_page_api::GetPageRequest;
+use pageserver_page_api::GetPageResponse;
+use pageserver_page_api::proto;
+use pageserver_page_api::*;
+use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
+use tonic::{Request, transport::Channel};
 
 use utils::shard::ShardIndex;
 
-use tokio_stream::wrappers::ReceiverStream;
 use pageserver_page_api::proto::PageServiceClient;
+use tokio_stream::wrappers::ReceiverStream;
 
-use tonic::{
-    Status,
-    Code,
-};
+use tonic::{Code, Status};
 
 use async_trait::async_trait;
 use std::time::Duration;
@@ -45,20 +42,28 @@ use client_cache::PooledItemFactory;
 #[derive(Clone)]
 pub struct StreamReturner {
     sender: tokio::sync::mpsc::Sender<proto::GetPageRequest>,
-    sender_hashmap: Arc<tokio::sync::Mutex<std::collections::HashMap<u64, tokio::sync::mpsc::Sender<Result<proto::GetPageResponse, Status>>>>>,
+    sender_hashmap: Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<
+                u64,
+                tokio::sync::mpsc::Sender<Result<proto::GetPageResponse, Status>>,
+            >,
+        >,
+    >,
 }
-pub struct MockStreamFactory {
-}
+pub struct MockStreamFactory {}
 
 impl MockStreamFactory {
     pub fn new() -> Self {
-        MockStreamFactory {
-        }
+        MockStreamFactory {}
     }
 }
 #[async_trait]
 impl PooledItemFactory<StreamReturner> for MockStreamFactory {
-    async fn create(&self, _connect_timeout: Duration) -> Result<Result<StreamReturner, tonic::Status>, tokio::time::error::Elapsed> {
+    async fn create(
+        &self,
+        _connect_timeout: Duration,
+    ) -> Result<Result<StreamReturner, tonic::Status>, tokio::time::error::Elapsed> {
         let (sender, mut receiver) = tokio::sync::mpsc::channel::<proto::GetPageRequest>(1000);
         // Create a StreamReturner that will send requests to the receiver channel
         let stream_returner = StreamReturner {
@@ -69,7 +74,6 @@ impl PooledItemFactory<StreamReturner> for MockStreamFactory {
         let map = Arc::clone(&stream_returner.sender_hashmap);
         tokio::spawn(async move {
             while let Some(request) = receiver.recv().await {
-
                 // Break out of the loop with 1% chance
                 if rand::random::<f32>() < 0.001 {
                     break;
@@ -111,7 +115,6 @@ impl PooledItemFactory<StreamReturner> for MockStreamFactory {
     }
 }
 
-
 pub struct StreamFactory {
     connection_pool: Arc<client_cache::ConnectionPool<Channel>>,
     auth_interceptor: AuthInterceptor,
@@ -134,21 +137,22 @@ impl StreamFactory {
 
 #[async_trait]
 impl PooledItemFactory<StreamReturner> for StreamFactory {
-    async fn create(&self, _connect_timeout: Duration) ->
-    Result<Result<StreamReturner, tonic::Status>, tokio::time::error::Elapsed>
-    {
-        let pool_clone : Arc<ConnectionPool<Channel>> = Arc::clone(&self.connection_pool);
+    async fn create(
+        &self,
+        _connect_timeout: Duration,
+    ) -> Result<Result<StreamReturner, tonic::Status>, tokio::time::error::Elapsed> {
+        let pool_clone: Arc<ConnectionPool<Channel>> = Arc::clone(&self.connection_pool);
         let pooled_client = pool_clone.get_client().await;
         let channel = pooled_client.unwrap().channel();
-        let mut client =
-            PageServiceClient::with_interceptor(channel, self.auth_interceptor.for_shard(self.shard));
+        let mut client = PageServiceClient::with_interceptor(
+            channel,
+            self.auth_interceptor.for_shard(self.shard),
+        );
 
         let (sender, receiver) = tokio::sync::mpsc::channel::<proto::GetPageRequest>(1000);
         let outbound = ReceiverStream::new(receiver);
 
-        let client_resp = client
-            .get_pages(Request::new(outbound))
-            .await;
+        let client_resp = client.get_pages(Request::new(outbound)).await;
 
         match client_resp {
             Err(status) => {
@@ -161,17 +165,23 @@ impl PooledItemFactory<StreamReturner> for StreamFactory {
             Ok(resp) => {
                 let stream_returner = StreamReturner {
                     sender: sender.clone(),
-                    sender_hashmap: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+                    sender_hashmap: Arc::new(tokio::sync::Mutex::new(
+                        std::collections::HashMap::new(),
+                    )),
                 };
-                let map : Arc<tokio::sync::Mutex<std::collections::HashMap<u64, tokio::sync::mpsc::Sender<Result<proto::GetPageResponse, _>>>>>
-                    = Arc::clone(&stream_returner.sender_hashmap);
+                let map: Arc<
+                    tokio::sync::Mutex<
+                        std::collections::HashMap<
+                            u64,
+                            tokio::sync::mpsc::Sender<Result<proto::GetPageResponse, _>>,
+                        >,
+                    >,
+                > = Arc::clone(&stream_returner.sender_hashmap);
 
                 tokio::spawn(async move {
-
                     let map_clone = Arc::clone(&map);
                     let mut inner = resp.into_inner();
                     loop {
-
                         let resp = inner.message().await;
                         if !resp.is_ok() {
                             break; // Exit the loop if no more messages
@@ -216,10 +226,11 @@ pub struct RequestTracker {
 }
 
 impl RequestTracker {
-    pub fn new(stream_pool: Arc<ConnectionPool<StreamReturner>>,
-                unary_pool: Arc<ConnectionPool<Channel>>,
-                auth_interceptor: AuthInterceptor,
-                shard: ShardIndex,
+    pub fn new(
+        stream_pool: Arc<ConnectionPool<StreamReturner>>,
+        unary_pool: Arc<ConnectionPool<Channel>>,
+        auth_interceptor: AuthInterceptor,
+        shard: ShardIndex,
     ) -> Self {
         let cur_id = Arc::new(AtomicU64::new(0));
 
@@ -228,7 +239,7 @@ impl RequestTracker {
             stream_pool: stream_pool,
             unary_pool: unary_pool,
             auth_interceptor: auth_interceptor,
-            shard: shard.clone()
+            shard: shard.clone(),
         }
     }
 
@@ -240,9 +251,14 @@ impl RequestTracker {
             let unary_pool = Arc::clone(&self.unary_pool);
             let pooled_client = unary_pool.get_client().await.unwrap();
             let channel = pooled_client.channel();
-            let mut ps_client = PageServiceClient::with_interceptor(channel, self.auth_interceptor.for_shard(self.shard));
+            let mut ps_client = PageServiceClient::with_interceptor(
+                channel,
+                self.auth_interceptor.for_shard(self.shard),
+            );
             let request = proto::CheckRelExistsRequest::from(req.clone());
-            let response = ps_client.check_rel_exists(tonic::Request::new(request)).await;
+            let response = ps_client
+                .check_rel_exists(tonic::Request::new(request))
+                .await;
 
             match response {
                 Err(status) => {
@@ -266,7 +282,10 @@ impl RequestTracker {
             let unary_pool = Arc::clone(&self.unary_pool);
             let pooled_client = unary_pool.get_client().await.unwrap();
             let channel = pooled_client.channel();
-            let mut ps_client = PageServiceClient::with_interceptor(channel, self.auth_interceptor.for_shard(self.shard));
+            let mut ps_client = PageServiceClient::with_interceptor(
+                channel,
+                self.auth_interceptor.for_shard(self.shard),
+            );
 
             let request = proto::GetRelSizeRequest::from(req.clone());
             let response = ps_client.get_rel_size(tonic::Request::new(request)).await;
@@ -281,7 +300,6 @@ impl RequestTracker {
                     return Ok(resp.get_ref().num_blocks);
                 }
             }
-
         }
     }
 
@@ -292,8 +310,12 @@ impl RequestTracker {
         loop {
             // Current sharding model assumes that all metadata is present only at shard 0.
             let unary_pool = Arc::clone(&self.unary_pool);
-            let pooled_client = unary_pool.get_client().await.unwrap();let channel = pooled_client.channel();
-            let mut ps_client = PageServiceClient::with_interceptor(channel, self.auth_interceptor.for_shard(self.shard));
+            let pooled_client = unary_pool.get_client().await.unwrap();
+            let channel = pooled_client.channel();
+            let mut ps_client = PageServiceClient::with_interceptor(
+                channel,
+                self.auth_interceptor.for_shard(self.shard),
+            );
 
             let request = proto::GetDbSizeRequest::from(req.clone());
             let response = ps_client.get_db_size(tonic::Request::new(request)).await;
@@ -308,7 +330,6 @@ impl RequestTracker {
                     return Ok(resp.get_ref().num_bytes);
                 }
             }
-
         }
     }
 
@@ -322,7 +343,9 @@ impl RequestTracker {
             //let request_id = self.cur_id.fetch_add(1, Ordering::SeqCst) + 1;
             let request_id = request.request_id;
             let response_sender: tokio::sync::mpsc::Sender<Result<proto::GetPageResponse, Status>>;
-            let mut response_receiver: tokio::sync::mpsc::Receiver<Result<proto::GetPageResponse, Status>>;
+            let mut response_receiver: tokio::sync::mpsc::Receiver<
+                Result<proto::GetPageResponse, Status>,
+            >;
 
             (response_sender, response_receiver) = tokio::sync::mpsc::channel(1);
             //request.request_id = request_id;
@@ -344,7 +367,9 @@ impl RequestTracker {
                 let mut map_inner = map.lock().await;
                 map_inner.insert(request_id, response_sender);
             }
-            let sent = returner.sender.send(proto::GetPageRequest::from(request))
+            let sent = returner
+                .sender
+                .send(proto::GetPageRequest::from(request))
                 .await;
 
             if let Err(_e) = sent {
@@ -354,22 +379,27 @@ impl RequestTracker {
                     // remove from hashmap
                     map_inner.remove(&request_id);
                 }
-                stream_returner.finish(Err(Status::new(Code::Unknown,
-                                                       "Failed to send request"))).await;
+                stream_returner
+                    .finish(Err(Status::new(Code::Unknown, "Failed to send request")))
+                    .await;
                 continue;
             }
 
             let response: Option<Result<proto::GetPageResponse, Status>>;
             response = response_receiver.recv().await;
             match response {
-                Some (resp) => {
+                Some(resp) => {
                     match resp {
                         Err(_status) => {
                             // Handle the case where the response was not received
-                            stream_returner.finish(Err(Status::new(Code::Unknown,
-                                                                   "Failed to receive response"))).await;
+                            stream_returner
+                                .finish(Err(Status::new(
+                                    Code::Unknown,
+                                    "Failed to receive response",
+                                )))
+                                .await;
                             continue;
-                        },
+                        }
                         Ok(resp) => {
                             stream_returner.finish(Result::Ok(())).await;
                             return Ok(resp.clone().into());
@@ -378,8 +408,9 @@ impl RequestTracker {
                 }
                 None => {
                     // Handle the case where the response channel was closed
-                    stream_returner.finish(Err(Status::new(Code::Unknown,
-                                                           "Response channel closed"))).await;
+                    stream_returner
+                        .finish(Err(Status::new(Code::Unknown, "Response channel closed")))
+                        .await;
                     continue;
                 }
             }
@@ -407,25 +438,25 @@ impl ShardedRequestTracker {
         // Default configuration for the client. These could be added to a config file
         //
         let tcp_client_cache_options = ClientCacheOptions {
-            max_delay_ms:       0,
-            drop_rate:          0.0,
-            hang_rate:          0.0,
-            connect_timeout:    Duration::from_secs(1),
-            connect_backoff:    Duration::from_millis(100),
-            max_consumers:      8, // Streams per connection
-            error_threshold:    10,
-            max_idle_duration:  Duration::from_secs(5),
+            max_delay_ms: 0,
+            drop_rate: 0.0,
+            hang_rate: 0.0,
+            connect_timeout: Duration::from_secs(1),
+            connect_backoff: Duration::from_millis(100),
+            max_consumers: 8, // Streams per connection
+            error_threshold: 10,
+            max_idle_duration: Duration::from_secs(5),
             max_total_connections: 8,
         };
         let stream_client_cache_options = ClientCacheOptions {
-            max_delay_ms:       0,
-            drop_rate:          0.0,
-            hang_rate:          0.0,
-            connect_timeout:    Duration::from_secs(1),
-            connect_backoff:    Duration::from_millis(100),
-            max_consumers:      64, // Requests per stream
-            error_threshold:    10,
-            max_idle_duration:  Duration::from_secs(5),
+            max_delay_ms: 0,
+            drop_rate: 0.0,
+            hang_rate: 0.0,
+            connect_timeout: Duration::from_secs(1),
+            connect_backoff: Duration::from_millis(100),
+            max_consumers: 64, // Requests per stream
+            error_threshold: 10,
+            max_idle_duration: Duration::from_secs(5),
             max_total_connections: 64, // Total allowable number of streams
         };
         ShardedRequestTracker {
@@ -437,23 +468,26 @@ impl ShardedRequestTracker {
         }
     }
 
-    pub async fn update_shard_map(&self,
-                            shard_urls: std::collections::HashMap<ShardIndex, String>,
-                            metrics: Option<Arc<PageserverClientAggregateMetrics>>,
-                            tenant_id: String, timeline_id: String, auth_str: Option<&str>) {
-
-
-       let mut trackers = std::collections::HashMap::new();
+    pub async fn update_shard_map(
+        &self,
+        shard_urls: std::collections::HashMap<ShardIndex, String>,
+        metrics: Option<Arc<PageserverClientAggregateMetrics>>,
+        tenant_id: String,
+        timeline_id: String,
+        auth_str: Option<&str>,
+    ) {
+        let mut trackers = std::collections::HashMap::new();
         for (shard, endpoint_url) in shard_urls {
             //
             // Create a pool of streams for streaming get_page requests
             //
-            let channel_fact : Arc<dyn PooledItemFactory<Channel> + Send + Sync> = Arc::new(ChannelFactory::new(
-                endpoint_url.clone(),
-                self.tcp_client_cache_options.max_delay_ms,
-                self.tcp_client_cache_options.drop_rate,
-                self.tcp_client_cache_options.hang_rate,
-            ));
+            let channel_fact: Arc<dyn PooledItemFactory<Channel> + Send + Sync> =
+                Arc::new(ChannelFactory::new(
+                    endpoint_url.clone(),
+                    self.tcp_client_cache_options.max_delay_ms,
+                    self.tcp_client_cache_options.drop_rate,
+                    self.tcp_client_cache_options.hang_rate,
+                ));
             let new_pool: Arc<ConnectionPool<Channel>>;
             new_pool = ConnectionPool::new(
                 Arc::clone(&channel_fact),
@@ -466,13 +500,15 @@ impl ShardedRequestTracker {
                 metrics.clone(),
             );
 
-            let auth_interceptor = AuthInterceptor::new(tenant_id.as_str(),
-                                                        timeline_id.as_str(),
-                                                        auth_str);
+            let auth_interceptor =
+                AuthInterceptor::new(tenant_id.as_str(), timeline_id.as_str(), auth_str);
 
             let stream_pool = ConnectionPool::<StreamReturner>::new(
-                Arc::new(StreamFactory::new(new_pool.clone(),
-                                            auth_interceptor.clone(), ShardIndex::unsharded())),
+                Arc::new(StreamFactory::new(
+                    new_pool.clone(),
+                    auth_interceptor.clone(),
+                    ShardIndex::unsharded(),
+                )),
                 self.stream_client_cache_options.connect_timeout,
                 self.stream_client_cache_options.connect_backoff,
                 self.stream_client_cache_options.max_consumers,
@@ -495,7 +531,7 @@ impl ShardedRequestTracker {
                 self.tcp_client_cache_options.error_threshold,
                 self.tcp_client_cache_options.max_idle_duration,
                 self.tcp_client_cache_options.max_total_connections,
-                metrics.clone()
+                metrics.clone(),
             );
             //
             // Create a new RequestTracker for this shard
@@ -507,11 +543,7 @@ impl ShardedRequestTracker {
         inner.trackers = trackers;
     }
 
-    pub async fn get_page(
-        &self,
-        req: GetPageRequest,
-    ) -> Result<GetPageResponse, tonic::Status> {
-
+    pub async fn get_page(&self, req: GetPageRequest) -> Result<GetPageResponse, tonic::Status> {
         // Get shard index from the request and look up the RequestTracker instance for that shard
         let shard_index = ShardIndex::unsharded(); // TODO!
         let mut tracker = self.lookup_tracker_for_shard(shard_index)?;

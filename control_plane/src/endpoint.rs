@@ -56,8 +56,8 @@ use compute_api::responses::{
     TlsConfig,
 };
 use compute_api::spec::{
-    Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database,
-    PgIdent, RemoteExtSpec, Role,
+    Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PgIdent,
+    RemoteExtSpec, Role,
 };
 
 // re-export these, because they're used in the reconfigure() function
@@ -993,7 +993,10 @@ impl Endpoint {
         stripe_size: Option<ShardStripeSize>,
         safekeepers: Option<Vec<NodeId>>,
     ) -> Result<()> {
-        anyhow::ensure!(!pageserver_conninfo.shards.is_empty(), "no pageservers provided");
+        anyhow::ensure!(
+            !pageserver_conninfo.shards.is_empty(),
+            "no pageservers provided"
+        );
 
         let (mut spec, compute_ctl_config) = {
             let config_path = self.endpoint_path().join("config.json");

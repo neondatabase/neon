@@ -6,8 +6,8 @@ use compute_api::responses::{
     LfcPrewarmState, TlsConfig,
 };
 use compute_api::spec::{
-    ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion,
-    PageserverConnectionInfo, PageserverShardConnectionInfo, PgIdent,
+    ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PageserverConnectionInfo,
+    PageserverShardConnectionInfo, PgIdent,
 };
 use futures::StreamExt;
 use futures::future::join_all;
@@ -265,17 +265,23 @@ impl ParsedSpec {
     }
 }
 
-fn extract_pageserver_conninfo_from_guc(pageserver_connstring_guc: &str) -> PageserverConnectionInfo {
-
+fn extract_pageserver_conninfo_from_guc(
+    pageserver_connstring_guc: &str,
+) -> PageserverConnectionInfo {
     PageserverConnectionInfo {
         shards: pageserver_connstring_guc
             .split(',')
             .into_iter()
             .enumerate()
-            .map(|(i, connstr)| (i as u32, PageserverShardConnectionInfo {
-                libpq_url: Some(connstr.to_string()),
-                grpc_url: None,
-            }))
+            .map(|(i, connstr)| {
+                (
+                    i as u32,
+                    PageserverShardConnectionInfo {
+                        libpq_url: Some(connstr.to_string()),
+                        grpc_url: None,
+                    },
+                )
+            })
             .collect(),
         prefer_grpc: false,
     }
@@ -1041,13 +1047,18 @@ impl ComputeNode {
     fn try_get_basebackup_grpc(&self, spec: &ParsedSpec, lsn: Lsn) -> Result<()> {
         let start_time = Instant::now();
 
-        let shard0 = spec.pageserver_conninfo.shards.get(&0).expect("shard 0 connection info missing");
+        let shard0 = spec
+            .pageserver_conninfo
+            .shards
+            .get(&0)
+            .expect("shard 0 connection info missing");
         let shard0_url = shard0.grpc_url.clone().expect("no grpc_url for shard 0");
 
         info!("getting basebackup@{} from pageserver {}", lsn, shard0_url);
-        
+
         let chunks = tokio::runtime::Handle::current().block_on(async move {
-            let mut client = page_api::proto::PageServiceClient::connect(shard0_url.to_string()).await?;
+            let mut client =
+                page_api::proto::PageServiceClient::connect(shard0_url.to_string()).await?;
 
             let req = page_api::proto::GetBaseBackupRequest {
                 lsn: lsn.0,
@@ -1098,9 +1109,16 @@ impl ComputeNode {
     fn try_get_basebackup_libpq(&self, spec: &ParsedSpec, lsn: Lsn) -> Result<()> {
         let start_time = Instant::now();
 
-        let shard0 = spec.pageserver_conninfo.shards.get(&0).expect("shard 0 connection info missing");
+        let shard0 = spec
+            .pageserver_conninfo
+            .shards
+            .get(&0)
+            .expect("shard 0 connection info missing");
         let shard0_connstr = shard0.libpq_url.clone().expect("no libpq_url for shard 0");
-        info!("getting basebackup@{} from pageserver {}", lsn, shard0_connstr);
+        info!(
+            "getting basebackup@{} from pageserver {}",
+            lsn, shard0_connstr
+        );
 
         let mut config = postgres::Config::from_str(&shard0_connstr)?;
 
@@ -1400,9 +1418,8 @@ impl ComputeNode {
             }
         };
 
-        self.get_basebackup(compute_state, lsn).with_context(|| {
-            format!("failed to get basebackup@{}", lsn)
-        })?;
+        self.get_basebackup(compute_state, lsn)
+            .with_context(|| format!("failed to get basebackup@{}", lsn))?;
 
         // Update pg_hba.conf received with basebackup.
         update_pg_hba(pgdata_path)?;
