@@ -169,14 +169,7 @@ impl PooledItemFactory<StreamReturner> for StreamFactory {
                         std::collections::HashMap::new(),
                     )),
                 };
-                let map: Arc<
-                    tokio::sync::Mutex<
-                        std::collections::HashMap<
-                            u64,
-                            tokio::sync::mpsc::Sender<Result<proto::GetPageResponse, _>>,
-                        >,
-                    >,
-                > = Arc::clone(&stream_returner.sender_hashmap);
+                let map = Arc::clone(&stream_returner.sender_hashmap);
 
                 tokio::spawn(async move {
                     let map_clone = Arc::clone(&map);
