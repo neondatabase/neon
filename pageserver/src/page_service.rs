@@ -3760,6 +3760,29 @@ impl proto::PageService for GrpcPageServiceHandler {
         let resp: page_api::GetSlruSegmentResponse = resp.segment;
         Ok(tonic::Response::new(resp.into()))
     }
+
+    #[instrument(skip_all, fields(lsn))]
+    async fn lease_lsn(
+        &self,
+        req: tonic::Request<proto::LeaseLsnRequest>,
+    ) -> Result<tonic::Response<proto::LeaseLsnResponse>, tonic::Status> {
+        let timeline = self.get_request_timeline(&req).await?;
+        let ctx = self.ctx.with_scope_timeline(&timeline);
+
+        // Validate and convert the request, and decorate the span.
+        let req: page_api::LeaseLsnRequest = req.into_inner().try_into()?;
+
+        span_record!(lsn=%req.lsn);
+
+        // Attempt to acquire a lease. Return FailedPrecondition if the lease could not be granted.
+        let lease_length = timeline.get_lsn_lease_length();
+        let expires = match timeline.renew_lsn_lease(req.lsn, lease_length, &ctx) {
+            Ok(lease) => lease.valid_until,
+            Err(err) => return Err(tonic::Status::failed_precondition(format!("{err}"))),
+        };
+
+        Ok(tonic::Response::new(expires.into()))
+    }
 }
 
 /// gRPC middleware layer that handles observability concerns:

@@ -1279,6 +1279,7 @@ dependencies = [
  "remote_storage",
  "serde",
  "serde_json",
+ "url",
  "utils",
 ]
 
@@ -4479,6 +4480,7 @@ dependencies = [
  "pageserver_api",
  "postgres_ffi_types",
  "prost 0.13.5",
+ "prost-types 0.13.5",
  "strum",
  "strum_macros",
  "thiserror 1.0.69",
@@ -5156,7 +5158,7 @@ dependencies = [
  "petgraph",
  "prettyplease",
  "prost 0.13.5",
- "prost-types 0.13.3",
+ "prost-types 0.13.5",
  "regex",
  "syn 2.0.100",
  "tempfile",
@@ -5199,9 +5201,9 @@ dependencies = [
 
 [[package]]
 name = "prost-types"
-version = "0.13.3"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4759aa0d3a6232fb8dbdb97b61de2c20047c68aca932c7ed76da9d788508d670"
+checksum = "52c2c1bf36ddb1a1c396b3601a3cec27c2462e45f07c386894ec3ccf5332bd16"
 dependencies = [
  "prost 0.13.5",
 ]
@@ -6808,6 +6810,7 @@ dependencies = [
  "chrono",
  "clap",
  "clashmap",
+ "compute_api",
  "control_plane",
  "cron",
  "diesel",
@@ -7641,7 +7644,7 @@ dependencies = [
  "prettyplease",
  "proc-macro2",
  "prost-build 0.13.3",
- "prost-types 0.13.3",
+ "prost-types 0.13.5",
  "quote",
  "syn 2.0.100",
 ]
@@ -7653,7 +7656,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9687bd5bfeafebdded2356950f278bba8226f0b32109537c4253406e09aafe1"
 dependencies = [
  "prost 0.13.5",
- "prost-types 0.13.3",
+ "prost-types 0.13.5",
  "tokio",
  "tokio-stream",
  "tonic 0.13.1",

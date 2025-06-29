@@ -56,8 +56,8 @@ use compute_api::responses::{
     TlsConfig,
 };
 use compute_api::spec::{
-    Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PgIdent,
-    RemoteExtSpec, Role,
+    Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PageserverProtocol,
+    PgIdent, RemoteExtSpec, Role,
 };
 use jsonwebtoken::jwk::{
     AlgorithmParameters, CommonParameters, EllipticCurve, Jwk, JwkSet, KeyAlgorithm, KeyOperations,
@@ -370,29 +370,6 @@ impl std::fmt::Display for EndpointTerminateMode {
             EndpointTerminateMode::Immediate => "immediate",
             EndpointTerminateMode::ImmediateTerminate => "immediate-terminate",
         })
-    }
-}
-
-/// Protocol used to connect to a Pageserver.
-#[derive(Clone, Copy, Debug)]
-pub enum PageserverProtocol {
-    Libpq,
-    Grpc,
-}
-
-impl PageserverProtocol {
-    /// Returns the URL scheme for the protocol, used in connstrings.
-    pub fn scheme(&self) -> &'static str {
-        match self {
-            Self::Libpq => "postgresql",
-            Self::Grpc => "grpc",
-        }
-    }
-}
-
-impl Display for PageserverProtocol {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.scheme())
     }
 }
 

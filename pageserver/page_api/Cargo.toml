@@ -11,6 +11,7 @@ futures.workspace = true
 pageserver_api.workspace = true
 postgres_ffi_types.workspace = true
 prost.workspace = true
+prost-types.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
 thiserror.workspace = true
