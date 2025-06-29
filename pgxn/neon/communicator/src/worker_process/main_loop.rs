@@ -484,7 +484,11 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 Ok(resp) => {
                     // Write the received page image directly to the shared memory location
                     // that the backend requested.
-                    assert!(resp.page_images.len() == 1);
+                    if resp.page_images.len() != 1 {
+                        error!("received unexpected response with {} page images received from pageserver for a request for one page",
+                               resp.page_images.len());
+                        return Err(-1);
+                    }
                     let page_image = resp.page_images[0].clone();
                     let src: &[u8] = page_image.as_ref();
                     let len = std::cmp::min(src.len(), dest.bytes_total() as usize);
@@ -564,7 +568,11 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                         "prefetch completed, remembering blk {} in rel {:?} in LFC",
                         *blkno, rel
                     );
-                    assert!(resp.page_images.len() == 1);
+                    if resp.page_images.len() != 1 {
+                        error!("received unexpected response with {} page images received from pageserver for a request for one page",
+                               resp.page_images.len());
+                        return Err(-1);
+                    }
                     let page_image = resp.page_images[0].clone();
                     self.cache
                         .remember_page(&rel, *blkno, page_image, not_modified_since, false)
