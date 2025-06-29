@@ -68,7 +68,7 @@ use utils::sync::gate::{Gate, GateGuard};
 use utils::{failpoint_support, pausable_failpoint};
 
 use crate::background_node_operations::{
-    Drain, Fill, MAX_RECONCILES_PER_OPERATION, Operation, OperationError, OperationHandler,
+    Delete, Drain, Fill, MAX_RECONCILES_PER_OPERATION, Operation, OperationError, OperationHandler,
 };
 use crate::compute_hook::{self, ComputeHook, NotifyError};
 use crate::drain_utils::{self, TenantShardDrain, TenantShardIterator};
@@ -575,7 +575,9 @@ impl From<ReconcileWaitError> for ApiError {
 impl From<OperationError> for ApiError {
     fn from(value: OperationError) -> Self {
         match value {
-            OperationError::NodeStateChanged(err) | OperationError::FinalizeError(err) => {
+            OperationError::NodeStateChanged(err)
+            | OperationError::FinalizeError(err)
+            | OperationError::ImpossibleConstraint(err) => {
                 ApiError::InternalServerError(anyhow::anyhow!(err))
             }
             OperationError::Cancelled => ApiError::Conflict("Operation was cancelled".into()),
@@ -6982,7 +6984,11 @@ impl Service {
     /// If a node has any work on it, it will be rescheduled: this is "clean" in the sense
     /// that we don't leave any bad state behind in the storage controller, but unclean
     /// in the sense that we are not carefully draining the node.
-    pub(crate) async fn node_delete(&self, node_id: NodeId) -> Result<(), ApiError> {
+    pub(crate) async fn delete_node(
+        &self,
+        node_id: NodeId,
+        _cancel: CancellationToken,
+    ) -> Result<(), OperationError> {
         let _node_lock =
             trace_exclusive_lock(&self.node_op_locks, node_id, NodeOperations::Delete).await;
 
@@ -7027,7 +7033,7 @@ impl Service {
                                 "Refusing to delete node, shard {} can't be rescheduled: {e}",
                                 shard.tenant_shard_id
                             );
-                            return Err(e.into());
+                            return Err(OperationError::ImpossibleConstraint(e.to_string().into()));
                         } else {
                             tracing::info!(
                                 "Rescheduled shard {} away from node during deletion",
@@ -7080,7 +7086,10 @@ impl Service {
         // 2. Actually delete the node from in-memory state and set tombstone to the database
         // for preventing the node to register again.
         tracing::info!("Deleting node from database");
-        self.persistence.set_tombstone(node_id).await?;
+        self.persistence
+            .set_tombstone(node_id)
+            .await
+            .map_err(|e| OperationError::FinalizeError(e.to_string().into()))?;
 
         Ok(())
     }
@@ -7642,6 +7651,116 @@ impl Service {
         }
 
         self.node_configure(node_id, availability, scheduling).await
+    }
+
+    pub(crate) async fn start_node_delete(
+        self: &Arc<Self>,
+        node_id: NodeId,
+    ) -> Result<(), ApiError> {
+        let (ongoing_op, node_policy) = {
+            let locked = self.inner.read().unwrap();
+            let nodes = &locked.nodes;
+            let node = nodes.get(&node_id).ok_or(ApiError::NotFound(
+                anyhow::anyhow!("Node {} not registered", node_id).into(),
+            ))?;
+
+            (
+                locked
+                    .ongoing_operation
+                    .as_ref()
+                    .map(|ongoing| ongoing.operation),
+                node.get_scheduling(),
+            )
+        };
+
+        if let Some(ongoing) = ongoing_op {
+            return Err(ApiError::PreconditionFailed(
+                format!("Background operation already ongoing for node: {}", ongoing).into(),
+            ));
+        }
+
+        match node_policy {
+            NodeSchedulingPolicy::Active | NodeSchedulingPolicy::Pause => {
+                self.node_configure(node_id, None, Some(NodeSchedulingPolicy::Pause))
+                    .await?;
+
+                let cancel = self.cancel.child_token();
+                let gate_guard = self.gate.enter().map_err(|_| ApiError::ShuttingDown)?;
+
+                self.inner.write().unwrap().ongoing_operation = Some(OperationHandler {
+                    operation: Operation::Delete(Delete { node_id }),
+                    cancel: cancel.clone(),
+                });
+
+                let span = tracing::info_span!(parent: None, "delete_node", %node_id);
+
+                tokio::task::spawn({
+                    let service = self.clone();
+                    let cancel = cancel.clone();
+                    async move {
+                        let _gate_guard = gate_guard;
+
+                        scopeguard::defer! {
+                            let prev = service.inner.write().unwrap().ongoing_operation.take();
+
+                            if let Some(Operation::Delete(removed_delete)) = prev.map(|h| h.operation) {
+                                assert_eq!(removed_delete.node_id, node_id, "We always take the same operation");
+                            } else {
+                                panic!("We always remove the same operation")
+                            }
+                        }
+
+                        tracing::info!("Delete background operation starting");
+                        let res = service.delete_node(node_id, cancel).await;
+                        match res {
+                            Ok(()) => {
+                                tracing::info!("Delete background operation completed successfully");
+                            }
+                            Err(OperationError::Cancelled) => {
+                                tracing::info!("Delete background operation was cancelled");
+                            }
+                            Err(err) => {
+                                tracing::error!("Delete background operation encountered: {err}")
+                            }
+                        }
+                    }
+                }.instrument(span));
+            }
+            policy => {
+                return Err(ApiError::PreconditionFailed(
+                    format!("Node {node_id} cannot be deleted due to {policy:?} policy").into(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) async fn cancel_node_delete(
+        self: &Arc<Self>,
+        node_id: NodeId,
+    ) -> Result<(), ApiError> {
+        {
+            let locked = self.inner.read().unwrap();
+            let nodes = &locked.nodes;
+            nodes.get(&node_id).ok_or(ApiError::NotFound(
+                anyhow::anyhow!("Node {} not registered", node_id).into(),
+            ))?;
+        }
+
+        if let Some(op_handler) = self.inner.read().unwrap().ongoing_operation.as_ref() {
+            if let Operation::Delete(delete) = op_handler.operation {
+                if delete.node_id == node_id {
+                    tracing::info!("Cancelling background delete operation for node {node_id}");
+                    op_handler.cancel.cancel();
+                    return Ok(());
+                }
+            }
+        }
+
+        Err(ApiError::PreconditionFailed(
+            format!("Node {node_id} has no delete in progress").into(),
+        ))
     }
 
     pub(crate) async fn start_node_drain(
