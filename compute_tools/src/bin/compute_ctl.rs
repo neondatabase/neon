@@ -36,6 +36,8 @@
 use std::ffi::OsString;
 use std::fs::File;
 use std::process::exit;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -190,7 +192,9 @@ fn main() -> Result<()> {
             cgroup: cli.cgroup,
             #[cfg(target_os = "linux")]
             vm_monitor_addr: cli.vm_monitor_addr,
-            installed_extensions_collection_interval: cli.installed_extensions_collection_interval,
+            installed_extensions_collection_interval: Arc::new(AtomicU64::new(
+                cli.installed_extensions_collection_interval,
+            )),
         },
         config,
     )?;
