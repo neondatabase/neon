@@ -1104,11 +1104,14 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber start_block,
 
 		lsn = XLogInsert(RM_XLOG_ID, XLOG_FPI);
 
-		for (int i = 0; i < count; i++)
+		if (!neon_enable_new_communicator)
 		{
-			lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, buffer.data);
-			neon_set_lwlsn_block(lsn, InfoFromSMgrRel(reln), forkNum,
-									  blocknum + i);
+			for (int i = 0; i < count; i++)
+			{
+				lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, buffer.data);
+				neon_set_lwlsn_block(lsn, InfoFromSMgrRel(reln), forkNum,
+									 blocknum + i);
+			}
 		}
 
 		blocknum += count;

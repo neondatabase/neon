@@ -693,6 +693,7 @@ lfc_prewarm(FileCacheState* fcs, uint32 n_workers)
 	dsm_segment *seg;
 	BackgroundWorkerHandle* bgw_handle[MAX_PREWARM_WORKERS];
 
+	Assert(!neon_enable_new_communicator);
 
 	if (!lfc_ensure_opened())
 		return;
@@ -847,6 +848,8 @@ lfc_prewarm_main(Datum main_arg)
 	PrewarmWorkerState* ws;
 	uint32 worker_id = DatumGetInt32(main_arg);
 
+	Assert(!neon_enable_new_communicator);
+
 	AmPrewarmWorker = true;
 
 	pqsignal(SIGTERM, die);
@@ -947,6 +950,8 @@ lfc_invalidate(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber nblocks)
 	FileCacheEntry *entry;
 	uint32		hash;
 
+	Assert(!neon_enable_new_communicator);
+
 	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
 		return;
 
@@ -992,6 +997,8 @@ lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	bool		found = false;
 	uint32		hash;
 
+	Assert(!neon_enable_new_communicator);
+
 	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
 		return false;
 
@@ -1026,6 +1033,8 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	int			found = 0;
 	uint32		hash;
 	int			i = 0;
+
+	Assert(!neon_enable_new_communicator);
 
 	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
 		return 0;
@@ -1133,6 +1142,8 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	uint32		entry_offset;
 	int			blocks_read = 0;
 	int			buf_offset = 0;
+
+	Assert(!neon_enable_new_communicator);
 
 	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
 		return -1;
@@ -1500,6 +1511,8 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 
 	int		chunk_offs = BLOCK_TO_CHUNK_OFF(blkno);
 
+	Assert(!neon_enable_new_communicator);
+
 	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
 		return false;
 
@@ -1644,6 +1657,8 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	uint64		generation;
 	uint32		entry_offset;
 	int			buf_offset = 0;
+
+	Assert(!neon_enable_new_communicator);
 
 	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
 		return;
