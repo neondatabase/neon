@@ -36,7 +36,14 @@ use client_cache::PooledItemFactory;
 #[derive(Clone)]
 pub struct StreamReturner {
     sender: tokio::sync::mpsc::Sender<proto::GetPageRequest>,
-    sender_hashmap: Arc<tokio::sync::Mutex<std::collections::HashMap<u64, tokio::sync::mpsc::Sender<Result<proto::GetPageResponse, Status>>>>>,
+    sender_hashmap: Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<
+                u64,
+                tokio::sync::mpsc::Sender<Result<proto::GetPageResponse, Status>>,
+            >,
+        >,
+    >,
 }
 
 pub struct StreamFactory {
