@@ -1649,7 +1649,9 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             // If --safekeepers argument is given, use only the listed
             // safekeeper nodes; otherwise all from the env.
             let safekeepers = parse_safekeepers(&args.safekeepers)?;
-            endpoint.reconfigure(pageservers, None, safekeepers).await?;
+            endpoint
+                .reconfigure(Some(pageservers), None, safekeepers, None)
+                .await?;
         }
         EndpointCmd::Stop(args) => {
             let endpoint_id = &args.endpoint_id;

@@ -1023,7 +1023,7 @@ impl Reconciler {
         if let Some(node) = &self.intent.attached {
             let result = self
                 .compute_hook
-                .notify(
+                .notify_attach(
                     compute_hook::ShardUpdate {
                         tenant_shard_id: self.tenant_shard_id,
                         node_id: node.get_id(),
