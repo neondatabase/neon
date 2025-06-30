@@ -2562,14 +2562,14 @@ def test_storage_controller_node_deletion(
 
 
 def test_storage_controller_node_delete_cancellation(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.num_pageservers = 2
+    neon_env_builder.num_pageservers = 3
+    neon_env_builder.num_azs = 3
     env = neon_env_builder.init_configs()
     env.start()
 
     tenant_count = 10
-    shard_count_per_tenant = 16
+    shard_count_per_tenant = 8
     tenant_ids = []
-
     for _ in range(0, tenant_count):
         tid = TenantId.generate()
         tenant_ids.append(tid)
@@ -2577,11 +2577,11 @@ def test_storage_controller_node_delete_cancellation(neon_env_builder: NeonEnvBu
             tid, placement_policy='{"Attached":1}', shard_count=shard_count_per_tenant
         )
 
-    # See sleep comment in the test above.
-    time.sleep(2)
+    # Sanity check: initial creations should not leave the system in an unstable scheduling state
+    assert env.storage_controller.reconcile_all() == 0
 
     nodes = env.storage_controller.node_list()
-    assert len(nodes) == 2
+    assert len(nodes) == 3
 
     env.storage_controller.configure_failpoints(("sleepy-delete-loop", "return(2000)"))
 
@@ -2603,7 +2603,7 @@ def test_storage_controller_node_delete_cancellation(neon_env_builder: NeonEnvBu
         backoff=2,
     )
 
-    env.storage_controller.cancel_node_drain(ps_id_to_delete)
+    env.storage_controller.cancel_node_delete(ps_id_to_delete)
 
     env.storage_controller.poll_node_status(
         ps_id_to_delete,
