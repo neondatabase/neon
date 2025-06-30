@@ -3319,6 +3319,8 @@ impl TenantShard {
         }
         match err {
             CompactionError::ShuttingDown => unreachable!("is_cancel"),
+            // Offload failures don't trip the circuit breaker, since they're cheap to retry and
+            // shouldn't block compaction.
             CompactionError::Offload(_) => {}
             CompactionError::CollectKeySpaceError(err) => {
                 // CollectKeySpaceError::Cancelled and PageRead::Cancelled are handled in `err.is_cancel` branch.
