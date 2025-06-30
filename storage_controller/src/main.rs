@@ -6,9 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, anyhow};
 use camino::Utf8PathBuf;
 
-#[cfg(feature = "testing")]
-use clap::ArgAction;
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use futures::future::OptionFuture;
 use http_utils::tls_certs::ReloadingCertificateResolver;
 use hyper0::Uri;
@@ -216,14 +214,13 @@ struct Cli {
     /// Number of safekeepers to choose for a timeline when creating it.
     /// Safekeepers will be choosen from different availability zones.
     /// This option exists primarily for testing purposes.
-    #[arg(long, default_value = "3", value_parser = clap::value_parser!(i64).range(1..))]
-    timeline_safekeeper_count: i64,
+    #[arg(long, default_value = "3", value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+    timeline_safekeeper_count: usize,
 
     /// When set, actively checks and initiates heatmap downloads/uploads during reconciliation.
     /// This speed up migrations by avoiding the default wait for the heatmap download interval.
     /// Primarily useful for testing to reduce test execution time.
-    #[cfg(feature = "testing")]
-    #[arg(long, default_value = "true", action=ArgAction::Set)]
+    #[arg(long, default_value = "false", action=ArgAction::Set)]
     kick_secondary_downloads: bool,
 }
 
@@ -472,7 +469,6 @@ async fn async_main() -> anyhow::Result<()> {
         use_local_compute_notifications: args.use_local_compute_notifications,
         timeline_safekeeper_count: args.timeline_safekeeper_count,
         posthog_config: posthog_config.clone(),
-        #[cfg(feature = "testing")]
         kick_secondary_downloads: args.kick_secondary_downloads,
     };
 
@@ -560,9 +556,15 @@ async fn async_main() -> anyhow::Result<()> {
         let cancel_bg = cancel.clone();
         let task = tokio::task::spawn(
             async move {
-                let feature_flag_service = FeatureFlagService::new(service, posthog_config);
-                let feature_flag_service = Arc::new(feature_flag_service);
-                feature_flag_service.run(cancel_bg).await
+                match FeatureFlagService::new(service, posthog_config) {
+                    Ok(feature_flag_service) => {
+                        let feature_flag_service = Arc::new(feature_flag_service);
+                        feature_flag_service.run(cancel_bg).await
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to create feature flag service: {}", e);
+                    }
+                };
             }
             .instrument(tracing::info_span!("feature_flag_service")),
         );

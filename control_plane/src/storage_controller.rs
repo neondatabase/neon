@@ -638,7 +638,13 @@ impl StorageController {
             args.push("--timelines-onto-safekeepers".to_string());
         }
 
-        if let Some(sk_cnt) = self.config.timeline_safekeeper_count {
+        // neon_local is used in test environments where we often have less than 3 safekeepers.
+        if self.config.timeline_safekeeper_count.is_some() || self.env.safekeepers.len() < 3 {
+            let sk_cnt = self
+                .config
+                .timeline_safekeeper_count
+                .unwrap_or(self.env.safekeepers.len());
+
             args.push(format!("--timeline-safekeeper-count={sk_cnt}"));
         }
 

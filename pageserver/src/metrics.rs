@@ -4439,6 +4439,14 @@ pub(crate) static BASEBACKUP_CACHE_SIZE: Lazy<UIntGauge> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub(crate) static BASEBACKUP_CACHE_PREPARE_QUEUE_SIZE: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_basebackup_cache_prepare_queue_size",
+        "Number of requests in the basebackup prepare channel"
+    )
+    .expect("failed to define a metric")
+});
+
 static PAGESERVER_CONFIG_IGNORED_ITEMS: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_config_ignored_items",
