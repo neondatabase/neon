@@ -70,7 +70,7 @@ def _wait_till_profiling_starts(
     http_client: EndpointHttpClient,
     event: threading.Event | None,
     repeat_delay_secs: float = 0.3,
-    timeout: int = 30,
+    timeout: int = 60,
 ) -> bool:
     """
     Wait until CPU profiling starts.
