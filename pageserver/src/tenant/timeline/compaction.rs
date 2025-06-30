@@ -977,7 +977,7 @@ impl KeyHistoryRetention {
             tline
                 .reconstruct_value(key, lsn, data, RedoAttemptType::GcCompaction)
                 .await
-                .with_context(|| format!("verification failed for key {} at lsn {}", key, lsn))?;
+                .with_context(|| format!("verification failed for key {key} at lsn {lsn}"))?;
 
             Ok(())
         }
@@ -2647,15 +2647,15 @@ impl Timeline {
             use std::fmt::Write;
             let mut output = String::new();
             if let Some((key, _, _)) = replay_history.first() {
-                write!(output, "key={} ", key).unwrap();
+                write!(output, "key={key} ").unwrap();
                 let mut cnt = 0;
                 for (_, lsn, val) in replay_history {
                     if val.is_image() {
-                        write!(output, "i@{} ", lsn).unwrap();
+                        write!(output, "i@{lsn} ").unwrap();
                     } else if val.will_init() {
-                        write!(output, "di@{} ", lsn).unwrap();
+                        write!(output, "di@{lsn} ").unwrap();
                     } else {
-                        write!(output, "d@{} ", lsn).unwrap();
+                        write!(output, "d@{lsn} ").unwrap();
                     }
                     cnt += 1;
                     if cnt >= 128 {

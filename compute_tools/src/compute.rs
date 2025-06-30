@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
 use compute_api::responses::{
@@ -15,12 +15,12 @@ use itertools::Itertools;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use once_cell::sync::Lazy;
+use pageserver_page_api::{self as page_api, BaseBackupCompression};
 use postgres;
 use postgres::NoTls;
 use postgres::error::SqlState;
 use remote_storage::{DownloadError, RemotePath};
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -36,6 +36,7 @@ use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 use utils::measured_stream::MeasuredReader;
 use utils::pid_file;
+use utils::shard::{ShardCount, ShardIndex, ShardNumber};
 
 use crate::configurator::launch_configurator;
 use crate::disk_quota::set_disk_quota;
@@ -218,7 +219,8 @@ pub struct ParsedSpec {
     pub pageserver_connstr: String,
     pub safekeeper_connstrings: Vec<String>,
     pub storage_auth_token: Option<String>,
-    pub endpoint_storage_addr: Option<SocketAddr>,
+    /// k8s dns name and port
+    pub endpoint_storage_addr: Option<String>,
     pub endpoint_storage_token: Option<String>,
 }
 
@@ -250,8 +252,7 @@ impl ParsedSpec {
             // duplicate entry?
             if current == previous {
                 return Err(format!(
-                    "duplicate entry in safekeeper_connstrings: {}!",
-                    current,
+                    "duplicate entry in safekeeper_connstrings: {current}!",
                 ));
             }
 
@@ -314,13 +315,10 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
                 .or(Err("invalid timeline id"))?
         };
 
-        let endpoint_storage_addr: Option<SocketAddr> = spec
+        let endpoint_storage_addr: Option<String> = spec
             .endpoint_storage_addr
             .clone()
-            .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_addr"))
-            .unwrap_or_default()
-            .parse()
-            .ok();
+            .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_addr"));
         let endpoint_storage_token = spec
             .endpoint_storage_token
             .clone()
@@ -406,11 +404,11 @@ impl ComputeNode {
         // that can affect `compute_ctl` and prevent it from properly configuring the database schema.
         // Unset them via connection string options before connecting to the database.
         // N.B. keep it in sync with `ZENITH_OPTIONS` in `get_maintenance_client()`.
-        const EXTRA_OPTIONS: &str = "-c role=cloud_admin -c default_transaction_read_only=off -c search_path=public -c statement_timeout=0";
+        const EXTRA_OPTIONS: &str = "-c role=cloud_admin -c default_transaction_read_only=off -c search_path=public -c statement_timeout=0 -c pgaudit.log=none";
         let options = match conn_conf.get_options() {
             // Allow the control plane to override any options set by the
             // compute
-            Some(options) => format!("{} {}", EXTRA_OPTIONS, options),
+            Some(options) => format!("{EXTRA_OPTIONS} {options}"),
             None => EXTRA_OPTIONS.to_string(),
         };
         conn_conf.options(&options);
@@ -999,13 +997,87 @@ impl ComputeNode {
         Ok(())
     }
 
-    // Get basebackup from the libpq connection to pageserver using `connstr` and
-    // unarchive it to `pgdata` directory overriding all its previous content.
+    /// Fetches a basebackup from the Pageserver using the compute state's Pageserver connstring and
+    /// unarchives it to `pgdata` directory, replacing any existing contents.
     #[instrument(skip_all, fields(%lsn))]
     fn try_get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
-        let start_time = Instant::now();
 
+        // Detect the protocol scheme. If the URL doesn't have a scheme, assume libpq.
+        let shard0_connstr = spec.pageserver_connstr.split(',').next().unwrap();
+        let scheme = match Url::parse(shard0_connstr) {
+            Ok(url) => url.scheme().to_lowercase().to_string(),
+            Err(url::ParseError::RelativeUrlWithoutBase) => "postgresql".to_string(),
+            Err(err) => return Err(anyhow!("invalid connstring URL: {err}")),
+        };
+
+        let started = Instant::now();
+        let (connected, size) = match scheme.as_str() {
+            "postgresql" | "postgres" => self.try_get_basebackup_libpq(spec, lsn)?,
+            "grpc" => self.try_get_basebackup_grpc(spec, lsn)?,
+            scheme => return Err(anyhow!("unknown URL scheme {scheme}")),
+        };
+
+        let mut state = self.state.lock().unwrap();
+        state.metrics.pageserver_connect_micros =
+            connected.duration_since(started).as_micros() as u64;
+        state.metrics.basebackup_bytes = size as u64;
+        state.metrics.basebackup_ms = started.elapsed().as_millis() as u64;
+
+        Ok(())
+    }
+
+    /// Fetches a basebackup via gRPC. The connstring must use grpc://. Returns the timestamp when
+    /// the connection was established, and the (compressed) size of the basebackup.
+    fn try_get_basebackup_grpc(&self, spec: &ParsedSpec, lsn: Lsn) -> Result<(Instant, usize)> {
+        let shard0_connstr = spec
+            .pageserver_connstr
+            .split(',')
+            .next()
+            .unwrap()
+            .to_string();
+        let shard_index = match spec.pageserver_connstr.split(',').count() as u8 {
+            0 | 1 => ShardIndex::unsharded(),
+            count => ShardIndex::new(ShardNumber(0), ShardCount(count)),
+        };
+
+        let (reader, connected) = tokio::runtime::Handle::current().block_on(async move {
+            let mut client = page_api::Client::new(
+                shard0_connstr,
+                spec.tenant_id,
+                spec.timeline_id,
+                shard_index,
+                spec.storage_auth_token.clone(),
+                None, // NB: base backups use payload compression
+            )
+            .await?;
+            let connected = Instant::now();
+            let reader = client
+                .get_base_backup(page_api::GetBaseBackupRequest {
+                    lsn: (lsn != Lsn(0)).then_some(lsn),
+                    compression: BaseBackupCompression::Gzip,
+                    replica: spec.spec.mode != ComputeMode::Primary,
+                    full: false,
+                })
+                .await?;
+            anyhow::Ok((reader, connected))
+        })?;
+
+        let mut reader = MeasuredReader::new(tokio_util::io::SyncIoBridge::new(reader));
+
+        // Set `ignore_zeros` so that unpack() reads the entire stream and doesn't just stop at the
+        // end-of-archive marker. If the server errors, the tar::Builder drop handler will write an
+        // end-of-archive marker before the error is emitted, and we would not see the error.
+        let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(&mut reader));
+        ar.set_ignore_zeros(true);
+        ar.unpack(&self.params.pgdata)?;
+
+        Ok((connected, reader.get_byte_count()))
+    }
+
+    /// Fetches a basebackup via libpq. The connstring must use postgresql://. Returns the timestamp
+    /// when the connection was established, and the (compressed) size of the basebackup.
+    fn try_get_basebackup_libpq(&self, spec: &ParsedSpec, lsn: Lsn) -> Result<(Instant, usize)> {
         let shard0_connstr = spec.pageserver_connstr.split(',').next().unwrap();
         let mut config = postgres::Config::from_str(shard0_connstr)?;
 
@@ -1019,16 +1091,14 @@ impl ComputeNode {
         }
 
         config.application_name("compute_ctl");
-        if let Some(spec) = &compute_state.pspec {
-            config.options(&format!(
-                "-c neon.compute_mode={}",
-                spec.spec.mode.to_type_str()
-            ));
-        }
+        config.options(&format!(
+            "-c neon.compute_mode={}",
+            spec.spec.mode.to_type_str()
+        ));
 
         // Connect to pageserver
         let mut client = config.connect(NoTls)?;
-        let pageserver_connect_micros = start_time.elapsed().as_micros() as u64;
+        let connected = Instant::now();
 
         let basebackup_cmd = match lsn {
             Lsn(0) => {
@@ -1065,16 +1135,13 @@ impl ComputeNode {
         // Set `ignore_zeros` so that unpack() reads all the Copy data and
         // doesn't stop at the end-of-archive marker. Otherwise, if the server
         // sends an Error after finishing the tarball, we will not notice it.
+        // The tar::Builder drop handler will write an end-of-archive marker
+        // before emitting the error, and we would not see it otherwise.
         let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(&mut bufreader));
         ar.set_ignore_zeros(true);
         ar.unpack(&self.params.pgdata)?;
 
-        // Report metrics
-        let mut state = self.state.lock().unwrap();
-        state.metrics.pageserver_connect_micros = pageserver_connect_micros;
-        state.metrics.basebackup_bytes = measured_reader.get_byte_count() as u64;
-        state.metrics.basebackup_ms = start_time.elapsed().as_millis() as u64;
-        Ok(())
+        Ok((connected, measured_reader.get_byte_count()))
     }
 
     // Gets the basebackup in a retry loop
@@ -1127,7 +1194,7 @@ impl ComputeNode {
         let sk_configs = sk_connstrs.into_iter().map(|connstr| {
             // Format connstr
             let id = connstr.clone();
-            let connstr = format!("postgresql://no_user@{}", connstr);
+            let connstr = format!("postgresql://no_user@{connstr}");
             let options = format!(
                 "-c timeline_id={} tenant_id={}",
                 pspec.timeline_id, pspec.tenant_id
@@ -1490,7 +1557,7 @@ impl ComputeNode {
                 let (mut client, connection) = conf.connect(NoTls).await?;
                 tokio::spawn(async move {
                     if let Err(e) = connection.await {
-                        eprintln!("connection error: {}", e);
+                        eprintln!("connection error: {e}");
                     }
                 });
 
@@ -1633,7 +1700,7 @@ impl ComputeNode {
                 Ok((mut client, connection)) => {
                     tokio::spawn(async move {
                         if let Err(e) = connection.await {
-                            eprintln!("connection error: {}", e);
+                            eprintln!("connection error: {e}");
                         }
                     });
                     if let Err(e) = handle_migrations(&mut client).await {
@@ -1937,7 +2004,7 @@ impl ComputeNode {
         let (client, connection) = connect_result.unwrap();
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("connection error: {}", e);
+                eprintln!("connection error: {e}");
             }
         });
         let result = client
@@ -2106,7 +2173,7 @@ LIMIT 100",
             db_client
                 .simple_query(&query)
                 .await
-                .with_context(|| format!("Failed to execute query: {}", query))?;
+                .with_context(|| format!("Failed to execute query: {query}"))?;
         }
 
         Ok(())
@@ -2133,7 +2200,7 @@ LIMIT 100",
         let version: Option<ExtVersion> = db_client
             .query_opt(version_query, &[&ext_name])
             .await
-            .with_context(|| format!("Failed to execute query: {}", version_query))?
+            .with_context(|| format!("Failed to execute query: {version_query}"))?
             .map(|row| row.get(0));
 
         // sanitize the inputs as postgres idents.
@@ -2148,14 +2215,14 @@ LIMIT 100",
             db_client
                 .simple_query(&query)
                 .await
-                .with_context(|| format!("Failed to execute query: {}", query))?;
+                .with_context(|| format!("Failed to execute query: {query}"))?;
         } else {
             let query =
                 format!("CREATE EXTENSION IF NOT EXISTS {ext_name} WITH VERSION {quoted_version}");
             db_client
                 .simple_query(&query)
                 .await
-                .with_context(|| format!("Failed to execute query: {}", query))?;
+                .with_context(|| format!("Failed to execute query: {query}"))?;
         }
 
         Ok(ext_version)

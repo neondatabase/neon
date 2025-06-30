@@ -1316,8 +1316,10 @@ dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
  "p256 0.13.2",
+ "pageserver_page_api",
  "postgres",
  "postgres_initdb",
+ "postgres_versioninfo",
  "regex",
  "remote_storage",
  "reqwest",
@@ -1334,6 +1336,7 @@ dependencies = [
  "tokio-postgres",
  "tokio-stream",
  "tokio-util",
+ "tonic 0.13.1",
  "tower 0.5.2",
  "tower-http",
  "tower-otel",
@@ -4406,6 +4409,8 @@ dependencies = [
  "once_cell",
  "postgres_backend",
  "postgres_ffi_types",
+ "postgres_versioninfo",
+ "posthog_client_lite",
  "rand 0.8.5",
  "remote_storage",
  "reqwest",
@@ -4429,6 +4434,7 @@ dependencies = [
  "futures",
  "http-utils",
  "pageserver_api",
+ "postgres_versioninfo",
  "reqwest",
  "serde",
  "thiserror 1.0.69",
@@ -4471,12 +4477,13 @@ dependencies = [
  "bytes",
  "futures",
  "pageserver_api",
- "postgres_ffi",
+ "postgres_ffi_types",
  "prost 0.13.5",
  "strum",
  "strum_macros",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "tonic 0.13.1",
  "tonic-build",
  "utils",
@@ -4897,6 +4904,7 @@ dependencies = [
  "once_cell",
  "postgres",
  "postgres_ffi_types",
+ "postgres_versioninfo",
  "pprof",
  "regex",
  "serde",
@@ -4919,8 +4927,20 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "camino",
+ "postgres_versioninfo",
  "thiserror 1.0.69",
  "tokio",
+ "workspace_hack",
+]
+
+[[package]]
+name = "postgres_versioninfo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_repr",
+ "thiserror 1.0.69",
  "workspace_hack",
 ]
 
@@ -6115,6 +6135,7 @@ dependencies = [
  "postgres-protocol",
  "postgres_backend",
  "postgres_ffi",
+ "postgres_versioninfo",
  "pprof",
  "pq_proto",
  "rand 0.8.5",
@@ -6159,6 +6180,7 @@ dependencies = [
  "const_format",
  "pageserver_api",
  "postgres_ffi",
+ "postgres_versioninfo",
  "pq_proto",
  "serde",
  "serde_json",
@@ -6482,6 +6504,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_repr"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "175ee3e80ae9982737ca543e96133087cbd9a485eecc3bc4de9c1a37b47ea59c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.100",
+]
+
+[[package]]
 name = "serde_spanned"
 version = "0.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6786,6 +6819,7 @@ dependencies = [
  "hex",
  "http-utils",
  "humantime",
+ "humantime-serde",
  "hyper 0.14.30",
  "itertools 0.10.5",
  "json-structural-diff",
@@ -6796,6 +6830,7 @@ dependencies = [
  "pageserver_api",
  "pageserver_client",
  "postgres_connection",
+ "posthog_client_lite",
  "rand 0.8.5",
  "regex",
  "reqwest",
@@ -8647,7 +8682,6 @@ dependencies = [
  "num-iter",
  "num-rational",
  "num-traits",
- "once_cell",
  "p256 0.13.2",
  "parquet",
  "prettyplease",

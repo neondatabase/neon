@@ -511,7 +511,7 @@ fn inmem_layer_log_display(
     start_lsn: Lsn,
     end_lsn: Lsn,
 ) -> std::fmt::Result {
-    write!(f, "timeline {} in-memory ", timeline)?;
+    write!(f, "timeline {timeline} in-memory ")?;
     inmem_layer_display(f, start_lsn, end_lsn)
 }
 

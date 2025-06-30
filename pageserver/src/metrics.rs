@@ -1727,12 +1727,7 @@ impl Drop for SmgrOpTimer {
 
 impl SmgrOpFlushInProgress {
     /// The caller must guarantee that `socket_fd`` outlives this function.
-    pub(crate) async fn measure<Fut, O>(
-        self,
-        started_at: Instant,
-        mut fut: Fut,
-        socket_fd: RawFd,
-    ) -> O
+    pub(crate) async fn measure<Fut, O>(self, started_at: Instant, fut: Fut, socket_fd: RawFd) -> O
     where
         Fut: std::future::Future<Output = O>,
     {
@@ -4440,6 +4435,14 @@ pub(crate) static BASEBACKUP_CACHE_SIZE: Lazy<UIntGauge> = Lazy::new(|| {
     register_uint_gauge!(
         "pageserver_basebackup_cache_size_bytes",
         "Total size of all basebackup cache entries on disk in bytes"
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static BASEBACKUP_CACHE_PREPARE_QUEUE_SIZE: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_basebackup_cache_prepare_queue_size",
+        "Number of requests in the basebackup prepare channel"
     )
     .expect("failed to define a metric")
 });

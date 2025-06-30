@@ -9,4 +9,5 @@ anyhow.workspace = true
 tokio.workspace = true
 camino.workspace = true
 thiserror.workspace = true
+postgres_versioninfo.workspace = true
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }

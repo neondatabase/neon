@@ -67,6 +67,7 @@ use nix::sys::signal::{Signal, kill};
 use pageserver_api::shard::ShardStripeSize;
 use pem::Pem;
 use reqwest::header::CONTENT_TYPE;
+use safekeeper_api::PgMajorVersion;
 use safekeeper_api::membership::SafekeeperGeneration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -89,7 +90,7 @@ pub struct EndpointConf {
     pg_port: u16,
     external_http_port: u16,
     internal_http_port: u16,
-    pg_version: u32,
+    pg_version: PgMajorVersion,
     grpc: bool,
     skip_pg_catalog_updates: bool,
     reconfigure_concurrency: usize,
@@ -192,7 +193,7 @@ impl ComputeControlPlane {
         pg_port: Option<u16>,
         external_http_port: Option<u16>,
         internal_http_port: Option<u16>,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         mode: ComputeMode,
         grpc: bool,
         skip_pg_catalog_updates: bool,
@@ -312,7 +313,7 @@ pub struct Endpoint {
     pub internal_http_address: SocketAddr,
 
     // postgres major version in the format: 14, 15, etc.
-    pg_version: u32,
+    pg_version: PgMajorVersion,
 
     // These are not part of the endpoint as such, but the environment
     // the endpoint runs in.
@@ -557,7 +558,7 @@ impl Endpoint {
                 conf.append("hot_standby", "on");
                 // prefetching of blocks referenced in WAL doesn't make sense for us
                 // Neon hot standby ignores pages that are not in the shared_buffers
-                if self.pg_version >= 15 {
+                if self.pg_version >= PgMajorVersion::PG15 {
                     conf.append("recovery_prefetch", "off");
                 }
             }
@@ -846,10 +847,10 @@ impl Endpoint {
 
         // Launch compute_ctl
         let conn_str = self.connstr("cloud_admin", "postgres");
-        println!("Starting postgres node at '{}'", conn_str);
+        println!("Starting postgres node at '{conn_str}'");
         if create_test_user {
             let conn_str = self.connstr("test", "neondb");
-            println!("Also at '{}'", conn_str);
+            println!("Also at '{conn_str}'");
         }
         let mut cmd = Command::new(self.env.neon_distrib_dir.join("compute_ctl"));
         cmd.args([
@@ -948,8 +949,7 @@ impl Endpoint {
                 Err(e) => {
                     if Instant::now().duration_since(start_at) > start_timeout {
                         return Err(e).context(format!(
-                            "timed out {:?} waiting to connect to compute_ctl HTTP",
-                            start_timeout,
+                            "timed out {start_timeout:?} waiting to connect to compute_ctl HTTP",
                         ));
                     }
                 }
@@ -988,7 +988,7 @@ impl Endpoint {
             // reqwest does not export its error construction utility functions, so let's craft the message ourselves
             let url = response.url().to_owned();
             let msg = match response.text().await {
-                Ok(err_body) => format!("Error: {}", err_body),
+                Ok(err_body) => format!("Error: {err_body}"),
                 Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
             };
             Err(anyhow::anyhow!(msg))
@@ -1054,7 +1054,7 @@ impl Endpoint {
         } else {
             let url = response.url().to_owned();
             let msg = match response.text().await {
-                Ok(err_body) => format!("Error: {}", err_body),
+                Ok(err_body) => format!("Error: {err_body}"),
                 Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
             };
             Err(anyhow::anyhow!(msg))

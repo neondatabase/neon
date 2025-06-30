@@ -206,16 +206,10 @@ impl Storage for FileStorage {
         let buf: Vec<u8> = s.write_to_buf()?;
 
         control_partial.write_all(&buf).await.with_context(|| {
-            format!(
-                "failed to write safekeeper state into control file at: {}",
-                control_partial_path
-            )
+            format!("failed to write safekeeper state into control file at: {control_partial_path}")
         })?;
         control_partial.flush().await.with_context(|| {
-            format!(
-                "failed to flush safekeeper state into control file at: {}",
-                control_partial_path
-            )
+            format!("failed to flush safekeeper state into control file at: {control_partial_path}")
         })?;
 
         let control_path = self.timeline_dir.join(CONTROL_FILE_NAME);

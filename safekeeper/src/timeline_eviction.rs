@@ -342,7 +342,7 @@ where
         let bytes_read1 = reader1
             .read(&mut buffer1[..bytes_to_read])
             .await
-            .with_context(|| format!("failed to read from reader1 at offset {}", offset))?;
+            .with_context(|| format!("failed to read from reader1 at offset {offset}"))?;
         if bytes_read1 == 0 {
             anyhow::bail!("unexpected EOF from reader1 at offset {}", offset);
         }
@@ -351,10 +351,7 @@ where
             .read_exact(&mut buffer2[..bytes_read1])
             .await
             .with_context(|| {
-                format!(
-                    "failed to read {} bytes from reader2 at offset {}",
-                    bytes_read1, offset
-                )
+                format!("failed to read {bytes_read1} bytes from reader2 at offset {offset}")
             })?;
         assert!(bytes_read2 == bytes_read1);
 

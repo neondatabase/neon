@@ -13,7 +13,7 @@ use pageserver_api::keyspace::KeySpace;
 use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::walrecord::{DecodedBkpBlock, DecodedWALRecord};
-use postgres_ffi::{BLCKSZ, page_is_new, page_set_lsn, pg_constants};
+use postgres_ffi::{BLCKSZ, PgMajorVersion, page_is_new, page_set_lsn, pg_constants};
 use serde::{Deserialize, Serialize};
 use utils::bin_ser::BeSer;
 use utils::lsn::Lsn;
@@ -139,7 +139,7 @@ impl SerializedValueBatch {
         decoded: DecodedWALRecord,
         shard_records: &mut HashMap<ShardIdentity, InterpretedWalRecord>,
         next_record_lsn: Lsn,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
     ) -> anyhow::Result<()> {
         // First determine how big the buffers need to be and allocate it up-front.
         // This duplicates some of the work below, but it's empirically much faster.
@@ -267,7 +267,7 @@ impl SerializedValueBatch {
     fn estimate_buffer_size(
         decoded: &DecodedWALRecord,
         shard: &ShardIdentity,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
     ) -> usize {
         let mut estimate: usize = 0;
 
@@ -303,7 +303,11 @@ impl SerializedValueBatch {
         estimate
     }
 
-    fn block_is_image(decoded: &DecodedWALRecord, blk: &DecodedBkpBlock, pg_version: u32) -> bool {
+    fn block_is_image(
+        decoded: &DecodedWALRecord,
+        blk: &DecodedBkpBlock,
+        pg_version: PgMajorVersion,
+    ) -> bool {
         blk.apply_image
             && blk.has_image
             && decoded.xl_rmid == pg_constants::RM_XLOG_ID

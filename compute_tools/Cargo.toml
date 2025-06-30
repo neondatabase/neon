@@ -38,6 +38,7 @@ once_cell.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 p256 = { version = "0.13", features = ["pem"] }
+pageserver_page_api.workspace = true
 postgres.workspace = true
 regex.workspace = true
 reqwest = { workspace = true, features = ["json"] }
@@ -53,6 +54,7 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 tokio-postgres.workspace = true
 tokio-util.workspace = true
 tokio-stream.workspace = true
+tonic.workspace = true
 tower-otel.workspace = true
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
@@ -64,6 +66,7 @@ uuid.workspace = true
 walkdir.workspace = true
 x509-cert.workspace = true
 
+postgres_versioninfo.workspace = true
 postgres_initdb.workspace = true
 compute_api.workspace = true
 utils.workspace = true

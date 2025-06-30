@@ -3699,7 +3699,9 @@ def test_timeline_delete_mid_live_migration(neon_env_builder: NeonEnvBuilder, mi
     env.start()
 
     for ps in env.pageservers:
-        ps.allowed_errors.append(".*Timeline.* has been deleted.*")
+        ps.allowed_errors.extend(
+            [".*Timeline.* has been deleted.*", ".*Timeline.*was cancelled and cannot be used"]
+        )
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
@@ -4223,13 +4225,20 @@ class DeletionSubject(Enum):
     TENANT = "tenant"
 
 
+class EmptyTimeline(Enum):
+    EMPTY = "empty"
+    NONEMPTY = "nonempty"
+
+
 @run_only_on_default_postgres("PG version is not interesting here")
 @pytest.mark.parametrize("restart_storcon", [RestartStorcon.RESTART, RestartStorcon.ONLINE])
 @pytest.mark.parametrize("deletetion_subject", [DeletionSubject.TENANT, DeletionSubject.TIMELINE])
+@pytest.mark.parametrize("empty_timeline", [EmptyTimeline.EMPTY, EmptyTimeline.NONEMPTY])
 def test_storcon_create_delete_sk_down(
     neon_env_builder: NeonEnvBuilder,
     restart_storcon: RestartStorcon,
     deletetion_subject: DeletionSubject,
+    empty_timeline: EmptyTimeline,
 ):
     """
     Test that the storcon can create and delete tenants and timelines with a safekeeper being down.
@@ -4281,10 +4290,11 @@ def test_storcon_create_delete_sk_down(
         ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
         ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
 
-    with env.endpoints.create("child_of_main", tenant_id=tenant_id) as ep:
-        # endpoint should start.
-        ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
-        ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
+    if empty_timeline == EmptyTimeline.NONEMPTY:
+        with env.endpoints.create("child_of_main", tenant_id=tenant_id) as ep:
+            # endpoint should start.
+            ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
+            ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
 
     env.storage_controller.assert_log_contains("writing pending op for sk id 1")
     env.safekeepers[0].start()
@@ -4489,6 +4499,53 @@ def test_storage_controller_graceful_migration(neon_env_builder: NeonEnvBuilder,
         )
     else:
         assert initial_ps.http_client().tenant_list_locations()["tenant_shards"] == []
+
+
+def test_attached_0_graceful_migration(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_pageservers = 4
+    neon_env_builder.num_azs = 2
+
+    neon_env_builder.storcon_kick_secondary_downloads = False
+
+    env = neon_env_builder.init_start()
+
+    # It is default, but we want to ensure that there are no secondary locations requested
+    env.storage_controller.tenant_policy_update(env.initial_tenant, {"placement": {"Attached": 0}})
+    env.storage_controller.reconcile_until_idle()
+
+    desc = env.storage_controller.tenant_describe(env.initial_tenant)["shards"][0]
+    src_ps_id = desc["node_attached"]
+    src_ps = env.get_pageserver(src_ps_id)
+    src_az = desc["preferred_az_id"]
+
+    # There must be no secondary locations with Attached(0) placement policy
+    assert len(desc["node_secondary"]) == 0
+
+    # Migrate tenant shard to the same AZ node
+    dst_ps = [ps for ps in env.pageservers if ps.id != src_ps_id and ps.az_id == src_az][0]
+
+    env.storage_controller.tenant_shard_migrate(
+        TenantShardId(env.initial_tenant, 0, 0),
+        dst_ps.id,
+        config=StorageControllerMigrationConfig(prewarm=True),
+    )
+
+    def tenant_shard_migrated():
+        src_locations = src_ps.http_client().tenant_list_locations()["tenant_shards"]
+        assert len(src_locations) == 0
+        log.info(f"Tenant shard migrated from {src_ps.id}")
+        dst_locations = dst_ps.http_client().tenant_list_locations()["tenant_shards"]
+        assert len(dst_locations) == 1
+        assert dst_locations[0][1]["mode"] == "AttachedSingle"
+        log.info(f"Tenant shard migrated to {dst_ps.id}")
+
+    # After all we expect that tenant shard exists only on dst node.
+    # We wait so long because [`DEFAULT_HEATMAP_PERIOD`] and [`DEFAULT_DOWNLOAD_INTERVAL`]
+    # are set to 60 seconds by default.
+    #
+    # TODO: we should consider making these configurable, so the test can run faster.
+    wait_until(tenant_shard_migrated, timeout=180, interval=5, status_interval=10)
+    log.info("Tenant shard migrated successfully")
 
 
 @run_only_on_default_postgres("this is like a 'unit test' against storcon db")

@@ -38,6 +38,7 @@ use pageserver_api::models::{
     WalRedoManagerStatus,
 };
 use pageserver_api::shard::{ShardIdentity, ShardStripeSize, TenantShardId};
+use postgres_ffi::PgMajorVersion;
 use remote_storage::{DownloadError, GenericRemoteStorage, TimeoutOrCancel};
 use remote_timeline_client::index::GcCompactionState;
 use remote_timeline_client::manifest::{
@@ -79,7 +80,7 @@ use self::timeline::uninit::{TimelineCreateGuard, TimelineExclusionError, Uninit
 use self::timeline::{
     EvictionTaskTenantState, GcCutoffs, TimelineDeleteProgress, TimelineResources, WaitLsnError,
 };
-use crate::basebackup_cache::BasebackupPrepareSender;
+use crate::basebackup_cache::BasebackupCache;
 use crate::config::PageServerConf;
 use crate::context;
 use crate::context::RequestContextBuilder;
@@ -161,7 +162,7 @@ pub struct TenantSharedResources {
     pub remote_storage: GenericRemoteStorage,
     pub deletion_queue_client: DeletionQueueClient,
     pub l0_flush_global_state: L0FlushGlobalState,
-    pub basebackup_prepare_sender: BasebackupPrepareSender,
+    pub basebackup_cache: Arc<BasebackupCache>,
     pub feature_resolver: FeatureResolver,
 }
 
@@ -330,7 +331,7 @@ pub struct TenantShard {
     deletion_queue_client: DeletionQueueClient,
 
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
-    basebackup_prepare_sender: BasebackupPrepareSender,
+    basebackup_cache: Arc<BasebackupCache>,
 
     /// Cached logical sizes updated updated on each [`TenantShard::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
@@ -497,7 +498,7 @@ impl WalRedoManager {
         lsn: Lsn,
         base_img: Option<(Lsn, bytes::Bytes)>,
         records: Vec<(Lsn, wal_decoder::models::record::NeonWalRecord)>,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         redo_attempt_type: RedoAttemptType,
     ) -> Result<bytes::Bytes, walredo::Error> {
         match self {
@@ -933,7 +934,7 @@ pub(crate) enum CreateTimelineParams {
 pub(crate) struct CreateTimelineParamsBootstrap {
     pub(crate) new_timeline_id: TimelineId,
     pub(crate) existing_initdb_timeline_id: Option<TimelineId>,
-    pub(crate) pg_version: u32,
+    pub(crate) pg_version: PgMajorVersion,
 }
 
 /// NB: See comment on [`CreateTimelineIdempotency::Branch`] for why there's no `pg_version` here.
@@ -971,7 +972,7 @@ pub(crate) enum CreateTimelineIdempotency {
     /// NB: special treatment, see comment in [`Self`].
     FailWithConflict,
     Bootstrap {
-        pg_version: u32,
+        pg_version: PgMajorVersion,
     },
     /// NB: branches always have the same `pg_version` as their ancestor.
     /// While [`pageserver_api::models::TimelineCreateRequestMode::Branch::pg_version`]
@@ -1362,7 +1363,7 @@ impl TenantShard {
             remote_storage,
             deletion_queue_client,
             l0_flush_global_state,
-            basebackup_prepare_sender,
+            basebackup_cache,
             feature_resolver,
         } = resources;
 
@@ -1379,7 +1380,7 @@ impl TenantShard {
             remote_storage.clone(),
             deletion_queue_client,
             l0_flush_global_state,
-            basebackup_prepare_sender,
+            basebackup_cache,
             feature_resolver,
         ));
 
@@ -2541,7 +2542,7 @@ impl TenantShard {
         self: &Arc<Self>,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         ctx: &RequestContext,
     ) -> anyhow::Result<(UninitializedTimeline, RequestContext)> {
         anyhow::ensure!(
@@ -2593,7 +2594,7 @@ impl TenantShard {
         self: &Arc<Self>,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let (uninit_tl, ctx) = self
@@ -2632,7 +2633,7 @@ impl TenantShard {
         self: &Arc<Self>,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         ctx: &RequestContext,
         in_memory_layer_desc: Vec<timeline::InMemoryLayerTestDesc>,
         delta_layer_desc: Vec<timeline::DeltaLayerTestDesc>,
@@ -2898,7 +2899,7 @@ impl TenantShard {
                     Lsn(0),
                     initdb_lsn,
                     initdb_lsn,
-                    15,
+                    PgMajorVersion::PG15,
                 );
                 this.prepare_new_timeline(
                     new_timeline_id,
@@ -3449,7 +3450,7 @@ impl TenantShard {
             use pageserver_api::models::ActivatingFrom;
             match &*current_state {
                 TenantState::Activating(_) | TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping { .. } => {
-                    panic!("caller is responsible for calling activate() only on Loading / Attaching tenants, got {state:?}", state = current_state);
+                    panic!("caller is responsible for calling activate() only on Loading / Attaching tenants, got {current_state:?}");
                 }
                 TenantState::Attaching => {
                     *current_state = TenantState::Activating(ActivatingFrom::Attaching);
@@ -4379,7 +4380,7 @@ impl TenantShard {
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
         l0_flush_global_state: L0FlushGlobalState,
-        basebackup_prepare_sender: BasebackupPrepareSender,
+        basebackup_cache: Arc<BasebackupCache>,
         feature_resolver: FeatureResolver,
     ) -> TenantShard {
         assert!(!attached_conf.location.generation.is_none());
@@ -4484,7 +4485,7 @@ impl TenantShard {
             ongoing_timeline_detach: std::sync::Mutex::default(),
             gc_block: Default::default(),
             l0_flush_global_state,
-            basebackup_prepare_sender,
+            basebackup_cache,
             feature_resolver,
         }
     }
@@ -5090,7 +5091,7 @@ impl TenantShard {
     pub(crate) async fn bootstrap_timeline_test(
         self: &Arc<Self>,
         timeline_id: TimelineId,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         load_existing_initdb: Option<TimelineId>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
@@ -5232,7 +5233,7 @@ impl TenantShard {
     async fn bootstrap_timeline(
         self: &Arc<Self>,
         timeline_id: TimelineId,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         load_existing_initdb: Option<TimelineId>,
         ctx: &RequestContext,
     ) -> Result<CreateTimelineResult, CreateTimelineError> {
@@ -5413,7 +5414,7 @@ impl TenantShard {
             pagestream_throttle_metrics: self.pagestream_throttle_metrics.clone(),
             l0_compaction_trigger: self.l0_compaction_trigger.clone(),
             l0_flush_global_state: self.l0_flush_global_state.clone(),
-            basebackup_prepare_sender: self.basebackup_prepare_sender.clone(),
+            basebackup_cache: self.basebackup_cache.clone(),
             feature_resolver: self.feature_resolver.clone(),
         }
     }
@@ -5770,7 +5771,7 @@ impl TenantShard {
 async fn run_initdb(
     conf: &'static PageServerConf,
     initdb_target_dir: &Utf8Path,
-    pg_version: u32,
+    pg_version: PgMajorVersion,
     cancel: &CancellationToken,
 ) -> Result<(), InitdbError> {
     let initdb_bin_path = conf
@@ -5999,7 +6000,7 @@ pub(crate) mod harness {
         ) -> anyhow::Result<Arc<TenantShard>> {
             let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
 
-            let (basebackup_requst_sender, _) = tokio::sync::mpsc::unbounded_channel();
+            let (basebackup_cache, _) = BasebackupCache::new(Utf8PathBuf::new(), None);
 
             let tenant = Arc::new(TenantShard::new(
                 TenantState::Attaching,
@@ -6017,7 +6018,7 @@ pub(crate) mod harness {
                 self.deletion_queue.new_client(),
                 // TODO: ideally we should run all unit tests with both configs
                 L0FlushGlobalState::new(L0FlushConfig::default()),
-                basebackup_requst_sender,
+                basebackup_cache,
                 FeatureResolver::new_disabled(),
             ));
 
@@ -6051,7 +6052,7 @@ pub(crate) mod harness {
             lsn: Lsn,
             base_img: Option<(Lsn, Bytes)>,
             records: Vec<(Lsn, NeonWalRecord)>,
-            _pg_version: u32,
+            _pg_version: PgMajorVersion,
             _redo_attempt_type: RedoAttemptType,
         ) -> Result<Bytes, walredo::Error> {
             let records_neon = records.iter().all(|r| apply_neon::can_apply_in_neon(&r.1));
@@ -6223,7 +6224,7 @@ mod tests {
     async fn randomize_timeline(
         tenant: &Arc<TenantShard>,
         new_timeline_id: TimelineId,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         spec: TestTimelineSpecification,
         random: &mut rand::rngs::StdRng,
         ctx: &RequestContext,
@@ -6616,7 +6617,7 @@ mod tests {
                 .put(
                     *TEST_KEY,
                     lsn,
-                    &Value::Image(test_img(&format!("foo at {}", lsn))),
+                    &Value::Image(test_img(&format!("foo at {lsn}"))),
                     ctx,
                 )
                 .await?;
@@ -6626,7 +6627,7 @@ mod tests {
                 .put(
                     *TEST_KEY,
                     lsn,
-                    &Value::Image(test_img(&format!("foo at {}", lsn))),
+                    &Value::Image(test_img(&format!("foo at {lsn}"))),
                     ctx,
                 )
                 .await?;
@@ -6640,7 +6641,7 @@ mod tests {
                 .put(
                     *TEST_KEY,
                     lsn,
-                    &Value::Image(test_img(&format!("foo at {}", lsn))),
+                    &Value::Image(test_img(&format!("foo at {lsn}"))),
                     ctx,
                 )
                 .await?;
@@ -6650,7 +6651,7 @@ mod tests {
                 .put(
                     *TEST_KEY,
                     lsn,
-                    &Value::Image(test_img(&format!("foo at {}", lsn))),
+                    &Value::Image(test_img(&format!("foo at {lsn}"))),
                     ctx,
                 )
                 .await?;
@@ -7149,7 +7150,7 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                         ctx,
                     )
                     .await?;
@@ -7437,7 +7438,7 @@ mod tests {
             .put(
                 gap_at_key,
                 current_lsn,
-                &Value::Image(test_img(&format!("{} at {}", gap_at_key, current_lsn))),
+                &Value::Image(test_img(&format!("{gap_at_key} at {current_lsn}"))),
                 &ctx,
             )
             .await?;
@@ -7476,7 +7477,7 @@ mod tests {
                 .put(
                     current_key,
                     current_lsn,
-                    &Value::Image(test_img(&format!("{} at {}", current_key, current_lsn))),
+                    &Value::Image(test_img(&format!("{current_key} at {current_lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -7584,7 +7585,7 @@ mod tests {
             while key < end_key {
                 current_lsn += 0x10;
 
-                let image_value = format!("{} at {}", child_gap_at_key, current_lsn);
+                let image_value = format!("{child_gap_at_key} at {current_lsn}");
 
                 let mut writer = parent_timeline.writer().await;
                 writer
@@ -7627,7 +7628,7 @@ mod tests {
                 .put(
                     key,
                     current_lsn,
-                    &Value::Image(test_img(&format!("{} at {}", key, current_lsn))),
+                    &Value::Image(test_img(&format!("{key} at {current_lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -7748,7 +7749,7 @@ mod tests {
                 .put(
                     test_key,
                     lsn,
-                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -7769,7 +7770,7 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                         &ctx,
                     )
                     .await?;
@@ -7783,7 +7784,7 @@ mod tests {
                 test_key.field6 = blknum as u32;
                 assert_eq!(
                     tline.get(test_key, lsn, &ctx).await?,
-                    test_img(&format!("{} at {}", blknum, last_lsn))
+                    test_img(&format!("{blknum} at {last_lsn}"))
                 );
             }
 
@@ -7829,7 +7830,7 @@ mod tests {
                 .put(
                     test_key,
                     lsn,
-                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -7858,11 +7859,11 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                         &ctx,
                     )
                     .await?;
-                println!("updating {} at {}", blknum, lsn);
+                println!("updating {blknum} at {lsn}");
                 writer.finish_write(lsn);
                 drop(writer);
                 updated[blknum] = lsn;
@@ -7873,7 +7874,7 @@ mod tests {
                 test_key.field6 = blknum as u32;
                 assert_eq!(
                     tline.get(test_key, lsn, &ctx).await?,
-                    test_img(&format!("{} at {}", blknum, last_lsn))
+                    test_img(&format!("{blknum} at {last_lsn}"))
                 );
             }
 
@@ -7926,11 +7927,11 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} {} at {}", idx, blknum, lsn))),
+                        &Value::Image(test_img(&format!("{idx} {blknum} at {lsn}"))),
                         &ctx,
                     )
                     .await?;
-                println!("updating [{}][{}] at {}", idx, blknum, lsn);
+                println!("updating [{idx}][{blknum}] at {lsn}");
                 writer.finish_write(lsn);
                 drop(writer);
                 updated[idx][blknum] = lsn;
@@ -8136,7 +8137,7 @@ mod tests {
                 .put(
                     test_key,
                     lsn,
-                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -8153,7 +8154,7 @@ mod tests {
                 test_key.field6 = (blknum * STEP) as u32;
                 assert_eq!(
                     tline.get(test_key, lsn, &ctx).await?,
-                    test_img(&format!("{} at {}", blknum, last_lsn))
+                    test_img(&format!("{blknum} at {last_lsn}"))
                 );
             }
 
@@ -8190,7 +8191,7 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                         &ctx,
                     )
                     .await?;
@@ -8443,7 +8444,7 @@ mod tests {
                 .put(
                     test_key,
                     lsn,
-                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -8463,7 +8464,7 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                         &ctx,
                     )
                     .await?;
@@ -9384,12 +9385,7 @@ mod tests {
         let end_lsn = Lsn(0x100);
         let image_layers = (0x20..=0x90)
             .step_by(0x10)
-            .map(|n| {
-                (
-                    Lsn(n),
-                    vec![(key, test_img(&format!("data key at {:x}", n)))],
-                )
-            })
+            .map(|n| (Lsn(n), vec![(key, test_img(&format!("data key at {n:x}")))]))
             .collect();
 
         let timeline = tenant
@@ -11433,11 +11429,11 @@ mod tests {
         if left != right {
             eprintln!("---LEFT---");
             for left in left.iter() {
-                eprintln!("{}", left);
+                eprintln!("{left}");
             }
             eprintln!("---RIGHT---");
             for right in right.iter() {
-                eprintln!("{}", right);
+                eprintln!("{right}");
             }
             assert_eq!(left, right);
         }

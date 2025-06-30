@@ -1,5 +1,6 @@
 pub mod chaos_injector;
 mod context_iterator;
+pub mod feature_flag;
 pub(crate) mod safekeeper_reconciler;
 mod safekeeper_service;
 
@@ -25,6 +26,7 @@ use futures::stream::FuturesUnordered;
 use http_utils::error::ApiError;
 use hyper::Uri;
 use itertools::Itertools;
+use pageserver_api::config::PostHogConfig;
 use pageserver_api::controller_api::{
     AvailabilityZone, MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability,
     NodeRegisterRequest, NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy,
@@ -260,7 +262,7 @@ fn passthrough_api_error(node: &Node, e: mgmt_api::Error) -> ApiError {
             // Presume errors receiving body are connectivity/availability issues except for decoding errors
             let src_str = err.source().map(|e| e.to_string()).unwrap_or_default();
             ApiError::ResourceUnavailable(
-                format!("{node} error receiving error body: {err} {}", src_str).into(),
+                format!("{node} error receiving error body: {err} {src_str}").into(),
             )
         }
         mgmt_api::Error::ApiError(StatusCode::NOT_FOUND, msg) => {
@@ -469,7 +471,13 @@ pub struct Config {
 
     /// Number of safekeepers to choose for a timeline when creating it.
     /// Safekeepers will be choosen from different availability zones.
-    pub timeline_safekeeper_count: i64,
+    pub timeline_safekeeper_count: usize,
+
+    /// PostHog integration config
+    pub posthog_config: Option<PostHogConfig>,
+
+    #[cfg(feature = "testing")]
+    pub kick_secondary_downloads: bool,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -670,7 +678,7 @@ impl std::fmt::Display for StopReconciliationsReason {
             Self::ShuttingDown => "Shutting down",
             Self::SteppingDown => "Stepping down",
         };
-        write!(writer, "{}", s)
+        write!(writer, "{s}")
     }
 }
 
@@ -2066,6 +2074,7 @@ impl Service {
                             &tenant_shard.shard,
                             &tenant_shard.config,
                             &PlacementPolicy::Attached(0),
+                            tenant_shard.intent.get_secondary().len(),
                         )),
                     },
                 )]);
@@ -5277,7 +5286,7 @@ impl Service {
             shard_params,
             result
                 .iter()
-                .map(|s| format!("{:?}", s))
+                .map(|s| format!("{s:?}"))
                 .collect::<Vec<_>>()
                 .join(",")
         );
@@ -5608,7 +5617,15 @@ impl Service {
             for parent_id in parent_ids {
                 let child_ids = parent_id.split(new_shard_count);
 
-                let (pageserver, generation, policy, parent_ident, config, preferred_az) = {
+                let (
+                    pageserver,
+                    generation,
+                    policy,
+                    parent_ident,
+                    config,
+                    preferred_az,
+                    secondary_count,
+                ) = {
                     let mut old_state = tenants
                         .remove(&parent_id)
                         .expect("It was present, we just split it");
@@ -5628,6 +5645,7 @@ impl Service {
                         old_state.shard,
                         old_state.config.clone(),
                         old_state.preferred_az().cloned(),
+                        old_state.intent.get_secondary().len(),
                     )
                 };
 
@@ -5649,6 +5667,7 @@ impl Service {
                                 &child_shard,
                                 &config,
                                 &policy,
+                                secondary_count,
                             )),
                         },
                     );
@@ -6190,7 +6209,7 @@ impl Service {
                     },
                 )
                 .await
-                .map_err(|e| ApiError::Conflict(format!("Failed to split {}: {}", parent_id, e)))?;
+                .map_err(|e| ApiError::Conflict(format!("Failed to split {parent_id}: {e}")))?;
 
             fail::fail_point!("shard-split-post-remote", |_| Err(ApiError::Conflict(
                 "failpoint".to_string()
@@ -6207,7 +6226,7 @@ impl Service {
                 response
                     .new_shards
                     .iter()
-                    .map(|s| format!("{:?}", s))
+                    .map(|s| format!("{s:?}"))
                     .collect::<Vec<_>>()
                     .join(",")
             );
@@ -7270,8 +7289,7 @@ impl Service {
             Ok(())
         } else {
             Err(ApiError::Conflict(format!(
-                "Node {} is in use, consider using tombstone API first",
-                node_id
+                "Node {node_id} is in use, consider using tombstone API first"
             )))
         }
     }
@@ -7957,7 +7975,7 @@ impl Service {
 
         if let Some(ongoing) = ongoing_op {
             return Err(ApiError::PreconditionFailed(
-                format!("Background operation already ongoing for node: {}", ongoing).into(),
+                format!("Background operation already ongoing for node: {ongoing}").into(),
             ));
         }
 
@@ -8088,7 +8106,7 @@ impl Service {
 
         if let Some(ongoing) = ongoing_op {
             return Err(ApiError::PreconditionFailed(
-                format!("Background operation already ongoing for node: {}", ongoing).into(),
+                format!("Background operation already ongoing for node: {ongoing}").into(),
             ));
         }
 
@@ -8676,6 +8694,11 @@ impl Service {
     /// we have this helper to move things along faster.
     #[cfg(feature = "testing")]
     async fn kick_secondary_download(&self, tenant_shard_id: TenantShardId) {
+        if !self.config.kick_secondary_downloads {
+            // No-op if kick_secondary_downloads functionaliuty is not configured
+            return;
+        }
+
         let (attached_node, secondaries) = {
             let locked = self.inner.read().unwrap();
             let Some(shard) = locked.tenants.get(&tenant_shard_id) else {
@@ -9154,7 +9177,7 @@ impl Service {
         let nodes = self.inner.read().unwrap().nodes.clone();
         let node = nodes.get(secondary).ok_or(mgmt_api::Error::ApiError(
             StatusCode::NOT_FOUND,
-            format!("Node with id {} not found", secondary),
+            format!("Node with id {secondary} not found"),
         ))?;
 
         match node
@@ -9215,8 +9238,7 @@ impl Service {
                     Err(err) => {
                         return Err(OperationError::FinalizeError(
                             format!(
-                                "Failed to finalise drain cancel of {} by setting scheduling policy to Active: {}",
-                                node_id, err
+                                "Failed to finalise drain cancel of {node_id} by setting scheduling policy to Active: {err}"
                             )
                             .into(),
                         ));
@@ -9324,8 +9346,7 @@ impl Service {
                     Err(err) => {
                         return Err(OperationError::FinalizeError(
                             format!(
-                                "Failed to finalise drain cancel of {} by setting scheduling policy to Active: {}",
-                                node_id, err
+                                "Failed to finalise drain cancel of {node_id} by setting scheduling policy to Active: {err}"
                             )
                             .into(),
                         ));
@@ -9535,8 +9556,7 @@ impl Service {
                     Err(err) => {
                         return Err(OperationError::FinalizeError(
                             format!(
-                                "Failed to finalise drain cancel of {} by setting scheduling policy to Active: {}",
-                                node_id, err
+                                "Failed to finalise drain cancel of {node_id} by setting scheduling policy to Active: {err}"
                             )
                             .into(),
                         ));
@@ -9618,8 +9638,7 @@ impl Service {
                     Err(err) => {
                         return Err(OperationError::FinalizeError(
                             format!(
-                                "Failed to finalise drain cancel of {} by setting scheduling policy to Active: {}",
-                                node_id, err
+                                "Failed to finalise drain cancel of {node_id} by setting scheduling policy to Active: {err}"
                             )
                             .into(),
                         ));

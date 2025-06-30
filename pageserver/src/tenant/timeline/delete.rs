@@ -241,8 +241,17 @@ impl DeleteTimelineFlow {
                 {
                     Ok(r) => r,
                     Err(DownloadError::NotFound) => {
-                        // Deletion is already complete
+                        // Deletion is already complete.
+                        // As we came here, we will need to remove the timeline from the tenant though.
                         tracing::info!("Timeline already deleted in remote storage");
+                        if let TimelineOrOffloaded::Offloaded(_) = &timeline {
+                            // We only supoprt this for offloaded timelines, as we don't know which state non-offloaded timelines are in.
+                            tracing::info!(
+                                "Timeline with gone index part is offloaded timeline. Removing from tenant."
+                            );
+                            remove_maybe_offloaded_timeline_from_tenant(tenant, &timeline, &guard)
+                                .await?;
+                        }
                         return Ok(());
                     }
                     Err(e) => {

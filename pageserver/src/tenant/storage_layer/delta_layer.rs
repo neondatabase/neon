@@ -783,7 +783,7 @@ impl DeltaLayer {
             ctx,
         )
         .await
-        .with_context(|| format!("Failed to open file '{}'", path))?;
+        .with_context(|| format!("Failed to open file '{path}'"))?;
         let file_id = page_cache::next_file_id();
         let block_reader = FileBlockReader::new(&file, file_id);
         let summary_blk = block_reader.read_blk(0, ctx).await?;
@@ -1401,7 +1401,7 @@ impl DeltaLayerInner {
                 match val {
                     Value::Image(img) => {
                         let checkpoint = CheckPoint::decode(&img)?;
-                        println!("   CHECKPOINT: {:?}", checkpoint);
+                        println!("   CHECKPOINT: {checkpoint:?}");
                     }
                     Value::WalRecord(_rec) => {
                         println!("   unexpected walrecord value for checkpoint key");
@@ -1622,11 +1622,6 @@ impl DeltaLayerIterator<'_> {
 pub(crate) mod test {
     use std::collections::BTreeMap;
 
-    use bytes::Bytes;
-    use itertools::MinMaxResult;
-    use rand::prelude::{SeedableRng, SliceRandom, StdRng};
-    use rand::{Rng, RngCore};
-
     use super::*;
     use crate::DEFAULT_PG_VERSION;
     use crate::context::DownloadBehavior;
@@ -1636,6 +1631,11 @@ pub(crate) mod test {
     use crate::tenant::storage_layer::{Layer, ResidentLayer};
     use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
     use crate::tenant::{TenantShard, Timeline};
+    use bytes::Bytes;
+    use itertools::MinMaxResult;
+    use postgres_ffi::PgMajorVersion;
+    use rand::prelude::{SeedableRng, SliceRandom, StdRng};
+    use rand::{Rng, RngCore};
 
     /// Construct an index for a fictional delta layer and and then
     /// traverse in order to plan vectored reads for a query. Finally,
@@ -1995,7 +1995,7 @@ pub(crate) mod test {
         let (tenant, ctx) = h.load().await;
         let ctx = &ctx;
         let timeline = tenant
-            .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, ctx)
+            .create_test_timeline(TimelineId::generate(), Lsn(0x10), PgMajorVersion::PG14, ctx)
             .await
             .unwrap();
         let ctx = &ctx.with_scope_timeline(&timeline);

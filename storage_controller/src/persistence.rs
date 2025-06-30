@@ -500,15 +500,13 @@ impl Persistence {
                 if let Some(np) = node_to_delete {
                     let lc = NodeLifecycle::from_str(&np.lifecycle).map_err(|e| {
                         DatabaseError::Logical(format!(
-                            "Node {} has invalid lifecycle: {}",
-                            del_node_id, e
+                            "Node {del_node_id} has invalid lifecycle: {e}"
                         ))
                     })?;
 
                     if lc != NodeLifecycle::Deleted {
                         return Err(DatabaseError::Logical(format!(
-                            "Node {} was not soft deleted before, cannot hard delete it",
-                            del_node_id
+                            "Node {del_node_id} was not soft deleted before, cannot hard delete it"
                         )));
                     }
 
@@ -642,8 +640,7 @@ impl Persistence {
                         .await?;
                     if deleted_node > 0 {
                         return Err(DatabaseError::Logical(format!(
-                            "Node {} is marked as deleted, re-attach is not allowed",
-                            input_node_id
+                            "Node {input_node_id} is marked as deleted, re-attach is not allowed"
                         )));
                     }
 
@@ -1005,7 +1002,7 @@ impl Persistence {
                 .execute(conn).await?;
             if u8::try_from(updated)
                 .map_err(|_| DatabaseError::Logical(
-                    format!("Overflow existing shard count {} while splitting", updated))
+                    format!("Overflow existing shard count {updated} while splitting"))
                 )? != old_shard_count.count() {
                 // Perhaps a deletion or another split raced with this attempt to split, mutating
                 // the parent shards that we intend to split. In this case the split request should fail.
@@ -1345,8 +1342,7 @@ impl Persistence {
 
                 if inserted_updated != 1 {
                     return Err(DatabaseError::Logical(format!(
-                        "unexpected number of rows ({})",
-                        inserted_updated
+                        "unexpected number of rows ({inserted_updated})"
                     )));
                 }
 
@@ -1408,8 +1404,7 @@ impl Persistence {
                     0 => Ok(false),
                     1 => Ok(true),
                     _ => Err(DatabaseError::Logical(format!(
-                        "unexpected number of rows ({})",
-                        inserted_updated
+                        "unexpected number of rows ({inserted_updated})"
                     ))),
                 }
             })
@@ -1478,8 +1473,7 @@ impl Persistence {
                     0 => Ok(()),
                     1 => Ok(()),
                     _ => Err(DatabaseError::Logical(format!(
-                        "unexpected number of rows ({})",
-                        updated
+                        "unexpected number of rows ({updated})"
                     ))),
                 }
             })
@@ -1572,8 +1566,7 @@ impl Persistence {
                     0 => Ok(false),
                     1 => Ok(true),
                     _ => Err(DatabaseError::Logical(format!(
-                        "unexpected number of rows ({})",
-                        inserted_updated
+                        "unexpected number of rows ({inserted_updated})"
                     ))),
                 }
             })

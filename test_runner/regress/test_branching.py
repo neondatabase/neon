@@ -172,7 +172,7 @@ def test_cannot_create_endpoint_on_non_uploaded_timeline(neon_env_builder: NeonE
             env.initial_tenant,
             env.initial_timeline,
             MembershipConfiguration(generation=1, members=[sk.safekeeper_id()], new_members=None),
-            int(env.pg_version),
+            int(env.pg_version) * 10000,
             Lsn(0),
             None,
         )

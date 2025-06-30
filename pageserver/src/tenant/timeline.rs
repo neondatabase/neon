@@ -58,7 +58,7 @@ use pageserver_api::reltag::{BlockNumber, RelTag};
 use pageserver_api::shard::{ShardIdentity, ShardIndex, ShardNumber, TenantShardId};
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::v14::xlog_utils;
-use postgres_ffi::{WAL_SEGMENT_SIZE, to_pg_timestamp};
+use postgres_ffi::{PgMajorVersion, WAL_SEGMENT_SIZE, to_pg_timestamp};
 use rand::Rng;
 use remote_storage::DownloadError;
 use serde_with::serde_as;
@@ -95,12 +95,12 @@ use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
 use super::tasks::log_compaction_error;
 use super::upload_queue::NotInitialized;
 use super::{
-    AttachedTenantConf, BasebackupPrepareSender, GcError, HeatMapTimeline, MaybeOffloaded,
+    AttachedTenantConf, GcError, HeatMapTimeline, MaybeOffloaded,
     debug_assert_current_span_has_tenant_and_timeline_id,
 };
 use crate::PERF_TRACE_TARGET;
 use crate::aux_file::AuxFileSizeEstimator;
-use crate::basebackup_cache::BasebackupPrepareRequest;
+use crate::basebackup_cache::BasebackupCache;
 use crate::config::PageServerConf;
 use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
@@ -178,7 +178,7 @@ pub enum LastImageLayerCreationStatus {
 
 impl std::fmt::Display for ImageLayerCreationMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 
@@ -201,7 +201,7 @@ pub struct TimelineResources {
     pub pagestream_throttle_metrics: Arc<crate::metrics::tenant_throttling::Pagestream>,
     pub l0_compaction_trigger: Arc<Notify>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
-    pub basebackup_prepare_sender: BasebackupPrepareSender,
+    pub basebackup_cache: Arc<BasebackupCache>,
     pub feature_resolver: FeatureResolver,
 }
 
@@ -225,7 +225,7 @@ pub struct Timeline {
     /// to shards, and is constant through the lifetime of this Timeline.
     shard_identity: ShardIdentity,
 
-    pub pg_version: u32,
+    pub pg_version: PgMajorVersion,
 
     /// The tuple has two elements.
     /// 1. `LayerFileManager` keeps track of the various physical representations of the layer files (inmem, local, remote).
@@ -448,7 +448,7 @@ pub struct Timeline {
     wait_lsn_log_slow: tokio::sync::Semaphore,
 
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
-    basebackup_prepare_sender: BasebackupPrepareSender,
+    basebackup_cache: Arc<BasebackupCache>,
 
     feature_resolver: FeatureResolver,
 }
@@ -632,7 +632,7 @@ pub enum ReadPathLayerId {
 impl std::fmt::Display for ReadPathLayerId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ReadPathLayerId::PersistentLayer(key) => write!(f, "{}", key),
+            ReadPathLayerId::PersistentLayer(key) => write!(f, "{key}"),
             ReadPathLayerId::InMemoryLayer(range) => {
                 write!(f, "in-mem {}..{}", range.start, range.end)
             }
@@ -708,7 +708,7 @@ impl MissingKeyError {
 
 impl std::fmt::Debug for MissingKeyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self)
+        write!(f, "{self}")
     }
 }
 
@@ -721,19 +721,19 @@ impl std::fmt::Display for MissingKeyError {
         )?;
 
         if let Some(ref ancestor_lsn) = self.ancestor_lsn {
-            write!(f, ", ancestor {}", ancestor_lsn)?;
+            write!(f, ", ancestor {ancestor_lsn}")?;
         }
 
         if let Some(ref query) = self.query {
-            write!(f, ", query {}", query)?;
+            write!(f, ", query {query}")?;
         }
 
         if let Some(ref read_path) = self.read_path {
-            write!(f, "\n{}", read_path)?;
+            write!(f, "\n{read_path}")?;
         }
 
         if let Some(ref backtrace) = self.backtrace {
-            write!(f, "\n{}", backtrace)?;
+            write!(f, "\n{backtrace}")?;
         }
 
         Ok(())
@@ -2500,6 +2500,37 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.basebackup_cache_enabled)
     }
 
+    /// Try to get a basebackup from the on-disk cache.
+    pub(crate) async fn get_cached_basebackup(&self, lsn: Lsn) -> Option<tokio::fs::File> {
+        self.basebackup_cache
+            .get(self.tenant_shard_id.tenant_id, self.timeline_id, lsn)
+            .await
+    }
+
+    /// Convenience method to attempt fetching a basebackup for the timeline if enabled and safe for
+    /// the given request parameters.
+    ///
+    /// TODO: consider moving this onto GrpcPageServiceHandler once the libpq handler is gone.
+    pub async fn get_cached_basebackup_if_enabled(
+        &self,
+        lsn: Option<Lsn>,
+        prev_lsn: Option<Lsn>,
+        full: bool,
+        replica: bool,
+        gzip: bool,
+    ) -> Option<tokio::fs::File> {
+        if !self.is_basebackup_cache_enabled() || !self.basebackup_cache.is_enabled() {
+            return None;
+        }
+        // We have to know which LSN to fetch the basebackup for.
+        let lsn = lsn?;
+        // We only cache gzipped, non-full basebackups for primary computes with automatic prev_lsn.
+        if prev_lsn.is_some() || full || replica || !gzip {
+            return None;
+        }
+        self.get_cached_basebackup(lsn).await
+    }
+
     /// Prepare basebackup for the given LSN and store it in the basebackup cache.
     /// The method is asynchronous and returns immediately.
     /// The actual basebackup preparation is performed in the background
@@ -2521,17 +2552,8 @@ impl Timeline {
             return;
         }
 
-        let res = self
-            .basebackup_prepare_sender
-            .send(BasebackupPrepareRequest {
-                tenant_shard_id: self.tenant_shard_id,
-                timeline_id: self.timeline_id,
-                lsn,
-            });
-        if let Err(e) = res {
-            // May happen during shutdown, it's not critical.
-            info!("Failed to send shutdown checkpoint: {e:#}");
-        }
+        self.basebackup_cache
+            .send_prepare(self.tenant_shard_id, self.timeline_id, lsn);
     }
 }
 
@@ -2913,7 +2935,7 @@ impl Timeline {
         shard_identity: ShardIdentity,
         walredo_mgr: Option<Arc<super::WalRedoManager>>,
         resources: TimelineResources,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         state: TimelineState,
         attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
         create_idempotency: crate::tenant::CreateTimelineIdempotency,
@@ -3088,7 +3110,7 @@ impl Timeline {
 
                 wait_lsn_log_slow: tokio::sync::Semaphore::new(1),
 
-                basebackup_prepare_sender: resources.basebackup_prepare_sender,
+                basebackup_cache: resources.basebackup_cache,
 
                 feature_resolver: resources.feature_resolver,
             };
@@ -4658,6 +4680,16 @@ impl Timeline {
         mut layer_flush_start_rx: tokio::sync::watch::Receiver<(u64, Lsn)>,
         ctx: &RequestContext,
     ) {
+        // Always notify waiters about the flush loop exiting since the loop might stop
+        // when the timeline hasn't been cancelled.
+        let scopeguard_rx = layer_flush_start_rx.clone();
+        scopeguard::defer! {
+            let (flush_counter, _) = *scopeguard_rx.borrow();
+            let _ = self
+                .layer_flush_done_tx
+                .send_replace((flush_counter, Err(FlushLayerError::Cancelled)));
+        }
+
         // Subscribe to L0 delta layer updates, for compaction backpressure.
         let mut watch_l0 = match self
             .layers
@@ -4687,9 +4719,6 @@ impl Timeline {
             let result = loop {
                 if self.cancel.is_cancelled() {
                     info!("dropping out of flush loop for timeline shutdown");
-                    // Note: we do not bother transmitting into [`layer_flush_done_tx`], because
-                    // anyone waiting on that will respect self.cancel as well: they will stop
-                    // waiting at the same time we as drop out of this loop.
                     return;
                 }
 
@@ -7179,9 +7208,7 @@ impl Timeline {
         if let Some(end) = layer_end_lsn {
             assert!(
                 end <= last_record_lsn,
-                "advance last record lsn before inserting a layer, end_lsn={}, last_record_lsn={}",
-                end,
-                last_record_lsn,
+                "advance last record lsn before inserting a layer, end_lsn={end}, last_record_lsn={last_record_lsn}",
             );
         }
 
@@ -7595,6 +7622,7 @@ mod tests {
     use std::sync::Arc;
 
     use pageserver_api::key::Key;
+    use postgres_ffi::PgMajorVersion;
     use std::iter::Iterator;
     use tracing::Instrument;
     use utils::id::TimelineId;
@@ -7669,7 +7697,7 @@ mod tests {
             .create_test_timeline_with_layers(
                 TimelineId::generate(),
                 Lsn(0x10),
-                14,
+                PgMajorVersion::PG14,
                 &ctx,
                 Vec::new(), // in-memory layers
                 delta_layers,
@@ -7805,7 +7833,7 @@ mod tests {
             .create_test_timeline_with_layers(
                 TimelineId::generate(),
                 Lsn(0x10),
-                14,
+                PgMajorVersion::PG14,
                 &ctx,
                 Vec::new(), // in-memory layers
                 delta_layers,
@@ -7865,7 +7893,12 @@ mod tests {
 
         let (tenant, ctx) = harness.load().await;
         let timeline = tenant
-            .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+            .create_test_timeline(
+                TimelineId::generate(),
+                Lsn(0x10),
+                PgMajorVersion::PG14,
+                &ctx,
+            )
             .await
             .unwrap();
 

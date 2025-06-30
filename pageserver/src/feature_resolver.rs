@@ -1,8 +1,9 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use arc_swap::ArcSwap;
 use pageserver_api::config::NodeMetadata;
 use posthog_client_lite::{
-    CaptureEvent, FeatureResolverBackgroundLoop, PostHogClientConfig, PostHogEvaluationError,
+    CaptureEvent, FeatureResolverBackgroundLoop, PostHogEvaluationError,
     PostHogFlagFilterPropertyValue,
 };
 use remote_storage::RemoteStorageKind;
@@ -12,10 +13,13 @@ use utils::id::TenantId;
 
 use crate::{config::PageServerConf, metrics::FEATURE_FLAG_EVALUATION};
 
+const DEFAULT_POSTHOG_REFRESH_INTERVAL: Duration = Duration::from_secs(600);
+
 #[derive(Clone)]
 pub struct FeatureResolver {
     inner: Option<Arc<FeatureResolverBackgroundLoop>>,
     internal_properties: Option<Arc<HashMap<String, PostHogFlagFilterPropertyValue>>>,
+    force_overrides_for_testing: Arc<ArcSwap<HashMap<String, String>>>,
 }
 
 impl FeatureResolver {
@@ -23,7 +27,15 @@ impl FeatureResolver {
         Self {
             inner: None,
             internal_properties: None,
+            force_overrides_for_testing: Arc::new(ArcSwap::new(Arc::new(HashMap::new()))),
         }
+    }
+
+    pub fn update(&self, spec: String) -> anyhow::Result<()> {
+        if let Some(inner) = &self.inner {
+            inner.update(spec)?;
+        }
+        Ok(())
     }
 
     pub fn spawn(
@@ -33,16 +45,24 @@ impl FeatureResolver {
     ) -> anyhow::Result<Self> {
         // DO NOT block in this function: make it return as fast as possible to avoid startup delays.
         if let Some(posthog_config) = &conf.posthog_config {
-            let inner = FeatureResolverBackgroundLoop::new(
-                PostHogClientConfig {
-                    server_api_key: posthog_config.server_api_key.clone(),
-                    client_api_key: posthog_config.client_api_key.clone(),
-                    project_id: posthog_config.project_id.clone(),
-                    private_api_url: posthog_config.private_api_url.clone(),
-                    public_api_url: posthog_config.public_api_url.clone(),
-                },
-                shutdown_pageserver,
-            );
+            let posthog_client_config = match posthog_config.clone().try_into_posthog_config() {
+                Ok(config) => config,
+                Err(e) => {
+                    tracing::warn!(
+                        "invalid posthog config, skipping posthog integration: {}",
+                        e
+                    );
+                    return Ok(FeatureResolver {
+                        inner: None,
+                        internal_properties: None,
+                        force_overrides_for_testing: Arc::new(ArcSwap::new(Arc::new(
+                            HashMap::new(),
+                        ))),
+                    });
+                }
+            };
+            let inner =
+                FeatureResolverBackgroundLoop::new(posthog_client_config, shutdown_pageserver);
             let inner = Arc::new(inner);
 
             // The properties shared by all tenants on this pageserver.
@@ -139,18 +159,23 @@ impl FeatureResolver {
                 }
                 tenants
             };
-            // TODO: make refresh period configurable
-            inner
-                .clone()
-                .spawn(handle, Duration::from_secs(60), fake_tenants);
+            inner.clone().spawn(
+                handle,
+                posthog_config
+                    .refresh_interval
+                    .unwrap_or(DEFAULT_POSTHOG_REFRESH_INTERVAL),
+                fake_tenants,
+            );
             Ok(FeatureResolver {
                 inner: Some(inner),
                 internal_properties: Some(internal_properties),
+                force_overrides_for_testing: Arc::new(ArcSwap::new(Arc::new(HashMap::new()))),
             })
         } else {
             Ok(FeatureResolver {
                 inner: None,
                 internal_properties: None,
+                force_overrides_for_testing: Arc::new(ArcSwap::new(Arc::new(HashMap::new()))),
             })
         }
     }
@@ -190,6 +215,11 @@ impl FeatureResolver {
         flag_key: &str,
         tenant_id: TenantId,
     ) -> Result<String, PostHogEvaluationError> {
+        let force_overrides = self.force_overrides_for_testing.load();
+        if let Some(value) = force_overrides.get(flag_key) {
+            return Ok(value.clone());
+        }
+
         if let Some(inner) = &self.inner {
             let res = inner.feature_store().evaluate_multivariate(
                 flag_key,
@@ -228,6 +258,15 @@ impl FeatureResolver {
         flag_key: &str,
         tenant_id: TenantId,
     ) -> Result<(), PostHogEvaluationError> {
+        let force_overrides = self.force_overrides_for_testing.load();
+        if let Some(value) = force_overrides.get(flag_key) {
+            return if value == "true" {
+                Ok(())
+            } else {
+                Err(PostHogEvaluationError::NoConditionGroupMatched)
+            };
+        }
+
         if let Some(inner) = &self.inner {
             let res = inner.feature_store().evaluate_boolean(
                 flag_key,
@@ -259,8 +298,22 @@ impl FeatureResolver {
             inner.feature_store().is_feature_flag_boolean(flag_key)
         } else {
             Err(PostHogEvaluationError::NotAvailable(
-                "PostHog integration is not enabled".to_string(),
+                "PostHog integration is not enabled, cannot auto-determine the flag type"
+                    .to_string(),
             ))
         }
+    }
+
+    /// Force override a feature flag for testing. This is only for testing purposes. Assume the caller only call it
+    /// from a single thread so it won't race.
+    pub fn force_override_for_testing(&self, flag_key: &str, value: Option<&str>) {
+        let mut force_overrides = self.force_overrides_for_testing.load().as_ref().clone();
+        if let Some(value) = value {
+            force_overrides.insert(flag_key.to_string(), value.to_string());
+        } else {
+            force_overrides.remove(flag_key);
+        }
+        self.force_overrides_for_testing
+            .store(Arc::new(force_overrides));
     }
 }
