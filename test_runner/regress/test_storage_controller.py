@@ -2563,9 +2563,10 @@ def test_storage_controller_node_delete_cancellation(neon_env_builder: NeonEnvBu
     env = neon_env_builder.init_configs()
     env.start()
 
-    tenant_count = 10
-    shard_count_per_tenant = 8
+    tenant_count = 12
+    shard_count_per_tenant = 16
     tenant_ids = []
+
     for _ in range(0, tenant_count):
         tid = TenantId.generate()
         tenant_ids.append(tid)
@@ -2579,7 +2580,7 @@ def test_storage_controller_node_delete_cancellation(neon_env_builder: NeonEnvBu
     nodes = env.storage_controller.node_list()
     assert len(nodes) == 3
 
-    env.storage_controller.configure_failpoints(("sleepy-delete-loop", "return(2000)"))
+    env.storage_controller.configure_failpoints(("sleepy-delete-loop", "return(10000)"))
 
     ps_id_to_delete = env.pageservers[0].id
 
