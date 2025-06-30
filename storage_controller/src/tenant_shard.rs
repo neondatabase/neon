@@ -133,7 +133,7 @@ pub(crate) struct TenantShard {
 
     /// Number of consecutive reconciliation errors that have occurred for this shard.
     ///
-    /// When this count reaches [`MAX_CONSECUTIVE_RECONCILIATION_ERRORS`], the tenant shard
+    /// When this count reaches MAX_CONSECUTIVE_RECONCILIATION_ERRORS, the tenant shard
     /// will be countered as keep-failing in `reconcile_all` calculations. This will lead to
     /// allowing optimizations to run even with some failing shards.
     ///

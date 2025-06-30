@@ -989,6 +989,92 @@ def test_storage_controller_compute_hook_retry(
     )
 
 
+@run_only_on_default_postgres("postgres behavior is not relevant")
+def test_storage_controller_compute_hook_keep_failing(
+    httpserver: HTTPServer,
+    neon_env_builder: NeonEnvBuilder,
+    httpserver_listen_address: ListenAddress
+):
+    neon_env_builder.num_pageservers = 3
+    (host, port) = httpserver_listen_address
+    neon_env_builder.control_plane_hooks_api = f"http://{host}:{port}"
+
+    status_by_tenant = {}
+    notifications = []
+
+    def handler(request: Request):
+        notifications.append(request.json)
+        notify_request = request.json
+        assert notify_request is not None
+        status = status_by_tenant.get(TenantId(notify_request["tenant_id"]), 400)
+        log.info(f"Notify request[{status}]: {notify_request}")
+        return Response(status=status)
+
+    httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(handler)
+
+    neon_env_builder.storage_controller_config = {"use_local_compute_notifications": False}
+
+    # Run neon environment
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    def generate_tenant():
+        tid = TenantId.generate()
+        status_by_tenant[tid] = 200
+        notifications.clear()
+        env.create_tenant(tid, placement_policy='{"Attached": 1}')
+        assert len(notifications) == 1
+        return tid
+
+    # Create initial tenants
+    tid_banned = generate_tenant()
+    tid_allowed = generate_tenant()
+
+    tid_banned_ps = env.get_tenant_pageserver(tid_banned)
+    assert tid_banned_ps is not None
+
+    # Block reconciliations
+    status_by_tenant[tid_banned] = 423
+    tid_banned_ps.stop()
+    env.storage_controller.allowed_errors.append(NOTIFY_BLOCKED_LOG)
+    env.storage_controller.allowed_errors.extend(NOTIFY_FAILURE_LOGS)
+    env.storage_controller.allowed_errors.append(".*Shard reconciliation is keep-failing.*")
+    env.storage_controller.node_configure(tid_banned_ps.id, {"availability": "Offline"})
+
+    # Starting CreateSecondary optimization
+    env.storage_controller.tenant_policy_update(tid_allowed, {"placement": {"Attached": 2}})
+
+    # Check if reconciliations are blocked
+    for _ in range(10):
+        notifications = []
+        try:
+            assert env.storage_controller.reconcile_all() != 0
+        except StorageControllerApiException as e:
+            assert "Control plane tenant busy" in str(e)
+        assert len(notifications) == 1
+        assert (
+            env.storage_controller.tenant_describe(tid_banned)["shards"][0][
+                "is_pending_compute_notification"
+            ]
+            is True
+        )
+    
+    # Check tid_allowed has two secondaries
+    status_by_tenant[tid_banned] = 200
+    assert len(env.storage_controller.tenant_describe(tid_allowed)["shards"]) == 2
+
+    # Unblock reconciliations
+    notifications = []
+    assert env.storage_controller.reconcile_all() == 1
+    assert len(notifications) == 1
+    assert (
+        env.storage_controller.tenant_describe(tid_banned)["shards"][0][
+            "is_pending_compute_notification"
+        ]
+        is False
+    )
+
+
 @run_only_on_default_postgres("this test doesn't start an endpoint")
 def test_storage_controller_compute_hook_revert(
     httpserver: HTTPServer,
