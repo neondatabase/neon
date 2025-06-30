@@ -2299,7 +2299,10 @@ LIMIT 100",
         let atomic_interval = self.params.installed_extensions_collection_interval.clone();
         let mut installed_extensions_collection_interval =
             2 * atomic_interval.load(std::sync::atomic::Ordering::SeqCst);
-        info!("[NEON_EXT_SPAWN] Spawning background installed extensions worker with Timeout: {}", installed_extensions_collection_interval);
+        info!(
+            "[NEON_EXT_SPAWN] Spawning background installed extensions worker with Timeout: {}",
+            installed_extensions_collection_interval
+        );
         let handle = tokio::spawn(async move {
             // An initial sleep is added to ensure that two collections don't happen at the same time.
             // The first collection happens during compute startup.
@@ -2337,13 +2340,19 @@ LIMIT 100",
         // If the value is -1, we never suspend so set the value to default collection.
         // If the value is 0, it means default, we will just continue to use the default.
         if spec.suspend_timeout_seconds == -1 || spec.suspend_timeout_seconds == 0 {
-            info!("[NEON_EXT_INT_UPD] Spec Timeout: {}, New Timeout: {}", spec.suspend_timeout_seconds, DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL);
+            info!(
+                "[NEON_EXT_INT_UPD] Spec Timeout: {}, New Timeout: {}",
+                spec.suspend_timeout_seconds, DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL
+            );
             self.params.installed_extensions_collection_interval.store(
                 DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL,
                 std::sync::atomic::Ordering::SeqCst,
             );
         } else {
-            info!("[NEON_EXT_INT_UPD] Spec Timeout: {}", spec.suspend_timeout_seconds);
+            info!(
+                "[NEON_EXT_INT_UPD] Spec Timeout: {}",
+                spec.suspend_timeout_seconds
+            );
             self.params.installed_extensions_collection_interval.store(
                 spec.suspend_timeout_seconds as u64,
                 std::sync::atomic::Ordering::SeqCst,
