@@ -263,7 +263,7 @@ impl ApiMethod for ComputeHookTimeline {
         let locked = match lock {
             Some(already_locked) => already_locked,
             None => {
-                // Lock order: this _must_ be only a try_lock, because we are called inside of the [`ComputeHook::state`] lock.
+                // Lock order: this _must_ be only a try_lock, because we are called inside of the [`ComputeHook::timelines`] lock.
                 let Ok(locked) = self.send_lock.clone().try_lock_owned() else {
                     return MaybeSendResult::AwaitLock((ttid, self.send_lock.clone()));
                 };
@@ -306,9 +306,9 @@ impl ApiMethod for ComputeHookTimeline {
                 && endpoint.timeline_id == *timeline_id
                 && endpoint.status() == EndpointStatus::Running
             {
-                let safekeepers = safekeepers.iter().map(|sk| sk.id).collect::<Vec<_>>();
-
                 tracing::info!("Reconfiguring safekeepers for endpoint {endpoint_name}");
+
+                let safekeepers = safekeepers.iter().map(|sk| sk.id).collect::<Vec<_>>();
 
                 endpoint
                     .reconfigure_safekeepers(safekeepers, *generation)
@@ -398,7 +398,6 @@ enum MaybeSendResult<R, K> {
 }
 
 type MaybeSendNotifyAttachResult = MaybeSendResult<NotifyAttachRequest, TenantId>;
-
 type MaybeSendNotifySafekeepersResult = MaybeSendResult<NotifySafekeepersRequest, TenantTimelineId>;
 
 impl ApiMethod for ComputeHookTenant {
@@ -415,7 +414,7 @@ impl ApiMethod for ComputeHookTenant {
         let locked = match lock {
             Some(already_locked) => already_locked,
             None => {
-                // Lock order: this _must_ be only a try_lock, because we are called inside of the [`ComputeHook::state`] lock.
+                // Lock order: this _must_ be only a try_lock, because we are called inside of the [`ComputeHook::tenants`] lock.
                 let Ok(locked) = self.get_send_lock().clone().try_lock_owned() else {
                     return MaybeSendResult::AwaitLock((tenant_id, self.get_send_lock().clone()));
                 };
