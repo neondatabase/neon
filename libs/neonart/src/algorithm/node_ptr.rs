@@ -45,6 +45,7 @@ impl<V> std::fmt::Debug for NodePtr<V> {
 
 impl<V> Copy for NodePtr<V> {}
 impl<V> Clone for NodePtr<V> {
+    #[allow(clippy::non_canonical_clone_impl)]
     fn clone(&self) -> NodePtr<V> {
         NodePtr {
             ptr: self.ptr,

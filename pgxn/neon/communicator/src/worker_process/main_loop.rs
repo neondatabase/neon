@@ -323,7 +323,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 self.request_prefetchv_counter.inc();
                 self.request_prefetchv_nblocks_counter
                     .inc_by(req.nblocks as u64);
-                let req = req.clone();
+                let req = *req;
                 tokio::spawn(async move { self.handle_prefetchv_request(&req).await });
                 NeonIOResult::PrefetchVLaunched
             }

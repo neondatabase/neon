@@ -370,6 +370,7 @@ mod tests {
         for i in 0..11 {
             all.push(slab.alloc(i));
         }
+        #[allow(clippy::needless_range_loop)]
         for i in 0..11 {
             assert!(unsafe { (*all[i]).val == i });
         }

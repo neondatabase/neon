@@ -321,6 +321,7 @@ where
             *item = core::INVALID_POS;
         }
 
+        #[allow(clippy::needless_range_loop)]
         for i in 0..old_num_buckets as usize {
             if buckets[i].inner.is_none() {
                 continue;

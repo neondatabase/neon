@@ -115,6 +115,7 @@ where
 // Error means you must retry.
 //
 // This corresponds to the 'lookupOpt' function in the paper
+#[allow(clippy::only_used_in_recursion)]
 fn lookup_recurse<'e, V: Value>(
     key: &[u8],
     node: NodeRef<'e, V>,
@@ -155,6 +156,7 @@ fn lookup_recurse<'e, V: Value>(
     }
 }
 
+#[allow(clippy::only_used_in_recursion)]
 fn next_recurse<'e, V: Value>(
     min_key: &[u8],
     path: &mut Vec<u8>,
@@ -213,6 +215,7 @@ fn next_recurse<'e, V: Value>(
 }
 
 // This corresponds to the 'insertOpt' function in the paper
+#[allow(clippy::only_used_in_recursion)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn update_recurse<'e, K: Key, V: Value, A: ArtAllocator<V>, F>(
     key: &[u8],
@@ -369,6 +372,7 @@ pub(crate) fn dump_tree<V: Value + std::fmt::Debug>(
 }
 
 // TODO: return an Err if writeln!() returns error, instead of unwrapping
+#[allow(clippy::only_used_in_recursion)]
 fn dump_recurse<'e, V: Value + std::fmt::Debug>(
     path: &[PathElement],
     node: NodeRef<'e, V>,
