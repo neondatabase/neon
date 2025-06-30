@@ -1,5 +1,6 @@
 pub mod chaos_injector;
 mod context_iterator;
+pub mod feature_flag;
 pub(crate) mod safekeeper_reconciler;
 mod safekeeper_service;
 
@@ -25,6 +26,7 @@ use futures::stream::FuturesUnordered;
 use http_utils::error::ApiError;
 use hyper::Uri;
 use itertools::Itertools;
+use pageserver_api::config::PostHogConfig;
 use pageserver_api::controller_api::{
     AvailabilityZone, MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability,
     NodeRegisterRequest, NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy,
@@ -159,6 +161,7 @@ enum TenantOperations {
     DropDetached,
     DownloadHeatmapLayers,
     TimelineLsnLease,
+    TimelineSafekeeperMigrate,
 }
 
 #[derive(Clone, strum_macros::Display)]
@@ -260,7 +263,7 @@ fn passthrough_api_error(node: &Node, e: mgmt_api::Error) -> ApiError {
             // Presume errors receiving body are connectivity/availability issues except for decoding errors
             let src_str = err.source().map(|e| e.to_string()).unwrap_or_default();
             ApiError::ResourceUnavailable(
-                format!("{node} error receiving error body: {err} {}", src_str).into(),
+                format!("{node} error receiving error body: {err} {src_str}").into(),
             )
         }
         mgmt_api::Error::ApiError(StatusCode::NOT_FOUND, msg) => {
@@ -469,7 +472,13 @@ pub struct Config {
 
     /// Number of safekeepers to choose for a timeline when creating it.
     /// Safekeepers will be choosen from different availability zones.
-    pub timeline_safekeeper_count: i64,
+    pub timeline_safekeeper_count: usize,
+
+    /// PostHog integration config
+    pub posthog_config: Option<PostHogConfig>,
+
+    /// When set, actively checks and initiates heatmap downloads/uploads.
+    pub kick_secondary_downloads: bool,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -483,6 +492,7 @@ impl From<DatabaseError> for ApiError {
             DatabaseError::Logical(reason) | DatabaseError::Migration(reason) => {
                 ApiError::InternalServerError(anyhow::anyhow!(reason))
             }
+            DatabaseError::Cas(reason) => ApiError::Conflict(reason),
         }
     }
 }
@@ -668,7 +678,7 @@ impl std::fmt::Display for StopReconciliationsReason {
             Self::ShuttingDown => "Shutting down",
             Self::SteppingDown => "Stepping down",
         };
-        write!(writer, "{}", s)
+        write!(writer, "{s}")
     }
 }
 
@@ -868,18 +878,18 @@ impl Service {
         // Emit compute hook notifications for all tenants which are already stably attached.  Other tenants
         // will emit compute hook notifications when they reconcile.
         //
-        // Ordering: our calls to notify_background synchronously establish a relative order for these notifications vs. any later
+        // Ordering: our calls to notify_attach_background synchronously establish a relative order for these notifications vs. any later
         // calls into the ComputeHook for the same tenant: we can leave these to run to completion in the background and any later
         // calls will be correctly ordered wrt these.
         //
-        // Concurrency: we call notify_background for all tenants, which will create O(N) tokio tasks, but almost all of them
+        // Concurrency: we call notify_attach_background for all tenants, which will create O(N) tokio tasks, but almost all of them
         // will just wait on the ComputeHook::API_CONCURRENCY semaphore immediately, so very cheap until they get that semaphore
         // unit and start doing I/O.
         tracing::info!(
             "Sending {} compute notifications",
             compute_notifications.len()
         );
-        self.compute_hook.notify_background(
+        self.compute_hook.notify_attach_background(
             compute_notifications,
             bg_compute_notify_result_tx.clone(),
             &self.cancel,
@@ -2064,6 +2074,7 @@ impl Service {
                             &tenant_shard.shard,
                             &tenant_shard.config,
                             &PlacementPolicy::Attached(0),
+                            tenant_shard.intent.get_secondary().len(),
                         )),
                     },
                 )]);
@@ -2573,7 +2584,7 @@ impl Service {
                 .do_initial_shard_scheduling(
                     tenant_shard_id,
                     initial_generation,
-                    &create_req.shard_parameters,
+                    create_req.shard_parameters,
                     create_req.config.clone(),
                     placement_policy.clone(),
                     preferred_az_id.as_ref(),
@@ -2630,7 +2641,7 @@ impl Service {
         &self,
         tenant_shard_id: TenantShardId,
         initial_generation: Option<Generation>,
-        shard_params: &ShardParameters,
+        shard_params: ShardParameters,
         config: TenantConfig,
         placement_policy: PlacementPolicy,
         preferred_az_id: Option<&AvailabilityZone>,
@@ -5274,7 +5285,7 @@ impl Service {
             shard_params,
             result
                 .iter()
-                .map(|s| format!("{:?}", s))
+                .map(|s| format!("{s:?}"))
                 .collect::<Vec<_>>()
                 .join(",")
         );
@@ -5605,7 +5616,15 @@ impl Service {
             for parent_id in parent_ids {
                 let child_ids = parent_id.split(new_shard_count);
 
-                let (pageserver, generation, policy, parent_ident, config, preferred_az) = {
+                let (
+                    pageserver,
+                    generation,
+                    policy,
+                    parent_ident,
+                    config,
+                    preferred_az,
+                    secondary_count,
+                ) = {
                     let mut old_state = tenants
                         .remove(&parent_id)
                         .expect("It was present, we just split it");
@@ -5625,6 +5644,7 @@ impl Service {
                         old_state.shard,
                         old_state.config.clone(),
                         old_state.preferred_az().cloned(),
+                        old_state.intent.get_secondary().len(),
                     )
                 };
 
@@ -5646,6 +5666,7 @@ impl Service {
                                 &child_shard,
                                 &config,
                                 &policy,
+                                secondary_count,
                             )),
                         },
                     );
@@ -6187,7 +6208,7 @@ impl Service {
                     },
                 )
                 .await
-                .map_err(|e| ApiError::Conflict(format!("Failed to split {}: {}", parent_id, e)))?;
+                .map_err(|e| ApiError::Conflict(format!("Failed to split {parent_id}: {e}")))?;
 
             fail::fail_point!("shard-split-post-remote", |_| Err(ApiError::Conflict(
                 "failpoint".to_string()
@@ -6204,7 +6225,7 @@ impl Service {
                 response
                     .new_shards
                     .iter()
-                    .map(|s| format!("{:?}", s))
+                    .map(|s| format!("{s:?}"))
                     .collect::<Vec<_>>()
                     .join(",")
             );
@@ -6260,7 +6281,7 @@ impl Service {
         for (child_id, child_ps, stripe_size) in child_locations {
             if let Err(e) = self
                 .compute_hook
-                .notify(
+                .notify_attach(
                     compute_hook::ShardUpdate {
                         tenant_shard_id: child_id,
                         node_id: child_ps,
@@ -7103,8 +7124,7 @@ impl Service {
             Ok(())
         } else {
             Err(ApiError::Conflict(format!(
-                "Node {} is in use, consider using tombstone API first",
-                node_id
+                "Node {node_id} is in use, consider using tombstone API first"
             )))
         }
     }
@@ -7654,7 +7674,7 @@ impl Service {
 
         if let Some(ongoing) = ongoing_op {
             return Err(ApiError::PreconditionFailed(
-                format!("Background operation already ongoing for node: {}", ongoing).into(),
+                format!("Background operation already ongoing for node: {ongoing}").into(),
             ));
         }
 
@@ -7785,7 +7805,7 @@ impl Service {
 
         if let Some(ongoing) = ongoing_op {
             return Err(ApiError::PreconditionFailed(
-                format!("Background operation already ongoing for node: {}", ongoing).into(),
+                format!("Background operation already ongoing for node: {ongoing}").into(),
             ));
         }
 
@@ -8346,7 +8366,6 @@ impl Service {
                             "Skipping migration of {tenant_shard_id} to {node} because secondary isn't ready: {progress:?}"
                         );
 
-                        #[cfg(feature = "testing")]
                         if progress.heatmap_mtime.is_none() {
                             // No heatmap might mean the attached location has never uploaded one, or that
                             // the secondary download hasn't happened yet.  This is relatively unusual in the field,
@@ -8371,8 +8390,12 @@ impl Service {
     /// happens on multi-minute timescales in the field, which is fine because optimisation is meant
     /// to be a lazy background thing. However, when testing, it is not practical to wait around, so
     /// we have this helper to move things along faster.
-    #[cfg(feature = "testing")]
     async fn kick_secondary_download(&self, tenant_shard_id: TenantShardId) {
+        if !self.config.kick_secondary_downloads {
+            // No-op if kick_secondary_downloads functionaliuty is not configured
+            return;
+        }
+
         let (attached_node, secondaries) = {
             let locked = self.inner.read().unwrap();
             let Some(shard) = locked.tenants.get(&tenant_shard_id) else {
@@ -8851,7 +8874,7 @@ impl Service {
         let nodes = self.inner.read().unwrap().nodes.clone();
         let node = nodes.get(secondary).ok_or(mgmt_api::Error::ApiError(
             StatusCode::NOT_FOUND,
-            format!("Node with id {} not found", secondary),
+            format!("Node with id {secondary} not found"),
         ))?;
 
         match node
@@ -8930,8 +8953,7 @@ impl Service {
                     Err(err) => {
                         return Err(OperationError::FinalizeError(
                             format!(
-                                "Failed to finalise drain cancel of {} by setting scheduling policy to Active: {}",
-                                node_id, err
+                                "Failed to finalise drain cancel of {node_id} by setting scheduling policy to Active: {err}"
                             )
                             .into(),
                         ));
@@ -9035,8 +9057,7 @@ impl Service {
                     Err(err) => {
                         return Err(OperationError::FinalizeError(
                             format!(
-                                "Failed to finalise drain cancel of {} by setting scheduling policy to Active: {}",
-                                node_id, err
+                                "Failed to finalise drain cancel of {node_id} by setting scheduling policy to Active: {err}"
                             )
                             .into(),
                         ));
@@ -9246,8 +9267,7 @@ impl Service {
                     Err(err) => {
                         return Err(OperationError::FinalizeError(
                             format!(
-                                "Failed to finalise drain cancel of {} by setting scheduling policy to Active: {}",
-                                node_id, err
+                                "Failed to finalise drain cancel of {node_id} by setting scheduling policy to Active: {err}"
                             )
                             .into(),
                         ));
@@ -9329,8 +9349,7 @@ impl Service {
                     Err(err) => {
                         return Err(OperationError::FinalizeError(
                             format!(
-                                "Failed to finalise drain cancel of {} by setting scheduling policy to Active: {}",
-                                node_id, err
+                                "Failed to finalise drain cancel of {node_id} by setting scheduling policy to Active: {err}"
                             )
                             .into(),
                         ));

@@ -515,7 +515,7 @@ impl<V: Value> NodeInternal4<V> {
                 return;
             }
         }
-        panic!("could not re-find parent with key {}", key_byte);
+        panic!("could not re-find parent with key {key_byte}");
     }
 
     fn delete_child(&mut self, key_byte: u8) {
@@ -529,7 +529,7 @@ impl<V: Value> NodeInternal4<V> {
                 return;
             }
         }
-        panic!("could not re-find parent with key {}", key_byte);
+        panic!("could not re-find parent with key {key_byte}");
     }
 
     fn is_full(&self) -> bool {
@@ -636,7 +636,7 @@ impl<V: Value> NodeInternal16<V> {
                 return;
             }
         }
-        panic!("could not re-find parent with key {}", key_byte);
+        panic!("could not re-find parent with key {key_byte}");
     }
 
     fn delete_child(&mut self, key_byte: u8) {
@@ -650,7 +650,7 @@ impl<V: Value> NodeInternal16<V> {
                 return;
             }
         }
-        panic!("could not re-find parent with key {}", key_byte);
+        panic!("could not re-find parent with key {key_byte}");
     }
 
     fn is_full(&self) -> bool {
@@ -790,7 +790,7 @@ impl<V: Value> NodeInternal48<V> {
     fn replace_child(&mut self, key_byte: u8, replacement: NodePtr<V>) {
         let idx = self.child_indexes[key_byte as usize];
         if idx == INVALID_CHILD_INDEX {
-            panic!("could not re-find parent with key {}", key_byte);
+            panic!("could not re-find parent with key {key_byte}");
         }
         self.child_ptrs[idx as usize] = replacement;
         self.validate();
@@ -799,7 +799,7 @@ impl<V: Value> NodeInternal48<V> {
     fn delete_child(&mut self, key_byte: u8) {
         let idx = self.child_indexes[key_byte as usize] as usize;
         if idx == INVALID_CHILD_INDEX as usize {
-            panic!("could not re-find parent with key {}", key_byte);
+            panic!("could not re-find parent with key {key_byte}");
         }
 
         // Compact the child_ptrs array
@@ -816,10 +816,7 @@ impl<V: Value> NodeInternal48<V> {
                     return;
                 }
             }
-            panic!(
-                "could not re-find last index {} on Internal48 node",
-                removed_idx
-            );
+            panic!("could not re-find last index {removed_idx} on Internal48 node");
         } else {
             self.child_indexes[key_byte as usize] = INVALID_CHILD_INDEX;
             self.num_children -= 1;
@@ -949,14 +946,14 @@ impl<V: Value> NodeInternal256<V> {
         if !self.child_ptrs[idx].is_null() {
             self.child_ptrs[idx] = replacement
         } else {
-            panic!("could not re-find parent with key {}", key_byte);
+            panic!("could not re-find parent with key {key_byte}");
         }
     }
 
     fn delete_child(&mut self, key_byte: u8) {
         let idx = key_byte as usize;
         if self.child_ptrs[idx].is_null() {
-            panic!("could not re-find parent with key {}", key_byte);
+            panic!("could not re-find parent with key {key_byte}");
         }
         self.num_children -= 1;
         self.child_ptrs[idx] = NodePtr::null();

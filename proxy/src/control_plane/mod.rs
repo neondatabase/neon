@@ -76,13 +76,9 @@ impl NodeInfo {
     pub(crate) async fn connect(
         &self,
         ctx: &RequestContext,
-        auth: &compute::AuthInfo,
         config: &ComputeConfig,
-        user_info: ComputeUserInfo,
-    ) -> Result<compute::PostgresConnection, compute::ConnectionError> {
-        self.conn_info
-            .connect(ctx, self.aux.clone(), auth, config, user_info)
-            .await
+    ) -> Result<compute::ComputeConnection, compute::ConnectionError> {
+        self.conn_info.connect(ctx, &self.aux, config).await
     }
 }
 

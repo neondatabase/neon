@@ -135,7 +135,7 @@ impl Debug for Generation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Valid(v) => {
-                write!(f, "{:08x}", v)
+                write!(f, "{v:08x}")
             }
             Self::None => {
                 write!(f, "<none>")

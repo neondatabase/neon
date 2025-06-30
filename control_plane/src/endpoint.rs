@@ -71,6 +71,7 @@ use nix::sys::signal::{Signal, kill};
 use pageserver_api::shard::ShardStripeSize;
 use pem::Pem;
 use reqwest::header::CONTENT_TYPE;
+use safekeeper_api::PgMajorVersion;
 use safekeeper_api::membership::SafekeeperGeneration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -92,7 +93,7 @@ pub struct EndpointConf {
     pg_port: u16,
     external_http_port: u16,
     internal_http_port: u16,
-    pg_version: u32,
+    pg_version: PgMajorVersion,
     grpc: bool,
     skip_pg_catalog_updates: bool,
     reconfigure_concurrency: usize,
@@ -195,7 +196,7 @@ impl ComputeControlPlane {
         pg_port: Option<u16>,
         external_http_port: Option<u16>,
         internal_http_port: Option<u16>,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         mode: ComputeMode,
         grpc: bool,
         skip_pg_catalog_updates: bool,
@@ -315,7 +316,7 @@ pub struct Endpoint {
     pub internal_http_address: SocketAddr,
 
     // postgres major version in the format: 14, 15, etc.
-    pg_version: u32,
+    pg_version: PgMajorVersion,
 
     // These are not part of the endpoint as such, but the environment
     // the endpoint runs in.
@@ -372,29 +373,6 @@ impl std::fmt::Display for EndpointTerminateMode {
             EndpointTerminateMode::Immediate => "immediate",
             EndpointTerminateMode::ImmediateTerminate => "immediate-terminate",
         })
-    }
-}
-
-/// Protocol used to connect to a Pageserver.
-#[derive(Clone, Copy, Debug)]
-pub enum PageserverProtocol {
-    Libpq,
-    Grpc,
-}
-
-impl PageserverProtocol {
-    /// Returns the URL scheme for the protocol, used in connstrings.
-    pub fn scheme(&self) -> &'static str {
-        match self {
-            Self::Libpq => "postgresql",
-            Self::Grpc => "grpc",
-        }
-    }
-}
-
-impl Display for PageserverProtocol {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.scheme())
     }
 }
 
@@ -560,7 +538,7 @@ impl Endpoint {
                 conf.append("hot_standby", "on");
                 // prefetching of blocks referenced in WAL doesn't make sense for us
                 // Neon hot standby ignores pages that are not in the shared_buffers
-                if self.pg_version >= 15 {
+                if self.pg_version >= PgMajorVersion::PG15 {
                     conf.append("recovery_prefetch", "off");
                 }
             }
@@ -838,10 +816,10 @@ impl Endpoint {
 
         // Launch compute_ctl
         let conn_str = self.connstr("cloud_admin", "postgres");
-        println!("Starting postgres node at '{}'", conn_str);
+        println!("Starting postgres node at '{conn_str}'");
         if create_test_user {
             let conn_str = self.connstr("test", "neondb");
-            println!("Also at '{}'", conn_str);
+            println!("Also at '{conn_str}'");
         }
         let mut cmd = Command::new(self.env.neon_distrib_dir.join("compute_ctl"));
         cmd.args([
@@ -940,8 +918,7 @@ impl Endpoint {
                 Err(e) => {
                     if Instant::now().duration_since(start_at) > start_timeout {
                         return Err(e).context(format!(
-                            "timed out {:?} waiting to connect to compute_ctl HTTP",
-                            start_timeout,
+                            "timed out {start_timeout:?} waiting to connect to compute_ctl HTTP",
                         ));
                     }
                 }
@@ -980,7 +957,7 @@ impl Endpoint {
             // reqwest does not export its error construction utility functions, so let's craft the message ourselves
             let url = response.url().to_owned();
             let msg = match response.text().await {
-                Ok(err_body) => format!("Error: {}", err_body),
+                Ok(err_body) => format!("Error: {err_body}"),
                 Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
             };
             Err(anyhow::anyhow!(msg))
@@ -989,15 +966,11 @@ impl Endpoint {
 
     pub async fn reconfigure(
         &self,
-        pageserver_conninfo: PageserverConnectionInfo,
+        pageserver_conninfo: Option<PageserverConnectionInfo>,
         stripe_size: Option<ShardStripeSize>,
         safekeepers: Option<Vec<NodeId>>,
+        safekeeper_generation: Option<SafekeeperGeneration>,
     ) -> Result<()> {
-        anyhow::ensure!(
-            !pageserver_conninfo.shards.is_empty(),
-            "no pageservers provided"
-        );
-
         let (mut spec, compute_ctl_config) = {
             let config_path = self.endpoint_path().join("config.json");
             let file = std::fs::File::open(config_path)?;
@@ -1009,7 +982,15 @@ impl Endpoint {
         let postgresql_conf = self.read_postgresql_conf()?;
         spec.cluster.postgresql_conf = Some(postgresql_conf);
 
-        spec.pageserver_connection_info = Some(pageserver_conninfo);
+        if let Some(pageserver_conninfo) = pageserver_conninfo {
+            // If pageservers are provided, we need to ensure that they are not empty.
+            // This is a requirement for the compute_ctl configuration.
+            anyhow::ensure!(
+                !pageserver_conninfo.shards.is_empty(),
+                "no pageservers provided"
+            );
+            spec.pageserver_connection_info = Some(pageserver_conninfo);
+        }
         if stripe_size.is_some() {
             spec.shard_stripe_size = stripe_size.map(|s| s.0 as usize);
         }
@@ -1018,6 +999,9 @@ impl Endpoint {
         if let Some(safekeepers) = safekeepers {
             let safekeeper_connstrings = self.build_safekeepers_connstrs(safekeepers)?;
             spec.safekeeper_connstrings = safekeeper_connstrings;
+            if let Some(g) = safekeeper_generation {
+                spec.safekeepers_generation = Some(g.into_inner());
+            }
         }
 
         let client = reqwest::Client::builder()
@@ -1048,11 +1032,29 @@ impl Endpoint {
         } else {
             let url = response.url().to_owned();
             let msg = match response.text().await {
-                Ok(err_body) => format!("Error: {}", err_body),
+                Ok(err_body) => format!("Error: {err_body}"),
                 Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
             };
             Err(anyhow::anyhow!(msg))
         }
+    }
+
+    pub async fn reconfigure_pageservers(
+        &self,
+        pageservers: PageserverConnectionInfo,
+        stripe_size: Option<ShardStripeSize>,
+    ) -> Result<()> {
+        self.reconfigure(Some(pageservers), stripe_size, None, None)
+            .await
+    }
+
+    pub async fn reconfigure_safekeepers(
+        &self,
+        safekeepers: Vec<NodeId>,
+        generation: SafekeeperGeneration,
+    ) -> Result<()> {
+        self.reconfigure(None, None, Some(safekeepers), Some(generation))
+            .await
     }
 
     pub async fn stop(

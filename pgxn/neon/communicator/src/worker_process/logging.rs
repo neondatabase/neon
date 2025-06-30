@@ -209,7 +209,7 @@ where
 
                 // Skip formatting the fields if the span had no fields.
                 if !fields.is_empty() {
-                    write!(writer, "{{{}}}", fields)?;
+                    write!(writer, "{{{fields}}}")?;
                 }
                 write!(writer, ": ")?;
             }

@@ -977,7 +977,7 @@ impl KeyHistoryRetention {
             tline
                 .reconstruct_value(key, lsn, data, RedoAttemptType::GcCompaction)
                 .await
-                .with_context(|| format!("verification failed for key {} at lsn {}", key, lsn))?;
+                .with_context(|| format!("verification failed for key {key} at lsn {lsn}"))?;
 
             Ok(())
         }
@@ -2647,15 +2647,15 @@ impl Timeline {
             use std::fmt::Write;
             let mut output = String::new();
             if let Some((key, _, _)) = replay_history.first() {
-                write!(output, "key={} ", key).unwrap();
+                write!(output, "key={key} ").unwrap();
                 let mut cnt = 0;
                 for (_, lsn, val) in replay_history {
                     if val.is_image() {
-                        write!(output, "i@{} ", lsn).unwrap();
+                        write!(output, "i@{lsn} ").unwrap();
                     } else if val.will_init() {
-                        write!(output, "di@{} ", lsn).unwrap();
+                        write!(output, "di@{lsn} ").unwrap();
                     } else {
-                        write!(output, "d@{} ", lsn).unwrap();
+                        write!(output, "d@{lsn} ").unwrap();
                     }
                     cnt += 1;
                     if cnt >= 128 {
@@ -3531,10 +3531,7 @@ impl Timeline {
             self.get_compaction_target_size(),
             &self.gate,
             self.cancel.clone(),
-        )
-        .await
-        .context("failed to create delta layer writer")
-        .map_err(CompactionError::Other)?;
+        );
 
         #[derive(Default)]
         struct RewritingLayers {
@@ -4330,7 +4327,8 @@ impl TimelineAdaptor {
             self.timeline.cancel.clone(),
             ctx,
         )
-        .await?;
+        .await
+        .map_err(CreateImageLayersError::Other)?;
 
         fail_point!("image-layer-writer-fail-before-finish", |_| {
             Err(CreateImageLayersError::Other(anyhow::anyhow!(
@@ -4339,7 +4337,10 @@ impl TimelineAdaptor {
         });
 
         let keyspace = KeySpace {
-            ranges: self.get_keyspace(key_range, lsn, ctx).await?,
+            ranges: self
+                .get_keyspace(key_range, lsn, ctx)
+                .await
+                .map_err(CreateImageLayersError::Other)?,
         };
         // TODO set proper (stateful) start. The create_image_layer_for_rel_blocks function mostly
         let outcome = self
@@ -4358,9 +4359,13 @@ impl TimelineAdaptor {
             unfinished_image_layer,
         } = outcome
         {
-            let (desc, path) = unfinished_image_layer.finish(ctx).await?;
+            let (desc, path) = unfinished_image_layer
+                .finish(ctx)
+                .await
+                .map_err(CreateImageLayersError::Other)?;
             let image_layer =
-                Layer::finish_creating(self.timeline.conf, &self.timeline, desc, &path)?;
+                Layer::finish_creating(self.timeline.conf, &self.timeline, desc, &path)
+                    .map_err(CreateImageLayersError::Other)?;
             self.new_images.push(image_layer);
         }
 

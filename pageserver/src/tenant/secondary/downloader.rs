@@ -1427,7 +1427,7 @@ async fn init_timeline_state(
         let local_meta = dentry
             .metadata()
             .await
-            .fatal_err(&format!("Read metadata on {}", file_path));
+            .fatal_err(&format!("Read metadata on {file_path}"));
 
         let file_name = file_path.file_name().expect("created it from the dentry");
         if crate::is_temporary(&file_path)

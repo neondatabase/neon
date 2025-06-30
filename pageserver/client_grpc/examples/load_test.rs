@@ -120,14 +120,11 @@ async fn client_worker(
                 let current = prev + 1;
                 assert!(
                     current <= max_consumers,
-                    "Connection {} exceeded max_consumers (got {})",
-                    conn_id,
-                    current
+                    "Connection {conn_id} exceeded max_consumers (got {current})",
                 );
 
                 println!(
-                    "[worker {}][iter {}] got MockConnection id={} ({} concurrent)",
-                    worker_id, iteration, conn_id, current
+                    "[worker {worker_id}][iter {iteration}] got MockConnection id={conn_id} ({current} concurrent)",
                 );
 
                 // 4. Simulate some work (10–100 ms)
@@ -138,8 +135,7 @@ async fn client_worker(
                 let prev2 = counter_arc.fetch_sub(1, Ordering::SeqCst);
                 let after = prev2 - 1;
                 println!(
-                    "[worker {}][iter {}] returning MockConnection id={} (now {} remain)",
-                    worker_id, iteration, conn_id, after
+                    "[worker {worker_id}][iter {iteration}] returning MockConnection id={conn_id} (now {after} remain)",
                 );
 
                 // 6. Return to the pool (mark success)
@@ -147,8 +143,7 @@ async fn client_worker(
             }
             Err(status) => {
                 eprintln!(
-                    "[worker {}][iter {}] failed to get client: {:?}",
-                    worker_id, iteration, status
+                    "[worker {worker_id}][iter {iteration}] failed to get client: {status:?}",
                 );
             }
         }
@@ -221,7 +216,7 @@ async fn main() {
         let _ = handle.await;
     }
     let elapsed = Instant::now().duration_since(start_time);
-    println!("All {} workers completed in {:?}", num_workers, elapsed);
+    println!("All {num_workers} workers completed in {elapsed:?}");
 
     // --------------------------------------
     // 5. Print the total number of unique connections seen so far
@@ -230,7 +225,7 @@ async fn main() {
         let seen_guard = seen_set.lock().unwrap();
         seen_guard.len()
     };
-    println!("Total unique connections used by workers: {}", unique_count);
+    println!("Total unique connections used by workers: {unique_count}");
 
     // --------------------------------------
     // 6. Sleep so the background sweeper can run (max_idle_duration = 2 s)
@@ -252,8 +247,7 @@ async fn main() {
     let sc = Arc::strong_count(&pool);
     assert!(
         sc == 1,
-        "Pool tasks did not all terminate: Arc::strong_count = {} (expected 1)",
-        sc
+        "Pool tasks did not all terminate: Arc::strong_count = {sc} (expected 1)",
     );
     println!("Verified: all pool tasks have terminated (strong_count == 1).");
 
@@ -265,23 +259,15 @@ async fn main() {
     let dropped = DROPPED.load(Ordering::SeqCst);
     assert!(
         created == dropped,
-        "Leaked connections: created={} but dropped={}",
-        created,
-        dropped
+        "Leaked connections: created={created} but dropped={dropped}",
     );
-    println!(
-        "Verified: no connections leaked (created = {}, dropped = {}).",
-        created, dropped
-    );
+    println!("Verified: no connections leaked (created = {created}, dropped = {dropped}).");
 
     // --------------------------------------
     // 10. Because `client_worker` asserted inside that no connection
     //     ever exceeded `max_consumers`, reaching this point means that check passed.
     // --------------------------------------
-    println!(
-        "All per-connection usage stayed within max_consumers = {}.",
-        max_consumers
-    );
+    println!("All per-connection usage stayed within max_consumers = {max_consumers}.");
 
     println!("Load test complete; exiting cleanly.");
 }

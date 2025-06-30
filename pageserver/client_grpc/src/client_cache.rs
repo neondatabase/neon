@@ -251,7 +251,7 @@ impl PooledItemFactory<Channel> for ChannelFactory {
             }
             Ok(Err(e)) => Ok(Err(tonic::Status::new(
                 tonic::Code::Unavailable,
-                format!("Failed to connect: {}", e),
+                format!("Failed to connect: {e}"),
             ))),
             Err(e) => Err(e),
         }

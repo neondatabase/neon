@@ -187,20 +187,14 @@ fn test_iter<A: ArtAllocator<TestValue>>(
         let item = iter.next(&r);
 
         if shadow_item != item.map(|(k, v)| (k, v.load())) {
-            eprintln!(
-                "FAIL: iterator returned {:?}, expected {:?}",
-                item, shadow_item
-            );
+            eprintln!("FAIL: iterator returned {item:?}, expected {shadow_item:?}");
             tree.start_read().dump(&mut std::io::stderr());
 
             eprintln!("SHADOW:");
             for si in shadow {
                 eprintln!("key: {:?}, val: {}", si.0, si.1);
             }
-            panic!(
-                "FAIL: iterator returned {:?}, expected {:?}",
-                item, shadow_item
-            );
+            panic!("FAIL: iterator returned {item:?}, expected {shadow_item:?}");
         }
         if item.is_none() {
             break;

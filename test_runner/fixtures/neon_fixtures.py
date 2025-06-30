@@ -453,6 +453,7 @@ class NeonEnvBuilder:
         pageserver_get_vectored_concurrent_io: str | None = None,
         pageserver_tracing_config: PageserverTracingConfig | None = None,
         pageserver_import_config: PageserverImportConfig | None = None,
+        storcon_kick_secondary_downloads: bool | None = True,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -513,6 +514,8 @@ class NeonEnvBuilder:
 
         self.pageserver_tracing_config = pageserver_tracing_config
         self.pageserver_import_config = pageserver_import_config
+
+        self.storcon_kick_secondary_downloads = storcon_kick_secondary_downloads
 
         self.pageserver_default_tenant_config_compaction_algorithm: dict[str, Any] | None = (
             pageserver_default_tenant_config_compaction_algorithm
@@ -1212,6 +1215,13 @@ class NeonEnv:
             storage_controller_config = storage_controller_config or {}
             storage_controller_config["use_https_safekeeper_api"] = True
 
+        # TODO(diko): uncomment when timeline_safekeeper_count option is in the release branch,
+        # so the compat tests will not fail bacause of it presence.
+        # if config.num_safekeepers < 3:
+        #     storage_controller_config = storage_controller_config or {}
+        #     if "timeline_safekeeper_count" not in storage_controller_config:
+        #         storage_controller_config["timeline_safekeeper_count"] = config.num_safekeepers
+
         if storage_controller_config is not None:
             cfg["storage_controller"] = storage_controller_config
 
@@ -1220,6 +1230,14 @@ class NeonEnv:
                 cfg["storage_controller"]["use_local_compute_notifications"] = False
             else:
                 cfg["storage_controller"] = {"use_local_compute_notifications": False}
+
+        if config.storcon_kick_secondary_downloads is not None:
+            # Configure whether storage controller should actively kick off secondary downloads
+            if "storage_controller" not in cfg:
+                cfg["storage_controller"] = {}
+            cfg["storage_controller"]["kick_secondary_downloads"] = (
+                config.storcon_kick_secondary_downloads
+            )
 
         # Create config for pageserver
         http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
@@ -2214,6 +2232,21 @@ class NeonStorageController(MetricsGetter, LogUtils):
         )
         response.raise_for_status()
         log.info(f"timeline_create success: {response.json()}")
+
+    def migrate_safekeepers(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        new_sk_set: list[int],
+    ):
+        response = self.request(
+            "POST",
+            f"{self.api}/v1/tenant/{tenant_id}/timeline/{timeline_id}/safekeeper_migrate",
+            json={"new_sk_set": new_sk_set},
+            headers=self.headers(TokenScope.PAGE_SERVER_API),
+        )
+        response.raise_for_status()
+        log.info(f"migrate_safekeepers success: {response.json()}")
 
     def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:
         """

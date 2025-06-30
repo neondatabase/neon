@@ -4,11 +4,14 @@ ROOT_PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 # managers.
 POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install/
 
+# Supported PostgreSQL versions
+POSTGRES_VERSIONS = v17 v16 v15 v14
+
 # CARGO_BUILD_FLAGS: Extra flags to pass to `cargo build`. `--locked`
 # and `--features testing` are popular examples.
 #
-# CARGO_PROFILE: You can also set to override the cargo profile to
-# use. By default, it is derived from BUILD_TYPE.
+# CARGO_PROFILE: Set to override the cargo profile to use. By default,
+# it is derived from BUILD_TYPE.
 
 # All intermediate build artifacts are stored here.
 BUILD_DIR := build
@@ -102,13 +105,13 @@ CACHEDIR_TAG_CONTENTS := "Signature: 8a477f597d28d172789f06886806bc55"
 # Top level Makefile to build Neon and PostgreSQL
 #
 .PHONY: all
-all: neon postgres neon-pg-ext
+all: neon postgres-install neon-pg-ext
 
 ### Neon Rust bits
 #
 # The 'postgres_ffi' depends on the Postgres headers.
 .PHONY: neon
-neon: postgres-headers walproposer-lib cargo-target-dir
+neon: postgres-headers-install walproposer-lib cargo-target-dir
 	+@echo "Compiling Neon"
 	$(CARGO_CMD_PREFIX) cargo build $(CARGO_BUILD_FLAGS) $(CARGO_PROFILE)
 
@@ -118,78 +121,8 @@ cargo-target-dir:
 	mkdir -p target
 	test -e target/CACHEDIR.TAG || echo "$(CACHEDIR_TAG_CONTENTS)" > target/CACHEDIR.TAG
 
-### PostgreSQL parts
-# Some rules are duplicated for Postgres v14 and 15. We may want to refactor
-# to avoid the duplication in the future, but it's tolerable for now.
-#
-$(BUILD_DIR)/%/config.status:
-	mkdir -p $(BUILD_DIR)
-	test -e $(BUILD_DIR)/CACHEDIR.TAG || echo "$(CACHEDIR_TAG_CONTENTS)" > $(BUILD_DIR)/CACHEDIR.TAG
-
-	+@echo "Configuring Postgres $* build"
-	@test -s $(ROOT_PROJECT_DIR)/vendor/postgres-$*/configure || { \
-		echo "\nPostgres submodule not found in $(ROOT_PROJECT_DIR)/vendor/postgres-$*/, execute "; \
-		echo "'git submodule update --init --recursive --depth 2 --progress .' in project root.\n"; \
-		exit 1; }
-	mkdir -p $(BUILD_DIR)/$*
-
-	VERSION=$*; \
-	EXTRA_VERSION=$$(cd $(ROOT_PROJECT_DIR)/vendor/postgres-$$VERSION && git rev-parse HEAD); \
-	(cd $(BUILD_DIR)/$$VERSION && \
-	env PATH="$(EXTRA_PATH_OVERRIDES):$$PATH" $(ROOT_PROJECT_DIR)/vendor/postgres-$$VERSION/configure \
-		CFLAGS='$(PG_CFLAGS)' LDFLAGS='$(PG_LDFLAGS)' \
-		$(PG_CONFIGURE_OPTS) --with-extra-version=" ($$EXTRA_VERSION)" \
-		--prefix=$(abspath $(POSTGRES_INSTALL_DIR))/$$VERSION > configure.log)
-
-# nicer alias to run 'configure'
-# Note: I've been unable to use templates for this part of our configuration.
-# I'm not sure why it wouldn't work, but this is the only place (apart from
-# the "build-all-versions" entry points) where direct mention of PostgreSQL
-# versions is used.
-.PHONY: postgres-configure-v17
-postgres-configure-v17: $(BUILD_DIR)/v17/config.status
-.PHONY: postgres-configure-v16
-postgres-configure-v16: $(BUILD_DIR)/v16/config.status
-.PHONY: postgres-configure-v15
-postgres-configure-v15: $(BUILD_DIR)/v15/config.status
-.PHONY: postgres-configure-v14
-postgres-configure-v14: $(BUILD_DIR)/v14/config.status
-
-# Install the PostgreSQL header files into $(POSTGRES_INSTALL_DIR)/<version>/include
-.PHONY: postgres-headers-%
-postgres-headers-%: postgres-configure-%
-	+@echo "Installing PostgreSQL $* headers"
-	$(MAKE) -C $(BUILD_DIR)/$*/src/include MAKELEVEL=0 install
-
-# Compile and install PostgreSQL
-.PHONY: postgres-%
-postgres-%: postgres-configure-% \
-		  postgres-headers-% # to prevent `make install` conflicts with neon's `postgres-headers`
-	+@echo "Compiling PostgreSQL $*"
-	$(MAKE) -C $(BUILD_DIR)/$* MAKELEVEL=0 install
-	+@echo "Compiling libpq $*"
-	$(MAKE) -C $(BUILD_DIR)/$*/src/interfaces/libpq install
-	+@echo "Compiling pg_prewarm $*"
-	$(MAKE) -C $(BUILD_DIR)/$*/contrib/pg_prewarm install
-	+@echo "Compiling pg_buffercache $*"
-	$(MAKE) -C $(BUILD_DIR)/$*/contrib/pg_buffercache install
-	+@echo "Compiling pg_visibility $*"
-	$(MAKE) -C $(BUILD_DIR)/$*/contrib/pg_visibility install
-	+@echo "Compiling pageinspect $*"
-	$(MAKE) -C $(BUILD_DIR)/$*/contrib/pageinspect install
-	+@echo "Compiling pg_trgm $*"
-	$(MAKE) -C $(BUILD_DIR)/$*/contrib/pg_trgm install
-	+@echo "Compiling amcheck $*"
-	$(MAKE) -C $(BUILD_DIR)/$*/contrib/amcheck install
-	+@echo "Compiling test_decoding $*"
-	$(MAKE) -C $(BUILD_DIR)/$*/contrib/test_decoding install
-
-.PHONY: postgres-check-%
-postgres-check-%: postgres-%
-	$(MAKE) -C $(BUILD_DIR)/$* MAKELEVEL=0 check
-
 .PHONY: neon-pg-ext-%
-neon-pg-ext-%: postgres-% cargo-target-dir
+neon-pg-ext-%: postgres-install-%
 	+@echo "Compiling neon-specific Postgres extensions for $*"
 	mkdir -p $(BUILD_DIR)/pgxn-$*
 	$(MAKE) PG_CONFIG="$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config" COPT='$(COPT)' \
@@ -231,39 +164,14 @@ ifeq ($(UNAME_S),Linux)
 		pg_crc32c.o
 endif
 
+# Shorthand to call neon-pg-ext-% target for all Postgres versions
 .PHONY: neon-pg-ext
-neon-pg-ext: \
-	neon-pg-ext-v14 \
-	neon-pg-ext-v15 \
-	neon-pg-ext-v16 \
-	neon-pg-ext-v17
-
-# shorthand to build all Postgres versions
-.PHONY: postgres
-postgres: \
-	postgres-v14 \
-	postgres-v15 \
-	postgres-v16 \
-	postgres-v17
-
-.PHONY: postgres-headers
-postgres-headers: \
-	postgres-headers-v14 \
-	postgres-headers-v15 \
-	postgres-headers-v16 \
-	postgres-headers-v17
-
-.PHONY: postgres-check
-postgres-check: \
-	postgres-check-v14 \
-	postgres-check-v15 \
-	postgres-check-v16 \
-	postgres-check-v17
+neon-pg-ext: $(foreach pg_version,$(POSTGRES_VERSIONS),neon-pg-ext-$(pg_version))
 
 # This removes everything
 .PHONY: distclean
 distclean:
-	$(RM) -r $(POSTGRES_INSTALL_DIR)
+	$(RM) -r $(POSTGRES_INSTALL_DIR) $(BUILD_DIR)
 	$(CARGO_CMD_PREFIX) cargo clean
 
 .PHONY: fmt
@@ -311,3 +219,19 @@ neon-pgindent: postgres-v17-pg-bsd-indent neon-pg-ext-v17
 .PHONY: setup-pre-commit-hook
 setup-pre-commit-hook:
 	ln -s -f $(ROOT_PROJECT_DIR)/pre-commit.py .git/hooks/pre-commit
+
+# Targets for building PostgreSQL are defined in postgres.mk.
+#
+# But if the caller has indicated that PostgreSQL is already
+# installed, by setting the PG_INSTALL_CACHED variable, skip it.
+ifdef PG_INSTALL_CACHED
+postgres-install: skip-install
+$(foreach pg_version,$(POSTGRES_VERSIONS),postgres-install-$(pg_version)): skip-install
+postgres-headers-install:
+	+@echo "Skipping installation of PostgreSQL headers because PG_INSTALL_CACHED is set"
+skip-install:
+	+@echo "Skipping PostgreSQL installation because PG_INSTALL_CACHED is set"
+
+else
+include postgres.mk
+endif

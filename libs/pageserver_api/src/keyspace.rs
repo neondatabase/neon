@@ -334,8 +334,7 @@ impl KeySpace {
                     std::cmp::max(range.start, prev.start) < std::cmp::min(range.end, prev.end);
                 assert!(
                     !overlap,
-                    "Attempt to merge ovelapping keyspaces: {:?} overlaps {:?}",
-                    prev, range
+                    "Attempt to merge ovelapping keyspaces: {prev:?} overlaps {range:?}"
                 );
             }
 
@@ -1104,7 +1103,7 @@ mod tests {
             // total range contains at least one shard-local page
             let all_nonzero = fragments.iter().all(|f| f.0 > 0);
             if !all_nonzero {
-                eprintln!("Found a zero-length fragment: {:?}", fragments);
+                eprintln!("Found a zero-length fragment: {fragments:?}");
             }
             assert!(all_nonzero);
         } else {

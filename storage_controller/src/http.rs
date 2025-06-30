@@ -22,7 +22,7 @@ use pageserver_api::controller_api::{
     MetadataHealthListUnhealthyResponse, MetadataHealthUpdateRequest, MetadataHealthUpdateResponse,
     NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, SafekeeperSchedulingPolicyRequest,
     ShardsPreferredAzsRequest, TenantCreateRequest, TenantPolicyRequest, TenantShardMigrateRequest,
-    TimelineImportRequest,
+    TimelineImportRequest, TimelineSafekeeperMigrateRequest,
 };
 use pageserver_api::models::{
     DetachBehavior, LsnLeaseRequest, TenantConfigPatchRequest, TenantConfigRequest,
@@ -34,6 +34,7 @@ use pageserver_api::upcall_api::{
     PutTimelineImportStatusRequest, ReAttachRequest, TimelineImportStatusRequest, ValidateRequest,
 };
 use pageserver_client::{BlockUnblock, mgmt_api};
+
 use routerify::Middleware;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -635,6 +636,32 @@ async fn handle_tenant_timeline_download_heatmap_layers(
     json_response(StatusCode::OK, ())
 }
 
+async fn handle_tenant_timeline_safekeeper_migrate(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
+    maybe_rate_limit(&req, tenant_id).await;
+
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let migrate_req = json_request::<TimelineSafekeeperMigrateRequest>(&mut req).await?;
+
+    service
+        .tenant_timeline_safekeeper_migrate(tenant_id, timeline_id, migrate_req)
+        .await?;
+
+    json_response(StatusCode::OK, ())
+}
+
 async fn handle_tenant_timeline_lsn_lease(
     service: Arc<Service>,
     req: Request<Body>,
@@ -721,9 +748,9 @@ async fn handle_tenant_timeline_passthrough(
 
     // Callers will always pass an unsharded tenant ID.  Before proxying, we must
     // rewrite this to a shard-aware shard zero ID.
-    let path = format!("{}", path);
+    let path = format!("{path}");
     let tenant_str = tenant_or_shard_id.tenant_id.to_string();
-    let tenant_shard_str = format!("{}", tenant_shard_id);
+    let tenant_shard_str = format!("{tenant_shard_id}");
     let path = path.replace(&tenant_str, &tenant_shard_str);
 
     let latency = &METRICS_REGISTRY
@@ -1539,7 +1566,7 @@ async fn handle_ready(req: Request<Body>) -> Result<Response<Body>, ApiError> {
 
 impl From<ReconcileError> for ApiError {
     fn from(value: ReconcileError) -> Self {
-        ApiError::Conflict(format!("Reconciliation error: {}", value))
+        ApiError::Conflict(format!("Reconciliation error: {value}"))
     }
 }
 
@@ -2455,6 +2482,16 @@ pub fn make_router(
                     r,
                     handle_tenant_timeline_download_heatmap_layers,
                     RequestName("v1_tenant_timeline_download_heatmap_layers"),
+                )
+            },
+        )
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/safekeeper_migrate",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_safekeeper_migrate,
+                    RequestName("v1_tenant_timeline_safekeeper_migrate"),
                 )
             },
         )

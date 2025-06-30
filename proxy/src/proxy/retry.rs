@@ -3,7 +3,7 @@ use std::io;
 
 use tokio::time;
 
-use crate::compute;
+use crate::compute::{self, PostgresError};
 use crate::config::RetryConfig;
 
 pub(crate) trait CouldRetry {
@@ -99,7 +99,6 @@ impl ShouldRetryWakeCompute for postgres_client::Error {
 impl CouldRetry for compute::ConnectionError {
     fn could_retry(&self) -> bool {
         match self {
-            compute::ConnectionError::Postgres(err) => err.could_retry(),
             compute::ConnectionError::TlsError(err) => err.could_retry(),
             compute::ConnectionError::WakeComputeError(err) => err.could_retry(),
             compute::ConnectionError::TooManyConnectionAttempts(_) => false,
@@ -109,10 +108,17 @@ impl CouldRetry for compute::ConnectionError {
 impl ShouldRetryWakeCompute for compute::ConnectionError {
     fn should_retry_wake_compute(&self) -> bool {
         match self {
-            compute::ConnectionError::Postgres(err) => err.should_retry_wake_compute(),
             // the cache entry was not checked for validity
             compute::ConnectionError::TooManyConnectionAttempts(_) => false,
             _ => true,
+        }
+    }
+}
+
+impl ShouldRetryWakeCompute for PostgresError {
+    fn should_retry_wake_compute(&self) -> bool {
+        match self {
+            PostgresError::Postgres(error) => error.should_retry_wake_compute(),
         }
     }
 }

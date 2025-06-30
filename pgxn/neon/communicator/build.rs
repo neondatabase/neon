@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Rust compiler produces a better error message than cbindgen.
                 eprintln!("Generating C bindings failed because of a Rust syntax error");
             }
-            e => panic!("Unable to generate C bindings: {:?}", e),
+            e => panic!("Unable to generate C bindings: {e:?}"),
         },
         |bindings| {
             bindings.write_to_file("communicator_bindings.h");

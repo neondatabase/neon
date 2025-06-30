@@ -168,15 +168,13 @@ impl FeatureStore {
                 let PostHogFlagFilterPropertyValue::String(provided) = provided else {
                     // Left should be a string
                     return Err(PostHogEvaluationError::Internal(format!(
-                        "The left side of the condition is not a string: {:?}",
-                        provided
+                        "The left side of the condition is not a string: {provided:?}"
                     )));
                 };
                 let PostHogFlagFilterPropertyValue::List(requested) = requested else {
                     // Right should be a list of string
                     return Err(PostHogEvaluationError::Internal(format!(
-                        "The right side of the condition is not a list: {:?}",
-                        requested
+                        "The right side of the condition is not a list: {requested:?}"
                     )));
                 };
                 Ok(requested.contains(provided))
@@ -185,14 +183,12 @@ impl FeatureStore {
                 let PostHogFlagFilterPropertyValue::String(requested) = requested else {
                     // Right should be a string
                     return Err(PostHogEvaluationError::Internal(format!(
-                        "The right side of the condition is not a string: {:?}",
-                        requested
+                        "The right side of the condition is not a string: {requested:?}"
                     )));
                 };
                 let Ok(requested) = requested.parse::<f64>() else {
                     return Err(PostHogEvaluationError::Internal(format!(
-                        "Can not parse the right side of the condition as a number: {:?}",
-                        requested
+                        "Can not parse the right side of the condition as a number: {requested:?}"
                     )));
                 };
                 // Left can either be a number or a string
@@ -201,16 +197,14 @@ impl FeatureStore {
                     PostHogFlagFilterPropertyValue::String(provided) => {
                         let Ok(provided) = provided.parse::<f64>() else {
                             return Err(PostHogEvaluationError::Internal(format!(
-                                "Can not parse the left side of the condition as a number: {:?}",
-                                provided
+                                "Can not parse the left side of the condition as a number: {provided:?}"
                             )));
                         };
                         provided
                     }
                     _ => {
                         return Err(PostHogEvaluationError::Internal(format!(
-                            "The left side of the condition is not a number or a string: {:?}",
-                            provided
+                            "The left side of the condition is not a number or a string: {provided:?}"
                         )));
                     }
                 };
@@ -218,14 +212,12 @@ impl FeatureStore {
                     "lt" => Ok(provided < requested),
                     "gt" => Ok(provided > requested),
                     op => Err(PostHogEvaluationError::Internal(format!(
-                        "Unsupported operator: {}",
-                        op
+                        "Unsupported operator: {op}"
                     ))),
                 }
             }
             _ => Err(PostHogEvaluationError::Internal(format!(
-                "Unsupported operator: {}",
-                operator
+                "Unsupported operator: {operator}"
             ))),
         }
     }
@@ -373,8 +365,7 @@ impl FeatureStore {
         if let Some(flag_config) = self.flags.get(flag_key) {
             if !flag_config.active {
                 return Err(PostHogEvaluationError::NotAvailable(format!(
-                    "The feature flag is not active: {}",
-                    flag_key
+                    "The feature flag is not active: {flag_key}"
                 )));
             }
             let Some(ref multivariate) = flag_config.filters.multivariate else {
@@ -401,8 +392,7 @@ impl FeatureStore {
                         // This should not happen because the rollout percentage always adds up to 100, but just in case that PostHog
                         // returned invalid spec, we return an error.
                         return Err(PostHogEvaluationError::Internal(format!(
-                            "Rollout percentage does not add up to 100: {}",
-                            flag_key
+                            "Rollout percentage does not add up to 100: {flag_key}"
                         )));
                     }
                     GroupEvaluationResult::Unmatched => continue,
@@ -413,8 +403,7 @@ impl FeatureStore {
         } else {
             // The feature flag is not available yet
             Err(PostHogEvaluationError::NotAvailable(format!(
-                "Not found in the local evaluation spec: {}",
-                flag_key
+                "Not found in the local evaluation spec: {flag_key}"
             )))
         }
     }
@@ -440,8 +429,7 @@ impl FeatureStore {
         if let Some(flag_config) = self.flags.get(flag_key) {
             if !flag_config.active {
                 return Err(PostHogEvaluationError::NotAvailable(format!(
-                    "The feature flag is not active: {}",
-                    flag_key
+                    "The feature flag is not active: {flag_key}"
                 )));
             }
             if flag_config.filters.multivariate.is_some() {
@@ -456,8 +444,7 @@ impl FeatureStore {
                 match self.evaluate_group(group, hash_on_global_rollout_percentage, properties)? {
                     GroupEvaluationResult::MatchedAndOverride(_) => {
                         return Err(PostHogEvaluationError::Internal(format!(
-                            "Boolean flag cannot have overrides: {}",
-                            flag_key
+                            "Boolean flag cannot have overrides: {flag_key}"
                         )));
                     }
                     GroupEvaluationResult::MatchedAndEvaluate => {
@@ -471,8 +458,7 @@ impl FeatureStore {
         } else {
             // The feature flag is not available yet
             Err(PostHogEvaluationError::NotAvailable(format!(
-                "Not found in the local evaluation spec: {}",
-                flag_key
+                "Not found in the local evaluation spec: {flag_key}"
             )))
         }
     }
@@ -483,8 +469,7 @@ impl FeatureStore {
             Ok(flag_config.filters.multivariate.is_none())
         } else {
             Err(PostHogEvaluationError::NotAvailable(format!(
-                "Not found in the local evaluation spec: {}",
-                flag_key
+                "Not found in the local evaluation spec: {flag_key}"
             )))
         }
     }
@@ -559,17 +544,8 @@ impl PostHogClient {
         self.config.server_api_key.starts_with("phs_")
     }
 
-    /// Fetch the feature flag specs from the server.
-    ///
-    /// This is unfortunately an undocumented API at:
-    /// - <https://posthog.com/docs/api/feature-flags#get-api-projects-project_id-feature_flags-local_evaluation>
-    /// - <https://posthog.com/docs/feature-flags/local-evaluation>
-    ///
-    /// The handling logic in [`FeatureStore`] mostly follows the Python API implementation.
-    /// See `_compute_flag_locally` in <https://github.com/PostHog/posthog-python/blob/master/posthog/client.py>
-    pub async fn get_feature_flags_local_evaluation(
-        &self,
-    ) -> anyhow::Result<LocalEvaluationResponse> {
+    /// Get the raw JSON spec, same as `get_feature_flags_local_evaluation` but without parsing.
+    pub async fn get_feature_flags_local_evaluation_raw(&self) -> anyhow::Result<String> {
         // BASE_URL/api/projects/:project_id/feature_flags/local_evaluation
         // with bearer token of self.server_api_key
         // OR
@@ -603,7 +579,22 @@ impl PostHogClient {
                 body
             ));
         }
-        Ok(serde_json::from_str(&body)?)
+        Ok(body)
+    }
+
+    /// Fetch the feature flag specs from the server.
+    ///
+    /// This is unfortunately an undocumented API at:
+    /// - <https://posthog.com/docs/api/feature-flags#get-api-projects-project_id-feature_flags-local_evaluation>
+    /// - <https://posthog.com/docs/feature-flags/local-evaluation>
+    ///
+    /// The handling logic in [`FeatureStore`] mostly follows the Python API implementation.
+    /// See `_compute_flag_locally` in <https://github.com/PostHog/posthog-python/blob/master/posthog/client.py>
+    pub async fn get_feature_flags_local_evaluation(
+        &self,
+    ) -> Result<LocalEvaluationResponse, anyhow::Error> {
+        let raw = self.get_feature_flags_local_evaluation_raw().await?;
+        Ok(serde_json::from_str(&raw)?)
     }
 
     /// Capture an event. This will only be used to report the feature flag usage back to PostHog, though

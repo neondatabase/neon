@@ -193,10 +193,10 @@ mod tests {
             })
             .unwrap();
 
-        println!("members: {}", members);
+        println!("members: {members}");
 
         let j = serde_json::to_string(&members).expect("failed to serialize");
-        println!("members json: {}", j);
+        println!("members json: {j}");
         assert_eq!(
             j,
             r#"[{"id":42,"host":"lala.org","pg_port":5432},{"id":43,"host":"bubu.org","pg_port":5432}]"#

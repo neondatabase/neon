@@ -68,16 +68,9 @@ impl<A: Alignment> AlignedBuffer<A> {
 
         assert!(
             begin <= end,
-            "range start must not be greater than end: {:?} <= {:?}",
-            begin,
-            end,
+            "range start must not be greater than end: {begin:?} <= {end:?}",
         );
-        assert!(
-            end <= len,
-            "range end out of bounds: {:?} <= {:?}",
-            end,
-            len,
-        );
+        assert!(end <= len, "range end out of bounds: {end:?} <= {len:?}",);
 
         let begin = self.range.start + begin;
         let end = self.range.start + end;

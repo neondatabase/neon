@@ -16,10 +16,11 @@
 //! stream combinators without dealing with errors, and avoids validating the same message twice.
 
 use std::fmt::Display;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use postgres_ffi::Oid;
-// TODO: split out Lsn, RelTag, SlruKind, Oid and other basic types to a separate crate, to avoid
+use postgres_ffi_types::Oid;
+// TODO: split out Lsn, RelTag, SlruKind and other basic types to a separate crate, to avoid
 // pulling in all of their other crate dependencies when building the client.
 use utils::lsn::Lsn;
 
@@ -191,15 +192,21 @@ pub struct GetBaseBackupRequest {
     pub replica: bool,
     /// If true, include relation files in the base backup. Mainly for debugging and tests.
     pub full: bool,
+    /// Compression algorithm to use. Base backups send a compressed payload instead of using gRPC
+    /// compression, so that we can cache compressed backups on the server.
+    pub compression: BaseBackupCompression,
 }
 
-impl From<proto::GetBaseBackupRequest> for GetBaseBackupRequest {
-    fn from(pb: proto::GetBaseBackupRequest) -> Self {
-        Self {
+impl TryFrom<proto::GetBaseBackupRequest> for GetBaseBackupRequest {
+    type Error = ProtocolError;
+
+    fn try_from(pb: proto::GetBaseBackupRequest) -> Result<Self, Self::Error> {
+        Ok(Self {
             lsn: (pb.lsn != 0).then_some(Lsn(pb.lsn)),
             replica: pb.replica,
             full: pb.full,
-        }
+            compression: pb.compression.try_into()?,
+        })
     }
 }
 
@@ -209,7 +216,52 @@ impl From<GetBaseBackupRequest> for proto::GetBaseBackupRequest {
             lsn: request.lsn.unwrap_or_default().0,
             replica: request.replica,
             full: request.full,
+            compression: request.compression.into(),
         }
+    }
+}
+
+/// Base backup compression algorithm.
+#[derive(Clone, Copy, Debug)]
+pub enum BaseBackupCompression {
+    None,
+    Gzip,
+}
+
+impl TryFrom<proto::BaseBackupCompression> for BaseBackupCompression {
+    type Error = ProtocolError;
+
+    fn try_from(pb: proto::BaseBackupCompression) -> Result<Self, Self::Error> {
+        match pb {
+            proto::BaseBackupCompression::Unknown => Err(ProtocolError::invalid("compression", pb)),
+            proto::BaseBackupCompression::None => Ok(Self::None),
+            proto::BaseBackupCompression::Gzip => Ok(Self::Gzip),
+        }
+    }
+}
+
+impl TryFrom<i32> for BaseBackupCompression {
+    type Error = ProtocolError;
+
+    fn try_from(compression: i32) -> Result<Self, Self::Error> {
+        proto::BaseBackupCompression::try_from(compression)
+            .map_err(|_| ProtocolError::invalid("compression", compression))
+            .and_then(Self::try_from)
+    }
+}
+
+impl From<BaseBackupCompression> for proto::BaseBackupCompression {
+    fn from(compression: BaseBackupCompression) -> Self {
+        match compression {
+            BaseBackupCompression::None => Self::None,
+            BaseBackupCompression::Gzip => Self::Gzip,
+        }
+    }
+}
+
+impl From<BaseBackupCompression> for i32 {
+    fn from(compression: BaseBackupCompression) -> Self {
+        proto::BaseBackupCompression::from(compression).into()
     }
 }
 
@@ -652,3 +704,54 @@ impl From<GetSlruSegmentResponse> for proto::GetSlruSegmentResponse {
 
 // SlruKind is defined in pageserver_api::reltag.
 pub type SlruKind = pageserver_api::reltag::SlruKind;
+
+/// Acquires or extends a lease on the given LSN. This guarantees that the Pageserver won't garbage
+/// collect the LSN until the lease expires.
+pub struct LeaseLsnRequest {
+    /// The LSN to lease.
+    pub lsn: Lsn,
+}
+
+impl TryFrom<proto::LeaseLsnRequest> for LeaseLsnRequest {
+    type Error = ProtocolError;
+
+    fn try_from(pb: proto::LeaseLsnRequest) -> Result<Self, Self::Error> {
+        if pb.lsn == 0 {
+            return Err(ProtocolError::Missing("lsn"));
+        }
+        Ok(Self { lsn: Lsn(pb.lsn) })
+    }
+}
+
+impl From<LeaseLsnRequest> for proto::LeaseLsnRequest {
+    fn from(request: LeaseLsnRequest) -> Self {
+        Self { lsn: request.lsn.0 }
+    }
+}
+
+/// Lease expiration time. If the lease could not be granted because the LSN has already been
+/// garbage collected, a FailedPrecondition status will be returned instead.
+pub type LeaseLsnResponse = SystemTime;
+
+impl TryFrom<proto::LeaseLsnResponse> for LeaseLsnResponse {
+    type Error = ProtocolError;
+
+    fn try_from(pb: proto::LeaseLsnResponse) -> Result<Self, Self::Error> {
+        let expires = pb.expires.ok_or(ProtocolError::Missing("expires"))?;
+        UNIX_EPOCH
+            .checked_add(Duration::new(expires.seconds as u64, expires.nanos as u32))
+            .ok_or_else(|| ProtocolError::invalid("expires", expires))
+    }
+}
+
+impl From<LeaseLsnResponse> for proto::LeaseLsnResponse {
+    fn from(response: LeaseLsnResponse) -> Self {
+        let expires = response.duration_since(UNIX_EPOCH).unwrap_or_default();
+        Self {
+            expires: Some(prost_types::Timestamp {
+                seconds: expires.as_secs() as i64,
+                nanos: expires.subsec_nanos() as i32,
+            }),
+        }
+    }
+}

@@ -25,7 +25,7 @@ use pageserver_api::keyspace::{KeySpaceRandomAccum, SparseKeySpace};
 use pageserver_api::models::RelSizeMigration;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
-use postgres_ffi::{BLCKSZ, TimestampTz, TransactionId};
+use postgres_ffi::{BLCKSZ, PgMajorVersion, TimestampTz, TransactionId};
 use postgres_ffi_types::forknum::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi_types::{Oid, RepOriginId};
 use serde::{Deserialize, Serialize};
@@ -1081,7 +1081,7 @@ impl Timeline {
         // fetch directory entry
         let buf = self.get(TWOPHASEDIR_KEY, lsn, ctx).await?;
 
-        if self.pg_version >= 17 {
+        if self.pg_version >= PgMajorVersion::PG17 {
             Ok(TwoPhaseDirectoryV17::des(&buf)?.xids)
         } else {
             Ok(TwoPhaseDirectory::des(&buf)?
@@ -1185,7 +1185,7 @@ impl Timeline {
             }
             let origin_id = k.field6 as RepOriginId;
             let origin_lsn = Lsn::des(&v)
-                .with_context(|| format!("decode replorigin value for {}: {v:?}", origin_id))?;
+                .with_context(|| format!("decode replorigin value for {origin_id}: {v:?}"))?;
             if origin_lsn != Lsn::INVALID {
                 result.insert(origin_id, origin_lsn);
             }
@@ -1613,7 +1613,7 @@ impl DatadirModification<'_> {
             .push((DirectoryKind::Db, MetricsUpdate::Set(0)));
         self.put(DBDIR_KEY, Value::Image(buf.into()));
 
-        let buf = if self.tline.pg_version >= 17 {
+        let buf = if self.tline.pg_version >= PgMajorVersion::PG17 {
             TwoPhaseDirectoryV17::ser(&TwoPhaseDirectoryV17 {
                 xids: HashSet::new(),
             })
@@ -1967,7 +1967,7 @@ impl DatadirModification<'_> {
     ) -> Result<(), WalIngestError> {
         // Add it to the directory entry
         let dirbuf = self.get(TWOPHASEDIR_KEY, ctx).await?;
-        let newdirbuf = if self.tline.pg_version >= 17 {
+        let newdirbuf = if self.tline.pg_version >= PgMajorVersion::PG17 {
             let mut dir = TwoPhaseDirectoryV17::des(&dirbuf)?;
             if !dir.xids.insert(xid) {
                 Err(WalIngestErrorKind::FileAlreadyExists(xid))?;
@@ -2383,7 +2383,7 @@ impl DatadirModification<'_> {
     ) -> Result<(), WalIngestError> {
         // Remove it from the directory entry
         let buf = self.get(TWOPHASEDIR_KEY, ctx).await?;
-        let newdirbuf = if self.tline.pg_version >= 17 {
+        let newdirbuf = if self.tline.pg_version >= PgMajorVersion::PG17 {
             let mut dir = TwoPhaseDirectoryV17::des(&buf)?;
 
             if !dir.xids.remove(&xid) {
@@ -2440,8 +2440,7 @@ impl DatadirModification<'_> {
             if path == p {
                 assert!(
                     modifying_file.is_none(),
-                    "duplicated entries found for {}",
-                    path
+                    "duplicated entries found for {path}"
                 );
                 modifying_file = Some(content);
             } else {
@@ -3016,7 +3015,7 @@ mod tests {
         // This shard will get the even blocks
         let shard = ShardIdentity::from_params(
             ShardNumber(0),
-            &ShardParameters {
+            ShardParameters {
                 count: ShardCount(2),
                 stripe_size: ShardStripeSize(1),
             },

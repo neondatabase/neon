@@ -86,7 +86,7 @@ impl ShmemHandle {
         // somewhat smaller than that, because with anything close to that, you'll run out of
         // memory anyway.
         if max_size >= 1 << 48 {
-            panic!("max size {} too large", max_size);
+            panic!("max size {max_size} too large");
         }
         if initial_size > max_size {
             panic!("initial size {initial_size} larger than max size {max_size}");
@@ -279,7 +279,7 @@ mod tests {
     fn assert_range(ptr: *const u8, expected: u8, range: Range<usize>) {
         for i in range {
             let b = unsafe { *(ptr.add(i)) };
-            assert_eq!(expected, b, "unexpected byte at offset {}", i);
+            assert_eq!(expected, b, "unexpected byte at offset {i}");
         }
     }
 

@@ -546,6 +546,11 @@ pub struct TimelineImportRequest {
     pub sk_set: Vec<NodeId>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct TimelineSafekeeperMigrateRequest {
+    pub new_sk_set: Vec<NodeId>,
+}
+
 #[cfg(test)]
 mod test {
     use serde_json;
@@ -577,8 +582,7 @@ mod test {
         let err = serde_json::from_value::<TenantCreateRequest>(create_request).unwrap_err();
         assert!(
             err.to_string().contains("unknown field `unknown_field`"),
-            "expect unknown field `unknown_field` error, got: {}",
-            err
+            "expect unknown field `unknown_field` error, got: {err}"
         );
     }
 

@@ -501,7 +501,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 
                     let old_cache_block = block_entry.cache_block.swap(cache_block, Ordering::Relaxed);
                     if old_cache_block != INVALID_CACHE_BLOCK {
-                        panic!("remember_page called in !is_write mode, but page is already cached at blk {}", old_cache_block);
+                        panic!("remember_page called in !is_write mode, but page is already cached at blk {old_cache_block}");
                     }
                     UpdateAction::Nothing
                 } else {

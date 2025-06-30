@@ -130,7 +130,7 @@ impl PooledItemFactory<StreamReturner> for StreamFactory {
                                 if let Some(sender) = hashmap.get(&response.request_id) {
                                     // Send the response to the original request sender
                                     if let Err(e) = sender.send(Ok(response.clone())).await {
-                                        eprintln!("Failed to send response: {}", e);
+                                        eprintln!("Failed to send response: {e}");
                                     }
                                     hashmap.remove(&response.request_id);
                                 } else {
@@ -152,7 +152,7 @@ impl PooledItemFactory<StreamReturner> for StreamFactory {
                     for sender in hashmap.values() {
                         let error = Status::new(Code::Unknown, "Stream closed");
                         if let Err(e) = sender.send(Err(error)).await {
-                            eprintln!("Failed to send close response: {}", e);
+                            eprintln!("Failed to send close response: {e}");
                         }
                     }
                     *hashmap_opt = None;
@@ -514,7 +514,7 @@ impl ShardedRequestTracker {
         let response = tracker.send_getpage_request(req).await;
         match response {
             Ok(resp) => Ok(resp),
-            Err(e) => Err(tonic::Status::unknown(format!("Failed to get page: {}", e))),
+            Err(e) => Err(tonic::Status::unknown(format!("Failed to get page: {e}"))),
         }
     }
 
@@ -570,8 +570,7 @@ impl ShardedRequestTracker {
             Ok(t.clone())
         } else {
             Err(tonic::Status::not_found(format!(
-                "Shard {} not found",
-                shard_index
+                "Shard {shard_index} not found",
             )))
         }
     }

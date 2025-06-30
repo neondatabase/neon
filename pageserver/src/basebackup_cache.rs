@@ -1,13 +1,12 @@
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Context;
-use async_compression::tokio::write::GzipEncoder;
 use camino::{Utf8Path, Utf8PathBuf};
 use metrics::core::{AtomicU64, GenericCounter};
 use pageserver_api::{config::BasebackupCacheConfig, models::TenantState};
 use tokio::{
     io::{AsyncWriteExt, BufWriter},
-    sync::mpsc::{UnboundedReceiver, UnboundedSender},
+    sync::mpsc::{Receiver, Sender, error::TrySendError},
 };
 use tokio_util::sync::CancellationToken;
 use utils::{
@@ -20,8 +19,8 @@ use crate::{
     basebackup::send_basebackup_tarball,
     context::{DownloadBehavior, RequestContext},
     metrics::{
-        BASEBACKUP_CACHE_ENTRIES, BASEBACKUP_CACHE_PREPARE, BASEBACKUP_CACHE_READ,
-        BASEBACKUP_CACHE_SIZE,
+        BASEBACKUP_CACHE_ENTRIES, BASEBACKUP_CACHE_PREPARE, BASEBACKUP_CACHE_PREPARE_QUEUE_SIZE,
+        BASEBACKUP_CACHE_READ, BASEBACKUP_CACHE_SIZE,
     },
     task_mgr::TaskKind,
     tenant::{
@@ -36,8 +35,8 @@ pub struct BasebackupPrepareRequest {
     pub lsn: Lsn,
 }
 
-pub type BasebackupPrepareSender = UnboundedSender<BasebackupPrepareRequest>;
-pub type BasebackupPrepareReceiver = UnboundedReceiver<BasebackupPrepareRequest>;
+pub type BasebackupPrepareSender = Sender<BasebackupPrepareRequest>;
+pub type BasebackupPrepareReceiver = Receiver<BasebackupPrepareRequest>;
 
 #[derive(Clone)]
 struct CacheEntry {
@@ -61,40 +60,65 @@ struct CacheEntry {
 /// and ~1 RPS for get requests.
 pub struct BasebackupCache {
     data_dir: Utf8PathBuf,
+    config: Option<BasebackupCacheConfig>,
 
     entries: std::sync::Mutex<HashMap<TenantTimelineId, CacheEntry>>,
+
+    prepare_sender: BasebackupPrepareSender,
 
     read_hit_count: GenericCounter<AtomicU64>,
     read_miss_count: GenericCounter<AtomicU64>,
     read_err_count: GenericCounter<AtomicU64>,
+
+    prepare_skip_count: GenericCounter<AtomicU64>,
 }
 
 impl BasebackupCache {
-    /// Creates a BasebackupCache and spawns the background task.
-    /// The initialization of the cache is performed in the background and does not
-    /// block the caller. The cache will return `None` for any get requests until
-    /// initialization is complete.
-    pub fn spawn(
-        runtime_handle: &tokio::runtime::Handle,
+    /// Create a new BasebackupCache instance.
+    /// Also returns a BasebackupPrepareReceiver which is needed to start
+    /// the background task.
+    /// The cache is initialized from the data_dir in the background task.
+    /// The cache will return `None` for any get requests until the initialization is complete.
+    /// The background task is spawned separately using [`Self::spawn_background_task`]
+    /// to avoid a circular dependency between the cache and the tenant manager.
+    pub fn new(
         data_dir: Utf8PathBuf,
         config: Option<BasebackupCacheConfig>,
-        prepare_receiver: BasebackupPrepareReceiver,
-        tenant_manager: Arc<TenantManager>,
-        cancel: CancellationToken,
-    ) -> Arc<Self> {
+    ) -> (Arc<Self>, BasebackupPrepareReceiver) {
+        let chan_size = config.as_ref().map(|c| c.max_size_entries).unwrap_or(1);
+
+        let (prepare_sender, prepare_receiver) = tokio::sync::mpsc::channel(chan_size);
+
         let cache = Arc::new(BasebackupCache {
             data_dir,
-
+            config,
             entries: std::sync::Mutex::new(HashMap::new()),
+            prepare_sender,
 
             read_hit_count: BASEBACKUP_CACHE_READ.with_label_values(&["hit"]),
             read_miss_count: BASEBACKUP_CACHE_READ.with_label_values(&["miss"]),
             read_err_count: BASEBACKUP_CACHE_READ.with_label_values(&["error"]),
+
+            prepare_skip_count: BASEBACKUP_CACHE_PREPARE.with_label_values(&["skip"]),
         });
 
-        if let Some(config) = config {
+        (cache, prepare_receiver)
+    }
+
+    /// Spawns the background task.
+    /// The background task initializes the cache from the disk,
+    /// processes prepare requests, and cleans up outdated cache entries.
+    /// Noop if the cache is disabled (config is None).
+    pub fn spawn_background_task(
+        self: Arc<Self>,
+        runtime_handle: &tokio::runtime::Handle,
+        prepare_receiver: BasebackupPrepareReceiver,
+        tenant_manager: Arc<TenantManager>,
+        cancel: CancellationToken,
+    ) {
+        if let Some(config) = self.config.clone() {
             let background = BackgroundTask {
-                c: cache.clone(),
+                c: self,
 
                 config,
                 tenant_manager,
@@ -109,8 +133,45 @@ impl BasebackupCache {
             };
             runtime_handle.spawn(background.run(prepare_receiver));
         }
+    }
 
-        cache
+    /// Send a basebackup prepare request to the background task.
+    /// The basebackup will be prepared asynchronously, it does not block the caller.
+    /// The request will be skipped if any cache limits are exceeded.
+    pub fn send_prepare(&self, tenant_shard_id: TenantShardId, timeline_id: TimelineId, lsn: Lsn) {
+        let req = BasebackupPrepareRequest {
+            tenant_shard_id,
+            timeline_id,
+            lsn,
+        };
+
+        BASEBACKUP_CACHE_PREPARE_QUEUE_SIZE.inc();
+        let res = self.prepare_sender.try_send(req);
+
+        if let Err(e) = res {
+            BASEBACKUP_CACHE_PREPARE_QUEUE_SIZE.dec();
+            self.prepare_skip_count.inc();
+            match e {
+                TrySendError::Full(_) => {
+                    // Basebackup prepares are pretty rare, normally we should not hit this.
+                    tracing::info!(
+                        tenant_id = %tenant_shard_id.tenant_id,
+                        %timeline_id,
+                        %lsn,
+                        "Basebackup prepare channel is full, skipping the request"
+                    );
+                }
+                TrySendError::Closed(_) => {
+                    // Normal during shutdown, not critical.
+                    tracing::info!(
+                        tenant_id = %tenant_shard_id.tenant_id,
+                        %timeline_id,
+                        %lsn,
+                        "Basebackup prepare channel is closed, skipping the request"
+                    );
+                }
+            }
+        }
     }
 
     /// Gets a basebackup entry from the cache.
@@ -123,6 +184,10 @@ impl BasebackupCache {
         timeline_id: TimelineId,
         lsn: Lsn,
     ) -> Option<tokio::fs::File> {
+        if !self.is_enabled() {
+            return None;
+        }
+
         // Fast path. Check if the entry exists using the in-memory state.
         let tti = TenantTimelineId::new(tenant_id, timeline_id);
         if self.entries.lock().unwrap().get(&tti).map(|e| e.lsn) != Some(lsn) {
@@ -148,6 +213,10 @@ impl BasebackupCache {
                 None
             }
         }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.config.is_some()
     }
 
     // Private methods.
@@ -367,6 +436,7 @@ impl BackgroundTask {
         loop {
             tokio::select! {
                 Some(req) = prepare_receiver.recv() => {
+                    BASEBACKUP_CACHE_PREPARE_QUEUE_SIZE.dec();
                     if let Err(err) = self.prepare_basebackup(
                         req.tenant_shard_id,
                         req.timeline_id,
@@ -594,13 +664,6 @@ impl BackgroundTask {
         let file = tokio::fs::File::create(entry_tmp_path).await?;
         let mut writer = BufWriter::new(file);
 
-        let mut encoder = GzipEncoder::with_quality(
-            &mut writer,
-            // Level::Best because compression is not on the hot path of basebackup requests.
-            // The decompression is almost not affected by the compression level.
-            async_compression::Level::Best,
-        );
-
         // We may receive a request before the WAL record is applied to the timeline.
         // Wait for the requested LSN to be applied.
         timeline
@@ -613,17 +676,19 @@ impl BackgroundTask {
             .await?;
 
         send_basebackup_tarball(
-            &mut encoder,
+            &mut writer,
             timeline,
             Some(req_lsn),
             None,
             false,
             false,
+            // Level::Best because compression is not on the hot path of basebackup requests.
+            // The decompression is almost not affected by the compression level.
+            Some(async_compression::Level::Best),
             &ctx,
         )
         .await?;
 
-        encoder.shutdown().await?;
         writer.flush().await?;
         writer.into_inner().sync_all().await?;
 

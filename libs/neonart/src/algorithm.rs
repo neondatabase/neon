@@ -355,8 +355,8 @@ enum PathElement {
 impl std::fmt::Debug for PathElement {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         match self {
-            PathElement::Prefix(prefix) => write!(fmt, "{:?}", prefix),
-            PathElement::KeyByte(key_byte) => write!(fmt, "{}", key_byte),
+            PathElement::Prefix(prefix) => write!(fmt, "{prefix:?}"),
+            PathElement::KeyByte(key_byte) => write!(fmt, "{key_byte}"),
         }
     }
 }
@@ -395,7 +395,7 @@ fn dump_recurse<'e, V: Value + std::fmt::Debug>(
         // and the lifetime of 'epoch_pin' enforces that the reference is only accessible
         // as long as the epoch is pinned.
         let val = unsafe { vptr.as_ref().unwrap() };
-        writeln!(dst, "{} {:?}: {:?}", indent, path, val).unwrap();
+        writeln!(dst, "{indent} {path:?}: {val:?}").unwrap();
         return Ok(());
     }
 

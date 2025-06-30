@@ -66,6 +66,7 @@ uuid.workspace = true
 walkdir.workspace = true
 x509-cert.workspace = true
 
+postgres_versioninfo.workspace = true
 postgres_initdb.workspace = true
 compute_api.workspace = true
 utils.workspace = true

@@ -23,9 +23,8 @@ impl KeyPrefix {
 
 #[cfg(test)]
 mod tests {
-    use crate::pqproto::id_to_cancel_key;
-
     use super::*;
+    use crate::pqproto::id_to_cancel_key;
 
     #[test]
     fn test_build_redis_key() {
