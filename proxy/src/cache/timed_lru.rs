@@ -228,7 +228,7 @@ impl<K: Hash + Eq + Clone, V: Clone> TimedLru<K, V> {
     pub(crate) fn flush(&self) {
         let now = Instant::now();
         let mut cache = self.cache.lock();
-        
+
         // Collect keys of expired entries first
         let expired_keys: Vec<_> = cache
             .iter()

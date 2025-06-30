@@ -3,8 +3,8 @@
 
 use anyhow::Context;
 use bytes::Bytes;
-use http::{Response, StatusCode, HeaderName, HeaderValue, HeaderMap};
 use http::header::AUTHORIZATION;
+use http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use http_utils::error::ApiError;
@@ -12,18 +12,18 @@ use serde::Serialize;
 use url::Url;
 use uuid::Uuid;
 
-use crate::context::RequestContext;
+use super::conn_pool::AuthData;
+use super::conn_pool::ConnInfoWithAuth;
+use super::conn_pool_lib::ConnInfo;
+use super::error::{ConnInfoError, Credentials};
+use crate::auth::backend::ComputeUserInfo;
+use crate::auth::endpoint_sni;
 use crate::config::{AuthenticationConfig, TlsConfig};
-use crate::auth::backend::{ComputeUserInfo};
-use crate::auth::{endpoint_sni, };
+use crate::context::RequestContext;
 use crate::metrics::{Metrics, SniGroup, SniKind};
 use crate::pqproto::StartupMessageParams;
 use crate::proxy::NeonOptions;
-use super::conn_pool::ConnInfoWithAuth;
-use super::error::{ConnInfoError, Credentials};
 use crate::types::{DbName, RoleName};
-use super::conn_pool::{AuthData};
-use super::conn_pool_lib::{ConnInfo};
 
 // Common header names used across serverless modules
 pub(super) static NEON_REQUEST_ID: HeaderName = HeaderName::from_static("neon-request-id");
@@ -31,7 +31,8 @@ pub(super) static CONN_STRING: HeaderName = HeaderName::from_static("neon-connec
 pub(super) static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 pub(super) static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
 pub(super) static ALLOW_POOL: HeaderName = HeaderName::from_static("neon-pool-opt-in");
-pub(super) static TXN_ISOLATION_LEVEL: HeaderName = HeaderName::from_static("neon-batch-isolation-level");
+pub(super) static TXN_ISOLATION_LEVEL: HeaderName =
+    HeaderName::from_static("neon-batch-isolation-level");
 pub(super) static TXN_READ_ONLY: HeaderName = HeaderName::from_static("neon-batch-read-only");
 pub(super) static TXN_DEFERRABLE: HeaderName = HeaderName::from_static("neon-batch-deferrable");
 
@@ -140,7 +141,6 @@ pub(crate) fn json_response<T: Serialize>(
     Ok(response)
 }
 
-
 pub(crate) fn get_conn_info(
     config: &'static AuthenticationConfig,
     ctx: &RequestContext,
@@ -148,7 +148,7 @@ pub(crate) fn get_conn_info(
     headers: &HeaderMap,
     tls: Option<&TlsConfig>,
 ) -> Result<ConnInfoWithAuth, ConnInfoError> {
-    let connection_url = match  connection_string {
+    let connection_url = match connection_string {
         Some(connection_string) => Url::parse(connection_string)?,
         None => {
             let connection_string = headers
@@ -159,7 +159,7 @@ pub(crate) fn get_conn_info(
             Url::parse(connection_string)?
         }
     };
-    
+
     let protocol = connection_url.scheme();
     if protocol != "postgres" && protocol != "postgresql" {
         return Err(ConnInfoError::IncorrectScheme);

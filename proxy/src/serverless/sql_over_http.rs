@@ -1,13 +1,14 @@
-use std::pin::pin;
-use std::sync::Arc;
 use bytes::Bytes;
 use futures::future::{Either, select, try_join};
 use futures::{StreamExt, TryFutureExt};
 use http::{Method, header::AUTHORIZATION};
-use http_body_util::{combinators::BoxBody, Full, BodyExt};
+use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use http_utils::error::ApiError;
 use hyper::body::Incoming;
-use hyper::{http::{HeaderName, HeaderValue}, Request, Response, StatusCode, header};
+use hyper::{
+    Request, Response, StatusCode, header,
+    http::{HeaderName, HeaderValue},
+};
 use indexmap::IndexMap;
 use postgres_client::error::{DbError, ErrorPosition, SqlState};
 use postgres_client::{
@@ -15,27 +16,29 @@ use postgres_client::{
 };
 use serde::Serialize;
 use serde_json::{Value, value::RawValue};
+use std::pin::pin;
+use std::sync::Arc;
 use tokio::time::{self, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 use typed_json::json;
 
 use super::backend::{LocalProxyConnError, PoolingBackend};
-use super::conn_pool::{AuthData,};
+use super::conn_pool::AuthData;
 use super::conn_pool_lib::{self, ConnInfo};
-use super::error::{HttpCodeError, ConnInfoError, ReadPayloadError};
+use super::error::{ConnInfoError, HttpCodeError, ReadPayloadError};
 use super::http_util::{
-    json_response, uuid_to_header_value, get_conn_info,
-    NEON_REQUEST_ID, CONN_STRING, RAW_TEXT_OUTPUT, ARRAY_MODE, ALLOW_POOL, TXN_ISOLATION_LEVEL, TXN_READ_ONLY, TXN_DEFERRABLE
+    ALLOW_POOL, ARRAY_MODE, CONN_STRING, NEON_REQUEST_ID, RAW_TEXT_OUTPUT, TXN_DEFERRABLE,
+    TXN_ISOLATION_LEVEL, TXN_READ_ONLY, get_conn_info, json_response, uuid_to_header_value,
 };
 use super::json::{JsonConversionError, json_to_pg_text, pg_text_row_to_json};
-use crate::auth::backend::{ComputeCredentialKeys,};
+use crate::auth::backend::ComputeCredentialKeys;
 
-use crate::config::{HttpConfig, ProxyConfig,};
+use crate::config::{HttpConfig, ProxyConfig};
 use crate::context::RequestContext;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
-use crate::http::{read_body_with_limit};
-use crate::metrics::{HttpDirection, Metrics, };
+use crate::http::read_body_with_limit;
+use crate::metrics::{HttpDirection, Metrics};
 use crate::serverless::backend::HttpConnError;
 use crate::usage_metrics::{MetricCounter, MetricCounterRecorder};
 use crate::util::run_until_cancelled;
@@ -310,7 +313,6 @@ impl HttpCodeError for SqlOverHttpError {
     }
 }
 
-
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SqlOverHttpCancel {
     #[error("query was cancelled")]
@@ -495,7 +497,9 @@ async fn handle_db_inner(
                 ComputeCredentialKeys::JwtPayload(payload)
                     if backend.auth_backend.is_local_proxy() =>
                 {
-                    let mut client = backend.connect_to_local_postgres(ctx, conn_info, config.disable_pg_session_jwt).await?;
+                    let mut client = backend
+                        .connect_to_local_postgres(ctx, conn_info, config.disable_pg_session_jwt)
+                        .await?;
                     if !config.disable_pg_session_jwt {
                         let (cli_inner, _dsc) = client.client_inner();
                         cli_inner.set_jwt_session(&payload).await?;
@@ -597,7 +601,6 @@ static HEADERS_TO_FORWARD: &[&HeaderName] = &[
     &TXN_READ_ONLY,
     &TXN_DEFERRABLE,
 ];
-
 
 async fn handle_auth_broker_inner(
     ctx: &RequestContext,

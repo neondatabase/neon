@@ -11,8 +11,8 @@ mod http_conn_pool;
 mod http_util;
 mod json;
 mod local_conn_pool;
-mod sql_over_http;
 pub mod rest;
+mod sql_over_http;
 mod websocket;
 
 use std::net::{IpAddr, SocketAddr};
@@ -30,13 +30,13 @@ use futures::future::{Either, select};
 use http::{Method, Response, StatusCode};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty};
+use http_util::{NEON_REQUEST_ID, uuid_to_header_value};
 use http_utils::error::ApiError;
 use hyper::body::Incoming;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
-use http_util::{NEON_REQUEST_ID, uuid_to_header_value};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
@@ -497,7 +497,7 @@ async fn request_handler(
             .status(StatusCode::OK) // 204 is also valid, but see: https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods/OPTIONS#status_code
             .body(Empty::new().map_err(|x| match x {}).boxed())
             .map_err(|e| ApiError::InternalServerError(e.into()))
-    } else if config.rest_config.is_rest_broker && request.uri().path().starts_with("/rest")  {
+    } else if config.rest_config.is_rest_broker && request.uri().path().starts_with("/rest") {
         let ctx = RequestContext::new(
             session_id,
             conn_info,
@@ -520,7 +520,6 @@ async fn request_handler(
         rest::handle(config, ctx, request, backend, http_cancellation_token)
             .instrument(span)
             .await
-        
     } else {
         json_response(StatusCode::BAD_REQUEST, "query is not supported")
     }

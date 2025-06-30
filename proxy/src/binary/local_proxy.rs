@@ -24,7 +24,7 @@ use crate::auth::backend::local::{JWKS_ROLE_MAP, LocalBackend};
 use crate::auth::{self};
 use crate::cancellation::CancellationHandler;
 use crate::config::{
-    self, AuthenticationConfig, ComputeConfig, HttpConfig, ProxyConfig, RetryConfig, RestConfig,
+    self, AuthenticationConfig, ComputeConfig, HttpConfig, ProxyConfig, RestConfig, RetryConfig,
 };
 use crate::control_plane::locks::ApiLocks;
 use crate::control_plane::messages::{EndpointJwksResponse, JwksSettings};

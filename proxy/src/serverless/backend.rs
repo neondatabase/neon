@@ -115,7 +115,8 @@ impl PoolingBackend {
 
         match &self.auth_backend {
             crate::auth::Backend::ControlPlane(console, ()) => {
-                let keys = self.config
+                let keys = self
+                    .config
                     .authentication_config
                     .jwks_cache
                     .check_jwt(
@@ -356,7 +357,6 @@ impl PoolingBackend {
                     return Err(e.into());
                 }
             }
-
 
             info!("backend session state initialized");
         }

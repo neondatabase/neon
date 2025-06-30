@@ -13,9 +13,9 @@ use crate::rate_limiter::{RateBucketInfo, RateLimitAlgorithm, RateLimiterConfig}
 use crate::scram::threadpool::ThreadPool;
 use crate::serverless::GlobalConnPoolOptions;
 use crate::serverless::cancel_set::CancelSet;
+use crate::serverless::rest::DbSchemaCache;
 pub use crate::tls::server_config::{TlsConfig, configure_tls};
 use crate::types::Host;
-use crate::serverless::rest::DbSchemaCache;
 
 pub struct ProxyConfig {
     pub tls_config: ArcSwapOption<TlsConfig>,

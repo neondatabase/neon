@@ -396,7 +396,11 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
                     .parse()
                     .expect("url is valid"),
                 audience: None,
-                role_names: vec![(&RoleName::from("authenticator")).into(), (&RoleName::from("authenticated")).into(), (&RoleName::from("anon")).into()],
+                role_names: vec![
+                    (&RoleName::from("authenticator")).into(),
+                    (&RoleName::from("authenticated")).into(),
+                    (&RoleName::from("anon")).into(),
+                ],
             }]);
         }
 

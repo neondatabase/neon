@@ -27,7 +27,7 @@ use crate::batch::BatchQueue;
 use crate::cancellation::{CancellationHandler, CancellationProcessor};
 use crate::config::{
     self, AuthenticationConfig, CacheOptions, ComputeConfig, HttpConfig, ProjectInfoCacheOptions,
-    ProxyConfig, ProxyProtocolV2, remote_storage_from_toml, RestConfig,
+    ProxyConfig, ProxyProtocolV2, RestConfig, remote_storage_from_toml,
 };
 use crate::context::parquet::ParquetUploadArgs;
 use crate::http::health_server::AppMetrics;
@@ -500,12 +500,11 @@ pub async fn run() -> anyhow::Result<()> {
     if let Some(db_schema_cache) = &config.rest_config.db_schema_cache {
         maintenance_tasks.spawn(async move {
             loop {
-                    tokio::time::sleep(Duration::from_secs(600)).await;
-                    db_schema_cache.flush();
-                }
+                tokio::time::sleep(Duration::from_secs(600)).await;
+                db_schema_cache.flush();
+            }
         });
     }
-    
 
     if let Some(metrics_config) = &config.metric_collection {
         // TODO: Add gc regardles of the metric collection being enabled.
