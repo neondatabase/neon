@@ -2145,13 +2145,17 @@ impl Timeline {
 
         // Regardless of whether we're going to try_freeze_and_flush
         // or not, stop ingesting any more data.
+        // This will not immediately shut down everything about the walreceiver:
+        // the walreceiver calls into a lot of places (like the read path)
+        // that are controlled by other cancellation tokens that get cancelled later
+        // (like the global timeline cancellation token).
         let walreceiver = self.walreceiver.lock().unwrap().take();
         tracing::debug!(
             is_some = walreceiver.is_some(),
             "Waiting for WalReceiverManager..."
         );
         if let Some(walreceiver) = walreceiver {
-            walreceiver.shutdown().await;
+            walreceiver.cancel().await;
         }
         // ... and inform any waiters for newer LSNs that there won't be any.
         self.last_record_lsn.shutdown();

@@ -126,20 +126,10 @@ impl WalReceiver {
     }
 
     #[instrument(skip_all, level = tracing::Level::DEBUG)]
-    pub async fn shutdown(self) {
+    pub async fn cancel(self) {
         debug_assert_current_span_has_tenant_and_timeline_id();
         debug!("cancelling walreceiver tasks");
         self.cancel.cancel();
-        match self.task.await {
-            Ok(()) => debug!("Shutdown success"),
-            Err(je) if je.is_cancelled() => unreachable!("not used"),
-            Err(je) if je.is_panic() => {
-                // already logged by panic hook
-            }
-            Err(je) => {
-                error!("shutdown walreceiver task join error: {je}")
-            }
-        }
     }
 
     pub(crate) fn status(&self) -> Option<ConnectionManagerStatus> {
