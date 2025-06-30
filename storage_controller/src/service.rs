@@ -878,18 +878,18 @@ impl Service {
         // Emit compute hook notifications for all tenants which are already stably attached.  Other tenants
         // will emit compute hook notifications when they reconcile.
         //
-        // Ordering: our calls to notify_background synchronously establish a relative order for these notifications vs. any later
+        // Ordering: our calls to notify_attach_background synchronously establish a relative order for these notifications vs. any later
         // calls into the ComputeHook for the same tenant: we can leave these to run to completion in the background and any later
         // calls will be correctly ordered wrt these.
         //
-        // Concurrency: we call notify_background for all tenants, which will create O(N) tokio tasks, but almost all of them
+        // Concurrency: we call notify_attach_background for all tenants, which will create O(N) tokio tasks, but almost all of them
         // will just wait on the ComputeHook::API_CONCURRENCY semaphore immediately, so very cheap until they get that semaphore
         // unit and start doing I/O.
         tracing::info!(
             "Sending {} compute notifications",
             compute_notifications.len()
         );
-        self.compute_hook.notify_background(
+        self.compute_hook.notify_attach_background(
             compute_notifications,
             bg_compute_notify_result_tx.clone(),
             &self.cancel,
@@ -6281,7 +6281,7 @@ impl Service {
         for (child_id, child_ps, stripe_size) in child_locations {
             if let Err(e) = self
                 .compute_hook
-                .notify(
+                .notify_attach(
                     compute_hook::ShardUpdate {
                         tenant_shard_id: child_id,
                         node_id: child_ps,
