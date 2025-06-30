@@ -1947,9 +1947,7 @@ impl Timeline {
         // we don't accidentally use it later in the function.
         drop(level0_deltas);
 
-        stats.read_lock_held_prerequisites_micros = stats
-            .read_lock_held_spawn_blocking_startup_micros
-            .till_now();
+        stats.compaction_prerequisites_micros = stats.read_lock_acquisition_micros.till_now();
 
         // TODO: replace with streaming k-merge
         let all_keys = {
@@ -1971,7 +1969,7 @@ impl Timeline {
             all_keys
         };
 
-        stats.read_lock_held_key_sort_micros = stats.read_lock_held_prerequisites_micros.till_now();
+        stats.read_lock_held_key_sort_micros = stats.compaction_prerequisites_micros.till_now();
 
         // Determine N largest holes where N is number of compacted layers. The vec is sorted by key range start.
         //
@@ -2387,9 +2385,8 @@ struct CompactLevel0Phase1StatsBuilder {
     tenant_id: Option<TenantShardId>,
     timeline_id: Option<TimelineId>,
     read_lock_acquisition_micros: DurationRecorder,
-    read_lock_held_spawn_blocking_startup_micros: DurationRecorder,
     read_lock_held_key_sort_micros: DurationRecorder,
-    read_lock_held_prerequisites_micros: DurationRecorder,
+    compaction_prerequisites_micros: DurationRecorder,
     read_lock_held_compute_holes_micros: DurationRecorder,
     read_lock_drop_micros: DurationRecorder,
     write_layer_files_micros: DurationRecorder,
@@ -2404,9 +2401,8 @@ struct CompactLevel0Phase1Stats {
     tenant_id: TenantShardId,
     timeline_id: TimelineId,
     read_lock_acquisition_micros: RecordedDuration,
-    read_lock_held_spawn_blocking_startup_micros: RecordedDuration,
     read_lock_held_key_sort_micros: RecordedDuration,
-    read_lock_held_prerequisites_micros: RecordedDuration,
+    compaction_prerequisites_micros: RecordedDuration,
     read_lock_held_compute_holes_micros: RecordedDuration,
     read_lock_drop_micros: RecordedDuration,
     write_layer_files_micros: RecordedDuration,
@@ -2431,16 +2427,12 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
                 .read_lock_acquisition_micros
                 .into_recorded()
                 .ok_or_else(|| anyhow!("read_lock_acquisition_micros not set"))?,
-            read_lock_held_spawn_blocking_startup_micros: value
-                .read_lock_held_spawn_blocking_startup_micros
-                .into_recorded()
-                .ok_or_else(|| anyhow!("read_lock_held_spawn_blocking_startup_micros not set"))?,
             read_lock_held_key_sort_micros: value
                 .read_lock_held_key_sort_micros
                 .into_recorded()
                 .ok_or_else(|| anyhow!("read_lock_held_key_sort_micros not set"))?,
-            read_lock_held_prerequisites_micros: value
-                .read_lock_held_prerequisites_micros
+            compaction_prerequisites_micros: value
+                .compaction_prerequisites_micros
                 .into_recorded()
                 .ok_or_else(|| anyhow!("read_lock_held_prerequisites_micros not set"))?,
             read_lock_held_compute_holes_micros: value
