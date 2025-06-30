@@ -885,7 +885,7 @@ async fn remote_copy(
                 }
                 tracing::info!("Deleting orphan layer file to make way for hard linking");
                 // Delete orphan layer file and try again, to ensure this layer has a well understood source
-                std::fs::remove_file(adopted_path)
+                std::fs::remove_file(&adoptee_path)
                     .map_err(|e| Error::launder(e.into(), Error::Prepare))?;
                 std::fs::hard_link(adopted_path, &adoptee_path)
                     .map_err(|e| Error::launder(e.into(), Error::Prepare))?;
