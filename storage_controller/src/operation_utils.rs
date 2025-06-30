@@ -56,17 +56,18 @@ where
 }
 
 /// Check that the state of the node being drained is as expected:
-/// node is present in memory and scheduling policy is set to [`NodeSchedulingPolicy::Draining`]
+/// node is present in memory and scheduling policy is set to expected_policy
 pub(crate) fn validate_node_state(
     node_id: &NodeId,
     nodes: Arc<HashMap<NodeId, Node>>,
+    expected_policy: NodeSchedulingPolicy,
 ) -> Result<(), OperationError> {
     let node = nodes.get(node_id).ok_or(OperationError::NodeStateChanged(
         format!("node {} was removed", node_id).into(),
     ))?;
 
     let current_policy = node.get_scheduling();
-    if !matches!(current_policy, NodeSchedulingPolicy::Draining) {
+    if current_policy != expected_policy {
         // TODO(vlad): maybe cancel pending reconciles before erroring out. need to think
         // about it
         return Err(OperationError::NodeStateChanged(

@@ -201,6 +201,7 @@ impl Node {
 
         match self.scheduling {
             NodeSchedulingPolicy::Active => MaySchedule::Yes(utilization),
+            NodeSchedulingPolicy::Deleting => MaySchedule::No,
             NodeSchedulingPolicy::Draining => MaySchedule::No,
             NodeSchedulingPolicy::Filling => MaySchedule::Yes(utilization),
             NodeSchedulingPolicy::Pause => MaySchedule::No,

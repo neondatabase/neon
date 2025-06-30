@@ -2522,7 +2522,7 @@ def test_storage_controller_node_deletion(
         wait_until(assert_shards_migrated)
 
     log.info(f"Deleting pageserver {victim.id}")
-    env.storage_controller.node_delete(victim.id)
+    env.storage_controller.node_delete_old(victim.id)
 
     if not while_offline:
 
@@ -2559,6 +2559,59 @@ def test_storage_controller_node_deletion(
     env.storage_controller.start()
     assert victim.id not in [n["id"] for n in env.storage_controller.node_list()]
     env.storage_controller.consistency_check()
+
+
+def test_storage_controller_node_delete_cancellation(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_count = 10
+    shard_count_per_tenant = 16
+    tenant_ids = []
+
+    for _ in range(0, tenant_count):
+        tid = TenantId.generate()
+        tenant_ids.append(tid)
+        env.create_tenant(
+            tid, placement_policy='{"Attached":1}', shard_count=shard_count_per_tenant
+        )
+
+    # See sleep comment in the test above.
+    time.sleep(2)
+
+    nodes = env.storage_controller.node_list()
+    assert len(nodes) == 2
+
+    env.storage_controller.configure_failpoints(("sleepy-delete-loop", "return(2000)"))
+
+    ps_id_to_delete = env.pageservers[0].id
+
+    env.storage_controller.warm_up_all_secondaries()
+    env.storage_controller.retryable_node_operation(
+        lambda ps_id: env.storage_controller.node_delete(ps_id),
+        ps_id_to_delete,
+        max_attempts=3,
+        backoff=2,
+    )
+
+    env.storage_controller.poll_node_status(
+        ps_id_to_delete,
+        PageserverAvailability.ACTIVE,
+        PageserverSchedulingPolicy.DELETING,
+        max_attempts=6,
+        backoff=2,
+    )
+
+    env.storage_controller.cancel_node_drain(ps_id_to_delete)
+
+    env.storage_controller.poll_node_status(
+        ps_id_to_delete,
+        PageserverAvailability.ACTIVE,
+        PageserverSchedulingPolicy.ACTIVE,
+        max_attempts=6,
+        backoff=2,
+    )
 
 
 @pytest.mark.parametrize("shard_count", [None, 2])
@@ -3116,7 +3169,7 @@ def test_ps_unavailable_after_delete(neon_env_builder: NeonEnvBuilder):
     assert_nodes_count(3)
 
     ps = env.pageservers[0]
-    env.storage_controller.node_delete(ps.id)
+    env.storage_controller.node_delete_old(ps.id)
 
     # After deletion, the node count must be reduced
     wait_until(lambda: assert_nodes_count(2))

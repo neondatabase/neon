@@ -892,6 +892,24 @@ async fn handle_node_drop(req: Request<Body>) -> Result<Response<Body>, ApiError
     json_response(StatusCode::OK, state.service.node_drop(node_id).await?)
 }
 
+async fn handle_node_delete_old(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+    json_response(
+        StatusCode::OK,
+        state.service.node_delete_old(node_id).await?,
+    )
+}
+
 async fn handle_tombstone_list(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -2218,7 +2236,11 @@ pub fn make_router(
         // This endpoint is deprecated and will be removed in a future version.
         // Use PUT /control/v1/node/:node_id/delete instead.
         .delete("/control/v1/node/:node_id", |r| {
-            named_request_span(r, handle_node_delete, RequestName("control_v1_node_delete"))
+            named_request_span(
+                r,
+                handle_node_delete_old,
+                RequestName("control_v1_node_delete"),
+            )
         })
         .get("/control/v1/node", |r| {
             named_request_span(r, handle_node_list, RequestName("control_v1_node"))

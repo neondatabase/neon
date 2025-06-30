@@ -69,7 +69,6 @@ use crate::background_node_operations::{
     Delete, Drain, Fill, MAX_RECONCILES_PER_OPERATION, Operation, OperationError, OperationHandler,
 };
 use crate::compute_hook::{self, ComputeHook, NotifyError};
-use crate::drain_utils::{self, TenantShardDrain, TenantShardIterator};
 use crate::heartbeater::{Heartbeater, PageserverState, SafekeeperState};
 use crate::id_lock_map::{
     IdLockMap, TracingExclusiveGuard, trace_exclusive_lock, trace_shared_lock,
@@ -77,6 +76,7 @@ use crate::id_lock_map::{
 use crate::leadership::Leadership;
 use crate::metrics;
 use crate::node::{AvailabilityTransition, Node};
+use crate::operation_utils::{self, TenantShardDrain, TenantShardIterator};
 use crate::pageserver_client::PageserverClient;
 use crate::peer_client::GlobalObservedState;
 use crate::persistence::split_state::SplitState;
@@ -103,7 +103,7 @@ use crate::timeline_import::{
     TimelineImportFinalizeError, TimelineImportState, UpcallClient,
 };
 
-const WAITER_FILL_DRAIN_POLL_TIMEOUT: Duration = Duration::from_millis(500);
+const WAITER_OPERATION_POLL_TIMEOUT: Duration = Duration::from_millis(500);
 
 // For operations that should be quick, like attaching a new tenant
 const SHORT_RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -2334,6 +2334,7 @@ impl Service {
                 NodeSchedulingPolicy::PauseForRestart
                     | NodeSchedulingPolicy::Draining
                     | NodeSchedulingPolicy::Filling
+                    | NodeSchedulingPolicy::Deleting
             );
 
             let mut new_nodes = (**nodes).clone();
@@ -6965,11 +6966,7 @@ impl Service {
     /// If a node has any work on it, it will be rescheduled: this is "clean" in the sense
     /// that we don't leave any bad state behind in the storage controller, but unclean
     /// in the sense that we are not carefully draining the node.
-    pub(crate) async fn delete_node(
-        &self,
-        node_id: NodeId,
-        _cancel: CancellationToken,
-    ) -> Result<(), OperationError> {
+    pub(crate) async fn node_delete_old(&self, node_id: NodeId) -> Result<(), ApiError> {
         let _node_lock =
             trace_exclusive_lock(&self.node_op_locks, node_id, NodeOperations::Delete).await;
 
@@ -7014,7 +7011,7 @@ impl Service {
                                 "Refusing to delete node, shard {} can't be rescheduled: {e}",
                                 shard.tenant_shard_id
                             );
-                            return Err(OperationError::ImpossibleConstraint(e.to_string().into()));
+                            return Err(e.into());
                         } else {
                             tracing::info!(
                                 "Rescheduled shard {} away from node during deletion",
@@ -7067,6 +7064,167 @@ impl Service {
         // 2. Actually delete the node from in-memory state and set tombstone to the database
         // for preventing the node to register again.
         tracing::info!("Deleting node from database");
+        self.persistence.set_tombstone(node_id).await?;
+
+        Ok(())
+    }
+
+    /// If a node has any work on it, it will be rescheduled: this is "clean" in the sense
+    /// that we don't leave any bad state behind in the storage controller, but unclean
+    /// in the sense that we are not carefully draining the node.
+    pub(crate) async fn delete_node(
+        self: &Arc<Self>,
+        node_id: NodeId,
+        last_policy: NodeSchedulingPolicy,
+        cancel: CancellationToken,
+    ) -> Result<(), OperationError> {
+        const SECONDARY_WARMUP_TIMEOUT: Duration = Duration::from_secs(30);
+        const SECONDARY_DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+        let reconciler_config = ReconcilerConfigBuilder::new(ReconcilerPriority::Normal)
+            .secondary_warmup_timeout(SECONDARY_WARMUP_TIMEOUT)
+            .secondary_download_request_timeout(SECONDARY_DOWNLOAD_REQUEST_TIMEOUT)
+            .build();
+
+        let mut waiters: Vec<ReconcilerWaiter> = Vec::new();
+
+        let mut tid_iter = self.create_tenant_shard_iterator().await;
+
+        while !tid_iter.finished() {
+            if cancel.is_cancelled() {
+                match self.node_configure(node_id, None, Some(last_policy)).await {
+                    Ok(()) => return Err(OperationError::Cancelled),
+                    Err(err) => {
+                        return Err(OperationError::FinalizeError(
+                            format!(
+                                "Failed to finalise delete cancel of {} by setting scheduling policy to {}: {}",
+                                node_id, String::from(last_policy), err
+                            )
+                            .into(),
+                        ));
+                    }
+                }
+            }
+
+            operation_utils::validate_node_state(
+                &node_id,
+                self.inner.read().unwrap().nodes.clone(),
+                NodeSchedulingPolicy::Deleting,
+            )?;
+
+            while waiters.len() < MAX_RECONCILES_PER_OPERATION {
+                let tid = match tid_iter.next() {
+                    Some(tid) => tid,
+                    None => {
+                        break;
+                    }
+                };
+
+                let mut locked = self.inner.write().unwrap();
+                let (nodes, tenants, scheduler) = locked.parts_mut();
+
+                let tenant_shard = match tenants.get_mut(&tid) {
+                    Some(tenant_shard) => tenant_shard,
+                    None => {
+                        tracing::warn!("Skip tenant shard {} during delete", tid);
+                        continue;
+                    }
+                };
+
+                match tenant_shard.get_scheduling_policy() {
+                    ShardSchedulingPolicy::Active | ShardSchedulingPolicy::Essential => {
+                        // A migration during drain is classed as 'essential' because it is required to
+                        // uphold our availability goals for the tenant: this shard is elegible for migration.
+                    }
+                    ShardSchedulingPolicy::Pause | ShardSchedulingPolicy::Stop => {
+                        // If we have been asked to avoid rescheduling this shard, then do not migrate it during a drain
+                        continue;
+                    }
+                }
+
+                let mut schedule_context = ScheduleContext::new(ScheduleMode::Normal);
+                schedule_context.avoid(&tenant_shard.intent.all_pageservers());
+
+                if tenant_shard.deref_node(node_id) {
+                    if let Err(e) = tenant_shard.schedule(scheduler, &mut schedule_context) {
+                        tracing::error!(
+                            "Refusing to delete node, shard {} can't be rescheduled: {e}",
+                            tenant_shard.tenant_shard_id
+                        );
+                        return Err(OperationError::ImpossibleConstraint(e.to_string().into()));
+                    } else {
+                        tracing::info!(
+                            "Rescheduled shard {} away from node during deletion",
+                            tenant_shard.tenant_shard_id
+                        )
+                    }
+
+                    let waiter = self.maybe_configured_reconcile_shard(
+                        tenant_shard,
+                        nodes,
+                        reconciler_config,
+                    );
+                    if let Some(some) = waiter {
+                        waiters.push(some);
+                    }
+                }
+
+                tenant_shard.observed.locations.remove(&node_id);
+            }
+
+            waiters = self
+                .await_waiters_remainder(waiters, WAITER_OPERATION_POLL_TIMEOUT)
+                .await;
+
+            failpoint_support::sleep_millis_async!("sleepy-delete-loop", &cancel);
+        }
+
+        while !waiters.is_empty() {
+            if cancel.is_cancelled() {
+                match self.node_configure(node_id, None, Some(last_policy)).await {
+                    Ok(()) => return Err(OperationError::Cancelled),
+                    Err(err) => {
+                        return Err(OperationError::FinalizeError(
+                            format!(
+                                "Failed to finalise drain cancel of {} by setting scheduling policy to {}: {}",
+                                node_id, String::from(last_policy), err
+                            )
+                            .into(),
+                        ));
+                    }
+                }
+            }
+
+            tracing::info!("Awaiting {} pending delete reconciliations", waiters.len());
+
+            waiters = self
+                .await_waiters_remainder(waiters, SHORT_RECONCILE_TIMEOUT)
+                .await;
+        }
+
+        {
+            let mut locked = self.inner.write().unwrap();
+            let (nodes, _, scheduler) = locked.parts_mut();
+
+            scheduler.node_remove(node_id);
+
+            let mut nodes_mut = (**nodes).clone();
+            if let Some(mut removed_node) = nodes_mut.remove(&node_id) {
+                // Ensure that any reconciler holding an Arc<> to this node will
+                // drop out when trying to RPC to it (setting Offline state sets the
+                // cancellation token on the Node object).
+                removed_node.set_availability(NodeAvailability::Offline);
+            }
+            *nodes = Arc::new(nodes_mut);
+            metrics::METRICS_REGISTRY
+                .metrics_group
+                .storage_controller_pageserver_nodes
+                .set(nodes.len() as i64);
+            metrics::METRICS_REGISTRY
+                .metrics_group
+                .storage_controller_https_pageserver_nodes
+                .set(nodes.values().filter(|n| n.has_https_port()).count() as i64);
+        }
+
         self.persistence
             .set_tombstone(node_id)
             .await
@@ -7639,12 +7797,16 @@ impl Service {
         self: &Arc<Self>,
         node_id: NodeId,
     ) -> Result<(), ApiError> {
-        let (ongoing_op, node_policy) = {
+        let (ongoing_op, node_policy, schedulable_nodes_count) = {
             let locked = self.inner.read().unwrap();
             let nodes = &locked.nodes;
             let node = nodes.get(&node_id).ok_or(ApiError::NotFound(
                 anyhow::anyhow!("Node {} not registered", node_id).into(),
             ))?;
+            let schedulable_nodes_count = nodes
+                .iter()
+                .filter(|(_, n)| matches!(n.may_schedule(), MaySchedule::Yes(_)))
+                .count();
 
             (
                 locked
@@ -7652,6 +7814,7 @@ impl Service {
                     .as_ref()
                     .map(|ongoing| ongoing.operation),
                 node.get_scheduling(),
+                schedulable_nodes_count,
             )
         };
 
@@ -7661,13 +7824,20 @@ impl Service {
             ));
         }
 
+        if schedulable_nodes_count == 0 {
+            tracing::warn!("No other schedulable nodes to move shards");
+        }
+
         match node_policy {
-            NodeSchedulingPolicy::Active | NodeSchedulingPolicy::Pause => {
-                self.node_configure(node_id, None, Some(NodeSchedulingPolicy::Pause))
+            NodeSchedulingPolicy::Active
+            | NodeSchedulingPolicy::Pause
+            | NodeSchedulingPolicy::PauseForRestart => {
+                self.node_configure(node_id, None, Some(NodeSchedulingPolicy::Deleting))
                     .await?;
 
                 let cancel = self.cancel.child_token();
                 let gate_guard = self.gate.enter().map_err(|_| ApiError::ShuttingDown)?;
+                let last_policy = node_policy.clone();
 
                 self.inner.write().unwrap().ongoing_operation = Some(OperationHandler {
                     operation: Operation::Delete(Delete { node_id }),
@@ -7676,37 +7846,51 @@ impl Service {
 
                 let span = tracing::info_span!(parent: None, "delete_node", %node_id);
 
-                tokio::task::spawn({
-                    let service = self.clone();
-                    let cancel = cancel.clone();
-                    async move {
-                        let _gate_guard = gate_guard;
+                tokio::task::spawn(
+                    {
+                        let service = self.clone();
+                        let cancel = cancel.clone();
+                        async move {
+                            let _gate_guard = gate_guard;
 
-                        scopeguard::defer! {
-                            let prev = service.inner.write().unwrap().ongoing_operation.take();
+                            scopeguard::defer! {
+                                let prev = service.inner.write().unwrap().ongoing_operation.take();
 
-                            if let Some(Operation::Delete(removed_delete)) = prev.map(|h| h.operation) {
-                                assert_eq!(removed_delete.node_id, node_id, "We always take the same operation");
-                            } else {
-                                panic!("We always remove the same operation")
+                                if let Some(Operation::Delete(removed_delete)) = prev.map(|h| h.operation) {
+                                    assert_eq!(removed_delete.node_id, node_id, "We always take the same operation");
+                                } else {
+                                    panic!("We always remove the same operation")
+                                }
                             }
-                        }
 
-                        tracing::info!("Delete background operation starting");
-                        let res = service.delete_node(node_id, cancel).await;
-                        match res {
-                            Ok(()) => {
-                                tracing::info!("Delete background operation completed successfully");
-                            }
-                            Err(OperationError::Cancelled) => {
-                                tracing::info!("Delete background operation was cancelled");
-                            }
-                            Err(err) => {
-                                tracing::error!("Delete background operation encountered: {err}")
+                            tracing::info!("Delete background operation starting");
+                            let res = service
+                                .delete_node(node_id, last_policy, cancel)
+                                .await;
+                            match res {
+                                Ok(()) => {
+                                    tracing::info!(
+                                        "Delete background operation completed successfully"
+                                    );
+                                }
+                                Err(OperationError::Cancelled) => {
+                                    tracing::info!("Delete background operation was cancelled");
+                                }
+                                Err(err) => {
+                                    tracing::error!(
+                                        "Delete background operation encountered: {err}"
+                                    )
+                                }
                             }
                         }
                     }
-                }.instrument(span));
+                    .instrument(span),
+                );
+            }
+            NodeSchedulingPolicy::Deleting => {
+                return Err(ApiError::Conflict(format!(
+                    "Node {node_id} has delete in progress"
+                )));
             }
             policy => {
                 return Err(ApiError::PreconditionFailed(
@@ -9019,25 +9203,7 @@ impl Service {
 
         let mut waiters = Vec::new();
 
-        let mut tid_iter = TenantShardIterator::new({
-            let service = self.clone();
-            move |last_inspected_shard: Option<TenantShardId>| {
-                let locked = &service.inner.read().unwrap();
-                let tenants = &locked.tenants;
-                let entry = match last_inspected_shard {
-                    Some(skip_past) => {
-                        // Skip to the last seen tenant shard id
-                        let mut cursor = tenants.iter().skip_while(|(tid, _)| **tid != skip_past);
-
-                        // Skip past the last seen
-                        cursor.nth(1)
-                    }
-                    None => tenants.first_key_value(),
-                };
-
-                entry.map(|(tid, _)| tid).copied()
-            }
-        });
+        let mut tid_iter = self.create_tenant_shard_iterator().await;
 
         while !tid_iter.finished() {
             if cancel.is_cancelled() {
@@ -9058,7 +9224,11 @@ impl Service {
                 }
             }
 
-            drain_utils::validate_node_state(&node_id, self.inner.read().unwrap().nodes.clone())?;
+            operation_utils::validate_node_state(
+                &node_id,
+                self.inner.read().unwrap().nodes.clone(),
+                NodeSchedulingPolicy::Draining,
+            )?;
 
             while waiters.len() < MAX_RECONCILES_PER_OPERATION {
                 let tid = match tid_iter.next() {
@@ -9138,7 +9308,7 @@ impl Service {
             }
 
             waiters = self
-                .await_waiters_remainder(waiters, WAITER_FILL_DRAIN_POLL_TIMEOUT)
+                .await_waiters_remainder(waiters, WAITER_OPERATION_POLL_TIMEOUT)
                 .await;
 
             failpoint_support::sleep_millis_async!("sleepy-drain-loop", &cancel);
@@ -9434,7 +9604,7 @@ impl Service {
             }
 
             waiters = self
-                .await_waiters_remainder(waiters, WAITER_FILL_DRAIN_POLL_TIMEOUT)
+                .await_waiters_remainder(waiters, WAITER_OPERATION_POLL_TIMEOUT)
                 .await;
         }
 
@@ -9611,6 +9781,30 @@ impl Service {
         }
 
         global_observed
+    }
+
+    async fn create_tenant_shard_iterator(
+        self: &Arc<Self>,
+    ) -> TenantShardIterator<impl Fn(Option<TenantShardId>) -> Option<TenantShardId>> {
+        let service = self.clone();
+        let tenants_accessor = move |last_inspected_shard: Option<TenantShardId>| {
+            let locked = &service.inner.read().unwrap();
+            let tenants = &locked.tenants;
+            let entry = match last_inspected_shard {
+                Some(skip_past) => {
+                    // Skip to the last seen tenant shard id
+                    let mut cursor = tenants.iter().skip_while(|(tid, _)| **tid != skip_past);
+
+                    // Skip past the last seen
+                    cursor.nth(1)
+                }
+                None => tenants.first_key_value(),
+            };
+
+            entry.map(|(tid, _)| tid).copied()
+        };
+
+        TenantShardIterator::new(tenants_accessor)
     }
 
     pub(crate) async fn update_shards_preferred_azs(

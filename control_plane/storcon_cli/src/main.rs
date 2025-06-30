@@ -71,7 +71,6 @@ enum Command {
         node_id: NodeId,
     },
     /// Start deletion of the specified pageserver.
-    /// The deletion is complete when the storage controller
     NodeStartDelete {
         #[arg(long)]
         node_id: NodeId,
@@ -926,7 +925,19 @@ async fn main() -> anyhow::Result<()> {
                 .dispatch::<(), ()>(Method::POST, format!("debug/v1/node/{node_id}/drop"), None)
                 .await?;
         }
-        Command::NodeDelete { node_id } | Command::NodeStartDelete { node_id } => {
+        Command::NodeDelete { node_id } => {
+            println!(
+                "NodeDelete is obsolete and will be removed in the future, use NodeStartDelete instead"
+            );
+            storcon_client
+                .dispatch::<(), ()>(
+                    Method::DELETE,
+                    format!("control/v1/node/{node_id}/delete"),
+                    None,
+                )
+                .await?;
+        }
+        Command::NodeStartDelete { node_id } => {
             storcon_client
                 .dispatch::<(), ()>(
                     Method::PUT,
@@ -949,8 +960,7 @@ async fn main() -> anyhow::Result<()> {
 
             let final_policy =
                 wait_for_scheduling_policy(storcon_client, node_id, *timeout, |sched| {
-                    use NodeSchedulingPolicy::*;
-                    matches!(sched, Active)
+                    !matches!(sched, NodeSchedulingPolicy::Deleting)
                 })
                 .await?;
 

@@ -1843,6 +1843,7 @@ class PageserverSchedulingPolicy(StrEnum):
     FILLING = "Filling"
     PAUSE = "Pause"
     PAUSE_FOR_RESTART = "PauseForRestart"
+    DELETING = "Deleting"
 
 
 class StorageControllerLeadershipStatus(StrEnum):
@@ -2048,6 +2049,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
             "POST",
             f"{self.api}/control/v1/node",
             json=body,
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def node_delete_old(self, node_id):
+        log.info(f"node_delete_old({node_id})")
+        self.request(
+            "DELETE",
+            f"{self.api}/control/v1/node/{node_id}/delete",
             headers=self.headers(TokenScope.ADMIN),
         )
 

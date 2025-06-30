@@ -673,7 +673,9 @@ impl Persistence {
                                 .or(scheduling_policy
                                     .eq(String::from(NodeSchedulingPolicy::Draining)))
                                 .or(scheduling_policy
-                                    .eq(String::from(NodeSchedulingPolicy::Filling))),
+                                    .eq(String::from(NodeSchedulingPolicy::Filling)))
+                                .or(scheduling_policy
+                                    .eq(String::from(NodeSchedulingPolicy::Deleting))),
                         )
                         .set(scheduling_policy.eq(String::from(NodeSchedulingPolicy::Active)))
                         .execute(conn)
