@@ -1056,7 +1056,7 @@ impl WalResidentTimeline {
 
             // if this is AppendResponse, fill in proper hot standby feedback.
             if let Some(AcceptorProposerMessage::AppendResponse(ref mut resp)) = rmsg {
-                resp.hs_feedback = self.walsenders.get_hotstandby().hs_feedback;
+                resp.hs_feedback = self.walsenders.get_hotstandby();
             }
         }
         Ok(rmsg)
