@@ -8,6 +8,7 @@ pub(crate) mod wake_compute;
 
 use std::collections::HashSet;
 use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use futures::TryStreamExt;
@@ -112,7 +113,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
     };
 
-    send_client_greeting(ctx, &config.greetings, client);
+    send_client_greeting(ctx, &config.greetings, client, node.socket_addr);
 
     let auth::Backend::ControlPlane(_, _user_info) = backend else {
         unreachable!("ensured above");
@@ -160,12 +161,19 @@ pub(crate) fn send_client_greeting(
     ctx: &RequestContext,
     greetings: &String,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    socket_addr: SocketAddr,
 ) {
     // Expose session_id to clients if we have a greeting message.
     if !greetings.is_empty() {
         let session_msg = format!("{}, session_id: {}", greetings, ctx.session_id());
         client.write_message(BeMessage::NoticeResponse(session_msg.as_str()));
     }
+
+    // needed for RI to know what IP to send cancellation to.
+    client.write_message(BeMessage::ParameterStatus {
+        name: "upstream_ip".as_bytes(),
+        value: socket_addr.ip().to_string().as_bytes(),
+    });
 
     // Forward recorded latencies for probing requests
     if let Some(testodrome_id) = ctx.get_testodrome_id() {

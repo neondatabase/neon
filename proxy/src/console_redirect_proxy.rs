@@ -230,7 +230,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         .authenticate(ctx, &mut node)
         .or_else(|e| async { Err(stream.throw_error(e, Some(ctx)).await) })
         .await?;
-    send_client_greeting(ctx, &config.greetings, &mut stream);
+    send_client_greeting(ctx, &config.greetings, &mut stream, node.socket_addr);
 
     // let session = cancellation_handler.get_key();
 
