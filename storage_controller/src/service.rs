@@ -105,8 +105,6 @@ use crate::timeline_import::{
     TimelineImportFinalizeError, TimelineImportState, UpcallClient,
 };
 
-pub use safekeeper_service::TimelineSafekeeperMigrateRequest;
-
 const WAITER_FILL_DRAIN_POLL_TIMEOUT: Duration = Duration::from_millis(500);
 
 // For operations that should be quick, like attaching a new tenant

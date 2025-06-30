@@ -22,7 +22,7 @@ use pageserver_api::controller_api::{
     MetadataHealthListUnhealthyResponse, MetadataHealthUpdateRequest, MetadataHealthUpdateResponse,
     NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, SafekeeperSchedulingPolicyRequest,
     ShardsPreferredAzsRequest, TenantCreateRequest, TenantPolicyRequest, TenantShardMigrateRequest,
-    TimelineImportRequest,
+    TimelineImportRequest, TimelineSafekeeperMigrateRequest,
 };
 use pageserver_api::models::{
     DetachBehavior, LsnLeaseRequest, TenantConfigPatchRequest, TenantConfigRequest,
@@ -48,10 +48,7 @@ use crate::metrics::{
 };
 use crate::persistence::SafekeeperUpsert;
 use crate::reconciler::ReconcileError;
-use crate::service::{
-    LeadershipStatus, RECONCILE_TIMEOUT, STARTUP_RECONCILE_TIMEOUT, Service,
-    TimelineSafekeeperMigrateRequest,
-};
+use crate::service::{LeadershipStatus, RECONCILE_TIMEOUT, STARTUP_RECONCILE_TIMEOUT, Service};
 
 /// State available to HTTP request handlers
 pub struct HttpState {

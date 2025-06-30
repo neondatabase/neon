@@ -19,6 +19,7 @@ use anyhow::Context;
 use http_utils::error::ApiError;
 use pageserver_api::controller_api::{
     SafekeeperDescribeResponse, SkSchedulingPolicy, TimelineImportRequest,
+    TimelineSafekeeperMigrateRequest,
 };
 use pageserver_api::models::{SafekeeperInfo, SafekeepersInfo, TimelineInfo};
 use safekeeper_api::PgVersionId;
@@ -41,11 +42,6 @@ pub struct TimelineLocateResponse {
     pub generation: SafekeeperGeneration,
     pub sk_set: Vec<NodeId>,
     pub new_sk_set: Option<Vec<NodeId>>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
-pub struct TimelineSafekeeperMigrateRequest {
-    pub new_sk_set: Vec<NodeId>,
 }
 
 impl Service {
