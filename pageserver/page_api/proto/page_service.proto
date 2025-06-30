@@ -269,6 +269,6 @@ message LeaseLsnRequest {
 // Lease acquisition response. If the lease could not be granted because the LSN has already been
 // garbage collected, a FailedPrecondition status will be returned instead.
 message LeaseLsnResponse {
-  // The lease expiration time (exclusive; valid up to and including this timestamp).
+  // The lease expiration time.
   google.protobuf.Timestamp expires = 1;
 }

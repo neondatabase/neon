@@ -729,9 +729,8 @@ impl From<LeaseLsnRequest> for proto::LeaseLsnRequest {
     }
 }
 
-/// Lease expiration time (exclusive; valid up to and including this timestamp). If the lease could
-/// not be granted because the LSN has already been garbage collected, a FailedPrecondition status
-/// will be returned instead.
+/// Lease expiration time. If the lease could not be granted because the LSN has already been
+/// garbage collected, a FailedPrecondition status will be returned instead.
 pub type LeaseLsnResponse = SystemTime;
 
 impl TryFrom<proto::LeaseLsnResponse> for LeaseLsnResponse {
