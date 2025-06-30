@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use control_plane::endpoint::{ComputeControlPlane, EndpointStatus, PageserverProtocol};
+use compute_api::spec::PageserverProtocol;
+use control_plane::endpoint::{ComputeControlPlane, EndpointStatus};
 use control_plane::local_env::LocalEnv;
 use futures::StreamExt;
 use hyper::StatusCode;

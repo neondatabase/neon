@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
 use compute_api::responses::{
@@ -6,7 +6,7 @@ use compute_api::responses::{
     LfcPrewarmState, TlsConfig,
 };
 use compute_api::spec::{
-    ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent,
+    ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PageserverProtocol, PgIdent,
 };
 use futures::StreamExt;
 use futures::future::join_all;
@@ -1003,19 +1003,12 @@ impl ComputeNode {
     fn try_get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
 
-        // Detect the protocol scheme. If the URL doesn't have a scheme, assume libpq.
         let shard0_connstr = spec.pageserver_connstr.split(',').next().unwrap();
-        let scheme = match Url::parse(shard0_connstr) {
-            Ok(url) => url.scheme().to_lowercase().to_string(),
-            Err(url::ParseError::RelativeUrlWithoutBase) => "postgresql".to_string(),
-            Err(err) => return Err(anyhow!("invalid connstring URL: {err}")),
-        };
-
         let started = Instant::now();
-        let (connected, size) = match scheme.as_str() {
-            "postgresql" | "postgres" => self.try_get_basebackup_libpq(spec, lsn)?,
-            "grpc" => self.try_get_basebackup_grpc(spec, lsn)?,
-            scheme => return Err(anyhow!("unknown URL scheme {scheme}")),
+
+        let (connected, size) = match PageserverProtocol::from_connstring(shard0_connstr)? {
+            PageserverProtocol::Libpq => self.try_get_basebackup_libpq(spec, lsn)?,
+            PageserverProtocol::Grpc => self.try_get_basebackup_grpc(spec, lsn)?,
         };
 
         let mut state = self.state.lock().unwrap();
