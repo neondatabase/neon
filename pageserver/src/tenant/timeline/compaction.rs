@@ -1815,12 +1815,10 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
         let begin = tokio::time::Instant::now();
+        let guard = self.layers.read(LayerManagerLockHolder::Compaction).await;
         let now = tokio::time::Instant::now();
         stats.read_lock_acquisition_micros =
             DurationRecorder::Recorded(RecordedDuration(now - begin), now);
-        let guard = self.layers.read(LayerManagerLockHolder::Compaction).await;
-        stats.read_lock_held_spawn_blocking_startup_micros =
-            stats.read_lock_acquisition_micros.till_now(); // set by caller
 
         let layers = guard.layer_map()?;
         let level0_deltas = layers.level0_deltas();
