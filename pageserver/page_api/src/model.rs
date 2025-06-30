@@ -18,8 +18,8 @@
 use std::fmt::Display;
 
 use bytes::Bytes;
-use postgres_ffi::Oid;
-// TODO: split out Lsn, RelTag, SlruKind, Oid and other basic types to a separate crate, to avoid
+use postgres_ffi_types::Oid;
+// TODO: split out Lsn, RelTag, SlruKind and other basic types to a separate crate, to avoid
 // pulling in all of their other crate dependencies when building the client.
 use utils::lsn::Lsn;
 
