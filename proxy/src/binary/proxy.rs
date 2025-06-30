@@ -975,6 +975,8 @@ async fn configure_redis(
     Ok((regional_redis_client, redis_notifications_client))
 }
 
+
+// TODO: move this to a common place (the exact same code is used in local_proxy.rs)
 #[derive(Error, Debug)]
 enum RefreshConfigError {
     #[error(transparent)]
