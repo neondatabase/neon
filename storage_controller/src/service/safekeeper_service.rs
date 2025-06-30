@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::safekeeper_reconciler::ScheduleRequest;
+use crate::compute_hook;
 use crate::heartbeater::SafekeeperState;
 use crate::id_lock_map::trace_shared_lock;
 use crate::metrics;
@@ -1198,7 +1199,11 @@ impl Service {
         // 4. Call PUT configuration on safekeepers from the current set,
         // delivering them joint_conf.
 
-        // TODO(diko): need to notify cplane with an updated set of safekeepers.
+        // Notify cplane/compute about the membership change BEFORE changing the membership on safekeepers.
+        // This way the compute will know about new safekeepers from joint_config before we require to
+        // collect a quorum from them.
+        self.cplane_notify_safekeepers(tenant_id, timeline_id, &joint_config)
+            .await?;
 
         let results = self
             .tenant_timeline_set_membership_quorum(
@@ -1305,8 +1310,55 @@ impl Service {
         )
         .await?;
 
-        // TODO(diko): need to notify cplane with an updated set of safekeepers.
+        // Notify cplane/compute about the membership change AFTER changing the membership on safekeepers.
+        // This way the compute will stop talking to excluded safekeepers only after we stop requiring to
+        // collect a quorum from them.
+        self.cplane_notify_safekeepers(tenant_id, timeline_id, &new_conf)
+            .await?;
 
         Ok(())
+    }
+
+    /// Notify cplane about safekeeper membership change.
+    /// The cplane will receive a joint set of safekeepers as a safekeeper list.
+    async fn cplane_notify_safekeepers(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        mconf: &membership::Configuration,
+    ) -> Result<(), ApiError> {
+        let mut safekeepers = Vec::new();
+        let mut ids: HashSet<_> = HashSet::new();
+
+        for member in mconf
+            .members
+            .m
+            .iter()
+            .chain(mconf.new_members.iter().flat_map(|m| m.m.iter()))
+        {
+            if ids.insert(member.id) {
+                safekeepers.push(compute_hook::SafekeeperInfo {
+                    id: member.id,
+                    hostname: Some(member.host.clone()),
+                });
+            }
+        }
+
+        self.compute_hook
+            .notify_safekeepers(
+                compute_hook::SafekeepersUpdate {
+                    tenant_id,
+                    timeline_id,
+                    generation: mconf.generation,
+                    safekeepers: safekeepers,
+                },
+                &self.cancel,
+            )
+            .await
+            .map_err(|err| {
+                ApiError::InternalServerError(anyhow::anyhow!(
+                    "failed to notify cplane about safekeeper membership change: {err}"
+                ))
+            })
     }
 }

@@ -7,10 +7,8 @@ use std::time::Duration;
 use anyhow::Context;
 use control_plane::endpoint::{ComputeControlPlane, EndpointStatus, PageserverProtocol};
 use control_plane::local_env::LocalEnv;
-use control_plane::safekeeper;
 use futures::StreamExt;
 use hyper::StatusCode;
-use itertools::traits;
 use pageserver_api::config::DEFAULT_GRPC_LISTEN_PORT;
 use pageserver_api::controller_api::AvailabilityZone;
 use pageserver_api::shard::{ShardCount, ShardNumber, ShardStripeSize, TenantShardId};
@@ -232,10 +230,10 @@ impl ComputeHookTimeline {
         }
     }
 
-    fn update(&mut self, generation: SafekeeperGeneration, safekeepers: Vec<SafekeeperInfo>) {
-        if generation > self.generation {
-            self.generation = generation;
-            self.safekeepers = safekeepers;
+    fn update(&mut self, sk_update: SafekeepersUpdate) {
+        if sk_update.generation > self.generation {
+            self.generation = sk_update.generation;
+            self.safekeepers = sk_update.safekeepers;
         }
     }
 }
@@ -281,7 +279,7 @@ impl ApiMethod for ComputeHookTimeline {
     }
 
     async fn notify_local(
-        env: &LocalEnv,
+        _env: &LocalEnv,
         cplane: &ComputeControlPlane,
         req: &NotifySafekeepersRequest,
     ) -> Result<(), NotifyError> {
@@ -328,10 +326,10 @@ struct NotifyAttachRequest {
 }
 
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
-struct SafekeeperInfo {
-    id: NodeId,
+pub(crate) struct SafekeeperInfo {
+    pub id: NodeId,
     // Optional, for debugging purposes.
-    hostname: Option<String>,
+    pub hostname: Option<String>,
 }
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
 pub(crate) struct NotifySafekeepersRequest {
@@ -757,24 +755,24 @@ impl ComputeHook {
 
     fn notify_safekeepers_prepare(
         &self,
-        safekeeper_update: SafekeepersUpdate,
+        safekeepers_update: SafekeepersUpdate,
     ) -> MaybeSendNotifySafekeepersResult {
         let mut timelines_locked = self.timelines.lock().unwrap();
 
         use std::collections::hash_map::Entry;
         let ttid = TenantTimelineId {
-            tenant_id: safekeeper_update.tenant_id,
-            timeline_id: safekeeper_update.timeline_id,
+            tenant_id: safekeepers_update.tenant_id,
+            timeline_id: safekeepers_update.timeline_id,
         };
 
         let timeline = match timelines_locked.entry(ttid) {
             Entry::Vacant(e) => e.insert(ComputeHookTimeline::new(
-                safekeeper_update.generation,
-                safekeeper_update.safekeepers,
+                safekeepers_update.generation,
+                safekeepers_update.safekeepers,
             )),
             Entry::Occupied(e) => {
                 let timeline = e.into_mut();
-                timeline.update(safekeeper_update.generation, safekeeper_update.safekeepers);
+                timeline.update(safekeepers_update);
                 timeline
             }
         };
@@ -964,19 +962,10 @@ impl ComputeHook {
 
     pub(super) async fn notify_safekeepers(
         &self,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-        generation: SafekeeperGeneration,
-        safekeepers: Vec<SafekeeperInfo>,
+        safekeepers_update: SafekeepersUpdate,
         cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
-        let maybe_send_result = self.notify_safekeepers_prepare(SafekeepersUpdate {
-            tenant_id,
-            timeline_id,
-            generation,
-            safekeepers,
-        });
-
+        let maybe_send_result = self.notify_safekeepers_prepare(safekeepers_update);
         self.notify_execute(&self.timelines, maybe_send_result, cancel)
             .await
     }
