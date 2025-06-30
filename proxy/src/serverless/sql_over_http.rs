@@ -3,44 +3,40 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures::future::{Either, select, try_join};
 use futures::{StreamExt, TryFutureExt};
-use http::Method;
-use http::header::AUTHORIZATION;
-use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Full};
+use http::{Method, header::AUTHORIZATION};
+use http_body_util::{combinators::BoxBody, Full, BodyExt};
 use http_utils::error::ApiError;
 use hyper::body::Incoming;
-use hyper::http::{HeaderName, HeaderValue};
-use hyper::{HeaderMap, Request, Response, StatusCode, header};
+use hyper::{http::{HeaderName, HeaderValue}, Request, Response, StatusCode, header};
 use indexmap::IndexMap;
 use postgres_client::error::{DbError, ErrorPosition, SqlState};
 use postgres_client::{
     GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, RowStream, Transaction,
 };
 use serde::Serialize;
-use serde_json::Value;
-use serde_json::value::RawValue;
+use serde_json::{Value, value::RawValue};
 use tokio::time::{self, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 use typed_json::json;
-use url::Url;
+
 use super::backend::{LocalProxyConnError, PoolingBackend};
-use super::conn_pool::{AuthData, ConnInfoWithAuth};
+use super::conn_pool::{AuthData,};
 use super::conn_pool_lib::{self, ConnInfo};
-use super::error::{HttpCodeError, ConnInfoError, Credentials, ReadPayloadError};
-use super::http_util::{json_response, uuid_to_header_value, NEON_REQUEST_ID, CONN_STRING, RAW_TEXT_OUTPUT, ARRAY_MODE, ALLOW_POOL, TXN_ISOLATION_LEVEL, TXN_READ_ONLY, TXN_DEFERRABLE};
+use super::error::{HttpCodeError, ConnInfoError, ReadPayloadError};
+use super::http_util::{
+    json_response, uuid_to_header_value, get_conn_info,
+    NEON_REQUEST_ID, CONN_STRING, RAW_TEXT_OUTPUT, ARRAY_MODE, ALLOW_POOL, TXN_ISOLATION_LEVEL, TXN_READ_ONLY, TXN_DEFERRABLE
+};
 use super::json::{JsonConversionError, json_to_pg_text, pg_text_row_to_json};
-use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
-use crate::auth::{endpoint_sni};
-use crate::config::{AuthenticationConfig, HttpConfig, ProxyConfig, TlsConfig};
+use crate::auth::backend::{ComputeCredentialKeys,};
+
+use crate::config::{HttpConfig, ProxyConfig,};
 use crate::context::RequestContext;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::http::{read_body_with_limit};
-use crate::metrics::{HttpDirection, Metrics, SniGroup, SniKind};
-use crate::pqproto::StartupMessageParams;
-use crate::proxy::NeonOptions;
+use crate::metrics::{HttpDirection, Metrics, };
 use crate::serverless::backend::HttpConnError;
-use crate::types::{DbName, RoleName};
 use crate::usage_metrics::{MetricCounter, MetricCounterRecorder};
 use crate::util::run_until_cancelled;
 
@@ -76,142 +72,6 @@ where
     // TODO: consider avoiding the allocation here.
     let json: Vec<Value> = serde::de::Deserialize::deserialize(deserializer)?;
     Ok(json_to_pg_text(json))
-}
-
-fn get_conn_info(
-    config: &'static AuthenticationConfig,
-    ctx: &RequestContext,
-    headers: &HeaderMap,
-    tls: Option<&TlsConfig>,
-) -> Result<ConnInfoWithAuth, ConnInfoError> {
-    let connection_string = headers
-        .get(&CONN_STRING)
-        .ok_or(ConnInfoError::InvalidHeader(&CONN_STRING))?
-        .to_str()
-        .map_err(|_| ConnInfoError::InvalidHeader(&CONN_STRING))?;
-
-    let connection_url = Url::parse(connection_string)?;
-
-    let protocol = connection_url.scheme();
-    if protocol != "postgres" && protocol != "postgresql" {
-        return Err(ConnInfoError::IncorrectScheme);
-    }
-
-    let mut url_path = connection_url
-        .path_segments()
-        .ok_or(ConnInfoError::MissingDbName)?;
-
-    let dbname: DbName =
-        urlencoding::decode(url_path.next().ok_or(ConnInfoError::InvalidDbName)?)?.into();
-    ctx.set_dbname(dbname.clone());
-
-    let username = RoleName::from(urlencoding::decode(connection_url.username())?);
-    if username.is_empty() {
-        return Err(ConnInfoError::MissingUsername);
-    }
-    ctx.set_user(username.clone());
-
-    let auth = if let Some(auth) = headers.get(&AUTHORIZATION) {
-        if !config.accept_jwts {
-            return Err(ConnInfoError::MissingCredentials(Credentials::Password));
-        }
-
-        let auth = auth
-            .to_str()
-            .map_err(|_| ConnInfoError::InvalidHeader(&AUTHORIZATION))?;
-        AuthData::Jwt(
-            auth.strip_prefix("Bearer ")
-                .ok_or(ConnInfoError::MissingCredentials(Credentials::BearerJwt))?
-                .into(),
-        )
-    } else if let Some(pass) = connection_url.password() {
-        // wrong credentials provided
-        if config.accept_jwts {
-            return Err(ConnInfoError::MissingCredentials(Credentials::BearerJwt));
-        }
-
-        AuthData::Password(match urlencoding::decode_binary(pass.as_bytes()) {
-            std::borrow::Cow::Borrowed(b) => b.into(),
-            std::borrow::Cow::Owned(b) => b.into(),
-        })
-    } else if config.accept_jwts {
-        return Err(ConnInfoError::MissingCredentials(Credentials::BearerJwt));
-    } else {
-        return Err(ConnInfoError::MissingCredentials(Credentials::Password));
-    };
-
-    let endpoint = match connection_url.host() {
-        Some(url::Host::Domain(hostname)) => {
-            if let Some(tls) = tls {
-                endpoint_sni(hostname, &tls.common_names).ok_or(ConnInfoError::MalformedEndpoint)?
-            } else {
-                hostname
-                    .split_once('.')
-                    .map_or(hostname, |(prefix, _)| prefix)
-                    .into()
-            }
-        }
-        Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) | None => {
-            return Err(ConnInfoError::MissingHostname);
-        }
-    };
-    ctx.set_endpoint_id(endpoint.clone());
-
-    let pairs = connection_url.query_pairs();
-
-    let mut options = Option::None;
-
-    let mut params = StartupMessageParams::default();
-    params.insert("user", &username);
-    params.insert("database", &dbname);
-    for (key, value) in pairs {
-        params.insert(&key, &value);
-        if key == "options" {
-            options = Some(NeonOptions::parse_options_raw(&value));
-        }
-    }
-
-    // check the URL that was used, for metrics
-    {
-        let host_endpoint = headers
-            // get the host header
-            .get("host")
-            // extract the domain
-            .and_then(|h| {
-                let (host, _port) = h.to_str().ok()?.split_once(':')?;
-                Some(host)
-            })
-            // get the endpoint prefix
-            .map(|h| h.split_once('.').map_or(h, |(prefix, _)| prefix));
-
-        let kind = if host_endpoint == Some(&*endpoint) {
-            SniKind::Sni
-        } else {
-            SniKind::NoSni
-        };
-
-        let protocol = ctx.protocol();
-        Metrics::get()
-            .proxy
-            .accepted_connections_by_sni
-            .inc(SniGroup { protocol, kind });
-    }
-
-    ctx.set_user_agent(
-        headers
-            .get(hyper::header::USER_AGENT)
-            .and_then(|h| h.to_str().ok())
-            .map(Into::into),
-    );
-
-    let user_info = ComputeUserInfo {
-        endpoint,
-        user: username,
-        options: options.unwrap_or_default(),
-    };
-
-    let conn_info = ConnInfo { user_info, dbname };
-    Ok(ConnInfoWithAuth { conn_info, auth })
 }
 
 pub(crate) async fn handle(
@@ -544,6 +404,7 @@ async fn handle_inner(
     let conn_info = get_conn_info(
         &config.authentication_config,
         ctx,
+        None,
         request.headers(),
         // todo: race condition?
         // we're unlikely to change the common names.
