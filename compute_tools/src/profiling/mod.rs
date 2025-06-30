@@ -3,7 +3,6 @@ use std::{
     io::{BufRead, BufReader, Cursor, Write},
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
-    sync::{Arc, atomic::AtomicBool},
 };
 
 use anyhow::{Context, anyhow};

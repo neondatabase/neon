@@ -5,8 +5,7 @@
 //!
 //! The profiling is done using the `perf` tool, which is expected to be
 //! available somewhere in `$PATH`.
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 
 use axum::extract::Query;
 use axum::response::IntoResponse;
