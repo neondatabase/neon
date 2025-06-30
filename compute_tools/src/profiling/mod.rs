@@ -131,11 +131,6 @@ pub struct ProfileGenerationOptions<'a, S: AsRef<str>> {
     /// when a message is received on this channel or when the timeout
     /// is reached, whichever comes first.
     pub should_stop: Option<tokio::sync::oneshot::Receiver<()>>,
-    /// An optional atomic boolean that can be used to check if the
-    /// profiling has started. This can be used to avoid starting the
-    /// profiling multiple times or to check if the profiling is already
-    /// in progress.
-    pub has_started: Option<Arc<AtomicBool>>,
 }
 
 /// Run perf against a process with the given name and generate a pprof
@@ -212,10 +207,6 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
 
     tracing::debug!("Running perf record command: {perf_record_command:?}");
     let mut perf_record_command = perf_record_command.spawn()?;
-
-    if let Some(has_started) = options.has_started {
-        has_started.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
 
     if let Some(mut rx) = options.should_stop {
         tokio::select! {

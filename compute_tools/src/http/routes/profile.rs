@@ -20,8 +20,6 @@ use crate::http::JsonResponse;
 static CANCEL_CHANNEL: Lazy<Mutex<Option<tokio::sync::oneshot::Sender<()>>>> =
     Lazy::new(|| Mutex::new(None));
 
-static PROGRESS: Lazy<Arc<AtomicBool>> = Lazy::new(|| Arc::new(AtomicBool::new(false)));
-
 fn default_sampling_frequency() -> u16 {
     100
 }
@@ -85,7 +83,7 @@ pub(in crate::http) async fn profile_status() -> impl IntoResponse {
 
     let cancel_channel = CANCEL_CHANNEL.lock().await;
 
-    if cancel_channel.is_some() && PROGRESS.load(Ordering::SeqCst) {
+    if cancel_channel.is_some() {
         JsonResponse::create_response(StatusCode::OK, "Profiling is currently in progress.")
     } else {
         JsonResponse::create_response(StatusCode::NO_CONTENT, "Profiling is not in progress.")
@@ -95,8 +93,6 @@ pub(in crate::http) async fn profile_status() -> impl IntoResponse {
 /// The HTTP request handler for stopping profiling the compute.
 pub(in crate::http) async fn profile_stop() -> impl IntoResponse {
     tracing::info!("Profile stop request received.");
-
-    PROGRESS.store(false, Ordering::SeqCst);
 
     match CANCEL_CHANNEL.lock().await.take() {
         Some(tx) => {
@@ -157,12 +153,9 @@ pub(in crate::http) async fn profile_start(
         blocklist_symbols: &["libc", "libgcc", "pthread", "vdso"],
         timeout: std::time::Duration::from_secs(request.timeout_seconds as u64),
         should_stop: Some(rx),
-        has_started: Some(Arc::clone(&PROGRESS)),
     };
 
     let pprof_data = crate::profiling::generate_pprof_using_perf(options).await;
-
-    PROGRESS.store(false, Ordering::SeqCst);
 
     if CANCEL_CHANNEL.lock().await.take().is_none() {
         tracing::error!("Profiling was cancelled from another request.");
