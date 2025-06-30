@@ -1345,9 +1345,12 @@ impl Timeline {
                 })
                 .attached_child();
 
-            self.get_vectored_reconstruct_data(query.clone(), reconstruct_state, &ctx)
-                .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
-                .await
+            let fut = self.get_vectored_reconstruct_data(query.clone(), reconstruct_state, &ctx)
+                .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone());
+            /*tokio::select! {
+                res = fut => res,
+                _ = ctx.cancellation_token().cancelled() => return Err(GetVectoredError::Cancelled),
+            }*/fut.await
         };
 
         if let Err(err) = traversal_res {

@@ -337,10 +337,14 @@ impl Layer {
                 })
                 .attached_child();
 
-            self.0
+            // good
+            let fut = self.0
                 .get_or_maybe_download(true, &ctx)
-                .maybe_perf_instrument(&ctx, |crnt_perf_context| crnt_perf_context.clone())
-                .await
+                .maybe_perf_instrument(&ctx, |crnt_perf_context| crnt_perf_context.clone());
+            /*tokio::select! {
+                res = fut => res,
+                _ = ctx.cancellation_token().cancelled() => return Err(GetVectoredError::Cancelled),
+            }*/fut.await
                 .map_err(|err| match err {
                     DownloadError::TimelineShutdown | DownloadError::DownloadCancelled => {
                         GetVectoredError::Cancelled
@@ -1041,10 +1045,11 @@ impl LayerInner {
         //
         // if we are cancelled while doing this `stat` the `self.inner` will be uninitialized. a
         // pending eviction will try to evict even upon finding an uninitialized `self.inner`.
-        let needs_download = self
-            .needs_download()
-            .await
-            .map_err(DownloadError::PreStatFailed);
+        let needs_download = tokio::select! {
+            dl = self.needs_download() => dl,
+            _ = ctx.cancellation_token().cancelled() => return Err(DownloadError::DownloadCancelled),
+        }
+        .map_err(DownloadError::PreStatFailed);
 
         scopeguard::ScopeGuard::into_inner(init_cancelled);
 
@@ -1054,8 +1059,12 @@ impl LayerInner {
             // the file is present locally because eviction has not had a chance to run yet
 
             #[cfg(test)]
-            self.failpoint(failpoints::FailpointKind::AfterDeterminingLayerNeedsNoDownload)
-                .await?;
+            //self.failpoint(failpoints::FailpointKind::AfterDeterminingLayerNeedsNoDownload)
+                //.await?;
+            tokio::select! {
+                dl = self.failpoint(failpoints::FailpointKind::AfterDeterminingLayerNeedsNoDownload) => dl?,
+                _ = ctx.cancellation_token().cancelled() => return Err(DownloadError::DownloadCancelled),
+            }
 
             LAYER_IMPL_METRICS.inc_init_needed_no_download();
 
@@ -1092,10 +1101,16 @@ impl LayerInner {
             tracing::info!(%reason, "downloading on-demand");
 
             let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
-            let res = self
+            let fut = self
                 .download_init_and_wait(timeline, permit, ctx.attached_child())
                 .maybe_perf_instrument(&ctx, |current_perf_span| current_perf_span.clone())
-                .await?;
+                ;
+            let res = tokio::select! {
+                res = fut => res,
+                _ = ctx.cancellation_token().cancelled() => return Err(DownloadError::DownloadCancelled),
+            }?;
+            // bad
+            //fut.await?;
 
             scopeguard::ScopeGuard::into_inner(init_cancelled);
             Ok(res)

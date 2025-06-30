@@ -727,7 +727,7 @@ impl RemoteTimelineClient {
                     reason: "no need for a downloads gauge",
                 },
             );
-            download::download_layer_file(
+            let fut = download::download_layer_file(
                 self.conf,
                 &self.storage_impl,
                 self.tenant_shard_id,
@@ -744,8 +744,11 @@ impl RemoteTimelineClient {
                 RemoteOpFileKind::Layer,
                 RemoteOpKind::Download,
                 Arc::clone(&self.metrics),
-            )
-            .await?
+            );
+            /*tokio::select! {
+                res = fut => res,
+                _ = ctx.cancellation_token().cancelled() => return Err(DownloadError::DownloadCancelled),
+            }*/fut.await?
         };
 
         REMOTE_ONDEMAND_DOWNLOADED_LAYERS.inc();

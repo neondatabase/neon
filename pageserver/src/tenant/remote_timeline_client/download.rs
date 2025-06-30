@@ -190,6 +190,8 @@ async fn download_object(
         .download(src_path, &DownloadOpts::default(), cancel)
         .await?;
 
+    tracing::info!("Starting layer download");
+
     pausable_failpoint!(
         "before-downloading-layer-stream-pausable",
         ctx.cancellation_token()
