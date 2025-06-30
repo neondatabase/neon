@@ -35,6 +35,8 @@
 syntax = "proto3";
 package page_api;
 
+import "google/protobuf/timestamp.proto";
+
 service PageService {
   // Returns whether a relation exists.
   rpc CheckRelExists(CheckRelExistsRequest) returns (CheckRelExistsResponse);
@@ -64,6 +66,10 @@ service PageService {
 
   // Fetches an SLRU segment.
   rpc GetSlruSegment (GetSlruSegmentRequest) returns (GetSlruSegmentResponse);
+
+  // Acquires or extends a lease on the given LSN. This guarantees that the Pageserver won't garbage
+  // collect the LSN until the lease expires. Must be acquired on all relevant shards.
+  rpc LeaseLsn (LeaseLsnRequest) returns (LeaseLsnResponse);
 }
 
 // The LSN a request should read at.
@@ -251,4 +257,18 @@ message GetSlruSegmentRequest {
 // These are up 32 pages (256 KB), so we can send them as a single response.
 message GetSlruSegmentResponse {
   bytes segment = 1;
+}
+
+// Acquires or extends a lease on the given LSN. This guarantees that the Pageserver won't garbage
+// collect the LSN until the lease expires. Must be acquired on all relevant shards.
+message LeaseLsnRequest {
+  // The LSN to lease. Can't be 0 or below the current GC cutoff.
+  uint64 lsn = 1;
+}
+
+// Lease acquisition response. If the lease could not be granted because the LSN has already been
+// garbage collected, a FailedPrecondition status will be returned instead.
+message LeaseLsnResponse {
+  // The lease expiration time.
+  google.protobuf.Timestamp expires = 1;
 }

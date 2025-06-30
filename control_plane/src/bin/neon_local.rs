@@ -16,9 +16,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use compute_api::requests::ComputeClaimsScope;
-use compute_api::spec::ComputeMode;
+use compute_api::spec::{ComputeMode, PageserverProtocol};
 use control_plane::broker::StorageBroker;
-use control_plane::endpoint::{ComputeControlPlane, EndpointTerminateMode, PageserverProtocol};
+use control_plane::endpoint::{ComputeControlPlane, EndpointTerminateMode};
 use control_plane::endpoint_storage::{ENDPOINT_STORAGE_DEFAULT_ADDR, EndpointStorage};
 use control_plane::local_env;
 use control_plane::local_env::{
@@ -1649,7 +1649,9 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             // If --safekeepers argument is given, use only the listed
             // safekeeper nodes; otherwise all from the env.
             let safekeepers = parse_safekeepers(&args.safekeepers)?;
-            endpoint.reconfigure(pageservers, None, safekeepers).await?;
+            endpoint
+                .reconfigure(Some(pageservers), None, safekeepers, None)
+                .await?;
         }
         EndpointCmd::Stop(args) => {
             let endpoint_id = &args.endpoint_id;

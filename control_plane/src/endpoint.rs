@@ -56,8 +56,8 @@ use compute_api::responses::{
     TlsConfig,
 };
 use compute_api::spec::{
-    Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PgIdent,
-    RemoteExtSpec, Role,
+    Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PageserverProtocol,
+    PgIdent, RemoteExtSpec, Role,
 };
 use jsonwebtoken::jwk::{
     AlgorithmParameters, CommonParameters, EllipticCurve, Jwk, JwkSet, KeyAlgorithm, KeyOperations,
@@ -370,29 +370,6 @@ impl std::fmt::Display for EndpointTerminateMode {
             EndpointTerminateMode::Immediate => "immediate",
             EndpointTerminateMode::ImmediateTerminate => "immediate-terminate",
         })
-    }
-}
-
-/// Protocol used to connect to a Pageserver.
-#[derive(Clone, Copy, Debug)]
-pub enum PageserverProtocol {
-    Libpq,
-    Grpc,
-}
-
-impl PageserverProtocol {
-    /// Returns the URL scheme for the protocol, used in connstrings.
-    pub fn scheme(&self) -> &'static str {
-        match self {
-            Self::Libpq => "postgresql",
-            Self::Grpc => "grpc",
-        }
-    }
-}
-
-impl Display for PageserverProtocol {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.scheme())
     }
 }
 
@@ -997,12 +974,11 @@ impl Endpoint {
 
     pub async fn reconfigure(
         &self,
-        pageservers: Vec<(PageserverProtocol, Host, u16)>,
+        pageservers: Option<Vec<(PageserverProtocol, Host, u16)>>,
         stripe_size: Option<ShardStripeSize>,
         safekeepers: Option<Vec<NodeId>>,
+        safekeeper_generation: Option<SafekeeperGeneration>,
     ) -> Result<()> {
-        anyhow::ensure!(!pageservers.is_empty(), "no pageservers provided");
-
         let (mut spec, compute_ctl_config) = {
             let config_path = self.endpoint_path().join("config.json");
             let file = std::fs::File::open(config_path)?;
@@ -1014,16 +990,24 @@ impl Endpoint {
         let postgresql_conf = self.read_postgresql_conf()?;
         spec.cluster.postgresql_conf = Some(postgresql_conf);
 
-        let pageserver_connstr = Self::build_pageserver_connstr(&pageservers);
-        spec.pageserver_connstring = Some(pageserver_connstr);
-        if stripe_size.is_some() {
-            spec.shard_stripe_size = stripe_size.map(|s| s.0 as usize);
+        // If pageservers are not specified, don't change them.
+        if let Some(pageservers) = pageservers {
+            anyhow::ensure!(!pageservers.is_empty(), "no pageservers provided");
+
+            let pageserver_connstr = Self::build_pageserver_connstr(&pageservers);
+            spec.pageserver_connstring = Some(pageserver_connstr);
+            if stripe_size.is_some() {
+                spec.shard_stripe_size = stripe_size.map(|s| s.0 as usize);
+            }
         }
 
         // If safekeepers are not specified, don't change them.
         if let Some(safekeepers) = safekeepers {
             let safekeeper_connstrings = self.build_safekeepers_connstrs(safekeepers)?;
             spec.safekeeper_connstrings = safekeeper_connstrings;
+            if let Some(g) = safekeeper_generation {
+                spec.safekeepers_generation = Some(g.into_inner());
+            }
         }
 
         let client = reqwest::Client::builder()
@@ -1059,6 +1043,24 @@ impl Endpoint {
             };
             Err(anyhow::anyhow!(msg))
         }
+    }
+
+    pub async fn reconfigure_pageservers(
+        &self,
+        pageservers: Vec<(PageserverProtocol, Host, u16)>,
+        stripe_size: Option<ShardStripeSize>,
+    ) -> Result<()> {
+        self.reconfigure(Some(pageservers), stripe_size, None, None)
+            .await
+    }
+
+    pub async fn reconfigure_safekeepers(
+        &self,
+        safekeepers: Vec<NodeId>,
+        generation: SafekeeperGeneration,
+    ) -> Result<()> {
+        self.reconfigure(None, None, Some(safekeepers), Some(generation))
+            .await
     }
 
     pub async fn stop(

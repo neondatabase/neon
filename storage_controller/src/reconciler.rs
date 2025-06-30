@@ -65,7 +65,7 @@ pub(super) struct Reconciler {
     pub(crate) compute_hook: Arc<ComputeHook>,
 
     /// To avoid stalling if the cloud control plane is unavailable, we may proceed
-    /// past failures in [`ComputeHook::notify`], but we _must_ remember that we failed
+    /// past failures in [`ComputeHook::notify_attach`], but we _must_ remember that we failed
     /// so that we can set [`crate::tenant_shard::TenantShard::pending_compute_notification`] to ensure a later retry.
     pub(crate) compute_notify_failure: bool,
 
@@ -1023,7 +1023,7 @@ impl Reconciler {
         if let Some(node) = &self.intent.attached {
             let result = self
                 .compute_hook
-                .notify(
+                .notify_attach(
                     compute_hook::ShardUpdate {
                         tenant_shard_id: self.tenant_shard_id,
                         node_id: node.get_id(),
