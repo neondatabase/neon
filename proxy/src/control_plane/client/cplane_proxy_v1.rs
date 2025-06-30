@@ -389,21 +389,6 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
         ctx: &RequestContext,
         endpoint: &EndpointId,
     ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
-        if true {
-            return Ok(vec![AuthRule {
-                id: "1".into(),
-                jwks_url: "https://climbing-minnow-11.clerk.accounts.dev/.well-known/jwks.json"
-                    .parse()
-                    .expect("url is valid"),
-                audience: None,
-                role_names: vec![
-                    (&RoleName::from("authenticator")).into(),
-                    (&RoleName::from("authenticated")).into(),
-                    (&RoleName::from("anon")).into(),
-                ],
-            }]);
-        }
-
         self.do_get_endpoint_jwks(ctx, endpoint).await
     }
 
@@ -413,24 +398,6 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
         ctx: &RequestContext,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
-        if true {
-            return Ok(CachedNodeInfo::new_uncached(NodeInfo {
-                conn_info: ConnectInfo {
-                    host_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
-                    host: "localhost".into(),
-                    port: 7432,
-                    ssl_mode: SslMode::Disable,
-                },
-                aux: MetricsAuxInfo {
-                    endpoint_id: EndpointId::from("foo").into(),
-                    project_id: ProjectId::from("foo").into(),
-                    branch_id: BranchId::from("foo").into(),
-                    compute_id: "foo".into(),
-                    cold_start_info: ColdStartInfo::Warm,
-                },
-            }));
-        }
-
         let key = user_info.endpoint_cache_key();
 
         macro_rules! check_cache {

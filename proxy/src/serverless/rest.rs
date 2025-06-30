@@ -652,7 +652,7 @@ async fn handle_inner(
     // we always use the authenticator role to connect to the database
     let autheticator_role = "authenticator";
     let connection_string = format!(
-        "postgresql://{}@{}.local.neon.build/database",
+        "postgresql://{}@{}.local.neon.build/database", //FIXME: how do we get the database name knowing only the endpoint id?
         autheticator_role, endpoint_id
     );
 
@@ -684,7 +684,7 @@ async fn handle_inner(
             .await
         }
         _ => Err(RestError::ConnInfo(ConnInfoError::MissingCredentials(
-            Credentials::Password,
+            Credentials::BearerJwt,
         ))),
     }
 }
