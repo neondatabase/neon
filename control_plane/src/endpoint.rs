@@ -1000,7 +1000,7 @@ impl Endpoint {
         pageservers: Option<Vec<(PageserverProtocol, Host, u16)>>,
         stripe_size: Option<ShardStripeSize>,
         safekeepers: Option<Vec<NodeId>>,
-        sk_generation: Option<SafekeeperGeneration>,
+        safekeeper_generation: Option<SafekeeperGeneration>,
     ) -> Result<()> {
         let (mut spec, compute_ctl_config) = {
             let config_path = self.endpoint_path().join("config.json");
@@ -1028,7 +1028,9 @@ impl Endpoint {
         if let Some(safekeepers) = safekeepers {
             let safekeeper_connstrings = self.build_safekeepers_connstrs(safekeepers)?;
             spec.safekeeper_connstrings = safekeeper_connstrings;
-            spec.safekeepers_generation = sk_generation.map(|g| g.into_inner());
+            if let Some(g) = safekeeper_generation {
+                spec.safekeepers_generation = Some(g.into_inner());
+            }
         }
 
         let client = reqwest::Client::builder()
