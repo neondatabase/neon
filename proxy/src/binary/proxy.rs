@@ -6,6 +6,7 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(any(test, feature = "testing"))]
 use anyhow::Context;
 use anyhow::{bail, ensure};
 use arc_swap::ArcSwapOption;
@@ -16,11 +17,14 @@ use remote_storage::RemoteStorageConfig;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, error, info, warn};
+use tracing::{Instrument, error, info, warn};
+#[cfg(any(test, feature = "testing"))]
+use tracing::debug;
 use utils::sentry_init::init_sentry;
 use utils::{project_build_tag, project_git_version};
 
 use crate::auth::backend::jwt::JwkCache;
+#[cfg(any(test, feature = "testing"))]
 use crate::auth::backend::local::{JWKS_ROLE_MAP, LocalBackend};
 use crate::auth::backend::{ConsoleRedirectBackend, MaybeOwned};
 use crate::batch::BatchQueue;
@@ -30,9 +34,12 @@ use crate::config::{
     ProxyConfig, ProxyProtocolV2, RestConfig, remote_storage_from_toml,
 };
 use crate::context::parquet::ParquetUploadArgs;
+#[cfg(any(test, feature = "testing"))]
 use crate::control_plane::messages::{EndpointJwksResponse, JwksSettings};
+#[cfg(any(test, feature = "testing"))]
 use crate::ext::TaskExt;
 use crate::http::health_server::AppMetrics;
+#[cfg(any(test, feature = "testing"))]
 use crate::intern::RoleNameInt;
 use crate::metrics::Metrics;
 use crate::rate_limiter::{EndpointRateLimiter, RateBucketInfo, WakeComputeRateLimiter};
@@ -44,13 +51,20 @@ use crate::serverless::GlobalConnPoolOptions;
 use crate::serverless::cancel_set::CancelSet;
 use crate::serverless::rest::DbSchemaCache;
 use crate::tls::client_config::compute_client_config_with_root_certs;
+#[cfg(any(test, feature = "testing"))]
 use crate::types::RoleName;
+#[cfg(any(test, feature = "testing"))]
 use crate::url::ApiUrl;
 use crate::{auth, control_plane, http, serverless, usage_metrics};
+#[cfg(any(test, feature = "testing"))]
 use camino::{Utf8Path, Utf8PathBuf};
+#[cfg(any(test, feature = "testing"))]
 use compute_api::spec::LocalProxySpec;
+#[cfg(any(test, feature = "testing"))]
 use std::str::FromStr;
+#[cfg(any(test, feature = "testing"))]
 use thiserror::Error;
+#[cfg(any(test, feature = "testing"))]
 use tokio::sync::Notify;
 
 project_git_version!(GIT_VERSION);
@@ -71,6 +85,7 @@ enum AuthBackendType {
     Postgres,
 
     #[clap(alias("local"))]
+    #[cfg(any(test, feature = "testing"))]
     Local,
 }
 
@@ -88,6 +103,7 @@ struct ProxyCliArgs {
     auth_backend: AuthBackendType,
     /// Path of the local proxy config file (used for local-file auth backend)
     #[clap(long, default_value = "./local_proxy.json")]
+    #[cfg(any(test, feature = "testing"))]
     config_path: Utf8PathBuf,
     /// listen for management callback connection on ip:port
     #[clap(short, long, default_value = "127.0.0.1:7000")]
@@ -452,6 +468,7 @@ pub async fn run() -> anyhow::Result<()> {
             }
 
             // if auth backend is local, we need to load the config file
+            #[cfg(any(test, feature = "testing"))]
             if let auth::Backend::Local(_) = &auth_backend {
                 // trigger the first config load **after** setting up the signal hook
                 // to avoid the race condition where:
@@ -907,6 +924,8 @@ fn build_auth_backend(
 
             Ok(Either::Right(config))
         }
+        
+        #[cfg(any(test, feature = "testing"))]
         AuthBackendType::Local => {
             let postgres: SocketAddr = "127.0.0.1:7432".parse()?;
             let compute_ctl: ApiUrl = "http://127.0.0.1:3081/".parse()?;
@@ -977,6 +996,7 @@ async fn configure_redis(
 
 
 // TODO: move this to a common place (the exact same code is used in local_proxy.rs)
+#[cfg(any(test, feature = "testing"))]
 #[derive(Error, Debug)]
 enum RefreshConfigError {
     #[error(transparent)]
@@ -989,6 +1009,7 @@ enum RefreshConfigError {
     Tls(anyhow::Error),
 }
 
+#[cfg(any(test, feature = "testing"))]
 async fn refresh_config_loop(config: &ProxyConfig, path: Utf8PathBuf, rx: Arc<Notify>) {
     let mut init = true;
     loop {
@@ -1015,6 +1036,7 @@ async fn refresh_config_loop(config: &ProxyConfig, path: Utf8PathBuf, rx: Arc<No
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
 async fn refresh_config_inner(
     config: &ProxyConfig,
     path: &Utf8Path,

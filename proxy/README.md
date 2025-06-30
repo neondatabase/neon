@@ -159,7 +159,7 @@ cargo run --bin local_proxy -- \
 ```
 
 ```sh
-LOGFMT=text OTEL_SDK_DISABLED=true cargo run --release --bin proxy -- \
+LOGFMT=text OTEL_SDK_DISABLED=true cargo run --release --bin proxy --features testing -- \
   -c server.crt -k server.key \
   --is-auth-broker true \
   --is-rest-broker true \
