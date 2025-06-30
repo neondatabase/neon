@@ -14,6 +14,7 @@ use std::{io, str};
 
 use anyhow::{Context as _, bail};
 use bytes::{Buf as _, BufMut as _, BytesMut};
+use chrono::Utc;
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
 use itertools::Itertools;
@@ -3780,6 +3781,13 @@ impl proto::PageService for GrpcPageServiceHandler {
             Ok(lease) => lease.valid_until,
             Err(err) => return Err(tonic::Status::failed_precondition(format!("{err}"))),
         };
+
+        // TODO: is this spammy? Move it compute-side?
+        info!(
+            "acquired lease for {} until {}",
+            req.lsn,
+            chrono::DateTime::<Utc>::from(expires).to_rfc3339()
+        );
 
         Ok(tonic::Response::new(expires.into()))
     }
