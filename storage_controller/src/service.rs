@@ -7088,9 +7088,6 @@ impl Service {
         Ok(())
     }
 
-    /// If a node has any work on it, it will be rescheduled: this is "clean" in the sense
-    /// that we don't leave any bad state behind in the storage controller, but unclean
-    /// in the sense that we are not carefully draining the node.
     pub(crate) async fn delete_node(
         self: &Arc<Self>,
         node_id: NodeId,
@@ -7187,7 +7184,9 @@ impl Service {
                     }
                 }
 
-                tenant_shard.observed.locations.remove(&node_id);
+                // For review purposes: discuss if we want for this line to remain or not.
+                //
+                // tenant_shard.observed.locations.remove(&node_id);
             }
 
             waiters = self
@@ -7234,6 +7233,7 @@ impl Service {
                 removed_node.set_availability(NodeAvailability::Offline);
             }
             *nodes = Arc::new(nodes_mut);
+
             metrics::METRICS_REGISTRY
                 .metrics_group
                 .storage_controller_pageserver_nodes
@@ -7838,7 +7838,7 @@ impl Service {
 
         if let Some(ongoing) = ongoing_op {
             return Err(ApiError::PreconditionFailed(
-                format!("Background operation already ongoing for node: {}", ongoing).into(),
+                format!("Background operation already ongoing for node: {ongoing}").into(),
             ));
         }
 
@@ -7855,7 +7855,7 @@ impl Service {
 
                 let cancel = self.cancel.child_token();
                 let gate_guard = self.gate.enter().map_err(|_| ApiError::ShuttingDown)?;
-                let last_policy = node_policy.clone();
+                let last_policy = node_policy;
 
                 self.inner.write().unwrap().ongoing_operation = Some(OperationHandler {
                     operation: Operation::Delete(Delete { node_id }),

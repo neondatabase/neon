@@ -65,7 +65,8 @@ enum Command {
         #[arg(long)]
         scheduling: Option<NodeSchedulingPolicy>,
     },
-    /// Exists for backward compatibility. Use [`Command::NodeStartDelete`] instead.
+    /// Exists for backup usage and will be removed in future.
+    /// Use [`Command::NodeStartDelete`] instead, if possible.
     NodeDelete {
         #[arg(long)]
         node_id: NodeId,
@@ -926,15 +927,10 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
         }
         Command::NodeDelete { node_id } => {
-            println!(
-                "NodeDelete is obsolete and will be removed in the future, use NodeStartDelete instead"
-            );
+            eprintln!("Warning: This command is obsolete and will be removed in a future version");
+            eprintln!("Use `NodeStartDelete` instead, if possible");
             storcon_client
-                .dispatch::<(), ()>(
-                    Method::DELETE,
-                    format!("control/v1/node/{node_id}/delete"),
-                    None,
-                )
+                .dispatch::<(), ()>(Method::DELETE, format!("control/v1/node/{node_id}"), None)
                 .await?;
         }
         Command::NodeStartDelete { node_id } => {

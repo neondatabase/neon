@@ -2067,7 +2067,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         log.info(f"node_delete_old({node_id})")
         self.request(
             "DELETE",
-            f"{self.api}/control/v1/node/{node_id}/delete",
+            f"{self.api}/control/v1/node/{node_id}",
             headers=self.headers(TokenScope.ADMIN),
         )
 
