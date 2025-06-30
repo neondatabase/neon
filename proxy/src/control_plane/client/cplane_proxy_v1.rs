@@ -1,6 +1,6 @@
 //! Production console backend.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,21 +17,20 @@ use tracing::{Instrument, debug, info, info_span, warn};
 use super::super::messages::{ControlPlaneErrorMessage, GetEndpointAccessControl, WakeCompute};
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::AuthRule;
-use crate::compute::ConnectInfo;
 use crate::context::RequestContext;
 use crate::control_plane::caches::ApiCaches;
 use crate::control_plane::errors::{
     ControlPlaneError, GetAuthInfoError, GetEndpointJwksError, WakeComputeError,
 };
 use crate::control_plane::locks::ApiLocks;
-use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo, Reason};
+use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, Reason};
 use crate::control_plane::{
     AccessBlockerFlags, AuthInfo, AuthSecret, CachedNodeInfo, EndpointAccessControl, NodeInfo,
     RoleAccessControl,
 };
 use crate::metrics::Metrics;
 use crate::rate_limiter::WakeComputeRateLimiter;
-use crate::types::{BranchId, EndpointCacheKey, EndpointId, ProjectId, RoleName};
+use crate::types::{EndpointCacheKey, EndpointId, RoleName};
 use crate::{compute, http, scram};
 
 pub(crate) const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");

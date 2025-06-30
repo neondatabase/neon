@@ -16,13 +16,13 @@ use remote_storage::RemoteStorageConfig;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, error, info, warn, debug};
+use tracing::{Instrument, debug, error, info, warn};
 use utils::sentry_init::init_sentry;
 use utils::{project_build_tag, project_git_version};
 
 use crate::auth::backend::jwt::JwkCache;
-use crate::auth::backend::{ConsoleRedirectBackend, MaybeOwned};
 use crate::auth::backend::local::{JWKS_ROLE_MAP, LocalBackend};
+use crate::auth::backend::{ConsoleRedirectBackend, MaybeOwned};
 use crate::batch::BatchQueue;
 use crate::cancellation::{CancellationHandler, CancellationProcessor};
 use crate::config::{
@@ -30,7 +30,10 @@ use crate::config::{
     ProxyConfig, ProxyProtocolV2, RestConfig, remote_storage_from_toml,
 };
 use crate::context::parquet::ParquetUploadArgs;
+use crate::control_plane::messages::{EndpointJwksResponse, JwksSettings};
+use crate::ext::TaskExt;
 use crate::http::health_server::AppMetrics;
+use crate::intern::RoleNameInt;
 use crate::metrics::Metrics;
 use crate::rate_limiter::{EndpointRateLimiter, RateBucketInfo, WakeComputeRateLimiter};
 use crate::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
@@ -41,17 +44,14 @@ use crate::serverless::GlobalConnPoolOptions;
 use crate::serverless::cancel_set::CancelSet;
 use crate::serverless::rest::DbSchemaCache;
 use crate::tls::client_config::compute_client_config_with_root_certs;
+use crate::types::RoleName;
 use crate::url::ApiUrl;
 use crate::{auth, control_plane, http, serverless, usage_metrics};
 use camino::{Utf8Path, Utf8PathBuf};
+use compute_api::spec::LocalProxySpec;
+use std::str::FromStr;
 use thiserror::Error;
 use tokio::sync::Notify;
-use compute_api::spec::LocalProxySpec;
-use crate::control_plane::messages::{EndpointJwksResponse, JwksSettings};
-use crate::types::RoleName;
-use crate::intern::RoleNameInt;
-use crate::ext::TaskExt;
-use std::str::FromStr;
 
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
@@ -906,14 +906,14 @@ fn build_auth_backend(
             let config = Box::leak(Box::new(backend));
 
             Ok(Either::Right(config))
-        },
+        }
         AuthBackendType::Local => {
             let postgres: SocketAddr = "127.0.0.1:7432".parse()?;
             let compute_ctl: ApiUrl = "http://127.0.0.1:3081/".parse()?;
-            let auth_backend = crate::auth::Backend::Local(crate::auth::backend::MaybeOwned::Owned(
-                LocalBackend::new(postgres, compute_ctl),
-            ));
-        
+            let auth_backend = crate::auth::Backend::Local(
+                crate::auth::backend::MaybeOwned::Owned(LocalBackend::new(postgres, compute_ctl)),
+            );
+
             let config = Box::leak(Box::new(auth_backend));
 
             Ok(Either::Left(config))
@@ -974,7 +974,6 @@ async fn configure_redis(
 
     Ok((regional_redis_client, redis_notifications_client))
 }
-
 
 #[derive(Error, Debug)]
 enum RefreshConfigError {
