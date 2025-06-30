@@ -780,6 +780,7 @@ impl Endpoint {
                 endpoint_storage_addr: Some(endpoint_storage_addr),
                 endpoint_storage_token: Some(endpoint_storage_token),
                 autoprewarm: false,
+                suspend_timeout_seconds: -1, // Only used in neon_local.
             };
 
             // this strange code is needed to support respec() in tests

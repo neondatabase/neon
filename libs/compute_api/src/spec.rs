@@ -184,6 +184,11 @@ pub struct ComputeSpec {
     /// Download LFC state from endpoint_storage and pass it to Postgres on startup
     #[serde(default)]
     pub autoprewarm: bool,
+
+    /// Suspend timeout in seconds.
+    ///
+    /// We use this value to derive other values, such as the installed extensions metric.
+    pub suspend_timeout_seconds: i64,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
