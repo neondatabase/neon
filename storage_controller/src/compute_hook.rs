@@ -70,8 +70,16 @@ struct ComputeRemoteState<R> {
 type ComputeRemoteTenantState = ComputeRemoteState<NotifyAttachRequest>;
 type ComputeRemoteTimelineState = ComputeRemoteState<NotifySafekeepersRequest>;
 
+/// The trait which define the handler-specific types and methods.
+/// We have two implementations of this trait so far:
+/// - [`ComputeHookTenant`] for tenant attach notifications ("/notify-attach")
+/// - [`ComputeHookTimeline`] for safekeeper change notifications ("/notify-safekeepers")
 trait ApiMethod {
+    /// Type of the key which identifies the resource.
+    /// It's either TenantId for tenant attach notifications,
+    /// or TenantTimelineId for safekeeper change notifications.
     type Key: std::cmp::Eq + std::hash::Hash + Clone;
+
     type Request: serde::Serialize + std::fmt::Debug;
 
     const API_PATH: &'static str;
@@ -213,6 +221,7 @@ impl ComputeHookTenant {
     }
 }
 
+/// The state of a timeline we need to notify the compute about.
 struct ComputeHookTimeline {
     generation: SafekeeperGeneration,
     safekeepers: Vec<SafekeeperInfo>,
@@ -230,6 +239,8 @@ impl ComputeHookTimeline {
         }
     }
 
+    /// Update the state with a new SafekeepersUpdate.
+    /// Noop if the update generation is not greater than the current generation.
     fn update(&mut self, sk_update: SafekeepersUpdate) {
         if sk_update.generation > self.generation {
             self.generation = sk_update.generation;
@@ -295,9 +306,9 @@ impl ApiMethod for ComputeHookTimeline {
                 && endpoint.timeline_id == *timeline_id
                 && endpoint.status() == EndpointStatus::Running
             {
-                tracing::info!("Reconfiguring endpoint {endpoint_name}");
-
                 let safekeepers = safekeepers.iter().map(|sk| sk.id).collect::<Vec<_>>();
+
+                tracing::info!("Reconfiguring safekeepers for endpoint {endpoint_name}");
 
                 endpoint
                     .reconfigure_safekeepers(safekeepers, *generation)
@@ -328,15 +339,18 @@ struct NotifyAttachRequest {
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
 pub(crate) struct SafekeeperInfo {
     pub id: NodeId,
-    // Optional, for debugging purposes.
+    /// Hostname of the safekeeper.
+    /// It exists for better debuggability. Might be missing.
+    /// Should not be used for anything else.
     pub hostname: Option<String>,
 }
+
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
-pub(crate) struct NotifySafekeepersRequest {
-    pub(crate) tenant_id: TenantId,
-    pub(crate) timeline_id: TimelineId,
-    pub(crate) generation: SafekeeperGeneration,
-    pub(crate) safekeepers: Vec<SafekeeperInfo>,
+struct NotifySafekeepersRequest {
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    generation: SafekeeperGeneration,
+    safekeepers: Vec<SafekeeperInfo>,
 }
 
 /// Error type for attempts to call into the control plane compute notification hook
@@ -490,7 +504,7 @@ impl ApiMethod for ComputeHookTenant {
 
         for (endpoint_name, endpoint) in &cplane.endpoints {
             if endpoint.tenant_id == *tenant_id && endpoint.status() == EndpointStatus::Running {
-                tracing::info!("Reconfiguring endpoint {endpoint_name}");
+                tracing::info!("Reconfiguring pageservers for endpoint {endpoint_name}");
 
                 let pageservers = shards
                     .iter()
@@ -759,12 +773,12 @@ impl ComputeHook {
     ) -> MaybeSendNotifySafekeepersResult {
         let mut timelines_locked = self.timelines.lock().unwrap();
 
-        use std::collections::hash_map::Entry;
         let ttid = TenantTimelineId {
             tenant_id: safekeepers_update.tenant_id,
             timeline_id: safekeepers_update.timeline_id,
         };
 
+        use std::collections::hash_map::Entry;
         let timeline = match timelines_locked.entry(ttid) {
             Entry::Vacant(e) => e.insert(ComputeHookTimeline::new(
                 safekeepers_update.generation,
@@ -776,9 +790,6 @@ impl ComputeHook {
                 timeline
             }
         };
-
-        // Update the request with the new safekeeper information
-        // timeline.request.safekeepers = safekeeper_update.safekeepers;
 
         timeline.maybe_send(ttid, None)
     }
@@ -1029,7 +1040,7 @@ pub(crate) mod tests {
         // An unsharded tenant is always ready to emit a notification, but won't
         // send the same one twice
         let send_result = tenant_state.maybe_send(tenant_id, None);
-        let MaybeSendNotifyAttachResult::Transmit((request, mut guard)) = send_result else {
+        let MaybeSendResult::Transmit((request, mut guard)) = send_result else {
             anyhow::bail!("Wrong send result");
         };
         assert_eq!(request.shards.len(), 1);
@@ -1044,7 +1055,7 @@ pub(crate) mod tests {
 
         // Try asking again: this should be a no-op
         let send_result = tenant_state.maybe_send(tenant_id, None);
-        assert!(matches!(send_result, MaybeSendNotifyAttachResult::Noop));
+        assert!(matches!(send_result, MaybeSendResult::Noop));
 
         // Writing the first shard of a multi-sharded situation (i.e. in a split)
         // resets the tenant state and puts it in an non-notifying state (need to
@@ -1061,7 +1072,7 @@ pub(crate) mod tests {
         });
         assert!(matches!(
             tenant_state.maybe_send(tenant_id, None),
-            MaybeSendNotifyAttachResult::Noop
+            MaybeSendResult::Noop
         ));
 
         // Writing the second shard makes it ready to notify
@@ -1077,7 +1088,7 @@ pub(crate) mod tests {
         });
 
         let send_result = tenant_state.maybe_send(tenant_id, None);
-        let MaybeSendNotifyAttachResult::Transmit((request, mut guard)) = send_result else {
+        let MaybeSendResult::Transmit((request, mut guard)) = send_result else {
             anyhow::bail!("Wrong send result");
         };
         assert_eq!(request.shards.len(), 2);
