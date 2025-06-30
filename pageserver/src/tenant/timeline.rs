@@ -5308,6 +5308,7 @@ impl Timeline {
         ctx: &RequestContext,
         img_range: Range<Key>,
         io_concurrency: IoConcurrency,
+        progress: Option<(usize, usize)>,
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         let mut wrote_keys = false;
 
@@ -5384,11 +5385,15 @@ impl Timeline {
             }
         }
 
+        let progress_report = progress
+            .map(|(idx, total)| format!("({idx}/{total}) "))
+            .unwrap_or_default();
         if wrote_keys {
             // Normal path: we have written some data into the new image layer for this
             // partition, so flush it to disk.
             info!(
-                "produced image layer for rel {}",
+                "{} produced image layer for rel {}",
+                progress_report,
                 ImageLayerName {
                     key_range: img_range.clone(),
                     lsn
@@ -5398,7 +5403,12 @@ impl Timeline {
                 unfinished_image_layer: image_layer_writer,
             })
         } else {
-            tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
+            tracing::debug!(
+                "{} no data in range {}-{}",
+                progress_report,
+                img_range.start,
+                img_range.end
+            );
             Ok(ImageLayerCreationOutcome::Empty)
         }
     }
@@ -5633,7 +5643,8 @@ impl Timeline {
             }
         }
 
-        for partition in partition_parts.iter() {
+        let total = partition_parts.len();
+        for (idx, partition) in partition_parts.iter().enumerate() {
             if self.cancel.is_cancelled() {
                 return Err(CreateImageLayersError::Cancelled);
             }
@@ -5718,6 +5729,7 @@ impl Timeline {
                     ctx,
                     img_range.clone(),
                     io_concurrency,
+                    Some((idx, total)),
                 )
                 .await?
             } else {
