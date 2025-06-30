@@ -844,4 +844,13 @@ impl Client {
             .await
             .map_err(Error::ReceiveBody)
     }
+
+    pub async fn update_feature_flag_spec(&self, spec: String) -> Result<()> {
+        let uri = format!("{}/v1/feature_flag_spec", self.mgmt_api_endpoint);
+        self.request(Method::POST, uri, spec)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
 }

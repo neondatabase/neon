@@ -14,6 +14,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio_util::codec::{Decoder, Encoder};
 
 use super::*;
+use crate::config::TlsConfig;
+use crate::context::RequestContext;
+use crate::pglb::handshake::{HandshakeData, handshake};
 
 enum Intercept {
     None,
@@ -169,7 +172,7 @@ async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
         .dbname("db")
         .password("password")
         .ssl_mode(SslMode::Require)
-        .connect_raw(server, client_config.make_tls_connect()?)
+        .tls_and_authenticate(server, client_config.make_tls_connect()?)
         .await?;
 
     proxy.await?
@@ -252,7 +255,7 @@ async fn connect_failure(
         .dbname("db")
         .password("password")
         .ssl_mode(SslMode::Require)
-        .connect_raw(server, client_config.make_tls_connect()?)
+        .tls_and_authenticate(server, client_config.make_tls_connect()?)
         .await
         .err()
         .context("client shouldn't be able to connect")?;

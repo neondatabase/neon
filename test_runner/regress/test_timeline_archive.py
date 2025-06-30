@@ -896,6 +896,134 @@ def test_timeline_retain_lsn(
             assert sum == pre_branch_sum
 
 
+def test_timeline_offload_delete_race(neon_env_builder: NeonEnvBuilder):
+    """
+    Regression test for https://github.com/neondatabase/cloud/issues/30406
+    """
+    remote_storage_kind = s3_storage()
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+    neon_env_builder.num_pageservers = 2
+
+    env = neon_env_builder.init_start()
+
+    # Turn off gc and compaction loops: we want to issue them manually for better reliability
+    tenant_id, root_timeline_id = env.create_tenant(
+        conf={
+            "gc_period": "0s",
+            "compaction_period": "0s",
+            "checkpoint_distance": f"{1024**2}",
+        }
+    )
+
+    origin_ps = env.get_tenant_pageserver(tenant_id)
+    assert origin_ps
+    origin_ps.allowed_errors.extend(
+        [
+            ".*Timed out waiting for deletion queue flush.*",
+            ".*Timed out waiting for flush to remote storage.*",
+        ]
+    )
+    origin_ps_http = origin_ps.http_client()
+
+    # We are not sharding this tenant
+    tenant_shard_id = TenantShardId(tenant_id, 0, 0)
+
+    # Create a branch and archive it
+    child_timeline_id = env.create_branch("test_archived_branch_persisted", tenant_id)
+
+    with env.endpoints.create_start(
+        "test_archived_branch_persisted", tenant_id=tenant_id
+    ) as endpoint:
+        endpoint.safe_psql_many(
+            [
+                "CREATE TABLE foo(key serial primary key, t text default 'data_content')",
+                "INSERT INTO foo SELECT FROM generate_series(1,512)",
+            ]
+        )
+        last_flush_lsn_upload(env, endpoint, tenant_id, child_timeline_id)
+
+    assert_prefix_not_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix=f"tenants/{str(tenant_id)}/",
+    )
+    assert_prefix_not_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix=f"tenants/{str(tenant_id)}/tenant-manifest",
+    )
+
+    origin_ps_http.timeline_archival_config(
+        tenant_id,
+        child_timeline_id,
+        state=TimelineArchivalState.ARCHIVED,
+    )
+
+    def timeline_offloaded_api(timeline_id: TimelineId) -> bool:
+        return any(
+            timeline["timeline_id"] == str(timeline_id)
+            for timeline in origin_ps_http.timeline_and_offloaded_list(
+                tenant_id=tenant_id
+            ).offloaded
+        )
+
+    def child_offloaded():
+        origin_ps_http.timeline_offload(tenant_id=tenant_id, timeline_id=child_timeline_id)
+        assert timeline_offloaded_api(child_timeline_id)
+
+    wait_until(child_offloaded)
+
+    # Delete the timeline from the origin pageserver, holding up the deletion queue so that it doesn't finish
+    failpoint_deletion_queue = "deletion-queue-before-execute-pause"
+    origin_ps_http.configure_failpoints((failpoint_deletion_queue, "pause"))
+    origin_ps_http.timeline_delete(tenant_id, child_timeline_id)
+
+    dest_ps = [ps for ps in env.pageservers if ps.id != origin_ps.id][0]
+    assert dest_ps
+    log.info(f"Migrating {tenant_id} {origin_ps.id}->{dest_ps.id}")
+    env.storage_controller.tenant_shard_migrate(tenant_shard_id, dest_ps_id=dest_ps.id)
+
+    log.info("unstuck the DELETE")
+    origin_ps_http.configure_failpoints((failpoint_deletion_queue, "off"))
+
+    def child_prefix_empty():
+        assert_prefix_empty(
+            neon_env_builder.pageserver_remote_storage,
+            prefix=f"tenants/{str(tenant_id)}/{str(child_timeline_id)}/",
+        )
+
+    wait_until(child_prefix_empty)
+
+    dest_ps_http = dest_ps.http_client()
+
+    # We can't use timeline_delete_wait_completed here as timeline status will return 404, but we want to return 404 from the deletion endpoint
+    def timeline_is_missing():
+        data = None
+        try:
+            data = dest_ps_http.timeline_delete(tenant_id, child_timeline_id)
+            log.info(f"timeline delete {data}")
+        except PageserverApiException as e:
+            log.debug(e)
+            if e.status_code == 404:
+                return
+
+        raise RuntimeError(f"Timeline exists {data}")
+
+    wait_until(timeline_is_missing)
+    # (dest_ps_http, tenant_id, child_timeline_id)
+
+    #
+    # Now ensure that scrubber doesn't have anything to clean up.
+    #
+
+    # Sleep some amount larger than min_age_secs
+    time.sleep(3)
+
+    # Ensure that min_age_secs has a deletion impeding effect
+    gc_summary = env.storage_scrubber.pageserver_physical_gc(min_age_secs=1, mode="full")
+    assert gc_summary["remote_storage_errors"] == 0
+    assert gc_summary["indices_deleted"] == 0
+    assert gc_summary["tenant_manifests_deleted"] == 0
+
+
 def test_timeline_offload_generations(neon_env_builder: NeonEnvBuilder):
     """
     Test for scrubber deleting old generations of manifests

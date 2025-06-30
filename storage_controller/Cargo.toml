@@ -27,6 +27,7 @@ governor.workspace = true
 hex.workspace = true
 hyper0.workspace = true
 humantime.workspace = true
+humantime-serde.workspace = true
 itertools.workspace = true
 json-structural-diff.workspace = true
 lasso.workspace = true
@@ -34,6 +35,7 @@ once_cell.workspace = true
 pageserver_api.workspace = true
 pageserver_client.workspace = true
 postgres_connection.workspace = true
+posthog_client_lite.workspace = true
 rand.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
 routerify.workspace = true

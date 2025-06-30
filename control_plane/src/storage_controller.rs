@@ -638,8 +638,26 @@ impl StorageController {
             args.push("--timelines-onto-safekeepers".to_string());
         }
 
-        if let Some(sk_cnt) = self.config.timeline_safekeeper_count {
+        // neon_local is used in test environments where we often have less than 3 safekeepers.
+        if self.config.timeline_safekeeper_count.is_some() || self.env.safekeepers.len() < 3 {
+            let sk_cnt = self
+                .config
+                .timeline_safekeeper_count
+                .unwrap_or(self.env.safekeepers.len());
+
             args.push(format!("--timeline-safekeeper-count={sk_cnt}"));
+        }
+
+        let mut envs = vec![
+            ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+            ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+        ];
+
+        if let Some(posthog_config) = &self.config.posthog_config {
+            envs.push((
+                "POSTHOG_CONFIG".to_string(),
+                serde_json::to_string(posthog_config)?,
+            ));
         }
 
         println!("Starting storage controller");
@@ -649,10 +667,7 @@ impl StorageController {
             &instance_dir,
             &self.env.storage_controller_bin(),
             args,
-            vec![
-                ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
-                ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
-            ],
+            envs,
             background_process::InitialPidFile::Create(self.pid_file(start_args.instance_id)),
             &start_args.start_timeout,
             || async {

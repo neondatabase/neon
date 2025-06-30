@@ -9,7 +9,7 @@
 
 use std::cmp::{max, min};
 use std::future::Future;
-use std::io::{self, SeekFrom};
+use std::io::{ErrorKind, SeekFrom};
 use std::pin::Pin;
 
 use anyhow::{Context, Result, bail};
@@ -154,8 +154,8 @@ pub struct PhysicalStorage {
     ///     record
     ///
     /// Partial segment 002 has no WAL records, and it will be removed by the
-    /// next truncate_wal(). This flag will be set to true after the first
-    /// truncate_wal() call.
+    /// next truncate_wal(). This flag will be set to false after the first
+    /// successful truncate_wal() call.
     ///
     /// [`write_lsn`]: Self::write_lsn
     pending_wal_truncation: bool,
@@ -202,6 +202,8 @@ impl PhysicalStorage {
             ttid.timeline_id, flush_lsn, state.commit_lsn, state.peer_horizon_lsn,
         );
         if flush_lsn < state.commit_lsn {
+            // note: can never happen. find_end_of_wal returns provided start_lsn
+            // (state.commit_lsn in our case) if it doesn't find anything.
             bail!(
                 "timeline {} potential data loss: flush_lsn {} by find_end_of_wal is less than commit_lsn  {} from control file",
                 ttid.timeline_id,
@@ -794,26 +796,13 @@ impl WalReader {
 
         // Try to open local file, if we may have WAL locally
         if self.pos >= self.local_start_lsn {
-            let res = open_wal_file(&self.timeline_dir, segno, self.wal_seg_size).await;
-            match res {
-                Ok((mut file, _)) => {
-                    file.seek(SeekFrom::Start(xlogoff as u64)).await?;
-                    return Ok(Box::pin(file));
-                }
-                Err(e) => {
-                    let is_not_found = e.chain().any(|e| {
-                        if let Some(e) = e.downcast_ref::<io::Error>() {
-                            e.kind() == io::ErrorKind::NotFound
-                        } else {
-                            false
-                        }
-                    });
-                    if !is_not_found {
-                        return Err(e);
-                    }
-                    // NotFound is expected, fall through to remote read
-                }
-            };
+            let res = open_wal_file(&self.timeline_dir, segno, self.wal_seg_size).await?;
+            if let Some((mut file, _)) = res {
+                file.seek(SeekFrom::Start(xlogoff as u64)).await?;
+                return Ok(Box::pin(file));
+            } else {
+                // NotFound is expected, fall through to remote read
+            }
         }
 
         // Try to open remote file, if remote reads are enabled
@@ -832,26 +821,31 @@ pub(crate) async fn open_wal_file(
     timeline_dir: &Utf8Path,
     segno: XLogSegNo,
     wal_seg_size: usize,
-) -> Result<(tokio::fs::File, bool)> {
+) -> Result<Option<(tokio::fs::File, bool)>> {
     let (wal_file_path, wal_file_partial_path) = wal_file_paths(timeline_dir, segno, wal_seg_size);
 
     // First try to open the .partial file.
     let mut partial_path = wal_file_path.to_owned();
     partial_path.set_extension("partial");
     if let Ok(opened_file) = tokio::fs::File::open(&wal_file_partial_path).await {
-        return Ok((opened_file, true));
+        return Ok(Some((opened_file, true)));
     }
 
     // If that failed, try it without the .partial extension.
-    let pf = tokio::fs::File::open(&wal_file_path)
-        .await
+    let pf_res = tokio::fs::File::open(&wal_file_path).await;
+    if let Err(e) = &pf_res {
+        if e.kind() == ErrorKind::NotFound {
+            return Ok(None);
+        }
+    }
+    let pf = pf_res
         .with_context(|| format!("failed to open WAL file {wal_file_path:#}"))
         .map_err(|e| {
-            warn!("{}", e);
+            warn!("{e}");
             e
         })?;
 
-    Ok((pf, false))
+    Ok(Some((pf, false)))
 }
 
 /// Helper returning full path to WAL segment file and its .partial brother.

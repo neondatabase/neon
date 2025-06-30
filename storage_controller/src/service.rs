@@ -1,5 +1,6 @@
 pub mod chaos_injector;
 mod context_iterator;
+pub mod feature_flag;
 pub(crate) mod safekeeper_reconciler;
 mod safekeeper_service;
 
@@ -25,6 +26,7 @@ use futures::stream::FuturesUnordered;
 use http_utils::error::ApiError;
 use hyper::Uri;
 use itertools::Itertools;
+use pageserver_api::config::PostHogConfig;
 use pageserver_api::controller_api::{
     AvailabilityZone, MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability,
     NodeRegisterRequest, NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy,
@@ -159,6 +161,7 @@ enum TenantOperations {
     DropDetached,
     DownloadHeatmapLayers,
     TimelineLsnLease,
+    TimelineSafekeeperMigrate,
 }
 
 #[derive(Clone, strum_macros::Display)]
@@ -469,9 +472,12 @@ pub struct Config {
 
     /// Number of safekeepers to choose for a timeline when creating it.
     /// Safekeepers will be choosen from different availability zones.
-    pub timeline_safekeeper_count: i64,
+    pub timeline_safekeeper_count: usize,
 
-    #[cfg(feature = "testing")]
+    /// PostHog integration config
+    pub posthog_config: Option<PostHogConfig>,
+
+    /// When set, actively checks and initiates heatmap downloads/uploads.
     pub kick_secondary_downloads: bool,
 }
 
@@ -486,6 +492,7 @@ impl From<DatabaseError> for ApiError {
             DatabaseError::Logical(reason) | DatabaseError::Migration(reason) => {
                 ApiError::InternalServerError(anyhow::anyhow!(reason))
             }
+            DatabaseError::Cas(reason) => ApiError::Conflict(reason),
         }
     }
 }
@@ -8359,7 +8366,6 @@ impl Service {
                             "Skipping migration of {tenant_shard_id} to {node} because secondary isn't ready: {progress:?}"
                         );
 
-                        #[cfg(feature = "testing")]
                         if progress.heatmap_mtime.is_none() {
                             // No heatmap might mean the attached location has never uploaded one, or that
                             // the secondary download hasn't happened yet.  This is relatively unusual in the field,
@@ -8384,7 +8390,6 @@ impl Service {
     /// happens on multi-minute timescales in the field, which is fine because optimisation is meant
     /// to be a lazy background thing. However, when testing, it is not practical to wait around, so
     /// we have this helper to move things along faster.
-    #[cfg(feature = "testing")]
     async fn kick_secondary_download(&self, tenant_shard_id: TenantShardId) {
         if !self.config.kick_secondary_downloads {
             // No-op if kick_secondary_downloads functionaliuty is not configured
