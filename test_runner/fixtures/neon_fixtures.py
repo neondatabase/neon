@@ -2270,6 +2270,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
             f"{self.api}/debug/v1/tenant/{tenant_id}/timeline/{timeline_id}/locate",
             headers=self.headers(TokenScope.ADMIN),
         )
+        log.info(f"XXX {response.json()}")
         return response.json()
 
     def tenant_describe(self, tenant_id: TenantId):

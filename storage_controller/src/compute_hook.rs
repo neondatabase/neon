@@ -609,7 +609,7 @@ impl ComputeHook {
         let cplane =
             ComputeControlPlane::load(env.clone()).expect("Error loading compute control plane");
 
-        M::notify_local(&env, &cplane, &req).await
+        M::notify_local(&env, &cplane, req).await
     }
 
     async fn do_notify_iteration<Req: serde::Serialize + std::fmt::Debug>(

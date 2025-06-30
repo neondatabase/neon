@@ -1350,7 +1350,7 @@ impl Service {
                     tenant_id,
                     timeline_id,
                     generation: mconf.generation,
-                    safekeepers: safekeepers,
+                    safekeepers,
                 },
                 &self.cancel,
             )
