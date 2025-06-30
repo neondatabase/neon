@@ -131,6 +131,15 @@ pub(crate) struct TenantShard {
     #[serde(serialize_with = "read_last_error")]
     pub(crate) last_error: std::sync::Arc<std::sync::Mutex<Option<Arc<ReconcileError>>>>,
 
+    /// Number of consecutive reconciliation errors that have occurred for this shard.
+    ///
+    /// When this count reaches [`MAX_CONSECUTIVE_RECONCILIATION_ERRORS`], the tenant shard
+    /// will be countered as keep-failing in `reconcile_all` calculations. This will lead to
+    /// allowing optimizations to run even with some failing shards.
+    ///
+    /// The counter is reset to 0 after a successful reconciliation.
+    pub(crate) consecutive_errors_count: usize,
+
     /// If we have a pending compute notification that for some reason we weren't able to send,
     /// set this to true. If this is set, calls to [`Self::get_reconcile_needed`] will return Yes
     /// and trigger a Reconciler run.  This is the mechanism by which compute notifications are included in the scope
@@ -594,6 +603,7 @@ impl TenantShard {
             waiter: Arc::new(SeqWait::new(Sequence(0))),
             error_waiter: Arc::new(SeqWait::new(Sequence(0))),
             last_error: Arc::default(),
+            consecutive_errors_count: 0,
             pending_compute_notification: false,
             scheduling_policy: ShardSchedulingPolicy::default(),
             preferred_node: None,
@@ -1859,6 +1869,7 @@ impl TenantShard {
             waiter: Arc::new(SeqWait::new(Sequence::initial())),
             error_waiter: Arc::new(SeqWait::new(Sequence::initial())),
             last_error: Arc::default(),
+            consecutive_errors_count: 0,
             pending_compute_notification: false,
             delayed_reconcile: false,
             scheduling_policy: serde_json::from_str(&tsp.scheduling_policy).unwrap(),
