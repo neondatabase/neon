@@ -5,7 +5,8 @@
 //!
 //! The profiling is done using the `perf` tool, which is expected to be
 //! available somewhere in `$PATH`.
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::extract::Query;
 use axum::response::IntoResponse;
@@ -18,6 +19,8 @@ use crate::http::JsonResponse;
 
 static CANCEL_CHANNEL: Lazy<Mutex<Option<tokio::sync::oneshot::Sender<()>>>> =
     Lazy::new(|| Mutex::new(None));
+
+static PROGRESS: Lazy<Arc<AtomicBool>> = Lazy::new(|| Arc::new(AtomicBool::new(false)));
 
 fn default_sampling_frequency() -> u16 {
     100
@@ -76,9 +79,24 @@ pub(in crate::http) struct ProfileRequest {
     timeout_seconds: u8,
 }
 
+/// The HTTP request handler for starting profiling the compute.
+pub(in crate::http) async fn profile_status() -> impl IntoResponse {
+    tracing::info!("Profile status request received.");
+
+    let cancel_channel = CANCEL_CHANNEL.lock().await;
+
+    if cancel_channel.is_some() && PROGRESS.load(Ordering::SeqCst) {
+        JsonResponse::create_response(StatusCode::OK, "Profiling is currently in progress.")
+    } else {
+        JsonResponse::create_response(StatusCode::NO_CONTENT, "Profiling is not in progress.")
+    }
+}
+
 /// The HTTP request handler for stopping profiling the compute.
 pub(in crate::http) async fn profile_stop() -> impl IntoResponse {
     tracing::info!("Profile stop request received.");
+
+    PROGRESS.store(false, Ordering::SeqCst);
 
     match CANCEL_CHANNEL.lock().await.take() {
         Some(tx) => {
@@ -119,7 +137,7 @@ pub(in crate::http) async fn profile_start(
         }
         Err(_) => {
             return JsonResponse::create_response(
-                StatusCode::ALREADY_REPORTED,
+                StatusCode::CONFLICT,
                 "Another request is being processed.",
             );
         }
@@ -128,11 +146,10 @@ pub(in crate::http) async fn profile_start(
     tracing::info!("Profiling will start with parameters: {request:?}");
     let pg_pid = Pid::from_raw(crate::compute::PG_PID.load(Ordering::SeqCst) as _);
 
+    let run_with_sudo = !cfg!(feature = "testing");
+
     let options = crate::profiling::ProfileGenerationOptions {
-        #[cfg(feature = "testing")]
-        run_with_sudo: false,
-        #[cfg(not(feature = "testing"))]
-        run_with_sudo: true,
+        run_with_sudo,
         perf_binary_path: None,
         process_pid: pg_pid,
         follow_forks: true,
@@ -140,9 +157,12 @@ pub(in crate::http) async fn profile_start(
         blocklist_symbols: &["libc", "libgcc", "pthread", "vdso"],
         timeout: std::time::Duration::from_secs(request.timeout_seconds as u64),
         should_stop: Some(rx),
+        has_started: Some(Arc::clone(&PROGRESS)),
     };
 
     let pprof_data = crate::profiling::generate_pprof_using_perf(options).await;
+
+    PROGRESS.store(false, Ordering::SeqCst);
 
     if CANCEL_CHANNEL.lock().await.take().is_none() {
         tracing::error!("Profiling was cancelled from another request.");
@@ -156,7 +176,7 @@ pub(in crate::http) async fn profile_start(
     let pprof_data = match pprof_data {
         Ok(data) => data,
         Err(e) => {
-            // tracing::error!(%e, "failed to generate pprof data");
+            tracing::error!(%e, "failed to generate pprof data");
             return JsonResponse::create_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to generate pprof data: {e}"),

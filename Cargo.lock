@@ -1334,6 +1334,7 @@ dependencies = [
  "serde_with",
  "signal-hook",
  "tar",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-postgres",

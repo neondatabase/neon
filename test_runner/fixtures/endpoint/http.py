@@ -103,21 +103,27 @@ class EndpointHttpClient(requests.Session):
             "timeout_seconds": timeout_seconds,
         }
 
-        res = self.get(
+        res = self.put(
             url,
             params=params,
             auth=self.auth,
         )
-
-        res.raise_for_status()
 
         return res.status_code, res.content
 
     def stop_profiling_cpu(self) -> int:
         url = f"http://localhost:{self.external_port}/profile/cpu"
         res = self.delete(url, auth=self.auth)
-        res.raise_for_status()
         return res.status_code
+
+    def get_profiling_cpu_status(self) -> bool:
+        """
+        Returns True if CPU profiling is currently running, False otherwise.
+        """
+        url = f"http://localhost:{self.external_port}/profile/cpu"
+        res = self.get(url, auth=self.auth)
+        res.raise_for_status()
+        return res.status_code == 200
 
     def database_schema(self, database: str):
         res = self.get(

@@ -86,7 +86,9 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                     .route("/metrics", get(metrics::get_metrics))
                     .route(
                         "/profile/cpu",
-                        get(profile::profile_start).delete(profile::profile_stop),
+                        get(profile::profile_status)
+                            .put(profile::profile_start)
+                            .delete(profile::profile_stop),
                     );
 
                 let authenticated_router = Router::<Arc<ComputeNode>>::new()

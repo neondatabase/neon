@@ -3,6 +3,7 @@ use std::{
     io::{BufRead, BufReader, Cursor, Write},
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
+    sync::{Arc, atomic::AtomicBool},
 };
 
 use anyhow::{Context, anyhow};
@@ -130,6 +131,11 @@ pub struct ProfileGenerationOptions<'a, S: AsRef<str>> {
     /// when a message is received on this channel or when the timeout
     /// is reached, whichever comes first.
     pub should_stop: Option<tokio::sync::oneshot::Receiver<()>>,
+    /// An optional atomic boolean that can be used to check if the
+    /// profiling has started. This can be used to avoid starting the
+    /// profiling multiple times or to check if the profiling is already
+    /// in progress.
+    pub has_started: Option<Arc<AtomicBool>>,
 }
 
 /// Run perf against a process with the given name and generate a pprof
@@ -168,13 +174,17 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
         .collect::<Vec<String>>()
         .join(",");
 
+    let temp_file = tempfile::NamedTempFile::new()
+        .context("Failed to create temporary file for perf output")?;
+    let temp_file_path = temp_file.path();
+
     // Step 1: Run perf to collect stack traces
     let mut perf_record_command = if options.run_with_sudo {
-        let mut cmd = std::process::Command::new(SUDO_PATH);
+        let mut cmd = tokio::process::Command::new(SUDO_PATH);
         cmd.arg(&perf_binary_path);
         cmd
     } else {
-        std::process::Command::new(&perf_binary_path)
+        tokio::process::Command::new(&perf_binary_path)
     };
 
     let mut perf_record_command = perf_record_command
@@ -194,26 +204,18 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
     }
 
     // Make it write to stdout instead of a file.
-    let perf_record_command = perf_record_command.arg("-o").arg("-");
+    let perf_record_command = perf_record_command
+        .arg("-o")
+        .arg(temp_file_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
 
-    let mut perf_record_command = perf_record_command
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
+    tracing::debug!("Running perf record command: {perf_record_command:?}");
+    let mut perf_record_command = perf_record_command.spawn()?;
 
-    let perf_record_stdout = perf_record_command
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow!("Failed to capture perf record output"))?;
-
-    let perf_script_command = std::process::Command::new(&perf_binary_path)
-        .arg("script")
-        .arg("-i")
-        .arg("-")
-        .stdin(perf_record_stdout)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
+    if let Some(has_started) = options.has_started {
+        has_started.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 
     if let Some(mut rx) = options.should_stop {
         tokio::select! {
@@ -229,9 +231,25 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
         tracing::trace!("Timeout reached, stopping perf...");
     }
 
-    let _ = perf_record_command.kill();
+    let perf_record_pid = perf_record_command
+        .id()
+        .ok_or_else(|| anyhow!("Failed to get perf record process ID"))?;
 
-    let perf_script_output = perf_script_command.wait_with_output()?;
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(perf_record_pid as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    );
+    let _ = perf_record_command.wait().await;
+
+    let perf_script_output = tokio::process::Command::new(&perf_binary_path)
+        .arg("script")
+        .arg("-i")
+        .arg(temp_file_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await?;
+
     if !perf_script_output.status.success() {
         return Err(anyhow!(
             "perf script command failed: {}",
@@ -240,10 +258,10 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
         ));
     }
 
-    let perf_script_output = perf_script_output.stdout;
-    let perf_output_str = String::from_utf8(perf_script_output)?;
+    let perf_script_stdout = perf_script_output.stdout;
+    let perf_output_str = String::from_utf8(perf_script_stdout)?;
     if perf_output_str.is_empty() {
-        return Err(anyhow!("perf script output is empty"));
+        return Err(anyhow!(format!("Perf script output is empty.\n")));
     }
 
     // Step 2: Collapse the stack traces into a folded stack trace
