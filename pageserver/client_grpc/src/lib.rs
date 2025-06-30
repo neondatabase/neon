@@ -4,6 +4,7 @@
 //! - Send requests to correct shards
 //!
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
@@ -12,17 +13,16 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use thiserror::Error;
 use tonic::metadata::AsciiMetadataValue;
+use tonic::transport::Channel;
 
 use pageserver_page_api::proto;
-use pageserver_page_api::*;
-
 use pageserver_page_api::proto::PageServiceClient;
+use pageserver_page_api::*;
 use utils::shard::ShardIndex;
 
-use std::fmt::Debug;
 pub mod client_cache;
+pub mod pool;
 pub mod request_tracker;
-use tonic::transport::Channel;
 
 use metrics::{IntCounterVec, core::Collector};
 
