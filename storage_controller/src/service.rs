@@ -161,6 +161,7 @@ enum TenantOperations {
     DropDetached,
     DownloadHeatmapLayers,
     TimelineLsnLease,
+    TimelineSafekeeperMigrate,
 }
 
 #[derive(Clone, strum_macros::Display)]
@@ -491,6 +492,7 @@ impl From<DatabaseError> for ApiError {
             DatabaseError::Logical(reason) | DatabaseError::Migration(reason) => {
                 ApiError::InternalServerError(anyhow::anyhow!(reason))
             }
+            DatabaseError::Cas(reason) => ApiError::Conflict(reason),
         }
     }
 }
