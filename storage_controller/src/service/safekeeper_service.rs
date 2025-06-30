@@ -1,4 +1,3 @@
-use std::cmp::max;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -735,13 +734,7 @@ impl Service {
             )
         });
         // Number of safekeepers in different AZs we are looking for
-        let mut wanted_count = self.config.timeline_safekeeper_count as usize;
-        // TODO(diko): remove this when `timeline_safekeeper_count` option is in the release
-        // branch and is specified in tests/neon_local config.
-        if cfg!(feature = "testing") && all_safekeepers.len() < wanted_count {
-            // In testing mode, we can have less safekeepers than the config says
-            wanted_count = max(all_safekeepers.len(), 1);
-        }
+        let wanted_count = self.config.timeline_safekeeper_count;
 
         let mut sks = Vec::new();
         let mut azs = HashSet::new();

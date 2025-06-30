@@ -212,7 +212,7 @@ pub struct NeonStorageControllerConf {
 
     pub use_local_compute_notifications: bool,
 
-    pub timeline_safekeeper_count: Option<i64>,
+    pub timeline_safekeeper_count: Option<usize>,
 
     pub posthog_config: Option<PostHogConfig>,
 

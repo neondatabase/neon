@@ -453,7 +453,7 @@ class NeonEnvBuilder:
         pageserver_get_vectored_concurrent_io: str | None = None,
         pageserver_tracing_config: PageserverTracingConfig | None = None,
         pageserver_import_config: PageserverImportConfig | None = None,
-        storcon_kick_secondary_downloads: bool | None = None,
+        storcon_kick_secondary_downloads: bool | None = True,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override

@@ -11,11 +11,12 @@ use crate::config::{ProxyConfig, ProxyProtocolV2};
 use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
+use crate::pglb::ClientRequestError;
 use crate::pglb::handshake::{HandshakeData, handshake};
 use crate::pglb::passthrough::ProxyPassthrough;
 use crate::protocol2::{ConnectHeader, ConnectionInfo, read_proxy_protocol};
 use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
-use crate::proxy::{ClientRequestError, ErrorSource, prepare_client_connection};
+use crate::proxy::{ErrorSource, finish_client_init};
 use crate::util::run_until_cancelled;
 
 pub async fn task_main(
@@ -232,7 +233,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let session = cancellation_handler.get_key();
 
-    prepare_client_connection(&pg_settings, *session.key(), &mut stream);
+    finish_client_init(&pg_settings, *session.key(), &mut stream);
     let stream = stream.flush_and_into_inner().await?;
 
     let session_id = ctx.session_id();
