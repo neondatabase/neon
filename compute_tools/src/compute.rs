@@ -271,7 +271,6 @@ fn extract_pageserver_conninfo_from_guc(
     PageserverConnectionInfo {
         shards: pageserver_connstring_guc
             .split(',')
-            .into_iter()
             .enumerate()
             .map(|(i, connstr)| {
                 (

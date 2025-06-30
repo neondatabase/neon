@@ -105,13 +105,13 @@ impl AtomicLockAndVersion {
 }
 
 fn set_locked_bit(version: u64) -> u64 {
-    return version + 2;
+    version + 2
 }
 
 fn is_obsolete(version: u64) -> bool {
-    return (version & 1) == 1;
+    (version & 1) == 1
 }
 
 fn is_locked(version: u64) -> bool {
-    return (version & 2) == 2;
+    (version & 2) == 2
 }

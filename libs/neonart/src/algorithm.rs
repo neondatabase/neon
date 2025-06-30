@@ -163,7 +163,7 @@ fn next_recurse<'e, V: Value>(
 ) -> Result<Option<&'e V>, ConcurrentUpdateError> {
     let rnode = node.read_lock_or_restart()?;
     let prefix = rnode.get_prefix();
-    if prefix.len() != 0 {
+    if !prefix.is_empty() {
         path.extend_from_slice(prefix);
     }
 
@@ -213,13 +213,14 @@ fn next_recurse<'e, V: Value>(
 }
 
 // This corresponds to the 'insertOpt' function in the paper
-pub(crate) fn update_recurse<'e, 'g, K: Key, V: Value, A: ArtAllocator<V>, F>(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_recurse<'e, K: Key, V: Value, A: ArtAllocator<V>, F>(
     key: &[u8],
     value_fn: F,
     node: NodeRef<'e, V>,
     rparent: Option<(ReadLockedNodeRef<V>, u8)>,
     rgrandparent: Option<(ReadLockedNodeRef<V>, u8)>,
-    guard: &'g mut TreeWriteGuard<'e, K, V, A>,
+    guard: &'_ mut TreeWriteGuard<'e, K, V, A>,
     level: usize,
     orig_key: &[u8],
 ) -> Result<(), ArtError>
@@ -248,8 +249,8 @@ where
         return Ok(());
     }
     let prefix_match_len = prefix_match_len.unwrap();
-    let key = &key[prefix_match_len as usize..];
-    let level = level + prefix_match_len as usize;
+    let key = &key[prefix_match_len..];
+    let level = level + prefix_match_len;
 
     if rnode.is_leaf() {
         assert_eq!(key.len(), 0);
@@ -321,7 +322,7 @@ where
             };
             wnode.write_unlock();
         }
-        return Ok(());
+        Ok(())
     } else {
         let next_child = next_node.unwrap(); // checked above it's not None
         if let Some((ref rparent, _)) = rparent {
@@ -357,14 +358,14 @@ impl std::fmt::Debug for PathElement {
     }
 }
 
-pub(crate) fn dump_tree<'e, V: Value + std::fmt::Debug>(
+pub(crate) fn dump_tree<V: Value + std::fmt::Debug>(
     root: RootPtr<V>,
-    epoch_pin: &'e EpochPin,
+    epoch_pin: &'_ EpochPin,
     dst: &mut dyn std::io::Write,
 ) {
     let root_ref = NodeRef::from_root_ptr(root);
 
-    let _ = dump_recurse(&[], root_ref, &epoch_pin, 0, dst);
+    let _ = dump_recurse(&[], root_ref, epoch_pin, 0, dst);
 }
 
 // TODO: return an Err if writeln!() returns error, instead of unwrapping
@@ -380,7 +381,7 @@ fn dump_recurse<'e, V: Value + std::fmt::Debug>(
     let rnode = node.read_lock_or_restart()?;
     let mut path = Vec::from(path);
     let prefix = rnode.get_prefix();
-    if prefix.len() != 0 {
+    if !prefix.is_empty() {
         path.push(PathElement::Prefix(Vec::from(prefix)));
     }
 
@@ -426,13 +427,13 @@ fn dump_recurse<'e, V: Value + std::fmt::Debug>(
 /// [foo]b -> [a]r  -> value
 ///      e -> [ls]e -> value
 ///```
-fn insert_split_prefix<'e, K: Key, V: Value, A: ArtAllocator<V>>(
+fn insert_split_prefix<K: Key, V: Value, A: ArtAllocator<V>>(
     key: &[u8],
     value: V,
     node: &mut WriteLockedNodeRef<V>,
     parent: &mut WriteLockedNodeRef<V>,
     parent_key: u8,
-    guard: &'e TreeWriteGuard<K, V, A>,
+    guard: &'_ TreeWriteGuard<K, V, A>,
 ) -> Result<(), OutOfMemoryError> {
     let old_node = node;
     let old_prefix = old_node.get_prefix();
@@ -463,11 +464,11 @@ fn insert_split_prefix<'e, K: Key, V: Value, A: ArtAllocator<V>>(
     Ok(())
 }
 
-fn insert_to_node<'e, K: Key, V: Value, A: ArtAllocator<V>>(
+fn insert_to_node<K: Key, V: Value, A: ArtAllocator<V>>(
     wnode: &mut WriteLockedNodeRef<V>,
     key: &[u8],
     value: V,
-    guard: &'e TreeWriteGuard<K, V, A>,
+    guard: &'_ TreeWriteGuard<K, V, A>,
 ) -> Result<(), OutOfMemoryError> {
     let value_child = allocate_node_for_value(&key[1..], value, guard.tree_writer.allocator)?;
     wnode.insert_child(key[0], value_child.into_ptr());

@@ -121,7 +121,7 @@ where
         }
 
         HashMapInit {
-            shmem_handle: shmem_handle,
+            shmem_handle,
             shared_ptr,
         }
     }
@@ -152,7 +152,7 @@ where
         let mut success = None;
 
         self.update_with_fn(key, |existing| {
-            if let Some(_) = existing {
+            if existing.is_some() {
                 success = Some(false);
                 UpdateAction::Nothing
             } else {
@@ -294,7 +294,7 @@ where
                 bucket_ptr.write(core::Bucket {
                     hash: 0,
                     next: if i < num_buckets {
-                        i as u32 + 1
+                        i + 1
                     } else {
                         inner.free_head
                     },
@@ -317,8 +317,8 @@ where
             buckets = std::slice::from_raw_parts_mut(buckets_ptr, num_buckets as usize);
             dictionary = std::slice::from_raw_parts_mut(dictionary_ptr, dictionary_size);
         }
-        for i in 0..dictionary.len() {
-            dictionary[i] = core::INVALID_POS;
+        for item in dictionary.iter_mut() {
+            *item = core::INVALID_POS;
         }
 
         for i in 0..old_num_buckets as usize {

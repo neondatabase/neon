@@ -96,8 +96,8 @@ pub extern "C" fn rcommunicator_shmem_init(
     let (neon_request_slots, remaining_area) =
         alloc_array_from_slice::<NeonIOHandle>(shmem_area, num_neon_request_slots);
 
-    for i in 0..num_neon_request_slots {
-        neon_request_slots[i].write(NeonIOHandle::default());
+    for slot in neon_request_slots.iter_mut() {
+        slot.write(NeonIOHandle::default());
     }
 
     // 'neon_request_slots' is initialized now. (MaybeUninit::slice_assume_init_mut() is nightly-only

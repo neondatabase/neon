@@ -217,10 +217,7 @@ impl PooledItemFactory<Channel> for ChannelFactory {
 
                 // Random drop (connect error)
                 if drop_rate > 0.0 && rng.gen_bool(drop_rate) {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "simulated connect drop",
-                    ));
+                    return Err(std::io::Error::other("simulated connect drop"));
                 }
 
                 // Otherwise perform real TCP connect
@@ -309,6 +306,7 @@ pub struct PooledClient<T> {
 }
 
 impl<T: Clone + Send + 'static> ConnectionPool<T> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         fact: Arc<dyn PooledItemFactory<T> + Send + Sync>,
         connect_timeout: Duration,
@@ -391,14 +389,11 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
                     && now.duration_since(entry.last_used) > self.max_idle_duration
                 {
                     // metric
-                    match self.aggregate_metrics {
-                        Some(ref metrics) => {
-                            metrics
-                                .retry_counters
-                                .with_label_values(&["connection_swept"])
-                                .inc();
-                        }
-                        None => {}
+                    if let Some(ref metrics) = self.aggregate_metrics {
+                        metrics
+                            .retry_counters
+                            .with_label_values(&["connection_swept"])
+                            .inc();
                     }
                     ids_to_remove.push(*id);
                     return false; // remove this entry
@@ -436,7 +431,7 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
                 pool: Arc::clone(&self),
                 is_ok: true,
                 id,
-                permit: permit,
+                permit,
             };
 
             // re‐insert with updated priority
@@ -444,7 +439,7 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
             if active_consumers < self.max_consumers {
                 inner.pq.push(id, active_consumers as usize);
             }
-            return Some(client);
+            Some(client)
         } else {
             // If there is no connection to take, it is because permits for a connection
             // need to drain. This can happen if a connection is removed because it has
@@ -453,7 +448,7 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
             //
             // Just forget the permit and retry.
             permit.forget();
-            return None;
+            None
         }
     }
 
@@ -485,14 +480,11 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
                     }
                 }
                 Err(_) => {
-                    match self_clone.aggregate_metrics {
-                        Some(ref metrics) => {
-                            metrics
-                                .retry_counters
-                                .with_label_values(&["sema_acquire_failed"])
-                                .inc();
-                        }
-                        None => {}
+                    if let Some(ref metrics) = self_clone.aggregate_metrics {
+                        metrics
+                            .retry_counters
+                            .with_label_values(&["sema_acquire_success"])
+                            .inc();
                     }
 
                     {
@@ -504,16 +496,15 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
                         //
                         let mut inner = self_clone.inner.lock().await;
                         inner.waiters += 1;
-                        if inner.waiters > (inner.in_progress * self_clone.max_consumers) {
-                            if (inner.entries.len() + inner.in_progress)
+                        if inner.waiters > (inner.in_progress * self_clone.max_consumers)
+                            && (inner.entries.len() + inner.in_progress)
                                 < self_clone.max_total_connections
-                            {
-                                let self_clone_spawn = Arc::clone(&self_clone);
-                                tokio::task::spawn(async move {
-                                    self_clone_spawn.create_connection().await;
-                                });
-                                inner.in_progress += 1;
-                            }
+                        {
+                            let self_clone_spawn = Arc::clone(&self_clone);
+                            tokio::task::spawn(async move {
+                                self_clone_spawn.create_connection().await;
+                            });
+                            inner.in_progress += 1;
                         }
                     }
                     // Wait for a connection to become available, either because it
@@ -541,7 +532,7 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
         }
     }
 
-    async fn create_connection(&self) -> () {
+    async fn create_connection(&self) {
         // Generate a random backoff to add some jitter so that connections
         // don't all retry at the same time.
         let mut backoff_delay = Duration::from_millis(
@@ -558,17 +549,13 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
             // until the failure stopped for at least one backoff period. Backoff
             // period includes some jitter, so that if multiple connections are
             // failing, they don't all retry at the same time.
-            loop {
-                if let Some(delay) = {
-                    let inner = self.inner.lock().await;
-                    inner.last_connect_failure.and_then(|at| {
-                        (at.elapsed() < backoff_delay).then(|| backoff_delay - at.elapsed())
-                    })
-                } {
-                    sleep(delay).await;
-                } else {
-                    break; // No delay, so we can create a connection
-                }
+            while let Some(delay) = {
+                let inner = self.inner.lock().await;
+                inner.last_connect_failure.and_then(|at| {
+                    (at.elapsed() < backoff_delay).then(|| backoff_delay - at.elapsed())
+                })
+            } {
+                sleep(delay).await;
             }
 
             //
@@ -578,14 +565,11 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
             // on this connection. (Requests made later on this channel will time out
             // with the same timeout.)
             //
-            match self.aggregate_metrics {
-                Some(ref metrics) => {
-                    metrics
-                        .retry_counters
-                        .with_label_values(&["connection_attempt"])
-                        .inc();
-                }
-                None => {}
+            if let Some(ref metrics) = self.aggregate_metrics {
+                metrics
+                    .retry_counters
+                    .with_label_values(&["connection_attempt"])
+                    .inc();
             }
 
             let attempt = self.fact.create(self.connect_timeout).await;
@@ -594,14 +578,11 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
                 // Connection succeeded
                 Ok(Ok(channel)) => {
                     {
-                        match self.aggregate_metrics {
-                            Some(ref metrics) => {
-                                metrics
-                                    .retry_counters
-                                    .with_label_values(&["connection_success"])
-                                    .inc();
-                            }
-                            None => {}
+                        if let Some(ref metrics) = self.aggregate_metrics {
+                            metrics
+                                .retry_counters
+                                .with_label_values(&["connection_success"])
+                                .inc();
                         }
                         let mut inner = self.inner.lock().await;
                         let id = uuid::Uuid::new_v4();
@@ -622,14 +603,11 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
                 }
                 // Connection failed, back off and retry
                 Ok(Err(_)) | Err(_) => {
-                    match self.aggregate_metrics {
-                        Some(ref metrics) => {
-                            metrics
-                                .retry_counters
-                                .with_label_values(&["connect_failed"])
-                                .inc();
-                        }
-                        None => {}
+                    if let Some(ref metrics) = self.aggregate_metrics {
+                        metrics
+                            .retry_counters
+                            .with_label_values(&["connect_failed"])
+                            .inc();
                     }
                     let mut inner = self.inner.lock().await;
                     inner.last_connect_failure = Some(Instant::now());
@@ -653,10 +631,10 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
         let mut inner = self.inner.lock().await;
         if let Some(entry) = inner.entries.get_mut(&id) {
             entry.last_used = Instant::now();
-            if entry.active_consumers <= 0 {
+            if entry.active_consumers == 0 {
                 panic!("A consumer completed when active_consumers was zero!")
             }
-            entry.active_consumers = entry.active_consumers - 1;
+            entry.active_consumers -= 1;
             if success {
                 if entry.consecutive_errors < self.error_threshold {
                     entry.consecutive_errors = 0;
@@ -664,14 +642,11 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
             } else {
                 entry.consecutive_errors += 1;
                 if entry.consecutive_errors == self.error_threshold {
-                    match self.aggregate_metrics {
-                        Some(ref metrics) => {
-                            metrics
-                                .retry_counters
-                                .with_label_values(&["connection_dropped"])
-                                .inc();
-                        }
-                        None => {}
+                    if let Some(ref metrics) = self.aggregate_metrics {
+                        metrics
+                            .retry_counters
+                            .with_label_values(&["connection_dropped"])
+                            .inc();
                     }
                 }
             }
@@ -719,7 +694,7 @@ impl<T: Clone + Send + 'static> ConnectionPool<T> {
 
 impl<T: Clone + Send + 'static> PooledClient<T> {
     pub fn channel(&self) -> T {
-        return self.channel.clone();
+        self.channel.clone()
     }
     pub async fn finish(mut self, result: Result<(), tonic::Status>) {
         self.is_ok = result.is_ok();

@@ -186,7 +186,7 @@ pub(super) async fn init(
 
 impl<'t> CommunicatorWorkerProcessStruct<'t> {
     /// Main loop of the worker process. Receive requests from the backends and process them.
-    pub(super) async fn run(self: &'static Self) {
+    pub(super) async fn run(&'static self) {
         let mut idxbuf: [u8; 4] = [0; 4];
 
         let mut submission_pipe_read =
@@ -241,7 +241,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         }
     }
 
-    async fn handle_request<'x>(self: &'static Self, req: &'x NeonIORequest) -> NeonIOResult {
+    async fn handle_request(&'static self, req: &'_ NeonIORequest) -> NeonIOResult {
         match req {
             NeonIORequest::Empty => {
                 error!("unexpected Empty IO request");
@@ -251,9 +251,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 self.request_rel_exists_counter.inc();
                 let rel = req.reltag();
 
-                let _in_progress_guard = self
-                    .in_progress_table
-                    .lock(RequestInProgressKey::Rel(rel.clone()));
+                let _in_progress_guard =
+                    self.in_progress_table.lock(RequestInProgressKey::Rel(rel));
 
                 let not_modified_since = match self.cache.get_rel_exists(&rel) {
                     CacheResult::Found(exists) => return NeonIOResult::RelExists(exists),
@@ -280,9 +279,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 self.request_rel_size_counter.inc();
                 let rel = req.reltag();
 
-                let _in_progress_guard = self
-                    .in_progress_table
-                    .lock(RequestInProgressKey::Rel(rel.clone()));
+                let _in_progress_guard =
+                    self.in_progress_table.lock(RequestInProgressKey::Rel(rel));
 
                 // Check the cache first
                 let not_modified_since = match self.cache.get_rel_size(&rel) {
@@ -296,10 +294,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 let read_lsn = self.request_lsns(not_modified_since);
                 match self
                     .request_tracker
-                    .process_get_rel_size_request(page_api::GetRelSizeRequest {
-                        read_lsn,
-                        rel: rel.clone(),
-                    })
+                    .process_get_rel_size_request(page_api::GetRelSizeRequest { read_lsn, rel })
                     .await
                 {
                     Ok(nblocks) => {
@@ -371,7 +366,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 let rel = req.reltag();
                 let _in_progress_guard = self
                     .in_progress_table
-                    .lock(RequestInProgressKey::Block(rel.clone(), req.block_number));
+                    .lock(RequestInProgressKey::Block(rel, req.block_number));
                 self.cache
                     .remember_page(&rel, req.block_number, req.src, Lsn(req.lsn), true)
                     .await;
@@ -439,7 +434,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             // because they're always acquired in the same order.
             let in_progress_guard = self
                 .in_progress_table
-                .lock(RequestInProgressKey::Block(rel.clone(), blkno))
+                .lock(RequestInProgressKey::Block(rel, blkno))
                 .await;
 
             let dest = req.dest[i as usize];
@@ -476,7 +471,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     request_id: self.next_request_id.fetch_add(1, Ordering::Relaxed),
                     request_class: page_api::GetPageClass::Normal,
                     read_lsn: self.request_lsns(not_modified_since),
-                    rel: rel.clone(),
+                    rel,
                     block_numbers: vec![*blkno],
                 })
                 .await
@@ -485,13 +480,15 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     // Write the received page image directly to the shared memory location
                     // that the backend requested.
                     if resp.page_images.len() != 1 {
-                        error!("received unexpected response with {} page images received from pageserver for a request for one page",
-                               resp.page_images.len());
+                        error!(
+                            "received unexpected response with {} page images received from pageserver for a request for one page",
+                            resp.page_images.len()
+                        );
                         return Err(-1);
                     }
                     let page_image = resp.page_images[0].clone();
                     let src: &[u8] = page_image.as_ref();
-                    let len = std::cmp::min(src.len(), dest.bytes_total() as usize);
+                    let len = std::cmp::min(src.len(), dest.bytes_total());
                     unsafe {
                         std::ptr::copy_nonoverlapping(src.as_ptr(), dest.as_mut_ptr(), len);
                     };
@@ -510,10 +507,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         Ok(())
     }
 
-    async fn handle_prefetchv_request(
-        self: &'static Self,
-        req: &CPrefetchVRequest,
-    ) -> Result<(), i32> {
+    async fn handle_prefetchv_request(&'static self, req: &CPrefetchVRequest) -> Result<(), i32> {
         let rel = req.reltag();
 
         // Check the cache first
@@ -525,7 +519,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             // because they're always acquired in the same order.
             let in_progress_guard = self
                 .in_progress_table
-                .lock(RequestInProgressKey::Block(rel.clone(), blkno))
+                .lock(RequestInProgressKey::Block(rel, blkno))
                 .await;
 
             let not_modified_since = match self.cache.page_is_cached(&rel, blkno).await {
@@ -558,7 +552,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     request_id: self.next_request_id.fetch_add(1, Ordering::Relaxed),
                     request_class: page_api::GetPageClass::Prefetch,
                     read_lsn: self.request_lsns(not_modified_since),
-                    rel: rel.clone(),
+                    rel,
                     block_numbers: vec![*blkno],
                 })
                 .await
@@ -569,8 +563,10 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                         *blkno, rel
                     );
                     if resp.page_images.len() != 1 {
-                        error!("received unexpected response with {} page images received from pageserver for a request for one page",
-                               resp.page_images.len());
+                        error!(
+                            "received unexpected response with {} page images received from pageserver for a request for one page",
+                            resp.page_images.len()
+                        );
                         return Err(-1);
                     }
                     let page_image = resp.page_images[0].clone();

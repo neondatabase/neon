@@ -305,14 +305,13 @@ impl<V: Value> NodePtr<V> {
         &self,
         allocator: &impl ArtAllocator<V>,
     ) -> Result<NodePtr<V>, OutOfMemoryError> {
-        let bigger = match self.variant() {
+        match self.variant() {
             NodeVariant::Internal4(n) => n.grow(allocator),
             NodeVariant::Internal16(n) => n.grow(allocator),
             NodeVariant::Internal48(n) => n.grow(allocator),
             NodeVariant::Internal256(_) => panic!("cannot grow Internal256 node"),
             NodeVariant::Leaf(_) => panic!("cannot grow Leaf node"),
-        };
-        bigger
+        }
     }
 
     pub(crate) fn insert_child(&mut self, key_byte: u8, child: NodePtr<V>) {
@@ -464,7 +463,7 @@ impl<V: Value> NodeInternal4<V> {
         new.extend_from_slice(prefix);
         new.push(prefix_byte);
         new.extend_from_slice(&self.prefix[0..self.prefix_len as usize]);
-        (&mut self.prefix[0..new.len()]).copy_from_slice(&new);
+        self.prefix[0..new.len()].copy_from_slice(&new);
         self.prefix_len = new.len() as u8;
     }
 
@@ -558,7 +557,7 @@ impl<V: Value> NodeInternal4<V> {
             tag: NodeTag::Internal16,
             lock_and_version: AtomicLockAndVersion::new(),
 
-            prefix: self.prefix.clone(),
+            prefix: self.prefix,
             prefix_len: self.prefix_len,
             num_children: self.num_children,
 
@@ -585,7 +584,7 @@ impl<V: Value> NodeInternal16<V> {
         new.extend_from_slice(prefix);
         new.push(prefix_byte);
         new.extend_from_slice(&self.prefix[0..self.prefix_len as usize]);
-        (&mut self.prefix[0..new.len()]).copy_from_slice(&new);
+        self.prefix[0..new.len()].copy_from_slice(&new);
         self.prefix_len = new.len() as u8;
     }
 
@@ -679,7 +678,7 @@ impl<V: Value> NodeInternal16<V> {
             tag: NodeTag::Internal48,
             lock_and_version: AtomicLockAndVersion::new(),
 
-            prefix: self.prefix.clone(),
+            prefix: self.prefix,
             prefix_len: self.prefix_len,
             num_children: self.num_children,
 
@@ -706,7 +705,7 @@ impl<V: Value> NodeInternal16<V> {
             tag: NodeTag::Internal4,
             lock_and_version: AtomicLockAndVersion::new(),
 
-            prefix: self.prefix.clone(),
+            prefix: self.prefix,
             prefix_len: self.prefix_len,
             num_children: self.num_children,
 
@@ -736,7 +735,7 @@ impl<V: Value> NodeInternal48<V> {
                     idx,
                     self.num_children
                 );
-                assert!(shadow_indexes.get(&idx).is_none());
+                assert!(!shadow_indexes.contains(&idx));
                 shadow_indexes.insert(idx);
                 count += 1;
             }
@@ -750,7 +749,7 @@ impl<V: Value> NodeInternal48<V> {
         new.extend_from_slice(prefix);
         new.push(prefix_byte);
         new.extend_from_slice(&self.prefix[0..self.prefix_len as usize]);
-        (&mut self.prefix[0..new.len()]).copy_from_slice(&new);
+        self.prefix[0..new.len()].copy_from_slice(&new);
         self.prefix_len = new.len() as u8;
     }
 
@@ -853,7 +852,7 @@ impl<V: Value> NodeInternal48<V> {
             tag: NodeTag::Internal256,
             lock_and_version: AtomicLockAndVersion::new(),
 
-            prefix: self.prefix.clone(),
+            prefix: self.prefix,
             prefix_len: self.prefix_len,
             num_children: self.num_children as u16,
 
@@ -879,7 +878,7 @@ impl<V: Value> NodeInternal48<V> {
             tag: NodeTag::Internal16,
             lock_and_version: AtomicLockAndVersion::new(),
 
-            prefix: self.prefix.clone(),
+            prefix: self.prefix,
             prefix_len: self.prefix_len,
             num_children: self.num_children,
 
@@ -912,7 +911,7 @@ impl<V: Value> NodeInternal256<V> {
         new.extend_from_slice(prefix);
         new.push(prefix_byte);
         new.extend_from_slice(&self.prefix[0..self.prefix_len as usize]);
-        (&mut self.prefix[0..new.len()]).copy_from_slice(&new);
+        self.prefix[0..new.len()].copy_from_slice(&new);
         self.prefix_len = new.len() as u8;
     }
 
@@ -987,7 +986,7 @@ impl<V: Value> NodeInternal256<V> {
             tag: NodeTag::Internal48,
             lock_and_version: AtomicLockAndVersion::new(),
 
-            prefix: self.prefix.clone(),
+            prefix: self.prefix,
             prefix_len: self.prefix_len,
             num_children: self.num_children as u8,
 
@@ -1019,7 +1018,7 @@ impl<V: Value> NodeLeaf<V> {
         new.extend_from_slice(prefix);
         new.push(prefix_byte);
         new.extend_from_slice(&self.prefix[0..self.prefix_len as usize]);
-        (&mut self.prefix[0..new.len()]).copy_from_slice(&new);
+        self.prefix[0..new.len()].copy_from_slice(&new);
         self.prefix_len = new.len() as u8;
     }
 

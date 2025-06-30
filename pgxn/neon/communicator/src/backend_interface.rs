@@ -60,8 +60,8 @@ pub extern "C" fn rcommunicator_backend_init(
 ///
 /// Safety: The C caller must ensure that the references are valid.
 #[unsafe(no_mangle)]
-pub extern "C" fn bcomm_start_io_request<'t>(
-    bs: &'t mut CommunicatorBackendStruct,
+pub extern "C" fn bcomm_start_io_request(
+    bs: &'_ mut CommunicatorBackendStruct,
     request: &NeonIORequest,
     immediate_result_ptr: &mut NeonIOResult,
 ) -> i32 {
@@ -81,12 +81,12 @@ pub extern "C" fn bcomm_start_io_request<'t>(
     // Tell the communicator about it
     bs.submit_request(request_idx);
 
-    return request_idx;
+    request_idx
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn bcomm_start_get_page_v_request<'t>(
-    bs: &'t mut CommunicatorBackendStruct,
+pub extern "C" fn bcomm_start_get_page_v_request(
+    bs: &mut CommunicatorBackendStruct,
     request: &NeonIORequest,
     immediate_result_ptr: &mut CCachedGetPageVResult,
 ) -> i32 {
@@ -104,7 +104,7 @@ pub extern "C" fn bcomm_start_get_page_v_request<'t>(
             &get_pagev_request.reltag(),
             get_pagev_request.block_number + i as u32,
         ) {
-            (*immediate_result_ptr).cache_block_numbers[i as usize] = cache_block;
+            immediate_result_ptr.cache_block_numbers[i as usize] = cache_block;
         } else {
             // not found in cache
             all_cached = false;
@@ -194,6 +194,6 @@ impl<'t> CommunicatorBackendStruct<'t> {
 
         self.neon_request_slots[idx as usize].fill_request(request, my_proc_number);
 
-        return idx as i32;
+        idx as i32
     }
 }

@@ -239,7 +239,7 @@ where
     phantom_key: PhantomData<K>,
 }
 
-impl<'a, 't: 'a, K: Key, V: Value, A: ArtAllocator<V>> TreeInitStruct<'t, K, V, A> {
+impl<'t, K: Key, V: Value, A: ArtAllocator<V>> TreeInitStruct<'t, K, V, A> {
     pub fn new(allocator: &'t A) -> TreeInitStruct<'t, K, V, A> {
         let tree_ptr = allocator.alloc_tree();
         let tree_ptr = NonNull::new(tree_ptr).expect("out of memory");
@@ -295,7 +295,7 @@ impl<'t, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteAccess<'t, K, V, A> {
 
     pub fn start_read(&'t self) -> TreeReadGuard<'t, K, V> {
         TreeReadGuard {
-            tree: &self.tree,
+            tree: self.tree,
             epoch_pin: self.epoch_handle.pin(),
             phantom_key: PhantomData,
         }
@@ -305,7 +305,7 @@ impl<'t, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteAccess<'t, K, V, A> {
 impl<'t, K: Key, V: Value> TreeReadAccess<'t, K, V> {
     pub fn start_read(&'t self) -> TreeReadGuard<'t, K, V> {
         TreeReadGuard {
-            tree: &self.tree,
+            tree: self.tree,
             epoch_pin: self.epoch_handle.pin(),
             phantom_key: PhantomData,
         }
@@ -360,7 +360,7 @@ impl<'e, K: Key, V: Value, A: ArtAllocator<V>> TreeWriteGuard<'e, K, V, A> {
         let mut success = None;
 
         self.update_with_fn(key, |existing| {
-            if let Some(_) = existing {
+            if existing.is_some() {
                 success = Some(false);
                 UpdateAction::Nothing
             } else {
@@ -461,11 +461,9 @@ where
     K: Key + for<'a> From<&'a [u8]>,
 {
     pub fn new_wrapping() -> TreeIterator<K> {
-        let mut next_key = Vec::new();
-        next_key.resize(K::KEY_LEN, 0);
         TreeIterator {
             done: false,
-            next_key,
+            next_key: vec![0; K::KEY_LEN],
             max_key: None,
             phantom_key: PhantomData,
         }
@@ -495,11 +493,9 @@ where
         let mut wrapped_around = false;
         loop {
             assert_eq!(self.next_key.len(), K::KEY_LEN);
-            if let Some((k, v)) = algorithm::iter_next(
-                &mut self.next_key,
-                read_guard.tree.root,
-                &read_guard.epoch_pin,
-            ) {
+            if let Some((k, v)) =
+                algorithm::iter_next(&self.next_key, read_guard.tree.root, &read_guard.epoch_pin)
+            {
                 assert_eq!(k.len(), K::KEY_LEN);
                 assert_eq!(self.next_key.len(), K::KEY_LEN);
 

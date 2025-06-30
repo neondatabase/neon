@@ -3,7 +3,6 @@
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crossbeam_utils::CachePadded;
-use spin;
 
 const NUM_SLOTS: usize = 1000;
 
@@ -62,10 +61,8 @@ impl EpochShared {
     pub(crate) fn advance(&self) -> u64 {
         // Advance the global epoch
         let old_epoch = self.global_epoch.fetch_add(2, Ordering::Relaxed);
-        let new_epoch = old_epoch + 2;
-
         // Anyone that release their pin after this will update their slot.
-        new_epoch
+        old_epoch + 2
     }
 
     pub(crate) fn broadcast(&self) {
@@ -99,10 +96,8 @@ impl EpochShared {
             let delta = now.wrapping_sub(this_epoch);
             if delta > u64::MAX / 2 {
                 // this is very recent
-            } else {
-                if delta > now.wrapping_sub(oldest) {
-                    oldest = this_epoch;
-                }
+            } else if delta > now.wrapping_sub(oldest) {
+                oldest = this_epoch;
             }
         }
         oldest

@@ -61,13 +61,11 @@ impl<'t, V: crate::Value> ArtMultiSlabAllocator<'t, V> {
         let (allocator_area, remain) = alloc_from_slice::<ArtMultiSlabAllocator<V>>(area);
         let (tree_area, remain) = alloc_from_slice::<Tree<V>>(remain);
 
-        let allocator = allocator_area.write(ArtMultiSlabAllocator {
+        allocator_area.write(ArtMultiSlabAllocator {
             tree_area: spin::Mutex::new(Some(tree_area)),
             inner: MultiSlabAllocator::new(remain, &Self::LAYOUTS),
             phantom_val: PhantomData,
-        });
-
-        allocator
+        })
     }
 }
 

@@ -47,6 +47,13 @@ pub struct PageserverClientAggregateMetrics {
     pub request_counters: IntCounterVec,
     pub retry_counters: IntCounterVec,
 }
+
+impl Default for PageserverClientAggregateMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PageserverClientAggregateMetrics {
     pub fn new() -> Self {
         let request_counters = IntCounterVec::new(
@@ -167,11 +174,11 @@ impl PageserverClient {
         match response {
             Err(status) => {
                 pooled_client.finish(Err(status.clone())).await; // Pass error to finish
-                return Err(PageserverClientError::RequestError(status));
+                Err(PageserverClientError::RequestError(status))
             }
             Ok(resp) => {
                 pooled_client.finish(Ok(())).await; // Pass success to finish
-                return Ok(resp.get_ref().exists);
+                Ok(resp.get_ref().exists)
             }
         }
     }
@@ -194,11 +201,11 @@ impl PageserverClient {
         match response {
             Err(status) => {
                 pooled_client.finish(Err(status.clone())).await; // Pass error to finish
-                return Err(PageserverClientError::RequestError(status));
+                Err(PageserverClientError::RequestError(status))
             }
             Ok(resp) => {
                 pooled_client.finish(Ok(())).await; // Pass success to finish
-                return Ok(resp.get_ref().num_blocks);
+                Ok(resp.get_ref().num_blocks)
             }
         }
     }
@@ -233,25 +240,22 @@ impl PageserverClient {
             ));
         };
 
-        match self.aggregate_metrics {
-            Some(ref metrics) => {
-                metrics
-                    .request_counters
-                    .with_label_values(&["get_page"])
-                    .inc();
-            }
-            None => {}
+        if let Some(ref metrics) = self.aggregate_metrics {
+            metrics
+                .request_counters
+                .with_label_values(&["get_page"])
+                .inc();
         }
 
         match response {
             Err(status) => {
                 pooled_client.finish(Err(status.clone())).await; // Pass error to finish
-                return Err(PageserverClientError::RequestError(status));
+                Err(PageserverClientError::RequestError(status))
             }
             Ok(resp) => {
                 pooled_client.finish(Ok(())).await; // Pass success to finish
                 let response: GetPageResponse = resp.into();
-                return Ok(response.page_images.to_vec());
+                Ok(response.page_images.to_vec())
             }
         }
     }
@@ -280,11 +284,9 @@ impl PageserverClient {
         match response {
             Err(status) => {
                 pooled_client.finish(Err(status.clone())).await; // Pass error to finish
-                return Err(PageserverClientError::RequestError(status));
+                Err(PageserverClientError::RequestError(status))
             }
-            Ok(resp) => {
-                return Ok(resp);
-            }
+            Ok(resp) => Ok(resp),
         }
     }
 
@@ -307,11 +309,11 @@ impl PageserverClient {
         match response {
             Err(status) => {
                 pooled_client.finish(Err(status.clone())).await; // Pass error to finish
-                return Err(PageserverClientError::RequestError(status));
+                Err(PageserverClientError::RequestError(status))
             }
             Ok(resp) => {
                 pooled_client.finish(Ok(())).await; // Pass success to finish
-                return Ok(resp.get_ref().num_bytes);
+                Ok(resp.get_ref().num_bytes)
             }
         }
     }
@@ -342,11 +344,11 @@ impl PageserverClient {
         match response {
             Err(status) => {
                 pooled_client.finish(Err(status.clone())).await; // Pass error to finish
-                return Err(PageserverClientError::RequestError(status));
+                Err(PageserverClientError::RequestError(status))
             }
             Ok(resp) => {
                 pooled_client.finish(Ok(())).await; // Pass success to finish
-                return Ok(resp);
+                Ok(resp)
             }
         }
     }
@@ -360,8 +362,7 @@ impl PageserverClient {
             channels.get(&shard).cloned()
         };
 
-        let usable_pool: Arc<client_cache::ConnectionPool<Channel>>;
-        match reused_pool {
+        let usable_pool = match reused_pool {
             Some(pool) => {
                 let pooled_client = pool.get_client().await.unwrap();
                 return pooled_client;
@@ -370,14 +371,13 @@ impl PageserverClient {
                 // Create a new pool using client_cache_options
                 // declare new_pool
 
-                let new_pool: Arc<client_cache::ConnectionPool<Channel>>;
                 let channel_fact = Arc::new(client_cache::ChannelFactory::new(
                     self.shard_map.get(&shard).unwrap().clone(),
                     self.client_cache_options.max_delay_ms,
                     self.client_cache_options.drop_rate,
                     self.client_cache_options.hang_rate,
                 ));
-                new_pool = client_cache::ConnectionPool::new(
+                let new_pool = client_cache::ConnectionPool::new(
                     channel_fact,
                     self.client_cache_options.connect_timeout,
                     self.client_cache_options.connect_backoff,
@@ -389,12 +389,11 @@ impl PageserverClient {
                 );
                 let mut write_pool = self.channels.write().unwrap();
                 write_pool.insert(shard, new_pool.clone());
-                usable_pool = new_pool.clone();
+                new_pool.clone()
             }
-        }
+        };
 
-        let pooled_client = usable_pool.get_client().await.unwrap();
-        return pooled_client;
+        usable_pool.get_client().await.unwrap()
     }
 }
 

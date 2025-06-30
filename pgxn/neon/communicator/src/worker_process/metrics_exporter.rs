@@ -8,7 +8,6 @@ use axum::response::Response;
 use http::StatusCode;
 use http::header::CONTENT_TYPE;
 
-use metrics;
 use metrics::proto::MetricFamily;
 use metrics::{Encoder, TextEncoder};
 

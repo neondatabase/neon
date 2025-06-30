@@ -75,8 +75,8 @@ where
         }
 
         MutexHashSetGuard {
-            key: key,
-            set: &self,
+            key,
+            set: self,
             mutex: my_mutex,
             _guard: my_guard,
         }

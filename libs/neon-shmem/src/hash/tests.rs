@@ -81,7 +81,7 @@ fn sparse() {
     for _ in 0..10000 {
         loop {
             let key = rand::random::<u128>();
-            if used_keys.get(&key).is_some() {
+            if used_keys.contains(&key) {
                 continue;
             }
             used_keys.insert(key);

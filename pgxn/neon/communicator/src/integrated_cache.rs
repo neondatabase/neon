@@ -221,7 +221,7 @@ struct RelKey(RelTag);
 
 impl From<&RelTag> for RelKey {
     fn from(val: &RelTag) -> RelKey {
-        RelKey(val.clone())
+        RelKey(*val)
     }
 }
 
@@ -234,7 +234,7 @@ struct BlockKey {
 impl From<(&RelTag, u32)> for BlockKey {
     fn from(val: (&RelTag, u32)) -> BlockKey {
         BlockKey {
-            rel: val.0.clone(),
+            rel: *val.0,
             block_number: val.1,
         }
     }
@@ -707,7 +707,7 @@ impl metrics::core::Collector for IntegratedCacheWriteAccess<'_> {
 ///
 /// This is in a separate function so that it can be shared by
 /// IntegratedCacheReadAccess::get_rel_size() and IntegratedCacheWriteAccess::get_rel_size()
-fn get_rel_size<'t>(
+fn get_rel_size(
     r: &neon_shmem::hash::HashMapAccess<RelKey, RelEntry>,
     rel: &RelTag,
 ) -> Option<u32> {

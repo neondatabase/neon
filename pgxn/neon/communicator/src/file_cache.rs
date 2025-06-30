@@ -96,8 +96,7 @@ impl FileCache {
 
         let dst_ref = unsafe { std::slice::from_raw_parts_mut(dst.stable_mut_ptr(), BLCKSZ) };
 
-        spawn_blocking(move || file.read_exact_at(dst_ref, cache_block as u64 * BLCKSZ as u64))
-            .await??;
+        spawn_blocking(move || file.read_exact_at(dst_ref, cache_block * BLCKSZ as u64)).await??;
         Ok(())
     }
 
@@ -111,8 +110,7 @@ impl FileCache {
 
         let src_ref = unsafe { std::slice::from_raw_parts(src.stable_ptr(), BLCKSZ) };
 
-        spawn_blocking(move || file.write_all_at(src_ref, cache_block as u64 * BLCKSZ as u64))
-            .await??;
+        spawn_blocking(move || file.write_all_at(src_ref, cache_block * BLCKSZ as u64)).await??;
 
         Ok(())
     }
@@ -151,7 +149,7 @@ impl metrics::core::Collector for FileCache {
 
             let total_free_blocks: i64 = free_list.free_blocks.len() as i64
                 + (free_list.max_blocks as i64 - free_list.next_free_block as i64);
-            self.num_free_blocks_gauge.set(total_free_blocks as i64);
+            self.num_free_blocks_gauge.set(total_free_blocks);
         }
 
         let mut values = Vec::new();

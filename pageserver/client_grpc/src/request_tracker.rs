@@ -41,12 +41,15 @@ use client_cache::PooledItemFactory;
 #[derive(Clone)]
 pub struct StreamReturner {
     sender: tokio::sync::mpsc::Sender<proto::GetPageRequest>,
+    #[allow(clippy::type_complexity)]
     sender_hashmap: Arc<
-        tokio::sync::Mutex<Option<
-            std::collections::HashMap<
-                u64,
-                tokio::sync::mpsc::Sender<Result<proto::GetPageResponse, Status>>,
-             >>,
+        tokio::sync::Mutex<
+            Option<
+                std::collections::HashMap<
+                    u64,
+                    tokio::sync::mpsc::Sender<Result<proto::GetPageResponse, Status>>,
+                >,
+            >,
         >,
     >,
 }
@@ -101,9 +104,9 @@ impl PooledItemFactory<StreamReturner> for StreamFactory {
             Ok(resp) => {
                 let stream_returner = StreamReturner {
                     sender: sender.clone(),
-                    sender_hashmap: Arc::new(tokio::sync::Mutex::new(
-                        Some(std::collections::HashMap::new()),
-                    )),
+                    sender_hashmap: Arc::new(tokio::sync::Mutex::new(Some(
+                        std::collections::HashMap::new(),
+                    ))),
                 };
                 let map = Arc::clone(&stream_returner.sender_hashmap);
 
@@ -122,7 +125,8 @@ impl PooledItemFactory<StreamReturner> for StreamFactory {
                             Ok(Some(response)) => {
                                 // look up stream in hash map
                                 let mut hashmap = map_clone.lock().await;
-                                let hashmap = hashmap.as_mut().expect("no other task clears the hashmap");
+                                let hashmap =
+                                    hashmap.as_mut().expect("no other task clears the hashmap");
                                 if let Some(sender) = hashmap.get(&response.request_id) {
                                     // Send the response to the original request sender
                                     if let Err(e) = sender.send(Ok(response.clone())).await {
@@ -130,7 +134,10 @@ impl PooledItemFactory<StreamReturner> for StreamFactory {
                                     }
                                     hashmap.remove(&response.request_id);
                                 } else {
-                                    eprintln!("No sender found for request ID: {}", response.request_id);
+                                    eprintln!(
+                                        "No sender found for request ID: {}",
+                                        response.request_id
+                                    );
                                 }
                             }
                         }
@@ -139,7 +146,9 @@ impl PooledItemFactory<StreamReturner> for StreamFactory {
 
                     // Close every sender stream in the hashmap
                     let mut hashmap_opt = map_clone.lock().await;
-                    let hashmap = hashmap_opt.as_mut().expect("no other task clears the hashmap");
+                    let hashmap = hashmap_opt
+                        .as_mut()
+                        .expect("no other task clears the hashmap");
                     for sender in hashmap.values() {
                         let error = Status::new(Code::Unknown, "Stream closed");
                         if let Err(e) = sender.send(Err(error)).await {
@@ -175,10 +184,10 @@ impl RequestTracker {
 
         RequestTracker {
             _cur_id: cur_id.clone(),
-            stream_pool: stream_pool,
-            unary_pool: unary_pool,
-            auth_interceptor: auth_interceptor,
-            shard: shard.clone(),
+            stream_pool,
+            unary_pool,
+            auth_interceptor,
+            shard,
         }
     }
 
@@ -194,7 +203,7 @@ impl RequestTracker {
                 channel,
                 self.auth_interceptor.for_shard(self.shard),
             );
-            let request = proto::CheckRelExistsRequest::from(req.clone());
+            let request = proto::CheckRelExistsRequest::from(req);
             let response = ps_client
                 .check_rel_exists(tonic::Request::new(request))
                 .await;
@@ -226,7 +235,7 @@ impl RequestTracker {
                 self.auth_interceptor.for_shard(self.shard),
             );
 
-            let request = proto::GetRelSizeRequest::from(req.clone());
+            let request = proto::GetRelSizeRequest::from(req);
             let response = ps_client.get_rel_size(tonic::Request::new(request)).await;
 
             match response {
@@ -256,7 +265,7 @@ impl RequestTracker {
                 self.auth_interceptor.for_shard(self.shard),
             );
 
-            let request = proto::GetDbSizeRequest::from(req.clone());
+            let request = proto::GetDbSizeRequest::from(req);
             let response = ps_client.get_db_size(tonic::Request::new(request)).await;
 
             match response {
@@ -335,8 +344,7 @@ impl RequestTracker {
                 continue;
             }
 
-            let response: Option<Result<proto::GetPageResponse, Status>>;
-            response = response_receiver.recv().await;
+            let response = response_receiver.recv().await;
             match response {
                 Some(resp) => {
                     match resp {
@@ -382,6 +390,13 @@ pub struct ShardedRequestTracker {
 // TODO: Functions in the ShardedRequestTracker should be able to timeout and
 // cancel a reqeust. The request should return an error if it is cancelled.
 //
+
+impl Default for ShardedRequestTracker {
+    fn default() -> Self {
+        ShardedRequestTracker::new()
+    }
+}
+
 impl ShardedRequestTracker {
     pub fn new() -> Self {
         //
@@ -438,8 +453,7 @@ impl ShardedRequestTracker {
                     self.tcp_client_cache_options.drop_rate,
                     self.tcp_client_cache_options.hang_rate,
                 ));
-            let new_pool: Arc<ConnectionPool<Channel>>;
-            new_pool = ConnectionPool::new(
+            let new_pool = ConnectionPool::new(
                 Arc::clone(&channel_fact),
                 self.tcp_client_cache_options.connect_timeout,
                 self.tcp_client_cache_options.connect_backoff,
@@ -472,8 +486,7 @@ impl ShardedRequestTracker {
             // Create a client pool for unary requests
             //
 
-            let unary_pool: Arc<ConnectionPool<Channel>>;
-            unary_pool = ConnectionPool::new(
+            let unary_pool = ConnectionPool::new(
                 Arc::clone(&channel_fact),
                 self.tcp_client_cache_options.connect_timeout,
                 self.tcp_client_cache_options.connect_backoff,
@@ -547,6 +560,7 @@ impl ShardedRequestTracker {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn lookup_tracker_for_shard(
         &self,
         shard_index: ShardIndex,

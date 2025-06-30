@@ -119,7 +119,7 @@ impl<'t> BlockAllocator<'t> {
         }
 
         // out of blocks
-        return INVALID_BLOCK;
+        INVALID_BLOCK
     }
 
     // TODO: this is currently unused. The slab allocator never releases blocks

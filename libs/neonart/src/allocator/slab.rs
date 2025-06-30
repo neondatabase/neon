@@ -374,11 +374,11 @@ mod tests {
             assert!(unsafe { (*all[i]).val == i });
         }
 
-        let distribution = Zipf::new(10 as f64, 1.1).unwrap();
+        let distribution = Zipf::new(10.0, 1.1).unwrap();
         let mut rng = rand::rng();
         for _ in 0..100000 {
             slab.0.dump();
-            let idx = (rng.sample(distribution) as usize).into();
+            let idx = rng.sample(distribution) as usize;
             let ptr: *mut TestObject = all[idx];
             if !ptr.is_null() {
                 assert_eq!(unsafe { (*ptr).val }, idx);

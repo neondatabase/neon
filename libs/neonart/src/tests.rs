@@ -102,7 +102,7 @@ fn sparse() {
     for _ in 0..10000 {
         loop {
             let key = rand::random::<u128>();
-            if used_keys.get(&key).is_some() {
+            if used_keys.contains(&key) {
                 continue;
             }
             used_keys.insert(key);
@@ -182,7 +182,7 @@ fn test_iter<A: ArtAllocator<TestValue>>(
     let mut iter = TreeIterator::new(&(TestKey::MIN..TestKey::MAX));
 
     loop {
-        let shadow_item = shadow_iter.next().map(|(k, v)| (k.clone(), v.clone()));
+        let shadow_item = shadow_iter.next().map(|(k, v)| (*k, *v));
         let r = tree.start_read();
         let item = iter.next(&r);
 
@@ -194,8 +194,7 @@ fn test_iter<A: ArtAllocator<TestValue>>(
             tree.start_read().dump(&mut std::io::stderr());
 
             eprintln!("SHADOW:");
-            let mut si = shadow.iter();
-            while let Some(si) = si.next() {
+            for si in shadow {
                 eprintln!("key: {:?}, val: {}", si.0, si.1);
             }
             panic!(

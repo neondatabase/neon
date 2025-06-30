@@ -90,8 +90,8 @@ where
             let dictionary =
                 unsafe { std::slice::from_raw_parts_mut(dictionary_ptr, dictionary_size as usize) };
 
-            for i in 0..dictionary.len() {
-                dictionary[i].write(INVALID_POS);
+            for item in dictionary.iter_mut() {
+                item.write(INVALID_POS);
             }
             // TODO: use std::slice::assume_init_mut() once it stabilizes
             unsafe {
@@ -121,7 +121,7 @@ where
             let bucket = &self.buckets[next as usize];
             let (bucket_key, bucket_value) = bucket.inner.as_ref().expect("entry is in use");
             if bucket_key == key {
-                return Some(&bucket_value);
+                return Some(bucket_value);
             }
             next = bucket.next;
         }
@@ -228,6 +228,6 @@ where
         bucket.next = INVALID_POS;
         bucket.inner = Some((key, value));
 
-        return Ok(pos);
+        Ok(pos)
     }
 }

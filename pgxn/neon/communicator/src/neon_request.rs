@@ -6,6 +6,7 @@ pub const MAX_GETPAGEV_PAGES: usize = 32;
 
 use pageserver_page_api as page_api;
 
+#[allow(clippy::large_enum_variant)]
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub enum NeonIORequest {
@@ -98,7 +99,7 @@ unsafe impl uring_common::buf::IoBufMut for ShmemBuf {
     }
 
     unsafe fn set_init(&mut self, pos: usize) {
-        if pos > crate::BLCKSZ as usize {
+        if pos > crate::BLCKSZ {
             panic!(
                 "set_init called past end of buffer, pos {}, buffer size {}",
                 pos,

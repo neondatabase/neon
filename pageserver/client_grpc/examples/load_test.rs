@@ -48,16 +48,9 @@ impl Drop for MockConnection {
     }
 }
 
+#[derive(Default)]
 pub struct MockConnectionFactory {
     counter: AtomicU64,
-}
-
-impl MockConnectionFactory {
-    pub fn new() -> Self {
-        MockConnectionFactory {
-            counter: AtomicU64::new(1),
-        }
-    }
 }
 
 #[async_trait::async_trait]
@@ -171,7 +164,7 @@ async fn main() {
     // --------------------------------------
     // 1. Create factory and shared instrumentation
     // --------------------------------------
-    let factory = Arc::new(MockConnectionFactory::new());
+    let factory = Arc::new(MockConnectionFactory::default());
 
     // Shared map: connection ID → Arc<AtomicUsize>
     let usage_map: Arc<Mutex<HashMap<u64, Arc<AtomicUsize>>>> =
