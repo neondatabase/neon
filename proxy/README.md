@@ -139,7 +139,7 @@ Now from client you can start a new session:
 PGSSLROOTCERT=./server.crt psql  "postgresql://proxy:password@endpoint.local.neon.build:4432/postgres?sslmode=verify-full"
 ```
 
-## auth broker hacky setup:
+## auth broker setup:
 
 ```sh
 docker run \
@@ -159,12 +159,13 @@ cargo run --bin local_proxy -- \
 ```
 
 ```sh
-LOGFMT=text cargo run --bin proxy -- \
-  --is-auth-broker true \
+LOGFMT=text OTEL_SDK_DISABLED=true cargo run --release --bin proxy -- \
   -c server.crt -k server.key \
+  --is-auth-broker true \
+  --is-rest-broker true \
   --wss 0.0.0.0:8080 \
   --http 0.0.0.0:7002 \
-  --auth-backend cplane-v1
+  --auth-backend local
 ```
 
 
