@@ -807,10 +807,7 @@ async fn handle_rest_inner(
     }?;
 
     // pick the current schema from the headers (or the first one from config)
-    //let schema_name = &current_schema(db_schemas, &method, &headers_map).map_err(RestError::SubzeroCore)?;
-    let schema_name = db_schema
-        .pick_current_schema(&method_str, &headers_map)
-        .map_err(RestError::SubzeroCore)?;
+    let schema_name = &DbSchema::pick_current_schema(db_schemas, &method_str, &headers_map)?;
 
     // add the content-profile header to the response
     let mut response_headers = vec![];
