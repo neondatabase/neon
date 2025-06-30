@@ -56,7 +56,8 @@ def test_pageserver_characterize_throughput_with_n_tenants(
 @pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(2048)])
 # we use 1 client to characterize latencies, and 64 clients to characterize throughput/scalability
 # we use 8 clients because we see a latency knee around 6-8 clients on im4gn.2xlarge instance type,
-# which we use for this periodic test - at a cpu utilization of around 70 %.
+# which we use for this periodic test - at a cpu utilization of around 70 % - which is considered
+# a good utilization for pageserver.
 @pytest.mark.parametrize("n_clients", [1, 8])
 @pytest.mark.parametrize("n_tenants", [1])
 @pytest.mark.timeout(2400)
