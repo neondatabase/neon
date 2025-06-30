@@ -179,7 +179,7 @@ impl ShardIdentity {
 
     /// For use when creating ShardIdentity instances for new shards, where a creation request
     /// specifies the ShardParameters that apply to all shards.
-    pub fn from_params(number: ShardNumber, params: &ShardParameters) -> Self {
+    pub fn from_params(number: ShardNumber, params: ShardParameters) -> Self {
         Self {
             number,
             count: params.count,
