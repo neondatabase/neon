@@ -106,7 +106,7 @@ use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
 };
 use crate::disk_usage_eviction_task::{DiskUsageEvictionInfo, EvictionCandidate, finite_f32};
-use crate::feature_resolver::FeatureResolver;
+use crate::feature_resolver::TenantFeatureResolver;
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::l0_flush::{self, L0FlushGlobalState};
 use crate::metrics::{
@@ -202,7 +202,7 @@ pub struct TimelineResources {
     pub l0_compaction_trigger: Arc<Notify>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
     pub basebackup_cache: Arc<BasebackupCache>,
-    pub feature_resolver: FeatureResolver,
+    pub feature_resolver: TenantFeatureResolver,
 }
 
 pub struct Timeline {
@@ -450,7 +450,7 @@ pub struct Timeline {
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
     basebackup_cache: Arc<BasebackupCache>,
 
-    feature_resolver: FeatureResolver,
+    feature_resolver: TenantFeatureResolver,
 }
 
 pub(crate) enum PreviousHeatmap {
