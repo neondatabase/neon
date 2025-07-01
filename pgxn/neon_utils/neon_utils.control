@@ -1,0 +1,6 @@
+# neon_utils extension
+comment = 'neon_utils - small useful functions'
+default_version = '1.0'
+module_pathname = '$libdir/neon_utils'
+relocatable = true
+trusted = true
