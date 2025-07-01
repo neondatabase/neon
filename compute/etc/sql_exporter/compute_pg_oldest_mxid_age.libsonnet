@@ -1,5 +1,5 @@
 {
-  metric_name: 'compute_min_mxid_age',
+  metric_name: 'compute_pg_oldest_mxid_age',
   type: 'gauge',
   help: 'Age of oldest MXIDs that have not been replaced by VACUUM. An indicator of how long it has been since VACUUM last ran.',
   key_labels: [
@@ -9,5 +9,5 @@
   values: [
     'min_mxid_age',
   ],
-  query: importstr 'sql_exporter/compute_autovacuum_metrics.sql',
+  query: importstr 'sql_exporter/compute_pg_oldest_mxid_age.sql',
 }

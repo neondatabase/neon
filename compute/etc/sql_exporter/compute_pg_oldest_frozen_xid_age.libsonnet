@@ -1,5 +1,5 @@
 {
-  metric_name: 'compute_frozen_xid_age',
+  metric_name: 'compute_pg_oldest_frozen_xid_age',
   type: 'gauge',
   help: 'Age of oldest XIDs that have not been frozen by VACUUM. An indicator of how long it has been since VACUUM last ran.',
   key_labels: [
@@ -9,5 +9,5 @@
   values: [
     'frozen_xid_age',
   ],
-  query: importstr 'sql_exporter/compute_autovacuum_metrics.sql',
+  query: importstr 'sql_exporter/compute_pg_oldest_frozen_xid_age.sql',
 }
