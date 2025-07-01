@@ -1,0 +1,14 @@
+create table spgist_point_tbl(id int4, p point);
+NOTICE:  admin event trigger is executed for cloud_admin
+WARNING:  Skipping Event Trigger
+DETAIL:  Event Trigger function "neon_proc" is owned by non-superuser role "neon_admin", and current_user "cloud_admin" is superuser
+create index spgist_point_idx on spgist_point_tbl using spgist(p) with (fillfactor = 25);
+NOTICE:  admin event trigger is executed for cloud_admin
+WARNING:  Skipping Event Trigger
+DETAIL:  Event Trigger function "neon_proc" is owned by non-superuser role "neon_admin", and current_user "cloud_admin" is superuser
+insert into spgist_point_tbl (id, p)        select g,      point(g*10, g*10) from generate_series(1, 10000) g;
+insert into spgist_point_tbl (id, p)        select g,      point(g*10, g*10) from generate_series(1, 10000) g;
+insert into spgist_point_tbl (id, p)        select g+100000, point(g*10+1, g*10+1) from generate_series(1, 10000) g;
+vacuum spgist_point_tbl;
+insert into spgist_point_tbl (id, p)        select g+100000, point(g*10+1, g*10+1) from generate_series(1, 10000) g;
+checkpoint;
