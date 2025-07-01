@@ -3503,18 +3503,16 @@ impl Timeline {
         // Only create image layers when there is no ancestor branches. TODO: create covering image layer
         // when some condition meet.
         let mut image_layer_writer = if !has_data_below {
-            Some(
-                SplitImageLayerWriter::new(
-                    self.conf,
-                    self.timeline_id,
-                    self.tenant_shard_id,
-                    job_desc.compaction_key_range.start,
-                    lowest_retain_lsn,
-                    self.get_compaction_target_size(),
-                    &self.gate,
-                    self.cancel.clone(),
-                )
-            )
+            Some(SplitImageLayerWriter::new(
+                self.conf,
+                self.timeline_id,
+                self.tenant_shard_id,
+                job_desc.compaction_key_range.start,
+                lowest_retain_lsn,
+                self.get_compaction_target_size(),
+                &self.gate,
+                self.cancel.clone(),
+            ))
         } else {
             None
         };
