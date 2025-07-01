@@ -10,6 +10,7 @@ nix.workspace = true
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }
 rustc-hash = { version = "2.1.1" }
 rand = "0.9.1"
+libc.workspace = true
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["html_reports"] }
