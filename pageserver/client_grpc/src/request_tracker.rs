@@ -240,6 +240,7 @@ impl RequestTracker {
 
             match response {
                 Err(status) => {
+                    tracing::info!("send_process_get_rel_size_request: got error {status}, retrying");
                     pooled_client.finish(Err(status.clone())).await; // Pass error to finish
                     continue;
                 }
